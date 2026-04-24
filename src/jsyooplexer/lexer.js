@@ -4,7 +4,7 @@
 
 import { parseArgs } from 'util';
 import fs from 'fs';
-import { isDigit, isAlpha, isAlphaNumOr_, isWhitespace, scanDigitsEnd } from './charFns.js';
+import { isDigit, isAlpha, isAlphaNumOr_, isWhitespace, scanDigitsEnd, createErrorPointingOutput } from './charFns.js';
 import { skipWhitespace } from './charEaters.js';
 
 // this is the list of all the kinds of things that could be tokens
@@ -25,7 +25,6 @@ const TokenTags = {
   lParen: 7,
   rParen: 8,
   discard: 9,
-
 };
 
 function scanIdentityToEnd(src, start) {
@@ -139,6 +138,12 @@ function lexNext(src, pos) {
     }
   }
 
+  // string literal
+
+  if (ch === "\"") {
+    
+  }
+
   // integer literal
   if (isDigit(ch)) {
     let end = scanDigitsEnd(src, p);
@@ -162,7 +167,8 @@ function lexNext(src, pos) {
   res.token.start = p;
   res.token.length = 1;
   res.nextPos = p + 1;
-  res.err = `unrecognized character at ${p}`;
+
+  res.err = `unrecognized character at position ${p}`;
 
   return res;
 }
@@ -200,10 +206,11 @@ function main() {
 
     if (err) {
       console.log('err', err);
+      console.log(createErrorPointingOutput(sourceStr, nextPos, 15));
       process.exit(1);
     }
 
-    console.log('token.tag', token.tag);
+    console.log('token', token.tag);
     pos = nextPos;
   }
 

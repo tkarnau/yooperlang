@@ -35,3 +35,12 @@ export function scanDigitsEnd(src, start) {
 
   return p;
 }
+
+export function createErrorPointingOutput(src, pos, padding) {
+  const start = Math.max(pos - padding, 0);
+  const end = Math.min(pos + padding, src.length - 1);
+
+  const line1 = src.substring(start, end);
+  const line2 = "^".padStart(padding, " ").padEnd(padding * 2, " ");
+  return [line1, line2].join("\n");
+}
