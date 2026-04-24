@@ -36,6 +36,36 @@ export function scanDigitsEnd(src, start) {
   return p;
 }
 
+export function scanStringLiteralEnd(src, start) {
+  const quote = src[start];
+  let p = start + 1;
+  while (p < src.length) {
+    const ch = src[p];
+    if (ch === '\\') {
+      p += 2;
+    } else if (ch === quote) {
+      return p + 1;
+    } else {
+      p++;
+    }
+  }
+  return -1;
+}
+
+export function scanIdentityToEnd(src, start) {
+  let p = start;
+  while (p < src.length) {
+    const ch = src[p];
+    if (isAlphaNumOr_(ch)) {
+      p++;
+    } else {
+      break;
+    }
+  }
+
+  return p;
+}
+
 export function createErrorPointingOutput(src, pos, padding) {
   const start = Math.max(pos - padding, 0);
   const end = Math.min(pos + padding, src.length - 1);

@@ -1,15 +1,29 @@
 // lexer for yooplang, first pass in JS
 
 // usage: node ./lexer.js <inputfile.yoop> (outputs to stdout)
+//    or if the little test mode flag is true, can just iterate that way for now
+//    without an input file
 
-import { parseArgs } from 'util';
-import fs from 'fs';
-import { isDigit, isAlpha, isAlphaNumOr_, isWhitespace, scanDigitsEnd, createErrorPointingOutput } from './charFns.js';
-import { skipWhitespace } from './charEaters.js';
+import { parseArgs } from "util";
+import fs from "fs";
+import {
+  isDigit,
+  isAlpha,
+  isAlphaNumOr_,
+  isWhitespace,
+  scanDigitsEnd,
+  createErrorPointingOutput,
+  scanIdentityToEnd,
+  scanStringLiteralEnd,
+} from "./charFns.js";
+import { skipWhitespace } from "./charEaters.js";
 
 // this is the list of all the kinds of things that could be tokens
 // tokens have different meanings in different contexts, but this will
 // be an exhaustive list of potential tokens
+
+// note: ONLY adding the bare minimum from test input files. Expanding as we go.
+// the tags will eventually be listed out of order, and that's fine for now
 const TokenTags = {
   // atoms
   eof: 0,
@@ -27,20 +41,31 @@ const TokenTags = {
   discard: 9,
 };
 
-function scanIdentityToEnd(src, start) {
-  let p = start;
-  while (p < src.length) {
-    const ch = src[p];
-    if (isAlphaNumOr_(ch)) {
-      p++;
-    } else {
-      break;
-    }
-  }
+const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => {
+  a[v] = k;
+  return a;
+}, {});
 
-  return p;
-}
+const tokenScanList = [
+  { str: "(", tag: TokenTags.lParen },
+  { str: ")", tag: TokenTags.rParen },
+  { str: ";", tag: TokenTags.semicolon },
+  { str: "=", tag: TokenTags.eq },
+].toSorted((a, b) => b.str.length - a.str.length);
 
+const keywordTagList = {
+  let: TokenTags.let,
+  _: TokenTags.discard, // bare underscores are discarded
+};
+
+// ********* scanners (probably should pull these out)
+
+// basically just scans the string until it sees an unescaped matching quote character.
+// needs to be more robust, but works for now.
+
+// *********** end scanners
+
+// basic objects
 function Token() {
   this.tag = 0;
   this.start = 0;
@@ -53,29 +78,7 @@ function LexResult() {
   this.nextPos = 0;
   this.err = "";
 }
-
-// function ParserState() {
-//   this.src = "";
-//   this.pos = -1;
-//   this.tokenType = 0;
-//   this.tokenStart = -1;
-//   this.tokenLength = -1;
-//   this.tokenInt = -1;
-//   this.err = "";
-// }
-
-const tokenScanList = [
-  { str: "(", tag: TokenTags.lParen },
-  { str: ")", tag: TokenTags.rParen },
-  { str: ";", tag: TokenTags.semicolon },
-  { str: "=", tag: TokenTags.eq },
-].toSorted((a, b) => b.str.length - a.str.length);
-
-const keywordTagList = {
-  let: TokenTags.let,
-  _: TokenTags.discard // bare underscores are discarded
-};
-
+// end basic objects
 
 function lexIdentifierOrKeyword(src, pos) {
   let res = new LexResult();
@@ -139,9 +142,20 @@ function lexNext(src, pos) {
   }
 
   // string literal
-
-  if (ch === "\"") {
-    
+  if (ch === '"' || ch === "'" || ch === "`") {
+    let end = scanStringLiteralEnd(src, p);
+    if (end === -1) {
+      res.err = `unterminated string literal at position ${p}`;
+      res.token.start = p;
+      res.token.length = 1;
+      res.nextPos = p + 1;
+      return res;
+    }
+    res.token.tag = TokenTags.strLiteral;
+    res.token.start = p;
+    res.token.length = end - p;
+    res.nextPos = end;
+    return res;
   }
 
   // integer literal
@@ -158,15 +172,13 @@ function lexNext(src, pos) {
   }
 
   // identifiers or keywords
-  if (isAlpha(ch) || ch === '_') {
+  if (isAlpha(ch) || ch === "_") {
     return lexIdentifierOrKeyword(src, p);
   }
 
-  // unrecognized character - skip it
-  res.token.tag = 0;
-  res.token.start = p;
-  res.token.length = 1;
-  res.nextPos = p + 1;
+  // if we made it here, we're crashing...
+
+  // unrecognized character - throwaway res with an err
 
   res.err = `unrecognized character at position ${p}`;
 
@@ -179,9 +191,9 @@ function main() {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
     options: {
-      inputFile: { type: 'string', short: 'i' },
+      inputFile: { type: "string", short: "i" },
     },
-    allowPositionals: true
+    allowPositionals: true,
   });
 
   let sourceStr = "";
@@ -189,14 +201,14 @@ function main() {
     let inputFile = values.inputFile ?? positionals[0];
 
     if (!fs.existsSync(inputFile)) {
-      console.log('input file not found.');
+      console.log("input file not found.");
       process.exit(1);
     }
 
-    // get string from file
+    // get string from file...
   } else {
     // initial test
-    sourceStr = "let x = 1; print(\"x holds ${x}\");"
+    sourceStr = "let x = 1; printf(`x holds ${x}`);";
   }
   let pos = 0;
   let currIter = 0;
@@ -205,12 +217,14 @@ function main() {
     const { token, nextPos, err } = lexNext(sourceStr, pos);
 
     if (err) {
-      console.log('err', err);
+      console.log("err", err);
       console.log(createErrorPointingOutput(sourceStr, nextPos, 15));
       process.exit(1);
     }
 
-    console.log('token', token.tag);
+    if (token.tag === TokenTags.eof) break; // we're done
+
+    console.log("token", token.tag, inverseTokenTags[token.tag]);
     pos = nextPos;
   }
 
