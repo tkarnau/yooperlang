@@ -32,7 +32,6 @@ function scanIdentityToEnd(src, start) {
   let p = start;
   while (p < src.length) {
     const ch = src[p];
-    console.log('inner ch', ch);
     if (isAlphaNumOr_(ch)) {
       p++;
     } else {
@@ -94,7 +93,6 @@ function lexIdentifierOrKeyword(src, pos) {
   } else {
     res.token.tag = TokenTags.ident;
   }
-  console.log('res', res);
 
   return res;
 }
@@ -121,7 +119,6 @@ function lexNext(src, pos) {
   }
 
   let ch = src[p];
-  console.log("ch", ch);
 
   // tokenscanlist by length longest to shortest
   // so that => is not mistakenly set as = and then >
@@ -181,8 +178,6 @@ function main() {
     allowPositionals: true
   });
 
-  // console.log('values', values);
-  // console.log('positionals', positionals);
   let sourceStr = "";
   if (!testMode) {
     let inputFile = values.inputFile ?? positionals[0];

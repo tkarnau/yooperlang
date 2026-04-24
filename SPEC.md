@@ -1,5 +1,7 @@
 # Yooperlang — Language Specification (v2 Draft)
 
+Yooper - person from the Upper Peninsula of Michigan
+
 A syntax-first specification for a fresh Yooperlang design.
 
 Yooperlang (`.yoop`) is a **systems language with a TypeScript feel**:
