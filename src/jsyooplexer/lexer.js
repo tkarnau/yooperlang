@@ -179,7 +179,6 @@ function lexNext(src, pos) {
   // if we made it here, we're crashing...
 
   // unrecognized character - throwaway res with an err
-
   res.err = `unrecognized character at position ${p}`;
 
   return res;
