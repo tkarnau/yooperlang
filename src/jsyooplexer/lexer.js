@@ -33,12 +33,38 @@ const TokenTags = {
 
   // keywords
   let: 4,
+  function: 14,
+  const: 15,
+  return: 16,
+  if: 17,
+  else: 18,
+  while: 19,
+  for: 20,
   // punctuation / operators
   eq: 5,
   semicolon: 6,
-  lParen: 7,
-  rParen: 8,
+  lparen: 7,
+  rparen: 8,
   discard: 9,
+  lcurly: 10,
+  rcurly: 11,
+  colon: 12,
+  comma: 13,
+  eqeq: 21,
+  neq: 22,
+  lte: 23,
+  gte: 24,
+  lt: 25,
+  gt: 26,
+  andand: 27,
+  oror: 28,
+  lshift: 29,
+  rshift: 30,
+  plus: 31,
+  minus: 32,
+  mult: 33,
+  divide: 34,
+  modulus: 35,
 };
 
 const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => {
@@ -47,14 +73,41 @@ const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => {
 }, {});
 
 const tokenScanList = [
-  { str: "(", tag: TokenTags.lParen },
-  { str: ")", tag: TokenTags.rParen },
+  { str: "(", tag: TokenTags.lparen },
+  { str: ")", tag: TokenTags.rparen },
   { str: ";", tag: TokenTags.semicolon },
   { str: "=", tag: TokenTags.eq },
+  { str: "{", tag: TokenTags.lcurly },
+  { str: "}", tag: TokenTags.rcurly },
+  { str: ":", tag: TokenTags.colon },
+  { str: ",", tag: TokenTags.comma },
+  { str: "==", tag: TokenTags.eqeq },
+  { str: "!=", tag: TokenTags.neq },
+  { str: "<=", tag: TokenTags.lte },
+  { str: ">=", tag: TokenTags.gte },
+  { str: "<", tag: TokenTags.lt },
+  { str: ">", tag: TokenTags.gt },
+  { str: "&&", tag: TokenTags.andand },
+  { str: "||", tag: TokenTags.oror },
+  { str: "<<", tag: TokenTags.lshift },
+  { str: ">>", tag: TokenTags.rshift },
+  { str: "+", tag: TokenTags.plus },
+  { str: "-", tag: TokenTags.minus },
+  { str: "*", tag: TokenTags.mult },
+  { str: "/", tag: TokenTags.divide },
+  { str: "%", tag: TokenTags.modulus },
+
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {
   let: TokenTags.let,
+  "function": TokenTags.function,
+  "const": TokenTags.const,
+  "return": TokenTags.return,
+  if: TokenTags.if,
+  else: TokenTags.else,
+  while: TokenTags.while,
+  for: TokenTags.for,
   _: TokenTags.discard, // bare underscores are discarded
 };
 
@@ -207,7 +260,26 @@ function main() {
     // get string from file...
   } else {
     // initial test
-    sourceStr = "let x = 1; printf(`x holds ${x}`);";
+    sourceStr = `
+      function add(a: int32, b: int32): int32 {
+        return a + b;
+      }
+
+      function main(): void {
+        const x: int32 = 10;
+        const y: int32 = 20;
+        const sum: int32 = add(x, y);
+
+        if (sum >= 25) {
+          let count: int32 = 0;
+          while (count < 3) {
+            count = count + 1;
+          }
+        } else {
+          _ = sum;
+        }
+      }
+    `;
   }
   let pos = 0;
   let currIter = 0;
