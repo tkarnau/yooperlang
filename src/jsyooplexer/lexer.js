@@ -24,7 +24,7 @@ import { skipWhitespace } from "./charEaters.js";
 
 // note: ONLY adding the bare minimum from test input files. Expanding as we go.
 // the tags will eventually be listed out of order, and that's fine for now
-const TokenTags = {
+export const TokenTags = {
   // atoms
   eof: 0,
   ident: 1, // not a keyword
@@ -160,7 +160,7 @@ For now I'm replicating the v1 yooper lexer but in a js fashion
 so that it is a little more human readable. I had moved too quickly to bootstrapping and the lexer logic was very hard to understand, even with LLM help.
 **************************
 */
-function lexNext(src, pos) {
+export function lexNext(src, pos) {
   let res = new LexResult();
   let p = skipWhitespace(src, pos);
 
@@ -239,6 +239,7 @@ function lexNext(src, pos) {
 
 const testMode = true;
 
+// can go away, but will leave around to iterate on the lexer independently, if needed...
 function main() {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
