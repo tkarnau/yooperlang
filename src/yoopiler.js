@@ -47,7 +47,9 @@ function main() {
         }
       `;
   }
-  parse(sourceStr);
+  const ast = parse(sourceStr);
+
+  console.log("ast", JSON.stringify(ast));
 
   console.log("compiler: ok");
 }

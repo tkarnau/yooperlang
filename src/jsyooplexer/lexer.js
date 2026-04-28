@@ -67,7 +67,7 @@ export const TokenTags = {
   modulus: 35,
 };
 
-const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => {
+export const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => {
   a[v] = k;
   return a;
 }, {});
