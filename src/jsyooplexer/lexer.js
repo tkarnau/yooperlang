@@ -240,6 +240,7 @@ export function lexNext(src, pos) {
 const testMode = true;
 
 // can go away, but will leave around to iterate on the lexer independently, if needed...
+// todo change to testLexer like we did with the parser and have some basic tests in here...
 function main() {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
@@ -296,7 +297,6 @@ function main() {
 
     if (token.tag === TokenTags.eof) break; // we're done
 
-    console.log("token", token.tag, inverseTokenTags[token.tag]);
     pos = nextPos;
   }
 
