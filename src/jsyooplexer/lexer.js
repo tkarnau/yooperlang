@@ -72,7 +72,7 @@ export const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => 
   return a;
 }, {});
 
-const tokenScanList = [
+export const tokenScanList = [
   { str: "(", tag: TokenTags.lparen },
   { str: ")", tag: TokenTags.rparen },
   { str: ";", tag: TokenTags.semicolon },

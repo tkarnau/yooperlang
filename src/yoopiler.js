@@ -42,7 +42,7 @@ function main() {
               count = count + 1;
             }
           } else {
-            _ = sum;
+            // nobody cares
           }
         }
       `;
