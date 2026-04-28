@@ -30,6 +30,7 @@ export const TokenTags = {
   ident: 1, // not a keyword
   intLiteral: 2,
   strLiteral: 3, // included wrapping quote characters
+  templateLiteral: 36, // backtick-quoted, may contain ${...} interpolations
 
   // keywords
   let: 4,
@@ -204,7 +205,7 @@ export function lexNext(src, pos) {
       res.nextPos = p + 1;
       return res;
     }
-    res.token.tag = TokenTags.strLiteral;
+    res.token.tag = ch === "`" ? TokenTags.templateLiteral : TokenTags.strLiteral;
     res.token.start = p;
     res.token.length = end - p;
     res.nextPos = end;
@@ -241,7 +242,7 @@ const testMode = true;
 
 // can go away, but will leave around to iterate on the lexer independently, if needed...
 // todo change to testLexer like we did with the parser and have some basic tests in here...
-function main() {
+export function testLexer() {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
     options: {
@@ -303,5 +304,3 @@ function main() {
   console.log("lexer: ok");
 }
 
-// start
-main();

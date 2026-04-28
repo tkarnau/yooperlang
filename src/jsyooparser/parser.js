@@ -114,6 +114,10 @@ export function parse(src) {
       const tok = advance();
       node = new ASTNode("strLiteral");
       node.value = src.substring(tok.start, tok.start + tok.length);
+    } else if (peek().tag === TokenTags.templateLiteral) {
+      const tok = advance();
+      const raw = src.substring(tok.start, tok.start + tok.length);
+      node = parseTemplateLiteralBody(raw);
     } else if (peek().tag === TokenTags.ident) {
       const name = parseIdentAsName();
       if (peek().tag === TokenTags.lparen) {
@@ -155,6 +159,62 @@ export function parse(src) {
       node = binNode;
     }
 
+    return node;
+  }
+
+  // a template literal token still has its surrounding backticks. split it into
+  // alternating string parts and embedded expressions, and re-parse each
+  // ${...} chunk through the full expression parser.
+  function parseTemplateLiteralBody(raw) {
+    const inner = raw.slice(1, -1); // strip surrounding backticks
+    const parts = []; // each entry: { kind: "stringPart", value } | { kind: "exprPart", expr }
+    let buf = "";
+    let i = 0;
+    while (i < inner.length) {
+      const ch = inner[i];
+      if (ch === "\\" && i + 1 < inner.length) {
+        // pass escape sequence through unchanged; codegen decodes it later
+        buf += ch + inner[i + 1];
+        i += 2;
+        continue;
+      }
+      if (ch === "$" && inner[i + 1] === "{") {
+        if (buf.length > 0) {
+          parts.push({ kind: "stringPart", value: buf });
+          buf = "";
+        }
+        // find matching closing brace, accounting for nested braces
+        let depth = 1;
+        let j = i + 2;
+        while (j < inner.length && depth > 0) {
+          if (inner[j] === "{") depth++;
+          else if (inner[j] === "}") depth--;
+          if (depth === 0) break;
+          j++;
+        }
+        if (depth !== 0) {
+          throw new Error(
+            `unterminated \${...} in template literal`,
+          );
+        }
+        const exprSrc = inner.substring(i + 2, j);
+        // re-parse the expression by recursively invoking parse() on a
+        // synthetic top-level wrapper, then unwrap to the inner expression.
+        const wrappedSrc = `function __t(): int32 { return ${exprSrc}; }`;
+        const subAst = parse(wrappedSrc);
+        const exprNode = subAst.body[0].body.body[0].value;
+        parts.push({ kind: "exprPart", expr: exprNode });
+        i = j + 1; // skip past closing }
+        continue;
+      }
+      buf += ch;
+      i++;
+    }
+    if (buf.length > 0) {
+      parts.push({ kind: "stringPart", value: buf });
+    }
+    const node = new ASTNode("templateLiteral");
+    node.parts = parts;
     return node;
   }
 

@@ -7,14 +7,13 @@ import path from "path";
 import { parse, testParser } from "./jsyooparser/parser.js";
 import { codegen } from "./jsyoopcodegen/codegen.js";
 
-const testMode = process.env.testMode === 'true';
+const testMode = process.env.testMode === "true";
 
 function runTests() {
   testParser();
 }
 
 function main() {
-
   if (testMode) {
     runTests();
   }
@@ -23,6 +22,7 @@ function main() {
     args: process.argv.slice(2),
     options: {
       inputFile: { type: "string", short: "i" },
+      outputFile: { type: "string", short: "o" },
     },
     allowPositionals: true,
   });
@@ -63,13 +63,19 @@ function main() {
     //   `;
 
     // Hello-world smoke test — exercises string literals + extern calls + codegen
-    sourceStr = `
-      function main(): int32 {
-        printf("Hello, World!\n");
-        return 0;
-      }
-    `;
+    sourceStr =
+      "\n" +
+      "      function main(): int32 {\n" +
+      '        printf("Hello, World!\\n");\n' +
+      "        let x: int32 = 4 + 5;\n" +
+      "        printf(`x is ${x}\\n`);\n" +
+      "        printf(`sum: ${x + 1}, doubled: ${x * 2}\\n`);\n" +
+      "        return 0;\n" +
+      "      }\n" +
+      "    ";
   }
+
+  const outputFileName = values.outputFile ?? "output";
 
   const ast = parse(sourceStr);
   console.log("parser: ok");
@@ -79,19 +85,17 @@ function main() {
   console.log("llvm IR: ok");
   console.log(ir);
 
-  if (testMode) {
-    const tmpIR = path.join(os.tmpdir(), "yooper_out.ll");
-    fs.writeFileSync(tmpIR, ir, "utf8");
-    if (process.platform === "win32") {
-      const clang = "C:\\Program Files\\LLVM\\bin\\clang.exe"; // todo make more robust
-      const clangArgs = [tmpIR, "-o", "output.exe"];
-      clangArgs.push("-fuse-ld=link"); // force different linker (couldn't figure out the problem)
-      execFileSync(clang, clangArgs, { stdio: "inherit" });
-      console.log("compiled: output.exe");
-    } else {
-      execFileSync("clang", [tmpIR, "-o", "output"], { stdio: "inherit" });
-      console.log("compiled: output");
-    }
+  const tmpIR = path.join(os.tmpdir(), "yooper_out.ll");
+  fs.writeFileSync(tmpIR, ir, "utf8");
+  if (process.platform === "win32") {
+    const clang = "C:\\Program Files\\LLVM\\bin\\clang.exe"; // todo make more robust
+    const clangArgs = [tmpIR, "-o", `${outputFileName}.exe`];
+    clangArgs.push("-fuse-ld=link"); // force different linker (couldn't figure out the problem)
+    execFileSync(clang, clangArgs, { stdio: "inherit" });
+    console.log(`compiled: ${outputFileName}`);
+  } else {
+    execFileSync("clang", [tmpIR, "-o", outputFileName], { stdio: "inherit" });
+    console.log(`compiled: ${outputFileName}`);
   }
 }
 
