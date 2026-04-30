@@ -13,10 +13,9 @@ Support every numeric literal form the spec lists in §2:
 | Binary int | `0b1010`, `0b1111_0000` |
 | Octal int | `0o755` |
 | Float | `1.0`, `3.14`, `1e-9`, `6.022e23` |
-| Suffixed | `42i32`, `255u8`, `1.0f32`, `3.14f64` |
 | Negative literals | `-7`, `-0.5` (folded from unary `-`) |
 
-Per spec §2, literals are **untyped** until they reach a typed context. This phase doesn't enforce range-checking yet (that's the typechecker's job in Phase 1.2) — it just makes sure the lexer can recognize every form and the parser carries the value, kind (int vs float), and any suffix forward.
+Per spec §2, literals are **untyped** until they reach a typed context. This phase doesn't enforce range-checking yet (that's the typechecker's job in Phase 1.2) — it just makes sure the lexer can recognize every form and the parser carries the value, kind (int vs float).
 
 ## Why this is first
 
@@ -26,7 +25,7 @@ It's the smallest, most isolated change that exercises real language design: unt
 
 - No range checking — `let x: uint8 = 256;` is not yet a compile error
 - No literal coercion logic — that lives in the typechecker
-- No new keywords beyond what's needed for suffixes (suffixes are part of the literal token, not separate keywords)
+- No new keywords
 - No struct or extern work — that's Phase 1.3 and Phase 3
 
 ---
@@ -109,35 +108,14 @@ lexNumericLiteral(src, pos):
     if src[end] == '+' or '-': end += 1
     end = scanDecDigitsAndUnderscores(src, end)
 
-  // suffix — i8/i16/i32/i64, u8/u16/u32/u64, usize/isize, f32/f64
-  suffix = null
-  if isAlpha(src[end]):
-    suffixEnd = scanIdentityToEnd(src, end)
-    candidate = src.substring(end, suffixEnd)
-    if isValidNumericSuffix(candidate):
-      suffix = candidate
-      end = suffixEnd
-    else:
-      // not a recognized suffix — leave the alpha run alone, the lexer
-      // will produce a separate ident token next iteration. but `42x`
-      // with no whitespace is a useful error: warn or error here.
-      // for v1: return an error "invalid numeric suffix `x`"
-
-  // validate digit string structure (no leading/trailing/double underscores,
-  // at least one digit). do this in one pass over src[digitsStart..endOfDigits]
-  validateDigitString(src, digitsStart, endOfDigits, base)
-
-  // float-suffix consistency: u8/i32/etc on a float is an error;
-  // f32/f64 on an int is allowed (just declares it's an untyped float)
-  if isFloat and suffix in {i8..u64, isize, usize}: error
 
   // parse the numeric value
   if isFloat:
-    val = parseFloat(stripUnderscores(src.substring(digitsStart, endBeforeSuffix)))
+    val = parseFloat(stripUnderscores(src.substring(digitsStart, end)))
     token.tag = floatLiteral
     token.floatVal = val
   else:
-    val = parseInt(stripUnderscores(src.substring(digitsStart, endBeforeSuffix)), base)
+    val = parseInt(stripUnderscores(src.substring(digitsStart, end)), base)
     token.tag = intLiteral
     token.intVal = val
 
@@ -146,8 +124,6 @@ lexNumericLiteral(src, pos):
   token.length = end - start
   res.nextPos = end
 ```
-
-`isValidNumericSuffix(s)` is a closed set: `["i8","i16","i32","i64","u8","u16","u32","u64","usize","isize","f32","f64"]`. Note the spec uses `int8`/`uint8`/`float32` as type names but `i8`/`u8`/`f32` as suffixes (per §2 literal table). Keep them distinct; the typechecker maps suffix → canonical type name in Phase 1.2.
 
 ### 3. Lexer — token shape ([lexer.js](../src/jsyooplexer/lexer.js))
 
