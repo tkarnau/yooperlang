@@ -229,18 +229,12 @@ For literals with a `suffix`, Phase 1.1 ignores the suffix in codegen — the ty
 | `-0.5` | `floatLiteral` value=-0.5 (folded) |
 | `1e-9` | `floatLiteral` value=1e-9 |
 | `6.022e23` | `floatLiteral` value=6.022e23 |
-| `42i32` | `intLiteral` value=42, suffix="i32" |
-| `255u8` | `intLiteral` value=255, suffix="u8" |
-| `1.0f32` | `floatLiteral` value=1.0, suffix="f32" |
-| `0xFFu8` | `intLiteral` value=255, suffix="u8" |
 | `1_000` then ident | `1000` followed by separate ident token |
 | `0x_FF` | error — leading underscore |
 | `1__000` | error — double underscore |
 | `1_` | error — trailing underscore |
 | `0x` | error — prefix with no digits |
 | `42x` (no whitespace) | error — invalid suffix `x` |
-| `42i32u8` | error — only one suffix allowed |
-| `1.0i32` | error — float with int suffix |
 | `1.` (trailing dot, no digits) | NOT a float — `1` followed by `.` (consistent with most C-style langs; this matters once `.` becomes field-access syntax in Phase 1.3) |
 
 The "trailing dot is not a float" rule is important: it keeps `1.foo` working as field access on integer 1 (not legal but at least parses cleanly). The scanner already enforces this via the `isDigit(src[end+1])` check in the fractional-part branch.
