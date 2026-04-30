@@ -6,10 +6,12 @@ import path from "path";
 
 import { parse, testParser } from "./jsyooparser/parser.js";
 import { codegen } from "./jsyoopcodegen/codegen.js";
+import { testCharacterFns } from "./jsyooplexer/charFns.js";
 
 const testMode = process.env.testMode === "true";
 
 function runTests() {
+  testCharacterFns();
   testParser();
 }
 
