@@ -1,5 +1,7 @@
 // LLVM IR code generator — walks the AST and creates IR code
 
+import { ASTNodeKind } from "../contracts.js";
+
 // yooperlang type names → LLVM IR type names
 const LLVM_TYPES = {
   int: "i32",
@@ -204,13 +206,13 @@ export function codegen(ast) {
 
   function emitExpr(node, fnLines) {
     switch (node.kind) {
-      case "intLiteral": {
+      case ASTNodeKind.INT_LITERAL: {
         return { val: String(node.value), yoopType: "int32" };
       }
-      case "floatLiteral": {
+      case ASTNodeKind.FLOAT_LITERAL: {
         return { val: llvmFloatConstant(node.value), yoopType: "float64" }; // double for now... revisiting with typechecker later
       }
-      case "strLiteral": {
+      case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
         const tmp = freshTemp();
         fnLines.push(
@@ -219,7 +221,7 @@ export function codegen(ast) {
         return { val: tmp, yoopType: "string" };
       }
 
-      case "ident": {
+      case ASTNodeKind.IDENT: {
         const yoopType = symbols.get(node.name);
         if (!yoopType) {
           throw new Error(`codegen: unknown identifier "${node.name}"`);
@@ -230,11 +232,11 @@ export function codegen(ast) {
         return { val: tmp, yoopType };
       }
 
-      case "callExpression": {
+      case ASTNodeKind.CALL_EXPRESSION: {
         return emitCall(node, fnLines);
       }
 
-      case "binaryExpression": {
+      case ASTNodeKind.BINARY_EXPRESSION: {
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const opType = unifyArithType(l.yoopType, r.yoopType, node.op);
@@ -248,7 +250,7 @@ export function codegen(ast) {
         return { val: tmp, yoopType: isCmp ? "bool" : opType };
       }
 
-      case "assignment": {
+      case ASTNodeKind.ASSIGNMENT: {
         const lhsType = symbols.get(node.name);
         if (!lhsType) {
           throw new Error(
@@ -263,7 +265,7 @@ export function codegen(ast) {
         return rhs;
       }
 
-      case "templateLiteral": {
+      case ASTNodeKind.TEMPLATE_LITERAL: {
         return emitTemplateLiteral(node, fnLines);
       }
 
@@ -332,13 +334,13 @@ export function codegen(ast) {
     const valueArgs = []; // { val, yoopType } that follow the format string
 
     for (const argNode of node.args) {
-      if (argNode.kind === "strLiteral") {
+      if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         // raw format text — strip the surrounding quotes, keep escapes intact
         const inner = argNode.value.slice(1, -1);
         fmtSpec += inner;
-      } else if (argNode.kind === "templateLiteral") {
+      } else if (argNode.kind === ASTNodeKind.TEMPLATE_LITERAL) {
         for (const part of argNode.parts) {
-          if (part.kind === "stringPart") {
+          if (part.kind === ASTNodeKind.STRING_PART) {
             fmtSpec += escapePctsRaw(part.value);
           } else {
             const r = emitExpr(part.expr, fnLines);
@@ -380,7 +382,7 @@ export function codegen(ast) {
   // *format string* as a static global, which is wrong if there are interp
   // values — so we error in that case.
   function emitTemplateLiteral(node, fnLines) {
-    const hasInterp = node.parts.some((p) => p.kind === "exprPart");
+    const hasInterp = node.parts.some((p) => p.kind === ASTNodeKind.EXPR_PART);
     if (hasInterp) {
       throw new Error(
         `codegen: template literals with \${...} interpolation are only supported inside printf(...) for now`,
@@ -399,10 +401,10 @@ export function codegen(ast) {
   // ** statement codegen ***********************************************
   function emitStatement(node, fnLines, ctx) {
     switch (node.kind) {
-      case "returnStatement": {
+      case ASTNodeKind.RETURN_STATEMENT: {
         if (
           !node.value ||
-          (node.value.kind === "ident" && node.value.name === "void")
+          (node.value.kind === ASTNodeKind.IDENT && node.value.name === "void")
         ) {
           if (ctx.returnType !== "void") {
             throw new Error(
@@ -422,8 +424,8 @@ export function codegen(ast) {
         break;
       }
 
-      case "letDecl":
-      case "constDecl": {
+      case ASTNodeKind.LET_DECL:
+      case ASTNodeKind.CONST_DECL: {
         const declType = canonYoopType(node.type);
         if (!LLVM_TYPES[declType]) {
           throw new Error(
@@ -450,19 +452,19 @@ export function codegen(ast) {
         break;
       }
 
-      case "expressionStatement":
+      case ASTNodeKind.EXPRESSION_STATEMENT:
         emitExpr(node.value, fnLines);
         break;
 
-      case "ifStatement":
+      case ASTNodeKind.IF_STATEMENT:
         emitIf(node, fnLines, ctx);
         break;
 
-      case "whileStatement":
+      case ASTNodeKind.WHILE_STATEMENT:
         emitWhile(node, fnLines, ctx);
         break;
 
-      case "block":
+      case ASTNodeKind.BLOCK:
         node.body.forEach((s) => emitStatement(s, fnLines, ctx));
         break;
 
@@ -515,7 +517,7 @@ export function codegen(ast) {
   }
 
   function emitBlock(blockOrNode, fnLines, ctx) {
-    if (blockOrNode.kind === "block") {
+    if (blockOrNode.kind === ASTNodeKind.BLOCK) {
       blockOrNode.body.forEach((s) => emitStatement(s, fnLines, ctx));
     } else {
       emitStatement(blockOrNode, fnLines, ctx);
@@ -565,7 +567,7 @@ export function codegen(ast) {
   function emitProgram(node) {
     // first pass: collect user function signatures
     for (const decl of node.body) {
-      if (decl.kind === "functionDecl") {
+      if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
         functionSigs.set(decl.name, {
           params: (decl.params ?? []).map((p) => canonYoopType(p.type)),
           returnType: canonYoopType(decl.returnType),
@@ -584,7 +586,7 @@ export function codegen(ast) {
 
     // third pass: emit function bodies
     node.body.forEach((decl) => {
-      if (decl.kind === "functionDecl") emitFunction(decl);
+      if (decl.kind === ASTNodeKind.FUNCTION_DECL) emitFunction(decl);
     });
   }
 
@@ -601,7 +603,7 @@ function collectCalls(node, defined) {
   const called = new Set();
   function walk(n) {
     if (!n || typeof n !== "object") return;
-    if (n.kind === "callExpression" && !defined.has(n.callee)) {
+    if (n.kind === ASTNodeKind.CALL_EXPRESSION && !defined.has(n.callee)) {
       called.add(n.callee);
     }
     for (const val of Object.values(n)) {

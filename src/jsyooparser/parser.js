@@ -5,9 +5,10 @@ import {
   tokenScanList,
 } from "../jsyooplexer/lexer.js";
 
-function ASTNode(kind) {
-  this.kind = kind;
-}
+import {
+  ASTNode,
+  ASTNodeKind
+} from '../contracts.js';
 
 function isBinaryOp(tag) {
   return (
@@ -76,7 +77,7 @@ export function parse(src) {
 
   function parseTopLevel() {
     // root of the current file or program... calling this program for now...
-    const node = new ASTNode("program");
+    const node = new ASTNode(ASTNodeKind.PROGRAM);
     try {
       node.body = [];
       while (peek().tag !== TokenTags.eof) {
@@ -111,27 +112,27 @@ export function parse(src) {
     if (peek().tag === TokenTags.minus) {
       advance(); // consume the dash
       const operand = parseExpression(70);
-      if (operand.kind === "intLiteral" || operand.kind === "floatLiteral") {
+      if (operand.kind === ASTNodeKind.INT_LITERAL || operand.kind === ASTNodeKind.FLOAT_LITERAL) {
         operand.value = -operand.value;
         return operand;
       }
 
       // non-literal operands, build unary expression node
-      node = new ASTNode("unaryExpression");
+      node = new ASTNode(ASTNodeKind.UNARY_EXPRESSION);
       node.op = "minus";
       node.operand = operand;
 
       return node;
     }
     if (peek().tag === TokenTags.intLiteral) {
-      node = new ASTNode("intLiteral");
+      node = new ASTNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
     } else if (peek().tag === TokenTags.floatLiteral) {
-      node = new ASTNode("floatLiteral");
+      node = new ASTNode(ASTNodeKind.FLOAT_LITERAL);
       node.value = advance().floatVal;
     } else if (peek().tag === TokenTags.strLiteral) {
       const tok = advance();
-      node = new ASTNode("strLiteral");
+      node = new ASTNode(ASTNodeKind.STRING_LITERAL);
       node.value = src.substring(tok.start, tok.start + tok.length);
     } else if (peek().tag === TokenTags.templateLiteral) {
       const tok = advance();
@@ -141,17 +142,17 @@ export function parse(src) {
       const name = parseIdentAsName();
       if (peek().tag === TokenTags.lparen) {
         // this is a function call
-        node = new ASTNode("callExpression");
+        node = new ASTNode(ASTNodeKind.CALL_EXPRESSION);
         node.callee = name;
         parseCallArgs(node);
       } else if (peek().tag === TokenTags.eq) {
         // assignment
         advance();
-        node = new ASTNode("assignment");
+        node = new ASTNode(ASTNodeKind.ASSIGNMENT);
         node.name = name;
         node.value = parseExpression();
       } else {
-        node = new ASTNode("ident");
+        node = new ASTNode(ASTNodeKind.IDENT);
         node.name = name;
       }
     } else {
@@ -171,7 +172,7 @@ export function parse(src) {
       advance(); // consume op
       const right = parseExpression(precedence);
 
-      const binNode = new ASTNode("binaryExpression");
+      const binNode = new ASTNode(ASTNodeKind.BINARY_EXPRESSION);
       binNode.op = inverseTokenTags[opToken.tag];
       binNode.left = node;
       binNode.right = right;
@@ -199,7 +200,7 @@ export function parse(src) {
       }
       if (ch === "$" && inner[i + 1] === "{") {
         if (buf.length > 0) {
-          parts.push({ kind: "stringPart", value: buf });
+          parts.push({ kind: ASTNodeKind.STRING_PART, value: buf });
           buf = "";
         }
         // find matching closing brace, accounting for nested braces
@@ -222,7 +223,7 @@ export function parse(src) {
         const wrappedSrc = `function __t(): int32 { return ${exprSrc}; }`;
         const subAst = parse(wrappedSrc);
         const exprNode = subAst.body[0].body.body[0].value;
-        parts.push({ kind: "exprPart", expr: exprNode });
+        parts.push({ kind: ASTNodeKind.EXPR_PART, expr: exprNode });
         i = j + 1; // skip past closing }
         continue;
       }
@@ -230,9 +231,9 @@ export function parse(src) {
       i++;
     }
     if (buf.length > 0) {
-      parts.push({ kind: "stringPart", value: buf });
+      parts.push({ kind: ASTNodeKind.STRING_PART, value: buf });
     }
-    const node = new ASTNode("templateLiteral");
+    const node = new ASTNode(ASTNodeKind.TEMPLATE_LITERAL);
     node.parts = parts;
     return node;
   }
@@ -274,7 +275,7 @@ export function parse(src) {
 
   function parseReturnStatement() {
     expect(TokenTags.return);
-    const node = new ASTNode("returnStatement");
+    const node = new ASTNode(ASTNodeKind.RETURN_STATEMENT);
     node.value = parseExpression();
     expect(TokenTags.semicolon);
 
@@ -287,12 +288,12 @@ export function parse(src) {
     switch (varToken.tag) {
       case TokenTags.let:
         {
-          node = new ASTNode("letDecl");
+          node = new ASTNode(ASTNodeKind.LET_DECL);
         }
         break;
       case TokenTags.const:
         {
-          node = new ASTNode("constDecl");
+          node = new ASTNode(ASTNodeKind.CONST_DECL);
         }
         break;
       default: {
@@ -318,7 +319,7 @@ export function parse(src) {
   function parseIfStatement() {
     expect(TokenTags.if);
     expect(TokenTags.lparen);
-    const node = new ASTNode("ifStatement");
+    const node = new ASTNode(ASTNodeKind.IF_STATEMENT);
     node.expression = parseExpression();
     expect(TokenTags.rparen);
     node.body = parseBlock();
@@ -338,7 +339,7 @@ export function parse(src) {
   function parseWhileStatement() {
     expect(TokenTags.while);
     expect(TokenTags.lparen);
-    const node = new ASTNode("whileStatement");
+    const node = new ASTNode(ASTNodeKind.WHILE_STATEMENT);
     node.expression = parseExpression();
     expect(TokenTags.rparen);
     node.body = parseBlock();
@@ -347,7 +348,7 @@ export function parse(src) {
   }
 
   function parseExpressionStatement() {
-    const node = new ASTNode("expressionStatement");
+    const node = new ASTNode(ASTNodeKind.EXPRESSION_STATEMENT);
     node.value = parseExpression();
     expect(TokenTags.semicolon);
 
@@ -357,7 +358,7 @@ export function parse(src) {
   // expects an identifier, args, curlys, statements...
   function parseFunctionDecl() {
     expect(TokenTags.function);
-    const node = new ASTNode("functionDecl");
+    const node = new ASTNode(ASTNodeKind.FUNCTION_DECL);
     // name
     node.name = parseIdentAsName();
 
@@ -388,7 +389,7 @@ export function parse(src) {
   }
 
   function parseFunctionParam() {
-    const node = new ASTNode("param");
+    const node = new ASTNode(ASTNodeKind.PARAM);
     // name
     node.name = parseIdentAsName();
 
@@ -411,7 +412,7 @@ export function parse(src) {
 
   function parseBlock() {
     expect(TokenTags.lcurly);
-    const node = new ASTNode("block");
+    const node = new ASTNode(ASTNodeKind.BLOCK);
     node.body = [];
 
     // parse rest of statements
