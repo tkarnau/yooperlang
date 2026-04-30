@@ -1,0 +1,10 @@
+function main(): int32 {
+  let x: float64 = 3.14;
+  let y: float64 = -0.5;
+  let z: float64 = 1e2;
+  printf(`x=${x} y=${y} z=${z}\n`);
+
+  return 0;
+}
+
+// expected output: x=3.140000 y=-0.500000 z=100.000000

@@ -208,8 +208,6 @@ Without a typechecker yet, we don't know whether a literal should be `float` or 
 
 For the `intLiteral` path, no codegen change is needed: hex/binary/octal literals are already parsed to JS numbers in the lexer, and codegen has always taken the JS number directly.
 
-For literals with a `suffix`, Phase 1.1 ignores the suffix in codegen — the typechecker will use it, but for now codegen behaves as if no suffix was given. This is fine because the suffix only narrows the type; it doesn't change the bit pattern.
-
 ---
 
 ## Edge cases to handle (write tests for each)

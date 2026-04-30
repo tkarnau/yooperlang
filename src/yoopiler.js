@@ -79,7 +79,7 @@ function main() {
       "    ";
   }
 
-  const outputFileName = values.outputFile ?? "output";
+  const outputFileName = values.outputFile ?? values.inputFile?.replace(".yoop", "") ?? "output";
 
   const ast = parse(sourceStr);
   console.log("parser: ok");

@@ -213,13 +213,13 @@ function lexNumericLiteral(src, pos) {
 
   // parse the numeric value
   let res = new LexResult()
-  const strippedDigits = src.substring(digitsStart, end).replace("_", "");
+  const strippedDigits = src.substring(digitsStart, end).replaceAll("_", "");
   if (isFloat) {
     let val = parseFloat(strippedDigits);
     res.token.tag = TokenTags.floatLiteral;
     res.token.floatVal = val;
   } else {
-    let val = parseInt(strippedDigits);
+    let val = parseInt(strippedDigits, base);
     res.token.tag = TokenTags.intLiteral;
     res.token.intVal = val;
   }
@@ -335,7 +335,17 @@ export function testLexer() {
         }
       }
     `;
+// const sourceStr = `
+// function main(): int32 {
+//   let a: int32 = 0xFF;
+//   let b: int32 = 0b1010;
+//   let c: int32 = 1_000_000;
+//   let d: int32 = -7;
+//   printf(\`a=\${a} b=\${b} c=\${c} d=\${d}\\n\`);
 
+//   return 0;
+// }
+//   `
   let pos = 0;
   let currIter = 0;
   let failsafe = 100_000_000;
@@ -358,7 +368,8 @@ export function testLexer() {
   const results = JSON.stringify(resultTokens);
   // if making changes to the lexer, verify and update this expecation:
 
-  // console.log(JSON.stringify(results));
+  // console.log(JSON.stringify(resultTokens, null, 2));
+  // fs.writeFileSync("lexout.json", JSON.stringify(resultTokens, null, 2));
   const expectedResults =
     '[{\"tag\":14,\"start\":7,\"length\":8,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":16,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":20,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":23,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":13,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":30,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":33,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":41,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":16,\"start\":57,\"length\":6,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":64,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":31,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":68,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":14,\"start\":86,\"length\":8,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":95,\"length\":4,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":103,\"length\":4,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":15,\"start\":118,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":124,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":127,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":135,\"length\":2,\"intVal\":10,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":15,\"start\":147,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":153,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":156,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":164,\"length\":2,\"intVal\":20,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":15,\"start\":176,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":182,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":187,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":195,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":199,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":13,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":202,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":17,\"start\":215,\"length\":2,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":219,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":24,\"start\":0,\"length\":2,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":226,\"length\":2,\"intVal\":25,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":4,\"start\":242,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":246,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":253,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":261,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":19,\"start\":274,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":281,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":25,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":289,\"length\":1,\"intVal\":3,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":306,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":314,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":31,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":322,\"length\":1,\"intVal\":1,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":18,\"start\":347,\"length\":4,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":9,\"start\":364,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":368,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0}]';
 

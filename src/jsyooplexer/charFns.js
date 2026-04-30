@@ -47,8 +47,13 @@ function scanCharPredicates(src, start, predicates) {
     if (predicates.some((pred) => pred(ch, src, start, p))) {
       p++;
     } else {
-      return p;
+      break;
     }
+  }
+
+  if (p === start) {
+    // expected one advancement, at least...
+    throw new Error(`expected one or more characters to satisfy a scanner predicate at pos ${p}`);
   }
 
   return p;
@@ -139,7 +144,7 @@ export function createErrorPointingOutput(src, pos, padding) {
 }
 
 export function testCharacterFns() {
-  const hexTest = "DEAD_BEEF";
+  const hexTest = "DEAD_BEEF_A933";
   const hexTestResult = scanHexDigitsAndUnderscores(hexTest, 0);
   assert(
     hexTestResult === hexTest.length,
