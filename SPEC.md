@@ -120,7 +120,6 @@ Literal forms:
 | Binary int | `0b1010`, `0b1111_0000` |
 | Octal int | `0o755` |
 | Float | `1.0`, `3.14`, `-0.5`, `1e-9`, `6.022e23` |
-| Suffixed | `42i32`, `255u8`, `1.0f32`, `3.14f64` (optional; disambiguates in untyped contexts) |
 
 A literal that doesn't fit its inferred or annotated type is a compile error at parse
 time (e.g. `let x: uint8 = 256;`). Negative literals are not valid for unsigned types.

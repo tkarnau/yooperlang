@@ -6,10 +6,14 @@ import path from "path";
 
 import { parse, testParser } from "./jsyooparser/parser.js";
 import { codegen } from "./jsyoopcodegen/codegen.js";
+import { testCharacterFns } from "./jsyooplexer/charFns.js";
+import { testLexer } from "./jsyooplexer/lexer.js";
 
 const testMode = process.env.testMode === "true";
 
 function runTests() {
+  testCharacterFns();
+  testLexer();
   testParser();
 }
 
@@ -75,7 +79,7 @@ function main() {
       "    ";
   }
 
-  const outputFileName = values.outputFile ?? "output";
+  const outputFileName = values.outputFile ?? values.inputFile?.replace(".yoop", "") ?? "output";
 
   const ast = parse(sourceStr);
   console.log("parser: ok");

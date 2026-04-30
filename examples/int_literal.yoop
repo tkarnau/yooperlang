@@ -1,0 +1,11 @@
+function main(): int32 {
+  let a: int32 = 0xFF;
+  let b: int32 = 0b1010;
+  let c: int32 = 1_000_000;
+  let d: int32 = -7;
+  printf(`a=${a} b=${b} c=${c} d=${d}\n`);
+
+  return 0;
+}
+
+// expected output is: a=255 b=10 c=1000000 d=-7

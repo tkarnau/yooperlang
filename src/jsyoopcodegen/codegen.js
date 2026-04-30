@@ -37,7 +37,9 @@ function isIntType(yoopType) {
 }
 
 function isFloatType(yoopType) {
-  return yoopType === "float" || yoopType === "float32" || yoopType === "float64";
+  return (
+    yoopType === "float" || yoopType === "float32" || yoopType === "float64"
+  );
 }
 
 // pick a printf format specifier for a yooper type
@@ -45,7 +47,12 @@ function printfSpec(yoopType) {
   if (yoopType === "string") return "%s";
   if (yoopType === "bool") return "%d";
   if (isIntType(yoopType)) {
-    if (yoopType === "int64" || yoopType === "uint64" || yoopType === "isize" || yoopType === "usize") {
+    if (
+      yoopType === "int64" ||
+      yoopType === "uint64" ||
+      yoopType === "isize" ||
+      yoopType === "usize"
+    ) {
       return "%lld";
     }
     return "%d";
@@ -64,7 +71,12 @@ function promotedLlvmType(yoopType) {
   if (yoopType === "bool") return "i32";
   if (isIntType(yoopType)) {
     // int8/int16 → i32; int64 stays i64
-    if (yoopType === "int64" || yoopType === "uint64" || yoopType === "isize" || yoopType === "usize") {
+    if (
+      yoopType === "int64" ||
+      yoopType === "uint64" ||
+      yoopType === "isize" ||
+      yoopType === "usize"
+    ) {
       return "i64";
     }
     return "i32";
@@ -86,15 +98,42 @@ function encodeStringBytes(inner) {
     if (ch === "\\" && i + 1 < inner.length) {
       i++;
       switch (inner[i]) {
-        case "n": bytes += "\\0A"; byteLen++; break;
-        case "t": bytes += "\\09"; byteLen++; break;
-        case "r": bytes += "\\0D"; byteLen++; break;
-        case "0": bytes += "\\00"; byteLen++; break;
-        case "\\": bytes += "\\5C"; byteLen++; break;
-        case '"': bytes += "\\22"; byteLen++; break;
-        case "`": bytes += "`"; byteLen++; break;
-        case "$": bytes += "$"; byteLen++; break;
-        default: bytes += inner[i]; byteLen++; break;
+        case "n":
+          bytes += "\\0A";
+          byteLen++;
+          break;
+        case "t":
+          bytes += "\\09";
+          byteLen++;
+          break;
+        case "r":
+          bytes += "\\0D";
+          byteLen++;
+          break;
+        case "0":
+          bytes += "\\00";
+          byteLen++;
+          break;
+        case "\\":
+          bytes += "\\5C";
+          byteLen++;
+          break;
+        case '"':
+          bytes += "\\22";
+          byteLen++;
+          break;
+        case "`":
+          bytes += "`";
+          byteLen++;
+          break;
+        case "$":
+          bytes += "$";
+          byteLen++;
+          break;
+        default:
+          bytes += inner[i];
+          byteLen++;
+          break;
       }
     } else if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) > 0x7e) {
       const hex = ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0");
@@ -151,15 +190,26 @@ export function codegen(ast) {
     return { name, byteLen };
   }
 
+  function llvmFloatConstant(jsNumber) {
+    const buf = Buffer.alloc(8);
+    // big endian hex encoded double (llvm docsthing),
+    // all floats are double and get potentially truncated based on operand type later
+    buf.writeDoubleBE(jsNumber, 0);
+    return "0x" + buf.toString("hex").toUpperCase();
+  }
+
   // ** expression codegen ************************************************
   // each emitExpr returns { val, yoopType } where val is an SSA name or
   // an integer literal, and yoopType is the canonical yooper type.
 
   function emitExpr(node, fnLines) {
     switch (node.kind) {
-      case "intLiteral":
+      case "intLiteral": {
         return { val: String(node.value), yoopType: "int32" };
-
+      }
+      case "floatLiteral": {
+        return { val: llvmFloatConstant(node.value), yoopType: "float64" }; // double for now... revisiting with typechecker later
+      }
       case "strLiteral": {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
         const tmp = freshTemp();
@@ -180,8 +230,9 @@ export function codegen(ast) {
         return { val: tmp, yoopType };
       }
 
-      case "callExpression":
+      case "callExpression": {
         return emitCall(node, fnLines);
+      }
 
       case "binaryExpression": {
         const l = emitExpr(node.left, fnLines);
@@ -200,19 +251,25 @@ export function codegen(ast) {
       case "assignment": {
         const lhsType = symbols.get(node.name);
         if (!lhsType) {
-          throw new Error(`codegen: assignment to unknown variable "${node.name}"`);
+          throw new Error(
+            `codegen: assignment to unknown variable "${node.name}"`,
+          );
         }
         const rhs = emitExpr(node.value, fnLines);
         checkAssignable(lhsType, rhs.yoopType, `assignment to "${node.name}"`);
-        fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr %${node.name}`);
+        fnLines.push(
+          `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${node.name}`,
+        );
         return rhs;
       }
 
-      case "templateLiteral":
+      case "templateLiteral": {
         return emitTemplateLiteral(node, fnLines);
+      }
 
-      default:
+      default: {
         throw new Error(`codegen: unhandled expression kind "${node.kind}"`);
+      }
     }
   }
 
@@ -234,7 +291,11 @@ export function codegen(ast) {
         );
       }
       sig.params.forEach((paramType, i) => {
-        checkAssignable(paramType, argResults[i].yoopType, `arg ${i} of "${node.callee}"`);
+        checkAssignable(
+          paramType,
+          argResults[i].yoopType,
+          `arg ${i} of "${node.callee}"`,
+        );
       });
       argList = sig.params
         .map((paramType, i) => `${llvmType(paramType)} ${argResults[i].val}`)
@@ -344,12 +405,18 @@ export function codegen(ast) {
           (node.value.kind === "ident" && node.value.name === "void")
         ) {
           if (ctx.returnType !== "void") {
-            throw new Error(`codegen: function "${ctx.fnName}" must return ${ctx.returnType}, found bare return`);
+            throw new Error(
+              `codegen: function "${ctx.fnName}" must return ${ctx.returnType}, found bare return`,
+            );
           }
           fnLines.push("  ret void");
         } else {
           const r = emitExpr(node.value, fnLines);
-          checkAssignable(ctx.returnType, r.yoopType, `return from "${ctx.fnName}"`);
+          checkAssignable(
+            ctx.returnType,
+            r.yoopType,
+            `return from "${ctx.fnName}"`,
+          );
           fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
         }
         break;
@@ -359,7 +426,9 @@ export function codegen(ast) {
       case "constDecl": {
         const declType = canonYoopType(node.type);
         if (!LLVM_TYPES[declType]) {
-          throw new Error(`codegen: unknown type "${node.type}" in declaration of "${node.name}"`);
+          throw new Error(
+            `codegen: unknown type "${node.type}" in declaration of "${node.name}"`,
+          );
         }
         if (symbols.has(node.name)) {
           throw new Error(`codegen: redeclaration of "${node.name}"`);
@@ -371,7 +440,11 @@ export function codegen(ast) {
         );
         if (node.assignment) {
           const r = emitExpr(node.assignment, fnLines);
-          checkAssignable(declType, r.yoopType, `initializer of "${node.name}"`);
+          checkAssignable(
+            declType,
+            r.yoopType,
+            `initializer of "${node.name}"`,
+          );
           fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
         }
         break;
@@ -401,7 +474,9 @@ export function codegen(ast) {
   function emitIf(node, fnLines, ctx) {
     const cond = emitExpr(node.expression, fnLines);
     if (cond.yoopType !== "bool") {
-      throw new Error(`codegen: if condition must be bool, got ${cond.yoopType}`);
+      throw new Error(
+        `codegen: if condition must be bool, got ${cond.yoopType}`,
+      );
     }
     const thenLabel = freshLabel("then");
     const elseLabel = freshLabel("else");
@@ -426,7 +501,9 @@ export function codegen(ast) {
     fnLines.push(`${condLabel}:`);
     const cond = emitExpr(node.expression, fnLines);
     if (cond.yoopType !== "bool") {
-      throw new Error(`codegen: while condition must be bool, got ${cond.yoopType}`);
+      throw new Error(
+        `codegen: while condition must be bool, got ${cond.yoopType}`,
+      );
     }
     fnLines.push(
       `  br i1 ${cond.val}, label %${bodyLabel}, label %${afterLabel}`,
@@ -623,6 +700,7 @@ const FLOAT_OP_MAP = {
 function binaryInstruction(op, opType) {
   const map = isFloatType(opType) ? FLOAT_OP_MAP : INT_OP_MAP;
   const instr = map[op];
-  if (!instr) throw new Error(`codegen: unknown binary op "${op}" for type ${opType}`);
+  if (!instr)
+    throw new Error(`codegen: unknown binary op "${op}" for type ${opType}`);
   return instr;
 }

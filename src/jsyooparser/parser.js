@@ -107,9 +107,28 @@ export function parse(src) {
 
   function parseExpression(minPrecedence = 0) {
     let node;
+    // unary first
+    if (peek().tag === TokenTags.minus) {
+      advance(); // consume the dash
+      const operand = parseExpression(70);
+      if (operand.kind === "intLiteral" || operand.kind === "floatLiteral") {
+        operand.value = -operand.value;
+        return operand;
+      }
+
+      // non-literal operands, build unary expression node
+      node = new ASTNode("unaryExpression");
+      node.op = "minus";
+      node.operand = operand;
+
+      return node;
+    }
     if (peek().tag === TokenTags.intLiteral) {
       node = new ASTNode("intLiteral");
       node.value = advance().intVal;
+    } else if (peek().tag === TokenTags.floatLiteral) {
+      node = new ASTNode("floatLiteral");
+      node.value = advance().floatVal;
     } else if (peek().tag === TokenTags.strLiteral) {
       const tok = advance();
       node = new ASTNode("strLiteral");

@@ -15,6 +15,10 @@ import {
   createErrorPointingOutput,
   scanIdentityToEnd,
   scanStringLiteralEnd,
+  scanHexDigitsAndUnderscores,
+  scanBinDigitsAndUnderscores,
+  scanOctDigitsAndUnderscores,
+  scanDecDigitsAndUnderscores,
 } from "./charFns.js";
 import { skipWhitespace } from "./charEaters.js";
 
@@ -31,6 +35,7 @@ export const TokenTags = {
   intLiteral: 2,
   strLiteral: 3, // included wrapping quote characters
   templateLiteral: 36, // backtick-quoted, may contain ${...} interpolations
+  floatLiteral: 37,
 
   // keywords
   let: 4,
@@ -68,10 +73,13 @@ export const TokenTags = {
   modulus: 35,
 };
 
-export const inverseTokenTags = Object.entries(TokenTags).reduce((a, [k, v]) => {
-  a[v] = k;
-  return a;
-}, {});
+export const inverseTokenTags = Object.entries(TokenTags).reduce(
+  (a, [k, v]) => {
+    a[v] = k;
+    return a;
+  },
+  {},
+);
 
 export const tokenScanList = [
   { str: "(", tag: TokenTags.lparen },
@@ -97,14 +105,13 @@ export const tokenScanList = [
   { str: "*", tag: TokenTags.mult },
   { str: "/", tag: TokenTags.divide },
   { str: "%", tag: TokenTags.modulus },
-
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {
   let: TokenTags.let,
-  "function": TokenTags.function,
-  "const": TokenTags.const,
-  "return": TokenTags.return,
+  function: TokenTags.function,
+  const: TokenTags.const,
+  return: TokenTags.return,
   if: TokenTags.if,
   else: TokenTags.else,
   while: TokenTags.while,
@@ -125,6 +132,7 @@ function Token() {
   this.start = 0;
   this.length = 0;
   this.intVal = 0;
+  this.floatVal = 0.0;
 }
 
 function LexResult() {
@@ -149,6 +157,76 @@ function lexIdentifierOrKeyword(src, pos) {
   } else {
     res.token.tag = TokenTags.ident;
   }
+
+  return res;
+}
+
+function lexNumericLiteral(src, pos) {
+  let start = pos;
+  let isFloat = false;
+  let base = 10;
+  let digitsStart = pos;
+  let end = digitsStart;
+
+  // check if we have an 0x prefix
+  if (src[pos] === '0' && pos + 1 < src.length) {
+    let next = src[pos + 1].toLowerCase();
+    if (next === 'x') {
+      base = 16;
+      pos += 2;
+      digitsStart = pos;
+      end = scanHexDigitsAndUnderscores(src, pos);
+    } else if (next === 'b') {
+      base = 2;
+      pos += 2;
+      digitsStart = pos;
+      end = scanBinDigitsAndUnderscores(src, pos);
+    } else if (next === 'o') {
+      base = 8;
+      pos += 2;
+      digitsStart = pos;
+      end = scanOctDigitsAndUnderscores(src, pos);
+    } else {
+      // plain decimal number starting with 0
+      end = scanDecDigitsAndUnderscores(src, pos);
+    }
+  } else {
+    end = scanDecDigitsAndUnderscores(src, pos);
+  }
+
+  // float fractional part - only legal in base10
+  if (base === 10 && src[end] === '.' && isDigit(src[end+1])) {
+    isFloat = true;
+    end++;
+    end = scanDecDigitsAndUnderscores(src, end);
+  }
+
+  // float exponent - only legal in base10
+  if (base === 10 && src[end].toLowerCase() == 'e') {
+    isFloat = true;
+    end++;
+    if (src[end] === '+' || src[end] === '-') {
+      end++;
+    }
+    end = scanDecDigitsAndUnderscores(src, end);
+  }
+
+  // parse the numeric value
+  let res = new LexResult()
+  const strippedDigits = src.substring(digitsStart, end).replaceAll("_", "");
+  if (isFloat) {
+    let val = parseFloat(strippedDigits);
+    res.token.tag = TokenTags.floatLiteral;
+    res.token.floatVal = val;
+  } else {
+    let val = parseInt(strippedDigits, base);
+    res.token.tag = TokenTags.intLiteral;
+    res.token.intVal = val;
+  }
+
+  res.token.start = start;
+  res.token.length = end - start;
+  res.nextPos = end;
 
   return res;
 }
@@ -205,7 +283,8 @@ export function lexNext(src, pos) {
       res.nextPos = p + 1;
       return res;
     }
-    res.token.tag = ch === "`" ? TokenTags.templateLiteral : TokenTags.strLiteral;
+    res.token.tag =
+      ch === "`" ? TokenTags.templateLiteral : TokenTags.strLiteral;
     res.token.start = p;
     res.token.length = end - p;
     res.nextPos = end;
@@ -214,15 +293,7 @@ export function lexNext(src, pos) {
 
   // integer literal
   if (isDigit(ch)) {
-    let end = scanDigitsEnd(src, p);
-    let val = parseInt(src.substring(p, end));
-    res.token.tag = TokenTags.intLiteral;
-    res.token.start = p;
-    res.token.length = end - p;
-    res.token.intVal = val;
-    res.nextPos = end;
-
-    return res;
+    return lexNumericLiteral(src, p);
   }
 
   // identifiers or keywords
@@ -243,27 +314,8 @@ const testMode = true;
 // can go away, but will leave around to iterate on the lexer independently, if needed...
 // todo change to testLexer like we did with the parser and have some basic tests in here...
 export function testLexer() {
-  const { values, positionals } = parseArgs({
-    args: process.argv.slice(2),
-    options: {
-      inputFile: { type: "string", short: "i" },
-    },
-    allowPositionals: true,
-  });
-
-  let sourceStr = "";
-  if (!testMode) {
-    let inputFile = values.inputFile ?? positionals[0];
-
-    if (!fs.existsSync(inputFile)) {
-      console.log("input file not found.");
-      process.exit(1);
-    }
-
-    // get string from file...
-  } else {
-    // initial test
-    sourceStr = `
+  // initial test
+  const sourceStr = `
       function add(a: int32, b: int32): int32 {
         return a + b;
       }
@@ -283,10 +335,21 @@ export function testLexer() {
         }
       }
     `;
-  }
+// const sourceStr = `
+// function main(): int32 {
+//   let a: int32 = 0xFF;
+//   let b: int32 = 0b1010;
+//   let c: int32 = 1_000_000;
+//   let d: int32 = -7;
+//   printf(\`a=\${a} b=\${b} c=\${c} d=\${d}\\n\`);
+
+//   return 0;
+// }
+//   `
   let pos = 0;
   let currIter = 0;
   let failsafe = 100_000_000;
+  const resultTokens = [];
   while (pos <= sourceStr.length && currIter++ < failsafe) {
     const { token, nextPos, err } = lexNext(sourceStr, pos);
 
@@ -299,8 +362,18 @@ export function testLexer() {
     if (token.tag === TokenTags.eof) break; // we're done
 
     pos = nextPos;
+    resultTokens.push(token);
   }
 
-  console.log("lexer: ok");
-}
+  const results = JSON.stringify(resultTokens);
+  // if making changes to the lexer, verify and update this expecation:
 
+  // console.log(JSON.stringify(resultTokens, null, 2));
+  // fs.writeFileSync("lexout.json", JSON.stringify(resultTokens, null, 2));
+  const expectedResults =
+    '[{\"tag\":14,\"start\":7,\"length\":8,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":16,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":20,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":23,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":13,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":30,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":33,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":41,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":16,\"start\":57,\"length\":6,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":64,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":31,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":68,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":14,\"start\":86,\"length\":8,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":95,\"length\":4,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":103,\"length\":4,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":15,\"start\":118,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":124,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":127,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":135,\"length\":2,\"intVal\":10,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":15,\"start\":147,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":153,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":156,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":164,\"length\":2,\"intVal\":20,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":15,\"start\":176,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":182,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":187,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":195,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":199,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":13,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":202,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":17,\"start\":215,\"length\":2,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":219,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":24,\"start\":0,\"length\":2,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":226,\"length\":2,\"intVal\":25,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":4,\"start\":242,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":246,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":12,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":253,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":261,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":19,\"start\":274,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":7,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":281,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":25,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":289,\"length\":1,\"intVal\":3,\"floatVal\":0},{\"tag\":8,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":306,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":314,\"length\":5,\"intVal\":0,\"floatVal\":0},{\"tag\":31,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":2,\"start\":322,\"length\":1,\"intVal\":1,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":18,\"start\":347,\"length\":4,\"intVal\":0,\"floatVal\":0},{\"tag\":10,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":9,\"start\":364,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":5,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":1,\"start\":368,\"length\":3,\"intVal\":0,\"floatVal\":0},{\"tag\":6,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0},{\"tag\":11,\"start\":0,\"length\":1,\"intVal\":0,\"floatVal\":0}]';
+
+  console.assert(results === expectedResults, "lexer did not produce the expected result");
+
+  console.log("lexer test completed");
+}

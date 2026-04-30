@@ -1,0 +1,25 @@
+// these should not compile and complain about lexing, better error support soon
+
+// function main(): int32 {
+//   let x: int32 = 0x_FF; // no leading underscore
+// }
+
+// Error: numeric token at pos 127 starting with underscore is not allowed
+
+// function main(): int32 {
+//   let x: int32 = 1__000;
+// }
+
+// Error: numeric token at pos 297 underscore must be surrounded by digits
+
+// function main(): int32 {
+//  let x: int32 = 0x; // no value after hex prefix
+// }
+
+// Error: expected one or more characters to satisfy a scanner predicate at pos 441
+
+function main(): int32 {
+  let x: int32 = 42x; // bad prefix notation
+}
+
+// Error: expected token 6 semicolon, got 1 ident at pos 611
