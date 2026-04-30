@@ -157,21 +157,8 @@ In `parseExpression`, alongside the existing `intLiteral` branch:
   const tok = advance();
   node = new ASTNode("floatLiteral");
   node.value = tok.floatVal;
-  if (tok.numSuffix) node.suffix = tok.numSuffix;
 }
 ```
-
-And update the `intLiteral` branch to carry the suffix:
-```js
-if (peek().tag === TokenTags.intLiteral) {
-  const tok = advance();
-  node = new ASTNode("intLiteral");
-  node.value = tok.intVal;
-  if (tok.numSuffix) node.suffix = tok.numSuffix;
-}
-```
-
-Important: only set `suffix` when present, so existing AST-equality tests in `testParser` still pass. The golden in [parser.js:435](../src/jsyooparser/parser.js#L435) compares serialized JSON; an undefined `suffix` field would change the output.
 
 #### b) Unary-minus folding
 
@@ -199,9 +186,6 @@ Why fold: the spec says "negative literals are not valid for unsigned types" (§
 
 The precedence number 70 is higher than `*`/`/` (60) so `-x * 2` parses as `(-x) * 2`, matching most languages.
 
-#### c) Suffix propagation
-
-When the parser builds a literal with `suffix`, it just copies the field through. Phase 1.2's typechecker reads it: if `suffix` is present, it pins the literal's type; if absent, the literal stays untyped until context types it.
 
 ### 5. Codegen — handle `floatLiteral` AST node ([codegen.js](../src/jsyoopcodegen/codegen.js))
 
