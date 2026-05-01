@@ -1,7 +1,7 @@
 // every Type has at least { kind, ... }
 //   kind: "prim" | "struct" | "ref" | "array" | "func" | "void" | "untypedInt" | "untypedFloat" | "error"
 
-const typeKinds = {
+export const typeKinds = {
   prim: "prim",
   struct: "struct",
   ref: "ref",
@@ -22,7 +22,7 @@ const freezerWrap = (kind, obj) => {
   return Object.freeze(self);
 };
 
-const primAnnotations = {
+export const primAnnotations = {
   int8: "int8",
   int16: "int16",
   int32: "int32",
@@ -39,6 +39,25 @@ const primAnnotations = {
   usize: "usize",
   isize: "isize",
 };
+
+export function isIntPrim(name) {
+  return [
+    primAnnotations.int8,
+    primAnnotations.int16,
+    primAnnotations.int32,
+    primAnnotations.int64,
+    primAnnotations.uint8,
+    primAnnotations.uint16,
+    primAnnotations.uint32,
+    primAnnotations.uint64,
+    primAnnotations.usize,
+    primAnnotations.isize,
+  ].includes(name);
+}
+
+export function isFloatPrim(name) {
+  return [primAnnotations.float32, primAnnotations.float64].includes(name);
+}
 
 export const PrimType = (name) => freezerWrap(typeKinds.prim, { name });
 
