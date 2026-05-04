@@ -1,2 +1,4 @@
 output.exe
-examples/*.exe
+examples/*
+!examples/*.yoop
+!examples/*.js
