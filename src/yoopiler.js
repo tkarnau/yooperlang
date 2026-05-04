@@ -8,6 +8,7 @@ import { parse, testParser } from "./jsyooparser/parser.js";
 import { codegen } from "./jsyoopcodegen/codegen.js";
 import { testCharacterFns } from "./jsyooplexer/charFns.js";
 import { testLexer } from "./jsyooplexer/lexer.js";
+import { typecheck } from "./jsyooptypecheck/typecheck.js";
 
 const testMode = process.env.testMode === "true";
 
@@ -84,6 +85,13 @@ function main() {
   const ast = parse(sourceStr);
   console.log("parser: ok");
   console.log("ast", JSON.stringify(ast));
+  const { errors } = typecheck(ast);
+  if (errors.length > 0) {
+    console.error("typecheck errors:");
+    errors.forEach((error) => console.error(error));
+    process.exit(1);
+  }
+  console.log("typecheck: ok");
   const ir = codegen(ast);
 
   console.log("llvm IR: ok");
