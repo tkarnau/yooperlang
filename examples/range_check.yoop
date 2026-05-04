@@ -1,0 +1,8 @@
+function main(): int32 {
+    let a: int8 = 100;
+    let b: int8 = 27;
+    let c: int8 = a + b;
+    printf(`a=${a}, b=${b}, c=${c}\n`);
+
+    return 0;
+}

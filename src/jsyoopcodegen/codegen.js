@@ -339,7 +339,24 @@ export function codegen(ast) {
     );
 
     const argList = ["ptr " + fmtTmp]
-      .concat(valueArgs.map((r) => `${promotedLlvmType(r.yoopType)} ${r.val}`))
+      .concat(
+        valueArgs.map((r) => {
+          const promoted = promotedLlvmType(r.yoopType);
+          const actual = llvmType(r.yoopType);
+          if (promoted !== actual) {
+            // varargs promotion: widen the value to the promoted type
+            const tmp = freshTemp();
+            if (isIntType(r.yoopType)) {
+              const op = r.yoopType.startsWith("uint") ? "zext" : "sext";
+              fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
+            } else if (isFloatType(r.yoopType)) {
+              fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
+            }
+            return `${promoted} ${tmp}`;
+          }
+          return `${promoted} ${r.val}`;
+        }),
+      )
       .join(", ");
 
     const tmp = freshTemp();

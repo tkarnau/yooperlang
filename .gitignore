@@ -2,3 +2,4 @@ output.exe
 examples/*
 !examples/*.yoop
 !examples/*.js
+output
