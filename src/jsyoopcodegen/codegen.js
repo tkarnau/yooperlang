@@ -338,6 +338,10 @@ export function codegen(ast) {
       `  ${fmtTmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`,
     );
 
+    // important learning
+    // varargs in C and llvm are passed as 32 bit ints or 64 bit doubles
+    // so we have to "promote" them to the right size here.
+    // sext is signed-extend, zext is zero-extend, fpext is float-extend
     const argList = ["ptr " + fmtTmp]
       .concat(
         valueArgs.map((r) => {
