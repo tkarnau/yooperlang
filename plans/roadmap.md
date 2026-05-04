@@ -189,6 +189,8 @@ function main(): int32 {
 
 This must compile and print `distance_sq = 25`.
 
+> Detailed plan: [phase-1-3-structs.md](phase-1-3-structs.md)
+
 ---
 
 ## Verification
