@@ -23,13 +23,6 @@ const LLVM_TYPES = {
   string: "ptr", // i8* — null-terminated UTF-8 pointer, llvm docs thing?
 };
 
-// canonicalize a yooper type alias to its underlying type
-function canonYoopType(yoopType) {
-  if (yoopType === "int") return "int32";
-  if (yoopType === "float") return "float32";
-  return yoopType;
-}
-
 function llvmType(yoopType) {
   return LLVM_TYPES[yoopType] ?? "ptr";
 }
@@ -207,10 +200,10 @@ export function codegen(ast) {
   function emitExpr(node, fnLines) {
     switch (node.kind) {
       case ASTNodeKind.INT_LITERAL: {
-        return { val: String(node.value), yoopType: "int32" };
+        return { val: String(node.value), yoopType: node.resolvedType.name ?? "int32" };
       }
       case ASTNodeKind.FLOAT_LITERAL: {
-        return { val: llvmFloatConstant(node.value), yoopType: "float64" }; // double for now... revisiting with typechecker later
+        return { val: llvmFloatConstant(node.value), yoopType: node.resolvedType.name ?? "float64" };
       }
       case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
@@ -239,15 +232,15 @@ export function codegen(ast) {
       case ASTNodeKind.BINARY_EXPRESSION: {
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
-        const opType = unifyArithType(l.yoopType, r.yoopType, node.op);
+        const resultType = node.resolvedType.name;
+        // for comparisons, the instruction operates on the operand type, not the result (bool)
+        const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(node.op);
+        const opType = isCmp ? l.yoopType : resultType;
         const llvmTy = llvmType(opType);
         const tmp = freshTemp();
         const instr = binaryInstruction(node.op, opType);
-
-        // comparisons return bool; arithmetic returns the operand type
-        const isCmp = instr.startsWith("icmp") || instr.startsWith("fcmp");
         fnLines.push(`  ${tmp} = ${instr} ${llvmTy} ${l.val}, ${r.val}`);
-        return { val: tmp, yoopType: isCmp ? "bool" : opType };
+        return { val: tmp, yoopType: resultType };
       }
 
       case ASTNodeKind.ASSIGNMENT: {
@@ -258,7 +251,6 @@ export function codegen(ast) {
           );
         }
         const rhs = emitExpr(node.value, fnLines);
-        checkAssignable(lhsType, rhs.yoopType, `assignment to "${node.name}"`);
         fnLines.push(
           `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${node.name}`,
         );
@@ -284,33 +276,18 @@ export function codegen(ast) {
     const argResults = node.args.map((a) => emitExpr(a, fnLines));
     const sig = functionSigs.get(node.callee);
     let argList;
-    let retType;
     if (sig) {
-      // user-defined: types are known
-      if (sig.params.length !== argResults.length) {
-        throw new Error(
-          `codegen: wrong arg count to "${node.callee}" — expected ${sig.params.length}, got ${argResults.length}`,
-        );
-      }
-      sig.params.forEach((paramType, i) => {
-        checkAssignable(
-          paramType,
-          argResults[i].yoopType,
-          `arg ${i} of "${node.callee}"`,
-        );
-      });
       argList = sig.params
         .map((paramType, i) => `${llvmType(paramType)} ${argResults[i].val}`)
         .join(", ");
-      retType = sig.returnType;
     } else {
-      // unknown extern (e.g. C funcs other than printf). assume ptr/i32.
+      // unknown extern (e.g. C funcs other than printf)
       argList = argResults
         .map((r) => `${llvmType(r.yoopType)} ${r.val}`)
         .join(", ");
-      retType = canonYoopType(knownExternRetType(node.callee));
     }
 
+    const retType = node.resolvedType.name;
     const llvmRet = llvmType(retType);
     if (llvmRet === "void") {
       fnLines.push(`  call void @${node.callee}(${argList})`);
@@ -406,19 +383,9 @@ export function codegen(ast) {
           !node.value ||
           (node.value.kind === ASTNodeKind.IDENT && node.value.name === "void")
         ) {
-          if (ctx.returnType !== "void") {
-            throw new Error(
-              `codegen: function "${ctx.fnName}" must return ${ctx.returnType}, found bare return`,
-            );
-          }
           fnLines.push("  ret void");
         } else {
           const r = emitExpr(node.value, fnLines);
-          checkAssignable(
-            ctx.returnType,
-            r.yoopType,
-            `return from "${ctx.fnName}"`,
-          );
           fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
         }
         break;
@@ -426,15 +393,7 @@ export function codegen(ast) {
 
       case ASTNodeKind.LET_DECL:
       case ASTNodeKind.CONST_DECL: {
-        const declType = canonYoopType(node.type);
-        if (!LLVM_TYPES[declType]) {
-          throw new Error(
-            `codegen: unknown type "${node.type}" in declaration of "${node.name}"`,
-          );
-        }
-        if (symbols.has(node.name)) {
-          throw new Error(`codegen: redeclaration of "${node.name}"`);
-        }
+        const declType = node.resolvedType.name;
         symbols.set(node.name, declType);
         const llvmTy = llvmType(declType);
         fnLines.push(
@@ -442,11 +401,6 @@ export function codegen(ast) {
         );
         if (node.assignment) {
           const r = emitExpr(node.assignment, fnLines);
-          checkAssignable(
-            declType,
-            r.yoopType,
-            `initializer of "${node.name}"`,
-          );
           fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
         }
         break;
@@ -475,11 +429,6 @@ export function codegen(ast) {
 
   function emitIf(node, fnLines, ctx) {
     const cond = emitExpr(node.expression, fnLines);
-    if (cond.yoopType !== "bool") {
-      throw new Error(
-        `codegen: if condition must be bool, got ${cond.yoopType}`,
-      );
-    }
     const thenLabel = freshLabel("then");
     const elseLabel = freshLabel("else");
     const mergeLabel = freshLabel("merge");
@@ -502,11 +451,6 @@ export function codegen(ast) {
     fnLines.push(`  br label %${condLabel}`);
     fnLines.push(`${condLabel}:`);
     const cond = emitExpr(node.expression, fnLines);
-    if (cond.yoopType !== "bool") {
-      throw new Error(
-        `codegen: while condition must be bool, got ${cond.yoopType}`,
-      );
-    }
     fnLines.push(
       `  br i1 ${cond.val}, label %${bodyLabel}, label %${afterLabel}`,
     );
@@ -530,12 +474,12 @@ export function codegen(ast) {
     labelCounter = 0;
     symbols = new Map();
 
-    const returnType = canonYoopType(node.returnType);
+    const returnType = node.resolvedType.name;
     const params = node.params ?? [];
     const llvmRet = llvmType(returnType);
 
     const paramSig = params
-      .map((p) => `${llvmType(canonYoopType(p.type))} %${p.name}.arg`)
+      .map((p) => `${llvmType(p.resolvedType.name)} %${p.name}.arg`)
       .join(", ");
 
     const fnLines = [];
@@ -544,7 +488,7 @@ export function codegen(ast) {
 
     // copy params into stack slots so they're addressable like locals
     for (const p of params) {
-      const ty = canonYoopType(p.type);
+      const ty = p.resolvedType.name;
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
       fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
@@ -569,8 +513,8 @@ export function codegen(ast) {
     for (const decl of node.body) {
       if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
         functionSigs.set(decl.name, {
-          params: (decl.params ?? []).map((p) => canonYoopType(p.type)),
-          returnType: canonYoopType(decl.returnType),
+          params: (decl.params ?? []).map((p) => p.resolvedType.name),
+          returnType: decl.resolvedType.name,
         });
       }
     }
@@ -625,16 +569,6 @@ function externDecl(name) {
   return known[name] ?? `declare i32 @${name}(...)`;
 }
 
-function knownExternRetType(name) {
-  const known = {
-    printf: "int32",
-    fprintf: "int32",
-    puts: "int32",
-    exit: "void",
-  };
-  return known[name] ?? "int32";
-}
-
 function alignOf(llvmTy) {
   if (llvmTy === "i64" || llvmTy === "double") return 8;
   if (llvmTy === "i32" || llvmTy === "float") return 4;
@@ -643,28 +577,7 @@ function alignOf(llvmTy) {
   return 8; // ptr
 }
 
-// ** type helpers and binary op resolution ****************************
-
-// allow assigning a value of `srcType` to a slot of `dstType`. for now
-// require an exact match after canonicalization; later this can permit
-// safe widenings (int8 → int32, etc.).
-function checkAssignable(dstType, srcType, where) {
-  const d = canonYoopType(dstType);
-  const s = canonYoopType(srcType);
-  if (d === s) return;
-  throw new Error(`type error in ${where}: expected ${d}, got ${s}`);
-}
-
-// pick a result type for an arithmetic or comparison op given two operand
-// types. for now: same-type only, fail otherwise.
-function unifyArithType(left, right, op) {
-  const l = canonYoopType(left);
-  const r = canonYoopType(right);
-  if (l !== r) {
-    throw new Error(`type error: cannot apply "${op}" to ${l} and ${r}`);
-  }
-  return l;
-}
+// ** binary op resolution ****************************
 
 // LLVM docs: https://llvm.org/docs/LangRef.html
 const INT_OP_MAP = {

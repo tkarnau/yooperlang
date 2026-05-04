@@ -29,6 +29,18 @@ export const ASTNodeKind = Object.freeze({
   WHILE_STATEMENT: "WHILE_STATEMENT",
 });
 
-export function ASTNode(kind) {
+export function SourceLocation(pos, line, column) {
+  this.pos = pos;
+  this.line = line;
+  this.column = column;
+}
+
+export function ASTNode(kind, sourceLoc) {
   this.kind = ASTNodeKind[kind];
+  if (!this.kind) {
+    throw new Error(`Invalid AST node kind: ${kind}`);
+  }
+  if (sourceLoc) {
+    this.sourceLoc = new SourceLocation(sourceLoc.pos, sourceLoc.line, sourceLoc.column);
+  }
 }

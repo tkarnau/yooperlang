@@ -38,6 +38,7 @@ export const primAnnotations = {
   string: "string",
   usize: "usize",
   isize: "isize",
+  void: "void",
 };
 
 export function isIntPrim(name) {
@@ -53,6 +54,49 @@ export function isIntPrim(name) {
     primAnnotations.usize,
     primAnnotations.isize,
   ].includes(name);
+}
+
+export function isUnsignedIntPrim(name) {
+  return [
+    primAnnotations.uint8,
+    primAnnotations.uint16,
+    primAnnotations.uint32,
+    primAnnotations.uint64,
+    primAnnotations.usize,
+  ].includes(name);
+}
+
+export function isSignedIntPrim(name) {
+  return [
+    primAnnotations.int8,
+    primAnnotations.int16,
+    primAnnotations.int32,
+    primAnnotations.int64,
+    primAnnotations.isize,
+  ].includes(name);
+}
+
+export function getBitWidthOfIntPrim(name) {
+  switch (name) {
+    case primAnnotations.int8:
+    case primAnnotations.uint8:
+      return 8;
+    case primAnnotations.int16:
+    case primAnnotations.uint16:
+      return 16;
+    case primAnnotations.int32:
+    case primAnnotations.uint32:
+      return 32;
+    case primAnnotations.int64:
+    case primAnnotations.uint64:
+      return 64;
+    case primAnnotations.isize:
+    case primAnnotations.usize:
+      // for simplicity, we'll just treat these as 64-bit for now
+      return 64;
+    default:
+      throw new Error(`Not an int primitive: ${name}`);
+  }
 }
 
 export function isFloatPrim(name) {
@@ -82,8 +126,8 @@ export function canonicalize(name) {
 // try to find primitive from type name, else return null
 export function primTypeFromName(name) {
   const canonName = canonicalize(name);
-  if (primAnnotations[name]) {
-    return PrimType(name);
+  if (primAnnotations[canonName]) {
+    return PrimType(canonName);
   }
 
   return null;
@@ -99,5 +143,49 @@ export function typesEqual(a, b) {
   if (a.kind === typeKinds.prim) {
     return a.name === b.name;
   }
-  // todo more fleshing out here...
+  if (a.kind === typeKinds.struct) {
+    if (a.name !== b.name) {
+      return false;
+    }
+    const aFieldNames = Object.keys(a.fields);
+    const bFieldNames = Object.keys(b.fields);
+    if (aFieldNames.length !== bFieldNames.length) {
+      return false;
+    }
+    for (const fieldName of aFieldNames) {
+      if (!b.fields[fieldName]) {
+        return false;
+      }
+      if (!typesEqual(a.fields[fieldName], b.fields[fieldName])) {
+        return false;
+      }
+    }
+    return true;
+  }
+  if (a.kind === typeKinds.ref) {
+    return typesEqual(a.inner, b.inner);
+  }
+  if (a.kind === typeKinds.array) {
+    return typesEqual(a.elem, b.elem);
+  }
+  if (a.kind === typeKinds.func) {
+    if (a.params.length !== b.params.length) {
+      return false;
+    }
+    for (let i = 0; i < a.params.length; i++) {
+      if (!typesEqual(a.params[i], b.params[i])) {
+        return false;
+      }
+    }
+    return typesEqual(a.returnType, b.returnType);
+  }
+  if (
+    a.kind === typeKinds.void ||
+    a.kind === typeKinds.untypedInt ||
+    a.kind === typeKinds.untypedFloat ||
+    a.kind === typeKinds.error
+  ) {
+    return true;
+  }
+  throw new Error(`Unknown type kind: ${a.kind}`);
 }
