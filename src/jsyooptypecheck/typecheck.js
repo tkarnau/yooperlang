@@ -515,44 +515,69 @@ function checkExpr(node, scope, ctx) {
       return node.resolvedType;
     }
     case ASTNodeKind.ASSIGNMENT: {
-      const binding = lookupInScope(scope, node.name);
-      if (!binding) {
-        pushError(ctx.errors, node, `undefined variable "${node.name}"`);
-        node.resolvedType = ErrorType();
+      // assignment target is an lvalue node — IDENT today, FIELD_ACCESS once
+      // §4(e) / §5(e) of the structs plan land. dispatch on its kind.
+      if (node.target.kind === ASTNodeKind.IDENT) {
+        const targetName = node.target.name;
+        const binding = lookupInScope(scope, targetName);
+        if (!binding) {
+          pushError(ctx.errors, node, `undefined variable "${targetName}"`);
+          node.resolvedType = ErrorType();
+          return node.resolvedType;
+        }
+        if (binding.kind === "const") {
+          pushError(ctx.errors, node, `cannot assign to const "${targetName}"`);
+          node.resolvedType = ErrorType();
+          return node.resolvedType;
+        }
+        node.target.resolvedType = binding.type;
+        const valueType = checkExpr(node.value, scope, ctx);
+        if (!isAssignable(binding.type, valueType)) {
+          pushError(
+            ctx.errors,
+            node,
+            `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${targetName}"`,
+          );
+        }
+
+        if (
+          (valueType.kind === typeKinds.untypedInt &&
+            isIntPrim(binding.type.name)) ||
+          (valueType.kind === typeKinds.untypedFloat &&
+            isFloatPrim(binding.type.name))
+        ) {
+          // coerce untyped literal to the binding's declared type
+          if (
+            node.value.kind === ASTNodeKind.INT_LITERAL ||
+            node.value.kind === ASTNodeKind.FLOAT_LITERAL
+          ) {
+            coerceLiteralToType(node.value, binding.type, ctx.errors);
+          } else {
+            node.value.resolvedType = binding.type;
+          }
+        }
+
+        node.resolvedType = binding.type;
         return node.resolvedType;
       }
-      if (binding.kind === "const") {
-        pushError(ctx.errors, node, `cannot assign to const "${node.name}"`);
-        node.resolvedType = ErrorType();
-        return node.resolvedType;
-      }
-      const valueType = checkExpr(node.value, scope, ctx);
-      if (!isAssignable(binding.type, valueType)) {
+
+      if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
+        // §4(e) — full field-write checking lands with struct registration.
+        // for now: typecheck both sides so cascading errors stay quiet, then
+        // bail with an explicit unimplemented marker.
+        checkExpr(node.target, scope, ctx);
+        checkExpr(node.value, scope, ctx);
         pushError(
           ctx.errors,
           node,
-          `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${node.name}"`,
+          `field assignment typecheck not yet implemented (struct support pending)`,
         );
+        node.resolvedType = ErrorType();
+        return node.resolvedType;
       }
 
-      if (
-        (valueType.kind === typeKinds.untypedInt &&
-          isIntPrim(binding.type.name)) ||
-        (valueType.kind === typeKinds.untypedFloat &&
-          isFloatPrim(binding.type.name))
-      ) {
-        // coerce untyped literal to the binding's declared type
-        if (
-          node.value.kind === ASTNodeKind.INT_LITERAL ||
-          node.value.kind === ASTNodeKind.FLOAT_LITERAL
-        ) {
-          coerceLiteralToType(node.value, binding.type, ctx.errors);
-        } else {
-          node.value.resolvedType = binding.type;
-        }
-      }
-
-      node.resolvedType = binding.type;
+      pushError(ctx.errors, node, `invalid assignment target`);
+      node.resolvedType = ErrorType();
       return node.resolvedType;
     }
     default: {

@@ -46,6 +46,7 @@ export const TokenTags = {
   else: 18,
   while: 19,
   for: 20,
+  type: 38,
   // punctuation / operators
   eq: 5,
   semicolon: 6,
@@ -71,6 +72,7 @@ export const TokenTags = {
   mult: 33,
   divide: 34,
   modulus: 35,
+  dot: 39,
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -105,6 +107,7 @@ export const tokenScanList = [
   { str: "*", tag: TokenTags.mult },
   { str: "/", tag: TokenTags.divide },
   { str: "%", tag: TokenTags.modulus },
+  { str: ".", tag: TokenTags.dot },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {
@@ -116,6 +119,7 @@ const keywordTagList = {
   else: TokenTags.else,
   while: TokenTags.while,
   for: TokenTags.for,
+  type: TokenTags.type,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

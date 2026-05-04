@@ -11,6 +11,7 @@ import { testLexer } from "./jsyooplexer/lexer.js";
 import { typecheck } from "./jsyooptypecheck/typecheck.js";
 
 const testMode = process.env.testMode === "true";
+const phaseMode = process.env.phaseMode === "true";
 
 function runTests() {
   testCharacterFns();
@@ -33,7 +34,10 @@ function main() {
   });
 
   let sourceStr = "";
-  if (!testMode) {
+  if (phaseMode) {
+    // hard coding phase file
+    sourceStr = fs.readFileSync("phasePrograms/phase_1_3_struct.yoop", "utf8");
+  } else if (!testMode) {
     let inputFile = values.inputFile ?? positionals[0];
 
     if (!fs.existsSync(inputFile)) {

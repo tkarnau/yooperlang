@@ -5,10 +5,7 @@ import {
   tokenScanList,
 } from "../jsyooplexer/lexer.js";
 
-import {
-  ASTNode,
-  ASTNodeKind
-} from '../contracts.js';
+import { ASTNode, ASTNodeKind } from "../contracts.js";
 import { posToSourceLocation } from "../helpers.js";
 
 function isBinaryOp(tag) {
@@ -94,6 +91,11 @@ export function parse(src) {
               node.body.push(parseFunctionDecl());
             }
             break;
+          case TokenTags.type:
+            {
+              node.body.push(parseTypeDecl());
+            }
+            break;
           default: {
             throw new Error(
               `unexpected token at top level ${peekTag} ${inverseTokenTags[peekTag]}`,
@@ -117,7 +119,10 @@ export function parse(src) {
     if (peek().tag === TokenTags.minus) {
       advance(); // consume the dash
       const operand = parseExpression(70);
-      if (operand.kind === ASTNodeKind.INT_LITERAL || operand.kind === ASTNodeKind.FLOAT_LITERAL) {
+      if (
+        operand.kind === ASTNodeKind.INT_LITERAL ||
+        operand.kind === ASTNodeKind.FLOAT_LITERAL
+      ) {
         operand.value = -operand.value;
         return operand;
       }
@@ -150,20 +155,62 @@ export function parse(src) {
         node = buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
         node.callee = name;
         parseCallArgs(node);
-      } else if (peek().tag === TokenTags.eq) {
-        // assignment
-        advance();
-        node = buildSourcedNode(ASTNodeKind.ASSIGNMENT);
-        node.name = name;
-        node.value = parseExpression();
       } else {
         node = buildSourcedNode(ASTNodeKind.IDENT);
         node.name = name;
       }
+    } else if (peek().tag === TokenTags.lcurly) {
+      advance(); // consume lcurly
+      node = buildSourcedNode(ASTNodeKind.STRUCT_LITERAL);
+      node.fields = [];
+      while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
+        const fieldNode = buildSourcedNode(ASTNodeKind.STRUCT_LITERAL_FIELD);
+        fieldNode.name = parseIdentAsName();
+        expect(TokenTags.colon);
+        fieldNode.value = parseExpression();
+        node.fields.push(fieldNode);
+        if (peek().tag === TokenTags.comma) {
+          advance();
+        } // allow trailing comma
+      }
+      expect(TokenTags.rcurly);
     } else {
       throw new Error(
         `unexpected token in expression: ${peek().tag} ${inverseTokenTags[peek().tag]}`,
       );
+    }
+    // handle field access
+    while (true) {
+      if (peek().tag === TokenTags.dot) {
+        advance(); // consume dot
+        const fieldName = parseIdentAsName();
+        const fieldAccessNode = buildSourcedNode(ASTNodeKind.FIELD_ACCESS);
+        fieldAccessNode.object = node;
+        fieldAccessNode.field = fieldName;
+        node = fieldAccessNode;
+        continue;
+      }
+      // phase 4 should add '[`, `(` (call) here too.
+      break;
+    }
+
+    // assignment — lvalue is whatever the primary+postfix chain produced.
+    // valid targets today are IDENT (`x = ...`) and FIELD_ACCESS (`p.x = ...`).
+    // assignment binds loosest and doesn't chain into the binary loop.
+    if (peek().tag === TokenTags.eq) {
+      if (
+        node.kind !== ASTNodeKind.IDENT &&
+        node.kind !== ASTNodeKind.FIELD_ACCESS
+      ) {
+        throw new Error(
+          `invalid assignment target: ${node.kind} at pos ${peek().start}`,
+        );
+      }
+      advance(); // consume '='
+      const assignNode = buildSourcedNode(ASTNodeKind.ASSIGNMENT);
+      assignNode.target = node;
+      assignNode.value = parseExpression();
+      return assignNode;
     }
 
     // handle binary ops
@@ -218,9 +265,7 @@ export function parse(src) {
           j++;
         }
         if (depth !== 0) {
-          throw new Error(
-            `unterminated \${...} in template literal`,
-          );
+          throw new Error(`unterminated \${...} in template literal`);
         }
         const exprSrc = inner.substring(i + 2, j);
         // re-parse the expression by recursively invoking parse() on a
@@ -389,6 +434,35 @@ export function parse(src) {
     // end of signature
     // function body
     node.body = parseBlock();
+
+    return node;
+  }
+
+  function parseTypeDecl() {
+    expect(TokenTags.type);
+    const node = buildSourcedNode(ASTNodeKind.TYPE_DECL);
+    // name
+    node.name = parseIdentAsName();
+    
+    if (peek().tag === TokenTags.lcurly) {
+      // struct type
+      node.fields = [];
+      expect(TokenTags.lcurly);
+      while (peek().tag === TokenTags.ident) {
+        const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+        fieldNode.name = parseIdentAsName();
+        expect(TokenTags.colon);
+        fieldNode.type = parseIdentAsName();
+        node.fields.push(fieldNode);
+        if (peek().tag === TokenTags.comma) {
+          advance();
+        } // allow trailing comma
+      }
+      expect(TokenTags.rcurly);
+    } else {
+      // type alias, just a reference to another type for now
+      node.targetType = parseIdentAsName();
+    }
 
     return node;
   }

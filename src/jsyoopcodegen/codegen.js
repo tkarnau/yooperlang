@@ -244,17 +244,25 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.ASSIGNMENT: {
-        const lhsType = symbols.get(node.name);
-        if (!lhsType) {
-          throw new Error(
-            `codegen: assignment to unknown variable "${node.name}"`,
+        // §5(e) will add FIELD_ACCESS targets via emitLvalue + GEP+store.
+        // today only IDENT targets are wired through.
+        if (node.target.kind === ASTNodeKind.IDENT) {
+          const targetName = node.target.name;
+          const lhsType = symbols.get(targetName);
+          if (!lhsType) {
+            throw new Error(
+              `codegen: assignment to unknown variable "${targetName}"`,
+            );
+          }
+          const rhs = emitExpr(node.value, fnLines);
+          fnLines.push(
+            `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${targetName}`,
           );
+          return rhs;
         }
-        const rhs = emitExpr(node.value, fnLines);
-        fnLines.push(
-          `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${node.name}`,
+        throw new Error(
+          `codegen: field assignment not yet implemented (target kind ${node.target.kind})`,
         );
-        return rhs;
       }
 
       case ASTNodeKind.TEMPLATE_LITERAL: {
