@@ -1,5 +1,7 @@
 // LLVM IR code generator — walks the AST and creates IR code
 
+import { parse } from "../jsyooparser/parser.js";
+import { typecheck } from "../jsyooptypecheck/typecheck.js";
 import { ASTNodeKind } from "../contracts.js";
 
 // yooperlang type names → LLVM IR type names
@@ -23,7 +25,7 @@ const LLVM_TYPES = {
   string: "ptr", // i8* — null-terminated UTF-8 pointer, llvm docs thing?
 };
 
-function llvmType(yoopType) {
+export function llvmType(yoopType) {
   return LLVM_TYPES[yoopType] ?? "ptr";
 }
 
@@ -38,7 +40,7 @@ function isFloatType(yoopType) {
 }
 
 // pick a printf format specifier for a yooper type
-function printfSpec(yoopType) {
+export function printfSpec(yoopType) {
   if (yoopType === "string") return "%s";
   if (yoopType === "bool") return "%d";
   if (isIntType(yoopType)) {
@@ -598,7 +600,7 @@ function externDecl(name) {
   return known[name] ?? `declare i32 @${name}(...)`;
 }
 
-function alignOf(llvmTy) {
+export function alignOf(llvmTy) {
   if (llvmTy === "i64" || llvmTy === "double") return 8;
   if (llvmTy === "i32" || llvmTy === "float") return 4;
   if (llvmTy === "i16") return 2;
@@ -647,4 +649,18 @@ function binaryInstruction(op, opType) {
   if (!instr)
     throw new Error(`codegen: unknown binary op "${op}" for type ${opType}`);
   return instr;
+}
+
+// convenience for tests: parse + typecheck + codegen in one call.
+// returns the IR string. throws if typecheck reports errors.
+export function compileSource(src) {
+  const ast = parse(src);
+  const { errors } = typecheck(ast);
+  if (errors.length > 0) {
+    throw new Error(
+      `compileSource: typecheck failed with ${errors.length} error(s):\n` +
+        errors.map((e) => `  ${e.message}`).join("\n"),
+    );
+  }
+  return codegen(ast);
 }

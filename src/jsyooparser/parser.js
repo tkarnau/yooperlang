@@ -508,30 +508,3 @@ export function parse(src) {
   return parseTopLevel();
 }
 
-export function testParser(src) {
-  const test1 = `
-    function add(a: int32, b: int32): int32 {
-        return a + b;
-      }
-
-      function main(): void {
-        const x: int32 = 10;
-        const y: int32 = 20;
-        const sum: int32 = add(x, y);
-
-        if (sum >= 25) {
-          let count: int32 = 0;
-          while (count < 3) {
-            count = count * 2 + 3;
-          }
-        } else {
-          // who cares
-        }
-      }
-  `;
-
-  // const test1Ast = parse(test1);
-  // console.log("test1Ast", JSON.stringify(test1Ast, null, 2));
-  // const expectedResult = `{"kind":"program","body":[{"kind":"functionDecl","name":"add","params":[{"kind":"param","name":"a","type":"int32"},{"kind":"param","name":"b","type":"int32"}],"returnType":"int32","body":{"kind":"block","body":[{"kind":"returnStatement","value":{"kind":"binaryExpression","op":"plus","left":{"kind":"ident","name":"a"},"right":{"kind":"ident","name":"b"}}}]}},{"kind":"functionDecl","name":"main","returnType":"void","body":{"kind":"block","body":[{"kind":"constDecl","name":"x","type":"int32","assignment":{"kind":"intLiteral","value":10}},{"kind":"constDecl","name":"y","type":"int32","assignment":{"kind":"intLiteral","value":20}},{"kind":"constDecl","name":"sum","type":"int32","assignment":{"kind":"callExpression","callee":"add","args":[{"kind":"ident","name":"x"},{"kind":"ident","name":"y"}]}},{"kind":"ifStatement","expression":{"kind":"binaryExpression","op":"gte","left":{"kind":"ident","name":"sum"},"right":{"kind":"intLiteral","value":25}},"body":{"kind":"block","body":[{"kind":"letDecl","name":"count","type":"int32","assignment":{"kind":"intLiteral","value":0}},{"kind":"whileStatement","expression":{"kind":"binaryExpression","op":"lt","left":{"kind":"ident","name":"count"},"right":{"kind":"intLiteral","value":3}},"body":{"kind":"block","body":[{"kind":"expressionStatement","value":{"kind":"assignment","name":"count","value":{"kind":"binaryExpression","op":"plus","left":{"kind":"binaryExpression","op":"mult","left":{"kind":"ident","name":"count"},"right":{"kind":"intLiteral","value":2}},"right":{"kind":"intLiteral","value":3}}}}]}}]},"elseBody":{"kind":"block","body":[]}}]}}]}`;
-  // console.log("test1Ast", JSON.stringify(test1Ast) === expectedResult ? "ok" : "failed");
-}
