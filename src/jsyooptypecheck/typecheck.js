@@ -12,6 +12,8 @@ import {
   primAnnotations,
   PrimType,
   primTypeFromName,
+  resolveTypeName,
+  StructType,
   typeKinds,
   typesEqual,
   UntypedFloatType,
@@ -34,6 +36,12 @@ export function typecheck(ast) {
 
   const errors = [];
   const moduleSymbols = new Map(); // name -> FuncType
+  const structTable = new Map(); // name -> StructType
+
+  const typeContext = {
+    moduleSymbols,
+    structTable,
+  };
 
   // pre-pass to collect function signatures for mutual recursion support, and also to check for duplicate function names
   for (const decl of ast.body) {
@@ -47,11 +55,57 @@ export function typecheck(ast) {
         const funcType = FuncType(
           (decl.params ?? []).map((p) => ({
             name: p.name,
-            type: primTypeFromName(p.type) ?? ErrorType(),
+            type: resolveTypeName(p.type, structTable) ?? ErrorType(),
           })),
-          primTypeFromName(decl.returnType) ?? ErrorType(),
+          resolveTypeName(decl.returnType, structTable) ?? ErrorType(),
         );
         moduleSymbols.set(decl.name, funcType);
+      }
+    }
+    if (decl.kind === ASTNodeKind.TYPE_DECL) {
+      // Handle type declaration
+      // two stage so that types can refer to themselves or each other
+      // don't worry about fields for now
+      if (structTable.has(decl.name)) {
+        errors.push({
+          message: `redeclaration of type "${decl.name}"`,
+          sourceLoc: decl.sourceLoc,
+        });
+      } else {
+        structTable.set(decl.name, StructType(decl.name, null)); // null fields for now
+      }
+    }
+  }
+
+  // struct fields pass
+  for (const decl of ast.body) {
+    if (decl.kind === ASTNodeKind.TYPE_DECL) {
+      const fields = [];
+      for (const field of decl.fields) {
+        let fieldType = resolveTypeName(field.type, structTable);
+        if (!fieldType) {
+          errors.push({
+            message: `unknown type "${field.type}" in field "${field.name}" of struct "${decl.name}"`,
+            sourceLoc: field.sourceLoc,
+          });
+          fieldType = ErrorType();
+        }
+        if (fields.some((f) => f.name === field.name)) {
+          errors.push({
+            message: `duplicate field name "${field.name}" in struct "${decl.name}"`,
+            sourceLoc: field.sourceLoc,
+          });
+        }
+        // check for recursive fields:
+        if (detectRecursiveField(decl.name, fieldType)) {
+          errors.push({
+            message: `recursive field "${field.name}" in struct "${decl.name}"`,
+            sourceLoc: field.sourceLoc,
+          });
+        }
+        fields.push({ name: field.name, type: fieldType });
+        // set the ast resolved type now that fields are resolved
+        decl.resolvedType = StructType(decl.name, fields);
       }
     }
   }
@@ -59,11 +113,29 @@ export function typecheck(ast) {
   // walk ast.body
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
-      checkFunction(decl, moduleSymbols, errors);
+      checkFunction(decl, typeContext, errors);
     }
   }
 
   return { ast, errors };
+}
+
+function detectRecursiveField(structName, fieldType, visited = new Set()) {
+  if (fieldType.kind === typeKinds.struct) {
+    if (fieldType.name === structName) {
+      return true;
+    }
+    if (visited.has(fieldType.name)) {
+      return false;
+    } // already visited this struct, avoid infinite recursion
+    visited.add(fieldType.name);
+    for (const field of fieldType.fields) {
+      if (detectRecursiveField(structName, field.type, visited)) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function pushScope(parent) {
@@ -153,12 +225,13 @@ function coerceLiteralToType(literalNode, targetType, errors) {
   }
 }
 
-function checkFunction(funcNode, moduleSymbols, errors) {
+function checkFunction(funcNode, typeContext, errors) {
   // start with null parent
   const scope = pushScope(null);
 
   for (const param of funcNode.params ?? []) {
-    const t = primTypeFromName(param.type) ?? ErrorType();
+    const t =
+      resolveTypeName(param.type, typeContext.structTable) ?? ErrorType();
     if (t.kind === typeKinds.error) {
       pushError(errors, param, `unknown type "${param.type}"`);
     }
@@ -168,7 +241,9 @@ function checkFunction(funcNode, moduleSymbols, errors) {
     param.resolvedType = t;
   }
 
-  const funcReturnType = primTypeFromName(funcNode.returnType) ?? ErrorType();
+  const funcReturnType =
+    resolveTypeName(funcNode.returnType, typeContext.structTable) ??
+    ErrorType();
   if (funcReturnType.kind === typeKinds.error) {
     pushError(errors, funcNode, `unknown return type "${funcNode.returnType}"`);
   }
@@ -177,7 +252,7 @@ function checkFunction(funcNode, moduleSymbols, errors) {
   const ctx = {
     funcReturnType,
     funcName: funcNode.name,
-    moduleSymbols,
+    typeContext,
     errors,
   };
   // now check the statements
@@ -197,7 +272,8 @@ function checkStatement(node, scope, ctx) {
 
     case ASTNodeKind.LET_DECL:
     case ASTNodeKind.CONST_DECL: {
-      const declaredType = primTypeFromName(node.type) ?? ErrorType();
+      const declaredType =
+        resolveTypeName(node.type, ctx.typeContext.structTable) ?? ErrorType();
       if (declaredType.kind === typeKinds.error) {
         pushError(ctx.errors, node, `unknown type "${node.type}"`);
       }
@@ -273,7 +349,10 @@ function checkStatement(node, scope, ctx) {
       return;
     }
     case ASTNodeKind.IF_STATEMENT: {
-      const boolPrimType = primTypeFromName(primAnnotations.bool);
+      const boolPrimType = resolveTypeName(
+        primAnnotations.bool,
+        ctx.typeContext.structTable,
+      );
       const exprType = checkExpr(node.expression, scope, ctx);
       if (!typesEqual(exprType, boolPrimType)) {
         pushError(
@@ -293,7 +372,10 @@ function checkStatement(node, scope, ctx) {
       return;
     }
     case ASTNodeKind.WHILE_STATEMENT: {
-      const boolPrimType = primTypeFromName(primAnnotations.bool);
+      const boolPrimType = resolveTypeName(
+        primAnnotations.bool,
+        ctx.typeContext.structTable,
+      );
       const exprType = checkExpr(node.expression, scope, ctx);
       if (!typesEqual(exprType, boolPrimType)) {
         pushError(
@@ -408,7 +490,7 @@ function checkExpr(node, scope, ctx) {
       }
 
       // Look up callee in module symbols (user-defined functions)
-      const sig = ctx.moduleSymbols.get(node.callee);
+      const sig = ctx.typeContext.moduleSymbols.get(node.callee);
 
       if (!sig) {
         // Check known externs
@@ -456,7 +538,10 @@ function checkExpr(node, scope, ctx) {
           return node.resolvedType;
         }
       } else if (node.op === "not") {
-        const boolPrimType = primTypeFromName(primAnnotations.bool);
+        const boolPrimType = resolveTypeName(
+          primAnnotations.bool,
+          ctx.typeContext.structTable,
+        );
         if (typesEqual(operandType, boolPrimType)) {
           node.resolvedType = boolPrimType;
           return node.resolvedType;
@@ -579,6 +664,34 @@ function checkExpr(node, scope, ctx) {
       pushError(ctx.errors, node, `invalid assignment target`);
       node.resolvedType = ErrorType();
       return node.resolvedType;
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      const objType = checkExpr(node.object, scope, ctx);
+      if (objType.kind === typeKinds.error) {
+        node.resolvedType = ErrorType();
+        return node.resolvedType;
+      }
+      if (objType.kind !== typeKinds.struct) {
+        pushError(
+          ctx.errors,
+          node,
+          `field access on non-struct type ${formatType(objType)}`,
+        );
+        node.resolvedType = ErrorType();
+        return node.resolvedType;
+      }
+      const field = objType.fields?.find(field => field.name === node.field);
+      if (!field) {
+        pushError(
+          ctx.errors,
+          node,
+          `type "${objType.name}" has no field "${node.field}"`,
+        );
+        node.resolvedType = ErrorType();
+        return node.resolvedType;
+      }
+      node.resolvedType = field.type;
+      return field.type;
     }
     default: {
       pushError(

@@ -133,6 +133,16 @@ export function primTypeFromName(name) {
   return null;
 }
 
+/**** important function ****
+ * This resolves a type name relative to some context decided by the caller
+ * For now this is going to handle structs as something non-primitive,
+ * but this is also where we would handle type aliases, generics, etc. in the future
+ */
+export function resolveTypeName(name, structTable) {
+  // naive for now
+  return primTypeFromName(name) ?? structTable.get(name) ?? null;
+}
+
 export function typesEqual(a, b) {
   if (!a || !b) {
     return false;
@@ -147,8 +157,8 @@ export function typesEqual(a, b) {
     if (a.name !== b.name) {
       return false;
     }
-    const aFieldNames = Object.keys(a.fields);
-    const bFieldNames = Object.keys(b.fields);
+    const aFieldNames = Object.keys(a.fields ?? {});
+    const bFieldNames = Object.keys(b.fields ?? {});
     if (aFieldNames.length !== bFieldNames.length) {
       return false;
     }
