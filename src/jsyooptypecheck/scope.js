@@ -1,5 +1,5 @@
 // Lexical scope chain used by the typechecker. Each scope is a Map of
-// name → { type, kind } with a pointer to its parent scope. lookupInScope
+// name -> { type, kind } with a pointer to its parent scope. lookupInScope
 // walks the chain; declareInScope refuses redeclarations within a single
 // scope.
 

@@ -2,7 +2,7 @@ import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { llvmType, printfSpec, alignOf, compileSource } from "./codegen.js";
 
-describe("llvmType: yoop type name → LLVM IR type", () => {
+describe("llvmType: yoop type name -> LLVM IR type", () => {
   const cases = [
     ["int32", "i32"],
     ["int8", "i8"],
@@ -15,7 +15,7 @@ describe("llvmType: yoop type name → LLVM IR type", () => {
     ["string", "ptr"],
   ];
   for (const [yoopTy, llTy] of cases) {
-    it(`${yoopTy} → ${llTy}`, () => assert.equal(llvmType(yoopTy), llTy));
+    it(`${yoopTy} -> ${llTy}`, () => assert.equal(llvmType(yoopTy), llTy));
   }
   it("unknown name falls back to ptr", () => {
     assert.equal(llvmType("Point"), "ptr");
@@ -23,13 +23,13 @@ describe("llvmType: yoop type name → LLVM IR type", () => {
 });
 
 describe("printfSpec: printf format specifier per yoop type", () => {
-  it("string → %s", () => assert.equal(printfSpec("string"), "%s"));
-  it("int32 → %d", () => assert.equal(printfSpec("int32"), "%d"));
-  it("int64 → %lld", () => assert.equal(printfSpec("int64"), "%lld"));
-  it("usize → %lld", () => assert.equal(printfSpec("usize"), "%lld"));
-  it("float32 → %f", () => assert.equal(printfSpec("float32"), "%f"));
-  it("float64 → %lf", () => assert.equal(printfSpec("float64"), "%lf"));
-  it("bool → %d", () => assert.equal(printfSpec("bool"), "%d"));
+  it("string -> %s", () => assert.equal(printfSpec("string"), "%s"));
+  it("int32 -> %d", () => assert.equal(printfSpec("int32"), "%d"));
+  it("int64 -> %lld", () => assert.equal(printfSpec("int64"), "%lld"));
+  it("usize -> %lld", () => assert.equal(printfSpec("usize"), "%lld"));
+  it("float32 -> %f", () => assert.equal(printfSpec("float32"), "%f"));
+  it("float64 -> %lf", () => assert.equal(printfSpec("float64"), "%lf"));
+  it("bool -> %d", () => assert.equal(printfSpec("bool"), "%d"));
   it("unknown type throws", () => {
     assert.throws(() => printfSpec("Point"), /don't know how to format/);
   });

@@ -25,7 +25,7 @@ describe("detectRecursiveField", () => {
     assert.equal(detectRecursiveField("Node", self.fields[0].type), true);
   });
 
-  it("mutual recursion (A → B → A) is detected", () => {
+  it("mutual recursion (A -> B -> A) is detected", () => {
     const a = StructType("A", [{ name: "b", type: null }]);
     const b = StructType("B", [{ name: "a", type: null }]);
     a.fields[0].type = b;
@@ -34,7 +34,7 @@ describe("detectRecursiveField", () => {
     assert.equal(detectRecursiveField("B", b.fields[0].type), true);
   });
 
-  it("non-cyclic chain (A → B with primitive leaves) is not recursive", () => {
+  it("non-cyclic chain (A -> B with primitive leaves) is not recursive", () => {
     const b = StructType("B", [{ name: "x", type: PrimType("int32") }]);
     const a = StructType("A", [{ name: "b", type: b }]);
     assert.equal(detectRecursiveField("A", a.fields[0].type), false);

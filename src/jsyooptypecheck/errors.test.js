@@ -31,27 +31,27 @@ describe("pushError", () => {
 });
 
 describe("formatType", () => {
-  it("prim → name", () => assert.equal(formatType(PrimType("int32")), "int32"));
-  it("struct → 'struct Name'", () => {
+  it("prim -> name", () => assert.equal(formatType(PrimType("int32")), "int32"));
+  it("struct -> 'struct Name'", () => {
     assert.equal(formatType(StructType("Point", [])), "struct Point");
   });
-  it("ref → 'ref <inner>'", () => {
+  it("ref -> 'ref <inner>'", () => {
     assert.equal(formatType(RefType(PrimType("int32"))), "ref int32");
   });
-  it("array → 'array <elem>'", () => {
+  it("array -> 'array <elem>'", () => {
     assert.equal(formatType(ArrayType(PrimType("uint8"))), "array uint8");
   });
-  it("func → '(params) -> return'", () => {
+  it("func -> '(params) -> return'", () => {
     const ft = FuncType([PrimType("int32"), PrimType("int32")], PrimType("int32"));
     assert.equal(formatType(ft), "(int32, int32) -> int32");
   });
-  it("void → 'void'", () => assert.equal(formatType(VoidType()), "void"));
-  it("untyped int → 'untyped int'", () => {
+  it("void -> 'void'", () => assert.equal(formatType(VoidType()), "void"));
+  it("untyped int -> 'untyped int'", () => {
     assert.equal(formatType(UntypedIntType()), "untyped int");
   });
-  it("untyped float → 'untyped float'", () => {
+  it("untyped float -> 'untyped float'", () => {
     assert.equal(formatType(UntypedFloatType()), "untyped float");
   });
-  it("error → 'error'", () => assert.equal(formatType(ErrorType()), "error"));
-  it("null → 'null'", () => assert.equal(formatType(null), "null"));
+  it("error -> 'error'", () => assert.equal(formatType(ErrorType()), "error"));
+  it("null -> 'null'", () => assert.equal(formatType(null), "null"));
 });

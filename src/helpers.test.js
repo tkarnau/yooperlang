@@ -14,7 +14,7 @@ describe("posToSourceLocation", () => {
   ];
 
   for (const { pos, line, column } of cases) {
-    it(`pos ${pos} → line ${line}, column ${column}`, () => {
+    it(`pos ${pos} -> line ${line}, column ${column}`, () => {
       const result = posToSourceLocation(src, pos);
       assert.equal(result.line, line);
       assert.equal(result.column, column);

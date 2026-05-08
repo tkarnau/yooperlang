@@ -187,7 +187,7 @@ User-defined generic types are deferred until after v2 stabilizes.
 let n: int32 = 0;
 let p: ref int32 = ref n;      // bind
 p = 42;                        // auto-deref write
-log_int(p);                    // auto-deref read → 42
+log_int(p);                    // auto-deref read -> 42
 ```
 
 `ref` is visible at formation and at passing; usage is transparent. No null, no

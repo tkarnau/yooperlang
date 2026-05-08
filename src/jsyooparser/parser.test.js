@@ -48,7 +48,7 @@ describe("parse: expressions", () => {
     assert.equal(e.right.value, 2);
   });
 
-  it("operator precedence: 1 + 2 * 3 → plus(1, mult(2, 3))", () => {
+  it("operator precedence: 1 + 2 * 3 -> plus(1, mult(2, 3))", () => {
     const e = exprOf("1 + 2 * 3");
     assert.equal(e.op, "plus");
     assert.equal(e.left.value, 1);

@@ -219,9 +219,9 @@ The same `{` token is also used for blocks. Could a `{` ever reach `parseExpress
 
 - `parseFunctionDecl` calls `parseBlock()` directly for the body
 - `parseIfStatement` / `parseWhileStatement` call `parseBlock()` directly for their bodies
-- `parseStatement` dispatches on `return`/`let`/`const`/`if`/`while`, with a default of `parseExpressionStatement` → `parseExpression`
+- `parseStatement` dispatches on `return`/`let`/`const`/`if`/`while`, with a default of `parseExpressionStatement` -> `parseExpression`
 
-So a bare `{` at statement-position currently lands in `parseExpressionStatement → parseExpression`. With this change, that becomes a struct literal. That's *fine*: `{ x: 1 }` as a statement is a useless expression — the typechecker can flag "struct literal at statement position has no target type" cleanly.
+So a bare `{` at statement-position currently lands in `parseExpressionStatement -> parseExpression`. With this change, that becomes a struct literal. That's *fine*: `{ x: 1 }` as a statement is a useless expression — the typechecker can flag "struct literal at statement position has no target type" cleanly.
 
 What about expression position inside `if (cond) { ... }`? The `(cond)` parses through `parseExpression` and hits `rparen`, returning before reaching `{`. Then `parseIfStatement` handles `{` directly via `parseBlock`. ✓
 
@@ -233,7 +233,7 @@ Spec implies field writes must work (the roadmap's `Field write: getelementptr t
 
 Two options:
 
-1. **Generalize `ASSIGNMENT`**: change `node.name` → `node.target` (an AST node — either an `IDENT` or a `FIELD_ACCESS`). Update the typechecker and codegen to handle either.
+1. **Generalize `ASSIGNMENT`**: change `node.name` -> `node.target` (an AST node — either an `IDENT` or a `FIELD_ACCESS`). Update the typechecker and codegen to handle either.
 2. **Defer field assignment** to a follow-up. The Phase 1 test program doesn't write to a field, so we *could* punt.
 
 Recommendation: **do option 1 now**. It's a tiny generalization — the Pratt parser, after building a primary + postfix chain, can detect a trailing `=` and rewrap the whole thing as `ASSIGNMENT { target: node, value: rhs }`. Implementation:

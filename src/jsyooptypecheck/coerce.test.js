@@ -24,12 +24,12 @@ describe("isAssignable", () => {
   it("equal prim types are assignable", () => {
     assert.ok(isAssignable(PrimType("int32"), PrimType("int32")));
   });
-  it("untyped int → any int prim", () => {
+  it("untyped int -> any int prim", () => {
     assert.ok(isAssignable(PrimType("int32"), UntypedIntType()));
     assert.ok(isAssignable(PrimType("uint8"), UntypedIntType()));
     assert.ok(isAssignable(PrimType("int64"), UntypedIntType()));
   });
-  it("untyped float → any float prim", () => {
+  it("untyped float -> any float prim", () => {
     assert.ok(isAssignable(PrimType("float32"), UntypedFloatType()));
     assert.ok(isAssignable(PrimType("float64"), UntypedFloatType()));
   });
@@ -50,19 +50,19 @@ describe("isAssignable", () => {
 });
 
 describe("unifyArith", () => {
-  it("untyped int + untyped int → untyped int", () => {
+  it("untyped int + untyped int -> untyped int", () => {
     assert.deepEqual(
       unifyArith(UntypedIntType(), UntypedIntType(), "plus"),
       UntypedIntType(),
     );
   });
-  it("untyped float + untyped float → untyped float", () => {
+  it("untyped float + untyped float -> untyped float", () => {
     assert.deepEqual(
       unifyArith(UntypedFloatType(), UntypedFloatType(), "plus"),
       UntypedFloatType(),
     );
   });
-  it("int32 + untyped int → int32 (typed wins)", () => {
+  it("int32 + untyped int -> int32 (typed wins)", () => {
     assert.deepEqual(
       unifyArith(PrimType("int32"), UntypedIntType(), "plus"),
       PrimType("int32"),

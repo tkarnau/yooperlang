@@ -20,8 +20,8 @@ import {
 } from "./types.js";
 
 describe("canonicalize", () => {
-  it("'int' → 'int32'", () => assert.equal(canonicalize("int"), "int32"));
-  it("'float' → 'float32'", () =>
+  it("'int' -> 'int32'", () => assert.equal(canonicalize("int"), "int32"));
+  it("'float' -> 'float32'", () =>
     assert.equal(canonicalize("float"), "float32"));
   it("named primitives are unchanged", () => {
     assert.equal(canonicalize("int64"), "int64");

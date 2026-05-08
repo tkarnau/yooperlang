@@ -4,7 +4,7 @@ import { parse } from "../jsyooparser/parser.js";
 import { typecheck } from "../jsyooptypecheck/typecheck.js";
 import { ASTNodeKind } from "../contracts.js";
 
-// yooperlang type names → LLVM IR type names
+// yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
   int: "i32",
   int8: "i8",
@@ -67,7 +67,7 @@ function promotedLlvmType(yoopType) {
   if (yoopType === "string") return "ptr";
   if (yoopType === "bool") return "i32";
   if (isIntType(yoopType)) {
-    // int8/int16 → i32; int64 stays i64
+    // int8/int16 -> i32; int64 stays i64
     if (
       yoopType === "int64" ||
       yoopType === "uint64" ||
