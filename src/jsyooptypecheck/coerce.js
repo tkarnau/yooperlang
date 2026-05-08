@@ -22,6 +22,49 @@ export function isBool(t) {
   return t.kind === typeKinds.prim && t.name === primAnnotations.bool;
 }
 
+// True if t is any int-like or float-like type — typed int prims, typed float
+// prims, or the "untyped" literal kinds. Used wherever the language accepts
+// "any number" (unary minus, template-literal interpolation, etc).
+export function isNumeric(t) {
+  if (!t) return false;
+  if (t.kind === typeKinds.untypedInt) return true;
+  if (t.kind === typeKinds.untypedFloat) return true;
+  if (t.kind === typeKinds.prim && isIntPrim(t.name)) return true;
+  if (t.kind === typeKinds.prim && isFloatPrim(t.name)) return true;
+  return false;
+}
+
+// When an expression's resolved type is "untyped int/float" but it's being
+// used in a position that wants a concrete int/float prim (e.g. `let x: int8 = 1`),
+// we either:
+//   - range-check + retype the literal node itself (for bare INT/FLOAT_LITERAL), or
+//   - just stamp the resolved type onto a compound expression like `1 + 2`
+// This is a no-op when no coercion is needed.
+export function coerceUntypedLiteralToTyped(
+  valueNode,
+  valueType,
+  targetType,
+  errors,
+) {
+  if (!valueType || !targetType) return;
+  if (targetType.kind !== typeKinds.prim) return;
+
+  const wantsInt =
+    valueType.kind === typeKinds.untypedInt && isIntPrim(targetType.name);
+  const wantsFloat =
+    valueType.kind === typeKinds.untypedFloat && isFloatPrim(targetType.name);
+  if (!wantsInt && !wantsFloat) return;
+
+  if (
+    valueNode.kind === ASTNodeKind.INT_LITERAL ||
+    valueNode.kind === ASTNodeKind.FLOAT_LITERAL
+  ) {
+    coerceLiteralToType(valueNode, targetType, errors);
+  } else {
+    valueNode.resolvedType = targetType;
+  }
+}
+
 // is source type assignable to destination type?
 export function isAssignable(dest, src) {
   if (!dest || !src) {

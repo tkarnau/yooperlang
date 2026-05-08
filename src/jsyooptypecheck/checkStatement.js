@@ -1,13 +1,16 @@
-// Statement typechecking. validateFunction sets up the function's scope +
-// param/return-type resolution, then walks the body via validateStatement.
-// validateStatement dispatches on AST node kind and pushes errors as it
-// goes; expressions inside statements delegate to resolveExprType.
+// Statement typechecking.
+//
+// validateFunction sets up the function's scope (params + return type),
+// then walks the body via validateStatement.
+//
+// validateStatement is a thin dispatcher: each AST node kind delegates to a
+// small named helper (checkLetOrConst, checkReturn, checkIf, ...). Helpers
+// push errors onto ctx.errors as they go; expressions inside statements
+// delegate to resolveExprType in checkExpr.js.
 
 import { ASTNodeKind } from "../contracts.js";
 import {
   ErrorType,
-  isFloatPrim,
-  isIntPrim,
   primAnnotations,
   resolveTypeFromName,
   typeKinds,
@@ -15,11 +18,9 @@ import {
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
 import { pushScope, declareInScope } from "./scope.js";
-import { coerceLiteralToType, isAssignable } from "./coerce.js";
-import { pinStructLiteral, resolveExprType } from "./checkExpr.js";
+import { checkInitializer, resolveExprType } from "./checkExpr.js";
 
 export function validateFunction(funcNode, typeContext, errors) {
-  // start with null parent
   const scope = pushScope(null);
 
   for (const param of funcNode.params ?? []) {
@@ -51,143 +52,113 @@ export function validateFunction(funcNode, typeContext, errors) {
 
 export function validateStatement(node, scope, ctx) {
   switch (node.kind) {
-    case ASTNodeKind.BLOCK: {
-      const inner = pushScope(scope);
-      for (const s of node.body) {
-        validateStatement(s, inner, ctx);
-      }
-      return;
-    }
-
+    case ASTNodeKind.BLOCK:
+      return checkBlock(node, scope, ctx);
     case ASTNodeKind.LET_DECL:
-    case ASTNodeKind.CONST_DECL: {
-      const declaredType =
-        resolveTypeFromName(node.type, ctx.typeContext.structTable) ?? ErrorType();
-      if (declaredType.kind === typeKinds.error) {
-        pushError(ctx.errors, node, `unknown type "${node.type}"`);
-      }
-      node.resolvedType = declaredType;
-
-      if (node.assignment) {
-        if (node.assignment.kind === ASTNodeKind.STRUCT_LITERAL) {
-          // pin the struct literal to the declared type so we can check field types
-          pinStructLiteral(node.assignment, declaredType, ctx.typeContext.structTable, ctx);
-        } else {
-          const rhsType = resolveExprType(node.assignment, scope, ctx);
-          if (!isAssignable(declaredType, rhsType)) {
-            pushError(
-              ctx.errors,
-              node,
-              `cannot assign ${formatType(rhsType)} to ${formatType(declaredType)} in initializer of "${node.name}"`,
-            );
-          }
-  
-          if (
-            (rhsType.kind === typeKinds.untypedInt &&
-              isIntPrim(declaredType.name)) ||
-            (rhsType.kind === typeKinds.untypedFloat &&
-              isFloatPrim(declaredType.name))
-          ) {
-            // only call coerceLiteralToType for actual literals (range check);
-            // for compound expressions (binary, call, etc.) just pin the resolved type
-            if (
-              node.assignment.kind === ASTNodeKind.INT_LITERAL ||
-              node.assignment.kind === ASTNodeKind.FLOAT_LITERAL
-            ) {
-              coerceLiteralToType(node.assignment, declaredType, ctx.errors);
-            } else {
-              node.assignment.resolvedType = declaredType;
-            }
-          }
-        }
-      }
-
-      const declKind = node.kind === ASTNodeKind.CONST_DECL ? "const" : "let";
-      declareInScope(
-        scope,
-        node.name,
-        declaredType,
-        declKind,
-        node,
-        ctx.errors,
-      );
-
-      return;
-    }
-    case ASTNodeKind.RETURN_STATEMENT: {
-      if (!node.value) {
-        if (ctx.funcReturnType.kind !== "void") {
-          pushError(
-            ctx.errors,
-            node,
-            `function "${ctx.funcName}" must return ${formatType(ctx.funcReturnType)}, go bare return`,
-          );
-        }
-        return;
-      }
-      if (node.value.kind === ASTNodeKind.STRUCT_LITERAL) {
-        // pin the struct literal to the function return type so we can check field types
-        pinStructLiteral(node.value, ctx.funcReturnType, ctx.typeContext.structTable, ctx);
-        return;
-      }
-      const returnExprType = resolveExprType(node.value, scope, ctx);
-
-      if (!isAssignable(ctx.funcReturnType, returnExprType)) {
-        pushError(
-          ctx.errors,
-          node,
-          `cannot return ${formatType(returnExprType)} from "${ctx.funcName}" returning ${formatType(ctx.funcReturnType)}`,
-        );
-      }
-      return;
-    }
-    case ASTNodeKind.EXPRESSION_STATEMENT: {
-      resolveExprType(node.value, scope, ctx);
-      return;
-    }
-    case ASTNodeKind.IF_STATEMENT: {
-      const boolPrimType = resolveTypeFromName(
-        primAnnotations.bool,
-        ctx.typeContext.structTable,
-      );
-      const exprType = resolveExprType(node.expression, scope, ctx);
-      if (!typesEqual(exprType, boolPrimType)) {
-        pushError(
-          ctx.errors,
-          node,
-          `if-statement must be a bool type expression, found ${formatType(exprType)}`,
-        );
-      }
-      validateStatement(node.body, scope, ctx);
-      if (node.elseBody) {
-        validateStatement(node.elseBody, scope, ctx);
-      }
-      return;
-    }
-    case ASTNodeKind.WHILE_STATEMENT: {
-      const boolPrimType = resolveTypeFromName(
-        primAnnotations.bool,
-        ctx.typeContext.structTable,
-      );
-      const exprType = resolveExprType(node.expression, scope, ctx);
-      if (!typesEqual(exprType, boolPrimType)) {
-        pushError(
-          ctx.errors,
-          node,
-          `while-statement must be a bool type expression, found ${formatType(exprType)}`,
-        );
-      }
-      // body block creates its own scope via the BLOCK case.
-      validateStatement(node.body, scope, ctx);
-      return;
-    }
-    // todo call expression as a statement ? do I need this if I have expression statements?
-    default: {
+    case ASTNodeKind.CONST_DECL:
+      return checkLetOrConst(node, scope, ctx);
+    case ASTNodeKind.RETURN_STATEMENT:
+      return checkReturn(node, scope, ctx);
+    case ASTNodeKind.EXPRESSION_STATEMENT:
+      return resolveExprType(node.value, scope, ctx);
+    case ASTNodeKind.IF_STATEMENT:
+      return checkIf(node, scope, ctx);
+    case ASTNodeKind.WHILE_STATEMENT:
+      return checkWhile(node, scope, ctx);
+    default:
       pushError(
         ctx.errors,
         node,
         `typecheck: unhandled statement kind "${node.kind}"`,
       );
+  }
+}
+
+// `{ ... }` — opens a fresh child scope, walks each inner statement.
+function checkBlock(node, scope, ctx) {
+  const inner = pushScope(scope);
+  for (const s of node.body) {
+    validateStatement(s, inner, ctx);
+  }
+}
+
+// `let x: T = expr;` / `const x: T = expr;`
+//   - resolve the declared type
+//   - if there's an initializer, type-check it against the declared type
+//   - bind the name in the current scope
+function checkLetOrConst(node, scope, ctx) {
+  const declaredType =
+    resolveTypeFromName(node.type, ctx.typeContext.structTable) ?? ErrorType();
+  if (declaredType.kind === typeKinds.error) {
+    pushError(ctx.errors, node, `unknown type "${node.type}"`);
+  }
+  node.resolvedType = declaredType;
+
+  if (node.assignment) {
+    checkInitializer(
+      node.assignment,
+      declaredType,
+      scope,
+      ctx,
+      (rhsType) =>
+        `cannot assign ${formatType(rhsType)} to ${formatType(declaredType)} in initializer of "${node.name}"`,
+    );
+  }
+
+  const declKind = node.kind === ASTNodeKind.CONST_DECL ? "const" : "let";
+  declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors);
+}
+
+// `return;` (in a void function) or `return expr;` — checks the value
+// against the enclosing function's declared return type.
+function checkReturn(node, scope, ctx) {
+  if (!node.value) {
+    if (ctx.funcReturnType.kind !== "void") {
+      pushError(
+        ctx.errors,
+        node,
+        `function "${ctx.funcName}" must return ${formatType(ctx.funcReturnType)}, go bare return`,
+      );
     }
+    return;
+  }
+  checkInitializer(
+    node.value,
+    ctx.funcReturnType,
+    scope,
+    ctx,
+    (returnExprType) =>
+      `cannot return ${formatType(returnExprType)} from "${ctx.funcName}" returning ${formatType(ctx.funcReturnType)}`,
+  );
+}
+
+// `if (cond) { ... } else { ... }` — condition must be bool. Each branch
+// is its own statement (the BLOCK case handles its own scope push).
+function checkIf(node, scope, ctx) {
+  requireBoolCondition(node, "if-statement", scope, ctx);
+  validateStatement(node.body, scope, ctx);
+  if (node.elseBody) {
+    validateStatement(node.elseBody, scope, ctx);
+  }
+}
+
+// `while (cond) { ... }` — condition must be bool.
+function checkWhile(node, scope, ctx) {
+  requireBoolCondition(node, "while-statement", scope, ctx);
+  validateStatement(node.body, scope, ctx);
+}
+
+function requireBoolCondition(node, label, scope, ctx) {
+  const boolType = resolveTypeFromName(
+    primAnnotations.bool,
+    ctx.typeContext.structTable,
+  );
+  const exprType = resolveExprType(node.expression, scope, ctx);
+  if (!typesEqual(exprType, boolType)) {
+    pushError(
+      ctx.errors,
+      node,
+      `${label} must be a bool type expression, found ${formatType(exprType)}`,
+    );
   }
 }
