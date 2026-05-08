@@ -282,7 +282,7 @@ For now, errors can be `throw new Error(...)` from the lexer — Phase 1.2 intro
 
 ## Out of scope (deferred to Phase 1.2 or later)
 
-- Range checking (`let x: uint8 = 256;` → error)
+- Range checking (`let x: uint8 = 256;` -> error)
 - Literal type coercion based on annotation
 - `int` and `float` as aliases for `int32` and `float32` (spec §14) — already in codegen's `canonicalize` table; typechecker will own this
 - Hex floats (`0x1.0p10`) — not in spec

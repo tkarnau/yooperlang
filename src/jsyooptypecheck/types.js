@@ -133,6 +133,16 @@ export function primTypeFromName(name) {
   return null;
 }
 
+/**** important function ****
+ * This resolves a type name relative to some context decided by the caller
+ * For now this is going to handle structs as something non-primitive,
+ * but this is also where we would handle type aliases, generics, etc. in the future
+ */
+export function resolveTypeFromName(name, structTable) {
+  // naive for now
+  return primTypeFromName(name) ?? structTable.get(name) ?? null;
+}
+
 export function typesEqual(a, b) {
   if (!a || !b) {
     return false;
@@ -144,23 +154,10 @@ export function typesEqual(a, b) {
     return a.name === b.name;
   }
   if (a.kind === typeKinds.struct) {
-    if (a.name !== b.name) {
-      return false;
-    }
-    const aFieldNames = Object.keys(a.fields);
-    const bFieldNames = Object.keys(b.fields);
-    if (aFieldNames.length !== bFieldNames.length) {
-      return false;
-    }
-    for (const fieldName of aFieldNames) {
-      if (!b.fields[fieldName]) {
-        return false;
-      }
-      if (!typesEqual(a.fields[fieldName], b.fields[fieldName])) {
-        return false;
-      }
-    }
-    return true;
+    // nominal: structTable canonicalizes by name and redeclaration is an
+    // error, so same name => same struct. avoids walking fields, which would
+    // recurse forever on self-referential types like Node { next: Ref<Node> }.
+    return a.name === b.name;
   }
   if (a.kind === typeKinds.ref) {
     return typesEqual(a.inner, b.inner);
