@@ -42,10 +42,27 @@ const Precedence = {
   [TokenTags.divide]: 60,
 };
 
+/*
+****************
+Main entry point for parsing yooperlang source code.
+The parser is a recursive descent parser with Pratt-style precedence handling
+for binary operators. It produces an AST where each node has a .kind field
+indicating its type, and source location information for error reporting.
+The AST is designed to be easily traversable for later stages like type
+checking and code generation.
+****************
+*/
 export function parse(src) {
   let pos = 0;
   let current = null; // current token
 
+  // helper functions for token stream management
+
+  // advances to the next token but returns the current one
+  // reason for returning the current token is that often the 
+  // caller needs to read info from the current token with reference
+  // to the next token, which is more complex than just reading the
+  // next string character.
   function advance() {
     const tok = current;
     const res = lexNext(src, pos);
@@ -54,10 +71,15 @@ export function parse(src) {
     return tok;
   }
 
+  // just peeks at the current token without advancing
   function peek() {
     return current;
   }
 
+  // similar to advance but asserts that the current token is the expected one
+  // otherwise we capture an error. Very common to use this for unambiguous
+  // sets of tokens, e.g. expecting a semicolon after a statement, or a closing
+  // paren after
   function expect(tag) {
     if (current.tag !== tag) {
       throw new Error(
@@ -443,7 +465,7 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.TYPE_DECL);
     // name
     node.name = parseIdentAsName();
-    
+
     if (peek().tag === TokenTags.lcurly) {
       // struct type
       node.fields = [];
@@ -507,4 +529,3 @@ export function parse(src) {
 
   return parseTopLevel();
 }
-
