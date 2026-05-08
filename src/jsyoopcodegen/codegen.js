@@ -509,8 +509,17 @@ export function codegen(ast) {
             if (isIntType(r.yoopType)) {
               const op = isUnsignedIntPrim(r.yoopType.name) ? "zext" : "sext";
               fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
+            } else if (
+              r.yoopType.kind === typeKinds.prim &&
+              r.yoopType.name === "bool"
+            ) {
+              fnLines.push(`  ${tmp} = zext ${actual} ${r.val} to ${promoted}`);
             } else if (isFloatType(r.yoopType)) {
               fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
+            } else {
+              throw new Error(
+                `codegen: don't know how to promote ${r.yoopType.kind}/${r.yoopType.name ?? ""} for varargs`,
+              );
             }
             return `${promoted} ${tmp}`;
           }

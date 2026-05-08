@@ -141,6 +141,7 @@ export function resolveExprType(node, scope, ctx) {
             !(
               (exprType.kind === typeKinds.prim &&
                 (exprType.name === primAnnotations.string ||
+                  exprType.name === primAnnotations.bool ||
                   isIntPrim(exprType.name) ||
                   isFloatPrim(exprType.name))) ||
               exprType.kind === typeKinds.untypedInt ||
@@ -150,7 +151,7 @@ export function resolveExprType(node, scope, ctx) {
             pushError(
               ctx.errors,
               part.expr,
-              `template literal interpolation must be a string, int, or float type, found ${formatType(exprType)}`,
+              `template literal interpolation must be a string, bool, int, or float type, found ${formatType(exprType)}`,
             );
           }
           continue;

@@ -83,14 +83,14 @@ describe("unifyArith", () => {
   it("int + float is unsupported (no implicit cross-coercion)", () => {
     assert.equal(unifyArith(PrimType("int32"), PrimType("float32"), "plus"), null);
   });
-  it("logical 'and' of two bools yields bool", () => {
+  it("logical 'andand' of two bools yields bool", () => {
     assert.deepEqual(
-      unifyArith(PrimType("bool"), PrimType("bool"), "and"),
+      unifyArith(PrimType("bool"), PrimType("bool"), "andand"),
       PrimType("bool"),
     );
   });
-  it("logical 'and' on non-bools yields null", () => {
-    assert.equal(unifyArith(PrimType("int32"), PrimType("int32"), "and"), null);
+  it("logical 'andand' on non-bools yields null", () => {
+    assert.equal(unifyArith(PrimType("int32"), PrimType("int32"), "andand"), null);
   });
   it("error on either side yields ErrorType (suppress cascades)", () => {
     assert.deepEqual(

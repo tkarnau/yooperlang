@@ -63,7 +63,7 @@ export function unifyArith(left, right, op) {
     return ErrorType();
 
   const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(op);
-  const isLogical = op === "and" || op === "or";
+  const isLogical = op === "andand" || op === "oror";
 
   if (isLogical) {
     if (isBool(left) && isBool(right)) return PrimType("bool");
