@@ -54,6 +54,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=100, b=27, c=127\n");
   });
+
+  it.skip("struct_basic.yoop creates a Point struct and prints the distance square", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/struct_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "distance squared = 25\n");
+  });
 });
 
 describe("e2e: fail fixtures fail at the right stage with the right message", () => {

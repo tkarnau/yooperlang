@@ -138,7 +138,7 @@ export function primTypeFromName(name) {
  * For now this is going to handle structs as something non-primitive,
  * but this is also where we would handle type aliases, generics, etc. in the future
  */
-export function resolveTypeName(name, structTable) {
+export function resolveTypeFromName(name, structTable) {
   // naive for now
   return primTypeFromName(name) ?? structTable.get(name) ?? null;
 }

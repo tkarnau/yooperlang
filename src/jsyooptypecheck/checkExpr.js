@@ -13,7 +13,7 @@ import {
   isFloatPrim,
   isIntPrim,
   primAnnotations,
-  resolveTypeName,
+  resolveTypeFromName,
   typeKinds,
   typesEqual,
 } from "./types.js";
@@ -108,7 +108,7 @@ export function resolveExprType(node, scope, ctx) {
           return node.resolvedType;
         }
       } else if (node.op === "not") {
-        const boolPrimType = resolveTypeName(
+        const boolPrimType = resolveTypeFromName(
           primAnnotations.bool,
           ctx.typeContext.structTable,
         );

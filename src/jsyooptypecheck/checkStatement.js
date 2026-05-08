@@ -9,7 +9,7 @@ import {
   isFloatPrim,
   isIntPrim,
   primAnnotations,
-  resolveTypeName,
+  resolveTypeFromName,
   typeKinds,
   typesEqual,
 } from "./types.js";
@@ -24,7 +24,7 @@ export function validateFunction(funcNode, typeContext, errors) {
 
   for (const param of funcNode.params ?? []) {
     const t =
-      resolveTypeName(param.type, typeContext.structTable) ?? ErrorType();
+      resolveTypeFromName(param.type, typeContext.structTable) ?? ErrorType();
     if (t.kind === typeKinds.error) {
       pushError(errors, param, `unknown type "${param.type}"`);
     }
@@ -33,7 +33,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   }
 
   const funcReturnType =
-    resolveTypeName(funcNode.returnType, typeContext.structTable) ??
+    resolveTypeFromName(funcNode.returnType, typeContext.structTable) ??
     ErrorType();
   if (funcReturnType.kind === typeKinds.error) {
     pushError(errors, funcNode, `unknown return type "${funcNode.returnType}"`);
@@ -62,7 +62,7 @@ export function validateStatement(node, scope, ctx) {
     case ASTNodeKind.LET_DECL:
     case ASTNodeKind.CONST_DECL: {
       const declaredType =
-        resolveTypeName(node.type, ctx.typeContext.structTable) ?? ErrorType();
+        resolveTypeFromName(node.type, ctx.typeContext.structTable) ?? ErrorType();
       if (declaredType.kind === typeKinds.error) {
         pushError(ctx.errors, node, `unknown type "${node.type}"`);
       }
@@ -135,7 +135,7 @@ export function validateStatement(node, scope, ctx) {
       return;
     }
     case ASTNodeKind.IF_STATEMENT: {
-      const boolPrimType = resolveTypeName(
+      const boolPrimType = resolveTypeFromName(
         primAnnotations.bool,
         ctx.typeContext.structTable,
       );
@@ -154,7 +154,7 @@ export function validateStatement(node, scope, ctx) {
       return;
     }
     case ASTNodeKind.WHILE_STATEMENT: {
-      const boolPrimType = resolveTypeName(
+      const boolPrimType = resolveTypeFromName(
         primAnnotations.bool,
         ctx.typeContext.structTable,
       );

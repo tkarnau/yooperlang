@@ -10,7 +10,7 @@ import {
   ErrorType,
   typesEqual,
   primTypeFromName,
-  resolveTypeName,
+  resolveTypeFromName,
   canonicalize,
   isIntPrim,
   isUnsignedIntPrim,
@@ -21,7 +21,8 @@ import {
 
 describe("canonicalize", () => {
   it("'int' → 'int32'", () => assert.equal(canonicalize("int"), "int32"));
-  it("'float' → 'float32'", () => assert.equal(canonicalize("float"), "float32"));
+  it("'float' → 'float32'", () =>
+    assert.equal(canonicalize("float"), "float32"));
   it("named primitives are unchanged", () => {
     assert.equal(canonicalize("int64"), "int64");
     assert.equal(canonicalize("uint8"), "uint8");
@@ -40,17 +41,17 @@ describe("primTypeFromName", () => {
   });
 });
 
-describe("resolveTypeName", () => {
+describe("resolveTypeFromName", () => {
   it("resolves primitives without consulting the struct table", () => {
-    assert.deepEqual(resolveTypeName("int32", new Map()), PrimType("int32"));
+    assert.deepEqual(resolveTypeFromName("int32", new Map()), PrimType("int32"));
   });
   it("resolves struct names from the struct table", () => {
     const point = StructType("Point", [{ name: "x", type: PrimType("int32") }]);
     const table = new Map([["Point", point]]);
-    assert.equal(resolveTypeName("Point", table), point);
+    assert.equal(resolveTypeFromName("Point", table), point);
   });
   it("returns null for unknown names", () => {
-    assert.equal(resolveTypeName("Nope", new Map()), null);
+    assert.equal(resolveTypeFromName("Nope", new Map()), null);
   });
 });
 

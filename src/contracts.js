@@ -32,6 +32,9 @@ export const ASTNodeKind = Object.freeze({
   RETURN_STATEMENT: "RETURN_STATEMENT",
   IF_STATEMENT: "IF_STATEMENT",
   WHILE_STATEMENT: "WHILE_STATEMENT",
+
+  // test undefined kind handling for iteration tests
+  FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });
 
 export function SourceLocation(pos, line, column) {

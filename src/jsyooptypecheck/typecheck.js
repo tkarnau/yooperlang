@@ -15,7 +15,7 @@ import { ASTNodeKind } from "../contracts.js";
 import {
   ErrorType,
   FuncType,
-  resolveTypeName,
+  resolveTypeFromName,
   StructType,
 } from "./types.js";
 import { formatType } from "./errors.js";
@@ -60,9 +60,9 @@ export function typecheck(ast) {
         const funcType = FuncType(
           (decl.params ?? []).map((p) => ({
             name: p.name,
-            type: resolveTypeName(p.type, structTable) ?? ErrorType(),
+            type: resolveTypeFromName(p.type, structTable) ?? ErrorType(),
           })),
-          resolveTypeName(decl.returnType, structTable) ?? ErrorType(),
+          resolveTypeFromName(decl.returnType, structTable) ?? ErrorType(),
         );
         moduleSymbols.set(decl.name, funcType);
       }
@@ -87,7 +87,7 @@ export function typecheck(ast) {
     if (decl.kind === ASTNodeKind.TYPE_DECL) {
       const fields = [];
       for (const field of decl.fields) {
-        let fieldType = resolveTypeName(field.type, structTable);
+        let fieldType = resolveTypeFromName(field.type, structTable);
         if (!fieldType) {
           errors.push({
             message: `unknown type "${field.type}" in field "${field.name}" of struct "${decl.name}"`,
