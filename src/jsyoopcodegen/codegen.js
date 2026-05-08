@@ -1,8 +1,18 @@
 // LLVM IR code generator — walks the AST and creates IR code
 
+import { parse } from "../jsyooparser/parser.js";
+import { typecheck } from "../jsyooptypecheck/typecheck.js";
 import { ASTNodeKind } from "../contracts.js";
+import {
+  PrimType,
+  VoidType,
+  isFloatPrim,
+  isIntPrim,
+  isUnsignedIntPrim,
+  typeKinds,
+} from "../jsyooptypecheck/types.js";
 
-// yooperlang type names → LLVM IR type names
+// yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
   int: "i32",
   int8: "i8",
@@ -21,63 +31,67 @@ const LLVM_TYPES = {
   bool: "i1",
   void: "void",
   string: "ptr", // i8* — null-terminated UTF-8 pointer, llvm docs thing?
+  ptr: "ptr", // default for unknown types
 };
 
-function llvmType(yoopType) {
-  return LLVM_TYPES[yoopType] ?? "ptr";
+export function llvmType(yoopType) {
+  switch (yoopType.kind) {
+    case typeKinds.prim: {
+      return LLVM_TYPES[yoopType.name] ?? LLVM_TYPES.ptr;
+    }
+    case typeKinds.struct: {
+      return `%struct.${yoopType.name}`;
+    }
+    case typeKinds.void: {
+      return LLVM_TYPES.void;
+    }
+    case typeKinds.ref: {
+      return LLVM_TYPES.ptr;
+    }
+    default: {
+      throw new Error(`llvmType: unhandled yooper type kind "${yoopType.kind}"`);
+    }
+  }
 }
 
-function isIntType(yoopType) {
-  return /^(int|uint)(8|16|32|64)?$|^[ui]size$/.test(yoopType);
+function isIntType(t) {
+  return t.kind === typeKinds.prim && isIntPrim(t.name);
 }
 
-function isFloatType(yoopType) {
-  return (
-    yoopType === "float" || yoopType === "float32" || yoopType === "float64"
-  );
+function isFloatType(t) {
+  return t.kind === typeKinds.prim && isFloatPrim(t.name);
+}
+
+function isWideInt(name) {
+  return name === "int64" || name === "uint64" || name === "isize" || name === "usize";
 }
 
 // pick a printf format specifier for a yooper type
-function printfSpec(yoopType) {
-  if (yoopType === "string") return "%s";
-  if (yoopType === "bool") return "%d";
-  if (isIntType(yoopType)) {
-    if (
-      yoopType === "int64" ||
-      yoopType === "uint64" ||
-      yoopType === "isize" ||
-      yoopType === "usize"
-    ) {
-      return "%lld";
-    }
-    return "%d";
+export function printfSpec(t) {
+  if (t.kind === typeKinds.struct) {
+    throw new Error(
+      `codegen bug: struct ${t.name} reached printf — typechecker should have rejected`,
+    );
   }
-  if (isFloatType(yoopType)) {
-    if (yoopType === "float64") return "%lf";
-    return "%f";
+  if (t.kind === typeKinds.prim) {
+    if (t.name === "string") return "%s";
+    if (t.name === "bool") return "%d";
+    if (isIntPrim(t.name)) return isWideInt(t.name) ? "%lld" : "%d";
+    if (isFloatPrim(t.name)) return t.name === "float64" ? "%lf" : "%f";
   }
-  throw new Error(`printf: don't know how to format yooper type "${yoopType}"`);
+  throw new Error(
+    `printf: don't know how to format yooper type "${t.kind}/${t.name ?? ""}"`,
+  );
 }
 
 // when a value is passed through C variadic printf, small ints/floats get
 // promoted. report the LLVM type that the call site should use.
-function promotedLlvmType(yoopType) {
-  if (yoopType === "string") return "ptr";
-  if (yoopType === "bool") return "i32";
-  if (isIntType(yoopType)) {
-    // int8/int16 → i32; int64 stays i64
-    if (
-      yoopType === "int64" ||
-      yoopType === "uint64" ||
-      yoopType === "isize" ||
-      yoopType === "usize"
-    ) {
-      return "i64";
-    }
-    return "i32";
-  }
-  if (isFloatType(yoopType)) {
-    return "double"; // float promotes to double through varargs
+function promotedLlvmType(t) {
+  if (t.kind === typeKinds.prim) {
+    if (t.name === "string") return "ptr";
+    if (t.name === "bool") return "i32";
+    if (isIntPrim(t.name)) return isWideInt(t.name) ? "i64" : "i32";
+    if (isFloatPrim(t.name)) return "double";
   }
   return "ptr";
 }
@@ -147,6 +161,7 @@ function encodeStringBytes(inner) {
 export function codegen(ast) {
   const lines = [];
   const globals = [];
+  const structDefs = [];
   let strConstCounter = 0;
   let tempCounter = 0;
   let labelCounter = 0;
@@ -185,6 +200,92 @@ export function codegen(ast) {
     return { name, byteLen };
   }
 
+  // alignment for a named-struct alloca: max alignment over the fields. nested
+  // structs recurse. empty structs align to 1.
+  function alignOfStruct(structType) {
+    const fields = structType.fields ?? [];
+    if (fields.length === 0) return 1;
+    let max = 1;
+    for (const f of fields) {
+      const a = f.type.kind === typeKinds.struct
+        ? alignOfStruct(f.type)
+        : alignOf(llvmType(f.type));
+      if (a > max) max = a;
+    }
+    return max;
+  }
+
+  // walk an lvalue node and return { ptr, type } where ptr addresses the
+  // storage and type is the yoop Type at that location. parallel to emitExpr,
+  // but loads are deferred to the caller.
+  function emitLvalue(node, fnLines) {
+    switch (node.kind) {
+      case ASTNodeKind.IDENT: {
+        const t = symbols.get(node.name);
+        if (!t) throw new Error(`codegen: unknown identifier "${node.name}"`);
+        return { ptr: `%${node.name}`, type: t };
+      }
+      case ASTNodeKind.FIELD_ACCESS: {
+        const base = emitLvalue(node.object, fnLines);
+        if (base.type.kind !== typeKinds.struct) {
+          throw new Error(
+            `codegen: field access on non-struct type — typechecker should have caught this`,
+          );
+        }
+        const idx = base.type.fields.findIndex((f) => f.name === node.field);
+        if (idx < 0) {
+          throw new Error(
+            `codegen: struct ${base.type.name} has no field "${node.field}"`,
+          );
+        }
+        const fieldType = base.type.fields[idx].type;
+        const gepTmp = freshTemp();
+        fnLines.push(
+          `  ${gepTmp} = getelementptr inbounds %struct.${base.type.name}, ptr ${base.ptr}, i32 0, i32 ${idx}`,
+        );
+        return { ptr: gepTmp, type: fieldType };
+      }
+      default: {
+        // r-value treated as an lvalue (e.g. `make_pair().a`): materialize
+        // the value into a fresh alloca and return a pointer to it.
+        const r = emitExpr(node, fnLines);
+        const t = r.yoopType;
+        const llvmTy = llvmType(t);
+        const slot = freshTemp();
+        const align = t.kind === typeKinds.struct
+          ? alignOfStruct(t)
+          : alignOf(llvmTy);
+        fnLines.push(`  ${slot} = alloca ${llvmTy}, align ${align}`);
+        fnLines.push(`  store ${llvmTy} ${r.val}, ptr ${slot}`);
+        return { ptr: slot, type: t };
+      }
+    }
+  }
+
+  // populate an already-allocated struct slot field-by-field. nested struct
+  // literals write directly into the corresponding GEP — no temp alloca.
+  function emitStructLiteralInto(litNode, destPtr, structType, fnLines) {
+    for (const litField of litNode.fields) {
+      const idx = structType.fields.findIndex((f) => f.name === litField.name);
+      const fieldType = structType.fields[idx].type;
+      const gepTmp = freshTemp();
+      fnLines.push(
+        `  ${gepTmp} = getelementptr inbounds %struct.${structType.name}, ptr ${destPtr}, i32 0, i32 ${idx}`,
+      );
+      if (
+        litField.value.kind === ASTNodeKind.STRUCT_LITERAL &&
+        fieldType.kind === typeKinds.struct
+      ) {
+        emitStructLiteralInto(litField.value, gepTmp, fieldType, fnLines);
+      } else {
+        const rhs = emitExpr(litField.value, fnLines);
+        fnLines.push(
+          `  store ${llvmType(fieldType)} ${rhs.val}, ptr ${gepTmp}`,
+        );
+      }
+    }
+  }
+
   function llvmFloatConstant(jsNumber) {
     const buf = Buffer.alloc(8);
     // big endian hex encoded double (llvm docsthing),
@@ -200,10 +301,19 @@ export function codegen(ast) {
   function emitExpr(node, fnLines) {
     switch (node.kind) {
       case ASTNodeKind.INT_LITERAL: {
-        return { val: String(node.value), yoopType: node.resolvedType.name ?? "int32" };
+        // untyped int literals reach codegen only when used in a context where
+        // their type doesn't matter for the IR text (e.g. as the immediate
+        // operand of an add); default to int32 so llvmType has something valid.
+        const t = node.resolvedType.kind === typeKinds.untypedInt
+          ? PrimType("int32")
+          : node.resolvedType;
+        return { val: String(node.value), yoopType: t };
       }
       case ASTNodeKind.FLOAT_LITERAL: {
-        return { val: llvmFloatConstant(node.value), yoopType: node.resolvedType.name ?? "float64" };
+        const t = node.resolvedType.kind === typeKinds.untypedFloat
+          ? PrimType("float64")
+          : node.resolvedType;
+        return { val: llvmFloatConstant(node.value), yoopType: t };
       }
       case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
@@ -211,7 +321,7 @@ export function codegen(ast) {
         fnLines.push(
           `  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`,
         );
-        return { val: tmp, yoopType: "string" };
+        return { val: tmp, yoopType: PrimType("string") };
       }
 
       case ASTNodeKind.IDENT: {
@@ -232,7 +342,7 @@ export function codegen(ast) {
       case ASTNodeKind.BINARY_EXPRESSION: {
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
-        const resultType = node.resolvedType.name;
+        const resultType = node.resolvedType;
         // for comparisons, the instruction operates on the operand type, not the result (bool)
         const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(node.op);
         const opType = isCmp ? l.yoopType : resultType;
@@ -244,17 +354,63 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.ASSIGNMENT: {
-        const lhsType = symbols.get(node.name);
-        if (!lhsType) {
-          throw new Error(
-            `codegen: assignment to unknown variable "${node.name}"`,
+        if (node.target.kind === ASTNodeKind.IDENT) {
+          const targetName = node.target.name;
+          const lhsType = symbols.get(targetName);
+          if (!lhsType) {
+            throw new Error(
+              `codegen: assignment to unknown variable "${targetName}"`,
+            );
+          }
+          const rhs = emitExpr(node.value, fnLines);
+          fnLines.push(
+            `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${targetName}`,
           );
+          return rhs;
         }
-        const rhs = emitExpr(node.value, fnLines);
-        fnLines.push(
-          `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${node.name}`,
+        if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
+          const lv = emitLvalue(node.target, fnLines);
+          if (
+            node.value.kind === ASTNodeKind.STRUCT_LITERAL &&
+            lv.type.kind === typeKinds.struct
+          ) {
+            emitStructLiteralInto(node.value, lv.ptr, lv.type, fnLines);
+            const llvmTy = llvmType(lv.type);
+            const tmp = freshTemp();
+            fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${lv.ptr}`);
+            return { val: tmp, yoopType: lv.type };
+          }
+          const rhs = emitExpr(node.value, fnLines);
+          fnLines.push(
+            `  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`,
+          );
+          return rhs;
+        }
+        throw new Error(
+          `codegen: unsupported assignment target kind "${node.target.kind}"`,
         );
-        return rhs;
+      }
+
+      case ASTNodeKind.FIELD_ACCESS: {
+        const lv = emitLvalue(node, fnLines);
+        const llvmTy = llvmType(lv.type);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${lv.ptr}`);
+        return { val: tmp, yoopType: lv.type };
+      }
+
+      case ASTNodeKind.STRUCT_LITERAL: {
+        const structType = node.resolvedType;
+        const tmpPtr = freshTemp();
+        fnLines.push(
+          `  ${tmpPtr} = alloca %struct.${structType.name}, align ${alignOfStruct(structType)}`,
+        );
+        emitStructLiteralInto(node, tmpPtr, structType, fnLines);
+        const loadTmp = freshTemp();
+        fnLines.push(
+          `  ${loadTmp} = load %struct.${structType.name}, ptr ${tmpPtr}`,
+        );
+        return { val: loadTmp, yoopType: structType };
       }
 
       case ASTNodeKind.TEMPLATE_LITERAL: {
@@ -287,11 +443,11 @@ export function codegen(ast) {
         .join(", ");
     }
 
-    const retType = node.resolvedType.name;
+    const retType = node.resolvedType;
     const llvmRet = llvmType(retType);
     if (llvmRet === "void") {
       fnLines.push(`  call void @${node.callee}(${argList})`);
-      return { val: "void", yoopType: "void" };
+      return { val: "void", yoopType: VoidType() };
     }
     const tmp = freshTemp();
     fnLines.push(`  ${tmp} = call ${llvmRet} @${node.callee}(${argList})`);
@@ -351,10 +507,19 @@ export function codegen(ast) {
             // varargs promotion: widen the value to the promoted type
             const tmp = freshTemp();
             if (isIntType(r.yoopType)) {
-              const op = r.yoopType.startsWith("uint") ? "zext" : "sext";
+              const op = isUnsignedIntPrim(r.yoopType.name) ? "zext" : "sext";
               fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
+            } else if (
+              r.yoopType.kind === typeKinds.prim &&
+              r.yoopType.name === "bool"
+            ) {
+              fnLines.push(`  ${tmp} = zext ${actual} ${r.val} to ${promoted}`);
             } else if (isFloatType(r.yoopType)) {
               fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
+            } else {
+              throw new Error(
+                `codegen: don't know how to promote ${r.yoopType.kind}/${r.yoopType.name ?? ""} for varargs`,
+              );
             }
             return `${promoted} ${tmp}`;
           }
@@ -365,7 +530,7 @@ export function codegen(ast) {
 
     const tmp = freshTemp();
     fnLines.push(`  ${tmp} = call i32 (ptr, ...) @printf(${argList})`);
-    return { val: tmp, yoopType: "int32" };
+    return { val: tmp, yoopType: PrimType("int32") };
   }
 
   // when a template-literal stringPart appears outside a printf format, we
@@ -393,7 +558,7 @@ export function codegen(ast) {
     fnLines.push(
       `  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`,
     );
-    return { val: tmp, yoopType: "string" };
+    return { val: tmp, yoopType: PrimType("string") };
   }
 
   // ** statement codegen ***********************************************
@@ -414,15 +579,29 @@ export function codegen(ast) {
 
       case ASTNodeKind.LET_DECL:
       case ASTNodeKind.CONST_DECL: {
-        const declType = node.resolvedType.name;
+        const declType = node.resolvedType;
         symbols.set(node.name, declType);
         const llvmTy = llvmType(declType);
-        fnLines.push(
-          `  %${node.name} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`,
-        );
+        const align = declType.kind === typeKinds.struct
+          ? alignOfStruct(declType)
+          : alignOf(llvmTy);
+        fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${align}`);
         if (node.assignment) {
-          const r = emitExpr(node.assignment, fnLines);
-          fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
+          if (
+            node.assignment.kind === ASTNodeKind.STRUCT_LITERAL &&
+            declType.kind === typeKinds.struct
+          ) {
+            // populate the alloca'd slot directly — skip the temp + load + store
+            emitStructLiteralInto(
+              node.assignment,
+              `%${node.name}`,
+              declType,
+              fnLines,
+            );
+          } else {
+            const r = emitExpr(node.assignment, fnLines);
+            fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
+          }
         }
         break;
       }
@@ -495,12 +674,12 @@ export function codegen(ast) {
     labelCounter = 0;
     symbols = new Map();
 
-    const returnType = node.resolvedType.name;
+    const returnType = node.resolvedType;
     const params = node.params ?? [];
     const llvmRet = llvmType(returnType);
 
     const paramSig = params
-      .map((p) => `${llvmType(p.resolvedType.name)} %${p.name}.arg`)
+      .map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`)
       .join(", ");
 
     const fnLines = [];
@@ -509,17 +688,18 @@ export function codegen(ast) {
 
     // copy params into stack slots so they're addressable like locals
     for (const p of params) {
-      const ty = p.resolvedType.name;
+      const ty = p.resolvedType;
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
-      fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
+      const align = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+      fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${align}`);
       fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
     }
 
     const ctx = { fnName: node.name, returnType };
     node.body.body.forEach((s) => emitStatement(s, fnLines, ctx));
 
-    if (returnType === "void") {
+    if (returnType.kind === typeKinds.void) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
@@ -530,12 +710,25 @@ export function codegen(ast) {
 
   // ********* top-level entry ***************
   function emitProgram(node) {
+    // zeroth pass: emit named struct type declarations. must come before any
+    // use (extern decls, function sigs) so the LLVM verifier sees the type.
+    for (const decl of node.body) {
+      if (decl.kind === ASTNodeKind.TYPE_DECL) {
+        const fieldLlvm = decl.resolvedType.fields
+          ? decl.resolvedType.fields
+              .map((f) => llvmType(f.type))
+              .join(", ")
+          : "";
+        structDefs.push(`%struct.${decl.name} = type { ${fieldLlvm} }`);
+      }
+    }
+    
     // first pass: collect user function signatures
     for (const decl of node.body) {
       if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
         functionSigs.set(decl.name, {
-          params: (decl.params ?? []).map((p) => p.resolvedType.name),
-          returnType: decl.resolvedType.name,
+          params: (decl.params ?? []).map((p) => p.resolvedType),
+          returnType: decl.resolvedType,
         });
       }
     }
@@ -557,9 +750,13 @@ export function codegen(ast) {
 
   emitProgram(ast);
 
-  const allLines = [...globals, globals.length ? "" : null, ...lines].filter(
-    (l) => l !== null,
-  );
+  const allLines = [
+    ...structDefs,
+    structDefs.length ? "" : null,
+    ...globals,
+    globals.length ? "" : null,
+    ...lines,
+  ].filter((l) => l !== null);
   return allLines.join("\n");
 }
 
@@ -590,7 +787,7 @@ function externDecl(name) {
   return known[name] ?? `declare i32 @${name}(...)`;
 }
 
-function alignOf(llvmTy) {
+export function alignOf(llvmTy) {
   if (llvmTy === "i64" || llvmTy === "double") return 8;
   if (llvmTy === "i32" || llvmTy === "float") return 4;
   if (llvmTy === "i16") return 2;
@@ -634,9 +831,26 @@ const FLOAT_OP_MAP = {
 };
 
 function binaryInstruction(op, opType) {
-  const map = isFloatType(opType) ? FLOAT_OP_MAP : INT_OP_MAP;
+  const useFloat = opType.kind === typeKinds.prim && isFloatPrim(opType.name);
+  const map = useFloat ? FLOAT_OP_MAP : INT_OP_MAP;
   const instr = map[op];
   if (!instr)
-    throw new Error(`codegen: unknown binary op "${op}" for type ${opType}`);
+    throw new Error(
+      `codegen: unknown binary op "${op}" for type ${opType.kind}/${opType.name ?? ""}`,
+    );
   return instr;
+}
+
+// convenience for tests: parse + typecheck + codegen in one call.
+// returns the IR string. throws if typecheck reports errors.
+export function compileSource(src) {
+  const ast = parse(src);
+  const { errors } = typecheck(ast);
+  if (errors.length > 0) {
+    throw new Error(
+      `compileSource: typecheck failed with ${errors.length} error(s):\n` +
+        errors.map((e) => `  ${e.message}`).join("\n"),
+    );
+  }
+  return codegen(ast);
 }

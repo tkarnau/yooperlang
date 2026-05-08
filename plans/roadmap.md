@@ -31,7 +31,7 @@ Errors are a recognizable convention (`err: string` field) plus the `?` operator
 - Detect "fallible" types (struct with trailing `err: string`)
 - Enforce err-observation rules per spec §11 (read err before scope exit, or use `?`, or `_ = f()`)
 - The `?` operator: postfix on fallible expr, rewrites to early return; only legal if enclosing fn returns fallible too
-- `?` value semantics: strip `err` field, yield the rest (single-field → bare value, multi-field → struct, err-only → `void`)
+- `?` value semantics: strip `err` field, yield the rest (single-field -> bare value, multi-field -> struct, err-only -> `void`)
 - Destructuring sugar (`const { value, err } = f()`) as syntactic rewrite
 
 ### Phase 3 — Modules and FFI
@@ -128,7 +128,7 @@ Type = {
 - `ArrayType { elem }` — for Phase 4
 - `FuncType { params: [{name, type, isRef}], returnType }`
 - `UntypedIntType` / `UntypedFloatType` — literal types before coercion (spec §2: literals are untyped until they reach a typed context)
-- Helpers: `canonicalize(name)` (replaces the `int`→`int32` map in [codegen.js:25](../src/jsyoopcodegen/codegen.js#L25)), `assignable(dst, src)`, `unifyArith(left, right, op)`, `coerceLiteralToType(literalType, targetType)`, `formatType(t)` for error messages
+- Helpers: `canonicalize(name)` (replaces the `int`->`int32` map in [codegen.js:25](../src/jsyoopcodegen/codegen.js#L25)), `assignable(dst, src)`, `unifyArith(left, right, op)`, `coerceLiteralToType(literalType, targetType)`, `formatType(t)` for error messages
 
 **Pass shape**:
 
@@ -137,7 +137,7 @@ Type = {
 3. **Validation rules**: every assignment runs `assignable(dst, src)`; every binary op runs `unifyArith`; every call checks arity and arg types; every return checks against the function's return type; every literal in a typed context gets coerced (range-checked) to the target type
 4. **Error reporting**: collect errors with source positions instead of throwing on first; emit them all at end-of-pass
 
-**Codegen refactor**: rip out type checks from [codegen.js](../src/jsyoopcodegen/codegen.js). Codegen now trusts `node.resolvedType` was set by the typechecker. Specifically remove the inline checks at [codegen.js:206](../src/jsyoopcodegen/codegen.js#L206), [572-588](../src/jsyoopcodegen/codegen.js#L572-L588), and the `unifyArithType`/`checkAssignable` helpers — they move into the typechecker. Keep `llvmTypeOf(yoopType)` and the type→format-specifier table in codegen because those are codegen concerns.
+**Codegen refactor**: rip out type checks from [codegen.js](../src/jsyoopcodegen/codegen.js). Codegen now trusts `node.resolvedType` was set by the typechecker. Specifically remove the inline checks at [codegen.js:206](../src/jsyoopcodegen/codegen.js#L206), [572-588](../src/jsyoopcodegen/codegen.js#L572-L588), and the `unifyArithType`/`checkAssignable` helpers — they move into the typechecker. Keep `llvmTypeOf(yoopType)` and the type->format-specifier table in codegen because those are codegen concerns.
 
 **Reuse**: keep `canonicalize`, `llvmType` map, alignment table, format-specifier table from [codegen.js:4-58](../src/jsyoopcodegen/codegen.js#L4-L58). They stay in codegen but operate on resolved `Type` objects instead of raw strings.
 
@@ -188,6 +188,8 @@ function main(): int32 {
 ```
 
 This must compile and print `distance_sq = 25`.
+
+> Detailed plan: [phase-1-3-structs.md](phase-1-3-structs.md)
 
 ---
 

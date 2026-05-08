@@ -4,25 +4,13 @@ import { execFileSync } from "child_process";
 import os from "os";
 import path from "path";
 
-import { parse, testParser } from "./jsyooparser/parser.js";
+import { parse } from "./jsyooparser/parser.js";
 import { codegen } from "./jsyoopcodegen/codegen.js";
-import { testCharacterFns } from "./jsyooplexer/charFns.js";
-import { testLexer } from "./jsyooplexer/lexer.js";
 import { typecheck } from "./jsyooptypecheck/typecheck.js";
 
-const testMode = process.env.testMode === "true";
-
-function runTests() {
-  testCharacterFns();
-  testLexer();
-  testParser();
-}
+const phaseMode = process.env.phaseMode === "true";
 
 function main() {
-  if (testMode) {
-    runTests();
-  }
-
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
     options: {
@@ -33,7 +21,10 @@ function main() {
   });
 
   let sourceStr = "";
-  if (!testMode) {
+  if (phaseMode) {
+    // hard coding phase file
+    sourceStr = fs.readFileSync("phasePrograms/phase_1_3_struct.yoop", "utf8");
+  } else {
     let inputFile = values.inputFile ?? positionals[0];
 
     if (!fs.existsSync(inputFile)) {
@@ -42,42 +33,6 @@ function main() {
     }
 
     sourceStr = fs.readFileSync(inputFile, "utf8");
-  } else {
-    // initial test
-    // sourceStr = `
-    //     function add(a: int32, b: int32): int32 {
-    //       return a + b;
-    //     }
-
-    //     function main(): void {
-    //       const x: int32 = 10;
-    //       const y: int32 = 20;
-    //       const sum: int32 = add(x, y);
-    //       const s: string;
-
-    //       if (sum >= 25) {
-    //         let count: int32 = 0;
-    //         while (count < 3) {
-    //           count = count + 1;
-    //         }
-    //       } else {
-    //         // nobody cares
-    //         s = "test";
-    //       }
-    //     }
-    //   `;
-
-    // Hello-world smoke test — exercises string literals + extern calls + codegen
-    sourceStr =
-      "\n" +
-      "      function main(): int32 {\n" +
-      '        printf("Hello, World!\\n");\n' +
-      "        let x: int32 = 4 + 5;\n" +
-      "        printf(`x is ${x}\\n`);\n" +
-      "        printf(`sum: ${x + 1}, doubled: ${x * 2}\\n`);\n" +
-      "        return 0;\n" +
-      "      }\n" +
-      "    ";
   }
 
   const outputFileName = values.outputFile ?? values.inputFile?.replace(".yoop", "") ?? "output";

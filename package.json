@@ -1,0 +1,10 @@
+{
+  "name": "yooperlang",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "test": "node --test --test-reporter=spec 'src/**/*.test.js'",
+    "test:unit": "node --test --test-reporter=spec 'src/**/!(e2e).test.js'",
+    "test:e2e": "node --test --test-reporter=spec src/e2e.test.js"
+  }
+}

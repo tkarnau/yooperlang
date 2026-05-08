@@ -22,7 +22,7 @@ A second motivation: Phase 1.1 added `floatLiteral` and `numSuffix` but punted o
 - No struct types — that's Phase 1.3. The `Type` enum reserves a `struct` kind but the typechecker won't construct one yet.
 - No `ref` or array types — placeholders only; Phase 4.
 - No trait/kind plumbing — placeholders only; Phases 5–6.
-- No widening conversions (`int8` → `int32` in arithmetic) — exact-match assignability stays for now, matching current behavior. Adding widening is its own design call we don't need to make yet.
+- No widening conversions (`int8` -> `int32` in arithmetic) — exact-match assignability stays for now, matching current behavior. Adding widening is its own design call we don't need to make yet.
 - No multi-file/import resolution — single-file symbol table only. Modules come in Phase 3.
 - No const-folding or value-range inference beyond literal coercion.
 
@@ -86,16 +86,16 @@ Keep these as factory functions returning frozen objects, not classes — keeps 
 
 ### Helpers in `types.js`
 
-- `canonicalize(name)` — `"int"` → `"int32"`, `"float"` → `"float32"`. This replaces the canonicalization logic at [codegen.js:24-29](../src/jsyoopcodegen/codegen.js#L24-L29).
+- `canonicalize(name)` — `"int"` -> `"int32"`, `"float"` -> `"float32"`. This replaces the canonicalization logic at [codegen.js:24-29](../src/jsyoopcodegen/codegen.js#L24-L29).
 - `primTypeFromName(name)` — given a string from a type annotation, returns a `PrimType` (after canonicalization) or `null` if unknown. This is what every `: int32` annotation runs through.
 - `typesEqual(a, b)` — structural equality across the union. Two `PrimType`s are equal iff their `name` matches; `StructType`s by name (nominal); `FuncType`s by recursive comparison.
 - `assignable(dst, src)` — returns true if a value of type `src` can flow into a slot of type `dst`. Initial rules:
-  - `typesEqual(dst, src)` → true
-  - `src.kind === "untypedInt"` and `dst` is an integer `PrimType` → true (caller is responsible for range-checking)
-  - `src.kind === "untypedFloat"` and `dst` is a float `PrimType` → true (caller does the coerce)
-  - `src.kind === "error"` or `dst.kind === "error"` → true (suppress cascades)
-  - else → false
-- `unifyArith(left, right, op)` — returns the result `Type`, or `null` if the op is illegal between these types. Both untyped → still untyped (e.g. `1 + 2` is `untypedInt`, pinned later by the surrounding context). One untyped, one typed → result is the typed one (the untyped side will be coerced). Two typed must match exactly. Comparison ops always produce `bool`. Logical ops require `bool` operands.
+  - `typesEqual(dst, src)` -> true
+  - `src.kind === "untypedInt"` and `dst` is an integer `PrimType` -> true (caller is responsible for range-checking)
+  - `src.kind === "untypedFloat"` and `dst` is a float `PrimType` -> true (caller does the coerce)
+  - `src.kind === "error"` or `dst.kind === "error"` -> true (suppress cascades)
+  - else -> false
+- `unifyArith(left, right, op)` — returns the result `Type`, or `null` if the op is illegal between these types. Both untyped -> still untyped (e.g. `1 + 2` is `untypedInt`, pinned later by the surrounding context). One untyped, one typed -> result is the typed one (the untyped side will be coerced). Two typed must match exactly. Comparison ops always produce `bool`. Logical ops require `bool` operands.
 - `coerceLiteralToType(literalNode, targetType)` — given an `intLiteral` / `floatLiteral` node and a target `PrimType`, range-check and rewrite the node's `resolvedType` to `targetType`. Returns `{ ok, error }`. Range tables for each primitive go here:
   - `int8`: `[-128, 127]`, `uint8`: `[0, 255]`, etc.
   - For floats: check value is finite; for `float32` check magnitude fits in IEEE-754 single-precision range (use `Math.fround(v) === v` as the simplest "no precision loss" guard, or the looser "in range" guard `Math.abs(v) <= 3.4e38`). Spec doesn't specify precision-loss strictness; start with range-only.
@@ -193,7 +193,7 @@ The call node's `resolvedType` is the callee's return type.
 
 #### Assignment
 
-Look up the LHS name. Recurse into RHS. Apply `assignable(lhsType, rhsType)`; if the RHS is an untyped literal, call `coerceLiteralToType(rhsNode, lhsType)` first (range-checked). Mismatch → error.
+Look up the LHS name. Recurse into RHS. Apply `assignable(lhsType, rhsType)`; if the RHS is an untyped literal, call `coerceLiteralToType(rhsNode, lhsType)` first (range-checked). Mismatch -> error.
 
 The current parser only emits `assignment` for bare `name = value`. Once Phase 1.3 adds field-access LHS, this case generalizes.
 
@@ -205,7 +205,7 @@ Each `exprPart` is type-checked and its `resolvedType` recorded. The whole `temp
 
 #### `letDecl` / `constDecl`
 
-Resolve the annotation via `primTypeFromName(node.type)`. Unknown type → error, but bind the variable as `ErrorType` so subsequent uses don't double-error. (Reserved: in Phase 1.3 the resolver also checks the module's struct-type table.)
+Resolve the annotation via `primTypeFromName(node.type)`. Unknown type -> error, but bind the variable as `ErrorType` so subsequent uses don't double-error. (Reserved: in Phase 1.3 the resolver also checks the module's struct-type table.)
 
 If `node.assignment` is present, recurse into it. Then coerce/check assignability into the declared type. Store the binding in the current scope.
 
@@ -403,7 +403,7 @@ Expected output: `c=127`. (Pre-Phase-1.2, this would have failed at codegen beca
 - **Mutation tracking for `const`** — flagged as a small drop-in but not required to ship the phase.
 - **String concatenation** — `"a" + "b"` stays an error; spec uses template literals.
 - **Bool arithmetic** — `true + 1` is an error (`unifyArith` returns `null`).
-- **Const-folding** — `let x: int8 = 100 + 30;` is fine (untyped + untyped → untyped, both coerce to int8). But `let x: int8 = 200 + 30;` errors as "literal 200 out of range" *and* "literal 30 out of range" — we don't do `200+30=230 > 127` math at compile time. That's a future polish item; spec doesn't require it.
+- **Const-folding** — `let x: int8 = 100 + 30;` is fine (untyped + untyped -> untyped, both coerce to int8). But `let x: int8 = 200 + 30;` errors as "literal 200 out of range" *and* "literal 30 out of range" — we don't do `200+30=230 > 127` math at compile time. That's a future polish item; spec doesn't require it.
 - **Unused variable warnings** — not in scope.
 - **Shadowing rules** — block-scoped shadowing is allowed (inner scope can rebind a name from an outer scope). Same-scope redeclaration is an error.
 
