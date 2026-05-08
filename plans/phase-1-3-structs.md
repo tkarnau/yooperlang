@@ -48,451 +48,202 @@ It's the smallest new language feature that needs every pass we just refactored 
 
 ---
 
+## Status snapshot
+
+This plan was originally written before the typechecker was split into per-concern modules. The lexer / AST / parser changes (§1–§3) are **done**. The typechecker structural pieces (§4.a–§4.c, plus the recursive-struct guard) are **done**. What remains, in rough order:
+
+1. **§4.d** — `STRUCT_LITERAL` typechecking (the case in [checkExpr.js:260-262](../src/jsyooptypecheck/checkExpr.js#L260-L262) is currently a commented-out stub).
+2. **§4.e** — `ASSIGNMENT` with a `FIELD_ACCESS` target. Currently emits a placeholder "not yet implemented" error at [checkExpr.js:213-226](../src/jsyooptypecheck/checkExpr.js#L213-L226).
+3. **§5** — Codegen. None of the struct emission / GEP / struct-pass-by-value paths exist yet; codegen still keys on string `yoopType` names and will need a small refactor to take `Type` objects before structs can be lowered.
+
+The bulk of the new work for the user from here is sections 4.D, 4.E, and all of 5.
+
+---
+
 ## Files touched
 
-**Edited**:
+The typechecker now lives in several files under [src/jsyooptypecheck/](../src/jsyooptypecheck/), not a single `typecheck.js`. Quick map:
 
-- [src/contracts.js](../src/contracts.js) — new `ASTNodeKind` entries: `TYPE_DECL`, `FIELD_DECL`, `FIELD_ACCESS`, `STRUCT_LITERAL`, `STRUCT_LITERAL_FIELD`
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — add `type` keyword tag and the `.` punctuation token
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — top-level `parseTypeDecl`, postfix field-access loop after primary, struct-literal prefix branch
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `StructType` is already defined; add a `resolveTypeName(name, structTable)` helper that knows about both prims and structs
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — struct registration pre-pass, `FIELD_ACCESS` and `STRUCT_LITERAL` cases in `checkExpr`, struct support in `isAssignable` (already mostly works via `typesEqual`), struct types as let/return/param annotations
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — emit `%struct.X` declarations, GEP-based field read/write, struct-literal materialization, struct pass-by-value, struct return
+- [typecheck.js](../src/jsyooptypecheck/typecheck.js) — orchestration only (the three pre-passes + per-function dispatch). Re-exports the helpers from siblings.
+- [checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — `resolveExprType` (was `checkExpr`) and `resolveCallType`.
+- [checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — `validateFunction` and `validateStatement` (was `checkFunction` / per-stmt cases inside `checkExpr`).
+- [coerce.js](../src/jsyooptypecheck/coerce.js) — `isAssignable`, `unifyArith`, `coerceLiteralToType`.
+- [scope.js](../src/jsyooptypecheck/scope.js) — `pushScope`, `lookupInScope`, `declareInScope`.
+- [errors.js](../src/jsyooptypecheck/errors.js) — `pushError`, `formatType`.
+- [recursiveStruct.js](../src/jsyooptypecheck/recursiveStruct.js) — `detectRecursiveField` (already wired in).
+- [types.js](../src/jsyooptypecheck/types.js) — Type factories. Note: the helper is **`resolveTypeFromName(name, structTable)`** (the original plan called it `resolveTypeName`).
 
-**No new files** — the typechecker module already exists.
+**Edited / to edit**:
 
----
-
-## 1. Lexer changes ([lexer.js](../src/jsyooplexer/lexer.js))
-
-### Add `type` as a keyword
-
-In `TokenTags`:
-
-```js
-type: 38,   // new — the `type` keyword for struct decls
-```
-
-In `keywordTagList`:
-
-```js
-type: TokenTags.type,
-```
-
-That's it for the lexer side of `type`. The rest is parsing.
-
-### Add `.` as a punctuation token
-
-Currently `.` is not in [tokenScanList](../src/jsyooplexer/lexer.js#L84-L108). Add:
-
-```js
-{ str: ".", tag: TokenTags.dot },
-```
-
-And add to `TokenTags`:
-
-```js
-dot: 39,
-```
-
-The lexer's numeric scanner already handles `.` correctly: `lexNumericLiteral` only consumes a `.` as a fractional part if `isDigit(src[end+1])` ([lexer.js:198](../src/jsyooplexer/lexer.js#L198)). So `1.foo` lexes as `intLiteral(1)`, `dot`, `ident("foo")` — exactly what we want for field access on an integer (which the typechecker will reject, but the *lex* is clean). Phase 1.1 already chose this rule explicitly; nothing to change.
-
-### Test
-
-Add the new keyword/dot to `testLexer`'s expected output, or — easier — just verify the new struct test program tokenizes without errors. The existing `expectedResults` golden in [lexer.js:374](../src/jsyooplexer/lexer.js#L374) doesn't use `type` or `.`, so it won't change.
+- [src/contracts.js](../src/contracts.js) — done: `TYPE_DECL`, `FIELD_DECL`, `FIELD_ACCESS`, `STRUCT_LITERAL`, `STRUCT_LITERAL_FIELD` are all registered.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — done: `type` keyword and `.` punctuation.
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — done: top-level dispatch, `parseTypeDecl`, postfix `.field` loop, struct-literal prefix branch, generalized `ASSIGNMENT` with `target`.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — done: `StructType` factory, `resolveTypeFromName(name, structTable)`, nominal `typesEqual` for struct kind.
+- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — done: three-pass struct registration (shells → fields → function sigs); per-function handoff to `validateFunction`.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — done: `FIELD_ACCESS` case. **Pending**: `STRUCT_LITERAL` case; `ASSIGNMENT` with `FIELD_ACCESS` target (currently a placeholder error).
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — **pending**: `LET_DECL` / `CONST_DECL` / `RETURN_STATEMENT` need to recognise an unpinned `STRUCT_LITERAL` initializer/return value and pin it to the declared/expected type.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — **pending**: emit `%struct.X` declarations, GEP-based field read/write, struct-literal materialization, struct pass-by-value, struct return. This file currently keys on string `yoopType` names everywhere — see §5(b).
 
 ---
 
-## 2. AST node kinds ([contracts.js](../src/contracts.js))
+## 1. Lexer changes ([lexer.js](../src/jsyooplexer/lexer.js)) — done
+
+Already in place:
+
+- `type` keyword: `TokenTags.type = 38` ([lexer.js:42](../src/jsyooplexer/lexer.js#L42)) plus the `keywordTagList` entry ([lexer.js:115](../src/jsyooplexer/lexer.js#L115)).
+- `.` punctuation: `TokenTags.dot = 39` ([lexer.js:68](../src/jsyooplexer/lexer.js#L68)) plus the `tokenScanList` entry ([lexer.js:103](../src/jsyooplexer/lexer.js#L103)).
+
+The numeric-literal scanner already only consumes `.` as a fractional part if `isDigit(src[end+1])` — so `1.foo` lexes as `intLiteral(1)`, `dot`, `ident("foo")`. Phase 1.1 chose this rule explicitly; nothing to change.
+
+---
+
+## 2. AST node kinds ([contracts.js](../src/contracts.js)) — done
+
+All five kinds are present in [contracts.js](../src/contracts.js):
 
 ```js
-// declarations
-TYPE_DECL: "TYPE_DECL",       // type Point { x: int32, y: int32, }
-FIELD_DECL: "FIELD_DECL",     // a single { name, type } inside a TYPE_DECL
-
-// expressions
-FIELD_ACCESS: "FIELD_ACCESS",       // p.x
-STRUCT_LITERAL: "STRUCT_LITERAL",   // { x: 1, y: 2 }
+TYPE_DECL: "TYPE_DECL",                    // type Point { x: int32, y: int32, }
+FIELD_DECL: "FIELD_DECL",                  // a single { name, type } inside a TYPE_DECL
+FIELD_ACCESS: "FIELD_ACCESS",              // p.x
+STRUCT_LITERAL: "STRUCT_LITERAL",          // { x: 1, y: 2 }
 STRUCT_LITERAL_FIELD: "STRUCT_LITERAL_FIELD",  // a single { name, value } inside a STRUCT_LITERAL
 ```
 
-`FIELD_DECL` and `STRUCT_LITERAL_FIELD` are not strictly required (could just be `{name, type}` and `{name, value}` plain objects), but keeping them as named AST nodes is consistent with how `PARAM` works today and makes them sourcedNodes (positions for error reporting on a per-field basis).
+---
+
+## 3. Parser changes ([parser.js](../src/jsyooparser/parser.js)) — done
+
+Already implemented:
+
+- **Top-level `type` dispatch** at [parser.js:94-98](../src/jsyooparser/parser.js#L94-L98).
+- **`parseTypeDecl`** at [parser.js:441-468](../src/jsyooparser/parser.js#L441-L468). Includes a small bonus path for type aliases (`type X = Y` style — sets `node.targetType` instead of `node.fields`); the typechecker ignores aliases for now, only `node.fields` flows through.
+- **Postfix `.field` loop** at [parser.js:183-195](../src/jsyooparser/parser.js#L183-L195) — runs after the primary, before binary ops, so `a.b * 2` parses as `(a.b) * 2`.
+- **Struct-literal prefix `{ ... }`** at [parser.js:162-176](../src/jsyooparser/parser.js#L162-L176). The disambiguation works positionally: `parseStatement` dispatches `return` / `let` / `const` / `if` / `while` / expression-statement, and `parseBlock` is only called from places that expect a block (function body, if/while body) — so a bare `{` reaching `parseExpression` is unambiguously a struct literal.
+- **Generalized `ASSIGNMENT` with `target`** at [parser.js:200-214](../src/jsyooparser/parser.js#L200-L214) — chose the recommended Option 1 from the original plan. After the primary + postfix chain, an `=` triggers wrapping the lvalue (which must be `IDENT` or `FIELD_ACCESS`) into an `ASSIGNMENT` node. Assignment binds loosest and doesn't chain into the binary loop.
 
 ---
 
-## 3. Parser changes ([parser.js](../src/jsyooparser/parser.js))
+## 4. Typechecker changes
 
-### a) Top-level dispatch — accept `type`
+The original plan called the dispatcher `checkExpr`. After Phase 1.2's split it is now **`resolveExprType`** in [checkExpr.js](../src/jsyooptypecheck/checkExpr.js); per-statement logic lives in **`validateStatement`** in [checkStatement.js](../src/jsyooptypecheck/checkStatement.js); function-level setup is **`validateFunction`**. The orchestration (the three pre-passes) is still in [typecheck.js](../src/jsyooptypecheck/typecheck.js).
 
-Currently `parseTopLevel` only accepts `function` ([parser.js:91-101](../src/jsyooparser/parser.js#L91-L101)). Extend the `switch`:
+Throughout the typechecker, `ctx` carries `ctx.typeContext = { moduleSymbols, structTable }` (so e.g. `ctx.typeContext.structTable` rather than the original plan's `ctx.structTable`). The plan below uses the current shapes.
+
+### a) Three-stage struct registration — done
+
+Implemented in [typecheck.js:53-121](../src/jsyooptypecheck/typecheck.js#L53-L121). Three passes (the original plan called this two-stage; it is now genuinely three because the function-signature pass is split out so it can resolve struct-typed params/returns):
+
+1. **Shells**: walk `ast.body`; for each `TYPE_DECL`, register `StructType(name, null)` in `structTable`. Reject redeclarations.
+2. **Fields**: walk again; for each `TYPE_DECL`, resolve every field's type via `resolveTypeFromName(field.type, structTable)`, push errors for unknown / duplicate / recursive fields, and replace the shell with a populated `StructType(name, fields)`. Also stamp `decl.resolvedType = fullType` so codegen can pull the canonical struct shape from the AST node.
+3. **Function signatures**: walk again; for each `FUNCTION_DECL`, build a `FuncType` using `resolveTypeFromName` (so struct-typed params/returns capture the populated `StructType`).
+
+Recursive-struct rejection lives in [recursiveStruct.js](../src/jsyooptypecheck/recursiveStruct.js) and is already wired into pass 2.
+
+### b) Resolve struct names in let/const/param/return-type annotations — done
+
+`primTypeFromName` is no longer called from any check site — every annotation goes through `resolveTypeFromName(name, structTable)`. Live sites:
+
+- Param resolution: [checkStatement.js:26-33](../src/jsyooptypecheck/checkStatement.js#L26-L33).
+- Return-type resolution: [checkStatement.js:35-41](../src/jsyooptypecheck/checkStatement.js#L35-L41).
+- Let/const declared type: [checkStatement.js:64-69](../src/jsyooptypecheck/checkStatement.js#L64-L69).
+- Pre-pass funcType build: [typecheck.js:111-117](../src/jsyooptypecheck/typecheck.js#L111-L117).
+
+`resolveTypeFromName` is the *only* type-name lookup helper in the typechecker now.
+
+### c) `FIELD_ACCESS` in `resolveExprType` — done
+
+Implemented at [checkExpr.js:232-259](../src/jsyooptypecheck/checkExpr.js#L232-L259). Recurses into `node.object`, errors if the object's type isn't `struct`, looks up the named field in `objType.fields`, sets `node.resolvedType = field.type`. Cascading errors are suppressed when the object's type is already an `error` type.
+
+### d) `STRUCT_LITERAL` in `resolveExprType` — **pending**
+
+This is the next thing to implement. The case is currently a commented-out stub at [checkExpr.js:260-262](../src/jsyooptypecheck/checkExpr.js#L260-L262):
 
 ```js
-switch (peekTag) {
-  case TokenTags.function:
-    node.body.push(parseFunctionDecl());
-    break;
-  case TokenTags.type:
-    node.body.push(parseTypeDecl());
-    break;
-  default:
-    throw new Error(`unexpected token at top level ...`);
+// case ASTNodeKind.STRUCT_LITERAL: {
+
+// }
+```
+
+**Why it's awkward.** A struct literal `{ x: 1, y: 2 }` cannot be typed in isolation — `{ x: 1 }` could be a `Point2D`, a `JustX`, anything with an `x` field. The literal needs a *target type* from its surrounding context (a let-decl's declared type, a return statement's expected type, a call argument's param type, or an assignment LHS's type). This is the same shape problem we already solve for untyped int/float literals (see [checkStatement.js:81-97](../src/jsyooptypecheck/checkStatement.js#L81-L97) — coercion happens in the *caller* after `resolveExprType` returns).
+
+**Recommended approach.** Mirror the literal-coercion pattern that already works:
+
+1. In `resolveExprType`, if `STRUCT_LITERAL` shows up uninvited (no caller has pinned it), recurse through each field's `value` so child errors still surface, then set `node.resolvedType = ErrorType()` and push `"struct literal has no target type"`. This keeps the case from blowing up on stray literals like `{x:1};` as an expression statement.
+2. Add a new helper `pinStructLiteral(litNode, targetType, scope, ctx)` — most natural home is [checkExpr.js](../src/jsyooptypecheck/checkExpr.js) alongside `resolveExprType`, since it walks expression nodes. It does:
+   - Reject `targetType.kind !== "struct"` ("cannot assign struct literal to non-struct type X").
+   - Walk `targetType.fields` once into a Map of `name -> declared field type`.
+   - For each `STRUCT_LITERAL_FIELD` in the literal: dedupe by name; look up the declared field type; recurse `resolveExprType(lf.value, scope, ctx)`; check `isAssignable(expected, valueType)`; if the value is an untyped literal, call `coerceLiteralToType`. Recurse `pinStructLiteral` if `lf.value.kind === STRUCT_LITERAL` (nested literals like `{ inner: { v: 42 } }`).
+   - After the loop, complain about any declared field that wasn't seen ("missing field 'y' in struct literal").
+   - Set `litNode.resolvedType = targetType`.
+3. Call `pinStructLiteral` from each context that supplies a target type:
+   - **Let/const initializer** ([checkStatement.js:71-98](../src/jsyooptypecheck/checkStatement.js#L71-L98)): before the existing `resolveExprType(node.assignment, ...)` call, special-case `node.assignment?.kind === STRUCT_LITERAL` to call `pinStructLiteral(node.assignment, declaredType, scope, ctx)` instead. Skip the `isAssignable` re-check after — pinning has already done it field-wise.
+   - **Return statement** ([checkStatement.js:112-132](../src/jsyooptypecheck/checkStatement.js#L112-L132)): same pattern, target type is `ctx.funcReturnType`.
+   - **Call argument** ([checkExpr.js:286-297](../src/jsyooptypecheck/checkExpr.js#L286-L297) inside `resolveCallType`): when `paramType.kind === "struct"` and `node.args[i].kind === STRUCT_LITERAL`, pin instead of `resolveExprType`. Useful for `distance_sq({ x: 3, y: 4 })`.
+   - **Assignment RHS** (see §4.e below).
+
+The reason to keep this as a separate helper rather than threading an `expectedType` parameter through every `resolveExprType` recursion: literal coercion already uses the "caller pins after the fact" pattern, and adding an `expectedType` param would touch every call site. The downside is each caller has to remember to special-case `STRUCT_LITERAL` — that's a small, finite list, and the unhandled fallback in `resolveExprType` itself produces a clean error.
+
+### e) `ASSIGNMENT` with `target: FIELD_ACCESS` — **pending**
+
+Currently a placeholder at [checkExpr.js:213-226](../src/jsyooptypecheck/checkExpr.js#L213-L226):
+
+```js
+if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
+  resolveExprType(node.target, scope, ctx);
+  resolveExprType(node.value, scope, ctx);
+  pushError(
+    ctx.errors,
+    node,
+    `field assignment typecheck not yet implemented (struct support pending)`,
+  );
+  node.resolvedType = ErrorType();
+  return node.resolvedType;
 }
 ```
 
-### b) `parseTypeDecl`
+Replace with the real check. The shape mirrors the existing IDENT branch right above it ([checkExpr.js:170-211](../src/jsyooptypecheck/checkExpr.js#L170-L211)):
 
-```
-parseTypeDecl():
-  expect(type)
-  node = buildSourcedNode(TYPE_DECL)
-  node.name = parseIdentAsName()
-  expect(lcurly)
-  node.fields = []
+1. `targetType = resolveExprType(node.target, scope, ctx)` — this already validates the field exists and bails out with `ErrorType` on non-struct objects. If `targetType.kind === "error"`, set `node.resolvedType = ErrorType()` and return (cascading errors are suppressed by `isAssignable`).
+2. **Mutability check**: walk the chain back to its root and verify the root binding isn't a `const`. The IDENT branch checks `binding.kind === "const"` directly; for nested chains we need a small helper:
 
-  while peek().tag != rcurly and peek().tag != eof:
-    fieldNode = buildSourcedNode(FIELD_DECL)
-    fieldNode.name = parseIdentAsName()
-    expect(colon)
-    fieldNode.type = parseIdentAsName()   // type-name string; resolved in typecheck
-    node.fields.push(fieldNode)
-    if peek().tag == comma: advance()
-    // trailing comma is allowed; required-comma-between-fields is not strict here
-  expect(rcurly)
+   ```js
+   function rootIdentOf(node) {
+     while (node.kind === ASTNodeKind.FIELD_ACCESS) node = node.object;
+     return node.kind === ASTNodeKind.IDENT ? node : null;
+   }
+   ```
 
-  return node
-```
+   If the root is an IDENT, look up its binding and reject const (`cannot assign to field of const "p"`). If the root isn't an IDENT (e.g. a call result like `make_pair().x = 1`), reject that too — the LLVM lowering would write to a temporary that gets discarded.
+3. RHS handling: if `node.value.kind === STRUCT_LITERAL`, call `pinStructLiteral(node.value, targetType, scope, ctx)`. Otherwise `valueType = resolveExprType(node.value, scope, ctx)` and check `isAssignable(targetType, valueType)`. For untyped int/float values, call `coerceLiteralToType` the same way the IDENT branch does.
+4. Set `node.resolvedType = targetType` and return it.
 
-Mirrors `parseFunctionParam`'s shape exactly. The trailing-comma allowance matches the test program in the roadmap (`type Point { x: int32, y: int32, }`).
+### f) `isAssignable` — already works for structs
 
-### c) Field access — postfix `.ident` loop
+[coerce.js:26-57](../src/jsyooptypecheck/coerce.js#L26-L57) calls `typesEqual(dest, src)` first, and `typesEqual` for `struct` kind is now nominal — same name = equal struct ([types.js:156-161](../src/jsyooptypecheck/types.js#L156-L161)). This is necessary for self-referential structs: the deep-walk version in the original plan would loop forever on `type Node { next: Ref<Node> }`. Nothing to change here.
 
-Today `parseExpression` parses a primary, then runs a binary-op loop ([parser.js:170-185](../src/jsyooparser/parser.js#L170-L185)). Field access doesn't fit the binary loop because the right side is an identifier, not a sub-expression. Insert a *postfix loop* between the primary and the binary loop:
+### g) `formatType` — done
 
-```js
-// after the primary `node` is parsed and before the binary-op loop:
+[errors.js:21-22](../src/jsyooptypecheck/errors.js#L21-L22) returns `struct ${t.name}`. Fine as-is.
 
-while (true) {
-  if (peek().tag === TokenTags.dot) {
-    advance(); // consume '.'
-    const fieldName = parseIdentAsName();
-    const fa = buildSourcedNode(ASTNodeKind.FIELD_ACCESS);
-    fa.object = node;
-    fa.field = fieldName;
-    node = fa;
-    continue;
-  }
-  // Phase 4 will add `[`, `(` (call) here too. Today, calls are still
-  // detected during ident parsing — leave that path alone for now.
-  break;
-}
-```
+### h) Template literals — already correct
 
-Why postfix loop and not Pratt infix: Pratt's binary path expects `parseExpression(precedence)` on the right side. `.` doesn't take an expression, just an identifier. Cleanest to keep it out of the precedence table and handle it as left-associative postfix chaining. Chains like `a.b.c.d` become `((a.b).c).d` — exactly what we want.
-
-`a.b * 2` parses as `(a.b) * 2` because the postfix loop is greedy *before* the binary loop runs. ✓
-
-### d) Struct literal — prefix `{ ident :`
-
-Today the prefix part of `parseExpression` dispatches on `intLiteral`, `floatLiteral`, `strLiteral`, `templateLiteral`, `ident`. Add `lcurly`. The body:
-
-```
-if peek().tag == lcurly:
-  advance() // consume '{'
-  node = buildSourcedNode(STRUCT_LITERAL)
-  node.fields = []
-
-  while peek().tag != rcurly and peek().tag != eof:
-    f = buildSourcedNode(STRUCT_LITERAL_FIELD)
-    f.name = parseIdentAsName()
-    expect(colon)
-    f.value = parseExpression()
-    node.fields.push(f)
-    if peek().tag == comma: advance()
-
-  expect(rcurly)
-  // fall through to the postfix/binary loops — `{x:1, y:2}.x` should parse
-```
-
-#### Disambiguation note
-
-The same `{` token is also used for blocks. Could a `{` ever reach `parseExpression` and be misparsed as a struct literal when the user actually meant a block? Walk the call sites:
-
-- `parseFunctionDecl` calls `parseBlock()` directly for the body
-- `parseIfStatement` / `parseWhileStatement` call `parseBlock()` directly for their bodies
-- `parseStatement` dispatches on `return`/`let`/`const`/`if`/`while`, with a default of `parseExpressionStatement` -> `parseExpression`
-
-So a bare `{` at statement-position currently lands in `parseExpressionStatement -> parseExpression`. With this change, that becomes a struct literal. That's *fine*: `{ x: 1 }` as a statement is a useless expression — the typechecker can flag "struct literal at statement position has no target type" cleanly.
-
-What about expression position inside `if (cond) { ... }`? The `(cond)` parses through `parseExpression` and hits `rparen`, returning before reaching `{`. Then `parseIfStatement` handles `{` directly via `parseBlock`. ✓
-
-So the disambiguation is *positional*, not lookahead-based — much simpler than the roadmap's suggestion of `{ ident :` lookahead. We don't need lookahead; we just need to know that statements stop expression parsing before `{` is reached.
-
-### e) Field assignment — `expr.field = value`
-
-Spec implies field writes must work (the roadmap's `Field write: getelementptr then store`). The current parser's `ident` branch detects `name = value` for plain assignment ([parser.js:153-158](../src/jsyooparser/parser.js#L153-L158)). For `p.x = value`, we need a different shape because the LHS is a `FIELD_ACCESS`, not a bare ident.
-
-Two options:
-
-1. **Generalize `ASSIGNMENT`**: change `node.name` -> `node.target` (an AST node — either an `IDENT` or a `FIELD_ACCESS`). Update the typechecker and codegen to handle either.
-2. **Defer field assignment** to a follow-up. The Phase 1 test program doesn't write to a field, so we *could* punt.
-
-Recommendation: **do option 1 now**. It's a tiny generalization — the Pratt parser, after building a primary + postfix chain, can detect a trailing `=` and rewrap the whole thing as `ASSIGNMENT { target: node, value: rhs }`. Implementation:
-
-After the postfix loop, before the binary loop:
-
-```js
-if (peek().tag === TokenTags.eq) {
-  // assignment — but only valid if `node` is an lvalue
-  // (IDENT or FIELD_ACCESS today; deref of REF later)
-  advance(); // consume '='
-  const rhs = parseExpression();
-  const a = buildSourcedNode(ASTNodeKind.ASSIGNMENT);
-  a.target = node;
-  a.value = rhs;
-  return a;   // assignment binds loosest; no further binary chaining
-}
-```
-
-Then *delete* the existing `eq` branch inside the ident-path ([parser.js:153-158](../src/jsyooparser/parser.js#L153-L158)) — it's now redundant.
-
-Update existing `ASSIGNMENT` consumers in typecheck and codegen: `node.name` becomes `node.target.name` (when target is `IDENT`), or follows a `FIELD_ACCESS` for field stores.
-
-If this turns out to be more churn than expected, fall back to deferring field-writes. The Phase 1 test program does not exercise it, so the phase can ship without it. But it's small enough that doing it now is preferred.
-
-### f) Type annotations may be struct names
-
-`parseVarDecl`, `parseFunctionDecl`, `parseFunctionParam` already call `parseIdentAsName()` for type annotations. Nothing changes at the parser level — the resolution happens in the typechecker, where struct names are looked up in the same name table as primitives.
+[checkExpr.js:140-156](../src/jsyooptypecheck/checkExpr.js#L140-L156) only allows string / int / float interpolations; struct types fall through and get rejected with `template literal interpolation must be a string, int, or float type, found struct Point`. Verify the negative test catches `${p}` once an end-to-end test exists.
 
 ---
 
-## 4. Typechecker changes ([typecheck.js](../src/jsyooptypecheck/typecheck.js))
+## 5. Codegen changes ([codegen.js](../src/jsyoopcodegen/codegen.js)) — **pending**
 
-### a) Two-stage struct registration
-
-Today's pre-pass walks `ast.body` once and records function signatures ([typecheck.js:39-57](../src/jsyooptypecheck/typecheck.js#L39-L57)). Split it into three phases:
-
-```
-phase A: struct names
-  for each TYPE_DECL in ast.body:
-    if structTable.has(name): error "redeclaration of type"
-    else: structTable.set(name, StructType(name, /*fields=*/null))   // shell
-
-phase B: struct fields
-  for each TYPE_DECL in ast.body:
-    fields = []
-    for each FIELD_DECL:
-      t = resolveTypeName(field.type, structTable)
-      if !t: error "unknown type 'X' in field 'foo' of struct 'S'"
-        t = ErrorType()
-      check no duplicate field name in this struct
-      fields.push({ name: field.name, type: t })
-    structTable.get(structDecl.name) = StructType(name, fields)
-    typeDecl.resolvedType = that StructType
-
-phase C: function signatures (uses both prims and structs)
-  for each FUNCTION_DECL:
-    same as today, but resolveTypeName instead of primTypeFromName
-```
-
-Two-stage struct registration (A then B) handles forward references: `type A { b: B }` and `type B { ... }` both work, regardless of declaration order.
-
-`resolveTypeName(name, structTable)` is the new helper:
-
-```js
-function resolveTypeName(name, structTable) {
-  return primTypeFromName(name) ?? structTable.get(name) ?? null;
-}
-```
-
-Recursive struct types (`type Node { next: Node }`) — the field's type is the `StructType` object from the table, which is the same object the struct itself is registered as. That's a self-reference. For now, that *would* be infinite size at codegen, so reject it: in phase B, if a field's resolved type is a `StructType` and the field's containing struct's name appears anywhere in that field's type tree (without going through a `ref`), error: `recursive struct "X" requires ref or pointer indirection`. Phase 4 will introduce `ref` and this check loosens.
-
-Pseudocode:
-
-```js
-function detectRecursiveField(structName, fieldType, visited = new Set()) {
-  if (fieldType.kind === "struct") {
-    if (fieldType.name === structName) return true;
-    if (visited.has(fieldType.name)) return false;
-    visited.add(fieldType.name);
-    for (const f of fieldType.fields) {
-      if (detectRecursiveField(structName, f.type, visited)) return true;
-    }
-  }
-  return false;
-}
-```
-
-### b) Resolve struct names in let/const/param/return-type annotations
-
-Replace every call to `primTypeFromName(node.type)` in [typecheck.js](../src/jsyooptypecheck/typecheck.js) with `resolveTypeName(node.type, ctx.structTable)`. The pre-pass already populated `structTable`, so by the time `checkFunction` runs, struct names resolve cleanly.
-
-Affected sites:
-- [typecheck.js:50](../src/jsyooptypecheck/typecheck.js#L50) (param type in pre-pass funcType build)
-- [typecheck.js:52](../src/jsyooptypecheck/typecheck.js#L52) (return type in pre-pass)
-- [typecheck.js:161](../src/jsyooptypecheck/typecheck.js#L161) (param type in checkFunction)
-- [typecheck.js:171](../src/jsyooptypecheck/typecheck.js#L171) (return type in checkFunction)
-- [typecheck.js:200](../src/jsyooptypecheck/typecheck.js#L200) (let/const declared type)
-
-Thread `structTable` through the `ctx` object so per-function checks can reach it.
-
-### c) `FIELD_ACCESS` in `checkExpr`
-
-```
-case FIELD_ACCESS:
-  objType = checkExpr(node.object, scope, ctx)
-  if objType.kind == "error":
-    node.resolvedType = ErrorType()
-    return node.resolvedType
-  if objType.kind != "struct":
-    error: "field access on non-struct type <formatType(objType)>"
-    node.resolvedType = ErrorType()
-    return
-  field = objType.fields.find(f => f.name == node.field)
-  if !field:
-    error: "type '<objType.name>' has no field '<node.field>'"
-    node.resolvedType = ErrorType()
-    return
-  node.resolvedType = field.type
-  return field.type
-```
-
-### d) `STRUCT_LITERAL` in `checkExpr`
-
-A struct literal must know its target type. There's no way to type a bare `{ x: 1 }` without context. The typechecker takes a target type from the surrounding context — already plumbed for literal coercion. Two options:
-
-1. Pass `expectedType` through `checkExpr(node, scope, ctx, expectedType)`. Today `checkExpr` doesn't take this parameter; would have to thread it through every recursion.
-2. After `checkExpr` returns, the *caller* (let-decl, return, call-arg, assignment) inspects what came back. If it's `STRUCT_LITERAL` with no `resolvedType` yet, the caller pins it.
-
-Option 2 is closer to how literal coercion already works in this codebase: see [typecheck.js:216-232](../src/jsyooptypecheck/typecheck.js#L216-L232) (let-decl coerces untyped int/float literals after the fact).
-
-So the rule for `STRUCT_LITERAL` in `checkExpr`:
-- Walk each field's `value` (recurse into `checkExpr`).
-- Set `node.resolvedType = null` for now (signals "needs target").
-- Return a sentinel — `UntypedStructType()`? Or just leave `resolvedType` unset and have callers detect it.
-
-Cleanest: introduce a new `UntypedStructType` (parallel to `UntypedIntType`) carrying the literal's parsed shape (`{ fields: [{ name, valueType }] }`). Then `assignable(StructType, UntypedStructType)` checks shape compatibility; the caller then calls a new `coerceStructLiteralToType(node, structType)` that pins it.
-
-Actually simpler: don't introduce `UntypedStructType` at all. Just let `STRUCT_LITERAL` produce `ErrorType` if no caller pins it, and have specific callers (`letDecl` initializer, `returnStatement`, call args, assignment RHS) special-case `STRUCT_LITERAL` *before* recursing. Pseudocode for the let-decl path:
-
-```js
-if (node.assignment?.kind === ASTNodeKind.STRUCT_LITERAL) {
-  pinStructLiteral(node.assignment, declaredType, ctx);
-} else {
-  // existing path: checkExpr then assignability check
-}
-
-function pinStructLiteral(litNode, targetType, ctx) {
-  if (targetType.kind !== "struct") {
-    error "struct literal cannot be assigned to non-struct type X";
-    litNode.resolvedType = ErrorType();
-    return;
-  }
-  const declaredFields = new Map(targetType.fields.map(f => [f.name, f.type]));
-  const seen = new Set();
-  for (const lf of litNode.fields) {  // STRUCT_LITERAL_FIELD
-    if (seen.has(lf.name)) error "duplicate field"; seen.add(lf.name);
-    const expected = declaredFields.get(lf.name);
-    if (!expected) {
-      error "struct '<X>' has no field '<lf.name>'"; continue;
-    }
-    const valueType = checkExpr(lf.value, scope, ctx);
-    if (!isAssignable(expected, valueType)) {
-      error "field '<lf.name>': cannot assign <valueType> to <expected>";
-    }
-    if (isLiteralCoercible(valueType, expected)) {
-      coerceLiteralToType(lf.value, expected, ctx.errors);
-    }
-    lf.resolvedType = expected;
-  }
-  for (const declF of targetType.fields) {
-    if (!seen.has(declF.name)) {
-      error "missing field '<declF.name>' in struct literal";
-    }
-  }
-  litNode.resolvedType = targetType;
-}
-```
-
-Use this same pinning logic from:
-- `LET_DECL` / `CONST_DECL` initializers ([typecheck.js:206-233](../src/jsyooptypecheck/typecheck.js#L206-L233))
-- `RETURN_STATEMENT` value ([typecheck.js:260-267](../src/jsyooptypecheck/typecheck.js#L260-L267))
-- `ASSIGNMENT` RHS (when LHS is a struct-typed lvalue)
-- Call argument when param is struct-typed (`checkCallWithSig`, [typecheck.js:582-593](../src/jsyooptypecheck/typecheck.js#L582-L593))
-
-If a `STRUCT_LITERAL` shows up in `checkExpr` with no caller having pinned it (e.g., `{x:1, y:2};` as an expression statement), error: `struct literal has no target type`. Set `resolvedType = ErrorType()`.
-
-### e) `ASSIGNMENT` with `target: FIELD_ACCESS`
-
-Replace [typecheck.js:518-557](../src/jsyooptypecheck/typecheck.js#L518-L557):
-
-```
-case ASSIGNMENT:
-  if node.target.kind == IDENT:
-    // existing logic, scoped to lookup by node.target.name
-  else if node.target.kind == FIELD_ACCESS:
-    targetType = checkExpr(node.target, scope, ctx)  // already validates field exists
-    if targetType.kind == "error":
-      node.resolvedType = ErrorType(); return
-    valueType = checkExpr(node.value, scope, ctx)
-    if !isAssignable(targetType, valueType):
-      error
-    // (literal coercion / struct-literal pinning if applicable)
-    node.resolvedType = targetType
-  else:
-    error: "invalid assignment target"
-```
-
-Mutability of struct fields: a field on a `let p: Point` is mutable (writeable); on a `const p: Point` it isn't. Walk the field-access chain back to its root and check the root binding's `kind`. Pseudocode:
-
-```js
-function rootIdentOf(node) {
-  while (node.kind === FIELD_ACCESS) node = node.object;
-  return node.kind === IDENT ? node : null;
-}
-```
-
-If the root binding is `const`, error: `cannot assign to field of const "<x>"`.
-
-### f) `isAssignable` — already mostly works for structs
-
-`typesEqual` ([types.js:146-164](../src/jsyooptypecheck/types.js#L146-L164)) already handles struct equality nominally + structurally. Two `StructType`s with the same name AND same fields are equal. For Phase 1.3's nominal-typing model, name-equality alone would suffice — but the existing code is fine as-is.
-
-Note: [types.js:150](../src/jsyooptypecheck/types.js#L150) iterates `Object.keys(a.fields)` — that assumes `fields` is an object. The `StructType` factory at [types.js:108](../src/jsyooptypecheck/types.js#L108) takes whatever you pass. Make sure `fields` is consistently an array of `{ name, type }` (matching the per-roadmap convention) and update `typesEqual` accordingly:
-
-```js
-if (a.kind === typeKinds.struct) {
-  if (a.name !== b.name) return false;
-  if (a.fields.length !== b.fields.length) return false;
-  for (let i = 0; i < a.fields.length; i++) {
-    if (a.fields[i].name !== b.fields[i].name) return false;
-    if (!typesEqual(a.fields[i].type, b.fields[i].type)) return false;
-  }
-  return true;
-}
-```
-
-### g) `formatType` — extend struct case
-
-Current [typecheck.js:670](../src/jsyooptypecheck/typecheck.js#L670): `return \`struct ${t.name}\`;` — fine. Keep.
-
-### h) Template literals — disallow struct interpolation
-
-`printf(\`p = ${p}\n\`)` where `p: Point` — currently the typechecker rejects anything that isn't string/int/float ([typecheck.js:489-503](../src/jsyooptypecheck/typecheck.js#L489-L503)). Already correctly produces an error for struct types. Verify the negative test catches `${p}`.
-
----
-
-## 5. Codegen changes ([codegen.js](../src/jsyoopcodegen/codegen.js))
+None of the struct codegen paths exist yet. There is one preparatory refactor that makes everything else shorter, then the actual struct work. Each subsection notes where the change drops in.
 
 ### a) Emit struct-type declarations at module top
 
-Before the existing function-sig pre-pass in `emitProgram` ([codegen.js:533-541](../src/jsyoopcodegen/codegen.js#L533-L541)), add:
+Currently `emitProgram` ([codegen.js:542-566](../src/jsyoopcodegen/codegen.js#L542-L566)) walks `ast.body` twice (collect function sigs, then emit function bodies) and emits externs in between. Add a *zeroth* pass before the existing first pass:
 
 ```js
 const structDefs = [];
-const structTable = new Map(); // name -> resolvedType (from typechecker)
 for (const decl of node.body) {
   if (decl.kind === ASTNodeKind.TYPE_DECL) {
-    structTable.set(decl.name, decl.resolvedType);
+    // decl.resolvedType is the StructType the typechecker stamped on in pass 2.
     const fieldLlvm = decl.resolvedType.fields
       .map(f => llvmType(f.type))
       .join(", ");
@@ -501,185 +252,208 @@ for (const decl of node.body) {
 }
 ```
 
-Append `structDefs` to the prelude (before `globals`). The final IR looks like:
+Then prepend `structDefs` to `lines` before the function bodies (or to the `globals` block — order in `allLines` at the bottom of `codegen` decides where it lands). The final IR should look like:
 
 ```
 %struct.Point = type { i32, i32 }
 
 @.str0 = private unnamed_addr constant [...] ...
 
+declare i32 @printf(ptr, ...)
+
 define i32 @distance_sq(%struct.Point %p.arg) { ... }
 define i32 @main() { ... }
 ```
 
-### b) `llvmType` accepts `Type` objects (already mostly does)
+Why before externs and before function definitions: LLVM verifier requires all named struct types to be declared before use, and function signatures referring to `%struct.Point` are uses.
 
-After Phase 1.2, `llvmType` should accept a `Type` object. Today it still takes a string ([codegen.js:26-28](../src/jsyoopcodegen/codegen.js#L26-L28)). Refactor to:
+### b) `llvmType` accepts `Type` objects — preparatory refactor
+
+Right now [codegen.js:28-30](../src/jsyoopcodegen/codegen.js#L28-L30) takes a string `yoopType` and looks it up in `LLVM_TYPES`. Every caller passes either a string literal (`"i32"`) or `node.resolvedType.name` / `param.resolvedType.name` ([codegen.js:513](../src/jsyoopcodegen/codegen.js#L513), [codegen.js:548-549](../src/jsyoopcodegen/codegen.js#L548-L549), etc.). For struct types `name` is fine, but the LLVM form is `%struct.Point`, not `Point`, and there's nothing in `LLVM_TYPES` to handle that.
+
+Rewrite to dispatch on `Type.kind`:
 
 ```js
-function llvmType(t) {
-  if (typeof t === "string") return LLVM_TYPES[t] ?? "ptr";  // back-compat shim
+export function llvmType(t) {
+  if (typeof t === "string") return LLVM_TYPES[t] ?? "ptr"; // back-compat shim — remove once all callers pass Type
   switch (t.kind) {
-    case "prim": return LLVM_TYPES[t.name] ?? "ptr";
+    case "prim":   return LLVM_TYPES[t.name] ?? "ptr";
     case "struct": return `%struct.${t.name}`;
-    case "void": return "void";
-    case "ref": return "ptr";
+    case "void":   return "void";
+    case "ref":    return "ptr";
     default: throw new Error(`llvmType: unsupported kind ${t.kind}`);
   }
 }
 ```
 
-Update every call site that currently passes a string (most pass `node.resolvedType.name` today — change those to pass `node.resolvedType`).
+Then sweep call sites — most read `.name` off a `resolvedType`. Drop the `.name` and pass the `Type` object instead. Two specific spots to be careful of:
 
-### c) Local struct allocation
+- The `symbols` map ([codegen.js:160](../src/jsyoopcodegen/codegen.js#L160)) currently stores `varName -> string`. Switch to `varName -> Type`. Every load/store site reads from this map (`emitExpr` IDENT case, `LET_DECL`, etc.), so update them in lockstep.
+- `printfSpec` and `promotedLlvmType` ([codegen.js:43-85](../src/jsyoopcodegen/codegen.js#L43-L85)) currently take a string and `switch` on it. Either keep them string-keyed and have the call site pass `t.name` only when `t.kind === "prim"` (cleaner), or update them to take `Type` and reject struct kinds explicitly. Either works — pick whichever is shorter when the time comes.
 
-In `LET_DECL` / `CONST_DECL` handling ([codegen.js:415-428](../src/jsyoopcodegen/codegen.js#L415-L428)):
+This refactor is independent of structs; once it's in, structs slot in cleanly. Without it, every struct path needs special-casing.
 
-- For prim types: `alloca i32, align 4` — unchanged.
-- For struct types: `alloca %struct.Point, align <max-field-align>`. Use a helper `alignOfStruct(structType)` that returns `Math.max(...fields.map(f => alignOf(llvmType(f.type))))`.
+### c) Local struct allocation in `LET_DECL` / `CONST_DECL`
 
-After alloca, if there's an initializer:
-- If RHS is a `STRUCT_LITERAL`, materialize directly into `%name` (see (e) below).
-- If RHS is another struct expression (call result or another struct local), emit a memcpy (see (f)).
-
-### d) Field read — `FIELD_ACCESS` in `emitExpr`
-
-```
-case FIELD_ACCESS:
-  objPtr, objType = emitLvalue(node.object, fnLines)
-    // objPtr is a pointer to the struct; objType is StructType
-  fieldIdx = objType.fields.findIndex(f => f.name == node.field)
-  fieldType = objType.fields[fieldIdx].type
-  llvmFieldTy = llvmType(fieldType)
-  gepTmp = freshTemp()
-  fnLines.push(
-    `${gepTmp} = getelementptr inbounds %struct.${objType.name}, ptr ${objPtr}, i32 0, i32 ${fieldIdx}`
-  )
-  loadTmp = freshTemp()
-  fnLines.push(`${loadTmp} = load ${llvmFieldTy}, ptr ${gepTmp}`)
-  return { val: loadTmp, yoopType: fieldType }
-```
-
-Need a new helper `emitLvalue(node, fnLines)` that returns a *pointer* to the value, not the loaded value. For `IDENT`, it's `%name` (the alloca slot). For nested `FIELD_ACCESS`, it returns a chain of GEPs without the final `load`. Today's `emitExpr` for `IDENT` always loads ([codegen.js:217-226](../src/jsyoopcodegen/codegen.js#L217-L226)) — that's correct for r-value contexts. For l-value (LHS of assignment, or base of field access on an aggregate), we need the pointer.
-
-```
-emitLvalue(node, fnLines):
-  switch node.kind:
-    case IDENT:
-      // the alloca for that name, no load
-      return { ptr: `%${node.name}`, type: symbols.get(node.name) }
-    case FIELD_ACCESS:
-      base = emitLvalue(node.object, fnLines)
-      // base.type must be StructType
-      fieldIdx = ...; fieldType = ...
-      gepTmp = freshTemp()
-      fnLines.push(`${gepTmp} = getelementptr inbounds %struct.${base.type.name}, ptr ${base.ptr}, i32 0, i32 ${fieldIdx}`)
-      return { ptr: gepTmp, type: fieldType }
-    default:
-      throw "not an lvalue"
-```
-
-### e) Field write — `ASSIGNMENT` with `FIELD_ACCESS` target
-
-```
-case ASSIGNMENT:
-  if target.kind == IDENT:
-    rhs = emitExpr(node.value, fnLines)
-    fnLines.push(`store ${llvmType(targetType)} ${rhs.val}, ptr %${target.name}`)
-  else if target.kind == FIELD_ACCESS:
-    lv = emitLvalue(node.target, fnLines)
-    rhs = emitExpr(node.value, fnLines)
-    fnLines.push(`store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`)
-```
-
-### f) Struct literal — `STRUCT_LITERAL`
-
-Two contexts:
-1. **Direct initializer of a let/const**: write fields directly into the alloca'd slot — no temporary needed.
-2. **Embedded** (call arg, return value, assignment RHS to a non-fresh slot): alloca a temp, populate it, then load (or memcpy) into the destination.
-
-For Phase 1.3, do (1) as a special-case inline in the let-decl codegen path; do (2) by alloca + populate + load.
-
-```
-emitStructLiteralInto(node, destPtr, structType, fnLines):
-  // populate the alloc'd slot at destPtr field-by-field
-  for each litField in node.fields:
-    fieldIdx = structType.fields.findIndex(f => f.name == litField.name)
-    fieldType = structType.fields[fieldIdx].type
-    gepTmp = freshTemp()
-    fnLines.push(`${gepTmp} = getelementptr inbounds %struct.${structType.name}, ptr ${destPtr}, i32 0, i32 ${fieldIdx}`)
-    rhs = emitExpr(litField.value, fnLines)
-    fnLines.push(`store ${llvmType(fieldType)} ${rhs.val}, ptr ${gepTmp}`)
-
-emitExpr(STRUCT_LITERAL):
-  // r-value context — alloca a temp, populate, return as a struct value
-  structType = node.resolvedType
-  tmpPtr = freshTemp()  // actually need to use a fresh name like %lit0, since alloca needs a unique name
-  fnLines.push(`${tmpPtr} = alloca %struct.${structType.name}, align ${alignOfStruct(structType)}`)
-  emitStructLiteralInto(node, tmpPtr, structType, fnLines)
-  loadTmp = freshTemp()
-  fnLines.push(`${loadTmp} = load %struct.${structType.name}, ptr ${tmpPtr}`)
-  return { val: loadTmp, yoopType: structType }
-```
-
-In the let-decl case, peephole-special:
-
-```
-case LET_DECL/CONST_DECL:
-  alloca the slot %name
-  if node.assignment?.kind == STRUCT_LITERAL:
-    emitStructLiteralInto(node.assignment, `%${name}`, declaredType, fnLines)
-  else if node.assignment is some other struct expr:
-    rhs = emitExpr(node.assignment, fnLines)  // returns {val: %loaded, yoopType: StructType}
-    fnLines.push(`store %struct.X ${rhs.val}, ptr %${name}`)
-  else:
-    // existing prim path: emitExpr + store
-```
-
-### g) Struct call args & returns
-
-LLVM IR can pass and return aggregates by value directly; the backend handles ABI lowering. Don't need `byval`/`sret` for Phase 1.3.
-
-Param sig in `emitFunction` ([codegen.js:502-504](../src/jsyoopcodegen/codegen.js#L502-L504)):
+[codegen.js:425-438](../src/jsyoopcodegen/codegen.js#L425-L438) currently does:
 
 ```js
-const paramSig = params
-  .map(p => `${llvmType(p.resolvedType)} %${p.name}.arg`)
-  .join(", ");
-```
-
-For struct param: `%struct.Point %p.arg`. Inside the function, allocate a slot and store the param into it (same pattern as for prims today, [codegen.js:511-517](../src/jsyoopcodegen/codegen.js#L511-L517)).
-
-Call site ([codegen.js:271-298](../src/jsyoopcodegen/codegen.js#L271-L298)):
-
-For each struct arg:
-- If arg is an `IDENT` of a struct local: `load %struct.Point, ptr %p` first, then pass the loaded value as `%struct.Point %tmp`.
-- If arg is a struct r-value (`STRUCT_LITERAL`, call result): `emitExpr` already returns the loaded value. Pass directly.
-
-Return: `ret %struct.Point %loaded` for struct returns. Mostly already works through the existing `ret` path; just verify `llvmType(returnType)` produces `%struct.Point`.
-
-### h) Update `printfSpec` / `promotedLlvmType` to reject structs explicitly
-
-Today these throw on unknown types. After typechecker rejection of struct interpolation, codegen shouldn't see them — but harden anyway:
-
-```js
-function printfSpec(t) {
-  if (t.kind === "struct") {
-    throw new Error("codegen bug: struct reached printf — typechecker should have rejected");
-  }
-  ...
+const declType = node.resolvedType.name;
+symbols.set(node.name, declType);
+const llvmTy = llvmType(declType);
+fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
+if (node.assignment) {
+  const r = emitExpr(node.assignment, fnLines);
+  fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
 }
 ```
 
+After §5(b) this becomes `Type`-aware. For struct types specifically:
+
+- `alloca %struct.Point, align <max-field-align>` — the alignment for an aggregate is the max of its fields' alignments. Add a small `alignOfStruct(structType)` helper that does `Math.max(...fields.map(f => alignOf(llvmType(f.type))))`.
+- If the initializer is a `STRUCT_LITERAL`, **skip the generic `emitExpr` + `store` path** — instead, populate the freshly-alloca'd slot field-by-field using `emitStructLiteralInto` (defined in §5(f)). That avoids the redundant temp-alloca+memcpy.
+- If the initializer is anything else that returns a struct value (a call result, another struct local being copied in), the generic `emitExpr` + `store` path still works (LLVM IR `store %struct.Point %val, ptr %name` is legal for aggregates).
+
+### d) Field read — `FIELD_ACCESS` in `emitExpr`
+
+Add a new case to the switch in `emitExpr` ([codegen.js:202-278](../src/jsyoopcodegen/codegen.js#L202-L278)). For an r-value field read:
+
+```js
+case ASTNodeKind.FIELD_ACCESS: {
+  const { ptr, type: objType } = emitLvalue(node.object, fnLines);
+  // objType is a StructType; node.resolvedType is the field's Type (typechecker stamped it)
+  const fieldIdx = objType.fields.findIndex(f => f.name === node.field);
+  const fieldType = objType.fields[fieldIdx].type;
+  const llvmFieldTy = llvmType(fieldType);
+  const gepTmp = freshTemp();
+  fnLines.push(
+    `  ${gepTmp} = getelementptr inbounds %struct.${objType.name}, ptr ${ptr}, i32 0, i32 ${fieldIdx}`
+  );
+  const loadTmp = freshTemp();
+  fnLines.push(`  ${loadTmp} = load ${llvmFieldTy}, ptr ${gepTmp}`);
+  return { val: loadTmp, yoopType: fieldType };
+}
+```
+
+This needs a new helper `emitLvalue(node, fnLines)` that returns a *pointer* to the value, not a load of it. Today `emitExpr`'s IDENT case ([codegen.js:219-228](../src/jsyoopcodegen/codegen.js#L219-L228)) always emits a `load` — fine for r-values, wrong for the base of a field access on an aggregate. `emitLvalue` is a parallel walker:
+
+```js
+function emitLvalue(node, fnLines) {
+  switch (node.kind) {
+    case ASTNodeKind.IDENT: {
+      const t = symbols.get(node.name);
+      return { ptr: `%${node.name}`, type: t };
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      const base = emitLvalue(node.object, fnLines);
+      const idx = base.type.fields.findIndex(f => f.name === node.field);
+      const fieldType = base.type.fields[idx].type;
+      const gepTmp = freshTemp();
+      fnLines.push(
+        `  ${gepTmp} = getelementptr inbounds %struct.${base.type.name}, ptr ${base.ptr}, i32 0, i32 ${idx}`
+      );
+      return { ptr: gepTmp, type: fieldType };
+    }
+    default:
+      // r-value used as lvalue (e.g. `make_pair().a`). Materialize into a fresh alloca.
+      // See §8 edge cases — this is the "support it, it's not much extra code" path.
+      throw new Error(`emitLvalue: unsupported node kind "${node.kind}" — see plan §8`);
+  }
+}
+```
+
+The `default` branch is where the "field access on a struct r-value" edge case (`make_pair().a`) lands. Cleanest implementation: call `emitExpr` to get the loaded struct value, alloca a fresh slot, store the value into it, return a pointer to that slot. The phase 1.3 canonical test doesn't exercise this, but the test for "Forward reference between structs" (§7) does (`a.inner.v` where `a.inner` is a chained field access — but that's already handled by the recursive `FIELD_ACCESS` case above; `make_pair().a` is the genuinely new case). Recommended to add the fallback.
+
+### e) Field write — `ASSIGNMENT` with `FIELD_ACCESS` target
+
+Currently [codegen.js:248-268](../src/jsyoopcodegen/codegen.js#L248-L268) only handles `target.kind === IDENT` and throws on anything else. Add the FIELD_ACCESS branch:
+
+```js
+case ASTNodeKind.ASSIGNMENT: {
+  if (node.target.kind === ASTNodeKind.IDENT) {
+    // existing path — unchanged
+  }
+  if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
+    const lv = emitLvalue(node.target, fnLines);
+    const rhs = emitExpr(node.value, fnLines);
+    fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
+    return rhs;
+  }
+  throw new Error(`codegen: unsupported assignment target ${node.target.kind}`);
+}
+```
+
+### f) Struct literal — `STRUCT_LITERAL` in `emitExpr`
+
+Two contexts:
+
+1. **Direct initializer of a let/const** (the `node.assignment?.kind === STRUCT_LITERAL` shortcut from §5(c)): write fields directly into the alloca'd slot, no temp.
+2. **Embedded** (call arg, return value, assignment RHS to a non-fresh slot): alloca a temp, populate it, then `load` (so the value can be passed/returned by value).
+
+Helper for case 1 (call from the LET_DECL/CONST_DECL handler):
+
+```js
+function emitStructLiteralInto(node, destPtr, structType, fnLines) {
+  for (const litField of node.fields) {
+    const idx = structType.fields.findIndex(f => f.name === litField.name);
+    const fieldType = structType.fields[idx].type;
+    const gepTmp = freshTemp();
+    fnLines.push(
+      `  ${gepTmp} = getelementptr inbounds %struct.${structType.name}, ptr ${destPtr}, i32 0, i32 ${idx}`
+    );
+    const rhs = emitExpr(litField.value, fnLines);
+    fnLines.push(`  store ${llvmType(fieldType)} ${rhs.val}, ptr ${gepTmp}`);
+  }
+}
+```
+
+Case 2 — the `STRUCT_LITERAL` case in `emitExpr`:
+
+```js
+case ASTNodeKind.STRUCT_LITERAL: {
+  const structType = node.resolvedType; // pinned by the typechecker (§4.d)
+  const tmpPtr = freshTemp();
+  fnLines.push(
+    `  ${tmpPtr} = alloca %struct.${structType.name}, align ${alignOfStruct(structType)}`
+  );
+  emitStructLiteralInto(node, tmpPtr, structType, fnLines);
+  const loadTmp = freshTemp();
+  fnLines.push(
+    `  ${loadTmp} = load %struct.${structType.name}, ptr ${tmpPtr}`
+  );
+  return { val: loadTmp, yoopType: structType };
+}
+```
+
+Note `yoopType: structType` (a `Type` object, not a string) — once §5(b) is in, the rest of the codegen handles this correctly.
+
+### g) Struct call args & returns
+
+LLVM passes/returns aggregates by value directly; the backend handles ABI lowering. No `byval` / `sret` needed for Phase 1.3.
+
+- **Param sig** in `emitFunction` ([codegen.js:512-514](../src/jsyoopcodegen/codegen.js#L512-L514)): currently `${llvmType(p.resolvedType.name)} %${p.name}.arg`. After §5(b), drop `.name` so structs flow through correctly.
+- **Param-to-stack copy** ([codegen.js:521-527](../src/jsyoopcodegen/codegen.js#L521-L527)): same shape works for structs (`alloca %struct.Point` + `store %struct.Point %p.arg, ptr %p`). Just make sure `symbols` stores the `Type` object, not a string.
+- **Call site** ([codegen.js:286-309](../src/jsyoopcodegen/codegen.js#L286-L309)): for each struct arg, `emitExpr` already produces a loaded struct value (an SSA temp of `%struct.X` type after §5(f)). Pass it directly with `${llvmType(paramType)} ${argResults[i].val}`. No special handling needed once §5(b) lands.
+- **Return**: [codegen.js:419-420](../src/jsyoopcodegen/codegen.js#L419-L420) already does `ret ${llvmType(ctx.returnType)} ${r.val}` — works for struct returns once `ctx.returnType` is the `Type` object instead of a string.
+
+### h) Update `printfSpec` / `promotedLlvmType` to reject structs explicitly
+
+Today these throw on unknown strings ([codegen.js:43-85](../src/jsyoopcodegen/codegen.js#L43-L85)). The typechecker already rejects struct interpolation, so this is defense-in-depth. Once they take `Type` objects, add an explicit struct-kind branch that throws `codegen bug: struct reached printf — typechecker should have rejected`. Until then, the existing throw-on-unknown is fine.
+
 ### i) `symbols` map now stores `Type` objects
 
-Today `symbols` is `varName -> string` ([codegen.js:158](../src/jsyoopcodegen/codegen.js#L158)). After Phase 1.2 it should already be `varName -> Type`. If not yet, do that now — every load/store call site reads it.
+Already mentioned in §5(b). Worth calling out separately because every load/store site reads from this map. Sweep:
+
+- `emitExpr` IDENT case at [codegen.js:219-228](../src/jsyoopcodegen/codegen.js#L219-L228).
+- `LET_DECL` / `CONST_DECL` at [codegen.js:425-438](../src/jsyoopcodegen/codegen.js#L425-L438).
+- `ASSIGNMENT` IDENT branch at [codegen.js:251-263](../src/jsyoopcodegen/codegen.js#L251-L263).
+- `emitFunction` param-copy at [codegen.js:521-527](../src/jsyoopcodegen/codegen.js#L521-L527).
 
 ---
 
 ## 6. Driver — no changes
 
-`yoopiler.js` already wires typecheck between parse and codegen. The errors collection format is unchanged. ✓
+`yoopiler.js` already wires typecheck between parse and codegen. The errors collection format is unchanged.
 
 ---
 
@@ -687,26 +461,7 @@ Today `symbols` is `varName -> string` ([codegen.js:158](../src/jsyoopcodegen/co
 
 ### Positive — must compile and run
 
-#### Phase 1.3 canonical test (the one in the roadmap)
-
-```yoop
-type Point {
-    x: int32,
-    y: int32,
-}
-
-function distance_sq(p: Point): int32 {
-    return p.x * p.x + p.y * p.y;
-}
-
-function main(): int32 {
-    let p: Point = { x: 3, y: 4 };
-    printf(`distance_sq = ${distance_sq(p)}\n`);
-    return 0;
-}
-```
-
-Expected output: `distance_sq = 25`
+The canonical Phase 1.3 test program is already in the repo at [phasePrograms/phase_1_3_struct.yoop](../phasePrograms/phase_1_3_struct.yoop) and matches the goal at the top of this plan. Expected output: `distance_sq = 25`.
 
 #### Field write
 
@@ -755,7 +510,7 @@ function main(): int32 {
 }
 ```
 
-Verifies: nested struct literals; chained field access (`a.inner.v`); two-stage struct registration handles either declaration order.
+Verifies: nested struct literals; chained field access (`a.inner.v`); three-pass struct registration handles either declaration order.
 
 ### Negative — must produce a single positioned typecheck error
 
@@ -770,7 +525,7 @@ Verifies: nested struct literals; chained field access (`a.inner.v`); two-stage 
 | `type A {} type A {}` | `redeclaration of type 'A'` |
 | `type Point { x: int32, x: int32 }` | `duplicate field 'x' in struct 'Point'` |
 | `type Bad { f: nope }` | `unknown type 'nope' in field 'f' of struct 'Bad'` |
-| `type Loop { next: Loop }` | `recursive struct 'Loop' requires ref` |
+| `type Loop { next: Loop }` | `recursive field 'next' in struct 'Loop'` |
 | `type Point { x: int32 } const p: Point = { x: 1 }; p.x = 2;` | `cannot assign to field of const "p"` |
 | `printf(\`p=${p}\n\`)` (where `p: Point`) | `template literal interpolation must be a string, int, or float type, found struct Point` |
 
@@ -801,18 +556,17 @@ The Phase 1.1 numeric program and Phase 1.2 typed-arithmetic programs must conti
 
 ## 8. Edge cases worth getting right
 
-- **Trailing comma in `type` body**: `type P { x: int32, y: int32, }` — already handled by the optional-comma loop. Verify.
+- **Trailing comma in `type` body**: `type P { x: int32, y: int32, }` — already handled by the optional-comma loop in `parseTypeDecl`. Verify.
 - **Trailing comma in struct literal**: `{ x: 1, y: 2, }` — same.
 - **Empty struct**: `type Empty {}` — legal? Spec doesn't forbid it; codegen should emit `%struct.Empty = type { }`. Allow it; struct literal `{}` for an empty struct works as the only valid initializer.
 - **Field order in literal vs decl**: `let p: Point = { y: 4, x: 3 };` — order doesn't have to match declaration. The pinning logic uses the declared field map, not positional. Correct value goes to correct slot regardless of literal order.
 - **Nested struct literals as struct-decl initializers**: `let a: A = { inner: { v: 42 } };` — recursion through `pinStructLiteral` handles this.
-- **Field access on struct r-value** (call result): `make_pair().a` — needs `emitLvalue` to handle this *or* explicit alloca-and-store first. For Phase 1.3, simplest: reject in the parser's postfix loop only if the typechecker can't model it. Actually, you can model it as: `make_pair()` returns a struct value (loaded), store it into a fresh alloca, GEP into that. Slightly more complex `emitLvalue`. Could defer if needed; the canonical test program doesn't exercise it.
-  - **Recommended**: support it, it's not much extra code: `emitLvalue` for any expression node that isn't IDENT/FIELD_ACCESS falls back to `emitExpr` then materializes into a fresh alloca.
-- **Self-referencing struct without ref**: caught by `detectRecursiveField` check above.
+- **Field access on struct r-value** (call result): `make_pair().a` — needs `emitLvalue` to handle this *or* explicit alloca-and-store first. For Phase 1.3, simplest: model as `make_pair()` returns a struct value (loaded), store it into a fresh alloca, GEP into that. See the `default` branch sketch in §5(d).
+- **Self-referencing struct without ref**: caught by `detectRecursiveField` already.
 - **Struct in template literal interpolation**: typechecker rejects. Codegen never sees one.
 - **Struct equality**: `p1 == p2` — typechecker says no (`unifyArith` returns `null` for two `StructType`s with `eqeq`). Verify negative test.
-- **Param-name collision with field name**: `function f(x: int32, p: Point): int32 { return p.x; }` — `x` is in scope as a param, `p.x` is a field access. The postfix `.x` runs on the result of looking up `p`, not on the bare `x`. ✓
-- **Block vs struct-literal disambiguation**: covered in §3(d). The fact that statements always re-enter expression parsing through `parseStatement` (which doesn't itself accept `{`) means a bare `{` reaching `parseExpression` is unambiguously a struct literal.
+- **Param-name collision with field name**: `function f(x: int32, p: Point): int32 { return p.x; }` — `x` is in scope as a param, `p.x` is a field access. The postfix `.x` runs on the result of looking up `p`, not on the bare `x`.
+- **Block vs struct-literal disambiguation**: covered in §3. Statements always re-enter expression parsing through `parseStatement` (which doesn't itself accept `{`), so a bare `{` reaching `parseExpression` is unambiguously a struct literal.
 
 ---
 
@@ -833,45 +587,35 @@ The Phase 1.1 numeric program and Phase 1.2 typed-arithmetic programs must conti
 ## 10. Phase exit criteria
 
 - All Phase 1.1 and 1.2 test programs continue to produce identical output.
-- The roadmap's canonical test program ([roadmap.md §1.3](./roadmap.md)) compiles, runs, and prints `distance_sq = 25`.
+- The roadmap's canonical test program ([phasePrograms/phase_1_3_struct.yoop](../phasePrograms/phase_1_3_struct.yoop)) compiles, runs, and prints `distance_sq = 25`.
 - Each negative-case program from §7 produces exactly one error at the right position and does not crash.
 - The multi-error case reports every distinct error.
 - [codegen.js](../src/jsyoopcodegen/codegen.js) emits `%struct.X = type { ... }` for every `type` decl, before any function definition.
 - Field reads use `getelementptr inbounds` + `load`; field writes use `getelementptr inbounds` + `store`.
 - Struct values pass as parameters and return from functions; `clang` compiles the IR without warnings or errors.
-- `node ./src/yoopiler.js` (test mode) still runs `runTests()`; if a `testTypecheck()` is added for struct cases, all assertions pass.
 
 ---
 
-## 11. Implementation order (recommended)
+## 11. Implementation order from here
 
-If you want to stage the work in commits, this order minimizes broken intermediate states:
+The remaining work, in the order that minimizes broken intermediate states:
 
-1. **Lexer**: add `type` keyword and `.` token. Verify existing tests still pass.
-2. **AST node kinds** in [contracts.js](../src/contracts.js).
-3. **Parser**:
-   a. `parseTypeDecl` + top-level dispatch
-   b. Postfix `.field` loop (no struct literal yet — `p.x` reads still only work in r-value position once typechecker/codegen catch up; but parser tests can already verify the AST shape)
-   c. Struct-literal prefix `{ ... }`
-   d. `ASSIGNMENT` generalization to `target` (only if doing field-writes now)
-4. **Typechecker** (`typecheck.js`):
-   a. Two-stage struct registration
-   b. `resolveTypeName` everywhere
-   c. `FIELD_ACCESS` case
-   d. `pinStructLiteral` + thread it through let/return/call/assignment
-   e. `ASSIGNMENT` with field target
-   f. Recursive-struct rejection
-5. **Codegen** ([codegen.js](../src/jsyoopcodegen/codegen.js)):
-   a. Emit `%struct.X` declarations
-   b. `llvmType` accepts struct types
-   c. `alloca`, GEP-load (field read)
-   d. `emitLvalue` helper, GEP-store (field write)
-   e. `emitStructLiteralInto` (initializer fast path)
-   f. R-value struct literal (alloca + populate + load)
-   g. Struct call args and returns
-6. **Tests**: write each negative-case program as a fixture; assert error count and message; include the positive programs in an `examples/pass/` directory and write a tiny runner that compiles each and asserts return code / stdout.
+1. **Typechecker §4.d — `STRUCT_LITERAL`**:
+   a. Add `pinStructLiteral` helper in [checkExpr.js](../src/jsyooptypecheck/checkExpr.js).
+   b. Wire it into the `LET_DECL` / `CONST_DECL` initializer path in [checkStatement.js](../src/jsyooptypecheck/checkStatement.js).
+   c. Wire it into `RETURN_STATEMENT` in the same file.
+   d. Wire it into the call-arg path in `resolveCallType` ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js)).
+   e. Add the unhandled fallback case in `resolveExprType` so stray literals produce a clean error.
+2. **Typechecker §4.e — Field assignment**:
+   a. Replace the placeholder error at [checkExpr.js:213-226](../src/jsyooptypecheck/checkExpr.js#L213-L226) with the real check.
+   b. Add `rootIdentOf` mutability check.
+   c. Wire `pinStructLiteral` into the RHS path so `p.field = { ... }` works.
+3. **Codegen preparatory refactor §5(b)**: switch `llvmType` to take `Type` objects, switch `symbols` to store `Type` objects, sweep all call sites. No struct support yet — just makes structs slot in cleanly. Verify Phase 1.1 / 1.2 IR output is unchanged.
+4. **Codegen §5(a)**: emit `%struct.X = type { ... }` declarations at the top of `emitProgram`.
+5. **Codegen §5(c, d, e, f, g)**: in roughly this order — local alloca, field read via `emitLvalue`, field write, struct literal materialization, call args / returns. The canonical test program exercises all of these.
+6. **Tests**: each negative-case program in §7 as a fixture; assert error count + message; positive programs in `phasePrograms/` (or a sibling `examples/pass/`) with a runner that compiles each and asserts return code / stdout.
 
-Each step in 3–5 should keep the existing test programs compiling. Incremental commits make bisecting easy if something breaks.
+Each step keeps the existing test programs compiling. Incremental commits make bisecting easy if something breaks.
 
 ---
 
@@ -880,7 +624,10 @@ Each step in 3–5 should keep the existing test programs compiling. Incremental
 - [SPEC.md §3 — Types](../SPEC.md) — struct semantics
 - [src/contracts.js](../src/contracts.js) — AST node kinds
 - [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — `type` keyword, `.` token
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parseTypeDecl`, postfix field-access, struct literal
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `StructType`, `resolveTypeName`
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — struct registration, field rules, struct-literal pinning
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `%struct.X` emission, GEP, struct pass-by-value
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parseTypeDecl`, postfix field-access, struct literal, generalized assignment
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `StructType`, `resolveTypeFromName`, nominal `typesEqual`
+- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — three-pass struct registration (orchestration only)
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — `resolveExprType`, `resolveCallType`; will host `pinStructLiteral`
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — `validateFunction`, `validateStatement`; struct-literal pinning hooks land here
+- [src/jsyooptypecheck/recursiveStruct.js](../src/jsyooptypecheck/recursiveStruct.js) — `detectRecursiveField` (already wired)
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `%struct.X` emission, GEP, struct pass-by-value (all pending)

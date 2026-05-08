@@ -16,7 +16,7 @@ import {
 import { pushError, formatType } from "./errors.js";
 import { pushScope, declareInScope } from "./scope.js";
 import { coerceLiteralToType, isAssignable } from "./coerce.js";
-import { resolveExprType } from "./checkExpr.js";
+import { pinStructLiteral, resolveExprType } from "./checkExpr.js";
 
 export function validateFunction(funcNode, typeContext, errors) {
   // start with null parent
@@ -69,30 +69,35 @@ export function validateStatement(node, scope, ctx) {
       node.resolvedType = declaredType;
 
       if (node.assignment) {
-        const rhsType = resolveExprType(node.assignment, scope, ctx);
-        if (!isAssignable(declaredType, rhsType)) {
-          pushError(
-            ctx.errors,
-            node,
-            `cannot assign ${formatType(rhsType)} to ${formatType(declaredType)} in initializer of "${node.name}"`,
-          );
-        }
-
-        if (
-          (rhsType.kind === typeKinds.untypedInt &&
-            isIntPrim(declaredType.name)) ||
-          (rhsType.kind === typeKinds.untypedFloat &&
-            isFloatPrim(declaredType.name))
-        ) {
-          // only call coerceLiteralToType for actual literals (range check);
-          // for compound expressions (binary, call, etc.) just pin the resolved type
+        if (node.assignment.kind === ASTNodeKind.STRUCT_LITERAL) {
+          // pin the struct literal to the declared type so we can check field types
+          pinStructLiteral(node.assignment, declaredType, ctx.typeContext.structTable, ctx);
+        } else {
+          const rhsType = resolveExprType(node.assignment, scope, ctx);
+          if (!isAssignable(declaredType, rhsType)) {
+            pushError(
+              ctx.errors,
+              node,
+              `cannot assign ${formatType(rhsType)} to ${formatType(declaredType)} in initializer of "${node.name}"`,
+            );
+          }
+  
           if (
-            node.assignment.kind === ASTNodeKind.INT_LITERAL ||
-            node.assignment.kind === ASTNodeKind.FLOAT_LITERAL
+            (rhsType.kind === typeKinds.untypedInt &&
+              isIntPrim(declaredType.name)) ||
+            (rhsType.kind === typeKinds.untypedFloat &&
+              isFloatPrim(declaredType.name))
           ) {
-            coerceLiteralToType(node.assignment, declaredType, ctx.errors);
-          } else {
-            node.assignment.resolvedType = declaredType;
+            // only call coerceLiteralToType for actual literals (range check);
+            // for compound expressions (binary, call, etc.) just pin the resolved type
+            if (
+              node.assignment.kind === ASTNodeKind.INT_LITERAL ||
+              node.assignment.kind === ASTNodeKind.FLOAT_LITERAL
+            ) {
+              coerceLiteralToType(node.assignment, declaredType, ctx.errors);
+            } else {
+              node.assignment.resolvedType = declaredType;
+            }
           }
         }
       }
@@ -120,7 +125,13 @@ export function validateStatement(node, scope, ctx) {
         }
         return;
       }
+      if (node.value.kind === ASTNodeKind.STRUCT_LITERAL) {
+        // pin the struct literal to the function return type so we can check field types
+        pinStructLiteral(node.value, ctx.funcReturnType, ctx.typeContext.structTable, ctx);
+        return;
+      }
       const returnExprType = resolveExprType(node.value, scope, ctx);
+
       if (!isAssignable(ctx.funcReturnType, returnExprType)) {
         pushError(
           ctx.errors,

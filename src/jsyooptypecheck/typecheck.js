@@ -48,41 +48,24 @@ export function typecheck(ast) {
     structTable,
   };
 
-  // pre-pass to collect function signatures for mutual recursion support, and also to check for duplicate function names
+  // pass 1: register struct shells so types can refer to themselves and each
+  // other regardless of declaration order. fields are filled in pass 2.
   for (const decl of ast.body) {
-    if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
-      if (moduleSymbols.has(decl.name)) {
-        errors.push({
-          message: `redeclaration of function "${decl.name}"`,
-          sourceLoc: decl.sourceLoc,
-        });
-      } else {
-        const funcType = FuncType(
-          (decl.params ?? []).map((p) => ({
-            name: p.name,
-            type: resolveTypeFromName(p.type, structTable) ?? ErrorType(),
-          })),
-          resolveTypeFromName(decl.returnType, structTable) ?? ErrorType(),
-        );
-        moduleSymbols.set(decl.name, funcType);
-      }
-    }
     if (decl.kind === ASTNodeKind.TYPE_DECL) {
-      // Handle type declaration
-      // two stage so that types can refer to themselves or each other
-      // don't worry about fields for now
       if (structTable.has(decl.name)) {
         errors.push({
           message: `redeclaration of type "${decl.name}"`,
           sourceLoc: decl.sourceLoc,
         });
       } else {
-        structTable.set(decl.name, StructType(decl.name, null)); // null fields for now
+        structTable.set(decl.name, StructType(decl.name, null));
       }
     }
   }
 
-  // struct fields pass
+  // pass 2: resolve struct fields. replace the structTable entry with a
+  // populated StructType so later resolutions (function sigs, params, locals)
+  // see the fields, not the shell.
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.TYPE_DECL) {
       const fields = [];
@@ -101,7 +84,6 @@ export function typecheck(ast) {
             sourceLoc: field.sourceLoc,
           });
         }
-        // check for recursive fields:
         if (detectRecursiveField(decl.name, fieldType)) {
           errors.push({
             message: `recursive field "${field.name}" in struct "${decl.name}"`,
@@ -109,8 +91,31 @@ export function typecheck(ast) {
           });
         }
         fields.push({ name: field.name, type: fieldType });
-        // set the ast resolved type now that fields are resolved
-        decl.resolvedType = StructType(decl.name, fields);
+      }
+      const fullType = StructType(decl.name, fields);
+      decl.resolvedType = fullType;
+      structTable.set(decl.name, fullType);
+    }
+  }
+
+  // pass 3: collect function signatures. runs after structTable is populated
+  // so struct-typed params/returns capture the full StructType, not the shell.
+  for (const decl of ast.body) {
+    if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
+      if (moduleSymbols.has(decl.name)) {
+        errors.push({
+          message: `redeclaration of function "${decl.name}"`,
+          sourceLoc: decl.sourceLoc,
+        });
+      } else {
+        const funcType = FuncType(
+          (decl.params ?? []).map((p) => ({
+            name: p.name,
+            type: resolveTypeFromName(p.type, structTable) ?? ErrorType(),
+          })),
+          resolveTypeFromName(decl.returnType, structTable) ?? ErrorType(),
+        );
+        moduleSymbols.set(decl.name, funcType);
       }
     }
   }

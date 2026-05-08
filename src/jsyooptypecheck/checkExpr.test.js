@@ -1,9 +1,15 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { resolveExprType } from "./checkExpr.js";
+import { pinStructLiteral, resolveExprType } from "./checkExpr.js";
 import { ASTNode, ASTNodeKind } from "../contracts.js";
-import { primAnnotations, resolveTypeFromName, typeKinds } from "./types.js";
+import {
+  PrimType,
+  StructType,
+  primAnnotations,
+  resolveTypeFromName,
+  typeKinds,
+} from "./types.js";
 import { declareInScope, pushScope } from "./scope.js";
 
 describe("resolveExprType", () => {
@@ -66,6 +72,86 @@ describe("resolveExprType", () => {
       assert.equal(type.name, primAnnotations.int32);
       assert.equal(identNode.resolvedType, type);
       assert.equal(ctx.errors.length, 0);
+    });
+  });
+  describe("field access", () => {
+    const makePointScope = () => {
+      const pointType = StructType("Point", [
+        { name: "x", type: PrimType(primAnnotations.int32) },
+        { name: "y", type: PrimType(primAnnotations.float32) },
+      ]);
+      const scope = pushScope(null);
+      const declNode = new ASTNode(ASTNodeKind.LET_DECL);
+      declareInScope(scope, "p", pointType, "let", declNode, []);
+      return scope;
+    };
+
+    const makeFieldAccessOf = (objName, fieldName) => {
+      const obj = new ASTNode(ASTNodeKind.IDENT);
+      obj.name = objName;
+      const node = new ASTNode(ASTNodeKind.FIELD_ACCESS);
+      node.object = obj;
+      node.field = fieldName;
+      return node;
+    };
+
+    it("resolves a known field to the field's type", () => {
+      const scope = makePointScope();
+      const node = makeFieldAccessOf("p", "y");
+      const ctx = { errors: [] };
+      const type = resolveExprType(node, scope, ctx);
+      assert.equal(type.kind, typeKinds.prim);
+      assert.equal(type.name, primAnnotations.float32);
+      assert.equal(node.resolvedType, type);
+      assert.equal(ctx.errors.length, 0);
+    });
+
+    it("reports an error when the field does not exist", () => {
+      const scope = makePointScope();
+      const node = makeFieldAccessOf("p", "z");
+      const ctx = { errors: [] };
+      const type = resolveExprType(node, scope, ctx);
+      assert.equal(type.kind, typeKinds.error);
+      assert.equal(ctx.errors.length, 1);
+      assert.equal(
+        ctx.errors[0].message,
+        'type "Point" has no field "z"',
+      );
+    });
+
+    it("reports an error when the receiver is not a struct", () => {
+      const scope = pushScope(null);
+      const declNode = new ASTNode(ASTNodeKind.LET_DECL);
+      declareInScope(
+        scope,
+        "i",
+        PrimType(primAnnotations.int32),
+        "let",
+        declNode,
+        [],
+      );
+      const node = makeFieldAccessOf("i", "x");
+      const ctx = { errors: [] };
+      const type = resolveExprType(node, scope, ctx);
+      assert.equal(type.kind, typeKinds.error);
+      assert.equal(ctx.errors.length, 1);
+      assert.equal(
+        ctx.errors[0].message,
+        "field access on non-struct type int32",
+      );
+    });
+  });
+  describe("struct literal pinning", () => {
+    it("reports an error when trying to pin a struct literal to a non-struct type", () => {
+      const litNode = new ASTNode(ASTNodeKind.STRUCT_LITERAL);
+      const targetType = PrimType(primAnnotations.int32);
+      const ctx = { errors: [] };
+      pinStructLiteral(litNode, targetType, null, ctx);
+      assert.equal(ctx.errors.length, 1);
+      assert.equal(
+        ctx.errors[0].message,
+        "cannot pin struct literal to non-struct type int32",
+      );
     });
   });
 });

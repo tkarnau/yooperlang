@@ -55,10 +55,34 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "a=100, b=27, c=127\n");
   });
 
-  it.skip("struct_basic.yoop creates a Point struct and prints the distance square", () => {
+  it("struct_basic.yoop creates a Point struct and prints the distance square", () => {
     const { stdout, exitCode } = runFixture("examples/pass/struct_basic.yoop");
     assert.equal(exitCode, 0);
-    assert.equal(stdout, "distance squared = 25\n");
+    assert.equal(stdout, "distance_sq = 25\n");
+  });
+
+  it("struct_field_write.yoop mutates a struct field through a chain of assignments", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/struct_field_write.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "c.value = 20\n");
+  });
+
+  it("struct_return.yoop returns a struct from a function and reads its fields", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/struct_return.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=7 b=11\n");
+  });
+
+  it("struct_nested.yoop initializes nested struct literals and chains field access", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/struct_nested.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a.inner.v = 42\n");
   });
 });
 

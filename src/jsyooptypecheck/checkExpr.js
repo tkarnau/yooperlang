@@ -211,23 +211,62 @@ export function resolveExprType(node, scope, ctx) {
       }
 
       if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
-        // §4(e) — full field-write checking lands with struct registration.
-        // for now: typecheck both sides so cascading errors stay quiet, then
-        // bail with an explicit unimplemented marker.
-        resolveExprType(node.target, scope, ctx);
-        resolveExprType(node.value, scope, ctx);
-        pushError(
-          ctx.errors,
-          node,
-          `field assignment typecheck not yet implemented (struct support pending)`,
-        );
-        node.resolvedType = ErrorType();
+        const targetType = resolveExprType(node.target, scope, ctx);
+        if (targetType.kind === typeKinds.error) {
+          node.resolvedType = ErrorType();
+          return node.resolvedType;
+        }
+        const rootIdent = rootIdentOf(node.target);
+        if (!rootIdent) {
+          pushError(
+            ctx.errors,
+            node,
+            `invalid assignment target — root of field chain is not an identifier`,
+          );
+          node.resolvedType = ErrorType();
+          return node.resolvedType;
+        }
+        const rootBinding = lookupInScope(scope, rootIdent.name);
+        if (rootBinding && rootBinding.kind === "const") {
+          pushError(
+            ctx.errors,
+            node,
+            `cannot assign to field of const "${rootIdent.name}"`,
+          );
+          node.resolvedType = ErrorType();
+          return node.resolvedType;
+        }
+
+        if (node.value.kind === ASTNodeKind.STRUCT_LITERAL) {
+          pinStructLiteral(node.value, targetType, scope, ctx);
+        } else {
+          const valueType = resolveExprType(node.value, scope, ctx);
+          if (!isAssignable(targetType, valueType)) {
+            pushError(
+              ctx.errors,
+              node,
+              `cannot assign ${formatType(valueType)} to ${formatType(targetType)} in field assignment`,
+            );
+          }
+          if (
+            (valueType.kind === typeKinds.untypedInt &&
+              isIntPrim(targetType.name)) ||
+            (valueType.kind === typeKinds.untypedFloat &&
+              isFloatPrim(targetType.name))
+          ) {
+            if (
+              node.value.kind === ASTNodeKind.INT_LITERAL ||
+              node.value.kind === ASTNodeKind.FLOAT_LITERAL
+            ) {
+              coerceLiteralToType(node.value, targetType, ctx.errors);
+            } else {
+              node.value.resolvedType = targetType;
+            }
+          }
+        }
+        node.resolvedType = targetType;
         return node.resolvedType;
       }
-
-      pushError(ctx.errors, node, `invalid assignment target`);
-      node.resolvedType = ErrorType();
-      return node.resolvedType;
     }
     case ASTNodeKind.FIELD_ACCESS: {
       const objType = resolveExprType(node.object, scope, ctx);
@@ -257,6 +296,20 @@ export function resolveExprType(node, scope, ctx) {
       node.resolvedType = field.type;
       return field.type;
     }
+    case ASTNodeKind.STRUCT_LITERAL: {
+      // recurse through each field's value and set to error, since no caller has pinned it
+      for (const field of node.fields) {
+        resolveExprType(field.value, scope, ctx);
+        field.value.resolvedType = ErrorType();
+        pushError(
+          ctx.errors,
+          field.value,
+          `struct literal has no target type`,
+        );
+      }
+      node.resolvedType = ErrorType();
+      return node.resolvedType;
+    }
     default: {
       pushError(
         ctx.errors,
@@ -267,6 +320,16 @@ export function resolveExprType(node, scope, ctx) {
       return node.resolvedType;
     }
   }
+}
+
+function rootIdentOf(node) {
+  while (node.kind === ASTNodeKind.FIELD_ACCESS) {
+    node = node.object;
+  }
+  if (node.kind === ASTNodeKind.IDENT) {
+    return node;
+  }
+  return null;
 }
 
 export function resolveCallType(node, sig, scope, ctx) {
@@ -281,18 +344,108 @@ export function resolveCallType(node, sig, scope, ctx) {
   }
 
   for (let i = 0; i < node.args.length; i++) {
-    const argType = resolveExprType(node.args[i], scope, ctx);
-    const paramType = sig.params[i].type;
-    if (!isAssignable(paramType, argType)) {
-      pushError(
-        ctx.errors,
-        node.args[i],
-        `arg ${i + 1}(${sig.params[i].name}) of "${node.callee}": cannot pass ${formatType(argType)} to ${formatType(paramType)}`,
-      );
+    if (sig.params[i].type.kind === typeKinds.struct && node.args[i].kind === ASTNodeKind.STRUCT_LITERAL) {
+      pinStructLiteral(node.args[i], sig.params[i].type, ctx.typeContext.structTable, ctx);
+    } else {
+      const argType = resolveExprType(node.args[i], scope, ctx);
+      const paramType = sig.params[i].type;
+      if (!isAssignable(paramType, argType)) {
+        pushError(
+          ctx.errors,
+          node.args[i],
+          `arg ${i + 1}(${sig.params[i].name}) of "${node.callee}": cannot pass ${formatType(argType)} to ${formatType(paramType)}`,
+        );
+      }
     }
     // TODO: coerce untyped literals to param type
   }
 
   node.resolvedType = sig.returnType;
   return node.resolvedType;
+}
+
+export function pinStructLiteral(litNode, targetType, scope, ctx) {
+  // reject if targetType is not a struct, otherwise resolveExprType will have
+  // nothing to unify against and will just set the literal's field types to error
+  if (targetType.kind !== typeKinds.struct) {
+    pushError(
+      ctx.errors,
+      litNode,
+      `cannot pin struct literal to non-struct type ${formatType(targetType)}`,
+    );
+    return;
+  }
+  // now walk the literal's fields once into a map of name -> declared field type
+  const targetFieldMap = new Map();
+  for (const targetField of targetType.fields ?? []) {
+    targetFieldMap.set(targetField.name, targetField.type);
+  }
+  const seen = new Set();
+  for (const field of litNode.fields) {
+    if (seen.has(field.name)) {
+      pushError(
+        ctx.errors,
+        field,
+        `duplicate field "${field.name}" in struct literal for "${targetType.name}"`,
+      );
+      continue;
+    }
+    seen.add(field.name);
+    const expectedType = targetFieldMap.get(field.name);
+    if (!expectedType) {
+      pushError(
+        ctx.errors,
+        field,
+        `type "${targetType.name}" has no field "${field.name}"`,
+      );
+      // still walk the value so nested errors surface
+      if (field.value.kind !== ASTNodeKind.STRUCT_LITERAL) {
+        resolveExprType(field.value, scope, ctx);
+      }
+      continue;
+    }
+    // nested struct literal: pin it directly. resolveExprType on a STRUCT_LITERAL
+    // would treat it as unpinned and emit a spurious "no target type" error.
+    if (field.value.kind === ASTNodeKind.STRUCT_LITERAL) {
+      pinStructLiteral(field.value, expectedType, scope, ctx);
+      continue;
+    }
+    const actualType = resolveExprType(field.value, scope, ctx);
+    if (!isAssignable(expectedType, actualType)) {
+      pushError(
+        ctx.errors,
+        field.value,
+        `cannot assign ${formatType(actualType)} to field "${field.name}" of type ${formatType(expectedType)} in struct literal for "${targetType.name}"`,
+      );
+    }
+    if (
+      (expectedType.kind === typeKinds.prim &&
+        isIntPrim(expectedType.name) &&
+        actualType.kind === typeKinds.untypedInt) ||
+      (expectedType.kind === typeKinds.prim &&
+        isFloatPrim(expectedType.name) &&
+        actualType.kind === typeKinds.untypedFloat)
+    ) {
+      if (
+        field.value.kind === ASTNodeKind.INT_LITERAL ||
+        field.value.kind === ASTNodeKind.FLOAT_LITERAL
+      ) {
+        coerceLiteralToType(field.value, expectedType, ctx.errors);
+      } else {
+        field.value.resolvedType = expectedType;
+      }
+    }
+  }
+  // if any expected fields are missing from the literal, complain and set the literal's type to error so downstream field accesses don't cascade
+  for (const targetField of targetType.fields ?? []) {
+    if (!litNode.fields.some((f) => f.name === targetField.name)) {
+      pushError(
+        ctx.errors,
+        litNode,
+        `missing field "${targetField.name}" in struct literal for "${targetType.name}"`,
+      );
+    }
+  }
+  // if all fields are present and accounted for, set the literal's resolved type to the target struct type
+  litNode.resolvedType = targetType;
 }
