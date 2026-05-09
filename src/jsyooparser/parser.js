@@ -40,6 +40,7 @@ const Precedence = {
   [TokenTags.minus]: 50,
   [TokenTags.mult]: 60,
   [TokenTags.divide]: 60,
+  [TokenTags.modulus]: 60,
 };
 
 /*
@@ -113,6 +114,30 @@ export function parse(src) {
 
   // load first token
   advance();
+
+  // Parse a type annotation and return a structured annotation object.
+  //   { kind: "typeName", name: "int32" }
+  //   { kind: "refType", inner: <annot> }
+  //   { kind: "arrayType", elem: <annot> }
+  function parseTypeAnnotation() {
+    // ref T
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      const inner = parseTypeAnnotation();
+      return { kind: "refType", inner };
+    }
+    // base type name
+    const nameTok = expect(TokenTags.ident);
+    const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    let annot = { kind: "typeName", name };
+    // optional [] suffix for arrays — in type position, [ always means T[]
+    if (peek().tag === TokenTags.lbracket) {
+      advance();               // consume [
+      expect(TokenTags.rbracket); // must be ]
+      annot = { kind: "arrayType", elem: annot };
+    }
+    return annot;
+  }
 
   function parseTopLevel() {
     // root of the current file or program... calling this program for now...
@@ -296,7 +321,7 @@ export function parse(src) {
     }
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
-    node.returnType = parseIdentAsName();
+    node.returnTypeAnnotation = parseTypeAnnotation();
     expect(TokenTags.semicolon);
     return node;
   }
@@ -332,6 +357,15 @@ export function parse(src) {
 
       return node;
     }
+
+    // ref x — parse lvalue address operand with high precedence so postfixes bind tightly
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      const refNode = buildSourcedNode(ASTNodeKind.REF_EXPRESSION);
+      refNode.operand = parseExpression(70);
+      return refNode;
+    }
+
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
@@ -346,6 +380,16 @@ export function parse(src) {
       const tok = advance();
       const raw = src.substring(tok.start, tok.start + tok.length);
       node = parseTemplateLiteralBody(raw);
+    } else if (peek().tag === TokenTags.lbracket) {
+      // array literal: [e1, e2, e3]
+      advance(); // consume [
+      node = buildSourcedNode(ASTNodeKind.ARRAY_LITERAL);
+      node.elements = [];
+      while (peek().tag !== TokenTags.rbracket && peek().tag !== TokenTags.eof) {
+        node.elements.push(parseExpression());
+        if (peek().tag === TokenTags.comma) advance();
+      }
+      expect(TokenTags.rbracket);
     } else if (peek().tag === TokenTags.ident) {
       const name = parseIdentAsName();
       if (peek().tag === TokenTags.lparen) {
@@ -379,7 +423,7 @@ export function parse(src) {
         peek().length,
       );
     }
-    // handle field access
+    // handle postfix ops: field access, ?, call-on-field, array index
     while (true) {
       if (peek().tag === TokenTags.dot) {
         advance(); // consume dot
@@ -406,16 +450,26 @@ export function parse(src) {
         node = callNode;
         continue;
       }
+      // array indexing: xs[i]
+      if (peek().tag === TokenTags.lbracket) {
+        advance(); // consume [
+        const indexNode = buildSourcedNode(ASTNodeKind.INDEX_EXPRESSION);
+        indexNode.object = node;
+        indexNode.index = parseExpression();
+        expect(TokenTags.rbracket);
+        node = indexNode;
+        continue;
+      }
       break;
     }
 
     // assignment — lvalue is whatever the primary+postfix chain produced.
-    // valid targets today are IDENT (`x = ...`) and FIELD_ACCESS (`p.x = ...`).
-    // assignment binds loosest and doesn't chain into the binary loop.
+    // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION
     if (peek().tag === TokenTags.eq) {
       if (
         node.kind !== ASTNodeKind.IDENT &&
-        node.kind !== ASTNodeKind.FIELD_ACCESS
+        node.kind !== ASTNodeKind.FIELD_ACCESS &&
+        node.kind !== ASTNodeKind.INDEX_EXPRESSION
       ) {
         throw parseError(
           `invalid assignment target: ${node.kind}`,
@@ -546,6 +600,15 @@ export function parse(src) {
       case TokenTags.while: {
         return parseWhileStatement();
       }
+      case TokenTags.for: {
+        return parseForStatement();
+      }
+      case TokenTags.break: {
+        return parseBreakStatement();
+      }
+      case TokenTags.continue: {
+        return parseContinueStatement();
+      }
       default: {
         return parseExpressionStatement();
       }
@@ -614,7 +677,7 @@ export function parse(src) {
     }
     node.name = parseIdentAsName();
     expect(TokenTags.colon);
-    node.type = parseIdentAsName();
+    node.typeAnnotation = parseTypeAnnotation();
     if (peek().tag === TokenTags.semicolon) {
       advance();
       return node;
@@ -657,6 +720,43 @@ export function parse(src) {
     return node;
   }
 
+  function parseForStatement() {
+    expect(TokenTags.for);
+    expect(TokenTags.lparen);
+    const node = buildSourcedNode(ASTNodeKind.FOR_LOOP);
+
+    // init: ident = expr ;
+    node.initIdent = parseIdentAsName();
+    expect(TokenTags.eq);
+    node.initExpr = parseExpression();
+    expect(TokenTags.semicolon);
+
+    // cond: expr ;
+    node.cond = parseExpression();
+    expect(TokenTags.semicolon);
+
+    // step: ident = expr
+    node.stepIdent = parseIdentAsName();
+    expect(TokenTags.eq);
+    node.stepExpr = parseExpression();
+
+    expect(TokenTags.rparen);
+    node.body = parseBlock();
+    return node;
+  }
+
+  function parseBreakStatement() {
+    expect(TokenTags.break);
+    expect(TokenTags.semicolon);
+    return buildSourcedNode(ASTNodeKind.BREAK_STATEMENT);
+  }
+
+  function parseContinueStatement() {
+    expect(TokenTags.continue);
+    expect(TokenTags.semicolon);
+    return buildSourcedNode(ASTNodeKind.CONTINUE_STATEMENT);
+  }
+
   function parseExpressionStatement() {
     const node = buildSourcedNode(ASTNodeKind.EXPRESSION_STATEMENT);
     node.value = parseExpression();
@@ -676,13 +776,18 @@ export function parse(src) {
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     node.params = [];
-    while (peek().tag === TokenTags.ident || peek().tag === TokenTags.comma) {
+    // params can start with: ident (name) or ref (modifier) or comma (separator)
+    while (
+      peek().tag === TokenTags.ident ||
+      peek().tag === TokenTags.ref ||
+      peek().tag === TokenTags.comma
+    ) {
       if (peek().tag === TokenTags.comma) advance();
       node.params.push(parseFunctionParam());
     }
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
-    node.returnType = parseIdentAsName();
+    node.returnTypeAnnotation = parseTypeAnnotation();
     node.body = parseBlock();
     return node;
   }
@@ -701,7 +806,7 @@ export function parse(src) {
         const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
         fieldNode.name = parseIdentAsName();
         expect(TokenTags.colon);
-        fieldNode.type = parseIdentAsName();
+        fieldNode.typeAnnotation = parseTypeAnnotation();
         node.fields.push(fieldNode);
         if (peek().tag === TokenTags.comma) {
           advance();
@@ -718,13 +823,18 @@ export function parse(src) {
 
   function parseFunctionParam() {
     const node = buildSourcedNode(ASTNodeKind.PARAM);
+    // ref modifier
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      node.isRef = true;
+    } else {
+      node.isRef = false;
+    }
     // name
     node.name = parseIdentAsName();
-
     // type
     expect(TokenTags.colon);
-    node.type = parseIdentAsName();
-
+    node.typeAnnotation = parseTypeAnnotation();
     return node;
   }
 

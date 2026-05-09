@@ -1,0 +1,5 @@
+function main(): int32 {
+    let s: string = "hello";
+    let n: int32 = int32(s);
+    return 0;
+}

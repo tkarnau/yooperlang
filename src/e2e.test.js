@@ -123,6 +123,42 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len = 7\n");
   });
+
+  it("refs_basic.yoop passes a ref param and writes through it", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/refs_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "x = 42\n");
+  });
+
+  it("refs_swap.yoop swaps two values through ref params", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/refs_swap.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "x=10 y=5\n");
+  });
+
+  it("arrays_basic.yoop creates an int32[] literal, reads len and elements, writes an element", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/arrays_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len=3 first=10 last=30\nxs[1]=99\n");
+  });
+
+  it("arrays_loop.yoop iterates an array with a for-loop and sums elements", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/arrays_loop.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum = 15\n");
+  });
+
+  it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/for_break_continue.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum = 10\nodd = 25\n");
+  });
+
+  it("casts.yoop: widening int cast, int-to-float, float-to-float casts", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/casts.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "b=100 d=100\nc=100.000000\ne=100.000000\n");
+  });
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
@@ -343,6 +379,54 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /multi-field.*must be destructured/.test(e.message)),
       `expected multi-strip error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("ref_return.yoop rejects a function whose return type is ref T", () => {
+    const { errors } = typecheckFixture("examples/fail/ref_return.yoop");
+    assert.ok(
+      errors.some((e) => /may not return 'ref T'/.test(e.message)),
+      `expected ref-return error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("break_outside_loop.yoop rejects break used outside any loop", () => {
+    const { errors } = typecheckFixture("examples/fail/break_outside_loop.yoop");
+    assert.ok(
+      errors.some((e) => /'break' is not inside a loop/.test(e.message)),
+      `expected break-outside-loop error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("continue_outside_loop.yoop rejects continue used outside any loop", () => {
+    const { errors } = typecheckFixture("examples/fail/continue_outside_loop.yoop");
+    assert.ok(
+      errors.some((e) => /'continue' is not inside a loop/.test(e.message)),
+      `expected continue-outside-loop error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("array_elem_type_mismatch.yoop rejects array literal with wrong element type", () => {
+    const { errors } = typecheckFixture("examples/fail/array_elem_type_mismatch.yoop");
+    assert.ok(
+      errors.some((e) => /element 2 has type/.test(e.message)),
+      `expected element-type-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("ref_nonlvalue.yoop rejects taking a ref of a non-lvalue expression", () => {
+    const { errors } = typecheckFixture("examples/fail/ref_nonlvalue.yoop");
+    assert.ok(
+      errors.some((e) => /non-lvalue/.test(e.message)),
+      `expected non-lvalue error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("cast_nonnumeric.yoop rejects casting a non-numeric type", () => {
+    const { errors } = typecheckFixture("examples/fail/cast_nonnumeric.yoop");
+    assert.ok(
+      errors.some((e) => /cannot cast/.test(e.message)),
+      `expected cannot-cast error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

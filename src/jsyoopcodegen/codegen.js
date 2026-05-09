@@ -6,6 +6,7 @@ import { ASTNodeKind } from "../contracts.js";
 import {
   PrimType,
   VoidType,
+  castInstruction,
   isFloatPrim,
   isIntPrim,
   isUnsignedIntPrim,
@@ -51,10 +52,22 @@ export function llvmType(yoopType) {
     case typeKinds.ref: {
       return LLVM_TYPES.ptr;
     }
+    case typeKinds.array: {
+      return `%yoop_array.${arrayElemLlvmName(yoopType.elem)}`;
+    }
     default: {
       throw new Error(`llvmType: unhandled yooper type kind "${yoopType.kind}"`);
     }
   }
+}
+
+// Stable string key for an array element type — used in %yoop_array.<name> struct names.
+function arrayElemLlvmName(elemType) {
+  if (elemType.kind === typeKinds.prim) return elemType.name;
+  if (elemType.kind === typeKinds.struct) {
+    return elemType.moduleId ? `${elemType.moduleId}__${elemType.name}` : elemType.name;
+  }
+  throw new Error(`arrayElemLlvmName: unsupported elem type "${elemType.kind}"`);
 }
 
 function isIntType(t) {
@@ -165,6 +178,7 @@ export function codegen(ast) {
   const lines = [];
   const globals = [];
   const structDefs = [];
+  const emittedArrayTypes = new Set();
   let strConstCounter = 0;
   let tempCounter = 0;
   let labelCounter = 0;
@@ -185,6 +199,14 @@ export function codegen(ast) {
 
   function freshLabel(hint) {
     return `${hint}_${labelCounter++}`;
+  }
+
+  function ensureArrayTypeDef(elemType) {
+    const name = llvmType({ kind: typeKinds.array, elem: elemType });
+    if (!emittedArrayTypes.has(name)) {
+      emittedArrayTypes.add(name);
+      structDefs.push(`${name} = type { ptr, i64 }`);
+    }
   }
 
   // emit a string global from a *quoted* source-form value (e.g. `"hello\n"`).
@@ -247,6 +269,19 @@ export function codegen(ast) {
           `  ${gepTmp} = getelementptr inbounds ${llvmType(base.type)}, ptr ${base.ptr}, i32 0, i32 ${idx}`,
         );
         return { ptr: gepTmp, type: fieldType };
+      }
+      case ASTNodeKind.INDEX_EXPRESSION: {
+        const base = emitLvalue(node.object, fnLines);
+        const arrayLlvmTy = llvmType(base.type);
+        const dataPtrField = freshTemp();
+        fnLines.push(`  ${dataPtrField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${base.ptr}, i32 0, i32 0`);
+        const dataPtr = freshTemp();
+        fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataPtrField}`);
+        const idx = emitExpr(node.index, fnLines);
+        const elemLlvmTy = llvmType(base.type.elem);
+        const elemPtr = freshTemp();
+        fnLines.push(`  ${elemPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${dataPtr}, ${llvmType(idx.yoopType)} ${idx.val}`);
+        return { ptr: elemPtr, type: base.type.elem };
       }
       default: {
         // r-value treated as an lvalue (e.g. `make_pair().a`): materialize
@@ -403,10 +438,24 @@ export function codegen(ast) {
         if (!yoopType) {
           throw new Error(`codegen: unknown identifier "${node.name}"`);
         }
+        if (node.autoDeref) {
+          const innerType = yoopType.inner;
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          const valTmp = freshTemp();
+          fnLines.push(`  ${valTmp} = load ${llvmType(innerType)}, ptr ${ptrTmp}`);
+          return { val: valTmp, yoopType: innerType };
+        }
         const llvmTy = llvmType(yoopType);
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = load ${llvmTy}, ptr %${node.name}`);
         return { val: tmp, yoopType };
+      }
+
+      case ASTNodeKind.REF_EXPRESSION: {
+        // ref x — pass the address of x (its alloca slot) without loading
+        const innerType = symbols.get(node.operand.name);
+        return { val: `%${node.operand.name}`, yoopType: node.resolvedType ?? { kind: typeKinds.ref, inner: innerType } };
       }
 
       case ASTNodeKind.CALL_EXPRESSION: {
@@ -436,6 +485,14 @@ export function codegen(ast) {
               `codegen: assignment to unknown variable "${targetName}"`,
             );
           }
+          if (node.target.autoDerefWrite) {
+            const innerType = lhsType.inner;
+            const ptrTmp = freshTemp();
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${targetName}`);
+            const rhs = emitExpr(node.value, fnLines);
+            fnLines.push(`  store ${llvmType(innerType)} ${rhs.val}, ptr ${ptrTmp}`);
+            return rhs;
+          }
           const rhs = emitExpr(node.value, fnLines);
           fnLines.push(
             `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${targetName}`,
@@ -460,6 +517,12 @@ export function codegen(ast) {
           );
           return rhs;
         }
+        if (node.target.kind === ASTNodeKind.INDEX_EXPRESSION) {
+          const lv = emitLvalue(node.target, fnLines);
+          const rhs = emitExpr(node.value, fnLines);
+          fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
+          return rhs;
+        }
         throw new Error(
           `codegen: unsupported assignment target kind "${node.target.kind}"`,
         );
@@ -467,8 +530,6 @@ export function codegen(ast) {
 
       case ASTNodeKind.FIELD_ACCESS: {
         // intrinsic: `s.len` on a string -> strlen(s) returning usize.
-        // typechecker accepts it (resolveFieldAccess); codegen lowers here
-        // because emitLvalue's path expects a struct receiver.
         const objType = node.object.resolvedType;
         if (
           objType &&
@@ -481,6 +542,56 @@ export function codegen(ast) {
           fnLines.push(`  ${tmp} = call i64 @strlen(ptr ${s.val})`);
           return { val: tmp, yoopType: PrimType("usize") };
         }
+        // intrinsic: `xs.len` on an array — GEP field 1 of the fat pointer.
+        if (node.isArrayLen) {
+          const lv = emitLvalue(node.object, fnLines);
+          const arrayLlvmTy = llvmType(lv.type);
+          const lenField = freshTemp();
+          fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${lv.ptr}, i32 0, i32 1`);
+          const lenVal = freshTemp();
+          fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
+          return { val: lenVal, yoopType: PrimType("usize") };
+        }
+        const lv = emitLvalue(node, fnLines);
+        const llvmTy = llvmType(lv.type);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${lv.ptr}`);
+        return { val: tmp, yoopType: lv.type };
+      }
+
+      case ASTNodeKind.ARRAY_LITERAL: {
+        const arrayType = node.resolvedType;
+        ensureArrayTypeDef(arrayType.elem);
+        const elemLlvmTy = llvmType(arrayType.elem);
+        const elemAlign = alignOf(elemLlvmTy);
+        const n = node.elements.length;
+        // Allocate backing storage
+        const dataBuf = freshTemp();
+        fnLines.push(`  ${dataBuf} = alloca [${n} x ${elemLlvmTy}], align ${elemAlign}`);
+        for (let i = 0; i < n; i++) {
+          const elemVal = emitExpr(node.elements[i], fnLines);
+          const gepTmp = freshTemp();
+          fnLines.push(`  ${gepTmp} = getelementptr [${n} x ${elemLlvmTy}], ptr ${dataBuf}, i32 0, i32 ${i}`);
+          fnLines.push(`  store ${elemLlvmTy} ${elemVal.val}, ptr ${gepTmp}`);
+        }
+        const dataPtr = freshTemp();
+        fnLines.push(`  ${dataPtr} = getelementptr [${n} x ${elemLlvmTy}], ptr ${dataBuf}, i32 0, i32 0`);
+        // Build fat pointer
+        const arrayLlvmTy = llvmType(arrayType);
+        const fatSlot = freshTemp();
+        fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+        const dataField = freshTemp();
+        fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+        fnLines.push(`  store ptr ${dataPtr}, ptr ${dataField}`);
+        const lenField = freshTemp();
+        fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+        fnLines.push(`  store i64 ${n}, ptr ${lenField}`);
+        const fatVal = freshTemp();
+        fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+        return { val: fatVal, yoopType: arrayType };
+      }
+
+      case ASTNodeKind.INDEX_EXPRESSION: {
         const lv = emitLvalue(node, fnLines);
         const llvmTy = llvmType(lv.type);
         const tmp = freshTemp();
@@ -540,6 +651,16 @@ export function codegen(ast) {
 
   // ** call expressions, including printf as a typed builtin **
   function emitCall(node, fnLines) {
+    // Numeric cast: int32(x), float64(y), etc.
+    if (node.isCast) {
+      const src = emitExpr(node.args[0], fnLines);
+      const dstType = node.castTargetType;
+      const opcode = castInstruction(src.yoopType, dstType);
+      if (!opcode) return { val: src.val, yoopType: dstType };
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = ${opcode} ${llvmType(src.yoopType)} ${src.val} to ${llvmType(dstType)}`);
+      return { val: tmp, yoopType: dstType };
+    }
     // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
       const { moduleId, exportName } = node.callee.namespaceLookup;
@@ -729,6 +850,7 @@ export function codegen(ast) {
       case ASTNodeKind.LET_DECL:
       case ASTNodeKind.CONST_DECL: {
         const declType = node.resolvedType;
+        if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
         symbols.set(node.name, declType);
         const llvmTy = llvmType(declType);
         const align = declType.kind === typeKinds.struct
@@ -776,6 +898,18 @@ export function codegen(ast) {
 
       case ASTNodeKind.WHILE_STATEMENT:
         emitWhile(node, fnLines, ctx);
+        break;
+
+      case ASTNodeKind.FOR_LOOP:
+        emitForLoop(node, fnLines, ctx);
+        break;
+
+      case ASTNodeKind.BREAK_STATEMENT:
+        fnLines.push(`  br label %${ctx.breakLabel}`);
+        break;
+
+      case ASTNodeKind.CONTINUE_STATEMENT:
+        fnLines.push(`  br label %${ctx.continueLabel}`);
         break;
 
       case ASTNodeKind.BLOCK:
@@ -869,9 +1003,48 @@ export function codegen(ast) {
       `  br i1 ${cond.val}, label %${bodyLabel}, label %${afterLabel}`,
     );
     fnLines.push(`${bodyLabel}:`);
-    emitBlock(node.body, fnLines, ctx);
-    fnLines.push(`  br label %${condLabel}`);
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: condLabel };
+    emitBlock(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${condLabel}`);
     fnLines.push(`${afterLabel}:`);
+  }
+
+  function emitForLoop(node, fnLines, ctx) {
+    const initType = symbols.get(node.initIdent);
+    const initVal = emitExpr(node.initExpr, fnLines);
+    fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr %${node.initIdent}`);
+
+    const condLabel = freshLabel("for_cond");
+    const bodyLabel = freshLabel("for_body");
+    const stepLabel = freshLabel("for_step");
+    const afterLabel = freshLabel("for_after");
+
+    fnLines.push(`  br label %${condLabel}`);
+    fnLines.push(`${condLabel}:`);
+    const cond = emitExpr(node.cond, fnLines);
+    fnLines.push(`  br i1 ${cond.val}, label %${bodyLabel}, label %${afterLabel}`);
+
+    fnLines.push(`${bodyLabel}:`);
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: stepLabel };
+    emitBlock(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${stepLabel}`);
+
+    fnLines.push(`${stepLabel}:`);
+    const stepType = symbols.get(node.stepIdent);
+    const stepVal = emitExpr(node.stepExpr, fnLines);
+    fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr %${node.stepIdent}`);
+    fnLines.push(`  br label %${condLabel}`);
+
+    fnLines.push(`${afterLabel}:`);
+  }
+
+  function blockIsTerminated(fnLines) {
+    for (let i = fnLines.length - 1; i >= 0; i--) {
+      const l = fnLines[i].trim();
+      if (!l || l.endsWith(":")) return false;
+      return l.startsWith("br ") || l.startsWith("ret ");
+    }
+    return false;
   }
 
   function emitBlock(blockOrNode, fnLines, ctx) {
@@ -917,7 +1090,7 @@ export function codegen(ast) {
     const ctx = { fnName: node.name, returnType };
     node.body.body.forEach((s) => emitStatement(s, fnLines, ctx));
 
-    if (returnType.kind === typeKinds.void) {
+    if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
@@ -1090,6 +1263,12 @@ function needsStrlen(node) {
   return found;
 }
 
+// True for both VoidType() and PrimType("void") — the typechecker emits the
+// latter when resolving the "void" type name via resolveTypeAnnotation.
+function isVoidReturn(rt) {
+  return rt.kind === typeKinds.void || (rt.kind === typeKinds.prim && rt.name === "void");
+}
+
 export function alignOf(llvmTy) {
   if (llvmTy === "i64" || llvmTy === "double") return 8;
   if (llvmTy === "i32" || llvmTy === "float") return 4;
@@ -1167,6 +1346,7 @@ export function codegenProgram(modules) {
   const allLines = [];
   const linkFlags = new Set();
   const emittedStructs = new Set();
+  const emittedArrayTypes = new Set();
 
   for (const mod of modules) {
     // Collect link flags from EXTERN_BLOCKs
@@ -1177,7 +1357,7 @@ export function codegenProgram(modules) {
     }
 
     // Run single-module codegen with this module's id set
-    const ir = codegenModule(mod, emittedStructs);
+    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes);
     allStructDefs.push(...ir.structDefs);
     allGlobals.push(...ir.globals);
     for (const e of ir.externs) allExterns.add(e);
@@ -1198,12 +1378,12 @@ export function codegenProgram(modules) {
 }
 
 // Codegen a single module, returning { structDefs, globals, externs, lines }.
-// emittedStructs is shared across modules to deduplicate struct type defs.
-function codegenModule(mod, emittedStructs) {
-  return codegenWithModuleId(mod.ast, mod.id, emittedStructs);
+// emittedStructs and emittedArrayTypes are shared across modules to deduplicate type defs.
+function codegenModule(mod, emittedStructs, emittedArrayTypes) {
+  return codegenWithModuleId(mod.ast, mod.id, emittedStructs, emittedArrayTypes);
 }
 
-function codegenWithModuleId(ast, moduleId, emittedStructs) {
+function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = new Set()) {
   const lines = [];
   const globals = [];
   const structDefs = [];
@@ -1216,6 +1396,23 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
   function freshTemp() { return `%t${tempCounter++}`; }
   function freshStrGlobal() { return `@.str_${moduleId}_${strConstCounter++}`; }
   function freshLabel(hint) { return `${hint}_${labelCounter++}`; }
+
+  function ensureArrayTypeDef(elemType) {
+    const name = llvmType({ kind: typeKinds.array, elem: elemType });
+    if (!emittedArrayTypes.has(name)) {
+      emittedArrayTypes.add(name);
+      structDefs.push(`${name} = type { ptr, i64 }`);
+    }
+  }
+
+  function blockIsTerminated(fnLines) {
+    for (let i = fnLines.length - 1; i >= 0; i--) {
+      const l = fnLines[i].trim();
+      if (!l || l.endsWith(":")) return false;
+      return l.startsWith("br ") || l.startsWith("ret ");
+    }
+    return false;
+  }
 
   function emitRawStringGlobal(inner) {
     const name = freshStrGlobal();
@@ -1346,7 +1543,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
     }
     const ctx = { fnName: symName, returnType: node.resolvedType };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
-    if (node.resolvedType.kind === typeKinds.void) {
+    if (isVoidReturn(node.resolvedType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
@@ -1379,10 +1576,22 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
       case ASTNodeKind.IDENT: {
         const yoopType = symbols.get(node.name);
         if (!yoopType) throw new Error(`codegen: unknown identifier "${node.name}"`);
+        if (node.autoDeref) {
+          const innerType = yoopType.inner;
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          const valTmp = freshTemp();
+          fnLines.push(`  ${valTmp} = load ${llvmType(innerType)}, ptr ${ptrTmp}`);
+          return { val: valTmp, yoopType: innerType };
+        }
         const llvmTy = llvmType(yoopType);
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = load ${llvmTy}, ptr %${node.name}`);
         return { val: tmp, yoopType };
+      }
+      case ASTNodeKind.REF_EXPRESSION: {
+        const innerType = symbols.get(node.operand.name);
+        return { val: `%${node.operand.name}`, yoopType: node.resolvedType ?? { kind: typeKinds.ref, inner: innerType } };
       }
       case ASTNodeKind.CALL_EXPRESSION: return emitCallExpr(node, fnLines);
       case ASTNodeKind.BINARY_EXPRESSION: {
@@ -1397,9 +1606,18 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
       }
       case ASTNodeKind.ASSIGNMENT: {
         if (node.target.kind === ASTNodeKind.IDENT) {
-          const lhsType = symbols.get(node.target.name);
+          const targetName = node.target.name;
+          const lhsType = symbols.get(targetName);
+          if (node.target.autoDerefWrite) {
+            const innerType = lhsType.inner;
+            const ptrTmp = freshTemp();
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${targetName}`);
+            const rhs = emitExpr(node.value, fnLines);
+            fnLines.push(`  store ${llvmType(innerType)} ${rhs.val}, ptr ${ptrTmp}`);
+            return rhs;
+          }
           const rhs = emitExpr(node.value, fnLines);
-          fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr %${node.target.name}`);
+          fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr %${targetName}`);
           return rhs;
         }
         if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
@@ -1414,6 +1632,12 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
           fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
           return rhs;
         }
+        if (node.target.kind === ASTNodeKind.INDEX_EXPRESSION) {
+          const lv = emitLval(node.target, fnLines);
+          const rhs = emitExpr(node.value, fnLines);
+          fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
+          return rhs;
+        }
         throw new Error(`codegen: unsupported assignment target kind "${node.target.kind}"`);
       }
       case ASTNodeKind.FIELD_ACCESS: {
@@ -1424,6 +1648,50 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
           fnLines.push(`  ${tmp} = call i64 @strlen(ptr ${s.val})`);
           return { val: tmp, yoopType: PrimType("usize") };
         }
+        if (node.isArrayLen) {
+          const lv = emitLval(node.object, fnLines);
+          const arrayLlvmTy = llvmType(lv.type);
+          const lenField = freshTemp();
+          fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${lv.ptr}, i32 0, i32 1`);
+          const lenVal = freshTemp();
+          fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
+          return { val: lenVal, yoopType: PrimType("usize") };
+        }
+        const lv = emitLval(node, fnLines);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmType(lv.type)}, ptr ${lv.ptr}`);
+        return { val: tmp, yoopType: lv.type };
+      }
+      case ASTNodeKind.ARRAY_LITERAL: {
+        const arrayType = node.resolvedType;
+        ensureArrayTypeDef(arrayType.elem);
+        const elemLlvmTy = llvmType(arrayType.elem);
+        const elemAlign = alignOf(elemLlvmTy);
+        const n = node.elements.length;
+        const dataBuf = freshTemp();
+        fnLines.push(`  ${dataBuf} = alloca [${n} x ${elemLlvmTy}], align ${elemAlign}`);
+        for (let i = 0; i < n; i++) {
+          const elemVal = emitExpr(node.elements[i], fnLines);
+          const gepTmp = freshTemp();
+          fnLines.push(`  ${gepTmp} = getelementptr [${n} x ${elemLlvmTy}], ptr ${dataBuf}, i32 0, i32 ${i}`);
+          fnLines.push(`  store ${elemLlvmTy} ${elemVal.val}, ptr ${gepTmp}`);
+        }
+        const dataPtr = freshTemp();
+        fnLines.push(`  ${dataPtr} = getelementptr [${n} x ${elemLlvmTy}], ptr ${dataBuf}, i32 0, i32 0`);
+        const arrayLlvmTy = llvmType(arrayType);
+        const fatSlot = freshTemp();
+        fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+        const dataField = freshTemp();
+        fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+        fnLines.push(`  store ptr ${dataPtr}, ptr ${dataField}`);
+        const lenField = freshTemp();
+        fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+        fnLines.push(`  store i64 ${n}, ptr ${lenField}`);
+        const fatVal = freshTemp();
+        fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+        return { val: fatVal, yoopType: arrayType };
+      }
+      case ASTNodeKind.INDEX_EXPRESSION: {
         const lv = emitLval(node, fnLines);
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = load ${llvmType(lv.type)}, ptr ${lv.ptr}`);
@@ -1463,6 +1731,15 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
   }
 
   function emitCallExpr(node, fnLines) {
+    if (node.isCast) {
+      const src = emitExpr(node.args[0], fnLines);
+      const dstType = node.castTargetType;
+      const opcode = castInstruction(src.yoopType, dstType);
+      if (!opcode) return { val: src.val, yoopType: dstType };
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = ${opcode} ${llvmType(src.yoopType)} ${src.val} to ${llvmType(dstType)}`);
+      return { val: tmp, yoopType: dstType };
+    }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
       const { moduleId: nsModId, exportName } = node.callee.namespaceLookup;
       const mangledName = mangle(nsModId, exportName);
@@ -1563,6 +1840,19 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
         fnLines.push(`  ${gepTmp} = getelementptr inbounds ${llvmType(base.type)}, ptr ${base.ptr}, i32 0, i32 ${idx}`);
         return { ptr: gepTmp, type: fieldType };
       }
+      case ASTNodeKind.INDEX_EXPRESSION: {
+        const base = emitLval(node.object, fnLines);
+        const arrayLlvmTy = llvmType(base.type);
+        const dataPtrField = freshTemp();
+        fnLines.push(`  ${dataPtrField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${base.ptr}, i32 0, i32 0`);
+        const dataPtr = freshTemp();
+        fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataPtrField}`);
+        const idx = emitExpr(node.index, fnLines);
+        const elemLlvmTy = llvmType(base.type.elem);
+        const elemPtr = freshTemp();
+        fnLines.push(`  ${elemPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${dataPtr}, ${llvmType(idx.yoopType)} ${idx.val}`);
+        return { ptr: elemPtr, type: base.type.elem };
+      }
       default: {
         const r = emitExpr(node, fnLines);
         const t = r.yoopType;
@@ -1644,6 +1934,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
       case ASTNodeKind.LET_DECL:
       case ASTNodeKind.CONST_DECL: {
         const declType = node.resolvedType;
+        if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
         symbols.set(node.name, declType);
         const llvmTy = llvmType(declType);
         const al = declType.kind === typeKinds.struct ? alignOfStruct(declType) : alignOf(llvmTy);
@@ -1663,6 +1954,9 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
       case ASTNodeKind.DISCARD_STATEMENT: emitExpr(node.value, fnLines); break;
       case ASTNodeKind.IF_STATEMENT: emitIfStmt(node, fnLines, ctx); break;
       case ASTNodeKind.WHILE_STATEMENT: emitWhileStmt(node, fnLines, ctx); break;
+      case ASTNodeKind.FOR_LOOP: emitForLoopStmt(node, fnLines, ctx); break;
+      case ASTNodeKind.BREAK_STATEMENT: fnLines.push(`  br label %${ctx.breakLabel}`); break;
+      case ASTNodeKind.CONTINUE_STATEMENT: fnLines.push(`  br label %${ctx.continueLabel}`); break;
       case ASTNodeKind.BLOCK: node.body.forEach((s) => emitStmt(s, fnLines, ctx)); break;
       default: throw new Error(`codegen: unhandled statement kind "${node.kind}"`);
     }
@@ -1720,8 +2014,38 @@ function codegenWithModuleId(ast, moduleId, emittedStructs) {
     const cond = emitExpr(node.expression, fnLines);
     fnLines.push(`  br i1 ${cond.val}, label %${bodyLabel}, label %${afterLabel}`);
     fnLines.push(`${bodyLabel}:`);
-    emitBlockStmt(node.body, fnLines, ctx);
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: condLabel };
+    emitBlockStmt(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${condLabel}`);
+    fnLines.push(`${afterLabel}:`);
+  }
+
+  function emitForLoopStmt(node, fnLines, ctx) {
+    const initType = symbols.get(node.initIdent);
+    const initVal = emitExpr(node.initExpr, fnLines);
+    fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr %${node.initIdent}`);
+
+    const condLabel = freshLabel("for_cond");
+    const bodyLabel = freshLabel("for_body");
+    const stepLabel = freshLabel("for_step");
+    const afterLabel = freshLabel("for_after");
+
     fnLines.push(`  br label %${condLabel}`);
+    fnLines.push(`${condLabel}:`);
+    const cond = emitExpr(node.cond, fnLines);
+    fnLines.push(`  br i1 ${cond.val}, label %${bodyLabel}, label %${afterLabel}`);
+
+    fnLines.push(`${bodyLabel}:`);
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: stepLabel };
+    emitBlockStmt(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${stepLabel}`);
+
+    fnLines.push(`${stepLabel}:`);
+    const stepType = symbols.get(node.stepIdent);
+    const stepVal = emitExpr(node.stepExpr, fnLines);
+    fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr %${node.stepIdent}`);
+    fnLines.push(`  br label %${condLabel}`);
+
     fnLines.push(`${afterLabel}:`);
   }
 

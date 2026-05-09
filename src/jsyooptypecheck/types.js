@@ -149,6 +149,83 @@ export function resolveTypeFromName(name, structTable) {
   return primTypeFromName(name) ?? structTable.get(name) ?? null;
 }
 
+// Resolve a structured type annotation object (from parseTypeAnnotation) to a Type.
+export function resolveTypeAnnotation(annot, structTable) {
+  if (!annot) return null;
+  if (annot.kind === "typeName") {
+    return resolveTypeFromName(annot.name, structTable);
+  }
+  if (annot.kind === "refType") {
+    const inner = resolveTypeAnnotation(annot.inner, structTable);
+    if (!inner) return null;
+    return RefType(inner);
+  }
+  if (annot.kind === "arrayType") {
+    const elem = resolveTypeAnnotation(annot.elem, structTable);
+    if (!elem) return null;
+    return ArrayType(elem);
+  }
+  throw new Error(`resolveTypeAnnotation: unknown annotation kind "${annot.kind}"`);
+}
+
+// Format a type annotation object as a human-readable string (for error messages).
+export function formatAnnotation(annot) {
+  if (!annot) return "unknown";
+  if (annot.kind === "typeName") return annot.name;
+  if (annot.kind === "refType") return `ref ${formatAnnotation(annot.inner)}`;
+  if (annot.kind === "arrayType") return `${formatAnnotation(annot.elem)}[]`;
+  return "unknown";
+}
+
+function bitWidthOf(name) {
+  switch (name) {
+    case "int8": case "uint8": return 8;
+    case "int16": case "uint16": return 16;
+    case "int32": case "uint32": return 32;
+    case "int64": case "uint64": case "usize": case "isize": return 64;
+    case "float32": return 32;
+    case "float64": return 64;
+    default: throw new Error(`bitWidthOf: unknown type "${name}"`);
+  }
+}
+
+// Returns true if a numeric cast from src to dst is valid (both must be numeric prims).
+export function isCastableTo(src, dst) {
+  if (!src || !dst) return false;
+  if (src.kind !== typeKinds.prim || dst.kind !== typeKinds.prim) return false;
+  const numericPrims = [
+    "int8","int16","int32","int64",
+    "uint8","uint16","uint32","uint64","usize","isize",
+    "float32","float64",
+  ];
+  return numericPrims.includes(src.name) && numericPrims.includes(dst.name);
+}
+
+// Returns the LLVM cast opcode string for casting srcType to dstType.
+// Caller must verify isCastableTo first. Returns null for no-op (same width int).
+export function castInstruction(srcType, dstType) {
+  const srcIsFloat = srcType.name.startsWith("float");
+  const dstIsFloat = dstType.name.startsWith("float");
+  const srcBits = bitWidthOf(srcType.name);
+  const dstBits = bitWidthOf(dstType.name);
+
+  if (srcIsFloat && dstIsFloat) {
+    return srcBits < dstBits ? "fpext" : "fptrunc";
+  }
+  if (!srcIsFloat && !dstIsFloat) {
+    if (srcBits === dstBits) return null; // same representation
+    if (srcBits < dstBits) {
+      return isUnsignedIntPrim(srcType.name) ? "zext" : "sext";
+    }
+    return "trunc";
+  }
+  if (!srcIsFloat && dstIsFloat) {
+    return isUnsignedIntPrim(srcType.name) ? "uitofp" : "sitofp";
+  }
+  // float to int
+  return isUnsignedIntPrim(dstType.name) ? "fptoui" : "fptosi";
+}
+
 export function typesEqual(a, b) {
   if (!a || !b) {
     return false;

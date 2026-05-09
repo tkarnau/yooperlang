@@ -1,0 +1,12 @@
+function fill(out: ref int32, val: int32): void {
+    out = val;
+}
+
+function main(): int32 {
+    let x: int32 = 0;
+    fill(ref x, 42);
+    printf(`x = ${x}\n`);
+    return 0;
+}
+
+// expected output: x = 42

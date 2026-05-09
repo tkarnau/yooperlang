@@ -43,6 +43,14 @@ export const ASTNodeKind = Object.freeze({
   DISCARD_STATEMENT: "DISCARD_STATEMENT",
   TRY_OP: "TRY_OP",
 
+  // phase 4: refs, arrays, control flow
+  FOR_LOOP: "FOR_LOOP",
+  BREAK_STATEMENT: "BREAK_STATEMENT",
+  CONTINUE_STATEMENT: "CONTINUE_STATEMENT",
+  ARRAY_LITERAL: "ARRAY_LITERAL",
+  INDEX_EXPRESSION: "INDEX_EXPRESSION",
+  REF_EXPRESSION: "REF_EXPRESSION",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });

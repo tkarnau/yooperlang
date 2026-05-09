@@ -21,12 +21,17 @@
 
 import { ASTNodeKind } from "../contracts.js";
 import {
+  ArrayType,
   ErrorType,
   PrimType,
+  RefType,
   UntypedFloatType,
   UntypedIntType,
   VoidType,
+  isCastableTo,
+  isIntPrim,
   primAnnotations,
+  primTypeFromName,
   resolveTypeFromName,
   typeKinds,
   typesEqual,
@@ -81,6 +86,12 @@ export function resolveExprType(node, scope, ctx) {
       return resolveOrphanStructLiteral(node, scope, ctx);
     case ASTNodeKind.TRY_OP:
       return resolveTryOp(node, scope, ctx);
+    case ASTNodeKind.REF_EXPRESSION:
+      return resolveRefExpression(node, scope, ctx);
+    case ASTNodeKind.ARRAY_LITERAL:
+      return resolveArrayLiteral(node, scope, ctx);
+    case ASTNodeKind.INDEX_EXPRESSION:
+      return resolveIndexExpression(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -99,10 +110,16 @@ function setType(node, type) {
 }
 
 // `x` — looks up the variable in the lexical scope chain.
+// If the binding type is RefType, sets autoDeref and returns the inner type.
 function resolveIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, node.name);
   if (binding) {
     if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    // Auto-deref: ref bindings transparently expose the inner type
+    if (binding.type.kind === typeKinds.ref) {
+      node.autoDeref = true;
+      return setType(node, binding.type.inner);
+    }
     return setType(node, binding.type);
   }
   // Fall back to module-level symbols (namespace imports, etc.)
@@ -127,6 +144,36 @@ function resolveBinary(node, scope, ctx) {
 // namespace, or known C extern), then checks arity + arg types.
 function resolveCall(node, scope, ctx) {
   const callee = node.callee;
+
+  // Cast detection: callee is a single IDENT matching a primitive type name.
+  // e.g. int64(x), float32(x), uint8(x & 0xFF)
+  if (typeof callee === "string") {
+    const primType = primTypeFromName(callee);
+    if (primType) {
+      if (node.args.length !== 1) {
+        pushError(ctx.errors, node,
+          `cast '${callee}(...)' requires exactly one argument`);
+        return setType(node, primType);
+      }
+      const argType = resolveExprType(node.args[0], scope, ctx);
+      // Coerce untyped literal to the cast target before checking castability
+      const effectiveArgType = argType.kind === typeKinds.untypedInt || argType.kind === typeKinds.untypedFloat
+        ? primType  // untyped literal → cast target is a no-op
+        : argType;
+      if (!isCastableTo(effectiveArgType, primType)) {
+        pushError(ctx.errors, node,
+          `cannot cast ${formatType(argType)} to ${formatType(primType)} — only numeric primitive casts are supported`);
+        return setType(node, primType);
+      }
+      node.isCast = true;
+      node.castTargetType = primType;
+      // If the arg is an untyped literal, coerce it to the cast target
+      if (argType.kind === typeKinds.untypedInt || argType.kind === typeKinds.untypedFloat) {
+        coerceUntypedLiteralToTyped(node.args[0], argType, primType, ctx.errors);
+      }
+      return setType(node, primType);
+    }
+  }
 
   // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
   if (callee && typeof callee === "object") {
@@ -253,14 +300,16 @@ function isPrintableInTemplate(t) {
   return isNumeric(t);
 }
 
-// `x = expr` or `x.field = expr`. The target is an lvalue — currently
-// either a plain identifier or a chain of field accesses rooted in one.
+// `x = expr` or `x.field = expr` or `xs[i] = expr`.
 function resolveAssignment(node, scope, ctx) {
   if (node.target.kind === ASTNodeKind.IDENT) {
     return resolveAssignmentToIdent(node, scope, ctx);
   }
   if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
     return resolveAssignmentToField(node, scope, ctx);
+  }
+  if (node.target.kind === ASTNodeKind.INDEX_EXPRESSION) {
+    return resolveAssignmentToIndex(node, scope, ctx);
   }
   pushError(
     ctx.errors,
@@ -281,6 +330,22 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     pushError(ctx.errors, node, `cannot assign to const "${targetName}"`);
     return setType(node, ErrorType());
   }
+
+  // Auto-deref write: if the binding is a ref, write through the pointer
+  if (binding.type.kind === typeKinds.ref) {
+    node.target.autoDerefWrite = true;
+    node.target.resolvedType = binding.type.inner;
+    checkInitializer(
+      node.value,
+      binding.type.inner,
+      scope,
+      ctx,
+      (valueType) =>
+        `cannot assign ${formatType(valueType)} to ${formatType(binding.type.inner)} through ref "${targetName}"`,
+    );
+    return setType(node, binding.type.inner);
+  }
+
   node.target.resolvedType = binding.type;
 
   checkInitializer(
@@ -291,9 +356,6 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${targetName}"`,
   );
-  // The previous value's err observation is irrelevant once it's been
-  // overwritten, but the *new* value still needs observation before scope
-  // exit. Reset the flag so re-checking happens at popScope.
   if (isFallible(binding.type)) {
     binding.errObserved = false;
   }
@@ -305,8 +367,6 @@ function resolveAssignmentToField(node, scope, ctx) {
   if (targetType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
-  // const-ness is checked on the root identifier of the field chain. For
-  // `a.b.c = 5`, `a` must be `let`, not `const`.
   const rootIdent = rootIdentOf(node.target);
   if (!rootIdent) {
     pushError(
@@ -337,17 +397,31 @@ function resolveAssignmentToField(node, scope, ctx) {
   return setType(node, targetType);
 }
 
-// `obj.field` — receiver must be a struct or namespace.
-//
-// Namespace: looks up the exported symbol, sets node.namespaceLookup for codegen.
-// Struct: resolves the field type (plus the `s.len` built-in for strings).
+function resolveAssignmentToIndex(node, scope, ctx) {
+  // Resolve the index expression to get the element type
+  const elemType = resolveExprType(node.target, scope, ctx);
+  if (elemType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  checkInitializer(
+    node.value,
+    elemType,
+    scope,
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(elemType)} in index assignment`,
+  );
+  return setType(node, elemType);
+}
+
+// `obj.field` — receiver must be a struct, namespace, string (for .len), or array (for .len).
 function resolveFieldAccess(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
 
-  // namespace.field — e.g. `io.greet` or `io.SomeType`
+  // namespace.field
   if (objType.kind === typeKinds.namespace) {
     if (!objType.exports.has(node.field)) {
       pushError(ctx.errors, node, `namespace "${node.object.name}" has no export "${node.field}"`);
@@ -368,6 +442,7 @@ function resolveFieldAccess(node, scope, ctx) {
     return setType(node, sym);
   }
 
+  // string.len intrinsic
   if (
     objType.kind === typeKinds.prim &&
     objType.name === primAnnotations.string &&
@@ -375,6 +450,17 @@ function resolveFieldAccess(node, scope, ctx) {
   ) {
     return setType(node, PrimType(primAnnotations.usize));
   }
+
+  // array.len intrinsic
+  if (objType.kind === typeKinds.array && node.field === "len") {
+    node.isArrayLen = true;
+    return setType(node, PrimType(primAnnotations.usize));
+  }
+  if (objType.kind === typeKinds.array) {
+    pushError(ctx.errors, node, `type ${formatType(objType)} has no field "${node.field}"`);
+    return setType(node, ErrorType());
+  }
+
   if (objType.kind !== typeKinds.struct) {
     pushError(ctx.errors, node, `field access on non-struct type ${formatType(objType)}`);
     return setType(node, ErrorType());
@@ -388,6 +474,69 @@ function resolveFieldAccess(node, scope, ctx) {
     markErrObservedThroughRoot(node.object, scope);
   }
   return setType(node, field.type);
+}
+
+// `ref x` — takes the address of an lvalue.
+function resolveRefExpression(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (operandType.kind === typeKinds.ref) {
+    pushError(ctx.errors, node, `cannot take ref of a ref — 'ref ref T' is not supported`);
+    return setType(node, ErrorType());
+  }
+  // Only lvalues can be ref'd
+  if (
+    node.operand.kind !== ASTNodeKind.IDENT &&
+    node.operand.kind !== ASTNodeKind.FIELD_ACCESS &&
+    node.operand.kind !== ASTNodeKind.INDEX_EXPRESSION
+  ) {
+    pushError(ctx.errors, node, `cannot take ref of a non-lvalue expression`);
+    return setType(node, ErrorType());
+  }
+  return setType(node, RefType(operandType));
+}
+
+// `[e1, e2, e3]` — infer element type from first element, check all match.
+function resolveArrayLiteral(node, scope, ctx) {
+  if (node.elements.length === 0) {
+    pushError(ctx.errors, node, `empty array literal requires explicit type annotation`);
+    return setType(node, ErrorType());
+  }
+  const firstType = resolveExprType(node.elements[0], scope, ctx);
+  for (let i = 1; i < node.elements.length; i++) {
+    const elemType = resolveExprType(node.elements[i], scope, ctx);
+    if (!typesEqual(firstType, elemType) && firstType.kind !== typeKinds.error && elemType.kind !== typeKinds.error) {
+      // Allow untyped int to match first typed element
+      if (!(elemType.kind === typeKinds.untypedInt && firstType.kind === typeKinds.prim) &&
+          !(elemType.kind === typeKinds.untypedFloat && firstType.kind === typeKinds.prim) &&
+          !(firstType.kind === typeKinds.untypedInt && elemType.kind === typeKinds.prim) &&
+          !(firstType.kind === typeKinds.untypedFloat && elemType.kind === typeKinds.prim)) {
+        pushError(ctx.errors, node.elements[i],
+          `array literal element ${i} has type ${formatType(elemType)}, expected ${formatType(firstType)}`);
+      }
+    }
+  }
+  return setType(node, ArrayType(firstType));
+}
+
+// `xs[i]` — object must be an array, index must be an integer type.
+function resolveIndexExpression(node, scope, ctx) {
+  const objType = resolveExprType(node.object, scope, ctx);
+  const idxType = resolveExprType(node.index, scope, ctx);
+  if (objType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (objType.kind !== typeKinds.array) {
+    pushError(ctx.errors, node, `cannot index non-array type ${formatType(objType)}`);
+    return setType(node, ErrorType());
+  }
+  const isIntIdx =
+    (idxType.kind === typeKinds.prim && isIntPrim(idxType.name)) ||
+    idxType.kind === typeKinds.untypedInt;
+  if (!isIntIdx) {
+    pushError(ctx.errors, node.index,
+      `array index must be an integer type, found ${formatType(idxType)}`);
+    return setType(node, ErrorType());
+  }
+  return setType(node, objType.elem);
 }
 
 // Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT
@@ -413,11 +562,7 @@ export function markErrObservedThroughRoot(exprNode, scope) {
   }
 }
 
-// `expr?` — postfix propagator. Three checks:
-//   1. operand must be a fallible struct
-//   2. enclosing function must return a fallible type (we'll early-return its err)
-//   3. if multi-field strip, mark the node so the destructure path can pick it up;
-//      every other context rejects via checkInitializer.
+// `expr?` — postfix propagator.
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) {
@@ -440,7 +585,6 @@ function resolveTryOp(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // The `?` itself counts as observation — it consumes err entirely.
   markErrObservedThroughRoot(node.operand, scope);
 
   const stripped = strippedTypeOf(operandType);
@@ -451,14 +595,6 @@ function resolveTryOp(node, scope, ctx) {
   return setType(node, stripped);
 }
 
-// A struct literal that reaches resolveExprType directly has no expected
-// target type to check against — we don't infer struct types from field
-// shapes. Walk children to surface their errors, then emit a "no target
-// type" error and mark this node as error.
-//
-// Initializers/return/assignments/args go through checkInitializer, which
-// pins struct literals via pinStructLiteral instead, so those paths never
-// reach this branch.
 function resolveOrphanStructLiteral(node, scope, ctx) {
   for (const field of node.fields) {
     resolveExprType(field.value, scope, ctx);
@@ -476,23 +612,6 @@ function rootIdentOf(node) {
 }
 
 // "Does this value-expression fit this target type?"
-//
-// Used by every place where the language has a known expected type:
-//   - `let x: T = expr`   /  `const x: T = expr`
-//   - `return expr`
-//   - `x = expr`          /  `x.field = expr`
-//   - call arguments      (target type = parameter type)
-//   - struct-literal field values (target type = declared field type)
-//
-// Steps:
-//   1. If the value is a struct literal, pin it to expectedType. (Struct
-//      literals can't be type-checked alone — they need a target.)
-//   2. Otherwise: resolve the value's type and, if it doesn't fit
-//      expectedType, push an error built from `mismatchMessage`.
-//   3. If the value is an untyped int/float literal flowing into a typed
-//      int/float prim, finish coercing it (range-check + retype).
-//
-// Returns the value's resolved type (== expectedType for struct literals).
 export function checkInitializer(
   valueNode,
   expectedType,
@@ -504,11 +623,15 @@ export function checkInitializer(
     pinStructLiteral(valueNode, expectedType, scope, ctx);
     return expectedType;
   }
+  // Array literal with a known array target type: check elements against elem type
+  if (
+    valueNode.kind === ASTNodeKind.ARRAY_LITERAL &&
+    expectedType.kind === typeKinds.array
+  ) {
+    checkArrayLiteralAgainstType(valueNode, expectedType, scope, ctx);
+    return expectedType;
+  }
   const valueType = resolveExprType(valueNode, scope, ctx);
-  // Multi-field `?` strips can only be consumed by a destructure. Every
-  // path that flows through checkInitializer (let/const init, return, call
-  // arg, assignment, struct-literal field) is by definition not a
-  // destructure, so reject here with a clear message.
   if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
     pushError(
       ctx.errors,
@@ -522,6 +645,28 @@ export function checkInitializer(
   }
   coerceUntypedLiteralToTyped(valueNode, valueType, expectedType, ctx.errors);
   return valueType;
+}
+
+// Check array literal elements against a known array type's element type.
+function checkArrayLiteralAgainstType(litNode, arrayType, scope, ctx) {
+  const elemType = arrayType.elem;
+  if (litNode.elements.length === 0) {
+    litNode.resolvedType = arrayType;
+    litNode.knownElemType = elemType;
+    return;
+  }
+  for (let i = 0; i < litNode.elements.length; i++) {
+    checkInitializer(
+      litNode.elements[i],
+      elemType,
+      scope,
+      ctx,
+      (actualType) =>
+        `array literal element ${i} has type ${formatType(actualType)}, expected ${formatType(elemType)}`,
+    );
+  }
+  litNode.resolvedType = arrayType;
+  litNode.knownElemType = elemType;
 }
 
 // `f(a, b)` — checks arity, then runs each arg through checkInitializer
@@ -538,14 +683,33 @@ export function resolveCallType(node, sig, scope, ctx) {
 
   for (let i = 0; i < node.args.length; i++) {
     const param = sig.params[i];
-    checkInitializer(
-      node.args[i],
-      param.type,
-      scope,
-      ctx,
-      (argType) =>
-        `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
-    );
+    if (param.isRef) {
+      // ref params require an explicit REF_EXPRESSION at the call site
+      if (node.args[i].kind !== ASTNodeKind.REF_EXPRESSION) {
+        const hint = node.args[i].kind === ASTNodeKind.IDENT ? node.args[i].name : "...";
+        pushError(ctx.errors, node.args[i],
+          `parameter "${param.name}" expects a ref argument — pass with 'ref ${hint}'`);
+        resolveExprType(node.args[i], scope, ctx);
+        continue;
+      }
+      // Validate inner expression type matches param's inner type
+      const innerExpType = resolveExprType(node.args[i].operand, scope, ctx);
+      const paramInner = param.type.inner; // param.type is RefType { inner }
+      if (paramInner && innerExpType.kind !== typeKinds.error && !typesEqual(innerExpType, paramInner)) {
+        pushError(ctx.errors, node.args[i],
+          `ref argument type ${formatType(innerExpType)} does not match param type ${formatType(paramInner)}`);
+      }
+      node.args[i].resolvedType = param.type;
+    } else {
+      checkInitializer(
+        node.args[i],
+        param.type,
+        scope,
+        ctx,
+        (argType) =>
+          `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
+      );
+    }
   }
 
   return setType(node, sig.returnType);
@@ -588,7 +752,6 @@ export function pinStructLiteral(litNode, targetType, scope, ctx) {
         field,
         `type "${targetType.name}" has no field "${field.name}"`,
       );
-      // still walk the value so nested errors surface
       if (field.value.kind !== ASTNodeKind.STRUCT_LITERAL) {
         resolveExprType(field.value, scope, ctx);
       }

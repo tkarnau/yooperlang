@@ -15,7 +15,7 @@ describe("parse: top-level shape", () => {
     assert.equal(ast.body.length, 1);
     assert.equal(ast.body[0].kind, ASTNodeKind.FUNCTION_DECL);
     assert.equal(ast.body[0].name, "main");
-    assert.equal(ast.body[0].returnType, "int32");
+    assert.deepEqual(ast.body[0].returnTypeAnnotation, { kind: "typeName", name: "int32" });
   });
 
   it("function params parse with name and type", () => {
@@ -23,7 +23,7 @@ describe("parse: top-level shape", () => {
     const fn = ast.body[0];
     assert.equal(fn.params.length, 2);
     assert.equal(fn.params[0].name, "a");
-    assert.equal(fn.params[0].type, "int32");
+    assert.deepEqual(fn.params[0].typeAnnotation, { kind: "typeName", name: "int32" });
     assert.equal(fn.params[1].name, "b");
   });
 });
@@ -72,7 +72,7 @@ describe("parse: statements", () => {
     const stmts = bodyOf("let x: int32 = 1;");
     assert.equal(stmts[0].kind, ASTNodeKind.LET_DECL);
     assert.equal(stmts[0].name, "x");
-    assert.equal(stmts[0].type, "int32");
+    assert.deepEqual(stmts[0].typeAnnotation, { kind: "typeName", name: "int32" });
   });
 
   it("const decl", () => {

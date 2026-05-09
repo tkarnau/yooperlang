@@ -58,6 +58,8 @@ Mid-level data shapes the spec leans on. None require traits/kinds to land.
 - `else if` chaining, `break`, `continue`
 - Casts as type-name calls: `int64(x)`, `uint8(x & 0xFF)`
 
+> Detailed plan: [phase-4-refs-arrays-control-flow.md](phase-4-refs-arrays-control-flow.md)
+
 ### Phase 5 — Traits
 
 Capability layer. Spec §5. Methods live inside `type X implements Trait { fields; fn; }` blocks (no bare impl blocks).

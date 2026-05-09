@@ -13,11 +13,14 @@
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
 import {
+  ArrayType,
   ErrorType,
   FuncType,
+  RefType,
   StructType,
   primTypeFromName,
-  resolveTypeFromName,
+  resolveTypeAnnotation,
+  formatAnnotation,
 } from "./types.js";
 import { formatType } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
@@ -55,6 +58,25 @@ function resolveTypeInModule(name, modId, moduleEnv) {
     if (resolved) return resolved;
   }
   return local ?? null;
+}
+
+// Resolve a structured type annotation within a multi-module context.
+function resolveTypeAnnotationInModule(annot, modId, moduleEnv) {
+  if (!annot) return null;
+  if (annot.kind === "typeName") {
+    return resolveTypeInModule(annot.name, modId, moduleEnv);
+  }
+  if (annot.kind === "refType") {
+    const inner = resolveTypeAnnotationInModule(annot.inner, modId, moduleEnv);
+    if (!inner) return null;
+    return RefType(inner);
+  }
+  if (annot.kind === "arrayType") {
+    const elem = resolveTypeAnnotationInModule(annot.elem, modId, moduleEnv);
+    if (!elem) return null;
+    return ArrayType(elem);
+  }
+  throw new Error(`resolveTypeAnnotationInModule: unknown annotation kind "${annot.kind}"`);
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
@@ -133,9 +155,9 @@ export function typecheckProgram(modules) {
       if (d.kind === ASTNodeKind.TYPE_DECL) {
         const fields = [];
         for (const field of (d.fields ?? [])) {
-          let fieldType = resolveTypeInModule(field.type, mod.id, moduleEnv);
+          let fieldType = resolveTypeAnnotationInModule(field.typeAnnotation, mod.id, moduleEnv);
           if (!fieldType) {
-            errors.push({ message: `unknown type "${field.type}" in field "${field.name}" of struct "${d.name}"`, sourceLoc: field.sourceLoc });
+            errors.push({ message: `unknown type "${formatAnnotation(field.typeAnnotation)}" in field "${field.name}" of struct "${d.name}"`, sourceLoc: field.sourceLoc });
             fieldType = ErrorType();
           }
           if (fields.some(f => f.name === field.name)) {
@@ -165,8 +187,11 @@ export function typecheckProgram(modules) {
         // Overwrite shell placed in pass A with properly-resolved types.
         // Redeclaration was already checked in pass A.
         localSymbols.set(funcDecl.name, FuncType(
-          (funcDecl.params ?? []).map(p => ({ name: p.name, type: resolveTypeInModule(p.type, mod.id, moduleEnv) ?? ErrorType() })),
-          resolveTypeInModule(funcDecl.returnType, mod.id, moduleEnv) ?? ErrorType(),
+          (funcDecl.params ?? []).map(p => {
+            const baseType = resolveTypeAnnotationInModule(p.typeAnnotation, mod.id, moduleEnv) ?? ErrorType();
+            return { name: p.name, type: p.isRef ? RefType(baseType) : baseType, isRef: p.isRef ?? false };
+          }),
+          resolveTypeAnnotationInModule(funcDecl.returnTypeAnnotation, mod.id, moduleEnv) ?? ErrorType(),
         ));
         if (decl.kind === ASTNodeKind.EXPORT_DECL || decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
           exports.add(funcDecl.name);
@@ -178,11 +203,11 @@ export function typecheckProgram(modules) {
         for (const ext of decl.decls) {
           if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
           const paramTypes = ext.params.map(p => {
-            const t = resolveTypeInModule(p.type, mod.id, moduleEnv) ?? ErrorType();
+            const t = resolveTypeAnnotationInModule(p.typeAnnotation, mod.id, moduleEnv) ?? ErrorType();
             p.resolvedType = t;
-            return { name: p.name, type: t };
+            return { name: p.name, type: t, isRef: p.isRef ?? false };
           });
-          const retType = resolveTypeInModule(ext.returnType, mod.id, moduleEnv) ?? ErrorType();
+          const retType = resolveTypeAnnotationInModule(ext.returnTypeAnnotation, mod.id, moduleEnv) ?? ErrorType();
           ext.resolvedType = retType;
           localSymbols.set(ext.name, FuncType(paramTypes, retType, ext.variadic));
         }
@@ -261,9 +286,9 @@ export function typecheck(ast) {
     if (d.kind === ASTNodeKind.TYPE_DECL) {
       const fields = [];
       for (const field of (d.fields ?? [])) {
-        let fieldType = resolveTypeFromName(field.type, structTable);
+        let fieldType = resolveTypeAnnotation(field.typeAnnotation, structTable);
         if (!fieldType) {
-          errors.push({ message: `unknown type "${field.type}" in field "${field.name}" of struct "${d.name}"`, sourceLoc: field.sourceLoc });
+          errors.push({ message: `unknown type "${formatAnnotation(field.typeAnnotation)}" in field "${field.name}" of struct "${d.name}"`, sourceLoc: field.sourceLoc });
           fieldType = ErrorType();
         }
         if (fields.some(f => f.name === field.name)) {
@@ -289,8 +314,11 @@ export function typecheck(ast) {
         errors.push({ message: `redeclaration of function "${d.name}"`, sourceLoc: d.sourceLoc });
       } else {
         moduleSymbols.set(d.name, FuncType(
-          (d.params ?? []).map(p => ({ name: p.name, type: resolveTypeFromName(p.type, structTable) ?? ErrorType() })),
-          resolveTypeFromName(d.returnType, structTable) ?? ErrorType(),
+          (d.params ?? []).map(p => {
+            const baseType = resolveTypeAnnotation(p.typeAnnotation, structTable) ?? ErrorType();
+            return { name: p.name, type: p.isRef ? RefType(baseType) : baseType, isRef: p.isRef ?? false };
+          }),
+          resolveTypeAnnotation(d.returnTypeAnnotation, structTable) ?? ErrorType(),
         ));
       }
     }
@@ -303,11 +331,11 @@ export function typecheck(ast) {
           continue;
         }
         const paramTypes = ext.params.map(p => {
-          const t = resolveTypeFromName(p.type, structTable) ?? ErrorType();
+          const t = resolveTypeAnnotation(p.typeAnnotation, structTable) ?? ErrorType();
           p.resolvedType = t;
-          return { name: p.name, type: t };
+          return { name: p.name, type: t, isRef: p.isRef ?? false };
         });
-        const retType = resolveTypeFromName(ext.returnType, structTable) ?? ErrorType();
+        const retType = resolveTypeAnnotation(ext.returnTypeAnnotation, structTable) ?? ErrorType();
         ext.resolvedType = retType;
         moduleSymbols.set(ext.name, FuncType(paramTypes, retType, ext.variadic));
       }
