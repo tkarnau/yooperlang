@@ -1,0 +1,55 @@
+type Point {
+    x: int32,
+    y: int32,
+}
+
+type Vec2 {
+    x: int32,
+    y: int32,
+}
+
+
+type Rect {
+    pos: Vec2,
+    length: int32,
+    width: int32,
+}
+
+function is_intersecting(rect1: Rect, rect2: Rect): bool {
+    return rect1.pos.x < rect2.pos.x + rect2.width
+        && rect2.pos.x < rect1.pos.x + rect1.width
+        && rect1.pos.y < rect2.pos.y + rect2.length
+        && rect2.pos.y < rect1.pos.y + rect1.length;
+}
+
+function distance_sq(p: Point): int32 {
+    return p.x * p.x + p.y * p.y;
+}
+
+function main(): int32 {
+    let p: Point = { x: 3, y: 4 };
+    printf(`distance_sq = ${distance_sq(p)}\n`);
+    let r1: Rect = {
+        pos: {
+            x: 5,
+            y: 9
+        },
+        length: 10,
+        width: 10,
+    };
+
+    let r2: Rect = {
+        pos: {
+            x: 2,
+            y: 2,
+        },
+        length: 10,
+        width: 10,
+    };
+
+    const result: bool = is_intersecting(r1, r2);
+
+    printf(`is intersecting: ${result}\n`);
+
+    return 0;
+}

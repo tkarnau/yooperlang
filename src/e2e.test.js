@@ -10,8 +10,9 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 
 import { parse } from "./jsyooparser/parser.js";
-import { typecheckSource } from "./jsyooptypecheck/typecheck.js";
-import { compileSource } from "./jsyoopcodegen/codegen.js";
+import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.js";
+import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
+import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
@@ -84,6 +85,184 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a.inner.v = 42\n");
   });
+
+  it("errors_basic.yoop reads a fallible struct and observes err via field access", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/errors_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len = 42\n");
+  });
+
+  it("errors_propagate.yoop uses '?' to bail on err and yield the success value", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_propagate.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "total = 84\n");
+  });
+
+  it("errors_propagate_failure.yoop traces an err through '?' and a destructure", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_propagate_failure.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "err: empty path\n");
+  });
+
+  it("errors_discard.yoop satisfies observation via '_ = ...'", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_discard.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "done\n");
+  });
+
+  it("errors_destructure_no_qmark.yoop destructures a fallible struct including err", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_destructure_no_qmark.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len = 7\n");
+  });
+});
+
+// Multi-file fixture: compile entry path through full module graph pipeline.
+function runFixtureEntry(relPath) {
+  const entryAbs = path.join(repoRoot, relPath);
+  const { ir, linkFlags } = compileEntry(entryAbs);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
+  const llPath = path.join(tmpDir, "out.ll");
+  const binPath = path.join(tmpDir, "out");
+  fs.writeFileSync(llPath, ir);
+  const clangArgs = [llPath, "-o", binPath, ...linkFlags.map((f) => `-l${f}`)];
+  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  const result = spawnSync(binPath, [], { encoding: "utf8" });
+  return { stdout: result.stdout, exitCode: result.status };
+}
+
+// Typecheck a multi-file fixture (entry + imports) and return errors.
+function typecheckFixtureEntry(relPath) {
+  const entryAbs = path.join(repoRoot, relPath);
+  const { modules } = loadModuleGraph(entryAbs);
+  return typecheckProgram(modules);
+}
+
+function typecheckFixture(relPath) {
+  const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
+  return typecheckSource(src);
+}
+
+describe("e2e: multi-file pass fixtures compile and produce expected output", () => {
+  it("imports_basic: named import + call", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_basic/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "9 = 9\n");
+  });
+
+  it("imports_namespace: import * as + dotted call", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_namespace/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "5 = 5\n");
+  });
+
+  it("imports_renamed: import { x as y }", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_renamed/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "16 = 16\n");
+  });
+
+  it("imports_struct: exported struct + cross-module fallible flow", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_struct/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len = 43\n");
+  });
+
+  it("extern_printf: explicit printf via extern block", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/extern_printf/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "hello\n");
+  });
+
+  it("extern_library: -lm link flag + cos(0) = 1", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/extern_library/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "cos(0) = 1.000000\n");
+  });
+
+  it("imports_diamond: diamond dep loads each module exactly once", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_diamond/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=42 b=42\n");
+  });
+
+  it("side_effect_import: side-effect-only import succeeds", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/side_effect_import/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "init loaded\n");
+  });
+
+  it("export_c: export \"C\" function emits unmangled symbol", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/export_c/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "add_one(5) = 6\n");
+  });
+});
+
+describe("e2e: multi-file fail fixtures produce the right errors", () => {
+  it("import_no_yoop_ext.yoop: import path must end in .yoop", () => {
+    const entryAbs = path.join(repoRoot, "examples/fail/import_no_yoop_ext.yoop");
+    assert.throws(
+      () => loadModuleGraph(entryAbs),
+      /must end in \.yoop/,
+    );
+  });
+
+  it("extern_unsupported_abi.yoop: extern \"Rust\" is rejected at parse time", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/extern_unsupported_abi.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /unsupported extern ABI "Rust"/);
+  });
+
+  it("import_after_decl.yoop: import after non-import decl is a parse error", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/import_after_decl.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /imports must come before other declarations/);
+  });
+
+  it("import_unknown_export: importing a non-exported name is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/import_unknown_export/main.yoop");
+    assert.ok(
+      errors.some((e) => /has no export "nope"/.test(e.message)),
+      `expected no-export error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("import_collision: re-importing the same local name is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/import_collision/main.yoop");
+    assert.ok(
+      errors.some((e) => /collides with an existing declaration/.test(e.message)),
+      `expected collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("import_cycle: cyclic imports are detected at graph-load time", () => {
+    const entryAbs = path.join(repoRoot, "examples/fail/import_cycle/a.yoop");
+    assert.throws(
+      () => loadModuleGraph(entryAbs),
+      /import cycle detected/,
+    );
+  });
+
+  it("namespace_private: accessing a private export via namespace is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/namespace_private/main.yoop");
+    assert.ok(
+      errors.some((e) => /has no export "private_fn"/.test(e.message)),
+      `expected namespace-private error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
 });
 
 describe("e2e: fail fixtures fail at the right stage with the right message", () => {
@@ -92,6 +271,78 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       path.join(repoRoot, "examples/fail/parse_bad_suffix.yoop"),
       "utf8",
     );
-    assert.throws(() => parse(src), /expected token .* semicolon/);
+    assert.throws(() => parse(src), /expected semicolon/);
+  });
+
+  it("err_dropped.yoop rejects a bare fallible call statement", () => {
+    const { errors } = typecheckFixture("examples/fail/err_dropped.yoop");
+    assert.ok(
+      errors.some((e) => /fallible result.*dropped/.test(e.message)),
+      `expected dropped-fallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_unobserved.yoop rejects a fallible binding whose err is never read", () => {
+    const { errors } = typecheckFixture("examples/fail/err_unobserved.yoop");
+    assert.ok(
+      errors.some((e) =>
+        /fallible binding "r".*must observe its 'err'/.test(e.message),
+      ),
+      `expected unobserved-err error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_destructure_missing_err.yoop rejects a destructure that omits err", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_destructure_missing_err.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /destructuring a fallible type.*include "err"/.test(e.message)),
+      `expected missing-err error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_qmark_in_nonfallible.yoop rejects '?' inside a non-fallible function", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_qmark_in_nonfallible.yoop",
+    );
+    assert.ok(
+      errors.some((e) =>
+        /'\?' is only legal inside a function that returns a fallible type/.test(
+          e.message,
+        ),
+      ),
+      `expected ?-in-nonfallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_qmark_on_nonfallible.yoop rejects '?' on a non-fallible operand", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_qmark_on_nonfallible.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /'\?' applied to non-fallible type/.test(e.message)),
+      `expected ?-on-nonfallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_destructure_unknown_field.yoop rejects an unknown destructured name", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_destructure_unknown_field.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /no field "nope"/.test(e.message)),
+      `expected unknown-field error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_multi_strip_no_destructure.yoop rejects multi-field '?' outside a destructure", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_multi_strip_no_destructure.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /multi-field.*must be destructured/.test(e.message)),
+      `expected multi-strip error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
   });
 });

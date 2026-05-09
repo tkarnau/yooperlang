@@ -1,0 +1,8 @@
+import { via_a } from "./a.yoop";
+import { via_b } from "./b.yoop";
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+function main(): int32 {
+    printf(`a=${via_a()} b=${via_b()}\n`);
+    return 0;
+}

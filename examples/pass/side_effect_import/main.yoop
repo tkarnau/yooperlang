@@ -1,0 +1,7 @@
+import "./init.yoop";
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+function main(): int32 {
+    printf(`init loaded\n`);
+    return 0;
+}

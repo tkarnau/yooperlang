@@ -1,0 +1,13 @@
+type Counter {
+    value: int32,
+}
+
+function main(): int32 {
+    let c: Counter = { value: 0 };
+    c.value = c.value + 10;
+    c.value = c.value * 2;
+    printf(`c.value = ${c.value}\n`);
+    return 0;
+}
+
+// expected output: c.value = 20

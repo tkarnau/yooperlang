@@ -33,6 +33,7 @@ import {
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope } from "./scope.js";
+import { isFallible, strippedTypeOf } from "./fallible.js";
 import {
   coerceUntypedLiteralToTyped,
   isAssignable,
@@ -78,6 +79,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveFieldAccess(node, scope, ctx);
     case ASTNodeKind.STRUCT_LITERAL:
       return resolveOrphanStructLiteral(node, scope, ctx);
+    case ASTNodeKind.TRY_OP:
+      return resolveTryOp(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -98,11 +101,18 @@ function setType(node, type) {
 // `x` — looks up the variable in the lexical scope chain.
 function resolveIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, node.name);
-  if (!binding) {
-    pushError(ctx.errors, node, `undefined variable "${node.name}"`);
-    return setType(node, ErrorType());
+  if (binding) {
+    if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    return setType(node, binding.type);
   }
-  return setType(node, binding.type);
+  // Fall back to module-level symbols (namespace imports, etc.)
+  const modType = ctx.typeContext.moduleSymbols?.get(node.name);
+  if (modType) {
+    if (modType.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    return setType(node, modType);
+  }
+  pushError(ctx.errors, node, `undefined variable "${node.name}"`);
+  return setType(node, ErrorType());
 }
 
 // `a + b`, `a == b`, `a && b` — recurses into both sides, then asks
@@ -113,23 +123,63 @@ function resolveBinary(node, scope, ctx) {
   return setType(node, unifyArith(leftType, rightType, node.op));
 }
 
-// `f(a, b, c)` — looks up the function (declared in this module or a
-// known C extern), then hands off to resolveCallType for arity + args.
+// `f(a, b, c)` or `ns.f(a, b, c)` — looks up the function (local, imported
+// namespace, or known C extern), then checks arity + arg types.
 function resolveCall(node, scope, ctx) {
-  // printf is variadic — type-resolve each arg, no arity/type check.
-  if (node.callee === "printf") {
-    for (const arg of node.args) {
-      resolveExprType(arg, scope, ctx);
+  const callee = node.callee;
+
+  // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
+  if (callee && typeof callee === "object") {
+    const calleeType = resolveExprType(callee, scope, ctx);
+    if (calleeType.kind === typeKinds.error) return setType(node, ErrorType());
+    if (calleeType.kind !== typeKinds.func) {
+      pushError(ctx.errors, node, `expression is not callable`);
+      return setType(node, ErrorType());
     }
-    return setType(node, PrimType(primAnnotations.int32));
+    return resolveCallWithSig(node, calleeType, scope, ctx);
   }
 
-  const sig =
-    ctx.typeContext.moduleSymbols.get(node.callee) ??
-    KNOWN_EXTERNS[node.callee];
+  // printf legacy path — variadic, type-resolve each arg, no arity check.
+  if (callee === "printf") {
+    const sig = ctx.typeContext.moduleSymbols.get("printf");
+    if (sig) {
+      // Declared via extern block — use variadic path
+    } else {
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, PrimType(primAnnotations.int32));
+    }
+  }
+
+  const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
-    pushError(ctx.errors, node, `unknown function "${node.callee}"`);
+    pushError(ctx.errors, node, `unknown function "${callee}"`);
     return setType(node, ErrorType());
+  }
+  // Annotate imported calls so codegen knows the source module for mangling.
+  const importedNames = ctx.typeContext.importedNames;
+  if (importedNames) {
+    const imp = importedNames.get(callee);
+    if (imp && imp.kind === "value") {
+      node.calleeModuleId = imp.fromModuleId;
+      node.calleeExportName = imp.exportName;
+    }
+  }
+  return resolveCallWithSig(node, sig, scope, ctx);
+}
+
+// Shared call resolution once the sig is known. Handles variadic externs.
+function resolveCallWithSig(node, sig, scope, ctx) {
+  if (sig.variadic) {
+    // Check the fixed prefix, then resolve variadic tail freely.
+    const fixedParams = sig.params ?? [];
+    for (let i = 0; i < fixedParams.length && i < node.args.length; i++) {
+      checkInitializer(node.args[i], fixedParams[i].type, scope, ctx,
+        (vt) => `arg ${i + 1} of call: cannot pass ${formatType(vt)} to ${formatType(fixedParams[i].type)}`);
+    }
+    for (let i = fixedParams.length; i < node.args.length; i++) {
+      resolveExprType(node.args[i], scope, ctx);
+    }
+    return setType(node, sig.returnType);
   }
   return resolveCallType(node, sig, scope, ctx);
 }
@@ -241,6 +291,12 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${targetName}"`,
   );
+  // The previous value's err observation is irrelevant once it's been
+  // overwritten, but the *new* value still needs observation before scope
+  // exit. Reset the flag so re-checking happens at popScope.
+  if (isFallible(binding.type)) {
+    binding.errObserved = false;
+  }
   return setType(node, binding.type);
 }
 
@@ -281,31 +337,118 @@ function resolveAssignmentToField(node, scope, ctx) {
   return setType(node, targetType);
 }
 
-// `obj.field` — receiver must be a struct, and `field` must be one of
-// its fields. Result type is the field's declared type.
+// `obj.field` — receiver must be a struct or namespace.
+//
+// Namespace: looks up the exported symbol, sets node.namespaceLookup for codegen.
+// Struct: resolves the field type (plus the `s.len` built-in for strings).
 function resolveFieldAccess(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
+
+  // namespace.field — e.g. `io.greet` or `io.SomeType`
+  if (objType.kind === typeKinds.namespace) {
+    if (!objType.exports.has(node.field)) {
+      pushError(ctx.errors, node, `namespace "${node.object.name}" has no export "${node.field}"`);
+      return setType(node, ErrorType());
+    }
+    const moduleEnv = ctx.typeContext.moduleEnv;
+    const srcEnv = moduleEnv?.get(objType.moduleId);
+    if (!srcEnv) {
+      pushError(ctx.errors, node, `internal: namespace module ${objType.moduleId} not found`);
+      return setType(node, ErrorType());
+    }
+    const sym = srcEnv.localSymbols.get(node.field) ?? srcEnv.structTable.get(node.field);
+    if (!sym) {
+      pushError(ctx.errors, node, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
+      return setType(node, ErrorType());
+    }
+    node.namespaceLookup = { moduleId: objType.moduleId, exportName: node.field };
+    return setType(node, sym);
+  }
+
+  if (
+    objType.kind === typeKinds.prim &&
+    objType.name === primAnnotations.string &&
+    node.field === "len"
+  ) {
+    return setType(node, PrimType(primAnnotations.usize));
+  }
   if (objType.kind !== typeKinds.struct) {
-    pushError(
-      ctx.errors,
-      node,
-      `field access on non-struct type ${formatType(objType)}`,
-    );
+    pushError(ctx.errors, node, `field access on non-struct type ${formatType(objType)}`);
     return setType(node, ErrorType());
   }
   const field = objType.fields?.find((f) => f.name === node.field);
   if (!field) {
+    pushError(ctx.errors, node, `type "${objType.name}" has no field "${node.field}"`);
+    return setType(node, ErrorType());
+  }
+  if (node.field === "err") {
+    markErrObservedThroughRoot(node.object, scope);
+  }
+  return setType(node, field.type);
+}
+
+// Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT
+// root. If we find one bound in scope, flip its `errObserved` flag so the
+// scope-exit check accepts it.
+export function markErrObservedThroughRoot(exprNode, scope) {
+  let n = exprNode;
+  while (n) {
+    if (n.kind === ASTNodeKind.IDENT) {
+      const b = lookupInScope(scope, n.name);
+      if (b) b.errObserved = true;
+      return;
+    }
+    if (n.kind === ASTNodeKind.FIELD_ACCESS) {
+      n = n.object;
+      continue;
+    }
+    if (n.kind === ASTNodeKind.TRY_OP) {
+      n = n.operand;
+      continue;
+    }
+    return;
+  }
+}
+
+// `expr?` — postfix propagator. Three checks:
+//   1. operand must be a fallible struct
+//   2. enclosing function must return a fallible type (we'll early-return its err)
+//   3. if multi-field strip, mark the node so the destructure path can pick it up;
+//      every other context rejects via checkInitializer.
+function resolveTryOp(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (!isFallible(operandType)) {
     pushError(
       ctx.errors,
       node,
-      `type "${objType.name}" has no field "${node.field}"`,
+      `'?' applied to non-fallible type ${formatType(operandType)} — only structs ending in 'err: string' are fallible`,
     );
     return setType(node, ErrorType());
   }
-  return setType(node, field.type);
+  if (!isFallible(ctx.funcReturnType)) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' is only legal inside a function that returns a fallible type; '${ctx.funcName}' returns ${formatType(ctx.funcReturnType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+
+  // The `?` itself counts as observation — it consumes err entirely.
+  markErrObservedThroughRoot(node.operand, scope);
+
+  const stripped = strippedTypeOf(operandType);
+  if (stripped && stripped.kind === "strippedMulti") {
+    node.strippedMulti = stripped;
+    return setType(node, ErrorType());
+  }
+  return setType(node, stripped);
 }
 
 // A struct literal that reaches resolveExprType directly has no expected
@@ -362,6 +505,18 @@ export function checkInitializer(
     return expectedType;
   }
   const valueType = resolveExprType(valueNode, scope, ctx);
+  // Multi-field `?` strips can only be consumed by a destructure. Every
+  // path that flows through checkInitializer (let/const init, return, call
+  // arg, assignment, struct-literal field) is by definition not a
+  // destructure, so reject here with a clear message.
+  if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
+    pushError(
+      ctx.errors,
+      valueNode,
+      `'?' on multi-field fallible type 'struct ${valueNode.strippedMulti.sourceName}' must be destructured (e.g. const { a, b } = f()?;)`,
+    );
+    return ErrorType();
+  }
   if (!isAssignable(expectedType, valueType)) {
     pushError(ctx.errors, valueNode, mismatchMessage(valueType));
   }

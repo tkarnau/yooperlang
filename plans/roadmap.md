@@ -46,6 +46,8 @@ The "program defines itself" story. The entry file pulls in everything; no flags
 - **`extern "C" from library "m"`**: emits `-lm` style link flags to clang
 - **`export "C" function`**: unmangled symbols for C ABI
 
+> Detailed plan: [phase-3-modules-and-ffi.md](phase-3-modules-and-ffi.md)
+
 ### Phase 4 — Refs, arrays, control flow gaps
 
 Mid-level data shapes the spec leans on. None require traits/kinds to land.

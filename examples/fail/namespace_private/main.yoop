@@ -1,0 +1,5 @@
+import * as m from "./m.yoop";
+
+function main(): int32 {
+    return m.private_fn();
+}

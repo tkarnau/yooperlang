@@ -1,0 +1,13 @@
+type Bytes {
+    len: int32,
+    err: string,
+}
+
+function read_all(path: string): Bytes {
+    return { len: 0, err: "x" };
+}
+
+function main(): int32 {
+    read_all("x");
+    return 0;
+}

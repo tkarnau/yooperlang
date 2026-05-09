@@ -1,0 +1,14 @@
+type Bytes {
+    len: int32,
+    err: string,
+}
+
+function read_all(path: string): Bytes {
+    return { len: 0, err: "x" };
+}
+
+function main(): int32 {
+    const { len } = read_all("x");
+    printf(`len = ${len}\n`);
+    return 0;
+}

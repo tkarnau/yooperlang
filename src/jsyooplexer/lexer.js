@@ -40,6 +40,13 @@ export const TokenTags = {
   while: 19,
   for: 20,
   type: 38,
+  import: 41,
+  export: 42,
+  extern: 43,
+  from: 44,
+  as: 45,
+  library: 46,
+  dotdotdot: 47, // for variadic params and rest patterns
   // punctuation / operators
   eq: 5,
   semicolon: 6,
@@ -66,6 +73,7 @@ export const TokenTags = {
   divide: 34,
   modulus: 35,
   dot: 39,
+  question: 40,
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -76,6 +84,7 @@ export const inverseTokenTags = Object.entries(TokenTags).reduce(
   {},
 );
 
+// sorted longest to shortest so we can match multi-char without context
 export const tokenScanList = [
   { str: "(", tag: TokenTags.lparen },
   { str: ")", tag: TokenTags.rparen },
@@ -85,6 +94,7 @@ export const tokenScanList = [
   { str: "}", tag: TokenTags.rcurly },
   { str: ":", tag: TokenTags.colon },
   { str: ",", tag: TokenTags.comma },
+  { str: "?", tag: TokenTags.question },
   { str: "==", tag: TokenTags.eqeq },
   { str: "!=", tag: TokenTags.neq },
   { str: "<=", tag: TokenTags.lte },
@@ -101,6 +111,7 @@ export const tokenScanList = [
   { str: "/", tag: TokenTags.divide },
   { str: "%", tag: TokenTags.modulus },
   { str: ".", tag: TokenTags.dot },
+  { str: "...", tag: TokenTags.dotdotdot },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {
@@ -113,6 +124,12 @@ const keywordTagList = {
   while: TokenTags.while,
   for: TokenTags.for,
   type: TokenTags.type,
+  import: TokenTags.import,
+  export: TokenTags.export,
+  extern: TokenTags.extern,
+  from: TokenTags.from,
+  as: TokenTags.as,
+  library: TokenTags.library,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

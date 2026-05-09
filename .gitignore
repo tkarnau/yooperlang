@@ -1,5 +1,8 @@
-output.exe
-examples/*
-!examples/*.yoop
-!examples/*.js
 output
+output.exe
+
+examples/**
+!examples/**/
+!examples/**/*.yoop
+!examples/**/*.js
+examples/**/*.exe

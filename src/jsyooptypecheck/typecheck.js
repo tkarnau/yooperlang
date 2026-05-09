@@ -15,124 +15,317 @@ import { ASTNodeKind } from "../contracts.js";
 import {
   ErrorType,
   FuncType,
-  resolveTypeFromName,
   StructType,
+  primTypeFromName,
+  resolveTypeFromName,
 } from "./types.js";
 import { formatType } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
 import { validateFunction } from "./checkStatement.js";
+import { resolveImports } from "./imports.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
-/***************
- * 1. Symbol collection
- * 2. Function bodies
- * 3. Validation rules
- * 4. Error reporting
- */
+// ─── helpers ─────────────────────────────────────────────────────────────────
+
+// If decl is an EXPORT_DECL wrapper, unwrap to the inner decl; otherwise
+// return the decl itself.
+function innerDecl(decl) {
+  if (decl.kind === ASTNodeKind.EXPORT_DECL) return decl.decl;
+  if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) return decl.fn;
+  return decl;
+}
+
+// Resolve a type name within a multi-module context: checks local structs,
+// primitive types, or structs imported via named imports.
+function resolveTypeInModule(name, modId, moduleEnv) {
+  const { structTable, importedNames } = moduleEnv.get(modId);
+  const local = structTable.get(name);
+  // If local is a fully-resolved struct (fields !== null), use it.
+  // If it's a shell (fields === null, from pass A / import copy), fall through
+  // to importedNames so pass-C-resolved source versions are preferred.
+  if (local && local.fields !== null) return local;
+  const prim = primTypeFromName(name);
+  if (prim) return prim;
+  const imp = importedNames.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = moduleEnv.get(imp.fromModuleId);
+    const resolved = srcEnv?.structTable.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return local ?? null;
+}
+
+// ─── multi-module entry point ─────────────────────────────────────────────────
+
+// typecheckProgram(modules) — main entry for multi-file compilation.
+// modules: topologically sorted (leaves first).
+// Returns { modules, errors, moduleEnv }.
+export function typecheckProgram(modules) {
+  const errors = [];
+  const moduleEnv = new Map(); // moduleId -> { localSymbols, structTable, exports, importedNames, linkLibraries }
+
+  // pass A: register struct shells so cross-module struct refs work in pass B
+  for (const mod of modules) {
+    const localSymbols = new Map();
+    const structTable = new Map();
+    const exports = new Set();
+    const importedNames = new Map();
+    const linkLibraries = new Set();
+
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.TYPE_DECL) {
+        if (structTable.has(d.name)) {
+          errors.push({ message: `redeclaration of type "${d.name}"`, sourceLoc: d.sourceLoc });
+        } else {
+          structTable.set(d.name, StructType(d.name, null, mod.id));
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+      }
+      // Register function shells so resolveImports (pass B) can find them.
+      // Redeclaration check lives here; pass C overwrites with proper sigs.
+      const funcDecl = d.kind === ASTNodeKind.FUNCTION_DECL ? d : null;
+      if (funcDecl) {
+        if (localSymbols.has(funcDecl.name)) {
+          errors.push({ message: `redeclaration of function "${funcDecl.name}"`, sourceLoc: funcDecl.sourceLoc });
+        } else {
+          localSymbols.set(funcDecl.name, FuncType([], ErrorType()));
+          if (decl.kind === ASTNodeKind.EXPORT_DECL || decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
+            exports.add(funcDecl.name);
+          }
+        }
+      }
+      if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+        for (const ext of decl.decls) {
+          if (ext.kind === ASTNodeKind.EXTERN_TYPE_DECL && !structTable.has(ext.name)) {
+            structTable.set(ext.name, StructType(ext.name, [], mod.id));
+          }
+          if (ext.kind === ASTNodeKind.EXTERN_FUNCTION_DECL) {
+            if (localSymbols.has(ext.name)) {
+              errors.push({ message: `redeclaration of "${ext.name}"`, sourceLoc: ext.sourceLoc });
+            } else {
+              localSymbols.set(ext.name, FuncType([], ErrorType()));
+            }
+          }
+        }
+        if (decl.source.kind === "library") linkLibraries.add(decl.source.value);
+      }
+    }
+
+    moduleEnv.set(mod.id, { localSymbols, structTable, exports, importedNames, linkLibraries });
+  }
+
+  // pass B: wire imports (so pass C can resolve cross-module type names)
+  for (const mod of modules) {
+    resolveImports(mod, moduleEnv, errors);
+  }
+
+  // pass C: struct fields + function sigs + extern decls
+  for (const mod of modules) {
+    const { localSymbols, structTable, exports } = moduleEnv.get(mod.id);
+
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+
+      // struct fields
+      if (d.kind === ASTNodeKind.TYPE_DECL) {
+        const fields = [];
+        for (const field of (d.fields ?? [])) {
+          let fieldType = resolveTypeInModule(field.type, mod.id, moduleEnv);
+          if (!fieldType) {
+            errors.push({ message: `unknown type "${field.type}" in field "${field.name}" of struct "${d.name}"`, sourceLoc: field.sourceLoc });
+            fieldType = ErrorType();
+          }
+          if (fields.some(f => f.name === field.name)) {
+            errors.push({ message: `duplicate field name "${field.name}" in struct "${d.name}"`, sourceLoc: field.sourceLoc });
+          }
+          if (detectRecursiveField(d.name, fieldType)) {
+            errors.push({ message: `recursive field "${field.name}" in struct "${d.name}"`, sourceLoc: field.sourceLoc });
+          }
+          fields.push({ name: field.name, type: fieldType });
+        }
+        const fullType = StructType(d.name, fields, mod.id);
+        d.resolvedType = fullType;
+        structTable.set(d.name, fullType);
+      }
+
+      // function signatures
+      let funcDecl = null;
+      if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
+        funcDecl = decl;
+      } else if (
+        (decl.kind === ASTNodeKind.EXPORT_DECL || decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) &&
+        d.kind === ASTNodeKind.FUNCTION_DECL
+      ) {
+        funcDecl = d;
+      }
+      if (funcDecl) {
+        // Overwrite shell placed in pass A with properly-resolved types.
+        // Redeclaration was already checked in pass A.
+        localSymbols.set(funcDecl.name, FuncType(
+          (funcDecl.params ?? []).map(p => ({ name: p.name, type: resolveTypeInModule(p.type, mod.id, moduleEnv) ?? ErrorType() })),
+          resolveTypeInModule(funcDecl.returnType, mod.id, moduleEnv) ?? ErrorType(),
+        ));
+        if (decl.kind === ASTNodeKind.EXPORT_DECL || decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
+          exports.add(funcDecl.name);
+        }
+      }
+
+      // extern function decls — overwrite shells placed in pass A
+      if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+        for (const ext of decl.decls) {
+          if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
+          const paramTypes = ext.params.map(p => {
+            const t = resolveTypeInModule(p.type, mod.id, moduleEnv) ?? ErrorType();
+            p.resolvedType = t;
+            return { name: p.name, type: t };
+          });
+          const retType = resolveTypeInModule(ext.returnType, mod.id, moduleEnv) ?? ErrorType();
+          ext.resolvedType = retType;
+          localSymbols.set(ext.name, FuncType(paramTypes, retType, ext.variadic));
+        }
+      }
+    }
+  }
+
+  // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.
+  // Pass B copied shells; overwrite with fully-resolved versions.
+  for (const mod of modules) {
+    const { localSymbols, structTable, importedNames } = moduleEnv.get(mod.id);
+    for (const [localName, { fromModuleId, exportName, kind }] of importedNames) {
+      const srcEnv = moduleEnv.get(fromModuleId);
+      if (!srcEnv) continue;
+      if (kind === "value") {
+        const resolved = srcEnv.localSymbols.get(exportName);
+        if (resolved) localSymbols.set(localName, resolved);
+      } else if (kind === "type") {
+        const resolved = srcEnv.structTable.get(exportName);
+        if (resolved) structTable.set(localName, resolved);
+      }
+    }
+  }
+
+  // pass D: function body typechecking
+  for (const mod of modules) {
+    const { localSymbols, structTable, importedNames } = moduleEnv.get(mod.id);
+    const typeContext = { moduleSymbols: localSymbols, structTable, moduleEnv, importedNames, currentModId: mod.id };
+
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+        validateFunction(d, typeContext, errors);
+      }
+    }
+  }
+
+  return { modules, errors, moduleEnv };
+}
+
+// ─── single-module entry point (legacy + test path) ──────────────────────────
 
 export function typecheck(ast) {
-  // returns { ast, errors }
-  // - ast: same node objects, mutated in place with .resolvedType set
-  //   on every expression; .resolvedType also set on letDecl/constDecl/
-  //   functionDecl/param so codegen can read declared types uniformly
-  // - errors: [] of { message, start, length }
-
   const errors = [];
-  const moduleSymbols = new Map(); // name -> FuncType
-  const structTable = new Map(); // name -> StructType
+  const moduleSymbols = new Map();
+  const structTable = new Map();
 
   const typeContext = {
     moduleSymbols,
     structTable,
+    moduleEnv: null,
   };
 
-  // pass 1: register struct shells so types can refer to themselves and each
-  // other regardless of declaration order. fields are filled in pass 2.
+  // pass 1: struct shells
   for (const decl of ast.body) {
-    if (decl.kind === ASTNodeKind.TYPE_DECL) {
-      if (structTable.has(decl.name)) {
-        errors.push({
-          message: `redeclaration of type "${decl.name}"`,
-          sourceLoc: decl.sourceLoc,
-        });
+    const d = innerDecl(decl);
+    if (d.kind === ASTNodeKind.TYPE_DECL) {
+      if (structTable.has(d.name)) {
+        errors.push({ message: `redeclaration of type "${d.name}"`, sourceLoc: d.sourceLoc });
       } else {
-        structTable.set(decl.name, StructType(decl.name, null));
+        structTable.set(d.name, StructType(d.name, null));
+      }
+    }
+    if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+      for (const ext of decl.decls) {
+        if (ext.kind === ASTNodeKind.EXTERN_TYPE_DECL && !structTable.has(ext.name)) {
+          structTable.set(ext.name, StructType(ext.name, []));
+        }
       }
     }
   }
 
-  // pass 2: resolve struct fields. replace the structTable entry with a
-  // populated StructType so later resolutions (function sigs, params, locals)
-  // see the fields, not the shell.
+  // pass 2: struct fields
   for (const decl of ast.body) {
-    if (decl.kind === ASTNodeKind.TYPE_DECL) {
+    const d = innerDecl(decl);
+    if (d.kind === ASTNodeKind.TYPE_DECL) {
       const fields = [];
-      for (const field of decl.fields) {
+      for (const field of (d.fields ?? [])) {
         let fieldType = resolveTypeFromName(field.type, structTable);
         if (!fieldType) {
-          errors.push({
-            message: `unknown type "${field.type}" in field "${field.name}" of struct "${decl.name}"`,
-            sourceLoc: field.sourceLoc,
-          });
+          errors.push({ message: `unknown type "${field.type}" in field "${field.name}" of struct "${d.name}"`, sourceLoc: field.sourceLoc });
           fieldType = ErrorType();
         }
-        if (fields.some((f) => f.name === field.name)) {
-          errors.push({
-            message: `duplicate field name "${field.name}" in struct "${decl.name}"`,
-            sourceLoc: field.sourceLoc,
-          });
+        if (fields.some(f => f.name === field.name)) {
+          errors.push({ message: `duplicate field name "${field.name}" in struct "${d.name}"`, sourceLoc: field.sourceLoc });
         }
-        if (detectRecursiveField(decl.name, fieldType)) {
-          errors.push({
-            message: `recursive field "${field.name}" in struct "${decl.name}"`,
-            sourceLoc: field.sourceLoc,
-          });
+        if (detectRecursiveField(d.name, fieldType)) {
+          errors.push({ message: `recursive field "${field.name}" in struct "${d.name}"`, sourceLoc: field.sourceLoc });
         }
         fields.push({ name: field.name, type: fieldType });
       }
-      const fullType = StructType(decl.name, fields);
-      decl.resolvedType = fullType;
-      structTable.set(decl.name, fullType);
+      const fullType = StructType(d.name, fields);
+      d.resolvedType = fullType;
+      structTable.set(d.name, fullType);
     }
   }
 
-  // pass 3: collect function signatures. runs after structTable is populated
-  // so struct-typed params/returns capture the full StructType, not the shell.
+  // pass 3: function sigs + extern decls
   for (const decl of ast.body) {
-    if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
-      if (moduleSymbols.has(decl.name)) {
-        errors.push({
-          message: `redeclaration of function "${decl.name}"`,
-          sourceLoc: decl.sourceLoc,
-        });
+    const d = innerDecl(decl);
+
+    if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+      if (moduleSymbols.has(d.name)) {
+        errors.push({ message: `redeclaration of function "${d.name}"`, sourceLoc: d.sourceLoc });
       } else {
-        const funcType = FuncType(
-          (decl.params ?? []).map((p) => ({
-            name: p.name,
-            type: resolveTypeFromName(p.type, structTable) ?? ErrorType(),
-          })),
-          resolveTypeFromName(decl.returnType, structTable) ?? ErrorType(),
-        );
-        moduleSymbols.set(decl.name, funcType);
+        moduleSymbols.set(d.name, FuncType(
+          (d.params ?? []).map(p => ({ name: p.name, type: resolveTypeFromName(p.type, structTable) ?? ErrorType() })),
+          resolveTypeFromName(d.returnType, structTable) ?? ErrorType(),
+        ));
+      }
+    }
+
+    if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+      for (const ext of decl.decls) {
+        if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
+        if (moduleSymbols.has(ext.name)) {
+          errors.push({ message: `redeclaration of "${ext.name}"`, sourceLoc: ext.sourceLoc });
+          continue;
+        }
+        const paramTypes = ext.params.map(p => {
+          const t = resolveTypeFromName(p.type, structTable) ?? ErrorType();
+          p.resolvedType = t;
+          return { name: p.name, type: t };
+        });
+        const retType = resolveTypeFromName(ext.returnType, structTable) ?? ErrorType();
+        ext.resolvedType = retType;
+        moduleSymbols.set(ext.name, FuncType(paramTypes, retType, ext.variadic));
       }
     }
   }
 
-  // walk ast.body
+  // pass 4: function bodies
   for (const decl of ast.body) {
-    if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
-      validateFunction(decl, typeContext, errors);
+    const d = innerDecl(decl);
+    if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+      validateFunction(d, typeContext, errors);
     }
   }
 
   return { ast, errors };
 }
 
-
 // convenience for tests: parse + typecheck in one call.
-// returns { ast, errors } — mirrors typecheck()'s shape.
 export function typecheckSource(src) {
   const ast = parse(src);
   return typecheck(ast);

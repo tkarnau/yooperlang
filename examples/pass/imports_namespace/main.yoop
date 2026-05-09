@@ -1,0 +1,6 @@
+import * as helpers from "./helpers.yoop";
+
+function main(): int32 {
+    printf(`5 = ${helpers.square(2) + 1}\n`);
+    return 0;
+}

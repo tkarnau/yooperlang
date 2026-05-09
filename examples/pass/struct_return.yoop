@@ -1,0 +1,16 @@
+type Pair {
+    a: int32,
+    b: int32,
+}
+
+function make_pair(): Pair {
+    return { a: 7, b: 11 };
+}
+
+function main(): int32 {
+    let p: Pair = make_pair();
+    printf(`a=${p.a} b=${p.b}\n`);
+    return 0;
+}
+
+// expected output: a=7 b=11

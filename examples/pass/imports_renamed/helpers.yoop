@@ -1,0 +1,1 @@
+export function square(x: int32): int32 { return x * x; }

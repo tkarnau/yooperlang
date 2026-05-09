@@ -16,7 +16,9 @@ describe("scope chain", () => {
     declareInScope(s, "x", PrimType("int32"), "let", null, errs);
     assert.deepEqual(errs, []);
     const b = lookupInScope(s, "x");
-    assert.deepEqual(b, { type: PrimType("int32"), kind: "let" });
+    assert.deepEqual(b.type, PrimType("int32"));
+    assert.equal(b.kind, "let");
+    assert.equal(b.errObserved, false);
   });
 
   it("lookup walks up the parent chain", () => {

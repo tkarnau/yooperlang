@@ -1,0 +1,16 @@
+type Point {
+    x: int32,
+    y: int32,
+}
+
+function distance_sq(p: Point): int32 {
+    return p.x * p.x + p.y * p.y;
+}
+
+function main(): int32 {
+    let p: Point = { x: 3, y: 4 };
+    printf(`distance_sq = ${distance_sq(p)}\n`);
+    return 0;
+}
+
+// expected output: distance_sq = 25
