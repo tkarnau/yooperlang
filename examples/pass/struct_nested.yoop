@@ -1,0 +1,15 @@
+type B {
+    v: int32,
+}
+
+type A {
+    inner: B,
+}
+
+function main(): int32 {
+    let a: A = { inner: { v: 42 } };
+    printf(`a.inner.v = ${a.inner.v}\n`);
+    return 0;
+}
+
+// expected output: a.inner.v = 42

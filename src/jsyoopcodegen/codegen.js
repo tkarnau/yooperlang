@@ -11,6 +11,7 @@ import {
   isUnsignedIntPrim,
   typeKinds,
 } from "../jsyooptypecheck/types.js";
+import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
 
 // yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
@@ -286,6 +287,78 @@ export function codegen(ast) {
     }
   }
 
+  // lower `expr?` up to the err check, returning the on-stack slot that
+  // holds the operand's full struct value. Caller decides what to do with
+  // the success value (single field load, void, or destructure).
+  //
+  // shape:
+  //   <eval operand> -> %tmp
+  //   alloca + store on stack
+  //   load err pointer; strlen(err) > 0 -> branch
+  //   try_fail: build default fallible return value, set err, ret
+  //   try_ok:  control resumes here for the success path
+  function emitTryOpToSlot(node, fnLines) {
+    const operandType = node.operand.resolvedType;
+    const r = emitExpr(node.operand, fnLines);
+    const slot = freshTemp();
+    fnLines.push(
+      `  ${slot} = alloca %struct.${operandType.name}, align ${alignOfStruct(operandType)}`,
+    );
+    fnLines.push(
+      `  store %struct.${operandType.name} ${r.val}, ptr ${slot}`,
+    );
+
+    const errIdx = operandType.fields.length - 1;
+    const errPtr = freshTemp();
+    fnLines.push(
+      `  ${errPtr} = getelementptr inbounds %struct.${operandType.name}, ptr ${slot}, i32 0, i32 ${errIdx}`,
+    );
+    const errStr = freshTemp();
+    fnLines.push(`  ${errStr} = load ptr, ptr ${errPtr}`);
+    const errLen = freshTemp();
+    fnLines.push(`  ${errLen} = call i64 @strlen(ptr ${errStr})`);
+    const failed = freshTemp();
+    fnLines.push(`  ${failed} = icmp ne i64 ${errLen}, 0`);
+
+    const failLabel = freshLabel("try_fail");
+    const okLabel = freshLabel("try_ok");
+    fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
+
+    fnLines.push(`${failLabel}:`);
+    emitFailVariantReturn(currentReturnType, errStr, fnLines);
+
+    fnLines.push(`${okLabel}:`);
+    return { ptr: slot, type: operandType };
+  }
+
+  // build the failure-variant struct of the *enclosing function's* return
+  // type: zeroinitializer for every field, then write `err`. Per spec, the
+  // caller short-circuits on err and never reads the other fields.
+  function emitFailVariantReturn(retType, errStr, fnLines) {
+    const failSlot = freshTemp();
+    fnLines.push(
+      `  ${failSlot} = alloca %struct.${retType.name}, align ${alignOfStruct(retType)}`,
+    );
+    fnLines.push(
+      `  store %struct.${retType.name} zeroinitializer, ptr ${failSlot}`,
+    );
+    const errIdx = retType.fields.length - 1;
+    const failErrPtr = freshTemp();
+    fnLines.push(
+      `  ${failErrPtr} = getelementptr inbounds %struct.${retType.name}, ptr ${failSlot}, i32 0, i32 ${errIdx}`,
+    );
+    fnLines.push(`  store ptr ${errStr}, ptr ${failErrPtr}`);
+    const failVal = freshTemp();
+    fnLines.push(
+      `  ${failVal} = load %struct.${retType.name}, ptr ${failSlot}`,
+    );
+    fnLines.push(`  ret %struct.${retType.name} ${failVal}`);
+  }
+
+  // Track the enclosing function's return type for emitFailVariantReturn.
+  // Set in emitFunction; consumed inside emitTryOpToSlot.
+  let currentReturnType = null;
+
   function llvmFloatConstant(jsNumber) {
     const buf = Buffer.alloc(8);
     // big endian hex encoded double (llvm docsthing),
@@ -392,11 +465,50 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.FIELD_ACCESS: {
+        // intrinsic: `s.len` on a string -> strlen(s) returning usize.
+        // typechecker accepts it (resolveFieldAccess); codegen lowers here
+        // because emitLvalue's path expects a struct receiver.
+        const objType = node.object.resolvedType;
+        if (
+          objType &&
+          objType.kind === typeKinds.prim &&
+          objType.name === "string" &&
+          node.field === "len"
+        ) {
+          const s = emitExpr(node.object, fnLines);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call i64 @strlen(ptr ${s.val})`);
+          return { val: tmp, yoopType: PrimType("usize") };
+        }
         const lv = emitLvalue(node, fnLines);
         const llvmTy = llvmType(lv.type);
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${lv.ptr}`);
         return { val: tmp, yoopType: lv.type };
+      }
+
+      case ASTNodeKind.TRY_OP: {
+        const slot = emitTryOpToSlot(node, fnLines);
+        const stripped = strippedTypeOf(node.operand.resolvedType);
+        if (!stripped || stripped.kind === "strippedMulti") {
+          // multi-strip in expression position is rejected by the
+          // typechecker — defensive.
+          throw new Error(
+            `codegen: TRY_OP at emitExpr saw an unsupported strip shape — typechecker should have rejected`,
+          );
+        }
+        if (stripped.kind === typeKinds.void) {
+          return { val: "void", yoopType: VoidType() };
+        }
+        // single non-err field: load it from index 0 of the on-stack source slot.
+        const valPtr = freshTemp();
+        fnLines.push(
+          `  ${valPtr} = getelementptr inbounds %struct.${slot.type.name}, ptr ${slot.ptr}, i32 0, i32 0`,
+        );
+        const val = freshTemp();
+        const llvmTy = llvmType(stripped);
+        fnLines.push(`  ${val} = load ${llvmTy}, ptr ${valPtr}`);
+        return { val, yoopType: stripped };
       }
 
       case ASTNodeKind.STRUCT_LITERAL: {
@@ -610,6 +722,17 @@ export function codegen(ast) {
         emitExpr(node.value, fnLines);
         break;
 
+      case ASTNodeKind.DESTRUCTURE_DECL:
+        emitDestructureDecl(node, fnLines);
+        break;
+
+      case ASTNodeKind.DISCARD_STATEMENT:
+        // `_ = expr;` — evaluate for side-effects only. If `expr` is a
+        // TRY_OP the err propagation still fires inside emitExpr; the
+        // discard suppresses the resulting value.
+        emitExpr(node.value, fnLines);
+        break;
+
       case ASTNodeKind.IF_STATEMENT:
         emitIf(node, fnLines, ctx);
         break;
@@ -624,6 +747,60 @@ export function codegen(ast) {
 
       default:
         throw new Error(`codegen: unhandled statement kind "${node.kind}"`);
+    }
+  }
+
+  // `const { a, b, err } = expr;`
+//
+// Two RHS shapes:
+//   - plain expression: stash the result in a slot, GEP each name out
+//   - TRY_OP: emitTryOpToSlot (handles err propagation), then GEP from the
+//     post-success slot using the *operand's* type (its fields are still
+//     all there, including err — we just won't pick err from them since
+//     the destructure names won't include it).
+  function emitDestructureDecl(node, fnLines) {
+    let slotPtr;
+    let slotType;
+    if (node.assignment.kind === ASTNodeKind.TRY_OP) {
+      const slot = emitTryOpToSlot(node.assignment, fnLines);
+      slotPtr = slot.ptr;
+      slotType = slot.type;
+    } else {
+      const r = emitExpr(node.assignment, fnLines);
+      slotType = node.assignment.resolvedType;
+      slotPtr = freshTemp();
+      fnLines.push(
+        `  ${slotPtr} = alloca %struct.${slotType.name}, align ${alignOfStruct(slotType)}`,
+      );
+      fnLines.push(
+        `  store %struct.${slotType.name} ${r.val}, ptr ${slotPtr}`,
+      );
+    }
+
+    for (const name of node.names) {
+      const idx = slotType.fields.findIndex((f) => f.name === name);
+      if (idx < 0) {
+        // typechecker should have caught this; bail loudly.
+        throw new Error(
+          `codegen: destructure name "${name}" not on type ${slotType.name}`,
+        );
+      }
+      const fieldType = slotType.fields[idx].type;
+      const llvmTy = llvmType(fieldType);
+      const align = fieldType.kind === typeKinds.struct
+        ? alignOfStruct(fieldType)
+        : alignOf(llvmTy);
+
+      const gepTmp = freshTemp();
+      fnLines.push(
+        `  ${gepTmp} = getelementptr inbounds %struct.${slotType.name}, ptr ${slotPtr}, i32 0, i32 ${idx}`,
+      );
+      const valTmp = freshTemp();
+      fnLines.push(`  ${valTmp} = load ${llvmTy}, ptr ${gepTmp}`);
+
+      symbols.set(name, fieldType);
+      fnLines.push(`  %${name} = alloca ${llvmTy}, align ${align}`);
+      fnLines.push(`  store ${llvmTy} ${valTmp}, ptr %${name}`);
     }
   }
 
@@ -675,6 +852,7 @@ export function codegen(ast) {
     symbols = new Map();
 
     const returnType = node.resolvedType;
+    currentReturnType = returnType;
     const params = node.params ?? [];
     const llvmRet = llvmType(returnType);
 
@@ -736,6 +914,10 @@ export function codegen(ast) {
     // second pass: collect external calls (calls to names not defined here)
     const defined = new Set([...functionSigs.keys()]);
     const called = collectCalls(node, defined);
+    // `?` and `s.len` lower to strlen at codegen time, but those calls
+    // aren't CALL_EXPRESSION nodes in the AST. Walk for them so the extern
+    // decl gets emitted alongside printf et al.
+    if (needsStrlen(node)) called.add("strlen");
     for (const name of called) {
       const decl = externDecl(name);
       if (decl) lines.push(decl);
@@ -783,8 +965,40 @@ function externDecl(name) {
     fprintf: "declare i32 @fprintf(ptr, ptr, ...)",
     puts: "declare i32 @puts(ptr)",
     exit: "declare void @exit(i32)",
+    strlen: "declare i64 @strlen(ptr)",
   };
   return known[name] ?? `declare i32 @${name}(...)`;
+}
+
+// Walks the AST for nodes that lower to a strlen call: TRY_OP (uses
+// strlen for the err-set check) and FIELD_ACCESS with field "len" on a
+// string-typed receiver (the s.len intrinsic).
+function needsStrlen(node) {
+  let found = false;
+  function walk(n) {
+    if (found || !n || typeof n !== "object") return;
+    if (n.kind === ASTNodeKind.TRY_OP) {
+      found = true;
+      return;
+    }
+    if (n.kind === ASTNodeKind.FIELD_ACCESS && n.field === "len") {
+      const objType = n.object?.resolvedType;
+      if (
+        objType &&
+        objType.kind === typeKinds.prim &&
+        objType.name === "string"
+      ) {
+        found = true;
+        return;
+      }
+    }
+    for (const val of Object.values(n)) {
+      if (Array.isArray(val)) val.forEach(walk);
+      else if (val && typeof val === "object" && val.kind) walk(val);
+    }
+  }
+  walk(node);
+  return found;
 }
 
 export function alignOf(llvmTy) {

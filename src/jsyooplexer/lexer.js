@@ -66,6 +66,7 @@ export const TokenTags = {
   divide: 34,
   modulus: 35,
   dot: 39,
+  question: 40,
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -76,6 +77,7 @@ export const inverseTokenTags = Object.entries(TokenTags).reduce(
   {},
 );
 
+// sorted longest to shortest so we can match multi-char without context
 export const tokenScanList = [
   { str: "(", tag: TokenTags.lparen },
   { str: ")", tag: TokenTags.rparen },
@@ -85,6 +87,7 @@ export const tokenScanList = [
   { str: "}", tag: TokenTags.rcurly },
   { str: ":", tag: TokenTags.colon },
   { str: ",", tag: TokenTags.comma },
+  { str: "?", tag: TokenTags.question },
   { str: "==", tag: TokenTags.eqeq },
   { str: "!=", tag: TokenTags.neq },
   { str: "<=", tag: TokenTags.lte },

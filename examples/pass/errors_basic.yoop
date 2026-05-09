@@ -1,0 +1,20 @@
+type Bytes {
+    len: int32,
+    err: string,
+}
+
+function read_all(path: string): Bytes {
+    return { len: 42, err: "" };
+}
+
+function main(): int32 {
+    const b: Bytes = read_all("foo");
+    if (b.err.len > 0) {
+        printf(`err: ${b.err}\n`);
+        return 1;
+    }
+    printf(`len = ${b.len}\n`);
+    return 0;
+}
+
+// expected output: len = 42

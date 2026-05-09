@@ -33,6 +33,7 @@ import {
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope } from "./scope.js";
+import { isFallible, strippedTypeOf } from "./fallible.js";
 import {
   coerceUntypedLiteralToTyped,
   isAssignable,
@@ -78,6 +79,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveFieldAccess(node, scope, ctx);
     case ASTNodeKind.STRUCT_LITERAL:
       return resolveOrphanStructLiteral(node, scope, ctx);
+    case ASTNodeKind.TRY_OP:
+      return resolveTryOp(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -241,6 +244,12 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${targetName}"`,
   );
+  // The previous value's err observation is irrelevant once it's been
+  // overwritten, but the *new* value still needs observation before scope
+  // exit. Reset the flag so re-checking happens at popScope.
+  if (isFallible(binding.type)) {
+    binding.errObserved = false;
+  }
   return setType(node, binding.type);
 }
 
@@ -283,10 +292,20 @@ function resolveAssignmentToField(node, scope, ctx) {
 
 // `obj.field` — receiver must be a struct, and `field` must be one of
 // its fields. Result type is the field's declared type.
+//
+// One built-in: `s.len` on a string yields usize (lowered to strlen at
+// codegen). The user-facing fallible idiom (`b.err.len > 0`) leans on it.
 function resolveFieldAccess(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
+  }
+  if (
+    objType.kind === typeKinds.prim &&
+    objType.name === primAnnotations.string &&
+    node.field === "len"
+  ) {
+    return setType(node, PrimType(primAnnotations.usize));
   }
   if (objType.kind !== typeKinds.struct) {
     pushError(
@@ -305,7 +324,71 @@ function resolveFieldAccess(node, scope, ctx) {
     );
     return setType(node, ErrorType());
   }
+  if (node.field === "err") {
+    markErrObservedThroughRoot(node.object, scope);
+  }
   return setType(node, field.type);
+}
+
+// Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT
+// root. If we find one bound in scope, flip its `errObserved` flag so the
+// scope-exit check accepts it.
+export function markErrObservedThroughRoot(exprNode, scope) {
+  let n = exprNode;
+  while (n) {
+    if (n.kind === ASTNodeKind.IDENT) {
+      const b = lookupInScope(scope, n.name);
+      if (b) b.errObserved = true;
+      return;
+    }
+    if (n.kind === ASTNodeKind.FIELD_ACCESS) {
+      n = n.object;
+      continue;
+    }
+    if (n.kind === ASTNodeKind.TRY_OP) {
+      n = n.operand;
+      continue;
+    }
+    return;
+  }
+}
+
+// `expr?` — postfix propagator. Three checks:
+//   1. operand must be a fallible struct
+//   2. enclosing function must return a fallible type (we'll early-return its err)
+//   3. if multi-field strip, mark the node so the destructure path can pick it up;
+//      every other context rejects via checkInitializer.
+function resolveTryOp(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (!isFallible(operandType)) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' applied to non-fallible type ${formatType(operandType)} — only structs ending in 'err: string' are fallible`,
+    );
+    return setType(node, ErrorType());
+  }
+  if (!isFallible(ctx.funcReturnType)) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' is only legal inside a function that returns a fallible type; '${ctx.funcName}' returns ${formatType(ctx.funcReturnType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+
+  // The `?` itself counts as observation — it consumes err entirely.
+  markErrObservedThroughRoot(node.operand, scope);
+
+  const stripped = strippedTypeOf(operandType);
+  if (stripped && stripped.kind === "strippedMulti") {
+    node.strippedMulti = stripped;
+    return setType(node, ErrorType());
+  }
+  return setType(node, stripped);
 }
 
 // A struct literal that reaches resolveExprType directly has no expected
@@ -362,6 +445,18 @@ export function checkInitializer(
     return expectedType;
   }
   const valueType = resolveExprType(valueNode, scope, ctx);
+  // Multi-field `?` strips can only be consumed by a destructure. Every
+  // path that flows through checkInitializer (let/const init, return, call
+  // arg, assignment, struct-literal field) is by definition not a
+  // destructure, so reject here with a clear message.
+  if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
+    pushError(
+      ctx.errors,
+      valueNode,
+      `'?' on multi-field fallible type 'struct ${valueNode.strippedMulti.sourceName}' must be destructured (e.g. const { a, b } = f()?;)`,
+    );
+    return ErrorType();
+  }
   if (!isAssignable(expectedType, valueType)) {
     pushError(ctx.errors, valueNode, mismatchMessage(valueType));
   }
