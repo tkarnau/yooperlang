@@ -369,6 +369,10 @@ export function parse(src) {
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
+    } else if (peek().tag === TokenTags.true || peek().tag === TokenTags.false) {
+      const tok = advance();
+      node = buildSourcedNode(ASTNodeKind.BOOL_LITERAL);
+      node.value = tok.tag === TokenTags.true;
     } else if (peek().tag === TokenTags.floatLiteral) {
       node = buildSourcedNode(ASTNodeKind.FLOAT_LITERAL);
       node.value = advance().floatVal;

@@ -68,6 +68,8 @@ export function resolveExprType(node, scope, ctx) {
       return setType(node, UntypedFloatType());
     case ASTNodeKind.STRING_LITERAL:
       return setType(node, PrimType(primAnnotations.string));
+    case ASTNodeKind.BOOL_LITERAL:
+      return setType(node, PrimType(primAnnotations.bool));
     case ASTNodeKind.IDENT:
       return resolveIdent(node, scope, ctx);
     case ASTNodeKind.BINARY_EXPRESSION:

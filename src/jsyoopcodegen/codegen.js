@@ -433,6 +433,10 @@ export function codegen(ast) {
         return { val: tmp, yoopType: PrimType("string") };
       }
 
+      case ASTNodeKind.BOOL_LITERAL: {
+        return { val: node.value ? "1" : "0", yoopType: PrimType("bool") };
+      }
+
       case ASTNodeKind.IDENT: {
         const yoopType = symbols.get(node.name);
         if (!yoopType) {
@@ -1572,6 +1576,9 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`);
         return { val: tmp, yoopType: PrimType("string") };
+      }
+      case ASTNodeKind.BOOL_LITERAL: {
+        return { val: node.value ? "1" : "0", yoopType: PrimType("bool") };
       }
       case ASTNodeKind.IDENT: {
         const yoopType = symbols.get(node.name);
