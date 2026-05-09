@@ -1,0 +1,5 @@
+extern "Rust" from "some_module" {
+    function foo(): int32;
+}
+
+function main(): int32 { return 0; }

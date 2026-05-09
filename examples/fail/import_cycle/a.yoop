@@ -1,0 +1,2 @@
+import { foo } from "./b.yoop";
+export function bar(): int32 { return foo(); }

@@ -40,6 +40,13 @@ export const TokenTags = {
   while: 19,
   for: 20,
   type: 38,
+  import: 41,
+  export: 42,
+  extern: 43,
+  from: 44,
+  as: 45,
+  library: 46,
+  dotdotdot: 47, // for variadic params and rest patterns
   // punctuation / operators
   eq: 5,
   semicolon: 6,
@@ -104,6 +111,7 @@ export const tokenScanList = [
   { str: "/", tag: TokenTags.divide },
   { str: "%", tag: TokenTags.modulus },
   { str: ".", tag: TokenTags.dot },
+  { str: "...", tag: TokenTags.dotdotdot },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {
@@ -116,6 +124,12 @@ const keywordTagList = {
   while: TokenTags.while,
   for: TokenTags.for,
   type: TokenTags.type,
+  import: TokenTags.import,
+  export: TokenTags.export,
+  extern: TokenTags.extern,
+  from: TokenTags.from,
+  as: TokenTags.as,
+  library: TokenTags.library,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

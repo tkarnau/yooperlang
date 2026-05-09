@@ -1,0 +1,2 @@
+import { answer } from "./util.yoop";
+export function via_b(): int32 { return answer(); }

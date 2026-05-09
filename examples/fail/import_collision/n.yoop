@@ -1,0 +1,1 @@
+export function x(): int32 { return 2; }

@@ -1,0 +1,13 @@
+import { read_all, Bytes } from "./io.yoop";
+
+function load(p: string): Bytes {
+    const n: int32 = read_all(p)?;
+    return { len: n + 1, err: "" };
+}
+
+function main(): int32 {
+    const { len, err } = load("foo");
+    if (err.len > 0) { printf(`err: ${err}\n`); return 1; }
+    printf(`len = ${len}\n`);
+    return 0;
+}

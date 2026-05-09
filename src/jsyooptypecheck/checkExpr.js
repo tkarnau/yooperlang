@@ -101,11 +101,18 @@ function setType(node, type) {
 // `x` — looks up the variable in the lexical scope chain.
 function resolveIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, node.name);
-  if (!binding) {
-    pushError(ctx.errors, node, `undefined variable "${node.name}"`);
-    return setType(node, ErrorType());
+  if (binding) {
+    if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    return setType(node, binding.type);
   }
-  return setType(node, binding.type);
+  // Fall back to module-level symbols (namespace imports, etc.)
+  const modType = ctx.typeContext.moduleSymbols?.get(node.name);
+  if (modType) {
+    if (modType.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    return setType(node, modType);
+  }
+  pushError(ctx.errors, node, `undefined variable "${node.name}"`);
+  return setType(node, ErrorType());
 }
 
 // `a + b`, `a == b`, `a && b` — recurses into both sides, then asks
@@ -116,23 +123,63 @@ function resolveBinary(node, scope, ctx) {
   return setType(node, unifyArith(leftType, rightType, node.op));
 }
 
-// `f(a, b, c)` — looks up the function (declared in this module or a
-// known C extern), then hands off to resolveCallType for arity + args.
+// `f(a, b, c)` or `ns.f(a, b, c)` — looks up the function (local, imported
+// namespace, or known C extern), then checks arity + arg types.
 function resolveCall(node, scope, ctx) {
-  // printf is variadic — type-resolve each arg, no arity/type check.
-  if (node.callee === "printf") {
-    for (const arg of node.args) {
-      resolveExprType(arg, scope, ctx);
+  const callee = node.callee;
+
+  // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
+  if (callee && typeof callee === "object") {
+    const calleeType = resolveExprType(callee, scope, ctx);
+    if (calleeType.kind === typeKinds.error) return setType(node, ErrorType());
+    if (calleeType.kind !== typeKinds.func) {
+      pushError(ctx.errors, node, `expression is not callable`);
+      return setType(node, ErrorType());
     }
-    return setType(node, PrimType(primAnnotations.int32));
+    return resolveCallWithSig(node, calleeType, scope, ctx);
   }
 
-  const sig =
-    ctx.typeContext.moduleSymbols.get(node.callee) ??
-    KNOWN_EXTERNS[node.callee];
+  // printf legacy path — variadic, type-resolve each arg, no arity check.
+  if (callee === "printf") {
+    const sig = ctx.typeContext.moduleSymbols.get("printf");
+    if (sig) {
+      // Declared via extern block — use variadic path
+    } else {
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, PrimType(primAnnotations.int32));
+    }
+  }
+
+  const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
-    pushError(ctx.errors, node, `unknown function "${node.callee}"`);
+    pushError(ctx.errors, node, `unknown function "${callee}"`);
     return setType(node, ErrorType());
+  }
+  // Annotate imported calls so codegen knows the source module for mangling.
+  const importedNames = ctx.typeContext.importedNames;
+  if (importedNames) {
+    const imp = importedNames.get(callee);
+    if (imp && imp.kind === "value") {
+      node.calleeModuleId = imp.fromModuleId;
+      node.calleeExportName = imp.exportName;
+    }
+  }
+  return resolveCallWithSig(node, sig, scope, ctx);
+}
+
+// Shared call resolution once the sig is known. Handles variadic externs.
+function resolveCallWithSig(node, sig, scope, ctx) {
+  if (sig.variadic) {
+    // Check the fixed prefix, then resolve variadic tail freely.
+    const fixedParams = sig.params ?? [];
+    for (let i = 0; i < fixedParams.length && i < node.args.length; i++) {
+      checkInitializer(node.args[i], fixedParams[i].type, scope, ctx,
+        (vt) => `arg ${i + 1} of call: cannot pass ${formatType(vt)} to ${formatType(fixedParams[i].type)}`);
+    }
+    for (let i = fixedParams.length; i < node.args.length; i++) {
+      resolveExprType(node.args[i], scope, ctx);
+    }
+    return setType(node, sig.returnType);
   }
   return resolveCallType(node, sig, scope, ctx);
 }
@@ -290,16 +337,37 @@ function resolveAssignmentToField(node, scope, ctx) {
   return setType(node, targetType);
 }
 
-// `obj.field` — receiver must be a struct, and `field` must be one of
-// its fields. Result type is the field's declared type.
+// `obj.field` — receiver must be a struct or namespace.
 //
-// One built-in: `s.len` on a string yields usize (lowered to strlen at
-// codegen). The user-facing fallible idiom (`b.err.len > 0`) leans on it.
+// Namespace: looks up the exported symbol, sets node.namespaceLookup for codegen.
+// Struct: resolves the field type (plus the `s.len` built-in for strings).
 function resolveFieldAccess(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
+
+  // namespace.field — e.g. `io.greet` or `io.SomeType`
+  if (objType.kind === typeKinds.namespace) {
+    if (!objType.exports.has(node.field)) {
+      pushError(ctx.errors, node, `namespace "${node.object.name}" has no export "${node.field}"`);
+      return setType(node, ErrorType());
+    }
+    const moduleEnv = ctx.typeContext.moduleEnv;
+    const srcEnv = moduleEnv?.get(objType.moduleId);
+    if (!srcEnv) {
+      pushError(ctx.errors, node, `internal: namespace module ${objType.moduleId} not found`);
+      return setType(node, ErrorType());
+    }
+    const sym = srcEnv.localSymbols.get(node.field) ?? srcEnv.structTable.get(node.field);
+    if (!sym) {
+      pushError(ctx.errors, node, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
+      return setType(node, ErrorType());
+    }
+    node.namespaceLookup = { moduleId: objType.moduleId, exportName: node.field };
+    return setType(node, sym);
+  }
+
   if (
     objType.kind === typeKinds.prim &&
     objType.name === primAnnotations.string &&
@@ -308,20 +376,12 @@ function resolveFieldAccess(node, scope, ctx) {
     return setType(node, PrimType(primAnnotations.usize));
   }
   if (objType.kind !== typeKinds.struct) {
-    pushError(
-      ctx.errors,
-      node,
-      `field access on non-struct type ${formatType(objType)}`,
-    );
+    pushError(ctx.errors, node, `field access on non-struct type ${formatType(objType)}`);
     return setType(node, ErrorType());
   }
   const field = objType.fields?.find((f) => f.name === node.field);
   if (!field) {
-    pushError(
-      ctx.errors,
-      node,
-      `type "${objType.name}" has no field "${node.field}"`,
-    );
+    pushError(ctx.errors, node, `type "${objType.name}" has no field "${node.field}"`);
     return setType(node, ErrorType());
   }
   if (node.field === "err") {
