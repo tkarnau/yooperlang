@@ -89,6 +89,32 @@ describe("lexer: punctuation", () => {
       tag("dot"),
     ]);
   });
+
+  it("'?' lexes as a single question token", () => {
+    const tokens = tokenize("?");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("question"));
+    assert.equal(tokens[0].length, 1);
+  });
+
+  it("'?' splits cleanly out of an adjacent expression", () => {
+    const tokens = tokenize("f()?");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("ident"),
+      tag("lparen"),
+      tag("rparen"),
+      tag("question"),
+    ]);
+  });
+
+  it("'??' lexes as two consecutive question tokens", () => {
+    // not real syntax in yoop, but the lexer should not get confused by it
+    const tokens = tokenize("??");
+    assert.equal(tokens.length, 2);
+    assert.equal(tokens[0].tag, tag("question"));
+    assert.equal(tokens[1].tag, tag("question"));
+  });
 });
 
 describe("lexer: string and template literals", () => {

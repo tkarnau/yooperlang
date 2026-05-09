@@ -59,7 +59,7 @@ export function parse(src) {
   // helper functions for token stream management
 
   // advances to the next token but returns the current one
-  // reason for returning the current token is that often the 
+  // reason for returning the current token is that often the
   // caller needs to read info from the current token with reference
   // to the next token, which is more complex than just reading the
   // next string character.
@@ -212,6 +212,14 @@ export function parse(src) {
         node = fieldAccessNode;
         continue;
       }
+      // handle postfix '?' for error handle for errors as values feature
+      if (peek().tag === TokenTags.question) {
+        advance(); // consume '?'
+        const tryOpNode = buildSourcedNode(ASTNodeKind.TRY_OP);
+        tryOpNode.operand = node;
+        node = tryOpNode;
+        continue;
+      }
       // phase 4 should add '[`, `(` (call) here too.
       break;
     }
@@ -322,10 +330,22 @@ export function parse(src) {
     expect(TokenTags.rparen);
   }
 
+  function parseDiscardStatement() {
+    expect(TokenTags.discard);
+    expect(TokenTags.eq);
+    const node = buildSourcedNode(ASTNodeKind.DISCARD_STATEMENT);
+    node.value = parseExpression();
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
   function parseStatement() {
     // only statements
     const peekTag = peek().tag;
     switch (peekTag) {
+      case TokenTags.discard: {
+        return parseDiscardStatement();
+      }
       case TokenTags.return: {
         return parseReturnStatement();
       }
@@ -354,8 +374,37 @@ export function parse(src) {
     return node;
   }
 
+  // verifies code like `let {x, y} = someExpr;`
+  // no renaming or nested destructuring for now, no types declared
+  function parseDestructureDecl(varToken, declKind) {
+    const node = buildSourcedNode(ASTNodeKind.DESTRUCTURE_DECL);
+    node.declKind = declKind;
+    node.names = [];
+    expect(TokenTags.lcurly);
+    while (peek().tag === TokenTags.ident) {
+      node.names.push(parseIdentAsName());
+      if (peek().tag === TokenTags.comma) {
+        advance();
+      }
+    }
+    expect(TokenTags.rcurly);
+    expect(TokenTags.eq);
+    node.assignment = parseExpression();
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
   function parseVarDecl() {
     const varToken = advance();
+    // check if destructure or normal decl
+    const declKind =
+      varToken.tag === TokenTags.let
+        ? ASTNodeKind.LET_DECL
+        : ASTNodeKind.CONST_DECL;
+    if (peek().tag === TokenTags.lcurly) {
+      // destructure decl
+      return parseDestructureDecl(varToken, declKind);
+    }
     let node;
     switch (varToken.tag) {
       case TokenTags.let:

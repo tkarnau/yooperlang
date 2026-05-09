@@ -5,6 +5,7 @@ export const ASTNodeKind = Object.freeze({
   CONST_DECL: "CONST_DECL",
   TYPE_DECL: "TYPE_DECL",
   FIELD_DECL: "FIELD_DECL",
+  DESTRUCTURE_DECL: "DESTRUCTURE_DECL",
 
   // literals
   TEMPLATE_LITERAL: "TEMPLATE_LITERAL",
@@ -32,6 +33,8 @@ export const ASTNodeKind = Object.freeze({
   RETURN_STATEMENT: "RETURN_STATEMENT",
   IF_STATEMENT: "IF_STATEMENT",
   WHILE_STATEMENT: "WHILE_STATEMENT",
+  DISCARD_STATEMENT: "DISCARD_STATEMENT",
+  TRY_OP: "TRY_OP",
 
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
