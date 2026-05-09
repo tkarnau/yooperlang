@@ -76,14 +76,29 @@ export function parse(src) {
     return current;
   }
 
+  // Format a parse error with source context: the offending line plus a caret.
+  function parseError(message, pos = current?.start ?? 0, length = 1) {
+    const { line, column } = posToSourceLocation(src, pos);
+    const lineText = src.split('\n')[line - 1] ?? '';
+    const caret = ' '.repeat(Math.max(0, column - 1)) + '^'.repeat(Math.max(1, length));
+    return new Error(
+      `${message}\n` +
+      `  --> line ${line}:${column}\n` +
+      `   | ${lineText}\n` +
+      `   | ${caret}`,
+    );
+  }
+
   // similar to advance but asserts that the current token is the expected one
   // otherwise we capture an error. Very common to use this for unambiguous
   // sets of tokens, e.g. expecting a semicolon after a statement, or a closing
   // paren after
   function expect(tag) {
     if (current.tag !== tag) {
-      throw new Error(
-        `expected token ${tag} ${inverseTokenTags[tag]}, got ${current.tag} ${inverseTokenTags[current.tag]} at pos ${current.start}`,
+      throw parseError(
+        `expected ${inverseTokenTags[tag]}, got ${inverseTokenTags[current.tag]}`,
+        current.start,
+        current.length,
       );
     }
     const tok = current;
@@ -119,7 +134,7 @@ export function parse(src) {
           case TokenTags.import:
             {
               if (seenNonImport) {
-                throw new Error("imports must come before other declarations");
+                throw parseError("imports must come before other declarations");
               }
               node.body.push(parseImportDecl());
             }
@@ -137,14 +152,15 @@ export function parse(src) {
             }
             break;
           default: {
-            throw new Error(
-              `unexpected token at top level ${peekTag} ${inverseTokenTags[peekTag]}`,
+            throw parseError(
+              `unexpected token at top level: ${inverseTokenTags[peekTag]}`,
+              peek().start,
+              peek().length,
             );
           }
         }
       }
     } catch (parseErr) {
-      console.log("parse error, stopping - AST so far", JSON.stringify(node));
       throw parseErr;
     }
 
@@ -203,7 +219,7 @@ export function parse(src) {
       return node;
     }
 
-    throw new Error(`unexpected token after import: ${inverseTokenTags[peek().tag]}`);
+    throw parseError(`unexpected token after import: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
   }
 
   function parseExportDecl() {
@@ -214,7 +230,7 @@ export function parse(src) {
       const abiTok = advance();
       const abi = unquoteStringLiteral(abiTok);
       if (abi !== "C") {
-        throw new Error(`unsupported export ABI "${abi}" — only "C" is supported`);
+        throw parseError(`unsupported export ABI "${abi}" — only "C" is supported`, abiTok.start, abiTok.length);
       }
       expect(TokenTags.function);
       const fn = parseFunctionDeclBody();
@@ -231,7 +247,7 @@ export function parse(src) {
       case TokenTags.let:
       case TokenTags.const:    node.decl = parseVarDecl(); break;
       default:
-        throw new Error(`unexpected token after export: ${inverseTokenTags[peek().tag]}`);
+        throw parseError(`unexpected token after export: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
     }
     return node;
   }
@@ -242,7 +258,7 @@ export function parse(src) {
     const abiTok = expect(TokenTags.strLiteral);
     node.abi = unquoteStringLiteral(abiTok);
     if (node.abi !== "C") {
-      throw new Error(`unsupported extern ABI "${node.abi}" — only "C" is supported in v0`);
+      throw parseError(`unsupported extern ABI "${node.abi}" — only "C" is supported in v0`, abiTok.start, abiTok.length);
     }
     expect(TokenTags.from);
     if (peek().tag === TokenTags.library) {
@@ -256,7 +272,7 @@ export function parse(src) {
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
       if (peek().tag === TokenTags.function) node.decls.push(parseExternFunctionDecl());
       else if (peek().tag === TokenTags.type) node.decls.push(parseExternTypeDecl());
-      else throw new Error(`unexpected token in extern block: ${inverseTokenTags[peek().tag]}`);
+      else throw parseError(`unexpected token in extern block: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
     }
     expect(TokenTags.rcurly);
     return node;
@@ -357,8 +373,10 @@ export function parse(src) {
       }
       expect(TokenTags.rcurly);
     } else {
-      throw new Error(
-        `unexpected token in expression: ${peek().tag} ${inverseTokenTags[peek().tag]}`,
+      throw parseError(
+        `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
       );
     }
     // handle field access
@@ -399,8 +417,10 @@ export function parse(src) {
         node.kind !== ASTNodeKind.IDENT &&
         node.kind !== ASTNodeKind.FIELD_ACCESS
       ) {
-        throw new Error(
-          `invalid assignment target: ${node.kind} at pos ${peek().start}`,
+        throw parseError(
+          `invalid assignment target: ${node.kind}`,
+          peek().start,
+          peek().length,
         );
       }
       advance(); // consume '='
@@ -462,7 +482,7 @@ export function parse(src) {
           j++;
         }
         if (depth !== 0) {
-          throw new Error(`unterminated \${...} in template literal`);
+          throw parseError(`unterminated \${...} in template literal`);
         }
         const exprSrc = inner.substring(i + 2, j);
         // re-parse the expression by recursively invoking parse() on a
@@ -585,8 +605,10 @@ export function parse(src) {
         }
         break;
       default: {
-        throw new Error(
-          `unexpected variable declaration token ${varToken.tag} ${inverseTokenTags[varToken.tag]}`,
+        throw parseError(
+          `unexpected variable declaration token: ${inverseTokenTags[varToken.tag]}`,
+          varToken.start,
+          varToken.length,
         );
       }
     }

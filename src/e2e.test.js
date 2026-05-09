@@ -271,7 +271,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       path.join(repoRoot, "examples/fail/parse_bad_suffix.yoop"),
       "utf8",
     );
-    assert.throws(() => parse(src), /expected token .* semicolon/);
+    assert.throws(() => parse(src), /expected semicolon/);
   });
 
   it("err_dropped.yoop rejects a bare fallible call statement", () => {
