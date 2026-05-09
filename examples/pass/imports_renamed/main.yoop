@@ -1,0 +1,6 @@
+import { square as sq } from "./helpers.yoop";
+
+function main(): int32 {
+    printf(`16 = ${sq(4)}\n`);
+    return 0;
+}

@@ -1,0 +1,3 @@
+import { x } from "./m.txt";
+
+function main(): int32 { return 0; }

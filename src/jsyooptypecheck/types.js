@@ -11,6 +11,7 @@ export const typeKinds = {
   untypedInt: "untypedInt",
   untypedFloat: "untypedFloat",
   error: "error",
+  namespace: "namespace",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -105,13 +106,18 @@ export function isFloatPrim(name) {
 
 export const PrimType = (name) => freezerWrap(typeKinds.prim, { name });
 
-export const StructType = (name, fields) =>
-  freezerWrap(typeKinds.struct, { name, fields });
+// moduleId: the module that defines this struct (for IR name mangling). null for legacy/test usage.
+export const StructType = (name, fields, moduleId = null) =>
+  freezerWrap(typeKinds.struct, { name, fields, moduleId });
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
-export const FuncType = (params, returnType) =>
-  freezerWrap(typeKinds.func, { params, returnType });
+// variadic: true for C variadic externs (e.g. printf). Skips arity check past fixed params.
+export const FuncType = (params, returnType, variadic = false) =>
+  freezerWrap(typeKinds.func, { params, returnType, variadic });
 export const VoidType = () => freezerWrap(typeKinds.void, {});
+// exports: Set<string> of exported names in the source module
+export const NamespaceType = (moduleId, exports) =>
+  freezerWrap(typeKinds.namespace, { moduleId, exports });
 export const UntypedIntType = () => freezerWrap(typeKinds.untypedInt, {});
 export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
@@ -154,10 +160,8 @@ export function typesEqual(a, b) {
     return a.name === b.name;
   }
   if (a.kind === typeKinds.struct) {
-    // nominal: structTable canonicalizes by name and redeclaration is an
-    // error, so same name => same struct. avoids walking fields, which would
-    // recurse forever on self-referential types like Node { next: Ref<Node> }.
-    return a.name === b.name;
+    // nominal by name + module; moduleId null means legacy/test single-module path.
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
   if (a.kind === typeKinds.ref) {
     return typesEqual(a.inner, b.inner);

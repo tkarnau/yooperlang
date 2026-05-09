@@ -1,0 +1,6 @@
+import { square } from "./helpers.yoop";
+
+function main(): int32 {
+    printf(`9 = ${square(3)}\n`);
+    return 0;
+}

@@ -1,0 +1,12 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from library "m" {
+    function cos(x: float64): float64;
+}
+
+function main(): int32 {
+    let x: float64 = cos(0.0);
+    printf(`cos(0) = ${x}\n`);
+    return 0;
+}

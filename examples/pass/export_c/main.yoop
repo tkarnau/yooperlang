@@ -1,0 +1,8 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+export "C" function add_one(n: int32): int32 { return n + 1; }
+
+function main(): int32 {
+    printf(`add_one(5) = ${add_one(5)}\n`);
+    return 0;
+}

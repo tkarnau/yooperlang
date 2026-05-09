@@ -76,14 +76,29 @@ export function parse(src) {
     return current;
   }
 
+  // Format a parse error with source context: the offending line plus a caret.
+  function parseError(message, pos = current?.start ?? 0, length = 1) {
+    const { line, column } = posToSourceLocation(src, pos);
+    const lineText = src.split('\n')[line - 1] ?? '';
+    const caret = ' '.repeat(Math.max(0, column - 1)) + '^'.repeat(Math.max(1, length));
+    return new Error(
+      `${message}\n` +
+      `  --> line ${line}:${column}\n` +
+      `   | ${lineText}\n` +
+      `   | ${caret}`,
+    );
+  }
+
   // similar to advance but asserts that the current token is the expected one
   // otherwise we capture an error. Very common to use this for unambiguous
   // sets of tokens, e.g. expecting a semicolon after a statement, or a closing
   // paren after
   function expect(tag) {
     if (current.tag !== tag) {
-      throw new Error(
-        `expected token ${tag} ${inverseTokenTags[tag]}, got ${current.tag} ${inverseTokenTags[current.tag]} at pos ${current.start}`,
+      throw parseError(
+        `expected ${inverseTokenTags[tag]}, got ${inverseTokenTags[current.tag]}`,
+        current.start,
+        current.length,
       );
     }
     const tok = current;
@@ -104,32 +119,193 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.PROGRAM);
     try {
       node.body = [];
+      let seenNonImport = false;
       while (peek().tag !== TokenTags.eof) {
         // only allow declarations
         const peekTag = peek().tag;
         switch (peekTag) {
           case TokenTags.function:
-            {
-              node.body.push(parseFunctionDecl());
-            }
-            break;
           case TokenTags.type:
             {
-              node.body.push(parseTypeDecl());
+              seenNonImport = true;
+              node.body.push(peekTag === TokenTags.function ? parseFunctionDecl() : parseTypeDecl());
+            }
+            break;
+          case TokenTags.import:
+            {
+              if (seenNonImport) {
+                throw parseError("imports must come before other declarations");
+              }
+              node.body.push(parseImportDecl());
+            }
+            break;
+          case TokenTags.export:
+            {
+              seenNonImport = true;
+              node.body.push(parseExportDecl());
+            }
+            break;
+          case TokenTags.extern:
+            {
+              seenNonImport = true;
+              node.body.push(parseExternBlock());
             }
             break;
           default: {
-            throw new Error(
-              `unexpected token at top level ${peekTag} ${inverseTokenTags[peekTag]}`,
+            throw parseError(
+              `unexpected token at top level: ${inverseTokenTags[peekTag]}`,
+              peek().start,
+              peek().length,
             );
           }
         }
       }
     } catch (parseErr) {
-      console.log("parse error, stopping - AST so far", JSON.stringify(node));
       throw parseErr;
     }
 
+    return node;
+  }
+
+  // Strip surrounding quotes from a strLiteral token value.
+  function unquoteStringLiteral(tok) {
+    return src.substring(tok.start + 1, tok.start + tok.length - 1);
+  }
+
+  function parseImportDecl() {
+    const node = buildSourcedNode(ASTNodeKind.IMPORT_DECL);
+    expect(TokenTags.import);
+
+    // side-effect: import "./init.yoop";
+    if (peek().tag === TokenTags.strLiteral) {
+      node.importKind = "side-effect";
+      node.sourcePath = unquoteStringLiteral(advance());
+      expect(TokenTags.semicolon);
+      return node;
+    }
+
+    // namespace: import * as ns from "./mod.yoop";
+    if (peek().tag === TokenTags.mult) {
+      node.importKind = "namespace";
+      advance(); // consume *
+      expect(TokenTags.as);
+      node.namespaceName = parseIdentAsName();
+      expect(TokenTags.from);
+      node.sourcePath = unquoteStringLiteral(expect(TokenTags.strLiteral));
+      expect(TokenTags.semicolon);
+      return node;
+    }
+
+    // named: import { a, b as c } from "./mod.yoop";
+    if (peek().tag === TokenTags.lcurly) {
+      node.importKind = "named";
+      node.specifiers = [];
+      advance(); // consume {
+      while (peek().tag === TokenTags.ident) {
+        const exportTok = expect(TokenTags.ident);
+        const exportName = src.substring(exportTok.start, exportTok.start + exportTok.length);
+        let localName = exportName;
+        if (peek().tag === TokenTags.as) {
+          advance();
+          localName = parseIdentAsName();
+        }
+        node.specifiers.push({ exportName, localName, sourceLoc: posToSourceLocation(src, exportTok.start) });
+        if (peek().tag === TokenTags.comma) advance();
+      }
+      expect(TokenTags.rcurly);
+      expect(TokenTags.from);
+      node.sourcePath = unquoteStringLiteral(expect(TokenTags.strLiteral));
+      expect(TokenTags.semicolon);
+      return node;
+    }
+
+    throw parseError(`unexpected token after import: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+  }
+
+  function parseExportDecl() {
+    expect(TokenTags.export);
+
+    // export "C" function ...
+    if (peek().tag === TokenTags.strLiteral) {
+      const abiTok = advance();
+      const abi = unquoteStringLiteral(abiTok);
+      if (abi !== "C") {
+        throw parseError(`unsupported export ABI "${abi}" — only "C" is supported`, abiTok.start, abiTok.length);
+      }
+      expect(TokenTags.function);
+      const fn = parseFunctionDeclBody();
+      const node = buildSourcedNode(ASTNodeKind.EXPORT_C_FUNCTION_DECL);
+      node.fn = fn;
+      return node;
+    }
+
+    // wrapping form: export function / type / let / const
+    const node = buildSourcedNode(ASTNodeKind.EXPORT_DECL);
+    switch (peek().tag) {
+      case TokenTags.function: node.decl = parseFunctionDecl(); break;
+      case TokenTags.type:     node.decl = parseTypeDecl(); break;
+      case TokenTags.let:
+      case TokenTags.const:    node.decl = parseVarDecl(); break;
+      default:
+        throw parseError(`unexpected token after export: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+    }
+    return node;
+  }
+
+  function parseExternBlock() {
+    const node = buildSourcedNode(ASTNodeKind.EXTERN_BLOCK);
+    expect(TokenTags.extern);
+    const abiTok = expect(TokenTags.strLiteral);
+    node.abi = unquoteStringLiteral(abiTok);
+    if (node.abi !== "C") {
+      throw parseError(`unsupported extern ABI "${node.abi}" — only "C" is supported in v0`, abiTok.start, abiTok.length);
+    }
+    expect(TokenTags.from);
+    if (peek().tag === TokenTags.library) {
+      advance();
+      node.source = { kind: "library", value: unquoteStringLiteral(expect(TokenTags.strLiteral)) };
+    } else {
+      node.source = { kind: "header", value: unquoteStringLiteral(expect(TokenTags.strLiteral)) };
+    }
+    expect(TokenTags.lcurly);
+    node.decls = [];
+    while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
+      if (peek().tag === TokenTags.function) node.decls.push(parseExternFunctionDecl());
+      else if (peek().tag === TokenTags.type) node.decls.push(parseExternTypeDecl());
+      else throw parseError(`unexpected token in extern block: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+    }
+    expect(TokenTags.rcurly);
+    return node;
+  }
+
+  function parseExternFunctionDecl() {
+    expect(TokenTags.function);
+    const node = buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
+    node.name = parseIdentAsName();
+    expect(TokenTags.lparen);
+    node.params = [];
+    node.variadic = false;
+    while (peek().tag !== TokenTags.rparen && peek().tag !== TokenTags.eof) {
+      if (peek().tag === TokenTags.dotdotdot) {
+        advance();
+        node.variadic = true;
+        break; // ... must be last before )
+      }
+      node.params.push(parseFunctionParam());
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rparen);
+    expect(TokenTags.colon);
+    node.returnType = parseIdentAsName();
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  function parseExternTypeDecl() {
+    expect(TokenTags.type);
+    const node = buildSourcedNode(ASTNodeKind.EXTERN_TYPE_DECL);
+    node.name = parseIdentAsName();
+    expect(TokenTags.semicolon);
     return node;
   }
 
@@ -197,8 +373,10 @@ export function parse(src) {
       }
       expect(TokenTags.rcurly);
     } else {
-      throw new Error(
-        `unexpected token in expression: ${peek().tag} ${inverseTokenTags[peek().tag]}`,
+      throw parseError(
+        `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
       );
     }
     // handle field access
@@ -220,7 +398,14 @@ export function parse(src) {
         node = tryOpNode;
         continue;
       }
-      // phase 4 should add '[`, `(` (call) here too.
+      // handle postfix call on a field access: ns.method(args)
+      if (peek().tag === TokenTags.lparen && node.kind === ASTNodeKind.FIELD_ACCESS) {
+        const callNode = buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
+        callNode.callee = node; // callee is a FIELD_ACCESS node, not a string
+        parseCallArgs(callNode);
+        node = callNode;
+        continue;
+      }
       break;
     }
 
@@ -232,8 +417,10 @@ export function parse(src) {
         node.kind !== ASTNodeKind.IDENT &&
         node.kind !== ASTNodeKind.FIELD_ACCESS
       ) {
-        throw new Error(
-          `invalid assignment target: ${node.kind} at pos ${peek().start}`,
+        throw parseError(
+          `invalid assignment target: ${node.kind}`,
+          peek().start,
+          peek().length,
         );
       }
       advance(); // consume '='
@@ -295,7 +482,7 @@ export function parse(src) {
           j++;
         }
         if (depth !== 0) {
-          throw new Error(`unterminated \${...} in template literal`);
+          throw parseError(`unterminated \${...} in template literal`);
         }
         const exprSrc = inner.substring(i + 2, j);
         // re-parse the expression by recursively invoking parse() on a
@@ -418,8 +605,10 @@ export function parse(src) {
         }
         break;
       default: {
-        throw new Error(
-          `unexpected variable declaration token ${varToken.tag} ${inverseTokenTags[varToken.tag]}`,
+        throw parseError(
+          `unexpected variable declaration token: ${inverseTokenTags[varToken.tag]}`,
+          varToken.start,
+          varToken.length,
         );
       }
     }
@@ -479,33 +668,22 @@ export function parse(src) {
   // expects an identifier, args, curlys, statements...
   function parseFunctionDecl() {
     expect(TokenTags.function);
+    return parseFunctionDeclBody();
+  }
+
+  function parseFunctionDeclBody() {
     const node = buildSourcedNode(ASTNodeKind.FUNCTION_DECL);
-    // name
     node.name = parseIdentAsName();
-
-    // arg signature
     expect(TokenTags.lparen);
-
+    node.params = [];
     while (peek().tag === TokenTags.ident || peek().tag === TokenTags.comma) {
-      if (peek().tag === TokenTags.comma) {
-        // just advance past the comma
-        advance();
-      }
-      if (!node.params) {
-        node.params = [];
-      }
+      if (peek().tag === TokenTags.comma) advance();
       node.params.push(parseFunctionParam());
     }
-
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
-
     node.returnType = parseIdentAsName();
-
-    // end of signature
-    // function body
     node.body = parseBlock();
-
     return node;
   }
 

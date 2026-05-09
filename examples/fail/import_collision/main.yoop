@@ -1,0 +1,4 @@
+import { x } from "./m.yoop";
+import { x } from "./n.yoop";
+
+function main(): int32 { return 0; }
