@@ -84,7 +84,50 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a.inner.v = 42\n");
   });
+
+  it("errors_basic.yoop reads a fallible struct and observes err via field access", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/errors_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len = 42\n");
+  });
+
+  it("errors_propagate.yoop uses '?' to bail on err and yield the success value", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_propagate.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "total = 84\n");
+  });
+
+  it("errors_propagate_failure.yoop traces an err through '?' and a destructure", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_propagate_failure.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "err: empty path\n");
+  });
+
+  it("errors_discard.yoop satisfies observation via '_ = ...'", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_discard.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "done\n");
+  });
+
+  it("errors_destructure_no_qmark.yoop destructures a fallible struct including err", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/errors_destructure_no_qmark.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len = 7\n");
+  });
 });
+
+function typecheckFixture(relPath) {
+  const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
+  return typecheckSource(src);
+}
 
 describe("e2e: fail fixtures fail at the right stage with the right message", () => {
   it("parse_bad_suffix.yoop throws a parse-time error about a missing semicolon", () => {
@@ -93,5 +136,77 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       "utf8",
     );
     assert.throws(() => parse(src), /expected token .* semicolon/);
+  });
+
+  it("err_dropped.yoop rejects a bare fallible call statement", () => {
+    const { errors } = typecheckFixture("examples/fail/err_dropped.yoop");
+    assert.ok(
+      errors.some((e) => /fallible result.*dropped/.test(e.message)),
+      `expected dropped-fallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_unobserved.yoop rejects a fallible binding whose err is never read", () => {
+    const { errors } = typecheckFixture("examples/fail/err_unobserved.yoop");
+    assert.ok(
+      errors.some((e) =>
+        /fallible binding "r".*must observe its 'err'/.test(e.message),
+      ),
+      `expected unobserved-err error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_destructure_missing_err.yoop rejects a destructure that omits err", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_destructure_missing_err.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /destructuring a fallible type.*include "err"/.test(e.message)),
+      `expected missing-err error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_qmark_in_nonfallible.yoop rejects '?' inside a non-fallible function", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_qmark_in_nonfallible.yoop",
+    );
+    assert.ok(
+      errors.some((e) =>
+        /'\?' is only legal inside a function that returns a fallible type/.test(
+          e.message,
+        ),
+      ),
+      `expected ?-in-nonfallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_qmark_on_nonfallible.yoop rejects '?' on a non-fallible operand", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_qmark_on_nonfallible.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /'\?' applied to non-fallible type/.test(e.message)),
+      `expected ?-on-nonfallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_destructure_unknown_field.yoop rejects an unknown destructured name", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_destructure_unknown_field.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /no field "nope"/.test(e.message)),
+      `expected unknown-field error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("err_multi_strip_no_destructure.yoop rejects multi-field '?' outside a destructure", () => {
+    const { errors } = typecheckFixture(
+      "examples/fail/err_multi_strip_no_destructure.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /multi-field.*must be destructured/.test(e.message)),
+      `expected multi-strip error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
   });
 });
