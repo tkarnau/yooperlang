@@ -1,0 +1,22 @@
+trait A {
+    function m(ref self): void;
+}
+
+trait B {
+    function m(ref self): void;
+}
+
+type T implements (A, B) {
+    x: int32,
+    function m(ref self): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because both trait A and trait B declare a method named `m`. A type cannot
+// implement two traits that require the same method name — the free-function call
+// form `m(ref t)` would be ambiguous. The typechecker rejects the collision at the
+// impl block level before any call sites are checked.

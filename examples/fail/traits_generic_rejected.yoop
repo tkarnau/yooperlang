@@ -1,0 +1,12 @@
+trait Iter<T> {
+    function next(ref self): int32;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails at parse time because generic trait declarations (`trait Foo<T>`) are not
+// supported in v0. The parser rejects the `<` immediately after the trait name.
+// Generic traits require the same substitution machinery as user-defined generic
+// types, which is deferred to a later phase.

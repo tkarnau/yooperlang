@@ -472,4 +472,135 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       `expected cannot-cast error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
+
+  it("traits_missing_method.yoop rejects impl that omits a required trait method", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_missing_method.yoop");
+    assert.ok(
+      errors.some((e) => /missing method "dispose"/.test(e.message)),
+      `expected missing-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_wrong_signature_return.yoop rejects impl method with wrong return type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_wrong_signature_return.yoop");
+    assert.ok(
+      errors.some((e) => /method "dispose" on type "T" has signature/.test(e.message)),
+      `expected signature-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_wrong_signature_param.yoop rejects impl method with extra parameter", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_wrong_signature_param.yoop");
+    assert.ok(
+      errors.some((e) => /method "dispose" on type "T" has signature/.test(e.message)),
+      `expected signature-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_collision_two_traits.yoop rejects type implementing two traits with the same method name", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_two_traits.yoop");
+    assert.ok(
+      errors.some((e) => /cannot implement both "A" and "B"/.test(e.message)),
+      `expected trait-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_collision_with_function.yoop rejects impl method colliding with a free function", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_with_function.yoop");
+    assert.ok(
+      errors.some((e) => /collides with module-level function "dispose"/.test(e.message)),
+      `expected function-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_self_outside.yoop rejects 'self' used outside a method body", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_self_outside.yoop");
+    assert.ok(
+      errors.some((e) => /'self' can only be used inside a trait method body/.test(e.message)),
+      `expected self-outside-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_extra_method.yoop rejects impl method not required by any trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_extra_method.yoop");
+    assert.ok(
+      errors.some((e) => /declares method "extra", but no implemented trait requires it/.test(e.message)),
+      `expected extra-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_ref_self_by_value.yoop rejects trait method signature missing 'ref'", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_ref_self_by_value.yoop"),
+      "utf8",
+    );
+    assert.throws(
+      () => parse(src),
+      /trait method "dispose" must take 'ref self' as its first parameter/,
+    );
+  });
+
+  it("traits_method_no_implements.yoop rejects methods on a type without implements", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_method_no_implements.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /methods are only allowed inside an 'implements' block/);
+  });
+
+  it("traits_unknown_trait.yoop rejects implementing an undefined trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_unknown_trait.yoop");
+    assert.ok(
+      errors.some((e) => /implements unknown trait "Foo"/.test(e.message)),
+      `expected unknown-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_default_body_in_trait.yoop rejects a method body inside a trait declaration", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_default_body_in_trait.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /expected semicolon, got lcurly/);
+  });
+
+  it("traits_extends_rejected.yoop rejects trait extends clause", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_extends_rejected.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /extends not yet supported/);
+  });
+
+  it("traits_generic_rejected.yoop rejects generic trait declaration", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_generic_rejected.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /trait generics are not supported/);
+  });
+
+  it("traits_method_call_sugar.yoop rejects method-call syntax on a trait method", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_method_call_sugar.yoop");
+    assert.ok(
+      errors.some((e) => /method-call form.*is not supported/.test(e.message)),
+      `expected method-call-sugar error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_redeclared_method.yoop rejects duplicate method in impl block", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_redeclared_method.yoop");
+    assert.ok(
+      errors.some((e) => /duplicate method "dispose" in type "T"/.test(e.message)),
+      `expected duplicate-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_self_assignment_wrong_type.yoop rejects wrong-type assignment to a self field", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_self_assignment_wrong_type.yoop");
+    assert.ok(
+      errors.some((e) => /cannot assign/.test(e.message)),
+      `expected type-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
 });

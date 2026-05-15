@@ -354,6 +354,13 @@ export function parse(src) {
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     // must be ref self as first param
+    if (peek().tag !== TokenTags.ref) {
+      throw parseError(
+        `trait method "${node.name}" must take 'ref self' as its first parameter`,
+        peek().start,
+        peek().length,
+      );
+    }
     expect(TokenTags.ref);
     expect(TokenTags.self);
 

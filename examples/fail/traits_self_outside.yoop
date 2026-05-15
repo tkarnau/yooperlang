@@ -1,0 +1,11 @@
+function f(): int32 {
+    return self.x;
+}
+
+function main(): int32 {
+    return f();
+}
+
+// Fails because `self` is used inside a free function, not inside a trait method
+// body. The keyword `self` is only valid as the first parameter of a trait method
+// and is not in scope in any other context.

@@ -491,7 +491,15 @@ function resolveFieldAccess(node, scope, ctx) {
   }
   const field = objType.fields?.find((f) => f.name === node.field);
   if (!field) {
-    pushError(ctx.errors, node, `type "${objType.name}" has no field "${node.field}"`);
+    if (objType.methods?.has(node.field)) {
+      pushError(
+        ctx.errors,
+        node,
+        `method-call form '.${node.field}()' is not supported — use the free-function form '${node.field}(ref value)'`,
+      );
+    } else {
+      pushError(ctx.errors, node, `type "${objType.name}" has no field "${node.field}"`);
+    }
     return setType(node, ErrorType());
   }
   if (node.field === "err") {

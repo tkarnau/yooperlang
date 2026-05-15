@@ -1,0 +1,19 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type T implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+    }
+    function extra(ref self): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because `extra` is defined in T's impl block but no implemented trait
+// requires it. Every method in an impl block must satisfy exactly one required
+// method from the listed traits — there is no "free method" concept in Yooper.

@@ -1,0 +1,23 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+    }
+}
+
+function main(): int32 {
+    let h: FileHandle = { fd: 7 };
+    h.dispose();
+    return 0;
+}
+
+// Fails because `h.dispose()` uses method-call syntax, which is not supported.
+// Trait methods must be called in the free-function form: `dispose(ref h)`.
+// The typechecker detects that `dispose` is a method name (not a field) and
+// produces a specific error pointing to the correct call form.

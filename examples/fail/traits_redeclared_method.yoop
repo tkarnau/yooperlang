@@ -1,0 +1,19 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type T implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+    }
+    function dispose(ref self): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because `dispose` is declared twice inside T's impl block. Each method
+// name may appear at most once. The typechecker rejects the duplicate before
+// attempting to match methods against trait requirements.
