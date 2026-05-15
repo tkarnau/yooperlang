@@ -214,4 +214,22 @@ describe("lexer: traits", () => {
       tag("ident"),
     ]);
   });
+  it("disposable lexes as a single ident, not as 'dispose' + 'able'", () => {
+    const tokens = tokenize("disposable");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("ident"));
+    assert.equal(tokens[0].length, "disposable".length);
+  });
+  it("selfie lexes as a single ident, not as 'self' + 'ie'", () => {
+    const tokens = tokenize("selfie");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("ident"));
+    assert.equal(tokens[0].length, "selfie".length);
+  });
+  it("implementsHelper lexes as a single ident", () => {
+    const tokens = tokenize("implementsHelper");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("ident"));
+    assert.equal(tokens[0].length, "implementsHelper".length);
+  });
 });

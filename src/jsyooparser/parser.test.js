@@ -412,7 +412,7 @@ describe("parse: phase 5 - traits", () => {
     it("rejects missing ref self in trait method", () => {
       assert.throws(
         () => parse("trait MyTrait { function method(self): void; }"),
-        /expected ref, got self/, // todo better error messages
+        /must take 'ref self' as its first parameter/,
       );
     });
     it("rejects missing self param in trait method", () => {

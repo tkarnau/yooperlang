@@ -453,6 +453,7 @@ export function typecheckProgram(modules) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TRAIT_DECL) continue;
       const trait = traitTable.get(d.name);
+      if (!trait) continue; // was rejected in pass A due to redeclaration
       // validate no duplicate method names within the trait
       const seen = new Set();
       for (const sig of d.methods) {
