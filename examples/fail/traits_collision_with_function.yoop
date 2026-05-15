@@ -1,0 +1,20 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+function dispose(x: int32): void {
+}
+
+type T implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because the module already declares a free function named `dispose`, and
+// T's impl block also provides a `dispose` method. The call form `dispose(ref t)`
+// would be ambiguous between the two, so the typechecker rejects the collision.

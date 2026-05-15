@@ -10,7 +10,7 @@ import { pushError } from "./errors.js";
 // module's local symbol/struct tables with the imported bindings.
 export function resolveImports(mod, moduleEnv, errors) {
   const modEnv = moduleEnv.get(mod.id);
-  const { localSymbols, structTable, importedNames } = modEnv;
+  const { localSymbols, structTable, importedNames, traitTable } = modEnv;
 
   for (const imp of mod.ast.body) {
     if (imp.kind !== ASTNodeKind.IMPORT_DECL) break; // imports-first rule
@@ -47,11 +47,15 @@ export function resolveImports(mod, moduleEnv, errors) {
         continue;
       }
 
-      // Determine if it's a type or a value
+      // Determine if it's a trait, type, or value
+      const srcTrait = srcEnv.traitTable?.get(spec.exportName);
       const srcStruct = srcEnv.structTable.get(spec.exportName);
       const srcSym = srcEnv.localSymbols.get(spec.exportName);
 
-      if (srcStruct) {
+      if (srcTrait) {
+        // It's a trait — record the import; pass C.5 re-syncs the resolved version
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "trait" });
+      } else if (srcStruct) {
         // It's a struct type (possibly a shell; pass C.5 re-syncs the resolved version)
         structTable.set(spec.localName, srcStruct);
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });

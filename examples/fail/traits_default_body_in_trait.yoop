@@ -1,0 +1,11 @@
+trait Foo {
+    function m(ref self): void { }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails at parse time because trait method signatures must end with `;`, not
+// a body block `{ }`. Default method bodies are not supported — trait declarations
+// carry only signatures, and all implementations live in the type's impl block.

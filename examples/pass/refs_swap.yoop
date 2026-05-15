@@ -1,0 +1,15 @@
+function swap(a: ref int32, b: ref int32): void {
+    let tmp: int32 = a;
+    a = b;
+    b = tmp;
+}
+
+function main(): int32 {
+    let x: int32 = 5;
+    let y: int32 = 10;
+    swap(ref x, ref y);
+    printf(`x=${x} y=${y}\n`);
+    return 0;
+}
+
+// expected output: x=10 y=5

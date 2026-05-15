@@ -10,10 +10,14 @@
 
 import { ASTNodeKind } from "../contracts.js";
 import {
+  ArrayType,
   ErrorType,
+  RefType,
   StructType,
   primAnnotations,
   resolveTypeFromName,
+  resolveTypeAnnotation,
+  formatAnnotation,
   typeKinds,
   typesEqual,
 } from "./types.js";
@@ -24,26 +28,57 @@ import {
   markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
-import { isFallible } from "./fallible.js";
+import { isFallible, } from "./fallible.js";
+import { isAssignable } from "./coerce.js";
+
+export function validateMethod(methodDecl, structType, typeContext, errors) {
+  const scope = pushScope(null);
+
+  // params[0] is self (ref structType); remaining params use types from C.3
+  const resolvedParams = methodDecl.resolvedFuncType?.params ?? [];
+  for (let i = 0; i < resolvedParams.length; i++) {
+    const p = resolvedParams[i];
+    declareInScope(scope, i === 0 ? "self" : p.name, p.type, typeKinds.param, methodDecl.params?.[i] ?? methodDecl, errors);
+  }
+
+  const funcReturnType = methodDecl.resolvedFuncType?.returnType ?? ErrorType();
+  const ctx = {
+    funcReturnType,
+    funcName: methodDecl.name,
+    typeContext,
+    errors,
+    inLoop: false,
+    inMethodBody: true,
+    enclosingType: structType,
+  };
+  validateStatement(methodDecl.body, scope, ctx);
+  popScope(scope, errors);
+}
 
 export function validateFunction(funcNode, typeContext, errors) {
   const scope = pushScope(null);
 
   for (const param of funcNode.params ?? []) {
-    const t =
-      resolveTypeFromName(param.type, typeContext.structTable) ?? ErrorType();
-    if (t.kind === typeKinds.error) {
-      pushError(errors, param, `unknown type "${param.type}"`);
+    const baseType = resolveTypeAnnotation(param.typeAnnotation, typeContext.structTable) ?? ErrorType();
+    if (baseType.kind === typeKinds.error) {
+      pushError(errors, param, `unknown type "${formatAnnotation(param.typeAnnotation)}"`);
     }
+    // ref params: binding type in scope is RefType(baseType)
+    const t = param.isRef ? RefType(baseType) : baseType;
     declareInScope(scope, param.name, t, typeKinds.param, param, errors);
     param.resolvedType = t;
   }
 
   const funcReturnType =
-    resolveTypeFromName(funcNode.returnType, typeContext.structTable) ??
+    resolveTypeAnnotation(funcNode.returnTypeAnnotation, typeContext.structTable) ??
     ErrorType();
   if (funcReturnType.kind === typeKinds.error) {
-    pushError(errors, funcNode, `unknown return type "${funcNode.returnType}"`);
+    pushError(errors, funcNode, `unknown return type "${formatAnnotation(funcNode.returnTypeAnnotation)}"`);
+  }
+  // Reject ref return types
+  if (funcReturnType.kind === typeKinds.ref) {
+    pushError(errors, funcNode,
+      `functions may not return 'ref T' — returning a reference to a local binding is unsafe`);
   }
   funcNode.resolvedType = funcReturnType;
 
@@ -52,6 +87,7 @@ export function validateFunction(funcNode, typeContext, errors) {
     funcName: funcNode.name,
     typeContext,
     errors,
+    inLoop: false,
   };
   validateStatement(funcNode.body, scope, ctx);
   // params + the synthetic outer body share `scope`. Block-statement
@@ -80,6 +116,12 @@ export function validateStatement(node, scope, ctx) {
       return checkIf(node, scope, ctx);
     case ASTNodeKind.WHILE_STATEMENT:
       return checkWhile(node, scope, ctx);
+    case ASTNodeKind.FOR_LOOP:
+      return checkForLoop(node, scope, ctx);
+    case ASTNodeKind.BREAK_STATEMENT:
+      return checkBreak(node, ctx);
+    case ASTNodeKind.CONTINUE_STATEMENT:
+      return checkContinue(node, ctx);
     default:
       pushError(
         ctx.errors,
@@ -106,41 +148,59 @@ function checkBlock(node, scope, ctx) {
 //   - bind the name in the current scope
 function checkLetOrConst(node, scope, ctx) {
   const declaredType =
-    resolveTypeFromName(node.type, ctx.typeContext.structTable) ?? ErrorType();
+    resolveTypeAnnotation(node.typeAnnotation, ctx.typeContext.structTable) ?? ErrorType();
   if (declaredType.kind === typeKinds.error) {
-    pushError(ctx.errors, node, `unknown type "${node.type}"`);
+    pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
   }
   node.resolvedType = declaredType;
 
   if (node.assignment) {
-    checkInitializer(
-      node.assignment,
-      declaredType,
-      scope,
-      ctx,
-      (rhsType) =>
-        `cannot assign ${formatType(rhsType)} to ${formatType(declaredType)} in initializer of "${node.name}"`,
-    );
+    // For array literals with a known declared array type, pass element type context
+    if (
+      declaredType.kind === typeKinds.array &&
+      node.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+    ) {
+      checkArrayLiteralWithElemType(node.assignment, declaredType.elem, scope, ctx);
+    } else {
+      checkInitializer(
+        node.assignment,
+        declaredType,
+        scope,
+        ctx,
+        (rhsType) =>
+          `cannot assign ${formatType(rhsType)} to ${formatType(declaredType)} in initializer of "${node.name}"`,
+      );
+    }
   }
 
   const declKind = node.kind === ASTNodeKind.CONST_DECL ? "const" : "let";
   declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors);
 }
 
+// Check an array literal against a known element type (used when the declared
+// type provides the target element type).
+function checkArrayLiteralWithElemType(litNode, elemType, scope, ctx) {
+  if (litNode.elements.length === 0) {
+    // Empty literal is OK when element type is known from declaration
+    litNode.resolvedType = { kind: typeKinds.array, elem: elemType };
+    litNode.knownElemType = elemType;
+    return;
+  }
+  for (let i = 0; i < litNode.elements.length; i++) {
+    checkInitializer(
+      litNode.elements[i],
+      elemType,
+      scope,
+      ctx,
+      (actualType) =>
+        `array literal element ${i} has type ${formatType(actualType)}, expected ${formatType(elemType)}`,
+    );
+  }
+  litNode.resolvedType = ArrayType(elemType);
+  litNode.knownElemType = elemType;
+}
+
 // `const { a, err } = expr;` / `let { a, err } = expr;`
-//
-// Two RHS shapes:
-//   1. Plain expression — RHS resolves to a concrete struct type.
-//      Each destructured name must be a field on that struct, and (if the
-//      struct is fallible) `err` must be among the names.
-//   2. `expr?` — the `?` already consumed err, so destructured names come
-//      from the *stripped* fields. The `?` itself counts as observation
-//      for the *operand's* binding, so we don't require `err` here.
-//
-// The multi-strip sentinel (TRY_OP whose operand has multiple non-err
-// fields) shows up here as a non-Type from resolveExprType. We synthesize
-// a transient "__stripped" StructType so the field-lookup loop can run
-// uniformly. That synthetic type never escapes this function.
 function checkDestructureDecl(node, scope, ctx) {
   const declKind = node.declKind === ASTNodeKind.CONST_DECL ? "const" : "let";
   let rhsType = resolveExprType(node.assignment, scope, ctx);
@@ -191,9 +251,6 @@ function checkDestructureDecl(node, scope, ctx) {
     declareInScope(scope, name, fieldType, declKind, node, ctx.errors);
   }
 
-  // Observation rule: when destructuring a fallible struct directly (no `?`),
-  // `err` must be in the names. With `?` the operator already propagated err,
-  // so the synthetic stripped type has no err and the rule doesn't apply.
   if (!isTryRhs && isFallible(rhsType) && !seenNames.has("err")) {
     pushError(
       ctx.errors,
@@ -203,24 +260,11 @@ function checkDestructureDecl(node, scope, ctx) {
   }
 }
 
-// `_ = expr;` — type-resolve the RHS for its side effects; no binding is
-// introduced. The discard counts as full observation: if the RHS root is a
-// fallible binding, mark its err as observed so the scope-exit check is
-// satisfied.
 function checkDiscardStatement(node, scope, ctx) {
   resolveExprType(node.value, scope, ctx);
   markErrObservedThroughRoot(node.value, scope);
 }
 
-// `expr;` as a top-level statement. If the expression's resolved type is
-// fallible (the user dropped a `f()` call result), that's a compile error —
-// the language requires explicit handling.
-//
-// Special case: `f()?;` where `f` returns an err-only fallible (`{ err: string }`)
-// strips to void, which is legal in statement position. Other strips that
-// happen to land in statement position still produce a non-void value that
-// gets dropped — but that's also "dropped fallible-call result" and is
-// rejected by the same check.
 function checkExpressionStatement(node, scope, ctx) {
   const t = resolveExprType(node.value, scope, ctx);
   if (isFallible(t)) {
@@ -233,8 +277,6 @@ function checkExpressionStatement(node, scope, ctx) {
   return t;
 }
 
-// `return;` (in a void function) or `return expr;` — checks the value
-// against the enclosing function's declared return type.
 function checkReturn(node, scope, ctx) {
   if (!node.value) {
     if (ctx.funcReturnType.kind !== "void") {
@@ -256,8 +298,6 @@ function checkReturn(node, scope, ctx) {
   );
 }
 
-// `if (cond) { ... } else { ... }` — condition must be bool. Each branch
-// is its own statement (the BLOCK case handles its own scope push).
 function checkIf(node, scope, ctx) {
   requireBoolCondition(node, "if-statement", scope, ctx);
   validateStatement(node.body, scope, ctx);
@@ -266,10 +306,66 @@ function checkIf(node, scope, ctx) {
   }
 }
 
-// `while (cond) { ... }` — condition must be bool.
 function checkWhile(node, scope, ctx) {
   requireBoolCondition(node, "while-statement", scope, ctx);
-  validateStatement(node.body, scope, ctx);
+  const loopCtx = { ...ctx, inLoop: true };
+  validateStatement(node.body, scope, loopCtx);
+}
+
+function checkForLoop(node, scope, ctx) {
+  // init: initIdent must be in scope, initExpr must match its type
+  const initBinding = lookupInScope(scope, node.initIdent);
+  if (!initBinding) {
+    pushError(ctx.errors, node,
+      `for-loop variable "${node.initIdent}" is not declared — declare it before the loop`);
+  } else {
+    const initExprType = resolveExprType(node.initExpr, scope, ctx);
+    checkAssignable(initBinding.type, initExprType, node, ctx);
+  }
+
+  // cond: must be bool
+  const condType = resolveExprType(node.cond, scope, ctx);
+  if (condType.kind !== typeKinds.prim || condType.name !== "bool") {
+    if (condType.kind !== typeKinds.error) {
+      pushError(ctx.errors, node.cond,
+        `for-loop condition must be bool, found ${formatType(condType)}`);
+    }
+  }
+
+  // step: stepIdent must be in scope, stepExpr must match its type
+  const stepBinding = lookupInScope(scope, node.stepIdent);
+  if (!stepBinding) {
+    pushError(ctx.errors, node,
+      `for-loop step variable "${node.stepIdent}" is not declared`);
+  } else {
+    const stepExprType = resolveExprType(node.stepExpr, scope, ctx);
+    checkAssignable(stepBinding.type, stepExprType, node, ctx);
+  }
+
+  // body with inLoop: true
+  const loopCtx = { ...ctx, inLoop: true };
+  validateStatement(node.body, scope, loopCtx);
+}
+
+function checkBreak(node, ctx) {
+  if (!ctx.inLoop) {
+    pushError(ctx.errors, node, `'break' is not inside a loop`);
+  }
+}
+
+function checkContinue(node, ctx) {
+  if (!ctx.inLoop) {
+    pushError(ctx.errors, node, `'continue' is not inside a loop`);
+  }
+}
+
+// Check that a value expression is assignable to a binding type (used by for-loop init/step).
+function checkAssignable(bindingType, exprType, node, ctx) {
+  if (exprType.kind === typeKinds.error) return; // suppress cascade
+  if (!isAssignable(bindingType, exprType)) {
+    pushError(ctx.errors, node,
+      `for-loop assignment: cannot assign ${formatType(exprType)} to ${formatType(bindingType)}`);
+  }
 }
 
 function requireBoolCondition(node, label, scope, ctx) {

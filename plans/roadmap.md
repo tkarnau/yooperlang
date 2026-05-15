@@ -58,15 +58,21 @@ Mid-level data shapes the spec leans on. None require traits/kinds to land.
 - `else if` chaining, `break`, `continue`
 - Casts as type-name calls: `int64(x)`, `uint8(x & 0xFF)`
 
+> Detailed plan: [phase-4-refs-arrays-control-flow.md](phase-4-refs-arrays-control-flow.md)
+
 ### Phase 5 — Traits
 
-Capability layer. Spec §5. Methods live inside `type X implements Trait { fields; fn; }` blocks (no bare impl blocks).
+Capability layer. Spec §5. Methods live inside `type X implements Trait { fields; fn; }` blocks (no bare impl blocks). Phase 5 ships **non-generic traits only**, with `extends` and method-call sugar deferred — kept tight so phase 6 (kinds) can lean on it.
 
-- `trait Foo { ... }` parsing and a TraitType in the type system
-- `extends` chaining (`BatchIterable<T> extends Iterable<T>`)
+- `trait Foo { ... }` parsing and a `TraitType` in the type system
 - `type T implements Trait { ... }` parsing, method registration
 - Multi-trait impls: `type T implements (A, B) { ... }`
 - Trait method resolution at call sites (free-function form, `dispose(ref x)`, per spec §17.2)
+- `ref T` for struct `T` (deferred from phase 4 — needed for `ref self`)
+- Same-name method collisions (across implemented traits, and against module free functions) rejected at typecheck
+- Generic traits, `extends`, and method-call sugar deferred to a later phase
+
+> Detailed plan: [phase-5-traits.md](phase-5-traits.md)
 
 ### Phase 6 — Kinds
 

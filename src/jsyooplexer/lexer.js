@@ -47,6 +47,17 @@ export const TokenTags = {
   as: 45,
   library: 46,
   dotdotdot: 47, // for variadic params and rest patterns
+  ref: 48,
+  break: 49,
+  continue: 50,
+  lbracket: 51, // [
+  rbracket: 52, // ]
+  true: 53,
+  false: 54,
+  trait: 55,
+  implements: 56,
+  self: 57,
+  extends: 58,
   // punctuation / operators
   eq: 5,
   semicolon: 6,
@@ -112,6 +123,8 @@ export const tokenScanList = [
   { str: "%", tag: TokenTags.modulus },
   { str: ".", tag: TokenTags.dot },
   { str: "...", tag: TokenTags.dotdotdot },
+  { str: "[", tag: TokenTags.lbracket },
+  { str: "]", tag: TokenTags.rbracket },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {
@@ -130,6 +143,15 @@ const keywordTagList = {
   from: TokenTags.from,
   as: TokenTags.as,
   library: TokenTags.library,
+  ref: TokenTags.ref,
+  break: TokenTags.break,
+  continue: TokenTags.continue,
+  true: TokenTags.true,
+  false: TokenTags.false,
+  trait: TokenTags.trait,
+  implements: TokenTags.implements,
+  self: TokenTags.self,
+  extends: TokenTags.extends,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

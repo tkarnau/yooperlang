@@ -1,0 +1,8 @@
+function bad(): ref int32 {
+    let x: int32 = 1;
+    return ref x;
+}
+
+function main(): int32 {
+    return 0;
+}

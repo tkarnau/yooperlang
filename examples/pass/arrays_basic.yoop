@@ -1,0 +1,11 @@
+function main(): int32 {
+    let xs: int32[] = [10, 20, 30];
+    printf(`len=${xs.len} first=${xs[0]} last=${xs[2]}\n`);
+    xs[1] = 99;
+    printf(`xs[1]=${xs[1]}\n`);
+    return 0;
+}
+
+// expected output:
+// len=3 first=10 last=30
+// xs[1]=99

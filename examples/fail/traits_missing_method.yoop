@@ -1,0 +1,15 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type T implements Disposable {
+    fd: int32,
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because T declares `implements Disposable` but provides no `dispose` method.
+// The typechecker requires every method listed in the trait to have a matching
+// implementation in the type's method block.

@@ -12,6 +12,7 @@ export const typeKinds = {
   untypedFloat: "untypedFloat",
   error: "error",
   namespace: "namespace",
+  trait: "trait",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -106,9 +107,21 @@ export function isFloatPrim(name) {
 
 export const PrimType = (name) => freezerWrap(typeKinds.prim, { name });
 
-// moduleId: the module that defines this struct (for IR name mangling). null for legacy/test usage.
-export const StructType = (name, fields, moduleId = null) =>
-  freezerWrap(typeKinds.struct, { name, fields, moduleId });
+// moduleId: the module that defines this struct (for IR name mangling). null for legacy/test usage. Also adding implementsTraits and methods
+export const StructType = (
+  name,
+  fields,
+  moduleId = null,
+  implementsTraits = [],
+  methods = new Map(),
+) =>
+  freezerWrap(typeKinds.struct, {
+    name,
+    fields,
+    moduleId,
+    implementsTraits,
+    methods,
+  });
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // variadic: true for C variadic externs (e.g. printf). Skips arity check past fixed params.
@@ -121,6 +134,24 @@ export const NamespaceType = (moduleId, exports) =>
 export const UntypedIntType = () => freezerWrap(typeKinds.untypedInt, {});
 export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
+export const TraitType = (name, methods, moduleId = null) =>
+  freezerWrap(typeKinds.trait, { name, methods, moduleId });
+
+/****************
+ * Placeholders - these are things that get materialized later in the pipeline,
+ * but we want to be able to represent them as types for now so that we can
+ * resolve type annotations that refer to them, these are not legal to appear
+ * outside of special situations
+ ***************** */
+
+// The `TraitSelfPlaceholder` is **only** legal inside a `RefType { inner }`
+// slot of a trait method's first param type. When a struct `T` implements
+// `Trait`, we materialize a per-type `FuncType` for each method by substituting
+// `RefType { inner: T }` for `RefType { inner: TraitSelfPlaceholder }`. That
+// substitution happens once per method per impl,
+export const TraitSelfPlaceholder = Object.freeze({
+  kind: "trait_self_placeholder",
+});
 
 // conventional name conversions go here
 export function canonicalize(name) {
@@ -132,6 +163,7 @@ export function canonicalize(name) {
 // try to find primitive from type name, else return null
 export function primTypeFromName(name) {
   const canonName = canonicalize(name);
+  if (canonName === "void") return VoidType();
   if (primAnnotations[canonName]) {
     return PrimType(canonName);
   }
@@ -147,6 +179,115 @@ export function primTypeFromName(name) {
 export function resolveTypeFromName(name, structTable) {
   // naive for now
   return primTypeFromName(name) ?? structTable.get(name) ?? null;
+}
+
+// Resolve a structured type annotation object (from parseTypeAnnotation) to a Type.
+export function resolveTypeAnnotation(annot, structTable, ctx) {
+  if (!annot) return null;
+  if (annot.kind === "typeName") {
+    return resolveTypeFromName(annot.name, structTable);
+  }
+  if (annot.kind === "refType") {
+    const inner = resolveTypeAnnotation(annot.inner, structTable, ctx);
+    if (!inner) return null;
+    return RefType(inner);
+  }
+  if (annot.kind === "arrayType") {
+    const elem = resolveTypeAnnotation(annot.elem, structTable, ctx);
+    if (!elem) return null;
+    return ArrayType(elem);
+  }
+  if (annot.kind === "selfType") {
+    if (!ctx?.selfType) {
+      throw new Error(
+        "resolveTypeAnnotation: 'self' used outside the trait/method context",
+      );
+    }
+    return ctx.selfType;
+  }
+  throw new Error(
+    `resolveTypeAnnotation: unknown annotation kind "${annot.kind}"`,
+  );
+}
+
+// Format a type annotation object as a human-readable string (for error messages).
+export function formatAnnotation(annot) {
+  if (!annot) return "unknown";
+  if (annot.kind === "typeName") return annot.name;
+  if (annot.kind === "refType") return `ref ${formatAnnotation(annot.inner)}`;
+  if (annot.kind === "arrayType") return `${formatAnnotation(annot.elem)}[]`;
+  return "unknown";
+}
+
+function bitWidthOf(name) {
+  switch (name) {
+    case "int8":
+    case "uint8":
+      return 8;
+    case "int16":
+    case "uint16":
+      return 16;
+    case "int32":
+    case "uint32":
+      return 32;
+    case "int64":
+    case "uint64":
+    case "usize":
+    case "isize":
+      return 64;
+    case "float32":
+      return 32;
+    case "float64":
+      return 64;
+    default:
+      throw new Error(`bitWidthOf: unknown type "${name}"`);
+  }
+}
+
+// Returns true if a numeric cast from src to dst is valid (both must be numeric prims).
+export function isCastableTo(src, dst) {
+  if (!src || !dst) return false;
+  if (src.kind !== typeKinds.prim || dst.kind !== typeKinds.prim) return false;
+  const numericPrims = [
+    "int8",
+    "int16",
+    "int32",
+    "int64",
+    "uint8",
+    "uint16",
+    "uint32",
+    "uint64",
+    "usize",
+    "isize",
+    "float32",
+    "float64",
+  ];
+  return numericPrims.includes(src.name) && numericPrims.includes(dst.name);
+}
+
+// Returns the LLVM cast opcode string for casting srcType to dstType.
+// Caller must verify isCastableTo first. Returns null for no-op (same width int).
+export function castInstruction(srcType, dstType) {
+  const srcIsFloat = srcType.name.startsWith("float");
+  const dstIsFloat = dstType.name.startsWith("float");
+  const srcBits = bitWidthOf(srcType.name);
+  const dstBits = bitWidthOf(dstType.name);
+
+  if (srcIsFloat && dstIsFloat) {
+    return srcBits < dstBits ? "fpext" : "fptrunc";
+  }
+  if (!srcIsFloat && !dstIsFloat) {
+    if (srcBits === dstBits) return null; // same representation
+    if (srcBits < dstBits) {
+      return isUnsignedIntPrim(srcType.name) ? "zext" : "sext";
+    }
+    return "trunc";
+  }
+  if (!srcIsFloat && dstIsFloat) {
+    return isUnsignedIntPrim(srcType.name) ? "uitofp" : "sitofp";
+  }
+  // float to int
+  return isUnsignedIntPrim(dstType.name) ? "fptoui" : "fptosi";
 }
 
 export function typesEqual(a, b) {
@@ -187,6 +328,9 @@ export function typesEqual(a, b) {
     a.kind === typeKinds.error
   ) {
     return true;
+  }
+  if (a.kind === typeKinds.trait) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
   throw new Error(`Unknown type kind: ${a.kind}`);
 }

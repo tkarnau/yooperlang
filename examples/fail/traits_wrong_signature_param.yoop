@@ -1,0 +1,17 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type T implements Disposable {
+    fd: int32,
+    function dispose(ref self, extra: int32): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because the impl method `dispose` takes an extra `extra: int32` parameter
+// beyond what the trait signature declares. The typechecker matches the full parameter
+// list (count and types) against the trait's required signature.

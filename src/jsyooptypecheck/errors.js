@@ -34,6 +34,8 @@ export function formatType(t) {
       return "untyped float";
     case typeKinds.error:
       return "error";
+    case typeKinds.trait:
+      return `trait ${t.name}`;
     default:
       return `unknown kind ${t.kind}`;
   }

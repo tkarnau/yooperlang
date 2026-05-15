@@ -1,0 +1,18 @@
+trait Writable {
+    function write(ref self): void;
+}
+
+type Record implements Writable {
+    fd: int32,
+    function write(ref self): void {
+        self.fd = "hi";
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because `self.fd = "hi"` assigns a string to an int32 field. Inside a
+// method body, `self` is auto-dereffed as a ref to the implementing type, so
+// field assignments go through the same type checking as any other assignment.

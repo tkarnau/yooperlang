@@ -1,0 +1,15 @@
+trait Base {
+    function base(ref self): void;
+}
+
+trait Sub extends Base {
+    function sub(ref self): void;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails at parse time because trait inheritance via `extends` is not supported
+// in v0. The parser rejects the `extends` keyword immediately after the trait
+// name with a clear "extends not yet supported" error.
