@@ -248,6 +248,42 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=7\n");
   });
+
+  it("traits_multi_impl: one type implementing two traits", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_multi_impl/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "closing fd=7\ndisposing fd=7\nrc=7 is_open=0\n");
+  });
+
+  it("traits_two_types_one_trait: two distinct types implementing the same trait", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_two_types_one_trait/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "file fd=1\nsocket sock=99\n");
+  });
+
+  it("traits_self_field: method body reads multiple fields and returns a value", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_self_field/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "encoded=304\n");
+  });
+
+  it("traits_self_call_other_method: method body invokes another method on the same type", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_self_call_other_method/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "closing fd=42\ndisposed via close (rc=42)\n");
+  });
+
+  it("traits_cross_module: trait declared in one module, implemented in another, called in main", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=13\n");
+  });
+
+  it("traits_recursive_method: trait method calls itself recursively", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_recursive_method/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "n=3\nn=2\nn=1\n");
+  });
 });
 
 describe("e2e: multi-file fail fixtures produce the right errors", () => {

@@ -206,12 +206,20 @@ function resolveCall(node, scope, ctx) {
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
     // Try trait method dispatch: callee(ref structValue, ...)
+    // Also handles `ref self` inside a method body where self: ref T.
     if (node.args.length >= 1 && node.args[0].kind === ASTNodeKind.REF_EXPRESSION) {
       const operandType = resolveExprType(node.args[0].operand, scope, ctx);
-      if (operandType.kind === typeKinds.struct && operandType.methods?.has(callee)) {
-        const methodSig = operandType.methods.get(callee);
-        node.calleeMethodOf = operandType;
-        node.calleeMangledName = `${operandType.moduleId}__${operandType.name}__${callee}`;
+      let structType = operandType.kind === typeKinds.ref ? operandType.inner : operandType;
+      // Re-lookup from structTable to get the fully-resolved version with methods populated.
+      // Inside method bodies, self's inner type may reference a pre-methods shell.
+      if (structType.kind === typeKinds.struct && ctx.typeContext.structTable) {
+        const canonical = ctx.typeContext.structTable.get(structType.name);
+        if (canonical) structType = canonical;
+      }
+      if (structType.kind === typeKinds.struct && structType.methods?.has(callee)) {
+        const methodSig = structType.methods.get(callee);
+        node.calleeMethodOf = structType;
+        node.calleeMangledName = `${structType.moduleId}__${structType.name}__${callee}`;
         return resolveCallWithSig(node, methodSig, scope, ctx);
       }
     }
@@ -708,10 +716,13 @@ export function resolveCallType(node, sig, scope, ctx) {
         resolveExprType(node.args[i], scope, ctx);
         continue;
       }
-      // Validate inner expression type matches param's inner type
+      // Validate inner expression type matches param's inner type.
+      // If the operand is itself a ref binding (e.g. `ref self` in a method body
+      // where self: ref T), unwrap one level so it matches the ref T param.
       const innerExpType = resolveExprType(node.args[i].operand, scope, ctx);
       const paramInner = param.type.inner; // param.type is RefType { inner }
-      if (paramInner && innerExpType.kind !== typeKinds.error && !typesEqual(innerExpType, paramInner)) {
+      const effectiveInner = innerExpType.kind === typeKinds.ref ? innerExpType.inner : innerExpType;
+      if (paramInner && effectiveInner.kind !== typeKinds.error && !typesEqual(effectiveInner, paramInner)) {
         pushError(ctx.errors, node.args[i],
           `ref argument type ${formatType(innerExpType)} does not match param type ${formatType(paramInner)}`);
       }

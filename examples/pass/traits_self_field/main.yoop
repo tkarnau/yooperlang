@@ -1,0 +1,19 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Encodable {
+    function encode(ref self): int32;
+}
+
+type Point implements Encodable {
+    x: int32,
+    y: int32,
+    function encode(ref self): int32 {
+        return self.x * 100 + self.y;
+    }
+}
+
+function main(): int32 {
+    let p: Point = { x: 3, y: 4 };
+    printf(`encoded=${encode(ref p)}\n`);
+    return 0;
+}

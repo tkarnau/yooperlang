@@ -750,9 +750,8 @@ export function parse(src) {
   function parseReturnStatement() {
     expect(TokenTags.return);
     const node = buildSourcedNode(ASTNodeKind.RETURN_STATEMENT);
-    node.value = parseExpression();
+    node.value = peek().tag === TokenTags.semicolon ? null : parseExpression();
     expect(TokenTags.semicolon);
-
     return node;
   }
 

@@ -163,6 +163,7 @@ export function canonicalize(name) {
 // try to find primitive from type name, else return null
 export function primTypeFromName(name) {
   const canonName = canonicalize(name);
+  if (canonName === "void") return VoidType();
   if (primAnnotations[canonName]) {
     return PrimType(canonName);
   }

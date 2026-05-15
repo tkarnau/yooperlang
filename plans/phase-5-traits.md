@@ -1162,7 +1162,7 @@ Phase 3 mangled struct names per-module (`%struct.<modId>__<TypeName>`). The met
 
 ### 7.1 Pass fixtures — [examples/pass/](../examples/pass/)
 
-Multi-file fixtures live in directories with a `main.yoop` entry; single-file fixtures live as `.yoop` files at the top of `examples/pass/`.
+Multi-file fixtures live in directories with a `main.yoop` entry; single-file fixtures live as `.yoop` files at the top of `examples/pass/`. However, each test in the traits phase should be added using the multi-file structure and put in their own subfolder and use the multi-file area in the e2e js tests.
 
 #### `traits_disposable.yoop` — single trait, single impl, single call
 
