@@ -166,3 +166,52 @@ describe("lexer: whitespace handling", () => {
     assert.equal(tokens[3].tag, tag("intLiteral"));
   });
 });
+
+describe("lexer: traits", () => {
+  it("lexes trait Disposable { ... }", () => {
+    const tokens = tokenize("trait Disposable { ... }");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("trait"),
+      tag("ident"),
+      tag("lcurly"),
+      tag("dotdotdot"),
+      tag("rcurly"),
+    ]);
+  });
+  it("lexes type T implements Foo { ... }", () => {
+    const tokens = tokenize("type T implements Foo { ... }");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("type"),
+      tag("ident"),
+      tag("implements"),
+      tag("ident"),
+      tag("lcurly"),
+      tag("dotdotdot"),
+      tag("rcurly"),
+    ]);
+  });
+  it("lexes function dispose(ref self): void`", () => {
+    const tokens = tokenize("function dispose(ref self): void");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("function"),
+      tag("ident"),
+      tag("lparen"),
+      tag("ref"),
+      tag("self"),
+      tag("rparen"),
+      tag("colon"),
+      tag("ident"),
+    ]);
+  });
+  it("lexes extends Foo", () => {
+    const tokens = tokenize("extends Foo");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("extends"),
+      tag("ident"),
+    ]);
+  });
+});

@@ -80,13 +80,14 @@ export function parse(src) {
   // Format a parse error with source context: the offending line plus a caret.
   function parseError(message, pos = current?.start ?? 0, length = 1) {
     const { line, column } = posToSourceLocation(src, pos);
-    const lineText = src.split('\n')[line - 1] ?? '';
-    const caret = ' '.repeat(Math.max(0, column - 1)) + '^'.repeat(Math.max(1, length));
+    const lineText = src.split("\n")[line - 1] ?? "";
+    const caret =
+      " ".repeat(Math.max(0, column - 1)) + "^".repeat(Math.max(1, length));
     return new Error(
       `${message}\n` +
-      `  --> line ${line}:${column}\n` +
-      `   | ${lineText}\n` +
-      `   | ${caret}`,
+        `  --> line ${line}:${column}\n` +
+        `   | ${lineText}\n` +
+        `   | ${caret}`,
     );
   }
 
@@ -132,7 +133,7 @@ export function parse(src) {
     let annot = { kind: "typeName", name };
     // optional [] suffix for arrays — in type position, [ always means T[]
     if (peek().tag === TokenTags.lbracket) {
-      advance();               // consume [
+      advance(); // consume [
       expect(TokenTags.rbracket); // must be ]
       annot = { kind: "arrayType", elem: annot };
     }
@@ -153,7 +154,11 @@ export function parse(src) {
           case TokenTags.type:
             {
               seenNonImport = true;
-              node.body.push(peekTag === TokenTags.function ? parseFunctionDecl() : parseTypeDecl());
+              node.body.push(
+                peekTag === TokenTags.function
+                  ? parseFunctionDecl()
+                  : parseTypeDecl(),
+              );
             }
             break;
           case TokenTags.import:
@@ -174,6 +179,12 @@ export function parse(src) {
             {
               seenNonImport = true;
               node.body.push(parseExternBlock());
+            }
+            break;
+          case TokenTags.trait:
+            {
+              seenNonImport = true;
+              node.body.push(parseTraitDecl());
             }
             break;
           default: {
@@ -228,13 +239,20 @@ export function parse(src) {
       advance(); // consume {
       while (peek().tag === TokenTags.ident) {
         const exportTok = expect(TokenTags.ident);
-        const exportName = src.substring(exportTok.start, exportTok.start + exportTok.length);
+        const exportName = src.substring(
+          exportTok.start,
+          exportTok.start + exportTok.length,
+        );
         let localName = exportName;
         if (peek().tag === TokenTags.as) {
           advance();
           localName = parseIdentAsName();
         }
-        node.specifiers.push({ exportName, localName, sourceLoc: posToSourceLocation(src, exportTok.start) });
+        node.specifiers.push({
+          exportName,
+          localName,
+          sourceLoc: posToSourceLocation(src, exportTok.start),
+        });
         if (peek().tag === TokenTags.comma) advance();
       }
       expect(TokenTags.rcurly);
@@ -244,7 +262,11 @@ export function parse(src) {
       return node;
     }
 
-    throw parseError(`unexpected token after import: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+    throw parseError(
+      `unexpected token after import: ${inverseTokenTags[peek().tag]}`,
+      peek().start,
+      peek().length,
+    );
   }
 
   function parseExportDecl() {
@@ -255,7 +277,11 @@ export function parse(src) {
       const abiTok = advance();
       const abi = unquoteStringLiteral(abiTok);
       if (abi !== "C") {
-        throw parseError(`unsupported export ABI "${abi}" — only "C" is supported`, abiTok.start, abiTok.length);
+        throw parseError(
+          `unsupported export ABI "${abi}" — only "C" is supported`,
+          abiTok.start,
+          abiTok.length,
+        );
       }
       expect(TokenTags.function);
       const fn = parseFunctionDeclBody();
@@ -267,13 +293,85 @@ export function parse(src) {
     // wrapping form: export function / type / let / const
     const node = buildSourcedNode(ASTNodeKind.EXPORT_DECL);
     switch (peek().tag) {
-      case TokenTags.function: node.decl = parseFunctionDecl(); break;
-      case TokenTags.type:     node.decl = parseTypeDecl(); break;
+      case TokenTags.function:
+        node.decl = parseFunctionDecl();
+        break;
+      case TokenTags.type:
+        node.decl = parseTypeDecl();
+        break;
       case TokenTags.let:
-      case TokenTags.const:    node.decl = parseVarDecl(); break;
+      case TokenTags.const:
+        node.decl = parseVarDecl();
+        break;
+      case TokenTags.trait:
+        node.decl = parseTraitDecl();
+        break;
       default:
-        throw parseError(`unexpected token after export: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+        throw parseError(
+          `unexpected token after export: ${inverseTokenTags[peek().tag]}`,
+          peek().start,
+          peek().length,
+        );
     }
+    return node;
+  }
+
+  function parseTraitDecl() {
+    const node = buildSourcedNode(ASTNodeKind.TRAIT_DECL);
+    expect(TokenTags.trait);
+
+    node.name = parseIdentAsName();
+
+    if (peek().tag === TokenTags.lt) {
+      throw parseError(
+        "trait generics are not supported in v0",
+        peek().start,
+        peek().length,
+      );
+    }
+
+    if (peek().tag === TokenTags.extends) {
+      throw parseError(
+        `extends not yet supported`,
+        peek().start,
+        peek().length,
+      );
+    }
+
+    expect(TokenTags.lcurly);
+    node.methods = [];
+    while (peek().tag === TokenTags.function) {
+      node.methods.push(parseMethodSig());
+    }
+
+    expect(TokenTags.rcurly);
+    return node;
+  }
+
+  function parseMethodSig() {
+    const node = buildSourcedNode(ASTNodeKind.METHOD_SIG);
+    expect(TokenTags.function);
+    node.name = parseIdentAsName();
+    expect(TokenTags.lparen);
+    // must be ref self as first param
+    expect(TokenTags.ref);
+    expect(TokenTags.self);
+
+    const selfParam = buildSourcedNode(ASTNodeKind.PARAM);
+    selfParam.isRef = true;
+    selfParam.name = "self";
+    selfParam.typeAnnotation = { kind: "selfType" };
+    node.params = [selfParam];
+
+    while (peek().tag === TokenTags.comma) {
+      advance();
+      node.params.push(parseFunctionParam());
+    }
+    expect(TokenTags.rparen);
+    expect(TokenTags.colon);
+    node.returnTypeAnnotation = parseTypeAnnotation();
+    expect(TokenTags.semicolon); // sigs end with ; not a body
+
     return node;
   }
 
@@ -283,21 +381,38 @@ export function parse(src) {
     const abiTok = expect(TokenTags.strLiteral);
     node.abi = unquoteStringLiteral(abiTok);
     if (node.abi !== "C") {
-      throw parseError(`unsupported extern ABI "${node.abi}" — only "C" is supported in v0`, abiTok.start, abiTok.length);
+      throw parseError(
+        `unsupported extern ABI "${node.abi}" — only "C" is supported in v0`,
+        abiTok.start,
+        abiTok.length,
+      );
     }
     expect(TokenTags.from);
     if (peek().tag === TokenTags.library) {
       advance();
-      node.source = { kind: "library", value: unquoteStringLiteral(expect(TokenTags.strLiteral)) };
+      node.source = {
+        kind: "library",
+        value: unquoteStringLiteral(expect(TokenTags.strLiteral)),
+      };
     } else {
-      node.source = { kind: "header", value: unquoteStringLiteral(expect(TokenTags.strLiteral)) };
+      node.source = {
+        kind: "header",
+        value: unquoteStringLiteral(expect(TokenTags.strLiteral)),
+      };
     }
     expect(TokenTags.lcurly);
     node.decls = [];
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
-      if (peek().tag === TokenTags.function) node.decls.push(parseExternFunctionDecl());
-      else if (peek().tag === TokenTags.type) node.decls.push(parseExternTypeDecl());
-      else throw parseError(`unexpected token in extern block: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+      if (peek().tag === TokenTags.function)
+        node.decls.push(parseExternFunctionDecl());
+      else if (peek().tag === TokenTags.type)
+        node.decls.push(parseExternTypeDecl());
+      else
+        throw parseError(
+          `unexpected token in extern block: ${inverseTokenTags[peek().tag]}`,
+          peek().start,
+          peek().length,
+        );
     }
     expect(TokenTags.rcurly);
     return node;
@@ -369,7 +484,10 @@ export function parse(src) {
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
-    } else if (peek().tag === TokenTags.true || peek().tag === TokenTags.false) {
+    } else if (
+      peek().tag === TokenTags.true ||
+      peek().tag === TokenTags.false
+    ) {
       const tok = advance();
       node = buildSourcedNode(ASTNodeKind.BOOL_LITERAL);
       node.value = tok.tag === TokenTags.true;
@@ -389,7 +507,10 @@ export function parse(src) {
       advance(); // consume [
       node = buildSourcedNode(ASTNodeKind.ARRAY_LITERAL);
       node.elements = [];
-      while (peek().tag !== TokenTags.rbracket && peek().tag !== TokenTags.eof) {
+      while (
+        peek().tag !== TokenTags.rbracket &&
+        peek().tag !== TokenTags.eof
+      ) {
         node.elements.push(parseExpression());
         if (peek().tag === TokenTags.comma) advance();
       }
@@ -420,6 +541,10 @@ export function parse(src) {
         } // allow trailing comma
       }
       expect(TokenTags.rcurly);
+    } else if (peek().tag === TokenTags.self) {
+      advance();
+      node = buildSourcedNode(ASTNodeKind.IDENT);
+      node.name = "self";
     } else {
       throw parseError(
         `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
@@ -447,7 +572,10 @@ export function parse(src) {
         continue;
       }
       // handle postfix call on a field access: ns.method(args)
-      if (peek().tag === TokenTags.lparen && node.kind === ASTNodeKind.FIELD_ACCESS) {
+      if (
+        peek().tag === TokenTags.lparen &&
+        node.kind === ASTNodeKind.FIELD_ACCESS
+      ) {
         const callNode = buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
         callNode.callee = node; // callee is a FIELD_ACCESS node, not a string
         parseCallArgs(callNode);
@@ -802,25 +930,86 @@ export function parse(src) {
     // name
     node.name = parseIdentAsName();
 
+    node.implements = [];
+    if (peek().tag === TokenTags.implements) {
+      advance();
+      if (peek().tag === TokenTags.lparen) {
+        advance();
+        while (peek().tag === TokenTags.ident) {
+          node.implements.push(parseIdentAsName());
+          if (peek().tag === TokenTags.comma) {
+            advance();
+          }
+        }
+        expect(TokenTags.rparen);
+      } else {
+        node.implements.push(parseIdentAsName());
+      }
+    }
+
     if (peek().tag === TokenTags.lcurly) {
       // struct type
       node.fields = [];
+      node.methods = [];
       expect(TokenTags.lcurly);
-      while (peek().tag === TokenTags.ident) {
-        const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
-        fieldNode.name = parseIdentAsName();
-        expect(TokenTags.colon);
-        fieldNode.typeAnnotation = parseTypeAnnotation();
-        node.fields.push(fieldNode);
-        if (peek().tag === TokenTags.comma) {
-          advance();
-        } // allow trailing comma
+      while (
+        peek().tag === TokenTags.ident ||
+        peek().tag === TokenTags.function
+      ) {
+        if (peek().tag === TokenTags.function) {
+          node.methods.push(parseMethodDecl());
+        } else {
+          const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+          fieldNode.name = parseIdentAsName();
+          expect(TokenTags.colon);
+          fieldNode.typeAnnotation = parseTypeAnnotation();
+          node.fields.push(fieldNode);
+          if (peek().tag === TokenTags.comma) {
+            advance();
+          } // allow trailing comma
+        }
       }
       expect(TokenTags.rcurly);
     } else {
       // type alias, just a reference to another type for now
       node.targetType = parseIdentAsName();
     }
+
+    // constraint: methods only allowed when implements is non-empty
+    if (node.methods?.length > 0 && node.implements.length === 0) {
+      throw parseError(
+        `methods are only allowed inside an 'implements' block - type "${node.name}" has methods but no 'implements' clause`,
+        peek().start,
+        peek().length,
+      );
+    }
+
+    return node;
+  }
+
+  function parseMethodDecl() {
+    const node = buildSourcedNode(ASTNodeKind.METHOD_DECL);
+    expect(TokenTags.function);
+    node.name = parseIdentAsName();
+    expect(TokenTags.lparen);
+    // must be ref self as first param
+    expect(TokenTags.ref);
+    expect(TokenTags.self);
+    
+    const selfParam = buildSourcedNode(ASTNodeKind.PARAM);
+    selfParam.isRef = true;
+    selfParam.name = "self";
+    selfParam.typeAnnotation = { kind: "selfType" };
+    node.params = [selfParam];
+
+    while (peek().tag === TokenTags.comma) {
+      advance();
+      node.params.push(parseFunctionParam());
+    }
+    expect(TokenTags.rparen);
+    expect(TokenTags.colon);
+    node.returnTypeAnnotation = parseTypeAnnotation();
+    node.body = parseBlock();
 
     return node;
   }

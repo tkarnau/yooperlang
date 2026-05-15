@@ -31,6 +31,30 @@ import {
 import { isFallible, } from "./fallible.js";
 import { isAssignable } from "./coerce.js";
 
+export function validateMethod(methodDecl, structType, typeContext, errors) {
+  const scope = pushScope(null);
+
+  // params[0] is self (ref structType); remaining params use types from C.3
+  const resolvedParams = methodDecl.resolvedFuncType?.params ?? [];
+  for (let i = 0; i < resolvedParams.length; i++) {
+    const p = resolvedParams[i];
+    declareInScope(scope, i === 0 ? "self" : p.name, p.type, typeKinds.param, methodDecl.params?.[i] ?? methodDecl, errors);
+  }
+
+  const funcReturnType = methodDecl.resolvedFuncType?.returnType ?? ErrorType();
+  const ctx = {
+    funcReturnType,
+    funcName: methodDecl.name,
+    typeContext,
+    errors,
+    inLoop: false,
+    inMethodBody: true,
+    enclosingType: structType,
+  };
+  validateStatement(methodDecl.body, scope, ctx);
+  popScope(scope, errors);
+}
+
 export function validateFunction(funcNode, typeContext, errors) {
   const scope = pushScope(null);
 

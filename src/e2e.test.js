@@ -159,6 +159,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(exitCode, 0);
     assert.equal(stdout, "b=100 d=100\nc=100.000000\ne=100.000000\n");
   });
+
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
@@ -240,6 +241,12 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/export_c/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "add_one(5) = 6\n");
+  });
+
+  it("traits_disposable: impl of a Disposable trait with a dispose method", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_disposable/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=7\n");
   });
 });
 

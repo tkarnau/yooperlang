@@ -52,6 +52,11 @@ export const ASTNodeKind = Object.freeze({
   INDEX_EXPRESSION: "INDEX_EXPRESSION",
   REF_EXPRESSION: "REF_EXPRESSION",
 
+  // phase 5: traits
+  TRAIT_DECL: "TRAIT_DECL",
+  METHOD_SIG: "METHOD_SIG",
+  METHOD_DECL: "METHOD_DECL",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });

@@ -130,7 +130,11 @@ function resolveIdent(node, scope, ctx) {
     if (modType.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
     return setType(node, modType);
   }
-  pushError(ctx.errors, node, `undefined variable "${node.name}"`);
+  if (node.name === "self") {
+    pushError(ctx.errors, node, `'self' can only be used inside a trait method body`);
+  } else {
+    pushError(ctx.errors, node, `undefined variable "${node.name}"`);
+  }
   return setType(node, ErrorType());
 }
 
@@ -201,6 +205,16 @@ function resolveCall(node, scope, ctx) {
 
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
+    // Try trait method dispatch: callee(ref structValue, ...)
+    if (node.args.length >= 1 && node.args[0].kind === ASTNodeKind.REF_EXPRESSION) {
+      const operandType = resolveExprType(node.args[0].operand, scope, ctx);
+      if (operandType.kind === typeKinds.struct && operandType.methods?.has(callee)) {
+        const methodSig = operandType.methods.get(callee);
+        node.calleeMethodOf = operandType;
+        node.calleeMangledName = `${operandType.moduleId}__${operandType.name}__${callee}`;
+        return resolveCallWithSig(node, methodSig, scope, ctx);
+      }
+    }
     pushError(ctx.errors, node, `unknown function "${callee}"`);
     return setType(node, ErrorType());
   }

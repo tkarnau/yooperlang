@@ -54,6 +54,10 @@ export const TokenTags = {
   rbracket: 52, // ]
   true: 53,
   false: 54,
+  trait: 55,
+  implements: 56,
+  self: 57,
+  extends: 58,
   // punctuation / operators
   eq: 5,
   semicolon: 6,
@@ -144,6 +148,10 @@ const keywordTagList = {
   continue: TokenTags.continue,
   true: TokenTags.true,
   false: TokenTags.false,
+  trait: TokenTags.trait,
+  implements: TokenTags.implements,
+  self: TokenTags.self,
+  extends: TokenTags.extends,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

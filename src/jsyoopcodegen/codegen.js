@@ -248,6 +248,12 @@ export function codegen(ast) {
       case ASTNodeKind.IDENT: {
         const t = symbols.get(node.name);
         if (!t) throw new Error(`codegen: unknown identifier "${node.name}"`);
+        if (t.kind === typeKinds.ref) {
+          // ref binding (e.g. self): load the actual pointer from its alloca slot
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          return { ptr: ptrTmp, type: t.inner };
+        }
         return { ptr: `%${node.name}`, type: t };
       }
       case ASTNodeKind.FIELD_ACCESS: {
@@ -457,9 +463,19 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.REF_EXPRESSION: {
-        // ref x — pass the address of x (its alloca slot) without loading
-        const innerType = symbols.get(node.operand.name);
-        return { val: `%${node.operand.name}`, yoopType: node.resolvedType ?? { kind: typeKinds.ref, inner: innerType } };
+        if (node.operand.kind === ASTNodeKind.IDENT) {
+          const operandType = symbols.get(node.operand.name);
+          if (operandType?.kind === typeKinds.ref) {
+            // ref of a ref binding (like `ref self`): forward the underlying pointer
+            const ptrTmp = freshTemp();
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.operand.name}`);
+            return { val: ptrTmp, yoopType: node.resolvedType };
+          }
+          return { val: `%${node.operand.name}`, yoopType: node.resolvedType };
+        }
+        // field access or index: use emitLvalue to get the address
+        const lv = emitLvalue(node.operand, fnLines);
+        return { val: lv.ptr, yoopType: node.resolvedType };
       }
 
       case ASTNodeKind.CALL_EXPRESSION: {
@@ -684,6 +700,24 @@ export function codegen(ast) {
 
     if (node.callee === "printf" && !currentExternNames.has("printf")) {
       return emitPrintfCall(node, fnLines);
+    }
+
+    // Trait method call: typechecker stamped the mangled symbol.
+    if (node.calleeMethodOf) {
+      const argResults = node.args.map((a) => emitExpr(a, fnLines));
+      const methodSig = node.calleeMethodOf.methods.get(node.callee);
+      const argList = methodSig.params.map((p, i) => {
+        const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
+        return `${llvmTy} ${argResults[i].val}`;
+      }).join(", ");
+      const llvmRet = llvmType(methodSig.returnType);
+      if (isVoidReturn(methodSig.returnType)) {
+        fnLines.push(`  call void @${node.calleeMangledName}(${argList})`);
+        return { val: "void", yoopType: VoidType() };
+      }
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = call ${llvmRet} @${node.calleeMangledName}(${argList})`);
+      return { val: tmp, yoopType: methodSig.returnType };
     }
 
     // Named import: typechecker annotated the call with the source module id.
@@ -1059,6 +1093,51 @@ export function codegen(ast) {
     }
   }
 
+  // **** method codegen *********
+  function emitMethod(methodDecl, structType) {
+    tempCounter = 0;
+    labelCounter = 0;
+    symbols = new Map();
+
+    const returnType = methodDecl.resolvedFuncType.returnType;
+    currentReturnType = returnType;
+    const params = methodDecl.params;
+    const llvmRet = llvmType(returnType);
+
+    const paramSig = params.map((p) => {
+      const ty = llvmType(p.resolvedType);
+      return `${ty} %${p.name}.arg`;
+    }).join(", ");
+
+    const fnLines = [];
+    fnLines.push(`define ${llvmRet} @${methodDecl.mangledSymbol}(${paramSig}) {`);
+    fnLines.push("entry:");
+
+    for (const p of params) {
+      const ty = p.resolvedType;
+      if (ty.kind === typeKinds.ref) {
+        fnLines.push(`  %${p.name} = alloca ptr, align 8`);
+        fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
+      } else {
+        const llvmTy = llvmType(ty);
+        const align = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+        fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${align}`);
+        fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+      }
+      symbols.set(p.name, ty);
+    }
+
+    const ctx = { fnName: methodDecl.name, returnType };
+    methodDecl.body.body.forEach((s) => emitStatement(s, fnLines, ctx));
+
+    if (isVoidReturn(returnType)) {
+      const last = fnLines[fnLines.length - 1].trim();
+      if (!last.startsWith("ret")) fnLines.push("  ret void");
+    }
+    fnLines.push("}");
+    lines.push(...fnLines);
+  }
+
   // **** function codegen *********
   function emitFunction(node, forceName = null) {
     tempCounter = 0;
@@ -1167,7 +1246,7 @@ export function codegen(ast) {
     }
     if (defined.size > 0 || called.size > 0) lines.push("");
 
-    // third pass: emit function bodies
+    // third pass: emit function and method bodies
     for (const decl of node.body) {
       if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
         emitFunction(decl);
@@ -1176,7 +1255,16 @@ export function codegen(ast) {
       } else if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
         // emit with the original unmangled name regardless of currentModuleId
         emitFunction(decl.fn, decl.fn.name);
+      } else if (decl.kind === ASTNodeKind.TYPE_DECL && decl.methods?.length > 0) {
+        for (const method of decl.methods) {
+          emitMethod(method, decl.resolvedType);
+        }
+      } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0) {
+        for (const method of decl.decl.methods) {
+          emitMethod(method, decl.decl.resolvedType);
+        }
       }
+      // TRAIT_DECL: no codegen — traits are compile-time only
     }
   }
 
@@ -1212,7 +1300,8 @@ function collectCalls(node, defined) {
     if (
       n.kind === ASTNodeKind.CALL_EXPRESSION &&
       typeof n.callee === "string" &&
-      !defined.has(n.callee)
+      !defined.has(n.callee) &&
+      !n.calleeMethodOf
     ) {
       called.add(n.callee);
     }
@@ -1499,7 +1588,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
   }
 
-  // Emit function bodies
+  // Emit function and method bodies
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
       // "main" is the C entry point — never mangle it.
@@ -1510,7 +1599,16 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       emitFn(decl.decl, sym);
     } else if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
       emitFn(decl.fn, decl.fn.name); // unmangled
+    } else if (decl.kind === ASTNodeKind.TYPE_DECL && decl.methods?.length > 0) {
+      for (const method of decl.methods) {
+        emitMethodFn(method);
+      }
+    } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0) {
+      for (const method of decl.decl.methods) {
+        emitMethodFn(method);
+      }
     }
+    // TRAIT_DECL: no codegen — traits are compile-time only
   }
 
   return { structDefs, globals, externs: new Set(lines.filter(l => l.startsWith("declare"))), lines: lines.filter(l => !l.startsWith("declare")) };
@@ -1548,6 +1646,44 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     const ctx = { fnName: symName, returnType: node.resolvedType };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     if (isVoidReturn(node.resolvedType)) {
+      const last = fnLines[fnLines.length - 1].trim();
+      if (!last.startsWith("ret")) fnLines.push("  ret void");
+    }
+    fnLines.push("}");
+    lines.push(...fnLines);
+  }
+
+  function emitMethodFn(methodDecl) {
+    tempCounter = 0;
+    labelCounter = 0;
+    symbols = new Map();
+    currentReturnType = methodDecl.resolvedFuncType.returnType;
+
+    const returnType = methodDecl.resolvedFuncType.returnType;
+    const params = methodDecl.params;
+    const llvmRet = llvmType(returnType);
+
+    const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
+    const fnLines = [`define ${llvmRet} @${methodDecl.mangledSymbol}(${paramSig}) {`, "entry:"];
+
+    for (const p of params) {
+      const ty = p.resolvedType;
+      if (ty.kind === typeKinds.ref) {
+        fnLines.push(`  %${p.name} = alloca ptr, align 8`);
+        fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
+      } else {
+        const llvmTy = llvmType(ty);
+        const al = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+        fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
+        fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+      }
+      symbols.set(p.name, ty);
+    }
+
+    const ctx = { fnName: methodDecl.name, returnType };
+    methodDecl.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
+
+    if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
@@ -1597,8 +1733,19 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         return { val: tmp, yoopType };
       }
       case ASTNodeKind.REF_EXPRESSION: {
-        const innerType = symbols.get(node.operand.name);
-        return { val: `%${node.operand.name}`, yoopType: node.resolvedType ?? { kind: typeKinds.ref, inner: innerType } };
+        if (node.operand.kind === ASTNodeKind.IDENT) {
+          const operandType = symbols.get(node.operand.name);
+          if (operandType?.kind === typeKinds.ref) {
+            // ref of a ref binding (like `ref self`): forward the underlying pointer
+            const ptrTmp = freshTemp();
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.operand.name}`);
+            return { val: ptrTmp, yoopType: node.resolvedType };
+          }
+          return { val: `%${node.operand.name}`, yoopType: node.resolvedType };
+        }
+        // field access or index: use emitLval to get the address
+        const lv = emitLval(node.operand, fnLines);
+        return { val: lv.ptr, yoopType: node.resolvedType };
       }
       case ASTNodeKind.CALL_EXPRESSION: return emitCallExpr(node, fnLines);
       case ASTNodeKind.BINARY_EXPRESSION: {
@@ -1762,6 +1909,25 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     if (node.callee === "printf") {
       return emitPrintfCallInner(node, fnLines);
     }
+
+    // Trait method call: typechecker stamped the mangled symbol.
+    if (node.calleeMethodOf) {
+      const argResults = node.args.map((a) => emitExpr(a, fnLines));
+      const methodSig = node.calleeMethodOf.methods.get(node.callee);
+      const argList = methodSig.params.map((p, i) => {
+        const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
+        return `${llvmTy} ${argResults[i].val}`;
+      }).join(", ");
+      const llvmRet = llvmType(methodSig.returnType);
+      if (isVoidReturn(methodSig.returnType)) {
+        fnLines.push(`  call void @${node.calleeMangledName}(${argList})`);
+        return { val: "void", yoopType: VoidType() };
+      }
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = call ${llvmRet} @${node.calleeMangledName}(${argList})`);
+      return { val: tmp, yoopType: methodSig.returnType };
+    }
+
     const sym = calleeSymbol(node);
     const argResults = node.args.map((a) => emitExpr(a, fnLines));
     const sig = functionSigs.get(node.callee);
@@ -1837,6 +2003,12 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       case ASTNodeKind.IDENT: {
         const t = symbols.get(node.name);
         if (!t) throw new Error(`codegen: unknown identifier "${node.name}"`);
+        if (t.kind === typeKinds.ref) {
+          // ref binding (e.g. self): load the actual pointer from its alloca slot
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          return { ptr: ptrTmp, type: t.inner };
+        }
         return { ptr: `%${node.name}`, type: t };
       }
       case ASTNodeKind.FIELD_ACCESS: {
