@@ -2,6 +2,7 @@ output
 output.exe
 
 examples/**
+!examples/**/
+examples/**/*.exe
 !**/*.yoop
 !examples/**/*.js
-examples/**/*.exe
