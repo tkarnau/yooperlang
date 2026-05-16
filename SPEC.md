@@ -369,21 +369,21 @@ kind disposable {
 }
 
 kind pooled {
-    applies_to: binding;
+    appliesTo: binding;
     requires Task;
     mustCall(wait | abandon).beforeScopeEnd();
     mustNotShare.acrossScopes();
 }
 
 kind scoped {
-    applies_to: binding;
+    appliesTo: binding;
     requires Task;
     autoJoin.beforeScopeEnd();
     mustNotEscape.scope();
 }
 
 kind task {
-    applies_to: function;
+    appliesTo: function;
     provides Task;                       // call results are Task<ReturnType>
 }
 
@@ -393,7 +393,7 @@ kind batchable(n: usize) {
 }
 
 kind simd_aligned {
-    applies_to: (type, binding);
+    appliesTo: (type, binding);
     layout({ align: 32 });
     restricts.iteration({
         allow:  "sequential",
@@ -407,7 +407,7 @@ kind simd_aligned {
 
 | Clause | Meaning |
 |---|---|
-| `applies_to: X` | `binding`, `parameter`, `field`, `function`, `type`. Default: any value-site. |
+| `appliesTo: X` | `binding`, `parameter`, `field`, `function`, `type`. Default: any value-site. |
 | `requires Trait` | Values of this kind must implement the named trait(s). |
 | `provides Trait` | The kind supplies the trait's implementation (can transform its initializer). |
 | `ownsBlock()` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
@@ -430,7 +430,7 @@ happens. The compiler inserts the call. This is how `disposable input = open(p) 
 
 ### Applying a kind
 
-Kind prefixes sit wherever the kind's `applies_to` permits:
+Kind prefixes sit wherever the kind's `appliesTo` permits:
 
 ```js
 // on a binding
@@ -506,7 +506,7 @@ pure task compute(x: int32): Result { ... }
 ```
 
 The parser sees a run of identifiers; each must name a kind whose
-`applies_to` includes `function`. If any doesn't, it's a compile error.
+`appliesTo` includes `function`. If any doesn't, it's a compile error.
 
 ### Reference parameters
 
@@ -861,7 +861,7 @@ Without `import.unsafe;`, the `unsafe_ptr` kind is not in scope.
 ## 14. Reserved keywords
 
 ```
-abandon         applies_to       autoJoin         bool
+abandon         appliesTo       autoJoin         bool
 break           char             const            contains
 continue        else             export           extern
 false           float32          float64          for
@@ -885,7 +885,7 @@ Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Kind and trait names are conventionally
 `snake_case` and `PascalCase` respectively.
 
 Contextual keywords (reserved only in their syntactic positions): `in`, `layout`,
-`restricts`, `provides`, `requires`, `applies_to`, `from`, `library`, `as`.
+`restricts`, `provides`, `requires`, `appliesTo`, `from`, `library`, `as`.
 
 ---
 
