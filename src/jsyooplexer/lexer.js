@@ -58,6 +58,15 @@ export const TokenTags = {
   implements: 56,
   self: 57,
   extends: 58,
+  kind: 59,
+  // kind stuff
+  appliesTo: 60,
+  requires: 61,
+  mustcall: 62,
+  ownsblock: 63,
+  beforeScopeEnd: 64,
+  binding: 65,
+
   // punctuation / operators
   eq: 5,
   semicolon: 6,
@@ -152,6 +161,13 @@ const keywordTagList = {
   implements: TokenTags.implements,
   self: TokenTags.self,
   extends: TokenTags.extends,
+  kind: TokenTags.kind,
+  appliesTo: TokenTags.appliesTo,
+  requires: TokenTags.requires,
+  mustcall: TokenTags.mustcall,
+  ownsblock: TokenTags.ownsblock,
+  beforeScopeEnd: TokenTags.beforeScopeEnd,
+  binding: TokenTags.binding,
   _: TokenTags.discard, // bare underscores are discarded
 };
 
