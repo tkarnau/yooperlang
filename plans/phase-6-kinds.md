@@ -4,13 +4,13 @@ Part of the [roadmap](./roadmap.md). Phase 5 landed traits, struct refs, and fre
 
 ## What a kind is
 
-A kind is a compile-time tag that attaches to a binding, parameter, field, function, or type and encodes one or more enforceable rules: lifecycle (`mustCall`), scoping (`ownsBlock`, `mustNotEscape`), sharing (`mustNotShare`), iteration (`restricts.iteration`), layout (`layout`), capability requirement (`requires Trait`), or capability provisioning (`provides Trait`). Kinds are the **only** mechanism for "the compiler should enforce X here" — there is no other place in the language that does flow-sensitive analysis on bindings.
+A kind is a compile-time tag that attaches to a binding, parameter, field, function, or type and encodes one or more enforceable rules: lifecycle (`mustCall`), scoping (`ownsBlock`, `mustNotEscape`), sharing (`mustNotShare`), iteration (`restricts iteration { ... }`), layout (`layout { ... }`), capability requirement (`requires Trait`), or capability provisioning (`provides Trait`). Kinds are the **only** mechanism for "the compiler should enforce X here" — there is no other place in the language that does flow-sensitive analysis on bindings.
 
 ```yoop
 kind disposable {
     requires Disposable;
-    ownsBlock();
-    mustCall(dispose).beforeScopeEnd();
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
 }
 
 function main(): int32 {
@@ -21,6 +21,7 @@ function main(): int32 {
     }
     return 0;
 }
+
 ```
 
 ## Why kinds are next
@@ -43,7 +44,7 @@ Phase 6 is too large for one plan file; existing phase plans run 400-1700 lines 
 
 ### 6.2 — Escape and sharing constraints
 
-`mustNotEscape.scope()`, `mustNotShare.acrossScopes()`, and `forbids: X` clauses. Adds a flow-sensitive escape-analysis pass over function returns, struct-field stores, and `ref` capture. Widens `appliesTo` to include `parameter` and `field`. Builds on 6.1's binding-flow infrastructure.
+`mustNotEscape scope;`, `mustNotShare acrossScopes;`, and `forbids X;` clauses. Adds a flow-sensitive escape-analysis pass over function returns, struct-field stores, and `ref` capture. Widens `appliesTo` to include `parameter` and `field`. Builds on 6.1's binding-flow infrastructure.
 
 ### 6.3 — Task and concurrency
 
@@ -55,7 +56,7 @@ The big sub-phase. Generic traits (`trait Task<T>` — phase 5 deferred these), 
 
 ### 6.5 — Layout, iteration restrictions, composition
 
-`layout({ align: N, ... })`, `restricts.iteration({ allow, forbid })`, and kind composition with `&` ([SPEC.md §6.4](../SPEC.md#L451)). Couples to the iteration story ([§9](../SPEC.md#L581)) — a collection's kind decides which `for ... in xs.method()` forms are legal. Also introduces parameterized kinds (`kind batchable(n: usize)`).
+`layout { align N; ... };`, `restricts iteration { allow ...; forbid ...; };`, and kind composition with `&` ([SPEC.md §6.4](../SPEC.md#L451)). Couples to the iteration story ([§9](../SPEC.md#L581)) — a collection's kind decides which `for ... in xs.method()` forms are legal. Also introduces parameterized kinds (`kind batchable(n: usize)`).
 
 ## What carries between sub-phases
 

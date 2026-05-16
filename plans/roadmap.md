@@ -78,7 +78,7 @@ Capability layer. Spec §5. Methods live inside `type X implements Trait { field
 
 The big one. Spec §6. Probably the hardest part of the language.
 
-- `kind foo { ... }` parsing with all clauses (`requires`, `provides`, `appliesTo`, `ownsBlock`, `mustCall`, `mustNotShare`, `autoJoin`, `restricts`, `layout`, `propagates`, `contains`, `forbids`)
+- `kind foo { ... }` parsing with all clauses (`requires`, `provides`, `appliesTo`, `ownsBlock`, `mustCall`, `mustNotShare`, `autoJoin`, `restricts`, `layout`, `propagates`, `contains`, `forbids`); each clause is a `keyword arg...;` statement or `keyword arg... { sub-clauses };` block
 - Kind prefix on bindings, params, fields, fn declarations
 - Static analysis pass for `mustCall` obligations (with cleanup insertion at `?`, return, fall-through)
 - `mustNotEscape` / `mustNotShare` checks

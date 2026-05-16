@@ -234,7 +234,7 @@ let disposable input = open_input(path) { ... }    // explicit let for mutabilit
 
 ### Block-owning kinds
 
-A kind can declare `ownsBlock()` in its definition (see §6). Such a binding's scope is
+A kind can declare `ownsBlock` in its definition (see §6). Such a binding's scope is
 **narrowable** to an explicit trailing `{ ... }`; if no block is written, the compiler
 synthesizes an implicit block at the tail of the enclosing scope, nesting multiple
 block-owning bindings in **reverse declaration order** (LIFO cleanup).
@@ -245,7 +245,7 @@ disposable input = open_input(path)? "opening input" {
     const bytes = read_all(ref input)? "reading bytes";
     const stats = scan(bytes)? "scanning";
     return { stats: stats, err: "" };
-    // dispose(input) fires at `}` — satisfies mustCall(dispose).beforeScopeEnd()
+    // dispose(input) fires at `}` — satisfies mustCall dispose beforeScopeEnd
 }
 // `input` is not in scope here
 
@@ -272,7 +272,7 @@ Semantically, the implicit form is equivalent to writing every block-owning bind
 block explicitly, nested in reverse order; the compiler just doesn't make you type it.
 
 A kind-prefixed binding may only have a trailing block when **at least one** of its
-kinds declares `ownsBlock()`. For kinds without that clause, no block is allowed.
+kinds declares `ownsBlock`. For kinds without that clause, no block is allowed.
 
 ### Destructuring (sugar)
 
@@ -364,64 +364,76 @@ rules. Kinds are the single mechanism for "the compiler should enforce X here."
 ```js
 kind disposable {
     requires Disposable;
-    ownsBlock();                             // binding may take a trailing `{ ... }`
-    mustCall(dispose).beforeScopeEnd();
+    ownsBlock;                               // binding may take a trailing `{ ... }`
+    mustCall dispose beforeScopeEnd;
 }
 
 kind pooled {
-    appliesTo: binding;
+    appliesTo binding;
     requires Task;
-    mustCall(wait | abandon).beforeScopeEnd();
-    mustNotShare.acrossScopes();
+    mustCall { wait; abandon; } beforeScopeEnd;
+    mustNotShare acrossScopes;
 }
 
 kind scoped {
-    appliesTo: binding;
+    appliesTo binding;
     requires Task;
-    autoJoin.beforeScopeEnd();
-    mustNotEscape.scope();
+    autoJoin beforeScopeEnd;
+    mustNotEscape scope;
 }
 
 kind task {
-    appliesTo: function;
-    provides Task;                       // call results are Task<ReturnType>
+    appliesTo function;
+    provides Task;                           // call results are Task<ReturnType>
 }
 
 kind batchable(n: usize) {
     requires BatchIterable;
-    restricts.iteration({ allow: batched({ max: n }) });
+    restricts iteration {
+        allow batched { max n; };
+    };
 }
 
 kind simd_aligned {
-    appliesTo: (type, binding);
-    layout({ align: 32 });
-    restricts.iteration({
-        allow:  "sequential",
-        allow:  simd({ width: 8 }),
-        forbid: "parallel",
-    });
+    appliesTo type binding;
+    layout {
+        align 32;
+    };
+    restricts iteration {
+        allow sequential;
+        allow simd { width 8; };
+        forbid parallel;
+    };
 }
 ```
+
+Every clause is a `;`-terminated statement of the form `keyword arg...` or
+`keyword arg... { sub-clauses }`. There are no parens, no method chains,
+and no colons in clause syntax — clause types are a closed set the compiler
+owns, and the grammar reflects that.
+
+Multiple `requires` are written as separate clauses
+(`requires Disposable; requires Closable;`), not as a list.
 
 ### What a kind can declare
 
 | Clause | Meaning |
 |---|---|
-| `appliesTo: X` | `binding`, `parameter`, `field`, `function`, `type`. Default: any value-site. |
-| `requires Trait` | Values of this kind must implement the named trait(s). |
+| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`. Default: any value-site. |
+| `requires Trait` | Values of this kind must implement the named trait. Repeat to require multiple. |
 | `provides Trait` | The kind supplies the trait's implementation (can transform its initializer). |
-| `ownsBlock()` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
-| `mustCall(fn).beforeScopeEnd()` | Fn must run before the binding's scope exits — an explicit block if present, otherwise the enclosing scope. |
-| `mustCall(fn).beforeAny()` | Fn must run before any other method. |
-| `mustCall(a \| b).beforeScopeEnd()` | At least one of these must run. |
-| `mustCall(fn).afterAny()` | Fn must run after every other method. |
-| `mustNotShare.acrossScopes()` | Cannot cross into a concurrent task. |
-| `mustNotEscape.scope()` | Cannot be returned or stored outside its scope. |
-| `autoJoin.beforeScopeEnd()` | Compiler inserts `wait` at scope exit. |
-| `restricts.iteration({...})` | Which `for*` forms are legal on this value. |
-| `layout({...})` | Memory layout contract (align, packing, SoA/AoS). |
+| `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
+| `mustCall fn beforeScopeEnd` | Fn must run before the binding's scope exits — an explicit block if present, otherwise the enclosing scope. |
+| `mustCall fn beforeAny` | Fn must run before any other method. |
+| `mustCall { a; b; } beforeScopeEnd` | At least one of these must run. |
+| `mustCall fn afterAny` | Fn must run after every other method. |
+| `mustNotShare acrossScopes` | Cannot cross into a concurrent task. |
+| `mustNotEscape scope` | Cannot be returned or stored outside its scope. |
+| `autoJoin beforeScopeEnd` | Compiler inserts `wait` at scope exit. |
+| `restricts iteration { ... }` | Which `for*` forms are legal on this value. |
+| `layout { ... }` | Memory layout contract (align, packing, SoA/AoS). |
 | `propagates<K>` / `contains<K>` | How containers surface or absorb another kind's constraints. |
-| `forbids: X` | Categories a function may not touch (`io`, `globalState`, …). |
+| `forbids X...` | Categories a function may not touch (`io`, `globalState`, …). |
 
 **Cleanup on early return from `?`.** Any `mustCall` obligation that's live at the
 point a `?` triggers an early return must be satisfied before the return actually
@@ -455,7 +467,7 @@ kind slow_batch = throughput_capped(8) & mustNotEscape;
 ```
 
 Contradictory compositions are compile errors (`align: 32` & `align: 64`,
-`allow: parallel` & `mustNotShare.acrossScopes()`, …).
+`allow parallel` & `mustNotShare acrossScopes`, …).
 
 ### Containment and propagation
 
@@ -554,7 +566,7 @@ function main(): void {
     let data       = fetch(url);             // synchronous-looking
     let scoped d   = fetch(url);             // concurrent, joined at `}`
     let pooled h   = fetch(url);             // handle; manual disposition
-    let { data, err } = wait h;              // satisfies mustCall(wait | abandon)
+    let { data, err } = wait h;              // satisfies mustCall { wait; abandon; } beforeScopeEnd
 
     _ = h;                                   // or abandon explicitly
 }
@@ -563,15 +575,15 @@ function main(): void {
 ### Safety
 
 - A plain `function` (no `task`) cannot be bound as `scoped` or `pooled` — the binding kind's `requires Task` isn't satisfied.
-- `scoped` carries `mustNotEscape.scope()` — the value cannot be returned or stored outside.
-- `pooled` carries `mustNotShare.acrossScopes()` and `mustCall(wait | abandon).beforeScopeEnd()`.
+- `scoped` carries `mustNotEscape scope` — the value cannot be returned or stored outside.
+- `pooled` carries `mustNotShare acrossScopes` and `mustCall { wait; abandon; } beforeScopeEnd`.
 
 ### Handle operations
 
 | Operator | Meaning |
 |---|---|
-| `wait h` | Block until the task completes; returns the result. Satisfies `mustCall(wait)`. |
-| `_ = h` | Abandon the task; result is discarded. Satisfies `mustCall(abandon)`. |
+| `wait h` | Block until the task completes; returns the result. Satisfies `mustCall wait`. |
+| `_ = h` | Abandon the task; result is discarded. Satisfies `mustCall abandon`. |
 
 These are keyword-level operations, not methods on `Task<T>`, because the compiler needs
 to see them for `mustCall` accounting.
@@ -629,7 +641,7 @@ RHS of `for … in`.
 
 - The collection's type must implement the trait the method lives on.
 - The collection's kind must not forbid the resulting iteration mode (e.g. a
-  `mustNotShare.acrossScopes()` kind forbids `.parallel()`; a non-scalar layout kind
+  `mustNotShare acrossScopes` kind forbids `.parallel()`; a non-scalar layout kind
   forbids `.simd(n)`).
 - The body binding's kind (if any) is checked against the iterator's element rules.
 
@@ -885,7 +897,12 @@ Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Kind and trait names are conventionally
 `snake_case` and `PascalCase` respectively.
 
 Contextual keywords (reserved only in their syntactic positions): `in`, `layout`,
-`restricts`, `provides`, `requires`, `appliesTo`, `from`, `library`, `as`.
+`restricts`, `provides`, `requires`, `appliesTo`, `ownsBlock`, `mustCall`,
+`mustNotShare`, `mustNotEscape`, `autoJoin`, `forbids`, `propagates`,
+`contains`, `from`, `library`, `as`. Inside kind-clause bodies, the timing
+modifiers `beforeScopeEnd`, `beforeAny`, `afterAny`, the axis identifiers
+`scope`, `acrossScopes`, and the `appliesTo` site identifiers `binding`,
+`parameter`, `field` are also contextual.
 
 ---
 
@@ -909,8 +926,8 @@ trait Disposable {
 
 kind disposable {
     requires Disposable;
-    ownsBlock();
-    mustCall(dispose).beforeScopeEnd();
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
 }
 
 type Input implements Disposable {

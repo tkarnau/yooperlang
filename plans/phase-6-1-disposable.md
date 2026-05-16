@@ -1,6 +1,6 @@
 # Phase 6.1 — Disposable
 
-Part of [phase 6 — kinds](./phase-6-kinds.md). Phase 5 implemented traits, struct refs, and free-function trait dispatch (`dispose(ref h)` mangled to `@<modId>__<Struct>__dispose`). The compiler can express "this type *supports* `dispose`" but has no way to enforce "this binding *must have* `dispose` called before scope exit." Sub-phase 6.1 introduces the minimum slice of [SPEC.md §6](../SPEC.md#L356) that closes the loop on `Disposable`: kind declarations, kind prefixes on bindings, `mustCall(...).beforeScopeEnd()` flow analysis, `ownsBlock()` with implicit-block synthesis, and cleanup-call insertion at every exit point in the binding's scope.
+Part of [phase 6 — kinds](./phase-6-kinds.md). Phase 5 implemented traits, struct refs, and free-function trait dispatch (`dispose(ref h)` mangled to `@<modId>__<Struct>__dispose`). The compiler can express "this type *supports* `dispose`" but has no way to enforce "this binding *must have* `dispose` called before scope exit." Sub-phase 6.1 introduces the minimum slice of [SPEC.md §6](../SPEC.md#L356) that closes the loop on `Disposable`: kind declarations, kind prefixes on bindings, `mustCall fn beforeScopeEnd` flow analysis, `ownsBlock` with implicit-block synthesis, and cleanup-call insertion at every exit point in the binding's scope.
 
 ## Goal
 
@@ -24,10 +24,10 @@ type FileHandle implements Disposable {
 }
 
 kind disposable {
-    appliesTo: binding;
+    appliesTo binding;
     requires Disposable;
-    ownsBlock();
-    mustCall(dispose).beforeScopeEnd();
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
 }
 
 function main(): int32 {
@@ -50,10 +50,10 @@ The output proves four things at once: (1) the kind decl parses and validates; (
 
 Concretely, this sub-phase delivers:
 
-- `kind foo { ... }` top-level decl, parsed with these clauses: `appliesTo: <site>;`, `requires <Trait>;`, `mustCall(<fn>).beforeScopeEnd();`, `ownsBlock();`. Other clauses (`provides`, `mustNotEscape`, `mustNotShare`, `forbids`, `layout`, `restricts`, `autoJoin`, `propagates`, `contains`, parameterized kinds, `&` composition) are rejected with explicit "not yet supported" parse errors.
-- `appliesTo` restricted to the single value `binding`. Other application sites (`parameter`, `field`, `function`, `type`, parenthesized tuples) are rejected at parse time with "appliesTo: <site> not yet supported in phase 6.1". The default ("any value-site") is forbidden — the clause is required, and must be `binding`.
+- `kind foo { ... }` top-level decl, parsed with these clauses: `appliesTo <site>;`, `requires <Trait>;`, `mustCall <fn> beforeScopeEnd;`, `ownsBlock;`. Each clause is a `keyword arg...;`-terminated statement; there are no parens, no colons, and no method chains in clause syntax. Other clauses (`provides`, `mustNotEscape`, `mustNotShare`, `forbids`, `layout`, `restricts`, `autoJoin`, `propagates`, `contains`, parameterized kinds, `&` composition) are rejected with explicit "not yet supported" parse errors.
+- `appliesTo` restricted to the single value `binding`. Other application sites (`parameter`, `field`, `function`, `type`, multi-site lists like `appliesTo function binding`) are rejected at parse time with "appliesTo <site> not yet supported in phase 6.1". The default ("any value-site") is forbidden — the clause is required, and must be `binding`.
 - Kind-prefixed bindings at statement position: `disposable a: FileHandle = expr;`. The kind prefix replaces (or precedes) the `let` / `const` keyword. Per [SPEC.md §4.4](../SPEC.md#L221), a kind-prefixed binding without `let` is implicitly `const`. `let disposable a: FileHandle = expr;` is also legal, for explicit mutability. `const disposable a: FileHandle = expr;` is legal but redundant — accepted, not flagged.
-- Trailing block on a binding whose kind declares `ownsBlock()`: `disposable a: FileHandle = expr { ...statements... }`. The block is the binding's scope; the binding is not visible after the block's `}`. Without the trailing block, the binding's scope is the tail of the enclosing scope (implicit-block form, [SPEC.md §4.5](../SPEC.md#L235)).
+- Trailing block on a binding whose kind declares `ownsBlock`: `disposable a: FileHandle = expr { ...statements... }`. The block is the binding's scope; the binding is not visible after the block's `}`. Without the trailing block, the binding's scope is the tail of the enclosing scope (implicit-block form, [SPEC.md §4.5](../SPEC.md#L235)).
 - Multiple implicit-block bindings in the same enclosing scope nest in reverse declaration order. `dispose(ref b)` fires before `dispose(ref a)`.
 - A new flow-analysis pass (`kindCheck.js`) that, for every `disposable` binding, attaches a cleanup record to the AST. At each exit point in the binding's scope (`return`, fall-through `}`, `?` early return), it inserts a synthetic cleanup-call node referencing the binding. Codegen consumes these nodes and emits trait-method calls in LIFO order.
 - A failed `?` inside a `disposable`'s scope fires cleanup *before* the early `ret`. This is the only feature in this phase that couples kindCheck to the existing `?` codegen.
@@ -65,26 +65,28 @@ Three reasons.
 
 1. **Disposable is half a feature without `mustCall`.** Phase 5 lets you write `dispose(ref h)` but nothing makes you. The whole reason to declare `trait Disposable` is to wire cleanup into the compiler. Until 6.1 lands, every FFI handle (`fopen`, `malloc`, `pthread_create`) is hand-disposed at every site.
 
-2. **It exercises the kind machinery on a single, tractable clause.** `mustCall(...).beforeScopeEnd()` is the simplest dynamic-rule clause in the spec. It needs scope tracking, exit-point enumeration, and codegen at synthetic insertion points — exactly the infrastructure that 6.2 (escape/share) and 6.3 (`task`/`wait`) lean on. Building it once, here, against a known trait, means 6.2 and 6.3 are extensions, not rewrites.
+2. **It exercises the kind machinery on a single, tractable clause.** `mustCall fn beforeScopeEnd` is the simplest dynamic-rule clause in the spec. It needs scope tracking, exit-point enumeration, and codegen at synthetic insertion points — exactly the infrastructure that 6.2 (escape/share) and 6.3 (`task`/`wait`) lean on. Building it once, here, against a known trait, means 6.2 and 6.3 are extensions, not rewrites.
 
 3. **The hard parts of kinds aren't in the syntax — they're in the analysis.** Implicit-block LIFO synthesis, cleanup-on-`?`, and flow-sensitive obligation tracking are the conceptually weighty pieces. 6.1 ships them all on day one against a single kind. Adding more clauses later is mechanical; getting the analysis topology right is not.
 
 ## Scope (what 6.1 does NOT do)
 
-- **No `appliesTo: parameter | field | function | type`.** Only `binding`. The other application sites are needed for the `task` kind (function), `pooled net<Bytes>` (field), `batchable(n) events` (parameter), and `simd_aligned` (type). 6.1 rejects each at parse time. Reasoning: every other site requires its own resolution rule — kind on a param affects call-site checking, kind on a field affects struct codegen, kind on a function rewrites the return type. Bundling them would balloon the phase; deferring them costs nothing for `disposable`.
+- **No `appliesTo parameter` / `field` / `function` / `type`, no multi-site lists.** Only `appliesTo binding;`. The other application sites are needed for the `task` kind (function), `pooled net<Bytes>` (field), `batchable(n) events` (parameter), and `simd_aligned` (type). 6.1 rejects each at parse time. Reasoning: every other site requires its own resolution rule — kind on a param affects call-site checking, kind on a field affects struct codegen, kind on a function rewrites the return type. Bundling them would balloon the phase; deferring them costs nothing for `disposable`.
 - **No `provides Trait`.** That's how the `task` kind generates `Task<T>` return types. Phase 6.3.
-- **No `mustCall(a | b).beforeScopeEnd()` (the disjunction form).** Single function name only. The disjunction is needed by `pooled` (`mustCall(wait | abandon)`); revisit in 6.3.
-- **No `mustCall(fn).beforeAny()` / `.afterAny()`.** Method-ordering rules; not needed by `disposable`. Reject at parse time.
+- **No `mustCall { a; b; } beforeScopeEnd` (the disjunction/block form).** Single function name only, written `mustCall fn beforeScopeEnd;`. The disjunction is needed by `pooled` (`mustCall { wait; abandon; } beforeScopeEnd;`); revisit in 6.3.
+- **No `mustCall fn beforeAny` / `afterAny`.** Method-ordering rules; not needed by `disposable`. Reject at parse time.
 - **No `mustNotEscape` / `mustNotShare` / `forbids`.** Phase 6.2.
-- **No `autoJoin.beforeScopeEnd()`.** That's a 6.3 clause used by `scoped`.
+- **No `autoJoin beforeScopeEnd`.** That's a 6.3 clause used by `scoped`.
 - **No `propagates<K>` / `contains<K>`.** Phase 6.4.
-- **No `layout({...})` / `restricts.iteration({...})`.** Phase 6.5.
+- **No `layout { ... }` / `restricts iteration { ... }`.** Phase 6.5.
 - **No parameterized kinds** (`kind batchable(n: usize) { ... }`). Rejected at parse time with "parameterized kinds not yet supported".
 - **No kind composition.** `kind slow_batch = a & b;` rejected.
 - **No `kind` inside `kind`-decl bodies.** Flat clause list only.
 - **No discharging `mustCall` by calling the method manually in user code.** If the user writes `dispose(ref a);` inside a `disposable a` scope, the compiler still inserts its own cleanup call at scope exit. Double-call detection is a 6.2 concern; for 6.1 the compiler is permissive — calling `dispose` twice is the user's problem. (We may revisit this if it becomes a footgun, but introducing the analysis now means the goal program shape `disposable f = open(p)? { ... }` is incompatible with users who already call dispose; better to let the compiler always insert and tell users to drop manual calls.)
 - **No re-binding under a kind.** `disposable a: FileHandle = b;` where `b` is itself a `disposable` binding is a typecheck error: "cannot re-bind a kind-tracked value under a new kind in phase 6.1". The aliasing rules belong with `mustNotShare` in 6.2.
 - **No kind imports.** A `kind` decl is local to its module in 6.1. Exporting/importing kinds is a phase 6.4 concern (it pairs with `propagates<K>` across module boundaries). `import { disposable } from "./foo.yoop";` is rejected. In practice the `disposable` kind decl will live in the same file that declares its `Disposable` trait, or be re-declared per module — the awkwardness is acknowledged and resolved in 6.4.
+
+- **One `requires` per line.** Multiple `requires` are written as separate `requires Trait;` clauses, not as a space-separated list. (List form is reserved for `appliesTo` and `forbids` in later sub-phases.)
 
 ## Status snapshot
 
@@ -155,25 +157,26 @@ Extensions to existing nodes:
 New keyword tags (add to `TokenTags`, ~[lexer.js:57](../src/jsyooplexer/lexer.js#L57)) and matching entries in `keywordTagList` (~[lexer.js:151](../src/jsyooplexer/lexer.js#L151)):
 
 ```js
-kind:          <next-tag>,
-appliesTo:    <next-tag>,
-requires:      <next-tag>,
-mustCall:      <next-tag>,
-ownsBlock:     <next-tag>,
-beforeScopeEnd:<next-tag>,
-binding:       <next-tag>,
+kind:           <next-tag>,
+appliesTo:      <next-tag>,
+requires:       <next-tag>,
+mustCall:       <next-tag>,
+ownsBlock:      <next-tag>,
+beforeScopeEnd: <next-tag>,
+binding:        <next-tag>,
 ```
 
 **Note**: `disposable` is NOT a keyword. Kind names are normal identifiers; the parser disambiguates `disposable a: T = ...` from a generic expression statement via lookahead.
 
-The keywords above are **fully reserved**, not contextual. The spec ([§14, line 864-872](../SPEC.md)) reserves all of these. Even though `appliesTo` and `mustCall` only appear inside `kind { ... }` bodies, contextual reservation would complicate the lexer for no real-world benefit — these aren't names users would want to bind otherwise.
+The clause keywords (`appliesTo`, `requires`, `mustCall`, `ownsBlock`) are **globally reserved** in the spec ([§14](../SPEC.md#L861)) so the user can't shadow them with locals; in practice the parser only treats them specially inside `kind { ... }` bodies. The timing modifier `beforeScopeEnd` and the site identifier `binding` are reserved only contextually (per spec §14) — the lexer still emits a dedicated tag for them to keep the parser shape simple, but they remain legal as identifiers outside kind-clause positions. (Phase 6.1's narrow grammar makes this distinction invisible in practice; later sub-phases extend it.)
 
 ### 2.a Lexer test cases
 
-- `kind` tokenizes as `kind` keyword.
-- `appliesTo` tokenizes as single keyword (note the underscore).
-- `mustCall` tokenizes as keyword.
-- `disposable` tokenizes as plain identifier.
+- `kind` tokenizes as the `kind` keyword.
+- `appliesTo` tokenizes as a single keyword (no underscore — pure camelCase).
+- `mustCall` tokenizes as a single keyword.
+- `beforeScopeEnd` tokenizes as a single keyword.
+- `disposable` tokenizes as a plain identifier.
 
 ## 3. Parser changes ([parser.js](../src/jsyooparser/parser.js))
 
@@ -204,20 +207,22 @@ kindClause :=
   | mustCallClause
   | ownsBlockClause
 
-appliesToClause := "appliesTo" ":" "binding" ";"
+appliesToClause := "appliesTo" "binding" ";"
 requiresClause  := "requires" IDENT ";"
-mustCallClause  := "mustCall" "(" IDENT ")" "." "beforeScopeEnd" "(" ")" ";"
-ownsBlockClause := "ownsBlock" "(" ")" ";"
+mustCallClause  := "mustCall" IDENT "beforeScopeEnd" ";"
+ownsBlockClause := "ownsBlock" ";"
 ```
+
+Each clause is a `keyword arg...;` statement. No parens, no colons, no method chains, no block forms in 6.1.
 
 Implementation notes:
 
-- `parseKindDecl` consumes `kind`, then `IDENT` (the kind name — store on `node.name`), then `{`. Loop reading clauses until `}`.
-- Each clause dispatcher peeks the leading keyword and routes to a `parseXxxClause` helper.
-- `parseAppliesToClause`: consume `appliesTo`, `:`, then expect `binding` keyword. Any other identifier or parenthesized tuple is a parse error: `"appliesTo: <name> not yet supported in phase 6.1; only 'binding' is accepted"`.
-- `parseRequiresClause`: consume `requires`, then `IDENT` (the trait name). Store as `node.traitName`. Don't resolve here — Pass C.2 does.
-- `parseMustCallClause`: consume `mustCall`, `(`, `IDENT`, `)`. Then `.`, then `beforeScopeEnd`, `(`, `)`. Store `node.methodName` and `node.timing = "beforeScopeEnd"`. If `.` is followed by anything other than `beforeScopeEnd` (e.g. `beforeAny`, `afterAny`), produce: `"mustCall(...).<X> not yet supported in phase 6.1; use .beforeScopeEnd()"`. If the inner of the parens is a pipe-delimited alternation (`fn1 | fn2`), produce: `"mustCall(a | b) not yet supported in phase 6.1; single function name only"`.
-- `parseOwnsBlockClause`: consume `ownsBlock`, `(`, `)`, `;`. No payload.
+- `parseKindDecl` consumes `kind`, then `IDENT` (the kind name — store on `node.name`), then `{`. Loop reading clauses until `}`. The `kind` decl itself takes no trailing `;` (matches `function`, `type`, `trait`).
+- Each clause dispatcher peeks the leading keyword token and routes to a `parseXxxClause` helper. Per-clause grammar is fixed (no general "clause-shape" parser) because the clause set is closed.
+- `parseAppliesToClause`: consume `appliesTo`, then expect `binding`. Any other identifier (`parameter`, `field`, `function`, `type`) or any second site identifier (i.e. multi-site list like `appliesTo function binding`) is a parse error: `"appliesTo <name> not yet supported in phase 6.1; only 'binding' is accepted"`.
+- `parseRequiresClause`: consume `requires`, then `IDENT` (the trait name). Store as `node.traitName`. Don't resolve here — Pass C.2 does. If a second `IDENT` appears before `;`, reject: `"requires takes a single trait per clause; write multiple 'requires Trait;' clauses for multiple traits"`.
+- `parseMustCallClause`: consume `mustCall`, then `IDENT` (the method name). If the next token is `{`, reject: `"mustCall { ... } block form (alternation) not yet supported in phase 6.1; single function name only"`. Otherwise expect `beforeScopeEnd` token. If a different timing keyword appears (`beforeAny`, `afterAny`), produce: `"mustCall ... <X> not yet supported in phase 6.1; use 'beforeScopeEnd'"`. Store `node.methodName` and `node.timing = "beforeScopeEnd"`.
+- `parseOwnsBlockClause`: consume `ownsBlock`, `;`. No payload. If the user wrote `ownsBlock()` (old syntax), the `(` is the first unexpected token and produces: `"ownsBlock takes no arguments; drop the parentheses"`.
 
 After the clause loop, before returning, validate **at the parser level**: exactly one `appliesToClause` is present. (Spec defaults to "any value-site" if absent, but 6.1 is `binding`-only and we want the user to write it explicitly to avoid surprises when later phases widen the default.) Missing or duplicate `appliesTo` is a parse error.
 
@@ -254,7 +259,7 @@ varDecl :=
 kindPrefix := IDENT                                   // the kind name; resolved in typecheck
 
 blockOrSemicolon :=
-    "{" statement* "}"     // trailing block (kind must declare ownsBlock())
+    "{" statement* "}"     // trailing block (kind must declare ownsBlock)
   | ";"                    // implicit-block form
 ```
 
@@ -264,7 +269,7 @@ Notes:
 - Detection at statement start: a `parseStatement` dispatcher already has `let` / `const` / `if` / `while` / `return` / `for` / `break` / `continue` / `_` / `{` / expression-statement branches. Add: if the current token is `IDENT` and the next is also `IDENT` and the one after that is `:`, treat it as a kind-prefixed binding. Three-token lookahead is sufficient — no general statement starts `<ident> <ident> :`.
   - Defensive: also reject `kind X X : ...` (the kind name being a *reserved keyword*) — those cases already lex as non-`IDENT` and naturally fail.
 - The `let` / `const` keyword may appear *after* the kind prefix (`disposable let a: T = ...`) per [SPEC.md §4.4](../SPEC.md#L221). Place it between the kind name and the binding ident.
-- The kind-prefixed forms always have an `=` RHS — a kind without an initializer makes no sense (`mustCall(dispose)` against what?). Enforce at parse: `disposable a: T;` (no `=`) is a parse error.
+- The kind-prefixed forms always have an `=` RHS — a kind without an initializer makes no sense (`mustCall dispose` against what?). Enforce at parse: `disposable a: T;` (no `=`) is a parse error.
 - After the RHS expression, peek: if `{`, parse a trailing block (the body is the binding's scope). If `;`, consume it. Anything else: parse error.
 - Trailing block must contain at least zero statements; an empty `{}` is legal.
 
@@ -287,8 +292,9 @@ Output AST shape, after parse:
 
 ### 3.d Parser test cases — accept
 
-- `kind disposable { appliesTo: binding; requires Disposable; mustCall(dispose).beforeScopeEnd(); ownsBlock(); }`
-- `kind cleanup { appliesTo: binding; mustCall(close).beforeScopeEnd(); }` (no `ownsBlock`, no `requires`)
+- `kind disposable { appliesTo binding; requires Disposable; mustCall dispose beforeScopeEnd; ownsBlock; }`
+- `kind cleanup { appliesTo binding; mustCall close beforeScopeEnd; }` (no `ownsBlock`, no `requires` — but typecheck will then fail per §5.c since `mustCall` needs a `requires`; this is accepted at *parse* time and rejected later)
+- `kind handle { appliesTo binding; requires Disposable; requires Closable; mustCall dispose beforeScopeEnd; }` (one `requires` per line)
 - `disposable a: FileHandle = make_handle();` (implicit block, implicit const)
 - `let disposable a: FileHandle = make_handle();` (explicit let, explicit mutability)
 - `disposable a: FileHandle = make_handle() { dispose(ref a); return 0; }` (trailing block — semantically odd but parses)
@@ -296,10 +302,12 @@ Output AST shape, after parse:
 ### 3.e Parser test cases — reject (with the exact phase-6.1 error message)
 
 - `kind disposable { requires Disposable; }` → missing `appliesTo`.
-- `kind disposable { appliesTo: parameter; ... }` → `appliesTo: parameter not yet supported`.
-- `kind disposable { appliesTo: (binding, parameter); ... }` → `appliesTo: tuple not yet supported`.
-- `kind disposable { appliesTo: binding; mustCall(dispose).beforeAny(); }` → `.beforeAny() not yet supported`.
-- `kind disposable { appliesTo: binding; mustCall(dispose | close).beforeScopeEnd(); }` → disjunction rejection.
+- `kind disposable { appliesTo parameter; ... }` → `appliesTo parameter not yet supported`.
+- `kind disposable { appliesTo function binding; ... }` → `appliesTo function not yet supported` (rejects on the first non-`binding` site).
+- `kind disposable { appliesTo binding; mustCall dispose beforeAny; }` → `mustCall ... beforeAny not yet supported`.
+- `kind disposable { appliesTo binding; mustCall { wait; abandon; } beforeScopeEnd; }` → `mustCall block form (alternation) not yet supported`.
+- `kind disposable { appliesTo binding; requires Disposable Closable; }` → `requires takes a single trait per clause`.
+- `kind disposable { ownsBlock(); }` → `ownsBlock takes no arguments; drop the parentheses` (catches users writing old-style syntax).
 - `kind disposable(n: usize) { ... }` → `parameterized kinds not yet supported`.
 - `kind slow = a & b;` → `kind composition not yet supported`.
 - `disposable a: FileHandle;` (no `=`) → `kind-prefixed binding requires initializer`.
@@ -409,7 +417,7 @@ function resolveKindClauses(mod, errors) {
           // the method must be declared by at least one required trait.
           const traitWithMethod = kt.requires.find(t => t.methods.has(c.methodName));
           if (!traitWithMethod) {
-            pushError(errors, c, `mustCall(${c.methodName}): no required trait declares this method`);
+            pushError(errors, c, `mustCall ${c.methodName}: no required trait declares this method`);
             break;
           }
           kt.mustCall.push({
@@ -436,7 +444,7 @@ function resolveKindClauses(mod, errors) {
 Notes:
 
 - `mustCall` references a method name that must be declared by one of the kind's `requires` traits. Without `requires`, no `mustCall` is legal (where would the method come from?). Reject with: `mustCall requires at least one 'requires' clause to resolve the method name`.
-- `ownsBlock()` is semantic-only at this stage; binding-site validation happens in checkStatement / checkExpr.
+- `ownsBlock` is semantic-only at this stage; binding-site validation happens in checkStatement / checkExpr.
 
 ### 5.d Pass D — `validateFunction` extension
 
@@ -450,7 +458,7 @@ In [checkStatement.js](../src/jsyooptypecheck/checkStatement.js), where `LET_DEC
 2. Verify `kindType.appliesTo === "binding"`. (For 6.1 this is always true since we reject other values at parse, but the check is a future-proofing line.)
 3. Type-check the RHS expression as today; the resulting `resolvedType` must be a `StructType` (not a primitive, not a ref, not an array). For 6.1, kinds only attach to struct values. Non-struct: error `kind '${k}' can only apply to struct values, got '${formatType(t)}'`.
 4. For every trait in `kindType.requires`, verify the struct's `implements` list includes that trait. Otherwise: `binding '${name}' has kind '${k}' which requires '${trait}', but type '${struct}' does not implement '${trait}'`.
-5. If `node.trailingBlock` is present, require `kindType.ownsBlock === true`. Otherwise: `kind '${k}' does not declare ownsBlock(); trailing block is not allowed`.
+5. If `node.trailingBlock` is present, require `kindType.ownsBlock === true`. Otherwise: `kind '${k}' does not declare ownsBlock; trailing block is not allowed`.
 6. Store `kindType` on the binding via `declareInScope`, by passing it through.
 7. If `node.trailingBlock` is present, declare the binding into the **trailing block's** scope, not the enclosing one. Specifically: push a new scope for the trailing block, declare the binding in that scope, walk the trailing block's body, popScope on the trailing block. (Implementation detail: `checkBlock` already pushes a scope; the binding is declared into that nested scope, then `checkBlock` walks the body.) After the trailing block, the binding is not visible — the implicit `popScope` removes it.
 8. If `node.trailingBlock` is absent (implicit form), declare the binding into the **current scope** as today, and record that the binding has an implicit-block obligation in the enclosing scope.
@@ -694,22 +702,22 @@ After the trailing block, the binding remains alloc'd (stack memory persists for
 
 The existing codegen for expressions descends through nested expressions. `kindCheck` annotates `tryOp.pendingCleanups` on every `?` it encounters, so codegen just consumes whatever's there. No structural change needed; only the emit-cleanups-before-emitFailVariantReturn edit from 7.d.
 
-## 8. Multi-trait `requires` (deferred even within 6.1)
+## 8. Multi-trait `requires`
 
-A kind may technically list multiple `requires` traits:
+A kind may list multiple traits, **one per clause** (never a space-separated list — that's reserved for `appliesTo` and `forbids` in later sub-phases):
 
 ```yoop
 kind ioHandle {
-    appliesTo: binding;
+    appliesTo binding;
     requires Disposable;
     requires Closable;
-    mustCall(dispose).beforeScopeEnd();
+    mustCall dispose beforeScopeEnd;
 }
 ```
 
-The parser accepts this (multiple `requires` clauses are allowed). The typechecker validates each. The `mustCall` method must be declared by at least one required trait — `dispose` is declared by `Disposable`, so this passes. Codegen resolves the cleanup call exactly as in the single-trait case.
+The parser accepts repeated `requires` clauses. The typechecker validates each. The `mustCall` method must be declared by at least one required trait — `dispose` is declared by `Disposable`, so this passes. Codegen resolves the cleanup call exactly as in the single-trait case.
 
-This works for free because the resolution rule says "method must be in one of the requires traits"; multiple requires just widen the search. We don't need to do anything special.
+This works for free because the resolution rule is "method must be in one of the requires traits"; multiple `requires` clauses just widen the search. No special handling needed.
 
 ## 9. Driver wiring ([yoopiler.js](../src/yoopiler.js))
 
@@ -795,10 +803,10 @@ type FileHandle implements Disposable {
 }
 
 kind disposable {
-    appliesTo: binding;
+    appliesTo binding;
     requires Disposable;
-    ownsBlock();
-    mustCall(dispose).beforeScopeEnd();
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
 }
 
 type Result { value: int32, err: string }
@@ -904,20 +912,23 @@ A kind whose `requires` list has two traits, both implemented by the bound struc
 | Fixture | Trigger |
 |---|---|
 | `kind_missing_appliesTo.yoop` | `kind k { requires D; }` — no `appliesTo` |
-| `kind_appliesTo_parameter.yoop` | `appliesTo: parameter;` rejected at parse |
+| `kind_appliesTo_parameter.yoop` | `appliesTo parameter;` rejected at parse |
+| `kind_appliesTo_multi.yoop` | `appliesTo function binding;` rejected (multi-site list deferred) |
 | `kind_duplicate_appliesTo.yoop` | two `appliesTo` clauses |
 | `kind_duplicate_mustcall.yoop` | two `mustCall` clauses |
 | `kind_unknown_trait.yoop` | `requires NotATrait;` |
-| `kind_mustcall_no_requires.yoop` | `mustCall(dispose)` with no `requires` |
-| `kind_mustcall_method_not_in_trait.yoop` | `requires Disposable; mustCall(close);` (close not on Disposable) |
-| `kind_beforeAny.yoop` | `mustCall(dispose).beforeAny()` rejected |
-| `kind_mustcall_disjunction.yoop` | `mustCall(a \| b).beforeScopeEnd()` rejected |
+| `kind_requires_list.yoop` | `requires Disposable Closable;` rejected (list form not allowed) |
+| `kind_mustcall_no_requires.yoop` | `mustCall dispose beforeScopeEnd;` with no `requires` clause |
+| `kind_mustcall_method_not_in_trait.yoop` | `requires Disposable; mustCall close beforeScopeEnd;` (close not on Disposable) |
+| `kind_beforeAny.yoop` | `mustCall dispose beforeAny;` rejected |
+| `kind_mustcall_disjunction.yoop` | `mustCall { wait; abandon; } beforeScopeEnd;` rejected (block form deferred) |
+| `kind_ownsblock_parens.yoop` | `ownsBlock();` rejected — old syntax with parens |
 | `kind_parameterized.yoop` | `kind k(n: usize) { ... }` rejected |
 | `kind_composition.yoop` | `kind k = a & b;` rejected |
 | `binding_unknown_kind.yoop` | `unknownKind a: T = ...;` |
 | `binding_non_struct.yoop` | `disposable a: int32 = 5;` |
 | `binding_missing_trait.yoop` | `disposable a: PlainStruct = {...};` where PlainStruct doesn't implement Disposable |
-| `binding_trailing_block_no_ownsblock.yoop` | kind without `ownsBlock()` but binding has a trailing block |
+| `binding_trailing_block_no_ownsblock.yoop` | kind without `ownsBlock` clause but binding has a trailing block |
 | `binding_no_initializer.yoop` | `disposable a: T;` — no `=` |
 | `binding_after_trailing_block_scope.yoop` | reference `a` after `disposable a: T = ... { }` — should fail with "name not in scope" |
 
