@@ -66,6 +66,16 @@ export const TokenTags = {
   ownsBlock: 63,
   beforeScopeEnd: 64,
   binding: 65,
+  // phase 6.2: escape and sharing
+  mustNotEscape: 66,
+  mustNotShare: 67,
+  forbids: 68,
+  scope: 69,
+  acrossScopes: 70,
+  parameter: 71,
+  field: 72,
+  io: 73,
+  globalState: 74,
 
   // punctuation / operators
   eq: 5,
@@ -168,6 +178,15 @@ const keywordTagList = {
   ownsBlock: TokenTags.ownsBlock,
   beforeScopeEnd: TokenTags.beforeScopeEnd,
   binding: TokenTags.binding,
+  mustNotEscape: TokenTags.mustNotEscape,
+  mustNotShare: TokenTags.mustNotShare,
+  forbids: TokenTags.forbids,
+  scope: TokenTags.scope,
+  acrossScopes: TokenTags.acrossScopes,
+  parameter: TokenTags.parameter,
+  field: TokenTags.field,
+  io: TokenTags.io,
+  globalState: TokenTags.globalState,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

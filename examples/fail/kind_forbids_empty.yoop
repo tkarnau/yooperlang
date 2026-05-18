@@ -1,0 +1,10 @@
+kind k {
+    appliesTo binding;
+    forbids;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: forbids requires at least one category

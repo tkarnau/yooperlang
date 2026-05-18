@@ -1,0 +1,26 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type Handle implements Disposable {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`drop ${self.id}\n`);
+    }
+}
+
+kind pooled {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+    mustNotShare acrossScopes;
+}
+
+function main(): int32 {
+    pooled h: Handle = { id: 1 };
+    return 0;
+}

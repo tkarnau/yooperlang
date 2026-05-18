@@ -1,0 +1,11 @@
+kind k {
+    appliesTo binding;
+    mustNotEscape scope;
+    mustNotEscape scope;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: duplicate mustNotEscape clause

@@ -46,6 +46,8 @@ Phase 6 is too large for one plan file; existing phase plans run 400-1700 lines 
 
 `mustNotEscape scope;`, `mustNotShare acrossScopes;`, and `forbids X;` clauses. Adds a flow-sensitive escape-analysis pass over function returns, struct-field stores, and `ref` capture. Widens `appliesTo` to include `parameter` and `field`. Builds on 6.1's binding-flow infrastructure.
 
+> Detailed plan: [phase-6-2-escape.md](phase-6-2-escape.md)
+
 ### 6.3 — Task and concurrency
 
 The big sub-phase. Generic traits (`trait Task<T>` — phase 5 deferred these), the `task` kind on function declarations, `provides Task` semantics that rewrite a `task` function's return type to `Task<T>`, the binding kinds `scoped` and `pooled` with their `wait` / `mustNotShare` / `mustNotEscape` / `autoJoin` rules per [SPEC.md §8](../SPEC.md#L532), the `wait h` and `_ = h` operators, and compiler-inserted `wait` for immediate and `scoped` bindings. Significant overlap with the runtime story; may need a minimal scheduler shim.

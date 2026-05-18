@@ -1,0 +1,10 @@
+kind k {
+    appliesTo binding;
+    forbids memory;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: unrecognized forbids category 'memory'; accepted: io, globalState

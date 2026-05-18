@@ -7,7 +7,7 @@ import { pushError, formatType } from "./errors.js";
 import { isFallible } from "./fallible.js";
 
 export function pushScope(parent) {
-  return { parent, bindings: new Map() };
+  return { parent, bindings: new Map(), depth: (parent?.depth ?? -1) + 1 };
 }
 
 export function declareInScope(scope, name, type, kind, node, errors, kindType = null) {
@@ -25,6 +25,9 @@ export function declareInScope(scope, name, type, kind, node, errors, kindType =
     // is the orthogonal phase-6.1 kind decl. The name collision is unfortunate
     // but the existing `kind` field is well-established.
     kindType,
+    // Phase 6.2: lexical depth at which this binding was declared. Used by the
+    // escape-analysis walker to detect field-store escapes into longer-lived structs.
+    scopeDepth: scope.depth,
   });
 }
 

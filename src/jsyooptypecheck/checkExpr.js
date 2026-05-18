@@ -117,6 +117,8 @@ function resolveIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, node.name);
   if (binding) {
     if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    // Phase 6.2: record the binding's lexical depth for escape analysis.
+    node.bindingScopeDepth = binding.scopeDepth ?? 0;
     // Auto-deref: ref bindings transparently expose the inner type
     if (binding.type.kind === typeKinds.ref) {
       node.autoDeref = true;

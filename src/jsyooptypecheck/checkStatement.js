@@ -65,7 +65,46 @@ export function validateFunction(funcNode, typeContext, errors) {
     }
     // ref params: binding type in scope is RefType(baseType)
     const t = param.isRef ? RefType(baseType) : baseType;
-    declareInScope(scope, param.name, t, typeKinds.param, param, errors);
+
+    // Phase 6.2: resolve kind prefix on parameter.
+    let paramKindType = null;
+    if (param.kindPrefix) {
+      const kt = typeContext.kindTable?.get(param.kindPrefix.name) ?? null;
+      if (!kt) {
+        pushError(errors, param, `unknown kind "${param.kindPrefix.name}"`);
+      } else {
+        // Validate applicability: kind must include "parameter" site.
+        if (!kt.appliesTo.has("parameter")) {
+          const sites = [...kt.appliesTo].join(", ") || "(none)";
+          pushError(errors, param,
+            `kind '${kt.name}' does not apply to parameters (declared appliesTo: ${sites})`);
+        } else {
+          // Unwrap ref to get the underlying struct type.
+          const structType = baseType.kind === typeKinds.ref ? baseType.inner : baseType;
+          if (structType.kind !== typeKinds.struct) {
+            pushError(errors, param,
+              `kind "${kt.name}" can only apply to struct values, got ${formatType(baseType)}`);
+          } else {
+            // Validate required traits.
+            for (const reqTrait of kt.requires) {
+              const implementsIt = (structType.implementsTraits ?? []).some(
+                (t2) => t2.name === reqTrait.name && (t2.moduleId ?? null) === (reqTrait.moduleId ?? null),
+              );
+              if (!implementsIt) {
+                pushError(errors, param,
+                  `parameter "${param.name}" has kind "${kt.name}" which requires "${reqTrait.name}", but type ${formatType(structType)} does not implement "${reqTrait.name}"`);
+              }
+            }
+          }
+          paramKindType = kt;
+        }
+      }
+      param.resolvedKindType = paramKindType;
+    } else {
+      param.resolvedKindType = null;
+    }
+
+    declareInScope(scope, param.name, t, typeKinds.param, param, errors, paramKindType);
     param.resolvedType = t;
   }
 
@@ -192,10 +231,20 @@ function checkLetOrConst(node, scope, ctx) {
 
   if (kindType) {
     validateKindBinding(node, kindType, declaredType, scope, ctx);
-  } else if (node.trailingBlock) {
-    // trailingBlock only legal for kind-prefixed bindings.
-    pushError(ctx.errors, node,
-      `trailing block on binding "${node.name}" requires a kind prefix that declares ownsBlock`);
+  } else {
+    if (node.trailingBlock) {
+      // trailingBlock only legal for kind-prefixed bindings.
+      pushError(ctx.errors, node,
+        `trailing block on binding "${node.name}" requires a kind prefix that declares ownsBlock`);
+    }
+    // Phase 6.2: reject aliasing a scoped binding under a non-scoped name.
+    if (node.assignment) {
+      const escapedName = findScopedIdentInExpr(node.assignment, scope);
+      if (escapedName) {
+        pushError(ctx.errors, node,
+          `cannot alias a scoped binding under a non-scoped name (phase 6.2): '${escapedName}' has mustNotEscape`);
+      }
+    }
   }
 
   const declKind = node.kind === ASTNodeKind.CONST_DECL ? "const" : "let";
@@ -216,23 +265,55 @@ function checkLetOrConst(node, scope, ctx) {
   declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors, kindType);
 }
 
+// Phase 6.2: Walk an expression and return the name of the first IDENT whose
+// scope binding carries mustNotEscape (a scoped sentinel). Returns null if none.
+function findScopedIdentInExpr(expr, scope) {
+  if (!expr || typeof expr !== "object") return null;
+  if (expr.kind === ASTNodeKind.IDENT) {
+    const binding = lookupInScope(scope, expr.name);
+    if (binding?.kindType?.mustNotEscape) return expr.name;
+    return null;
+  }
+  // REF_EXPRESSION wrapping an IDENT: also an alias
+  if (expr.kind === ASTNodeKind.REF_EXPRESSION) {
+    return findScopedIdentInExpr(expr.operand, scope);
+  }
+  // Recursively check children
+  for (const val of Object.values(expr)) {
+    if (Array.isArray(val)) {
+      for (const v of val) {
+        const found = findScopedIdentInExpr(v, scope);
+        if (found) return found;
+      }
+    } else if (val && typeof val === "object" && val.kind) {
+      const found = findScopedIdentInExpr(val, scope);
+      if (found) return found;
+    }
+  }
+  return null;
+}
+
 // Validate that a kind-prefixed binding satisfies the kind's clause set.
 function validateKindBinding(node, kindType, declaredType, scope, ctx) {
-  // appliesTo is restricted to "binding" in 6.1 (parser-enforced); no check.
+  // Phase 6.2: check appliesTo includes "binding".
+  if (!kindType.appliesTo.has("binding")) {
+    const sites = [...kindType.appliesTo].join(", ") || "(none)";
+    pushError(ctx.errors, node,
+      `kind '${kindType.name}' does not apply to bindings (declared appliesTo: ${sites})`);
+  }
 
-  // Re-bind under a kind: forbidden in 6.1. If the RHS is an IDENT that
+  // Re-bind under a kind: forbidden. If the RHS is an IDENT that
   // resolves to a binding which already carries a kindType, reject.
   if (node.assignment?.kind === ASTNodeKind.IDENT) {
-    const src = lookupInScope(scope, node.assignment.name);
-    if (src?.kindType) {
+    const existing = lookupInScope(scope, node.assignment.name);
+    if (existing?.kindType) {
       pushError(ctx.errors, node,
         `cannot re-bind a kind-tracked value under a new kind in phase 6.1`);
     }
   }
 
   // The struct under a kind binding must be a plain struct value (not a ref,
-  // not an array, not a primitive). The error from a primitive RHS gives the
-  // user a clearer message than the cascade from trait-implements failing.
+  // not an array, not a primitive).
   if (declaredType.kind === typeKinds.error) return;
   if (declaredType.kind !== typeKinds.struct) {
     pushError(ctx.errors, node,

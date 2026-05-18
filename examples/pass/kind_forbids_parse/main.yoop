@@ -1,0 +1,17 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Empty {
+    unused: int32,
+}
+
+kind safe {
+    appliesTo binding;
+    forbids io globalState;
+}
+
+function main(): int32 {
+    safe x: Empty = { unused: 0 };
+    return 0;
+}

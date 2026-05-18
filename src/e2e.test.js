@@ -188,6 +188,11 @@ function typecheckFixture(relPath) {
   return typecheckSource(src);
 }
 
+function parseFixture(relPath) {
+  const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
+  return parse(src);
+}
+
 describe("e2e: multi-file pass fixtures compile and produce expected output", () => {
   it("imports_basic: named import + call", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_basic/main.yoop");
@@ -331,6 +336,48 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_multi_requires/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=11\n");
+  });
+
+  // phase 6.2: scoped kind and escape analysis
+  it("scoped_basic: scoped kind with mustNotEscape, kind-prefixed param, dispose fires at scope end", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_basic/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "fd=1\ndisposing fd=1\n");
+  });
+
+  it("scoped_param_only: plain let binding may be passed ref to a scoped parameter", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_param_only/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "fd=7\n");
+  });
+
+  it("scoped_lifo_with_disposable: scoped and disposable interleaved dispose in LIFO order", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_lifo_with_disposable/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=2\ndisposing fd=1\n");
+  });
+
+  it("scoped_field_access_ok: returning a primitive field of a scoped binding is not an escape", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_field_access_ok/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "fd=9\ndisposing fd=9\n");
+  });
+
+  it("scoped_nested_block: trailing-block form of scoped kind fires dispose at inner block end", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_nested_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "inside\ndisposing fd=5\nafter\n");
+  });
+
+  it("kind_pooled_parse: mustNotShare acrossScopes parses and does not break mustCall pipeline", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/kind_pooled_parse/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "drop 1\n");
+  });
+
+  it("kind_forbids_parse: forbids io globalState parses and stores categories without enforcement", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/kind_forbids_parse/main.yoop");
+    assert.equal(errors.length, 0, `expected no errors, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 });
 
@@ -705,6 +752,119 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /does not declare ownsBlock/.test(e.message)),
       `expected no-ownsBlock error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // phase 6.2 parser rejections
+  it("kind_appliesto_function.yoop rejects appliesTo function (phase 6.5)", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_appliesto_function.yoop"),
+      /appliesTo function not yet supported/,
+    );
+  });
+
+  it("kind_appliesto_duplicate.yoop rejects duplicate appliesTo site", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_appliesto_duplicate.yoop"),
+      /duplicate appliesTo site 'binding'/,
+    );
+  });
+
+  it("kind_appliesto_empty.yoop rejects empty appliesTo list", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_appliesto_empty.yoop"),
+      /appliesTo requires at least one site/,
+    );
+  });
+
+  it("kind_mustnotescape_function.yoop rejects mustNotEscape function", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_mustnotescape_function.yoop"),
+      /mustNotEscape function not yet supported/,
+    );
+  });
+
+  it("kind_mustnotshare_acrossthreads.yoop rejects mustNotShare acrossThreads", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_mustnotshare_acrossthreads.yoop"),
+      /acrossThreads not yet supported/,
+    );
+  });
+
+  it("kind_forbids_unknown.yoop rejects unrecognized forbids category", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_forbids_unknown.yoop"),
+      /unrecognized forbids category 'memory'/,
+    );
+  });
+
+  it("kind_forbids_empty.yoop rejects empty forbids list", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_forbids_empty.yoop"),
+      /forbids requires at least one category/,
+    );
+  });
+
+  it("kind_duplicate_mustnotescape.yoop rejects duplicate mustNotEscape clause", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_duplicate_mustnotescape.yoop");
+    assert.ok(
+      errors.some((e) => /duplicate mustNotEscape clause/.test(e.message)),
+      `expected duplicate-mustNotEscape error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("param_two_kinds.yoop rejects a parameter with two kind prefixes", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/param_two_kinds.yoop"),
+      /a parameter may carry at most one kind prefix/,
+    );
+  });
+
+  it("param_kind_not_applies.yoop rejects a kind on a parameter when appliesTo excludes parameter", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/param_kind_not_applies.yoop");
+    assert.ok(
+      errors.some((e) => /does not apply to parameters/.test(e.message)),
+      `expected param-applicability error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_kind_not_applies.yoop rejects a kind on a binding when appliesTo excludes binding", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_kind_not_applies.yoop");
+    assert.ok(
+      errors.some((e) => /does not apply to bindings/.test(e.message)),
+      `expected binding-applicability error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("field_with_kind.yoop rejects a kind-prefixed struct field", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/field_with_kind.yoop");
+    assert.ok(
+      errors.some((e) => /kind-bearing struct fields require propagates/.test(e.message)),
+      `expected field-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("scoped_escape_return.yoop rejects returning a scoped binding", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/scoped_escape_return.yoop");
+    assert.ok(
+      errors.some((e) => /forbids escape via return/.test(e.message)),
+      `expected escape-return error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("scoped_escape_pass_unscoped.yoop rejects passing a scoped ref to a non-scoped parameter", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/scoped_escape_pass_unscoped.yoop");
+    assert.ok(
+      errors.some((e) => /does not declare 'scoped' or 'mustNotEscape scope' kind/.test(e.message)),
+      `expected escape-pass-unscoped error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("scoped_alias.yoop rejects aliasing a scoped binding under a plain name", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/scoped_alias.yoop");
+    assert.ok(
+      errors.some((e) => /cannot alias a scoped binding/.test(e.message)),
+      `expected scoped-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

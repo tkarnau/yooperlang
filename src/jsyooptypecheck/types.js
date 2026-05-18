@@ -146,10 +146,13 @@ export function KindType(name, moduleId) {
   this.kind = typeKinds.kind;
   this.name = name;
   this.moduleId = moduleId;
-  this.appliesTo = "binding";              // 6.1: always "binding"
+  this.appliesTo = new Set();              // 6.2: Set<"binding"|"parameter"|"field"> (was scalar)
   this.requires = [];                       // array of TraitType
   this.mustCall = [];                       // array of { methodName, timing, traitType }
   this.ownsBlock = false;
+  this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
+  this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
+  this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
 }
 
 /****************
