@@ -1,0 +1,16 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall close beforeScopeEnd;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because `mustCall close` references a method that is not declared by
+// any of the kind's required traits — Disposable only declares `dispose`.

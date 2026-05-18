@@ -1,0 +1,22 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type PlainStruct {
+    fd: int32,
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+function main(): int32 {
+    disposable a: PlainStruct = { fd: 1 };
+    return 0;
+}
+
+// Fails because PlainStruct does not implement Disposable, but the kind
+// `disposable` requires it. The kind-binding validation in checkLetOrConst
+// rejects any RHS whose struct type is missing a required trait.

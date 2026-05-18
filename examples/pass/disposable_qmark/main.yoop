@@ -1,0 +1,44 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+    }
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Result { value: int32, err: string }
+
+function readOne(ref h: FileHandle, fail: bool): Result {
+    if (fail) {
+        return { value: 0, err: "boom" };
+    }
+    return { value: h.fd, err: "" };
+}
+
+function go(fail: bool): Result {
+    disposable a: FileHandle = { fd: 5 };
+    const v: int32 = readOne(ref a, fail)?;
+    return { value: v, err: "" };
+}
+
+function main(): int32 {
+    const r1: Result = go(false);
+    printf(`ok r1=${r1.value} err='${r1.err}'\n`);
+    const r2: Result = go(true);
+    printf(`fail r2=${r2.value} err='${r2.err}'\n`);
+    return 0;
+}

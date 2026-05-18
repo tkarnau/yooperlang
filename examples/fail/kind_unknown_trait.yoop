@@ -1,0 +1,13 @@
+kind disposable {
+    appliesTo binding;
+    requires NotATrait;
+    mustCall dispose beforeScopeEnd;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because `NotATrait` is not a declared trait in this module. The
+// kind-clause resolution pass (Pass C.2) rejects any required trait name
+// that does not resolve.

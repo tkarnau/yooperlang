@@ -10,7 +10,7 @@ export function pushScope(parent) {
   return { parent, bindings: new Map() };
 }
 
-export function declareInScope(scope, name, type, kind, node, errors) {
+export function declareInScope(scope, name, type, kind, node, errors, kindType = null) {
   if (scope.bindings.has(name)) {
     pushError(errors, node, `redeclaration of "${name}"`);
     return;
@@ -20,6 +20,11 @@ export function declareInScope(scope, name, type, kind, node, errors) {
     kind,
     node,
     errObserved: false,
+    // Phase 6.1: language-level kind attached to this binding (e.g. disposable).
+    // `kind` (above) is the mutability of the binding (let/const); `kindType`
+    // is the orthogonal phase-6.1 kind decl. The name collision is unfortunate
+    // but the existing `kind` field is well-established.
+    kindType,
   });
 }
 

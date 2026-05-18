@@ -146,6 +146,13 @@ function checkBlock(node, scope, ctx) {
 //   - resolve the declared type
 //   - if there's an initializer, type-check it against the declared type
 //   - bind the name in the current scope
+//
+// Phase 6.1: when `node.kindPrefix` is set, the binding is kind-prefixed
+// (e.g. `disposable a: FileHandle = ...`). We additionally:
+//   - resolve the kind name against ctx.typeContext.kindTable
+//   - validate the RHS struct type implements every trait in kind.requires
+//   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
+//     the name in the trailing block's scope rather than the enclosing one
 function checkLetOrConst(node, scope, ctx) {
   const declaredType =
     resolveTypeAnnotation(node.typeAnnotation, ctx.typeContext.structTable) ?? ErrorType();
@@ -153,6 +160,16 @@ function checkLetOrConst(node, scope, ctx) {
     pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
   }
   node.resolvedType = declaredType;
+
+  // Resolve kind prefix (phase 6.1). null on plain let/const.
+  let kindType = null;
+  if (node.kindPrefix) {
+    kindType = ctx.typeContext.kindTable?.get(node.kindPrefix.name) ?? null;
+    if (!kindType) {
+      pushError(ctx.errors, node, `unknown kind "${node.kindPrefix.name}"`);
+    }
+  }
+  node.resolvedKindType = kindType;
 
   if (node.assignment) {
     // For array literals with a known declared array type, pass element type context
@@ -173,8 +190,72 @@ function checkLetOrConst(node, scope, ctx) {
     }
   }
 
+  if (kindType) {
+    validateKindBinding(node, kindType, declaredType, scope, ctx);
+  } else if (node.trailingBlock) {
+    // trailingBlock only legal for kind-prefixed bindings.
+    pushError(ctx.errors, node,
+      `trailing block on binding "${node.name}" requires a kind prefix that declares ownsBlock`);
+  }
+
   const declKind = node.kind === ASTNodeKind.CONST_DECL ? "const" : "let";
-  declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors);
+
+  // For trailing-block form, the binding is scoped to the inner block only;
+  // declare it there and walk the block's body, then return without leaking
+  // the name into the enclosing scope.
+  if (kindType && node.trailingBlock) {
+    const inner = pushScope(scope);
+    declareInScope(inner, node.name, declaredType, declKind, node, ctx.errors, kindType);
+    for (const s of node.trailingBlock.body) {
+      validateStatement(s, inner, ctx);
+    }
+    popScope(inner, ctx.errors);
+    return;
+  }
+
+  declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors, kindType);
+}
+
+// Validate that a kind-prefixed binding satisfies the kind's clause set.
+function validateKindBinding(node, kindType, declaredType, scope, ctx) {
+  // appliesTo is restricted to "binding" in 6.1 (parser-enforced); no check.
+
+  // Re-bind under a kind: forbidden in 6.1. If the RHS is an IDENT that
+  // resolves to a binding which already carries a kindType, reject.
+  if (node.assignment?.kind === ASTNodeKind.IDENT) {
+    const src = lookupInScope(scope, node.assignment.name);
+    if (src?.kindType) {
+      pushError(ctx.errors, node,
+        `cannot re-bind a kind-tracked value under a new kind in phase 6.1`);
+    }
+  }
+
+  // The struct under a kind binding must be a plain struct value (not a ref,
+  // not an array, not a primitive). The error from a primitive RHS gives the
+  // user a clearer message than the cascade from trait-implements failing.
+  if (declaredType.kind === typeKinds.error) return;
+  if (declaredType.kind !== typeKinds.struct) {
+    pushError(ctx.errors, node,
+      `kind "${kindType.name}" can only apply to struct values, got ${formatType(declaredType)}`);
+    return;
+  }
+
+  // The RHS struct must implement every required trait.
+  for (const reqTrait of kindType.requires) {
+    const implementsIt = (declaredType.implementsTraits ?? []).some(
+      (t) => t.name === reqTrait.name && (t.moduleId ?? null) === (reqTrait.moduleId ?? null),
+    );
+    if (!implementsIt) {
+      pushError(ctx.errors, node,
+        `binding "${node.name}" has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
+    }
+  }
+
+  // Trailing block is only legal when the kind declares ownsBlock.
+  if (node.trailingBlock && !kindType.ownsBlock) {
+    pushError(ctx.errors, node,
+      `kind "${kindType.name}" does not declare ownsBlock; trailing block is not allowed`);
+  }
 }
 
 // Check an array literal against a known element type (used when the declared

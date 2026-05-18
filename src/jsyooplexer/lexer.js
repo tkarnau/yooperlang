@@ -62,8 +62,8 @@ export const TokenTags = {
   // kind stuff
   appliesTo: 60,
   requires: 61,
-  mustcall: 62,
-  ownsblock: 63,
+  mustCall: 62,
+  ownsBlock: 63,
   beforeScopeEnd: 64,
   binding: 65,
 
@@ -164,8 +164,8 @@ const keywordTagList = {
   kind: TokenTags.kind,
   appliesTo: TokenTags.appliesTo,
   requires: TokenTags.requires,
-  mustcall: TokenTags.mustcall,
-  ownsblock: TokenTags.ownsblock,
+  mustCall: TokenTags.mustCall,
+  ownsBlock: TokenTags.ownsBlock,
   beforeScopeEnd: TokenTags.beforeScopeEnd,
   binding: TokenTags.binding,
   _: TokenTags.discard, // bare underscores are discarded

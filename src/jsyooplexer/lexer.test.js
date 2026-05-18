@@ -74,13 +74,13 @@ describe("lexer: keywords vs identifiers", () => {
     const tokens = tokenize("requires");
     assert.equal(tokens[0].tag, tag("requires"));
   });
-  it("'mustcall' is the mustcall keyword", () => {
-    const tokens = tokenize("mustcall");
-    assert.equal(tokens[0].tag, tag("mustcall"));
+  it("'mustCall' is the mustCall keyword", () => {
+    const tokens = tokenize("mustCall");
+    assert.equal(tokens[0].tag, tag("mustCall"));
   });
-  it("'ownsblock' is the ownsblock keyword", () => {
-    const tokens = tokenize("ownsblock");
-    assert.equal(tokens[0].tag, tag("ownsblock"));
+  it("'ownsBlock' is the ownsBlock keyword", () => {
+    const tokens = tokenize("ownsBlock");
+    assert.equal(tokens[0].tag, tag("ownsBlock"));
   });
   it("'beforeScopeEnd' is the beforeScopeEnd keyword", () => {
     const tokens = tokenize("beforeScopeEnd");
