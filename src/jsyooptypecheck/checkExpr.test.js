@@ -6,11 +6,19 @@ import { ASTNode, ASTNodeKind } from "../contracts.js";
 import {
   PrimType,
   StructType,
+  FuncType,
+  RefType,
   primAnnotations,
   resolveTypeFromName,
   typeKinds,
 } from "./types.js";
 import { declareInScope, pushScope } from "./scope.js";
+import { typecheckProgram } from "./typecheck.js";
+import { parse } from "../jsyooparser/parser.js";
+
+function singleModule(src, id = "test") {
+  return [{ id, ast: parse(src) }];
+}
 
 describe("resolveExprType", () => {
   it("resolves unknown nodes to error type", () => {
@@ -153,5 +161,78 @@ describe("resolveExprType", () => {
         "cannot pin struct literal to non-struct type int32",
       );
     });
+  });
+});
+
+describe("resolveCall: trait method dispatch", () => {
+  it("resolveCall falls through to trait dispatch when free-function lookup misses", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable {
+          fd: int32,
+          function dispose(ref self): void { }
+        }
+        function main(): int32 {
+          let h: FileHandle = { fd: 3 };
+          dispose(ref h);
+          return 0;
+        }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("annotates the call node with calleeMethodOf and calleeMangledName", () => {
+    const src = `
+      trait Disposable { function dispose(ref self): void; }
+      type FileHandle implements Disposable {
+        fd: int32,
+        function dispose(ref self): void { }
+      }
+      function main(): int32 {
+        let h: FileHandle = { fd: 3 };
+        dispose(ref h);
+        return 0;
+      }
+    `;
+    const { errors, modules } = typecheckProgram(singleModule(src));
+    assert.deepEqual(errors, []);
+    const mainDecl = modules[0].ast.body.find(
+      (d) => d.kind === ASTNodeKind.FUNCTION_DECL && d.name === "main",
+    );
+    const disposeCall = mainDecl.body.body[1].value;
+    assert.equal(disposeCall.kind, ASTNodeKind.CALL_EXPRESSION);
+    assert.ok(disposeCall.calleeMethodOf, "should annotate calleeMethodOf");
+    assert.equal(disposeCall.calleeMethodOf.name, "FileHandle");
+    assert.match(disposeCall.calleeMangledName, /FileHandle.*dispose|dispose.*FileHandle/);
+  });
+
+  it("rejects unknown function that is not a method call", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        function main(): int32 {
+          notAFunction(42);
+          return 0;
+        }
+      `),
+    );
+    assert.ok(errors.some((e) => /unknown function.*notAFunction/.test(e.message)));
+  });
+});
+
+describe("resolveExprType: self outside method context", () => {
+  it("self used in a free function body produces an error", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        function main(): int32 {
+          let x: int32 = self;
+          return 0;
+        }
+      `),
+    );
+    assert.ok(
+      errors.some((e) => /'self'.*inside.*trait|trait.*method.*self/.test(e.message)),
+    );
   });
 });

@@ -4,7 +4,13 @@
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
-import { typecheckSource } from "./typecheck.js";
+import { typecheckSource, typecheckProgram } from "./typecheck.js";
+import { parse } from "../jsyooparser/parser.js";
+import { typeKinds } from "./types.js";
+
+function singleModule(src, id = "test") {
+  return [{ id, ast: parse(src) }];
+}
 
 describe("typecheckSource: well-typed programs produce zero errors", () => {
   it("function with int literal return", () => {
@@ -76,6 +82,176 @@ describe("typecheckSource: ill-typed programs report positioned errors", () => {
       "function main(): int32 { let x: int8 = 200; return 0; }",
     );
     assert.ok(errors.some((e) => /out of range|range/i.test(e.message)));
+  });
+});
+
+describe("typecheckProgram: trait shells — pass A", () => {
+  it("registers a trait in traitTable after pass A", () => {
+    const { moduleEnv, errors } = typecheckProgram(
+      singleModule("trait Disposable { function dispose(ref self): void; }"),
+    );
+    assert.deepEqual(errors, []);
+    const env = moduleEnv.get("test");
+    assert.ok(env.traitTable.has("Disposable"));
+    const trait = env.traitTable.get("Disposable");
+    assert.equal(trait.kind, typeKinds.trait);
+    assert.equal(trait.name, "Disposable");
+  });
+
+  it("rejects a trait that redeclares a struct name", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+        "type Disposable { n: int32, }\ntrait Disposable { function dispose(ref self): void; }",
+      ),
+    );
+    assert.ok(errors.some((e) => /redeclaration.*Disposable/.test(e.message)));
+  });
+});
+
+describe("typecheckProgram: trait method sigs — pass C.1", () => {
+  it("populates trait.methods with the resolved FuncType for each method sig", () => {
+    const { moduleEnv, errors } = typecheckProgram(
+      singleModule(
+        "trait Closable { function close(ref self): int32; function name(ref self): int32; }",
+      ),
+    );
+    assert.deepEqual(errors, []);
+    const env = moduleEnv.get("test");
+    const trait = env.traitTable.get("Closable");
+    assert.ok(trait.methods.has("close"));
+    assert.ok(trait.methods.has("name"));
+    const closeSig = trait.methods.get("close");
+    assert.equal(closeSig.kind, typeKinds.func);
+    assert.equal(closeSig.params.length, 1);
+    assert.equal(closeSig.params[0].name, "self");
+    assert.equal(closeSig.params[0].isRef, true);
+    assert.equal(closeSig.returnType.name, "int32");
+  });
+
+  it("rejects duplicate method names within a single trait", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+        "trait Dup { function go(ref self): void; function go(ref self): void; }",
+      ),
+    );
+    assert.ok(errors.some((e) => /duplicate method.*go.*Dup/.test(e.message)));
+  });
+});
+
+describe("typecheckProgram: impl block validation — pass C.3", () => {
+  it("well-formed impl produces no errors", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable { fd: int32, function dispose(ref self): void { } }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("missing method in impl is flagged", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable { fd: int32, }
+      `),
+    );
+    assert.ok(
+      errors.some(
+        (e) => /implements.*Disposable.*missing.*dispose|missing.*dispose.*Disposable/.test(e.message),
+      ),
+    );
+  });
+
+  it("extra method in impl (no trait requires it) is flagged", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable {
+          fd: int32,
+          function dispose(ref self): void { }
+          function extra(ref self): void { }
+        }
+      `),
+    );
+    assert.ok(
+      errors.some((e) => /declares method.*extra.*no implemented trait/.test(e.message)),
+    );
+  });
+
+  it("wrong return type in impl method is flagged", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable {
+          fd: int32,
+          function dispose(ref self): int32 { return 0; }
+        }
+      `),
+    );
+    assert.ok(
+      errors.some((e) => /signature.*dispose|dispose.*signature/.test(e.message)),
+    );
+  });
+
+  it("two-trait collision: both traits require same method name is flagged", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait TraitA { function go(ref self): void; }
+        trait TraitB { function go(ref self): void; }
+        type T implements (TraitA, TraitB) {
+          n: int32,
+          function go(ref self): void { }
+        }
+      `),
+    );
+    assert.ok(
+      errors.some((e) => /cannot implement.*TraitA.*TraitB|TraitB.*TraitA/.test(e.message)),
+    );
+  });
+
+  it("method colliding with a module-level free function is flagged", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        function dispose(x: int32): void { }
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable {
+          fd: int32,
+          function dispose(ref self): void { }
+        }
+      `),
+    );
+    assert.ok(
+      errors.some((e) => /collides.*dispose|dispose.*collides/.test(e.message)),
+    );
+  });
+
+  it("implementing an unknown trait is flagged", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+        "type FileHandle implements UnknownTrait { fd: int32, }",
+      ),
+    );
+    assert.ok(
+      errors.some((e) => /unknown trait.*UnknownTrait|UnknownTrait.*unknown/.test(e.message)),
+    );
+  });
+});
+
+describe("typecheckProgram: self in method body scope", () => {
+  it("self is in scope inside a method body and resolves to the implementing type", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Counter { function increment(ref self): void; }
+        type C implements Counter {
+          count: int32,
+          function increment(ref self): void {
+            self.count = self.count + 1;
+          }
+        }
+      `),
+    );
+    assert.deepEqual(errors, []);
   });
 });
 

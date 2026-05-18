@@ -1,0 +1,17 @@
+trait Disposable {
+    function dispose(self): void;
+}
+
+type T implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails at parse time because the trait method signature writes `self` without
+// the required `ref` keyword. Every trait method's first parameter must be
+// `ref self` — value-mode self is not supported.

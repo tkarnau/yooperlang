@@ -1,0 +1,11 @@
+type FileHandle {
+    fd: int32,
+}
+
+function main(): int32 {
+    notAKind a: FileHandle = { fd: 1 };
+    return 0;
+}
+
+// Fails because `notAKind` is not a declared kind in this module. The
+// kind-prefix lookup in checkLetOrConst rejects unknown kind names.

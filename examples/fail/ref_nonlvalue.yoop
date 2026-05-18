@@ -1,0 +1,6 @@
+function take(x: ref int32): void { }
+
+function main(): int32 {
+    take(ref 42);
+    return 0;
+}

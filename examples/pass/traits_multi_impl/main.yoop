@@ -1,0 +1,41 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+trait Closable {
+    function close(ref self): int32;
+}
+
+type FileHandle implements (Disposable, Closable) {
+    fd: int32,
+    is_open: bool,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+        self.is_open = false;
+    }
+    function close(ref self): int32 {
+        printf(`closing fd=${self.fd}\n`);
+        self.is_open = false;
+        return self.fd;
+    }
+}
+
+function main(): int32 {
+    let h: FileHandle = { fd: 7, is_open: true };
+    let rc: int32 = close(ref h);
+    dispose(ref h);
+    printf(`rc=${rc} is_open=${h.is_open}\n`);
+    return 0;
+}
+
+// expected output
+/* 
+closing fd=7
+    /* nested block comment example
+    disposing fd=7
+    rc=7 is_open=0
+    */ normally this would break, but we keep track of block comments within
+    block comments
+*/

@@ -1,0 +1,27 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`file fd=${self.fd}\n`);
+    }
+}
+
+type Socket implements Disposable {
+    sock: int32,
+    function dispose(ref self): void {
+        printf(`socket sock=${self.sock}\n`);
+    }
+}
+
+function main(): int32 {
+    let h: FileHandle = { fd: 1 };
+    let s: Socket = { sock: 99 };
+    dispose(ref h);
+    dispose(ref s);
+    return 0;
+}

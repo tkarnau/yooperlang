@@ -123,6 +123,43 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len = 7\n");
   });
+
+  it("refs_basic.yoop passes a ref param and writes through it", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/refs_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "x = 42\n");
+  });
+
+  it("refs_swap.yoop swaps two values through ref params", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/refs_swap.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "x=10 y=5\n");
+  });
+
+  it("arrays_basic.yoop creates an int32[] literal, reads len and elements, writes an element", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/arrays_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len=3 first=10 last=30\nxs[1]=99\n");
+  });
+
+  it("arrays_loop.yoop iterates an array with a for-loop and sums elements", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/arrays_loop.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum = 15\n");
+  });
+
+  it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/for_break_continue.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum = 10\nodd = 25\n");
+  });
+
+  it("casts.yoop: widening int cast, int-to-float, float-to-float casts", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/casts.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "b=100 d=100\nc=100.000000\ne=100.000000\n");
+  });
+
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
@@ -204,6 +241,96 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/export_c/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "add_one(5) = 6\n");
+  });
+
+  it("traits_disposable: impl of a Disposable trait with a dispose method", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_disposable/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=7\n");
+  });
+
+  it("traits_multi_impl: one type implementing two traits", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_multi_impl/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "closing fd=7\ndisposing fd=7\nrc=7 is_open=0\n");
+  });
+
+  it("traits_two_types_one_trait: two distinct types implementing the same trait", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_two_types_one_trait/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "file fd=1\nsocket sock=99\n");
+  });
+
+  it("traits_self_field: method body reads multiple fields and returns a value", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_self_field/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "encoded=304\n");
+  });
+
+  it("traits_self_call_other_method: method body invokes another method on the same type", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_self_call_other_method/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "closing fd=42\ndisposed via close (rc=42)\n");
+  });
+
+  it("traits_cross_module: trait declared in one module, implemented in another, called in main", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=13\n");
+  });
+
+  it("traits_recursive_method: trait method calls itself recursively", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_recursive_method/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "n=3\nn=2\nn=1\n");
+  });
+
+  it("disposable_basic: two implicit-block bindings fire cleanup in LIFO order at function return", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_basic/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "working\ndisposing fd=2\ndisposing fd=1\n");
+  });
+
+  it("disposable_explicit_block: trailing-block binding fires cleanup at its `}`", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_explicit_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "inside block\ndisposing fd=7\nafter block\n");
+  });
+
+  it("disposable_return: cleanup fires on every explicit return path", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_return/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=9\ndisposing fd=9\nr1=1 r2=0\n");
+  });
+
+  it("disposable_qmark: cleanup fires before `?`-induced early return on the failure path", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_qmark/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=5\nok r1=5 err=''\ndisposing fd=5\nfail r2=0 err='boom'\n");
+  });
+
+  it("disposable_lifo_three: three implicit-block bindings dispose in reverse declaration order", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_lifo_three/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=3\ndisposing fd=2\ndisposing fd=1\n");
+  });
+
+  it("disposable_nested_block: implicit and explicit blocks interleave with correct LIFO scoping", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_nested_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "inside\ndisposing fd=3\ndisposing fd=2\noutside\ndisposing fd=1\n");
+  });
+
+  it("disposable_let_explicit: `let disposable` allows mutation and still fires cleanup", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_let_explicit/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=99\n");
+  });
+
+  it("disposable_multi_requires: kind with two requires resolves a mustCall method from one of them", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_multi_requires/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=11\n");
   });
 });
 
@@ -343,6 +470,241 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /multi-field.*must be destructured/.test(e.message)),
       `expected multi-strip error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("ref_return.yoop rejects a function whose return type is ref T", () => {
+    const { errors } = typecheckFixture("examples/fail/ref_return.yoop");
+    assert.ok(
+      errors.some((e) => /may not return 'ref T'/.test(e.message)),
+      `expected ref-return error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("break_outside_loop.yoop rejects break used outside any loop", () => {
+    const { errors } = typecheckFixture("examples/fail/break_outside_loop.yoop");
+    assert.ok(
+      errors.some((e) => /'break' is not inside a loop/.test(e.message)),
+      `expected break-outside-loop error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("continue_outside_loop.yoop rejects continue used outside any loop", () => {
+    const { errors } = typecheckFixture("examples/fail/continue_outside_loop.yoop");
+    assert.ok(
+      errors.some((e) => /'continue' is not inside a loop/.test(e.message)),
+      `expected continue-outside-loop error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("array_elem_type_mismatch.yoop rejects array literal with wrong element type", () => {
+    const { errors } = typecheckFixture("examples/fail/array_elem_type_mismatch.yoop");
+    assert.ok(
+      errors.some((e) => /element 2 has type/.test(e.message)),
+      `expected element-type-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("ref_nonlvalue.yoop rejects taking a ref of a non-lvalue expression", () => {
+    const { errors } = typecheckFixture("examples/fail/ref_nonlvalue.yoop");
+    assert.ok(
+      errors.some((e) => /non-lvalue/.test(e.message)),
+      `expected non-lvalue error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("cast_nonnumeric.yoop rejects casting a non-numeric type", () => {
+    const { errors } = typecheckFixture("examples/fail/cast_nonnumeric.yoop");
+    assert.ok(
+      errors.some((e) => /cannot cast/.test(e.message)),
+      `expected cannot-cast error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_missing_method.yoop rejects impl that omits a required trait method", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_missing_method.yoop");
+    assert.ok(
+      errors.some((e) => /missing method "dispose"/.test(e.message)),
+      `expected missing-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_wrong_signature_return.yoop rejects impl method with wrong return type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_wrong_signature_return.yoop");
+    assert.ok(
+      errors.some((e) => /method "dispose" on type "T" has signature/.test(e.message)),
+      `expected signature-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_wrong_signature_param.yoop rejects impl method with extra parameter", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_wrong_signature_param.yoop");
+    assert.ok(
+      errors.some((e) => /method "dispose" on type "T" has signature/.test(e.message)),
+      `expected signature-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_collision_two_traits.yoop rejects type implementing two traits with the same method name", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_two_traits.yoop");
+    assert.ok(
+      errors.some((e) => /cannot implement both "A" and "B"/.test(e.message)),
+      `expected trait-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_collision_with_function.yoop rejects impl method colliding with a free function", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_with_function.yoop");
+    assert.ok(
+      errors.some((e) => /collides with module-level function "dispose"/.test(e.message)),
+      `expected function-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_self_outside.yoop rejects 'self' used outside a method body", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_self_outside.yoop");
+    assert.ok(
+      errors.some((e) => /'self' can only be used inside a trait method body/.test(e.message)),
+      `expected self-outside-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_extra_method.yoop rejects impl method not required by any trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_extra_method.yoop");
+    assert.ok(
+      errors.some((e) => /declares method "extra", but no implemented trait requires it/.test(e.message)),
+      `expected extra-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_ref_self_by_value.yoop rejects trait method signature missing 'ref'", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_ref_self_by_value.yoop"),
+      "utf8",
+    );
+    assert.throws(
+      () => parse(src),
+      /trait method "dispose" must take 'ref self' as its first parameter/,
+    );
+  });
+
+  it("traits_method_no_implements.yoop rejects methods on a type without implements", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_method_no_implements.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /methods are only allowed inside an 'implements' block/);
+  });
+
+  it("traits_unknown_trait.yoop rejects implementing an undefined trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_unknown_trait.yoop");
+    assert.ok(
+      errors.some((e) => /implements unknown trait "Foo"/.test(e.message)),
+      `expected unknown-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_default_body_in_trait.yoop rejects a method body inside a trait declaration", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_default_body_in_trait.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /expected semicolon, got lcurly/);
+  });
+
+  it("traits_extends_rejected.yoop rejects trait extends clause", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_extends_rejected.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /extends not yet supported/);
+  });
+
+  it("traits_generic_rejected.yoop rejects generic trait declaration", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/traits_generic_rejected.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /trait generics are not supported/);
+  });
+
+  it("traits_method_call_sugar.yoop rejects method-call syntax on a trait method", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_method_call_sugar.yoop");
+    assert.ok(
+      errors.some((e) => /method-call form.*is not supported/.test(e.message)),
+      `expected method-call-sugar error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_redeclared_method.yoop rejects duplicate method in impl block", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_redeclared_method.yoop");
+    assert.ok(
+      errors.some((e) => /duplicate method "dispose" in type "T"/.test(e.message)),
+      `expected duplicate-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("traits_self_assignment_wrong_type.yoop rejects wrong-type assignment to a self field", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_self_assignment_wrong_type.yoop");
+    assert.ok(
+      errors.some((e) => /cannot assign/.test(e.message)),
+      `expected type-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_unknown_trait.yoop rejects a kind requires clause referencing an undeclared trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_unknown_trait.yoop");
+    assert.ok(
+      errors.some((e) => /unknown trait 'NotATrait'/.test(e.message)),
+      `expected unknown-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_mustcall_no_requires.yoop rejects a mustCall clause with no `requires`", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_mustcall_no_requires.yoop");
+    assert.ok(
+      errors.some((e) => /mustCall requires at least one 'requires' clause/.test(e.message)),
+      `expected mustCall-no-requires error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_mustcall_method_not_in_trait.yoop rejects a mustCall method missing from required traits", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_mustcall_method_not_in_trait.yoop");
+    assert.ok(
+      errors.some((e) => /no required trait declares this method/.test(e.message)),
+      `expected method-not-in-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_unknown_kind.yoop rejects a binding prefixed by an undeclared kind", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_unknown_kind.yoop");
+    assert.ok(
+      errors.some((e) => /unknown kind "notAKind"/.test(e.message)),
+      `expected unknown-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_missing_trait.yoop rejects a kind-prefixed binding whose type lacks a required trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_missing_trait.yoop");
+    assert.ok(
+      errors.some((e) => /does not implement "Disposable"/.test(e.message)),
+      `expected missing-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_non_struct.yoop rejects a kind-prefixed binding with a non-struct type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_non_struct.yoop");
+    assert.ok(
+      errors.some((e) => /can only apply to struct values/.test(e.message)),
+      `expected non-struct-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_trailing_block_no_ownsblock.yoop rejects a trailing-block binding under a kind without ownsBlock", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_trailing_block_no_ownsblock.yoop");
+    assert.ok(
+      errors.some((e) => /does not declare ownsBlock/.test(e.message)),
+      `expected no-ownsBlock error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

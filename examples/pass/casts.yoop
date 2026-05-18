@@ -1,0 +1,16 @@
+function main(): int32 {
+    let a: int32 = 100;
+    let b: int64 = int64(a);
+    let c: float64 = float64(a);
+    let d: int32 = int32(b);
+    let e: float32 = float32(c);
+    printf(`b=${b} d=${d}\n`);
+    printf(`c=${c}\n`);
+    printf(`e=${e}\n`);
+    return 0;
+}
+
+// expected output:
+// b=100 d=100
+// c=100.000000
+// e=100.000000

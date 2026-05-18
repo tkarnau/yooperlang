@@ -62,6 +62,38 @@ describe("lexer: keywords vs identifiers", () => {
     const tokens = tokenize("type");
     assert.equal(tokens[0].tag, tag("type"));
   });
+  it("'kind' is the kind keyword", () => {
+    const tokens = tokenize("kind");
+    assert.equal(tokens[0].tag, tag("kind"));
+  });
+  it("'appliesTo' is the appliesTo keyword", () => {
+    const tokens = tokenize("appliesTo");
+    assert.equal(tokens[0].tag, tag("appliesTo"));
+  });
+  it("'requires' is the requires keyword", () => {
+    const tokens = tokenize("requires");
+    assert.equal(tokens[0].tag, tag("requires"));
+  });
+  it("'mustCall' is the mustCall keyword", () => {
+    const tokens = tokenize("mustCall");
+    assert.equal(tokens[0].tag, tag("mustCall"));
+  });
+  it("'ownsBlock' is the ownsBlock keyword", () => {
+    const tokens = tokenize("ownsBlock");
+    assert.equal(tokens[0].tag, tag("ownsBlock"));
+  });
+  it("'beforeScopeEnd' is the beforeScopeEnd keyword", () => {
+    const tokens = tokenize("beforeScopeEnd");
+    assert.equal(tokens[0].tag, tag("beforeScopeEnd"));
+  });
+  it("'binding' is the binding keyword", () => {
+    const tokens = tokenize("binding");
+    assert.equal(tokens[0].tag, tag("binding"));
+  });
+  it("'disposable' is an ident", () => {
+    const tokens = tokenize("disposable");
+    assert.equal(tokens[0].tag, tag("ident"));
+  });
 });
 
 describe("lexer: punctuation", () => {
@@ -164,5 +196,72 @@ describe("lexer: whitespace handling", () => {
     assert.equal(tokens.length, 4);
     assert.equal(tokens[0].tag, tag("let"));
     assert.equal(tokens[3].tag, tag("intLiteral"));
+  });
+});
+
+describe("lexer: traits", () => {
+  it("lexes trait Disposable { ... }", () => {
+    const tokens = tokenize("trait Disposable { ... }");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("trait"),
+      tag("ident"),
+      tag("lcurly"),
+      tag("dotdotdot"),
+      tag("rcurly"),
+    ]);
+  });
+  it("lexes type T implements Foo { ... }", () => {
+    const tokens = tokenize("type T implements Foo { ... }");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("type"),
+      tag("ident"),
+      tag("implements"),
+      tag("ident"),
+      tag("lcurly"),
+      tag("dotdotdot"),
+      tag("rcurly"),
+    ]);
+  });
+  it("lexes function dispose(ref self): void`", () => {
+    const tokens = tokenize("function dispose(ref self): void");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("function"),
+      tag("ident"),
+      tag("lparen"),
+      tag("ref"),
+      tag("self"),
+      tag("rparen"),
+      tag("colon"),
+      tag("ident"),
+    ]);
+  });
+  it("lexes extends Foo", () => {
+    const tokens = tokenize("extends Foo");
+    const tags = tokens.map((t) => t.tag);
+    assert.deepEqual(tags, [
+      tag("extends"),
+      tag("ident"),
+    ]);
+  });
+  it("disposable lexes as a single ident, not as 'dispose' + 'able'", () => {
+    const tokens = tokenize("disposable");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("ident"));
+    assert.equal(tokens[0].length, "disposable".length);
+  });
+  it("selfie lexes as a single ident, not as 'self' + 'ie'", () => {
+    const tokens = tokenize("selfie");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("ident"));
+    assert.equal(tokens[0].length, "selfie".length);
+  });
+  it("implementsHelper lexes as a single ident", () => {
+    const tokens = tokenize("implementsHelper");
+    assert.equal(tokens.length, 1);
+    assert.equal(tokens[0].tag, tag("ident"));
+    assert.equal(tokens[0].length, "implementsHelper".length);
   });
 });

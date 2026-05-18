@@ -26,6 +26,30 @@ function isBinaryOp(tag) {
   );
 }
 
+function isKindClauseStartTag(tag) {
+  return (
+    tag === TokenTags.appliesTo ||
+    tag === TokenTags.requires ||
+    tag === TokenTags.mustCall ||
+    tag === TokenTags.ownsBlock
+  );
+}
+
+// Identifier text -> deferred-feature error message. Used inside kind { ... }
+// to produce a precise "not yet supported" error for clause keywords that
+// later sub-phases will introduce; today they lex as plain idents.
+const DeferredKindClauseMessages = {
+  provides: "provides clause not yet supported in phase 6.1",
+  mustNotEscape: "mustNotEscape not yet supported (phase 6.2)",
+  mustNotShare: "mustNotShare not yet supported (phase 6.2)",
+  forbids: "forbids not yet supported (phase 6.2)",
+  autoJoin: "autoJoin not yet supported (phase 6.3)",
+  propagates: "propagates not yet supported (phase 6.4)",
+  contains: "contains not yet supported (phase 6.4)",
+  restricts: "restricts not yet supported (phase 6.5)",
+  layout: "layout not yet supported (phase 6.5)",
+};
+
 const Precedence = {
   [TokenTags.eq]: 10,
   [TokenTags.oror]: 20,
@@ -40,6 +64,7 @@ const Precedence = {
   [TokenTags.minus]: 50,
   [TokenTags.mult]: 60,
   [TokenTags.divide]: 60,
+  [TokenTags.modulus]: 60,
 };
 
 /*
@@ -76,16 +101,33 @@ export function parse(src) {
     return current;
   }
 
+  // Peek `n` tokens ahead without disturbing parser state. peekAhead(0)
+  // is equivalent to peek(); peekAhead(1) is the token following `current`,
+  // and so on. Used for statement-start disambiguation where a kind-prefixed
+  // binding needs three tokens of lookahead (`IDENT IDENT :`).
+  function peekAhead(n) {
+    if (n === 0) return current;
+    let p = pos;
+    let tok = null;
+    for (let i = 0; i < n; i++) {
+      const r = lexNext(src, p);
+      tok = r.token;
+      p = r.nextPos;
+    }
+    return tok;
+  }
+
   // Format a parse error with source context: the offending line plus a caret.
   function parseError(message, pos = current?.start ?? 0, length = 1) {
     const { line, column } = posToSourceLocation(src, pos);
-    const lineText = src.split('\n')[line - 1] ?? '';
-    const caret = ' '.repeat(Math.max(0, column - 1)) + '^'.repeat(Math.max(1, length));
+    const lineText = src.split("\n")[line - 1] ?? "";
+    const caret =
+      " ".repeat(Math.max(0, column - 1)) + "^".repeat(Math.max(1, length));
     return new Error(
       `${message}\n` +
-      `  --> line ${line}:${column}\n` +
-      `   | ${lineText}\n` +
-      `   | ${caret}`,
+        `  --> line ${line}:${column}\n` +
+        `   | ${lineText}\n` +
+        `   | ${caret}`,
     );
   }
 
@@ -114,6 +156,30 @@ export function parse(src) {
   // load first token
   advance();
 
+  // Parse a type annotation and return a structured annotation object.
+  //   { kind: "typeName", name: "int32" }
+  //   { kind: "refType", inner: <annot> }
+  //   { kind: "arrayType", elem: <annot> }
+  function parseTypeAnnotation() {
+    // ref T
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      const inner = parseTypeAnnotation();
+      return { kind: "refType", inner };
+    }
+    // base type name
+    const nameTok = expect(TokenTags.ident);
+    const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    let annot = { kind: "typeName", name };
+    // optional [] suffix for arrays — in type position, [ always means T[]
+    if (peek().tag === TokenTags.lbracket) {
+      advance(); // consume [
+      expect(TokenTags.rbracket); // must be ]
+      annot = { kind: "arrayType", elem: annot };
+    }
+    return annot;
+  }
+
   function parseTopLevel() {
     // root of the current file or program... calling this program for now...
     const node = buildSourcedNode(ASTNodeKind.PROGRAM);
@@ -128,7 +194,11 @@ export function parse(src) {
           case TokenTags.type:
             {
               seenNonImport = true;
-              node.body.push(peekTag === TokenTags.function ? parseFunctionDecl() : parseTypeDecl());
+              node.body.push(
+                peekTag === TokenTags.function
+                  ? parseFunctionDecl()
+                  : parseTypeDecl(),
+              );
             }
             break;
           case TokenTags.import:
@@ -151,6 +221,18 @@ export function parse(src) {
               node.body.push(parseExternBlock());
             }
             break;
+          case TokenTags.trait:
+            {
+              seenNonImport = true;
+              node.body.push(parseTraitDecl());
+            }
+            break;
+          case TokenTags.kind:
+            {
+              seenNonImport = true;
+              node.body.push(parseKindDecl());
+            }
+            break;
           default: {
             throw parseError(
               `unexpected token at top level: ${inverseTokenTags[peekTag]}`,
@@ -170,6 +252,213 @@ export function parse(src) {
   // Strip surrounding quotes from a strLiteral token value.
   function unquoteStringLiteral(tok) {
     return src.substring(tok.start + 1, tok.start + tok.length - 1);
+  }
+
+  function parseKindDecl() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_DECL);
+    expect(TokenTags.kind);
+    node.name = parseIdentAsName();
+
+    // parameterized kinds — `kind foo(...)` — are reserved for later phases
+    if (peek().tag === TokenTags.lparen) {
+      throw parseError(
+        "parameterized kinds not yet supported in phase 6.1",
+        peek().start,
+        peek().length,
+      );
+    }
+    // composition — `kind foo = a & b;`
+    if (peek().tag === TokenTags.eq) {
+      throw parseError(
+        "kind composition not yet supported in phase 6.1",
+        peek().start,
+        peek().length,
+      );
+    }
+
+    expect(TokenTags.lcurly);
+
+    node.clauses = [];
+    while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
+      if (isKindClauseStartTag(peek().tag)) {
+        node.clauses.push(parseKindClause());
+        continue;
+      }
+      // Surface a precise message for deferred-feature clause keywords
+      // (they currently lex as plain idents).
+      if (peek().tag === TokenTags.ident) {
+        const text = src.substring(
+          peek().start,
+          peek().start + peek().length,
+        );
+        const msg = DeferredKindClauseMessages[text];
+        if (msg) {
+          throw parseError(msg, peek().start, peek().length);
+        }
+      }
+      throw parseError(
+        `unexpected token in kind declaration: ${inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.rcurly);
+
+    // exactly-one-appliesTo validation. Per the plan, the default
+    // ("any value-site") is forbidden in 6.1 to avoid future surprise.
+    const appliesToClauses = node.clauses.filter(
+      (c) => c.kind === ASTNodeKind.KIND_APPLIES_TO_CLAUSE,
+    );
+    if (appliesToClauses.length === 0) {
+      throw parseError(
+        `kind '${node.name}' missing required 'appliesTo' clause`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    if (appliesToClauses.length > 1) {
+      throw parseError(
+        "duplicate appliesTo clause",
+        appliesToClauses[1].sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  function parseKindClause() {
+    switch (peek().tag) {
+      case TokenTags.appliesTo:
+        return parseAppliesToClause();
+      case TokenTags.requires:
+        return parseRequiresClause();
+      case TokenTags.mustCall:
+        return parseMustCallClause();
+      case TokenTags.ownsBlock:
+        return parseOwnsBlockClause();
+      default:
+        // unreachable — caller guards with isKindClauseStartTag
+        throw parseError(
+          `unexpected token in kind declaration: ${inverseTokenTags[peek().tag]}`,
+          peek().start,
+          peek().length,
+        );
+    }
+  }
+
+  function parseAppliesToClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
+    expect(TokenTags.appliesTo);
+    // 6.1 only accepts the literal `binding` keyword.
+    if (peek().tag !== TokenTags.binding) {
+      const tok = peek();
+      const name =
+        tok.tag === TokenTags.ident
+          ? src.substring(tok.start, tok.start + tok.length)
+          : inverseTokenTags[tok.tag];
+      throw parseError(
+        `appliesTo ${name} not yet supported in phase 6.1; only 'binding' is accepted`,
+        tok.start,
+        tok.length,
+      );
+    }
+    advance(); // consume `binding`
+    // Reject multi-site lists eagerly. The next token must be `;`.
+    if (
+      peek().tag === TokenTags.binding ||
+      peek().tag === TokenTags.ident
+    ) {
+      const tok = peek();
+      const name =
+        tok.tag === TokenTags.ident
+          ? src.substring(tok.start, tok.start + tok.length)
+          : "binding";
+      throw parseError(
+        `appliesTo ${name} not yet supported in phase 6.1; only 'binding' is accepted`,
+        tok.start,
+        tok.length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    node.site = "binding";
+    return node;
+  }
+
+  function parseRequiresClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_REQUIRES_CLAUSE);
+    expect(TokenTags.requires);
+    node.traitName = parseIdentAsName();
+    // List form (`requires A B;`) is reserved.
+    if (peek().tag === TokenTags.ident) {
+      throw parseError(
+        "requires takes a single trait per clause; write multiple 'requires Trait;' clauses for multiple traits",
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  function parseMustCallClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_MUSTCALL_CLAUSE);
+    expect(TokenTags.mustCall);
+    // The disjunction/block form `mustCall { a; b; } beforeScopeEnd;` is
+    // reserved for later sub-phases.
+    if (peek().tag === TokenTags.lcurly) {
+      throw parseError(
+        "mustCall block form (alternation) not yet supported in phase 6.1; single function name only",
+        peek().start,
+        peek().length,
+      );
+    }
+    node.methodName = parseIdentAsName();
+    // After the method name, expect the timing keyword. `beforeAny` /
+    // `afterAny` lex as plain idents today, so handle them by source text.
+    if (peek().tag === TokenTags.beforeScopeEnd) {
+      advance();
+      node.timing = "beforeScopeEnd";
+    } else if (peek().tag === TokenTags.ident) {
+      const text = src.substring(
+        peek().start,
+        peek().start + peek().length,
+      );
+      if (text === "beforeAny" || text === "afterAny") {
+        throw parseError(
+          `mustCall ${node.methodName} ${text} not yet supported in phase 6.1; use 'beforeScopeEnd'`,
+          peek().start,
+          peek().length,
+        );
+      }
+      throw parseError(
+        `expected 'beforeScopeEnd' after mustCall method name, got '${text}'`,
+        peek().start,
+        peek().length,
+      );
+    } else {
+      throw parseError(
+        `expected 'beforeScopeEnd' after mustCall method name, got ${inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  function parseOwnsBlockClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_OWNSBLOCK_CLAUSE);
+    expect(TokenTags.ownsBlock);
+    // Reject the old paren-style `ownsBlock();`.
+    if (peek().tag === TokenTags.lparen) {
+      throw parseError(
+        "ownsBlock takes no arguments; drop the parentheses",
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
   }
 
   function parseImportDecl() {
@@ -203,13 +492,20 @@ export function parse(src) {
       advance(); // consume {
       while (peek().tag === TokenTags.ident) {
         const exportTok = expect(TokenTags.ident);
-        const exportName = src.substring(exportTok.start, exportTok.start + exportTok.length);
+        const exportName = src.substring(
+          exportTok.start,
+          exportTok.start + exportTok.length,
+        );
         let localName = exportName;
         if (peek().tag === TokenTags.as) {
           advance();
           localName = parseIdentAsName();
         }
-        node.specifiers.push({ exportName, localName, sourceLoc: posToSourceLocation(src, exportTok.start) });
+        node.specifiers.push({
+          exportName,
+          localName,
+          sourceLoc: posToSourceLocation(src, exportTok.start),
+        });
         if (peek().tag === TokenTags.comma) advance();
       }
       expect(TokenTags.rcurly);
@@ -219,7 +515,11 @@ export function parse(src) {
       return node;
     }
 
-    throw parseError(`unexpected token after import: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+    throw parseError(
+      `unexpected token after import: ${inverseTokenTags[peek().tag]}`,
+      peek().start,
+      peek().length,
+    );
   }
 
   function parseExportDecl() {
@@ -230,7 +530,11 @@ export function parse(src) {
       const abiTok = advance();
       const abi = unquoteStringLiteral(abiTok);
       if (abi !== "C") {
-        throw parseError(`unsupported export ABI "${abi}" — only "C" is supported`, abiTok.start, abiTok.length);
+        throw parseError(
+          `unsupported export ABI "${abi}" — only "C" is supported`,
+          abiTok.start,
+          abiTok.length,
+        );
       }
       expect(TokenTags.function);
       const fn = parseFunctionDeclBody();
@@ -242,13 +546,92 @@ export function parse(src) {
     // wrapping form: export function / type / let / const
     const node = buildSourcedNode(ASTNodeKind.EXPORT_DECL);
     switch (peek().tag) {
-      case TokenTags.function: node.decl = parseFunctionDecl(); break;
-      case TokenTags.type:     node.decl = parseTypeDecl(); break;
+      case TokenTags.function:
+        node.decl = parseFunctionDecl();
+        break;
+      case TokenTags.type:
+        node.decl = parseTypeDecl();
+        break;
       case TokenTags.let:
-      case TokenTags.const:    node.decl = parseVarDecl(); break;
+      case TokenTags.const:
+        node.decl = parseVarDecl();
+        break;
+      case TokenTags.trait:
+        node.decl = parseTraitDecl();
+        break;
       default:
-        throw parseError(`unexpected token after export: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+        throw parseError(
+          `unexpected token after export: ${inverseTokenTags[peek().tag]}`,
+          peek().start,
+          peek().length,
+        );
     }
+    return node;
+  }
+
+  function parseTraitDecl() {
+    const node = buildSourcedNode(ASTNodeKind.TRAIT_DECL);
+    expect(TokenTags.trait);
+
+    node.name = parseIdentAsName();
+
+    if (peek().tag === TokenTags.lt) {
+      throw parseError(
+        "trait generics are not supported in v0",
+        peek().start,
+        peek().length,
+      );
+    }
+
+    if (peek().tag === TokenTags.extends) {
+      throw parseError(
+        `extends not yet supported`,
+        peek().start,
+        peek().length,
+      );
+    }
+
+    expect(TokenTags.lcurly);
+    node.methods = [];
+    while (peek().tag === TokenTags.function) {
+      node.methods.push(parseMethodSig());
+    }
+
+    expect(TokenTags.rcurly);
+    return node;
+  }
+
+  function parseMethodSig() {
+    const node = buildSourcedNode(ASTNodeKind.METHOD_SIG);
+    expect(TokenTags.function);
+    node.name = parseIdentAsName();
+    expect(TokenTags.lparen);
+    // must be ref self as first param
+    if (peek().tag !== TokenTags.ref) {
+      throw parseError(
+        `trait method "${node.name}" must take 'ref self' as its first parameter`,
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.ref);
+    expect(TokenTags.self);
+
+    const selfParam = buildSourcedNode(ASTNodeKind.PARAM);
+    selfParam.isRef = true;
+    selfParam.name = "self";
+    selfParam.typeAnnotation = { kind: "selfType" };
+    node.params = [selfParam];
+
+    while (peek().tag === TokenTags.comma) {
+      advance();
+      node.params.push(parseFunctionParam());
+    }
+    expect(TokenTags.rparen);
+    expect(TokenTags.colon);
+    node.returnTypeAnnotation = parseTypeAnnotation();
+    expect(TokenTags.semicolon); // sigs end with ; not a body
+
     return node;
   }
 
@@ -258,21 +641,38 @@ export function parse(src) {
     const abiTok = expect(TokenTags.strLiteral);
     node.abi = unquoteStringLiteral(abiTok);
     if (node.abi !== "C") {
-      throw parseError(`unsupported extern ABI "${node.abi}" — only "C" is supported in v0`, abiTok.start, abiTok.length);
+      throw parseError(
+        `unsupported extern ABI "${node.abi}" — only "C" is supported in v0`,
+        abiTok.start,
+        abiTok.length,
+      );
     }
     expect(TokenTags.from);
     if (peek().tag === TokenTags.library) {
       advance();
-      node.source = { kind: "library", value: unquoteStringLiteral(expect(TokenTags.strLiteral)) };
+      node.source = {
+        kind: "library",
+        value: unquoteStringLiteral(expect(TokenTags.strLiteral)),
+      };
     } else {
-      node.source = { kind: "header", value: unquoteStringLiteral(expect(TokenTags.strLiteral)) };
+      node.source = {
+        kind: "header",
+        value: unquoteStringLiteral(expect(TokenTags.strLiteral)),
+      };
     }
     expect(TokenTags.lcurly);
     node.decls = [];
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
-      if (peek().tag === TokenTags.function) node.decls.push(parseExternFunctionDecl());
-      else if (peek().tag === TokenTags.type) node.decls.push(parseExternTypeDecl());
-      else throw parseError(`unexpected token in extern block: ${inverseTokenTags[peek().tag]}`, peek().start, peek().length);
+      if (peek().tag === TokenTags.function)
+        node.decls.push(parseExternFunctionDecl());
+      else if (peek().tag === TokenTags.type)
+        node.decls.push(parseExternTypeDecl());
+      else
+        throw parseError(
+          `unexpected token in extern block: ${inverseTokenTags[peek().tag]}`,
+          peek().start,
+          peek().length,
+        );
     }
     expect(TokenTags.rcurly);
     return node;
@@ -296,7 +696,7 @@ export function parse(src) {
     }
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
-    node.returnType = parseIdentAsName();
+    node.returnTypeAnnotation = parseTypeAnnotation();
     expect(TokenTags.semicolon);
     return node;
   }
@@ -332,9 +732,25 @@ export function parse(src) {
 
       return node;
     }
+
+    // ref x — parse lvalue address operand with high precedence so postfixes bind tightly
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      const refNode = buildSourcedNode(ASTNodeKind.REF_EXPRESSION);
+      refNode.operand = parseExpression(70);
+      return refNode;
+    }
+
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
+    } else if (
+      peek().tag === TokenTags.true ||
+      peek().tag === TokenTags.false
+    ) {
+      const tok = advance();
+      node = buildSourcedNode(ASTNodeKind.BOOL_LITERAL);
+      node.value = tok.tag === TokenTags.true;
     } else if (peek().tag === TokenTags.floatLiteral) {
       node = buildSourcedNode(ASTNodeKind.FLOAT_LITERAL);
       node.value = advance().floatVal;
@@ -346,6 +762,19 @@ export function parse(src) {
       const tok = advance();
       const raw = src.substring(tok.start, tok.start + tok.length);
       node = parseTemplateLiteralBody(raw);
+    } else if (peek().tag === TokenTags.lbracket) {
+      // array literal: [e1, e2, e3]
+      advance(); // consume [
+      node = buildSourcedNode(ASTNodeKind.ARRAY_LITERAL);
+      node.elements = [];
+      while (
+        peek().tag !== TokenTags.rbracket &&
+        peek().tag !== TokenTags.eof
+      ) {
+        node.elements.push(parseExpression());
+        if (peek().tag === TokenTags.comma) advance();
+      }
+      expect(TokenTags.rbracket);
     } else if (peek().tag === TokenTags.ident) {
       const name = parseIdentAsName();
       if (peek().tag === TokenTags.lparen) {
@@ -372,6 +801,10 @@ export function parse(src) {
         } // allow trailing comma
       }
       expect(TokenTags.rcurly);
+    } else if (peek().tag === TokenTags.self) {
+      advance();
+      node = buildSourcedNode(ASTNodeKind.IDENT);
+      node.name = "self";
     } else {
       throw parseError(
         `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
@@ -379,7 +812,7 @@ export function parse(src) {
         peek().length,
       );
     }
-    // handle field access
+    // handle postfix ops: field access, ?, call-on-field, array index
     while (true) {
       if (peek().tag === TokenTags.dot) {
         advance(); // consume dot
@@ -399,23 +832,36 @@ export function parse(src) {
         continue;
       }
       // handle postfix call on a field access: ns.method(args)
-      if (peek().tag === TokenTags.lparen && node.kind === ASTNodeKind.FIELD_ACCESS) {
+      if (
+        peek().tag === TokenTags.lparen &&
+        node.kind === ASTNodeKind.FIELD_ACCESS
+      ) {
         const callNode = buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
         callNode.callee = node; // callee is a FIELD_ACCESS node, not a string
         parseCallArgs(callNode);
         node = callNode;
         continue;
       }
+      // array indexing: xs[i]
+      if (peek().tag === TokenTags.lbracket) {
+        advance(); // consume [
+        const indexNode = buildSourcedNode(ASTNodeKind.INDEX_EXPRESSION);
+        indexNode.object = node;
+        indexNode.index = parseExpression();
+        expect(TokenTags.rbracket);
+        node = indexNode;
+        continue;
+      }
       break;
     }
 
     // assignment — lvalue is whatever the primary+postfix chain produced.
-    // valid targets today are IDENT (`x = ...`) and FIELD_ACCESS (`p.x = ...`).
-    // assignment binds loosest and doesn't chain into the binary loop.
+    // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION
     if (peek().tag === TokenTags.eq) {
       if (
         node.kind !== ASTNodeKind.IDENT &&
-        node.kind !== ASTNodeKind.FIELD_ACCESS
+        node.kind !== ASTNodeKind.FIELD_ACCESS &&
+        node.kind !== ASTNodeKind.INDEX_EXPRESSION
       ) {
         throw parseError(
           `invalid assignment target: ${node.kind}`,
@@ -546,6 +992,26 @@ export function parse(src) {
       case TokenTags.while: {
         return parseWhileStatement();
       }
+      case TokenTags.for: {
+        return parseForStatement();
+      }
+      case TokenTags.break: {
+        return parseBreakStatement();
+      }
+      case TokenTags.continue: {
+        return parseContinueStatement();
+      }
+      case TokenTags.ident: {
+        // kind-prefixed binding form: `IDENT IDENT : ...`
+        // (no other statement starts `ident ident :`).
+        if (
+          peekAhead(1).tag === TokenTags.ident &&
+          peekAhead(2).tag === TokenTags.colon
+        ) {
+          return parseVarDecl();
+        }
+        return parseExpressionStatement();
+      }
       default: {
         return parseExpressionStatement();
       }
@@ -555,9 +1021,8 @@ export function parse(src) {
   function parseReturnStatement() {
     expect(TokenTags.return);
     const node = buildSourcedNode(ASTNodeKind.RETURN_STATEMENT);
-    node.value = parseExpression();
+    node.value = peek().tag === TokenTags.semicolon ? null : parseExpression();
     expect(TokenTags.semicolon);
-
     return node;
   }
 
@@ -582,39 +1047,80 @@ export function parse(src) {
   }
 
   function parseVarDecl() {
-    const varToken = advance();
-    // check if destructure or normal decl
-    const declKind =
-      varToken.tag === TokenTags.let
-        ? ASTNodeKind.LET_DECL
-        : ASTNodeKind.CONST_DECL;
-    if (peek().tag === TokenTags.lcurly) {
-      // destructure decl
-      return parseDestructureDecl(varToken, declKind);
+    // Three accepted shapes here:
+    //   (1) let|const IDENT : type (= expr)? ;
+    //   (2) let|const IDENT IDENT : type = expr {block} | ;     (kind-prefixed)
+    //   (3) IDENT IDENT : type = expr {block} | ;               (implicit-const kind-prefixed)
+    // Shape (3) is dispatched in parseStatement; (1) and (2) start with let/const.
+    let declToken = null; // let | const, or null for implicit-const
+    if (peek().tag === TokenTags.let || peek().tag === TokenTags.const) {
+      declToken = advance();
     }
-    let node;
-    switch (varToken.tag) {
-      case TokenTags.let:
-        {
-          node = buildSourcedNode(ASTNodeKind.LET_DECL);
-        }
-        break;
-      case TokenTags.const:
-        {
-          node = buildSourcedNode(ASTNodeKind.CONST_DECL);
-        }
-        break;
-      default: {
-        throw parseError(
-          `unexpected variable declaration token: ${inverseTokenTags[varToken.tag]}`,
-          varToken.start,
-          varToken.length,
-        );
-      }
+
+    // destructure: `let { a, b } = expr;` — only valid for non-kind-prefixed form
+    if (declToken !== null && peek().tag === TokenTags.lcurly) {
+      const declKind =
+        declToken.tag === TokenTags.let
+          ? ASTNodeKind.LET_DECL
+          : ASTNodeKind.CONST_DECL;
+      return parseDestructureDecl(declToken, declKind);
     }
+
+    // Decide whether a kind prefix is present. Either:
+    //   - declToken was null (shape 3): caller already verified IDENT IDENT :
+    //   - declToken was present and we see IDENT IDENT :
+    let kindPrefix = null;
+    if (
+      peek().tag === TokenTags.ident &&
+      peekAhead(1).tag === TokenTags.ident &&
+      peekAhead(2).tag === TokenTags.colon
+    ) {
+      const kindTok = advance();
+      kindPrefix = {
+        name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+        sourceLoc: posToSourceLocation(src, kindTok.start),
+      };
+    }
+
+    // Build the binding node. Kind-prefixed bindings without a `let` keyword
+    // are implicitly const per SPEC §4.4.
+    let nodeKind;
+    if (declToken === null) {
+      nodeKind = ASTNodeKind.CONST_DECL;
+    } else if (declToken.tag === TokenTags.let) {
+      nodeKind = ASTNodeKind.LET_DECL;
+    } else {
+      nodeKind = ASTNodeKind.CONST_DECL;
+    }
+    const node = buildSourcedNode(nodeKind);
+    node.kindPrefix = kindPrefix;
+    node.trailingBlock = null;
+
     node.name = parseIdentAsName();
     expect(TokenTags.colon);
-    node.type = parseIdentAsName();
+    node.typeAnnotation = parseTypeAnnotation();
+
+    // Kind-prefixed bindings always require an initializer; the `mustCall`
+    // obligation has nothing to bind against without one.
+    if (kindPrefix !== null) {
+      if (peek().tag !== TokenTags.eq) {
+        throw parseError(
+          "kind-prefixed binding requires initializer",
+          peek().start,
+          peek().length,
+        );
+      }
+      advance(); // consume =
+      node.assignment = parseExpression();
+      if (peek().tag === TokenTags.lcurly) {
+        node.trailingBlock = parseBlock();
+      } else {
+        expect(TokenTags.semicolon);
+      }
+      return node;
+    }
+
+    // Plain let/const path — semicolon-only is legal (no initializer).
     if (peek().tag === TokenTags.semicolon) {
       advance();
       return node;
@@ -622,7 +1128,6 @@ export function parse(src) {
     expect(TokenTags.eq);
     node.assignment = parseExpression();
     expect(TokenTags.semicolon);
-
     return node;
   }
 
@@ -657,6 +1162,43 @@ export function parse(src) {
     return node;
   }
 
+  function parseForStatement() {
+    expect(TokenTags.for);
+    expect(TokenTags.lparen);
+    const node = buildSourcedNode(ASTNodeKind.FOR_LOOP);
+
+    // init: ident = expr ;
+    node.initIdent = parseIdentAsName();
+    expect(TokenTags.eq);
+    node.initExpr = parseExpression();
+    expect(TokenTags.semicolon);
+
+    // cond: expr ;
+    node.cond = parseExpression();
+    expect(TokenTags.semicolon);
+
+    // step: ident = expr
+    node.stepIdent = parseIdentAsName();
+    expect(TokenTags.eq);
+    node.stepExpr = parseExpression();
+
+    expect(TokenTags.rparen);
+    node.body = parseBlock();
+    return node;
+  }
+
+  function parseBreakStatement() {
+    expect(TokenTags.break);
+    expect(TokenTags.semicolon);
+    return buildSourcedNode(ASTNodeKind.BREAK_STATEMENT);
+  }
+
+  function parseContinueStatement() {
+    expect(TokenTags.continue);
+    expect(TokenTags.semicolon);
+    return buildSourcedNode(ASTNodeKind.CONTINUE_STATEMENT);
+  }
+
   function parseExpressionStatement() {
     const node = buildSourcedNode(ASTNodeKind.EXPRESSION_STATEMENT);
     node.value = parseExpression();
@@ -676,13 +1218,18 @@ export function parse(src) {
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     node.params = [];
-    while (peek().tag === TokenTags.ident || peek().tag === TokenTags.comma) {
+    // params can start with: ident (name) or ref (modifier) or comma (separator)
+    while (
+      peek().tag === TokenTags.ident ||
+      peek().tag === TokenTags.ref ||
+      peek().tag === TokenTags.comma
+    ) {
       if (peek().tag === TokenTags.comma) advance();
       node.params.push(parseFunctionParam());
     }
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
-    node.returnType = parseIdentAsName();
+    node.returnTypeAnnotation = parseTypeAnnotation();
     node.body = parseBlock();
     return node;
   }
@@ -693,19 +1240,44 @@ export function parse(src) {
     // name
     node.name = parseIdentAsName();
 
+    node.implements = [];
+    if (peek().tag === TokenTags.implements) {
+      advance();
+      if (peek().tag === TokenTags.lparen) {
+        advance();
+        while (peek().tag === TokenTags.ident) {
+          node.implements.push(parseIdentAsName());
+          if (peek().tag === TokenTags.comma) {
+            advance();
+          }
+        }
+        expect(TokenTags.rparen);
+      } else {
+        node.implements.push(parseIdentAsName());
+      }
+    }
+
     if (peek().tag === TokenTags.lcurly) {
       // struct type
       node.fields = [];
+      node.methods = [];
       expect(TokenTags.lcurly);
-      while (peek().tag === TokenTags.ident) {
-        const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
-        fieldNode.name = parseIdentAsName();
-        expect(TokenTags.colon);
-        fieldNode.type = parseIdentAsName();
-        node.fields.push(fieldNode);
-        if (peek().tag === TokenTags.comma) {
-          advance();
-        } // allow trailing comma
+      while (
+        peek().tag === TokenTags.ident ||
+        peek().tag === TokenTags.function
+      ) {
+        if (peek().tag === TokenTags.function) {
+          node.methods.push(parseMethodDecl());
+        } else {
+          const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+          fieldNode.name = parseIdentAsName();
+          expect(TokenTags.colon);
+          fieldNode.typeAnnotation = parseTypeAnnotation();
+          node.fields.push(fieldNode);
+          if (peek().tag === TokenTags.comma) {
+            advance();
+          } // allow trailing comma
+        }
       }
       expect(TokenTags.rcurly);
     } else {
@@ -713,18 +1285,59 @@ export function parse(src) {
       node.targetType = parseIdentAsName();
     }
 
+    // constraint: methods only allowed when implements is non-empty
+    if (node.methods?.length > 0 && node.implements.length === 0) {
+      throw parseError(
+        `methods are only allowed inside an 'implements' block - type "${node.name}" has methods but no 'implements' clause`,
+        peek().start,
+        peek().length,
+      );
+    }
+
+    return node;
+  }
+
+  function parseMethodDecl() {
+    const node = buildSourcedNode(ASTNodeKind.METHOD_DECL);
+    expect(TokenTags.function);
+    node.name = parseIdentAsName();
+    expect(TokenTags.lparen);
+    // must be ref self as first param
+    expect(TokenTags.ref);
+    expect(TokenTags.self);
+    
+    const selfParam = buildSourcedNode(ASTNodeKind.PARAM);
+    selfParam.isRef = true;
+    selfParam.name = "self";
+    selfParam.typeAnnotation = { kind: "selfType" };
+    node.params = [selfParam];
+
+    while (peek().tag === TokenTags.comma) {
+      advance();
+      node.params.push(parseFunctionParam());
+    }
+    expect(TokenTags.rparen);
+    expect(TokenTags.colon);
+    node.returnTypeAnnotation = parseTypeAnnotation();
+    node.body = parseBlock();
+
     return node;
   }
 
   function parseFunctionParam() {
     const node = buildSourcedNode(ASTNodeKind.PARAM);
+    // ref modifier
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      node.isRef = true;
+    } else {
+      node.isRef = false;
+    }
     // name
     node.name = parseIdentAsName();
-
     // type
     expect(TokenTags.colon);
-    node.type = parseIdentAsName();
-
+    node.typeAnnotation = parseTypeAnnotation();
     return node;
   }
 

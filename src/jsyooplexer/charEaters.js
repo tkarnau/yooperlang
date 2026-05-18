@@ -32,6 +32,26 @@ export function skipWhitespace(src, pos) {
           // continue skipping whitespace
           return skipWhitespace(src, p);
         }
+        if (ch === '/' && nextCh === '*') { // block comment '/* */'
+          p += 2; // skip the '/*'
+          let blockCommentStack = 1; // support nested block comments
+          while (p + 1 < src.length) {
+            if (src[p] === '*' && src[p + 1] === '/') {
+              p += 2; // skip the '*/'
+              blockCommentStack--;
+              if (blockCommentStack === 0) {
+                break;
+              }
+            } else if (src[p] === '/' && src[p + 1] === '*') {
+              p += 2; // skip the '/*'
+              blockCommentStack++;
+            }
+            p++;
+          }
+
+          // continue skipping whitespace
+          return skipWhitespace(src, p);
+        }
       }
 
       // done skipping whitespace

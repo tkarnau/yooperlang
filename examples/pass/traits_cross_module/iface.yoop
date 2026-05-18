@@ -1,0 +1,3 @@
+export trait Disposable {
+    function dispose(ref self): void;
+}

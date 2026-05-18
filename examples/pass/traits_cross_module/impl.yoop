@@ -1,0 +1,9 @@
+import { Disposable } from "./iface.yoop";
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+export type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+    }
+}

@@ -1,0 +1,11 @@
+kind disposable {
+    appliesTo binding;
+    mustCall dispose beforeScopeEnd;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because mustCall references a method ("dispose") but no `requires`
+// clause is present to provide the trait where that method is declared.

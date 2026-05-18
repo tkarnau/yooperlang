@@ -1,0 +1,13 @@
+type T implements Foo {
+    fd: int32,
+    function doSomething(ref self): void {
+    }
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails because `Foo` is not declared anywhere in this module. The typechecker
+// resolves trait names during the impl block validation pass and rejects any
+// name that does not correspond to a known trait declaration.

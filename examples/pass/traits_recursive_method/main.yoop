@@ -1,0 +1,21 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Counter {
+    function tick(ref self): void;
+}
+
+type Tick implements Counter {
+    n: int32,
+    function tick(ref self): void {
+        if (self.n <= 0) { return; }
+        printf(`n=${self.n}\n`);
+        self.n = self.n - 1;
+        tick(ref self);
+    }
+}
+
+function main(): int32 {
+    let t: Tick = { n: 3 };
+    tick(ref t);
+    return 0;
+}

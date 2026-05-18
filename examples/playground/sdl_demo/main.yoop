@@ -75,28 +75,29 @@ function channel(hue: float32, phase_offset: float32): uint8 {
     return uint8(int32(v * 255.0));
 }
 
-// ── Constants ─────────────────────────────────────────────────────────────────
-
-const WIN_W: int32 = 800;
-const WIN_H: int32 = 600;
-const FPS_TARGET: uint32 = 60;
-const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
-const DURATION_MS: uint32 = 8000;
-
-// SDL_Init flags
-const SDL_INIT_VIDEO: uint32 = 0x00000020;
-
-// SDL_CreateWindow position / flags
-const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
-const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
-
-// SDL_CreateRenderer flags
-const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
-const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
 function main(): int32 {
+    // ── Constants ─────────────────────────────────────────────────────────────────
+
+    const WIN_W: int32 = 800;
+    const WIN_H: int32 = 600;
+    const FPS_TARGET: uint32 = 60;
+    const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+    const DURATION_MS: uint32 = 8000;
+
+    // SDL_Init flags
+    const SDL_INIT_VIDEO: uint32 = 0x00000020;
+
+    // SDL_CreateWindow position / flags
+    const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+    const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+
+    // SDL_CreateRenderer flags
+    const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
+    const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
+    
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("SDL_Init failed\n");
         return 1;

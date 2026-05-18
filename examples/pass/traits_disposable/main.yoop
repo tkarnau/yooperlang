@@ -1,0 +1,18 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+    }
+}
+
+function main(): int32 {
+    let h: FileHandle = { fd: 7 };
+    dispose(ref h);
+    return 0;
+}

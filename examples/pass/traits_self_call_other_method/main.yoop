@@ -1,0 +1,27 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Closable {
+    function close(ref self): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements (Closable, Disposable) {
+    fd: int32,
+    function close(ref self): int32 {
+        printf(`closing fd=${self.fd}\n`);
+        return self.fd;
+    }
+    function dispose(ref self): void {
+        let rc: int32 = close(ref self);
+        printf(`disposed via close (rc=${rc})\n`);
+    }
+}
+
+function main(): int32 {
+    let h: FileHandle = { fd: 42 };
+    dispose(ref h);
+    return 0;
+}
