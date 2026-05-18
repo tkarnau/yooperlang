@@ -284,6 +284,54 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(exitCode, 0);
     assert.equal(stdout, "n=3\nn=2\nn=1\n");
   });
+
+  it("disposable_basic: two implicit-block bindings fire cleanup in LIFO order at function return", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_basic/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "working\ndisposing fd=2\ndisposing fd=1\n");
+  });
+
+  it("disposable_explicit_block: trailing-block binding fires cleanup at its `}`", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_explicit_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "inside block\ndisposing fd=7\nafter block\n");
+  });
+
+  it("disposable_return: cleanup fires on every explicit return path", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_return/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=9\ndisposing fd=9\nr1=1 r2=0\n");
+  });
+
+  it("disposable_qmark: cleanup fires before `?`-induced early return on the failure path", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_qmark/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=5\nok r1=5 err=''\ndisposing fd=5\nfail r2=0 err='boom'\n");
+  });
+
+  it("disposable_lifo_three: three implicit-block bindings dispose in reverse declaration order", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_lifo_three/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=3\ndisposing fd=2\ndisposing fd=1\n");
+  });
+
+  it("disposable_nested_block: implicit and explicit blocks interleave with correct LIFO scoping", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_nested_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "inside\ndisposing fd=3\ndisposing fd=2\noutside\ndisposing fd=1\n");
+  });
+
+  it("disposable_let_explicit: `let disposable` allows mutation and still fires cleanup", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_let_explicit/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=99\n");
+  });
+
+  it("disposable_multi_requires: kind with two requires resolves a mustCall method from one of them", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_multi_requires/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposing fd=11\n");
+  });
 });
 
 describe("e2e: multi-file fail fixtures produce the right errors", () => {
@@ -601,6 +649,62 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /cannot assign/.test(e.message)),
       `expected type-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_unknown_trait.yoop rejects a kind requires clause referencing an undeclared trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_unknown_trait.yoop");
+    assert.ok(
+      errors.some((e) => /unknown trait 'NotATrait'/.test(e.message)),
+      `expected unknown-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_mustcall_no_requires.yoop rejects a mustCall clause with no `requires`", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_mustcall_no_requires.yoop");
+    assert.ok(
+      errors.some((e) => /mustCall requires at least one 'requires' clause/.test(e.message)),
+      `expected mustCall-no-requires error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_mustcall_method_not_in_trait.yoop rejects a mustCall method missing from required traits", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_mustcall_method_not_in_trait.yoop");
+    assert.ok(
+      errors.some((e) => /no required trait declares this method/.test(e.message)),
+      `expected method-not-in-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_unknown_kind.yoop rejects a binding prefixed by an undeclared kind", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_unknown_kind.yoop");
+    assert.ok(
+      errors.some((e) => /unknown kind "notAKind"/.test(e.message)),
+      `expected unknown-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_missing_trait.yoop rejects a kind-prefixed binding whose type lacks a required trait", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_missing_trait.yoop");
+    assert.ok(
+      errors.some((e) => /does not implement "Disposable"/.test(e.message)),
+      `expected missing-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_non_struct.yoop rejects a kind-prefixed binding with a non-struct type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_non_struct.yoop");
+    assert.ok(
+      errors.some((e) => /can only apply to struct values/.test(e.message)),
+      `expected non-struct-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("binding_trailing_block_no_ownsblock.yoop rejects a trailing-block binding under a kind without ownsBlock", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/binding_trailing_block_no_ownsblock.yoop");
+    assert.ok(
+      errors.some((e) => /does not declare ownsBlock/.test(e.message)),
+      `expected no-ownsBlock error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

@@ -36,6 +36,8 @@ export function formatType(t) {
       return "error";
     case typeKinds.trait:
       return `trait ${t.name}`;
+    case typeKinds.kind:
+      return `kind ${t.name}`;
     default:
       return `unknown kind ${t.kind}`;
   }

@@ -444,3 +444,206 @@ describe("parse: phase 5 - traits", () => {
     });
   });
 });
+
+describe("parse: phase 6.1 - kind decls", () => {
+  it("full clause set parses, clauses preserved in order", () => {
+    const stmts = parse(
+      `kind disposable {
+         appliesTo binding;
+         requires Disposable;
+         mustCall dispose beforeScopeEnd;
+         ownsBlock;
+       }`,
+    ).body;
+    assert.equal(stmts.length, 1);
+    const k = stmts[0];
+    assert.equal(k.kind, ASTNodeKind.KIND_DECL);
+    assert.equal(k.name, "disposable");
+    assert.equal(k.clauses.length, 4);
+    assert.equal(k.clauses[0].kind, ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
+    assert.equal(k.clauses[0].site, "binding");
+    assert.equal(k.clauses[1].kind, ASTNodeKind.KIND_REQUIRES_CLAUSE);
+    assert.equal(k.clauses[1].traitName, "Disposable");
+    assert.equal(k.clauses[2].kind, ASTNodeKind.KIND_MUSTCALL_CLAUSE);
+    assert.equal(k.clauses[2].methodName, "dispose");
+    assert.equal(k.clauses[2].timing, "beforeScopeEnd");
+    assert.equal(k.clauses[3].kind, ASTNodeKind.KIND_OWNSBLOCK_CLAUSE);
+  });
+
+  it("kind with only appliesTo and mustCall parses (typecheck enforces requires)", () => {
+    const k = parse(
+      "kind cleanup { appliesTo binding; mustCall close beforeScopeEnd; }",
+    ).body[0];
+    assert.equal(k.clauses.length, 2);
+  });
+
+  it("multiple requires clauses parse independently", () => {
+    const k = parse(
+      `kind handle {
+         appliesTo binding;
+         requires Disposable;
+         requires Closable;
+         mustCall dispose beforeScopeEnd;
+       }`,
+    ).body[0];
+    const requires = k.clauses.filter(
+      (c) => c.kind === ASTNodeKind.KIND_REQUIRES_CLAUSE,
+    );
+    assert.equal(requires.length, 2);
+    assert.equal(requires[0].traitName, "Disposable");
+    assert.equal(requires[1].traitName, "Closable");
+  });
+
+  describe("reject cases", () => {
+    it("rejects missing appliesTo clause", () => {
+      assert.throws(
+        () => parse("kind disposable { requires Disposable; }"),
+        /missing required 'appliesTo' clause/,
+      );
+    });
+    it("rejects duplicate appliesTo clause", () => {
+      assert.throws(
+        () =>
+          parse(
+            "kind disposable { appliesTo binding; appliesTo binding; }",
+          ),
+        /duplicate appliesTo clause/,
+      );
+    });
+    it("rejects appliesTo parameter", () => {
+      assert.throws(
+        () => parse("kind k { appliesTo parameter; }"),
+        /appliesTo parameter not yet supported/,
+      );
+    });
+    it("rejects multi-site appliesTo list", () => {
+      assert.throws(
+        () => parse("kind k { appliesTo binding binding; }"),
+        /appliesTo binding not yet supported/,
+      );
+    });
+    it("rejects mustCall beforeAny", () => {
+      assert.throws(
+        () =>
+          parse(
+            "kind k { appliesTo binding; mustCall dispose beforeAny; }",
+          ),
+        /mustCall dispose beforeAny not yet supported/,
+      );
+    });
+    it("rejects mustCall block (alternation) form", () => {
+      assert.throws(
+        () =>
+          parse(
+            "kind k { appliesTo binding; mustCall { wait; abandon; } beforeScopeEnd; }",
+          ),
+        /mustCall block form \(alternation\) not yet supported/,
+      );
+    });
+    it("rejects requires list form", () => {
+      assert.throws(
+        () =>
+          parse(
+            "kind k { appliesTo binding; requires Disposable Closable; }",
+          ),
+        /requires takes a single trait per clause/,
+      );
+    });
+    it("rejects ownsBlock with parentheses", () => {
+      assert.throws(
+        () => parse("kind k { appliesTo binding; ownsBlock(); }"),
+        /ownsBlock takes no arguments/,
+      );
+    });
+    it("rejects parameterized kind decl", () => {
+      assert.throws(
+        () => parse("kind k(n: usize) { appliesTo binding; }"),
+        /parameterized kinds not yet supported/,
+      );
+    });
+    it("rejects kind composition", () => {
+      assert.throws(
+        () => parse("kind slow = a & b;"),
+        /kind composition not yet supported/,
+      );
+    });
+    it("rejects provides clause", () => {
+      assert.throws(
+        () =>
+          parse("kind k { appliesTo binding; provides Foo; }"),
+        /provides clause not yet supported/,
+      );
+    });
+    it("rejects mustNotEscape clause", () => {
+      assert.throws(
+        () =>
+          parse("kind k { appliesTo binding; mustNotEscape; }"),
+        /mustNotEscape not yet supported/,
+      );
+    });
+  });
+});
+
+describe("parse: phase 6.1 - kind-prefixed bindings", () => {
+  // run a single body statement through the parser by wrapping it in a function
+  function stmtOf(src) {
+    const ast = parse(`function f(): int32 { ${src} return 0; }`);
+    return ast.body[0].body.body[0];
+  }
+
+  it("implicit-const, implicit-block: `disposable a: FileHandle = expr;`", () => {
+    const s = stmtOf("disposable a: FileHandle = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.CONST_DECL);
+    assert.equal(s.name, "a");
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.trailingBlock, null);
+    assert.deepEqual(s.typeAnnotation, {
+      kind: "typeName",
+      name: "FileHandle",
+    });
+    assert.equal(s.assignment.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+
+  it("explicit let with kind prefix retains LET_DECL", () => {
+    const s = stmtOf("let disposable a: FileHandle = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.LET_DECL);
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.trailingBlock, null);
+  });
+
+  it("explicit const with kind prefix retains CONST_DECL", () => {
+    const s = stmtOf("const disposable a: FileHandle = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.CONST_DECL);
+    assert.equal(s.kindPrefix.name, "disposable");
+  });
+
+  it("trailing block parses into trailingBlock field", () => {
+    const s = stmtOf(
+      "disposable a: FileHandle = make_handle() { return 0; }",
+    );
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.trailingBlock.kind, ASTNodeKind.BLOCK);
+    assert.equal(s.trailingBlock.body.length, 1);
+    assert.equal(
+      s.trailingBlock.body[0].kind,
+      ASTNodeKind.RETURN_STATEMENT,
+    );
+  });
+
+  it("plain `let x: T = expr;` still parses without kindPrefix", () => {
+    const s = stmtOf("let x: int32 = 5;");
+    assert.equal(s.kind, ASTNodeKind.LET_DECL);
+    assert.equal(s.kindPrefix ?? null, null);
+    assert.equal(s.trailingBlock ?? null, null);
+  });
+
+  describe("reject cases", () => {
+    it("rejects kind-prefixed binding without initializer", () => {
+      assert.throws(
+        () =>
+          parse("function f(): int32 { disposable a: FileHandle; return 0; }"),
+        /kind-prefixed binding requires initializer/,
+      );
+    });
+  });
+});

@@ -62,6 +62,38 @@ describe("lexer: keywords vs identifiers", () => {
     const tokens = tokenize("type");
     assert.equal(tokens[0].tag, tag("type"));
   });
+  it("'kind' is the kind keyword", () => {
+    const tokens = tokenize("kind");
+    assert.equal(tokens[0].tag, tag("kind"));
+  });
+  it("'appliesTo' is the appliesTo keyword", () => {
+    const tokens = tokenize("appliesTo");
+    assert.equal(tokens[0].tag, tag("appliesTo"));
+  });
+  it("'requires' is the requires keyword", () => {
+    const tokens = tokenize("requires");
+    assert.equal(tokens[0].tag, tag("requires"));
+  });
+  it("'mustCall' is the mustCall keyword", () => {
+    const tokens = tokenize("mustCall");
+    assert.equal(tokens[0].tag, tag("mustCall"));
+  });
+  it("'ownsBlock' is the ownsBlock keyword", () => {
+    const tokens = tokenize("ownsBlock");
+    assert.equal(tokens[0].tag, tag("ownsBlock"));
+  });
+  it("'beforeScopeEnd' is the beforeScopeEnd keyword", () => {
+    const tokens = tokenize("beforeScopeEnd");
+    assert.equal(tokens[0].tag, tag("beforeScopeEnd"));
+  });
+  it("'binding' is the binding keyword", () => {
+    const tokens = tokenize("binding");
+    assert.equal(tokens[0].tag, tag("binding"));
+  });
+  it("'disposable' is an ident", () => {
+    const tokens = tokenize("disposable");
+    assert.equal(tokens[0].tag, tag("ident"));
+  });
 });
 
 describe("lexer: punctuation", () => {

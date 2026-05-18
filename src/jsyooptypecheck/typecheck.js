@@ -16,6 +16,7 @@ import {
   ArrayType,
   ErrorType,
   FuncType,
+  KindType,
   RefType,
   StructType,
   primTypeFromName,
@@ -26,11 +27,12 @@ import {
   typeKinds,
   typesEqual,
 } from "./types.js";
-import { formatType } from "./errors.js";
+import { formatType, pushError } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
 import { validateFunction, validateMethod } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
+import { runKindCheck } from "./kindCheck.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
@@ -226,6 +228,80 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
   env.structTable.set(typeDecl.name, fullStruct);
 }
 
+// ─── kind clause resolution (phase 6.1) ──────────────────────────────────────
+
+// Pass C.2: walk each kind decl and resolve its clauses against the module's
+// trait table. `requires` clauses populate kt.requires; `mustCall` clauses
+// resolve their method name against the union of required-trait method sets.
+function resolveKindClauses(mod, moduleEnv, errors) {
+  const env = moduleEnv.get(mod.id);
+  for (const decl of mod.ast.body) {
+    const d = innerDecl(decl);
+    if (d.kind !== ASTNodeKind.KIND_DECL) continue;
+    const kt = d.resolvedKindType;
+    if (!kt) continue; // rejected in pass A
+    let mustCallSeen = false;
+    let ownsBlockSeen = false;
+    // appliesTo is parser-validated as "exactly one" already; here we just
+    // record it on the type.
+    let mustCallClause = null;
+    for (const c of d.clauses) {
+      switch (c.kind) {
+        case ASTNodeKind.KIND_APPLIES_TO_CLAUSE:
+          // already validated by parser; store the site.
+          break;
+        case ASTNodeKind.KIND_REQUIRES_CLAUSE: {
+          const trait =
+            env.traitTable.get(c.traitName) ??
+            lookupImportedTrait(c.traitName, mod, moduleEnv);
+          if (!trait) {
+            pushError(errors, c, `unknown trait '${c.traitName}' in requires clause of kind '${kt.name}'`);
+            break;
+          }
+          kt.requires.push(trait);
+          break;
+        }
+        case ASTNodeKind.KIND_MUSTCALL_CLAUSE:
+          if (mustCallSeen) {
+            pushError(errors, c, `duplicate mustCall clause in kind '${kt.name}'`);
+            break;
+          }
+          mustCallSeen = true;
+          mustCallClause = c;
+          break;
+        case ASTNodeKind.KIND_OWNSBLOCK_CLAUSE:
+          if (ownsBlockSeen) {
+            pushError(errors, c, `duplicate ownsBlock clause in kind '${kt.name}'`);
+            break;
+          }
+          ownsBlockSeen = true;
+          kt.ownsBlock = true;
+          break;
+      }
+    }
+    // mustCall resolution runs after requires have been collected so we can
+    // search the full trait set.
+    if (mustCallClause) {
+      if (kt.requires.length === 0) {
+        pushError(errors, mustCallClause,
+          `mustCall requires at least one 'requires' clause to resolve method '${mustCallClause.methodName}' in kind '${kt.name}'`);
+      } else {
+        const traitWithMethod = kt.requires.find((t) => t.methods.has(mustCallClause.methodName));
+        if (!traitWithMethod) {
+          pushError(errors, mustCallClause,
+            `mustCall ${mustCallClause.methodName}: no required trait declares this method in kind '${kt.name}'`);
+        } else {
+          kt.mustCall.push({
+            methodName: mustCallClause.methodName,
+            timing: mustCallClause.timing,
+            traitType: traitWithMethod,
+          });
+        }
+      }
+    }
+  }
+}
+
 // ─── multi-module entry point ─────────────────────────────────────────────────
 
 // typecheckProgram(modules) — main entry for multi-file compilation.
@@ -243,6 +319,7 @@ export function typecheckProgram(modules) {
     const importedNames = new Map();
     const linkLibraries = new Set();
     const traitTable = new Map();
+    const kindTable = new Map();
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
@@ -314,6 +391,24 @@ export function typecheckProgram(modules) {
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
+
+      if (d.kind === ASTNodeKind.KIND_DECL) {
+        if (
+          kindTable.has(d.name) ||
+          traitTable.has(d.name) ||
+          structTable.has(d.name) ||
+          localSymbols.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of kind "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          const kt = new KindType(d.name, mod.id);
+          kindTable.set(d.name, kt);
+          d.resolvedKindType = kt;
+        }
+      }
     }
 
     moduleEnv.set(mod.id, {
@@ -323,6 +418,7 @@ export function typecheckProgram(modules) {
       importedNames,
       linkLibraries,
       traitTable,
+      kindTable,
     });
   }
 
@@ -492,6 +588,11 @@ export function typecheckProgram(modules) {
       }
     }
 
+    // pass C.2 - kind clause resolution (between trait sigs and impl blocks).
+    // After C.1, every trait shell has its method map populated, which is what
+    // `requires`/`mustCall` need to resolve against.
+    resolveKindClauses(mod, moduleEnv, errors);
+
     // pass C.3 - impl block validation
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
@@ -525,22 +626,25 @@ export function typecheckProgram(modules) {
 
   // pass D: function body typechecking
   for (const mod of modules) {
-    const { localSymbols, structTable, importedNames } = moduleEnv.get(mod.id);
+    const { localSymbols, structTable, importedNames, kindTable } = moduleEnv.get(mod.id);
     const typeContext = {
       moduleSymbols: localSymbols,
       structTable,
       moduleEnv,
       importedNames,
       currentModId: mod.id,
+      kindTable,
     };
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         validateFunction(d, typeContext, errors);
+        runKindCheck(d, errors);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
         for (const method of d.methods) {
           validateMethod(method, d.resolvedType, typeContext, errors);
+          runKindCheck(method, errors);
         }
       }
     }
@@ -560,6 +664,7 @@ export function typecheck(ast) {
     moduleSymbols,
     structTable,
     moduleEnv: null,
+    kindTable: new Map(),
   };
 
   // pass 1: struct shells

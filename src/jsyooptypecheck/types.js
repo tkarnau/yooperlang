@@ -13,6 +13,7 @@ export const typeKinds = {
   error: "error",
   namespace: "namespace",
   trait: "trait",
+  kind: "kind",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -136,6 +137,20 @@ export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
 export const TraitType = (name, methods, moduleId = null) =>
   freezerWrap(typeKinds.trait, { name, methods, moduleId });
+
+// KindType is a language-level "kind" decl (phase 6.1: `disposable`). Unlike
+// other types in this file, KindType is mutable during pass C.2 — clauses
+// resolve trait references and method names after the shell is registered in
+// pass A. The shape mirrors the plan in plans/phase-6-1-disposable.md §4.a.
+export function KindType(name, moduleId) {
+  this.kind = typeKinds.kind;
+  this.name = name;
+  this.moduleId = moduleId;
+  this.appliesTo = "binding";              // 6.1: always "binding"
+  this.requires = [];                       // array of TraitType
+  this.mustCall = [];                       // array of { methodName, timing, traitType }
+  this.ownsBlock = false;
+}
 
 /****************
  * Placeholders - these are things that get materialized later in the pipeline,

@@ -1645,6 +1645,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
     const ctx = { fnName: symName, returnType: node.resolvedType };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
+    emitImplicitCleanups(node.body, fnLines);
     if (isVoidReturn(node.resolvedType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
@@ -1682,6 +1683,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
 
     const ctx = { fnName: methodDecl.name, returnType };
     methodDecl.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
+    emitImplicitCleanups(methodDecl.body, fnLines);
 
     if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
@@ -2080,9 +2082,34 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     const okLabel = freshLabel("try_ok");
     fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
     fnLines.push(`${failLabel}:`);
+    // Phase 6.1: fire any pending cleanups in the failure branch before the
+    // early `ret` produced by emitFailRet. errStr has already been captured
+    // above, so it survives the cleanup calls.
+    emitPendingCleanups(node, fnLines);
     emitFailRet(currentReturnType, errStr, fnLines);
     fnLines.push(`${okLabel}:`);
     return { ptr: slot, type: operandType };
+  }
+
+  // Phase 6.1: emit a single CLEANUP_CALL node. The binding's alloca slot is
+  // `%<bindingName>` (kind-prefixed bindings always declare a struct value;
+  // the trait method takes `ref self` so we pass the slot pointer directly).
+  function emitCleanupCall(node, fnLines) {
+    const mangled = `${node.moduleId}__${node.structType.name}__${node.methodName}`;
+    fnLines.push(`  call void @${mangled}(ptr %${node.bindingName})`);
+  }
+
+  function emitImplicitCleanups(block, fnLines) {
+    const cleanups = block?.implicitCleanups;
+    if (!cleanups || cleanups.length === 0) return;
+    if (blockIsTerminated(fnLines)) return;
+    for (const c of cleanups) emitCleanupCall(c, fnLines);
+  }
+
+  function emitPendingCleanups(node, fnLines) {
+    const cleanups = node?.pendingCleanups;
+    if (!cleanups || cleanups.length === 0) return;
+    for (const c of cleanups) emitCleanupCall(c, fnLines);
   }
 
   function emitFailRet(retType, errStr, fnLines) {
@@ -2102,10 +2129,15 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   function emitStmt(node, fnLines, ctx) {
     switch (node.kind) {
       case ASTNodeKind.RETURN_STATEMENT: {
+        // Compute the return value first, fire pending cleanups, then ret.
+        // Cleanups must come AFTER the return value is computed (in case the
+        // value reads from a binding being cleaned up) but BEFORE `ret`.
         if (!node.value || (node.value.kind === ASTNodeKind.IDENT && node.value.name === "void")) {
+          emitPendingCleanups(node, fnLines);
           fnLines.push("  ret void");
         } else {
           const r = emitExpr(node.value, fnLines);
+          emitPendingCleanups(node, fnLines);
           fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
         }
         break;
@@ -2126,8 +2158,21 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
             fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
           }
         }
+        // Phase 6.1: kind-prefixed binding with `ownsBlock` form. Walk the
+        // trailing block in place, then fire its implicit cleanups before
+        // control falls out of the trailing block's scope.
+        if (node.trailingBlock) {
+          node.trailingBlock.body.forEach((s) => emitStmt(s, fnLines, ctx));
+          emitImplicitCleanups(node.trailingBlock, fnLines);
+        }
         break;
       }
+      case ASTNodeKind.CLEANUP_CALL:
+        // Synthetic node produced by kindCheck; codegen normally emits these
+        // inline via emitCleanupCall(...). Reach this case only if a stray
+        // node slipped into a statement list.
+        emitCleanupCall(node, fnLines);
+        break;
       case ASTNodeKind.EXPRESSION_STATEMENT: emitExpr(node.value, fnLines); break;
       case ASTNodeKind.DESTRUCTURE_DECL: emitDestrDecl(node, fnLines); break;
       case ASTNodeKind.DISCARD_STATEMENT: emitExpr(node.value, fnLines); break;
@@ -2231,6 +2276,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   function emitBlockStmt(blockOrNode, fnLines, ctx) {
     if (blockOrNode.kind === ASTNodeKind.BLOCK) {
       blockOrNode.body.forEach((s) => emitStmt(s, fnLines, ctx));
+      emitImplicitCleanups(blockOrNode, fnLines);
     } else {
       emitStmt(blockOrNode, fnLines, ctx);
     }

@@ -26,6 +26,30 @@ function isBinaryOp(tag) {
   );
 }
 
+function isKindClauseStartTag(tag) {
+  return (
+    tag === TokenTags.appliesTo ||
+    tag === TokenTags.requires ||
+    tag === TokenTags.mustCall ||
+    tag === TokenTags.ownsBlock
+  );
+}
+
+// Identifier text -> deferred-feature error message. Used inside kind { ... }
+// to produce a precise "not yet supported" error for clause keywords that
+// later sub-phases will introduce; today they lex as plain idents.
+const DeferredKindClauseMessages = {
+  provides: "provides clause not yet supported in phase 6.1",
+  mustNotEscape: "mustNotEscape not yet supported (phase 6.2)",
+  mustNotShare: "mustNotShare not yet supported (phase 6.2)",
+  forbids: "forbids not yet supported (phase 6.2)",
+  autoJoin: "autoJoin not yet supported (phase 6.3)",
+  propagates: "propagates not yet supported (phase 6.4)",
+  contains: "contains not yet supported (phase 6.4)",
+  restricts: "restricts not yet supported (phase 6.5)",
+  layout: "layout not yet supported (phase 6.5)",
+};
+
 const Precedence = {
   [TokenTags.eq]: 10,
   [TokenTags.oror]: 20,
@@ -75,6 +99,22 @@ export function parse(src) {
   // just peeks at the current token without advancing
   function peek() {
     return current;
+  }
+
+  // Peek `n` tokens ahead without disturbing parser state. peekAhead(0)
+  // is equivalent to peek(); peekAhead(1) is the token following `current`,
+  // and so on. Used for statement-start disambiguation where a kind-prefixed
+  // binding needs three tokens of lookahead (`IDENT IDENT :`).
+  function peekAhead(n) {
+    if (n === 0) return current;
+    let p = pos;
+    let tok = null;
+    for (let i = 0; i < n; i++) {
+      const r = lexNext(src, p);
+      tok = r.token;
+      p = r.nextPos;
+    }
+    return tok;
   }
 
   // Format a parse error with source context: the offending line plus a caret.
@@ -187,6 +227,12 @@ export function parse(src) {
               node.body.push(parseTraitDecl());
             }
             break;
+          case TokenTags.kind:
+            {
+              seenNonImport = true;
+              node.body.push(parseKindDecl());
+            }
+            break;
           default: {
             throw parseError(
               `unexpected token at top level: ${inverseTokenTags[peekTag]}`,
@@ -206,6 +252,213 @@ export function parse(src) {
   // Strip surrounding quotes from a strLiteral token value.
   function unquoteStringLiteral(tok) {
     return src.substring(tok.start + 1, tok.start + tok.length - 1);
+  }
+
+  function parseKindDecl() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_DECL);
+    expect(TokenTags.kind);
+    node.name = parseIdentAsName();
+
+    // parameterized kinds — `kind foo(...)` — are reserved for later phases
+    if (peek().tag === TokenTags.lparen) {
+      throw parseError(
+        "parameterized kinds not yet supported in phase 6.1",
+        peek().start,
+        peek().length,
+      );
+    }
+    // composition — `kind foo = a & b;`
+    if (peek().tag === TokenTags.eq) {
+      throw parseError(
+        "kind composition not yet supported in phase 6.1",
+        peek().start,
+        peek().length,
+      );
+    }
+
+    expect(TokenTags.lcurly);
+
+    node.clauses = [];
+    while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
+      if (isKindClauseStartTag(peek().tag)) {
+        node.clauses.push(parseKindClause());
+        continue;
+      }
+      // Surface a precise message for deferred-feature clause keywords
+      // (they currently lex as plain idents).
+      if (peek().tag === TokenTags.ident) {
+        const text = src.substring(
+          peek().start,
+          peek().start + peek().length,
+        );
+        const msg = DeferredKindClauseMessages[text];
+        if (msg) {
+          throw parseError(msg, peek().start, peek().length);
+        }
+      }
+      throw parseError(
+        `unexpected token in kind declaration: ${inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.rcurly);
+
+    // exactly-one-appliesTo validation. Per the plan, the default
+    // ("any value-site") is forbidden in 6.1 to avoid future surprise.
+    const appliesToClauses = node.clauses.filter(
+      (c) => c.kind === ASTNodeKind.KIND_APPLIES_TO_CLAUSE,
+    );
+    if (appliesToClauses.length === 0) {
+      throw parseError(
+        `kind '${node.name}' missing required 'appliesTo' clause`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    if (appliesToClauses.length > 1) {
+      throw parseError(
+        "duplicate appliesTo clause",
+        appliesToClauses[1].sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  function parseKindClause() {
+    switch (peek().tag) {
+      case TokenTags.appliesTo:
+        return parseAppliesToClause();
+      case TokenTags.requires:
+        return parseRequiresClause();
+      case TokenTags.mustCall:
+        return parseMustCallClause();
+      case TokenTags.ownsBlock:
+        return parseOwnsBlockClause();
+      default:
+        // unreachable — caller guards with isKindClauseStartTag
+        throw parseError(
+          `unexpected token in kind declaration: ${inverseTokenTags[peek().tag]}`,
+          peek().start,
+          peek().length,
+        );
+    }
+  }
+
+  function parseAppliesToClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
+    expect(TokenTags.appliesTo);
+    // 6.1 only accepts the literal `binding` keyword.
+    if (peek().tag !== TokenTags.binding) {
+      const tok = peek();
+      const name =
+        tok.tag === TokenTags.ident
+          ? src.substring(tok.start, tok.start + tok.length)
+          : inverseTokenTags[tok.tag];
+      throw parseError(
+        `appliesTo ${name} not yet supported in phase 6.1; only 'binding' is accepted`,
+        tok.start,
+        tok.length,
+      );
+    }
+    advance(); // consume `binding`
+    // Reject multi-site lists eagerly. The next token must be `;`.
+    if (
+      peek().tag === TokenTags.binding ||
+      peek().tag === TokenTags.ident
+    ) {
+      const tok = peek();
+      const name =
+        tok.tag === TokenTags.ident
+          ? src.substring(tok.start, tok.start + tok.length)
+          : "binding";
+      throw parseError(
+        `appliesTo ${name} not yet supported in phase 6.1; only 'binding' is accepted`,
+        tok.start,
+        tok.length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    node.site = "binding";
+    return node;
+  }
+
+  function parseRequiresClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_REQUIRES_CLAUSE);
+    expect(TokenTags.requires);
+    node.traitName = parseIdentAsName();
+    // List form (`requires A B;`) is reserved.
+    if (peek().tag === TokenTags.ident) {
+      throw parseError(
+        "requires takes a single trait per clause; write multiple 'requires Trait;' clauses for multiple traits",
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  function parseMustCallClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_MUSTCALL_CLAUSE);
+    expect(TokenTags.mustCall);
+    // The disjunction/block form `mustCall { a; b; } beforeScopeEnd;` is
+    // reserved for later sub-phases.
+    if (peek().tag === TokenTags.lcurly) {
+      throw parseError(
+        "mustCall block form (alternation) not yet supported in phase 6.1; single function name only",
+        peek().start,
+        peek().length,
+      );
+    }
+    node.methodName = parseIdentAsName();
+    // After the method name, expect the timing keyword. `beforeAny` /
+    // `afterAny` lex as plain idents today, so handle them by source text.
+    if (peek().tag === TokenTags.beforeScopeEnd) {
+      advance();
+      node.timing = "beforeScopeEnd";
+    } else if (peek().tag === TokenTags.ident) {
+      const text = src.substring(
+        peek().start,
+        peek().start + peek().length,
+      );
+      if (text === "beforeAny" || text === "afterAny") {
+        throw parseError(
+          `mustCall ${node.methodName} ${text} not yet supported in phase 6.1; use 'beforeScopeEnd'`,
+          peek().start,
+          peek().length,
+        );
+      }
+      throw parseError(
+        `expected 'beforeScopeEnd' after mustCall method name, got '${text}'`,
+        peek().start,
+        peek().length,
+      );
+    } else {
+      throw parseError(
+        `expected 'beforeScopeEnd' after mustCall method name, got ${inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  function parseOwnsBlockClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_OWNSBLOCK_CLAUSE);
+    expect(TokenTags.ownsBlock);
+    // Reject the old paren-style `ownsBlock();`.
+    if (peek().tag === TokenTags.lparen) {
+      throw parseError(
+        "ownsBlock takes no arguments; drop the parentheses",
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
   }
 
   function parseImportDecl() {
@@ -748,6 +1001,17 @@ export function parse(src) {
       case TokenTags.continue: {
         return parseContinueStatement();
       }
+      case TokenTags.ident: {
+        // kind-prefixed binding form: `IDENT IDENT : ...`
+        // (no other statement starts `ident ident :`).
+        if (
+          peekAhead(1).tag === TokenTags.ident &&
+          peekAhead(2).tag === TokenTags.colon
+        ) {
+          return parseVarDecl();
+        }
+        return parseExpressionStatement();
+      }
       default: {
         return parseExpressionStatement();
       }
@@ -783,39 +1047,80 @@ export function parse(src) {
   }
 
   function parseVarDecl() {
-    const varToken = advance();
-    // check if destructure or normal decl
-    const declKind =
-      varToken.tag === TokenTags.let
-        ? ASTNodeKind.LET_DECL
-        : ASTNodeKind.CONST_DECL;
-    if (peek().tag === TokenTags.lcurly) {
-      // destructure decl
-      return parseDestructureDecl(varToken, declKind);
+    // Three accepted shapes here:
+    //   (1) let|const IDENT : type (= expr)? ;
+    //   (2) let|const IDENT IDENT : type = expr {block} | ;     (kind-prefixed)
+    //   (3) IDENT IDENT : type = expr {block} | ;               (implicit-const kind-prefixed)
+    // Shape (3) is dispatched in parseStatement; (1) and (2) start with let/const.
+    let declToken = null; // let | const, or null for implicit-const
+    if (peek().tag === TokenTags.let || peek().tag === TokenTags.const) {
+      declToken = advance();
     }
-    let node;
-    switch (varToken.tag) {
-      case TokenTags.let:
-        {
-          node = buildSourcedNode(ASTNodeKind.LET_DECL);
-        }
-        break;
-      case TokenTags.const:
-        {
-          node = buildSourcedNode(ASTNodeKind.CONST_DECL);
-        }
-        break;
-      default: {
-        throw parseError(
-          `unexpected variable declaration token: ${inverseTokenTags[varToken.tag]}`,
-          varToken.start,
-          varToken.length,
-        );
-      }
+
+    // destructure: `let { a, b } = expr;` — only valid for non-kind-prefixed form
+    if (declToken !== null && peek().tag === TokenTags.lcurly) {
+      const declKind =
+        declToken.tag === TokenTags.let
+          ? ASTNodeKind.LET_DECL
+          : ASTNodeKind.CONST_DECL;
+      return parseDestructureDecl(declToken, declKind);
     }
+
+    // Decide whether a kind prefix is present. Either:
+    //   - declToken was null (shape 3): caller already verified IDENT IDENT :
+    //   - declToken was present and we see IDENT IDENT :
+    let kindPrefix = null;
+    if (
+      peek().tag === TokenTags.ident &&
+      peekAhead(1).tag === TokenTags.ident &&
+      peekAhead(2).tag === TokenTags.colon
+    ) {
+      const kindTok = advance();
+      kindPrefix = {
+        name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+        sourceLoc: posToSourceLocation(src, kindTok.start),
+      };
+    }
+
+    // Build the binding node. Kind-prefixed bindings without a `let` keyword
+    // are implicitly const per SPEC §4.4.
+    let nodeKind;
+    if (declToken === null) {
+      nodeKind = ASTNodeKind.CONST_DECL;
+    } else if (declToken.tag === TokenTags.let) {
+      nodeKind = ASTNodeKind.LET_DECL;
+    } else {
+      nodeKind = ASTNodeKind.CONST_DECL;
+    }
+    const node = buildSourcedNode(nodeKind);
+    node.kindPrefix = kindPrefix;
+    node.trailingBlock = null;
+
     node.name = parseIdentAsName();
     expect(TokenTags.colon);
     node.typeAnnotation = parseTypeAnnotation();
+
+    // Kind-prefixed bindings always require an initializer; the `mustCall`
+    // obligation has nothing to bind against without one.
+    if (kindPrefix !== null) {
+      if (peek().tag !== TokenTags.eq) {
+        throw parseError(
+          "kind-prefixed binding requires initializer",
+          peek().start,
+          peek().length,
+        );
+      }
+      advance(); // consume =
+      node.assignment = parseExpression();
+      if (peek().tag === TokenTags.lcurly) {
+        node.trailingBlock = parseBlock();
+      } else {
+        expect(TokenTags.semicolon);
+      }
+      return node;
+    }
+
+    // Plain let/const path — semicolon-only is legal (no initializer).
     if (peek().tag === TokenTags.semicolon) {
       advance();
       return node;
@@ -823,7 +1128,6 @@ export function parse(src) {
     expect(TokenTags.eq);
     node.assignment = parseExpression();
     expect(TokenTags.semicolon);
-
     return node;
   }
 

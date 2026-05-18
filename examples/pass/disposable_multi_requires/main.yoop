@@ -1,0 +1,36 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+trait Closable {
+    function close(ref self): int32;
+}
+
+type FileHandle implements (Disposable, Closable) {
+    fd: int32,
+    is_open: bool,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+        self.is_open = false;
+    }
+    function close(ref self): int32 {
+        printf(`closing fd=${self.fd}\n`);
+        return self.fd;
+    }
+}
+
+kind ioHandle {
+    appliesTo binding;
+    requires Disposable;
+    requires Closable;
+    mustCall dispose beforeScopeEnd;
+}
+
+function main(): int32 {
+    ioHandle a: FileHandle = { fd: 11, is_open: true };
+    return 0;
+}

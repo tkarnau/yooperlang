@@ -1,0 +1,17 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+function main(): int32 {
+    disposable a: int32 = 5;
+    return 0;
+}
+
+// Fails because a kind-prefixed binding must have a struct type RHS; int32
+// cannot implement traits, so the kind cannot attach to it.
