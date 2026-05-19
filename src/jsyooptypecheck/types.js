@@ -14,6 +14,7 @@ export const typeKinds = {
   namespace: "namespace",
   trait: "trait",
   kind: "kind",
+  task: "task",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -137,6 +138,11 @@ export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
 export const TraitType = (name, methods, moduleId = null) =>
   freezerWrap(typeKinds.trait, { name, methods, moduleId });
+
+// Phase 6.3: compiler-builtin Task<T>. Not user-declarable; produced as the
+// rewritten return type of any function declared with the `task` modifier.
+export const TaskType = (resultType) =>
+  freezerWrap(typeKinds.task, { resultType });
 
 // KindType is a language-level "kind" decl (phase 6.1: `disposable`). Unlike
 // other types in this file, KindType is mutable during pass C.2 — clauses
@@ -349,6 +355,9 @@ export function typesEqual(a, b) {
   }
   if (a.kind === typeKinds.trait) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
+  if (a.kind === typeKinds.task) {
+    return typesEqual(a.resultType, b.resultType);
   }
   throw new Error(`Unknown type kind: ${a.kind}`);
 }

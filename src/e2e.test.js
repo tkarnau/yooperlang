@@ -13,6 +13,7 @@ import { parse } from "./jsyooparser/parser.js";
 import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
+import { RUNTIME_C, runtimeLinkFlags } from "./runtimeBuild.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
@@ -23,7 +24,14 @@ function runFixture(relPath) {
   const llPath = path.join(tmpDir, "out.ll");
   const binPath = path.join(tmpDir, "out");
   fs.writeFileSync(llPath, ir);
-  execFileSync("clang", [llPath, "-o", binPath], { stdio: "pipe" });
+  const clangArgs = [
+    llPath,
+    RUNTIME_C,
+    "-o",
+    binPath,
+    ...runtimeLinkFlags().map((f) => `-l${f}`),
+  ];
+  execFileSync("clang", clangArgs, { stdio: "pipe" });
   const result = spawnSync(binPath, [], { encoding: "utf8" });
   return { stdout: result.stdout, exitCode: result.status };
 }
@@ -170,7 +178,14 @@ function runFixtureEntry(relPath) {
   const llPath = path.join(tmpDir, "out.ll");
   const binPath = path.join(tmpDir, "out");
   fs.writeFileSync(llPath, ir);
-  const clangArgs = [llPath, "-o", binPath, ...linkFlags.map((f) => `-l${f}`)];
+  const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
+  const clangArgs = [
+    llPath,
+    RUNTIME_C,
+    "-o",
+    binPath,
+    ...allLinkFlags.map((f) => `-l${f}`),
+  ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
   const result = spawnSync(binPath, [], { encoding: "utf8" });
   return { stdout: result.stdout, exitCode: result.status };
@@ -369,8 +384,8 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "inside\ndisposing fd=5\nafter\n");
   });
 
-  it("kind_pooled_parse: mustNotShare acrossScopes parses and does not break mustCall pipeline", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/kind_pooled_parse/main.yoop");
+  it("kind_tracked_parse: mustNotShare acrossScopes parses and does not break mustCall pipeline", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/kind_tracked_parse/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "drop 1\n");
   });
@@ -378,6 +393,89 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
   it("kind_forbids_parse: forbids io globalState parses and stores categories without enforcement", () => {
     const { errors } = typecheckFixtureEntry("examples/pass/kind_forbids_parse/main.yoop");
     assert.equal(errors.length, 0, `expected no errors, got: ${errors.map((e) => e.message).join(" | ")}`);
+  });
+
+  // ---- 6.3-prelude: C runtime linked + init/shutdown injection ----
+
+  it("runtime_linked: trivial program links the C runtime and exits cleanly via init/shutdown", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/runtime_linked/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "hello\n");
+  });
+
+  it("runtime_qmark_in_main: `?`-induced early return in main flows through yoop_runtime_shutdown", () => {
+    const { stdout } = runFixtureEntry("examples/pass/runtime_qmark_in_main/main.yoop");
+    // First call succeeds (`got 42`); second call fails and propagates via `?`
+    // — the unreachable printf never fires. Shutdown is injected at every ret,
+    // including the qmark-fail branch.
+    assert.equal(stdout, "got 42\n");
+  });
+
+  it("runtime_disposable_in_main: dispose() fires before yoop_runtime_shutdown before ret", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/runtime_disposable_in_main/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "work\ndisposing 7\n");
+  });
+
+  it("runtime_linked: emitted IR contains the runtime declares + init/shutdown around main", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_linked/main.yoop"));
+    assert.match(ir, /declare void @yoop_runtime_init\(\)/);
+    assert.match(ir, /declare void @yoop_runtime_shutdown\(\)/);
+    // init is the first instruction of main's entry block.
+    assert.match(ir, /define i32 @main\(\)\s*\{\s*entry:\s*\n\s*call void @yoop_runtime_init\(\)/);
+    // shutdown immediately before main's `ret`.
+    assert.match(ir, /call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32/);
+  });
+
+  it("runtime_disposable_in_main: emitted IR orders cleanup → shutdown → ret", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_disposable_in_main/main.yoop"));
+    // dispose call, then shutdown, then ret — in that order, with no other
+    // instructions between them.
+    assert.match(
+      ir,
+      /call void @[^\s(]+__H__dispose\(ptr %a\)\s*\n\s*call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32 0/,
+    );
+  });
+
+  // ---- 6.3 sugar: task / joined / pooled / wait ----
+
+  it("task_immediate: const T = task_call() auto-spawns and waits inline", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_immediate/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=9\n");
+  });
+
+  it("task_joined: joined d = task_call(); wait d returns the result", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_joined/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "d=16\n");
+  });
+
+  it("task_pooled: pooled h = task_call(); wait h returns the result", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_pooled/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "h=25\n");
+  });
+
+  it("task_three_forms: immediate, joined, pooled work end-to-end in the same main", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_three_forms/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=9\nd=16\nh=25\n");
+  });
+
+  it("task_three_forms: emitted IR has thunk + submit + wait + release/free_sync_pair", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/task_three_forms/main.yoop"));
+    // The per-task thunk is emitted.
+    assert.match(ir, /define void @[^\s(]+__compute__thunk\(ptr %ts\)/);
+    // The task struct is declared.
+    assert.match(ir, /%Task_[^ ]+__compute = type/);
+    // submit + wait + free_sync_pair appear for the immediate path.
+    assert.match(ir, /call void @yoop_task_submit\(/);
+    assert.match(ir, /call void @yoop_task_wait\(/);
+    assert.match(ir, /call void @yoop_task_free_sync_pair\(/);
+    // pooled path: alloc + release.
+    assert.match(ir, /call ptr @yoop_task_alloc\(/);
+    assert.match(ir, /call void @yoop_task_release\(/);
   });
 });
 
@@ -865,6 +963,55 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /cannot alias a scoped binding/.test(e.message)),
       `expected scoped-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // ---- phase 6.3 task fail fixtures ----
+  it("task_on_main.yoop rejects `task main`", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/task_on_main.yoop");
+    assert.ok(
+      errors.some((e) => /task cannot be applied to main/.test(e.message)),
+      `expected task-on-main error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("task_void_return.yoop rejects a void-returning task fn", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/task_void_return.yoop");
+    assert.ok(
+      errors.some((e) => /task function "noop" cannot return void/.test(e.message)),
+      `expected void-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("wait_non_task.yoop rejects wait on a non-Task operand", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/wait_non_task.yoop");
+    assert.ok(
+      errors.some((e) => /wait requires a Task<T> operand/.test(e.message)),
+      `expected wait-non-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("wait_in_task_body.yoop rejects wait inside a task fn body", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/wait_in_task_body.yoop");
+    assert.ok(
+      errors.some((e) => /wait inside task body not supported/.test(e.message)),
+      `expected wait-in-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("joined_no_task_rhs.yoop rejects joined binding without a task call RHS", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/joined_no_task_rhs.yoop");
+    assert.ok(
+      errors.some((e) => /joined binding "d" requires a task call RHS/.test(e.message)),
+      `expected joined-no-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("pooled_no_task_rhs.yoop rejects pooled binding without a task call RHS", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/pooled_no_task_rhs.yoop");
+    assert.ok(
+      errors.some((e) => /pooled binding "h" requires a task call RHS/.test(e.message)),
+      `expected pooled-no-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

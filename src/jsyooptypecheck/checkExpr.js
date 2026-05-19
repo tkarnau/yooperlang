@@ -94,6 +94,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveArrayLiteral(node, scope, ctx);
     case ASTNodeKind.INDEX_EXPRESSION:
       return resolveIndexExpression(node, scope, ctx);
+    case ASTNodeKind.WAIT_EXPRESSION:
+      return resolveWaitExpression(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -255,6 +257,31 @@ function resolveCallWithSig(node, sig, scope, ctx) {
     return setType(node, sig.returnType);
   }
   return resolveCallType(node, sig, scope, ctx);
+}
+
+// `wait h` — operand must be Task<T>; result type is T. Rejected inside a
+// task function body (no nested waits in 6.3; future suspension lifts it).
+function resolveWaitExpression(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (operandType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait requires a Task<T> operand, found ${formatType(operandType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  if (ctx.inTaskBody) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait inside task body not supported (future phase will land coroutine suspension)`,
+    );
+  }
+  return setType(node, operandType.resultType);
 }
 
 // `-x` or `!x`. Minus accepts any numeric type; not requires bool.

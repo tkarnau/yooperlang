@@ -56,6 +56,18 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
   }
 
   function makeCleanupCall(o) {
+    // Phase 6.3: obligation `type` selects the synthetic AST node kind.
+    if (o.type === "autoWait") {
+      const node = new ASTNode(ASTNodeKind.TASK_AUTO_WAIT, o.sourceLoc);
+      node.bindingName = o.bindingName;
+      node.taskResultType = o.taskResultType;
+      return node;
+    }
+    if (o.type === "release") {
+      const node = new ASTNode(ASTNodeKind.TASK_RELEASE, o.sourceLoc);
+      node.bindingName = o.bindingName;
+      return node;
+    }
     const node = new ASTNode(ASTNodeKind.CLEANUP_CALL, o.sourceLoc);
     node.bindingName = o.bindingName;
     node.methodName = o.methodName;
@@ -66,11 +78,31 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
 
   function obligationFor(stmt) {
     const kt = stmt.resolvedKindType;
-    if (!kt || kt.mustCall.length === 0) return null;
+    if (!kt) return null;
+    // Phase 6.3: builtin kinds — joined / pooled — yield task-flavored obligations.
+    if (kt.builtin && stmt.resolvedType?.kind === "task") {
+      if (kt.autoJoin) {
+        return {
+          type: "autoWait",
+          bindingName: stmt.name,
+          taskResultType: stmt.resolvedType.resultType,
+          sourceLoc: stmt.sourceLoc,
+        };
+      }
+      if (kt.refcounted) {
+        return {
+          type: "release",
+          bindingName: stmt.name,
+          sourceLoc: stmt.sourceLoc,
+        };
+      }
+    }
+    if (kt.mustCall.length === 0) return null;
     const declaredType = stmt.resolvedType;
     if (!declaredType || declaredType.kind !== "struct") return null;
     const mc = kt.mustCall[0]; // 6.1: single mustCall
     return {
+      type: "mustCall",
       bindingName: stmt.name,
       methodName: mc.methodName,
       structType: declaredType,

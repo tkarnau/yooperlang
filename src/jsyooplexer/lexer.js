@@ -76,6 +76,11 @@ export const TokenTags = {
   field: 72,
   io: 73,
   globalState: 74,
+  // phase 6.3: task/concurrency
+  task: 75,
+  wait: 76,
+  joined: 77,
+  pooled: 78,
 
   // punctuation / operators
   eq: 5,
@@ -187,6 +192,10 @@ const keywordTagList = {
   field: TokenTags.field,
   io: TokenTags.io,
   globalState: TokenTags.globalState,
+  task: TokenTags.task,
+  wait: TokenTags.wait,
+  joined: TokenTags.joined,
+  pooled: TokenTags.pooled,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

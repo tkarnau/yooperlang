@@ -19,6 +19,8 @@ import {
   KindType,
   RefType,
   StructType,
+  TaskType,
+  VoidType,
   primTypeFromName,
   resolveTypeAnnotation,
   formatAnnotation,
@@ -518,6 +520,35 @@ export function typecheckProgram(modules) {
       if (funcDecl) {
         // Overwrite shell placed in pass A with properly-resolved types.
         // Redeclaration was already checked in pass A.
+        const declaredReturnType =
+          resolveTypeAnnotationInModule(
+            funcDecl.returnTypeAnnotation,
+            mod.id,
+            moduleEnv,
+          ) ?? ErrorType();
+        funcDecl.declaredReturnType = declaredReturnType;
+        let externalReturnType = declaredReturnType;
+        if (funcDecl.isTask) {
+          if (funcDecl.name === "main") {
+            errors.push({
+              message: `task cannot be applied to main`,
+              sourceLoc: funcDecl.sourceLoc,
+            });
+          } else if (
+            declaredReturnType.kind === "void" ||
+            declaredReturnType.kind === "error"
+          ) {
+            if (declaredReturnType.kind === "void") {
+              errors.push({
+                message: `task function "${funcDecl.name}" cannot return void`,
+                sourceLoc: funcDecl.sourceLoc,
+              });
+            }
+            externalReturnType = ErrorType();
+          } else {
+            externalReturnType = TaskType(declaredReturnType);
+          }
+        }
         localSymbols.set(
           funcDecl.name,
           FuncType(
@@ -534,11 +565,7 @@ export function typecheckProgram(modules) {
                 isRef: p.isRef ?? false,
               };
             }),
-            resolveTypeAnnotationInModule(
-              funcDecl.returnTypeAnnotation,
-              mod.id,
-              moduleEnv,
-            ) ?? ErrorType(),
+            externalReturnType,
           ),
         );
         if (

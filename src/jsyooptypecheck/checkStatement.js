@@ -28,6 +28,8 @@ import {
   markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
+import { lookupBuiltinKind } from "./builtinKinds.js";
+import { TaskType } from "./types.js";
 import { isFallible, } from "./fallible.js";
 import { isAssignable } from "./coerce.js";
 
@@ -121,12 +123,15 @@ export function validateFunction(funcNode, typeContext, errors) {
   }
   funcNode.resolvedType = funcReturnType;
 
+  // Phase 6.3: inside a task function body, `return` statements type against
+  // the declared T (not Task<T>), and `wait` is rejected.
   const ctx = {
     funcReturnType,
     funcName: funcNode.name,
     typeContext,
     errors,
     inLoop: false,
+    inTaskBody: !!funcNode.isTask,
   };
   validateStatement(funcNode.body, scope, ctx);
   // params + the synthetic outer body share `scope`. Block-statement
@@ -193,6 +198,13 @@ function checkBlock(node, scope, ctx) {
 //   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
 //     the name in the trailing block's scope rather than the enclosing one
 function checkLetOrConst(node, scope, ctx) {
+  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` —
+  // built-in kind prefix; type is inferred as Task<T> from the RHS.
+  const builtinName = node.kindPrefix?.builtin ?? null;
+  if (builtinName === "joined" || builtinName === "pooled") {
+    return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
+  }
+
   const declaredType =
     resolveTypeAnnotation(node.typeAnnotation, ctx.typeContext.structTable) ?? ErrorType();
   if (declaredType.kind === typeKinds.error) {
@@ -211,8 +223,16 @@ function checkLetOrConst(node, scope, ctx) {
   node.resolvedKindType = kindType;
 
   if (node.assignment) {
-    // For array literals with a known declared array type, pass element type context
+    // Phase 6.3: immediate task call — `const x: T = compute(...);` where
+    // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
+      !kindType &&
+      node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
+      isTaskCallReturningType(node.assignment, declaredType, scope, ctx)
+    ) {
+      // resolveCall already populated node.assignment.resolvedType = Task<T>.
+      node.immediateTaskCall = true;
+    } else if (
       declaredType.kind === typeKinds.array &&
       node.assignment.kind === ASTNodeKind.ARRAY_LITERAL
     ) {
@@ -263,6 +283,56 @@ function checkLetOrConst(node, scope, ctx) {
   }
 
   declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors, kindType);
+}
+
+// Phase 6.3: typecheck `joined h = task_call();` / `pooled h = task_call();`.
+// The RHS must be a call to a task function (whose external return type is
+// Task<T>); the binding's resolved type is Task<T>.
+function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
+  const kt = lookupBuiltinKind(builtinName);
+  node.resolvedKindType = kt;
+  node.builtinKind = builtinName;
+
+  if (!node.assignment) {
+    pushError(ctx.errors, node,
+      `${builtinName} binding "${node.name}" requires an initializer`);
+    node.resolvedType = ErrorType();
+    declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
+    return;
+  }
+
+  const rhsType = resolveExprType(node.assignment, scope, ctx);
+  if (rhsType.kind === typeKinds.error) {
+    node.resolvedType = ErrorType();
+    declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
+    return;
+  }
+  if (rhsType.kind !== typeKinds.task) {
+    pushError(ctx.errors, node,
+      `${builtinName} binding "${node.name}" requires a task call RHS, got ${formatType(rhsType)}`);
+    node.resolvedType = ErrorType();
+    declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
+    return;
+  }
+  node.resolvedType = rhsType;
+  declareInScope(scope, node.name, rhsType, "const", node, ctx.errors, kt);
+}
+
+// Returns true iff `callExpr` is a CALL_EXPRESSION whose resolved return type
+// is Task<targetType>. resolveExprType is invoked as a side effect.
+function isTaskCallReturningType(callExpr, targetType, scope, ctx) {
+  // Lookahead-only check based on the callee — does the named function have
+  // a TaskType return? We must invoke resolveExprType for arity/type checking,
+  // but we want to avoid emitting a spurious "Task<T> not assignable to T" error.
+  const rhsType = resolveExprType(callExpr, scope, ctx);
+  if (rhsType.kind !== typeKinds.task) return false;
+  if (targetType.kind === typeKinds.error) return false;
+  if (!typesEqual(rhsType.resultType, targetType)) {
+    pushError(ctx.errors, callExpr,
+      `task call returns ${formatType(rhsType)}, cannot immediately bind to ${formatType(targetType)}`);
+    return true; // we still own this site; suppress the cascading mismatch
+  }
+  return true;
 }
 
 // Phase 6.2: Walk an expression and return the name of the first IDENT whose

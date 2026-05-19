@@ -69,6 +69,12 @@ export const ASTNodeKind = Object.freeze({
   KIND_MUST_NOT_SHARE_CLAUSE: "KIND_MUST_NOT_SHARE_CLAUSE",
   KIND_FORBIDS_CLAUSE: "KIND_FORBIDS_CLAUSE",
 
+  // phase 6.3: task / concurrency sugar
+  WAIT_EXPRESSION: "WAIT_EXPRESSION",
+  TASK_AUTO_WAIT: "TASK_AUTO_WAIT",
+  TASK_RELEASE: "TASK_RELEASE",
+  TASK_RETAIN: "TASK_RETAIN",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });

@@ -191,14 +191,15 @@ export function parse(src) {
         const peekTag = peek().tag;
         switch (peekTag) {
           case TokenTags.function:
+          case TokenTags.task:
           case TokenTags.type:
             {
               seenNonImport = true;
-              node.body.push(
-                peekTag === TokenTags.function
-                  ? parseFunctionDecl()
-                  : parseTypeDecl(),
-              );
+              if (peekTag === TokenTags.type) {
+                node.body.push(parseTypeDecl());
+              } else {
+                node.body.push(parseFunctionDecl());
+              }
             }
             break;
           case TokenTags.import:
@@ -869,6 +870,14 @@ export function parse(src) {
       return refNode;
     }
 
+    // wait x — task handle await; same tight precedence as ref
+    if (peek().tag === TokenTags.wait) {
+      advance();
+      const waitNode = buildSourcedNode(ASTNodeKind.WAIT_EXPRESSION);
+      waitNode.operand = parseExpression(70);
+      return waitNode;
+    }
+
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
@@ -1114,6 +1123,10 @@ export function parse(src) {
       case TokenTags.const: {
         return parseVarDecl();
       }
+      case TokenTags.joined:
+      case TokenTags.pooled: {
+        return parseTaskBinding();
+      }
       case TokenTags.if: {
         return parseIfStatement();
       }
@@ -1259,6 +1272,45 @@ export function parse(src) {
     return node;
   }
 
+  // Phase 6.3: `joined h = expr;` / `pooled h = expr;` — task-builtin binding
+  // prefixes that infer their type from the task call on the RHS. No type
+  // annotation is permitted (Task<T> is compiler-internal).
+  function parseTaskBinding() {
+    const prefixTok = advance(); // joined | pooled
+    const builtinName =
+      prefixTok.tag === TokenTags.joined ? "joined" : "pooled";
+
+    const node = buildSourcedNode(ASTNodeKind.CONST_DECL);
+    node.kindPrefix = {
+      name: builtinName,
+      builtin: builtinName,
+      sourceLoc: posToSourceLocation(src, prefixTok.start),
+    };
+    node.trailingBlock = null;
+    node.name = parseIdentAsName();
+
+    if (peek().tag === TokenTags.colon) {
+      throw parseError(
+        `${builtinName} bindings infer their type from the task call; remove the type annotation`,
+        peek().start,
+        peek().length,
+      );
+    }
+    node.typeAnnotation = null;
+
+    if (peek().tag !== TokenTags.eq) {
+      throw parseError(
+        `${builtinName} binding requires initializer`,
+        peek().start,
+        peek().length,
+      );
+    }
+    advance(); // =
+    node.assignment = parseExpression();
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
   function parseIfStatement() {
     expect(TokenTags.if);
     expect(TokenTags.lparen);
@@ -1337,12 +1389,32 @@ export function parse(src) {
 
   // expects an identifier, args, curlys, statements...
   function parseFunctionDecl() {
-    expect(TokenTags.function);
-    return parseFunctionDeclBody();
+    let isTask = false;
+    // Two accepted shapes:
+    //   function foo(...) {...}
+    //   task foo(...) {...}          (task replaces `function`)
+    // The `task function foo(...)` shape is rejected — it's redundant.
+    if (peek().tag === TokenTags.task) {
+      advance();
+      isTask = true;
+      if (peek().tag === TokenTags.function) {
+        throw parseError(
+          "`task function` is redundant — use `task <name>(...)`",
+          peek().start,
+          peek().length,
+        );
+      }
+    } else {
+      expect(TokenTags.function);
+    }
+    const node = parseFunctionDeclBody();
+    node.isTask = isTask;
+    return node;
   }
 
   function parseFunctionDeclBody() {
     const node = buildSourcedNode(ASTNodeKind.FUNCTION_DECL);
+    node.isTask = false;
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     node.params = [];

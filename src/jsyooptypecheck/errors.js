@@ -38,6 +38,8 @@ export function formatType(t) {
       return `trait ${t.name}`;
     case typeKinds.kind:
       return `kind ${t.name}`;
+    case typeKinds.task:
+      return `Task<${formatType(t.resultType)}>`;
     default:
       return `unknown kind ${t.kind}`;
   }

@@ -1,0 +1,4 @@
+function main(): int32 {
+    pooled h = 7;
+    return 0;
+}

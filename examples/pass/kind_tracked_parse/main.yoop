@@ -13,7 +13,7 @@ type Handle implements Disposable {
     }
 }
 
-kind pooled {
+kind tracked {
     appliesTo binding;
     requires Disposable;
     mustCall dispose beforeScopeEnd;
@@ -21,6 +21,6 @@ kind pooled {
 }
 
 function main(): int32 {
-    pooled h: Handle = { id: 1 };
+    tracked h: Handle = { id: 1 };
     return 0;
 }

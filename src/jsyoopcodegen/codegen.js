@@ -37,6 +37,21 @@ const LLVM_TYPES = {
   ptr: "ptr", // default for unknown types
 };
 
+// LLVM `declare` lines for the C runtime ABI. Emitted unconditionally so the
+// codegen-injected init/shutdown calls in `main` (and any future task
+// scheduling) resolve at link time.
+const RUNTIME_DECLARES = [
+  "declare void @yoop_runtime_init()",
+  "declare void @yoop_runtime_shutdown()",
+  "declare void @yoop_task_submit(ptr, ptr)",
+  "declare void @yoop_task_wait(ptr)",
+  "declare ptr @yoop_task_alloc(i64)",
+  "declare void @yoop_task_retain(ptr)",
+  "declare void @yoop_task_release(ptr)",
+  "declare void @yoop_handle_signal_done(ptr)",
+  "declare void @yoop_task_free_sync_pair(ptr)",
+];
+
 export function llvmType(yoopType) {
   switch (yoopType.kind) {
     case typeKinds.prim: {
@@ -55,10 +70,33 @@ export function llvmType(yoopType) {
     case typeKinds.array: {
       return `%yoop_array.${arrayElemLlvmName(yoopType.elem)}`;
     }
+    case typeKinds.task: {
+      // SSA values of Task<T> are pointers; the per-task struct definition
+      // lives in codegen state, not in the type-system.
+      return "ptr";
+    }
     default: {
       throw new Error(`llvmType: unhandled yooper type kind "${yoopType.kind}"`);
     }
   }
+}
+
+// Build a Task struct symbol for a given (moduleId, taskFnName) pair. The
+// returned name is the LLVM type identifier that the per-task aggregate gets
+// declared under, and is what call-site codegen / thunk emission GEP into.
+export function taskStructName(moduleId, taskFnName) {
+  return `%Task_${moduleId}__${taskFnName}`;
+}
+
+// Mangle a yoop type into a stable suffix for struct names.
+export function mangleTypeForTaskName(t) {
+  if (!t) return "unknown";
+  if (t.kind === typeKinds.prim) return t.name;
+  if (t.kind === typeKinds.struct) {
+    return t.moduleId ? `${t.moduleId}__${t.name}` : t.name;
+  }
+  if (t.kind === typeKinds.ref) return `ref_${mangleTypeForTaskName(t.inner)}`;
+  return "unknown";
 }
 
 // Stable string key for an array element type — used in %yoop_array.<name> struct names.
@@ -397,12 +435,17 @@ export function codegen(ast) {
     fnLines.push(
       `  ${failVal} = load ${retLlvmTy}, ptr ${failSlot}`,
     );
+    if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
     fnLines.push(`  ret ${retLlvmTy} ${failVal}`);
   }
 
   // Track the enclosing function's return type for emitFailVariantReturn.
   // Set in emitFunction; consumed inside emitTryOpToSlot.
   let currentReturnType = null;
+
+  // True while emitting the body of `main` (the program's C entry point).
+  // Consumed at every `ret` site so we can inject yoop_runtime_shutdown().
+  let inMainFn = false;
 
   // Set by codegenProgram for each module. null in single-module mode.
   let currentModuleId = null;
@@ -877,9 +920,11 @@ export function codegen(ast) {
           !node.value ||
           (node.value.kind === ASTNodeKind.IDENT && node.value.name === "void")
         ) {
+          if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
           fnLines.push("  ret void");
         } else {
           const r = emitExpr(node.value, fnLines);
+          if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
           fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
         }
         break;
@@ -1156,9 +1201,13 @@ export function codegen(ast) {
     // In multi-module mode, mangle the symbol. forceName overrides (for export "C").
     const symName = forceName ?? (currentModuleId ? mangle(currentModuleId, node.name) : node.name);
 
+    const prevInMain = inMainFn;
+    inMainFn = symName === "main";
+
     const fnLines = [];
     fnLines.push(`define ${llvmRet} @${symName}(${paramSig}) {`);
     fnLines.push("entry:");
+    if (inMainFn) fnLines.push("  call void @yoop_runtime_init()");
 
     // copy params into stack slots so they're addressable like locals
     for (const p of params) {
@@ -1175,11 +1224,15 @@ export function codegen(ast) {
 
     if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
-      if (!last.startsWith("ret")) fnLines.push("  ret void");
+      if (!last.startsWith("ret")) {
+        if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
+        fnLines.push("  ret void");
+      }
     }
 
     fnLines.push("}");
     lines.push(...fnLines);
+    inMainFn = prevInMain;
   }
 
   // ********* top-level entry ***************
@@ -1244,6 +1297,9 @@ export function codegen(ast) {
       const decl = externDecl(name);
       if (decl) lines.push(decl);
     }
+    // Runtime ABI declares — emitted unconditionally so codegen-injected
+    // init/shutdown (and future task scheduling) resolve at link time.
+    lines.push(...RUNTIME_DECLARES);
     if (defined.size > 0 || called.size > 0) lines.push("");
 
     // third pass: emit function and method bodies
@@ -1485,6 +1541,10 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   let labelCounter = 0;
   const functionSigs = new Map();
   let symbols = new Map();
+  // Phase 6.3: bindingName -> { taskFnName }. Tracks which task fn a
+  // joined/pooled/immediate binding originated from, so `wait <ident>` can
+  // recover the result type + struct layout at the wait site.
+  let bindingDeclTable = new Map();
 
   function freshTemp() { return `%t${tempCounter++}`; }
   function freshStrGlobal() { return `@.str_${moduleId}_${strConstCounter++}`; }
@@ -1519,6 +1579,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   }
 
   let currentReturnType = null;
+  let inMainFn = false;
 
   // For now, emit struct defs using mangled names.
   for (const decl of ast.body) {
@@ -1562,7 +1623,39 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   if (usesLegacyPrintf(ast) && !externFnNames.has("printf")) {
     lines.push("declare i32 @printf(ptr, ...)");
   }
+  // Runtime ABI declares — emitted in every module so the dedup pass folds
+  // them into a single declare per symbol in the final IR.
+  lines.push(...RUNTIME_DECLARES);
   if (lines.length) lines.push("");
+
+  // Phase 6.3: collect task function metadata. Each task fn gets its own
+  // %Task_<modId>__<fnName> struct: prefix layout (per runtime-design §1.a)
+  // followed by the result slot and per-arg fields.
+  const taskFnTable = new Map(); // taskFnName -> { decl, structName, resultType, args }
+  for (const decl of ast.body) {
+    const d =
+      decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl :
+      decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn :
+      decl;
+    if (d.kind === ASTNodeKind.FUNCTION_DECL && d.isTask) {
+      const structName = taskStructName(moduleId, d.name);
+      const resultType = d.declaredReturnType;
+      const args = (d.params ?? []).map((p) => p.resolvedType);
+      taskFnTable.set(d.name, { decl: d, structName, resultType, args });
+      // Emit the struct def: prefix + result + args. LLVM handles alignment.
+      const fields = [
+        "ptr",                  // 0: thunk
+        "i8",                   // 8: state
+        "[3 x i8]",             // 9: pad
+        "i32",                  // 12: refcount
+        "ptr",                  // 16: mutex_ptr
+        "ptr",                  // 24: cond_ptr
+        llvmType(resultType),   // 32: result slot
+        ...args.map((a) => llvmType(a)),
+      ];
+      structDefs.push(`${structName} = type { ${fields.join(", ")} }`);
+    }
+  }
 
   // Collect function sigs
   for (const decl of ast.body) {
@@ -1571,9 +1664,13 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn :
       decl;
     if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+      const isTask = !!d.isTask;
       functionSigs.set(d.name, {
         params: (d.params ?? []).map((p) => p.resolvedType),
-        returnType: d.resolvedType,
+        // For task fns, the body itself returns the declared T; the rewritten
+        // Task<T> return is the *external* signature seen by callers.
+        returnType: isTask ? d.declaredReturnType : d.resolvedType,
+        isTask,
       });
     }
     if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
@@ -1594,9 +1691,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       // "main" is the C entry point — never mangle it.
       const sym = decl.name === "main" ? "main" : mangle(moduleId, decl.name);
       emitFn(decl, sym);
+      if (decl.isTask) emitTaskThunk(decl);
     } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.FUNCTION_DECL) {
       const sym = decl.decl.name === "main" ? "main" : mangle(moduleId, decl.decl.name);
       emitFn(decl.decl, sym);
+      if (decl.decl.isTask) emitTaskThunk(decl.decl);
     } else if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
       emitFn(decl.fn, decl.fn.name); // unmangled
     } else if (decl.kind === ASTNodeKind.TYPE_DECL && decl.methods?.length > 0) {
@@ -1630,11 +1729,15 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     tempCounter = 0;
     labelCounter = 0;
     symbols = new Map();
+    bindingDeclTable = new Map();
     currentReturnType = node.resolvedType;
+    const prevInMain = inMainFn;
+    inMainFn = symName === "main";
     const params = node.params ?? [];
     const llvmRet = llvmType(node.resolvedType);
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
     const fnLines = [`define ${llvmRet} @${symName}(${paramSig}) {`, "entry:"];
+    if (inMainFn) fnLines.push("  call void @yoop_runtime_init()");
     for (const p of params) {
       const ty = p.resolvedType;
       const llvmTy = llvmType(ty);
@@ -1648,16 +1751,21 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     emitImplicitCleanups(node.body, fnLines);
     if (isVoidReturn(node.resolvedType)) {
       const last = fnLines[fnLines.length - 1].trim();
-      if (!last.startsWith("ret")) fnLines.push("  ret void");
+      if (!last.startsWith("ret")) {
+        if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
+        fnLines.push("  ret void");
+      }
     }
     fnLines.push("}");
     lines.push(...fnLines);
+    inMainFn = prevInMain;
   }
 
   function emitMethodFn(methodDecl) {
     tempCounter = 0;
     labelCounter = 0;
     symbols = new Map();
+    bindingDeclTable = new Map();
     currentReturnType = methodDecl.resolvedFuncType.returnType;
 
     const returnType = methodDecl.resolvedFuncType.returnType;
@@ -1691,6 +1799,117 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
     fnLines.push("}");
     lines.push(...fnLines);
+  }
+
+  // Phase 6.3: per-task-function thunk. Layout-aware: GEP into the handle's
+  // result slot (field 6) and arg fields (7..) by struct index. The body
+  // itself is emitted via emitFn as a regular function returning T.
+  function emitTaskThunk(taskDecl) {
+    const meta = taskFnTable.get(taskDecl.name);
+    if (!meta) return;
+    const tcount = (n) => `%tt${n}`;
+    let tn = 0;
+    const fnLines = [];
+    const thunkSym = `${mangle(moduleId, taskDecl.name)}__thunk`;
+    fnLines.push(`define void @${thunkSym}(ptr %ts) {`);
+    fnLines.push("entry:");
+    // Load each arg from its corresponding struct field (7 + i).
+    const argVals = [];
+    for (let i = 0; i < meta.args.length; i++) {
+      const argType = meta.args[i];
+      const llvmArgTy = llvmType(argType);
+      const gep = tcount(tn++);
+      fnLines.push(
+        `  ${gep} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 ${7 + i}`,
+      );
+      const val = tcount(tn++);
+      fnLines.push(`  ${val} = load ${llvmArgTy}, ptr ${gep}`);
+      argVals.push({ val, ty: llvmArgTy });
+    }
+    const bodySym = mangle(moduleId, taskDecl.name);
+    const argList = argVals.map((a) => `${a.ty} ${a.val}`).join(", ");
+    const resultLlvm = llvmType(meta.resultType);
+    if (isVoidReturn(meta.resultType)) {
+      fnLines.push(`  call void @${bodySym}(${argList})`);
+    } else {
+      const resVal = tcount(tn++);
+      fnLines.push(`  ${resVal} = call ${resultLlvm} @${bodySym}(${argList})`);
+      // Store the result at field 6.
+      const resPtr = tcount(tn++);
+      fnLines.push(
+        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 6`,
+      );
+      fnLines.push(`  store ${resultLlvm} ${resVal}, ptr ${resPtr}`);
+    }
+    fnLines.push("  call void @yoop_handle_signal_done(ptr %ts)");
+    fnLines.push("  ret void");
+    fnLines.push("}");
+    lines.push(...fnLines);
+  }
+
+  // Phase 6.3: helpers shared by joined / pooled / immediate binding emission.
+  // Initializes the prefix fields and stores args. Caller is responsible for
+  // alloca/heap allocation of the handle.
+  function emitTaskHandleInit(handlePtr, taskFnName, argNodes, fnLines) {
+    const meta = taskFnTable.get(taskFnName);
+    const thunkSym = `${mangle(moduleId, taskFnName)}__thunk`;
+    // field 0: thunk pointer
+    const thunkPtr = freshTemp();
+    fnLines.push(
+      `  ${thunkPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 0`,
+    );
+    fnLines.push(`  store ptr @${thunkSym}, ptr ${thunkPtr}`);
+    // field 1: state = 0 (atomic store)
+    const statePtr = freshTemp();
+    fnLines.push(
+      `  ${statePtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 1`,
+    );
+    fnLines.push(`  store i8 0, ptr ${statePtr}`);
+    // field 4 / 5: mutex_ptr / cond_ptr = null (yoop_task_submit allocates them).
+    const mPtr = freshTemp();
+    fnLines.push(
+      `  ${mPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 4`,
+    );
+    fnLines.push(`  store ptr null, ptr ${mPtr}`);
+    const cPtr = freshTemp();
+    fnLines.push(
+      `  ${cPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 5`,
+    );
+    fnLines.push(`  store ptr null, ptr ${cPtr}`);
+    // args at fields 7..
+    for (let i = 0; i < argNodes.length; i++) {
+      const arg = emitExpr(argNodes[i], fnLines);
+      const llvmArgTy = llvmType(meta.args[i]);
+      const slotPtr = freshTemp();
+      fnLines.push(
+        `  ${slotPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 ${7 + i}`,
+      );
+      fnLines.push(`  store ${llvmArgTy} ${arg.val}, ptr ${slotPtr}`);
+    }
+    return { thunkSym, meta };
+  }
+
+  // Compute sizeof(Task struct) via the getelementptr null trick.
+  function emitTaskStructSize(meta, fnLines) {
+    const sizeTmp = freshTemp();
+    fnLines.push(
+      `  ${sizeTmp} = getelementptr ${meta.structName}, ptr null, i32 1`,
+    );
+    const sizeI64 = freshTemp();
+    fnLines.push(`  ${sizeI64} = ptrtoint ptr ${sizeTmp} to i64`);
+    return sizeI64;
+  }
+
+  // Pull the task fn name out of a CALL_EXPRESSION RHS. Currently only
+  // local-module task calls are supported (no imported task fns in 6.3).
+  function taskCallFnName(callExpr) {
+    if (callExpr.kind !== ASTNodeKind.CALL_EXPRESSION) return null;
+    if (typeof callExpr.callee !== "string") return null;
+    if (callExpr.calleeModuleId) {
+      // Imported task fn — out of 6.3 scope; reject at codegen.
+      throw new Error(`codegen: cross-module task calls not supported in phase 6.3`);
+    }
+    return taskFnTable.has(callExpr.callee) ? callExpr.callee : null;
   }
 
   function calleeSymbol(node) {
@@ -1882,8 +2101,52 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         fnLines.push(`  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`);
         return { val: tmp, yoopType: PrimType("string") };
       }
+      case ASTNodeKind.WAIT_EXPRESSION: {
+        return emitWaitExpression(node, fnLines);
+      }
       default: throw new Error(`codegen: unhandled expression kind "${node.kind}"`);
     }
+  }
+
+  // Phase 6.3: `wait <ident>`. The operand must be a Task<T>-typed binding
+  // (joined or pooled). Load its handle ptr, block in the runtime, then load
+  // the result from field 6.
+  function emitWaitExpression(node, fnLines) {
+    const operand = node.operand;
+    if (operand.kind !== ASTNodeKind.IDENT) {
+      throw new Error(`codegen: wait operand must be a binding identifier in phase 6.3`);
+    }
+    // Resolve the task fn meta via the binding's source. We need the
+    // result type and struct layout, but the binding only carries TaskType.
+    // We look it up via the binding's source declaration node.
+    const taskMeta = lookupWaitTargetMeta(operand);
+    const handlePtr = freshTemp();
+    fnLines.push(`  ${handlePtr} = load ptr, ptr %${operand.name}`);
+    fnLines.push(`  call void @yoop_task_wait(ptr ${handlePtr})`);
+    const resultLlvm = llvmType(taskMeta.resultType);
+    const resPtr = freshTemp();
+    fnLines.push(
+      `  ${resPtr} = getelementptr inbounds ${taskMeta.structName}, ptr ${handlePtr}, i32 0, i32 6`,
+    );
+    const resVal = freshTemp();
+    fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
+    return { val: resVal, yoopType: taskMeta.resultType };
+  }
+
+  // Map a wait operand back to its originating task fn via the binding's
+  // declaration. The binding's source is the joined/pooled CONST_DECL whose
+  // RHS is a CALL_EXPRESSION naming the task fn.
+  function lookupWaitTargetMeta(operand) {
+    const decl = bindingDeclTable.get(operand.name);
+    if (!decl) {
+      throw new Error(`codegen: wait operand "${operand.name}" has no recorded task source`);
+    }
+    const fnName = decl.taskFnName;
+    const meta = taskFnTable.get(fnName);
+    if (!meta) {
+      throw new Error(`codegen: wait operand "${operand.name}" references unknown task fn "${fnName}"`);
+    }
+    return meta;
   }
 
   function emitCallExpr(node, fnLines) {
@@ -2094,9 +2357,104 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   // Phase 6.1: emit a single CLEANUP_CALL node. The binding's alloca slot is
   // `%<bindingName>` (kind-prefixed bindings always declare a struct value;
   // the trait method takes `ref self` so we pass the slot pointer directly).
+  // Phase 6.3: also dispatches TASK_AUTO_WAIT / TASK_RELEASE / TASK_RETAIN.
   function emitCleanupCall(node, fnLines) {
+    if (node.kind === ASTNodeKind.TASK_AUTO_WAIT) {
+      // joined binding: handle ptr is stored in %<name>'s ptr slot.
+      const handlePtr = freshTemp();
+      fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      fnLines.push(`  call void @yoop_task_wait(ptr ${handlePtr})`);
+      fnLines.push(`  call void @yoop_task_free_sync_pair(ptr ${handlePtr})`);
+      return;
+    }
+    if (node.kind === ASTNodeKind.TASK_RELEASE) {
+      const handlePtr = freshTemp();
+      fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      fnLines.push(`  call void @yoop_task_release(ptr ${handlePtr})`);
+      return;
+    }
+    if (node.kind === ASTNodeKind.TASK_RETAIN) {
+      const handlePtr = freshTemp();
+      fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      fnLines.push(`  call void @yoop_task_retain(ptr ${handlePtr})`);
+      return;
+    }
     const mangled = `${node.moduleId}__${node.structType.name}__${node.methodName}`;
     fnLines.push(`  call void @${mangled}(ptr %${node.bindingName})`);
+  }
+
+  // Phase 6.3: `joined h = task_call();` — stack-allocate the Task struct,
+  // submit it, and bind %h to a ptr slot holding the handle. The auto-wait
+  // and free_sync_pair are inserted by kindCheck at scope exit.
+  function emitJoinedBinding(node, fnLines) {
+    const fnName = taskCallFnName(node.assignment);
+    if (!fnName) {
+      throw new Error(`codegen: joined RHS must be a task call`);
+    }
+    const meta = taskFnTable.get(fnName);
+    const handleSlot = freshTemp();
+    fnLines.push(
+      `  ${handleSlot} = alloca ${meta.structName}, align 8`,
+    );
+    // zero-init the struct so refcount/state start clean.
+    fnLines.push(`  store ${meta.structName} zeroinitializer, ptr ${handleSlot}`);
+    emitTaskHandleInit(handleSlot, fnName, node.assignment.args ?? [], fnLines);
+    fnLines.push(`  call void @yoop_task_submit(ptr ${handleSlot}, ptr @${mangle(moduleId, fnName)}__thunk)`);
+    // Bind %name as a ptr slot pointing at the on-stack handle.
+    symbols.set(node.name, node.resolvedType); // TaskType
+    bindingDeclTable.set(node.name, { taskFnName: fnName });
+    fnLines.push(`  %${node.name} = alloca ptr, align 8`);
+    fnLines.push(`  store ptr ${handleSlot}, ptr %${node.name}`);
+  }
+
+  // Phase 6.3: `pooled h = task_call();` — heap-allocate a refcounted handle.
+  // yoop_task_alloc returns a zero-init buffer with refcount=2 (caller +
+  // worker). kindCheck inserts a release at scope exit; the worker thunk
+  // releases its own reference via yoop_handle_signal_done.
+  function emitPooledBinding(node, fnLines) {
+    const fnName = taskCallFnName(node.assignment);
+    if (!fnName) {
+      throw new Error(`codegen: pooled RHS must be a task call`);
+    }
+    const meta = taskFnTable.get(fnName);
+    const size = emitTaskStructSize(meta, fnLines);
+    const heapPtr = freshTemp();
+    fnLines.push(`  ${heapPtr} = call ptr @yoop_task_alloc(i64 ${size})`);
+    emitTaskHandleInit(heapPtr, fnName, node.assignment.args ?? [], fnLines);
+    fnLines.push(`  call void @yoop_task_submit(ptr ${heapPtr}, ptr @${mangle(moduleId, fnName)}__thunk)`);
+    symbols.set(node.name, node.resolvedType); // TaskType
+    bindingDeclTable.set(node.name, { taskFnName: fnName });
+    fnLines.push(`  %${node.name} = alloca ptr, align 8`);
+    fnLines.push(`  store ptr ${heapPtr}, ptr %${node.name}`);
+  }
+
+  // Phase 6.3: immediate task call — `const x: T = compute(...);`. Allocate
+  // on the stack, submit, wait inline, load the result, free the sync pair.
+  function emitImmediateTaskBinding(node, fnLines) {
+    const fnName = taskCallFnName(node.assignment);
+    if (!fnName) {
+      throw new Error(`codegen: immediate task binding expects a task call RHS`);
+    }
+    const meta = taskFnTable.get(fnName);
+    const handleSlot = freshTemp();
+    fnLines.push(`  ${handleSlot} = alloca ${meta.structName}, align 8`);
+    fnLines.push(`  store ${meta.structName} zeroinitializer, ptr ${handleSlot}`);
+    emitTaskHandleInit(handleSlot, fnName, node.assignment.args ?? [], fnLines);
+    fnLines.push(`  call void @yoop_task_submit(ptr ${handleSlot}, ptr @${mangle(moduleId, fnName)}__thunk)`);
+    fnLines.push(`  call void @yoop_task_wait(ptr ${handleSlot})`);
+    // Load the result from field 6.
+    const declType = node.resolvedType;
+    symbols.set(node.name, declType);
+    const llvmTy = llvmType(declType);
+    fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
+    const resPtr = freshTemp();
+    fnLines.push(
+      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 6`,
+    );
+    const resVal = freshTemp();
+    fnLines.push(`  ${resVal} = load ${llvmTy}, ptr ${resPtr}`);
+    fnLines.push(`  store ${llvmTy} ${resVal}, ptr %${node.name}`);
+    fnLines.push(`  call void @yoop_task_free_sync_pair(ptr ${handleSlot})`);
   }
 
   function emitImplicitCleanups(block, fnLines) {
@@ -2123,6 +2481,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     fnLines.push(`  store ptr ${errStr}, ptr ${failErrPtr}`);
     const failVal = freshTemp();
     fnLines.push(`  ${failVal} = load ${retLlvmTy}, ptr ${failSlot}`);
+    if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
     fnLines.push(`  ret ${retLlvmTy} ${failVal}`);
   }
 
@@ -2132,18 +2491,38 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         // Compute the return value first, fire pending cleanups, then ret.
         // Cleanups must come AFTER the return value is computed (in case the
         // value reads from a binding being cleaned up) but BEFORE `ret`.
+        // Runtime shutdown comes AFTER cleanups (cleanups may call into user /
+        // FFI code) and immediately before the `ret`.
         if (!node.value || (node.value.kind === ASTNodeKind.IDENT && node.value.name === "void")) {
           emitPendingCleanups(node, fnLines);
+          if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
           fnLines.push("  ret void");
         } else {
           const r = emitExpr(node.value, fnLines);
           emitPendingCleanups(node, fnLines);
+          if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
           fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
         }
         break;
       }
       case ASTNodeKind.LET_DECL:
       case ASTNodeKind.CONST_DECL: {
+        // Phase 6.3: builtin task-binding kinds (joined / pooled) and the
+        // immediate-task-call shape have their own emission paths.
+        const builtin = node.kindPrefix?.builtin;
+        if (builtin === "joined") {
+          emitJoinedBinding(node, fnLines);
+          break;
+        }
+        if (builtin === "pooled") {
+          emitPooledBinding(node, fnLines);
+          break;
+        }
+        if (node.immediateTaskCall) {
+          emitImmediateTaskBinding(node, fnLines);
+          break;
+        }
+
         const declType = node.resolvedType;
         if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
         symbols.set(node.name, declType);
