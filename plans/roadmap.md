@@ -98,12 +98,21 @@ The first piece of phase 6.3 is the runtime, separated from the language-sugar w
 
 This phase lands no surface-language changes; it's the foundation phase 6.3 (language sugar) builds on. The full contract is in [runtime-design.md](runtime-design.md).
 
-### Phase 7 — Generics, polish, self-hosting
+### Phase 7 — Generics, pattern matching, switch
 
 Once kinds are stable, the language is usable. From here:
 
 - User-defined generic types (deferred per spec §3)
 - Pattern matching / sum types (deferred per spec §10)
+
+### Phase 8 - Beginning standard library ideas and internals
+
+- Dynamic array
+- File I/O
+- Basic networking
+
+### Phase 9 - polish, self-hosting
+
 - Optimization passes
 - Begin self-hosting: rewrite the compiler in Yooper, bootstrap through the JS one
 
