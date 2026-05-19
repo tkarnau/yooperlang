@@ -1,0 +1,7 @@
+kind aligned(n: string) {
+    appliesTo binding;
+}
+
+function main(): int32 {
+    return 0;
+}

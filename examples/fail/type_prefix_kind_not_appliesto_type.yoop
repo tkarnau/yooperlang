@@ -1,0 +1,9 @@
+kind only_binding { appliesTo binding; }
+
+type V only_binding {
+    a: int32,
+}
+
+function main(): int32 {
+    return 0;
+}

@@ -1,0 +1,7 @@
+kind a32 { appliesTo binding; layout { align 32; }; }
+kind a64 { appliesTo binding; layout { align 64; }; }
+kind bad = a32 & a64;
+
+function main(): int32 {
+    return 0;
+}

@@ -16,6 +16,7 @@ import {
   ArrayType,
   ErrorType,
   FuncType,
+  KindApplication,
   KindType,
   RefType,
   StructType,
@@ -109,6 +110,8 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
 //   - its type is `Task<T>` (which inherently carries the `Task` builtin), OR
 //   - its type is itself a struct that propagates kinds (transitive — every
 //     kind the inner struct propagates is one this field carries).
+// Phase 6.5: propagatedKinds entries are KindApplications; we still match
+// by KindType identity (args don't affect propagation matching).
 export function fieldCarriedKinds(field) {
   const out = [];
   if (field.kindType) out.push(field.kindType);
@@ -116,7 +119,8 @@ export function fieldCarriedKinds(field) {
     if (!out.includes(TASK_KIND)) out.push(TASK_KIND);
   }
   if (field.type?.kind === "struct" && field.type.propagatedKinds?.length) {
-    for (const k of field.type.propagatedKinds) {
+    for (const a of field.type.propagatedKinds) {
+      const k = a.kindType ?? a; // tolerate legacy bare-KindType during transition
       if (!out.includes(k)) out.push(k);
     }
   }
@@ -250,7 +254,17 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
   }
 
   // Step 5: rebuild StructType with implements + methods set.
-  const fullStruct = StructType(typeDecl.name, fields, mod.id, resolvedImplements, resolvedMethods);
+  // Phase 6.5: preserve propagatedKinds + kindApplication from the C-pass type.
+  const prev = typeDecl.resolvedType;
+  const fullStruct = StructType(
+    typeDecl.name,
+    fields,
+    mod.id,
+    resolvedImplements,
+    resolvedMethods,
+    prev?.propagatedKinds ?? [],
+    prev?.kindApplication ?? null,
+  );
   typeDecl.resolvedType = fullStruct;
   for (const m of typeDecl.methods ?? []) {
     m.implementingType = fullStruct;
@@ -270,10 +284,13 @@ function resolveKindClauses(mod, moduleEnv, errors) {
     if (d.kind !== ASTNodeKind.KIND_DECL) continue;
     const kt = d.resolvedKindType;
     if (!kt) continue; // rejected in pass A
+    // Composition decls have no clauses — they get merged in C.2b.
+    if (d.composition) continue;
     let mustCallSeen = false;
     let ownsBlockSeen = false;
     let mustNotEscapeSeen = false;
     let mustNotShareSeen = false;
+    let layoutSeen = false;
     let mustCallClause = null;
     for (const c of d.clauses) {
       switch (c.kind) {
@@ -333,6 +350,16 @@ function resolveKindClauses(mod, moduleEnv, errors) {
             }
           }
           break;
+        case ASTNodeKind.KIND_LAYOUT_CLAUSE: {
+          if (layoutSeen) {
+            pushError(errors, c, `duplicate layout clause in kind '${kt.name}'`);
+            break;
+          }
+          layoutSeen = true;
+          const slot = resolveLayoutAlign(c.alignExpr, kt, errors);
+          if (slot) kt.layoutAlign = slot;
+          break;
+        }
       }
     }
     // mustCall resolution runs after requires have been collected so we can
@@ -356,6 +383,278 @@ function resolveKindClauses(mod, moduleEnv, errors) {
       }
     }
   }
+}
+
+// ─── phase 6.5: layout / composition / parameterized kinds ──────────────────
+
+// Validate a `layout { align <expr>; }` align expression. Returns a slot
+// `{ kind: "const", value }` for integer literals or `{ kind: "param", name }`
+// for an IDENT that names one of the kind's params. Pushes an error and
+// returns null on any other shape.
+function resolveLayoutAlign(expr, kt, errors) {
+  if (!expr) return null;
+  if (expr.kind === ASTNodeKind.INT_LITERAL) {
+    const v = expr.value;
+    if (!Number.isInteger(v) || v <= 0 || (v & (v - 1)) !== 0 || v > 4096) {
+      pushError(errors, expr,
+        `layout align must be a power of two between 1 and 4096, got ${v}`);
+      return null;
+    }
+    return { kind: "const", value: v };
+  }
+  if (expr.kind === ASTNodeKind.IDENT) {
+    const p = kt.params.find((pp) => pp.name === expr.name);
+    if (!p) {
+      pushError(errors, expr,
+        `layout align references unknown identifier '${expr.name}' (must be a constant or a kind parameter)`);
+      return null;
+    }
+    return { kind: "param", name: expr.name };
+  }
+  pushError(errors, expr,
+    `layout align must be a constant integer literal or a kind parameter reference`);
+  return null;
+}
+
+// Resolve a kind reference by name into a KindType. Looks up the local
+// kindTable (which includes imports + the seeded builtin Task) plus the
+// builtin kind table for joined/pooled/Task.
+function lookupKindByName(name, modEnv) {
+  const fromTable = modEnv.kindTable?.get(name);
+  if (fromTable) return fromTable;
+  // builtin lookup is centralized in builtinKinds.js
+  // but joined/pooled/Task aren't typically composed; the kind table
+  // already has Task seeded.
+  return null;
+}
+
+// Build a KindApplication from a use-site kind prefix: validate arg count,
+// evaluate args to constants. Site applicability is NOT checked here —
+// caller invokes `validateKindAppSite` after C.2 so the kind's `appliesTo`
+// is populated. Returns null on error.
+function resolveKindApplication(kindPrefix, modEnv, errors) {
+  if (!kindPrefix) return null;
+  const kt = lookupKindByName(kindPrefix.name, modEnv);
+  if (!kt) {
+    pushError(errors, { sourceLoc: kindPrefix.sourceLoc },
+      `unknown kind "${kindPrefix.name}"`);
+    return null;
+  }
+  // Arg-count check (params populated in pass A).
+  const args = kindPrefix.args ?? [];
+  if (args.length !== kt.params.length) {
+    pushError(errors, { sourceLoc: kindPrefix.sourceLoc },
+      `kind '${kt.name}' expects ${kt.params.length} argument(s), got ${args.length}`);
+    return null;
+  }
+  // Evaluate each arg as a compile-time integer constant.
+  const resolvedArgs = [];
+  for (let i = 0; i < args.length; i++) {
+    const a = args[i];
+    if (a.kind !== ASTNodeKind.INT_LITERAL) {
+      pushError(errors, a,
+        `kind argument must be a constant in phase 6.5 (got ${a.kind})`);
+      return null;
+    }
+    resolvedArgs.push(a.value);
+  }
+  return new KindApplication(kt, resolvedArgs);
+}
+
+// Phase 6.5: separate site-applicability check, runs after C.2 has populated
+// every kind's `appliesTo` set.
+function validateKindAppSite(app, site, sourceLoc, errors) {
+  if (!app) return;
+  const kt = app.kindType;
+  if (!kt.appliesTo.has(site)) {
+    const sites = [...kt.appliesTo].join(", ") || "(none)";
+    pushError(errors, { sourceLoc },
+      `kind '${kt.name}' does not apply to ${site}s (declared appliesTo: ${sites})`);
+  }
+}
+
+// Shim to avoid a CJS-style require in this ESM file: builtin kinds are
+// already merged into the module's kindTable by typecheckProgram's pass A
+// (Task seed) and by parsing for joined/pooled (which take a separate path).
+function require_builtin_kind_via_lookup(_name) {
+  return null;
+}
+
+// Pass C.2b: flatten composition decls. Must run after C.2 so referenced
+// kinds' clauses are populated. Cross-module references work because
+// imported kinds share the same KindType instance with the source module
+// (which is topologically earlier, hence already resolved).
+function resolveKindComposition(mod, moduleEnv, errors) {
+  const env = moduleEnv.get(mod.id);
+  for (const decl of mod.ast.body) {
+    const d = innerDecl(decl);
+    if (d.kind !== ASTNodeKind.KIND_DECL) continue;
+    if (!d.composition) continue;
+    const kt = d.resolvedKindType;
+    if (!kt) continue;
+
+    // Resolve each reference.
+    const refs = [];
+    for (const ref of d.composition.kindRefs) {
+      const target = env.kindTable.get(ref.name);
+      if (!target) {
+        pushError(errors, { sourceLoc: ref.sourceLoc },
+          `unknown kind '${ref.name}' in composition of kind '${kt.name}'`);
+        continue;
+      }
+      // Validate arg count
+      const argCount = (ref.args ?? []).length;
+      if (argCount !== target.params.length) {
+        pushError(errors, { sourceLoc: ref.sourceLoc },
+          `kind '${target.name}' expects ${target.params.length} argument(s) in composition, got ${argCount}`);
+        continue;
+      }
+      // Evaluate args
+      const resolvedArgs = [];
+      let argOk = true;
+      for (const a of ref.args ?? []) {
+        if (a.kind !== ASTNodeKind.INT_LITERAL) {
+          pushError(errors, a,
+            `composition argument must be a constant integer literal`);
+          argOk = false;
+          break;
+        }
+        resolvedArgs.push(a.value);
+      }
+      if (!argOk) continue;
+      refs.push({ target, args: resolvedArgs, sourceLoc: ref.sourceLoc });
+    }
+    kt.composedFrom = refs.map((r) => ({ name: r.target.name, args: r.args }));
+
+    if (refs.length === 0) {
+      // Nothing to merge; leave kt with empty slots.
+      continue;
+    }
+
+    // Compute appliesTo as the intersection of components'.
+    let intersected = null;
+    for (const r of refs) {
+      const set = r.target.appliesTo;
+      if (intersected === null) {
+        intersected = new Set(set);
+      } else {
+        for (const s of [...intersected]) {
+          if (!set.has(s)) intersected.delete(s);
+        }
+      }
+    }
+    if (!intersected || intersected.size === 0) {
+      pushError(errors, d,
+        `composition has no common application site in kind '${kt.name}'`);
+    } else {
+      for (const s of intersected) kt.appliesTo.add(s);
+    }
+
+    // Flatten clauses.
+    let mustCallEntry = null;
+    let mustCallSourceName = null;
+    let layoutSlot = null;
+    let layoutSourceName = null;
+    for (const r of refs) {
+      const target = r.target;
+      // requires — union by trait identity.
+      for (const t of target.requires) {
+        if (
+          !kt.requires.some(
+            (e) => e.name === t.name && (e.moduleId ?? null) === (t.moduleId ?? null),
+          )
+        ) {
+          kt.requires.push(t);
+        }
+      }
+      // mustCall — contradiction if two components disagree on method name.
+      for (const mc of target.mustCall) {
+        if (mustCallEntry && mustCallEntry.methodName !== mc.methodName) {
+          pushError(errors, d,
+            `composition contradiction in kind '${kt.name}': mustCall ${mustCallSourceName} vs mustCall ${mc.methodName}`);
+        } else if (!mustCallEntry) {
+          mustCallEntry = mc;
+          mustCallSourceName = mc.methodName;
+        }
+      }
+      // ownsBlock, mustNotEscape — boolean union.
+      if (target.ownsBlock) kt.ownsBlock = true;
+      if (target.mustNotEscape) kt.mustNotEscape = true;
+      // mustNotShare, forbids — set union.
+      for (const s of target.mustNotShare) {
+        if (!kt.mustNotShare.includes(s)) kt.mustNotShare.push(s);
+      }
+      for (const f of target.forbids) {
+        if (!kt.forbids.includes(f)) kt.forbids.push(f);
+      }
+      // layoutAlign — contradiction if two components specify different
+      // constant values. (Param-bearing layouts can't appear here since
+      // composition operands take constant args, but we still propagate
+      // a substituted-const value.)
+      if (target.layoutAlign) {
+        let candidateValue = null;
+        if (target.layoutAlign.kind === "const") {
+          candidateValue = target.layoutAlign.value;
+        } else if (target.layoutAlign.kind === "param") {
+          const idx = target.params.findIndex((p) => p.name === target.layoutAlign.name);
+          if (idx >= 0 && idx < r.args.length) candidateValue = r.args[idx];
+        }
+        if (candidateValue != null) {
+          if (layoutSlot && layoutSlot.value !== candidateValue) {
+            pushError(errors, d,
+              `composition contradiction in kind '${kt.name}': align ${layoutSlot.value} vs align ${candidateValue}`);
+          } else {
+            layoutSlot = { kind: "const", value: candidateValue };
+            layoutSourceName = target.name;
+          }
+        }
+      }
+    }
+    if (mustCallEntry) kt.mustCall.push(mustCallEntry);
+    if (layoutSlot) kt.layoutAlign = layoutSlot;
+  }
+}
+
+// Resolve a propagates-clause entry (parser produces { name, args, sourceLoc })
+// into a KindApplication suitable for storage on StructType/FuncType.
+function resolveKindAppFromPropagatesEntry(ref, modEnv, errors) {
+  const target = modEnv.kindTable.get(ref.name);
+  if (!target) {
+    pushError(errors, { sourceLoc: ref.sourceLoc },
+      `unknown kind '${ref.name}' in propagates clause`);
+    return null;
+  }
+  const argCount = (ref.args ?? []).length;
+  if (argCount !== target.params.length) {
+    pushError(errors, { sourceLoc: ref.sourceLoc },
+      `kind '${target.name}' expects ${target.params.length} argument(s) in propagates clause, got ${argCount}`);
+    return null;
+  }
+  const resolvedArgs = [];
+  for (const a of ref.args ?? []) {
+    if (a.kind !== ASTNodeKind.INT_LITERAL) {
+      pushError(errors, a,
+        `propagates argument must be a constant integer literal`);
+      return null;
+    }
+    resolvedArgs.push(a.value);
+  }
+  return new KindApplication(target, resolvedArgs);
+}
+
+// Compute the effective layout alignment for a KindApplication after
+// substituting parameter references. Returns null if no layout is declared.
+export function effectiveLayoutAlign(app) {
+  if (!app) return null;
+  const slot = app.kindType.layoutAlign;
+  if (!slot) return null;
+  if (slot.kind === "const") return slot.value;
+  if (slot.kind === "param") {
+    const idx = app.kindType.params.findIndex((p) => p.name === slot.name);
+    if (idx < 0) return null;
+    return app.args[idx] ?? null;
+  }
+  return null;
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
@@ -464,6 +763,21 @@ export function typecheckProgram(modules) {
           });
         } else {
           const kt = new KindType(d.name, mod.id);
+          // Phase 6.5: record kind parameters on the shell so use-site
+          // resolution can validate arg counts during pass C.
+          for (const p of d.params ?? []) {
+            const annot = p.typeAnnotation;
+            const typeName = annot?.kind === "typeName" ? annot.name : null;
+            const allowed = ["usize", "uint32", "uint64", "int32", "int64"];
+            if (!typeName || !allowed.includes(typeName)) {
+              const display = typeName ?? "<complex>";
+              errors.push({
+                message: `kind parameter type '${display}' not yet supported (use usize/int32/uint32 in phase 6.5)`,
+                sourceLoc: p.sourceLoc,
+              });
+            }
+            kt.params.push({ name: p.name, typeName, sourceLoc: p.sourceLoc });
+          }
           kindTable.set(d.name, kt);
           d.resolvedKindType = kt;
         }
@@ -506,26 +820,21 @@ export function typecheckProgram(modules) {
           });
         }
 
-        // Phase 6.4: resolve `propagates<K1, K2, ...>` against the local kind table.
+        // Phase 6.4/6.5: resolve `propagates<K1, K2(args), ...>` into KindApplications.
         const propagatedKinds = [];
         if (d.propagatesClause) {
+          const env2 = moduleEnv.get(mod.id);
           for (const ref of d.propagatesClause.kindNames) {
-            const kt = moduleEnv.get(mod.id).kindTable.get(ref.name);
-            if (!kt) {
-              errors.push({
-                message: `unknown kind '${ref.name}' in propagates clause of struct "${d.name}"`,
-                sourceLoc: ref.sourceLoc,
-              });
-              continue;
-            }
-            if (propagatedKinds.some((k) => k === kt)) {
+            const app = resolveKindAppFromPropagatesEntry(ref, env2, errors);
+            if (!app) continue;
+            if (propagatedKinds.some((a) => a.kindType === app.kindType)) {
               errors.push({
                 message: `duplicate kind '${ref.name}' in propagates clause of struct "${d.name}"`,
                 sourceLoc: ref.sourceLoc,
               });
               continue;
             }
-            propagatedKinds.push(kt);
+            propagatedKinds.push(app);
           }
         }
 
@@ -582,10 +891,12 @@ export function typecheckProgram(modules) {
         // Phase 6.4: every kind-carrying field's kind must be in propagatedKinds.
         // A field "carries kind K" if its kindPrefix resolves to K, or its type
         // is `Task<T>` (which inherently carries the builtin `Task` kind).
+        // Phase 6.5: propagatedKinds entries are KindApplications; compare by
+        // KindType identity.
         for (const f of fields) {
           const carried = fieldCarriedKinds(f);
           for (const ck of carried) {
-            if (!propagatedKinds.includes(ck)) {
+            if (!propagatedKinds.some((a) => a.kindType === ck)) {
               errors.push({
                 message: `field '${f.name}' carries kind '${ck.name}' but enclosing struct '${d.name}' does not propagate it`,
                 sourceLoc: d.sourceLoc,
@@ -594,7 +905,27 @@ export function typecheckProgram(modules) {
           }
         }
 
-        const fullType = StructType(d.name, fields, mod.id, [], new Map(), propagatedKinds);
+        // Phase 6.5: type-decl kind prefix (e.g. `type Vec4 aligned(32) { ... }`).
+        // Resolve the application now; site applicability is validated after C.2.
+        let typeKindApp = null;
+        if (d.kindPrefix) {
+          typeKindApp = resolveKindApplication(
+            d.kindPrefix,
+            moduleEnv.get(mod.id),
+            errors,
+          );
+          d.resolvedKindApplication = typeKindApp;
+        }
+
+        const fullType = StructType(
+          d.name,
+          fields,
+          mod.id,
+          [],
+          new Map(),
+          propagatedKinds,
+          typeKindApp,
+        );
         d.resolvedType = fullType;
         structTable.set(d.name, fullType);
       }
@@ -633,22 +964,16 @@ export function typecheckProgram(modules) {
         if (funcDecl.propagatesClause) {
           const env = moduleEnv.get(mod.id);
           for (const ref of funcDecl.propagatesClause.kindNames) {
-            const kt = env.kindTable.get(ref.name);
-            if (!kt) {
-              errors.push({
-                message: `unknown kind '${ref.name}' in propagates clause of function "${funcDecl.name}"`,
-                sourceLoc: ref.sourceLoc,
-              });
-              continue;
-            }
-            if (returnPropagatedKinds.includes(kt)) {
+            const app = resolveKindAppFromPropagatesEntry(ref, env, errors);
+            if (!app) continue;
+            if (returnPropagatedKinds.some((a) => a.kindType === app.kindType)) {
               errors.push({
                 message: `duplicate kind '${ref.name}' in propagates clause of function "${funcDecl.name}"`,
                 sourceLoc: ref.sourceLoc,
               });
               continue;
             }
-            returnPropagatedKinds.push(kt);
+            returnPropagatedKinds.push(app);
           }
         }
         funcDecl.returnPropagatedKinds = returnPropagatedKinds;
@@ -780,6 +1105,20 @@ export function typecheckProgram(modules) {
     // After C.1, every trait shell has its method map populated, which is what
     // `requires`/`mustCall` need to resolve against.
     resolveKindClauses(mod, moduleEnv, errors);
+    // pass C.2b - flatten composition decls now that primitive kinds in this
+    // module have their clauses resolved. Cross-module operands are already
+    // resolved because modules are typechecked in topological order.
+    resolveKindComposition(mod, moduleEnv, errors);
+
+    // pass C.2c - validate type-decl kind-prefix applicability now that every
+    // kind's `appliesTo` set is populated (struct fields ran before C.2).
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind !== ASTNodeKind.TYPE_DECL) continue;
+      const app = d.resolvedKindApplication;
+      if (!app) continue;
+      validateKindAppSite(app, "type", d.kindPrefix.sourceLoc, errors);
+    }
 
     // pass C.3 - impl block validation
     for (const decl of mod.ast.body) {

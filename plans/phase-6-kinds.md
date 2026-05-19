@@ -64,9 +64,11 @@ The big sub-phase. Splits in two:
 
 > Detailed plan: [phase-6-4-containment-propagation.md](phase-6-4-containment-propagation.md)
 
-### 6.5 — Layout, iteration restrictions, composition
+### 6.5 — Layout, composition, parameterized kinds
 
-`layout { align N; ... };`, `restricts iteration { allow ...; forbid ...; };`, and kind composition with `&` ([SPEC.md §6.4](../SPEC.md#L451)). Couples to the iteration story ([§9](../SPEC.md#L581)) — a collection's kind decides which `for ... in xs.method()` forms are legal. Also introduces parameterized kinds (`kind batchable(n: usize)`).
+`layout { align N; };` and kind composition with `&` ([SPEC.md §6.4](../SPEC.md#L451)), plus parameterized kinds (`kind aligned(n: usize)`) and the `appliesTo type` site (retiring 6.4's deferral). `restricts iteration` and `contains<K>` remain deferred past 6.5 — both depend on iteration infrastructure (`for item in xs.method()` plus generic iterator traits) that lands in phase 7. 6.5 closes phase 6.
+
+> Detailed plan: [phase-6-5-layout-composition.md](phase-6-5-layout-composition.md)
 
 ## What carries between sub-phases
 

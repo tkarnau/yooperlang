@@ -1,0 +1,7 @@
+kind only_binding { appliesTo binding; }
+kind only_type { appliesTo type; layout { align 16; }; }
+kind bad = only_binding & only_type;
+
+function main(): int32 {
+    return 0;
+}
