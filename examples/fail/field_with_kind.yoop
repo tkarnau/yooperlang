@@ -1,0 +1,31 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+    }
+}
+
+kind scoped {
+    appliesTo binding parameter field;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+    mustNotEscape scope;
+}
+
+type Wrapper {
+    handle: scoped FileHandle,
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: kind-bearing struct fields require propagates<K> or contains<K> (phase 6.4)

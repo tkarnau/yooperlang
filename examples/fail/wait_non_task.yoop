@@ -1,0 +1,5 @@
+function main(): int32 {
+    const x: int32 = 1;
+    const y: int32 = wait x;
+    return y;
+}

@@ -1,0 +1,9 @@
+kind k {
+    appliesTo binding binding;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: duplicate appliesTo site 'binding'

@@ -461,7 +461,7 @@ describe("parse: phase 6.1 - kind decls", () => {
     assert.equal(k.name, "disposable");
     assert.equal(k.clauses.length, 4);
     assert.equal(k.clauses[0].kind, ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
-    assert.equal(k.clauses[0].site, "binding");
+    assert.deepEqual(k.clauses[0].sites, ["binding"]);
     assert.equal(k.clauses[1].kind, ASTNodeKind.KIND_REQUIRES_CLAUSE);
     assert.equal(k.clauses[1].traitName, "Disposable");
     assert.equal(k.clauses[2].kind, ASTNodeKind.KIND_MUSTCALL_CLAUSE);
@@ -510,16 +510,16 @@ describe("parse: phase 6.1 - kind decls", () => {
         /duplicate appliesTo clause/,
       );
     });
-    it("rejects appliesTo parameter", () => {
+    it("rejects appliesTo function site", () => {
       assert.throws(
-        () => parse("kind k { appliesTo parameter; }"),
-        /appliesTo parameter not yet supported/,
+        () => parse("kind k { appliesTo function; }"),
+        /appliesTo function not yet supported/,
       );
     });
-    it("rejects multi-site appliesTo list", () => {
+    it("rejects duplicate appliesTo site", () => {
       assert.throws(
         () => parse("kind k { appliesTo binding binding; }"),
-        /appliesTo binding not yet supported/,
+        /duplicate appliesTo site 'binding'/,
       );
     });
     it("rejects mustCall beforeAny", () => {
@@ -574,11 +574,11 @@ describe("parse: phase 6.1 - kind decls", () => {
         /provides clause not yet supported/,
       );
     });
-    it("rejects mustNotEscape clause", () => {
+    it("rejects mustNotEscape without 'scope' keyword", () => {
       assert.throws(
         () =>
           parse("kind k { appliesTo binding; mustNotEscape; }"),
-        /mustNotEscape not yet supported/,
+        /mustNotEscape semicolon not yet supported/,
       );
     });
   });

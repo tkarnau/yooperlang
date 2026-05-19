@@ -1,0 +1,22 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+task compute(x: int32): int32 {
+    return x * x;
+}
+
+function main(): int32 {
+    const a: int32 = compute(3);
+    printf(`a=${a}\n`);
+
+    joined d = compute(4);
+    const d_val: int32 = wait d;
+    printf(`d=${d_val}\n`);
+
+    pooled h = compute(5);
+    const h_val: int32 = wait h;
+    printf(`h=${h_val}\n`);
+
+    return 0;
+}

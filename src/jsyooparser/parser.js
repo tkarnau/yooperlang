@@ -31,7 +31,10 @@ function isKindClauseStartTag(tag) {
     tag === TokenTags.appliesTo ||
     tag === TokenTags.requires ||
     tag === TokenTags.mustCall ||
-    tag === TokenTags.ownsBlock
+    tag === TokenTags.ownsBlock ||
+    tag === TokenTags.mustNotEscape ||
+    tag === TokenTags.mustNotShare ||
+    tag === TokenTags.forbids
   );
 }
 
@@ -40,9 +43,6 @@ function isKindClauseStartTag(tag) {
 // later sub-phases will introduce; today they lex as plain idents.
 const DeferredKindClauseMessages = {
   provides: "provides clause not yet supported in phase 6.1",
-  mustNotEscape: "mustNotEscape not yet supported (phase 6.2)",
-  mustNotShare: "mustNotShare not yet supported (phase 6.2)",
-  forbids: "forbids not yet supported (phase 6.2)",
   autoJoin: "autoJoin not yet supported (phase 6.3)",
   propagates: "propagates not yet supported (phase 6.4)",
   contains: "contains not yet supported (phase 6.4)",
@@ -191,14 +191,15 @@ export function parse(src) {
         const peekTag = peek().tag;
         switch (peekTag) {
           case TokenTags.function:
+          case TokenTags.task:
           case TokenTags.type:
             {
               seenNonImport = true;
-              node.body.push(
-                peekTag === TokenTags.function
-                  ? parseFunctionDecl()
-                  : parseTypeDecl(),
-              );
+              if (peekTag === TokenTags.type) {
+                node.body.push(parseTypeDecl());
+              } else {
+                node.body.push(parseFunctionDecl());
+              }
             }
             break;
           case TokenTags.import:
@@ -336,6 +337,12 @@ export function parse(src) {
         return parseMustCallClause();
       case TokenTags.ownsBlock:
         return parseOwnsBlockClause();
+      case TokenTags.mustNotEscape:
+        return parseMustNotEscapeClause();
+      case TokenTags.mustNotShare:
+        return parseMustNotShareClause();
+      case TokenTags.forbids:
+        return parseForbidsClause();
       default:
         // unreachable — caller guards with isKindClauseStartTag
         throw parseError(
@@ -349,38 +356,160 @@ export function parse(src) {
   function parseAppliesToClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
     expect(TokenTags.appliesTo);
-    // 6.1 only accepts the literal `binding` keyword.
-    if (peek().tag !== TokenTags.binding) {
+    const sites = [];
+    while (peek().tag !== TokenTags.semicolon && peek().tag !== TokenTags.eof) {
+      const tok = peek();
+      let site;
+      switch (tok.tag) {
+        case TokenTags.binding:
+          site = "binding";
+          break;
+        case TokenTags.parameter:
+          site = "parameter";
+          break;
+        case TokenTags.field:
+          site = "field";
+          break;
+        case TokenTags.function:
+          throw parseError(
+            "appliesTo function not yet supported (phase 6.5; introduced by task kind)",
+            tok.start,
+            tok.length,
+          );
+        case TokenTags.type:
+          throw parseError(
+            "appliesTo type not yet supported (phase 6.5; introduced by layout-bearing kinds)",
+            tok.start,
+            tok.length,
+          );
+        default: {
+          const name =
+            tok.tag === TokenTags.ident
+              ? src.substring(tok.start, tok.start + tok.length)
+              : inverseTokenTags[tok.tag];
+          throw parseError(
+            `unrecognized appliesTo site '${name}'`,
+            tok.start,
+            tok.length,
+          );
+        }
+      }
+      if (sites.includes(site)) {
+        throw parseError(
+          `duplicate appliesTo site '${site}'`,
+          tok.start,
+          tok.length,
+        );
+      }
+      sites.push(site);
+      advance();
+    }
+    if (sites.length === 0) {
+      throw parseError(
+        "appliesTo requires at least one site",
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    node.sites = sites;
+    return node;
+  }
+
+  function parseMustNotEscapeClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE);
+    expect(TokenTags.mustNotEscape);
+    if (peek().tag !== TokenTags.scope) {
       const tok = peek();
       const name =
         tok.tag === TokenTags.ident
           ? src.substring(tok.start, tok.start + tok.length)
           : inverseTokenTags[tok.tag];
       throw parseError(
-        `appliesTo ${name} not yet supported in phase 6.1; only 'binding' is accepted`,
+        `mustNotEscape ${name} not yet supported in phase 6.2; only 'scope' is accepted`,
         tok.start,
         tok.length,
       );
     }
-    advance(); // consume `binding`
-    // Reject multi-site lists eagerly. The next token must be `;`.
-    if (
-      peek().tag === TokenTags.binding ||
-      peek().tag === TokenTags.ident
-    ) {
+    advance(); // consume `scope`
+    expect(TokenTags.semicolon);
+    node.target = "scope";
+    return node;
+  }
+
+  function parseMustNotShareClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_MUST_NOT_SHARE_CLAUSE);
+    expect(TokenTags.mustNotShare);
+    if (peek().tag !== TokenTags.acrossScopes) {
       const tok = peek();
       const name =
         tok.tag === TokenTags.ident
           ? src.substring(tok.start, tok.start + tok.length)
-          : "binding";
+          : inverseTokenTags[tok.tag];
+      if (name === "acrossThreads") {
+        throw parseError(
+          "mustNotShare acrossThreads not yet supported (phase 6.3 wires concurrent sharing)",
+          tok.start,
+          tok.length,
+        );
+      }
       throw parseError(
-        `appliesTo ${name} not yet supported in phase 6.1; only 'binding' is accepted`,
+        `unrecognized mustNotShare target '${name}'; only 'acrossScopes' is accepted`,
         tok.start,
         tok.length,
       );
     }
+    advance(); // consume `acrossScopes`
     expect(TokenTags.semicolon);
-    node.site = "binding";
+    node.target = "acrossScopes";
+    return node;
+  }
+
+  function parseForbidsClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_FORBIDS_CLAUSE);
+    expect(TokenTags.forbids);
+    const categories = [];
+    while (peek().tag !== TokenTags.semicolon && peek().tag !== TokenTags.eof) {
+      const tok = peek();
+      let cat;
+      switch (tok.tag) {
+        case TokenTags.io:
+          cat = "io";
+          break;
+        case TokenTags.globalState:
+          cat = "globalState";
+          break;
+        default: {
+          const name =
+            tok.tag === TokenTags.ident
+              ? src.substring(tok.start, tok.start + tok.length)
+              : inverseTokenTags[tok.tag];
+          throw parseError(
+            `unrecognized forbids category '${name}'; accepted: io, globalState`,
+            tok.start,
+            tok.length,
+          );
+        }
+      }
+      if (categories.includes(cat)) {
+        throw parseError(
+          `duplicate forbids category '${cat}'`,
+          tok.start,
+          tok.length,
+        );
+      }
+      categories.push(cat);
+      advance();
+    }
+    if (categories.length === 0) {
+      throw parseError(
+        "forbids requires at least one category",
+        peek().start,
+        peek().length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    node.categories = categories;
     return node;
   }
 
@@ -741,6 +870,14 @@ export function parse(src) {
       return refNode;
     }
 
+    // wait x — task handle await; same tight precedence as ref
+    if (peek().tag === TokenTags.wait) {
+      advance();
+      const waitNode = buildSourcedNode(ASTNodeKind.WAIT_EXPRESSION);
+      waitNode.operand = parseExpression(70);
+      return waitNode;
+    }
+
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
@@ -986,6 +1123,10 @@ export function parse(src) {
       case TokenTags.const: {
         return parseVarDecl();
       }
+      case TokenTags.joined:
+      case TokenTags.pooled: {
+        return parseTaskBinding();
+      }
       case TokenTags.if: {
         return parseIfStatement();
       }
@@ -1131,6 +1272,45 @@ export function parse(src) {
     return node;
   }
 
+  // Phase 6.3: `joined h = expr;` / `pooled h = expr;` — task-builtin binding
+  // prefixes that infer their type from the task call on the RHS. No type
+  // annotation is permitted (Task<T> is compiler-internal).
+  function parseTaskBinding() {
+    const prefixTok = advance(); // joined | pooled
+    const builtinName =
+      prefixTok.tag === TokenTags.joined ? "joined" : "pooled";
+
+    const node = buildSourcedNode(ASTNodeKind.CONST_DECL);
+    node.kindPrefix = {
+      name: builtinName,
+      builtin: builtinName,
+      sourceLoc: posToSourceLocation(src, prefixTok.start),
+    };
+    node.trailingBlock = null;
+    node.name = parseIdentAsName();
+
+    if (peek().tag === TokenTags.colon) {
+      throw parseError(
+        `${builtinName} bindings infer their type from the task call; remove the type annotation`,
+        peek().start,
+        peek().length,
+      );
+    }
+    node.typeAnnotation = null;
+
+    if (peek().tag !== TokenTags.eq) {
+      throw parseError(
+        `${builtinName} binding requires initializer`,
+        peek().start,
+        peek().length,
+      );
+    }
+    advance(); // =
+    node.assignment = parseExpression();
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
   function parseIfStatement() {
     expect(TokenTags.if);
     expect(TokenTags.lparen);
@@ -1209,23 +1389,45 @@ export function parse(src) {
 
   // expects an identifier, args, curlys, statements...
   function parseFunctionDecl() {
-    expect(TokenTags.function);
-    return parseFunctionDeclBody();
+    let isTask = false;
+    // Two accepted shapes:
+    //   function foo(...) {...}
+    //   task foo(...) {...}          (task replaces `function`)
+    // The `task function foo(...)` shape is rejected — it's redundant.
+    if (peek().tag === TokenTags.task) {
+      advance();
+      isTask = true;
+      if (peek().tag === TokenTags.function) {
+        throw parseError(
+          "`task function` is redundant — use `task <name>(...)`",
+          peek().start,
+          peek().length,
+        );
+      }
+    } else {
+      expect(TokenTags.function);
+    }
+    const node = parseFunctionDeclBody();
+    node.isTask = isTask;
+    return node;
   }
 
   function parseFunctionDeclBody() {
     const node = buildSourcedNode(ASTNodeKind.FUNCTION_DECL);
+    node.isTask = false;
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     node.params = [];
-    // params can start with: ident (name) or ref (modifier) or comma (separator)
+    // params can start with: ident (name/kind-prefix), ref (modifier), or comma (separator)
     while (
       peek().tag === TokenTags.ident ||
       peek().tag === TokenTags.ref ||
       peek().tag === TokenTags.comma
     ) {
       if (peek().tag === TokenTags.comma) advance();
-      node.params.push(parseFunctionParam());
+      if (peek().tag !== TokenTags.rparen && peek().tag !== TokenTags.eof) {
+        node.params.push(parseFunctionParam());
+      }
     }
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
@@ -1272,6 +1474,16 @@ export function parse(src) {
           const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
           fieldNode.name = parseIdentAsName();
           expect(TokenTags.colon);
+          // Detect kind-prefix on field type: `IDENT IDENT` after colon.
+          // Parse it fully so the typechecker can emit a clear error message.
+          fieldNode.kindPrefix = null;
+          if (peek().tag === TokenTags.ident && peekAhead(1).tag === TokenTags.ident) {
+            const kindTok = advance();
+            fieldNode.kindPrefix = {
+              name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+              sourceLoc: posToSourceLocation(src, kindTok.start),
+            };
+          }
           fieldNode.typeAnnotation = parseTypeAnnotation();
           node.fields.push(fieldNode);
           if (peek().tag === TokenTags.comma) {
@@ -1326,6 +1538,32 @@ export function parse(src) {
 
   function parseFunctionParam() {
     const node = buildSourcedNode(ASTNodeKind.PARAM);
+    node.kindPrefix = null;
+
+    // Detect kind prefix: IDENT followed by (IDENT or ref) means kind-prefixed param.
+    // Examples: `scoped h: ref FileHandle` or `scoped ref h: FileHandle`.
+    if (peek().tag === TokenTags.ident) {
+      const next1 = peekAhead(1);
+      if (next1.tag === TokenTags.ident || next1.tag === TokenTags.ref) {
+        const kindTok = advance();
+        node.kindPrefix = {
+          name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+          sourceLoc: posToSourceLocation(src, kindTok.start),
+        };
+        // Reject a second kind prefix: IDENT followed by (IDENT or ref) again
+        if (peek().tag === TokenTags.ident) {
+          const next2 = peekAhead(1);
+          if (next2.tag === TokenTags.ident) {
+            throw parseError(
+              "a parameter may carry at most one kind prefix in phase 6.2",
+              peek().start,
+              peek().length,
+            );
+          }
+        }
+      }
+    }
+
     // ref modifier
     if (peek().tag === TokenTags.ref) {
       advance();

@@ -1,0 +1,20 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Result { value: int32, err: string }
+
+function maybe(fail: bool): Result {
+    if (fail) {
+        return { value: 0, err: "boom" };
+    }
+    return { value: 42, err: "" };
+}
+
+function main(): Result {
+    const v: int32 = maybe(false)?;
+    printf(`got ${v}\n`);
+    const bad: int32 = maybe(true)?;
+    printf(`unreachable ${bad}\n`);
+    return { value: v, err: "" };
+}

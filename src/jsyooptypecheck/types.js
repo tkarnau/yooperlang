@@ -14,6 +14,7 @@ export const typeKinds = {
   namespace: "namespace",
   trait: "trait",
   kind: "kind",
+  task: "task",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -138,6 +139,11 @@ export const ErrorType = () => freezerWrap(typeKinds.error, {});
 export const TraitType = (name, methods, moduleId = null) =>
   freezerWrap(typeKinds.trait, { name, methods, moduleId });
 
+// Phase 6.3: compiler-builtin Task<T>. Not user-declarable; produced as the
+// rewritten return type of any function declared with the `task` modifier.
+export const TaskType = (resultType) =>
+  freezerWrap(typeKinds.task, { resultType });
+
 // KindType is a language-level "kind" decl (phase 6.1: `disposable`). Unlike
 // other types in this file, KindType is mutable during pass C.2 — clauses
 // resolve trait references and method names after the shell is registered in
@@ -146,10 +152,13 @@ export function KindType(name, moduleId) {
   this.kind = typeKinds.kind;
   this.name = name;
   this.moduleId = moduleId;
-  this.appliesTo = "binding";              // 6.1: always "binding"
+  this.appliesTo = new Set();              // 6.2: Set<"binding"|"parameter"|"field"> (was scalar)
   this.requires = [];                       // array of TraitType
   this.mustCall = [];                       // array of { methodName, timing, traitType }
   this.ownsBlock = false;
+  this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
+  this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
+  this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
 }
 
 /****************
@@ -346,6 +355,9 @@ export function typesEqual(a, b) {
   }
   if (a.kind === typeKinds.trait) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
+  if (a.kind === typeKinds.task) {
+    return typesEqual(a.resultType, b.resultType);
   }
   throw new Error(`Unknown type kind: ${a.kind}`);
 }

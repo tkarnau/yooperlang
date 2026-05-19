@@ -7,6 +7,7 @@ import path from "path";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
+import { RUNTIME_C, runtimeLinkFlags } from "./runtimeBuild.js";
 
 const phaseMode = process.env.phaseMode === "true";
 
@@ -48,13 +49,28 @@ function main() {
 
   const tmpIR = path.join(os.tmpdir(), "yooper_out.ll");
   fs.writeFileSync(tmpIR, ir, "utf8");
+  const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
+
   if (process.platform === "win32") {
     const clang = "C:\\Program Files\\LLVM\\bin\\clang.exe";
-    const clangArgs = [tmpIR, "-o", `${outputFileName}.exe`, ...linkFlags.map((f) => `-l${f}`), "-fuse-ld=link"];
+    const clangArgs = [
+      tmpIR,
+      RUNTIME_C,
+      "-o",
+      `${outputFileName}.exe`,
+      ...allLinkFlags.map((f) => `-l${f}`),
+      "-fuse-ld=link",
+    ];
     execFileSync(clang, clangArgs, { stdio: "inherit" });
     console.log(`compiled: ${outputFileName}`);
   } else {
-    const clangArgs = [tmpIR, "-o", outputFileName, ...linkFlags.map((f) => `-l${f}`)];
+    const clangArgs = [
+      tmpIR,
+      RUNTIME_C,
+      "-o",
+      outputFileName,
+      ...allLinkFlags.map((f) => `-l${f}`),
+    ];
     execFileSync("clang", clangArgs, { stdio: "inherit" });
     console.log(`compiled: ${outputFileName}`);
   }

@@ -371,11 +371,9 @@ kind disposable {
 kind pooled {
     appliesTo binding;
     requires Task;
-    mustCall { wait; abandon; } beforeScopeEnd;
-    mustNotShare acrossScopes;
 }
 
-kind scoped {
+kind joined {
     appliesTo binding;
     requires Task;
     autoJoin beforeScopeEnd;
@@ -424,9 +422,9 @@ Multiple `requires` are written as separate clauses
 | `provides Trait` | The kind supplies the trait's implementation (can transform its initializer). |
 | `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
 | `mustCall fn beforeScopeEnd` | Fn must run before the binding's scope exits — an explicit block if present, otherwise the enclosing scope. |
-| `mustCall fn beforeAny` | Fn must run before any other method. |
-| `mustCall { a; b; } beforeScopeEnd` | At least one of these must run. |
-| `mustCall fn afterAny` | Fn must run after every other method. |
+| `mustCall fn beforeAny` | *(reserved — not implemented.)* Fn must run before any other method. |
+| `mustCall { a; b; } beforeScopeEnd` | *(reserved — not implemented.)* At least one of these must run. |
+| `mustCall fn afterAny` | *(reserved — not implemented.)* Fn must run after every other method. |
 | `mustNotShare acrossScopes` | Cannot cross into a concurrent task. |
 | `mustNotEscape scope` | Cannot be returned or stored outside its scope. |
 | `autoJoin beforeScopeEnd` | Compiler inserts `wait` at scope exit. |
@@ -545,17 +543,25 @@ bare `impl` block; a method always implements a trait.
 
 Concurrency is a **kind story**. There are no `async` / `await` keywords in v2.
 
+The runtime contract — how tasks are allocated, scheduled, waited on, and torn
+down — is specified separately in [plans/runtime-design.md](plans/runtime-design.md).
+This section describes only the language surface.
+
 ### The model
 
 - `task` is a kind applied to a function. It declares that the function's return value becomes a `Task<T>` at the call site.
-- Every call to a `task` function is **semantically a spawn**. The compiler is free to lower spawn-then-immediate-wait into a direct call with no thread.
+- Every call to a `task` function is **semantically a spawn**. The compiler may lower spawn-then-immediate-wait into a direct synchronous call when it can prove no observable difference; otherwise the runtime schedules the work on a worker thread.
+- `wait` blocks the calling thread until the task body completes. (Suspendable `wait` — yielding the worker rather than blocking it — is a planned future capability and does not change the surface syntax.)
 - The **binding's kind** decides when the compiler forces the `wait`:
 
-| Binding form | When `wait` is forced |
-|---|---|
-| `let x = f()` (no kind) | Immediately — the next statement sees the value. |
-| `let scoped x = f()` | At the enclosing scope's `}`. |
-| `let pooled h = f()` | Never — you call `wait h` or `_ = h` yourself. |
+| Binding form | When `wait` is forced | Lifetime / storage |
+|---|---|---|
+| `let x = f()` (no kind) | Immediately — the next statement sees the value. | Stack-allocated handle; spawn + wait inline. |
+| `let joined d = f()` | At the enclosing scope's `}` (`autoJoin`); also on first read of `d` if earlier. | Stack-allocated; bounded by scope. |
+| `let pooled h = f()` | Never automatically — you call `wait h` yourself. | Heap-allocated, atomically refcounted. |
+
+Allocation details and the refcount lifecycle are specified in
+[runtime-design.md §4 and §6](plans/runtime-design.md).
 
 ### Example
 
@@ -563,30 +569,59 @@ Concurrency is a **kind story**. There are no `async` / `await` keywords in v2.
 task fetch(url: string): Bytes { ... }
 
 function main(): void {
-    let data       = fetch(url);             // synchronous-looking
-    let scoped d   = fetch(url);             // concurrent, joined at `}`
-    let pooled h   = fetch(url);             // handle; manual disposition
-    let { data, err } = wait h;              // satisfies mustCall { wait; abandon; } beforeScopeEnd
+    let data     = fetch(url);             // synchronous-looking; wait inserted inline
+    let joined d = fetch(url);             // concurrent; wait inserted at the next `}`
+    let pooled h = fetch(url);             // handle value; copyable, returnable
+    let result   = wait h;                  // block on h, read its result
 
-    _ = h;                                   // or abandon explicitly
+    _ = fetch(url);                         // fire-and-forget; result is dropped
 }
 ```
 
 ### Safety
 
-- A plain `function` (no `task`) cannot be bound as `scoped` or `pooled` — the binding kind's `requires Task` isn't satisfied.
-- `scoped` carries `mustNotEscape scope` — the value cannot be returned or stored outside.
-- `pooled` carries `mustNotShare acrossScopes` and `mustCall { wait; abandon; } beforeScopeEnd`.
+- A plain `function` (no `task`) cannot be bound as `joined` or `pooled` — the binding kind's `requires Task` isn't satisfied.
+- `joined` carries `mustNotEscape scope` — the value cannot be returned or stored outside its declaring scope.
+- `pooled` is a plain value-typed handle. It can be returned, stored in arrays, passed by value or by `ref`. The kind imposes no compiler-enforced lifecycle obligation; the user calls `wait` (or simply drops the handle to fire-and-forget).
 
 ### Handle operations
 
 | Operator | Meaning |
 |---|---|
-| `wait h` | Block until the task completes; returns the result. Satisfies `mustCall wait`. |
-| `_ = h` | Abandon the task; result is discarded. Satisfies `mustCall abandon`. |
+| `wait h` | Block until the task referenced by `h` completes; evaluate to the result. `h` must name a binding of type `Task<T>`. |
 
-These are keyword-level operations, not methods on `Task<T>`, because the compiler needs
-to see them for `mustCall` accounting.
+`wait` is a keyword-level operation, not a method on `Task<T>`, so the compiler can
+account for it during flow analysis (in particular, the `joined` kind's `autoJoin`
+clause is implemented by inserting a synthetic `wait` at scope exit, and the
+compiler must recognize the operator to detect when an explicit user `wait` makes
+the synthetic insertion redundant).
+
+`_ = expr;` is the language's generic discard form (see §4). When `expr` is a
+task call (`_ = fetch(url);`), the result handle is spawned and immediately
+dropped; the body still runs to completion in the background, and its result is
+discarded when the worker releases the last reference. This is the
+fire-and-forget idiom — it is not a task-specific operator.
+
+### Safety and deadlock
+
+The MVP runtime model uses run-to-completion tasks on a fixed-size worker pool
+(see [runtime-design.md §3](plans/runtime-design.md)). A `wait` inside a `task`
+function body blocks the worker thread. With N workers and deeper-than-N nested
+waits, deadlock is possible:
+
+- Submitting N tasks that all `wait` on an N+1th task that's still queued behind
+  them deadlocks the pool.
+
+Mitigations until suspendable wait lands:
+
+- Oversize the pool via `YOOP_NUM_WORKERS` (default is `num_cpus`).
+- Prefer composing tasks at non-task call sites (i.e., in `main` or regular
+  functions). The deadlock surface only matters when waits nest inside task
+  bodies.
+
+Suspendable `wait` inside task bodies — `wait` yielding the worker rather than
+blocking it — is a planned future capability that eliminates this hazard. The
+language surface does not change when it lands.
 
 ---
 
@@ -873,21 +908,21 @@ Without `import.unsafe;`, the `unsafe_ptr` kind is not in scope.
 ## 14. Reserved keywords
 
 ```
-abandon         appliesTo       autoJoin         bool
-break           char             const            contains
-continue        else             export           extern
-false           float32          float64          for
-forbids         from             function         if
-implements      import           in               int8
-int16           int32            int64            isize
+appliesTo       autoJoin         bool             break
+char            const            contains         continue
+else            export           extern           false
+float32         float64          for              forbids
+from            function         if               implements
+import          in               int8             int16
+int32           int64            isize            joined
 kind            layout           let              mustCall
 mustNotEscape   mustNotShare     pooled           propagates
 provides        pure             ref              requires
 restricts       return           scoped           string
-task            trait            true             type
-uint8           uint16           uint32           uint64
-unsafe_ptr      usize            void             wait
-while           int              float
+task            Task             trait            true
+type            uint8            uint16           uint32
+uint64          unsafe_ptr       usize            void
+wait            while            int              float
 ```
 
 int is 32 bit signed int
