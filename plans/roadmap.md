@@ -105,6 +105,8 @@ Once kinds are stable, the language is usable. From here:
 - User-defined generic types (deferred per spec §3)
 - Pattern matching / sum types (deferred per spec §10)
 
+> Detailed plan: [phase-7-1-generics.md](phase-7-1-generics.md)
+
 ### Phase 8 - Beginning standard library ideas and internals
 
 - Dynamic array
