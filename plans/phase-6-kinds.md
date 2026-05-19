@@ -50,7 +50,13 @@ Phase 6 is too large for one plan file; existing phase plans run 400-1700 lines 
 
 ### 6.3 — Task and concurrency
 
-The big sub-phase. Generic traits (`trait Task<T>` — phase 5 deferred these), the `task` kind on function declarations, `provides Task` semantics that rewrite a `task` function's return type to `Task<T>`, the binding kinds `scoped` and `pooled` with their `wait` / `mustNotShare` / `mustNotEscape` / `autoJoin` rules per [SPEC.md §8](../SPEC.md#L532), the `wait h` and `_ = h` operators, and compiler-inserted `wait` for immediate and `scoped` bindings. Significant overlap with the runtime story; may need a minimal scheduler shim.
+The big sub-phase. Splits in two:
+
+**6.3-prelude — runtime.** Lands the pthread-backed worker pool, LLVM coroutine intrinsic shape, refcount lifecycle for `pooled` handles, cross-platform threading shim, and compiler-injected init/shutdown in `main`. The full contract is specified in [runtime-design.md](runtime-design.md); 6.3-prelude is the implementation of that contract. No surface-language changes ship here — it's the foundation the language sugar builds on.
+
+**6.3 — language sugar.** Layered on top of the prelude. The `task` kind on function declarations, `provides Task` semantics that rewrite a `task` function's return type to `Task<T>`, the binding kinds `joined` (renamed from the spec's task-flavored `scoped` to avoid collision with the disposable-flavored `scoped` from 6.2) and `pooled` with their respective `autoJoin` / `mustNotEscape` rules per [SPEC.md §8](../SPEC.md#L532), the `wait h` operator, and compiler-inserted `wait` for immediate and `joined` bindings. `Task<T>` is a built-in type constructor handled by the compiler — Phase 5 deferred user-declarable generics; we ship `Task<T>` as a special case rather than landing full generics here. The `pooled` kind in this revised design is intentionally minimal: no `mustCall`, no `mustNotShare` — the handle is just a value-typed `Task<T>` whose lifetime is managed by atomic refcounting in codegen.
+
+> Detailed plan to be written after 6.3-prelude lands.
 
 ### 6.4 — Containment and propagation
 
@@ -65,6 +71,7 @@ The big sub-phase. Generic traits (`trait Task<T>` — phase 5 deferred these), 
 - The `KindType` representation, declared in 6.1, gains clauses in each later sub-phase.
 - The flow-analysis walker, written in 6.1 for `mustCall` only, is the same machinery that 6.2 (escape) and 6.3 (`wait` insertion) extend.
 - The cleanup-emission codegen path, established in 6.1, is what 6.3's `autoJoin` reuses for compiler-inserted `wait`.
+- The runtime ABI introduced by 6.3-prelude (`yoop_task_submit`, `yoop_task_wait`, `yoop_task_alloc`/`retain`/`release`) is the target for any later sub-phase that adds task-like features (parallel iteration in 6.5, future I/O multiplexing).
 
 Each sub-phase has its own pass/fail fixtures under [examples/](../examples/) and is gated on the full regression suite.
 
