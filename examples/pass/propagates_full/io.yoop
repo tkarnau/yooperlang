@@ -1,0 +1,25 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+export trait Disposable {
+    function dispose(ref self): void;
+}
+
+export kind disposable {
+    appliesTo binding field;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+export type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`closed fd=${self.fd}\n`);
+    }
+}
+
+export function open(name: string): FileHandle {
+    return { fd: 7 };
+}

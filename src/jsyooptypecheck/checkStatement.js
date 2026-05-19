@@ -29,6 +29,15 @@ import {
   resolveExprType,
 } from "./checkExpr.js";
 import { lookupBuiltinKind } from "./builtinKinds.js";
+
+// Phase 6.4: kind-prefix resolution walks both the local kindTable (user
+// kinds + the seeded `Task` builtin) and the builtin-kind table (joined /
+// pooled / Task). Returns null if neither matches.
+function resolveKindByName(name, typeContext) {
+  return (
+    typeContext.kindTable?.get(name) ?? lookupBuiltinKind(name) ?? null
+  );
+}
 import { TaskType } from "./types.js";
 import { isFallible, } from "./fallible.js";
 import { isAssignable } from "./coerce.js";
@@ -71,7 +80,7 @@ export function validateFunction(funcNode, typeContext, errors) {
     // Phase 6.2: resolve kind prefix on parameter.
     let paramKindType = null;
     if (param.kindPrefix) {
-      const kt = typeContext.kindTable?.get(param.kindPrefix.name) ?? null;
+      const kt = resolveKindByName(param.kindPrefix.name, typeContext);
       if (!kt) {
         pushError(errors, param, `unknown kind "${param.kindPrefix.name}"`);
       } else {
@@ -80,6 +89,11 @@ export function validateFunction(funcNode, typeContext, errors) {
           const sites = [...kt.appliesTo].join(", ") || "(none)";
           pushError(errors, param,
             `kind '${kt.name}' does not apply to parameters (declared appliesTo: ${sites})`);
+        } else if (kt.builtin) {
+          // Phase 6.4: builtin kinds (e.g. `pooled`) carry their own type rules;
+          // skip the struct-shape check. The associated type (Task<T>) is
+          // validated by the binding-resolution path.
+          paramKindType = kt;
         } else {
           // Unwrap ref to get the underlying struct type.
           const structType = baseType.kind === typeKinds.ref ? baseType.inner : baseType;
@@ -288,6 +302,9 @@ function checkLetOrConst(node, scope, ctx) {
 // Phase 6.3: typecheck `joined h = task_call();` / `pooled h = task_call();`.
 // The RHS must be a call to a task function (whose external return type is
 // Task<T>); the binding's resolved type is Task<T>.
+// Phase 6.4: `pooled` additionally accepts a Task<T>-typed expression (e.g.
+// `pooled h3 = h2;` where h2 is pooled). Codegen detects the copy site and
+// emits a retain. `joined` still requires a fresh task call.
 function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
   const kt = lookupBuiltinKind(builtinName);
   node.resolvedKindType = kt;
@@ -314,6 +331,22 @@ function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
     declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
     return;
   }
+
+  // joined requires a fresh task call (allocates on stack, can't copy).
+  // pooled accepts both task calls and Task<T>-typed copies (phase 6.4).
+  const rhsIsCall = node.assignment.kind === ASTNodeKind.CALL_EXPRESSION;
+  if (builtinName === "joined" && !rhsIsCall) {
+    pushError(ctx.errors, node,
+      `joined binding "${node.name}" requires a task call RHS, got ${formatType(rhsType)}`);
+    node.resolvedType = ErrorType();
+    declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
+    return;
+  }
+  // Mark pooled-copy bindings so codegen branches between submit-vs-retain.
+  if (builtinName === "pooled" && !rhsIsCall) {
+    node.pooledCopy = true;
+  }
+
   node.resolvedType = rhsType;
   declareInScope(scope, node.name, rhsType, "const", node, ctx.errors, kt);
 }

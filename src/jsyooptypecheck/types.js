@@ -110,12 +110,16 @@ export function isFloatPrim(name) {
 export const PrimType = (name) => freezerWrap(typeKinds.prim, { name });
 
 // moduleId: the module that defines this struct (for IR name mangling). null for legacy/test usage. Also adding implementsTraits and methods
+// propagatedKinds (phase 6.4): list of KindType, kinds this struct propagates
+// to bindings of this type. A field whose type carries a propagated kind is
+// what the struct is "surfacing" upward.
 export const StructType = (
   name,
   fields,
   moduleId = null,
   implementsTraits = [],
   methods = new Map(),
+  propagatedKinds = [],
 ) =>
   freezerWrap(typeKinds.struct, {
     name,
@@ -123,12 +127,16 @@ export const StructType = (
     moduleId,
     implementsTraits,
     methods,
+    propagatedKinds,
   });
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // variadic: true for C variadic externs (e.g. printf). Skips arity check past fixed params.
-export const FuncType = (params, returnType, variadic = false) =>
-  freezerWrap(typeKinds.func, { params, returnType, variadic });
+// returnPropagatedKinds (phase 6.4): list of KindType the function's return
+// type propagates. Mirrors the StructType.propagatedKinds slot so callers see
+// the kinds without re-resolving the return type.
+export const FuncType = (params, returnType, variadic = false, returnPropagatedKinds = []) =>
+  freezerWrap(typeKinds.func, { params, returnType, variadic, returnPropagatedKinds });
 export const VoidType = () => freezerWrap(typeKinds.void, {});
 // exports: Set<string> of exported names in the source module
 export const NamespaceType = (moduleId, exports) =>
@@ -221,6 +229,11 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     if (!elem) return null;
     return ArrayType(elem);
   }
+  if (annot.kind === "taskType") {
+    const inner = resolveTypeAnnotation(annot.inner, structTable, ctx);
+    if (!inner) return null;
+    return TaskType(inner);
+  }
   if (annot.kind === "selfType") {
     if (!ctx?.selfType) {
       throw new Error(
@@ -240,6 +253,7 @@ export function formatAnnotation(annot) {
   if (annot.kind === "typeName") return annot.name;
   if (annot.kind === "refType") return `ref ${formatAnnotation(annot.inner)}`;
   if (annot.kind === "arrayType") return `${formatAnnotation(annot.elem)}[]`;
+  if (annot.kind === "taskType") return `Task<${formatAnnotation(annot.inner)}>`;
   return "unknown";
 }
 

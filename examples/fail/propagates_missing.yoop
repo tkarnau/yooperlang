@@ -1,0 +1,24 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {}
+}
+
+kind disposable {
+    appliesTo binding field;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type S {
+    f: disposable FileHandle,
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: field 'f' carries kind 'disposable' but enclosing struct 'S' does not propagate it

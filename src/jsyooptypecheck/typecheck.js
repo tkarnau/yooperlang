@@ -35,6 +35,7 @@ import { detectRecursiveField } from "./recursiveStruct.js";
 import { validateFunction, validateMethod } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
 import { runKindCheck } from "./kindCheck.js";
+import { TASK_KIND } from "./builtinKinds.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
@@ -84,6 +85,11 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     if (!elem) return null;
     return ArrayType(elem);
   }
+  if (annot.kind === "taskType") {
+    const inner = resolveTypeAnnotationInModule(annot.inner, modId, moduleEnv, ctx);
+    if (!inner) return null;
+    return TaskType(inner);
+  }
   if (annot.kind === "selfType") {
     if (!ctx?.selfType) {
       throw new Error("resolveTypeAnnotationInModule: 'self' used outside trait/method context");
@@ -93,6 +99,28 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
   throw new Error(
     `resolveTypeAnnotationInModule: unknown annotation kind "${annot.kind}"`,
   );
+}
+
+// ─── propagation helpers (phase 6.4) ────────────────────────────────────────
+
+// Return the list of KindType instances that a struct field carries.
+// A field carries a kind iff:
+//   - its `kindType` (resolved from `kindPrefix`) is set, OR
+//   - its type is `Task<T>` (which inherently carries the `Task` builtin), OR
+//   - its type is itself a struct that propagates kinds (transitive — every
+//     kind the inner struct propagates is one this field carries).
+export function fieldCarriedKinds(field) {
+  const out = [];
+  if (field.kindType) out.push(field.kindType);
+  if (field.type?.kind === "task") {
+    if (!out.includes(TASK_KIND)) out.push(TASK_KIND);
+  }
+  if (field.type?.kind === "struct" && field.type.propagatedKinds?.length) {
+    for (const k of field.type.propagatedKinds) {
+      if (!out.includes(k)) out.push(k);
+    }
+  }
+  return out;
 }
 
 // ─── trait helpers ───────────────────────────────────────────────────────────
@@ -348,6 +376,9 @@ export function typecheckProgram(modules) {
     const linkLibraries = new Set();
     const traitTable = new Map();
     const kindTable = new Map();
+    // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
+    // the kind-name that pairs with the built-in `Task<T>` type.
+    kindTable.set("Task", TASK_KIND);
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
@@ -436,6 +467,7 @@ export function typecheckProgram(modules) {
           kindTable.set(d.name, kt);
           d.resolvedKindType = kt;
         }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
     }
 
@@ -466,15 +498,60 @@ export function typecheckProgram(modules) {
 
       // struct fields
       if (d.kind === ASTNodeKind.TYPE_DECL) {
+        // Phase 6.4: reject `contains<K>` at a single point.
+        if (d.containsClause) {
+          errors.push({
+            message: `contains not yet supported (phase 6.5 or later)`,
+            sourceLoc: d.containsClause.sourceLoc,
+          });
+        }
+
+        // Phase 6.4: resolve `propagates<K1, K2, ...>` against the local kind table.
+        const propagatedKinds = [];
+        if (d.propagatesClause) {
+          for (const ref of d.propagatesClause.kindNames) {
+            const kt = moduleEnv.get(mod.id).kindTable.get(ref.name);
+            if (!kt) {
+              errors.push({
+                message: `unknown kind '${ref.name}' in propagates clause of struct "${d.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            if (propagatedKinds.some((k) => k === kt)) {
+              errors.push({
+                message: `duplicate kind '${ref.name}' in propagates clause of struct "${d.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            propagatedKinds.push(kt);
+          }
+        }
+
         const fields = [];
         for (const field of d.fields ?? []) {
-          // Phase 6.2: reject kind-prefixed field types at typecheck.
+          // Phase 6.4: resolve field kind prefix against the kindTable.
+          let fieldKindType = null;
           if (field.kindPrefix) {
-            errors.push({
-              message: `kind-bearing struct fields require propagates<K> or contains<K> on the enclosing struct (phase 6.4)`,
-              sourceLoc: field.sourceLoc,
-            });
+            fieldKindType = moduleEnv
+              .get(mod.id)
+              .kindTable.get(field.kindPrefix.name);
+            if (!fieldKindType) {
+              errors.push({
+                message: `unknown kind '${field.kindPrefix.name}' on field '${field.name}' of struct "${d.name}"`,
+                sourceLoc: field.sourceLoc,
+              });
+            } else if (!fieldKindType.appliesTo.has("field")) {
+              const sites = [...fieldKindType.appliesTo].join(", ") || "(none)";
+              errors.push({
+                message: `kind '${fieldKindType.name}' does not apply to fields (declared appliesTo: ${sites})`,
+                sourceLoc: field.sourceLoc,
+              });
+            }
           }
+          field.resolvedKindType = fieldKindType ?? null;
+
           let fieldType = resolveTypeAnnotationInModule(
             field.typeAnnotation,
             mod.id,
@@ -499,9 +576,25 @@ export function typecheckProgram(modules) {
               sourceLoc: field.sourceLoc,
             });
           }
-          fields.push({ name: field.name, type: fieldType });
+          fields.push({ name: field.name, type: fieldType, kindType: fieldKindType });
         }
-        const fullType = StructType(d.name, fields, mod.id);
+
+        // Phase 6.4: every kind-carrying field's kind must be in propagatedKinds.
+        // A field "carries kind K" if its kindPrefix resolves to K, or its type
+        // is `Task<T>` (which inherently carries the builtin `Task` kind).
+        for (const f of fields) {
+          const carried = fieldCarriedKinds(f);
+          for (const ck of carried) {
+            if (!propagatedKinds.includes(ck)) {
+              errors.push({
+                message: `field '${f.name}' carries kind '${ck.name}' but enclosing struct '${d.name}' does not propagate it`,
+                sourceLoc: d.sourceLoc,
+              });
+            }
+          }
+        }
+
+        const fullType = StructType(d.name, fields, mod.id, [], new Map(), propagatedKinds);
         d.resolvedType = fullType;
         structTable.set(d.name, fullType);
       }
@@ -527,6 +620,39 @@ export function typecheckProgram(modules) {
             moduleEnv,
           ) ?? ErrorType();
         funcDecl.declaredReturnType = declaredReturnType;
+
+        // Phase 6.4: resolve `propagates<K1, K2, ...>` on the function return.
+        // Reject `contains` on returns at the same point.
+        if (funcDecl.containsClause) {
+          errors.push({
+            message: `contains not yet supported (phase 6.5 or later)`,
+            sourceLoc: funcDecl.containsClause.sourceLoc,
+          });
+        }
+        const returnPropagatedKinds = [];
+        if (funcDecl.propagatesClause) {
+          const env = moduleEnv.get(mod.id);
+          for (const ref of funcDecl.propagatesClause.kindNames) {
+            const kt = env.kindTable.get(ref.name);
+            if (!kt) {
+              errors.push({
+                message: `unknown kind '${ref.name}' in propagates clause of function "${funcDecl.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            if (returnPropagatedKinds.includes(kt)) {
+              errors.push({
+                message: `duplicate kind '${ref.name}' in propagates clause of function "${funcDecl.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            returnPropagatedKinds.push(kt);
+          }
+        }
+        funcDecl.returnPropagatedKinds = returnPropagatedKinds;
+
         let externalReturnType = declaredReturnType;
         if (funcDecl.isTask) {
           if (funcDecl.name === "main") {
@@ -566,6 +692,8 @@ export function typecheckProgram(modules) {
               };
             }),
             externalReturnType,
+            false,
+            returnPropagatedKinds,
           ),
         );
         if (
@@ -664,7 +792,7 @@ export function typecheckProgram(modules) {
   // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.
   // Pass B copied shells; overwrite with fully-resolved versions.
   for (const mod of modules) {
-    const { localSymbols, structTable, importedNames, traitTable } = moduleEnv.get(mod.id);
+    const { localSymbols, structTable, importedNames, traitTable, kindTable } = moduleEnv.get(mod.id);
     for (const [
       localName,
       { fromModuleId, exportName, kind },
@@ -680,6 +808,9 @@ export function typecheckProgram(modules) {
       } else if (kind === "trait") {
         const resolved = srcEnv.traitTable.get(exportName);
         if (resolved) traitTable.set(localName, resolved);
+      } else if (kind === "kind") {
+        const resolved = srcEnv.kindTable.get(exportName);
+        if (resolved) kindTable.set(localName, resolved);
       }
     }
   }
