@@ -82,10 +82,21 @@ The big one. Spec §6. Probably the hardest part of the language.
 - Kind prefix on bindings, params, fields, fn declarations
 - Static analysis pass for `mustCall` obligations (with cleanup insertion at `?`, return, fall-through)
 - `mustNotEscape` / `mustNotShare` checks
-- `task` kind + Task<T> trait + scoped/pooled/immediate binding semantics (compiler-inserted `wait`)
+- `task` kind syntax (compile-time): kind-prefixed function decls, `provides Task` semantics, `wait` operator, `joined`/`pooled`/immediate binding behavior
+- `task` runtime: pthread-backed worker pool, LLVM coroutine intrinsics for forward-compat, refcounted `pooled` handles, cross-platform threading shim. The runtime contract lives in [runtime-design.md](runtime-design.md) and lands before the language-sugar phase 6.3 work.
 - Block-owning kinds with implicit-block synthesis in reverse declaration order
 
 > Detailed plan: [phase-6-kinds.md](phase-6-kinds.md)
+
+### Phase 6.3-prelude — Concurrency runtime
+
+The first piece of phase 6.3 is the runtime, separated from the language-sugar work so the two move on independent tracks. Deliverables:
+
+- `runtime/yoop_runtime.{c,h}` — central FIFO worker pool, mutex/condvar shim, refcount lifecycle for pooled handles, `yoop_runtime_init/shutdown`. Cross-platform via `#ifdef _WIN32`.
+- Codegen support in [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) for per-result-type `Task_<T>` struct emission, per-task-function thunks, LLVM coroutine intrinsics, and compiler-injected init/shutdown calls in `main`.
+- Build pipeline update in the yoopiler driver to compile and link the runtime alongside user `.ll` output.
+
+This phase lands no surface-language changes; it's the foundation phase 6.3 (language sugar) builds on. The full contract is in [runtime-design.md](runtime-design.md).
 
 ### Phase 7 — Generics, polish, self-hosting
 
@@ -212,6 +223,8 @@ After Phase 1:
 - The Phase 1 test program above must compile and run, printing `distance_sq = 25`
 - Negative-test programs (invalid code) must fail at typecheck time with positions, not at codegen time
 
+After Phase 6.3-prelude: the runtime in `runtime/yoop_runtime.{c,h}` builds on Linux (and eventually macOS / Windows) and can be linked into a yoopiler-produced executable that calls `yoop_runtime_init` / `yoop_runtime_shutdown` without error, even before any task functions exist in user code.
+
 Run end-to-end via `node ./src/yoopiler.js -i examples/test.yoop -o output` and execute `output.exe`. Add a small test runner script that walks `examples/` (split into `examples/pass/` and `examples/fail/`) and asserts each compiles or fails as expected — this becomes the regression suite for every phase after.
 
 ---
@@ -219,9 +232,11 @@ Run end-to-end via `node ./src/yoopiler.js -i examples/test.yoop -o output` and 
 ## Critical files
 
 - [SPEC.md](../SPEC.md) — language spec; reread before starting each phase
+- [runtime-design.md](runtime-design.md) — concurrency runtime contract; the implementation reference for phase 6.3
 - [src/yoopiler.js](../src/yoopiler.js) — driver; will need an import-walking loop in Phase 3
 - [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — Phase 1 numeric literals, ongoing keyword additions
 - [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — Phase 1 struct syntax, growing each phase
 - [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — Phase 1 type-check removal, struct emission
 - `src/jsyooptypecheck/` — new in Phase 1, grows every phase after
+- `runtime/` — companion C runtime added in Phase 6.3
 - [examples/test.yoop](../examples/test.yoop) — extend each phase; consider splitting into `pass/` and `fail/`

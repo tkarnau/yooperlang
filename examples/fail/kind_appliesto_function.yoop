@@ -1,0 +1,11 @@
+type T { x: int32, }
+
+kind k {
+    appliesTo binding function;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: appliesTo function not yet supported (phase 6.5)

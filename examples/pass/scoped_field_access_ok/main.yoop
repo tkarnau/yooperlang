@@ -1,0 +1,32 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        printf(`disposing fd=${self.fd}\n`);
+    }
+}
+
+kind scoped {
+    appliesTo binding parameter;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+    mustNotEscape scope;
+}
+
+function fd_of(scoped h: ref FileHandle): int32 {
+    return h.fd;
+}
+
+function main(): int32 {
+    scoped a: FileHandle = { fd: 9 };
+    printf(`fd=${fd_of(ref a)}\n`);
+    return 0;
+}

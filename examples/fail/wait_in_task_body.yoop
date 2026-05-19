@@ -1,0 +1,10 @@
+task one(): int32 {
+    return 1;
+}
+task chain(): int32 {
+    joined d = one();
+    return wait d;
+}
+function main(): int32 {
+    return 0;
+}

@@ -19,6 +19,8 @@ import {
   KindType,
   RefType,
   StructType,
+  TaskType,
+  VoidType,
   primTypeFromName,
   resolveTypeAnnotation,
   formatAnnotation,
@@ -242,13 +244,14 @@ function resolveKindClauses(mod, moduleEnv, errors) {
     if (!kt) continue; // rejected in pass A
     let mustCallSeen = false;
     let ownsBlockSeen = false;
-    // appliesTo is parser-validated as "exactly one" already; here we just
-    // record it on the type.
+    let mustNotEscapeSeen = false;
+    let mustNotShareSeen = false;
     let mustCallClause = null;
     for (const c of d.clauses) {
       switch (c.kind) {
         case ASTNodeKind.KIND_APPLIES_TO_CLAUSE:
-          // already validated by parser; store the site.
+          // Store all sites from the multi-site list (parser validated at least one).
+          for (const s of c.sites) kt.appliesTo.add(s);
           break;
         case ASTNodeKind.KIND_REQUIRES_CLAUSE: {
           const trait =
@@ -276,6 +279,31 @@ function resolveKindClauses(mod, moduleEnv, errors) {
           }
           ownsBlockSeen = true;
           kt.ownsBlock = true;
+          break;
+        case ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE:
+          if (mustNotEscapeSeen) {
+            pushError(errors, c, `duplicate mustNotEscape clause in kind '${kt.name}'`);
+            break;
+          }
+          mustNotEscapeSeen = true;
+          kt.mustNotEscape = true;
+          break;
+        case ASTNodeKind.KIND_MUST_NOT_SHARE_CLAUSE:
+          if (mustNotShareSeen) {
+            pushError(errors, c, `duplicate mustNotShare clause in kind '${kt.name}'`);
+            break;
+          }
+          mustNotShareSeen = true;
+          kt.mustNotShare.push(c.target);
+          break;
+        case ASTNodeKind.KIND_FORBIDS_CLAUSE:
+          for (const cat of c.categories) {
+            if (kt.forbids.includes(cat)) {
+              pushError(errors, c, `duplicate forbids category '${cat}' in kind '${kt.name}'`);
+            } else {
+              kt.forbids.push(cat);
+            }
+          }
           break;
       }
     }
@@ -440,6 +468,13 @@ export function typecheckProgram(modules) {
       if (d.kind === ASTNodeKind.TYPE_DECL) {
         const fields = [];
         for (const field of d.fields ?? []) {
+          // Phase 6.2: reject kind-prefixed field types at typecheck.
+          if (field.kindPrefix) {
+            errors.push({
+              message: `kind-bearing struct fields require propagates<K> or contains<K> on the enclosing struct (phase 6.4)`,
+              sourceLoc: field.sourceLoc,
+            });
+          }
           let fieldType = resolveTypeAnnotationInModule(
             field.typeAnnotation,
             mod.id,
@@ -485,6 +520,35 @@ export function typecheckProgram(modules) {
       if (funcDecl) {
         // Overwrite shell placed in pass A with properly-resolved types.
         // Redeclaration was already checked in pass A.
+        const declaredReturnType =
+          resolveTypeAnnotationInModule(
+            funcDecl.returnTypeAnnotation,
+            mod.id,
+            moduleEnv,
+          ) ?? ErrorType();
+        funcDecl.declaredReturnType = declaredReturnType;
+        let externalReturnType = declaredReturnType;
+        if (funcDecl.isTask) {
+          if (funcDecl.name === "main") {
+            errors.push({
+              message: `task cannot be applied to main`,
+              sourceLoc: funcDecl.sourceLoc,
+            });
+          } else if (
+            declaredReturnType.kind === "void" ||
+            declaredReturnType.kind === "error"
+          ) {
+            if (declaredReturnType.kind === "void") {
+              errors.push({
+                message: `task function "${funcDecl.name}" cannot return void`,
+                sourceLoc: funcDecl.sourceLoc,
+              });
+            }
+            externalReturnType = ErrorType();
+          } else {
+            externalReturnType = TaskType(declaredReturnType);
+          }
+        }
         localSymbols.set(
           funcDecl.name,
           FuncType(
@@ -501,11 +565,7 @@ export function typecheckProgram(modules) {
                 isRef: p.isRef ?? false,
               };
             }),
-            resolveTypeAnnotationInModule(
-              funcDecl.returnTypeAnnotation,
-              mod.id,
-              moduleEnv,
-            ) ?? ErrorType(),
+            externalReturnType,
           ),
         );
         if (
@@ -624,7 +684,9 @@ export function typecheckProgram(modules) {
     }
   }
 
-  // pass D: function body typechecking
+  // pass D: function body typechecking.
+  // Split into two sub-passes so that all param kind types are resolved before
+  // any runKindCheck runs (escape analysis needs param kinds from callees).
   for (const mod of modules) {
     const { localSymbols, structTable, importedNames, kindTable } = moduleEnv.get(mod.id);
     const typeContext = {
@@ -636,15 +698,35 @@ export function typecheckProgram(modules) {
       kindTable,
     };
 
+    // pass D.1: validate all functions and methods (populates resolvedKindType on params)
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         validateFunction(d, typeContext, errors);
-        runKindCheck(d, errors);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
         for (const method of d.methods) {
           validateMethod(method, d.resolvedType, typeContext, errors);
-          runKindCheck(method, errors);
+        }
+      }
+    }
+
+    // Build a table of function declarations for the escape-analysis call-site check.
+    const funcDeclTable = new Map();
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+        funcDeclTable.set(d.name, d);
+      }
+    }
+
+    // pass D.2: run kind check (escape analysis) now that all param kinds are resolved
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+        runKindCheck(d, errors, funcDeclTable);
+      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
+        for (const method of d.methods) {
+          runKindCheck(method, errors, funcDeclTable);
         }
       }
     }

@@ -1,0 +1,9 @@
+kind k {
+    appliesTo;
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: appliesTo requires at least one site
