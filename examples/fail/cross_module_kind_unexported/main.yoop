@@ -1,0 +1,7 @@
+import { disposable } from "./io.yoop";
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: 'disposable' is not exported from './io.yoop'

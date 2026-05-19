@@ -1,0 +1,40 @@
+import { disposable, FileHandle, open } from "./io.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Session propagates<disposable> {
+    handle: disposable FileHandle,
+}
+
+function load_session(name: string): Session propagates<disposable> {
+    return { handle: open(name) };
+}
+
+task fetch(x: int32): int32 {
+    return x * x;
+}
+
+type Job propagates<Task> {
+    work: Task<int32>,
+}
+
+function launch(x: int32): Job propagates<Task> {
+    pooled h = fetch(x);
+    return { work: h };
+}
+
+function take_pooled(pooled h: Task<int32>): int32 {
+    return wait h;
+}
+
+function main(): int32 {
+    let s: Session = load_session("x.txt");
+    let j: Job = launch(6);
+    pooled h2 = fetch(5);
+    pooled h3 = h2;
+    const n: int32 = take_pooled(h3);
+    printf(`n=${n}\n`);
+    return 0;
+}

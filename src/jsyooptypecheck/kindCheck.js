@@ -66,6 +66,8 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     if (o.type === "release") {
       const node = new ASTNode(ASTNodeKind.TASK_RELEASE, o.sourceLoc);
       node.bindingName = o.bindingName;
+      node.fieldName = o.fieldName ?? null;
+      node.structType = o.structType ?? null;
       return node;
     }
     const node = new ASTNode(ASTNodeKind.CLEANUP_CALL, o.sourceLoc);
@@ -73,42 +75,97 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     node.methodName = o.methodName;
     node.structType = o.structType;
     node.moduleId = o.moduleId;
+    node.fieldName = o.fieldName ?? null;
+    node.fieldStructType = o.fieldStructType ?? null;
     return node;
   }
 
-  function obligationFor(stmt) {
+  // Returns the array of obligations registered for this binding/param.
+  // Sources:
+  //   - explicit kindPrefix: `disposable a: H = ...` / `pooled h = task_call()`
+  //   - propagated kinds on the resolved struct type (phase 6.4)
+  function obligationsFor(stmt) {
+    const out = [];
     const kt = stmt.resolvedKindType;
-    if (!kt) return null;
-    // Phase 6.3: builtin kinds — joined / pooled — yield task-flavored obligations.
-    if (kt.builtin && stmt.resolvedType?.kind === "task") {
-      if (kt.autoJoin) {
-        return {
-          type: "autoWait",
-          bindingName: stmt.name,
-          taskResultType: stmt.resolvedType.resultType,
-          sourceLoc: stmt.sourceLoc,
-        };
-      }
-      if (kt.refcounted) {
-        return {
-          type: "release",
-          bindingName: stmt.name,
-          sourceLoc: stmt.sourceLoc,
-        };
+    if (kt) {
+      // Phase 6.3: builtin kinds — joined / pooled — yield task-flavored obligations.
+      if (kt.builtin && stmt.resolvedType?.kind === "task") {
+        if (kt.autoJoin) {
+          out.push({
+            type: "autoWait",
+            bindingName: stmt.name,
+            taskResultType: stmt.resolvedType.resultType,
+            sourceLoc: stmt.sourceLoc,
+          });
+        } else if (kt.refcounted) {
+          out.push({
+            type: "release",
+            bindingName: stmt.name,
+            sourceLoc: stmt.sourceLoc,
+          });
+        }
+      } else if (kt.mustCall.length > 0) {
+        const declaredType = stmt.resolvedType;
+        if (declaredType?.kind === "struct") {
+          const mc = kt.mustCall[0]; // 6.1: single mustCall
+          out.push({
+            type: "mustCall",
+            bindingName: stmt.name,
+            methodName: mc.methodName,
+            structType: declaredType,
+            moduleId: declaredType.moduleId,
+            sourceLoc: stmt.sourceLoc,
+          });
+        }
       }
     }
-    if (kt.mustCall.length === 0) return null;
-    const declaredType = stmt.resolvedType;
-    if (!declaredType || declaredType.kind !== "struct") return null;
-    const mc = kt.mustCall[0]; // 6.1: single mustCall
-    return {
-      type: "mustCall",
-      bindingName: stmt.name,
-      methodName: mc.methodName,
-      structType: declaredType,
-      moduleId: declaredType.moduleId,
-      sourceLoc: stmt.sourceLoc,
-    };
+
+    // Phase 6.4: propagated obligations. For each kind on the resolved struct's
+    // propagatedKinds list, walk the fields and emit one obligation per match.
+    const rt = stmt.resolvedType;
+    if (rt?.kind === "struct" && rt.propagatedKinds?.length > 0) {
+      for (const propK of rt.propagatedKinds) {
+        for (const f of rt.fields ?? []) {
+          if (!fieldCarriesKind(f, propK)) continue;
+          if (propK.refcounted) {
+            out.push({
+              type: "release",
+              bindingName: stmt.name,
+              fieldName: f.name,
+              structType: rt,
+              sourceLoc: stmt.sourceLoc,
+            });
+          } else if (propK.mustCall.length > 0) {
+            const mc = propK.mustCall[0];
+            // The dispose call targets the field's struct type (e.g. FileHandle),
+            // not the enclosing struct (Session).
+            out.push({
+              type: "mustCall",
+              bindingName: stmt.name,
+              fieldName: f.name,
+              methodName: mc.methodName,
+              structType: rt,           // enclosing struct (for GEP layout)
+              fieldStructType: f.type,  // the trait-implementing struct
+              moduleId: f.type?.moduleId,
+              sourceLoc: stmt.sourceLoc,
+            });
+          }
+        }
+      }
+    }
+    return out;
+  }
+
+  // Does a struct field carry the given kind?
+  function fieldCarriesKind(field, kindType) {
+    if (field.kindType === kindType) return true;
+    if (kindType.builtin && kindType.refcounted && field.type?.kind === "task") {
+      return true;
+    }
+    if (field.type?.kind === "struct" && field.type.propagatedKinds?.includes(kindType)) {
+      return true;
+    }
+    return false;
   }
 
   // Returns true if the resolved type is non-primitive (struct or ref to struct),
@@ -169,7 +226,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
         // First descend into the initializer for any nested ? operators that
         // still need pending-cleanup annotation under the current frame.
         if (stmt.assignment) walkExpr(stmt.assignment);
-        const obligation = obligationFor(stmt);
+        const obligations = obligationsFor(stmt);
         // Phase 6.2: register an escape sentinel if this binding has mustNotEscape.
         if (stmt.resolvedKindType?.mustNotEscape) {
           const sentinel = {
@@ -180,11 +237,11 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
           };
           stack[stack.length - 1].escapeSentinels.push(sentinel);
         }
-        if (!obligation) return;
+        if (obligations.length === 0) return;
         if (stmt.trailingBlock) {
-          // trailing-block form: the binding's obligation belongs to the
+          // trailing-block form: the binding's obligations belong to the
           // inner block's frame.
-          const innerFrame = { obligations: [obligation], escapeSentinels: [] };
+          const innerFrame = { obligations: [...obligations], escapeSentinels: [] };
           stack.push(innerFrame);
           for (const s of stmt.trailingBlock.body) walkStatement(s);
           stmt.trailingBlock.implicitCleanups = innerFrame.obligations
@@ -193,7 +250,9 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
             .map(makeCleanupCall);
           stack.pop();
         } else {
-          stack[stack.length - 1].obligations.push(obligation);
+          for (const o of obligations) {
+            stack[stack.length - 1].obligations.push(o);
+          }
         }
         return;
       }
@@ -274,8 +333,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     }
 
     // Phase 6.2: check CALL_EXPRESSION for ref-pass escapes.
+    // Phase 6.4: also mark pooled-typed arguments to pooled params for retain.
     if (e.kind === ASTNodeKind.CALL_EXPRESSION) {
       checkCallEscape(e);
+      markPooledArgRetains(e);
       // Fall through to generic recursion below to walk args.
     }
 
@@ -345,7 +406,25 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     }
   }
 
+  // Phase 6.4: for any call to a function whose params include `pooled`,
+  // mark each matching argument so codegen emits a TASK_RETAIN at the call site.
+  function markPooledArgRetains(callNode) {
+    const callee = callNode.callee;
+    if (typeof callee !== "string" || !funcDeclTable) return;
+    const calleeDecl = funcDeclTable.get(callee);
+    if (!calleeDecl) return;
+    const params = calleeDecl.params ?? [];
+    const args = callNode.args ?? [];
+    for (let i = 0; i < Math.min(args.length, params.length); i++) {
+      const pkt = params[i].resolvedKindType;
+      if (pkt?.builtin && pkt.refcounted) {
+        args[i].pooledArgRetain = true;
+      }
+    }
+  }
+
   // Phase 6.2: populate outer frame with escape sentinels from scoped parameters.
+  // Phase 6.4: also register a release obligation for any pooled parameter.
   const outerFrame = { obligations: [], escapeSentinels: [] };
   for (const p of fnOrMethodDecl.params ?? []) {
     const kt = p.resolvedKindType;
@@ -357,8 +436,24 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
         sourceLoc: p.sourceLoc,
       });
     }
+    if (kt?.builtin && kt.refcounted) {
+      outerFrame.obligations.push({
+        type: "release",
+        bindingName: p.name,
+        sourceLoc: p.sourceLoc,
+      });
+    }
   }
   stack.push(outerFrame);
   walkBlock(body);
   stack.pop();
+
+  // Phase 6.4: param-level obligations (e.g. pooled param release) live in the
+  // outer frame, not the body's block frame. They didn't get folded into
+  // body.implicitCleanups by walkBlock, so append them here in LIFO order so
+  // fall-through cleanup fires them after body-local obligations.
+  if (outerFrame.obligations.length > 0) {
+    const extra = outerFrame.obligations.slice().reverse().map(makeCleanupCall);
+    body.implicitCleanups = (body.implicitCleanups ?? []).concat(extra);
+  }
 }

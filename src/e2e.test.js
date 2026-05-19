@@ -463,6 +463,24 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "a=9\nd=16\nh=25\n");
   });
 
+  // ---- 6.4 propagation: cross-module kind import + struct propagates ----
+
+  it("propagates_full: end-to-end propagates<disposable> + propagates<Task> across modules", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/propagates_full/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "n=25\nclosed fd=7\n");
+  });
+
+  it("propagates_full: emitted IR shows propagated dispose + release at scope exit", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/propagates_full/main.yoop"));
+    // Propagated release on `j.work` — GEP into Job then yoop_task_release.
+    assert.match(ir, /call void @yoop_task_release\(/);
+    // Pooled-to-pooled retain on h2 -> h3 transfer.
+    assert.match(ir, /call void @yoop_task_retain\(/);
+    // Propagated dispose call to the imported FileHandle's dispose method.
+    assert.match(ir, /call void @[^\s(]+__FileHandle__dispose\(/);
+  });
+
   it("task_three_forms: emitted IR has thunk + submit + wait + release/free_sync_pair", () => {
     const { ir } = compileEntry(path.join(repoRoot, "examples/pass/task_three_forms/main.yoop"));
     // The per-task thunk is emitted.
@@ -934,11 +952,11 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("field_with_kind.yoop rejects a kind-prefixed struct field", () => {
+  it("field_with_kind.yoop rejects a kind-prefixed struct field without propagates", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/field_with_kind.yoop");
     assert.ok(
-      errors.some((e) => /kind-bearing struct fields require propagates/.test(e.message)),
-      `expected field-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /carries kind 'scoped' but enclosing struct .* does not propagate it/.test(e.message)),
+      `expected propagates-missing error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -1012,6 +1030,39 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /pooled binding "h" requires a task call RHS/.test(e.message)),
       `expected pooled-no-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // ---- phase 6.4 fail fixtures ----
+  it("propagates_missing.yoop rejects a kind-bearing field without propagates", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_missing.yoop");
+    assert.ok(
+      errors.some((e) => /carries kind 'disposable' but enclosing struct 'S' does not propagate it/.test(e.message)),
+      `expected propagates-missing error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("propagates_unknown_kind.yoop rejects propagates with an unresolved kind name", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_unknown_kind.yoop");
+    assert.ok(
+      errors.some((e) => /unknown kind 'bogus'/.test(e.message)),
+      `expected unknown-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("contains_deferred.yoop rejects contains<K> as not yet supported", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/contains_deferred.yoop");
+    assert.ok(
+      errors.some((e) => /contains not yet supported \(phase 6\.5 or later\)/.test(e.message)),
+      `expected contains-deferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("cross_module_kind_unexported rejects importing a non-exported kind", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/cross_module_kind_unexported/main.yoop");
+    assert.ok(
+      errors.some((e) => /has no export "disposable"/.test(e.message)),
+      `expected unexported-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

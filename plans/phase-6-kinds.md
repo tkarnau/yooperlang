@@ -60,7 +60,9 @@ The big sub-phase. Splits in two:
 
 ### 6.4 — Containment and propagation
 
-`type T propagates<K> { ... }` and `type T contains<K> { ... }` ([SPEC.md §6.5](../SPEC.md#L460)), plus `function f(...): T propagates<K>` on return types. Containers either surface their fields' kind rules to callers (propagate) or absorb them (contain). Smaller polish layer; depends on 6.1-6.3.
+`type T propagates<K> { ... }` and `function f(...): T propagates<K>` on return types ([SPEC.md §6.5](../SPEC.md#L460)). Containers surface their fields' kind rules to callers. Also retires three deferrals: 6.1's cross-module kind import, 6.2's kind-on-field rejection, and 6.3's `pooled`-as-parameter / `pooled`-to-`pooled` assignment. `contains<K>` parses but is rejected (no forcing deferral; revisited in 6.5+).
+
+> Detailed plan: [phase-6-4-containment-propagation.md](phase-6-4-containment-propagation.md)
 
 ### 6.5 — Layout, iteration restrictions, composition
 

@@ -10,7 +10,7 @@ import { pushError } from "./errors.js";
 // module's local symbol/struct tables with the imported bindings.
 export function resolveImports(mod, moduleEnv, errors) {
   const modEnv = moduleEnv.get(mod.id);
-  const { localSymbols, structTable, importedNames, traitTable } = modEnv;
+  const { localSymbols, structTable, importedNames, traitTable, kindTable } = modEnv;
 
   for (const imp of mod.ast.body) {
     if (imp.kind !== ASTNodeKind.IMPORT_DECL) break; // imports-first rule
@@ -47,12 +47,18 @@ export function resolveImports(mod, moduleEnv, errors) {
         continue;
       }
 
-      // Determine if it's a trait, type, or value
+      // Determine if it's a kind, trait, type, or value
+      const srcKind = srcEnv.kindTable?.get(spec.exportName);
       const srcTrait = srcEnv.traitTable?.get(spec.exportName);
       const srcStruct = srcEnv.structTable.get(spec.exportName);
       const srcSym = srcEnv.localSymbols.get(spec.exportName);
 
-      if (srcTrait) {
+      if (srcKind) {
+        // Phase 6.4: cross-module kind import. Identity is preserved by reference —
+        // the same KindType instance is shared across modules so equality holds.
+        kindTable.set(spec.localName, srcKind);
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "kind" });
+      } else if (srcTrait) {
         // It's a trait — record the import; pass C.5 re-syncs the resolved version
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "trait" });
       } else if (srcStruct) {

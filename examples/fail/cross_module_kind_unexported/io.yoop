@@ -1,0 +1,9 @@
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding field;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
