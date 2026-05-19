@@ -44,8 +44,6 @@ function isKindClauseStartTag(tag) {
 const DeferredKindClauseMessages = {
   provides: "provides clause not yet supported in phase 6.1",
   autoJoin: "autoJoin not yet supported (phase 6.3)",
-  propagates: "propagates not yet supported (phase 6.4)",
-  contains: "contains not yet supported (phase 6.4)",
   restricts: "restricts not yet supported (phase 6.5)",
   layout: "layout not yet supported (phase 6.5)",
 };
@@ -156,6 +154,71 @@ export function parse(src) {
   // load first token
   advance();
 
+  // Phase 6.4: shared parser for `propagates<K1, K2, ...>` and `contains<K1, ...>`
+  // clauses. Lives on struct decls and function return types. The current token
+  // must be `propagates` or `contains` when this is called.
+  function parseKindListClause() {
+    const tok = advance(); // consume propagates|contains
+    const variant = tok.tag === TokenTags.propagates ? "propagates" : "contains";
+    expect(TokenTags.lt);
+    const kindNames = [];
+    if (peek().tag === TokenTags.gt) {
+      throw parseError(
+        `${variant} requires at least one kind name`,
+        peek().start,
+        peek().length,
+      );
+    }
+    while (peek().tag !== TokenTags.gt && peek().tag !== TokenTags.eof) {
+      const nameTok = expect(TokenTags.ident);
+      const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+      kindNames.push({
+        name,
+        sourceLoc: posToSourceLocation(src, nameTok.start),
+      });
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.gt);
+    return {
+      variant,
+      kindNames,
+      sourceLoc: posToSourceLocation(src, tok.start),
+    };
+  }
+
+  // Parse zero-or-more `propagates<...>`/`contains<...>` clauses into the
+  // provided node, attaching them as `propagatesClause` / `containsClause`.
+  function parsePropagationClauses(node) {
+    node.propagatesClause = null;
+    node.containsClause = null;
+    while (
+      peek().tag === TokenTags.propagates ||
+      peek().tag === TokenTags.contains
+    ) {
+      const startTok = peek();
+      const clause = parseKindListClause();
+      if (clause.variant === "propagates") {
+        if (node.propagatesClause) {
+          throw parseError(
+            "duplicate propagates clause",
+            startTok.start,
+            startTok.length,
+          );
+        }
+        node.propagatesClause = clause;
+      } else {
+        if (node.containsClause) {
+          throw parseError(
+            "duplicate contains clause",
+            startTok.start,
+            startTok.length,
+          );
+        }
+        node.containsClause = clause;
+      }
+    }
+  }
+
   // Parse a type annotation and return a structured annotation object.
   //   { kind: "typeName", name: "int32" }
   //   { kind: "refType", inner: <annot> }
@@ -171,6 +234,15 @@ export function parse(src) {
     const nameTok = expect(TokenTags.ident);
     const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
     let annot = { kind: "typeName", name };
+    // Phase 6.4: `Task<T>` — built-in generic. The compiler emits Task<T>
+    // internally from `task fn ...` declarations; this is the surface syntax
+    // used in struct fields and pooled-parameter annotations.
+    if (name === "Task" && peek().tag === TokenTags.lt) {
+      advance(); // consume <
+      const inner = parseTypeAnnotation();
+      expect(TokenTags.gt);
+      annot = { kind: "taskType", inner };
+    }
     // optional [] suffix for arrays — in type position, [ always means T[]
     if (peek().tag === TokenTags.lbracket) {
       advance(); // consume [
@@ -687,6 +759,9 @@ export function parse(src) {
         break;
       case TokenTags.trait:
         node.decl = parseTraitDecl();
+        break;
+      case TokenTags.kind:
+        node.decl = parseKindDecl();
         break;
       default:
         throw parseError(
@@ -1418,11 +1493,13 @@ export function parse(src) {
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     node.params = [];
-    // params can start with: ident (name/kind-prefix), ref (modifier), or comma (separator)
+    // params can start with: ident (name/kind-prefix), ref (modifier), comma
+    // (separator), or a kind keyword (phase 6.4: `pooled` is a kind prefix).
     while (
       peek().tag === TokenTags.ident ||
       peek().tag === TokenTags.ref ||
-      peek().tag === TokenTags.comma
+      peek().tag === TokenTags.comma ||
+      peek().tag === TokenTags.pooled
     ) {
       if (peek().tag === TokenTags.comma) advance();
       if (peek().tag !== TokenTags.rparen && peek().tag !== TokenTags.eof) {
@@ -1432,6 +1509,8 @@ export function parse(src) {
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
     node.returnTypeAnnotation = parseTypeAnnotation();
+    // Phase 6.4: optional `propagates<...>` clause on return type.
+    parsePropagationClauses(node);
     node.body = parseBlock();
     return node;
   }
@@ -1458,6 +1537,9 @@ export function parse(src) {
         node.implements.push(parseIdentAsName());
       }
     }
+
+    // Phase 6.4: optional `propagates<...>` / `contains<...>` clauses.
+    parsePropagationClauses(node);
 
     if (peek().tag === TokenTags.lcurly) {
       // struct type
@@ -1540,9 +1622,21 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.PARAM);
     node.kindPrefix = null;
 
+    // Phase 6.4: `pooled` is a reserved kind keyword; it lexes as a non-ident
+    // token but is a valid param prefix (`pooled h: Task<int32>`). Built-in
+    // kind keywords are handled via the same kindPrefix shape as user kinds.
+    if (peek().tag === TokenTags.pooled) {
+      const kindTok = advance();
+      node.kindPrefix = {
+        name: "pooled",
+        builtin: "pooled",
+        sourceLoc: posToSourceLocation(src, kindTok.start),
+      };
+    }
+
     // Detect kind prefix: IDENT followed by (IDENT or ref) means kind-prefixed param.
     // Examples: `scoped h: ref FileHandle` or `scoped ref h: FileHandle`.
-    if (peek().tag === TokenTags.ident) {
+    if (!node.kindPrefix && peek().tag === TokenTags.ident) {
       const next1 = peekAhead(1);
       if (next1.tag === TokenTags.ident || next1.tag === TokenTags.ref) {
         const kindTok = advance();

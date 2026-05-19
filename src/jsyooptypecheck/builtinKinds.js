@@ -18,10 +18,26 @@ export const JOINED_KIND = makeBuiltin("joined", { autoJoin: true });
 
 // `pooled h = task_call();` — heap-allocated, refcounted Task<T>. Scope-exit
 // inserts release; copy/return sites get retain pairs.
-export const POOLED_KIND = makeBuiltin("pooled", { refcounted: true });
+// Phase 6.4: `pooled` also applies to parameters (a function that takes
+// ownership of a refcounted Task handle).
+export const POOLED_KIND = (() => {
+  const k = makeBuiltin("pooled", { refcounted: true });
+  k.appliesTo = new Set(["binding", "parameter"]);
+  return k;
+})();
+
+// Phase 6.4: `Task` is the kind name that pairs with the `Task<T>` type when
+// it appears inside a struct (`type Job propagates<Task> { work: Task<int32> }`).
+// It produces the same refcount lifecycle as `pooled` but applies to fields.
+export const TASK_KIND = (() => {
+  const k = makeBuiltin("Task", { refcounted: true });
+  k.appliesTo = new Set(["field", "binding"]);
+  return k;
+})();
 
 export function lookupBuiltinKind(name) {
   if (name === "joined") return JOINED_KIND;
   if (name === "pooled") return POOLED_KIND;
+  if (name === "Task") return TASK_KIND;
   return null;
 }

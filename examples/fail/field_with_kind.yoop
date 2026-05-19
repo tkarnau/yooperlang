@@ -28,4 +28,4 @@ function main(): int32 {
     return 0;
 }
 
-// Fails: kind-bearing struct fields require propagates<K> or contains<K> (phase 6.4)
+// Fails: field 'handle' carries kind 'scoped' but enclosing struct 'Wrapper' does not propagate it

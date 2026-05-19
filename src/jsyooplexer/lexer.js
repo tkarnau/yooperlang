@@ -81,6 +81,9 @@ export const TokenTags = {
   wait: 76,
   joined: 77,
   pooled: 78,
+  // phase 6.4: containment / propagation
+  propagates: 79,
+  contains: 80,
 
   // punctuation / operators
   eq: 5,
@@ -196,6 +199,8 @@ const keywordTagList = {
   wait: TokenTags.wait,
   joined: TokenTags.joined,
   pooled: TokenTags.pooled,
+  propagates: TokenTags.propagates,
+  contains: TokenTags.contains,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

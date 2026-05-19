@@ -2111,42 +2111,42 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   // Phase 6.3: `wait <ident>`. The operand must be a Task<T>-typed binding
   // (joined or pooled). Load its handle ptr, block in the runtime, then load
   // the result from field 6.
+  // Phase 6.4: also accepts a pooled parameter (no bindingDeclTable entry);
+  // we fall back to a byte-offset GEP since the originating task fn is unknown.
   function emitWaitExpression(node, fnLines) {
     const operand = node.operand;
     if (operand.kind !== ASTNodeKind.IDENT) {
       throw new Error(`codegen: wait operand must be a binding identifier in phase 6.3`);
     }
-    // Resolve the task fn meta via the binding's source. We need the
-    // result type and struct layout, but the binding only carries TaskType.
-    // We look it up via the binding's source declaration node.
-    const taskMeta = lookupWaitTargetMeta(operand);
     const handlePtr = freshTemp();
     fnLines.push(`  ${handlePtr} = load ptr, ptr %${operand.name}`);
     fnLines.push(`  call void @yoop_task_wait(ptr ${handlePtr})`);
-    const resultLlvm = llvmType(taskMeta.resultType);
+
+    const decl = bindingDeclTable.get(operand.name);
+    if (decl) {
+      // Known task fn: use the typed GEP for clarity.
+      const meta = taskFnTable.get(decl.taskFnName);
+      const resultLlvm = llvmType(meta.resultType);
+      const resPtr = freshTemp();
+      fnLines.push(
+        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 6`,
+      );
+      const resVal = freshTemp();
+      fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
+      return { val: resVal, yoopType: meta.resultType };
+    }
+
+    // Anonymous source (e.g. `pooled h` parameter). The result type comes
+    // from the operand's TaskType; the result slot lives at byte offset 32
+    // of every task struct (prefix layout is universal — see runtime-design.md).
+    const operandType = symbols.get(operand.name);
+    const resultType = operandType.resultType;
+    const resultLlvm = llvmType(resultType);
     const resPtr = freshTemp();
-    fnLines.push(
-      `  ${resPtr} = getelementptr inbounds ${taskMeta.structName}, ptr ${handlePtr}, i32 0, i32 6`,
-    );
+    fnLines.push(`  ${resPtr} = getelementptr inbounds i8, ptr ${handlePtr}, i64 32`);
     const resVal = freshTemp();
     fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
-    return { val: resVal, yoopType: taskMeta.resultType };
-  }
-
-  // Map a wait operand back to its originating task fn via the binding's
-  // declaration. The binding's source is the joined/pooled CONST_DECL whose
-  // RHS is a CALL_EXPRESSION naming the task fn.
-  function lookupWaitTargetMeta(operand) {
-    const decl = bindingDeclTable.get(operand.name);
-    if (!decl) {
-      throw new Error(`codegen: wait operand "${operand.name}" has no recorded task source`);
-    }
-    const fnName = decl.taskFnName;
-    const meta = taskFnTable.get(fnName);
-    if (!meta) {
-      throw new Error(`codegen: wait operand "${operand.name}" references unknown task fn "${fnName}"`);
-    }
-    return meta;
+    return { val: resVal, yoopType: resultType };
   }
 
   function emitCallExpr(node, fnLines) {
@@ -2195,6 +2195,14 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
 
     const sym = calleeSymbol(node);
     const argResults = node.args.map((a) => emitExpr(a, fnLines));
+    // Phase 6.4: for each arg flagged by kindCheck as a pooled-to-pooled
+    // transfer, retain before passing so the callee's scope-exit release is
+    // balanced.
+    for (let i = 0; i < node.args.length; i++) {
+      if (node.args[i].pooledArgRetain) {
+        fnLines.push(`  call void @yoop_task_retain(ptr ${argResults[i].val})`);
+      }
+    }
     const sig = functionSigs.get(node.callee);
     let argList;
     if (sig?.variadic) {
@@ -2321,6 +2329,12 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       } else {
         const rhs = emitExpr(litField.value, fnLines);
         fnLines.push(`  store ${llvmType(fieldType)} ${rhs.val}, ptr ${gepTmp}`);
+        // Phase 6.4: storing a Task<T> handle into a struct field transfers a
+        // reference. Retain so the source binding's scope-exit release stays
+        // balanced and the receiving struct owns its own count.
+        if (fieldType.kind === typeKinds.task) {
+          fnLines.push(`  call void @yoop_task_retain(ptr ${rhs.val})`);
+        }
       }
     }
   }
@@ -2358,6 +2372,10 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   // `%<bindingName>` (kind-prefixed bindings always declare a struct value;
   // the trait method takes `ref self` so we pass the slot pointer directly).
   // Phase 6.3: also dispatches TASK_AUTO_WAIT / TASK_RELEASE / TASK_RETAIN.
+  // Phase 6.4: when `node.fieldName` is set, GEP into the binding's struct
+  // field (and for TASK_RELEASE additionally load the handle ptr) before
+  // dispatching, so propagated obligations target `binding.field` instead of
+  // the binding directly.
   function emitCleanupCall(node, fnLines) {
     if (node.kind === ASTNodeKind.TASK_AUTO_WAIT) {
       // joined binding: handle ptr is stored in %<name>'s ptr slot.
@@ -2369,7 +2387,13 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
     if (node.kind === ASTNodeKind.TASK_RELEASE) {
       const handlePtr = freshTemp();
-      fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      if (node.fieldName) {
+        // Propagated release: GEP into the field (Task<T> = ptr), then load.
+        const fieldPtr = emitFieldGep(node, fnLines);
+        fnLines.push(`  ${handlePtr} = load ptr, ptr ${fieldPtr}`);
+      } else {
+        fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      }
       fnLines.push(`  call void @yoop_task_release(ptr ${handlePtr})`);
       return;
     }
@@ -2379,8 +2403,33 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       fnLines.push(`  call void @yoop_task_retain(ptr ${handlePtr})`);
       return;
     }
+    // CLEANUP_CALL — mustCall dispatch.
+    if (node.fieldName) {
+      // Phase 6.4: propagated dispose. GEP into binding's struct field; the
+      // trait method takes `ref self` so we pass the field pointer directly.
+      const fieldStruct = node.fieldStructType;
+      const mangled = `${fieldStruct.moduleId}__${fieldStruct.name}__${node.methodName}`;
+      const fieldPtr = emitFieldGep(node, fnLines);
+      fnLines.push(`  call void @${mangled}(ptr ${fieldPtr})`);
+      return;
+    }
     const mangled = `${node.moduleId}__${node.structType.name}__${node.methodName}`;
     fnLines.push(`  call void @${mangled}(ptr %${node.bindingName})`);
+  }
+
+  // Phase 6.4: GEP into `%<binding>.<field>`. Returns the SSA name of the
+  // field pointer.
+  function emitFieldGep(node, fnLines) {
+    const enclosing = node.structType;
+    const idx = enclosing.fields.findIndex((f) => f.name === node.fieldName);
+    if (idx < 0) {
+      throw new Error(`codegen: struct ${enclosing.name} has no field "${node.fieldName}"`);
+    }
+    const tmp = freshTemp();
+    fnLines.push(
+      `  ${tmp} = getelementptr inbounds ${llvmType(enclosing)}, ptr %${node.bindingName}, i32 0, i32 ${idx}`,
+    );
+    return tmp;
   }
 
   // Phase 6.3: `joined h = task_call();` — stack-allocate the Task struct,
@@ -2426,6 +2475,16 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     bindingDeclTable.set(node.name, { taskFnName: fnName });
     fnLines.push(`  %${node.name} = alloca ptr, align 8`);
     fnLines.push(`  store ptr ${heapPtr}, ptr %${node.name}`);
+  }
+
+  // Phase 6.4: `pooled h3 = h2;` — copy the existing handle pointer and
+  // retain it. The scope-exit release on h3 then balances the retain.
+  function emitPooledCopyBinding(node, fnLines) {
+    const rhs = emitExpr(node.assignment, fnLines);
+    symbols.set(node.name, node.resolvedType); // TaskType
+    fnLines.push(`  %${node.name} = alloca ptr, align 8`);
+    fnLines.push(`  store ptr ${rhs.val}, ptr %${node.name}`);
+    fnLines.push(`  call void @yoop_task_retain(ptr ${rhs.val})`);
   }
 
   // Phase 6.3: immediate task call — `const x: T = compute(...);`. Allocate
@@ -2515,7 +2574,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
           break;
         }
         if (builtin === "pooled") {
-          emitPooledBinding(node, fnLines);
+          if (node.pooledCopy) {
+            emitPooledCopyBinding(node, fnLines);
+          } else {
+            emitPooledBinding(node, fnLines);
+          }
           break;
         }
         if (node.immediateTaskCall) {

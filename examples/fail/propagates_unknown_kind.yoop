@@ -1,0 +1,9 @@
+type S propagates<bogus> {
+    x: int32,
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// Fails: unknown kind 'bogus' in propagates clause of struct "S"
