@@ -84,6 +84,10 @@ export const TokenTags = {
   // phase 6.4: containment / propagation
   propagates: 79,
   contains: 80,
+  // phase 6.5: layout / composition
+  layout: 81,
+  align: 82,
+  amp: 83, // standalone & (composition operator), distinct from &&
 
   // punctuation / operators
   eq: 5,
@@ -140,6 +144,7 @@ export const tokenScanList = [
   { str: "<", tag: TokenTags.lt },
   { str: ">", tag: TokenTags.gt },
   { str: "&&", tag: TokenTags.andand },
+  { str: "&", tag: TokenTags.amp },
   { str: "||", tag: TokenTags.oror },
   { str: "<<", tag: TokenTags.lshift },
   { str: ">>", tag: TokenTags.rshift },
@@ -201,6 +206,8 @@ const keywordTagList = {
   pooled: TokenTags.pooled,
   propagates: TokenTags.propagates,
   contains: TokenTags.contains,
+  layout: TokenTags.layout,
+  align: TokenTags.align,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

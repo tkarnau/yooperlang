@@ -513,7 +513,7 @@ describe("parse: phase 6.1 - kind decls", () => {
     it("rejects appliesTo function site", () => {
       assert.throws(
         () => parse("kind k { appliesTo function; }"),
-        /appliesTo function not yet supported/,
+        /user-declared `appliesTo function` kinds are deferred/,
       );
     });
     it("rejects duplicate appliesTo site", () => {
@@ -555,17 +555,20 @@ describe("parse: phase 6.1 - kind decls", () => {
         /ownsBlock takes no arguments/,
       );
     });
-    it("rejects parameterized kind decl", () => {
-      assert.throws(
-        () => parse("kind k(n: usize) { appliesTo binding; }"),
-        /parameterized kinds not yet supported/,
-      );
+    it("accepts parameterized kind decl (phase 6.5)", () => {
+      const ast = parse("kind k(n: usize) { appliesTo binding; }");
+      const k = ast.body[0];
+      assert.equal(k.name, "k");
+      assert.equal(k.params.length, 1);
+      assert.equal(k.params[0].name, "n");
     });
-    it("rejects kind composition", () => {
-      assert.throws(
-        () => parse("kind slow = a & b;"),
-        /kind composition not yet supported/,
-      );
+    it("accepts kind composition (phase 6.5)", () => {
+      const ast = parse("kind slow = a & b;");
+      const k = ast.body[0];
+      assert.equal(k.name, "slow");
+      assert.equal(k.composition.kindRefs.length, 2);
+      assert.equal(k.composition.kindRefs[0].name, "a");
+      assert.equal(k.composition.kindRefs[1].name, "b");
     });
     it("rejects provides clause", () => {
       assert.throws(

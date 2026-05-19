@@ -12,6 +12,7 @@ import { ASTNodeKind } from "../contracts.js";
 import {
   ArrayType,
   ErrorType,
+  KindApplication,
   RefType,
   StructType,
   primAnnotations,
@@ -116,8 +117,32 @@ export function validateFunction(funcNode, typeContext, errors) {
         }
       }
       param.resolvedKindType = paramKindType;
+      // Phase 6.5: build a KindApplication for the parameter site as well.
+      if (paramKindType) {
+        const args = param.kindPrefix.args ?? [];
+        if (args.length !== paramKindType.params.length) {
+          pushError(errors, param,
+            `kind '${paramKindType.name}' expects ${paramKindType.params.length} argument(s), got ${args.length}`);
+        } else {
+          const resolved = [];
+          let ok = true;
+          for (const a of args) {
+            if (a.kind !== ASTNodeKind.INT_LITERAL) {
+              pushError(errors, a,
+                `kind argument must be a constant in phase 6.5`);
+              ok = false;
+              break;
+            }
+            resolved.push(a.value);
+          }
+          if (ok) {
+            param.resolvedKindApplication = new KindApplication(paramKindType, resolved);
+          }
+        }
+      }
     } else {
       param.resolvedKindType = null;
+      param.resolvedKindApplication = null;
     }
 
     declareInScope(scope, param.name, t, typeKinds.param, param, errors, paramKindType);
@@ -226,15 +251,37 @@ function checkLetOrConst(node, scope, ctx) {
   }
   node.resolvedType = declaredType;
 
-  // Resolve kind prefix (phase 6.1). null on plain let/const.
+  // Resolve kind prefix (phase 6.1, args added in 6.5). null on plain let/const.
   let kindType = null;
+  let kindApp = null;
   if (node.kindPrefix) {
     kindType = ctx.typeContext.kindTable?.get(node.kindPrefix.name) ?? null;
     if (!kindType) {
       pushError(ctx.errors, node, `unknown kind "${node.kindPrefix.name}"`);
+    } else {
+      // Phase 6.5: validate kind arguments (must be constants).
+      const args = node.kindPrefix.args ?? [];
+      if (args.length !== kindType.params.length) {
+        pushError(ctx.errors, node,
+          `kind '${kindType.name}' expects ${kindType.params.length} argument(s), got ${args.length}`);
+      } else {
+        const resolved = [];
+        let ok = true;
+        for (const a of args) {
+          if (a.kind !== ASTNodeKind.INT_LITERAL) {
+            pushError(ctx.errors, a,
+              `kind argument must be a constant in phase 6.5`);
+            ok = false;
+            break;
+          }
+          resolved.push(a.value);
+        }
+        if (ok) kindApp = new KindApplication(kindType, resolved);
+      }
     }
   }
   node.resolvedKindType = kindType;
+  node.resolvedKindApplication = kindApp;
 
   if (node.assignment) {
     // Phase 6.3: immediate task call — `const x: T = compute(...);` where

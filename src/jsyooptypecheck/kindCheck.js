@@ -122,9 +122,11 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
 
     // Phase 6.4: propagated obligations. For each kind on the resolved struct's
     // propagatedKinds list, walk the fields and emit one obligation per match.
+    // Phase 6.5: propagatedKinds entries are KindApplication; unwrap to KindType.
     const rt = stmt.resolvedType;
     if (rt?.kind === "struct" && rt.propagatedKinds?.length > 0) {
-      for (const propK of rt.propagatedKinds) {
+      for (const propA of rt.propagatedKinds) {
+        const propK = propA.kindType ?? propA;
         for (const f of rt.fields ?? []) {
           if (!fieldCarriesKind(f, propK)) continue;
           if (propK.refcounted) {
@@ -162,7 +164,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     if (kindType.builtin && kindType.refcounted && field.type?.kind === "task") {
       return true;
     }
-    if (field.type?.kind === "struct" && field.type.propagatedKinds?.includes(kindType)) {
+    if (
+      field.type?.kind === "struct" &&
+      field.type.propagatedKinds?.some((a) => (a.kindType ?? a) === kindType)
+    ) {
       return true;
     }
     return false;

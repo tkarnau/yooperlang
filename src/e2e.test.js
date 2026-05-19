@@ -495,6 +495,24 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.match(ir, /call ptr @yoop_task_alloc\(/);
     assert.match(ir, /call void @yoop_task_release\(/);
   });
+
+  // ---- 6.5: layout / composition / parameterized kinds ----
+
+  it("layout_compose: type-level aligned + composed scoped_alt fires dispose at scope exit", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/layout_compose/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "v.x=1.000000 h.x=5.000000\nbye vec4\n");
+  });
+
+  it("layout_compose: emitted IR has align 32 on both Vec4 allocas", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/layout_compose/main.yoop"));
+    // Both `v` (type-level) and `h` (composed scoped_alt has no layout, so
+    // alignment comes from the type's aligned(32) prefix) get align 32.
+    const vMatches = ir.match(/%v = alloca[^\n]+align 32/g) ?? [];
+    const hMatches = ir.match(/%h = alloca[^\n]+align 32/g) ?? [];
+    assert.ok(vMatches.length >= 1, `expected %v alloca with align 32`);
+    assert.ok(hMatches.length >= 1, `expected %h alloca with align 32`);
+  });
 });
 
 describe("e2e: multi-file fail fixtures produce the right errors", () => {
@@ -872,10 +890,10 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   });
 
   // phase 6.2 parser rejections
-  it("kind_appliesto_function.yoop rejects appliesTo function (phase 6.5)", () => {
+  it("kind_appliesto_function.yoop rejects appliesTo function (deferred past 6.5)", () => {
     assert.throws(
       () => parseFixture("examples/fail/kind_appliesto_function.yoop"),
-      /appliesTo function not yet supported/,
+      /user-declared `appliesTo function` kinds are deferred/,
     );
   });
 
@@ -1063,6 +1081,77 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /has no export "disposable"/.test(e.message)),
       `expected unexported-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // ---- phase 6.5: layout / composition / parameterized kinds ----
+
+  it("kind_compose_contradiction.yoop rejects two align values in composition", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_compose_contradiction.yoop");
+    assert.ok(
+      errors.some((e) => /composition contradiction.*align 32 vs align 64/.test(e.message)),
+      `expected align-contradiction error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_compose_no_common_site.yoop rejects composition with no overlap in appliesTo", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_compose_no_common_site.yoop");
+    assert.ok(
+      errors.some((e) => /composition has no common application site/.test(e.message)),
+      `expected no-common-site error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_param_wrong_type.yoop rejects an unsupported kind-parameter type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_param_wrong_type.yoop");
+    assert.ok(
+      errors.some((e) => /kind parameter type 'string' not yet supported/.test(e.message)),
+      `expected unsupported-param-type error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_app_arg_mismatch.yoop rejects a kind use that omits required args", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_app_arg_mismatch.yoop");
+    assert.ok(
+      errors.some((e) => /kind 'aligned' expects 1 argument\(s\)/.test(e.message)),
+      `expected arg-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_app_non_constant.yoop rejects a non-constant kind argument", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_app_non_constant.yoop");
+    assert.ok(
+      errors.some((e) => /kind argument must be a constant in phase 6\.5/.test(e.message)),
+      `expected non-constant-arg error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("restricts_deferred.yoop rejects `restricts iteration` as deferred", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/restricts_deferred.yoop"),
+      /iteration restrictions deferred until for-in iteration lands \(phase 7\)/,
+    );
+  });
+
+  it("type_prefix_kind_not_appliesto_type.yoop rejects a type prefix whose kind lacks appliesTo type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/type_prefix_kind_not_appliesto_type.yoop");
+    assert.ok(
+      errors.some((e) => /kind 'only_binding' does not apply to types/.test(e.message)),
+      `expected appliesTo-type error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("layout_unknown_subclause.yoop rejects an unknown layout sub-clause", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/layout_unknown_subclause.yoop"),
+      /layout sub-clause 'packing' deferred/,
+    );
+  });
+
+  it("nested_composition.yoop rejects parenthesized composition operands", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/nested_composition.yoop"),
+      /expected ident/i,
     );
   });
 });
