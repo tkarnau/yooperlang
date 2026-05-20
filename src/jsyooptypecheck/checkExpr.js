@@ -780,16 +780,30 @@ export function resolveCallType(node, sig, scope, ctx) {
     const param = sig.params[i];
     if (param.isRef) {
       // ref params accept either an explicit `ref expr` taking the address of
-      // a local, OR a bare IDENT whose binding is itself ref-typed (so an
-      // opaque C handle like `let win: ref SDL_Window = ...` can be passed
-      // straight through to the next FFI call without writing `ref win`).
+      // a local, OR a bare IDENT/field-access whose value is itself ref-typed
+      // (so an opaque C handle held in `let win: ref SDL_Window = ...` or in
+      // a struct field `handle: ref SDL_Window` can be passed straight
+      // through to the next FFI call without writing `ref win`).
       const paramInner = param.type.inner; // param.type is RefType { inner }
-      if (node.args[i].kind === ASTNodeKind.IDENT) {
-        const binding = lookupInScope(scope, node.args[i].name);
-        if (binding && binding.type.kind === typeKinds.ref) {
-          if (paramInner && binding.type.inner.kind !== typeKinds.error && !typesEqual(binding.type.inner, paramInner)) {
+      if (
+        node.args[i].kind === ASTNodeKind.IDENT ||
+        node.args[i].kind === ASTNodeKind.FIELD_ACCESS
+      ) {
+        const argType = resolveExprType(node.args[i], scope, ctx);
+        // For IDENT, resolveIdent auto-derefs ref bindings; consult the
+        // binding type directly. For FIELD_ACCESS, the resolved expression
+        // type is already the field's declared type (no auto-deref).
+        let refType = null;
+        if (node.args[i].kind === ASTNodeKind.IDENT) {
+          const binding = lookupInScope(scope, node.args[i].name);
+          if (binding && binding.type.kind === typeKinds.ref) refType = binding.type;
+        } else if (argType && argType.kind === typeKinds.ref) {
+          refType = argType;
+        }
+        if (refType) {
+          if (paramInner && refType.inner.kind !== typeKinds.error && !typesEqual(refType.inner, paramInner)) {
             pushError(ctx.errors, node.args[i],
-              `ref argument type ${formatType(binding.type)} does not match param type ${formatType(paramInner)}`);
+              `ref argument type ${formatType(refType)} does not match param type ${formatType(paramInner)}`);
           }
           node.args[i].resolvedType = param.type;
           node.args[i].passRefBinding = true;
