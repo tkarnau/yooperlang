@@ -33,6 +33,7 @@ import {
   primAnnotations,
   primTypeFromName,
   resolveTypeFromName,
+  substituteTypeParams,
   typeKinds,
   typesEqual,
 } from "./types.js";
@@ -45,6 +46,7 @@ import {
   isNumeric,
   unifyArith,
 } from "./coerce.js";
+import { instantiateFunc, mangleType } from "./instantiate.js";
 
 // Built-in C-runtime functions the typechecker accepts even when the
 // program doesn't declare them. printf is variadic so it's special-cased
@@ -204,6 +206,15 @@ function resolveCall(node, scope, ctx) {
     } else {
       for (const arg of node.args) resolveExprType(arg, scope, ctx);
       return setType(node, PrimType(primAnnotations.int32));
+    }
+  }
+
+  // Phase 7.1: generic function call — look up in the genericFuncTable
+  // (local or imported) and run call-site inference.
+  if (typeof callee === "string") {
+    const generic = lookupGenericFunc(callee, ctx);
+    if (generic) {
+      return resolveGenericCall(node, generic, scope, ctx);
     }
   }
 
@@ -777,6 +788,207 @@ export function resolveCallType(node, sig, scope, ctx) {
   }
 
   return setType(node, sig.returnType);
+}
+
+// Phase 7.1: look up a generic function decl by name in the local + imported
+// generic func tables.
+function lookupGenericFunc(name, ctx) {
+  const tc = ctx.typeContext;
+  const local = tc.genericFuncTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp) {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const remote = srcEnv?.genericFuncTable?.get(imp.exportName);
+    if (remote) return remote;
+  }
+  return null;
+}
+
+// Phase 7.1: unify a generic param type against a concrete arg type, filling
+// the `subst` map (paramName -> Type). Returns true on success, false on
+// conflict. Untyped literals do NOT pin a type param — only concrete types do.
+function unifyAgainstTypeParam(paramType, argType, declId, subst) {
+  if (!paramType) return true;
+  // If paramType is a TypeParamType belonging to our decl, capture argType.
+  if (
+    paramType.kind === typeKinds.typeParam &&
+    paramType.originDecl === declId
+  ) {
+    // Skip untyped literals — don't pin a param to "untypedInt".
+    if (
+      argType.kind === typeKinds.untypedInt ||
+      argType.kind === typeKinds.untypedFloat
+    ) {
+      return true;
+    }
+    const prev = subst.get(paramType.name);
+    if (!prev) {
+      subst.set(paramType.name, argType);
+      return true;
+    }
+    return typesEqual(prev, argType);
+  }
+  // Recursive walks on composite types.
+  if (
+    paramType.kind === typeKinds.ref &&
+    argType?.kind === typeKinds.ref
+  ) {
+    return unifyAgainstTypeParam(paramType.inner, argType.inner, declId, subst);
+  }
+  if (
+    paramType.kind === typeKinds.array &&
+    argType?.kind === typeKinds.array
+  ) {
+    return unifyAgainstTypeParam(paramType.elem, argType.elem, declId, subst);
+  }
+  if (
+    paramType.kind === typeKinds.task &&
+    argType?.kind === typeKinds.task
+  ) {
+    return unifyAgainstTypeParam(
+      paramType.resultType,
+      argType.resultType,
+      declId,
+      subst,
+    );
+  }
+  if (
+    paramType.kind === typeKinds.struct &&
+    argType?.kind === typeKinds.struct
+  ) {
+    // Same generic instantiation? Walk field by field.
+    if ((paramType.fields ?? []).length !== (argType.fields ?? []).length) {
+      return true; // arity differs — caller handles via assignability
+    }
+    for (let i = 0; i < (paramType.fields ?? []).length; i++) {
+      if (
+        !unifyAgainstTypeParam(
+          paramType.fields[i].type,
+          argType.fields[i].type,
+          declId,
+          subst,
+        )
+      ) {
+        return false;
+      }
+    }
+    return true;
+  }
+  return true;
+}
+
+// Phase 7.1: handle a call to a generic function. Walks param types against
+// arg types to infer the type-arg map, then instantiates the function.
+function resolveGenericCall(node, generic, scope, ctx) {
+  const sig = generic.genericSig;
+  if (!sig) {
+    pushError(ctx.errors, node, `generic function "${generic.name}" has no resolved signature`);
+    return setType(node, ErrorType());
+  }
+  if (sig.params.length !== node.args.length) {
+    pushError(
+      ctx.errors,
+      node,
+      `wrong arg count to "${node.callee}" — expected ${sig.params.length}, got ${node.args.length}`,
+    );
+    return setType(node, ErrorType());
+  }
+
+  // First pass: resolve each arg's type (without pinning untyped literals)
+  // so we can do unification on concrete shapes.
+  const argTypes = [];
+  for (let i = 0; i < node.args.length; i++) {
+    const argType = resolveExprType(node.args[i], scope, ctx);
+    argTypes.push(argType);
+  }
+
+  // Unify.
+  const subst = new Map();
+  for (let i = 0; i < sig.params.length; i++) {
+    const paramT = sig.params[i].type;
+    const argT = argTypes[i];
+    if (argT.kind === typeKinds.error) continue;
+    if (
+      !unifyAgainstTypeParam(paramT, argT, generic.id, subst)
+    ) {
+      pushError(
+        ctx.errors,
+        node.args[i],
+        `conflicting type argument for generic function "${node.callee}": ${formatType(argT)} vs prior binding`,
+      );
+    }
+  }
+
+  // Every type param must be bound.
+  const concreteArgs = [];
+  for (const pn of generic.paramNames) {
+    const bound = subst.get(pn);
+    if (!bound) {
+      pushError(
+        ctx.errors,
+        node,
+        `cannot infer type argument "${pn}" for generic function "${node.callee}"`,
+      );
+      return setType(node, ErrorType());
+    }
+    concreteArgs.push(bound);
+  }
+
+  // Instantiate.
+  const inst = instantiateFunc(
+    ctx.typeContext.registry,
+    generic,
+    concreteArgs,
+  );
+  if (!inst) {
+    pushError(ctx.errors, node, `internal: failed to instantiate generic "${node.callee}"`);
+    return setType(node, ErrorType());
+  }
+
+  // Second pass: now that we know the substituted param types, check arg
+  // assignability and pin untyped literals.
+  for (let i = 0; i < inst.funcType.params.length; i++) {
+    const param = inst.funcType.params[i];
+    const argNode = node.args[i];
+    if (param.isRef) {
+      if (argNode.kind !== ASTNodeKind.REF_EXPRESSION) {
+        pushError(
+          ctx.errors,
+          argNode,
+          `parameter "${param.name}" expects a ref argument`,
+        );
+        continue;
+      }
+      const innerType = argTypes[i].kind === typeKinds.ref ? argTypes[i].inner : argTypes[i];
+      const paramInner = param.type.inner;
+      if (paramInner && innerType.kind !== typeKinds.error && !typesEqual(innerType, paramInner)) {
+        pushError(
+          ctx.errors,
+          argNode,
+          `ref argument type ${formatType(argTypes[i])} does not match param type ${formatType(paramInner)}`,
+        );
+      }
+      argNode.resolvedType = param.type;
+      continue;
+    }
+    if (argTypes[i].kind === typeKinds.error) continue;
+    if (!isAssignable(param.type, argTypes[i])) {
+      pushError(
+        ctx.errors,
+        argNode,
+        `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argTypes[i])} to ${formatType(param.type)}`,
+      );
+    } else {
+      coerceUntypedLiteralToTyped(argNode, argTypes[i], param.type, ctx.errors);
+    }
+  }
+
+  // Annotate the call for codegen.
+  node.genericInstantiation = inst;
+  node.calleeMangledName = `${inst.moduleId}__${inst.mangledName}`;
+  // If the function was imported, the IR symbol still mangles by source module.
+  return setType(node, inst.funcType.returnType);
 }
 
 // `Foo { x: 1, y: 2 }` — type-checks each field value against the target

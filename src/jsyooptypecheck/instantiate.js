@@ -1,0 +1,355 @@
+// Phase 7.1: instantiation registry for generic structs, functions, and traits.
+//
+// A generic decl is described by:
+//   - decl id (a stable string used as the originDecl for its TypeParamTypes)
+//   - param list ([{name, typeParam: TypeParamType}])
+//   - "body" (struct field list / function signature / trait method map) with
+//     TypeParamTypes embedded where the user wrote `T`
+//
+// `instantiateStruct`/`instantiateFunc`/`instantiateTrait` look up a cached
+// monomorphic Type by (declId, argTypes). On miss they substitute the param
+// map across the body, build a fresh frozen Type, cache, and return it.
+//
+// The keying uses `cacheKeyForArgs(argTypes)` which serializes types into a
+// stable string. Nested generic args contribute their already-instantiated
+// names (e.g. `Box<int32>` is keyed by the mangled "m__Box__int32").
+
+import {
+  ArrayType,
+  ErrorType,
+  FuncType,
+  RefType,
+  StructType,
+  TaskType,
+  TraitType,
+  primTypeFromName,
+  substituteTypeParams,
+  typeKinds,
+} from "./types.js";
+
+// Serialize a type to a stable key string. Used both for registry keys and
+// for mangled struct/function names.
+export function mangleType(t) {
+  if (!t) return "unknown";
+  switch (t.kind) {
+    case typeKinds.prim:
+      return t.name;
+    case typeKinds.struct:
+      return t.moduleId ? `${t.moduleId}__${t.name}` : t.name;
+    case typeKinds.ref:
+      return `ref_${mangleType(t.inner)}`;
+    case typeKinds.array:
+      return `arr_${mangleType(t.elem)}`;
+    case typeKinds.task:
+      return `Task__${mangleType(t.resultType)}`;
+    case typeKinds.void:
+      return "void";
+    case typeKinds.typeParam:
+      return `tp_${t.originDecl}_${t.name}`;
+    default:
+      return `unk_${t.kind}`;
+  }
+}
+
+function cacheKeyForArgs(argTypes) {
+  return argTypes.map(mangleType).join("__");
+}
+
+// Build a substitution Map<originDecl, Map<paramName, Type>> for a single decl.
+function buildSubstitution(declId, paramNames, argTypes) {
+  const inner = new Map();
+  for (let i = 0; i < paramNames.length; i++) {
+    inner.set(paramNames[i], argTypes[i]);
+  }
+  const outer = new Map();
+  outer.set(declId, inner);
+  return outer;
+}
+
+// Instantiate a generic struct decl at concrete `argTypes`.
+//   genericDecl: {
+//     id, name, moduleId, paramNames: [string],
+//     genericFields: [{name, type, kindType}],
+//     implementsTraits: [...], methods: Map<...>,
+//     propagatedKinds: [...], kindApplication: ...
+//   }
+// Returns a fully-frozen monomorphic StructType (or an "open" instantiation
+// when argTypes contain TypeParamType — substitution will canonicalize it).
+export function instantiateStruct(registry, genericDecl, argTypes) {
+  const key = `S:${genericDecl.id}:${cacheKeyForArgs(argTypes)}`;
+  const cached = registry.structs.get(key);
+  if (cached) return cached;
+
+  if (argTypes.length !== genericDecl.paramNames.length) {
+    return ErrorType();
+  }
+
+  const mangledName = monomorphizedName(genericDecl.name, argTypes);
+  const sub = buildSubstitution(
+    genericDecl.id,
+    genericDecl.paramNames,
+    argTypes,
+  );
+  const fields = (genericDecl.genericFields ?? []).map((f) => ({
+    name: f.name,
+    type: substituteTypeParams(f.type, sub),
+    kindType: f.kindType ?? null,
+  }));
+  const inst = StructType(
+    mangledName,
+    fields,
+    genericDecl.moduleId,
+    genericDecl.implementsTraits ?? [],
+    genericDecl.methods ?? new Map(),
+    genericDecl.propagatedKinds ?? [],
+    genericDecl.kindApplication ?? null,
+    { declId: genericDecl.id, args: argTypes },
+  );
+  registry.structs.set(key, inst);
+  registry.byMangledName.set(`${genericDecl.moduleId}__${mangledName}`, inst);
+  // Also index by declId so the registry-aware substitution can re-instantiate.
+  if (!registry.genericDeclById) registry.genericDeclById = new Map();
+  registry.genericDeclById.set(genericDecl.id, genericDecl);
+  return inst;
+}
+
+// Phase 7.1: a registry-aware instantiator closure suitable for the
+// `instantiator` argument of substituteTypeParams.
+export function makeInstantiator(registry) {
+  return (declId, argTypes) => {
+    const decl = registry.genericDeclById?.get(declId);
+    if (!decl) return null;
+    return instantiateStruct(registry, decl, argTypes);
+  };
+}
+
+// Instantiate a generic function decl.
+//   genericFuncDecl: { id, name, moduleId, paramNames: [string],
+//     genericSig: FuncType with TypeParamTypes embedded,
+//     ast: original FUNCTION_DECL node (for codegen) }
+// Returns { funcType, mangledName, argTypes, declId }.
+export function instantiateFunc(registry, genericFuncDecl, argTypes) {
+  const key = `F:${genericFuncDecl.id}:${cacheKeyForArgs(argTypes)}`;
+  const cached = registry.funcs.get(key);
+  if (cached) return cached;
+
+  if (argTypes.length !== genericFuncDecl.paramNames.length) {
+    return null;
+  }
+  const sub = buildSubstitution(
+    genericFuncDecl.id,
+    genericFuncDecl.paramNames,
+    argTypes,
+  );
+  const sig = genericFuncDecl.genericSig;
+  const instSig = substituteTypeParams(sig, sub);
+  const mangledName = monomorphizedName(genericFuncDecl.name, argTypes);
+  const inst = {
+    funcType: instSig,
+    mangledName,
+    argTypes,
+    declId: genericFuncDecl.id,
+    declName: genericFuncDecl.name,
+    moduleId: genericFuncDecl.moduleId,
+    ast: genericFuncDecl.ast,
+  };
+  registry.funcs.set(key, inst);
+  registry.funcInstancesByDecl.set(
+    genericFuncDecl.id,
+    [...(registry.funcInstancesByDecl.get(genericFuncDecl.id) ?? []), inst],
+  );
+  return inst;
+}
+
+// Instantiate a generic trait. Returns a TraitType with substituted method sigs.
+export function instantiateTrait(registry, genericTraitDecl, argTypes) {
+  const key = `T:${genericTraitDecl.id}:${cacheKeyForArgs(argTypes)}`;
+  const cached = registry.traits.get(key);
+  if (cached) return cached;
+  const sub = buildSubstitution(
+    genericTraitDecl.id,
+    genericTraitDecl.paramNames,
+    argTypes,
+  );
+  const methods = new Map();
+  for (const [name, sig] of genericTraitDecl.genericMethods) {
+    methods.set(name, substituteTypeParams(sig, sub));
+  }
+  // Build a TraitType. We keep the original name + moduleId — the type-args
+  // are recorded separately on the instance (in a registry side-map) but
+  // typesEqual on TraitType still compares by (name, moduleId).
+  const inst = TraitType(
+    genericTraitDecl.name,
+    methods,
+    genericTraitDecl.moduleId,
+    [],
+  );
+  registry.traits.set(key, inst);
+  registry.traitArgsByInstance.set(inst, argTypes);
+  return inst;
+}
+
+// Build a stable monomorphized name suffix from the type arg list.
+// e.g. `Box`, [int32] -> "Box__int32"
+//      `Pair`, [int32, Box<int32>] -> "Pair__int32__m__Box__int32"
+function monomorphizedName(baseName, argTypes) {
+  return `${baseName}__${argTypes.map(mangleType).join("__")}`;
+}
+
+// Create an empty registry. One per program (across all modules).
+export function createInstantiationRegistry() {
+  return {
+    structs: new Map(),
+    funcs: new Map(),
+    traits: new Map(),
+    byMangledName: new Map(),
+    funcInstancesByDecl: new Map(),
+    traitArgsByInstance: new Map(),
+  };
+}
+
+// Phase 7.1: resolve a type annotation using a typeContext (as built by
+// typecheckProgram in pass D). This wraps the multi-module resolver and
+// supplies the registry + the typeContext's typeParamScope. Used in
+// checkStatement.js and checkExpr.js where the historical resolver took only
+// `(annot, structTable)`.
+//
+// `extraScope` lets a caller (e.g. a method body) inject `selfType` without
+// modifying the typeContext.
+export function resolveTypeInCtx(annot, typeContext, extraScope) {
+  if (!annot) return null;
+  if (typeContext.moduleEnv) {
+    // Multi-module path
+    return resolveAnnotMulti(annot, typeContext, extraScope);
+  }
+  // Single-module fallback — minimal: support primitives, refs, arrays,
+  // taskType. Generic applications fail because there's no registry/decl.
+  return resolveAnnotSingle(annot, typeContext, extraScope);
+}
+
+function resolveAnnotMulti(annot, typeContext, extraScope) {
+  const tps = extraScope?.typeParamScope ?? typeContext.typeParamScope ?? null;
+  if (annot.kind === "typeName") {
+    if (tps) {
+      const tp = tps.get(annot.name);
+      if (tp) return tp;
+    }
+    const env = typeContext.moduleEnv.get(typeContext.currentModId);
+    const local = env.structTable?.get(annot.name);
+    if (local && local.fields !== null) return local;
+    const prim = primTypeFromName(annot.name);
+    if (prim) return prim;
+    const imp = env.importedNames?.get(annot.name);
+    if (imp && imp.kind === "type") {
+      const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
+      const resolved = srcEnv?.structTable.get(imp.exportName);
+      if (resolved) return resolved;
+    }
+    return local ?? null;
+  }
+  if (annot.kind === "refType") {
+    const inner = resolveAnnotMulti(annot.inner, typeContext, extraScope);
+    if (!inner) return null;
+    return RefType(inner);
+  }
+  if (annot.kind === "arrayType") {
+    const elem = resolveAnnotMulti(annot.elem, typeContext, extraScope);
+    if (!elem) return null;
+    return ArrayType(elem);
+  }
+  if (annot.kind === "taskType") {
+    const inner = resolveAnnotMulti(annot.inner, typeContext, extraScope);
+    if (!inner) return null;
+    return TaskType(inner);
+  }
+  if (annot.kind === "typeApplication") {
+    const argTypes = [];
+    for (const a of annot.typeArgs) {
+      const t = resolveAnnotMulti(a, typeContext, extraScope);
+      if (!t) return null;
+      argTypes.push(t);
+    }
+    if (annot.name === "Task" && argTypes.length === 1) {
+      return TaskType(argTypes[0]);
+    }
+    if (!typeContext.registry) return null;
+    const env = typeContext.moduleEnv.get(typeContext.currentModId);
+    const localStruct = env.genericStructTable?.get(annot.name);
+    if (localStruct) {
+      if (argTypes.length !== localStruct.paramNames.length) return null;
+      return instantiateStruct(typeContext.registry, localStruct, argTypes);
+    }
+    const localTrait = env.genericTraitTable?.get(annot.name);
+    if (localTrait) {
+      if (argTypes.length !== localTrait.paramNames.length) return null;
+      return instantiateTrait(typeContext.registry, localTrait, argTypes);
+    }
+    const imp = env.importedNames?.get(annot.name);
+    if (imp) {
+      const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
+      if (srcEnv) {
+        const rs = srcEnv.genericStructTable?.get(imp.exportName);
+        if (rs) {
+          if (argTypes.length !== rs.paramNames.length) return null;
+          return instantiateStruct(typeContext.registry, rs, argTypes);
+        }
+        const rt = srcEnv.genericTraitTable?.get(imp.exportName);
+        if (rt) {
+          if (argTypes.length !== rt.paramNames.length) return null;
+          return instantiateTrait(typeContext.registry, rt, argTypes);
+        }
+      }
+    }
+    return null;
+  }
+  if (annot.kind === "selfType") {
+    return extraScope?.selfType ?? null;
+  }
+  return null;
+}
+
+function resolveAnnotSingle(annot, typeContext, extraScope) {
+  const tps = extraScope?.typeParamScope ?? typeContext.typeParamScope ?? null;
+  if (annot.kind === "typeName") {
+    if (tps) {
+      const tp = tps.get(annot.name);
+      if (tp) return tp;
+    }
+    return (
+      primTypeFromName(annot.name) ??
+      typeContext.structTable?.get(annot.name) ??
+      null
+    );
+  }
+  if (annot.kind === "refType") {
+    const inner = resolveAnnotSingle(annot.inner, typeContext, extraScope);
+    if (!inner) return null;
+    return RefType(inner);
+  }
+  if (annot.kind === "arrayType") {
+    const elem = resolveAnnotSingle(annot.elem, typeContext, extraScope);
+    if (!elem) return null;
+    return ArrayType(elem);
+  }
+  if (annot.kind === "taskType") {
+    const inner = resolveAnnotSingle(annot.inner, typeContext, extraScope);
+    if (!inner) return null;
+    return TaskType(inner);
+  }
+  if (annot.kind === "typeApplication") {
+    const argTypes = [];
+    for (const a of annot.typeArgs) {
+      const t = resolveAnnotSingle(a, typeContext, extraScope);
+      if (!t) return null;
+      argTypes.push(t);
+    }
+    if (annot.name === "Task" && argTypes.length === 1) {
+      return TaskType(argTypes[0]);
+    }
+    return null;
+  }
+  if (annot.kind === "selfType") {
+    return extraScope?.selfType ?? null;
+  }
+  return null;
+}

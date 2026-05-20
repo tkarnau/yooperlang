@@ -1,0 +1,10 @@
+function identity<T>(x: T): T {
+    return x;
+}
+
+function main(): int32 {
+    let n: int32 = 100;
+    let m: int32 = identity(n);
+    printf(`m=${m}\n`);
+    return 0;
+}

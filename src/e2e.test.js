@@ -168,6 +168,29 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "b=100 d=100\nc=100.000000\ne=100.000000\n");
   });
 
+  // ---- 7.1 generics ----
+
+  it("generic_box.yoop: monomorphic Box<int32> field access", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_box.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "b=42\n");
+  });
+
+  it("generic_identity.yoop: generic function identity<T> inferred from arg", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_identity.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "m=100\n");
+  });
+
+  it("generics_overview.yoop exercises generic structs, fns, traits", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generics_overview.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "bi=42\nbf=3.500000\nid_i=100 id_f=3.500000\nu=42\np.first=10 p.second.value=20\ncell=99\n",
+    );
+  });
+
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
@@ -799,14 +822,6 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       "utf8",
     );
     assert.throws(() => parse(src), /extends not yet supported/);
-  });
-
-  it("traits_generic_rejected.yoop rejects generic trait declaration", () => {
-    const src = fs.readFileSync(
-      path.join(repoRoot, "examples/fail/traits_generic_rejected.yoop"),
-      "utf8",
-    );
-    assert.throws(() => parse(src), /trait generics are not supported/);
   });
 
   it("traits_method_call_sugar.yoop rejects method-call syntax on a trait method", () => {

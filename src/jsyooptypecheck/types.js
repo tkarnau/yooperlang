@@ -15,6 +15,8 @@ export const typeKinds = {
   trait: "trait",
   kind: "kind",
   task: "task",
+  // Phase 7.1: a reference to a generic type parameter in a generic decl.
+  typeParam: "typeParam",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -124,6 +126,11 @@ export const StructType = (
   methods = new Map(),
   propagatedKinds = [],
   kindApplication = null,
+  // Phase 7.1: when this struct was produced by instantiating a generic decl,
+  // `genericInstance: { declId, args }` captures the original generic decl
+  // and the type-args used. Substitution uses this to re-instantiate when
+  // args are themselves type-params (open instantiation -> concrete).
+  genericInstance = null,
 ) =>
   freezerWrap(typeKinds.struct, {
     name,
@@ -133,6 +140,7 @@ export const StructType = (
     methods,
     propagatedKinds,
     kindApplication,
+    genericInstance,
   });
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
@@ -149,8 +157,18 @@ export const NamespaceType = (moduleId, exports) =>
 export const UntypedIntType = () => freezerWrap(typeKinds.untypedInt, {});
 export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
-export const TraitType = (name, methods, moduleId = null) =>
-  freezerWrap(typeKinds.trait, { name, methods, moduleId });
+// Phase 7.1: trait types carry an optional type-param list for generic traits.
+// `typeParams` is a list of TypeParamType. For non-generic traits, it's [].
+export const TraitType = (name, methods, moduleId = null, typeParams = []) =>
+  freezerWrap(typeKinds.trait, { name, methods, moduleId, typeParams });
+
+// Phase 7.1: TypeParamType is a placeholder appearing inside a generic decl's
+// resolved types (struct field types, function param/return types, trait
+// method signatures). It is replaced via substituteTypeParams at every
+// instantiation site. `originDecl` is a stable per-decl id so two unrelated
+// `T`s never compare equal.
+export const TypeParamType = (name, originDecl) =>
+  freezerWrap(typeKinds.typeParam, { name, originDecl });
 
 // Phase 6.3: compiler-builtin Task<T>. Not user-declarable; produced as the
 // rewritten return type of any function declared with the `task` modifier.
@@ -232,9 +250,20 @@ export function resolveTypeFromName(name, structTable) {
 }
 
 // Resolve a structured type annotation object (from parseTypeAnnotation) to a Type.
+//
+// Phase 7.1: ctx may carry:
+//   - typeParamScope: Map<paramName, TypeParamType> for resolving bare names
+//     to type-params when inside a generic decl
+//   - instantiateGeneric: function(name, argTypes, annot) used to handle
+//     typeApplication annotations (delegated to the instantiation registry)
 export function resolveTypeAnnotation(annot, structTable, ctx) {
   if (!annot) return null;
   if (annot.kind === "typeName") {
+    // Phase 7.1: look up type-params in scope first.
+    if (ctx?.typeParamScope) {
+      const tp = ctx.typeParamScope.get(annot.name);
+      if (tp) return tp;
+    }
     return resolveTypeFromName(annot.name, structTable);
   }
   if (annot.kind === "refType") {
@@ -251,6 +280,25 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     const inner = resolveTypeAnnotation(annot.inner, structTable, ctx);
     if (!inner) return null;
     return TaskType(inner);
+  }
+  if (annot.kind === "typeApplication") {
+    // Resolve each type arg first.
+    const argTypes = [];
+    for (const a of annot.typeArgs) {
+      const t = resolveTypeAnnotation(a, structTable, ctx);
+      if (!t) return null;
+      argTypes.push(t);
+    }
+    // Bridge: Task<T> is the only built-in generic in the single-module
+    // path. The multi-module path uses ctx.instantiateGeneric for user
+    // generics.
+    if (annot.name === "Task" && argTypes.length === 1) {
+      return TaskType(argTypes[0]);
+    }
+    if (ctx?.instantiateGeneric) {
+      return ctx.instantiateGeneric(annot.name, argTypes, annot);
+    }
+    return null;
   }
   if (annot.kind === "selfType") {
     if (!ctx?.selfType) {
@@ -272,6 +320,10 @@ export function formatAnnotation(annot) {
   if (annot.kind === "refType") return `ref ${formatAnnotation(annot.inner)}`;
   if (annot.kind === "arrayType") return `${formatAnnotation(annot.elem)}[]`;
   if (annot.kind === "taskType") return `Task<${formatAnnotation(annot.inner)}>`;
+  if (annot.kind === "typeApplication") {
+    const args = annot.typeArgs.map(formatAnnotation).join(", ");
+    return `${annot.name}<${args}>`;
+  }
   return "unknown";
 }
 
@@ -391,5 +443,109 @@ export function typesEqual(a, b) {
   if (a.kind === typeKinds.task) {
     return typesEqual(a.resultType, b.resultType);
   }
+  if (a.kind === typeKinds.typeParam) {
+    return a.name === b.name && a.originDecl === b.originDecl;
+  }
   throw new Error(`Unknown type kind: ${a.kind}`);
+}
+
+// Phase 7.1: walk a type, replacing every TypeParamType matched in
+// `substitution` (a Map<originDecl-string, Map<paramName, Type>>) with the
+// substituted Type. For frozen primitives, just returns the input. New
+// composite types are constructed and frozen.
+//
+// `instantiator` is an optional callback (declId, args) -> StructType used
+// when a struct carries a `genericInstance` tag — substitution re-instantiates
+// against the registry so an open `Box<T>` becomes the canonical `Box<int32>`.
+let _globalInstantiator = null;
+export function setGlobalInstantiator(fn) {
+  _globalInstantiator = fn;
+}
+export function substituteTypeParams(type, substitution, instantiator = null) {
+  if (!type) return type;
+  const inst = instantiator ?? _globalInstantiator;
+  switch (type.kind) {
+    case typeKinds.typeParam: {
+      const byDecl = substitution.get(type.originDecl);
+      if (!byDecl) return type;
+      const v = byDecl.get(type.name);
+      return v ?? type;
+    }
+    case typeKinds.ref:
+      return RefType(substituteTypeParams(type.inner, substitution, inst));
+    case typeKinds.array:
+      return ArrayType(substituteTypeParams(type.elem, substitution, inst));
+    case typeKinds.task:
+      return TaskType(substituteTypeParams(type.resultType, substitution, inst));
+    case typeKinds.func: {
+      const params = type.params.map((p) => ({
+        ...p,
+        type: substituteTypeParams(p.type, substitution, inst),
+      }));
+      return FuncType(
+        params,
+        substituteTypeParams(type.returnType, substitution, inst),
+        type.variadic ?? false,
+        type.returnPropagatedKinds ?? [],
+      );
+    }
+    case typeKinds.struct: {
+      // Phase 7.1: if this struct is a generic instantiation, substitute its
+      // type args and re-instantiate via the registry. This is what turns an
+      // open `Box<T>` (inside a generic body) into the concrete `Box<int32>`
+      // at codegen time.
+      if (type.genericInstance && inst) {
+        const newArgs = type.genericInstance.args.map((a) =>
+          substituteTypeParams(a, substitution, inst),
+        );
+        // If args are unchanged (no substitution happened), keep the original.
+        const allSame = newArgs.every(
+          (a, i) => a === type.genericInstance.args[i],
+        );
+        if (allSame) return type;
+        const fresh = inst(type.genericInstance.declId, newArgs);
+        if (fresh) return fresh;
+      }
+      if (!type.fields) return type;
+      const hasParam = type.fields.some((f) => typeHasTypeParam(f.type));
+      if (!hasParam) return type;
+      const fields = type.fields.map((f) => ({
+        ...f,
+        type: substituteTypeParams(f.type, substitution, inst),
+      }));
+      return StructType(
+        type.name,
+        fields,
+        type.moduleId,
+        type.implementsTraits ?? [],
+        type.methods ?? new Map(),
+        type.propagatedKinds ?? [],
+        type.kindApplication ?? null,
+        type.genericInstance ?? null,
+      );
+    }
+    // prim/void/untyped/error/namespace/trait/kind — no nested type
+    default:
+      return type;
+  }
+}
+
+// Helper: does this type (or anything it contains) reference a typeParam?
+export function typeHasTypeParam(type) {
+  if (!type) return false;
+  if (type.kind === typeKinds.typeParam) return true;
+  if (type.kind === typeKinds.ref) return typeHasTypeParam(type.inner);
+  if (type.kind === typeKinds.array) return typeHasTypeParam(type.elem);
+  if (type.kind === typeKinds.task) return typeHasTypeParam(type.resultType);
+  if (type.kind === typeKinds.func) {
+    return (
+      type.params.some((p) => typeHasTypeParam(p.type)) ||
+      typeHasTypeParam(type.returnType)
+    );
+  }
+  if (type.kind === typeKinds.struct) {
+    if (!type.fields) return false;
+    return type.fields.some((f) => typeHasTypeParam(f.type));
+  }
+  return false;
 }

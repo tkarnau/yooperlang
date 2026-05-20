@@ -300,7 +300,8 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(type.kind, ASTNodeKind.TYPE_DECL);
     assert.equal(type.name, "FileHandle");
     assert.equal(type.implements.length, 1);
-    assert.equal(type.implements[0], "Disposable");
+    assert.equal(type.implements[0].name, "Disposable");
+    assert.equal(type.implements[0].typeArgs, null);
     assert.equal(type.fields.length, 1);
     const field = type.fields[0];
     assert.equal(field.kind, ASTNodeKind.FIELD_DECL);
@@ -331,8 +332,8 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(type.kind, ASTNodeKind.TYPE_DECL);
     assert.equal(type.name, "Channel");
     assert.equal(type.implements.length, 2);
-    assert.equal(type.implements[0], "Disposable");
-    assert.equal(type.implements[1], "Closable");
+    assert.equal(type.implements[0].name, "Disposable");
+    assert.equal(type.implements[1].name, "Closable");
   });
   it("self field references parses properly", () => {
     // A method body using `self.count`: parses as `FIELD_ACCESS { object: IDENT { name: "self" }, field: "count" }`.
@@ -389,16 +390,19 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(stmts.length, 1);
     const type = stmts[0];
     assert.equal(type.implements.length, 2);
-    assert.equal(type.implements[0], "MyTrait1");
-    assert.equal(type.implements[1], "MyTrait2");
+    assert.equal(type.implements[0].name, "MyTrait1");
+    assert.equal(type.implements[1].name, "MyTrait2");
   });
   describe("reject cases", () => {
-    it("rejects generics, not yet supported", () => {
-      assert.throws(
-        () =>
-          parse("trait MyTrait<T> { function method(ref self, x: T): void; }"),
-        /trait generics are not supported in v0/,
+    it("parses generic traits (phase 7.1)", () => {
+      const ast = parse(
+        "trait MyTrait<T> { function method(ref self, x: T): void; }",
       );
+      const tr = ast.body[0];
+      assert.equal(tr.kind, "TRAIT_DECL");
+      assert.equal(tr.name, "MyTrait");
+      assert.equal(tr.typeParams.length, 1);
+      assert.equal(tr.typeParams[0].name, "T");
     });
     it("rejects extends, not yet supported", () => {
       assert.throws(

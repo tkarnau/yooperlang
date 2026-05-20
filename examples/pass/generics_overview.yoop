@@ -1,0 +1,72 @@
+type Box<T> {
+    value: T,
+}
+
+type Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+// Generic function, T inferred from arg type.
+function identity<T>(x: T): T {
+    return x;
+}
+
+// Generic function returning a generic struct.
+function wrap<T>(x: T): Box<T> {
+    return { value: x };
+}
+
+// Generic function consuming a generic struct.
+function unwrap<T>(b: Box<T>): T {
+    return b.value;
+}
+
+// Generic trait.
+trait Container<T> {
+    function get(ref self): T;
+}
+
+// Impl of the generic trait at a concrete type argument.
+type IntCell implements Container<int32> {
+    n: int32,
+    function get(ref self): int32 {
+        return self.n;
+    }
+}
+
+function main(): int32 {
+    // Generic struct, monomorphization #1 at int32.
+    let bi: Box<int32> = { value: 42 };
+    printf(`bi=${bi.value}\n`);
+
+    // Same generic, monomorphization #2 at float64 — via a generic function.
+    let f: float64 = float64(35) / float64(10);
+    let bf: Box<float64> = wrap(f);
+    printf(`bf=${bf.value}\n`);
+
+    // identity called with two distinct concrete arg types — two
+    // monomorphizations, both inferred from the arg (no turbofish needed).
+    let n: int32 = 100;
+    let id_i: int32 = identity(n);
+    let id_f: float64 = identity(f);
+    printf(`id_i=${id_i} id_f=${id_f}\n`);
+
+    // Generic function consuming Box<int32>.
+    let u: int32 = unwrap(bi);
+    printf(`u=${u}\n`);
+
+    // Two-param generic with a nested generic argument. Exercises:
+    //   - multi-parameter monomorphization (Pair<int32, _>)
+    //   - recursive instantiation (Box<int32> must instantiate first)
+    //   - the `>>` lexer hazard (must split into two `gt` tokens in type position)
+    let p: Pair<int32, Box<int32>> = { first: 10, second: { value: 20 } };
+    printf(`p.first=${p.first} p.second.value=${p.second.value}\n`);
+
+    // Generic trait + concrete impl. Free-function dispatch per spec §17.2.
+    let cell: IntCell = { n: 99 };
+    let v: int32 = get(ref cell);
+    printf(`cell=${v}\n`);
+
+    return 0;
+}
