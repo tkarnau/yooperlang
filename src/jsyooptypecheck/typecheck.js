@@ -1477,13 +1477,14 @@ export function typecheckProgram(modules) {
         for (const ext of decl.decls) {
           if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
           const paramTypes = ext.params.map((p) => {
-            const t =
+            const baseType =
               resolveTypeAnnotationInModule(
                 p.typeAnnotation,
                 mod.id,
                 moduleEnv,
                 baseCtx(),
               ) ?? ErrorType();
+            const t = p.isRef ? RefType(baseType) : baseType;
             p.resolvedType = t;
             return { name: p.name, type: t, isRef: p.isRef ?? false };
           });
@@ -1834,8 +1835,9 @@ export function typecheck(ast) {
           continue;
         }
         const paramTypes = ext.params.map((p) => {
-          const t =
+          const baseType =
             resolveTypeAnnotation(p.typeAnnotation, structTable) ?? ErrorType();
+          const t = p.isRef ? RefType(baseType) : baseType;
           p.resolvedType = t;
           return { name: p.name, type: t, isRef: p.isRef ?? false };
         });

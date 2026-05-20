@@ -36,6 +36,32 @@ function runFixture(relPath) {
   return { stdout: result.stdout, exitCode: result.status };
 }
 
+// Variant of runFixture that stages an asset file alongside the binary and
+// runs the binary with cwd set to that staging dir, so the yoop program can
+// `fopen` the asset by relative path.
+function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
+  const src = fs.readFileSync(path.join(repoRoot, yoopRelPath), "utf8");
+  const ir = compileSource(src);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
+  const llPath = path.join(tmpDir, "out.ll");
+  const binPath = path.join(tmpDir, "out");
+  fs.writeFileSync(llPath, ir);
+  fs.copyFileSync(
+    path.join(repoRoot, assetRelPath),
+    path.join(tmpDir, assetDestName),
+  );
+  const clangArgs = [
+    llPath,
+    RUNTIME_C,
+    "-o",
+    binPath,
+    ...runtimeLinkFlags().map((f) => `-l${f}`),
+  ];
+  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  const result = spawnSync(binPath, [], { encoding: "utf8", cwd: tmpDir });
+  return { stdout: result.stdout, exitCode: result.status };
+}
+
 describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   it("hello.yoop prints greeting + arithmetic + pow result", () => {
     const { stdout, exitCode } = runFixture("examples/pass/hello.yoop");
@@ -211,6 +237,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "IntBox\nnamed\nIntBox\nIntBox\n");
+  });
+
+  it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
+    const { stdout, exitCode } = runFixtureWithAsset(
+      "examples/pass/language_showcase.yoop",
+      "examples/pass/language_showcase.txt",
+      "language_showcase.txt",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "bytes: 44\nlines: 2\nwords: 9\nmost common letter: 'o' (4 times)\n",
+    );
   });
 
 });
