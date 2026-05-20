@@ -34,7 +34,8 @@ function isKindClauseStartTag(tag) {
     tag === TokenTags.ownsBlock ||
     tag === TokenTags.mustNotEscape ||
     tag === TokenTags.mustNotShare ||
-    tag === TokenTags.forbids
+    tag === TokenTags.forbids ||
+    tag === TokenTags.layout
   );
 }
 
@@ -44,8 +45,8 @@ function isKindClauseStartTag(tag) {
 const DeferredKindClauseMessages = {
   provides: "provides clause not yet supported in phase 6.1",
   autoJoin: "autoJoin not yet supported (phase 6.3)",
-  restricts: "restricts not yet supported (phase 6.5)",
-  layout: "layout not yet supported (phase 6.5)",
+  restricts:
+    "iteration restrictions deferred until for-in iteration lands (phase 7)",
 };
 
 const Precedence = {
@@ -115,6 +116,73 @@ export function parse(src) {
     return tok;
   }
 
+  // Phase 6.5: given that peekAhead(openIdx) is a `(`, walk forward over
+  // balanced parens and return the peek-ahead index of the matching `)`.
+  // Returns -1 on EOF before a match.
+  function findMatchingRparen(openIdx) {
+    let depth = 1;
+    let i = openIdx + 1;
+    while (depth > 0) {
+      const t = peekAhead(i);
+      if (t.tag === TokenTags.eof) return -1;
+      if (t.tag === TokenTags.lparen) depth++;
+      else if (t.tag === TokenTags.rparen) depth--;
+      i++;
+    }
+    return i - 1;
+  }
+
+  // Phase 6.5: true if the current tokens look like a kind-prefixed binding
+  // start: `IDENT IDENT :` or `IDENT ( ... ) IDENT :`. Used for both
+  // statement-start dispatch (implicit-const form) and the `let|const`
+  // kind-prefix recognizer.
+  function looksLikeKindPrefixedBindingStart() {
+    if (peek().tag !== TokenTags.ident) return false;
+    if (
+      peekAhead(1).tag === TokenTags.ident &&
+      peekAhead(2).tag === TokenTags.colon
+    ) {
+      return true;
+    }
+    if (peekAhead(1).tag === TokenTags.lparen) {
+      const j = findMatchingRparen(1);
+      if (j < 0) return false;
+      return (
+        peekAhead(j + 1).tag === TokenTags.ident &&
+        peekAhead(j + 2).tag === TokenTags.colon
+      );
+    }
+    return false;
+  }
+
+  // Phase 6.5: consume `IDENT ( argList )?` and return a kindPrefix record.
+  // Used at every kind-use site (bindings, parameters, type-decl prefixes).
+  function consumeKindPrefixWithArgs() {
+    const kindTok = expect(TokenTags.ident);
+    const name = src.substring(
+      kindTok.start,
+      kindTok.start + kindTok.length,
+    );
+    let args = null;
+    if (peek().tag === TokenTags.lparen) {
+      advance(); // (
+      args = [];
+      while (
+        peek().tag !== TokenTags.rparen &&
+        peek().tag !== TokenTags.eof
+      ) {
+        args.push(parseExpression());
+        if (peek().tag === TokenTags.comma) advance();
+      }
+      expect(TokenTags.rparen);
+    }
+    return {
+      name,
+      args,
+      sourceLoc: posToSourceLocation(src, kindTok.start),
+    };
+  }
+
   // Format a parse error with source context: the offending line plus a caret.
   function parseError(message, pos = current?.start ?? 0, length = 1) {
     const { line, column } = posToSourceLocation(src, pos);
@@ -172,8 +240,23 @@ export function parse(src) {
     while (peek().tag !== TokenTags.gt && peek().tag !== TokenTags.eof) {
       const nameTok = expect(TokenTags.ident);
       const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+      // Phase 6.5: optional kind arguments — `propagates<K(args)>`
+      let args = null;
+      if (peek().tag === TokenTags.lparen) {
+        advance();
+        args = [];
+        while (
+          peek().tag !== TokenTags.rparen &&
+          peek().tag !== TokenTags.eof
+        ) {
+          args.push(parseExpression());
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rparen);
+      }
       kindNames.push({
         name,
+        args,
         sourceLoc: posToSourceLocation(src, nameTok.start),
       });
       if (peek().tag === TokenTags.comma) advance();
@@ -331,22 +414,72 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.KIND_DECL);
     expect(TokenTags.kind);
     node.name = parseIdentAsName();
+    node.params = [];
+    node.composition = null;
 
-    // parameterized kinds — `kind foo(...)` — are reserved for later phases
+    // parameterized kinds — `kind foo(n: usize, ...)`
     if (peek().tag === TokenTags.lparen) {
-      throw parseError(
-        "parameterized kinds not yet supported in phase 6.1",
-        peek().start,
-        peek().length,
-      );
+      advance(); // (
+      while (
+        peek().tag !== TokenTags.rparen &&
+        peek().tag !== TokenTags.eof
+      ) {
+        const nameTok = expect(TokenTags.ident);
+        const pname = src.substring(
+          nameTok.start,
+          nameTok.start + nameTok.length,
+        );
+        expect(TokenTags.colon);
+        const annot = parseTypeAnnotation();
+        node.params.push({
+          name: pname,
+          typeAnnotation: annot,
+          sourceLoc: posToSourceLocation(src, nameTok.start),
+        });
+        if (peek().tag === TokenTags.comma) advance();
+      }
+      expect(TokenTags.rparen);
     }
-    // composition — `kind foo = a & b;`
+
+    // composition — `kind foo = a & b(args) & c;`
     if (peek().tag === TokenTags.eq) {
-      throw parseError(
-        "kind composition not yet supported in phase 6.1",
-        peek().start,
-        peek().length,
-      );
+      advance(); // =
+      const kindRefs = [];
+      while (true) {
+        const refTok = expect(TokenTags.ident);
+        const refName = src.substring(
+          refTok.start,
+          refTok.start + refTok.length,
+        );
+        const args = [];
+        let hasArgs = false;
+        if (peek().tag === TokenTags.lparen) {
+          hasArgs = true;
+          advance(); // (
+          while (
+            peek().tag !== TokenTags.rparen &&
+            peek().tag !== TokenTags.eof
+          ) {
+            args.push(parseExpression());
+            if (peek().tag === TokenTags.comma) advance();
+          }
+          expect(TokenTags.rparen);
+        }
+        kindRefs.push({
+          name: refName,
+          args: hasArgs ? args : null,
+          sourceLoc: posToSourceLocation(src, refTok.start),
+        });
+        if (peek().tag === TokenTags.amp) {
+          advance();
+          continue;
+        }
+        break;
+      }
+      expect(TokenTags.semicolon);
+      node.composition = { kindRefs };
+      node.clauses = [];
+      return node;
     }
 
     expect(TokenTags.lcurly);
@@ -415,6 +548,8 @@ export function parse(src) {
         return parseMustNotShareClause();
       case TokenTags.forbids:
         return parseForbidsClause();
+      case TokenTags.layout:
+        return parseLayoutClause();
       default:
         // unreachable — caller guards with isKindClauseStartTag
         throw parseError(
@@ -444,16 +579,13 @@ export function parse(src) {
           break;
         case TokenTags.function:
           throw parseError(
-            "appliesTo function not yet supported (phase 6.5; introduced by task kind)",
+            "user-declared `appliesTo function` kinds are deferred (phase 7+); the built-in task kind covers the only current use case",
             tok.start,
             tok.length,
           );
         case TokenTags.type:
-          throw parseError(
-            "appliesTo type not yet supported (phase 6.5; introduced by layout-bearing kinds)",
-            tok.start,
-            tok.length,
-          );
+          site = "type";
+          break;
         default: {
           const name =
             tok.tag === TokenTags.ident
@@ -534,6 +666,51 @@ export function parse(src) {
     advance(); // consume `acrossScopes`
     expect(TokenTags.semicolon);
     node.target = "acrossScopes";
+    return node;
+  }
+
+  function parseLayoutClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_LAYOUT_CLAUSE);
+    expect(TokenTags.layout);
+    expect(TokenTags.lcurly);
+    node.alignExpr = null;
+    let sawAlign = false;
+    while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
+      const tok = peek();
+      if (tok.tag === TokenTags.align) {
+        if (sawAlign) {
+          throw parseError(
+            "duplicate 'align' sub-clause in layout body",
+            tok.start,
+            tok.length,
+          );
+        }
+        sawAlign = true;
+        advance(); // align
+        node.alignExpr = parseExpression();
+        expect(TokenTags.semicolon);
+        continue;
+      }
+      // Surface a precise message for any unknown sub-clause name.
+      const name =
+        tok.tag === TokenTags.ident
+          ? src.substring(tok.start, tok.start + tok.length)
+          : inverseTokenTags[tok.tag];
+      throw parseError(
+        `layout sub-clause '${name}' deferred`,
+        tok.start,
+        tok.length,
+      );
+    }
+    expect(TokenTags.rcurly);
+    expect(TokenTags.semicolon);
+    if (!sawAlign) {
+      throw parseError(
+        "layout body must contain an 'align' sub-clause",
+        node.sourceLoc.pos,
+        1,
+      );
+    }
     return node;
   }
 
@@ -1218,12 +1395,9 @@ export function parse(src) {
         return parseContinueStatement();
       }
       case TokenTags.ident: {
-        // kind-prefixed binding form: `IDENT IDENT : ...`
-        // (no other statement starts `ident ident :`).
-        if (
-          peekAhead(1).tag === TokenTags.ident &&
-          peekAhead(2).tag === TokenTags.colon
-        ) {
+        // kind-prefixed binding form: `IDENT IDENT : ...` or
+        // `IDENT(args) IDENT : ...` (phase 6.5).
+        if (looksLikeKindPrefixedBindingStart()) {
           return parseVarDecl();
         }
         return parseExpressionStatement();
@@ -1283,19 +1457,11 @@ export function parse(src) {
     }
 
     // Decide whether a kind prefix is present. Either:
-    //   - declToken was null (shape 3): caller already verified IDENT IDENT :
-    //   - declToken was present and we see IDENT IDENT :
+    //   - declToken was null (shape 3): caller already verified IDENT (args)? IDENT :
+    //   - declToken was present and we see IDENT (args)? IDENT :
     let kindPrefix = null;
-    if (
-      peek().tag === TokenTags.ident &&
-      peekAhead(1).tag === TokenTags.ident &&
-      peekAhead(2).tag === TokenTags.colon
-    ) {
-      const kindTok = advance();
-      kindPrefix = {
-        name: src.substring(kindTok.start, kindTok.start + kindTok.length),
-        sourceLoc: posToSourceLocation(src, kindTok.start),
-      };
+    if (looksLikeKindPrefixedBindingStart()) {
+      kindPrefix = consumeKindPrefixWithArgs();
     }
 
     // Build the binding node. Kind-prefixed bindings without a `let` keyword
@@ -1521,6 +1687,33 @@ export function parse(src) {
     // name
     node.name = parseIdentAsName();
 
+    // Phase 6.5: optional single kind prefix on the type declaration,
+    // e.g. `type Vec4 aligned(32) implements Disposable { ... }`.
+    // Detected when the next token is an IDENT that is NOT `implements` and
+    // is not the start of a propagates/contains clause — i.e. an IDENT
+    // followed by (args)? then one of: `implements`, `propagates`, `contains`,
+    // `{`, `=` (alias), or `;`.
+    node.kindPrefix = null;
+    if (peek().tag === TokenTags.ident) {
+      let afterIdx = 1;
+      if (peekAhead(1).tag === TokenTags.lparen) {
+        const j = findMatchingRparen(1);
+        if (j > 0) afterIdx = j + 1;
+        else afterIdx = -1;
+      }
+      if (afterIdx > 0) {
+        const after = peekAhead(afterIdx);
+        if (
+          after.tag === TokenTags.implements ||
+          after.tag === TokenTags.propagates ||
+          after.tag === TokenTags.contains ||
+          after.tag === TokenTags.lcurly
+        ) {
+          node.kindPrefix = consumeKindPrefixWithArgs();
+        }
+      }
+    }
+
     node.implements = [];
     if (peek().tag === TokenTags.implements) {
       advance();
@@ -1635,21 +1828,31 @@ export function parse(src) {
     }
 
     // Detect kind prefix: IDENT followed by (IDENT or ref) means kind-prefixed param.
-    // Examples: `scoped h: ref FileHandle` or `scoped ref h: FileHandle`.
+    // Also supports `IDENT(args) IDENT|ref` (phase 6.5 parameterized kinds).
+    // Examples: `scoped h: ref FileHandle`, `scoped ref h: FileHandle`,
+    //           `aligned(32) v: Vec4`.
     if (!node.kindPrefix && peek().tag === TokenTags.ident) {
       const next1 = peekAhead(1);
+      let looksLikeKindPrefix = false;
       if (next1.tag === TokenTags.ident || next1.tag === TokenTags.ref) {
-        const kindTok = advance();
-        node.kindPrefix = {
-          name: src.substring(kindTok.start, kindTok.start + kindTok.length),
-          sourceLoc: posToSourceLocation(src, kindTok.start),
-        };
-        // Reject a second kind prefix: IDENT followed by (IDENT or ref) again
+        looksLikeKindPrefix = true;
+      } else if (next1.tag === TokenTags.lparen) {
+        const j = findMatchingRparen(1);
+        if (j >= 0) {
+          const after = peekAhead(j + 1);
+          if (after.tag === TokenTags.ident || after.tag === TokenTags.ref) {
+            looksLikeKindPrefix = true;
+          }
+        }
+      }
+      if (looksLikeKindPrefix) {
+        node.kindPrefix = consumeKindPrefixWithArgs();
+        // Reject a second kind prefix.
         if (peek().tag === TokenTags.ident) {
           const next2 = peekAhead(1);
           if (next2.tag === TokenTags.ident) {
             throw parseError(
-              "a parameter may carry at most one kind prefix in phase 6.2",
+              "a parameter may carry at most one kind prefix in phase 6.5",
               peek().start,
               peek().length,
             );

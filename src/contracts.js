@@ -68,6 +68,8 @@ export const ASTNodeKind = Object.freeze({
   KIND_MUST_NOT_ESCAPE_CLAUSE: "KIND_MUST_NOT_ESCAPE_CLAUSE",
   KIND_MUST_NOT_SHARE_CLAUSE: "KIND_MUST_NOT_SHARE_CLAUSE",
   KIND_FORBIDS_CLAUSE: "KIND_FORBIDS_CLAUSE",
+  // phase 6.5: layout / composition / parameterized kinds
+  KIND_LAYOUT_CLAUSE: "KIND_LAYOUT_CLAUSE",
 
   // phase 6.3: task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",

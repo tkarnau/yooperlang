@@ -110,9 +110,12 @@ export function isFloatPrim(name) {
 export const PrimType = (name) => freezerWrap(typeKinds.prim, { name });
 
 // moduleId: the module that defines this struct (for IR name mangling). null for legacy/test usage. Also adding implementsTraits and methods
-// propagatedKinds (phase 6.4): list of KindType, kinds this struct propagates
+// propagatedKinds (phase 6.4): list of KindApplication, kinds this struct propagates
 // to bindings of this type. A field whose type carries a propagated kind is
 // what the struct is "surfacing" upward.
+// kindApplication (phase 6.5): optional KindApplication attached via a
+// type-decl kind prefix (e.g. `type Vec4 aligned(32) { ... }`). Layout
+// information is read off this at every binding site.
 export const StructType = (
   name,
   fields,
@@ -120,6 +123,7 @@ export const StructType = (
   implementsTraits = [],
   methods = new Map(),
   propagatedKinds = [],
+  kindApplication = null,
 ) =>
   freezerWrap(typeKinds.struct, {
     name,
@@ -128,6 +132,7 @@ export const StructType = (
     implementsTraits,
     methods,
     propagatedKinds,
+    kindApplication,
   });
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
@@ -160,13 +165,26 @@ export function KindType(name, moduleId) {
   this.kind = typeKinds.kind;
   this.name = name;
   this.moduleId = moduleId;
-  this.appliesTo = new Set();              // 6.2: Set<"binding"|"parameter"|"field"> (was scalar)
+  this.appliesTo = new Set();              // 6.2: Set<"binding"|"parameter"|"field"|"type"> (was scalar)
   this.requires = [];                       // array of TraitType
   this.mustCall = [];                       // array of { methodName, timing, traitType }
   this.ownsBlock = false;
   this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
   this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
   this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
+  // 6.5: parameter list, layout-align slot, composition diagnostics.
+  this.params = [];                         // [{ name, type, sourceLoc }]
+  this.layoutAlign = null;                  // { kind: "const", value } | { kind: "param", name } | null
+  this.composedFrom = null;                 // KindRef[] | null (diagnostics only)
+}
+
+// Phase 6.5: a KindApplication is a `KindType` paired with the constant
+// arguments supplied at a use site (`aligned(32)` => { kindType: aligned, args: [32] }).
+// Use sites store the application on their AST node so codegen can read
+// per-site layout without re-resolving.
+export function KindApplication(kindType, args) {
+  this.kindType = kindType;
+  this.args = args; // array of constants (numbers for now)
 }
 
 /****************

@@ -265,17 +265,54 @@ export function codegen(ast) {
 
   // alignment for a named-struct alloca: max alignment over the fields. nested
   // structs recurse. empty structs align to 1.
+  // Phase 6.5: if the struct has a type-level kind application carrying a
+  // `layout { align N }`, raise to max(natural, N).
   function alignOfStruct(structType) {
     const fields = structType.fields ?? [];
-    if (fields.length === 0) return 1;
-    let max = 1;
+    let max = fields.length === 0 ? 1 : 1;
     for (const f of fields) {
       const a = f.type.kind === typeKinds.struct
         ? alignOfStruct(f.type)
         : alignOf(llvmType(f.type));
       if (a > max) max = a;
     }
+    const typeAlign = typeLevelAlign(structType);
+    if (typeAlign && typeAlign > max) max = typeAlign;
     return max;
+  }
+
+  // Phase 6.5: read the substituted layout-align value from a struct's
+  // type-level KindApplication, or null if none.
+  function typeLevelAlign(structType) {
+    const app = structType?.kindApplication;
+    if (!app) return null;
+    const slot = app.kindType?.layoutAlign;
+    if (!slot) return null;
+    if (slot.kind === "const") return slot.value;
+    if (slot.kind === "param") {
+      const idx = app.kindType.params.findIndex((p) => p.name === slot.name);
+      if (idx < 0 || idx >= app.args.length) return null;
+      return app.args[idx];
+    }
+    return null;
+  }
+
+  // Phase 6.5: effective alignment for a binding site. Consults the
+  // binding-site KindApplication first, then falls back to the struct's
+  // type-level alignment (already folded into alignOfStruct).
+  function effectiveAlign(declType, kindApp) {
+    if (kindApp) {
+      const slot = kindApp.kindType?.layoutAlign;
+      if (slot) {
+        if (slot.kind === "const") return slot.value;
+        if (slot.kind === "param") {
+          const idx = kindApp.kindType.params.findIndex((p) => p.name === slot.name);
+          if (idx >= 0 && idx < kindApp.args.length) return kindApp.args[idx];
+        }
+      }
+    }
+    if (declType?.kind === typeKinds.struct) return alignOfStruct(declType);
+    return alignOf(llvmType(declType));
   }
 
   // walk an lvalue node and return { ptr, type } where ptr addresses the
@@ -936,9 +973,7 @@ export function codegen(ast) {
         if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
         symbols.set(node.name, declType);
         const llvmTy = llvmType(declType);
-        const align = declType.kind === typeKinds.struct
-          ? alignOfStruct(declType)
-          : alignOf(llvmTy);
+        const align = effectiveAlign(declType, node.resolvedKindApplication);
         fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${align}`);
         if (node.assignment) {
           if (
@@ -1165,7 +1200,7 @@ export function codegen(ast) {
         fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
       } else {
         const llvmTy = llvmType(ty);
-        const align = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+        const align = effectiveAlign(ty, p.resolvedKindApplication);
         fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${align}`);
         fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
       }
@@ -1214,7 +1249,7 @@ export function codegen(ast) {
       const ty = p.resolvedType;
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
-      const align = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+      const align = effectiveAlign(ty, p.resolvedKindApplication);
       fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${align}`);
       fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
     }
@@ -1716,13 +1751,47 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
 
   function alignOfStruct(structType) {
     const fields = structType.fields ?? [];
-    if (fields.length === 0) return 1;
     let max = 1;
     for (const f of fields) {
       const a = f.type.kind === typeKinds.struct ? alignOfStruct(f.type) : alignOf(llvmType(f.type));
       if (a > max) max = a;
     }
+    const typeAlign = typeLevelAlign(structType);
+    if (typeAlign && typeAlign > max) max = typeAlign;
     return max;
+  }
+
+  // Phase 6.5: read the substituted layout-align value from a struct's
+  // type-level KindApplication, or null if none.
+  function typeLevelAlign(structType) {
+    const app = structType?.kindApplication;
+    if (!app) return null;
+    const slot = app.kindType?.layoutAlign;
+    if (!slot) return null;
+    if (slot.kind === "const") return slot.value;
+    if (slot.kind === "param") {
+      const idx = app.kindType.params.findIndex((p) => p.name === slot.name);
+      if (idx < 0 || idx >= app.args.length) return null;
+      return app.args[idx];
+    }
+    return null;
+  }
+
+  // Phase 6.5: effective alignment for a binding site (consults the
+  // binding-site KindApplication first, then alignOfStruct/alignOf).
+  function effectiveAlign(declType, kindApp) {
+    if (kindApp) {
+      const slot = kindApp.kindType?.layoutAlign;
+      if (slot) {
+        if (slot.kind === "const") return slot.value;
+        if (slot.kind === "param") {
+          const idx = kindApp.kindType.params.findIndex((p) => p.name === slot.name);
+          if (idx >= 0 && idx < kindApp.args.length) return kindApp.args[idx];
+        }
+      }
+    }
+    if (declType?.kind === typeKinds.struct) return alignOfStruct(declType);
+    return alignOf(llvmType(declType));
   }
 
   function emitFn(node, symName) {
@@ -1742,7 +1811,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       const ty = p.resolvedType;
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
-      const al = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+      const al = effectiveAlign(ty, p.resolvedKindApplication);
       fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
       fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
     }
@@ -1782,7 +1851,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
       } else {
         const llvmTy = llvmType(ty);
-        const al = ty.kind === typeKinds.struct ? alignOfStruct(ty) : alignOf(llvmTy);
+        const al = effectiveAlign(ty, p.resolvedKindApplication);
         fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
         fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
       }
@@ -2590,7 +2659,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
         symbols.set(node.name, declType);
         const llvmTy = llvmType(declType);
-        const al = declType.kind === typeKinds.struct ? alignOfStruct(declType) : alignOf(llvmTy);
+        const al = effectiveAlign(declType, node.resolvedKindApplication);
         fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${al}`);
         if (node.assignment) {
           if (node.assignment.kind === ASTNodeKind.STRUCT_LITERAL && declType.kind === typeKinds.struct) {

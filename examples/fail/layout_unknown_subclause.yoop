@@ -1,0 +1,8 @@
+kind packed {
+    appliesTo type;
+    layout { packing tight; };
+}
+
+function main(): int32 {
+    return 0;
+}

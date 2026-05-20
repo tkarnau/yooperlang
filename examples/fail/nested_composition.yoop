@@ -1,0 +1,8 @@
+kind b { appliesTo binding; }
+kind c { appliesTo binding; }
+kind d { appliesTo binding; }
+kind a = (b & c) & d;
+
+function main(): int32 {
+    return 0;
+}
