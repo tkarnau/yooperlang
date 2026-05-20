@@ -152,7 +152,15 @@ function resolveIdent(node, scope, ctx) {
 function resolveBinary(node, scope, ctx) {
   const leftType = resolveExprType(node.left, scope, ctx);
   const rightType = resolveExprType(node.right, scope, ctx);
-  return setType(node, unifyArith(leftType, rightType, node.op));
+  const resultType = unifyArith(leftType, rightType, node.op);
+  // Pin untyped literal operands to the unified type so downstream (codegen)
+  // doesn't have to second-guess their precision. E.g. `b.hue + 0.015` where
+  // b.hue is float32 should coerce 0.015 from untypedFloat to float32.
+  if (resultType && resultType.kind === typeKinds.prim) {
+    coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
+    coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
+  }
+  return setType(node, resultType);
 }
 
 // `f(a, b, c)` or `ns.f(a, b, c)` — looks up the function (local, imported
@@ -771,7 +779,23 @@ export function resolveCallType(node, sig, scope, ctx) {
   for (let i = 0; i < node.args.length; i++) {
     const param = sig.params[i];
     if (param.isRef) {
-      // ref params require an explicit REF_EXPRESSION at the call site
+      // ref params accept either an explicit `ref expr` taking the address of
+      // a local, OR a bare IDENT whose binding is itself ref-typed (so an
+      // opaque C handle like `let win: ref SDL_Window = ...` can be passed
+      // straight through to the next FFI call without writing `ref win`).
+      const paramInner = param.type.inner; // param.type is RefType { inner }
+      if (node.args[i].kind === ASTNodeKind.IDENT) {
+        const binding = lookupInScope(scope, node.args[i].name);
+        if (binding && binding.type.kind === typeKinds.ref) {
+          if (paramInner && binding.type.inner.kind !== typeKinds.error && !typesEqual(binding.type.inner, paramInner)) {
+            pushError(ctx.errors, node.args[i],
+              `ref argument type ${formatType(binding.type)} does not match param type ${formatType(paramInner)}`);
+          }
+          node.args[i].resolvedType = param.type;
+          node.args[i].passRefBinding = true;
+          continue;
+        }
+      }
       if (node.args[i].kind !== ASTNodeKind.REF_EXPRESSION) {
         const hint = node.args[i].kind === ASTNodeKind.IDENT ? node.args[i].name : "...";
         pushError(ctx.errors, node.args[i],
@@ -779,11 +803,15 @@ export function resolveCallType(node, sig, scope, ctx) {
         resolveExprType(node.args[i], scope, ctx);
         continue;
       }
+      // Run resolveExprType on the whole REF_EXPRESSION first so the
+      // non-lvalue check inside resolveRefExpression fires (e.g. `ref 42`
+      // is rejected here). Then re-derive the inner type for the
+      // param-shape check below.
+      resolveExprType(node.args[i], scope, ctx);
       // Validate inner expression type matches param's inner type.
       // If the operand is itself a ref binding (e.g. `ref self` in a method body
       // where self: ref T), unwrap one level so it matches the ref T param.
       const innerExpType = resolveExprType(node.args[i].operand, scope, ctx);
-      const paramInner = param.type.inner; // param.type is RefType { inner }
       const effectiveInner = innerExpType.kind === typeKinds.ref ? innerExpType.inner : innerExpType;
       if (paramInner && effectiveInner.kind !== typeKinds.error && !typesEqual(effectiveInner, paramInner)) {
         pushError(ctx.errors, node.args[i],

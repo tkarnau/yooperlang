@@ -161,6 +161,13 @@ static void join_worker(yoop_thread_t* t) {
 
 // ---- init / shutdown ------------------------------------------------------
 
+// n_workers_target is the worker count we'll spawn on first task submit.
+// Stored separately from n_workers (which counts actually-spawned workers)
+// so programs that never submit a task pay no pthread cost. Crucial on
+// macOS where pthread_create before SDL_Init confuses the Cocoa app
+// lifecycle and prevents windows from appearing.
+static int n_workers_target = 0;
+
 void yoop_runtime_init(void) {
     init_lock();
     if (g_rt.initialized) { init_unlock(); return; }
@@ -173,18 +180,28 @@ void yoop_runtime_init(void) {
     }
     if (n < 1) n = 1;
 
-    g_rt.n_workers  = n;
+    n_workers_target = n;
+    g_rt.n_workers  = 0;
     g_rt.shutdown   = 0;
     g_rt.queue_head = NULL;
     g_rt.queue_tail = NULL;
+    g_rt.workers    = NULL;
     yoop_mutex_init(&g_rt.queue_mu);
     yoop_cond_init(&g_rt.queue_cv);
 
-    g_rt.workers = (yoop_thread_t*)malloc(sizeof(yoop_thread_t) * (size_t)n);
-    for (int i = 0; i < n; i++) spawn_worker(&g_rt.workers[i]);
-
     g_rt.initialized = 1;
     init_unlock();
+}
+
+// Spawn the worker pool on demand. Caller must hold queue_mu. No-op if
+// workers are already spawned.
+static void ensure_workers_spawned_locked(void) {
+    if (g_rt.workers) return;
+    int n = n_workers_target;
+    if (n < 1) n = 1;
+    g_rt.workers = (yoop_thread_t*)malloc(sizeof(yoop_thread_t) * (size_t)n);
+    for (int i = 0; i < n; i++) spawn_worker(&g_rt.workers[i]);
+    g_rt.n_workers = n;
 }
 
 void yoop_runtime_shutdown(void) {
@@ -196,9 +213,12 @@ void yoop_runtime_shutdown(void) {
     yoop_cond_broadcast(&g_rt.queue_cv);
     yoop_mutex_unlock(&g_rt.queue_mu);
 
-    for (int i = 0; i < g_rt.n_workers; i++) join_worker(&g_rt.workers[i]);
-    free(g_rt.workers);
-    g_rt.workers = NULL;
+    if (g_rt.workers) {
+        for (int i = 0; i < g_rt.n_workers; i++) join_worker(&g_rt.workers[i]);
+        free(g_rt.workers);
+        g_rt.workers = NULL;
+    }
+    g_rt.n_workers = 0;
 
     // Drain anything left in the queue. Shouldn't happen if every submit was
     // paired with a wait, but don't strand allocations.
@@ -233,6 +253,7 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
     node->next   = NULL;
 
     yoop_mutex_lock(&g_rt.queue_mu);
+    ensure_workers_spawned_locked();
     if (g_rt.queue_tail) g_rt.queue_tail->next = node;
     else                 g_rt.queue_head = node;
     g_rt.queue_tail = node;

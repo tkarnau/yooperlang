@@ -64,11 +64,23 @@ function main() {
     execFileSync(clang, clangArgs, { stdio: "inherit" });
     console.log(`compiled: ${outputFileName}`);
   } else {
+    // On macOS, Homebrew installs libraries under /opt/homebrew (Apple Silicon)
+    // or /usr/local (Intel). Add those to clang's search paths if they exist so
+    // `extern "C" from library "SDL2"` and friends link without extra setup.
+    const extraSearchPaths = [];
+    if (process.platform === "darwin") {
+      for (const prefix of ["/opt/homebrew", "/usr/local"]) {
+        if (fs.existsSync(`${prefix}/lib`)) {
+          extraSearchPaths.push(`-L${prefix}/lib`, `-I${prefix}/include`);
+        }
+      }
+    }
     const clangArgs = [
       tmpIR,
       RUNTIME_C,
       "-o",
       outputFileName,
+      ...extraSearchPaths,
       ...allLinkFlags.map((f) => `-l${f}`),
     ];
     execFileSync("clang", clangArgs, { stdio: "inherit" });

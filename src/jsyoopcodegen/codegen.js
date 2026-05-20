@@ -510,7 +510,7 @@ export function codegen(ast) {
         const t = node.resolvedType.kind === typeKinds.untypedFloat
           ? PrimType("float64")
           : node.resolvedType;
-        return { val: llvmFloatConstant(node.value), yoopType: t };
+        return { val: llvmFloatConstant(node.value, t.name), yoopType: t };
       }
       case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
@@ -575,6 +575,25 @@ export function codegen(ast) {
         const tmp = freshTemp();
         const instr = binaryInstruction(node.op, opType);
         fnLines.push(`  ${tmp} = ${instr} ${llvmTy} ${l.val}, ${r.val}`);
+        return { val: tmp, yoopType: resultType };
+      }
+
+      case ASTNodeKind.UNARY_EXPRESSION: {
+        const operand = emitExpr(node.operand, fnLines);
+        const resultType = node.resolvedType;
+        const llvmTy = llvmType(resultType);
+        const tmp = freshTemp();
+        if (node.op === "minus") {
+          if (resultType.kind === typeKinds.prim && (resultType.name === "float32" || resultType.name === "float64")) {
+            fnLines.push(`  ${tmp} = fneg ${llvmTy} ${operand.val}`);
+          } else {
+            fnLines.push(`  ${tmp} = sub ${llvmTy} 0, ${operand.val}`);
+          }
+        } else if (node.op === "not") {
+          fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, 1`);
+        } else {
+          throw new Error(`codegen: unhandled unary op "${node.op}"`);
+        }
         return { val: tmp, yoopType: resultType };
       }
 
@@ -1377,9 +1396,13 @@ function mangle(moduleId, localName) {
   return `${moduleId}__${localName}`;
 }
 
-function llvmFloatConstant(jsNumber) {
+function llvmFloatConstant(jsNumber, primName = "float64") {
+  // LLVM IR requires float (32-bit) constants to be exactly representable as
+  // float32 even though they're written as 64-bit hex. Round through float32
+  // first so the hex form round-trips cleanly.
+  const val = primName === "float32" ? Math.fround(jsNumber) : jsNumber;
   const buf = Buffer.alloc(8);
-  buf.writeDoubleBE(jsNumber, 0);
+  buf.writeDoubleBE(val, 0);
   return "0x" + buf.toString("hex").toUpperCase();
 }
 
@@ -1480,6 +1503,7 @@ const INT_OP_MAP = {
   gte: "icmp sge",
   andand: "and",
   oror: "or",
+  pipe: "or",
   lshift: "shl",
   rshift: "ashr",
 };
@@ -2183,7 +2207,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
       case ASTNodeKind.FLOAT_LITERAL: {
         const t = node.resolvedType.kind === typeKinds.untypedFloat ? PrimType("float64") : node.resolvedType;
-        return { val: llvmFloatConstant(node.value), yoopType: t };
+        return { val: llvmFloatConstant(node.value, t.name), yoopType: t };
       }
       case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
@@ -2234,6 +2258,24 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         const opType = isCmp ? l.yoopType : resultType;
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = ${binaryInstruction(node.op, opType)} ${llvmType(opType)} ${l.val}, ${r.val}`);
+        return { val: tmp, yoopType: resultType };
+      }
+      case ASTNodeKind.UNARY_EXPRESSION: {
+        const operand = emitExpr(node.operand, fnLines);
+        const resultType = node.resolvedType;
+        const llvmTy = llvmType(resultType);
+        const tmp = freshTemp();
+        if (node.op === "minus") {
+          if (resultType.kind === typeKinds.prim && (resultType.name === "float32" || resultType.name === "float64")) {
+            fnLines.push(`  ${tmp} = fneg ${llvmTy} ${operand.val}`);
+          } else {
+            fnLines.push(`  ${tmp} = sub ${llvmTy} 0, ${operand.val}`);
+          }
+        } else if (node.op === "not") {
+          fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, 1`);
+        } else {
+          throw new Error(`codegen: unhandled unary op "${node.op}"`);
+        }
         return { val: tmp, yoopType: resultType };
       }
       case ASTNodeKind.ASSIGNMENT: {

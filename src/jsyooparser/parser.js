@@ -22,7 +22,8 @@ function isBinaryOp(tag) {
     tag === TokenTags.lte ||
     tag === TokenTags.gte ||
     tag === TokenTags.andand ||
-    tag === TokenTags.oror
+    tag === TokenTags.oror ||
+    tag === TokenTags.pipe
   );
 }
 
@@ -53,6 +54,7 @@ const Precedence = {
   [TokenTags.eq]: 10,
   [TokenTags.oror]: 20,
   [TokenTags.andand]: 30,
+  [TokenTags.pipe]: 35,
   [TokenTags.eqeq]: 40,
   [TokenTags.neq]: 40,
   [TokenTags.lt]: 40,
@@ -96,6 +98,15 @@ export function parse(src) {
   function advance() {
     const tok = current;
     const res = lexNext(src, pos);
+    if (res.err) {
+      // Surface lex errors as parse errors at the *actual* offending
+      // position. Without this, lexNext leaves nextPos=0 and the parser
+      // mistakes the error for an EOF token at line 1:1, masking the real
+      // problem. Find the bad char by skipping whitespace from `pos`.
+      let p = pos;
+      while (p < src.length && /\s/.test(src[p])) p++;
+      throw parseError(`lex: ${res.err}`, p, 1);
+    }
     pos = res.nextPos;
     current = res.token;
     return tok;
@@ -2041,6 +2052,13 @@ export function parse(src) {
     // type
     expect(TokenTags.colon);
     node.typeAnnotation = parseTypeAnnotation();
+    // Canonicalize `name: ref T` to `ref name: T` so downstream sees a single
+    // form for ref params (common in extern blocks where `ref` reads more
+    // naturally next to the type than next to the name).
+    if (!node.isRef && node.typeAnnotation?.kind === "refType") {
+      node.isRef = true;
+      node.typeAnnotation = node.typeAnnotation.inner;
+    }
     return node;
   }
 

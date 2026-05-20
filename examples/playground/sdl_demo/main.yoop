@@ -1,3 +1,5 @@
+import { Ball, ball_step } from "./physics.yoop";
+
 // SDL2 bouncing-balls demo -- three neon balls arc around a dark window,
 // each cycling through a different phase of the colour wheel.
 //
@@ -14,7 +16,6 @@
 //   - SDL_Event union inspection for clean quit-on-keypress handling.
 //     The demo instead runs for a fixed wall-clock duration via SDL_GetTicks.
 
-import { Ball, ball_step } from "./physics.yoop";
 
 // ── Math ─────────────────────────────────────────────────────────────────────
 
@@ -64,6 +65,10 @@ extern "C" from library "SDL2" {
 
     function SDL_GetTicks(): uint32;
     function SDL_Delay(ms: uint32): void;
+    // On macOS, Cocoa's run loop doesn't advance unless this is called
+    // each frame -- without it the window stays invisible even after
+    // CreateWindow + RenderPresent succeed.
+    function SDL_PumpEvents(): void;
 }
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
@@ -127,6 +132,11 @@ function main(): int32 {
     while (SDL_GetTicks() - start < DURATION_MS) {
         const frame_start: uint32 = SDL_GetTicks();
 
+        // Pump the Cocoa event loop so the window stays responsive (and on
+        // macOS, so it actually appears at all -- without this the window
+        // is created but never composited).
+        SDL_PumpEvents();
+
         // Physics: advance each ball by the nominal ms-per-frame.
         const dt: float32 = float32(MS_PER_FRAME);
         b1 = ball_step(b1, dt, float32(WIN_W), float32(WIN_H));
@@ -147,8 +157,8 @@ function main(): int32 {
         );
         let row1: int32 = int32(-b1.radius);
         while (row1 <= int32(b1.radius)) {
-            const half: int32 = int32(sqrt(float64(b1.radius * b1.radius) - float64(float32(row1) * float32(row1))));
-            SDL_RenderDrawLine(ren, int32(b1.x) - half, int32(b1.y) + row1, int32(b1.x) + half, int32(b1.y) + row1);
+            const half1: int32 = int32(sqrt(float64(b1.radius * b1.radius) - float64(float32(row1) * float32(row1))));
+            SDL_RenderDrawLine(ren, int32(b1.x) - half1, int32(b1.y) + row1, int32(b1.x) + half1, int32(b1.y) + row1);
             row1 = row1 + 1;
         }
 
@@ -162,8 +172,8 @@ function main(): int32 {
         );
         let row2: int32 = int32(-b2.radius);
         while (row2 <= int32(b2.radius)) {
-            const half: int32 = int32(sqrt(float64(b2.radius * b2.radius) - float64(float32(row2) * float32(row2))));
-            SDL_RenderDrawLine(ren, int32(b2.x) - half, int32(b2.y) + row2, int32(b2.x) + half, int32(b2.y) + row2);
+            const half2: int32 = int32(sqrt(float64(b2.radius * b2.radius) - float64(float32(row2) * float32(row2))));
+            SDL_RenderDrawLine(ren, int32(b2.x) - half2, int32(b2.y) + row2, int32(b2.x) + half2, int32(b2.y) + row2);
             row2 = row2 + 1;
         }
 
@@ -177,8 +187,8 @@ function main(): int32 {
         );
         let row3: int32 = int32(-b3.radius);
         while (row3 <= int32(b3.radius)) {
-            const half: int32 = int32(sqrt(float64(b3.radius * b3.radius) - float64(float32(row3) * float32(row3))));
-            SDL_RenderDrawLine(ren, int32(b3.x) - half, int32(b3.y) + row3, int32(b3.x) + half, int32(b3.y) + row3);
+            const half3: int32 = int32(sqrt(float64(b3.radius * b3.radius) - float64(float32(row3) * float32(row3))));
+            SDL_RenderDrawLine(ren, int32(b3.x) - half3, int32(b3.y) + row3, int32(b3.x) + half3, int32(b3.y) + row3);
             row3 = row3 + 1;
         }
 
