@@ -210,6 +210,117 @@ function lookupImportedTrait(name, mod, moduleEnv) {
   return srcEnv?.traitTable.get(imp.exportName) ?? null;
 }
 
+// Phase 7.2: returns { ok: true } if `argType` satisfies `requiredTrait`,
+// otherwise { ok: false, message }. `mod` and `moduleEnv` aren't needed
+// today but are passed in for symmetry with the resolution helpers above —
+// future "trait impls registered in module X" lookups slot here.
+export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
+  if (!argType || !requiredTrait) {
+    return { ok: false, message: `internal: empty arg or bound` };
+  }
+  if (argType.kind === typeKinds.error) {
+    // suppress secondary errors from a type that already failed to resolve
+    return { ok: true };
+  }
+  if (argType.kind === typeKinds.struct) {
+    for (const t of argType.implementsTraits ?? []) {
+      if (t === requiredTrait) return { ok: true };
+    }
+    return {
+      ok: false,
+      message: `type "${argType.name}" does not implement trait "${requiredTrait.name}"`,
+    };
+  }
+  if (argType.kind === typeKinds.typeParam) {
+    if (argType.bound && argType.bound === requiredTrait) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      message: `type parameter "${argType.name}" does not satisfy bound "${requiredTrait.name}" — add 'implements ${requiredTrait.name}' to ${argType.name}'s declaration`,
+    };
+  }
+  // primitives, refs, arrays, etc. — no impls today.
+  const typeDesc =
+    argType.kind === typeKinds.prim
+      ? argType.name
+      : argType.kind === typeKinds.ref
+      ? `ref ${argType.inner?.name ?? "?"}`
+      : argType.kind;
+  return {
+    ok: false,
+    message: `type "${typeDesc}" does not implement trait "${requiredTrait.name}"`,
+  };
+}
+
+// Phase 7.2: resolve bound annotations on every type param of a generic decl
+// and mutate the existing TypeParamType in `genericDecl.paramScope` to carry
+// the resolved TraitType. `astTypeParams` is the AST array (each entry has
+// optional `bound` field set by the parser). Idempotent — bounds already set
+// are left alone (and re-resolution skipped).
+function resolveAndAttachBounds(
+  genericDecl,
+  astTypeParams,
+  mod,
+  moduleEnv,
+  programState,
+  errors,
+) {
+  for (const tpNode of astTypeParams ?? []) {
+    if (!tpNode.bound) continue;
+    const tpType = genericDecl.paramScope.get(tpNode.name);
+    if (!tpType || tpType.bound) continue;
+    const result = resolveBoundTrait(
+      tpNode.bound,
+      genericDecl.paramScope,
+      mod,
+      moduleEnv,
+      programState,
+    );
+    if (!result) {
+      errors.push({
+        message: `unknown trait "${formatAnnotation(tpNode.bound)}" in bound on type parameter "${tpNode.name}"`,
+        sourceLoc: tpNode.sourceLoc,
+      });
+      continue;
+    }
+    if (result.notTrait) {
+      errors.push({
+        message: `bound on type parameter "${tpNode.name}" must be a trait, got "${formatAnnotation(tpNode.bound)}"`,
+        sourceLoc: tpNode.sourceLoc,
+      });
+      continue;
+    }
+    tpType.bound = result;
+  }
+}
+
+// Phase 7.2: resolve a `T implements TraitAnnot` bound. Runs in pass C so that
+// trait decls (incl. generic ones) and the current decl's own param scope are
+// both visible — `<T implements Iterable<T>>` must resolve the inner `T` to the
+// same TypeParamType that's already in scope.
+//
+// Returns the resolved TraitType or null on failure (caller pushes the error).
+function resolveBoundTrait(annot, paramScope, mod, moduleEnv, programState) {
+  // Non-generic trait lookup first — `resolveTypeInModule` only checks struct
+  // and primitive tables, so a bare trait name would otherwise be unresolved.
+  if (annot.kind === "typeName") {
+    const env = moduleEnv.get(mod.id);
+    const localTrait = env.traitTable?.get(annot.name);
+    if (localTrait) return localTrait;
+    const imported = lookupImportedTrait(annot.name, mod, moduleEnv);
+    if (imported) return imported;
+  }
+  const ctx = {
+    typeParamScope: paramScope,
+    registry: programState.registry,
+  };
+  const resolved = resolveTypeAnnotationInModule(annot, mod.id, moduleEnv, ctx);
+  if (!resolved) return null;
+  if (resolved.kind !== typeKinds.trait) return { notTrait: true, resolved };
+  return resolved;
+}
+
 function substituteSelfInSig(traitSig, thisStruct) {
   const params = traitSig.params.map((p) => {
     if (p.type.kind === typeKinds.ref && p.type.inner === TraitSelfPlaceholder) {
@@ -797,6 +908,25 @@ export function typecheckProgram(modules) {
   // re-instantiate open generic struct types into their concrete forms.
   setGlobalInstantiator(makeInstantiator(programState.registry));
 
+  // Phase 7.2: install the bound checker. Every instantiate*() that hits the
+  // cache for the first time calls back here with each bounded (param, arg)
+  // pair. Source-location tracking happens via the call-site error path in
+  // checkExpr; this back-channel catches instantiations triggered by type
+  // annotations (e.g. fields with `Box<NotImpl>`).
+  programState.registry.boundChecker = ({
+    genericDecl,
+    argType,
+    paramName,
+    requiredTrait,
+  }) => {
+    const res = checkBoundSatisfied(argType, requiredTrait);
+    if (res.ok) return;
+    errors.push({
+      message: `type argument for parameter "${paramName}" of generic "${genericDecl.name}" does not satisfy bound: ${res.message}`,
+      sourceLoc: genericDecl.ast?.sourceLoc ?? null,
+    });
+  };
+
   // pass A: register struct shells so cross-module struct refs work in pass B
   for (const mod of modules) {
     const localSymbols = new Map();
@@ -833,7 +963,7 @@ export function typecheckProgram(modules) {
             const paramNames = d.typeParams.map((p) => p.name);
             const paramScope = new Map();
             for (const pn of paramNames) {
-              paramScope.set(pn, TypeParamType(pn, declId));
+              paramScope.set(pn, new TypeParamType(pn, declId));
             }
             const genericDecl = {
               id: declId,
@@ -884,7 +1014,7 @@ export function typecheckProgram(modules) {
             const paramNames = funcDecl.typeParams.map((p) => p.name);
             const paramScope = new Map();
             for (const pn of paramNames) {
-              paramScope.set(pn, TypeParamType(pn, declId));
+              paramScope.set(pn, new TypeParamType(pn, declId));
             }
             const genericDecl = {
               id: declId,
@@ -962,7 +1092,7 @@ export function typecheckProgram(modules) {
           const paramNames = d.typeParams.map((p) => p.name);
           const paramScope = new Map();
           for (const pn of paramNames) {
-            paramScope.set(pn, TypeParamType(pn, declId));
+            paramScope.set(pn, new TypeParamType(pn, declId));
           }
           const genericDecl = {
             id: declId,
@@ -1054,6 +1184,16 @@ export function typecheckProgram(modules) {
       // in scope and stash on the genericDecl record.
       if (d.kind === ASTNodeKind.TYPE_DECL && d.genericDecl) {
         const gd = d.genericDecl;
+        // Phase 7.2: resolve `implements TraitAnnot` bounds onto the
+        // TypeParamTypes in paramScope before resolving field types.
+        resolveAndAttachBounds(
+          gd,
+          d.typeParams,
+          mod,
+          moduleEnv,
+          programState,
+          errors,
+        );
         const ctxForGeneric = genericCtx(gd.paramScope);
         const genericFields = [];
         for (const field of d.fields ?? []) {
@@ -1225,6 +1365,17 @@ export function typecheckProgram(modules) {
         // and their signature is stashed on the genericDecl record. They are
         // NOT inserted into localSymbols.
         const isGenericFunc = !!funcDecl.genericDecl;
+        if (isGenericFunc) {
+          // Phase 7.2: attach bounds to the type params before resolving the sig.
+          resolveAndAttachBounds(
+            funcDecl.genericDecl,
+            funcDecl.typeParams,
+            mod,
+            moduleEnv,
+            programState,
+            errors,
+          );
+        }
         const ctxForFunc = isGenericFunc
           ? genericCtx(funcDecl.genericDecl.paramScope)
           : baseCtx();
@@ -1358,6 +1509,15 @@ export function typecheckProgram(modules) {
       // Phase 7.1: generic trait — resolve method sigs with type-param scope.
       if (d.genericDecl) {
         const gd = d.genericDecl;
+        // Phase 7.2: attach bounds before resolving method signatures.
+        resolveAndAttachBounds(
+          gd,
+          d.typeParams,
+          mod,
+          moduleEnv,
+          programState,
+          errors,
+        );
         const ctxForSig = {
           ...genericCtx(gd.paramScope),
           selfType: TraitSelfPlaceholder,

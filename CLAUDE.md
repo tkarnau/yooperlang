@@ -61,7 +61,7 @@ Pipeline: source `.yoop` → **lex** → **parse** → **typecheck** → **codeg
 The things that aren't obvious from reading any single file — read this section before editing across stages.
 
 - **Codegen requires `node.resolvedType` on every node.** Codegen does zero type-checking. If you add an AST kind, the typechecker must set `.resolvedType` on it before codegen sees it, or codegen will crash or emit wrong IR.
-- **Types are immutable (`Object.freeze`'d) — except `KindType`.** `KindType` mutates during pass C.2 to fill in resolved clause details. Don't freeze it; do treat every other type object as immutable.
+- **Types are immutable (`Object.freeze`'d) — except `KindType` and `TypeParamType`.** `KindType` mutates during pass C.2 to fill in resolved clause details. `TypeParamType` mutates *once* during pass C of Phase 7.2 to fill in its `bound` slot (a `TraitType` from `<T implements TraitName>`); after that it's effectively immutable. Don't freeze either; do treat every other type object as immutable.
 - **Struct literals can't be typed standalone.** A bare `Foo { x: 1 }` returns an error from `resolveExprType`. Struct literals must be pinned to a target type via `checkInitializer` (assignment RHS, return value, call argument, etc.).
 - **Two unrelated meanings of "kind" on a binding.** `binding.kind` = mutability (`"let"` / `"const"` / `"discard"`). `binding.kindType` = the Phase 6 user-defined kind declaration. Same word, orthogonal semantics.
 - **Imported structs may be shells mid-pass.** Pass A registers struct types with `fields: null`; pass C fills them in. Don't assume a `StructType` from an imported module is fully populated before pass C completes.

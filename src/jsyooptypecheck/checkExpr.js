@@ -23,8 +23,10 @@ import { ASTNodeKind } from "../contracts.js";
 import {
   ArrayType,
   ErrorType,
+  FuncType,
   PrimType,
   RefType,
+  TraitSelfPlaceholder,
   UntypedFloatType,
   UntypedIntType,
   VoidType,
@@ -47,6 +49,7 @@ import {
   unifyArith,
 } from "./coerce.js";
 import { instantiateFunc, mangleType } from "./instantiate.js";
+import { checkBoundSatisfied } from "./typecheck.js";
 
 // Built-in C-runtime functions the typechecker accepts even when the
 // program doesn't declare them. printf is variadic so it's special-cased
@@ -237,6 +240,18 @@ function resolveCall(node, scope, ctx) {
         node.calleeMangledName = `${structType.moduleId}__${structType.name}__${callee}`;
         return resolveCallWithSig(node, methodSig, scope, ctx);
       }
+      // Phase 7.2: bound-method dispatch on a TypeParamType receiver. Inside
+      // a generic body, `m(ref x)` where x: T and T's bound declares m
+      // resolves against the bound's method signature. The call is tagged
+      // with `boundMethod` so codegen can rewrite it post-substitution.
+      const tpHit = resolveBoundMethodOnTypeParam(
+        callee,
+        node,
+        scope,
+        ctx,
+        structType,
+      );
+      if (tpHit) return tpHit;
     }
     pushError(ctx.errors, node, `unknown function "${callee}"`);
     return setType(node, ErrorType());
@@ -790,6 +805,42 @@ export function resolveCallType(node, sig, scope, ctx) {
   return setType(node, sig.returnType);
 }
 
+// Phase 7.2: resolve a free-function call as a bound-method dispatch on a
+// TypeParamType receiver. Returns a Type if the lookup succeeded (and the
+// call's resolvedType is set), or null to let the caller emit "unknown
+// function".
+//
+// `receiverType` is the receiver's underlying type (RefType already unwrapped).
+function resolveBoundMethodOnTypeParam(callee, node, scope, ctx, receiverType) {
+  if (!receiverType || receiverType.kind !== typeKinds.typeParam) return null;
+  const bound = receiverType.bound;
+  if (!bound) return null;
+  const methodSig = bound.methods?.get(callee);
+  if (!methodSig) return null;
+  // Substitute the trait-self placeholder with the receiver TypeParamType so
+  // a method `function show(ref self): string` becomes `(ref T): string`.
+  const subbedParams = methodSig.params.map((p) => {
+    if (
+      p.type.kind === typeKinds.ref &&
+      p.type.inner === TraitSelfPlaceholder
+    ) {
+      return { ...p, type: RefType(receiverType) };
+    }
+    return p;
+  });
+  const subbedSig = FuncType(subbedParams, methodSig.returnType, false);
+  // Tag the call so codegen can rewrite it post-substitution. Codegen reads
+  // `boundMethod.methodName` and looks up the impl on the substituted struct.
+  node.boundMethod = {
+    methodName: callee,
+    traitName: bound.name,
+    traitModuleId: bound.moduleId,
+    receiverParamName: receiverType.name,
+    receiverOriginDecl: receiverType.originDecl,
+  };
+  return resolveCallWithSig(node, subbedSig, scope, ctx);
+}
+
 // Phase 7.1: look up a generic function decl by name in the local + imported
 // generic func tables.
 function lookupGenericFunc(name, ctx) {
@@ -933,6 +984,27 @@ function resolveGenericCall(node, generic, scope, ctx) {
       return setType(node, ErrorType());
     }
     concreteArgs.push(bound);
+  }
+
+  // Phase 7.2: call-site bound check. Runs before instantiation so the
+  // diagnostic points at the call site, not the registry side-channel.
+  let boundCheckFailed = false;
+  for (let i = 0; i < generic.paramNames.length; i++) {
+    const pn = generic.paramNames[i];
+    const tpType = generic.paramScope?.get(pn);
+    if (!tpType?.bound) continue;
+    const res = checkBoundSatisfied(concreteArgs[i], tpType.bound);
+    if (!res.ok) {
+      pushError(
+        ctx.errors,
+        node,
+        `call to "${node.callee}": type argument "${pn}" = ${formatType(concreteArgs[i])} does not satisfy bound — ${res.message}`,
+      );
+      boundCheckFailed = true;
+    }
+  }
+  if (boundCheckFailed) {
+    return setType(node, ErrorType());
   }
 
   // Instantiate.

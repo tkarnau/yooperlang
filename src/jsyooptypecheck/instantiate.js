@@ -83,6 +83,9 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
   if (argTypes.length !== genericDecl.paramNames.length) {
     return ErrorType();
   }
+  // Phase 7.2: registry-level bound checks. The typechecker installs
+  // `boundChecker` so the pure-types layer stays out of the way.
+  runBoundChecks(registry, genericDecl, argTypes);
 
   const mangledName = monomorphizedName(genericDecl.name, argTypes);
   const sub = buildSubstitution(
@@ -136,6 +139,7 @@ export function instantiateFunc(registry, genericFuncDecl, argTypes) {
   if (argTypes.length !== genericFuncDecl.paramNames.length) {
     return null;
   }
+  runBoundChecks(registry, genericFuncDecl, argTypes);
   const sub = buildSubstitution(
     genericFuncDecl.id,
     genericFuncDecl.paramNames,
@@ -166,6 +170,7 @@ export function instantiateTrait(registry, genericTraitDecl, argTypes) {
   const key = `T:${genericTraitDecl.id}:${cacheKeyForArgs(argTypes)}`;
   const cached = registry.traits.get(key);
   if (cached) return cached;
+  runBoundChecks(registry, genericTraitDecl, argTypes);
   const sub = buildSubstitution(
     genericTraitDecl.id,
     genericTraitDecl.paramNames,
@@ -205,7 +210,34 @@ export function createInstantiationRegistry() {
     byMangledName: new Map(),
     funcInstancesByDecl: new Map(),
     traitArgsByInstance: new Map(),
+    // Phase 7.2: callback installed by the typechecker. Receives
+    // ({ genericDecl, argTypes, paramIndex, paramName, requiredTrait }) and
+    // pushes a typecheck error if the arg doesn't satisfy the bound.
+    boundChecker: null,
   };
+}
+
+// Phase 7.2: walk a generic decl's typeParam AST nodes and call the
+// registry's `boundChecker` for any param whose TypeParamType carries a bound.
+// Bound checking is best-effort here — even on failure we proceed with the
+// instantiation so dependent type checking can still progress. The diagnostic
+// surfaces via the typechecker's error array.
+function runBoundChecks(registry, genericDecl, argTypes) {
+  const check = registry.boundChecker;
+  if (!check) return;
+  const paramScope = genericDecl.paramScope;
+  if (!paramScope) return;
+  for (let i = 0; i < genericDecl.paramNames.length; i++) {
+    const pn = genericDecl.paramNames[i];
+    const tpType = paramScope.get(pn);
+    if (!tpType?.bound) continue;
+    check({
+      genericDecl,
+      argType: argTypes[i],
+      paramName: pn,
+      requiredTrait: tpType.bound,
+    });
+  }
 }
 
 // Phase 7.1: resolve a type annotation using a typeContext (as built by

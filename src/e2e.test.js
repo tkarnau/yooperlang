@@ -191,6 +191,28 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  // ---- 7.2 trait bounds ----
+
+  it("generic_bound_basic.yoop: call trait method via bounded T", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_bound_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "v=42\n");
+  });
+
+  it("generic_bound_struct.yoop: bounded type param on a generic struct", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_bound_struct.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "tag\n");
+  });
+
+  it("generic_bounds_overview.yoop: full 7.2 showcase (incl. generic-calls-generic)", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/generic_bounds_overview.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "IntBox\nnamed\nIntBox\nIntBox\n");
+  });
+
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
@@ -1167,6 +1189,32 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.throws(
       () => parseFixture("examples/fail/nested_composition.yoop"),
       /expected ident/i,
+    );
+  });
+
+  // ---- 7.2 trait-bound fail fixtures ----
+
+  it("generic_bound_unsatisfied.yoop rejects calling a bounded generic with a non-impl type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/generic_bound_unsatisfied.yoop");
+    assert.ok(
+      errors.some((e) => /does not satisfy bound.*does not implement trait "Display"/.test(e.message)),
+      `expected unsatisfied-bound error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("generic_bound_unknown_trait.yoop rejects an unknown trait in a bound", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/generic_bound_unknown_trait.yoop");
+    assert.ok(
+      errors.some((e) => /unknown trait "DoesNotExist" in bound/.test(e.message)),
+      `expected unknown-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("generic_bound_method_missing.yoop rejects calling a method not on the bound", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/generic_bound_method_missing.yoop");
+    assert.ok(
+      errors.some((e) => /unknown function "other"/.test(e.message)),
+      `expected unknown-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

@@ -1,0 +1,6 @@
+function describe<T implements DoesNotExist>(ref x: T): void {
+}
+
+function main(): int32 {
+    return 0;
+}

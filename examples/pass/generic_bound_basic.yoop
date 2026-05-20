@@ -1,0 +1,21 @@
+trait Display {
+    function show(ref self): int32;
+}
+
+type IntBox implements Display {
+    n: int32,
+    function show(ref self): int32 {
+        return self.n;
+    }
+}
+
+function describe<T implements Display>(ref x: T): void {
+    let v: int32 = show(ref x);
+    printf(`v=${v}\n`);
+}
+
+function main(): int32 {
+    let a: IntBox = { n: 42 };
+    describe(ref a);
+    return 0;
+}

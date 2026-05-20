@@ -167,8 +167,15 @@ export const TraitType = (name, methods, moduleId = null, typeParams = []) =>
 // method signatures). It is replaced via substituteTypeParams at every
 // instantiation site. `originDecl` is a stable per-decl id so two unrelated
 // `T`s never compare equal.
-export const TypeParamType = (name, originDecl) =>
-  freezerWrap(typeKinds.typeParam, { name, originDecl });
+// Phase 7.2: `bound` is set later in pass C if the param has an `implements`
+// clause. Unlike other types in this file, TypeParamType is mutable for that
+// one slot — see CLAUDE.md cross-cutting invariants.
+export function TypeParamType(name, originDecl) {
+  this.kind = typeKinds.typeParam;
+  this.name = name;
+  this.originDecl = originDecl;
+  this.bound = null; // TraitType | null
+}
 
 // Phase 6.3: compiler-builtin Task<T>. Not user-declarable; produced as the
 // rewritten return type of any function declared with the `task` modifier.

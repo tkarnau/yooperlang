@@ -654,3 +654,70 @@ describe("parse: phase 6.1 - kind-prefixed bindings", () => {
     });
   });
 });
+
+describe("parse: phase 7.2 - trait bounds on type params", () => {
+  it("parses single bound on a generic function param", () => {
+    const ast = parse(
+      "function drain<T implements Iterable<T>>(ref it: T): void { }",
+    );
+    const fn = ast.body[0];
+    assert.equal(fn.typeParams.length, 1);
+    assert.equal(fn.typeParams[0].name, "T");
+    assert.ok(fn.typeParams[0].bound);
+    assert.equal(fn.typeParams[0].bound.kind, "typeApplication");
+    assert.equal(fn.typeParams[0].bound.name, "Iterable");
+    assert.equal(fn.typeParams[0].bound.typeArgs.length, 1);
+    assert.equal(fn.typeParams[0].bound.typeArgs[0].name, "T");
+  });
+  it("parses simple (non-generic) trait bound", () => {
+    const ast = parse(
+      "type Sorted<T implements Ord> { x: T, }",
+    );
+    const td = ast.body[0];
+    assert.equal(td.typeParams[0].name, "T");
+    assert.equal(td.typeParams[0].bound.kind, "typeName");
+    assert.equal(td.typeParams[0].bound.name, "Ord");
+  });
+  it("parses bound on a generic trait's type param", () => {
+    const ast = parse(
+      "trait Container<T implements Display> { function get(ref self): T; }",
+    );
+    const tr = ast.body[0];
+    assert.equal(tr.typeParams[0].name, "T");
+    assert.equal(tr.typeParams[0].bound.name, "Display");
+  });
+  it("unbounded type params still parse with bound: null", () => {
+    const ast = parse("function id<T>(x: T): T { return x; }");
+    assert.equal(ast.body[0].typeParams[0].bound, null);
+  });
+  it("parses multiple type params with mixed bounds", () => {
+    const ast = parse(
+      "function f<T implements Display, U, V implements Iterable<U>>(): void { }",
+    );
+    const params = ast.body[0].typeParams;
+    assert.equal(params.length, 3);
+    assert.equal(params[0].bound.name, "Display");
+    assert.equal(params[1].bound, null);
+    assert.equal(params[2].bound.name, "Iterable");
+  });
+  describe("reject cases", () => {
+    it("rejects missing trait after implements", () => {
+      assert.throws(
+        () => parse("function f<T implements>(): void { }"),
+        /expected trait name after 'implements'/,
+      );
+    });
+    it("rejects empty parenthesized bound list (multiple bounds reserved)", () => {
+      assert.throws(
+        () => parse("function f<T implements (Foo, Bar)>(): void { }"),
+        /multiple trait bounds.*not yet supported/,
+      );
+    });
+    it("rejects ref-type as bound", () => {
+      assert.throws(
+        () => parse("function f<T implements ref Foo>(): void { }"),
+        /trait bound must be a trait name/,
+      );
+    });
+  });
+});

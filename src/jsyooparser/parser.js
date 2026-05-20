@@ -427,6 +427,36 @@ export function parse(src) {
         posToSourceLocation(src, nameTok.start),
       );
       node.name = paramName;
+      // Phase 7.2: optional `implements TraitAnnotation` bound on the param.
+      node.bound = null;
+      if (peek().tag === TokenTags.implements) {
+        const implTok = peek();
+        advance(); // consume `implements`
+        // Reject `<T implements >` and `<T implements ,>` early.
+        if (atClosingGt() || peek().tag === TokenTags.comma) {
+          throw parseError(
+            `expected trait name after 'implements' in type parameter bound`,
+            implTok.start,
+            implTok.length,
+          );
+        }
+        if (peek().tag === TokenTags.lparen) {
+          throw parseError(
+            `multiple trait bounds (e.g. <T implements (Foo, Bar)>) are not yet supported`,
+            peek().start,
+            peek().length,
+          );
+        }
+        const annot = parseTypeAnnotation();
+        if (annot.kind === "refType" || annot.kind === "arrayType") {
+          throw parseError(
+            `trait bound must be a trait name, not a ref/array type`,
+            nameTok.start,
+            nameTok.length,
+          );
+        }
+        node.bound = annot;
+      }
       params.push(node);
       if (peek().tag === TokenTags.comma) {
         advance();

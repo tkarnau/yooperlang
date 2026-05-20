@@ -15,6 +15,7 @@ import {
 } from "../jsyooptypecheck/types.js";
 import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
+import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
 
 // yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
@@ -1602,11 +1603,11 @@ const CLONE_SKIP_FIELDS = new Set([
   "sourceLoc",
   "implementingType", // back-ref to a frozen StructType
 ]);
-function cloneAstWithSubstitution(node, sub) {
+function cloneAstWithSubstitution(node, sub, registry = null) {
   if (node === null || node === undefined) return node;
   if (typeof node !== "object") return node;
   if (Array.isArray(node)) {
-    return node.map((n) => cloneAstWithSubstitution(n, sub));
+    return node.map((n) => cloneAstWithSubstitution(n, sub, registry));
   }
   if (node instanceof Map || node instanceof Set) return node;
   const out = {};
@@ -1623,18 +1624,64 @@ function cloneAstWithSubstitution(node, sub) {
     ) {
       out[key] = v ? substituteTypeParams(v, sub) : v;
     } else if (Array.isArray(v)) {
-      out[key] = v.map((x) => cloneAstWithSubstitution(x, sub));
+      out[key] = v.map((x) => cloneAstWithSubstitution(x, sub, registry));
     } else if (v && typeof v === "object") {
       if (v instanceof Map || v instanceof Set) {
         out[key] = v;
       } else if (Object.isFrozen(v)) {
         out[key] = substituteTypeParams(v, sub);
       } else {
-        out[key] = cloneAstWithSubstitution(v, sub);
+        out[key] = cloneAstWithSubstitution(v, sub, registry);
       }
     } else {
       out[key] = v;
     }
+  }
+  // Phase 7.2: re-instantiate a generic call whose original argTypes carried
+  // an outer TypeParamType. After substitution we have concrete argTypes, so
+  // we ask the registry for the concrete instance and re-point the call.
+  if (
+    out.kind === ASTNodeKind.CALL_EXPRESSION &&
+    out.genericInstantiation &&
+    registry
+  ) {
+    const oldInst = out.genericInstantiation;
+    const decl =
+      registry.funcInstancesByDecl &&
+      [...registry.funcInstancesByDecl.values()].flat().find(
+        (i) => i.declId === oldInst.declId,
+      )?.ast?.genericDecl;
+    if (decl && oldInst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) {
+      const newArgs = oldInst.argTypes.map((t) => substituteTypeParams(t, sub));
+      const newInst = instantiateFunc(registry, decl, newArgs);
+      if (newInst) out.genericInstantiation = newInst;
+    }
+  }
+  // Phase 7.2: rewrite a bound-method call into a normal struct-method call
+  // once the receiver's TypeParamType has been substituted with a concrete
+  // struct. The bound check at instantiation guarantees the impl exists.
+  if (
+    out.kind === ASTNodeKind.CALL_EXPRESSION &&
+    out.boundMethod
+  ) {
+    const firstArg = out.args?.[0];
+    let recvType = firstArg?.resolvedType;
+    if (recvType?.kind === typeKinds.ref) recvType = recvType.inner;
+    if (!recvType || recvType.kind !== typeKinds.struct) {
+      // Receiver is still abstract — keep the boundMethod tag. This branch is
+      // hit when we're producing an "open" instantiation (the outer T flowed
+      // in). Open instances are filtered out before IR emission.
+      return out;
+    }
+    const methodSig = recvType.methods?.get(out.boundMethod.methodName);
+    if (!methodSig) {
+      throw new Error(
+        `codegen: bound-method "${out.boundMethod.methodName}" not found on substituted type "${recvType.name}"`,
+      );
+    }
+    out.calleeMethodOf = recvType;
+    out.calleeMangledName = `${recvType.moduleId}__${recvType.name}__${out.boundMethod.methodName}`;
+    out.boundMethod = null;
   }
   return out;
 }
@@ -1850,6 +1897,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       for (const inst of instances) {
         if (inst.moduleId !== moduleId) continue;
         if (inst.emitted) continue;
+        // Phase 7.2: skip "open" instances where some argType is still a
+        // TypeParamType (came from a generic-calls-generic site). They only
+        // exist in the registry as caching artifacts — the concrete instances
+        // produced when the outer generic is monomorphized are what get IR.
+        if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
         inst.emitted = true;
         emitGenericFuncInstance(inst);
       }
@@ -1916,7 +1968,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       inner.set(decl.genericDecl.paramNames[i], inst.argTypes[i]);
     }
     sub.set(inst.declId, inner);
-    const cloned = cloneAstWithSubstitution(decl, sub);
+    const cloned = cloneAstWithSubstitution(
+      decl,
+      sub,
+      programState?.registry ?? null,
+    );
     const sym = mangle(moduleId, inst.mangledName);
     emitFn(cloned, sym);
   }
