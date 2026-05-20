@@ -1,6 +1,6 @@
 # Yooperlang — Claude working notes
 
-A JS-implemented compiler for the Yooperlang language. Emits LLVM IR text, shells out to `clang` to link and produce an executable. Language spec in [SPEC.md](SPEC.md); phase-by-phase build plan in [plans/roadmap.md](plans/roadmap.md). Currently mid Phase 6 (kinds), with Phase 7 (generics, pattern matching) next.
+A JS-implemented compiler for the Yooperlang language. Emits LLVM IR text, shells out to `clang` to link and produce an executable. Language spec in [SPEC.md](SPEC.md); phase-by-phase build plan in [plans/roadmap.md](plans/roadmap.md). Currently mid Phase 7 — Phase 7.1 (user-defined generics: structs, functions, traits) has landed; trait bounds and pattern matching are next ([plans/phase-7-2-trait-bounds.md](plans/phase-7-2-trait-bounds.md), [plans/phase-7-3-pattern-matching.md](plans/phase-7-3-pattern-matching.md)).
 
 Pipeline: source `.yoop` → **lex** → **parse** → **typecheck** → **codegen** (LLVM IR) → `clang` → executable.
 
@@ -20,28 +20,31 @@ Pipeline: source `.yoop` → **lex** → **parse** → **typecheck** → **codeg
 - `TokenTags` enum and `keywordTagList` map live in [lexer.js](src/jsyooplexer/lexer.js). Character predicates in [charFns.js](src/jsyooplexer/charFns.js); whitespace + nestable block comments in [charEaters.js](src/jsyooplexer/charEaters.js).
 - Numeric literals support underscore separators (validated: must be between digits) and `0x`/`0b`/`0o` bases. Block comments nest. Template literals (backticks) are returned raw; `${...}` interpolation is parsed later in the parser.
 
-### [src/jsyooparser/](src/jsyooparser/) — parsing (~1,900 lines)
+### [src/jsyooparser/](src/jsyooparser/) — parsing (~2,000 lines)
 - Public entry: `parse(src) → ASTNode` (PROGRAM root) at [parser.js:79](src/jsyooparser/parser.js#L79). Throws via `parseError` with line/column/caret; one error aborts the whole parse.
 - Recursive descent with Pratt-style precedence climbing for binary ops. Precedence table at [parser.js:52](src/jsyooparser/parser.js#L52); climbing loop in `parseExpression(minPrecedence)`.
 - Parser state (`pos`, `current`) is closure-scoped inside `parse()`. No resumability. Helpers: `advance`, `peek`, `peekAhead(n)` (re-lexes, no cache — keep lookahead shallow; existing max is 3 tokens for kind-prefixed bindings).
 - Every node is created via `buildSourcedNode(ASTNodeKind.X)` at [parser.js:218](src/jsyooparser/parser.js#L218) so `sourceLoc` is set — downstream error reporting depends on this.
 - Deferred-feature pattern: keywords reserved for later phases (e.g. `provides`, `restricts`) lex as plain identifiers and the parser emits an explicit "not yet supported" message if they appear in a clause. Mirror this when reserving anything new.
+- **Generics (Phase 7.1)**: `parseTypeParamList()` parses `<T, U>` after a decl name and wires `typeParams` onto `FUNCTION_DECL`/`TYPE_DECL`/`TRAIT_DECL`. `parseTypeAnnotation()` accepts a type-application shape — any identifier followed by `<` becomes `{ name, typeArgs: [TypeAnnotation] }`. `>>` is split into two `gt` tokens parser-side when closing a nested type-application so `Pair<int32, Box<int32>>` parses; the lexer is unchanged. Explicit type args at call sites are not supported — `<` in expression position is still a binary op, keeping `peekAhead` shallow.
 
-### [src/jsyooptypecheck/](src/jsyooptypecheck/) — type system (~3,900 lines across ~12 files)
+### [src/jsyooptypecheck/](src/jsyooptypecheck/) — type system (~6,400 lines across ~13 files)
 - Orchestration in [typecheck.js](src/jsyooptypecheck/typecheck.js) — passes A (declarations), B (signatures), C (bodies + kind resolution).
-- Types in [types.js](src/jsyooptypecheck/types.js): `PrimType`, `StructType`, `RefType`, `ArrayType`, `FuncType`, `KindType`, `KindApplication`, `TaskType`. Also `untypedInt`/`untypedFloat` literal placeholders and `error`/`namespace`.
+- Types in [types.js](src/jsyooptypecheck/types.js): `PrimType`, `StructType`, `RefType`, `ArrayType`, `FuncType`, `KindType`, `KindApplication`, `TaskType`, `TraitType`, `TypeParamType`. Also `untypedInt`/`untypedFloat` literal placeholders and `error`/`namespace`.
 - Per-node dispatchers (recursive on `node.kind`, not visitor): expressions in [checkExpr.js](src/jsyooptypecheck/checkExpr.js) (`resolveExprType`, `checkInitializer`); statements + function bodies in [checkStatement.js](src/jsyooptypecheck/checkStatement.js).
 - Kind flow analysis (mustCall obligations, escape analysis, propagation) in [kindCheck.js](src/jsyooptypecheck/kindCheck.js).
 - Coercion rules in [coerce.js](src/jsyooptypecheck/coerce.js) (`isAssignable`, `unifyArith`, literal pinning). Lexical scope chain in [scope.js](src/jsyooptypecheck/scope.js). Errors accumulated via `pushError` in [errors.js](src/jsyooptypecheck/errors.js) (not thrown). Fallible (`err`-bearing) binding tracking in [fallible.js](src/jsyooptypecheck/fallible.js). Builtin kinds (`joined`, `pooled`, `Task`) in [builtinKinds.js](src/jsyooptypecheck/builtinKinds.js). Cross-module symbol resolution in [imports.js](src/jsyooptypecheck/imports.js).
+- **Generics (Phase 7.1)**: generic decls (structs/funcs/traits with `typeParams`) are registered in per-module `genericStructTable`/`genericFuncTable`/generic-trait-table — **never** in the concrete `structTable`/`funcTable`, which only ever hold monomorphic types. `TypeParamType { name, originDecl }` placeholders appear inside generic bodies; `substituteTypeParams(type, sub, instantiator)` ([types.js:464](src/jsyooptypecheck/types.js#L464)) walks types replacing them. A **type-param scope** map is threaded through the `ctx` of `resolveTypeAnnotation()` so bare `T`s in a generic body resolve as `TypeParamType`s. The **instantiation registry** ([instantiate.js](src/jsyooptypecheck/instantiate.js)) is keyed by `(declId, argTypes)` and lazily monomorphizes structs/funcs/traits on demand — every concrete `StructType`/`FuncType` derived from a generic decl is cached, frozen, and reused. **Call-site inference** for generic functions runs inside `resolveExprType` on `CALL_EXPRESSION` in [checkExpr.js](src/jsyooptypecheck/checkExpr.js): walk param/arg types in tandem, unify each `TypeParamType` against concrete arg types, error on conflicts and on un-inferrable params (no turbofish — diagnostic is the workaround). Untyped int/float literals do **not** pin a type param; they default per existing rules only if every other arg constraining the param is also untyped.
 
-### [src/jsyoopcodegen/](src/jsyoopcodegen/) — LLVM IR emission (~2,800 lines)
+### [src/jsyoopcodegen/](src/jsyoopcodegen/) — LLVM IR emission (~3,000 lines)
 - Public entries:
-  - `compileEntry(absPath)` at [codegen.js:2811](src/jsyoopcodegen/codegen.js#L2811) — full pipeline from entry file.
-  - `codegenProgram(modules)` at [codegen.js:1526](src/jsyoopcodegen/codegen.js#L1526) — multi-module IR from already-typechecked modules.
-  - `codegen(ast)` at [codegen.js:215](src/jsyoopcodegen/codegen.js#L215) — single-module (legacy / tests).
+  - `compileEntry(absPath)` at [codegen.js:2943](src/jsyoopcodegen/codegen.js#L2943) — full pipeline from entry file.
+  - `codegenProgram(modules, _moduleEnv, programState)` at [codegen.js:1533](src/jsyoopcodegen/codegen.js#L1533) — multi-module IR from already-typechecked modules; `programState.registry` carries the instantiation registry from typecheck.
+  - `codegen(ast)` at [codegen.js:216](src/jsyoopcodegen/codegen.js#L216) — single-module (legacy / tests).
 - Single-pass AST → LLVM IR text. No intermediate IR, no optimization. Dispatchers: `emitStatement`, `emitExpr`, `emitCall`, `emitLvalue`. Temp + label counters reset per function.
 - Emits to `/tmp/yooper_out.ll` and shells out to `clang` with link flags from [src/runtimeBuild.js](src/runtimeBuild.js).
 - Multi-module symbol mangling: `<moduleId>__<symbolName>`. Internal to codegen; doesn't appear in user source.
+- **Generics (Phase 7.1)**: monomorphic struct/function definitions are emitted from the typechecker's instantiation registry, *not* by walking AST `TYPE_DECL`/`FUNCTION_DECL` nodes for generic decls. The registry walk in `codegenProgram` emits one LLVM struct per resolved `StructType` and one LLVM function per `FuncType` instance, mangled as `<moduleId>__<name>__<arg1>__<arg2>` (nested args flatten via the same `__` scheme). `structContainsTypeParam` ([codegen.js:1642](src/jsyoopcodegen/codegen.js#L1642)) is the gate that skips emitting "open" (still-parameterized) types. Generic function bodies are emitted by cloning the AST and pre-substituting type-param-bearing fields via `cloneAstWithSubstitution` ([codegen.js:1605](src/jsyoopcodegen/codegen.js#L1605)) — codegen never sees a `TypeParamType` directly.
 
 ### [src/jsyoopdriver/](src/jsyoopdriver/) — driver (~80 lines)
 - [moduleGraph.js](src/jsyoopdriver/moduleGraph.js) walks imports from the entry file, detects cycles, returns a topologically ordered list of modules for typecheck + codegen.
@@ -65,12 +68,16 @@ The things that aren't obvious from reading any single file — read this sectio
 - **Fallible `err` fields unobserved at scope exit are compile errors, not warnings.** Enforced in `popScope` via [fallible.js](src/jsyooptypecheck/fallible.js). Adding a new way to produce a fallible value means making sure `err` observation is tracked.
 - **Error control flow differs by stage.** Lexer + parser throw and abort on first error. Typechecker accumulates into an `errors` array. Codegen assumes a clean AST and will crash on malformed input.
 - **Source locations on every AST node are load-bearing.** Diagnostics rely on `node.sourceLoc` being set. Use `buildSourcedNode` (parser) or copy `sourceLoc` when synthesizing nodes elsewhere.
+- **Generic decls live in a separate table from concrete ones.** The `structTable`/`funcTable`/`traitTable` only ever contain monomorphic types — generic decls go in `genericStructTable`/`genericFuncTable`/their trait equivalent and are instantiated lazily into the registry by `resolveTypeAnnotation` (for explicit type apps) and by call-site inference (for generic functions). Never put a `TypeParamType`-bearing type into a concrete table, and never reach across into the generic table when you mean to look up a concrete type.
+- **Codegen never sees `TypeParamType`.** Generic struct/function bodies that reach codegen have been pre-substituted via `cloneAstWithSubstitution` so every `resolvedType` is concrete. If a `TypeParamType` ever appears in codegen, it's a typechecker bug — instantiation was missed at the use site.
 
 ## Phase model
 
-Features land phase-by-phase per [plans/roadmap.md](plans/roadmap.md). Currently mid Phase 6.5; recent landings include `propagates` (6.4), kind composition with `&`, and `layout { align ... }` (6.5).
+Features land phase-by-phase per [plans/roadmap.md](plans/roadmap.md). Currently mid Phase 7. Recent landings: Phase 7.1 (user-defined generic structs/functions/traits, with `Task<T>` no longer special-cased in the parser); Phase 6.5 (`layout { align ... }`, kind composition with `&`); Phase 6.4 (`propagates`).
 
-Code is annotated with phase comments (e.g. `// 6.5:`, `// phase 6.4:`). Treat these as load-bearing — they mark the version a piece of logic became correct and help future readers locate the spec section.
+Next up: Phase 7.2 (trait bounds, [plans/phase-7-2-trait-bounds.md](plans/phase-7-2-trait-bounds.md)) and Phase 7.3 (pattern matching / `switch`, [plans/phase-7-3-pattern-matching.md](plans/phase-7-3-pattern-matching.md)).
+
+Code is annotated with phase comments (e.g. `// 6.5:`, `// phase 6.4:`, `// Phase 7.1:`). Treat these as load-bearing — they mark the version a piece of logic became correct and help future readers locate the spec section.
 
 ## Test conventions
 

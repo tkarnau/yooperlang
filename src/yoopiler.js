@@ -36,7 +36,7 @@ function main() {
   const entryAbs = fs.realpathSync(path.resolve(inputFile));
 
   const { modules } = loadModuleGraph(entryAbs);
-  const { errors } = typecheckProgram(modules);
+  const { errors, moduleEnv, programState } = typecheckProgram(modules);
   if (errors.length > 0) {
     console.error("typecheck errors:");
     errors.forEach((error) => console.error(`  ${error.message}`));
@@ -44,7 +44,7 @@ function main() {
   }
   console.log("typecheck: ok");
 
-  const { ir, linkFlags } = codegenProgram(modules);
+  const { ir, linkFlags } = codegenProgram(modules, moduleEnv, programState);
   console.log("llvm IR: ok");
 
   const tmpIR = path.join(os.tmpdir(), "yooper_out.ll");
