@@ -1,0 +1,9 @@
+type Box<T> {
+    value: T,
+}
+
+function main(): int32 {
+    let b: Box<int32> = { value: 42 };
+    printf(`b=${b.value}\n`);
+    return 0;
+}

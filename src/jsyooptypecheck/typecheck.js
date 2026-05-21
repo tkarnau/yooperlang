@@ -21,6 +21,7 @@ import {
   RefType,
   StructType,
   TaskType,
+  TypeParamType,
   VoidType,
   primTypeFromName,
   resolveTypeAnnotation,
@@ -30,6 +31,14 @@ import {
   typeKinds,
   typesEqual,
 } from "./types.js";
+import {
+  createInstantiationRegistry,
+  instantiateFunc,
+  instantiateStruct,
+  instantiateTrait,
+  makeInstantiator,
+} from "./instantiate.js";
+import { setGlobalInstantiator } from "./types.js";
 import { formatType, pushError } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
@@ -71,9 +80,20 @@ function resolveTypeInModule(name, modId, moduleEnv) {
 }
 
 // Resolve a structured type annotation within a multi-module context.
+//
+// Phase 7.1: ctx may carry:
+//   - typeParamScope: Map<paramName, TypeParamType> for resolving bare names
+//     to type-params when inside a generic decl
+//   - registry / programState: needed to call into the instantiation registry
+//     when an annotation is a typeApplication
 function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
   if (!annot) return null;
   if (annot.kind === "typeName") {
+    // Phase 7.1: type-params in scope shadow normal type lookup.
+    if (ctx?.typeParamScope) {
+      const tp = ctx.typeParamScope.get(annot.name);
+      if (tp) return tp;
+    }
     return resolveTypeInModule(annot.name, modId, moduleEnv);
   }
   if (annot.kind === "refType") {
@@ -91,6 +111,19 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     if (!inner) return null;
     return TaskType(inner);
   }
+  if (annot.kind === "typeApplication") {
+    const argTypes = [];
+    for (const a of annot.typeArgs) {
+      const t = resolveTypeAnnotationInModule(a, modId, moduleEnv, ctx);
+      if (!t) return null;
+      argTypes.push(t);
+    }
+    // Bridge: built-in Task<T> stays a TaskType.
+    if (annot.name === "Task" && argTypes.length === 1) {
+      return TaskType(argTypes[0]);
+    }
+    return resolveGenericApplication(annot.name, argTypes, modId, moduleEnv, ctx);
+  }
   if (annot.kind === "selfType") {
     if (!ctx?.selfType) {
       throw new Error("resolveTypeAnnotationInModule: 'self' used outside trait/method context");
@@ -100,6 +133,46 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
   throw new Error(
     `resolveTypeAnnotationInModule: unknown annotation kind "${annot.kind}"`,
   );
+}
+
+// Phase 7.1: resolve `Name<Arg1, Arg2, ...>` by looking up the generic decl
+// in the module's generic tables (or imports) and instantiating it.
+function resolveGenericApplication(name, argTypes, modId, moduleEnv, ctx) {
+  const env = moduleEnv.get(modId);
+  const registry = ctx?.registry;
+  if (!registry) return null;
+  // Local generic struct
+  const localStruct = env.genericStructTable?.get(name);
+  if (localStruct) {
+    if (argTypes.length !== localStruct.paramNames.length) {
+      return null; // arity mismatch reported by caller via formatAnnotation
+    }
+    return instantiateStruct(registry, localStruct, argTypes);
+  }
+  // Local generic trait
+  const localTrait = env.genericTraitTable?.get(name);
+  if (localTrait) {
+    if (argTypes.length !== localTrait.paramNames.length) return null;
+    return instantiateTrait(registry, localTrait, argTypes);
+  }
+  // Imported generics
+  const imp = env.importedNames?.get(name);
+  if (imp) {
+    const srcEnv = moduleEnv.get(imp.fromModuleId);
+    if (srcEnv) {
+      const remoteStruct = srcEnv.genericStructTable?.get(imp.exportName);
+      if (remoteStruct) {
+        if (argTypes.length !== remoteStruct.paramNames.length) return null;
+        return instantiateStruct(registry, remoteStruct, argTypes);
+      }
+      const remoteTrait = srcEnv.genericTraitTable?.get(imp.exportName);
+      if (remoteTrait) {
+        if (argTypes.length !== remoteTrait.paramNames.length) return null;
+        return instantiateTrait(registry, remoteTrait, argTypes);
+      }
+    }
+  }
+  return null;
 }
 
 // ─── propagation helpers (phase 6.4) ────────────────────────────────────────
@@ -137,6 +210,117 @@ function lookupImportedTrait(name, mod, moduleEnv) {
   return srcEnv?.traitTable.get(imp.exportName) ?? null;
 }
 
+// Phase 7.2: returns { ok: true } if `argType` satisfies `requiredTrait`,
+// otherwise { ok: false, message }. `mod` and `moduleEnv` aren't needed
+// today but are passed in for symmetry with the resolution helpers above —
+// future "trait impls registered in module X" lookups slot here.
+export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
+  if (!argType || !requiredTrait) {
+    return { ok: false, message: `internal: empty arg or bound` };
+  }
+  if (argType.kind === typeKinds.error) {
+    // suppress secondary errors from a type that already failed to resolve
+    return { ok: true };
+  }
+  if (argType.kind === typeKinds.struct) {
+    for (const t of argType.implementsTraits ?? []) {
+      if (t === requiredTrait) return { ok: true };
+    }
+    return {
+      ok: false,
+      message: `type "${argType.name}" does not implement trait "${requiredTrait.name}"`,
+    };
+  }
+  if (argType.kind === typeKinds.typeParam) {
+    if (argType.bound && argType.bound === requiredTrait) {
+      return { ok: true };
+    }
+    return {
+      ok: false,
+      message: `type parameter "${argType.name}" does not satisfy bound "${requiredTrait.name}" — add 'implements ${requiredTrait.name}' to ${argType.name}'s declaration`,
+    };
+  }
+  // primitives, refs, arrays, etc. — no impls today.
+  const typeDesc =
+    argType.kind === typeKinds.prim
+      ? argType.name
+      : argType.kind === typeKinds.ref
+      ? `ref ${argType.inner?.name ?? "?"}`
+      : argType.kind;
+  return {
+    ok: false,
+    message: `type "${typeDesc}" does not implement trait "${requiredTrait.name}"`,
+  };
+}
+
+// Phase 7.2: resolve bound annotations on every type param of a generic decl
+// and mutate the existing TypeParamType in `genericDecl.paramScope` to carry
+// the resolved TraitType. `astTypeParams` is the AST array (each entry has
+// optional `bound` field set by the parser). Idempotent — bounds already set
+// are left alone (and re-resolution skipped).
+function resolveAndAttachBounds(
+  genericDecl,
+  astTypeParams,
+  mod,
+  moduleEnv,
+  programState,
+  errors,
+) {
+  for (const tpNode of astTypeParams ?? []) {
+    if (!tpNode.bound) continue;
+    const tpType = genericDecl.paramScope.get(tpNode.name);
+    if (!tpType || tpType.bound) continue;
+    const result = resolveBoundTrait(
+      tpNode.bound,
+      genericDecl.paramScope,
+      mod,
+      moduleEnv,
+      programState,
+    );
+    if (!result) {
+      errors.push({
+        message: `unknown trait "${formatAnnotation(tpNode.bound)}" in bound on type parameter "${tpNode.name}"`,
+        sourceLoc: tpNode.sourceLoc,
+      });
+      continue;
+    }
+    if (result.notTrait) {
+      errors.push({
+        message: `bound on type parameter "${tpNode.name}" must be a trait, got "${formatAnnotation(tpNode.bound)}"`,
+        sourceLoc: tpNode.sourceLoc,
+      });
+      continue;
+    }
+    tpType.bound = result;
+  }
+}
+
+// Phase 7.2: resolve a `T implements TraitAnnot` bound. Runs in pass C so that
+// trait decls (incl. generic ones) and the current decl's own param scope are
+// both visible — `<T implements Iterable<T>>` must resolve the inner `T` to the
+// same TypeParamType that's already in scope.
+//
+// Returns the resolved TraitType or null on failure (caller pushes the error).
+function resolveBoundTrait(annot, paramScope, mod, moduleEnv, programState) {
+  // Non-generic trait lookup first — `resolveTypeInModule` only checks struct
+  // and primitive tables, so a bare trait name would otherwise be unresolved.
+  if (annot.kind === "typeName") {
+    const env = moduleEnv.get(mod.id);
+    const localTrait = env.traitTable?.get(annot.name);
+    if (localTrait) return localTrait;
+    const imported = lookupImportedTrait(annot.name, mod, moduleEnv);
+    if (imported) return imported;
+  }
+  const ctx = {
+    typeParamScope: paramScope,
+    registry: programState.registry,
+  };
+  const resolved = resolveTypeAnnotationInModule(annot, mod.id, moduleEnv, ctx);
+  if (!resolved) return null;
+  if (resolved.kind !== typeKinds.trait) return { notTrait: true, resolved };
+  return resolved;
+}
+
 function substituteSelfInSig(traitSig, thisStruct) {
   const params = traitSig.params.map((p) => {
     if (p.type.kind === typeKinds.ref && p.type.inner === TraitSelfPlaceholder) {
@@ -160,17 +344,68 @@ function formatSig(sig) {
   return `(${params}): ${formatType(sig.returnType)}`;
 }
 
-function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
+function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   const env = moduleEnv.get(mod.id);
   const structShell = env.structTable.get(typeDecl.name);
   if (!structShell) return;
 
   // Step 1: resolve trait names.
   const resolvedImplements = [];
-  for (const traitName of typeDecl.implements) {
+  // Phase 7.1: implements entries are records { name, typeArgs }. For
+  // generic trait implementations (typeArgs != null), instantiate the trait
+  // and substitute its method sigs.
+  for (const entry of typeDecl.implements) {
+    const traitName = typeof entry === "string" ? entry : entry.name;
+    const typeArgs = typeof entry === "string" ? null : entry.typeArgs;
+    const sourceLoc =
+      typeof entry === "string" ? typeDecl.sourceLoc : entry.sourceLoc;
+    if (typeArgs) {
+      // Generic trait — look up the generic decl and instantiate.
+      const localGeneric = env.genericTraitTable?.get(traitName);
+      const imp = env.importedNames?.get(traitName);
+      const remoteGeneric =
+        imp && moduleEnv.get(imp.fromModuleId)?.genericTraitTable?.get(imp.exportName);
+      const genericTrait = localGeneric ?? remoteGeneric ?? null;
+      if (!genericTrait) {
+        errors.push({
+          message: `type "${typeDecl.name}" implements unknown generic trait "${traitName}"`,
+          sourceLoc,
+        });
+        continue;
+      }
+      if (typeArgs.length !== genericTrait.paramNames.length) {
+        errors.push({
+          message: `trait "${traitName}" expects ${genericTrait.paramNames.length} type argument(s), got ${typeArgs.length}`,
+          sourceLoc,
+        });
+        continue;
+      }
+      const resolvedArgs = [];
+      let ok = true;
+      for (const a of typeArgs) {
+        const t = resolveTypeAnnotationInModule(a, mod.id, moduleEnv, {
+          registry: programState.registry,
+        });
+        if (!t) {
+          errors.push({
+            message: `unknown type argument "${formatAnnotation(a)}" in implements clause`,
+            sourceLoc,
+          });
+          ok = false;
+          break;
+        }
+        resolvedArgs.push(t);
+      }
+      if (!ok) continue;
+      const inst = instantiateTrait(programState.registry, genericTrait, resolvedArgs);
+      // Stash the resolved arg list on the instance for method substitution.
+      programState.registry.traitArgsByInstance.set(inst, resolvedArgs);
+      resolvedImplements.push(inst);
+      continue;
+    }
     const trait = env.traitTable.get(traitName) ?? lookupImportedTrait(traitName, mod, moduleEnv);
     if (!trait) {
-      errors.push({ message: `type "${typeDecl.name}" implements unknown trait "${traitName}"`, sourceLoc: typeDecl.sourceLoc });
+      errors.push({ message: `type "${typeDecl.name}" implements unknown trait "${traitName}"`, sourceLoc });
       continue;
     }
     resolvedImplements.push(trait);
@@ -178,18 +413,16 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
 
   const fields = structShell.fields ?? [];
 
-  // Step 2: substitute self in each trait's required methods.
-  const requiredMethods = new Map();
+  // Step 2: substitute self in each trait's required methods. Group by method
+  // name so a single impl body can satisfy multiple traits that demand the
+  // same name and signature (Phase 7.4 — cross-trait same-name impls are now
+  // legal because every call site qualifies through the trait).
+  const requiredMethods = new Map(); // methodName -> Array<{traitName, sig}>
   for (const trait of resolvedImplements) {
     for (const [methodName, traitSig] of trait.methods) {
-      if (requiredMethods.has(methodName) && requiredMethods.get(methodName).traitName !== trait.name) {
-        errors.push({
-          message: `type "${typeDecl.name}" cannot implement both "${requiredMethods.get(methodName).traitName}" and "${trait.name}" — both require method "${methodName}"`,
-          sourceLoc: typeDecl.sourceLoc,
-        });
-        continue;
-      }
-      requiredMethods.set(methodName, { traitName: trait.name, sig: substituteSelfInSig(traitSig, structShell) });
+      const subbed = substituteSelfInSig(traitSig, structShell);
+      if (!requiredMethods.has(methodName)) requiredMethods.set(methodName, []);
+      requiredMethods.get(methodName).push({ traitName: trait.name, sig: subbed });
     }
   }
 
@@ -203,22 +436,29 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
     }
     implMethodNames.add(methodDecl.name);
 
-    if (env.localSymbols.has(methodDecl.name)) {
-      errors.push({
-        message: `method "${methodDecl.name}" on type "${typeDecl.name}" collides with module-level function "${methodDecl.name}" — rename one`,
-        sourceLoc: methodDecl.sourceLoc,
-      });
-    }
-
-    const required = requiredMethods.get(methodDecl.name);
-    if (!required) {
+    const requiredList = requiredMethods.get(methodDecl.name);
+    if (!requiredList || requiredList.length === 0) {
       errors.push({
         message: `type "${typeDecl.name}" declares method "${methodDecl.name}", but no implemented trait requires it`,
         sourceLoc: methodDecl.sourceLoc,
       });
       continue;
     }
-    methodDecl.implementsTrait = required.traitName;
+
+    // If more than one trait requires this name, their signatures must agree —
+    // otherwise a single impl body can't satisfy both.
+    let sigConflict = false;
+    for (let i = 1; i < requiredList.length; i++) {
+      if (!sigsEqual(requiredList[0].sig, requiredList[i].sig)) {
+        errors.push({
+          message: `method "${methodDecl.name}" required by traits "${requiredList[0].traitName}" and "${requiredList[i].traitName}" with incompatible signatures — cannot implement both`,
+          sourceLoc: methodDecl.sourceLoc,
+        });
+        sigConflict = true;
+        break;
+      }
+    }
+    if (sigConflict) continue;
 
     const ctxForMethod = { selfType: structShell };
     const params = methodDecl.params.map((p) => {
@@ -230,24 +470,29 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
     const returnType = resolveTypeAnnotationInModule(methodDecl.returnTypeAnnotation, mod.id, moduleEnv, ctxForMethod) ?? ErrorType();
     const implSig = FuncType(params, returnType, false);
 
-    if (!sigsEqual(implSig, required.sig)) {
+    const requiredSig = requiredList[0].sig;
+    if (!sigsEqual(implSig, requiredSig)) {
       errors.push({
-        message: `method "${methodDecl.name}" on type "${typeDecl.name}" has signature ${formatSig(implSig)}, expected ${formatSig(required.sig)} from trait "${required.traitName}"`,
+        message: `method "${methodDecl.name}" on type "${typeDecl.name}" has signature ${formatSig(implSig)}, expected ${formatSig(requiredSig)} from trait "${requiredList[0].traitName}"`,
         sourceLoc: methodDecl.sourceLoc,
       });
       continue;
     }
     methodDecl.resolvedFuncType = implSig;
     methodDecl.resolvedType = returnType;
-    methodDecl.mangledSymbol = `${mod.id}__${typeDecl.name}__${methodDecl.name}`;
+    // Phase 7.4: one impl body can satisfy multiple same-named trait methods;
+    // codegen emits one LLVM `define` per (trait, method) using the trait-
+    // qualified mangle scheme.
+    methodDecl.implementsTraits = requiredList.map((r) => r.traitName);
     resolvedMethods.set(methodDecl.name, implSig);
   }
 
   // Step 4: every required method must be implemented.
-  for (const [methodName, required] of requiredMethods) {
+  for (const [methodName, list] of requiredMethods) {
     if (!resolvedMethods.has(methodName)) {
+      const traitNames = list.map((r) => `"${r.traitName}"`).join(" / ");
       errors.push({
-        message: `type "${typeDecl.name}" implements trait "${required.traitName}" but is missing method "${methodName}" with signature ${formatSig(required.sig)}`,
+        message: `type "${typeDecl.name}" implements trait ${traitNames} but is missing method "${methodName}" with signature ${formatSig(list[0].sig)}`,
         sourceLoc: typeDecl.sourceLoc,
       });
     }
@@ -665,6 +910,32 @@ export function effectiveLayoutAlign(app) {
 export function typecheckProgram(modules) {
   const errors = [];
   const moduleEnv = new Map(); // moduleId -> { localSymbols, structTable, exports, importedNames, linkLibraries }
+  // Phase 7.1: program-wide instantiation registry, shared across modules.
+  const programState = {
+    registry: createInstantiationRegistry(),
+  };
+  // Wire the registry-aware instantiator so substituteTypeParams can
+  // re-instantiate open generic struct types into their concrete forms.
+  setGlobalInstantiator(makeInstantiator(programState.registry));
+
+  // Phase 7.2: install the bound checker. Every instantiate*() that hits the
+  // cache for the first time calls back here with each bounded (param, arg)
+  // pair. Source-location tracking happens via the call-site error path in
+  // checkExpr; this back-channel catches instantiations triggered by type
+  // annotations (e.g. fields with `Box<NotImpl>`).
+  programState.registry.boundChecker = ({
+    genericDecl,
+    argType,
+    paramName,
+    requiredTrait,
+  }) => {
+    const res = checkBoundSatisfied(argType, requiredTrait);
+    if (res.ok) return;
+    errors.push({
+      message: `type argument for parameter "${paramName}" of generic "${genericDecl.name}" does not satisfy bound: ${res.message}`,
+      sourceLoc: genericDecl.ast?.sourceLoc ?? null,
+    });
+  };
 
   // pass A: register struct shells so cross-module struct refs work in pass B
   for (const mod of modules) {
@@ -675,6 +946,11 @@ export function typecheckProgram(modules) {
     const linkLibraries = new Set();
     const traitTable = new Map();
     const kindTable = new Map();
+    // Phase 7.1: generic decl tables — generic decls live here and never
+    // enter structTable/localSymbols/traitTable (those are monomorphic only).
+    const genericStructTable = new Map();
+    const genericFuncTable = new Map();
+    const genericTraitTable = new Map();
     // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
     // the kind-name that pairs with the built-in `Task<T>` type.
     kindTable.set("Task", TASK_KIND);
@@ -682,21 +958,93 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.TYPE_DECL) {
-        if (structTable.has(d.name)) {
-          errors.push({
-            message: `redeclaration of type "${d.name}"`,
-            sourceLoc: d.sourceLoc,
-          });
+        const hasTypeParams = d.typeParams && d.typeParams.length > 0;
+        if (hasTypeParams) {
+          // Phase 7.1: generic struct decl. Register in genericStructTable.
+          if (genericStructTable.has(d.name) || structTable.has(d.name)) {
+            errors.push({
+              message: `redeclaration of type "${d.name}"`,
+              sourceLoc: d.sourceLoc,
+            });
+          } else {
+            // The decl id is used as the TypeParamType.originDecl so two
+            // unrelated `T`s in different decls don't collide.
+            const declId = `${mod.id}__struct__${d.name}`;
+            const paramNames = d.typeParams.map((p) => p.name);
+            const paramScope = new Map();
+            for (const pn of paramNames) {
+              paramScope.set(pn, new TypeParamType(pn, declId));
+            }
+            const genericDecl = {
+              id: declId,
+              name: d.name,
+              moduleId: mod.id,
+              paramNames,
+              paramScope,
+              genericFields: null, // filled in pass C
+              ast: d,
+              implementsTraits: [],
+              methods: new Map(),
+              propagatedKinds: [],
+              kindApplication: null,
+            };
+            genericStructTable.set(d.name, genericDecl);
+            d.genericDecl = genericDecl;
+          }
+          if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         } else {
-          structTable.set(d.name, StructType(d.name, null, mod.id));
+          if (structTable.has(d.name) || genericStructTable.has(d.name)) {
+            errors.push({
+              message: `redeclaration of type "${d.name}"`,
+              sourceLoc: d.sourceLoc,
+            });
+          } else {
+            structTable.set(d.name, StructType(d.name, null, mod.id));
+          }
+          if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         }
-        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
       // Register function shells so resolveImports (pass B) can find them.
       // Redeclaration check lives here; pass C overwrites with proper sigs.
       const funcDecl = d.kind === ASTNodeKind.FUNCTION_DECL ? d : null;
       if (funcDecl) {
-        if (localSymbols.has(funcDecl.name)) {
+        const hasTypeParams = funcDecl.typeParams && funcDecl.typeParams.length > 0;
+        if (hasTypeParams) {
+          // Phase 7.1: generic function decl.
+          if (
+            genericFuncTable.has(funcDecl.name) ||
+            localSymbols.has(funcDecl.name)
+          ) {
+            errors.push({
+              message: `redeclaration of function "${funcDecl.name}"`,
+              sourceLoc: funcDecl.sourceLoc,
+            });
+          } else {
+            const declId = `${mod.id}__fn__${funcDecl.name}`;
+            const paramNames = funcDecl.typeParams.map((p) => p.name);
+            const paramScope = new Map();
+            for (const pn of paramNames) {
+              paramScope.set(pn, new TypeParamType(pn, declId));
+            }
+            const genericDecl = {
+              id: declId,
+              name: funcDecl.name,
+              moduleId: mod.id,
+              paramNames,
+              paramScope,
+              genericSig: null, // filled in pass C
+              ast: funcDecl,
+            };
+            genericFuncTable.set(funcDecl.name, genericDecl);
+            funcDecl.genericDecl = genericDecl;
+            if (
+              decl.kind === ASTNodeKind.EXPORT_DECL ||
+              decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL
+            ) {
+              exports.add(funcDecl.name);
+            }
+          }
+        } else if (localSymbols.has(funcDecl.name) || genericFuncTable.has(funcDecl.name)) {
           errors.push({
             message: `redeclaration of function "${funcDecl.name}"`,
             sourceLoc: funcDecl.sourceLoc,
@@ -735,15 +1083,38 @@ export function typecheckProgram(modules) {
       }
 
       if (d.kind === ASTNodeKind.TRAIT_DECL) {
+        const hasTypeParams = d.typeParams && d.typeParams.length > 0;
         if (
           traitTable.has(d.name) ||
+          genericTraitTable.has(d.name) ||
           structTable.has(d.name) ||
-          localSymbols.has(d.name)
+          genericStructTable.has(d.name) ||
+          localSymbols.has(d.name) ||
+          genericFuncTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of trait "${d.name}"`,
             sourceLoc: d.sourceLoc,
           });
+        } else if (hasTypeParams) {
+          // Phase 7.1: generic trait decl.
+          const declId = `${mod.id}__trait__${d.name}`;
+          const paramNames = d.typeParams.map((p) => p.name);
+          const paramScope = new Map();
+          for (const pn of paramNames) {
+            paramScope.set(pn, new TypeParamType(pn, declId));
+          }
+          const genericDecl = {
+            id: declId,
+            name: d.name,
+            moduleId: mod.id,
+            paramNames,
+            paramScope,
+            genericMethods: new Map(), // filled in pass C
+            ast: d,
+          };
+          genericTraitTable.set(d.name, genericDecl);
+          d.genericDecl = genericDecl;
         } else {
           traitTable.set(d.name, TraitType(d.name, new Map(), mod.id));
         }
@@ -793,6 +1164,9 @@ export function typecheckProgram(modules) {
       linkLibraries,
       traitTable,
       kindTable,
+      genericStructTable,
+      genericFuncTable,
+      genericTraitTable,
     });
   }
 
@@ -803,15 +1177,69 @@ export function typecheckProgram(modules) {
 
   // pass C: struct fields + function sigs + extern decls
   for (const mod of modules) {
-    const { localSymbols, structTable, exports, traitTable } = moduleEnv.get(
-      mod.id,
-    );
+    const env = moduleEnv.get(mod.id);
+    const { localSymbols, structTable, exports, traitTable } = env;
+    // Default ctx (no typeParamScope, registry always available).
+    const baseCtx = () => ({ registry: programState.registry });
+    // ctx for a generic decl body — adds the type-param scope.
+    const genericCtx = (paramScope) => ({
+      registry: programState.registry,
+      typeParamScope: paramScope,
+    });
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
 
+      // Phase 7.1: generic struct decl — resolve field types with type params
+      // in scope and stash on the genericDecl record.
+      if (d.kind === ASTNodeKind.TYPE_DECL && d.genericDecl) {
+        const gd = d.genericDecl;
+        // Phase 7.2: resolve `implements TraitAnnot` bounds onto the
+        // TypeParamTypes in paramScope before resolving field types.
+        resolveAndAttachBounds(
+          gd,
+          d.typeParams,
+          mod,
+          moduleEnv,
+          programState,
+          errors,
+        );
+        const ctxForGeneric = genericCtx(gd.paramScope);
+        const genericFields = [];
+        for (const field of d.fields ?? []) {
+          let fieldType = resolveTypeAnnotationInModule(
+            field.typeAnnotation,
+            mod.id,
+            moduleEnv,
+            ctxForGeneric,
+          );
+          if (!fieldType) {
+            errors.push({
+              message: `unknown type "${formatAnnotation(field.typeAnnotation)}" in field "${field.name}" of generic struct "${d.name}"`,
+              sourceLoc: field.sourceLoc,
+            });
+            fieldType = ErrorType();
+          }
+          if (genericFields.some((f) => f.name === field.name)) {
+            errors.push({
+              message: `duplicate field name "${field.name}" in struct "${d.name}"`,
+              sourceLoc: field.sourceLoc,
+            });
+          }
+          field.resolvedKindType = null;
+          genericFields.push({
+            name: field.name,
+            type: fieldType,
+            kindType: null,
+          });
+        }
+        gd.genericFields = genericFields;
+        // Don't continue — fall through to skip the regular TYPE_DECL handler
+        // below by checking d.genericDecl there.
+      }
+
       // struct fields
-      if (d.kind === ASTNodeKind.TYPE_DECL) {
+      if (d.kind === ASTNodeKind.TYPE_DECL && !d.genericDecl) {
         // Phase 6.4: reject `contains<K>` at a single point.
         if (d.containsClause) {
           errors.push({
@@ -865,6 +1293,7 @@ export function typecheckProgram(modules) {
             field.typeAnnotation,
             mod.id,
             moduleEnv,
+            baseCtx(),
           );
           if (!fieldType) {
             errors.push({
@@ -942,6 +1371,24 @@ export function typecheckProgram(modules) {
         funcDecl = d;
       }
       if (funcDecl) {
+        // Phase 7.1: generic functions are resolved with type params in scope
+        // and their signature is stashed on the genericDecl record. They are
+        // NOT inserted into localSymbols.
+        const isGenericFunc = !!funcDecl.genericDecl;
+        if (isGenericFunc) {
+          // Phase 7.2: attach bounds to the type params before resolving the sig.
+          resolveAndAttachBounds(
+            funcDecl.genericDecl,
+            funcDecl.typeParams,
+            mod,
+            moduleEnv,
+            programState,
+            errors,
+          );
+        }
+        const ctxForFunc = isGenericFunc
+          ? genericCtx(funcDecl.genericDecl.paramScope)
+          : baseCtx();
         // Overwrite shell placed in pass A with properly-resolved types.
         // Redeclaration was already checked in pass A.
         const declaredReturnType =
@@ -949,6 +1396,7 @@ export function typecheckProgram(modules) {
             funcDecl.returnTypeAnnotation,
             mod.id,
             moduleEnv,
+            ctxForFunc,
           ) ?? ErrorType();
         funcDecl.declaredReturnType = declaredReturnType;
 
@@ -1000,27 +1448,32 @@ export function typecheckProgram(modules) {
             externalReturnType = TaskType(declaredReturnType);
           }
         }
-        localSymbols.set(
-          funcDecl.name,
-          FuncType(
-            (funcDecl.params ?? []).map((p) => {
-              const baseType =
-                resolveTypeAnnotationInModule(
-                  p.typeAnnotation,
-                  mod.id,
-                  moduleEnv,
-                ) ?? ErrorType();
-              return {
-                name: p.name,
-                type: p.isRef ? RefType(baseType) : baseType,
-                isRef: p.isRef ?? false,
-              };
-            }),
-            externalReturnType,
-            false,
-            returnPropagatedKinds,
-          ),
+        const paramTypes = (funcDecl.params ?? []).map((p) => {
+          const baseType =
+            resolveTypeAnnotationInModule(
+              p.typeAnnotation,
+              mod.id,
+              moduleEnv,
+              ctxForFunc,
+            ) ?? ErrorType();
+          return {
+            name: p.name,
+            type: p.isRef ? RefType(baseType) : baseType,
+            isRef: p.isRef ?? false,
+          };
+        });
+        const funcType = FuncType(
+          paramTypes,
+          externalReturnType,
+          false,
+          returnPropagatedKinds,
         );
+        if (isGenericFunc) {
+          // Stash on the generic decl record for later instantiation.
+          funcDecl.genericDecl.genericSig = funcType;
+        } else {
+          localSymbols.set(funcDecl.name, funcType);
+        }
         if (
           decl.kind === ASTNodeKind.EXPORT_DECL ||
           decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL
@@ -1034,12 +1487,14 @@ export function typecheckProgram(modules) {
         for (const ext of decl.decls) {
           if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
           const paramTypes = ext.params.map((p) => {
-            const t =
+            const baseType =
               resolveTypeAnnotationInModule(
                 p.typeAnnotation,
                 mod.id,
                 moduleEnv,
+                baseCtx(),
               ) ?? ErrorType();
+            const t = p.isRef ? RefType(baseType) : baseType;
             p.resolvedType = t;
             return { name: p.name, type: t, isRef: p.isRef ?? false };
           });
@@ -1048,6 +1503,7 @@ export function typecheckProgram(modules) {
               ext.returnTypeAnnotation,
               mod.id,
               moduleEnv,
+              baseCtx(),
             ) ?? ErrorType();
           ext.resolvedType = retType;
           localSymbols.set(
@@ -1061,6 +1517,59 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TRAIT_DECL) continue;
+      // Phase 7.1: generic trait — resolve method sigs with type-param scope.
+      if (d.genericDecl) {
+        const gd = d.genericDecl;
+        // Phase 7.2: attach bounds before resolving method signatures.
+        resolveAndAttachBounds(
+          gd,
+          d.typeParams,
+          mod,
+          moduleEnv,
+          programState,
+          errors,
+        );
+        const ctxForSig = {
+          ...genericCtx(gd.paramScope),
+          selfType: TraitSelfPlaceholder,
+        };
+        const seen = new Set();
+        for (const sig of d.methods) {
+          if (seen.has(sig.name)) {
+            errors.push({
+              message: `duplicate method name "${sig.name}" in trait "${d.name}"`,
+              sourceLoc: sig.sourceLoc,
+            });
+            continue;
+          }
+          seen.add(sig.name);
+          const params = sig.params.map((p) => {
+            const baseType =
+              resolveTypeAnnotationInModule(
+                p.typeAnnotation,
+                mod.id,
+                moduleEnv,
+                ctxForSig,
+              ) ?? ErrorType();
+            return {
+              name: p.name,
+              type: p.isRef ? RefType(baseType) : baseType,
+              isRef: p.isRef ?? false,
+            };
+          });
+          const returnType =
+            resolveTypeAnnotationInModule(
+              sig.returnTypeAnnotation,
+              mod.id,
+              moduleEnv,
+              ctxForSig,
+            ) ?? ErrorType();
+          const sigFunc = FuncType(params, returnType, false);
+          gd.genericMethods.set(sig.name, sigFunc);
+          sig.resolvedFuncType = sigFunc;
+        }
+        continue;
+      }
       const trait = traitTable.get(d.name);
       if (!trait) continue; // was rejected in pass A due to redeclaration
       // validate no duplicate method names within the trait
@@ -1074,7 +1583,7 @@ export function typecheckProgram(modules) {
           continue;
         }
         seen.add(sig.name);
-        const ctxForSig = { selfType: TraitSelfPlaceholder };
+        const ctxForSig = { ...baseCtx(), selfType: TraitSelfPlaceholder };
         const params = sig.params.map((p) => {
           const baseType =
             resolveTypeAnnotationInModule(
@@ -1124,7 +1633,8 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TYPE_DECL || !d.implements?.length) continue;
-      validateImplBlock(d, mod, moduleEnv, errors);
+      if (d.genericDecl) continue; // generic struct impls deferred
+      validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
   }
 
@@ -1158,7 +1668,8 @@ export function typecheckProgram(modules) {
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
   for (const mod of modules) {
-    const { localSymbols, structTable, importedNames, kindTable } = moduleEnv.get(mod.id);
+    const env = moduleEnv.get(mod.id);
+    const { localSymbols, structTable, importedNames, kindTable, traitTable } = env;
     const typeContext = {
       moduleSymbols: localSymbols,
       structTable,
@@ -1166,14 +1677,27 @@ export function typecheckProgram(modules) {
       importedNames,
       currentModId: mod.id,
       kindTable,
+      // Phase 7.4: trait-qualified call resolution needs the trait table.
+      traitTable,
+      // Phase 7.1: needed for generic call-site inference and for resolving
+      // typeApplication annotations inside function bodies.
+      registry: programState.registry,
+      genericFuncTable: env.genericFuncTable,
+      genericStructTable: env.genericStructTable,
+      genericTraitTable: env.genericTraitTable,
     };
 
     // pass D.1: validate all functions and methods (populates resolvedKindType on params)
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
-        validateFunction(d, typeContext, errors);
-      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
+        // Phase 7.1: generic functions are typechecked once with their type
+        // params in scope. Per-instantiation IR emission happens in codegen.
+        const tcForFn = d.genericDecl
+          ? { ...typeContext, typeParamScope: d.genericDecl.paramScope }
+          : typeContext;
+        validateFunction(d, tcForFn, errors);
+      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           validateMethod(method, d.resolvedType, typeContext, errors);
         }
@@ -1192,9 +1716,9 @@ export function typecheckProgram(modules) {
     // pass D.2: run kind check (escape analysis) now that all param kinds are resolved
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
-      if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+      if (d.kind === ASTNodeKind.FUNCTION_DECL && !d.genericDecl) {
         runKindCheck(d, errors, funcDeclTable);
-      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
+      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable);
         }
@@ -1202,7 +1726,7 @@ export function typecheckProgram(modules) {
     }
   }
 
-  return { modules, errors, moduleEnv };
+  return { modules, errors, moduleEnv, programState };
 }
 
 // ─── single-module entry point (legacy + test path) ──────────────────────────
@@ -1323,8 +1847,9 @@ export function typecheck(ast) {
           continue;
         }
         const paramTypes = ext.params.map((p) => {
-          const t =
+          const baseType =
             resolveTypeAnnotation(p.typeAnnotation, structTable) ?? ErrorType();
+          const t = p.isRef ? RefType(baseType) : baseType;
           p.resolvedType = t;
           return { name: p.name, type: t, isRef: p.isRef ?? false };
         });

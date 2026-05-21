@@ -22,6 +22,11 @@ import {
   typeKinds,
   typesEqual,
 } from "./types.js";
+import {
+  instantiateStruct,
+  instantiateTrait,
+  resolveTypeInCtx,
+} from "./instantiate.js";
 import { pushError, formatType } from "./errors.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
@@ -71,7 +76,8 @@ export function validateFunction(funcNode, typeContext, errors) {
   const scope = pushScope(null);
 
   for (const param of funcNode.params ?? []) {
-    const baseType = resolveTypeAnnotation(param.typeAnnotation, typeContext.structTable) ?? ErrorType();
+    const baseType =
+      resolveTypeInCtx(param.typeAnnotation, typeContext) ?? ErrorType();
     if (baseType.kind === typeKinds.error) {
       pushError(errors, param, `unknown type "${formatAnnotation(param.typeAnnotation)}"`);
     }
@@ -150,7 +156,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   }
 
   const funcReturnType =
-    resolveTypeAnnotation(funcNode.returnTypeAnnotation, typeContext.structTable) ??
+    resolveTypeInCtx(funcNode.returnTypeAnnotation, typeContext) ??
     ErrorType();
   if (funcReturnType.kind === typeKinds.error) {
     pushError(errors, funcNode, `unknown return type "${formatAnnotation(funcNode.returnTypeAnnotation)}"`);
@@ -245,7 +251,7 @@ function checkLetOrConst(node, scope, ctx) {
   }
 
   const declaredType =
-    resolveTypeAnnotation(node.typeAnnotation, ctx.typeContext.structTable) ?? ErrorType();
+    resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
   if (declaredType.kind === typeKinds.error) {
     pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
   }

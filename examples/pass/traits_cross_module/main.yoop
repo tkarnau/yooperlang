@@ -1,8 +1,9 @@
 import { FileHandle } from "./impl.yoop";
+import { Disposable } from "./iface.yoop";
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
 
 function main(): int32 {
     let h: FileHandle = { fd: 13 };
-    dispose(ref h);
+    Disposable.dispose(ref h);
     return 0;
 }

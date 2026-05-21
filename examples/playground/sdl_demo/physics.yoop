@@ -1,45 +1,41 @@
-// Bouncing ball physics -- pure value computation, no FFI required.
-// All functions take and return Ball by value so refs are not needed.
+// Bouncing ball physics. Ball implements the Steppable trait so the per-frame
+// update reads as a method call on the receiver, mutating in place via
+// `ref self` instead of returning a fresh Ball each frame.
 
-export type Ball {
+export trait Steppable {
+    function step(ref self, dt: float32, win_w: float32, win_h: float32): void;
+}
+
+export type Ball implements Steppable {
     x: float32,
     y: float32,
     vx: float32,
     vy: float32,
     radius: float32,
     hue: float32,
-}
 
-// Advance one ball by dt milliseconds, bouncing off the window edges.
-export function ball_step(b: Ball, dt: float32, win_w: float32, win_h: float32): Ball {
-    let nx: float32 = b.x + b.vx * dt;
-    let ny: float32 = b.y + b.vy * dt;
-    let nvx: float32 = b.vx;
-    let nvy: float32 = b.vy;
+    // Advance the ball one dt-step, bouncing off the window edges.
+    function step(ref self, dt: float32, win_w: float32, win_h: float32): void {
+        self.x = self.x + self.vx * dt;
+        self.y = self.y + self.vy * dt;
 
-    if (nx - b.radius < 0.0) {
-        nx = b.radius;
-        nvx = nvx * -1.0;
-    }
-    if (nx + b.radius > win_w) {
-        nx = win_w - b.radius;
-        nvx = nvx * -1.0;
-    }
-    if (ny - b.radius < 0.0) {
-        ny = b.radius;
-        nvy = nvy * -1.0;
-    }
-    if (ny + b.radius > win_h) {
-        ny = win_h - b.radius;
-        nvy = nvy * -1.0;
-    }
+        if (self.x - self.radius < 0.0) {
+            self.x = self.radius;
+            self.vx = self.vx * -1.0;
+        }
+        if (self.x + self.radius > win_w) {
+            self.x = win_w - self.radius;
+            self.vx = self.vx * -1.0;
+        }
+        if (self.y - self.radius < 0.0) {
+            self.y = self.radius;
+            self.vy = self.vy * -1.0;
+        }
+        if (self.y + self.radius > win_h) {
+            self.y = win_h - self.radius;
+            self.vy = self.vy * -1.0;
+        }
 
-    return {
-        x: nx,
-        y: ny,
-        vx: nvx,
-        vy: nvy,
-        radius: b.radius,
-        hue: b.hue + 0.015,
-    };
+        self.hue = self.hue + 0.015;
+    }
 }

@@ -32,6 +32,6 @@ type Vec4 aligned(32) implements Disposable {
 function main(): int32 {
     let v: Vec4 = { x: 1.0, y: 2.0, z: 3.0, w: 4.0 };
     scoped_alt h: Vec4 = { x: 5.0, y: 6.0, z: 7.0, w: 8.0 };
-    printf(`v.x=%f h.x=%f\n`, v.x, h.x);
+    printf(`v.x=${v.x} h.x=${h.x}\n`);
     return 0;
 }

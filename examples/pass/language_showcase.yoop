@@ -1,0 +1,95 @@
+// language_showcase.yoop -- open a small text file via libc, scan its bytes,
+// and print byte/line/word counts plus the most common ASCII letter.
+//
+// Exercises: extern "C" with an opaque FILE type, ref T parameters for C
+// pointers, string -> const char* lowering, primitive arithmetic, arrays
+// with indexing and .len, while/for control flow, and template-literal
+// printf formatting. The companion e2e test in src/e2e.test.js stages
+// language_showcase.txt next to the binary before running it.
+
+extern "C" from "stdio.h" {
+    type FILE;
+    function fopen(path: string, mode: string): ref FILE;
+    function fclose(ref fp: FILE): int32;
+    function fgetc(ref fp: FILE): int32;
+    function printf(fmt: string, ...): int32;
+    function putchar(ch: int32): int32;
+}
+
+function isLowerLetter(ch: int32): bool {
+    return ch >= 97 && ch <= 122;
+}
+
+function toLower(ch: int32): int32 {
+    if (ch >= 65 && ch <= 90) {
+        return ch + 32;
+    }
+    return ch;
+}
+
+function isWhitespace(ch: int32): bool {
+    return ch == 32 || ch == 9 || ch == 10 || ch == 13;
+}
+
+function main(): int32 {
+    // Trust the harness: e2e copies language_showcase.txt into the binary's
+    // cwd before running. A null fp from a missing file would segfault on
+    // the first fgetc -- that's an acceptable, loud failure for a test.
+    let fp: ref FILE = fopen("language_showcase.txt", "r");
+
+    let bytes: int32 = 0;
+    let lines: int32 = 0;
+    let words: int32 = 0;
+    let inWord: bool = false;
+
+    // 26 slots, one per a-z. No repeat-literal syntax yet, so spell it out.
+    let freq: int32[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+    let ch: int32 = fgetc(ref fp);
+    while (ch != -1) {
+        bytes = bytes + 1;
+        if (ch == 10) {
+            lines = lines + 1;
+        }
+
+        if (isWhitespace(ch)) {
+            if (inWord) {
+                words = words + 1;
+            }
+            inWord = false;
+        } else {
+            inWord = true;
+        }
+
+        let lo: int32 = toLower(ch);
+        if (isLowerLetter(lo)) {
+            freq[lo - 97] = freq[lo - 97] + 1;
+        }
+
+        ch = fgetc(ref fp);
+    }
+    if (inWord) {
+        words = words + 1;
+    }
+
+    fclose(ref fp);
+
+    let maxCount: int32 = 0;
+    let maxIndex: int32 = 0;
+    let i: int32 = 0;
+    for (i = 0; i < 26; i = i + 1) {
+        if (freq[i] > maxCount) {
+            maxCount = freq[i];
+            maxIndex = i;
+        }
+    }
+
+    printf(`bytes: ${bytes}\n`);
+    printf(`lines: ${lines}\n`);
+    printf(`words: ${words}\n`);
+    printf("most common letter: '");
+    putchar(maxIndex + 97);
+    printf(`' (${maxCount} times)\n`);
+
+    return 0;
+}

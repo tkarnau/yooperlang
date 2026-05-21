@@ -300,7 +300,8 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(type.kind, ASTNodeKind.TYPE_DECL);
     assert.equal(type.name, "FileHandle");
     assert.equal(type.implements.length, 1);
-    assert.equal(type.implements[0], "Disposable");
+    assert.equal(type.implements[0].name, "Disposable");
+    assert.equal(type.implements[0].typeArgs, null);
     assert.equal(type.fields.length, 1);
     const field = type.fields[0];
     assert.equal(field.kind, ASTNodeKind.FIELD_DECL);
@@ -331,8 +332,8 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(type.kind, ASTNodeKind.TYPE_DECL);
     assert.equal(type.name, "Channel");
     assert.equal(type.implements.length, 2);
-    assert.equal(type.implements[0], "Disposable");
-    assert.equal(type.implements[1], "Closable");
+    assert.equal(type.implements[0].name, "Disposable");
+    assert.equal(type.implements[1].name, "Closable");
   });
   it("self field references parses properly", () => {
     // A method body using `self.count`: parses as `FIELD_ACCESS { object: IDENT { name: "self" }, field: "count" }`.
@@ -389,16 +390,19 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(stmts.length, 1);
     const type = stmts[0];
     assert.equal(type.implements.length, 2);
-    assert.equal(type.implements[0], "MyTrait1");
-    assert.equal(type.implements[1], "MyTrait2");
+    assert.equal(type.implements[0].name, "MyTrait1");
+    assert.equal(type.implements[1].name, "MyTrait2");
   });
   describe("reject cases", () => {
-    it("rejects generics, not yet supported", () => {
-      assert.throws(
-        () =>
-          parse("trait MyTrait<T> { function method(ref self, x: T): void; }"),
-        /trait generics are not supported in v0/,
+    it("parses generic traits (phase 7.1)", () => {
+      const ast = parse(
+        "trait MyTrait<T> { function method(ref self, x: T): void; }",
       );
+      const tr = ast.body[0];
+      assert.equal(tr.kind, "TRAIT_DECL");
+      assert.equal(tr.name, "MyTrait");
+      assert.equal(tr.typeParams.length, 1);
+      assert.equal(tr.typeParams[0].name, "T");
     });
     it("rejects extends, not yet supported", () => {
       assert.throws(
@@ -646,6 +650,73 @@ describe("parse: phase 6.1 - kind-prefixed bindings", () => {
         () =>
           parse("function f(): int32 { disposable a: FileHandle; return 0; }"),
         /kind-prefixed binding requires initializer/,
+      );
+    });
+  });
+});
+
+describe("parse: phase 7.2 - trait bounds on type params", () => {
+  it("parses single bound on a generic function param", () => {
+    const ast = parse(
+      "function drain<T implements Iterable<T>>(ref it: T): void { }",
+    );
+    const fn = ast.body[0];
+    assert.equal(fn.typeParams.length, 1);
+    assert.equal(fn.typeParams[0].name, "T");
+    assert.ok(fn.typeParams[0].bound);
+    assert.equal(fn.typeParams[0].bound.kind, "typeApplication");
+    assert.equal(fn.typeParams[0].bound.name, "Iterable");
+    assert.equal(fn.typeParams[0].bound.typeArgs.length, 1);
+    assert.equal(fn.typeParams[0].bound.typeArgs[0].name, "T");
+  });
+  it("parses simple (non-generic) trait bound", () => {
+    const ast = parse(
+      "type Sorted<T implements Ord> { x: T, }",
+    );
+    const td = ast.body[0];
+    assert.equal(td.typeParams[0].name, "T");
+    assert.equal(td.typeParams[0].bound.kind, "typeName");
+    assert.equal(td.typeParams[0].bound.name, "Ord");
+  });
+  it("parses bound on a generic trait's type param", () => {
+    const ast = parse(
+      "trait Container<T implements Display> { function get(ref self): T; }",
+    );
+    const tr = ast.body[0];
+    assert.equal(tr.typeParams[0].name, "T");
+    assert.equal(tr.typeParams[0].bound.name, "Display");
+  });
+  it("unbounded type params still parse with bound: null", () => {
+    const ast = parse("function id<T>(x: T): T { return x; }");
+    assert.equal(ast.body[0].typeParams[0].bound, null);
+  });
+  it("parses multiple type params with mixed bounds", () => {
+    const ast = parse(
+      "function f<T implements Display, U, V implements Iterable<U>>(): void { }",
+    );
+    const params = ast.body[0].typeParams;
+    assert.equal(params.length, 3);
+    assert.equal(params[0].bound.name, "Display");
+    assert.equal(params[1].bound, null);
+    assert.equal(params[2].bound.name, "Iterable");
+  });
+  describe("reject cases", () => {
+    it("rejects missing trait after implements", () => {
+      assert.throws(
+        () => parse("function f<T implements>(): void { }"),
+        /expected trait name after 'implements'/,
+      );
+    });
+    it("rejects empty parenthesized bound list (multiple bounds reserved)", () => {
+      assert.throws(
+        () => parse("function f<T implements (Foo, Bar)>(): void { }"),
+        /multiple trait bounds.*not yet supported/,
+      );
+    });
+    it("rejects ref-type as bound", () => {
+      assert.throws(
+        () => parse("function f<T implements ref Foo>(): void { }"),
+        /trait bound must be a trait name/,
       );
     });
   });

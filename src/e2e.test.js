@@ -36,6 +36,32 @@ function runFixture(relPath) {
   return { stdout: result.stdout, exitCode: result.status };
 }
 
+// Variant of runFixture that stages an asset file alongside the binary and
+// runs the binary with cwd set to that staging dir, so the yoop program can
+// `fopen` the asset by relative path.
+function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
+  const src = fs.readFileSync(path.join(repoRoot, yoopRelPath), "utf8");
+  const ir = compileSource(src);
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
+  const llPath = path.join(tmpDir, "out.ll");
+  const binPath = path.join(tmpDir, "out");
+  fs.writeFileSync(llPath, ir);
+  fs.copyFileSync(
+    path.join(repoRoot, assetRelPath),
+    path.join(tmpDir, assetDestName),
+  );
+  const clangArgs = [
+    llPath,
+    RUNTIME_C,
+    "-o",
+    binPath,
+    ...runtimeLinkFlags().map((f) => `-l${f}`),
+  ];
+  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  const result = spawnSync(binPath, [], { encoding: "utf8", cwd: tmpDir });
+  return { stdout: result.stdout, exitCode: result.status };
+}
+
 describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   it("hello.yoop prints greeting + arithmetic + pow result", () => {
     const { stdout, exitCode } = runFixture("examples/pass/hello.yoop");
@@ -166,6 +192,64 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/casts.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "b=100 d=100\nc=100.000000\ne=100.000000\n");
+  });
+
+  // ---- 7.1 generics ----
+
+  it("generic_box.yoop: monomorphic Box<int32> field access", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_box.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "b=42\n");
+  });
+
+  it("generic_identity.yoop: generic function identity<T> inferred from arg", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_identity.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "m=100\n");
+  });
+
+  it("generics_overview.yoop exercises generic structs, fns, traits", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generics_overview.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "bi=42\nbf=3.500000\nid_i=100 id_f=3.500000\nu=42\np.first=10 p.second.value=20\ncell=99\n",
+    );
+  });
+
+  // ---- 7.2 trait bounds ----
+
+  it("generic_bound_basic.yoop: call trait method via bounded T", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_bound_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "v=42\n");
+  });
+
+  it("generic_bound_struct.yoop: bounded type param on a generic struct", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_bound_struct.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "tag\n");
+  });
+
+  it("generic_bounds_overview.yoop: full 7.2 showcase (incl. generic-calls-generic)", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/generic_bounds_overview.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "IntBox\nnamed\nIntBox\nIntBox\n");
+  });
+
+  it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
+    const { stdout, exitCode } = runFixtureWithAsset(
+      "examples/pass/language_showcase.yoop",
+      "examples/pass/language_showcase.txt",
+      "language_showcase.txt",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "bytes: 44\nlines: 2\nwords: 9\nmost common letter: 'o' (4 times)\n",
+    );
   });
 
 });
@@ -305,6 +389,21 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "n=3\nn=2\nn=1\n");
   });
 
+  // Phase 7.4: cross-trait same-name impl — one method body, two emitted
+  // LLVM symbols, each callable via its respective trait qualifier.
+  it("traits_cross_trait_same_name: one impl satisfies two traits with the same method name", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_trait_same_name/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "bot=7\nbot=7\n");
+  });
+
+  // Phase 7.4: trait method name == free function name now coexist cleanly.
+  it("traits_method_name_collides_with_fn: free fn and trait method share a name", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_method_name_collides_with_fn/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "free flush 42\nflushing 3\n");
+  });
+
   it("disposable_basic: two implicit-block bindings fire cleanup in LIFO order at function return", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_basic/main.yoop");
     assert.equal(exitCode, 0);
@@ -433,7 +532,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     // instructions between them.
     assert.match(
       ir,
-      /call void @[^\s(]+__H__dispose\(ptr %a\)\s*\n\s*call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32 0/,
+      /call void @[^\s(]+__H__Disposable__dispose\(ptr %a\)\s*\n\s*call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32 0/,
     );
   });
 
@@ -478,7 +577,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     // Pooled-to-pooled retain on h2 -> h3 transfer.
     assert.match(ir, /call void @yoop_task_retain\(/);
     // Propagated dispose call to the imported FileHandle's dispose method.
-    assert.match(ir, /call void @[^\s(]+__FileHandle__dispose\(/);
+    assert.match(ir, /call void @[^\s(]+__FileHandle__Disposable__dispose\(/);
   });
 
   it("task_three_forms: emitted IR has thunk + submit + wait + release/free_sync_pair", () => {
@@ -726,19 +825,36 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("traits_collision_two_traits.yoop rejects type implementing two traits with the same method name", () => {
+  // Phase 7.4: these two scenarios are no longer errors — cross-trait same-
+  // name impls and trait-method/free-function name collisions are both
+  // allowed, because every trait call site qualifies through the trait name.
+  // The old fail-fixtures stay on disk as ground truth that they typecheck
+  // cleanly now.
+  it("traits_collision_two_traits.yoop now typechecks cleanly (Phase 7.4 lifted the restriction)", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_two_traits.yoop");
-    assert.ok(
-      errors.some((e) => /cannot implement both "A" and "B"/.test(e.message)),
-      `expected trait-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    assert.deepEqual(
+      errors,
+      [],
+      `expected no errors, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
-  it("traits_collision_with_function.yoop rejects impl method colliding with a free function", () => {
+  it("traits_collision_with_function.yoop now typechecks cleanly (Phase 7.4 lifted the restriction)", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_with_function.yoop");
+    assert.deepEqual(
+      errors,
+      [],
+      `expected no errors, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 7.4: bare-form trait method call is rejected with a hint at the
+  // qualified form.
+  it("traits_bare_form_call.yoop rejects bare 'dispose(ref h)' and hints at Disposable.dispose", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_bare_form_call.yoop");
     assert.ok(
-      errors.some((e) => /collides with module-level function "dispose"/.test(e.message)),
-      `expected function-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /unknown function "dispose".*Disposable\.dispose/.test(e.message)),
+      `expected bare-form rejection with hint, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -799,14 +915,6 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       "utf8",
     );
     assert.throws(() => parse(src), /extends not yet supported/);
-  });
-
-  it("traits_generic_rejected.yoop rejects generic trait declaration", () => {
-    const src = fs.readFileSync(
-      path.join(repoRoot, "examples/fail/traits_generic_rejected.yoop"),
-      "utf8",
-    );
-    assert.throws(() => parse(src), /trait generics are not supported/);
   });
 
   it("traits_method_call_sugar.yoop rejects method-call syntax on a trait method", () => {
@@ -1152,6 +1260,32 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.throws(
       () => parseFixture("examples/fail/nested_composition.yoop"),
       /expected ident/i,
+    );
+  });
+
+  // ---- 7.2 trait-bound fail fixtures ----
+
+  it("generic_bound_unsatisfied.yoop rejects calling a bounded generic with a non-impl type", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/generic_bound_unsatisfied.yoop");
+    assert.ok(
+      errors.some((e) => /does not satisfy bound.*does not implement trait "Display"/.test(e.message)),
+      `expected unsatisfied-bound error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("generic_bound_unknown_trait.yoop rejects an unknown trait in a bound", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/generic_bound_unknown_trait.yoop");
+    assert.ok(
+      errors.some((e) => /unknown trait "DoesNotExist" in bound/.test(e.message)),
+      `expected unknown-trait error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("generic_bound_method_missing.yoop rejects calling a method not on the bound", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/generic_bound_method_missing.yoop");
+    assert.ok(
+      errors.some((e) => /unknown function "other"/.test(e.message)),
+      `expected unknown-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

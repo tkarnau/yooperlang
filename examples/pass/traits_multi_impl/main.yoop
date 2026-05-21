@@ -24,8 +24,8 @@ type FileHandle implements (Disposable, Closable) {
 
 function main(): int32 {
     let h: FileHandle = { fd: 7, is_open: true };
-    let rc: int32 = close(ref h);
-    dispose(ref h);
+    let rc: int32 = Closable.close(ref h);
+    Disposable.dispose(ref h);
     printf(`rc=${rc} is_open=${h.is_open}\n`);
     return 0;
 }

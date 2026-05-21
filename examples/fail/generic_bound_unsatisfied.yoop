@@ -1,0 +1,17 @@
+trait Display {
+    function show(ref self): string;
+}
+
+type Bare {
+    n: int32,
+}
+
+function describe<T implements Display>(ref x: T): void {
+    let s: string = Display.show(ref x);
+}
+
+function main(): int32 {
+    let b: Bare = { n: 1 };
+    describe(ref b);
+    return 0;
+}

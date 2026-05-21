@@ -164,8 +164,52 @@ describe("resolveExprType", () => {
   });
 });
 
-describe("resolveCall: trait method dispatch", () => {
-  it("resolveCall falls through to trait dispatch when free-function lookup misses", () => {
+describe("resolveCall: trait-qualified method dispatch (Phase 7.4)", () => {
+  it("typechecks a Trait.method(ref x) call cleanly", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait Disposable { function dispose(ref self): void; }
+        type FileHandle implements Disposable {
+          fd: int32,
+          function dispose(ref self): void { }
+        }
+        function main(): int32 {
+          let h: FileHandle = { fd: 3 };
+          Disposable.dispose(ref h);
+          return 0;
+        }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("annotates the call node with calleeMethodOf, calleeTrait, and trait-qualified calleeMangledName", () => {
+    const src = `
+      trait Disposable { function dispose(ref self): void; }
+      type FileHandle implements Disposable {
+        fd: int32,
+        function dispose(ref self): void { }
+      }
+      function main(): int32 {
+        let h: FileHandle = { fd: 3 };
+        Disposable.dispose(ref h);
+        return 0;
+      }
+    `;
+    const { errors, modules } = typecheckProgram(singleModule(src));
+    assert.deepEqual(errors, []);
+    const mainDecl = modules[0].ast.body.find(
+      (d) => d.kind === ASTNodeKind.FUNCTION_DECL && d.name === "main",
+    );
+    const disposeCall = mainDecl.body.body[1].value;
+    assert.equal(disposeCall.kind, ASTNodeKind.CALL_EXPRESSION);
+    assert.ok(disposeCall.calleeMethodOf, "should annotate calleeMethodOf");
+    assert.equal(disposeCall.calleeMethodOf.name, "FileHandle");
+    assert.equal(disposeCall.calleeTrait?.name, "Disposable");
+    assert.match(disposeCall.calleeMangledName, /FileHandle__Disposable__dispose/);
+  });
+
+  it("hints at the trait-qualified form when bare-form call misses", () => {
     const { errors } = typecheckProgram(
       singleModule(`
         trait Disposable { function dispose(ref self): void; }
@@ -180,32 +224,10 @@ describe("resolveCall: trait method dispatch", () => {
         }
       `),
     );
-    assert.deepEqual(errors, []);
-  });
-
-  it("annotates the call node with calleeMethodOf and calleeMangledName", () => {
-    const src = `
-      trait Disposable { function dispose(ref self): void; }
-      type FileHandle implements Disposable {
-        fd: int32,
-        function dispose(ref self): void { }
-      }
-      function main(): int32 {
-        let h: FileHandle = { fd: 3 };
-        dispose(ref h);
-        return 0;
-      }
-    `;
-    const { errors, modules } = typecheckProgram(singleModule(src));
-    assert.deepEqual(errors, []);
-    const mainDecl = modules[0].ast.body.find(
-      (d) => d.kind === ASTNodeKind.FUNCTION_DECL && d.name === "main",
+    assert.ok(
+      errors.some((e) => /unknown function "dispose".*Disposable\.dispose/.test(e.message)),
+      `expected hint at Disposable.dispose; got: ${JSON.stringify(errors)}`,
     );
-    const disposeCall = mainDecl.body.body[1].value;
-    assert.equal(disposeCall.kind, ASTNodeKind.CALL_EXPRESSION);
-    assert.ok(disposeCall.calleeMethodOf, "should annotate calleeMethodOf");
-    assert.equal(disposeCall.calleeMethodOf.name, "FileHandle");
-    assert.match(disposeCall.calleeMangledName, /FileHandle.*dispose|dispose.*FileHandle/);
   });
 
   it("rejects unknown function that is not a method call", () => {

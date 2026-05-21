@@ -1,26 +1,24 @@
+import { Ball, Steppable } from "./physics.yoop";
+
 // SDL2 bouncing-balls demo -- three neon balls arc around a dark window,
 // each cycling through a different phase of the colour wheel.
 //
-// What works today (phase 3):
+// Showcases:
 //   - C FFI declarations and library linking
 //   - float32/float64 arithmetic, uint8 casts for colour channels
 //   - Cross-module Ball type and physics from physics.yoop
 //   - sin/sqrt from libm for colour cycling and circle scanlines
-//
-// What requires phase 4:
-//   - Passing opaque C types (SDL_Window, SDL_Renderer) as ref parameters
-//     to yoop-defined helper functions.  For now the circle-drawing loop
-//     is inlined directly in main().
-//   - SDL_Event union inspection for clean quit-on-keypress handling.
-//     The demo instead runs for a fixed wall-clock duration via SDL_GetTicks.
+//   - Traits: Ball implements Steppable, Window/Renderer implement Disposable
+//   - Kinds: `disposable` bindings drop the SDL handles automatically (LIFO)
+//     so SDL_DestroyRenderer / SDL_DestroyWindow are never called by hand.
 
-import { Ball, ball_step } from "./physics.yoop";
 
 // ── Math ─────────────────────────────────────────────────────────────────────
 
 extern "C" from library "m" {
     function sin(x: float64): float64;
     function sqrt(x: float64): float64;
+    function printf(fmt: string, ...): int32;
 }
 
 // ── SDL2 ──────────────────────────────────────────────────────────────────────
@@ -33,37 +31,78 @@ extern "C" from library "SDL2" {
     function SDL_Init(flags: uint32): int32;
     function SDL_Quit(): void;
 
+    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+
     function SDL_CreateWindow(
         title: string,
         x: int32, y: int32,
         w: int32, h: int32,
         flags: uint32
     ): ref SDL_Window;
-    function SDL_DestroyWindow(win: ref SDL_Window): void;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
 
     function SDL_CreateRenderer(
-        win: ref SDL_Window,
+        ref win: SDL_Window,
         index: int32,
         flags: uint32
     ): ref SDL_Renderer;
-    function SDL_DestroyRenderer(ren: ref SDL_Renderer): void;
+    function SDL_DestroyRenderer(ref ren: SDL_Renderer): void;
 
     function SDL_SetRenderDrawColor(
-        ren: ref SDL_Renderer,
+        ref ren: SDL_Renderer,
         r: uint8, g: uint8, b: uint8, a: uint8
     ): int32;
-    function SDL_RenderClear(ren: ref SDL_Renderer): int32;
-    function SDL_RenderPresent(ren: ref SDL_Renderer): void;
+    function SDL_RenderClear(ref ren: SDL_Renderer): int32;
+    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
 
     // Draw a single horizontal span -- used to scanline-fill circles.
     function SDL_RenderDrawLine(
-        ren: ref SDL_Renderer,
+        ref ren: SDL_Renderer,
         x1: int32, y1: int32,
         x2: int32, y2: int32
     ): int32;
 
     function SDL_GetTicks(): uint32;
     function SDL_Delay(ms: uint32): void;
+    // On macOS, Cocoa's run loop doesn't advance unless this is called
+    // each frame -- without it the window stays invisible even after
+    // CreateWindow + RenderPresent succeed.
+    function SDL_PumpEvents(): void;
+}
+
+// ── Resource RAII via traits + kinds ────────────────────────────────────────
+
+// Anything that can be deterministically cleaned up at scope end.
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+// Thin yoop-side wrapper around the opaque C handle. Holding the handle in
+// a struct field lets it be tracked by the `disposable` kind below; the
+// dispose method forwards to the SDL destructor.
+type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void {
+        SDL_DestroyWindow(self.handle);
+        printf("Destroyed window handle\n");
+    }
+}
+
+type Renderer implements Disposable {
+    handle: ref SDL_Renderer,
+    function dispose(ref self): void {
+        SDL_DestroyRenderer(self.handle);
+        printf("Destroyed renderer handle\n");
+    }
+}
+
+// `disposable x: T = ...` requires T implements Disposable and emits a call
+// to `dispose(ref x)` at scope end (in LIFO order across multiple bindings).
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
 }
 
 // ── Colour helpers ────────────────────────────────────────────────────────────
@@ -87,6 +126,8 @@ function main(): int32 {
     const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
     const DURATION_MS: uint32 = 8000;
 
+    const SDL_SCANCODE_ESCAPE: int32 = 41;
+
     // SDL_Init flags
     const SDL_INIT_VIDEO: uint32 = 0x00000020;
 
@@ -97,102 +138,120 @@ function main(): int32 {
     // SDL_CreateRenderer flags
     const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
     const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
-    
+
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("SDL_Init failed\n");
         return 1;
     }
 
-    let win: ref SDL_Window = SDL_CreateWindow(
-        "yooperlang SDL2 demo",
-        SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-        WIN_W, WIN_H,
-        SDL_WINDOW_SHOWN
-    );
+    // SDL handles wrapped so the `disposable` kind handles destruction
+    // automatically at function exit -- ren first, then win (LIFO).
+    disposable win: Window = {
+        handle: SDL_CreateWindow(
+            "yooperlang SDL2 demo",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            WIN_W, WIN_H,
+            SDL_WINDOW_SHOWN
+        )
+    } {
+        disposable ren: Renderer = {
+            handle: SDL_CreateRenderer(
+                win.handle, -1,
+                SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+            )
+        };
 
-    let ren: ref SDL_Renderer = SDL_CreateRenderer(
-        win, -1,
-        SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
-    );
+        // Three balls, staggered positions and velocities so they never overlap
+        // at t=0.  Hue offsets spread them evenly around the colour wheel (2π/3
+        // radians apart).
+        let b1: Ball = { x: 200.0, y: 150.0, vx:  0.22, vy:  0.17, radius: 42.0, hue: 0.0 };
+        let b2: Ball = { x: 400.0, y: 400.0, vx: -0.19, vy:  0.25, radius: 36.0, hue: 2.094 };
+        let b3: Ball = { x: 620.0, y: 250.0, vx:  0.15, vy: -0.21, radius: 50.0, hue: 4.189 };
 
-    // Three balls, staggered positions and velocities so they never overlap
-    // at t=0.  Hue offsets spread them evenly around the colour wheel (2π/3
-    // radians apart).
-    let b1: Ball = { x: 200.0, y: 150.0, vx:  0.22, vy:  0.17, radius: 42.0, hue: 0.0 };
-    let b2: Ball = { x: 400.0, y: 400.0, vx: -0.19, vy:  0.25, radius: 36.0, hue: 2.094 };
-    let b3: Ball = { x: 620.0, y: 250.0, vx:  0.15, vy: -0.21, radius: 50.0, hue: 4.189 };
+        const start: uint32 = SDL_GetTicks();
 
-    const start: uint32 = SDL_GetTicks();
+        while (SDL_GetTicks() > 0/*  - start < DURATION_MS */) {
+            const frame_start: uint32 = SDL_GetTicks();
 
-    while (SDL_GetTicks() - start < DURATION_MS) {
-        const frame_start: uint32 = SDL_GetTicks();
+            let kbRef: int = 0;
+            const keyboardState: uint8[] = SDL_GetKeyboardState(ref kbRef);
+            if (keyboardState[SDL_SCANCODE_ESCAPE] != 0) {
+                break;
+            }
 
-        // Physics: advance each ball by the nominal ms-per-frame.
-        const dt: float32 = float32(MS_PER_FRAME);
-        b1 = ball_step(b1, dt, float32(WIN_W), float32(WIN_H));
-        b2 = ball_step(b2, dt, float32(WIN_W), float32(WIN_H));
-        b3 = ball_step(b3, dt, float32(WIN_W), float32(WIN_H));
+            // Pump the Cocoa event loop so the window stays responsive (and on
+            // macOS, so it actually appears at all -- without this the window
+            // is created but never composited).
+            SDL_PumpEvents();
 
-        // Clear to near-black background.
-        SDL_SetRenderDrawColor(ren, uint8(15), uint8(15), uint8(20), uint8(255));
-        SDL_RenderClear(ren);
+            // Physics via the Steppable trait -- in-place mutation through `ref`.
+            const dt: float32 = float32(MS_PER_FRAME);
+            Steppable.step(ref b1, dt, float32(WIN_W), float32(WIN_H));
+            Steppable.step(ref b2, dt, float32(WIN_W), float32(WIN_H));
+            Steppable.step(ref b3, dt, float32(WIN_W), float32(WIN_H));
 
-        // Draw ball 1 -- colour based on its hue.
-        SDL_SetRenderDrawColor(
-            ren,
-            channel(b1.hue, 0.0),
-            channel(b1.hue, 2.094),
-            channel(b1.hue, 4.189),
-            uint8(255)
-        );
-        let row1: int32 = int32(-b1.radius);
-        while (row1 <= int32(b1.radius)) {
-            const half: int32 = int32(sqrt(float64(b1.radius * b1.radius) - float64(float32(row1) * float32(row1))));
-            SDL_RenderDrawLine(ren, int32(b1.x) - half, int32(b1.y) + row1, int32(b1.x) + half, int32(b1.y) + row1);
-            row1 = row1 + 1;
+            // Clear to near-black background.
+            SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(15), uint8(20), uint8(255));
+            SDL_RenderClear(ren.handle);
+
+            // Draw ball 1 -- colour based on its hue.
+            SDL_SetRenderDrawColor(
+                ren.handle,
+                channel(b1.hue, 0.0),
+                channel(b1.hue, 2.094),
+                channel(b1.hue, 4.189),
+                uint8(255)
+            );
+            let row1: int32 = int32(-b1.radius);
+            while (row1 <= int32(b1.radius)) {
+                const half1: int32 = int32(sqrt(float64(b1.radius * b1.radius) - float64(float32(row1) * float32(row1))));
+                SDL_RenderDrawLine(ren.handle, int32(b1.x) - half1, int32(b1.y) + row1, int32(b1.x) + half1, int32(b1.y) + row1);
+                row1 = row1 + 1;
+            }
+
+            // Draw ball 2.
+            SDL_SetRenderDrawColor(
+                ren.handle,
+                channel(b2.hue, 0.0),
+                channel(b2.hue, 2.094),
+                channel(b2.hue, 4.189),
+                uint8(255)
+            );
+            let row2: int32 = int32(-b2.radius);
+            while (row2 <= int32(b2.radius)) {
+                const half2: int32 = int32(sqrt(float64(b2.radius * b2.radius) - float64(float32(row2) * float32(row2))));
+                SDL_RenderDrawLine(ren.handle, int32(b2.x) - half2, int32(b2.y) + row2, int32(b2.x) + half2, int32(b2.y) + row2);
+                row2 = row2 + 1;
+            }
+
+            // Draw ball 3.
+            SDL_SetRenderDrawColor(
+                ren.handle,
+                channel(b3.hue, 0.0),
+                channel(b3.hue, 2.094),
+                channel(b3.hue, 4.189),
+                uint8(255)
+            );
+            let row3: int32 = int32(-b3.radius);
+            while (row3 <= int32(b3.radius)) {
+                const half3: int32 = int32(sqrt(float64(b3.radius * b3.radius) - float64(float32(row3) * float32(row3))));
+                SDL_RenderDrawLine(ren.handle, int32(b3.x) - half3, int32(b3.y) + row3, int32(b3.x) + half3, int32(b3.y) + row3);
+                row3 = row3 + 1;
+            }
+
+            SDL_RenderPresent(ren.handle);
+
+            // Cap frame rate when vsync is not available.
+            const elapsed: uint32 = SDL_GetTicks() - frame_start;
+            if (elapsed < MS_PER_FRAME) {
+                SDL_Delay(MS_PER_FRAME - elapsed);
+            }
         }
 
-        // Draw ball 2.
-        SDL_SetRenderDrawColor(
-            ren,
-            channel(b2.hue, 0.0),
-            channel(b2.hue, 2.094),
-            channel(b2.hue, 4.189),
-            uint8(255)
-        );
-        let row2: int32 = int32(-b2.radius);
-        while (row2 <= int32(b2.radius)) {
-            const half: int32 = int32(sqrt(float64(b2.radius * b2.radius) - float64(float32(row2) * float32(row2))));
-            SDL_RenderDrawLine(ren, int32(b2.x) - half, int32(b2.y) + row2, int32(b2.x) + half, int32(b2.y) + row2);
-            row2 = row2 + 1;
-        }
-
-        // Draw ball 3.
-        SDL_SetRenderDrawColor(
-            ren,
-            channel(b3.hue, 0.0),
-            channel(b3.hue, 2.094),
-            channel(b3.hue, 4.189),
-            uint8(255)
-        );
-        let row3: int32 = int32(-b3.radius);
-        while (row3 <= int32(b3.radius)) {
-            const half: int32 = int32(sqrt(float64(b3.radius * b3.radius) - float64(float32(row3) * float32(row3))));
-            SDL_RenderDrawLine(ren, int32(b3.x) - half, int32(b3.y) + row3, int32(b3.x) + half, int32(b3.y) + row3);
-            row3 = row3 + 1;
-        }
-
-        SDL_RenderPresent(ren);
-
-        // Cap frame rate when vsync is not available.
-        const elapsed: uint32 = SDL_GetTicks() - frame_start;
-        if (elapsed < MS_PER_FRAME) {
-            SDL_Delay(MS_PER_FRAME - elapsed);
-        }
+        // No SDL_DestroyRenderer / SDL_DestroyWindow here -- the `disposable`
+        // bindings handle that automatically at function exit, LIFO-ordered.
+        SDL_Quit();
     }
-
-    SDL_DestroyRenderer(ren);
-    SDL_DestroyWindow(win);
-    SDL_Quit();
+    printf("Exiting cleanly\n");
     return 0;
 }

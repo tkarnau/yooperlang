@@ -1,0 +1,12 @@
+trait Display {
+    function show(ref self): string;
+}
+
+function describe<T implements Display>(ref x: T): void {
+    // `other` is not on the bound trait Display
+    let s: string = other(ref x);
+}
+
+function main(): int32 {
+    return 0;
+}

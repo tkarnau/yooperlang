@@ -1,5 +1,3 @@
-extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
-
 trait Disposable {
     function dispose(ref self): void;
 }
@@ -7,12 +5,15 @@ trait Disposable {
 type FileHandle implements Disposable {
     fd: int32,
     function dispose(ref self): void {
-        printf(`disposing fd=${self.fd}\n`);
     }
 }
 
 function main(): int32 {
     let h: FileHandle = { fd: 7 };
-    Disposable.dispose(ref h);
+    dispose(ref h);
     return 0;
 }
+
+// Phase 7.4: trait methods can no longer be called via the bare-form
+// `dispose(ref h)`. The typechecker rejects the call with a hint pointing at
+// the qualified form `Disposable.dispose(ref h)`.

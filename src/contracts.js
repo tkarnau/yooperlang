@@ -77,6 +77,9 @@ export const ASTNodeKind = Object.freeze({
   TASK_RELEASE: "TASK_RELEASE",
   TASK_RETAIN: "TASK_RETAIN",
 
+  // phase 7.1: generics
+  TYPE_PARAM: "TYPE_PARAM",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });

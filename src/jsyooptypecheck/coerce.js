@@ -107,9 +107,25 @@ export function unifyArith(left, right, op) {
 
   const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(op);
   const isLogical = op === "andand" || op === "oror";
+  const isBitwise = op === "pipe";
 
   if (isLogical) {
     if (isBool(left) && isBool(right)) return PrimType("bool");
+    return null;
+  }
+
+  if (isBitwise) {
+    // Both operands must be integer (typed or untyped). No floats, no bools.
+    const isIntish = (t) =>
+      t.kind === typeKinds.untypedInt ||
+      (t.kind === typeKinds.prim && isIntPrim(t.name));
+    if (!isIntish(left) || !isIntish(right)) return null;
+    if (left.kind === typeKinds.untypedInt && right.kind === typeKinds.untypedInt) {
+      return UntypedIntType();
+    }
+    if (left.kind === typeKinds.untypedInt) return right;
+    if (right.kind === typeKinds.untypedInt) return left;
+    if (typesEqual(left, right)) return left;
     return null;
   }
 
