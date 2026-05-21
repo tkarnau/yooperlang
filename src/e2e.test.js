@@ -389,6 +389,21 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "n=3\nn=2\nn=1\n");
   });
 
+  // Phase 7.4: cross-trait same-name impl — one method body, two emitted
+  // LLVM symbols, each callable via its respective trait qualifier.
+  it("traits_cross_trait_same_name: one impl satisfies two traits with the same method name", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_trait_same_name/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "bot=7\nbot=7\n");
+  });
+
+  // Phase 7.4: trait method name == free function name now coexist cleanly.
+  it("traits_method_name_collides_with_fn: free fn and trait method share a name", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_method_name_collides_with_fn/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "free flush 42\nflushing 3\n");
+  });
+
   it("disposable_basic: two implicit-block bindings fire cleanup in LIFO order at function return", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_basic/main.yoop");
     assert.equal(exitCode, 0);
@@ -517,7 +532,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     // instructions between them.
     assert.match(
       ir,
-      /call void @[^\s(]+__H__dispose\(ptr %a\)\s*\n\s*call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32 0/,
+      /call void @[^\s(]+__H__Disposable__dispose\(ptr %a\)\s*\n\s*call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32 0/,
     );
   });
 
@@ -562,7 +577,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     // Pooled-to-pooled retain on h2 -> h3 transfer.
     assert.match(ir, /call void @yoop_task_retain\(/);
     // Propagated dispose call to the imported FileHandle's dispose method.
-    assert.match(ir, /call void @[^\s(]+__FileHandle__dispose\(/);
+    assert.match(ir, /call void @[^\s(]+__FileHandle__Disposable__dispose\(/);
   });
 
   it("task_three_forms: emitted IR has thunk + submit + wait + release/free_sync_pair", () => {
@@ -810,19 +825,36 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("traits_collision_two_traits.yoop rejects type implementing two traits with the same method name", () => {
+  // Phase 7.4: these two scenarios are no longer errors — cross-trait same-
+  // name impls and trait-method/free-function name collisions are both
+  // allowed, because every trait call site qualifies through the trait name.
+  // The old fail-fixtures stay on disk as ground truth that they typecheck
+  // cleanly now.
+  it("traits_collision_two_traits.yoop now typechecks cleanly (Phase 7.4 lifted the restriction)", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_two_traits.yoop");
-    assert.ok(
-      errors.some((e) => /cannot implement both "A" and "B"/.test(e.message)),
-      `expected trait-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    assert.deepEqual(
+      errors,
+      [],
+      `expected no errors, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
-  it("traits_collision_with_function.yoop rejects impl method colliding with a free function", () => {
+  it("traits_collision_with_function.yoop now typechecks cleanly (Phase 7.4 lifted the restriction)", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/traits_collision_with_function.yoop");
+    assert.deepEqual(
+      errors,
+      [],
+      `expected no errors, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 7.4: bare-form trait method call is rejected with a hint at the
+  // qualified form.
+  it("traits_bare_form_call.yoop rejects bare 'dispose(ref h)' and hints at Disposable.dispose", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/traits_bare_form_call.yoop");
     assert.ok(
-      errors.some((e) => /collides with module-level function "dispose"/.test(e.message)),
-      `expected function-collision error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /unknown function "dispose".*Disposable\.dispose/.test(e.message)),
+      `expected bare-form rejection with hint, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

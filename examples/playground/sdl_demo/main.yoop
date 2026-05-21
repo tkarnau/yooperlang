@@ -186,9 +186,9 @@ function main(): int32 {
 
             // Physics via the Steppable trait -- in-place mutation through `ref`.
             const dt: float32 = float32(MS_PER_FRAME);
-            step(ref b1, dt, float32(WIN_W), float32(WIN_H));
-            step(ref b2, dt, float32(WIN_W), float32(WIN_H));
-            step(ref b3, dt, float32(WIN_W), float32(WIN_H));
+            Steppable.step(ref b1, dt, float32(WIN_W), float32(WIN_H));
+            Steppable.step(ref b2, dt, float32(WIN_W), float32(WIN_H));
+            Steppable.step(ref b3, dt, float32(WIN_W), float32(WIN_H));
 
             // Clear to near-black background.
             SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(15), uint8(20), uint8(255));

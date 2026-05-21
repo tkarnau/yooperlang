@@ -16,6 +16,7 @@ import {
 import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
+import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
 
 // yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
@@ -806,7 +807,7 @@ export function codegen(ast) {
     // Trait method call: typechecker stamped the mangled symbol.
     if (node.calleeMethodOf) {
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
-      const methodSig = node.calleeMethodOf.methods.get(node.callee);
+      const methodSig = node.calleeMethodOf.methods.get(node.calleeMethodName);
       const argList = methodSig.params.map((p, i) => {
         const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
         return `${llvmTy} ${argResults[i].val}`;
@@ -1195,7 +1196,17 @@ export function codegen(ast) {
   }
 
   // **** method codegen *********
+  // Phase 7.4: one impl body can satisfy multiple traits (when their method
+  // signatures agree). Emit one LLVM `define` per trait in implementsTraits,
+  // each under the trait-qualified mangle. Bodies are identical.
   function emitMethod(methodDecl, structType) {
+    const traits = methodDecl.implementsTraits ?? [];
+    for (const traitName of traits) {
+      emitMethodOnce(methodDecl, structType, traitName);
+    }
+  }
+
+  function emitMethodOnce(methodDecl, structType, traitName) {
     tempCounter = 0;
     labelCounter = 0;
     symbols = new Map();
@@ -1210,8 +1221,9 @@ export function codegen(ast) {
       return `${ty} %${p.name}.arg`;
     }).join(", ");
 
+    const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
     const fnLines = [];
-    fnLines.push(`define ${llvmRet} @${methodDecl.mangledSymbol}(${paramSig}) {`);
+    fnLines.push(`define ${llvmRet} @${mangled}(${paramSig}) {`);
     fnLines.push("entry:");
 
     for (const p of params) {
@@ -1704,7 +1716,12 @@ function cloneAstWithSubstitution(node, sub, registry = null) {
       );
     }
     out.calleeMethodOf = recvType;
-    out.calleeMangledName = `${recvType.moduleId}__${recvType.name}__${out.boundMethod.methodName}`;
+    out.calleeMethodName = out.boundMethod.methodName;
+    out.calleeMangledName = mangleTraitMethod(
+      recvType,
+      out.boundMethod.traitName,
+      out.boundMethod.methodName,
+    );
     out.boundMethod = null;
   }
   return out;
@@ -1904,11 +1921,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       emitFn(decl.fn, decl.fn.name); // unmangled
     } else if (decl.kind === ASTNodeKind.TYPE_DECL && decl.methods?.length > 0 && !decl.genericDecl) {
       for (const method of decl.methods) {
-        emitMethodFn(method);
+        emitMethodFn(method, decl.resolvedType);
       }
     } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0 && !decl.decl.genericDecl) {
       for (const method of decl.decl.methods) {
-        emitMethodFn(method);
+        emitMethodFn(method, decl.decl.resolvedType);
       }
     }
     // TRAIT_DECL: no codegen — traits are compile-time only
@@ -2037,7 +2054,16 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     inMainFn = prevInMain;
   }
 
-  function emitMethodFn(methodDecl) {
+  function emitMethodFn(methodDecl, structType) {
+    // Phase 7.4: one impl body can satisfy multiple traits — emit one define
+    // per trait, all sharing the same body.
+    const traits = methodDecl.implementsTraits ?? [];
+    for (const traitName of traits) {
+      emitMethodFnOnce(methodDecl, structType, traitName);
+    }
+  }
+
+  function emitMethodFnOnce(methodDecl, structType, traitName) {
     tempCounter = 0;
     labelCounter = 0;
     symbols = new Map();
@@ -2049,7 +2075,8 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     const llvmRet = llvmType(returnType);
 
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
-    const fnLines = [`define ${llvmRet} @${methodDecl.mangledSymbol}(${paramSig}) {`, "entry:"];
+    const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
+    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig}) {`, "entry:"];
 
     for (const p of params) {
       const ty = p.resolvedType;
@@ -2477,7 +2504,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     // Trait method call: typechecker stamped the mangled symbol.
     if (node.calleeMethodOf) {
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
-      const methodSig = node.calleeMethodOf.methods.get(node.callee);
+      const methodSig = node.calleeMethodOf.methods.get(node.calleeMethodName);
       const argList = methodSig.params.map((p, i) => {
         const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
         return `${llvmTy} ${argResults[i].val}`;
@@ -2706,13 +2733,14 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     if (node.fieldName) {
       // Phase 6.4: propagated dispose. GEP into binding's struct field; the
       // trait method takes `ref self` so we pass the field pointer directly.
+      // Phase 7.4: mangled with the supplying trait name.
       const fieldStruct = node.fieldStructType;
-      const mangled = `${fieldStruct.moduleId}__${fieldStruct.name}__${node.methodName}`;
+      const mangled = mangleTraitMethod(fieldStruct, node.traitName, node.methodName);
       const fieldPtr = emitFieldGep(node, fnLines);
       fnLines.push(`  call void @${mangled}(ptr ${fieldPtr})`);
       return;
     }
-    const mangled = `${node.moduleId}__${node.structType.name}__${node.methodName}`;
+    const mangled = mangleTraitMethod(node.structType, node.traitName, node.methodName);
     fnLines.push(`  call void @${mangled}(ptr %${node.bindingName})`);
   }
 

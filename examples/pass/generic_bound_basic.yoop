@@ -10,7 +10,7 @@ type IntBox implements Display {
 }
 
 function describe<T implements Display>(ref x: T): void {
-    let v: int32 = show(ref x);
+    let v: int32 = Display.show(ref x);
     printf(`v=${v}\n`);
 }
 

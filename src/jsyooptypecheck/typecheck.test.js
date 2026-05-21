@@ -194,7 +194,9 @@ describe("typecheckProgram: impl block validation — pass C.3", () => {
     );
   });
 
-  it("two-trait collision: both traits require same method name is flagged", () => {
+  // Phase 7.4: cross-trait same-name methods are now allowed when signatures
+  // agree, because every call site qualifies through the trait.
+  it("two traits requiring the same method name with matching signatures is allowed", () => {
     const { errors } = typecheckProgram(
       singleModule(`
         trait TraitA { function go(ref self): void; }
@@ -205,12 +207,28 @@ describe("typecheckProgram: impl block validation — pass C.3", () => {
         }
       `),
     );
+    assert.deepEqual(errors, []);
+  });
+
+  it("two traits requiring the same method name with incompatible signatures is rejected", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        trait TraitA { function go(ref self): void; }
+        trait TraitB { function go(ref self): int32; }
+        type T implements (TraitA, TraitB) {
+          n: int32,
+          function go(ref self): void { }
+        }
+      `),
+    );
     assert.ok(
-      errors.some((e) => /cannot implement.*TraitA.*TraitB|TraitB.*TraitA/.test(e.message)),
+      errors.some((e) => /incompatible signatures/.test(e.message)),
     );
   });
 
-  it("method colliding with a module-level free function is flagged", () => {
+  // Phase 7.4: a trait method name may now coincide with a module-level
+  // free function name — the trait-qualified call site disambiguates.
+  it("trait method name coinciding with a module-level free function is allowed", () => {
     const { errors } = typecheckProgram(
       singleModule(`
         function dispose(x: int32): void { }
@@ -221,9 +239,7 @@ describe("typecheckProgram: impl block validation — pass C.3", () => {
         }
       `),
     );
-    assert.ok(
-      errors.some((e) => /collides.*dispose|dispose.*collides/.test(e.message)),
-    );
+    assert.deepEqual(errors, []);
   });
 
   it("implementing an unknown trait is flagged", () => {

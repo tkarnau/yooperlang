@@ -15,13 +15,13 @@ type FileHandle implements (Closable, Disposable) {
         return self.fd;
     }
     function dispose(ref self): void {
-        let rc: int32 = close(ref self);
+        let rc: int32 = Closable.close(ref self);
         printf(`disposed via close (rc=${rc})\n`);
     }
 }
 
 function main(): int32 {
     let h: FileHandle = { fd: 42 };
-    dispose(ref h);
+    Disposable.dispose(ref h);
     return 0;
 }

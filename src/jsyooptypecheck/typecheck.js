@@ -413,18 +413,16 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
 
   const fields = structShell.fields ?? [];
 
-  // Step 2: substitute self in each trait's required methods.
-  const requiredMethods = new Map();
+  // Step 2: substitute self in each trait's required methods. Group by method
+  // name so a single impl body can satisfy multiple traits that demand the
+  // same name and signature (Phase 7.4 — cross-trait same-name impls are now
+  // legal because every call site qualifies through the trait).
+  const requiredMethods = new Map(); // methodName -> Array<{traitName, sig}>
   for (const trait of resolvedImplements) {
     for (const [methodName, traitSig] of trait.methods) {
-      if (requiredMethods.has(methodName) && requiredMethods.get(methodName).traitName !== trait.name) {
-        errors.push({
-          message: `type "${typeDecl.name}" cannot implement both "${requiredMethods.get(methodName).traitName}" and "${trait.name}" — both require method "${methodName}"`,
-          sourceLoc: typeDecl.sourceLoc,
-        });
-        continue;
-      }
-      requiredMethods.set(methodName, { traitName: trait.name, sig: substituteSelfInSig(traitSig, structShell) });
+      const subbed = substituteSelfInSig(traitSig, structShell);
+      if (!requiredMethods.has(methodName)) requiredMethods.set(methodName, []);
+      requiredMethods.get(methodName).push({ traitName: trait.name, sig: subbed });
     }
   }
 
@@ -438,22 +436,29 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
     implMethodNames.add(methodDecl.name);
 
-    if (env.localSymbols.has(methodDecl.name)) {
-      errors.push({
-        message: `method "${methodDecl.name}" on type "${typeDecl.name}" collides with module-level function "${methodDecl.name}" — rename one`,
-        sourceLoc: methodDecl.sourceLoc,
-      });
-    }
-
-    const required = requiredMethods.get(methodDecl.name);
-    if (!required) {
+    const requiredList = requiredMethods.get(methodDecl.name);
+    if (!requiredList || requiredList.length === 0) {
       errors.push({
         message: `type "${typeDecl.name}" declares method "${methodDecl.name}", but no implemented trait requires it`,
         sourceLoc: methodDecl.sourceLoc,
       });
       continue;
     }
-    methodDecl.implementsTrait = required.traitName;
+
+    // If more than one trait requires this name, their signatures must agree —
+    // otherwise a single impl body can't satisfy both.
+    let sigConflict = false;
+    for (let i = 1; i < requiredList.length; i++) {
+      if (!sigsEqual(requiredList[0].sig, requiredList[i].sig)) {
+        errors.push({
+          message: `method "${methodDecl.name}" required by traits "${requiredList[0].traitName}" and "${requiredList[i].traitName}" with incompatible signatures — cannot implement both`,
+          sourceLoc: methodDecl.sourceLoc,
+        });
+        sigConflict = true;
+        break;
+      }
+    }
+    if (sigConflict) continue;
 
     const ctxForMethod = { selfType: structShell };
     const params = methodDecl.params.map((p) => {
@@ -465,24 +470,29 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     const returnType = resolveTypeAnnotationInModule(methodDecl.returnTypeAnnotation, mod.id, moduleEnv, ctxForMethod) ?? ErrorType();
     const implSig = FuncType(params, returnType, false);
 
-    if (!sigsEqual(implSig, required.sig)) {
+    const requiredSig = requiredList[0].sig;
+    if (!sigsEqual(implSig, requiredSig)) {
       errors.push({
-        message: `method "${methodDecl.name}" on type "${typeDecl.name}" has signature ${formatSig(implSig)}, expected ${formatSig(required.sig)} from trait "${required.traitName}"`,
+        message: `method "${methodDecl.name}" on type "${typeDecl.name}" has signature ${formatSig(implSig)}, expected ${formatSig(requiredSig)} from trait "${requiredList[0].traitName}"`,
         sourceLoc: methodDecl.sourceLoc,
       });
       continue;
     }
     methodDecl.resolvedFuncType = implSig;
     methodDecl.resolvedType = returnType;
-    methodDecl.mangledSymbol = `${mod.id}__${typeDecl.name}__${methodDecl.name}`;
+    // Phase 7.4: one impl body can satisfy multiple same-named trait methods;
+    // codegen emits one LLVM `define` per (trait, method) using the trait-
+    // qualified mangle scheme.
+    methodDecl.implementsTraits = requiredList.map((r) => r.traitName);
     resolvedMethods.set(methodDecl.name, implSig);
   }
 
   // Step 4: every required method must be implemented.
-  for (const [methodName, required] of requiredMethods) {
+  for (const [methodName, list] of requiredMethods) {
     if (!resolvedMethods.has(methodName)) {
+      const traitNames = list.map((r) => `"${r.traitName}"`).join(" / ");
       errors.push({
-        message: `type "${typeDecl.name}" implements trait "${required.traitName}" but is missing method "${methodName}" with signature ${formatSig(required.sig)}`,
+        message: `type "${typeDecl.name}" implements trait ${traitNames} but is missing method "${methodName}" with signature ${formatSig(list[0].sig)}`,
         sourceLoc: typeDecl.sourceLoc,
       });
     }
@@ -1659,7 +1669,7 @@ export function typecheckProgram(modules) {
   // any runKindCheck runs (escape analysis needs param kinds from callees).
   for (const mod of modules) {
     const env = moduleEnv.get(mod.id);
-    const { localSymbols, structTable, importedNames, kindTable } = env;
+    const { localSymbols, structTable, importedNames, kindTable, traitTable } = env;
     const typeContext = {
       moduleSymbols: localSymbols,
       structTable,
@@ -1667,6 +1677,8 @@ export function typecheckProgram(modules) {
       importedNames,
       currentModId: mod.id,
       kindTable,
+      // Phase 7.4: trait-qualified call resolution needs the trait table.
+      traitTable,
       // Phase 7.1: needed for generic call-site inference and for resolving
       // typeApplication annotations inside function bodies.
       registry: programState.registry,

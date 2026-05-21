@@ -50,6 +50,7 @@ import {
 } from "./coerce.js";
 import { instantiateFunc, mangleType } from "./instantiate.js";
 import { checkBoundSatisfied } from "./typecheck.js";
+import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
 // Built-in C-runtime functions the typechecker accepts even when the
 // program doesn't declare them. printf is variadic so it's special-cased
@@ -198,6 +199,21 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
+  // Phase 7.4: trait-qualified call — `Steppable.step(ref b1, ...)`. Intercept
+  // before the namespace-call branch below: a FIELD_ACCESS whose object IDENT
+  // resolves to a TraitType dispatches through the trait's method table.
+  if (
+    callee &&
+    typeof callee === "object" &&
+    callee.kind === ASTNodeKind.FIELD_ACCESS &&
+    callee.object?.kind === ASTNodeKind.IDENT
+  ) {
+    const trait = lookupTraitByName(callee.object.name, ctx);
+    if (trait) {
+      return resolveTraitQualifiedCall(node, trait, callee.field, scope, ctx);
+    }
+  }
+
   // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
   if (callee && typeof callee === "object") {
     const calleeType = resolveExprType(callee, scope, ctx);
@@ -231,37 +247,19 @@ function resolveCall(node, scope, ctx) {
 
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
-    // Try trait method dispatch: callee(ref structValue, ...)
-    // Also handles `ref self` inside a method body where self: ref T.
-    if (node.args.length >= 1 && node.args[0].kind === ASTNodeKind.REF_EXPRESSION) {
-      const operandType = resolveExprType(node.args[0].operand, scope, ctx);
-      let structType = operandType.kind === typeKinds.ref ? operandType.inner : operandType;
-      // Re-lookup from structTable to get the fully-resolved version with methods populated.
-      // Inside method bodies, self's inner type may reference a pre-methods shell.
-      if (structType.kind === typeKinds.struct && ctx.typeContext.structTable) {
-        const canonical = ctx.typeContext.structTable.get(structType.name);
-        if (canonical) structType = canonical;
-      }
-      if (structType.kind === typeKinds.struct && structType.methods?.has(callee)) {
-        const methodSig = structType.methods.get(callee);
-        node.calleeMethodOf = structType;
-        node.calleeMangledName = `${structType.moduleId}__${structType.name}__${callee}`;
-        return resolveCallWithSig(node, methodSig, scope, ctx);
-      }
-      // Phase 7.2: bound-method dispatch on a TypeParamType receiver. Inside
-      // a generic body, `m(ref x)` where x: T and T's bound declares m
-      // resolves against the bound's method signature. The call is tagged
-      // with `boundMethod` so codegen can rewrite it post-substitution.
-      const tpHit = resolveBoundMethodOnTypeParam(
-        callee,
+    // Phase 7.4: bare-form `m(ref x)` is no longer a trait dispatch path.
+    // If any in-scope trait has a method by this name, hint at the qualified
+    // form (`Trait.m(ref x)`); otherwise emit a plain "unknown function".
+    const hint = traitMethodHint(callee, ctx);
+    if (hint) {
+      pushError(
+        ctx.errors,
         node,
-        scope,
-        ctx,
-        structType,
+        `unknown function "${callee}" — did you mean ${hint}? Trait methods must be called via the qualified form 'Trait.method(ref x, ...)'.`,
       );
-      if (tpHit) return tpHit;
+    } else {
+      pushError(ctx.errors, node, `unknown function "${callee}"`);
     }
-    pushError(ctx.errors, node, `unknown function "${callee}"`);
     return setType(node, ErrorType());
   }
   // Annotate imported calls so codegen knows the source module for mangling.
@@ -847,40 +845,181 @@ export function resolveCallType(node, sig, scope, ctx) {
   return setType(node, sig.returnType);
 }
 
-// Phase 7.2: resolve a free-function call as a bound-method dispatch on a
-// TypeParamType receiver. Returns a Type if the lookup succeeded (and the
-// call's resolvedType is set), or null to let the caller emit "unknown
-// function".
-//
-// `receiverType` is the receiver's underlying type (RefType already unwrapped).
-function resolveBoundMethodOnTypeParam(callee, node, scope, ctx, receiverType) {
-  if (!receiverType || receiverType.kind !== typeKinds.typeParam) return null;
-  const bound = receiverType.bound;
-  if (!bound) return null;
-  const methodSig = bound.methods?.get(callee);
-  if (!methodSig) return null;
-  // Substitute the trait-self placeholder with the receiver TypeParamType so
-  // a method `function show(ref self): string` becomes `(ref T): string`.
-  const subbedParams = methodSig.params.map((p) => {
-    if (
-      p.type.kind === typeKinds.ref &&
-      p.type.inner === TraitSelfPlaceholder
-    ) {
-      return { ...p, type: RefType(receiverType) };
+// Phase 7.4: trait-qualified call resolution — `Steppable.step(ref b1, ...)`.
+// The trait is looked up by name; the method's first param must be `ref self`
+// and receives a struct (or, inside a generic body, a TypeParamType whose
+// bound matches `trait`). Tags the node with `calleeMangledName` for codegen.
+function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
+  if (node.args.length < 1 || node.args[0].kind !== ASTNodeKind.REF_EXPRESSION) {
+    pushError(
+      ctx.errors,
+      node,
+      `trait method "${trait.name}.${methodName}" requires a 'ref' receiver as the first argument`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+
+  const operandType = resolveExprType(node.args[0].operand, scope, ctx);
+  let recvType = operandType.kind === typeKinds.ref ? operandType.inner : operandType;
+  // Inside method bodies, `self`'s inner type may reference a pre-methods
+  // shell; re-fetch from structTable for the canonical fully-resolved version.
+  if (recvType.kind === typeKinds.struct && ctx.typeContext.structTable) {
+    const canonical = ctx.typeContext.structTable.get(recvType.name);
+    if (canonical) recvType = canonical;
+  }
+
+  // Phase 7.4 + 7.1: if the trait reference is generic (e.g. `Container.get`
+  // where Container is `trait Container<T>`), resolve it against the
+  // receiver's concrete instantiation by name. The receiver's
+  // implementsTraits already contains the substituted TraitType with the
+  // concrete method sigs.
+  let resolvedTrait = trait;
+  if (trait.isGenericTraitRef) {
+    const implTraits = recvType.kind === typeKinds.struct
+      ? (recvType.implementsTraits ?? [])
+      : recvType.kind === typeKinds.typeParam && recvType.bound
+      ? [recvType.bound]
+      : [];
+    resolvedTrait = implTraits.find((t) => t.name === trait.name) ?? null;
+    if (!resolvedTrait) {
+      pushError(
+        ctx.errors,
+        node,
+        `${recvType.kind === typeKinds.typeParam ? `type parameter "${recvType.name}"` : `type "${recvType.name ?? "?"}"`} does not implement trait "${trait.name}"`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+  }
+
+  const methodSig = resolvedTrait.methods?.get(methodName);
+  if (!methodSig) {
+    pushError(ctx.errors, node, `trait "${resolvedTrait.name}" has no method "${methodName}"`);
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+
+  // Case 1: receiver is a struct implementing the trait.
+  if (recvType.kind === typeKinds.struct) {
+    const implementsIt = (recvType.implementsTraits ?? []).some(
+      (t) => t === resolvedTrait || (trait.isGenericTraitRef && t.name === resolvedTrait.name),
+    );
+    if (!implementsIt) {
+      pushError(
+        ctx.errors,
+        node,
+        `type "${recvType.name}" does not implement trait "${resolvedTrait.name}"`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
+    node.calleeMethodOf = recvType;
+    node.calleeTrait = resolvedTrait;
+    node.calleeMethodName = methodName;
+    node.calleeMangledName = mangleTraitMethod(recvType, resolvedTrait.name, methodName);
+    return resolveCallWithSig(node, subbedSig, scope, ctx);
+  }
+
+  // Case 2 (Phase 7.2): receiver is a TypeParamType whose bound is this trait.
+  if (recvType.kind === typeKinds.typeParam) {
+    const boundMatches =
+      recvType.bound === resolvedTrait ||
+      (trait.isGenericTraitRef && recvType.bound?.name === resolvedTrait.name);
+    if (!boundMatches) {
+      pushError(
+        ctx.errors,
+        node,
+        `type parameter "${recvType.name}" is not bound to trait "${resolvedTrait.name}" — add 'implements ${resolvedTrait.name}' to ${recvType.name}'s declaration`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
+    node.boundMethod = {
+      methodName,
+      traitName: resolvedTrait.name,
+      traitModuleId: resolvedTrait.moduleId,
+      receiverParamName: recvType.name,
+      receiverOriginDecl: recvType.originDecl,
+    };
+    node.calleeMethodName = methodName;
+    return resolveCallWithSig(node, subbedSig, scope, ctx);
+  }
+
+  pushError(
+    ctx.errors,
+    node,
+    `trait method "${trait.name}.${methodName}" requires a struct (or trait-bounded type parameter) receiver, got ${formatType(recvType)}`,
+  );
+  for (const arg of node.args) resolveExprType(arg, scope, ctx);
+  return setType(node, ErrorType());
+}
+
+// Replace `ref TraitSelfPlaceholder` with `ref concreteType` in a method sig.
+function substituteSelfPlaceholder(methodSig, concreteType) {
+  const params = methodSig.params.map((p) => {
+    if (p.type.kind === typeKinds.ref && p.type.inner === TraitSelfPlaceholder) {
+      return { ...p, type: RefType(concreteType) };
     }
     return p;
   });
-  const subbedSig = FuncType(subbedParams, methodSig.returnType, false);
-  // Tag the call so codegen can rewrite it post-substitution. Codegen reads
-  // `boundMethod.methodName` and looks up the impl on the substituted struct.
-  node.boundMethod = {
-    methodName: callee,
-    traitName: bound.name,
-    traitModuleId: bound.moduleId,
-    receiverParamName: receiverType.name,
-    receiverOriginDecl: receiverType.originDecl,
-  };
-  return resolveCallWithSig(node, subbedSig, scope, ctx);
+  return FuncType(params, methodSig.returnType, false);
+}
+
+// Look up a trait by name in the current module's trait table or its imports.
+// For generic traits (declared as `trait Foo<T>`), returns a placeholder
+// `{ isGeneric: true, name }` — `resolveTraitQualifiedCall` matches it
+// against the receiver's instantiated trait by name.
+function lookupTraitByName(name, ctx) {
+  const tc = ctx.typeContext;
+  const local = tc.traitTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "trait") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const remote = srcEnv?.traitTable.get(imp.exportName);
+    if (remote) return remote;
+  }
+  // Phase 7.4 + Phase 7.1: generic trait reference at a call site. We can't
+  // resolve the methodSig from the generic shell directly (it carries
+  // TypeParamType placeholders), so return a name-only marker. The receiver
+  // will carry the concrete instantiated TraitType we'll resolve through.
+  if (tc.genericTraitTable?.has(name)) {
+    return { isGenericTraitRef: true, name };
+  }
+  if (imp && imp.kind === "trait") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    if (srcEnv?.genericTraitTable?.has(imp.exportName)) {
+      return { isGenericTraitRef: true, name: imp.exportName };
+    }
+  }
+  return null;
+}
+
+// Phase 7.4: when free-function lookup misses, hint at the trait-qualified
+// form if any in-scope trait has a method by that name. Returns a hint string
+// like '`Steppable.step(...)`' or null.
+function traitMethodHint(methodName, ctx) {
+  const tc = ctx.typeContext;
+  const candidates = [];
+  if (tc.traitTable) {
+    for (const [traitName, trait] of tc.traitTable) {
+      if (trait.methods?.has(methodName)) candidates.push(traitName);
+    }
+  }
+  if (tc.importedNames) {
+    for (const [localName, imp] of tc.importedNames) {
+      if (imp.kind !== "trait") continue;
+      const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+      const trait = srcEnv?.traitTable.get(imp.exportName);
+      if (trait?.methods?.has(methodName)) candidates.push(localName);
+    }
+  }
+  if (candidates.length === 0) return null;
+  if (candidates.length === 1) return `\`${candidates[0]}.${methodName}(...)\``;
+  return `one of: ${candidates.map((t) => `\`${t}.${methodName}(...)\``).join(", ")}`;
 }
 
 // Phase 7.1: look up a generic function decl by name in the local + imported

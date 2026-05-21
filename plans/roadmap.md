@@ -105,7 +105,7 @@ Once kinds are stable, the language is usable. From here:
 - User-defined generic types (deferred per spec §3)
 - Pattern matching / sum types (deferred per spec §10)
 
-> Detailed plans: [phase-7-1-generics.md](phase-7-1-generics.md), [phase-7-2-trait-bounds.md](phase-7-2-trait-bounds.md), [phase-7-3-pattern-matching.md](phase-7-3-pattern-matching.md)
+> Detailed plans: [phase-7-1-generics.md](phase-7-1-generics.md), [phase-7-2-trait-bounds.md](phase-7-2-trait-bounds.md), [phase-7-3-pattern-matching.md](phase-7-3-pattern-matching.md), [phase-7-4-trait-call-syntax.md](phase-7-4-trait-call-syntax.md)
 
 ### Phase 8 - Beginning standard library ideas and internals
 

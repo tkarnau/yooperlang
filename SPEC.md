@@ -1040,7 +1040,7 @@ What this example demonstrates:
 ## 17. Open questions
 
 1. **Kind-transforms-RHS (`provides` semantics).** When `scoped` / `pooled` bind a call expression, the kind supplies the spawn wrapping. This is the one place a kind modifies *code*, not just enforces rules. Worth giving it a distinct grammar (`provides … intercepts { … }`) to keep it visible?
-2. **Trait method resolution.** Methods live on `type … implements Trait` blocks. Call syntax is `dispose(ref x)` (free function) vs. `x.dispose()` (method). v2 picks free-function form for uniformity with non-method code — revisit if it feels wrong in practice.
+2. **Trait method resolution.** Methods live on `type … implements Trait` blocks. Call syntax is **trait-qualified**: `Disposable.dispose(ref x)` — the trait name must be in scope at the call site. (Phase 7.4 settled this: bare-form `dispose(ref x)` and dotted form `x.dispose()` are both rejected. Trait method names live in the trait's namespace and may freely coincide with module-level free-function names or with method names from other traits implemented by the same type, because every call site is unambiguously qualified.)
 3. **String ↔ cstr.** UTF-8 immutable `string` is TypeScript-adjacent; C expects null-terminated bytes. Options: implicit cstr view, explicit conversion, or two types.
 4. **Array length & FFI.** `xs.len` intrinsic means fat pointers; worth a separate `c_array<T>` for ABI-exact interop.
 5. **`ref` lifetimes.** Minimum rule: a `ref` cannot outlive the stack frame it names. Beyond that, `mustNotEscape` covers the rest.

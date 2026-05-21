@@ -10,12 +10,12 @@ type Tick implements Counter {
         if (self.n <= 0) { return; }
         printf(`n=${self.n}\n`);
         self.n = self.n - 1;
-        tick(ref self);
+        Counter.tick(ref self);
     }
 }
 
 function main(): int32 {
     let t: Tick = { n: 3 };
-    tick(ref t);
+    Counter.tick(ref t);
     return 0;
 }

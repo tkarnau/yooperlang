@@ -7,7 +7,7 @@ type Bare {
 }
 
 function describe<T implements Display>(ref x: T): void {
-    let s: string = show(ref x);
+    let s: string = Display.show(ref x);
 }
 
 function main(): int32 {

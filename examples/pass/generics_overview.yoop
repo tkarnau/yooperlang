@@ -65,7 +65,7 @@ function main(): int32 {
 
     // Generic trait + concrete impl. Free-function dispatch per spec §17.2.
     let cell: IntCell = { n: 99 };
-    let v: int32 = get(ref cell);
+    let v: int32 = Container.get(ref cell);
     printf(`cell=${v}\n`);
 
     return 0;
