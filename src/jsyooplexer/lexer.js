@@ -23,100 +23,100 @@ import { skipWhitespace } from "./charEaters.js";
 // the tags will eventually be listed out of order, and that's fine for now
 export const TokenTags = {
   // atoms
-  eof: 0,
-  ident: 1, // not a keyword
-  intLiteral: 2,
-  strLiteral: 3, // included wrapping quote characters
-  templateLiteral: 36, // backtick-quoted, may contain ${...} interpolations
-  floatLiteral: 37,
+  eof: "eof",
+  ident: "ident", // not a keyword
+  intLiteral: "intLiteral",
+  strLiteral: "strLiteral", // included wrapping quote characters
+  templateLiteral: "templateLiteral", // backtick-quoted, may contain ${...} interpolations
+  floatLiteral: "floatLiteral",
 
   // keywords
-  let: 4,
-  function: 14,
-  const: 15,
-  return: 16,
-  if: 17,
-  else: 18,
-  while: 19,
-  for: 20,
-  type: 38,
-  import: 41,
-  export: 42,
-  extern: 43,
-  from: 44,
-  as: 45,
-  library: 46,
-  dotdotdot: 47, // for variadic params and rest patterns
-  ref: 48,
-  break: 49,
-  continue: 50,
-  lbracket: 51, // [
-  rbracket: 52, // ]
-  true: 53,
-  false: 54,
-  trait: 55,
-  implements: 56,
-  self: 57,
-  extends: 58,
-  kind: 59,
+  let: "let",
+  function: "function",
+  const: "const",
+  return: "return",
+  if: "if",
+  else: "else",
+  while: "while",
+  for: "for",
+  type: "type",
+  import: "import",
+  export: "export",
+  extern: "extern",
+  from: "from",
+  as: "as",
+  library: "library",
+  dotdotdot: "dotdotdot", // for variadic params and rest patterns
+  ref: "ref",
+  break: "break",
+  continue: "continue",
+  lbracket: "lbracket", // [
+  rbracket: "rbracket", // ]
+  true: "true",
+  false: "false",
+  trait: "trait",
+  implements: "implements",
+  self: "self",
+  extends: "extends",
+  kind: "kind",
   // kind stuff
-  appliesTo: 60,
-  requires: 61,
-  mustCall: 62,
-  ownsBlock: 63,
-  beforeScopeEnd: 64,
-  binding: 65,
+  appliesTo: "appliesTo",
+  requires: "requires",
+  mustCall: "mustCall",
+  ownsBlock: "ownsBlock",
+  beforeScopeEnd: "beforeScopeEnd",
+  binding: "binding",
   // phase 6.2: escape and sharing
-  mustNotEscape: 66,
-  mustNotShare: 67,
-  forbids: 68,
-  scope: 69,
-  acrossScopes: 70,
-  parameter: 71,
-  field: 72,
-  io: 73,
-  globalState: 74,
+  mustNotEscape: "mustNotEscape",
+  mustNotShare: "mustNotShare",
+  forbids: "forbids",
+  scope: "scope",
+  acrossScopes: "acrossScopes",
+  parameter: "parameter",
+  field: "field",
+  io: "io",
+  globalState: "globalState",
   // phase 6.3: task/concurrency
-  task: 75,
-  wait: 76,
-  joined: 77,
-  pooled: 78,
+  task: "task",
+  wait: "wait",
+  joined: "joined",
+  pooled: "pooled",
   // phase 6.4: containment / propagation
-  propagates: 79,
-  contains: 80,
+  propagates: "propagates",
+  contains: "contains",
   // phase 6.5: layout / composition
-  layout: 81,
-  align: 82,
-  amp: 83, // standalone & (composition operator), distinct from &&
+  layout: "layout",
+  align: "align",
+  amp: "amp", // standalone & (composition operator), distinct from &&
 
   // punctuation / operators
-  eq: 5,
-  semicolon: 6,
-  lparen: 7,
-  rparen: 8,
-  discard: 9,
-  lcurly: 10,
-  rcurly: 11,
-  colon: 12,
-  comma: 13,
-  eqeq: 21,
-  neq: 22,
-  lte: 23,
-  gte: 24,
-  lt: 25,
-  gt: 26,
-  andand: 27,
-  oror: 28,
-  pipe: 36,
-  lshift: 29,
-  rshift: 30,
-  plus: 31,
-  minus: 32,
-  mult: 33,
-  divide: 34,
-  modulus: 35,
-  dot: 39,
-  question: 40,
+  eq: "eq",
+  semicolon: "semicolon",
+  lparen: "lparen",
+  rparen: "rparen",
+  discard: "discard",
+  lcurly: "lcurly",
+  rcurly: "rcurly",
+  colon: "colon",
+  comma: "comma",
+  eqeq: "eqeq",
+  neq: "neq",
+  lte: "lte",
+  gte: "gte",
+  lt: "lt",
+  gt: "gt",
+  andand: "andand",
+  oror: "oror",
+  pipe: "pipe",
+  lshift: "lshift",
+  rshift: "rshift",
+  plus: "plus",
+  minus: "minus",
+  mult: "mult",
+  divide: "divide",
+  modulus: "modulus",
+  dot: "dot",
+  question: "question",
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -263,19 +263,19 @@ function lexNumericLiteral(src, pos) {
   let end = digitsStart;
 
   // check if we have an 0x prefix
-  if (src[pos] === '0' && pos + 1 < src.length) {
+  if (src[pos] === "0" && pos + 1 < src.length) {
     let next = src[pos + 1].toLowerCase();
-    if (next === 'x') {
+    if (next === "x") {
       base = 16;
       pos += 2;
       digitsStart = pos;
       end = scanHexDigitsAndUnderscores(src, pos);
-    } else if (next === 'b') {
+    } else if (next === "b") {
       base = 2;
       pos += 2;
       digitsStart = pos;
       end = scanBinDigitsAndUnderscores(src, pos);
-    } else if (next === 'o') {
+    } else if (next === "o") {
       base = 8;
       pos += 2;
       digitsStart = pos;
@@ -289,24 +289,29 @@ function lexNumericLiteral(src, pos) {
   }
 
   // float fractional part - only legal in base10
-  if (base === 10 && end < src.length && src[end] === '.' && isDigit(src[end+1])) {
+  if (
+    base === 10 &&
+    end < src.length &&
+    src[end] === "." &&
+    isDigit(src[end + 1])
+  ) {
     isFloat = true;
     end++;
     end = scanDecDigitsAndUnderscores(src, end);
   }
 
   // float exponent - only legal in base10
-  if (base === 10 && end < src.length && src[end]?.toLowerCase() === 'e') {
+  if (base === 10 && end < src.length && src[end]?.toLowerCase() === "e") {
     isFloat = true;
     end++;
-    if (src[end] === '+' || src[end] === '-') {
+    if (src[end] === "+" || src[end] === "-") {
       end++;
     }
     end = scanDecDigitsAndUnderscores(src, end);
   }
 
   // parse the numeric value
-  let res = new LexResult()
+  let res = new LexResult();
   const strippedDigits = src.substring(digitsStart, end).replaceAll("_", "");
   if (isFloat) {
     let val = parseFloat(strippedDigits);
