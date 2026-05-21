@@ -8,6 +8,7 @@ import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
 import { RUNTIME_C, runtimeLinkFlags } from "./runtimeBuild.js";
+import { formatDiagnostic } from "./helpers.js";
 
 const phaseMode = process.env.phaseMode === "true";
 
@@ -35,11 +36,44 @@ function main() {
   const outputFileName = values.outputFile ?? inputFile?.replace(".yoop", "") ?? "output";
   const entryAbs = fs.realpathSync(path.resolve(inputFile));
 
-  const { modules } = loadModuleGraph(entryAbs);
+  let modules;
+  try {
+    ({ modules } = loadModuleGraph(entryAbs));
+  } catch (err) {
+    if (err && err.isParseError) {
+      // Parse error from the lexer/parser: it has line/column/length and
+      // already includes a formatted code frame in `message`. We don't know
+      // which file the parser threw from (loadModuleGraph throws bare), so
+      // assume the entry until we plumb that through.
+      console.error(
+        formatDiagnostic({
+          filePath: inputFile,
+          src: fs.readFileSync(entryAbs, "utf8"),
+          loc: { pos: err.pos, line: err.line, column: err.column, length: err.length },
+          message: err.rawMessage ?? err.message,
+        }),
+      );
+      process.exit(1);
+    }
+    throw err;
+  }
+
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   if (errors.length > 0) {
-    console.error("typecheck errors:");
-    errors.forEach((error) => console.error(`  ${error.message}`));
+    const modById = new Map(modules.map((m) => [m.id, m]));
+    console.error(`typecheck failed (${errors.length} error${errors.length === 1 ? "" : "s"}):\n`);
+    for (const error of errors) {
+      const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
+      console.error(
+        formatDiagnostic({
+          filePath: mod?.absPath ?? inputFile,
+          src: mod?.src ?? "",
+          loc: error.sourceLoc,
+          message: error.message,
+        }),
+      );
+      console.error("");
+    }
     process.exit(1);
   }
   console.log("typecheck: ok");

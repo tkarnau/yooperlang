@@ -88,6 +88,12 @@ export const TokenTags = {
   layout: "layout",
   align: "align",
   amp: "amp", // standalone & (composition operator), distinct from &&
+  // phase 7.5: switch / patterns / sum types / unions
+  switch: "switch",
+  case: "case",
+  default: "default",
+  enum: "enum",
+  union: "union",
 
   // punctuation / operators
   eq: "eq",
@@ -210,6 +216,11 @@ const keywordTagList = {
   contains: TokenTags.contains,
   layout: TokenTags.layout,
   align: TokenTags.align,
+  switch: TokenTags.switch,
+  case: TokenTags.case,
+  default: TokenTags.default,
+  enum: TokenTags.enum,
+  union: TokenTags.union,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

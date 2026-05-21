@@ -512,6 +512,18 @@ export function parse(src) {
               }
             }
             break;
+          case TokenTags.enum:
+            {
+              seenNonImport = true;
+              node.body.push(parseEnumDecl());
+            }
+            break;
+          case TokenTags.union:
+            {
+              seenNonImport = true;
+              node.body.push(parseUnionDecl());
+            }
+            break;
           case TokenTags.import:
             {
               if (seenNonImport) {
@@ -1095,6 +1107,12 @@ export function parse(src) {
       case TokenTags.kind:
         node.decl = parseKindDecl();
         break;
+      case TokenTags.enum:
+        node.decl = parseEnumDecl();
+        break;
+      case TokenTags.union:
+        node.decl = parseUnionDecl();
+        break;
       default:
         throw parseError(
           `unexpected token after export: ${inverseTokenTags[peek().tag]}`,
@@ -1355,11 +1373,51 @@ export function parse(src) {
     while (true) {
       if (peek().tag === TokenTags.dot) {
         advance(); // consume dot
+        // Capture the field name token before consuming it so we can pin
+        // diagnostics (e.g. "no such variant") at the field identifier
+        // rather than at the FIELD_ACCESS node's overall anchor.
+        const fieldTok = peek();
         const fieldName = parseIdentAsName();
-        const fieldAccessNode = buildSourcedNode(ASTNodeKind.FIELD_ACCESS);
+        const fieldAccessNode = new ASTNode(
+          ASTNodeKind.FIELD_ACCESS,
+          posToSourceLocation(src, node.sourceLoc?.pos ?? fieldTok.start),
+        );
         fieldAccessNode.object = node;
         fieldAccessNode.field = fieldName;
+        fieldAccessNode.fieldSourceLoc = posToSourceLocation(
+          src,
+          fieldTok.start,
+          fieldTok.length,
+        );
         node = fieldAccessNode;
+        continue;
+      }
+      // phase 7.5: variant constructor — EnumName.Variant { fields }
+      // Only matches IDENT.IDENT followed by `{`. Bare `EnumName.Variant`
+      // (no payload) stays a FIELD_ACCESS; the typechecker promotes it.
+      if (
+        peek().tag === TokenTags.lcurly &&
+        node.kind === ASTNodeKind.FIELD_ACCESS &&
+        node.object?.kind === ASTNodeKind.IDENT
+      ) {
+        const vc = buildSourcedNode(ASTNodeKind.VARIANT_CONSTRUCTOR);
+        vc.enumName = node.object.name;
+        vc.variantName = node.field;
+        vc.fields = [];
+        advance(); // consume {
+        while (
+          peek().tag !== TokenTags.rcurly &&
+          peek().tag !== TokenTags.eof
+        ) {
+          const fieldNode = buildSourcedNode(ASTNodeKind.STRUCT_LITERAL_FIELD);
+          fieldNode.name = parseIdentAsName();
+          expect(TokenTags.colon);
+          fieldNode.value = parseExpression();
+          vc.fields.push(fieldNode);
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rcurly);
+        node = vc;
         continue;
       }
       // handle postfix '?' for error handle for errors as values feature
@@ -1543,6 +1601,9 @@ export function parse(src) {
       }
       case TokenTags.continue: {
         return parseContinueStatement();
+      }
+      case TokenTags.switch: {
+        return parseSwitchStatement();
       }
       case TokenTags.ident: {
         // kind-prefixed binding form: `IDENT IDENT : ...` or
@@ -1970,6 +2031,310 @@ export function parse(src) {
     }
 
     return node;
+  }
+
+  // Phase 7.5: enum declaration.
+  //   enum Name<TParams?> { Variant1 { f: T, ... }, Variant2, ... }
+  function parseEnumDecl() {
+    expect(TokenTags.enum);
+    const node = buildSourcedNode(ASTNodeKind.ENUM_DECL);
+    node.name = parseIdentAsName();
+    node.typeParams = parseTypeParamList();
+    node.variants = [];
+    expect(TokenTags.lcurly);
+    const seenNames = new Set();
+    while (peek().tag === TokenTags.ident) {
+      const varTok = peek();
+      const variant = buildSourcedNode(ASTNodeKind.ENUM_VARIANT);
+      variant.name = parseIdentAsName();
+      if (seenNames.has(variant.name)) {
+        throw parseError(
+          `duplicate variant name '${variant.name}' in enum '${node.name}'`,
+          varTok.start,
+          varTok.length,
+        );
+      }
+      seenNames.add(variant.name);
+      if (peek().tag === TokenTags.lcurly) {
+        // payload variant — { field: Type, ... }
+        advance(); // consume {
+        variant.fields = [];
+        while (peek().tag === TokenTags.ident) {
+          const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+          fieldNode.name = parseIdentAsName();
+          expect(TokenTags.colon);
+          fieldNode.typeAnnotation = parseTypeAnnotation();
+          fieldNode.kindPrefix = null;
+          variant.fields.push(fieldNode);
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rcurly);
+        if (variant.fields.length === 0) {
+          throw parseError(
+            `variant '${variant.name}' has empty payload braces — write '${variant.name}' for a no-payload variant`,
+            varTok.start,
+            varTok.length,
+          );
+        }
+      } else {
+        // no-payload variant
+        variant.fields = null;
+      }
+      node.variants.push(variant);
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rcurly);
+    if (node.variants.length === 0) {
+      throw parseError(
+        `enum '${node.name}' must declare at least one variant`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 7.5: union declaration — untagged overlapping-memory aggregate.
+  //   union Name { field: Type, ... }
+  function parseUnionDecl() {
+    expect(TokenTags.union);
+    const node = buildSourcedNode(ASTNodeKind.UNION_DECL);
+    node.name = parseIdentAsName();
+    // Reject generics on unions — deferred (see plans/phase-7-5-sum-types-and-unions.md).
+    if (peek().tag === TokenTags.lt) {
+      throw parseError(
+        `generic unions are not yet supported (deferred)`,
+        peek().start,
+        peek().length,
+      );
+    }
+    // Reject `implements` on unions — deferred.
+    if (peek().tag === TokenTags.implements) {
+      throw parseError(
+        `union types cannot implement traits in this phase (deferred)`,
+        peek().start,
+        peek().length,
+      );
+    }
+    node.fields = [];
+    expect(TokenTags.lcurly);
+    while (peek().tag === TokenTags.ident) {
+      const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+      fieldNode.name = parseIdentAsName();
+      expect(TokenTags.colon);
+      fieldNode.typeAnnotation = parseTypeAnnotation();
+      fieldNode.kindPrefix = null;
+      node.fields.push(fieldNode);
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rcurly);
+    if (node.fields.length === 0) {
+      throw parseError(
+        `union '${node.name}' must declare at least one field`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 7.5: switch statement with optional variant patterns.
+  //   switch (expr) { case Pat: { ... }  default: { ... } }
+  function parseSwitchStatement() {
+    expect(TokenTags.switch);
+    const node = buildSourcedNode(ASTNodeKind.SWITCH_STATEMENT);
+    expect(TokenTags.lparen);
+    node.scrutinee = parseExpression();
+    expect(TokenTags.rparen);
+    expect(TokenTags.lcurly);
+    node.arms = [];
+    node.defaultArm = null;
+    let sawDefault = false;
+    while (
+      peek().tag !== TokenTags.rcurly &&
+      peek().tag !== TokenTags.eof
+    ) {
+      const armStartTok = peek();
+      if (peek().tag === TokenTags.default) {
+        if (sawDefault) {
+          throw parseError(
+            `duplicate 'default' clause in switch`,
+            armStartTok.start,
+            armStartTok.length,
+          );
+        }
+        advance(); // consume default
+        expect(TokenTags.colon);
+        node.defaultArm = parseBlock();
+        sawDefault = true;
+        continue;
+      }
+      if (peek().tag !== TokenTags.case) {
+        throw parseError(
+          `expected 'case' or 'default' in switch body, got ${inverseTokenTags[peek().tag]}`,
+          armStartTok.start,
+          armStartTok.length,
+        );
+      }
+      if (sawDefault) {
+        throw parseError(
+          `'default' must be the last clause in a switch`,
+          armStartTok.start,
+          armStartTok.length,
+        );
+      }
+      advance(); // consume case
+      const arm = buildSourcedNode(ASTNodeKind.SWITCH_ARM);
+      arm.patterns = [parseSwitchPattern()];
+      while (peek().tag === TokenTags.comma) {
+        advance();
+        arm.patterns.push(parseSwitchPattern());
+      }
+      expect(TokenTags.colon);
+      arm.body = parseBlock();
+      node.arms.push(arm);
+    }
+    expect(TokenTags.rcurly);
+    if (node.arms.length === 0 && node.defaultArm === null) {
+      throw parseError(
+        `empty switch — must have at least one case or default`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 7.5: parse a single arm pattern. Accepts:
+  //   - INT_LITERAL / BOOL_LITERAL                       → LITERAL_PATTERN
+  //   - `_`                                              → VARIANT_PATTERN { isWildcard: true }
+  //   - IDENT.IDENT { fieldBindings? }                   → VARIANT_PATTERN
+  //   - IDENT.IDENT                                      → VARIANT_PATTERN (no-payload form)
+  // (Char literals tokenize as strLiterals today; reject string and float
+  // literals at pattern position with explicit diagnostics.)
+  function parseSwitchPattern() {
+    const tok = peek();
+    if (tok.tag === TokenTags.discard) {
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.VARIANT_PATTERN);
+      p.isWildcard = true;
+      p.enumName = null;
+      p.variantName = null;
+      p.fieldBindings = null;
+      return p;
+    }
+    // negative-literal sugar: `-N` consumed as a single INT/FLOAT literal value.
+    if (tok.tag === TokenTags.minus) {
+      advance();
+      const num = peek();
+      if (num.tag !== TokenTags.intLiteral) {
+        throw parseError(
+          `expected integer literal after '-' in pattern`,
+          num.start,
+          num.length,
+        );
+      }
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
+      p.literalKind = "int";
+      p.value = -num.intVal;
+      return p;
+    }
+    if (tok.tag === TokenTags.intLiteral) {
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
+      p.literalKind = "int";
+      p.value = tok.intVal;
+      return p;
+    }
+    if (tok.tag === TokenTags.true || tok.tag === TokenTags.false) {
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
+      p.literalKind = "bool";
+      p.value = tok.tag === TokenTags.true;
+      return p;
+    }
+    if (tok.tag === TokenTags.floatLiteral) {
+      throw parseError(
+        `float literals are not allowed in switch patterns`,
+        tok.start,
+        tok.length,
+      );
+    }
+    if (tok.tag === TokenTags.strLiteral) {
+      throw parseError(
+        `string literals are not allowed in switch patterns`,
+        tok.start,
+        tok.length,
+      );
+    }
+    if (tok.tag === TokenTags.ident) {
+      const enumName = parseIdentAsName();
+      if (peek().tag !== TokenTags.dot) {
+        throw parseError(
+          `variant patterns must be written as EnumName.Variant; bare identifier '${enumName}' is not allowed in a pattern`,
+          tok.start,
+          tok.length,
+        );
+      }
+      advance(); // consume dot
+      const variantName = parseIdentAsName();
+      const p = buildSourcedNode(ASTNodeKind.VARIANT_PATTERN);
+      p.isWildcard = false;
+      p.enumName = enumName;
+      p.variantName = variantName;
+      p.fieldBindings = null;
+      if (peek().tag === TokenTags.lcurly) {
+        advance();
+        p.fieldBindings = [];
+        while (
+          peek().tag !== TokenTags.rcurly &&
+          peek().tag !== TokenTags.eof
+        ) {
+          const fb = {};
+          if (peek().tag === TokenTags.discard) {
+            // bare _ inside braces — placeholder field-ignore (positional-style)
+            const dtok = advance();
+            fb.fieldName = null;
+            fb.bindingName = null;
+            fb.isWildcard = true;
+            fb.sourceLoc = posToSourceLocation(src, dtok.start);
+          } else {
+            const fnameTok = expect(TokenTags.ident);
+            fb.fieldName = src.substring(
+              fnameTok.start,
+              fnameTok.start + fnameTok.length,
+            );
+            fb.sourceLoc = posToSourceLocation(src, fnameTok.start);
+            fb.isWildcard = false;
+            fb.bindingName = fb.fieldName; // shorthand: bind to same name
+            if (peek().tag === TokenTags.colon) {
+              advance();
+              if (peek().tag === TokenTags.discard) {
+                advance();
+                fb.isWildcard = true;
+                fb.bindingName = null;
+              } else {
+                const renameTok = expect(TokenTags.ident);
+                fb.bindingName = src.substring(
+                  renameTok.start,
+                  renameTok.start + renameTok.length,
+                );
+              }
+            }
+          }
+          p.fieldBindings.push(fb);
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rcurly);
+      }
+      return p;
+    }
+    throw parseError(
+      `unexpected token in switch pattern: ${inverseTokenTags[tok.tag]}`,
+      tok.start,
+      tok.length,
+    );
   }
 
   function parseMethodDecl() {

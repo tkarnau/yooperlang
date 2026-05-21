@@ -1,0 +1,6 @@
+union U { a: int32, b: uint32 }
+
+function main(): int32 {
+    let u: U = { a: 1, b: 2 };
+    return 0;
+}

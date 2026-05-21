@@ -78,6 +78,14 @@ export function llvmType(yoopType) {
       // lives in codegen state, not in the type-system.
       return "ptr";
     }
+    case typeKinds.enum: {
+      const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
+      return `%enum.${id}`;
+    }
+    case typeKinds.union: {
+      const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
+      return `%union.${id}`;
+    }
     default: {
       throw new Error(`llvmType: unhandled yooper type kind "${yoopType.kind}"`);
     }
@@ -1498,6 +1506,119 @@ export function alignOf(llvmTy) {
   return 8; // ptr
 }
 
+// Phase 7.5: rough byte size of a yoop type, for sizing union and enum
+// payloads. Mirrors `alignOf` — only uses natural sizes and assumes packed
+// layout (LLVM will round up to alignment in practice; we round up explicitly
+// where it matters).
+export function sizeOfType(t) {
+  if (!t) return 8;
+  if (t.kind === typeKinds.prim) {
+    switch (t.name) {
+      case "int8":
+      case "uint8":
+      case "bool":
+      case "char":
+        return 1;
+      case "int16":
+      case "uint16":
+        return 2;
+      case "int32":
+      case "uint32":
+      case "float32":
+      case "float":
+      case "int":
+        return 4;
+      case "int64":
+      case "uint64":
+      case "usize":
+      case "isize":
+      case "float64":
+        return 8;
+      case "string":
+        return 8;
+      default:
+        return 8;
+    }
+  }
+  if (t.kind === typeKinds.ref) return 8;
+  if (t.kind === typeKinds.array) return 16; // ptr + len
+  if (t.kind === typeKinds.struct) {
+    // Approximate: sum field sizes, padding each to the field's alignment.
+    let off = 0;
+    let maxAlign = 1;
+    for (const f of t.fields ?? []) {
+      const al = sizeOfAlign(f.type);
+      if (al > maxAlign) maxAlign = al;
+      off = roundUp(off, al) + sizeOfType(f.type);
+    }
+    return roundUp(off, maxAlign);
+  }
+  if (t.kind === typeKinds.union) {
+    let max = 0;
+    for (const f of t.fields ?? []) {
+      const s = sizeOfType(f.type);
+      if (s > max) max = s;
+    }
+    return max;
+  }
+  if (t.kind === typeKinds.enum) {
+    let maxPayload = 0;
+    for (const v of t.variants.values()) {
+      if (v.fields === null) continue;
+      let off = 0;
+      let maxAlign = 1;
+      for (const f of v.fields) {
+        const al = sizeOfAlign(f.type);
+        if (al > maxAlign) maxAlign = al;
+        off = roundUp(off, al) + sizeOfType(f.type);
+      }
+      const padded = roundUp(off, maxAlign);
+      if (padded > maxPayload) maxPayload = padded;
+    }
+    return 4 /* tag */ + maxPayload;
+  }
+  return 8;
+}
+
+export function sizeOfAlign(t) {
+  if (!t) return 8;
+  if (t.kind === typeKinds.prim) return alignOf(LLVM_TYPES[t.name] ?? "ptr");
+  if (t.kind === typeKinds.ref) return 8;
+  if (t.kind === typeKinds.array) return 8;
+  if (t.kind === typeKinds.struct) {
+    let max = 1;
+    for (const f of t.fields ?? []) {
+      const a = sizeOfAlign(f.type);
+      if (a > max) max = a;
+    }
+    return max;
+  }
+  if (t.kind === typeKinds.union) {
+    let max = 1;
+    for (const f of t.fields ?? []) {
+      const a = sizeOfAlign(f.type);
+      if (a > max) max = a;
+    }
+    return max;
+  }
+  if (t.kind === typeKinds.enum) {
+    let max = 4; // i32 tag
+    for (const v of t.variants.values()) {
+      if (v.fields === null) continue;
+      for (const f of v.fields) {
+        const a = sizeOfAlign(f.type);
+        if (a > max) max = a;
+      }
+    }
+    return max;
+  }
+  return 8;
+}
+
+function roundUp(x, a) {
+  return Math.floor((x + a - 1) / a) * a;
+}
+
 // ** binary op resolution ****************************
 
 // LLVM docs: https://llvm.org/docs/LangRef.html
@@ -1809,6 +1930,63 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
           ? d.resolvedType.fields.map((f) => llvmType(f.type)).join(", ")
           : "";
         structDefs.push(`${mangled} = type { ${fieldLlvm} }`);
+      }
+    }
+    // Phase 7.5: emit enum struct + per-variant payload structs.
+    //   %enum.<mod>__<E> = type { i32, [P x i8] }     (tag + payload bytes)
+    //   %enumv.<mod>__<E>__<V> = type { ... fields ... }  (per-variant payload)
+    if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType) {
+      const enumLlvm = llvmType(d.resolvedType);
+      if (!emittedStructs.has(enumLlvm)) {
+        emittedStructs.add(enumLlvm);
+        // Payload size = max variant payload size (computed from sizeOfType).
+        let maxPayload = 0;
+        for (const v of d.resolvedType.variants.values()) {
+          if (v.fields === null) continue;
+          let off = 0;
+          let maxAlign = 1;
+          for (const f of v.fields) {
+            const al = sizeOfAlign(f.type);
+            if (al > maxAlign) maxAlign = al;
+            off = Math.floor((off + al - 1) / al) * al + sizeOfType(f.type);
+          }
+          const padded = Math.floor((off + maxAlign - 1) / maxAlign) * maxAlign;
+          if (padded > maxPayload) maxPayload = padded;
+        }
+        // Always emit a non-empty payload byte array so LLVM accepts the GEP
+        // shape uniformly. Min payload size is 1 byte to keep the indexed
+        // form `[N x i8]` legal.
+        const payloadSize = Math.max(maxPayload, 1);
+        structDefs.push(`${enumLlvm} = type { i32, [${payloadSize} x i8] }`);
+        // Per-variant payload struct (for variants that have fields).
+        const enumId = d.resolvedType.moduleId
+          ? `${d.resolvedType.moduleId}__${d.resolvedType.name}`
+          : d.resolvedType.name;
+        for (const v of d.resolvedType.variants.values()) {
+          if (v.fields === null) continue;
+          const variantLlvm = `%enumv.${enumId}__${v.name}`;
+          if (!emittedStructs.has(variantLlvm)) {
+            emittedStructs.add(variantLlvm);
+            const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
+            structDefs.push(`${variantLlvm} = type { ${fieldLlvm} }`);
+          }
+        }
+      }
+    }
+    // Phase 7.5: emit union struct as a `[N x i8]`-shaped aggregate (max
+    // field size, max field alignment). All field accesses bitcast through
+    // the byte buffer.
+    if (d.kind === ASTNodeKind.UNION_DECL && d.resolvedType) {
+      const unionLlvm = llvmType(d.resolvedType);
+      if (!emittedStructs.has(unionLlvm)) {
+        emittedStructs.add(unionLlvm);
+        let maxSize = 0;
+        for (const f of d.resolvedType.fields) {
+          const s = sizeOfType(f.type);
+          if (s > maxSize) maxSize = s;
+        }
+        const size = Math.max(maxSize, 1);
+        structDefs.push(`${unionLlvm} = type { [${size} x i8] }`);
       }
     }
   }
@@ -2430,8 +2608,51 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       case ASTNodeKind.WAIT_EXPRESSION: {
         return emitWaitExpression(node, fnLines);
       }
+      case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+        return emitVariantConstructor(node, fnLines);
+      }
       default: throw new Error(`codegen: unhandled expression kind "${node.kind}"`);
     }
+  }
+
+  // Phase 7.5: emit `Enum.Variant { f1: v1, ... }` (or no-payload `Enum.V`).
+  // Layout: alloca enum struct → store tag at field 0 → bitcast payload
+  // bytes to the per-variant payload struct and GEP/store each field → load
+  // the whole enum as the rvalue.
+  function emitVariantConstructor(node, fnLines) {
+    const enumType = node.resolvedEnumType;
+    const variant = node.resolvedVariant;
+    if (!enumType || !variant) {
+      throw new Error(`codegen: variant constructor missing resolved enum/variant`);
+    }
+    const enumLlvm = llvmType(enumType);
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${enumLlvm}, align ${sizeOfAlign(enumType)}`);
+    // tag store
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`);
+    fnLines.push(`  store i32 ${variant.ordinal}, ptr ${tagPtr}`);
+    // payload store (only if the variant has fields)
+    if (variant.fields !== null && node.fields !== null && node.fields.length > 0) {
+      const payloadPtr = freshTemp();
+      fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 1`);
+      const enumId = enumType.moduleId
+        ? `${enumType.moduleId}__${enumType.name}`
+        : enumType.name;
+      const variantLlvm = `%enumv.${enumId}__${variant.name}`;
+      for (const litField of node.fields) {
+        const idx = variant.fields.findIndex((f) => f.name === litField.name);
+        if (idx < 0) continue;
+        const fieldType = variant.fields[idx].type;
+        const fieldPtr = freshTemp();
+        fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${variantLlvm}, ptr ${payloadPtr}, i32 0, i32 ${idx}`);
+        const rhs = emitExpr(litField.value, fnLines);
+        fnLines.push(`  store ${llvmType(fieldType)} ${rhs.val}, ptr ${fieldPtr}`);
+      }
+    }
+    const loadTmp = freshTemp();
+    fnLines.push(`  ${loadTmp} = load ${enumLlvm}, ptr ${slot}`);
+    return { val: loadTmp, yoopType: enumType };
   }
 
   // Phase 6.3: `wait <ident>`. The operand must be a Task<T>-typed binding
@@ -2612,6 +2833,13 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const base = emitLval(node.object, fnLines);
+        // Phase 7.5: union field access — every field overlaps at offset 0;
+        // the union's pointer is already the field's pointer (just retyped).
+        if (base.type.kind === typeKinds.union) {
+          const uf = base.type.fields.find((f) => f.name === node.field);
+          if (!uf) throw new Error(`codegen: union has no field ${node.field}`);
+          return { ptr: base.ptr, type: uf.type };
+        }
         const idx = base.type.fields.findIndex((f) => f.name === node.field);
         const fieldType = base.type.fields[idx].type;
         const gepTmp = freshTemp();
@@ -2645,6 +2873,22 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   }
 
   function emitStructLitInto(litNode, destPtr, structType, fnLines) {
+    // Phase 7.5: union literal — exactly one field gets stored, and it lives
+    // at byte offset 0 of the union (the field's LLVM type, treated as an
+    // overlay onto the byte buffer). All fields share offset 0, so we can
+    // ignore the lookup `idx` here.
+    if (structType.kind === typeKinds.union) {
+      for (const litField of litNode.fields) {
+        const f = structType.fields.find((ff) => ff.name === litField.name);
+        if (!f) continue;
+        const rhs = emitExpr(litField.value, fnLines);
+        // destPtr is a ptr to the union struct, which has shape [N x i8].
+        // Storing the RHS as its own LLVM type at that pointer is a valid
+        // type-pun (LLVM types are erased at the IR level).
+        fnLines.push(`  store ${llvmType(f.type)} ${rhs.val}, ptr ${destPtr}`);
+      }
+      return;
+    }
     for (const litField of litNode.fields) {
       const idx = structType.fields.findIndex((f) => f.name === litField.name);
       const fieldType = structType.fields[idx].type;
@@ -2951,8 +3195,143 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       case ASTNodeKind.BREAK_STATEMENT: fnLines.push(`  br label %${ctx.breakLabel}`); break;
       case ASTNodeKind.CONTINUE_STATEMENT: fnLines.push(`  br label %${ctx.continueLabel}`); break;
       case ASTNodeKind.BLOCK: node.body.forEach((s) => emitStmt(s, fnLines, ctx)); break;
+      case ASTNodeKind.SWITCH_STATEMENT: emitSwitchStmt(node, fnLines, ctx); break;
       default: throw new Error(`codegen: unhandled statement kind "${node.kind}"`);
     }
+  }
+
+  // Phase 7.5: lower a `switch` statement.
+  //
+  //   Scrutinee int/bool/char:
+  //     emit scrutinee → use LLVM `switch <ty>` with a case list mapping
+  //     literal -> arm-entry label and a default label (user default body or
+  //     the merge label).
+  //
+  //   Scrutinee enum:
+  //     load tag from field 0, switch on i32 ordinal. Each variant arm gets
+  //     an arm-entry label; the arm body binds payload fields by GEP'ing into
+  //     the (allocated) enum slot's payload bytes via the variant struct.
+  function emitSwitchStmt(node, fnLines, ctx) {
+    const scrutType = node.scrutineeType;
+    const endLabel = freshLabel("switch_end");
+    const defaultLabel = freshLabel("switch_default");
+
+    // For enum scrutinees we need the underlying alloca slot so payload GEPs
+    // resolve. emitLval handles that for any lvalue; for arbitrary scrutinee
+    // expressions emitLval will materialize a temp slot for us.
+    let scrutSlot = null;
+    let scrutVal = null;
+    if (scrutType.kind === typeKinds.enum) {
+      scrutSlot = emitLval(node.scrutinee, fnLines);
+      const enumLlvm = llvmType(scrutType);
+      const tagPtr = freshTemp();
+      fnLines.push(`  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${scrutSlot.ptr}, i32 0, i32 0`);
+      const tagVal = freshTemp();
+      fnLines.push(`  ${tagVal} = load i32, ptr ${tagPtr}`);
+      scrutVal = { val: tagVal, yoopType: PrimType("int32") };
+    } else {
+      scrutVal = emitExpr(node.scrutinee, fnLines);
+    }
+
+    // Build (literal, label) pairs for the LLVM switch.
+    const armEntries = []; // { label, arm }
+    const caseLines = []; // strings inside `[ ... ]`
+
+    for (const arm of node.arms) {
+      const armLabel = freshLabel("switch_arm");
+      armEntries.push({ label: armLabel, arm });
+      for (const pat of arm.patterns) {
+        if (pat.kind === ASTNodeKind.LITERAL_PATTERN) {
+          const litVal = literalPatternIRValue(pat, scrutType);
+          const ty = llvmType(scrutType);
+          caseLines.push(`${ty} ${litVal}, label %${armLabel}`);
+        } else if (pat.kind === ASTNodeKind.VARIANT_PATTERN && !pat.isWildcard) {
+          caseLines.push(`i32 ${pat.resolvedVariant.ordinal}, label %${armLabel}`);
+        }
+        // VARIANT_PATTERN { isWildcard: true } only appears as `case _:` which
+        // the parser routed through the default-arm slot already (we don't
+        // emit cases for it).
+      }
+    }
+
+    const scrutTyForSwitch =
+      scrutType.kind === typeKinds.enum ? "i32" : llvmType(scrutType);
+    fnLines.push(
+      `  switch ${scrutTyForSwitch} ${scrutVal.val}, label %${defaultLabel} [ ${caseLines.join(" ")} ]`,
+    );
+
+    for (const { label, arm } of armEntries) {
+      fnLines.push(`${label}:`);
+      // Bind any variant-pattern field bindings for this arm. We support
+      // exactly one variant pattern per arm body (multi-pattern arms are
+      // typecheck-restricted to literal-only homogeneous lists).
+      const vp = arm.patterns.find(
+        (p) => p.kind === ASTNodeKind.VARIANT_PATTERN && !p.isWildcard,
+      );
+      if (vp && vp.resolvedVariant.fields !== null && vp.fieldBindings) {
+        const enumType = vp.resolvedEnumType;
+        const enumLlvm = llvmType(enumType);
+        const enumId = enumType.moduleId
+          ? `${enumType.moduleId}__${enumType.name}`
+          : enumType.name;
+        const variantLlvm = `%enumv.${enumId}__${vp.variantName}`;
+        const payloadPtr = freshTemp();
+        fnLines.push(
+          `  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${scrutSlot.ptr}, i32 0, i32 1`,
+        );
+        for (const fb of vp.fieldBindings) {
+          if (fb.isWildcard) continue;
+          if (!fb.fieldName || !fb.bindingName) continue;
+          const idx = vp.resolvedVariant.fields.findIndex(
+            (f) => f.name === fb.fieldName,
+          );
+          if (idx < 0) continue;
+          const fieldType = vp.resolvedVariant.fields[idx].type;
+          const fieldLlvmTy = llvmType(fieldType);
+          const fieldPtr = freshTemp();
+          fnLines.push(
+            `  ${fieldPtr} = getelementptr inbounds ${variantLlvm}, ptr ${payloadPtr}, i32 0, i32 ${idx}`,
+          );
+          const valTmp = freshTemp();
+          fnLines.push(`  ${valTmp} = load ${fieldLlvmTy}, ptr ${fieldPtr}`);
+          // Materialize the binding as a normal local alloca.
+          symbols.set(fb.bindingName, fieldType);
+          fnLines.push(
+            `  %${fb.bindingName} = alloca ${fieldLlvmTy}, align ${sizeOfAlign(fieldType)}`,
+          );
+          fnLines.push(
+            `  store ${fieldLlvmTy} ${valTmp}, ptr %${fb.bindingName}`,
+          );
+        }
+      }
+      const armCtx = { ...ctx, breakLabel: endLabel };
+      emitBlockStmt(arm.body, fnLines, armCtx);
+      if (!blockIsTerminated(fnLines)) {
+        fnLines.push(`  br label %${endLabel}`);
+      }
+    }
+
+    fnLines.push(`${defaultLabel}:`);
+    if (node.defaultArm) {
+      const armCtx = { ...ctx, breakLabel: endLabel };
+      emitBlockStmt(node.defaultArm, fnLines, armCtx);
+      if (!blockIsTerminated(fnLines)) {
+        fnLines.push(`  br label %${endLabel}`);
+      }
+    } else {
+      fnLines.push(`  br label %${endLabel}`);
+    }
+    fnLines.push(`${endLabel}:`);
+  }
+
+  // Phase 7.5: format a LITERAL_PATTERN value as the LLVM constant for its
+  // case label. For bool we emit i1 0/1; for ints we emit the numeric value
+  // directly (LLVM accepts decimal constants).
+  function literalPatternIRValue(pat, scrutType) {
+    if (scrutType.kind === typeKinds.prim && scrutType.name === "bool") {
+      return pat.value ? "1" : "0";
+    }
+    return String(pat.value);
   }
 
   function emitDestrDecl(node, fnLines) {

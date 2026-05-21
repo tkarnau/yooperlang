@@ -80,14 +80,25 @@ export const ASTNodeKind = Object.freeze({
   // phase 7.1: generics
   TYPE_PARAM: "TYPE_PARAM",
 
+  // phase 7.5: switch / patterns / sum types / unions
+  SWITCH_STATEMENT: "SWITCH_STATEMENT",
+  SWITCH_ARM: "SWITCH_ARM",
+  LITERAL_PATTERN: "LITERAL_PATTERN",
+  VARIANT_PATTERN: "VARIANT_PATTERN",
+  ENUM_DECL: "ENUM_DECL",
+  ENUM_VARIANT: "ENUM_VARIANT",
+  UNION_DECL: "UNION_DECL",
+  VARIANT_CONSTRUCTOR: "VARIANT_CONSTRUCTOR",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });
 
-export function SourceLocation(pos, line, column) {
+export function SourceLocation(pos, line, column, length) {
   this.pos = pos;
   this.line = line;
   this.column = column;
+  if (length !== undefined) this.length = length;
 }
 
 export function ASTNode(kind, sourceLoc) {
@@ -96,6 +107,11 @@ export function ASTNode(kind, sourceLoc) {
     throw new Error(`Invalid AST node kind: ${kind}`);
   }
   if (sourceLoc) {
-    this.sourceLoc = new SourceLocation(sourceLoc.pos, sourceLoc.line, sourceLoc.column);
+    this.sourceLoc = new SourceLocation(
+      sourceLoc.pos,
+      sourceLoc.line,
+      sourceLoc.column,
+      sourceLoc.length,
+    );
   }
 }

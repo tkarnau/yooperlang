@@ -17,6 +17,9 @@ export const typeKinds = {
   task: "task",
   // Phase 7.1: a reference to a generic type parameter in a generic decl.
   typeParam: "typeParam",
+  // Phase 7.5: tagged sum and C-style overlapping union.
+  enum: "enum",
+  union: "union",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -161,6 +164,19 @@ export const ErrorType = () => freezerWrap(typeKinds.error, {});
 // `typeParams` is a list of TypeParamType. For non-generic traits, it's [].
 export const TraitType = (name, methods, moduleId = null, typeParams = []) =>
   freezerWrap(typeKinds.trait, { name, methods, moduleId, typeParams });
+
+// Phase 7.5: tagged sum type.
+//   variants: Map<variantName, { fields: [{name, type}] | null, ordinal: number }>
+//   fields === null means a payload-less variant (e.g. `Empty`).
+//   ordinal: stable 0-indexed integer from declaration order; used as the
+//     LLVM discriminator value at codegen time.
+export const EnumType = (name, variants, moduleId = null) =>
+  freezerWrap(typeKinds.enum, { name, variants, moduleId });
+
+// Phase 7.5: untagged C-style union — every field starts at offset 0,
+// size = max(sizeof(field)), alignment = max(alignof(field)). No tag.
+export const UnionType = (name, fields, moduleId = null) =>
+  freezerWrap(typeKinds.union, { name, fields, moduleId });
 
 // Phase 7.1: TypeParamType is a placeholder appearing inside a generic decl's
 // resolved types (struct field types, function param/return types, trait
@@ -452,6 +468,9 @@ export function typesEqual(a, b) {
   }
   if (a.kind === typeKinds.typeParam) {
     return a.name === b.name && a.originDecl === b.originDecl;
+  }
+  if (a.kind === typeKinds.enum || a.kind === typeKinds.union) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
   throw new Error(`Unknown type kind: ${a.kind}`);
 }

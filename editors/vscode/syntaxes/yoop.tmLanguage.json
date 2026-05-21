@@ -112,11 +112,11 @@
       "patterns": [
         {
           "name": "keyword.control.yoop",
-          "match": "\\b(if|else|while|for|break|continue|return)\\b"
+          "match": "\\b(if|else|while|for|break|continue|return|case|switch|default)\\b"
         },
         {
           "name": "keyword.declaration.yoop",
-          "match": "\\b(let|const|function|type|trait|kind|library)\\b"
+          "match": "\\b(let|const|function|type|trait|kind|library|enum|union)\\b"
         },
         {
           "name": "keyword.modifier.yoop",

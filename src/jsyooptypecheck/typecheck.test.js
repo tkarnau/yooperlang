@@ -271,3 +271,179 @@ describe("typecheckProgram: self in method body scope", () => {
   });
 });
 
+describe("Phase 7.5: enum declarations and variant constructors", () => {
+  it("declares a simple enum and constructs each variant", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum Shape {
+          Circle { radius: int32 },
+          Empty,
+        }
+        function main(): int32 {
+          let a: Shape = Shape.Circle { radius: 1 };
+          let b: Shape = Shape.Empty;
+          return 0;
+        }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects unknown variant", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum E { A, B }
+        function main(): int32 {
+          let x: E = E.NotThere;
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /has no variant/);
+  });
+
+  it("rejects payload variant without braces", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum E { A { x: int32 } }
+        function main(): int32 {
+          let x: E = E.A;
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /requires fields/);
+  });
+
+  it("rejects payload braces on no-payload variant", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum E { A }
+        function main(): int32 {
+          let x: E = E.A { foo: 1 };
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /has no payload/);
+  });
+
+  it("rejects extra fields in variant constructor", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum E { A { x: int32 } }
+        function main(): int32 {
+          let v: E = E.A { x: 1, y: 2 };
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /has no field/);
+  });
+});
+
+describe("Phase 7.5: union declarations and literals", () => {
+  it("declares a union and accepts a single-field literal", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        type Channels { r: uint8, g: uint8, b: uint8, a: uint8 }
+        union Color { rgba: uint32, channels: Channels }
+        function main(): int32 {
+          let c: Color = { rgba: 4278190335 };
+          let r: uint8 = c.channels.r;
+          return 0;
+        }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects multi-field union literal", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        union U { a: int32, b: uint32 }
+        function main(): int32 {
+          let u: U = { a: 1, b: 2 };
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /exactly one field/);
+  });
+});
+
+describe("Phase 7.5: switch statement", () => {
+  it("typechecks an exhaustive enum switch with no default", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum E { A { x: int32 }, B }
+        function pick(e: E): int32 {
+          switch (e) {
+            case E.A { x }: { return x; }
+            case E.B: { return 0; }
+          }
+          return -1;
+        }
+        function main(): int32 { return pick(E.B); }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects non-exhaustive enum switch without default", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        enum E { A, B, C }
+        function pick(e: E): int32 {
+          switch (e) {
+            case E.A: { return 1; }
+            case E.B: { return 2; }
+          }
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /not exhaustive.*missing variants: C/);
+  });
+
+  it("rejects switch over a struct scrutinee", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        type S { x: int32 }
+        function f(): int32 {
+          let s: S = { x: 1 };
+          switch (s) {
+            default: { return 0; }
+          }
+          return 0;
+        }
+      `),
+    );
+    assert.equal(errors.length >= 1, true);
+    assert.match(errors[0].message, /scrutinee must be int.*enum/);
+  });
+
+  it("typechecks an int switch with default", () => {
+    const { errors } = typecheckProgram(
+      singleModule(`
+        function classify(n: int32): int32 {
+          switch (n) {
+            case 1: { return 10; }
+            case 2, 3: { return 23; }
+            default: { return 0; }
+          }
+          return 0;
+        }
+        function main(): int32 { return classify(2); }
+      `),
+    );
+    assert.deepEqual(errors, []);
+  });
+});
+

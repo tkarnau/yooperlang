@@ -14,6 +14,7 @@ import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
 import {
   ArrayType,
+  EnumType,
   ErrorType,
   FuncType,
   KindApplication,
@@ -22,6 +23,7 @@ import {
   StructType,
   TaskType,
   TypeParamType,
+  UnionType,
   VoidType,
   primTypeFromName,
   resolveTypeAnnotation,
@@ -62,7 +64,8 @@ function innerDecl(decl) {
 // Resolve a type name within a multi-module context: checks local structs,
 // primitive types, or structs imported via named imports.
 function resolveTypeInModule(name, modId, moduleEnv) {
-  const { structTable, importedNames } = moduleEnv.get(modId);
+  const { structTable, importedNames, enumTable, unionTable } =
+    moduleEnv.get(modId);
   const local = structTable.get(name);
   // If local is a fully-resolved struct (fields !== null), use it.
   // If it's a shell (fields === null, from pass A / import copy), fall through
@@ -70,10 +73,19 @@ function resolveTypeInModule(name, modId, moduleEnv) {
   if (local && local.fields !== null) return local;
   const prim = primTypeFromName(name);
   if (prim) return prim;
+  // Phase 7.5: enum / union nominal lookup. Both are sibling nominal types
+  // alongside struct.
+  const localEnum = enumTable?.get(name);
+  if (localEnum) return localEnum;
+  const localUnion = unionTable?.get(name);
+  if (localUnion) return localUnion;
   const imp = importedNames.get(name);
   if (imp && imp.kind === "type") {
     const srcEnv = moduleEnv.get(imp.fromModuleId);
-    const resolved = srcEnv?.structTable.get(imp.exportName);
+    const resolved =
+      srcEnv?.structTable.get(imp.exportName) ??
+      srcEnv?.enumTable?.get(imp.exportName) ??
+      srcEnv?.unionTable?.get(imp.exportName);
     if (resolved) return resolved;
   }
   return local ?? null;
@@ -939,6 +951,7 @@ export function typecheckProgram(modules) {
 
   // pass A: register struct shells so cross-module struct refs work in pass B
   for (const mod of modules) {
+    const errStart = errors.length;
     const localSymbols = new Map();
     const structTable = new Map();
     const exports = new Set();
@@ -951,12 +964,59 @@ export function typecheckProgram(modules) {
     const genericStructTable = new Map();
     const genericFuncTable = new Map();
     const genericTraitTable = new Map();
+    // Phase 7.5: enum / union tables. Like structTable, these hold a "shell"
+    // value after pass A and are populated with field types in pass C.
+    const enumTable = new Map();
+    const unionTable = new Map();
     // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
     // the kind-name that pairs with the built-in `Task<T>` type.
     kindTable.set("Task", TASK_KIND);
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
+      // Phase 7.5: register an enum shell so pass C can resolve variant fields.
+      // Generic enums are not yet supported — reject at parse-time complement.
+      if (d.kind === ASTNodeKind.ENUM_DECL) {
+        if (d.typeParams && d.typeParams.length > 0) {
+          errors.push({
+            message: `generic enums are not yet supported (deferred)`,
+            sourceLoc: d.sourceLoc,
+          });
+          continue;
+        }
+        if (
+          enumTable.has(d.name) ||
+          structTable.has(d.name) ||
+          unionTable.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of type "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          // Shell — variants Map left empty; pass C populates fields.
+          enumTable.set(d.name, EnumType(d.name, new Map(), mod.id));
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+        continue;
+      }
+      if (d.kind === ASTNodeKind.UNION_DECL) {
+        if (
+          enumTable.has(d.name) ||
+          structTable.has(d.name) ||
+          unionTable.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of type "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          // Shell — fields filled in pass C.
+          unionTable.set(d.name, UnionType(d.name, [], mod.id));
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+        continue;
+      }
       if (d.kind === ASTNodeKind.TYPE_DECL) {
         const hasTypeParams = d.typeParams && d.typeParams.length > 0;
         if (hasTypeParams) {
@@ -1167,18 +1227,24 @@ export function typecheckProgram(modules) {
       genericStructTable,
       genericFuncTable,
       genericTraitTable,
+      enumTable,
+      unionTable,
     });
+    stampModuleId(errors, errStart, mod.id);
   }
 
   // pass B: wire imports (so pass C can resolve cross-module type names)
   for (const mod of modules) {
+    const errStart = errors.length;
     resolveImports(mod, moduleEnv, errors);
+    stampModuleId(errors, errStart, mod.id);
   }
 
   // pass C: struct fields + function sigs + extern decls
   for (const mod of modules) {
+    const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
-    const { localSymbols, structTable, exports, traitTable } = env;
+    const { localSymbols, structTable, exports, traitTable, enumTable, unionTable } = env;
     // Default ctx (no typeParamScope, registry always available).
     const baseCtx = () => ({ registry: programState.registry });
     // ctx for a generic decl body — adds the type-param scope.
@@ -1357,6 +1423,98 @@ export function typecheckProgram(modules) {
         );
         d.resolvedType = fullType;
         structTable.set(d.name, fullType);
+      }
+
+      // Phase 7.5: resolve enum variant fields.
+      if (d.kind === ASTNodeKind.ENUM_DECL) {
+        const variants = new Map();
+        let ordinal = 0;
+        for (const variantNode of d.variants ?? []) {
+          let resolvedFields = null;
+          if (variantNode.fields !== null) {
+            resolvedFields = [];
+            const seenFieldNames = new Set();
+            for (const f of variantNode.fields) {
+              if (seenFieldNames.has(f.name)) {
+                errors.push({
+                  message: `duplicate field "${f.name}" in variant "${variantNode.name}" of enum "${d.name}"`,
+                  sourceLoc: f.sourceLoc,
+                });
+                continue;
+              }
+              seenFieldNames.add(f.name);
+              let ft = resolveTypeAnnotationInModule(
+                f.typeAnnotation,
+                mod.id,
+                moduleEnv,
+                baseCtx(),
+              );
+              if (!ft) {
+                errors.push({
+                  message: `unknown type "${formatAnnotation(f.typeAnnotation)}" in variant "${variantNode.name}" of enum "${d.name}"`,
+                  sourceLoc: f.sourceLoc,
+                });
+                ft = ErrorType();
+              }
+              resolvedFields.push({ name: f.name, type: ft });
+            }
+          }
+          variants.set(variantNode.name, {
+            name: variantNode.name,
+            fields: resolvedFields,
+            ordinal,
+          });
+          variantNode.ordinal = ordinal;
+          ordinal++;
+        }
+        const fullEnum = EnumType(d.name, variants, mod.id);
+        d.resolvedType = fullEnum;
+        enumTable.set(d.name, fullEnum);
+      }
+
+      // Phase 7.5: resolve union field types.
+      if (d.kind === ASTNodeKind.UNION_DECL) {
+        const fields = [];
+        const seenNames = new Set();
+        for (const f of d.fields ?? []) {
+          if (seenNames.has(f.name)) {
+            errors.push({
+              message: `duplicate field "${f.name}" in union "${d.name}"`,
+              sourceLoc: f.sourceLoc,
+            });
+            continue;
+          }
+          seenNames.add(f.name);
+          let ft = resolveTypeAnnotationInModule(
+            f.typeAnnotation,
+            mod.id,
+            moduleEnv,
+            baseCtx(),
+          );
+          if (!ft) {
+            errors.push({
+              message: `unknown type "${formatAnnotation(f.typeAnnotation)}" in union "${d.name}"`,
+              sourceLoc: f.sourceLoc,
+            });
+            ft = ErrorType();
+          }
+          // Reject fields with disallowed layouts (refs/arrays/tasks/kinds
+          // mix poorly with raw bit-reinterpretation; structs and prims are
+          // fine).
+          if (
+            ft.kind === typeKinds.task ||
+            ft.kind === typeKinds.ref
+          ) {
+            errors.push({
+              message: `union field "${f.name}" has type ${formatAnnotation(f.typeAnnotation)} — refs and Tasks are not allowed in unions`,
+              sourceLoc: f.sourceLoc,
+            });
+          }
+          fields.push({ name: f.name, type: ft });
+        }
+        const fullUnion = UnionType(d.name, fields, mod.id);
+        d.resolvedType = fullUnion;
+        unionTable.set(d.name, fullUnion);
       }
 
       // function signatures
@@ -1636,6 +1794,7 @@ export function typecheckProgram(modules) {
       if (d.genericDecl) continue; // generic struct impls deferred
       validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
+    stampModuleId(errors, errStart, mod.id);
   }
 
   // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.
@@ -1668,6 +1827,7 @@ export function typecheckProgram(modules) {
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
   for (const mod of modules) {
+    const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
     const { localSymbols, structTable, importedNames, kindTable, traitTable } = env;
     const typeContext = {
@@ -1685,6 +1845,9 @@ export function typecheckProgram(modules) {
       genericFuncTable: env.genericFuncTable,
       genericStructTable: env.genericStructTable,
       genericTraitTable: env.genericTraitTable,
+      // Phase 7.5: enum and union nominal tables.
+      enumTable: env.enumTable,
+      unionTable: env.unionTable,
     };
 
     // pass D.1: validate all functions and methods (populates resolvedKindType on params)
@@ -1724,9 +1887,19 @@ export function typecheckProgram(modules) {
         }
       }
     }
+    stampModuleId(errors, errStart, mod.id);
   }
 
   return { modules, errors, moduleEnv, programState };
+}
+
+// Stamp `moduleId` onto error records added to `errors` since `startIdx`.
+// Used by typecheckProgram to attribute errors to the module being processed
+// without threading moduleId through every pushError call site.
+function stampModuleId(errors, startIdx, moduleId) {
+  for (let i = startIdx; i < errors.length; i++) {
+    if (errors[i].moduleId === undefined) errors[i].moduleId = moduleId;
+  }
 }
 
 // ─── single-module entry point (legacy + test path) ──────────────────────────

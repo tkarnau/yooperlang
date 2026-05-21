@@ -271,10 +271,18 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     if (local && local.fields !== null) return local;
     const prim = primTypeFromName(annot.name);
     if (prim) return prim;
+    // Phase 7.5: enum / union tables.
+    const localEnum = env.enumTable?.get(annot.name);
+    if (localEnum) return localEnum;
+    const localUnion = env.unionTable?.get(annot.name);
+    if (localUnion) return localUnion;
     const imp = env.importedNames?.get(annot.name);
     if (imp && imp.kind === "type") {
       const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
-      const resolved = srcEnv?.structTable.get(imp.exportName);
+      const resolved =
+        srcEnv?.structTable.get(imp.exportName) ??
+        srcEnv?.enumTable?.get(imp.exportName) ??
+        srcEnv?.unionTable?.get(imp.exportName);
       if (resolved) return resolved;
     }
     return local ?? null;

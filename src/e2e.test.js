@@ -239,6 +239,41 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "IntBox\nnamed\nIntBox\nIntBox\n");
   });
 
+  // ---- 7.5 sum types, unions, switch / pattern matching ----
+
+  it("switch_int.yoop: literal-only switch with multi-pattern arms + default", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/switch_int.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "classify(0)=0\nclassify(2)=1\nclassify(10)=10\nclassify(99)=-1\n",
+    );
+  });
+
+  it("switch_bool.yoop: bool exhaustive switch (no default required)", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/switch_bool.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "label(true)=1\nlabel(false)=0\n");
+  });
+
+  it("enum_basic.yoop: payload + no-payload variants, switch destructuring", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/enum_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a is A\nb.x=42\n");
+  });
+
+  it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/enum_showcase.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "circle r=2\nrect 3x4\nsquare s=5\nempty\n");
+  });
+
+  it("union_rgba.yoop: untagged union, read via two field aliases, write through one updates the other", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/union_rgba.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "r=221 g=204 b=187 a=170\nafter-write b=187\n");
+  });
+
   it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
     const { stdout, exitCode } = runFixtureWithAsset(
       "examples/pass/language_showcase.yoop",
@@ -285,6 +320,15 @@ function typecheckFixtureEntry(relPath) {
 function typecheckFixture(relPath) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
   return typecheckSource(src);
+}
+
+// Phase 7.5: single-file fixture typechecked through the multi-module pipeline
+// (which has the full pass A/B/C with enum / union / generics wired). The
+// legacy `typecheckSource` only supports the structs+functions subset.
+function typecheckFixtureProgram(relPath) {
+  const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
+  const mod = { id: "fixture", ast: parse(src) };
+  return typecheckProgram([mod]);
 }
 
 function parseFixture(relPath) {
@@ -1286,6 +1330,36 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /unknown function "other"/.test(e.message)),
       `expected unknown-method error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // ---- 7.5 sum types and unions ----
+
+  it("enum_switch_non_exhaustive.yoop rejects an enum switch that omits a variant without default", () => {
+    const { errors } = typecheckFixtureProgram(
+      "examples/fail/enum_switch_non_exhaustive.yoop",
+    );
+    assert.ok(
+      errors.some((e) =>
+        /not exhaustive.*missing variants: C/.test(e.message),
+      ),
+      `expected non-exhaustive enum switch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("enum_unknown_variant.yoop rejects E.NotThere", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/enum_unknown_variant.yoop");
+    assert.ok(
+      errors.some((e) => /has no variant "NotThere"/.test(e.message)),
+      `expected unknown-variant error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("union_multi_field.yoop rejects a union literal with more than one field", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/union_multi_field.yoop");
+    assert.ok(
+      errors.some((e) => /exactly one field/.test(e.message)),
+      `expected multi-field union error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

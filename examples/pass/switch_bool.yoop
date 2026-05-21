@@ -1,0 +1,17 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function label(b: bool): int32 {
+    switch (b) {
+        case true: { return 1; }
+        case false: { return 0; }
+    }
+    return -1;
+}
+
+function main(): int32 {
+    printf(`label(true)=${label(true)}\n`);
+    printf(`label(false)=${label(false)}\n`);
+    return 0;
+}

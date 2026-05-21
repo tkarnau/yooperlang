@@ -1,0 +1,28 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Channels {
+    r: uint8,
+    g: uint8,
+    b: uint8,
+    a: uint8,
+}
+
+union Color {
+    rgba: uint32,
+    channels: Channels,
+}
+
+function main(): int32 {
+    let c: Color = { rgba: 0xAABBCCDD };
+    let r: uint8 = c.channels.r;
+    let g: uint8 = c.channels.g;
+    let b: uint8 = c.channels.b;
+    let a: uint8 = c.channels.a;
+    printf(`r=${r} g=${g} b=${b} a=${a}\n`);
+    c.channels.r = 0x11;
+    let new_b: uint8 = c.channels.b;
+    printf(`after-write b=${new_b}\n`);
+    return 0;
+}

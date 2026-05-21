@@ -102,6 +102,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveIndexExpression(node, scope, ctx);
     case ASTNodeKind.WAIT_EXPRESSION:
       return resolveWaitExpression(node, scope, ctx);
+    case ASTNodeKind.VARIANT_CONSTRUCTOR:
+      return resolveVariantConstructor(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -501,15 +503,56 @@ function resolveAssignmentToIndex(node, scope, ctx) {
 
 // `obj.field` — receiver must be a struct, namespace, string (for .len), or array (for .len).
 function resolveFieldAccess(node, scope, ctx) {
+  // Phase 7.5: bare `EnumName.Variant` (no payload). Detect before
+  // resolveExprType on the IDENT object would error with "undefined variable".
+  if (node.object.kind === ASTNodeKind.IDENT) {
+    const maybeEnum = lookupEnumByName(node.object.name, ctx);
+    if (maybeEnum) {
+      const variant = maybeEnum.variants.get(node.field);
+      const fieldLoc = node.fieldSourceLoc ?? node;
+      if (!variant) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `enum "${maybeEnum.name}" has no variant "${node.field}"`,
+        );
+        return setType(node, ErrorType());
+      }
+      if (variant.fields !== null) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `variant "${maybeEnum.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} } — write '${maybeEnum.name}.${variant.name} { ... }'`,
+        );
+        return setType(node, ErrorType());
+      }
+      // Promote in-place to a VARIANT_CONSTRUCTOR with no fields.
+      node.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+      node.enumName = node.object.name;
+      node.variantName = node.field;
+      node.fields = null;
+      node.resolvedEnumType = maybeEnum;
+      node.resolvedVariant = variant;
+      // Clean up FIELD_ACCESS-specific properties (best-effort tidiness).
+      delete node.object;
+      delete node.field;
+      return setType(node, maybeEnum);
+    }
+  }
+
   const objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
 
+  // For "no such field"-style diagnostics, prefer the field identifier's
+  // location so the squiggle lands on the field name, not the whole expr.
+  const fieldLoc = node.fieldSourceLoc ?? node;
+
   // namespace.field
   if (objType.kind === typeKinds.namespace) {
     if (!objType.exports.has(node.field)) {
-      pushError(ctx.errors, node, `namespace "${node.object.name}" has no export "${node.field}"`);
+      pushError(ctx.errors, fieldLoc, `namespace "${node.object.name}" has no export "${node.field}"`);
       return setType(node, ErrorType());
     }
     const moduleEnv = ctx.typeContext.moduleEnv;
@@ -520,7 +563,7 @@ function resolveFieldAccess(node, scope, ctx) {
     }
     const sym = srcEnv.localSymbols.get(node.field) ?? srcEnv.structTable.get(node.field);
     if (!sym) {
-      pushError(ctx.errors, node, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
+      pushError(ctx.errors, fieldLoc, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
       return setType(node, ErrorType());
     }
     node.namespaceLookup = { moduleId: objType.moduleId, exportName: node.field };
@@ -542,10 +585,25 @@ function resolveFieldAccess(node, scope, ctx) {
     return setType(node, PrimType(primAnnotations.usize));
   }
   if (objType.kind === typeKinds.array) {
-    pushError(ctx.errors, node, `type ${formatType(objType)} has no field "${node.field}"`);
+    pushError(ctx.errors, fieldLoc, `type ${formatType(objType)} has no field "${node.field}"`);
     return setType(node, ErrorType());
   }
 
+  // Phase 7.5: field access on a union type — same path as struct, just a
+  // type-punning read into the union's chosen field type. Codegen lowers via
+  // a bitcast.
+  if (objType.kind === typeKinds.union) {
+    const uf = objType.fields?.find((f) => f.name === node.field);
+    if (!uf) {
+      pushError(
+        ctx.errors,
+        fieldLoc,
+        `union "${objType.name}" has no field "${node.field}"`,
+      );
+      return setType(node, ErrorType());
+    }
+    return setType(node, uf.type);
+  }
   if (objType.kind !== typeKinds.struct) {
     pushError(ctx.errors, node, `field access on non-struct type ${formatType(objType)}`);
     return setType(node, ErrorType());
@@ -555,11 +613,11 @@ function resolveFieldAccess(node, scope, ctx) {
     if (objType.methods?.has(node.field)) {
       pushError(
         ctx.errors,
-        node,
+        fieldLoc,
         `method-call form '.${node.field}()' is not supported — use the free-function form '${node.field}(ref value)'`,
       );
     } else {
-      pushError(ctx.errors, node, `type "${objType.name}" has no field "${node.field}"`);
+      pushError(ctx.errors, fieldLoc, `type "${objType.name}" has no field "${node.field}"`);
     }
     return setType(node, ErrorType());
   }
@@ -702,6 +760,134 @@ function rootIdentOf(node) {
     node = node.object;
   }
   return node.kind === ASTNodeKind.IDENT ? node : null;
+}
+
+// Phase 7.5: look up an enum type by name. Checks the local enumTable then
+// imported names. Returns null when the name isn't an enum.
+export function lookupEnumByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.enumTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.enumTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 7.5: look up a union type by name. Mirrors lookupEnumByName.
+export function lookupUnionByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.unionTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.unionTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 7.5: `Shape.Circle { radius: 5.0 }` — typecheck a variant constructor
+// with a payload. The parser also emits this node for the bare no-payload form
+// `Shape.Empty`, but only after promotion inside resolveFieldAccess.
+function resolveVariantConstructor(node, scope, ctx) {
+  const enumType = lookupEnumByName(node.enumName, ctx);
+  if (!enumType) {
+    pushError(
+      ctx.errors,
+      node,
+      `unknown enum "${node.enumName}"`,
+    );
+    for (const f of node.fields ?? []) {
+      resolveExprType(f.value, scope, ctx);
+    }
+    return setType(node, ErrorType());
+  }
+  const variant = enumType.variants.get(node.variantName);
+  if (!variant) {
+    pushError(
+      ctx.errors,
+      node,
+      `enum "${enumType.name}" has no variant "${node.variantName}"`,
+    );
+    for (const f of node.fields ?? []) {
+      resolveExprType(f.value, scope, ctx);
+    }
+    return setType(node, ErrorType());
+  }
+  // Stash the resolved variant info for codegen.
+  node.resolvedEnumType = enumType;
+  node.resolvedVariant = variant;
+
+  if (variant.fields === null) {
+    // No-payload variant — fields must be null (or empty) on the constructor.
+    if (node.fields && node.fields.length > 0) {
+      pushError(
+        ctx.errors,
+        node,
+        `variant "${enumType.name}.${variant.name}" has no payload — drop the '{ ... }'`,
+      );
+    }
+    return setType(node, enumType);
+  }
+
+  if (node.fields === null) {
+    pushError(
+      ctx.errors,
+      node,
+      `variant "${enumType.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} }`,
+    );
+    return setType(node, enumType);
+  }
+
+  const targetFieldMap = new Map();
+  for (const f of variant.fields) targetFieldMap.set(f.name, f.type);
+  const seen = new Set();
+  for (const litField of node.fields) {
+    if (seen.has(litField.name)) {
+      pushError(
+        ctx.errors,
+        litField,
+        `duplicate field "${litField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+      continue;
+    }
+    seen.add(litField.name);
+    const expected = targetFieldMap.get(litField.name);
+    if (!expected) {
+      pushError(
+        ctx.errors,
+        litField,
+        `variant "${enumType.name}.${variant.name}" has no field "${litField.name}"`,
+      );
+      resolveExprType(litField.value, scope, ctx);
+      continue;
+    }
+    checkInitializer(
+      litField.value,
+      expected,
+      scope,
+      ctx,
+      (actualType) =>
+        `cannot assign ${formatType(actualType)} to field "${litField.name}" of ${enumType.name}.${variant.name} (expected ${formatType(expected)})`,
+    );
+  }
+  for (const targetField of variant.fields) {
+    if (!node.fields.some((f) => f.name === targetField.name)) {
+      pushError(
+        ctx.errors,
+        node,
+        `missing field "${targetField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+    }
+  }
+  return setType(node, enumType);
 }
 
 // "Does this value-expression fit this target type?"
@@ -1248,6 +1434,51 @@ function resolveGenericCall(node, generic, scope, ctx) {
 // struct's declared field type, reports duplicates and missing fields,
 // and stamps the literal node with its resolved type.
 export function pinStructLiteral(litNode, targetType, scope, ctx) {
+  // Phase 7.5: a union literal looks identical to a struct literal in source
+  // (`Color { rgba: 0x...}`), but only one field may be named.
+  if (targetType.kind === typeKinds.union) {
+    if (litNode.fields.length === 0) {
+      pushError(
+        ctx.errors,
+        litNode,
+        `union literal must initialize exactly one field; ${targetType.name} has [${targetType.fields.map((f) => f.name).join(", ")}]`,
+      );
+      litNode.resolvedType = targetType;
+      return;
+    }
+    if (litNode.fields.length > 1) {
+      pushError(
+        ctx.errors,
+        litNode,
+        `union literal must initialize exactly one field — found ${litNode.fields.length} (${litNode.fields.map((f) => f.name).join(", ")})`,
+      );
+    }
+    const targetFieldMap = new Map();
+    for (const tf of targetType.fields) targetFieldMap.set(tf.name, tf.type);
+    for (const litField of litNode.fields) {
+      const expected = targetFieldMap.get(litField.name);
+      if (!expected) {
+        pushError(
+          ctx.errors,
+          litField,
+          `union "${targetType.name}" has no field "${litField.name}"`,
+        );
+        resolveExprType(litField.value, scope, ctx);
+        continue;
+      }
+      checkInitializer(
+        litField.value,
+        expected,
+        scope,
+        ctx,
+        (actualType) =>
+          `cannot assign ${formatType(actualType)} to union field "${litField.name}" of union "${targetType.name}" (expected ${formatType(expected)})`,
+      );
+    }
+    litNode.resolvedType = targetType;
+    litNode.isUnionLiteral = true;
+    return;
+  }
   if (targetType.kind !== typeKinds.struct) {
     pushError(
       ctx.errors,

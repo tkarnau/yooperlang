@@ -6,11 +6,20 @@
 
 import { typeKinds } from "./types.js";
 
-export function pushError(errors, node, message) {
-  errors.push({
-    message,
-    sourceLoc: node?.sourceLoc,
-  });
+// `locSource` may be either an AST node (we read its `sourceLoc`) or a raw
+// sourceLoc object `{ pos, line, column, length? }`. Use the raw form when
+// the offending token is finer-grained than the enclosing node — e.g. the
+// field identifier of a FIELD_ACCESS expression.
+export function pushError(errors, locSource, message) {
+  let sourceLoc;
+  if (locSource && typeof locSource === "object") {
+    if (locSource.sourceLoc) {
+      sourceLoc = locSource.sourceLoc;
+    } else if ("pos" in locSource) {
+      sourceLoc = locSource;
+    }
+  }
+  errors.push({ message, sourceLoc });
 }
 
 export function formatType(t) {
@@ -40,6 +49,12 @@ export function formatType(t) {
       return `kind ${t.name}`;
     case typeKinds.task:
       return `Task<${formatType(t.resultType)}>`;
+    case typeKinds.enum:
+      return `enum ${t.name}`;
+    case typeKinds.union:
+      return `union ${t.name}`;
+    case typeKinds.typeParam:
+      return t.name;
     default:
       return `unknown kind ${t.kind}`;
   }
