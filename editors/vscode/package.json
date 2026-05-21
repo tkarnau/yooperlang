@@ -1,12 +1,13 @@
 {
   "name": "yoop-lang",
   "displayName": "Yooperlang",
-  "description": "Syntax highlighting for Yooperlang (.yoop) files.",
-  "version": "0.0.1",
+  "description": "Syntax highlighting and language-server diagnostics for Yooperlang (.yoop) files.",
+  "version": "0.1.0",
   "publisher": "yoop-lang",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
+  "main": "./extension.js",
   "categories": [
     "Programming Languages"
   ],
@@ -31,5 +32,8 @@
         "path": "./syntaxes/yoop.tmLanguage.json"
       }
     ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }

@@ -206,12 +206,21 @@ export function parse(src) {
     const lineText = src.split("\n")[line - 1] ?? "";
     const caret =
       " ".repeat(Math.max(0, column - 1)) + "^".repeat(Math.max(1, length));
-    return new Error(
+    const err = new Error(
       `${message}\n` +
         `  --> line ${line}:${column}\n` +
         `   | ${lineText}\n` +
         `   | ${caret}`,
     );
+    // Structured fields so consumers (LSP, tooling) can map the error to a
+    // source range without re-parsing the formatted text.
+    err.isParseError = true;
+    err.rawMessage = message;
+    err.pos = pos;
+    err.length = length;
+    err.line = line;
+    err.column = column;
+    return err;
   }
 
   // similar to advance but asserts that the current token is the expected one

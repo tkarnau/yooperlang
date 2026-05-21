@@ -15,10 +15,16 @@ import { moduleIdFor } from "./moduleId.js";
 //   src: string              — file contents
 //   ast: ProgramNode
 //   imports: [IMPORT_DECL]   — decls with resolvedAbsPath/resolvedModuleId set
-export function loadModuleGraph(entryAbsPath) {
+//
+// Options:
+//   readFile(absPath) -> string | null
+//     Optional override for reading a module's source. Returning null falls
+//     back to fs. Used by the LSP to inject unsaved buffers.
+export function loadModuleGraph(entryAbsPath, options = {}) {
   const byPath = new Map(); // absPath -> Module
   const onStack = new Set(); // for cycle detection
   const order = []; // post-order (leaves first)
+  const readFile = options.readFile ?? (() => null);
 
   loadOne(entryAbsPath);
   return { entry: byPath.get(entryAbsPath), modules: order };
@@ -30,7 +36,8 @@ export function loadModuleGraph(entryAbsPath) {
     if (byPath.has(absPath)) return byPath.get(absPath);
     onStack.add(absPath);
 
-    const src = fs.readFileSync(absPath, "utf8");
+    const overlay = readFile(absPath);
+    const src = overlay != null ? overlay : fs.readFileSync(absPath, "utf8");
     const ast = parse(src);
     const id = moduleIdFor(absPath);
     const mod = { id, absPath, src, ast, imports: [] };

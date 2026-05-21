@@ -365,6 +365,7 @@ export function lexNext(src, pos) {
 
     if (src.substring(p, p + tokenScanObj.str.length) === tokenScanObj.str) {
       res.token.tag = tokenScanObj.tag;
+      res.token.start = p;
       res.token.length = tokenScanObj.str.length;
       res.nextPos = p + tokenScanObj.str.length;
 
