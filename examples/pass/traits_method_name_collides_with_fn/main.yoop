@@ -1,0 +1,27 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+// Phase 7.4: trait method names may now coincide with module-level free
+// function names. Each call site is unambiguously disambiguated by syntax:
+//   `flush(...)`             -> the free function
+//   `Flushable.flush(ref x)` -> the trait method
+trait Flushable {
+    function flush(ref self): void;
+}
+
+type Buf implements Flushable {
+    n: int32,
+    function flush(ref self): void {
+        printf(`flushing ${self.n}\n`);
+    }
+}
+
+function flush(x: int32): void {
+    printf(`free flush ${x}\n`);
+}
+
+function main(): int32 {
+    let b: Buf = { n: 3 };
+    flush(42);
+    Flushable.flush(ref b);
+    return 0;
+}

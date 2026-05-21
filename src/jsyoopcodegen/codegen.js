@@ -10,10 +10,13 @@ import {
   isFloatPrim,
   isIntPrim,
   isUnsignedIntPrim,
+  substituteTypeParams,
   typeKinds,
 } from "../jsyooptypecheck/types.js";
 import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
+import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
+import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
 
 // yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
@@ -508,7 +511,7 @@ export function codegen(ast) {
         const t = node.resolvedType.kind === typeKinds.untypedFloat
           ? PrimType("float64")
           : node.resolvedType;
-        return { val: llvmFloatConstant(node.value), yoopType: t };
+        return { val: llvmFloatConstant(node.value, t.name), yoopType: t };
       }
       case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
@@ -573,6 +576,25 @@ export function codegen(ast) {
         const tmp = freshTemp();
         const instr = binaryInstruction(node.op, opType);
         fnLines.push(`  ${tmp} = ${instr} ${llvmTy} ${l.val}, ${r.val}`);
+        return { val: tmp, yoopType: resultType };
+      }
+
+      case ASTNodeKind.UNARY_EXPRESSION: {
+        const operand = emitExpr(node.operand, fnLines);
+        const resultType = node.resolvedType;
+        const llvmTy = llvmType(resultType);
+        const tmp = freshTemp();
+        if (node.op === "minus") {
+          if (resultType.kind === typeKinds.prim && (resultType.name === "float32" || resultType.name === "float64")) {
+            fnLines.push(`  ${tmp} = fneg ${llvmTy} ${operand.val}`);
+          } else {
+            fnLines.push(`  ${tmp} = sub ${llvmTy} 0, ${operand.val}`);
+          }
+        } else if (node.op === "not") {
+          fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, 1`);
+        } else {
+          throw new Error(`codegen: unhandled unary op "${node.op}"`);
+        }
         return { val: tmp, yoopType: resultType };
       }
 
@@ -785,7 +807,7 @@ export function codegen(ast) {
     // Trait method call: typechecker stamped the mangled symbol.
     if (node.calleeMethodOf) {
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
-      const methodSig = node.calleeMethodOf.methods.get(node.callee);
+      const methodSig = node.calleeMethodOf.methods.get(node.calleeMethodName);
       const argList = methodSig.params.map((p, i) => {
         const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
         return `${llvmTy} ${argResults[i].val}`;
@@ -1174,7 +1196,17 @@ export function codegen(ast) {
   }
 
   // **** method codegen *********
+  // Phase 7.4: one impl body can satisfy multiple traits (when their method
+  // signatures agree). Emit one LLVM `define` per trait in implementsTraits,
+  // each under the trait-qualified mangle. Bodies are identical.
   function emitMethod(methodDecl, structType) {
+    const traits = methodDecl.implementsTraits ?? [];
+    for (const traitName of traits) {
+      emitMethodOnce(methodDecl, structType, traitName);
+    }
+  }
+
+  function emitMethodOnce(methodDecl, structType, traitName) {
     tempCounter = 0;
     labelCounter = 0;
     symbols = new Map();
@@ -1189,8 +1221,9 @@ export function codegen(ast) {
       return `${ty} %${p.name}.arg`;
     }).join(", ");
 
+    const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
     const fnLines = [];
-    fnLines.push(`define ${llvmRet} @${methodDecl.mangledSymbol}(${paramSig}) {`);
+    fnLines.push(`define ${llvmRet} @${mangled}(${paramSig}) {`);
     fnLines.push("entry:");
 
     for (const p of params) {
@@ -1375,9 +1408,13 @@ function mangle(moduleId, localName) {
   return `${moduleId}__${localName}`;
 }
 
-function llvmFloatConstant(jsNumber) {
+function llvmFloatConstant(jsNumber, primName = "float64") {
+  // LLVM IR requires float (32-bit) constants to be exactly representable as
+  // float32 even though they're written as 64-bit hex. Round through float32
+  // first so the hex form round-trips cleanly.
+  const val = primName === "float32" ? Math.fround(jsNumber) : jsNumber;
   const buf = Buffer.alloc(8);
-  buf.writeDoubleBE(jsNumber, 0);
+  buf.writeDoubleBE(val, 0);
   return "0x" + buf.toString("hex").toUpperCase();
 }
 
@@ -1478,6 +1515,7 @@ const INT_OP_MAP = {
   gte: "icmp sge",
   andand: "and",
   oror: "or",
+  pipe: "or",
   lshift: "shl",
   rshift: "ashr",
 };
@@ -1509,21 +1547,27 @@ function binaryInstruction(op, opType) {
 
 // convenience for tests: parse + typecheck + codegen in one call.
 // returns the IR string. throws if typecheck reports errors.
+//
+// Phase 7.1: routes through the multi-module pipeline with a single
+// synthetic module so generics (which require the program-wide
+// instantiation registry) work in single-file test fixtures.
 export function compileSource(src) {
   const ast = parse(src);
-  const { errors } = typecheck(ast);
+  const mod = { id: "m", ast };
+  const { errors, programState } = typecheckProgram([mod]);
   if (errors.length > 0) {
     throw new Error(
       `compileSource: typecheck failed with ${errors.length} error(s):\n` +
         errors.map((e) => `  ${e.message}`).join("\n"),
     );
   }
-  return codegen(ast);
+  const { ir } = codegenProgram([mod], null, programState);
+  return ir;
 }
 
 // Multi-module codegen. modules must be topologically sorted (leaves first),
 // as returned by loadModuleGraph. Returns { ir, linkFlags }.
-export function codegenProgram(modules) {
+export function codegenProgram(modules, _moduleEnv, programState) {
   const allStructDefs = [];
   const allGlobals = [];
   const allExterns = new Set();
@@ -1531,6 +1575,22 @@ export function codegenProgram(modules) {
   const linkFlags = new Set();
   const emittedStructs = new Set();
   const emittedArrayTypes = new Set();
+
+  // Phase 7.1: emit each generic-struct instantiation as a struct def.
+  // Done before per-module codegen so call-site references resolve.
+  if (programState?.registry) {
+    for (const [_key, structType] of programState.registry.structs) {
+      // Skip open instantiations (still contain TypeParamType).
+      if (structContainsTypeParam(structType)) continue;
+      const mangled = llvmType(structType);
+      if (emittedStructs.has(mangled)) continue;
+      emittedStructs.add(mangled);
+      const fieldLlvm = (structType.fields ?? [])
+        .map((f) => llvmType(f.type))
+        .join(", ");
+      allStructDefs.push(`${mangled} = type { ${fieldLlvm} }`);
+    }
+  }
 
   for (const mod of modules) {
     // Collect link flags from EXTERN_BLOCKs
@@ -1541,7 +1601,7 @@ export function codegenProgram(modules) {
     }
 
     // Run single-module codegen with this module's id set
-    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes);
+    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes, programState);
     allStructDefs.push(...ir.structDefs);
     allGlobals.push(...ir.globals);
     for (const e of ir.externs) allExterns.add(e);
@@ -1563,11 +1623,131 @@ export function codegenProgram(modules) {
 
 // Codegen a single module, returning { structDefs, globals, externs, lines }.
 // emittedStructs and emittedArrayTypes are shared across modules to deduplicate type defs.
-function codegenModule(mod, emittedStructs, emittedArrayTypes) {
-  return codegenWithModuleId(mod.ast, mod.id, emittedStructs, emittedArrayTypes);
+function codegenModule(mod, emittedStructs, emittedArrayTypes, programState) {
+  return codegenWithModuleId(mod.ast, mod.id, emittedStructs, emittedArrayTypes, programState);
 }
 
-function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = new Set()) {
+// Phase 7.1: helper for codegenProgram — true iff a struct's fields contain
+// any TypeParamType (i.e. the struct is an "open" instantiation built during
+// type-checking of a generic decl body).
+// Phase 7.1: deep-clone an AST subtree, substituting type-params in every
+// `resolvedType` / `declaredReturnType` / `castTargetType` slot we encounter.
+// Skip fields known to introduce back-references or that don't need cloning.
+const CLONE_SKIP_FIELDS = new Set([
+  "genericDecl", // back-ref from decl AST to genericDecl record
+  "genericInstantiation", // back-ref from call site to instance record
+  "sourceLoc",
+  "implementingType", // back-ref to a frozen StructType
+]);
+function cloneAstWithSubstitution(node, sub, registry = null) {
+  if (node === null || node === undefined) return node;
+  if (typeof node !== "object") return node;
+  if (Array.isArray(node)) {
+    return node.map((n) => cloneAstWithSubstitution(n, sub, registry));
+  }
+  if (node instanceof Map || node instanceof Set) return node;
+  const out = {};
+  for (const key of Object.keys(node)) {
+    if (CLONE_SKIP_FIELDS.has(key)) {
+      out[key] = node[key];
+      continue;
+    }
+    const v = node[key];
+    if (
+      key === "resolvedType" ||
+      key === "declaredReturnType" ||
+      key === "castTargetType"
+    ) {
+      out[key] = v ? substituteTypeParams(v, sub) : v;
+    } else if (Array.isArray(v)) {
+      out[key] = v.map((x) => cloneAstWithSubstitution(x, sub, registry));
+    } else if (v && typeof v === "object") {
+      if (v instanceof Map || v instanceof Set) {
+        out[key] = v;
+      } else if (Object.isFrozen(v)) {
+        out[key] = substituteTypeParams(v, sub);
+      } else {
+        out[key] = cloneAstWithSubstitution(v, sub, registry);
+      }
+    } else {
+      out[key] = v;
+    }
+  }
+  // Phase 7.2: re-instantiate a generic call whose original argTypes carried
+  // an outer TypeParamType. After substitution we have concrete argTypes, so
+  // we ask the registry for the concrete instance and re-point the call.
+  if (
+    out.kind === ASTNodeKind.CALL_EXPRESSION &&
+    out.genericInstantiation &&
+    registry
+  ) {
+    const oldInst = out.genericInstantiation;
+    const decl =
+      registry.funcInstancesByDecl &&
+      [...registry.funcInstancesByDecl.values()].flat().find(
+        (i) => i.declId === oldInst.declId,
+      )?.ast?.genericDecl;
+    if (decl && oldInst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) {
+      const newArgs = oldInst.argTypes.map((t) => substituteTypeParams(t, sub));
+      const newInst = instantiateFunc(registry, decl, newArgs);
+      if (newInst) out.genericInstantiation = newInst;
+    }
+  }
+  // Phase 7.2: rewrite a bound-method call into a normal struct-method call
+  // once the receiver's TypeParamType has been substituted with a concrete
+  // struct. The bound check at instantiation guarantees the impl exists.
+  if (
+    out.kind === ASTNodeKind.CALL_EXPRESSION &&
+    out.boundMethod
+  ) {
+    const firstArg = out.args?.[0];
+    let recvType = firstArg?.resolvedType;
+    if (recvType?.kind === typeKinds.ref) recvType = recvType.inner;
+    if (!recvType || recvType.kind !== typeKinds.struct) {
+      // Receiver is still abstract — keep the boundMethod tag. This branch is
+      // hit when we're producing an "open" instantiation (the outer T flowed
+      // in). Open instances are filtered out before IR emission.
+      return out;
+    }
+    const methodSig = recvType.methods?.get(out.boundMethod.methodName);
+    if (!methodSig) {
+      throw new Error(
+        `codegen: bound-method "${out.boundMethod.methodName}" not found on substituted type "${recvType.name}"`,
+      );
+    }
+    out.calleeMethodOf = recvType;
+    out.calleeMethodName = out.boundMethod.methodName;
+    out.calleeMangledName = mangleTraitMethod(
+      recvType,
+      out.boundMethod.traitName,
+      out.boundMethod.methodName,
+    );
+    out.boundMethod = null;
+  }
+  return out;
+}
+
+function structContainsTypeParam(structType) {
+  if (!structType.fields) return false;
+  const seen = new Set();
+  function hasParam(t) {
+    if (!t) return false;
+    if (t.kind === typeKinds.typeParam) return true;
+    if (t.kind === typeKinds.ref) return hasParam(t.inner);
+    if (t.kind === typeKinds.array) return hasParam(t.elem);
+    if (t.kind === typeKinds.struct) {
+      const key = (t.moduleId ? `${t.moduleId}__` : "") + t.name;
+      if (seen.has(key)) return false;
+      seen.add(key);
+      if (!t.fields) return false;
+      return t.fields.some((f) => hasParam(f.type));
+    }
+    return false;
+  }
+  return structType.fields.some((f) => hasParam(f.type));
+}
+
+function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = new Set(), programState = null) {
   const lines = [];
   const globals = [];
   const structDefs = [];
@@ -1616,10 +1796,12 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   let currentReturnType = null;
   let inMainFn = false;
 
-  // For now, emit struct defs using mangled names.
+  // For now, emit struct defs using mangled names. Phase 7.1: generic type
+  // decls (with typeParams) have no resolvedType — their instantiations are
+  // emitted in codegenProgram from the registry.
   for (const decl of ast.body) {
     const d = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
-    if (d.kind === ASTNodeKind.TYPE_DECL && d.resolvedType) {
+    if (d.kind === ASTNodeKind.TYPE_DECL && d.resolvedType && !d.genericDecl) {
       const mangled = llvmType(d.resolvedType);
       if (!emittedStructs.has(mangled)) {
         emittedStructs.add(mangled);
@@ -1692,13 +1874,14 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
   }
 
-  // Collect function sigs
+  // Collect function sigs. Phase 7.1: skip generic decls — their
+  // instantiations register their own sigs in the registry.
   for (const decl of ast.body) {
     const d =
       decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl :
       decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn :
       decl;
-    if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+    if (d.kind === ASTNodeKind.FUNCTION_DECL && !d.genericDecl) {
       const isTask = !!d.isTask;
       functionSigs.set(d.name, {
         params: (d.params ?? []).map((p) => p.resolvedType),
@@ -1720,29 +1903,50 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
   }
 
-  // Emit function and method bodies
+  // Emit function and method bodies. Phase 7.1: skip generic decls; their
+  // per-instantiation bodies are emitted from the registry below.
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
+      if (decl.genericDecl) continue;
       // "main" is the C entry point — never mangle it.
       const sym = decl.name === "main" ? "main" : mangle(moduleId, decl.name);
       emitFn(decl, sym);
       if (decl.isTask) emitTaskThunk(decl);
     } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.FUNCTION_DECL) {
+      if (decl.decl.genericDecl) continue;
       const sym = decl.decl.name === "main" ? "main" : mangle(moduleId, decl.decl.name);
       emitFn(decl.decl, sym);
       if (decl.decl.isTask) emitTaskThunk(decl.decl);
     } else if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) {
       emitFn(decl.fn, decl.fn.name); // unmangled
-    } else if (decl.kind === ASTNodeKind.TYPE_DECL && decl.methods?.length > 0) {
+    } else if (decl.kind === ASTNodeKind.TYPE_DECL && decl.methods?.length > 0 && !decl.genericDecl) {
       for (const method of decl.methods) {
-        emitMethodFn(method);
+        emitMethodFn(method, decl.resolvedType);
       }
-    } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0) {
+    } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0 && !decl.decl.genericDecl) {
       for (const method of decl.decl.methods) {
-        emitMethodFn(method);
+        emitMethodFn(method, decl.decl.resolvedType);
       }
     }
     // TRAIT_DECL: no codegen — traits are compile-time only
+  }
+
+  // Phase 7.1: emit one function per generic instantiation owned by this
+  // module (registry tracks each instance's source module).
+  if (programState?.registry) {
+    for (const [_declId, instances] of programState.registry.funcInstancesByDecl) {
+      for (const inst of instances) {
+        if (inst.moduleId !== moduleId) continue;
+        if (inst.emitted) continue;
+        // Phase 7.2: skip "open" instances where some argType is still a
+        // TypeParamType (came from a generic-calls-generic site). They only
+        // exist in the registry as caching artifacts — the concrete instances
+        // produced when the outer generic is monomorphized are what get IR.
+        if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
+        inst.emitted = true;
+        emitGenericFuncInstance(inst);
+      }
+    }
   }
 
   return { structDefs, globals, externs: new Set(lines.filter(l => l.startsWith("declare"))), lines: lines.filter(l => !l.startsWith("declare")) };
@@ -1794,6 +1998,26 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     return alignOf(llvmType(declType));
   }
 
+  // Phase 7.1: emit a single instantiation of a generic function. We clone
+  // the original AST body with type-params substituted, then run emitFn on
+  // the clone with the mangled symbol.
+  function emitGenericFuncInstance(inst) {
+    const decl = inst.ast;
+    const sub = new Map();
+    const inner = new Map();
+    for (let i = 0; i < inst.argTypes.length; i++) {
+      inner.set(decl.genericDecl.paramNames[i], inst.argTypes[i]);
+    }
+    sub.set(inst.declId, inner);
+    const cloned = cloneAstWithSubstitution(
+      decl,
+      sub,
+      programState?.registry ?? null,
+    );
+    const sym = mangle(moduleId, inst.mangledName);
+    emitFn(cloned, sym);
+  }
+
   function emitFn(node, symName) {
     tempCounter = 0;
     labelCounter = 0;
@@ -1830,7 +2054,16 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     inMainFn = prevInMain;
   }
 
-  function emitMethodFn(methodDecl) {
+  function emitMethodFn(methodDecl, structType) {
+    // Phase 7.4: one impl body can satisfy multiple traits — emit one define
+    // per trait, all sharing the same body.
+    const traits = methodDecl.implementsTraits ?? [];
+    for (const traitName of traits) {
+      emitMethodFnOnce(methodDecl, structType, traitName);
+    }
+  }
+
+  function emitMethodFnOnce(methodDecl, structType, traitName) {
     tempCounter = 0;
     labelCounter = 0;
     symbols = new Map();
@@ -1842,7 +2075,8 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     const llvmRet = llvmType(returnType);
 
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
-    const fnLines = [`define ${llvmRet} @${methodDecl.mangledSymbol}(${paramSig}) {`, "entry:"];
+    const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
+    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig}) {`, "entry:"];
 
     for (const p of params) {
       const ty = p.resolvedType;
@@ -1982,6 +2216,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   }
 
   function calleeSymbol(node) {
+    // Phase 7.1: generic-function call — use the instantiation's mangled name.
+    if (node.genericInstantiation) {
+      const inst = node.genericInstantiation;
+      return mangle(inst.moduleId, inst.mangledName);
+    }
     if (node.calleeModuleId) return mangle(node.calleeModuleId, node.calleeExportName);
     if (externFnNames.has(node.callee) || cExportNames.has(node.callee)) return node.callee;
     return mangle(moduleId, node.callee);
@@ -1995,7 +2234,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
       case ASTNodeKind.FLOAT_LITERAL: {
         const t = node.resolvedType.kind === typeKinds.untypedFloat ? PrimType("float64") : node.resolvedType;
-        return { val: llvmFloatConstant(node.value), yoopType: t };
+        return { val: llvmFloatConstant(node.value, t.name), yoopType: t };
       }
       case ASTNodeKind.STRING_LITERAL: {
         const { name, byteLen } = emitQuotedStringGlobal(node.value);
@@ -2046,6 +2285,24 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         const opType = isCmp ? l.yoopType : resultType;
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = ${binaryInstruction(node.op, opType)} ${llvmType(opType)} ${l.val}, ${r.val}`);
+        return { val: tmp, yoopType: resultType };
+      }
+      case ASTNodeKind.UNARY_EXPRESSION: {
+        const operand = emitExpr(node.operand, fnLines);
+        const resultType = node.resolvedType;
+        const llvmTy = llvmType(resultType);
+        const tmp = freshTemp();
+        if (node.op === "minus") {
+          if (resultType.kind === typeKinds.prim && (resultType.name === "float32" || resultType.name === "float64")) {
+            fnLines.push(`  ${tmp} = fneg ${llvmTy} ${operand.val}`);
+          } else {
+            fnLines.push(`  ${tmp} = sub ${llvmTy} 0, ${operand.val}`);
+          }
+        } else if (node.op === "not") {
+          fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, 1`);
+        } else {
+          throw new Error(`codegen: unhandled unary op "${node.op}"`);
+        }
         return { val: tmp, yoopType: resultType };
       }
       case ASTNodeKind.ASSIGNMENT: {
@@ -2247,7 +2504,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     // Trait method call: typechecker stamped the mangled symbol.
     if (node.calleeMethodOf) {
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
-      const methodSig = node.calleeMethodOf.methods.get(node.callee);
+      const methodSig = node.calleeMethodOf.methods.get(node.calleeMethodName);
       const argList = methodSig.params.map((p, i) => {
         const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
         return `${llvmTy} ${argResults[i].val}`;
@@ -2476,13 +2733,14 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     if (node.fieldName) {
       // Phase 6.4: propagated dispose. GEP into binding's struct field; the
       // trait method takes `ref self` so we pass the field pointer directly.
+      // Phase 7.4: mangled with the supplying trait name.
       const fieldStruct = node.fieldStructType;
-      const mangled = `${fieldStruct.moduleId}__${fieldStruct.name}__${node.methodName}`;
+      const mangled = mangleTraitMethod(fieldStruct, node.traitName, node.methodName);
       const fieldPtr = emitFieldGep(node, fnLines);
       fnLines.push(`  call void @${mangled}(ptr ${fieldPtr})`);
       return;
     }
-    const mangled = `${node.moduleId}__${node.structType.name}__${node.methodName}`;
+    const mangled = mangleTraitMethod(node.structType, node.traitName, node.methodName);
     fnLines.push(`  call void @${mangled}(ptr %${node.bindingName})`);
   }
 
@@ -2810,12 +3068,12 @@ function usesLegacyPrintf(ast) {
 
 export function compileEntry(entryAbsPath) {
   const { modules } = loadModuleGraph(entryAbsPath);
-  const { errors, moduleEnv } = typecheckProgram(modules);
+  const { errors, moduleEnv, programState } = typecheckProgram(modules);
   if (errors.length > 0) {
     throw new Error(
       `compileEntry: typecheck failed with ${errors.length} error(s):\n` +
         errors.map((e) => `  ${e.message}`).join("\n"),
     );
   }
-  return codegenProgram(modules, moduleEnv);
+  return codegenProgram(modules, moduleEnv, programState);
 }

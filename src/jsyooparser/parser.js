@@ -22,7 +22,8 @@ function isBinaryOp(tag) {
     tag === TokenTags.lte ||
     tag === TokenTags.gte ||
     tag === TokenTags.andand ||
-    tag === TokenTags.oror
+    tag === TokenTags.oror ||
+    tag === TokenTags.pipe
   );
 }
 
@@ -53,6 +54,7 @@ const Precedence = {
   [TokenTags.eq]: 10,
   [TokenTags.oror]: 20,
   [TokenTags.andand]: 30,
+  [TokenTags.pipe]: 35,
   [TokenTags.eqeq]: 40,
   [TokenTags.neq]: 40,
   [TokenTags.lt]: 40,
@@ -79,6 +81,12 @@ checking and code generation.
 export function parse(src) {
   let pos = 0;
   let current = null; // current token
+  // Phase 7.1: when a closing `>` is needed inside a type-application and the
+  // next token is `>>` (rshift), we consume the rshift and remember that one
+  // virtual `>` remains. The next call to `consumeClosingGt()` returns without
+  // advancing. The flag is only consulted by `consumeClosingGt`; other parser
+  // sites see the underlying token as usual.
+  let pendingGtFromRshift = false;
 
   // helper functions for token stream management
 
@@ -90,6 +98,15 @@ export function parse(src) {
   function advance() {
     const tok = current;
     const res = lexNext(src, pos);
+    if (res.err) {
+      // Surface lex errors as parse errors at the *actual* offending
+      // position. Without this, lexNext leaves nextPos=0 and the parser
+      // mistakes the error for an EOF token at line 1:1, masking the real
+      // problem. Find the bad char by skipping whitespace from `pos`.
+      let p = pos;
+      while (p < src.length && /\s/.test(src[p])) p++;
+      throw parseError(`lex: ${res.err}`, p, 1);
+    }
     pos = res.nextPos;
     current = res.token;
     return tok;
@@ -219,6 +236,36 @@ export function parse(src) {
     return new ASTNode(kind, posToSourceLocation(src, pos));
   }
 
+  // Phase 7.1: consume the closing `>` of a type application or type-param
+  // list, splitting a `>>` token in two if needed.
+  function consumeClosingGt() {
+    if (pendingGtFromRshift) {
+      pendingGtFromRshift = false;
+      return;
+    }
+    if (peek().tag === TokenTags.gt) {
+      advance();
+      return;
+    }
+    if (peek().tag === TokenTags.rshift) {
+      advance();
+      pendingGtFromRshift = true;
+      return;
+    }
+    throw parseError(
+      `expected '>', got ${inverseTokenTags[peek().tag]}`,
+      peek().start,
+      peek().length,
+    );
+  }
+
+  // Phase 7.1: peek at "the next closing-gt-equivalent". Returns true if the
+  // current token is `gt`, `rshift`, or a pending split-rshift gt.
+  function atClosingGt() {
+    if (pendingGtFromRshift) return true;
+    return peek().tag === TokenTags.gt || peek().tag === TokenTags.rshift;
+  }
+
   // load first token
   advance();
 
@@ -306,6 +353,7 @@ export function parse(src) {
   //   { kind: "typeName", name: "int32" }
   //   { kind: "refType", inner: <annot> }
   //   { kind: "arrayType", elem: <annot> }
+  //   { kind: "typeApplication", name: "Box", typeArgs: [<annot>...] }
   function parseTypeAnnotation() {
     // ref T
     if (peek().tag === TokenTags.ref) {
@@ -316,15 +364,39 @@ export function parse(src) {
     // base type name
     const nameTok = expect(TokenTags.ident);
     const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
-    let annot = { kind: "typeName", name };
-    // Phase 6.4: `Task<T>` — built-in generic. The compiler emits Task<T>
-    // internally from `task fn ...` declarations; this is the surface syntax
-    // used in struct fields and pooled-parameter annotations.
-    if (name === "Task" && peek().tag === TokenTags.lt) {
+    let annot;
+    // Phase 7.1: any identifier followed by `<` parses as a generic type
+    // application. The closing `>` may be the first half of a `>>` token —
+    // consumeClosingGt() handles the split.
+    if (peek().tag === TokenTags.lt) {
       advance(); // consume <
-      const inner = parseTypeAnnotation();
-      expect(TokenTags.gt);
-      annot = { kind: "taskType", inner };
+      const typeArgs = [];
+      if (atClosingGt()) {
+        throw parseError(
+          `empty type argument list <> in type annotation`,
+          peek().start,
+          peek().length,
+        );
+      }
+      while (true) {
+        typeArgs.push(parseTypeAnnotation());
+        if (peek().tag === TokenTags.comma) {
+          advance();
+          if (atClosingGt()) {
+            throw parseError(
+              `trailing comma in type argument list is not allowed`,
+              peek().start,
+              peek().length,
+            );
+          }
+          continue;
+        }
+        break;
+      }
+      consumeClosingGt();
+      annot = { kind: "typeApplication", name, typeArgs };
+    } else {
+      annot = { kind: "typeName", name };
     }
     // optional [] suffix for arrays — in type position, [ always means T[]
     if (peek().tag === TokenTags.lbracket) {
@@ -333,6 +405,80 @@ export function parse(src) {
       annot = { kind: "arrayType", elem: annot };
     }
     return annot;
+  }
+
+  // Phase 7.1: parse `<T, U, V>` after a decl name. Returns an array of
+  // TYPE_PARAM AST nodes (possibly empty if no `<` follows).
+  function parseTypeParamList() {
+    if (peek().tag !== TokenTags.lt) return [];
+    advance(); // consume <
+    const params = [];
+    if (atClosingGt()) {
+      throw parseError(
+        `empty type parameter list <> is not allowed`,
+        peek().start,
+        peek().length,
+      );
+    }
+    if (peek().tag === TokenTags.comma) {
+      throw parseError(
+        `leading comma in type parameter list`,
+        peek().start,
+        peek().length,
+      );
+    }
+    while (true) {
+      const nameTok = expect(TokenTags.ident);
+      const paramName = src.substring(
+        nameTok.start,
+        nameTok.start + nameTok.length,
+      );
+      const node = new ASTNode(
+        ASTNodeKind.TYPE_PARAM,
+        posToSourceLocation(src, nameTok.start),
+      );
+      node.name = paramName;
+      // Phase 7.2: optional `implements TraitAnnotation` bound on the param.
+      node.bound = null;
+      if (peek().tag === TokenTags.implements) {
+        const implTok = peek();
+        advance(); // consume `implements`
+        // Reject `<T implements >` and `<T implements ,>` early.
+        if (atClosingGt() || peek().tag === TokenTags.comma) {
+          throw parseError(
+            `expected trait name after 'implements' in type parameter bound`,
+            implTok.start,
+            implTok.length,
+          );
+        }
+        if (peek().tag === TokenTags.lparen) {
+          throw parseError(
+            `multiple trait bounds (e.g. <T implements (Foo, Bar)>) are not yet supported`,
+            peek().start,
+            peek().length,
+          );
+        }
+        const annot = parseTypeAnnotation();
+        if (annot.kind === "refType" || annot.kind === "arrayType") {
+          throw parseError(
+            `trait bound must be a trait name, not a ref/array type`,
+            nameTok.start,
+            nameTok.length,
+          );
+        }
+        node.bound = annot;
+      }
+      params.push(node);
+      if (peek().tag === TokenTags.comma) {
+        advance();
+        // allow trailing comma — break if we hit the closing gt now
+        if (atClosingGt()) break;
+        continue;
+      }
+      break;
+    }
+    consumeClosingGt();
+    return params;
   }
 
   function parseTopLevel() {
@@ -956,13 +1102,8 @@ export function parse(src) {
 
     node.name = parseIdentAsName();
 
-    if (peek().tag === TokenTags.lt) {
-      throw parseError(
-        "trait generics are not supported in v0",
-        peek().start,
-        peek().length,
-      );
-    }
+    // Phase 7.1: optional type parameter list — `trait Iter<T> { ... }`.
+    node.typeParams = parseTypeParamList();
 
     if (peek().tag === TokenTags.extends) {
       throw parseError(
@@ -1657,6 +1798,8 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.FUNCTION_DECL);
     node.isTask = false;
     node.name = parseIdentAsName();
+    // Phase 7.1: optional type parameter list — `function map<T, U>(...)`.
+    node.typeParams = parseTypeParamList();
     expect(TokenTags.lparen);
     node.params = [];
     // params can start with: ident (name/kind-prefix), ref (modifier), comma
@@ -1681,11 +1824,44 @@ export function parse(src) {
     return node;
   }
 
+  // Phase 7.1: parse a single trait reference inside an `implements ...` clause.
+  // Accepts either `TraitName` or `TraitName<T1, T2, ...>`.
+  function parseImplementsClauseRef() {
+    const nameTok = expect(TokenTags.ident);
+    const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    const sourceLoc = posToSourceLocation(src, nameTok.start);
+    let typeArgs = null;
+    if (peek().tag === TokenTags.lt) {
+      advance();
+      typeArgs = [];
+      if (atClosingGt()) {
+        throw parseError(
+          `empty type argument list <> in implements clause`,
+          peek().start,
+          peek().length,
+        );
+      }
+      while (true) {
+        typeArgs.push(parseTypeAnnotation());
+        if (peek().tag === TokenTags.comma) {
+          advance();
+          if (atClosingGt()) break;
+          continue;
+        }
+        break;
+      }
+      consumeClosingGt();
+    }
+    return { name, typeArgs, sourceLoc };
+  }
+
   function parseTypeDecl() {
     expect(TokenTags.type);
     const node = buildSourcedNode(ASTNodeKind.TYPE_DECL);
     // name
     node.name = parseIdentAsName();
+    // Phase 7.1: optional type parameter list — `type Box<T> { ... }`.
+    node.typeParams = parseTypeParamList();
 
     // Phase 6.5: optional single kind prefix on the type declaration,
     // e.g. `type Vec4 aligned(32) implements Disposable { ... }`.
@@ -1714,20 +1890,23 @@ export function parse(src) {
       }
     }
 
+    // Phase 7.1: implements clause now accepts generic trait applications, e.g.
+    // `implements Container<int32>`. Each entry is a record { name, typeArgs }
+    // where typeArgs is null for non-generic trait references (backward-compatible).
     node.implements = [];
     if (peek().tag === TokenTags.implements) {
       advance();
       if (peek().tag === TokenTags.lparen) {
         advance();
         while (peek().tag === TokenTags.ident) {
-          node.implements.push(parseIdentAsName());
+          node.implements.push(parseImplementsClauseRef());
           if (peek().tag === TokenTags.comma) {
             advance();
           }
         }
         expect(TokenTags.rparen);
       } else {
-        node.implements.push(parseIdentAsName());
+        node.implements.push(parseImplementsClauseRef());
       }
     }
 
@@ -1873,6 +2052,13 @@ export function parse(src) {
     // type
     expect(TokenTags.colon);
     node.typeAnnotation = parseTypeAnnotation();
+    // Canonicalize `name: ref T` to `ref name: T` so downstream sees a single
+    // form for ref params (common in extern blocks where `ref` reads more
+    // naturally next to the type than next to the name).
+    if (!node.isRef && node.typeAnnotation?.kind === "refType") {
+      node.isRef = true;
+      node.typeAnnotation = node.typeAnnotation.inner;
+    }
     return node;
   }
 

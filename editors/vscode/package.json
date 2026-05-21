@@ -1,0 +1,35 @@
+{
+  "name": "yoop-lang",
+  "displayName": "Yooperlang",
+  "description": "Syntax highlighting for Yooperlang (.yoop) files.",
+  "version": "0.0.1",
+  "publisher": "yoop-lang",
+  "engines": {
+    "vscode": "^1.75.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "contributes": {
+    "languages": [
+      {
+        "id": "yoop",
+        "aliases": [
+          "Yooperlang",
+          "yoop"
+        ],
+        "extensions": [
+          ".yoop"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "yoop",
+        "scopeName": "source.yoop",
+        "path": "./syntaxes/yoop.tmLanguage.json"
+      }
+    ]
+  }
+}

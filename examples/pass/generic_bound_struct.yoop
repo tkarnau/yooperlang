@@ -1,0 +1,27 @@
+trait Display {
+    function show(ref self): string;
+}
+
+type Tag implements Display {
+    label: string,
+    function show(ref self): string {
+        return self.label;
+    }
+}
+
+// Bounded type param on a generic struct.
+type Holder<T implements Display> {
+    inner: T,
+}
+
+function describe<T implements Display>(ref x: T): void {
+    let s: string = Display.show(ref x);
+    printf(`${s}\n`);
+}
+
+function main(): int32 {
+    let t: Tag = { label: "tag" };
+    let h: Holder<Tag> = { inner: t };
+    describe(ref h.inner);
+    return 0;
+}

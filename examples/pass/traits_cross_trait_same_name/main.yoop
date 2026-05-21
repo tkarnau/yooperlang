@@ -1,0 +1,27 @@
+extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+
+trait Greeter {
+    function greet(ref self): void;
+}
+
+trait Farewell {
+    function greet(ref self): void;
+}
+
+// Phase 7.4: a single impl body can satisfy two traits that require the
+// same method name. Each call site qualifies through the trait, so codegen
+// emits a separate LLVM symbol per (trait, method) — both pointing at the
+// same body — without ambiguity.
+type Bot implements (Greeter, Farewell) {
+    n: int32,
+    function greet(ref self): void {
+        printf(`bot=${self.n}\n`);
+    }
+}
+
+function main(): int32 {
+    let b: Bot = { n: 7 };
+    Greeter.greet(ref b);
+    Farewell.greet(ref b);
+    return 0;
+}

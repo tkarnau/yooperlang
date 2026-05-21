@@ -1,0 +1,39 @@
+trait Display {
+    function show(ref self): string;
+}
+
+type IntBox implements Display {
+    n: int32,
+    function show(ref self): string {
+        return "IntBox";
+    }
+}
+
+type Named implements Display {
+    name: string,
+    function show(ref self): string {
+        return self.name;
+    }
+}
+
+// Single-bound generic function. Calls show() on T via the bound.
+function describe<T implements Display>(ref x: T): void {
+    let s: string = Display.show(ref x);
+    printf(`${s}\n`);
+}
+
+// Bounded type param flowing through a generic — exercises the
+// TypeParamType-as-arg case in checkBoundSatisfied.
+function describe_twice<T implements Display>(ref x: T): void {
+    describe(ref x);
+    describe(ref x);
+}
+
+function main(): int32 {
+    let a: IntBox = { n: 1 };
+    let b: Named = { name: "named" };
+    describe(ref a);            // T = IntBox
+    describe(ref b);            // T = Named
+    describe_twice(ref a);      // generic-calls-generic
+    return 0;
+}

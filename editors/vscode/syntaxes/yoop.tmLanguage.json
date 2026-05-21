@@ -1,0 +1,228 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Yooperlang",
+  "scopeName": "source.yoop",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#strings" },
+    { "include": "#numbers" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#functions" },
+    { "include": "#operators" },
+    { "include": "#punctuation" },
+    { "include": "#identifiers" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        {
+          "name": "comment.line.double-slash.yoop",
+          "match": "//.*$"
+        },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.yoop",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
+    },
+    "strings": {
+      "patterns": [
+        { "include": "#string-double" },
+        { "include": "#string-single" },
+        { "include": "#string-template" }
+      ]
+    },
+    "string-double": {
+      "name": "string.quoted.double.yoop",
+      "begin": "\"",
+      "end": "\"",
+      "patterns": [{ "include": "#string-escape" }]
+    },
+    "string-single": {
+      "name": "string.quoted.single.yoop",
+      "begin": "'",
+      "end": "'",
+      "patterns": [{ "include": "#string-escape" }]
+    },
+    "string-template": {
+      "name": "string.template.yoop",
+      "begin": "`",
+      "end": "`",
+      "patterns": [
+        { "include": "#string-escape" },
+        { "include": "#template-interpolation" }
+      ]
+    },
+    "template-interpolation": {
+      "name": "meta.embedded.expression.yoop",
+      "begin": "\\$\\{",
+      "end": "\\}",
+      "beginCaptures": {
+        "0": { "name": "punctuation.section.embedded.begin.yoop" }
+      },
+      "endCaptures": {
+        "0": { "name": "punctuation.section.embedded.end.yoop" }
+      },
+      "patterns": [
+        {
+          "begin": "\\{",
+          "end": "\\}",
+          "patterns": [{ "include": "$self" }]
+        },
+        { "include": "$self" }
+      ]
+    },
+    "string-escape": {
+      "name": "constant.character.escape.yoop",
+      "match": "\\\\(x[0-9A-Fa-f]{2}|.)"
+    },
+    "numbers": {
+      "patterns": [
+        {
+          "name": "constant.numeric.hex.yoop",
+          "match": "\\b0x[0-9A-Fa-f][0-9A-Fa-f_]*\\b"
+        },
+        {
+          "name": "constant.numeric.binary.yoop",
+          "match": "\\b0b[01][01_]*\\b"
+        },
+        {
+          "name": "constant.numeric.octal.yoop",
+          "match": "\\b0o[0-7][0-7_]*\\b"
+        },
+        {
+          "name": "constant.numeric.float.yoop",
+          "match": "\\b[0-9][0-9_]*\\.[0-9][0-9_]*([eE][+-]?[0-9][0-9_]*)?\\b"
+        },
+        {
+          "name": "constant.numeric.float.yoop",
+          "match": "\\b[0-9][0-9_]*[eE][+-]?[0-9][0-9_]*\\b"
+        },
+        {
+          "name": "constant.numeric.integer.yoop",
+          "match": "\\b[0-9][0-9_]*\\b"
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.yoop",
+          "match": "\\b(if|else|while|for|break|continue|return)\\b"
+        },
+        {
+          "name": "keyword.declaration.yoop",
+          "match": "\\b(let|const|function|type|trait|kind|library)\\b"
+        },
+        {
+          "name": "keyword.modifier.yoop",
+          "match": "\\b(implements|extends|extern|export|import|from|as|ref)\\b"
+        },
+        {
+          "name": "keyword.other.kindclause.yoop",
+          "match": "\\b(appliesTo|requires|mustCall|ownsBlock|beforeScopeEnd|binding|mustNotEscape|mustNotShare|forbids|scope|acrossScopes|parameter|field|io|globalState|propagates|contains|layout|align)\\b"
+        },
+        {
+          "name": "keyword.other.concurrency.yoop",
+          "match": "\\b(task|wait|joined|pooled)\\b"
+        },
+        {
+          "name": "invalid.deprecated.reserved.yoop",
+          "match": "\\b(provides|restricts|autoJoin)\\b"
+        },
+        {
+          "name": "constant.language.boolean.yoop",
+          "match": "\\b(true|false)\\b"
+        },
+        {
+          "name": "variable.language.self.yoop",
+          "match": "\\bself\\b"
+        },
+        {
+          "name": "constant.language.discard.yoop",
+          "match": "\\b_\\b"
+        }
+      ]
+    },
+    "types": {
+      "patterns": [
+        {
+          "name": "support.type.primitive.yoop",
+          "match": "\\b(int8|int16|int32|int64|uint8|uint16|uint32|uint64|float32|float64|usize|isize|int|float|bool|char|string|void)\\b"
+        },
+        {
+          "name": "entity.name.type.yoop",
+          "match": "\\b[A-Z][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    },
+    "functions": {
+      "patterns": [
+        {
+          "match": "\\b(function)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.yoop" },
+            "2": { "name": "entity.name.function.yoop" }
+          }
+        },
+        {
+          "name": "entity.name.function.yoop",
+          "match": "\\b[a-z_][a-zA-Z0-9_]*(?=\\s*\\()"
+        }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        {
+          "name": "keyword.operator.spread.yoop",
+          "match": "\\.\\.\\."
+        },
+        {
+          "name": "keyword.operator.comparison.yoop",
+          "match": "==|!=|<=|>=|<(?!<)|>(?!>)"
+        },
+        {
+          "name": "keyword.operator.logical.yoop",
+          "match": "&&|\\|\\|"
+        },
+        {
+          "name": "keyword.operator.bitwise.yoop",
+          "match": "<<|>>|&"
+        },
+        {
+          "name": "keyword.operator.assignment.yoop",
+          "match": "="
+        },
+        {
+          "name": "keyword.operator.arithmetic.yoop",
+          "match": "[+\\-*/%]"
+        },
+        {
+          "name": "keyword.operator.fallible.yoop",
+          "match": "\\?"
+        }
+      ]
+    },
+    "punctuation": {
+      "patterns": [
+        { "name": "punctuation.terminator.yoop", "match": ";" },
+        { "name": "punctuation.separator.yoop", "match": "[,:.]" },
+        { "name": "punctuation.section.parens.yoop", "match": "[()]" },
+        { "name": "punctuation.section.brackets.yoop", "match": "[\\[\\]]" },
+        { "name": "punctuation.section.braces.yoop", "match": "[{}]" }
+      ]
+    },
+    "identifiers": {
+      "patterns": [
+        {
+          "name": "variable.other.yoop",
+          "match": "\\b[a-zA-Z_][a-zA-Z0-9_]*\\b"
+        }
+      ]
+    }
+  }
+}

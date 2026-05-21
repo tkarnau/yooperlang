@@ -21,7 +21,7 @@ type Socket implements Disposable {
 function main(): int32 {
     let h: FileHandle = { fd: 1 };
     let s: Socket = { sock: 99 };
-    dispose(ref h);
-    dispose(ref s);
+    Disposable.dispose(ref h);
+    Disposable.dispose(ref s);
     return 0;
 }

@@ -73,6 +73,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     const node = new ASTNode(ASTNodeKind.CLEANUP_CALL, o.sourceLoc);
     node.bindingName = o.bindingName;
     node.methodName = o.methodName;
+    node.traitName = o.traitName ?? null;
     node.structType = o.structType;
     node.moduleId = o.moduleId;
     node.fieldName = o.fieldName ?? null;
@@ -112,6 +113,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
             type: "mustCall",
             bindingName: stmt.name,
             methodName: mc.methodName,
+            // Phase 7.4: cleanup-call mangling is trait-qualified — the
+            // trait that supplied `mustCall` is statically known via the
+            // kind's `requires` clause.
+            traitName: mc.traitType?.name,
             structType: declaredType,
             moduleId: declaredType.moduleId,
             sourceLoc: stmt.sourceLoc,
@@ -146,6 +151,8 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
               bindingName: stmt.name,
               fieldName: f.name,
               methodName: mc.methodName,
+              // Phase 7.4: trait that supplies the cleanup method.
+              traitName: mc.traitType?.name,
               structType: rt,           // enclosing struct (for GEP layout)
               fieldStructType: f.type,  // the trait-implementing struct
               moduleId: f.type?.moduleId,
