@@ -114,6 +114,18 @@ function channel(hue: float32, phase_offset: float32): uint8 {
     return uint8(int32(v * 255.0));
 }
 
+type Channels {
+    // little endian
+    a: uint8,
+    b: uint8,
+    g: uint8,
+    r: uint8,
+}
+
+union Color {
+    rgba: uint32,
+    channels: Channels,
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -127,6 +139,13 @@ function main(): int32 {
     const DURATION_MS: uint32 = 8000;
 
     const SDL_SCANCODE_ESCAPE: int32 = 41;
+    const SDL_SCANCODE_W: int32 = 26;
+    const SDL_SCANCODE_A: int32 = 4;
+    const SDL_SCANCODE_S: int32 = 22;
+    const SDL_SCANCODE_D: int32 = 7;
+
+    const PLAYER_SIZE: float32 = 24.0;
+    const PLAYER_SPEED: float32 = 0.3;
 
     // SDL_Init flags
     const SDL_INIT_VIDEO: uint32 = 0x00000020;
@@ -168,6 +187,10 @@ function main(): int32 {
         let b2: Ball = { x: 400.0, y: 400.0, vx: -0.19, vy:  0.25, radius: 36.0, hue: 2.094 };
         let b3: Ball = { x: 620.0, y: 250.0, vx:  0.15, vy: -0.21, radius: 50.0, hue: 4.189 };
 
+        // WASD-controlled player square. Position is the top-left corner.
+        let player_x: float32 = float32(WIN_W) * 0.5 - PLAYER_SIZE * 0.5;
+        let player_y: float32 = float32(WIN_H) * 0.5 - PLAYER_SIZE * 0.5;
+
         const start: uint32 = SDL_GetTicks();
 
         while (SDL_GetTicks() > 0/*  - start < DURATION_MS */) {
@@ -190,8 +213,20 @@ function main(): int32 {
             Steppable.step(ref b2, dt, float32(WIN_W), float32(WIN_H));
             Steppable.step(ref b3, dt, float32(WIN_W), float32(WIN_H));
 
+            // WASD movement, then clamp to window.
+            const move: float32 = PLAYER_SPEED * dt;
+            if (keyboardState[SDL_SCANCODE_W] != 0) { player_y = player_y - move; }
+            if (keyboardState[SDL_SCANCODE_S] != 0) { player_y = player_y + move; }
+            if (keyboardState[SDL_SCANCODE_A] != 0) { player_x = player_x - move; }
+            if (keyboardState[SDL_SCANCODE_D] != 0) { player_x = player_x + move; }
+            if (player_x < 0.0) { player_x = 0.0; }
+            if (player_y < 0.0) { player_y = 0.0; }
+            if (player_x + PLAYER_SIZE > float32(WIN_W)) { player_x = float32(WIN_W) - PLAYER_SIZE; }
+            if (player_y + PLAYER_SIZE > float32(WIN_H)) { player_y = float32(WIN_H) - PLAYER_SIZE; }
+
             // Clear to near-black background.
-            SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(15), uint8(20), uint8(255));
+            const bg: Color = { rgba: 0x770F1455 };
+            SDL_SetRenderDrawColor(ren.handle, bg.channels.r, bg.channels.g, bg.channels.b, bg.channels.a);
             SDL_RenderClear(ren.handle);
 
             // Draw ball 1 -- colour based on its hue.
@@ -237,6 +272,17 @@ function main(): int32 {
                 const half3: int32 = int32(sqrt(float64(b3.radius * b3.radius) - float64(float32(row3) * float32(row3))));
                 SDL_RenderDrawLine(ren.handle, int32(b3.x) - half3, int32(b3.y) + row3, int32(b3.x) + half3, int32(b3.y) + row3);
                 row3 = row3 + 1;
+            }
+
+            // Player square -- scanline fill in solid white.
+            SDL_SetRenderDrawColor(ren.handle, uint8(255), uint8(255), uint8(255), uint8(255));
+            const px: int32 = int32(player_x);
+            const py: int32 = int32(player_y);
+            const psize: int32 = int32(PLAYER_SIZE);
+            let prow: int32 = 0;
+            while (prow < psize) {
+                SDL_RenderDrawLine(ren.handle, px, py + prow, px + psize, py + prow);
+                prow = prow + 1;
             }
 
             SDL_RenderPresent(ren.handle);

@@ -223,6 +223,43 @@ function encodeStringBytes(inner) {
   return { llvmStr: bytes, byteLen };
 }
 
+// LLVM gotcha: only allocas in a function's entry block are "static" and
+// released as part of the prologue/epilogue. An alloca emitted in any other
+// block becomes a *dynamic* alloca — it adjusts the stack pointer at runtime
+// and that adjustment isn't undone until the whole function returns. So an
+// alloca inside a loop body leaks stack on every iteration. For long-running
+// main loops (e.g. an SDL render loop) this eventually overflows the stack.
+//
+// Every Yoop alloca has a compile-time-constant size and depends on no prior
+// SSA value, so unconditionally moving them into the entry block is safe and
+// matches the canonical LLVM idiom.
+function hoistAllocasToEntry(fnLines) {
+  // fnLines[0] is `define ... {`, fnLines[1] is `entry:`. Find the entry
+  // block's terminator (the first br/ret/unreachable/switch/invoke after the
+  // entry label) and lift any alloca that appears past it into a position
+  // right before that terminator. Inserting before the label of the next
+  // block instead would land *between* the terminator and that label — which
+  // is invalid IR.
+  const terminatorRe = /^\s+(br|ret|unreachable|switch|resume|invoke)\b/;
+  let entryTerm = -1;
+  for (let i = 2; i < fnLines.length; i++) {
+    if (terminatorRe.test(fnLines[i])) { entryTerm = i; break; }
+  }
+  if (entryTerm === -1) return;
+
+  const allocaRe = /^\s+%\S+\s*=\s*alloca\b/;
+  const hoisted = [];
+  for (let i = fnLines.length - 1; i > entryTerm; i--) {
+    if (allocaRe.test(fnLines[i])) {
+      hoisted.push(fnLines[i]);
+      fnLines.splice(i, 1);
+    }
+  }
+  if (hoisted.length === 0) return;
+  hoisted.reverse();
+  fnLines.splice(entryTerm, 0, ...hoisted);
+}
+
 export function codegen(ast) {
   const lines = [];
   const globals = [];
@@ -1256,6 +1293,7 @@ export function codegen(ast) {
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
   }
 
@@ -1307,6 +1345,7 @@ export function codegen(ast) {
     }
 
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
     inMainFn = prevInMain;
   }
@@ -2228,6 +2267,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
     }
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
     inMainFn = prevInMain;
   }
@@ -2279,6 +2319,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
   }
 
@@ -2325,6 +2366,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     fnLines.push("  call void @yoop_handle_signal_done(ptr %ts)");
     fnLines.push("  ret void");
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
   }
 
