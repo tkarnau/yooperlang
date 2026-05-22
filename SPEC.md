@@ -912,12 +912,46 @@ C interop sometimes needs raw, nullable, arithmetic-capable pointers. Only avail
 when a file opts in at the top:
 
 ```js
-import.unsafe;                             // enables the unsafe_ptr kind
+import.unsafe;                             // enables unsafe_ptr<T>
 
-let unsafe_ptr p: ref int32;
+let p: unsafe_ptr<int32> = null;
+let q: unsafe_ptr<int32> = &x;             // address-of an lvalue
+let v: int32 = *p;                          // deref read
+*p = 42;                                    // deref write
+let r: unsafe_ptr<int32> = p + 1;          // strides by sizeof(int32)
+let n: int64 = q - p;                       // element count (matching pointees)
+let b: bool = (p == null);
 ```
 
-Without `import.unsafe;`, the `unsafe_ptr` kind is not in scope.
+`unsafe_ptr<T>` is a distinct type, not a kind on `ref T`. Operators:
+
+| Form | Result | Notes |
+| --- | --- | --- |
+| `&lvalue` | `unsafe_ptr<T>` | Prefix `&`; lvalue-only. |
+| `*p` | `T` | Prefix `*`; load through the pointer. Reading through `null` is UB. |
+| `*p = v` | — | Assignment LHS form; `v` must be assignable to `T`. |
+| `p + n`, `p - n` | `unsafe_ptr<T>` | `n` is any integer; stride is `sizeof(T)`. |
+| `p - q` | `int64` | Element count; both sides must share pointee type. |
+| `p[i]` | `T` (lvalue) | Sugar for `*(p + i)`. |
+| `p == q`, `p != q` | `bool` | Pointees must match, or one side is `null`. |
+
+Casts are explicit and spelled as intrinsics:
+
+```js
+let bp: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(p);
+let n: uintptr = unsafe_ptr.toInt(p);
+let p2: unsafe_ptr<int32> = unsafe_ptr.fromInt<int32>(n);
+```
+
+`uintptr` is a built-in integer type with the platform pointer width. `null` is a
+literal whose type is pinned by context (assignment target, return type, call
+arg, or the other side of an equality compare) — a bare `null` in an
+unconstrained position is a typecheck error.
+
+Without `import.unsafe;`, `unsafe_ptr<T>` is not in scope and any mention of it
+is a typecheck error. Pointers do not participate in kind containment: a struct
+holding `unsafe_ptr<T>` does not inherit kind obligations from `T`. `unsafe_ptr`
+is also rejected inside `pure` functions.
 
 ---
 
@@ -946,13 +980,14 @@ from            function         if               implements
 import          in               int8             int16
 int32           int64            isize            joined
 kind            layout           let              mustCall
-mustNotEscape   mustNotShare     pooled           propagates
-provides        pure             ref              requires
-restricts       return           scoped           string
-task            Task             trait            true
-type            uint8            uint16           uint32
-uint64          unsafe_ptr       usize            void
-wait            while            int              float
+mustNotEscape   mustNotShare     null             pooled
+propagates      provides         pure             ref
+requires        restricts        return           scoped
+string          task             Task             trait
+true            type             uint8            uint16
+uint32          uint64           uintptr          unsafe_ptr
+usize           void             wait             while
+int             float
 ```
 
 int is 32 bit signed int

@@ -22,6 +22,7 @@ import {
   StructType,
   TaskType,
   TraitType,
+  UnsafePtrType,
   primTypeFromName,
   substituteTypeParams,
   typeKinds,
@@ -323,6 +324,10 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
     }
+    // Phase 8.A: built-in unsafe_ptr<T>.
+    if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
+      return UnsafePtrType(argTypes[0]);
+    }
     if (!typeContext.registry) return null;
     const env = typeContext.moduleEnv.get(typeContext.currentModId);
     const localStruct = env.genericStructTable?.get(annot.name);
@@ -396,6 +401,10 @@ function resolveAnnotSingle(annot, typeContext, extraScope) {
     }
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
+    }
+    // Phase 8.A: built-in unsafe_ptr<T>.
+    if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
+      return UnsafePtrType(argTypes[0]);
     }
     return null;
   }

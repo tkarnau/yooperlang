@@ -33,6 +33,7 @@ const LLVM_TYPES = {
   uint64: "i64",
   usize: "i64",
   isize: "i64",
+  uintptr: "i64",
   float: "float",
   float32: "float",
   float64: "double",
@@ -89,6 +90,11 @@ export function llvmType(yoopType) {
     case typeKinds.union: {
       const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
       return `%union.${id}`;
+    }
+    case typeKinds.unsafePtr: {
+      // Phase 8.A: LLVM opaque pointers. The pointee type is tracked in the
+      // yoop type but never appears in the LLVM type signature.
+      return "ptr";
     }
     default: {
       throw new Error(`llvmType: unhandled yooper type kind "${yoopType.kind}"`);
@@ -541,6 +547,85 @@ export function codegen(ast) {
   // Names of extern functions in the current module — not mangled.
   let currentExternNames = new Set();
 
+  // Phase 8.A: pointer-arithmetic / pointer-comparison emitter. Called by
+  // BINARY_EXPRESSION when at least one operand is an unsafe_ptr<T> or null.
+  function emitPointerBinary(node, fnLines) {
+    const op = node.op;
+    if (op === "eqeq" || op === "neq") {
+      const l = emitExpr(node.left, fnLines);
+      const r = emitExpr(node.right, fnLines);
+      const cond = op === "eqeq" ? "eq" : "ne";
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = icmp ${cond} ptr ${l.val}, ${r.val}`);
+      return { val: tmp, yoopType: PrimType("bool") };
+    }
+    if (op === "plus" || op === "minus") {
+      const leftIsPtr =
+        node.left.resolvedType?.kind === typeKinds.unsafePtr;
+      const rightIsPtr =
+        node.right.resolvedType?.kind === typeKinds.unsafePtr;
+      // ptr - ptr: ptrtoint both, sub, sdiv by sizeof(pointee).
+      if (leftIsPtr && rightIsPtr && op === "minus") {
+        const l = emitExpr(node.left, fnLines);
+        const r = emitExpr(node.right, fnLines);
+        const li = freshTemp();
+        const ri = freshTemp();
+        fnLines.push(`  ${li} = ptrtoint ptr ${l.val} to i64`);
+        fnLines.push(`  ${ri} = ptrtoint ptr ${r.val} to i64`);
+        const diff = freshTemp();
+        fnLines.push(`  ${diff} = sub i64 ${li}, ${ri}`);
+        const pointee = node.left.resolvedType.pointee;
+        const elemLlvmTy = llvmType(pointee);
+        const sizeofTmp = freshTemp();
+        // `getelementptr <T>, ptr null, i32 1` gives sizeof(T) — standard trick.
+        fnLines.push(
+          `  ${sizeofTmp} = getelementptr ${elemLlvmTy}, ptr null, i32 1`,
+        );
+        const sizeInt = freshTemp();
+        fnLines.push(`  ${sizeInt} = ptrtoint ptr ${sizeofTmp} to i64`);
+        const out = freshTemp();
+        fnLines.push(`  ${out} = sdiv i64 ${diff}, ${sizeInt}`);
+        return { val: out, yoopType: PrimType("int64") };
+      }
+      // ptr +/- int (or int + ptr): emit GEP.
+      const ptrSide = leftIsPtr ? node.left : node.right;
+      const intSide = leftIsPtr ? node.right : node.left;
+      const ptrVal = emitExpr(ptrSide, fnLines);
+      const intVal = emitExpr(intSide, fnLines);
+      const pointee = ptrSide.resolvedType.pointee;
+      const elemLlvmTy = llvmType(pointee);
+      // For `p - n`, negate the offset.
+      let offsetVal = intVal.val;
+      let offsetLlvmTy = llvmType(intVal.yoopType);
+      if (
+        intVal.yoopType.kind === typeKinds.untypedInt ||
+        (intVal.yoopType.kind === typeKinds.prim &&
+          intVal.yoopType.name !== "int64")
+      ) {
+        // Widen non-int64 offsets to i64 for GEP. Sign-extend for signed
+        // ints, zero-extend for unsigned — defer that nuance, sext is fine
+        // for the integer ranges typical of FFI offsets.
+        if (offsetLlvmTy !== "i64") {
+          const widened = freshTemp();
+          fnLines.push(`  ${widened} = sext ${offsetLlvmTy} ${offsetVal} to i64`);
+          offsetVal = widened;
+          offsetLlvmTy = "i64";
+        }
+      }
+      if (op === "minus") {
+        const neg = freshTemp();
+        fnLines.push(`  ${neg} = sub i64 0, ${offsetVal}`);
+        offsetVal = neg;
+      }
+      const out = freshTemp();
+      fnLines.push(
+        `  ${out} = getelementptr ${elemLlvmTy}, ptr ${ptrVal.val}, i64 ${offsetVal}`,
+      );
+      return { val: out, yoopType: ptrSide.resolvedType };
+    }
+    throw new Error(`codegen: unsupported pointer binary op "${op}"`);
+  }
+
   // ** expression codegen ************************************************
   // each emitExpr returns { val, yoopType } where val is an SSA name or
   // an integer literal, and yoopType is the canonical yooper type.
@@ -615,6 +700,17 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // Phase 8.A: pointer arithmetic and pointer/null comparisons branch
+        // off the integer/float path. Detect via operand resolvedType.
+        const leftTy = node.left.resolvedType;
+        const rightTy = node.right.resolvedType;
+        const leftIsPtr = leftTy?.kind === typeKinds.unsafePtr;
+        const rightIsPtr = rightTy?.kind === typeKinds.unsafePtr;
+        const leftIsNull = leftTy?.kind === typeKinds.untypedNull;
+        const rightIsNull = rightTy?.kind === typeKinds.untypedNull;
+        if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
+          return emitPointerBinary(node, fnLines);
+        }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const resultType = node.resolvedType;
@@ -626,6 +722,49 @@ export function codegen(ast) {
         const instr = binaryInstruction(node.op, opType);
         fnLines.push(`  ${tmp} = ${instr} ${llvmTy} ${l.val}, ${r.val}`);
         return { val: tmp, yoopType: resultType };
+      }
+
+      case ASTNodeKind.NULL_LITERAL: {
+        // Phase 8.A: pinned to UnsafePtrType by the typechecker via
+        // resolvedType. The LLVM constant for any pointer null is `null`.
+        return { val: "null", yoopType: node.resolvedType };
+      }
+
+      case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
+        // Phase 8.A: lvalue-only operand; reuse emitLvalue to materialize
+        // the address. The yoop result type is unsafe_ptr<T>.
+        const lv = emitLvalue(node.operand, fnLines);
+        return { val: lv.ptr, yoopType: node.resolvedType };
+      }
+
+      case ASTNodeKind.DEREF_EXPRESSION: {
+        // Phase 8.A: rvalue load through an unsafe_ptr<T>.
+        const p = emitExpr(node.operand, fnLines);
+        const pointee = node.resolvedType;
+        const llvmTy = llvmType(pointee);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${p.val}`);
+        return { val: tmp, yoopType: pointee };
+      }
+
+      case ASTNodeKind.UNSAFE_PTR_CAST: {
+        // Phase 8.A: bitcast / ptrtoint / inttoptr.
+        const operand = emitExpr(node.operand, fnLines);
+        if (node.castKind === "bitcast") {
+          return { val: operand.val, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toInt") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = ptrtoint ptr ${operand.val} to i64`);
+          return { val: tmp, yoopType: PrimType("uintptr") };
+        }
+        if (node.castKind === "fromInt") {
+          const tmp = freshTemp();
+          const srcLlvmTy = llvmType(operand.yoopType);
+          fnLines.push(`  ${tmp} = inttoptr ${srcLlvmTy} ${operand.val} to ptr`);
+          return { val: tmp, yoopType: node.resolvedType };
+        }
+        throw new Error(`codegen: unknown unsafe_ptr cast kind "${node.castKind}"`);
       }
 
       case ASTNodeKind.UNARY_EXPRESSION: {
@@ -692,6 +831,16 @@ export function codegen(ast) {
           const lv = emitLvalue(node.target, fnLines);
           const rhs = emitExpr(node.value, fnLines);
           fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
+          return rhs;
+        }
+        if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+          // Phase 8.A: `*p = v` — store through an unsafe_ptr<T>.
+          const ptrExpr = emitExpr(node.target.operand, fnLines);
+          const rhs = emitExpr(node.value, fnLines);
+          const pointee = node.target.resolvedType;
+          fnLines.push(
+            `  store ${llvmType(pointee)} ${rhs.val}, ptr ${ptrExpr.val}`,
+          );
           return rhs;
         }
         throw new Error(
@@ -2644,6 +2793,67 @@ function codegenWithModuleId(
     return mangle(moduleId, node.callee);
   }
 
+  // Phase 8.A: multi-module pointer-arithmetic / comparison emitter.
+  function emitPointerBinaryMM(node, fnLines) {
+    const op = node.op;
+    if (op === "eqeq" || op === "neq") {
+      const l = emitExpr(node.left, fnLines);
+      const r = emitExpr(node.right, fnLines);
+      const cond = op === "eqeq" ? "eq" : "ne";
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = icmp ${cond} ptr ${l.val}, ${r.val}`);
+      return { val: tmp, yoopType: PrimType("bool") };
+    }
+    if (op === "plus" || op === "minus") {
+      const leftIsPtr =
+        node.left.resolvedType?.kind === typeKinds.unsafePtr;
+      const rightIsPtr =
+        node.right.resolvedType?.kind === typeKinds.unsafePtr;
+      if (leftIsPtr && rightIsPtr && op === "minus") {
+        const l = emitExpr(node.left, fnLines);
+        const r = emitExpr(node.right, fnLines);
+        const li = freshTemp();
+        const ri = freshTemp();
+        fnLines.push(`  ${li} = ptrtoint ptr ${l.val} to i64`);
+        fnLines.push(`  ${ri} = ptrtoint ptr ${r.val} to i64`);
+        const diff = freshTemp();
+        fnLines.push(`  ${diff} = sub i64 ${li}, ${ri}`);
+        const pointee = node.left.resolvedType.pointee;
+        const elemLlvmTy = llvmType(pointee);
+        const sizeofTmp = freshTemp();
+        fnLines.push(`  ${sizeofTmp} = getelementptr ${elemLlvmTy}, ptr null, i32 1`);
+        const sizeInt = freshTemp();
+        fnLines.push(`  ${sizeInt} = ptrtoint ptr ${sizeofTmp} to i64`);
+        const out = freshTemp();
+        fnLines.push(`  ${out} = sdiv i64 ${diff}, ${sizeInt}`);
+        return { val: out, yoopType: PrimType("int64") };
+      }
+      const ptrSide = leftIsPtr ? node.left : node.right;
+      const intSide = leftIsPtr ? node.right : node.left;
+      const ptrVal = emitExpr(ptrSide, fnLines);
+      const intVal = emitExpr(intSide, fnLines);
+      const pointee = ptrSide.resolvedType.pointee;
+      const elemLlvmTy = llvmType(pointee);
+      let offsetVal = intVal.val;
+      let offsetLlvmTy = llvmType(intVal.yoopType);
+      if (offsetLlvmTy !== "i64") {
+        const widened = freshTemp();
+        fnLines.push(`  ${widened} = sext ${offsetLlvmTy} ${offsetVal} to i64`);
+        offsetVal = widened;
+        offsetLlvmTy = "i64";
+      }
+      if (op === "minus") {
+        const neg = freshTemp();
+        fnLines.push(`  ${neg} = sub i64 0, ${offsetVal}`);
+        offsetVal = neg;
+      }
+      const out = freshTemp();
+      fnLines.push(`  ${out} = getelementptr ${elemLlvmTy}, ptr ${ptrVal.val}, i64 ${offsetVal}`);
+      return { val: out, yoopType: ptrSide.resolvedType };
+    }
+    throw new Error(`codegen: unsupported pointer binary op "${op}"`);
+  }
+
   function emitExpr(node, fnLines) {
     switch (node.kind) {
       case ASTNodeKind.INT_LITERAL: {
@@ -2696,6 +2906,18 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.CALL_EXPRESSION: return emitCallExpr(node, fnLines);
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // Phase 8.A: route pointer arithmetic / pointer-null comparison
+        // through emitPointerBinaryMM. Same logic as single-module path.
+        const leftTy = node.left.resolvedType;
+        const rightTy = node.right.resolvedType;
+        if (
+          leftTy?.kind === typeKinds.unsafePtr ||
+          rightTy?.kind === typeKinds.unsafePtr ||
+          leftTy?.kind === typeKinds.untypedNull ||
+          rightTy?.kind === typeKinds.untypedNull
+        ) {
+          return emitPointerBinaryMM(node, fnLines);
+        }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const resultType = node.resolvedType;
@@ -2704,6 +2926,39 @@ function codegenWithModuleId(
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = ${binaryInstruction(node.op, opType)} ${llvmType(opType)} ${l.val}, ${r.val}`);
         return { val: tmp, yoopType: resultType };
+      }
+      case ASTNodeKind.NULL_LITERAL: {
+        return { val: "null", yoopType: node.resolvedType };
+      }
+      case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
+        const lv = emitLval(node.operand, fnLines);
+        return { val: lv.ptr, yoopType: node.resolvedType };
+      }
+      case ASTNodeKind.DEREF_EXPRESSION: {
+        const p = emitExpr(node.operand, fnLines);
+        const pointee = node.resolvedType;
+        const llvmTy = llvmType(pointee);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${p.val}`);
+        return { val: tmp, yoopType: pointee };
+      }
+      case ASTNodeKind.UNSAFE_PTR_CAST: {
+        const operand = emitExpr(node.operand, fnLines);
+        if (node.castKind === "bitcast") {
+          return { val: operand.val, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toInt") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = ptrtoint ptr ${operand.val} to i64`);
+          return { val: tmp, yoopType: PrimType("uintptr") };
+        }
+        if (node.castKind === "fromInt") {
+          const tmp = freshTemp();
+          const srcLlvmTy = llvmType(operand.yoopType);
+          fnLines.push(`  ${tmp} = inttoptr ${srcLlvmTy} ${operand.val} to ptr`);
+          return { val: tmp, yoopType: node.resolvedType };
+        }
+        throw new Error(`codegen: unknown unsafe_ptr cast kind "${node.castKind}"`);
       }
       case ASTNodeKind.UNARY_EXPRESSION: {
         const operand = emitExpr(node.operand, fnLines);
@@ -2755,6 +3010,14 @@ function codegenWithModuleId(
           const lv = emitLval(node.target, fnLines);
           const rhs = emitExpr(node.value, fnLines);
           fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
+          return rhs;
+        }
+        if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+          // Phase 8.A: `*p = v` — store through an unsafe_ptr<T>.
+          const ptrExpr = emitExpr(node.target.operand, fnLines);
+          const rhs = emitExpr(node.value, fnLines);
+          const pointee = node.target.resolvedType;
+          fnLines.push(`  store ${llvmType(pointee)} ${rhs.val}, ptr ${ptrExpr.val}`);
           return rhs;
         }
         throw new Error(`codegen: unsupported assignment target kind "${node.target.kind}"`);

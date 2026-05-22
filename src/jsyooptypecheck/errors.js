@@ -55,6 +55,10 @@ export function formatType(t) {
       return `union ${t.name}`;
     case typeKinds.typeParam:
       return t.name;
+    case typeKinds.unsafePtr:
+      return `unsafe_ptr<${formatType(t.pointee)}>`;
+    case typeKinds.untypedNull:
+      return "null";
     default:
       return `unknown kind ${t.kind}`;
   }

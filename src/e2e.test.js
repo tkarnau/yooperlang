@@ -310,6 +310,18 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "r=221 g=204 b=187 a=170\nafter-write b=187\n");
   });
 
+  it("unsafe_ptr_basic.yoop: address-of, deref read/write, null compare", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "v=42 x=99\nisnull=0 nb=1\n");
+  });
+
+  it("unsafe_ptr_arithmetic.yoop: malloc + GEP + bitcast + ptr<->int round-trip", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_arithmetic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "diff=3\nsame=1\n");
+  });
+
   it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
     const { stdout, exitCode } = runFixtureWithAsset(
       "examples/pass/language_showcase.yoop",
@@ -1472,6 +1484,30 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /exactly one field/.test(e.message)),
       `expected multi-field union error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("unsafe_ptr_no_import.yoop rejects unsafe_ptr without import.unsafe", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_no_import.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /'import\.unsafe;'/.test(e.message)),
+      `expected unsafe-gating error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("unsafe_ptr_deref_non_ptr.yoop rejects '*' on a non-pointer", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_deref_non_ptr.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /cannot deref non-pointer type/.test(e.message)),
+      `expected non-pointer deref error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

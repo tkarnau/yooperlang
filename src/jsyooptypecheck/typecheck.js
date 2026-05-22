@@ -25,6 +25,8 @@ import {
   TaskType,
   TypeParamType,
   UnionType,
+  UnsafePtrType,
+  UntypedNullType,
   VoidType,
   primTypeFromName,
   resolveTypeAnnotation,
@@ -53,6 +55,100 @@ import { TASK_KIND } from "./builtinKinds.js";
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// Phase 8.A: walks an annotation object (from parser) looking for any
+// `unsafe_ptr` reference. Returns true if any subtree names the type.
+function annotMentionsUnsafePtr(annot) {
+  if (!annot) return false;
+  if (annot.kind === "typeName") return annot.name === "unsafe_ptr";
+  if (annot.kind === "refType") return annotMentionsUnsafePtr(annot.inner);
+  if (annot.kind === "arrayType") return annotMentionsUnsafePtr(annot.elem);
+  if (annot.kind === "taskType") return annotMentionsUnsafePtr(annot.inner);
+  if (annot.kind === "unsafePtrType") return true;
+  if (annot.kind === "typeApplication") {
+    if (annot.name === "unsafe_ptr") return true;
+    return annot.typeArgs.some(annotMentionsUnsafePtr);
+  }
+  return false;
+}
+
+// Phase 8.A: scan the whole AST of a module (which did NOT opt into
+// `import.unsafe;`) for any use of the pointer surface, and emit a clear
+// diagnostic per occurrence. The walker is structural: it visits every key
+// on every plain object, recursing into arrays and child nodes. Cheap
+// enough — we do it once per module before pass C.
+function walkAstForUnsafe(node, errors, visited = new WeakSet()) {
+  if (!node) return;
+  if (typeof node !== "object") return;
+  if (visited.has(node)) return;
+  visited.add(node);
+
+  if (Array.isArray(node)) {
+    for (const item of node) walkAstForUnsafe(item, errors, visited);
+    return;
+  }
+
+  // AST nodes have a `kind` string from ASTNodeKind. Use it to flag the
+  // pointer-introducing node kinds directly.
+  if (typeof node.kind === "string") {
+    switch (node.kind) {
+      case ASTNodeKind.ADDRESS_OF_EXPRESSION:
+        errors.push({
+          message: `'&' (address-of) requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      case ASTNodeKind.DEREF_EXPRESSION:
+        errors.push({
+          message: `'*' pointer dereference requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      case ASTNodeKind.NULL_LITERAL:
+        errors.push({
+          message: `'null' requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      case ASTNodeKind.UNSAFE_PTR_CAST:
+        errors.push({
+          message: `unsafe_ptr cast requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Type annotations are plain objects with a `kind` like "typeName" /
+  // "typeApplication" / etc. — distinct from AST node kinds. Detect them
+  // via the absence of a sourceLoc-shaped property *and* a string `kind`
+  // that names a primitive/struct type or generic application. Cheap test:
+  // if walking encounters such an object, run annotMentionsUnsafePtr on it.
+  // We attach the error to the nearest enclosing AST node's sourceLoc by
+  // passing it down — but that requires extra plumbing. For an MVP we use
+  // the parent AST node's loc when we recurse from there (handled below).
+
+  for (const key of Object.keys(node)) {
+    if (key === "sourceLoc" || key === "fieldSourceLoc") continue;
+    const child = node[key];
+    if (!child || typeof child !== "object") continue;
+    // Type-annotation slot detection: parser uses `typeAnnotation` field on
+    // bindings/params/fields/returns. Flag once per occurrence with the
+    // enclosing AST node's source location.
+    if (key === "typeAnnotation" || key === "returnTypeAnnotation") {
+      if (annotMentionsUnsafePtr(child)) {
+        errors.push({
+          message: `'unsafe_ptr<T>' requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+      }
+      continue; // annotations don't contain AST nodes; no further recursion
+    }
+    walkAstForUnsafe(child, errors, visited);
+  }
+}
 
 // If decl is an EXPORT_DECL wrapper, unwrap to the inner decl; otherwise
 // return the decl itself.
@@ -134,6 +230,11 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     // Bridge: built-in Task<T> stays a TaskType.
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
+    }
+    // Phase 8.A: built-in unsafe_ptr<T>. Gating is enforced where the
+    // resolved type ends up bound to source (binding/parameter/return/field).
+    if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
+      return UnsafePtrType(argTypes[0]);
     }
     return resolveGenericApplication(annot.name, argTypes, modId, moduleEnv, ctx);
   }
@@ -1336,6 +1437,8 @@ export function typecheckProgram(modules) {
       genericTraitTable,
       enumTable,
       unionTable,
+      // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
+      allowsUnsafe: !!mod.ast.allowsUnsafe,
     });
     stampModuleId(errors, errStart, mod.id);
   }
@@ -1344,6 +1447,17 @@ export function typecheckProgram(modules) {
   for (const mod of modules) {
     const errStart = errors.length;
     resolveImports(mod, moduleEnv, errors);
+    stampModuleId(errors, errStart, mod.id);
+  }
+
+  // Phase 8.A: `import.unsafe;` gating pass — scan each non-unsafe module
+  // for any unsafe_ptr type annotation, address-of/deref/null/cast node, and
+  // surface a precise diagnostic. Cheap recursive walk; runs once per module.
+  for (const mod of modules) {
+    const env = moduleEnv.get(mod.id);
+    if (env?.allowsUnsafe) continue;
+    const errStart = errors.length;
+    walkAstForUnsafe(mod.ast, errors);
     stampModuleId(errors, errStart, mod.id);
   }
 
@@ -1980,6 +2094,15 @@ export function typecheckProgram(modules) {
       // Phase 7.5: enum and union nominal tables.
       enumTable: env.enumTable,
       unionTable: env.unionTable,
+      // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
+      allowsUnsafe: env.allowsUnsafe,
+      // Phase 8.A: callback that resolves a parser-emitted type annotation
+      // to a Type in this module's scope. Used by expression-level type-arg
+      // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`).
+      resolveTypeAnnotation: (annot) =>
+        resolveTypeAnnotationInModule(annot, mod.id, moduleEnv, {
+          registry: programState.registry,
+        }),
     };
 
     // pass D.1: validate all functions and methods (populates resolvedKindType on params)
@@ -2060,6 +2183,18 @@ export function typecheck(ast) {
     moduleEnv: null,
     kindTable: new Map(),
   };
+  // Phase 8.A: expose a thin resolver hook so expression-level type-arg
+  // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`) can
+  // resolve their explicit type arguments.
+  typeContext.resolveTypeAnnotation = (annot) =>
+    resolveTypeAnnotation(annot, structTable, { typeParamScope: null });
+  // Phase 8.A: gating — single-module path mirrors the typecheckProgram
+  // walker. Modules that didn't opt into `import.unsafe;` cannot mention
+  // any pointer surface.
+  typeContext.allowsUnsafe = !!ast.allowsUnsafe;
+  if (!ast.allowsUnsafe) {
+    walkAstForUnsafe(ast, errors);
+  }
 
   // pass 1: struct shells
   for (const decl of ast.body) {

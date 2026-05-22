@@ -28,8 +28,10 @@ import {
   PrimType,
   RefType,
   TraitSelfPlaceholder,
+  UnsafePtrType,
   UntypedFloatType,
   UntypedIntType,
+  UntypedNullType,
   VoidType,
   isCastableTo,
   isIntPrim,
@@ -105,6 +107,14 @@ export function resolveExprType(node, scope, ctx) {
       return resolveWaitExpression(node, scope, ctx);
     case ASTNodeKind.VARIANT_CONSTRUCTOR:
       return resolveVariantConstructor(node, scope, ctx);
+    case ASTNodeKind.ADDRESS_OF_EXPRESSION:
+      return resolveAddressOf(node, scope, ctx);
+    case ASTNodeKind.DEREF_EXPRESSION:
+      return resolveDeref(node, scope, ctx);
+    case ASTNodeKind.NULL_LITERAL:
+      return setType(node, UntypedNullType());
+    case ASTNodeKind.UNSAFE_PTR_CAST:
+      return resolveUnsafePtrCast(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -413,12 +423,41 @@ function resolveAssignment(node, scope, ctx) {
   if (node.target.kind === ASTNodeKind.INDEX_EXPRESSION) {
     return resolveAssignmentToIndex(node, scope, ctx);
   }
+  if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+    return resolveAssignmentToDeref(node, scope, ctx);
+  }
   pushError(
     ctx.errors,
     node,
     `invalid assignment target kind "${node.target.kind}"`,
   );
   return setType(node, ErrorType());
+}
+
+// Phase 8.A: `*p = v` — assignment through an unsafe_ptr<T>. Resolves the
+// pointer, checks the RHS against the pointee type.
+function resolveAssignmentToDeref(node, scope, ctx) {
+  const ptrType = resolveExprType(node.target.operand, scope, ctx);
+  if (ptrType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (ptrType.kind !== typeKinds.unsafePtr) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot deref non-pointer type ${formatType(ptrType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  const pointee = ptrType.pointee;
+  node.target.resolvedType = pointee;
+  checkInitializer(
+    node.value,
+    pointee,
+    scope,
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(pointee)} through pointer`,
+  );
+  return setType(node, pointee);
 }
 
 function resolveAssignmentToIdent(node, scope, ctx) {
@@ -660,6 +699,122 @@ function resolveRefExpression(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   return setType(node, RefType(operandType));
+}
+
+// Phase 8.A: `&lvalue` — address-of. Returns unsafe_ptr<T> where T is the
+// lvalue's type. Only lvalues are accepted (IDENT, FIELD_ACCESS,
+// INDEX_EXPRESSION, DEREF_EXPRESSION).
+function resolveAddressOf(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (
+    node.operand.kind !== ASTNodeKind.IDENT &&
+    node.operand.kind !== ASTNodeKind.FIELD_ACCESS &&
+    node.operand.kind !== ASTNodeKind.INDEX_EXPRESSION &&
+    node.operand.kind !== ASTNodeKind.DEREF_EXPRESSION
+  ) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot take address of an rvalue — operand of '&' must be an lvalue`,
+    );
+    return setType(node, ErrorType());
+  }
+  return setType(node, UnsafePtrType(operandType));
+}
+
+// Phase 8.A: `*p` — dereference an unsafe_ptr<T>. Returns T.
+function resolveDeref(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (operandType.kind !== typeKinds.unsafePtr) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot deref non-pointer type ${formatType(operandType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  return setType(node, operandType.pointee);
+}
+
+// Phase 8.A: unsafe_ptr.cast<U>(p), unsafe_ptr.toInt(p), unsafe_ptr.fromInt<T>(n)
+function resolveUnsafePtrCast(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+
+  if (node.castKind === "bitcast") {
+    if (operandType.kind !== typeKinds.unsafePtr) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.cast expects an unsafe_ptr<T>, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    const targetPointee = resolveTypeAnnotInCtx(node.typeArg, ctx);
+    if (!targetPointee) {
+      pushError(ctx.errors, node, `unsafe_ptr.cast: unknown target pointee type`);
+      return setType(node, ErrorType());
+    }
+    return setType(node, UnsafePtrType(targetPointee));
+  }
+
+  if (node.castKind === "toInt") {
+    if (operandType.kind !== typeKinds.unsafePtr) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.toInt expects an unsafe_ptr<T>, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    return setType(node, PrimType(primAnnotations.uintptr));
+  }
+
+  if (node.castKind === "fromInt") {
+    const isIntegerSource =
+      (operandType.kind === typeKinds.prim && isIntPrim(operandType.name)) ||
+      operandType.kind === typeKinds.untypedInt;
+    if (!isIntegerSource) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.fromInt expects an integer argument, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    const targetPointee = resolveTypeAnnotInCtx(node.typeArg, ctx);
+    if (!targetPointee) {
+      pushError(ctx.errors, node, `unsafe_ptr.fromInt: unknown target pointee type`);
+      return setType(node, ErrorType());
+    }
+    return setType(node, UnsafePtrType(targetPointee));
+  }
+
+  pushError(ctx.errors, node, `unknown unsafe_ptr cast kind ${node.castKind}`);
+  return setType(node, ErrorType());
+}
+
+// Resolve a type annotation node within an expression context. The caller
+// provides ctx which carries the typeContext (single-module path) and/or
+// module-resolver hooks for the multi-module path.
+function resolveTypeAnnotInCtx(annot, ctx) {
+  if (!annot) return null;
+  // Prefer the typeContext.resolveTypeAnnotation hook if installed by the
+  // caller (multi-module path threads this through ctx.typeContext).
+  if (ctx?.typeContext?.resolveTypeAnnotation) {
+    return ctx.typeContext.resolveTypeAnnotation(annot);
+  }
+  // Single-module fallback: use the static resolver.
+  if (ctx?.typeContext?.structTable) {
+    // Lazy require to avoid an import cycle.
+    // Direct delegation through the static helper exported by types.js.
+    // We import here-by-reference via globalThis to avoid circular import.
+    const fn = ctx.typeContext.resolveTypeAnnotationFallback;
+    if (fn) return fn(annot);
+  }
+  return null;
 }
 
 // `[e1, e2, e3]` — infer element type from first element, check all match.

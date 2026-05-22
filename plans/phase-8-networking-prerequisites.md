@@ -1,6 +1,6 @@
 # Phase 8 — Networking Prerequisites: Language & Runtime Primitives for HTTP
 
-> Numbering is provisional. This sits after the in-flight Phase 7.2 (trait bounds) and 7.3 (pattern matching), and absorbs the deferred Phase 6 `unsafe_ptr` work into Phase 8.A. Renumber if 7.x grows further before this lands.
+> Phase 7 has now finished landing the language-design pieces this plan depends on: 7.2 (trait bounds), 7.3 (literal `switch`), 7.4 (trait-qualified call syntax), and 7.5 (`enum` tagged unions, C-style `union`, variant patterns + exhaustiveness). Phase 8 absorbs the deferred Phase 6 `unsafe_ptr` work into Phase 8.A.
 
 ## Context
 
@@ -16,21 +16,23 @@ What already exists and is reusable (do not redesign):
 - Fallible-struct convention with `err: string` and the `?` operator ([src/jsyooptypecheck/fallible.js](../src/jsyooptypecheck/fallible.js)).
 - Pthread-based worker pool in [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) and the `Task<T>` builtin type with run-to-completion semantics.
 - `layout { align N; }` clause for forcing struct alignment ([plans/phase-6-5-layout-composition.md](phase-6-5-layout-composition.md)).
+- **Tagged `enum` types, untagged `union` types, and `switch` with literal + variant patterns + exhaustiveness checking** (Phase 7.5 — [plans/phase-7-5-sum-types-and-unions.md](phase-7-5-sum-types-and-unions.md)). `union` is a first-class top-level decl: every field starts at offset 0, total size = max field size, total alignment = max field alignment. Sufficient to express `sockaddr_in` / `sockaddr_in6` / `sockaddr_storage`-shaped overlap directly.
+- Generics (Phase 7.1), trait bounds (Phase 7.2), and trait-qualified call syntax `Trait.method(ref x, ...)` (Phase 7.4).
 
 What is missing or under-specified (this plan addresses):
 
-1. `unsafe_ptr` is reserved in [SPEC.md](../SPEC.md) (lines 885–890) but has no operational spec — no arithmetic, deref, address-of, casts, nullability rules.
-2. `layout` clause is **alignment-only** — no field-order guarantee, no packing, no padding control. Insufficient for `sockaddr_in`-style structs.
-3. No C-style `union` or anonymous-union fields. Blocks `sockaddr_storage`-family types.
-4. No `c_int` / `c_size_t` / `c_ssize_t` / `c_long` portable aliases — extern signatures cannot match the platform-dependent widths of syscall signatures.
-5. No way to get the raw data pointer out of a `uint8[]`, nor to construct one from `(ptr, len)` — blocks passing buffers to `read` / `recv` / `send` / `write`.
-6. No `errno` access — most socket syscalls report failure via `errno`.
-7. No module-level mutable state. An event loop wants a process-singleton.
-8. No array slice syntax (`xs[i..j]` reserved but unimplemented).
-9. `Task<T>` cannot actually suspend — coroutine bodies are empty.
-10. No I/O multiplexer in the runtime (no epoll/kqueue/IOCP integration with the scheduler).
-11. No timers exposed to user code.
-12. No `task` / `wait` language surface yet (Phase 6.3 sugar planned, not landed).
+1. `unsafe_ptr` is reserved in [SPEC.md](../SPEC.md) §12 but has no operational spec — no arithmetic, deref, address-of, casts, nullability rules.
+2. `layout` clause is **alignment-only** — no field-order guarantee, no packing, no padding control. Insufficient for `sockaddr_in`-style structs whose ABI is pinned by libc.
+3. No `c_int` / `c_size_t` / `c_ssize_t` / `c_long` portable aliases — extern signatures cannot match the platform-dependent widths of syscall signatures.
+4. No way to get the raw data pointer out of a `uint8[]`, nor to construct one from `(ptr, len)` — blocks passing buffers to `read` / `recv` / `send` / `write`.
+5. No `errno` access — most socket syscalls report failure via `errno`.
+6. No module-level mutable state. An event loop wants a process-singleton.
+7. No array slice syntax (`xs[i..j]` reserved but unimplemented).
+8. `Task<T>` cannot actually suspend — coroutine bodies are empty.
+9. No I/O multiplexer in the runtime (no epoll/kqueue/IOCP integration with the scheduler).
+10. No timers exposed to user code.
+11. No `task` / `wait` language surface yet (Phase 6.3 sugar planned, not landed).
+12. No anonymous-union fields *inside* structs. Standalone `union` exists (Phase 7.5); the sockaddr family can use that. Inline anonymous unions remain a follow-up — see [phase-7-5-sum-types-and-unions.md](phase-7-5-sum-types-and-unions.md).
 
 ## Recommended approach
 
@@ -64,7 +66,7 @@ Extends the `layout` clause from alignment-only to full C-ABI control, and intro
 
 Files touched: spec, parser ([parser.js:1160](../src/jsyooparser/parser.js#L1160) extern blocks; layout clause), typechecker ([types.js](../src/jsyooptypecheck/types.js) for new `PrimType` instances or a `CIntType` family), codegen (target-triple-aware width resolution).
 
-Defer to a follow-up if needed: `union` and anonymous unions. The `sockaddr_in` / `sockaddr_in6` pair can be handled without unions by allocating `sockaddr_storage`-sized buffers via `uint8[]` of the right size+alignment, then casting `unsafe_ptr<uint8>` → `unsafe_ptr<sockaddr_in>`. Ugly but unblocks Phase 8.D; a real `union` clause can land later.
+The `sockaddr_in` / `sockaddr_in6` overlap is now expressible as a real `union` (Phase 7.5 landed) — declare `union SockAddrStorage { v4: sockaddr_in, v6: sockaddr_in6, raw: uint8 }` and the layout rules (size = max, align = max, offset-0 fields) match the C semantics directly. No `unsafe_ptr<uint8>` ↔ `unsafe_ptr<sockaddr_in>` reinterpret cast needed for that case. Inline *anonymous* unions inside a struct remain unsupported and stay deferred — workaround is the standalone union.
 
 ### Phase 8.C — Buffer interop intrinsics
 
@@ -141,8 +143,8 @@ Files touched: [runtime/yoop_runtime.c](../runtime/yoop_runtime.c), new `runtime
 
 - The networking library itself (socket wrappers, HTTP/1.1 parser, router, TLS).
 - A pure-sync HTTP client variant (would be possible after Phases 8.A–8.E without 8.F, but the design chose async-first).
-- A `union` clause — the `sockaddr_storage` need is worked around in Phase 8.B; a real union can come later.
-- Pattern matching's interaction with raw pointers (none — `unsafe_ptr<T>` does not participate in `switch` exhaustiveness in Phase 7.3).
+- Anonymous inline unions inside structs. Standalone `union` decls (Phase 7.5) cover the sockaddr family; nested anonymous unions are a follow-up.
+- Pattern matching's interaction with raw pointers — `switch` exhaustiveness (Phase 7.5) is defined for `bool`, integer literal sets, and `enum` variants only. `unsafe_ptr<T>` does not participate.
 
 ## Verification (for each phase, when implemented)
 

@@ -90,6 +90,12 @@ export const ASTNodeKind = Object.freeze({
   UNION_DECL: "UNION_DECL",
   VARIANT_CONSTRUCTOR: "VARIANT_CONSTRUCTOR",
 
+  // phase 8.A: unsafe pointers
+  ADDRESS_OF_EXPRESSION: "ADDRESS_OF_EXPRESSION",
+  DEREF_EXPRESSION: "DEREF_EXPRESSION",
+  NULL_LITERAL: "NULL_LITERAL",
+  UNSAFE_PTR_CAST: "UNSAFE_PTR_CAST",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });

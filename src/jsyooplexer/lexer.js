@@ -94,6 +94,8 @@ export const TokenTags = {
   default: "default",
   enum: "enum",
   union: "union",
+  // phase 8.A: unsafe pointers
+  null: "null",
 
   // punctuation / operators
   eq: "eq",
@@ -221,6 +223,7 @@ const keywordTagList = {
   default: TokenTags.default,
   enum: TokenTags.enum,
   union: TokenTags.union,
+  null: TokenTags.null,
   _: TokenTags.discard, // bare underscores are discarded
 };
 

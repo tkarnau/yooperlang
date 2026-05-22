@@ -495,6 +495,9 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.PROGRAM);
     try {
       node.body = [];
+      // Phase 8.A: `import.unsafe;` enables `unsafe_ptr<T>` and friends.
+      // Defaults to false; set true if the module opts in at top.
+      node.allowsUnsafe = false;
       let seenNonImport = false;
       while (peek().tag !== TokenTags.eof) {
         // only allow declarations
@@ -528,6 +531,44 @@ export function parse(src) {
             {
               if (seenNonImport) {
                 throw parseError("imports must come before other declarations");
+              }
+              // Phase 8.A: `import.unsafe;` — module-level opt-in for raw
+              // pointers. Sets a flag on the PROGRAM node; doesn't push a
+              // body entry (it's an attribute, not a declaration).
+              if (peekAhead(1).tag === TokenTags.dot) {
+                const importTok = peek();
+                advance(); // import
+                advance(); // .
+                if (peek().tag !== TokenTags.ident) {
+                  throw parseError(
+                    `expected identifier after 'import.'`,
+                    peek().start,
+                    peek().length,
+                  );
+                }
+                const featTok = peek();
+                const featName = src.substring(
+                  featTok.start,
+                  featTok.start + featTok.length,
+                );
+                if (featName !== "unsafe") {
+                  throw parseError(
+                    `unknown import attribute 'import.${featName}' — only 'import.unsafe' is supported`,
+                    featTok.start,
+                    featTok.length,
+                  );
+                }
+                advance(); // unsafe
+                expect(TokenTags.semicolon);
+                if (node.allowsUnsafe) {
+                  throw parseError(
+                    `duplicate 'import.unsafe;' declaration`,
+                    importTok.start,
+                    importTok.length,
+                  );
+                }
+                node.allowsUnsafe = true;
+                break;
               }
               node.body.push(parseImportDecl());
             }
@@ -1298,6 +1339,30 @@ export function parse(src) {
       return waitNode;
     }
 
+    // Phase 8.A: prefix `&x` — address-of an lvalue. Same tight precedence
+    // as `ref` so postfixes bind to the operand. The `&` token also serves
+    // as bitwise-AND in binary position; that's parsed by the precedence
+    // climber and never reaches this primary path. We fall through to the
+    // postfix + assignment check so address-of expressions still flow
+    // through the usual end-of-primary path.
+    if (peek().tag === TokenTags.amp) {
+      advance();
+      const addrNode = buildSourcedNode(ASTNodeKind.ADDRESS_OF_EXPRESSION);
+      addrNode.operand = parseExpression(70);
+      node = addrNode;
+    } else if (peek().tag === TokenTags.mult) {
+      // Phase 8.A: prefix `*p` — pointer dereference. Falls through so that
+      // `*p = v` and `*p.field` work via the postfix + assignment path.
+      advance();
+      const derefNode = buildSourcedNode(ASTNodeKind.DEREF_EXPRESSION);
+      derefNode.operand = parseExpression(70);
+      node = derefNode;
+    } else if (peek().tag === TokenTags.null) {
+      // Phase 8.A: `null` literal. Type pinned by context.
+      advance();
+      node = buildSourcedNode(ASTNodeKind.NULL_LITERAL);
+    } else
+
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
@@ -1334,7 +1399,39 @@ export function parse(src) {
       expect(TokenTags.rbracket);
     } else if (peek().tag === TokenTags.ident) {
       const name = parseIdentAsName();
-      if (peek().tag === TokenTags.lparen) {
+      // Phase 8.A: `unsafe_ptr.cast<U>(p)` / `unsafe_ptr.toInt(p)` /
+      // `unsafe_ptr.fromInt<T>(n)` — explicit type-arg intrinsics.
+      // Recognized only by literal token shape so we don't have to weaken
+      // the "no `<` in expression position" invariant elsewhere.
+      if (
+        name === "unsafe_ptr" &&
+        peek().tag === TokenTags.dot &&
+        peekAhead(1).tag === TokenTags.ident
+      ) {
+        const opTok = peekAhead(1);
+        const opName = src.substring(opTok.start, opTok.start + opTok.length);
+        if (opName === "cast" || opName === "toInt" || opName === "fromInt") {
+          advance(); // .
+          advance(); // cast/toInt/fromInt
+          const castNode = buildSourcedNode(ASTNodeKind.UNSAFE_PTR_CAST);
+          castNode.castKind =
+            opName === "cast" ? "bitcast" : opName === "toInt" ? "toInt" : "fromInt";
+          castNode.typeArg = null;
+          if (opName === "cast" || opName === "fromInt") {
+            expect(TokenTags.lt);
+            castNode.typeArg = parseTypeAnnotation();
+            consumeClosingGt();
+          }
+          expect(TokenTags.lparen);
+          castNode.operand = parseExpression();
+          expect(TokenTags.rparen);
+          node = castNode;
+        } else {
+          // fall through to regular IDENT, postfix loop handles `.`
+          node = buildSourcedNode(ASTNodeKind.IDENT);
+          node.name = name;
+        }
+      } else if (peek().tag === TokenTags.lparen) {
         // this is a function call
         node = buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
         node.callee = name;
@@ -1453,12 +1550,17 @@ export function parse(src) {
     }
 
     // assignment — lvalue is whatever the primary+postfix chain produced.
-    // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION
-    if (peek().tag === TokenTags.eq) {
+    // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION, DEREF_EXPRESSION
+    // Phase 8.A: only consume assignment at top-level expression precedence.
+    // When parseExpression is called recursively (e.g. as the operand of
+    // a unary `*` with minPrecedence=70), assignment must stay outside our
+    // grammar — otherwise `*p = v` parses as `*(p = v)`.
+    if (peek().tag === TokenTags.eq && minPrecedence === 0) {
       if (
         node.kind !== ASTNodeKind.IDENT &&
         node.kind !== ASTNodeKind.FIELD_ACCESS &&
-        node.kind !== ASTNodeKind.INDEX_EXPRESSION
+        node.kind !== ASTNodeKind.INDEX_EXPRESSION &&
+        node.kind !== ASTNodeKind.DEREF_EXPRESSION
       ) {
         throw parseError(
           `invalid assignment target: ${node.kind}`,
