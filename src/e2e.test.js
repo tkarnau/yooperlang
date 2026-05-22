@@ -322,16 +322,20 @@ function runFixtureEntry(relPath) {
   const binPath = path.join(tmpDir, "out");
   fs.writeFileSync(llPath, ir);
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
+  // -g preserves the DWARF metadata yoopiler emits; -O0 mirrors the
+  // production yoopiler.js invocation so e2e behavior matches what users see.
   const clangArgs = [
     llPath,
     RUNTIME_C,
+    "-g",
+    "-O0",
     "-o",
     binPath,
     ...allLinkFlags.map((f) => `-l${f}`),
   ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
   const result = spawnSync(binPath, [], { encoding: "utf8" });
-  return { stdout: result.stdout, exitCode: result.status };
+  return { stdout: result.stdout, exitCode: result.status, binPath };
 }
 
 // Typecheck a multi-file fixture (entry + imports) and return errors.
@@ -588,10 +592,12 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_linked/main.yoop"));
     assert.match(ir, /declare void @yoop_runtime_init\(\)/);
     assert.match(ir, /declare void @yoop_runtime_shutdown\(\)/);
-    // init is the first instruction of main's entry block.
-    assert.match(ir, /define i32 @main\(\)\s*\{\s*entry:\s*\n\s*call void @yoop_runtime_init\(\)/);
-    // shutdown immediately before main's `ret`.
-    assert.match(ir, /call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32/);
+    // init is the first instruction of main's entry block. The `define` line
+    // may carry a `!dbg !N` (DWARF subprogram attachment).
+    assert.match(ir, /define i32 @main\(\)(?: !dbg !\d+)?\s*\{\s*entry:\s*\n\s*call void @yoop_runtime_init\(\)/);
+    // shutdown immediately before main's `ret`. Each instruction may carry
+    // a trailing `, !dbg !N`.
+    assert.match(ir, /call void @yoop_runtime_shutdown\(\)(?:, !dbg !\d+)?\s*\n\s*ret i32/);
   });
 
   it("runtime_disposable_in_main: emitted IR orders cleanup → shutdown → ret", () => {
@@ -600,8 +606,45 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     // instructions between them.
     assert.match(
       ir,
-      /call void @[^\s(]+__H__Disposable__dispose\(ptr %a\)\s*\n\s*call void @yoop_runtime_shutdown\(\)\s*\n\s*ret i32 0/,
+      /call void @[^\s(]+__H__Disposable__dispose\(ptr %a\)(?:, !dbg !\d+)?\s*\n\s*call void @yoop_runtime_shutdown\(\)(?:, !dbg !\d+)?\s*\n\s*ret i32 0/,
     );
+  });
+
+  it("dwarf: emitted IR carries required DWARF metadata for lldb backtraces", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_linked/main.yoop"));
+    // Required named metadata — without these clang silently strips DI.
+    assert.match(ir, /!llvm\.dbg\.cu = !\{!\d+\}/);
+    assert.match(ir, /!llvm\.module\.flags = !\{[^}]+\}/);
+    assert.match(ir, /!\d+ = !\{i32 \d+, !"Dwarf Version", i32 \d+\}/);
+    assert.match(ir, /!\d+ = !\{i32 \d+, !"Debug Info Version", i32 \d+\}/);
+    // Per-module DIFile + DICompileUnit pointing at the .yoop entry file.
+    assert.match(ir, /!DIFile\(filename: "main\.yoop", directory: "[^"]*runtime_linked"\)/);
+    assert.match(ir, /distinct !DICompileUnit\(language: DW_LANG_C99[^)]*emissionKind: FullDebug\)/);
+    // `main` has a DISubprogram and the define line is tagged with !dbg.
+    assert.match(ir, /distinct !DISubprogram\(name: "main", linkageName: "main"/);
+    assert.match(ir, /define i32 @main\(\) !dbg !\d+/);
+    // At least one DILocation node was emitted for an instruction in main.
+    assert.match(ir, /!\d+ = !DILocation\(line: \d+, column: \d+, scope: !\d+\)/);
+  });
+
+  // Requires `lldb` on PATH. On systems without it (or where DWARF was
+  // stripped at link time), the assertions confirm that DI survived clang and
+  // is consumable by an actual debugger — not just that the IR text looks
+  // right. We use `image lookup` (no process attach) so this works in CI
+  // without debugger-attach permissions.
+  it("dwarf: lldb resolves main to its .yoop source file and line", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/runtime_linked/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      ["-o", "image lookup -n main -v", "-o", "quit", "--batch", binPath],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    assert.match(text, /main\.yoop/, `lldb output had no .yoop reference:\n${text}`);
+    assert.match(text, /CompileUnit:.*main\.yoop/, `lldb did not surface a CompileUnit for main.yoop:\n${text}`);
+    assert.match(text, /LineEntry:.*main\.yoop:\d+/, `lldb did not surface a LineEntry mapping main to a .yoop line:\n${text}`);
   });
 
   // ---- 6.3 sugar: task / joined / pooled / wait ----

@@ -130,6 +130,20 @@ function resolveIdent(node, scope, ctx) {
     if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
     // Phase 6.2: record the binding's lexical depth for escape analysis.
     node.bindingScopeDepth = binding.scopeDepth ?? 0;
+    // LSP: back-pointer to the declaring AST node so go-to-definition and
+    // hover can navigate from a reference to its declaration without
+    // re-running scope resolution. Stored non-enumerably so generic AST
+    // walkers (kindCheck.walkExpr, checkStatement.findScopedIdentInExpr,
+    // codegen.cloneAstWithSubstitution, etc.) don't follow the cycle this
+    // back-pointer creates from a reference to its decl and back.
+    if (binding.node) {
+      Object.defineProperty(node, "resolvedDeclNode", {
+        value: binding.node,
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+    }
     // Auto-deref: ref bindings transparently expose the inner type
     if (binding.type.kind === typeKinds.ref) {
       node.autoDeref = true;

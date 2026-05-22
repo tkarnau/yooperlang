@@ -18,6 +18,7 @@ import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
 import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
+import { createDebugInfo, annotateLinesWithDbg } from "./debugInfo.js";
 
 // yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
@@ -1738,6 +1739,14 @@ export function codegenProgram(modules, _moduleEnv, programState) {
   const linkFlags = new Set();
   const emittedStructs = new Set();
   const emittedArrayTypes = new Set();
+  // One DebugInfo per program. Each module registers a DIFile + DICompileUnit
+  // via beginModule and gets a `{ fileMd, cuMd }` handle threaded into its
+  // emitter. The finalize() block is appended after all per-module IR.
+  const debugInfo = createDebugInfo();
+  // llvm.dbg.declare attaches a DILocalVariable to its alloca slot. Declared
+  // once globally so per-module emitters can call it without each emitting
+  // their own forward declaration.
+  allExterns.add("declare void @llvm.dbg.declare(metadata, metadata, metadata)");
 
   // Phase 7.1: emit each generic-struct instantiation as a struct def.
   // Done before per-module codegen so call-site references resolve.
@@ -1764,13 +1773,14 @@ export function codegenProgram(modules, _moduleEnv, programState) {
     }
 
     // Run single-module codegen with this module's id set
-    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes, programState);
+    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes, programState, debugInfo);
     allStructDefs.push(...ir.structDefs);
     allGlobals.push(...ir.globals);
     for (const e of ir.externs) allExterns.add(e);
     allLines.push(...ir.lines);
   }
 
+  const diText = debugInfo.finalize();
   const parts = [
     ...allStructDefs,
     allStructDefs.length ? "" : null,
@@ -1779,6 +1789,8 @@ export function codegenProgram(modules, _moduleEnv, programState) {
     ...[...allExterns],
     allExterns.size ? "" : null,
     ...allLines,
+    "",
+    diText,
   ].filter((l) => l !== null);
 
   return { ir: parts.join("\n"), linkFlags: [...linkFlags] };
@@ -1786,8 +1798,16 @@ export function codegenProgram(modules, _moduleEnv, programState) {
 
 // Codegen a single module, returning { structDefs, globals, externs, lines }.
 // emittedStructs and emittedArrayTypes are shared across modules to deduplicate type defs.
-function codegenModule(mod, emittedStructs, emittedArrayTypes, programState) {
-  return codegenWithModuleId(mod.ast, mod.id, emittedStructs, emittedArrayTypes, programState);
+function codegenModule(mod, emittedStructs, emittedArrayTypes, programState, debugInfo) {
+  return codegenWithModuleId(
+    mod.ast,
+    mod.id,
+    emittedStructs,
+    emittedArrayTypes,
+    programState,
+    debugInfo,
+    mod.absPath,
+  );
 }
 
 // Phase 7.1: helper for codegenProgram — true iff a struct's fields contain
@@ -1910,7 +1930,15 @@ function structContainsTypeParam(structType) {
   return structType.fields.some((f) => hasParam(f.type));
 }
 
-function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = new Set(), programState = null) {
+function codegenWithModuleId(
+  ast,
+  moduleId,
+  emittedStructs,
+  emittedArrayTypes = new Set(),
+  programState = null,
+  debugInfo = null,
+  moduleAbsPath = null,
+) {
   const lines = [];
   const globals = [];
   const structDefs = [];
@@ -1919,6 +1947,96 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   let labelCounter = 0;
   const functionSigs = new Map();
   let symbols = new Map();
+  // Per-module DWARF handles. Lazily initialized via beginModule on first
+  // function emission so callers (like compileSource) that synthesize a
+  // module without an absPath still get a stable synthetic file name.
+  let diFileMd = null;
+  let diCuMd = null;
+  function ensureDebugModule() {
+    if (!debugInfo || diFileMd) return;
+    const handle = debugInfo.beginModule(moduleAbsPath ?? `<${moduleId}>.yoop`);
+    diFileMd = handle.fileMd;
+    diCuMd = handle.cuMd;
+  }
+  // Build a DISubprogram for a function/method definition. Returns the !N ref
+  // to attach to the `define` line and to thread into ctx.subprogram for
+  // statement-level DILocation lookups. Returns null when DI is disabled (e.g.
+  // legacy callers that didn't supply a debugInfo handle).
+  function makeSubprogram(funcName, linkageName, sourceLoc) {
+    if (!debugInfo) return null;
+    ensureDebugModule();
+    const line = sourceLoc?.line && sourceLoc.line > 0 ? sourceLoc.line : 1;
+    return debugInfo.subprogram(funcName, linkageName, line, diFileMd, diCuMd);
+  }
+  // Look up a DILocation for the given AST node. Returns null when DI is off
+  // or the current scope hasn't established a subprogram yet (top-level
+  // emission). Falls back to line 1 for synthesized nodes without sourceLoc.
+  function dbgLocFor(node, ctx) {
+    if (!debugInfo || !ctx?.subprogram) return null;
+    const loc = node?.sourceLoc;
+    const line = loc?.line && loc.line > 0 ? loc.line : 1;
+    const col = loc?.column && loc.column > 0 ? loc.column : 0;
+    return debugInfo.location(line, col, ctx.subprogram);
+  }
+  // Fallback pass: LLVM's verifier requires every `call` to another debug-
+  // info-bearing function (and every `ret`/`br`/etc. inside a function with
+  // a DISubprogram) to carry a !dbg. The per-statement annotation covers
+  // user code, but implicit cleanups, runtime init/shutdown, and a few other
+  // synthesized lines emit outside emitStmt's wrapper. Sweep the whole
+  // function and attach the subprogram's first-line location to anything
+  // still unmarked.
+  function finalizeFnDbg(fnLines, subprogramRef, fnSourceLoc) {
+    if (!debugInfo || !subprogramRef) return;
+    const line = fnSourceLoc?.line && fnSourceLoc.line > 0 ? fnSourceLoc.line : 1;
+    const fallback = debugInfo.location(line, 0, subprogramRef);
+    annotateLinesWithDbg(fnLines, 0, fallback);
+  }
+
+  // Map a Yooperlang type to its DI type reference for use in a
+  // DILocalVariable. Returns null for shapes we don't yet describe — caller
+  // should skip emitting llvm.dbg.declare for that binding so lldb just
+  // omits it from `frame variable` rather than showing garbage.
+  function diTypeFor(yoopType) {
+    if (!yoopType || !debugInfo) return null;
+    switch (yoopType.kind) {
+      case typeKinds.prim:
+        return debugInfo.basicTypeForPrim(yoopType.name);
+      case typeKinds.ref:
+      case typeKinds.task:
+        // Phase MVP+1: refs and Tasks are described as opaque pointers.
+        // Once we emit DICompositeType for the pointee struct, we'll thread
+        // it through here as the DIDerivedType's baseType.
+        return debugInfo.opaquePointer();
+      default:
+        return null;
+    }
+  }
+
+  // Emit `call void @llvm.dbg.declare(metadata ptr <slot>, metadata !VAR,
+  // metadata !DIExpression()), !dbg !LOC` so lldb can map %slot -> source
+  // variable name + type. No-op when DI is off, when the type isn't
+  // describable yet, or when the binding has no usable sourceLoc.
+  function emitDbgDeclare(fnLines, { name, slotPtr, yoopType, sourceLoc, subprogramRef, argIndex }) {
+    if (!debugInfo || !subprogramRef) return;
+    const typeRef = diTypeFor(yoopType);
+    if (!typeRef) return;
+    ensureDebugModule();
+    const line = sourceLoc?.line && sourceLoc.line > 0 ? sourceLoc.line : 1;
+    const col = sourceLoc?.column && sourceLoc.column > 0 ? sourceLoc.column : 0;
+    const varRef = debugInfo.localVariable({
+      name,
+      scope: subprogramRef,
+      file: diFileMd,
+      line,
+      typeRef,
+      argIndex,
+    });
+    if (!varRef) return;
+    const locRef = debugInfo.location(line, col, subprogramRef);
+    fnLines.push(
+      `  call void @llvm.dbg.declare(metadata ptr ${slotPtr}, metadata ${varRef}, metadata !DIExpression()), !dbg ${locRef}`,
+    );
+  }
   // Phase 6.3: bindingName -> { taskFnName }. Tracks which task fn a
   // joined/pooled/immediate binding originated from, so `wait <ident>` can
   // recover the result type + struct layout at the wait site.
@@ -2302,17 +2420,28 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     const params = node.params ?? [];
     const llvmRet = llvmType(node.resolvedType);
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
-    const fnLines = [`define ${llvmRet} @${symName}(${paramSig}) {`, "entry:"];
+    const subprogramRef = makeSubprogram(node.name ?? symName, symName, node.sourceLoc);
+    const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
+    const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
     if (inMainFn) fnLines.push("  call void @yoop_runtime_init()");
-    for (const p of params) {
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
       const ty = p.resolvedType;
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
       const al = effectiveAlign(ty, p.resolvedKindApplication);
       fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
       fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+      emitDbgDeclare(fnLines, {
+        name: p.name,
+        slotPtr: `%${p.name}`,
+        yoopType: ty,
+        sourceLoc: p.sourceLoc ?? node.sourceLoc,
+        subprogramRef,
+        argIndex: i + 1, // DWARF arg index is 1-based
+      });
     }
-    const ctx = { fnName: symName, returnType: node.resolvedType };
+    const ctx = { fnName: symName, returnType: node.resolvedType, subprogram: subprogramRef };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(node.body, fnLines);
     if (isVoidReturn(node.resolvedType)) {
@@ -2324,6 +2453,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
+    finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc);
     lines.push(...fnLines);
     inMainFn = prevInMain;
   }
@@ -2350,9 +2480,12 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
 
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
     const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
-    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig}) {`, "entry:"];
+    const subprogramRef = makeSubprogram(methodDecl.name, mangled, methodDecl.sourceLoc);
+    const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
+    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig})${dbgSuffix} {`, "entry:"];
 
-    for (const p of params) {
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
       const ty = p.resolvedType;
       if (ty.kind === typeKinds.ref) {
         fnLines.push(`  %${p.name} = alloca ptr, align 8`);
@@ -2364,9 +2497,17 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
       }
       symbols.set(p.name, ty);
+      emitDbgDeclare(fnLines, {
+        name: p.name,
+        slotPtr: `%${p.name}`,
+        yoopType: ty,
+        sourceLoc: p.sourceLoc ?? methodDecl.sourceLoc,
+        subprogramRef,
+        argIndex: i + 1,
+      });
     }
 
-    const ctx = { fnName: methodDecl.name, returnType };
+    const ctx = { fnName: methodDecl.name, returnType, subprogram: subprogramRef };
     methodDecl.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(methodDecl.body, fnLines);
 
@@ -2376,6 +2517,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
+    finalizeFnDbg(fnLines, subprogramRef, methodDecl.sourceLoc);
     lines.push(...fnLines);
   }
 
@@ -3270,6 +3412,21 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   }
 
   function emitStmt(node, fnLines, ctx) {
+    // Post-pass !dbg annotation: record where this statement's emission
+    // starts, dispatch to the real emitter, then walk the new lines and
+    // attach `, !dbg <loc>` to every side-effecting / control-flow
+    // instruction that isn't already annotated. Nested statements
+    // (if/while/for/block) attach their own !dbg first, so this outer pass
+    // is a no-op on their lines (annotateLinesWithDbg skips them).
+    const startIdx = fnLines.length;
+    emitStmtImpl(node, fnLines, ctx);
+    if (debugInfo && ctx?.subprogram) {
+      const loc = dbgLocFor(node, ctx);
+      if (loc) annotateLinesWithDbg(fnLines, startIdx, loc);
+    }
+  }
+
+  function emitStmtImpl(node, fnLines, ctx) {
     switch (node.kind) {
       case ASTNodeKind.RETURN_STATEMENT: {
         // Compute the return value first, fire pending cleanups, then ret.
@@ -3317,6 +3474,13 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         const llvmTy = llvmType(declType);
         const al = effectiveAlign(declType, node.resolvedKindApplication);
         fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${al}`);
+        emitDbgDeclare(fnLines, {
+          name: node.name,
+          slotPtr: `%${node.name}`,
+          yoopType: declType,
+          sourceLoc: node.sourceLoc,
+          subprogramRef: ctx.subprogram,
+        });
         if (node.assignment) {
           if (node.assignment.kind === ASTNodeKind.STRUCT_LITERAL && declType.kind === typeKinds.struct) {
             emitStructLitInto(node.assignment, `%${node.name}`, declType, fnLines);

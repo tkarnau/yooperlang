@@ -9,6 +9,7 @@ import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
 import { RUNTIME_C, runtimeLinkFlags } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
+import { dumpAst } from "./dumpAst.js";
 
 const phaseMode = process.env.phaseMode === "true";
 
@@ -18,7 +19,8 @@ function main() {
     options: {
       inputFile: { type: "string", short: "i" },
       outputFile: { type: "string", short: "o" },
-      outputModules: { type: "boolean", short: "a" }
+      outputModules: { type: "boolean", short: "a" },
+      "dump-ast": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -38,6 +40,12 @@ function main() {
   const outputFileName = values.outputFile ?? inputFile?.replace(".yoop", "") ?? "output";
   const modulesOutputFileName = values.outputModules ? `${outputFileName}.m` : null;
   const entryAbs = fs.realpathSync(path.resolve(inputFile));
+
+  if (values["dump-ast"]) {
+    const astOut = values.outputFile ?? `${outputFileName}.ast.html`;
+    dumpAst(inputFile, astOut);
+    return;
+  }
 
   let modules;
   try {
@@ -89,6 +97,10 @@ function main() {
   fs.writeFileSync(tmpIR, ir, "utf8");
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
 
+  // `-g` keeps the DWARF metadata that codegen emits; `-O0` keeps every
+  // statement's DILocation distinct so `lldb` stepping doesn't fold lines.
+  // Once an opt-level flag lands these should respect it.
+  const debugFlags = ["-g", "-O0"];
   if (process.platform === "win32") {
     const clang = "C:\\Program Files\\LLVM\\bin\\clang.exe";
     const clangArgs = [
@@ -96,6 +108,7 @@ function main() {
       RUNTIME_C,
       "-o",
       `${outputFileName}.exe`,
+      ...debugFlags,
       ...allLinkFlags.map((f) => `-l${f}`),
       "-fuse-ld=link",
     ];
@@ -118,6 +131,7 @@ function main() {
       RUNTIME_C,
       "-o",
       outputFileName,
+      ...debugFlags,
       ...extraSearchPaths,
       ...allLinkFlags.map((f) => `-l${f}`),
     ];

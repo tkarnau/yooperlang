@@ -1318,7 +1318,7 @@ export function parse(src) {
     } else if (peek().tag === TokenTags.templateLiteral) {
       const tok = advance();
       const raw = src.substring(tok.start, tok.start + tok.length);
-      node = parseTemplateLiteralBody(raw);
+      node = parseTemplateLiteralBody(raw, tok.start);
     } else if (peek().tag === TokenTags.lbracket) {
       // array literal: [e1, e2, e3]
       advance(); // consume [
@@ -1497,8 +1497,10 @@ export function parse(src) {
   // a template literal token still has its surrounding backticks. split it into
   // alternating string parts and embedded expressions, and re-parse each
   // ${...} chunk through the full expression parser.
-  function parseTemplateLiteralBody(raw) {
+  function parseTemplateLiteralBody(raw, templateStart) {
     const inner = raw.slice(1, -1); // strip surrounding backticks
+    // inner[k] corresponds to outer offset (templateStart + 1 + k) because
+    // the leading backtick consumes one outer char before `inner` starts.
     const parts = []; // each entry: { kind: "stringPart", value } | { kind: "exprPart", expr }
     let buf = "";
     let i = 0;
@@ -1528,11 +1530,20 @@ export function parse(src) {
           throw parseError(`unterminated \${...} in template literal`);
         }
         const exprSrc = inner.substring(i + 2, j);
-        // re-parse the expression by recursively invoking parse() on a
-        // synthetic top-level wrapper, then unwrap to the inner expression.
-        const wrappedSrc = `function __t(): int32 { return ${exprSrc}; }`;
+        // Re-parse the expression via a synthetic wrapper. The resulting
+        // sourceLocs are relative to `wrappedSrc`; we remap them to the
+        // outer source so LSP go-to-definition / hover land on the actual
+        // characters the user sees.
+        const wrapperPrefix = "function __t(): int32 { return ";
+        const wrappedSrc = `${wrapperPrefix}${exprSrc}; }`;
         const subAst = parse(wrappedSrc);
         const exprNode = subAst.body[0].body.body[0].value;
+        // Outer offset of exprSrc's first char:
+        //   templateStart (the opening backtick)
+        //   + 1 (skip backtick to reach `inner`)
+        //   + i + 2 (skip past `${`)
+        const exprOuterStart = templateStart + 1 + i + 2;
+        remapSourceLocs(exprNode, src, wrapperPrefix.length, exprOuterStart);
         parts.push({ kind: ASTNodeKind.EXPR_PART, expr: exprNode });
         i = j + 1; // skip past closing }
         continue;
@@ -1546,6 +1557,34 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.TEMPLATE_LITERAL);
     node.parts = parts;
     return node;
+  }
+
+  // Walk a sub-AST whose sourceLocs are relative to a synthetic source and
+  // rewrite each sourceLoc to be relative to the outer source. `innerStart`
+  // is the offset within the synthetic source where the user-written
+  // expression begins; `outerStart` is its corresponding offset in `outerSrc`.
+  function remapSourceLocs(node, outerSrc, innerStart, outerStart) {
+    const visited = new WeakSet();
+    function visit(n) {
+      if (!n || typeof n !== "object" || visited.has(n)) return;
+      visited.add(n);
+      if (Array.isArray(n)) { for (const c of n) visit(c); return; }
+      if (n.sourceLoc && typeof n.sourceLoc.pos === "number") {
+        const innerPos = n.sourceLoc.pos;
+        const newOuterPos = outerStart + (innerPos - innerStart);
+        if (newOuterPos >= 0 && newOuterPos <= outerSrc.length) {
+          const remapped = posToSourceLocation(outerSrc, newOuterPos);
+          if (n.sourceLoc.length != null) remapped.length = n.sourceLoc.length;
+          n.sourceLoc = remapped;
+        }
+      }
+      for (const key of Object.keys(n)) {
+        if (key === "sourceLoc" || key === "resolvedType" || key === "resolvedDeclNode") continue;
+        const v = n[key];
+        if (v && typeof v === "object") visit(v);
+      }
+    }
+    visit(node);
   }
 
   function parseCallArgs(node) {

@@ -5,16 +5,33 @@
 // stdlib only. The server reuses the existing lexer/parser/typechecker via
 // the analyze() helper.
 //
-// Capabilities (v1):
+// Capabilities:
 //   - Full text-document sync (client sends the whole file on every change).
 //   - publishDiagnostics on open / change / save.
 //   - clear diagnostics on close.
-//
-// Future: incremental sync, hover, go-to-def, completion, code actions.
+//   - textDocument/hover  — type info from resolvedType.
+//   - textDocument/definition — back-pointers stamped during typecheck.
+//   - textDocument/documentSymbol — outline view.
+//   - textDocument/semanticTokens/full — type-aware coloring.
 
 import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "node:fs";
 import { analyze } from "./analyze.js";
+import {
+  collectDocumentSymbols,
+  findDefinition,
+  findNodeAt,
+  getHoverInfo,
+  hoverFromName,
+  identTokenAt,
+  offsetToPos,
+  offsetToRange,
+  posToOffset,
+} from "./nav.js";
+import { buildSemanticTokens, SEMANTIC_TOKEN_LEGEND } from "./semanticTokens.js";
+import { findReferences, identifyTarget } from "./references.js";
+import { renameAtCursor } from "./rename.js";
+import { collectCompletions } from "./completion.js";
 
 // ---------- LSP framing (Content-Length headers) -----------------------------
 
@@ -78,7 +95,10 @@ process.stdin.on("end", () => {
 
 // ---------- document store ---------------------------------------------------
 
-// uri -> { text, absPath }
+// uri -> { text, absPath, version, analysis? }
+//   `analysis` is the cached result of analyze() at the last didOpen/didChange.
+//   It's invalidated by setting analysis = null on didChange before the next
+//   request rebuilds it lazily.
 const documents = new Map();
 
 function uriToAbsPath(uri) {
@@ -99,6 +119,16 @@ function absPathToUri(absPath) {
   return pathToFileURL(absPath).toString();
 }
 
+// Read the current text for a module: prefer an open overlay (so an
+// unsaved buffer reflects the latest edits) and fall back to disk.
+// Returns null if the file isn't readable.
+function textForAbsPath(absPath) {
+  for (const doc of documents.values()) {
+    if (doc.absPath === absPath) return doc.text;
+  }
+  try { return fs.readFileSync(absPath, "utf8"); } catch { return null; }
+}
+
 // Build the overlay map: for every open doc, prefer its in-memory text.
 function buildOverlays() {
   const overlays = new Map();
@@ -108,47 +138,20 @@ function buildOverlays() {
   return overlays;
 }
 
-// ---------- diagnostics ------------------------------------------------------
-
-function posToRange(text, pos, length) {
-  // Convert a flat offset to LSP {line, character} (both 0-indexed).
-  const before = text.slice(0, pos);
-  const newlineCount = (before.match(/\n/g) || []).length;
-  const lastNewline = before.lastIndexOf("\n");
-  const character = lastNewline === -1 ? pos : pos - lastNewline - 1;
-  const startLine = newlineCount;
-  const startChar = character;
-  // For a length, walk forward. Most diagnostics have length 1; clamp at the
-  // end of the file to avoid running off the buffer.
-  const endPos = Math.min(text.length, pos + Math.max(1, length));
-  const between = text.slice(pos, endPos);
-  const newlinesBetween = (between.match(/\n/g) || []).length;
-  let endLine = startLine + newlinesBetween;
-  let endChar;
-  if (newlinesBetween === 0) {
-    endChar = startChar + (endPos - pos);
-  } else {
-    const lastNl = between.lastIndexOf("\n");
-    endChar = endPos - pos - lastNl - 1;
-  }
-  return {
-    start: { line: startLine, character: startChar },
-    end: { line: endLine, character: endChar },
-  };
-}
-
-function publishFor(uri) {
+// Run analyze() for the document at `uri` (or return the cached result).
+// The cache key is implicit: `doc.analysis` is invalidated to null by
+// didChange. Returns null when the document doesn't exist.
+function analysisFor(uri) {
   const doc = documents.get(uri);
-  if (!doc || !doc.absPath) return;
-
+  if (!doc || !doc.absPath) return null;
+  if (doc.analysis) return doc.analysis;
   const overlays = buildOverlays();
-  let result;
   try {
-    result = analyze(doc.absPath, overlays);
+    doc.analysis = analyze(doc.absPath, overlays);
   } catch (err) {
-    // Defensive: analyze() should swallow exceptions itself, but if anything
-    // sneaks through, surface it as a single diagnostic so the user knows.
-    result = {
+    // analyze() shouldn't throw, but if it does, surface a single diagnostic
+    // and an empty analysis so feature handlers no-op cleanly.
+    doc.analysis = {
       diagnostics: [
         {
           absPath: doc.absPath,
@@ -160,8 +163,44 @@ function publishFor(uri) {
           severity: 1,
         },
       ],
+      modules: [],
+      moduleEnv: null,
+      programState: null,
+      entryModule: null,
+      modById: new Map(),
     };
   }
+  return doc.analysis;
+}
+
+// Resolve a (uri, LSP position) tuple to { node, module, ancestry, offset }
+// or null if the doc isn't open / position is out of range.
+function resolveAt(uri, position) {
+  const doc = documents.get(uri);
+  if (!doc) return null;
+  const analysis = analysisFor(uri);
+  if (!analysis) return null;
+  const mod = analysis.modules.find((m) => m.absPath === doc.absPath);
+  if (!mod) return null;
+  const src = doc.text;
+  const offset = posToOffset(src, position.line, position.character);
+  const ancestry = [];
+  const node = findNodeAt(mod.ast, offset, src, ancestry);
+  return { node, module: mod, ancestry, offset, src, analysis };
+}
+
+// ---------- diagnostics ------------------------------------------------------
+
+function posToRange(text, pos, length) {
+  return offsetToRange(text, pos, length);
+}
+
+function publishFor(uri) {
+  const doc = documents.get(uri);
+  if (!doc || !doc.absPath) return;
+
+  const result = analysisFor(uri);
+  if (!result) return;
 
   // Group diagnostics by absPath; we publish one notification per file we
   // produced diagnostics for. Also publish an empty array for the current
@@ -217,8 +256,23 @@ function handleMessage(msg) {
           change: 1, // Full
           save: { includeText: false },
         },
+        hoverProvider: true,
+        definitionProvider: true,
+        documentSymbolProvider: true,
+        referencesProvider: true,
+        renameProvider: { prepareProvider: false },
+        completionProvider: {
+          // No trigger characters yet — VSCode fires completion on
+          // identifier-char input by default, which is enough for now.
+          resolveProvider: false,
+        },
+        semanticTokensProvider: {
+          legend: SEMANTIC_TOKEN_LEGEND,
+          full: true,
+          range: false,
+        },
       },
-      serverInfo: { name: "yoopiler-lsp", version: "0.0.1" },
+      serverInfo: { name: "yoopiler-lsp", version: "0.1.0" },
     });
     return;
   }
@@ -227,7 +281,7 @@ function handleMessage(msg) {
   if (msg.method === "textDocument/didOpen") {
     const td = msg.params.textDocument;
     const absPath = uriToAbsPath(td.uri);
-    documents.set(td.uri, { text: td.text, absPath });
+    documents.set(td.uri, { text: td.text, absPath, analysis: null });
     publishFor(td.uri);
     return;
   }
@@ -241,11 +295,15 @@ function handleMessage(msg) {
     if (change && typeof change.text === "string") {
       doc.text = change.text;
     }
+    // Invalidate cached analysis so the next feature request reanalyzes.
+    doc.analysis = null;
     publishFor(td.uri);
     return;
   }
 
   if (msg.method === "textDocument/didSave") {
+    const doc = documents.get(msg.params.textDocument.uri);
+    if (doc) doc.analysis = null;
     publishFor(msg.params.textDocument.uri);
     return;
   }
@@ -255,6 +313,131 @@ function handleMessage(msg) {
     documents.delete(uri);
     // Clear any squiggles on the closed file.
     sendNotification("textDocument/publishDiagnostics", { uri, diagnostics: [] });
+    return;
+  }
+
+  if (msg.method === "textDocument/hover") {
+    const { textDocument, position } = msg.params;
+    const at = resolveAt(textDocument.uri, position);
+    if (!at) { sendResponse(msg.id, null); return; }
+    let text = at.node ? getHoverInfo(at.node, at.module) : null;
+    // Fall back to a type/kind hover when the cursor is on a type
+    // annotation (parser object, not an AST node) — getHoverInfo on the
+    // enclosing decl wouldn't show anything useful about the type name.
+    if (!text) {
+      const tok = identTokenAt(at.src, at.offset);
+      if (tok) text = hoverFromName(tok.text, at.module, at.analysis);
+    }
+    if (!text) { sendResponse(msg.id, null); return; }
+    sendResponse(msg.id, {
+      contents: { kind: "markdown", value: "```yoop\n" + text + "\n```" },
+    });
+    return;
+  }
+
+  if (msg.method === "textDocument/definition") {
+    const { textDocument, position } = msg.params;
+    const at = resolveAt(textDocument.uri, position);
+    if (!at) { sendResponse(msg.id, null); return; }
+    // Compute the identifier under the cursor so findDefinition can fall
+    // back to a name lookup when the AST hit is null (type annotations,
+    // kind references — these aren't AST nodes with sourceLocs).
+    const tok = identTokenAt(at.src, at.offset);
+    const def = findDefinition(at.node, {
+      module: at.module,
+      modById: at.analysis.modById,
+      moduleEnv: at.analysis.moduleEnv,
+      programState: at.analysis.programState,
+      tokenText: tok?.text,
+    });
+    if (!def) { sendResponse(msg.id, null); return; }
+    // Read the target file's text to build a valid range. Prefer the open
+    // overlay if one exists.
+    let targetText = null;
+    for (const d of documents.values()) {
+      if (d.absPath === def.absPath) { targetText = d.text; break; }
+    }
+    if (targetText == null) {
+      try { targetText = fs.readFileSync(def.absPath, "utf8"); } catch { targetText = ""; }
+    }
+    sendResponse(msg.id, {
+      uri: absPathToUri(def.absPath),
+      range: offsetToRange(targetText, def.pos, def.length),
+    });
+    return;
+  }
+
+  if (msg.method === "textDocument/documentSymbol") {
+    const { textDocument } = msg.params;
+    const at = resolveAt(textDocument.uri, { line: 0, character: 0 });
+    if (!at) { sendResponse(msg.id, []); return; }
+    sendResponse(msg.id, collectDocumentSymbols(at.module.ast, at.src));
+    return;
+  }
+
+  if (msg.method === "textDocument/semanticTokens/full") {
+    const { textDocument } = msg.params;
+    const at = resolveAt(textDocument.uri, { line: 0, character: 0 });
+    if (!at) { sendResponse(msg.id, { data: [] }); return; }
+    sendResponse(msg.id, buildSemanticTokens(at.module.ast, at.src));
+    return;
+  }
+
+  if (msg.method === "textDocument/references") {
+    const { textDocument, position } = msg.params;
+    const at = resolveAt(textDocument.uri, position);
+    if (!at) { sendResponse(msg.id, []); return; }
+    const tok = identTokenAt(at.src, at.offset);
+    const target = identifyTarget(at.node, {
+      module: at.module,
+      modById: at.analysis.modById,
+      moduleEnv: at.analysis.moduleEnv,
+      programState: at.analysis.programState,
+      tokenText: tok?.text,
+    });
+    if (!target) { sendResponse(msg.id, []); return; }
+    const refs = findReferences(target, { modules: at.analysis.modules });
+    const out = [];
+    for (const ref of refs) {
+      const text = textForAbsPath(ref.absPath);
+      if (text == null) continue;
+      out.push({
+        uri: absPathToUri(ref.absPath),
+        range: offsetToRange(text, ref.pos, ref.length),
+      });
+    }
+    sendResponse(msg.id, out);
+    return;
+  }
+
+  if (msg.method === "textDocument/rename") {
+    const { textDocument, position, newName } = msg.params;
+    const at = resolveAt(textDocument.uri, position);
+    if (!at) { sendError(msg.id, -32603, "rename: no document"); return; }
+    const tok = identTokenAt(at.src, at.offset);
+    const result = renameAtCursor(at.node, newName, {
+      module: at.module,
+      modById: at.analysis.modById,
+      moduleEnv: at.analysis.moduleEnv,
+      programState: at.analysis.programState,
+      modules: at.analysis.modules,
+      tokenText: tok?.text,
+      getModuleText: textForAbsPath,
+    });
+    if (result.error) { sendError(msg.id, -32602, result.error); return; }
+    sendResponse(msg.id, result.workspaceEdit);
+    return;
+  }
+
+  if (msg.method === "textDocument/completion") {
+    const { textDocument, position } = msg.params;
+    const at = resolveAt(textDocument.uri, position);
+    if (!at) { sendResponse(msg.id, { isIncomplete: false, items: [] }); return; }
+    const items = collectCompletions(at.module, at.src, position, {
+      moduleEnv: at.analysis.moduleEnv,
+      modById: at.analysis.modById,
+    });
+    sendResponse(msg.id, { isIncomplete: false, items });
     return;
   }
 
@@ -273,3 +456,8 @@ function handleMessage(msg) {
     sendError(msg.id, -32601, `method not found: ${msg.method}`);
   }
 }
+
+// Keep `offsetToPos` reachable so importing modules can use it via this
+// barrel — currently only nav.js does, but server.js also exposes it for
+// future ad-hoc helpers.
+export { offsetToPos };

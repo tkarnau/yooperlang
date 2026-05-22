@@ -15,8 +15,16 @@ export const Severity = {
 };
 
 // overlays: Map<absPath, srcText>
-// Returns: { diagnostics: [Diagnostic] }
-//   Each Diagnostic: { absPath, pos, length, line, column, message, severity }
+// Returns: { diagnostics, modules, moduleEnv, programState, entryModule, modById }
+//   diagnostics: [{ absPath, pos, length, line, column, message, severity }]
+//   modules: typechecked module list (each carries `ast` with resolvedType
+//     filled in on every expression/decl node). Empty array if loading failed.
+//   moduleEnv: Map<moduleId, env> from typecheckProgram (localSymbols,
+//     structTable, traitTable, etc.). Null on failure.
+//   programState: the instantiation registry + global state. Null on failure.
+//   entryModule: the entry-point module (last in topo order). May be null on
+//     load failure.
+//   modById: Map<moduleId, module> for fast cross-module lookups.
 export function analyze(entryAbsPath, overlays = new Map()) {
   const diagnostics = [];
 
@@ -27,7 +35,14 @@ export function analyze(entryAbsPath, overlays = new Map()) {
     });
   } catch (err) {
     diagnostics.push(diagFromThrown(err, entryAbsPath));
-    return { diagnostics };
+    return {
+      diagnostics,
+      modules: [],
+      moduleEnv: null,
+      programState: null,
+      entryModule: null,
+      modById: new Map(),
+    };
   }
 
   // Entry is the last module in the topo order (post-order leaves-first).
@@ -47,7 +62,14 @@ export function analyze(entryAbsPath, overlays = new Map()) {
       message: `internal: typecheck threw: ${err.message}`,
       severity: Severity.error,
     });
-    return { diagnostics };
+    return {
+      diagnostics,
+      modules: graph.modules,
+      moduleEnv: null,
+      programState: null,
+      entryModule: entryMod,
+      modById,
+    };
   }
 
   for (const err of typecheckResult.errors) {
@@ -64,7 +86,14 @@ export function analyze(entryAbsPath, overlays = new Map()) {
     });
   }
 
-  return { diagnostics };
+  return {
+    diagnostics,
+    modules: graph.modules,
+    moduleEnv: typecheckResult.moduleEnv,
+    programState: typecheckResult.programState,
+    entryModule: entryMod,
+    modById,
+  };
 }
 
 function diagFromThrown(err, entryAbsPath) {
