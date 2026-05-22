@@ -109,14 +109,23 @@ export function validateFunction(funcNode, typeContext, errors) {
             pushError(errors, param,
               `kind "${kt.name}" can only apply to struct values, got ${formatType(baseType)}`);
           } else {
-            // Validate required traits.
-            for (const reqTrait of kt.requires) {
-              const implementsIt = (structType.implementsTraits ?? []).some(
-                (t2) => t2.name === reqTrait.name && (t2.moduleId ?? null) === (reqTrait.moduleId ?? null),
-              );
-              if (!implementsIt) {
-                pushError(errors, param,
-                  `parameter "${param.name}" has kind "${kt.name}" which requires "${reqTrait.name}", but type ${formatType(structType)} does not implement "${reqTrait.name}"`);
+            // Phase 6.4 strict propagates: a struct that propagates this kind
+            // satisfies the kind's requirement via its propagated fields, even
+            // if it does not implement the required traits directly. Skip the
+            // direct-implements check in that case.
+            const structPropagatesThisKind = (structType.propagatedKinds ?? []).some(
+              (a) => (a.kindType ?? a) === kt,
+            );
+            if (!structPropagatesThisKind) {
+              // Validate required traits.
+              for (const reqTrait of kt.requires) {
+                const implementsIt = (structType.implementsTraits ?? []).some(
+                  (t2) => t2.name === reqTrait.name && (t2.moduleId ?? null) === (reqTrait.moduleId ?? null),
+                );
+                if (!implementsIt) {
+                  pushError(errors, param,
+                    `parameter "${param.name}" has kind "${kt.name}" which requires "${reqTrait.name}", but type ${formatType(structType)} does not implement "${reqTrait.name}"`);
+                }
               }
             }
           }
@@ -489,14 +498,23 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     return;
   }
 
-  // The RHS struct must implement every required trait.
-  for (const reqTrait of kindType.requires) {
-    const implementsIt = (declaredType.implementsTraits ?? []).some(
-      (t) => t.name === reqTrait.name && (t.moduleId ?? null) === (reqTrait.moduleId ?? null),
-    );
-    if (!implementsIt) {
-      pushError(ctx.errors, node,
-        `binding "${node.name}" has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
+  // Phase 6.4 strict propagates: a struct that propagates this kind satisfies
+  // the kind's requirement via propagated fields, even if it does not
+  // implement the required traits directly. Skip the direct-implements check
+  // in that case — the obligation flows via the field walk in kindCheck.
+  const structPropagatesThisKind = (declaredType.propagatedKinds ?? []).some(
+    (a) => (a.kindType ?? a) === kindType,
+  );
+  if (!structPropagatesThisKind) {
+    // The RHS struct must implement every required trait.
+    for (const reqTrait of kindType.requires) {
+      const implementsIt = (declaredType.implementsTraits ?? []).some(
+        (t) => t.name === reqTrait.name && (t.moduleId ?? null) === (reqTrait.moduleId ?? null),
+      );
+      if (!implementsIt) {
+        pushError(ctx.errors, node,
+          `binding "${node.name}" has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
+      }
     }
   }
 

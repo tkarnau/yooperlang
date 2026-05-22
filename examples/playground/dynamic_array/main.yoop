@@ -2,17 +2,24 @@
 //
 //   - `DynArray<T> implements Disposable propagates<usedisposable>`:
 //     the type itself is the disposable thing, and its `propagates<usedisposable>`
-//     clause tells every binding of DynArray<T> to inherit the dispose obligation.
+//     clause says: every binding of `DynArray<T>` carries the dispose obligation
+//     and must either fulfil it or pass it on. There is no way to use a value
+//     of this type that silently leaks the obligation.
 //   - `new_dynarray<T>(...): DynArray<T> propagates<usedisposable>`:
 //     factory that pushes the obligation through its return type to the caller.
-//   - Calling `let arr: DynArray<int32> = new_dynarray(4)` is enough — no kind
-//     keyword required. The compiler auto-inserts `Disposable.dispose(ref arr)`
-//     before scope end.
+//     The function must declare `propagates<usedisposable>`, otherwise the
+//     return is rejected — a helper that creates a DynArray either disposes
+//     it locally or hands the dispose obligation up to its caller.
+//   - At a call site (main) the binding's `usedisposable` keyword opts into
+//     auto-cleanup: the compiler injects `Disposable.dispose(ref arr)` at
+//     scope end. A plain `let arr: DynArray<int32> = ...` is also legal but
+//     then the user must either call `Disposable.dispose(ref arr)` manually
+//     or return `arr` from a function that propagates `usedisposable`.
 //
-// Try removing `propagates<usedisposable>` from the type and the compiler will
-// no longer auto-inject the cleanup. Try leaking `arr` out of the scope and
-// the kind's `mustNotShare acrossScopes` would (with that clause re-added) be
-// rejected too.
+// Try dropping `propagates<usedisposable>` from `new_dynarray` and the compiler
+// will reject the return: the kind's obligation has nowhere to go. Try dropping
+// the `usedisposable` keyword on `arr` in main without adding a manual dispose
+// call, and the compiler will reject the binding for an unsatisfied obligation.
 
 /*
     This demonstrates a dynamic array implementation for yooperlang
@@ -24,8 +31,12 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
+type Maybe {
+    err: string,
+}
+
 trait Disposable {
-    function dispose(ref self): void;
+    function dispose(ref self): Maybe;
 }
 
 
@@ -42,17 +53,26 @@ type DynArray<T> implements Disposable propagates<usedisposable> {
     data: T[],
     len: usize,
     cap: usize,
+    isDisposed: bool,
 
-    function dispose(ref self): void {
+    function dispose(ref self): Maybe {
+        if (self.isDisposed) {
+            return { err: "already disposed" };
+        }
+        self.isDisposed = true;
         printf(`(dispose: freeing DynArray, len=${self.len} cap=${self.cap})\n`);
         heap_free(self.data);
+        return { err: "" };
     }
 }
 
-// Factory. `propagates<usedisposable>` documents the contract; the obligation
-// is also surfaced via the type itself, so either is sufficient.
-function new_dynarray<T>(initial_cap: usize): DynArray<T> {
-    const newArr: DynArray<T> = { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
+// Factory. `propagates<usedisposable>` on the return type transfers the
+// dispose obligation to the caller. The local `newArr` does NOT declare the
+// kind keyword — the function's propagates clause is what allows it to escape
+// via return without local discharge. Adding `usedisposable` here would mean
+// "I'll dispose this locally", which contradicts returning it.
+function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<usedisposable> {
+    let newArr: DynArray<T> = { data: heap_alloc(initial_cap), len: 0, cap: initial_cap, isDisposed: false };
 
     return newArr;
 }
@@ -80,21 +100,48 @@ function get<T>(a: ref DynArray<T>, i: usize): T {
 }
 
 function main(): int32 {
-    // No `usedisposable` keyword needed — propagates<usedisposable> on
-    // DynArray<T> means the binding auto-acquires the mustCall obligation.
-    let arr: DynArray<int32> = new_dynarray(4) ;
-    // Force two grow passes (4 -> 8 -> 16).
-    let i: int32 = 0;
-    while (i < 10) {
-        push(ref arr, i * i);
-        i = i + 1;
+    // `usedisposable` opts into auto-cleanup at scope end. The compiler
+    // injects `Disposable.dispose(ref arr)` before this function returns.
+    usedisposable arr: DynArray<int32> = new_dynarray(4) {
+        // Force two grow passes (4 -> 8 -> 16).
+        let i: int32 = 0;
+        while (i < 10) {
+            push(ref arr, i * i);
+            i = i + 1;
+        }
+        
+        printf(`len=${arr.len} cap=${arr.cap}\n`);
+        let j: usize = 0;
+        while (j < arr.len) {
+            printf(`arr[${j}]=${get(ref arr, j)}\n`);
+            j = j + 1;
+        }
+        const disposeResult: Maybe = Disposable.dispose(ref arr);
+        if (disposeResult.err.len > 0) {
+            printf(`disposal failure: err${disposeResult.err}\n`);
+        }
+    
+        const disposeResult2: Maybe = Disposable.dispose(ref arr);
+        if (disposeResult2.err.len > 0) {
+            printf(`disposal2 failure: ${disposeResult2.err}\n`);
+        }
     }
 
-    printf(`len=${arr.len} cap=${arr.cap}\n`);
-    let j: usize = 0;
-    while (j < arr.len) {
-        printf(`arr[${j}]=${get(ref arr, j)}\n`);
-        j = j + 1;
+    // Manual discharge route: plain `let` of a propagating type is fine if
+    // the user satisfies the obligation themselves at the same conditional
+    // depth as the binding. Hiding the call inside an `if`/`while`/etc. does
+    // NOT satisfy it — that path is conditional, the obligation is not.
+    let arr2: DynArray<int32> = new_dynarray(4);
+    if (2 > 1) {
+        const r1: Maybe = Disposable.dispose(ref arr2);
+        if (r1.err.len > 0) {
+            printf(`disposal of arr2 failed (then): ${r1.err}\n`);
+        }
+    } else {
+        const r2: Maybe = Disposable.dispose(ref arr2);
+        if (r2.err.len > 0) {
+            printf(`disposal of arr2 failed (else): ${r2.err}\n`);
+        }
     }
 
     // The compiler emits `Disposable.dispose(ref arr)` right here, before return.

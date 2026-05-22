@@ -206,6 +206,18 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "len=3 arr[2]=30\ndisposing(3)\n");
   });
 
+  it("propagates_manual_dispose.yoop: a plain `let` of a propagating type passes when the user discharges the obligation manually", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/propagates_manual_dispose.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "using(7)\ndisposed(7)\n");
+  });
+
+  it("propagates_dispose_both_branches.yoop: dispose in BOTH arms of an if/else satisfies a plain `let` binding", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/propagates_dispose_both_branches.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "disposed(7)\n");
+  });
+
   it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
     const { stdout, exitCode } = runFixture("examples/pass/for_break_continue.yoop");
     assert.equal(exitCode, 0);
@@ -1194,6 +1206,39 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /carries kind 'scoped' but enclosing struct .* does not propagate it/.test(e.message)),
       `expected propagates-missing error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 6.4 strict propagates enforcement.
+  it("propagates_return_not_declared.yoop rejects a function that returns a propagating type without declaring propagates<K>", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_not_declared.yoop");
+    assert.ok(
+      errors.some((e) => /carrying propagates<usedisposable>.*either declare 'propagates<usedisposable>'/.test(e.message)),
+      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("propagates_binding_missing_kind.yoop rejects a binding whose propagates<K> obligation is never satisfied", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_binding_missing_kind.yoop");
+    assert.ok(
+      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<usedisposable>/.test(e.message)),
+      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("propagates_struct_literal_missing_kind.yoop rejects a struct-literal binding whose propagates<K> obligation is never satisfied", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_struct_literal_missing_kind.yoop");
+    assert.ok(
+      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<usedisposable>/.test(e.message)),
+      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("propagates_dispose_only_then.yoop rejects a binding whose dispose appears in only one arm of an if/else", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_dispose_only_then.yoop");
+    assert.ok(
+      errors.some((e) => /binding 'r' has unsatisfied obligation from propagates<usedisposable>/.test(e.message)),
+      `expected one-arm-only error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

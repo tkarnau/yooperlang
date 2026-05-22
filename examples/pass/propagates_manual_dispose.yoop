@@ -1,0 +1,42 @@
+// Phase 6.4 strict propagates: a binding of a propagating type may use a
+// plain `let`/`const` (no kind keyword) provided the user satisfies the
+// obligation manually before scope end. Here `main` calls `Disposable.dispose`
+// directly on `arr`, which discharges the `usedisposable` obligation — so the
+// compiler accepts the binding without `usedisposable` and does NOT
+// auto-inject another dispose at scope end.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind usedisposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Resource implements Disposable propagates<usedisposable> {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`disposed(${self.id})\n`);
+    }
+}
+
+function make_resource(): Resource propagates<usedisposable> {
+    return { id: 7 };
+}
+
+function main(): int32 {
+    let r: Resource = make_resource();
+    printf(`using(${r.id})\n`);
+    Disposable.dispose(ref r);
+    return 0;
+}
+
+// expected output:
+// using(7)
+// disposed(7)

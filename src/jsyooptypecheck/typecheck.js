@@ -2017,14 +2017,18 @@ export function typecheckProgram(modules) {
       }
     }
 
-    // pass D.2: run kind check (escape analysis) now that all param kinds are resolved
+    // pass D.2: run kind check (escape analysis) now that all param kinds are resolved.
+    // Generic function decls are included — kindCheck operates on the open
+    // (TypeParamType-bearing) body since the obligations it stamps onto AST
+    // nodes (pendingCleanups, implicitCleanups) are preserved by the
+    // per-instance `cloneAstWithSubstitution` walk in codegen.
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
-      if (d.kind === ASTNodeKind.FUNCTION_DECL && !d.genericDecl) {
-        runKindCheck(d, errors, funcDeclTable);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+        runKindCheck(d, errors, funcDeclTable, programState.registry);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
-          runKindCheck(method, errors, funcDeclTable);
+          runKindCheck(method, errors, funcDeclTable, programState.registry);
         }
       }
     }

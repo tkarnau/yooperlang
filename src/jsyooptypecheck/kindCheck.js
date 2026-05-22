@@ -27,13 +27,44 @@ import { ASTNodeKind, ASTNode } from "../contracts.js";
 import { pushError } from "./errors.js";
 import { typeKinds } from "./types.js";
 
-export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
+export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, registry = null) {
   const body = fnOrMethodDecl.body;
   if (!body || body.kind !== ASTNodeKind.BLOCK) return;
+
+  // Phase 7.x: when the struct on a binding is an open generic instantiation
+  // (a `Box<T>` referenced inside a generic body, where T is still a
+  // TypeParamType), its `implementsTraits` snapshot was taken in pass C.1
+  // BEFORE pass C.3's `validateImplBlock` populated the genericDecl. Reach
+  // through `genericInstance.declId` into the registry to read the up-to-date
+  // trait list from the genericDecl. For closed instances and non-generic
+  // structs, the struct's own field is authoritative.
+  function effectiveImplementsTraits(rt) {
+    if (!rt) return [];
+    const direct = rt.implementsTraits ?? [];
+    if (direct.length > 0) return direct;
+    const declId = rt.genericInstance?.declId;
+    if (declId != null && registry?.genericDeclById) {
+      const gd = registry.genericDeclById.get(declId);
+      if (gd?.implementsTraits) return gd.implementsTraits;
+    }
+    return direct;
+  }
 
   // Each frame: { obligations: [obligation], escapeSentinels: [sentinel] }
   // sentinel: { bindingName, kindName, declScope }
   const stack = [];
+
+  // Phase 6.4 strict propagates: path-coverage satisfaction tracking. The
+  // walker treats `o.satisfied` as a per-path mutable flag and uses
+  // snapshot/restore around if/else branches to compute "satisfied on every
+  // reaching path". After both arms of an if/else, the post-merge sat state
+  // is the intersection of each arm's sat state. Branches that diverged
+  // (returned, etc.) are excluded from the intersection — they don't reach
+  // the merge point. Loops (while/for) discard inner sat changes since the
+  // body may execute zero times. `walkDiverged` is set when control flow
+  // exits the current branch via `return`; subsequent statements in the
+  // block are skipped.
+  let walkDiverged = false;
 
   function flattenStackReverse() {
     // Innermost frame first, and within each frame, latest binding first.
@@ -82,118 +113,260 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
   }
 
   // Returns the array of obligations registered for this binding/param.
-  // Sources:
-  //   - explicit kindPrefix: `disposable a: H = ...` / `pooled h = task_call()`
-  //   - propagated kinds on the resolved struct type (phase 6.4)
+  // Phase 6.4 strict propagates: obligations are emitted for any binding of a
+  // type that propagates a `mustCall`/`refcounted` kind, regardless of whether
+  // the binding declares the kind keyword. The keyword is an opt-IN to
+  // auto-cleanup-at-scope-exit; bindings without it must satisfy the
+  // obligation manually (by calling the cleanup method directly) or transfer
+  // it to the caller via the enclosing function's `propagates<K>` clause.
+  //
+  // Every obligation carries:
+  //   - `kindType`        — the K it represents.
+  //   - `autoCleanup`     — true if the binding's kind keyword authorises
+  //                         the compiler to inject the cleanup call at
+  //                         scope exit; false if the user is on the hook.
+  //   - `transferred`     — flipped by RETURN_STATEMENT when the enclosing
+  //                         function declares `propagates<K>` and the
+  //                         returned value carries the obligation.
+  //   - `satisfied`       — flipped by `walkExpr` when it sees a direct call
+  //                         to the obligation's cleanup method on the
+  //                         tracked binding (linear flow-insensitive).
+  //   - `reported`        — dedupes the unsatisfied-at-scope-exit error so
+  //                         the same obligation doesn't fire twice across a
+  //                         return + block-end pair.
   function obligationsFor(stmt) {
     const out = [];
     const kt = stmt.resolvedKindType;
-    if (kt) {
-      // Phase 6.3: builtin kinds — joined / pooled — yield task-flavored obligations.
-      if (kt.builtin && stmt.resolvedType?.kind === "task") {
-        if (kt.autoJoin) {
-          out.push({
-            type: "autoWait",
-            bindingName: stmt.name,
-            taskResultType: stmt.resolvedType.resultType,
-            sourceLoc: stmt.sourceLoc,
-          });
-        } else if (kt.refcounted) {
-          out.push({
+    const rt = stmt.resolvedType;
+
+    // Phase 6.3: builtin kinds bound directly to Task<T> — joined / pooled.
+    // These are always opt-in via keyword, so `autoCleanup` is true.
+    if (kt?.builtin && rt?.kind === "task") {
+      if (kt.autoJoin) {
+        out.push(mkObligation({
+          type: "autoWait",
+          bindingName: stmt.name,
+          taskResultType: rt.resultType,
+          kindType: kt,
+          autoCleanup: true,
+          sourceLoc: stmt.sourceLoc,
+        }));
+      } else if (kt.refcounted) {
+        out.push(mkObligation({
+          type: "release",
+          bindingName: stmt.name,
+          kindType: kt,
+          autoCleanup: true,
+          sourceLoc: stmt.sourceLoc,
+        }));
+      }
+      return out;
+    }
+
+    if (rt?.kind !== "struct") return out;
+
+    // Build the set of kinds that produce obligations on this binding, with
+    // each kind's `autoCleanup` flag:
+    //   - any K in `rt.propagatedKinds` with mustCall/refcounted → tracked
+    //     (autoCleanup defaults to false; flipped to true if the binding
+    //     declares K via its kind keyword).
+    //   - any K from the callee's `returnPropagatedKinds` (if the
+    //     initializer is a direct call) → same treatment. Covers cases
+    //     where a function propagates a kind the type itself doesn't.
+    //   - the explicit `kt` (from the keyword), if it isn't builtin and has
+    //     mustCall/refcounted clauses → tracked with autoCleanup=true.
+    const kindMeta = new Map(); // kindType -> { autoCleanup: bool }
+    const addKind = (propA, autoCleanup) => {
+      const propK = propA?.kindType ?? propA;
+      if (!propK) return;
+      const hasObligation =
+        (propK.mustCall?.length ?? 0) > 0 || propK.refcounted;
+      if (!hasObligation) return;
+      const existing = kindMeta.get(propK);
+      if (existing) {
+        if (autoCleanup) existing.autoCleanup = true;
+      } else {
+        kindMeta.set(propK, { autoCleanup });
+      }
+    };
+    for (const propA of rt.propagatedKinds ?? []) addKind(propA, false);
+    if (
+      stmt.assignment?.kind === ASTNodeKind.CALL_EXPRESSION &&
+      typeof stmt.assignment.callee === "string" &&
+      funcDeclTable
+    ) {
+      const calleeDecl = funcDeclTable.get(stmt.assignment.callee);
+      for (const app of calleeDecl?.returnPropagatedKinds ?? []) addKind(app, false);
+    }
+    // The kt.builtin && rt is task case is handled above by the early return;
+    // here we additionally flip autoCleanup=true when a builtin kind keyword
+    // (e.g. `Task`) is applied to a struct binding whose propagatedKinds
+    // includes the kind.
+    if (kt) addKind(kt, true);
+
+    const effectiveTraits = effectiveImplementsTraits(rt);
+    for (const [K, meta] of kindMeta) {
+      const requires = K.requires ?? [];
+      const structImplsRequires = requires.every((reqT) =>
+        effectiveTraits.some(
+          (t) => t.name === reqT.name && (t.moduleId ?? null) === (reqT.moduleId ?? null),
+        ),
+      );
+      if (structImplsRequires && (K.mustCall?.length ?? 0) > 0) {
+        const mc = K.mustCall[0];
+        out.push(mkObligation({
+          type: "mustCall",
+          bindingName: stmt.name,
+          methodName: mc.methodName,
+          // Phase 7.4: cleanup-call mangling is trait-qualified.
+          traitName: mc.traitType?.name,
+          structType: rt,
+          moduleId: rt.moduleId,
+          kindType: K,
+          autoCleanup: meta.autoCleanup,
+          sourceLoc: stmt.sourceLoc,
+        }));
+        continue;
+      }
+      // Via propagation through fields. Also handles refcounted kinds (e.g.
+      // `Task`) with no mustCall, where the obligation is a release on the
+      // field.
+      for (const f of rt.fields ?? []) {
+        if (!fieldCarriesKind(f, K)) continue;
+        if (K.refcounted) {
+          out.push(mkObligation({
             type: "release",
             bindingName: stmt.name,
+            fieldName: f.name,
+            structType: rt,
+            kindType: K,
+            autoCleanup: meta.autoCleanup,
             sourceLoc: stmt.sourceLoc,
-          });
-        }
-      } else if (kt.mustCall.length > 0) {
-        const declaredType = stmt.resolvedType;
-        if (declaredType?.kind === "struct") {
-          const mc = kt.mustCall[0]; // 6.1: single mustCall
-          out.push({
+          }));
+        } else if ((K.mustCall?.length ?? 0) > 0) {
+          const mc = K.mustCall[0];
+          out.push(mkObligation({
             type: "mustCall",
             bindingName: stmt.name,
+            fieldName: f.name,
             methodName: mc.methodName,
-            // Phase 7.4: cleanup-call mangling is trait-qualified — the
-            // trait that supplied `mustCall` is statically known via the
-            // kind's `requires` clause.
             traitName: mc.traitType?.name,
-            structType: declaredType,
-            moduleId: declaredType.moduleId,
+            structType: rt,
+            fieldStructType: f.type,
+            moduleId: f.type?.moduleId,
+            kindType: K,
+            autoCleanup: meta.autoCleanup,
             sourceLoc: stmt.sourceLoc,
-          });
+          }));
         }
       }
     }
+    return out;
+  }
 
-    // Phase 6.4: propagated obligations. For each kind on the resolved struct's
-    // propagatedKinds list, walk the fields and emit one obligation per match.
-    // Phase 6.5: propagatedKinds entries are KindApplication; unwrap to KindType.
-    const rt = stmt.resolvedType;
-    if (rt?.kind === "struct" && rt.propagatedKinds?.length > 0) {
-      // Avoid double-emitting: if the binding already has an explicit
-      // kindPrefix matching one of the propagated kinds, skip self-propagation
-      // for that kind (the explicit branch above already emitted the
-      // obligation).
-      const explicitKind = kt;
-      for (const propA of rt.propagatedKinds) {
-        const propK = propA.kindType ?? propA;
-        // Phase 7.x self-propagation: if the struct *itself* satisfies the
-        // kind's `requires` (i.e. it implements every required trait), the
-        // binding inherits the kind directly — no field traversal needed.
-        // This is the natural shape for things like DynArray<T> which are
-        // themselves Disposable.
-        if (propK !== explicitKind && propK.mustCall.length > 0 && propK.requires.length > 0) {
-          const structImplsAll = propK.requires.every((reqT) =>
-            (rt.implementsTraits ?? []).some(
-              (t) =>
-                t.name === reqT.name &&
-                (t.moduleId ?? null) === (reqT.moduleId ?? null),
-            ),
-          );
-          if (structImplsAll) {
-            const mc = propK.mustCall[0];
-            out.push({
-              type: "mustCall",
-              bindingName: stmt.name,
-              methodName: mc.methodName,
-              traitName: mc.traitType?.name,
-              structType: rt,
-              moduleId: rt.moduleId,
-              sourceLoc: stmt.sourceLoc,
-            });
-            // Don't ALSO walk fields for this kind — the obligation is on
-            // the binding itself.
-            continue;
-          }
+  // Centralised obligation constructor that fills in the lifecycle flags.
+  function mkObligation(o) {
+    return {
+      transferred: false,
+      satisfied: false,
+      reported: false,
+      ...o,
+    };
+  }
+
+  // Snapshot/restore/merge of `satisfied` flags across the live frame stack.
+  // Used by walkStatement's IF/WHILE/FOR cases to compute path coverage.
+  function snapshotSat() {
+    const map = new Map();
+    for (const frame of stack) {
+      for (const o of frame.obligations) {
+        map.set(o, o.satisfied);
+      }
+    }
+    return map;
+  }
+  function restoreSat(snap) {
+    for (const [o, v] of snap) {
+      o.satisfied = v;
+    }
+  }
+  // Intersection: an obligation is "satisfied" in the merged state iff it
+  // was satisfied on every contributing path. Used when joining two branches
+  // of an if/else at a merge point.
+  function mergeSatIntersect(a, b) {
+    const merged = new Map();
+    const all = new Set([...a.keys(), ...b.keys()]);
+    for (const o of all) {
+      merged.set(o, (a.get(o) ?? false) && (b.get(o) ?? false));
+    }
+    return merged;
+  }
+
+  // Walk a branch and report whether it diverged (exited via return). The
+  // outer `walkDiverged` is saved and restored so each branch is walked
+  // independently.
+  function walkBranchAndTrack(node) {
+    const saved = walkDiverged;
+    walkDiverged = false;
+    walkBranch(node);
+    const branchDiverged = walkDiverged;
+    walkDiverged = saved;
+    return branchDiverged;
+  }
+
+  // Phase 6.4 strict propagates: mark obligations associated with the given
+  // identifier name and kind as `transferred`. Returns true if at least one
+  // obligation was marked.
+  //
+  // Bindings that declared the kind keyword (`autoCleanup === true`) are
+  // committed to local cleanup — declaring the keyword IS the user's
+  // statement that the lifetime ends in this scope. Even if the enclosing
+  // function declares `propagates<K>`, the keyword wins: cleanup fires
+  // before return, and the obligation is NOT transferred.
+  function markIdentObligationsTransferred(identName, kindType) {
+    let any = false;
+    for (const frame of stack) {
+      for (const o of frame.obligations) {
+        if (
+          o.bindingName === identName &&
+          o.kindType === kindType &&
+          !o.transferred &&
+          !o.autoCleanup
+        ) {
+          o.transferred = true;
+          any = true;
         }
-        for (const f of rt.fields ?? []) {
-          if (!fieldCarriesKind(f, propK)) continue;
-          if (propK.refcounted) {
-            out.push({
-              type: "release",
-              bindingName: stmt.name,
-              fieldName: f.name,
-              structType: rt,
-              sourceLoc: stmt.sourceLoc,
-            });
-          } else if (propK.mustCall.length > 0) {
-            const mc = propK.mustCall[0];
-            // The dispose call targets the field's struct type (e.g. FileHandle),
-            // not the enclosing struct (Session).
-            out.push({
-              type: "mustCall",
-              bindingName: stmt.name,
-              fieldName: f.name,
-              methodName: mc.methodName,
-              // Phase 7.4: trait that supplies the cleanup method.
-              traitName: mc.traitType?.name,
-              structType: rt,           // enclosing struct (for GEP layout)
-              fieldStructType: f.type,  // the trait-implementing struct
-              moduleId: f.type?.moduleId,
-              sourceLoc: stmt.sourceLoc,
-            });
-          }
-        }
+      }
+    }
+    return any;
+  }
+
+  // Phase 6.4 strict propagates: emit the unsatisfied-obligation error for any
+  // tracked obligation that has reached scope exit without being satisfied,
+  // transferred, or cleaned up automatically. Uses `o.reported` to dedupe.
+  function reportUnsatisfied(o) {
+    if (o.reported || o.satisfied || o.transferred || o.autoCleanup) return;
+    o.reported = true;
+    const kName = o.kindType?.name ?? "<kind>";
+    const methodHint = o.methodName
+      ? ` call '${o.kindType?.requires?.[0]?.name ?? "Trait"}.${o.methodName}(ref ${o.bindingName})' to satisfy it,`
+      : "";
+    pushError(errors, { sourceLoc: o.sourceLoc },
+      `binding '${o.bindingName}' has unsatisfied obligation from propagates<${kName}>; declare the '${kName}' kind keyword for auto-cleanup,${methodHint} or transfer it to the caller via 'propagates<${kName}>' on the enclosing function`);
+  }
+
+  // Convert a list of obligations into auto-cleanup nodes for codegen,
+  // skipping any that are satisfied, transferred, or not autoCleanup. Errors
+  // are emitted (via reportUnsatisfied) as a side effect for non-autoCleanup
+  // obligations that reached this exit point unsatisfied.
+  function projectCleanups(obligations) {
+    const out = [];
+    for (const o of obligations) {
+      if (o.satisfied || o.transferred) continue;
+      if (o.autoCleanup) {
+        out.push(makeCleanupCall(o));
+      } else {
+        reportUnsatisfied(o);
       }
     }
     return out;
@@ -256,11 +429,11 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     if (!block || block.kind !== ASTNodeKind.BLOCK) return;
     const frame = { obligations: [], escapeSentinels: [] };
     stack.push(frame);
-    for (const s of block.body) walkStatement(s);
-    block.implicitCleanups = frame.obligations
-      .slice()
-      .reverse()
-      .map(makeCleanupCall);
+    for (const s of block.body) {
+      if (walkDiverged) break;
+      walkStatement(s);
+    }
+    block.implicitCleanups = projectCleanups(frame.obligations.slice().reverse());
     stack.pop();
   }
 
@@ -290,10 +463,9 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
           const innerFrame = { obligations: [...obligations], escapeSentinels: [] };
           stack.push(innerFrame);
           for (const s of stmt.trailingBlock.body) walkStatement(s);
-          stmt.trailingBlock.implicitCleanups = innerFrame.obligations
-            .slice()
-            .reverse()
-            .map(makeCleanupCall);
+          stmt.trailingBlock.implicitCleanups = projectCleanups(
+            innerFrame.obligations.slice().reverse(),
+          );
           stack.pop();
         } else {
           for (const o of obligations) {
@@ -314,8 +486,49 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
             }
           }
           walkExpr(stmt.value);
+          // Phase 6.4 strict propagates: if the returned value carries a
+          // propagating kind, the enclosing function must declare
+          // `propagates<K>` so the obligation transfers to the caller.
+          // IDENT returns: when the function declares propagates<K>, mark
+          // matching active obligations as transferred (suppresses cleanup
+          // + the unsatisfied-at-scope-exit error for that obligation).
+          // Non-IDENT returns (struct literal, call): the binding-side
+          // pathway has nothing to transfer, so we emit the function-side
+          // error directly when the function fails to declare propagates<K>.
+          const rt = stmt.value.resolvedType;
+          if (rt?.kind === "struct" && (rt.propagatedKinds?.length ?? 0) > 0) {
+            const declaredPropagates = new Set(
+              (fnOrMethodDecl.returnPropagatedKinds ?? []).map(
+                (a) => a.kindType ?? a,
+              ),
+            );
+            const identName =
+              stmt.value.kind === ASTNodeKind.IDENT ? stmt.value.name : null;
+            for (const propA of rt.propagatedKinds) {
+              const propK = propA.kindType ?? propA;
+              const carriesObligation =
+                (propK.mustCall?.length ?? 0) > 0 || propK.refcounted;
+              if (!carriesObligation) continue;
+              if (identName) {
+                if (declaredPropagates.has(propK)) {
+                  markIdentObligationsTransferred(identName, propK);
+                }
+                // If not declared: the IDENT's binding-side obligation will
+                // be reported by `reportUnsatisfied` below — no need for a
+                // separate function-side error.
+              } else if (!declaredPropagates.has(propK)) {
+                pushError(errors, stmt,
+                  `function returns a value of type ${rt.name} carrying propagates<${propK.name}>; either declare 'propagates<${propK.name}>' on the function or satisfy the obligation before return`);
+              }
+            }
+          }
         }
-        stmt.pendingCleanups = flattenStackReverse().map(makeCleanupCall);
+        // Project cleanups for every active obligation. Auto-cleanup obligations
+        // (kind-keyword bindings) get a CLEANUP_CALL injected here; manually-
+        // tracked obligations that reached return without satisfaction or
+        // transfer surface the unsatisfied error via reportUnsatisfied.
+        stmt.pendingCleanups = projectCleanups(flattenStackReverse());
+        walkDiverged = true;
         return;
       }
       case ASTNodeKind.EXPRESSION_STATEMENT:
@@ -327,21 +540,62 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
       case ASTNodeKind.DESTRUCTURE_DECL:
         if (stmt.assignment) walkExpr(stmt.assignment);
         return;
-      case ASTNodeKind.IF_STATEMENT:
+      case ASTNodeKind.IF_STATEMENT: {
         walkExpr(stmt.expression);
-        walkBranch(stmt.body);
-        if (stmt.elseBody) walkBranch(stmt.elseBody);
+        // Phase 6.4 strict propagates: walk each arm independently from a
+        // shared starting sat state, then merge at the join point. A manual
+        // dispose call satisfies an outer-scope obligation only if it
+        // appears on every path that reaches the merge.
+        const base = snapshotSat();
+        const thenDiverged = walkBranchAndTrack(stmt.body);
+        const thenSnap = snapshotSat();
+        restoreSat(base);
+        if (stmt.elseBody) {
+          const elseDiverged = walkBranchAndTrack(stmt.elseBody);
+          const elseSnap = snapshotSat();
+          if (thenDiverged && elseDiverged) {
+            // Both arms exit via return — code after the if is unreachable.
+            walkDiverged = true;
+            restoreSat(base);
+          } else if (thenDiverged) {
+            // Only the else arm reaches the merge.
+            restoreSat(elseSnap);
+          } else if (elseDiverged) {
+            // Only the then arm reaches the merge.
+            restoreSat(thenSnap);
+          } else {
+            restoreSat(mergeSatIntersect(thenSnap, elseSnap));
+          }
+        } else {
+          // No else: the no-branch (fall-through if cond false) path has
+          // sat=base. If the then-arm diverged, that's the only reaching
+          // path; otherwise intersect with base.
+          if (thenDiverged) {
+            restoreSat(base);
+          } else {
+            restoreSat(mergeSatIntersect(thenSnap, base));
+          }
+        }
         return;
-      case ASTNodeKind.WHILE_STATEMENT:
+      }
+      case ASTNodeKind.WHILE_STATEMENT: {
         walkExpr(stmt.expression);
-        walkBranch(stmt.body);
+        // The body may execute zero times; nothing inside can be relied on
+        // to satisfy an outer obligation.
+        const base = snapshotSat();
+        walkBranchAndTrack(stmt.body);
+        restoreSat(base);
         return;
-      case ASTNodeKind.FOR_LOOP:
+      }
+      case ASTNodeKind.FOR_LOOP: {
         if (stmt.initExpr) walkExpr(stmt.initExpr);
         if (stmt.cond) walkExpr(stmt.cond);
         if (stmt.stepExpr) walkExpr(stmt.stepExpr);
-        walkBranch(stmt.body);
+        const base = snapshotSat();
+        walkBranchAndTrack(stmt.body);
+        restoreSat(base);
         return;
+      }
       case ASTNodeKind.BLOCK:
         walkBlock(stmt);
         return;
@@ -366,7 +620,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     if (!e || typeof e !== "object") return;
 
     if (e.kind === ASTNodeKind.TRY_OP) {
-      e.pendingCleanups = flattenStackReverse().map(makeCleanupCall);
+      e.pendingCleanups = projectCleanups(flattenStackReverse());
       walkExpr(e.operand);
       return;
     }
@@ -383,6 +637,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     if (e.kind === ASTNodeKind.CALL_EXPRESSION) {
       checkCallEscape(e);
       markPooledArgRetains(e);
+      markManualCleanupSatisfies(e);
       // Fall through to generic recursion below to walk args.
     }
 
@@ -452,6 +707,34 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     }
   }
 
+  // Phase 6.4 strict propagates: a direct trait-qualified call like
+  // `Disposable.dispose(ref arr)` flips the active mustCall obligation's
+  // `satisfied` flag. The walker uses path coverage (snapshot/restore around
+  // branches in walkStatement) to ensure a dispose inside one arm of an
+  // if/else doesn't satisfy an obligation unless the other arm also
+  // disposes — that logic lives in the IF_STATEMENT handler, not here.
+  function markManualCleanupSatisfies(callNode) {
+    const method = callNode.calleeMethodName;
+    if (!method) return;
+    const firstArg = callNode.args?.[0];
+    if (firstArg?.kind !== ASTNodeKind.REF_EXPRESSION) return;
+    const operand = firstArg.operand;
+    if (!operand || operand.kind !== ASTNodeKind.IDENT) return;
+    const bindingName = operand.name;
+    for (const frame of stack) {
+      for (const o of frame.obligations) {
+        if (
+          o.type === "mustCall" &&
+          o.bindingName === bindingName &&
+          o.methodName === method &&
+          !o.satisfied
+        ) {
+          o.satisfied = true;
+        }
+      }
+    }
+  }
+
   // Phase 6.4: for any call to a function whose params include `pooled`,
   // mark each matching argument so codegen emits a TASK_RETAIN at the call site.
   function markPooledArgRetains(callNode) {
@@ -483,11 +766,13 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
       });
     }
     if (kt?.builtin && kt.refcounted) {
-      outerFrame.obligations.push({
+      outerFrame.obligations.push(mkObligation({
         type: "release",
         bindingName: p.name,
+        kindType: kt,
+        autoCleanup: true,
         sourceLoc: p.sourceLoc,
-      });
+      }));
     }
   }
   stack.push(outerFrame);
@@ -499,7 +784,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
   // body.implicitCleanups by walkBlock, so append them here in LIFO order so
   // fall-through cleanup fires them after body-local obligations.
   if (outerFrame.obligations.length > 0) {
-    const extra = outerFrame.obligations.slice().reverse().map(makeCleanupCall);
+    const extra = projectCleanups(outerFrame.obligations.slice().reverse());
     body.implicitCleanups = (body.implicitCleanups ?? []).concat(extra);
   }
 }

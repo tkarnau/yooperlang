@@ -476,11 +476,41 @@ type RenderPass propagates<gpu_buffer> { buf: GpuBuffer; }   // callers inherit 
 type RenderPass contains<gpu_buffer>   { buf: GpuBuffer; }   // struct absorbs them
 ```
 
+`contains<K>` is reserved but not yet implemented; until it lands, a function that breaks the propagates chain (creates a value of a propagating type, satisfies its rules locally, and returns it without re-declaring `propagates<K>`) is implicitly a "contains" boundary — the caller sees a value with no outstanding obligation.
+
 Functions propagate the same way:
 
 ```js
 function make_pass(scene: Scene): RenderPass propagates<gpu_buffer>;
 ```
+
+**`propagates<K>` is a "must handle, or hand off" contract.** A value of a type that declares `propagates<K>` cannot be silently discarded. The user has exactly three legal ways to discharge the obligation:
+
+1. **Auto-cleanup via the kind keyword.** Bind the value with the kind prefix and the compiler injects the cleanup at scope end:
+
+   ```js
+   usedisposable arr: DynArray<int32> = new_dynarray(4);
+   // compiler inserts: Disposable.dispose(ref arr) before scope end
+   ```
+
+2. **Manual discharge.** Bind with plain `let`/`const` and call the cleanup method directly before the binding goes out of scope:
+
+   ```js
+   let arr: DynArray<int32> = new_dynarray(4);
+   use(arr);
+   Disposable.dispose(ref arr);   // satisfies the obligation
+   ```
+
+3. **Transfer to the caller.** Bind with plain `let`/`const` and `return` it from a function whose return type also declares `propagates<K>`:
+
+   ```js
+   function new_dynarray<T>(n: usize): DynArray<T> propagates<usedisposable> {
+       let a: DynArray<T> = { ... };
+       return a;   // obligation flows to caller
+   }
+   ```
+
+Failing to choose one of the three is a compile error: a binding whose obligation is unsatisfied at scope end, or a function that returns a propagating value without declaring `propagates<K>`, both fail to typecheck. The kind keyword on a binding is opt-in convenience for case (1); it does not change what `propagates<K>` on the type means.
 
 ---
 

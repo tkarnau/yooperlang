@@ -44,7 +44,7 @@ function push<T>(a: ref DynArray<T>, value: T): void {
 }
 
 function main(): int32 {
-    let arr: DynArray<int32> = new_dynarray(2);
+    usedisposable arr: DynArray<int32> = new_dynarray(2);
     push(ref arr, 10);
     push(ref arr, 20);
     push(ref arr, 30);
