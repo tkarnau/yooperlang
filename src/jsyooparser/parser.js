@@ -882,7 +882,12 @@ export function parse(src) {
     expect(TokenTags.layout);
     expect(TokenTags.lcurly);
     node.alignExpr = null;
+    // Phase 8.B: opt-in marker that this layout mirrors a C struct's ABI.
+    // Currently contractual only — yoop's natural struct layout already
+    // matches C for trivially-aligned structs.
+    node.abiC = false;
     let sawAlign = false;
+    let sawAbi = false;
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
       const tok = peek();
       if (tok.tag === TokenTags.align) {
@@ -899,6 +904,38 @@ export function parse(src) {
         expect(TokenTags.semicolon);
         continue;
       }
+      // Phase 8.B: `abi "C";` — match by ident name since `abi` isn't a
+      // tokenized keyword. Reserved per SPEC §14 so user code shouldn't
+      // shadow it accidentally.
+      if (tok.tag === TokenTags.ident) {
+        const name = src.substring(tok.start, tok.start + tok.length);
+        if (name === "abi") {
+          if (sawAbi) {
+            throw parseError(
+              "duplicate 'abi' sub-clause in layout body",
+              tok.start,
+              tok.length,
+            );
+          }
+          sawAbi = true;
+          advance(); // abi
+          const valueTok = expect(TokenTags.strLiteral);
+          const abiName = src.substring(
+            valueTok.start + 1,
+            valueTok.start + valueTok.length - 1,
+          );
+          if (abiName !== "C") {
+            throw parseError(
+              `abi "${abiName}" is not a supported ABI marker — only "C" is recognized`,
+              valueTok.start,
+              valueTok.length,
+            );
+          }
+          node.abiC = true;
+          expect(TokenTags.semicolon);
+          continue;
+        }
+      }
       // Surface a precise message for any unknown sub-clause name.
       const name =
         tok.tag === TokenTags.ident
@@ -912,9 +949,9 @@ export function parse(src) {
     }
     expect(TokenTags.rcurly);
     expect(TokenTags.semicolon);
-    if (!sawAlign) {
+    if (!sawAlign && !sawAbi) {
       throw parseError(
-        "layout body must contain an 'align' sub-clause",
+        "layout body must contain at least one sub-clause ('align' or 'abi')",
         node.sourceLoc.pos,
         1,
       );

@@ -268,10 +268,26 @@ export const TraitSelfPlaceholder = Object.freeze({
   kind: "trait_self_placeholder",
 });
 
+// Phase 8.B: C-portable integer aliases. Resolution-time synonyms — the
+// alias *is* the target type for every downstream purpose (typesEqual,
+// assignability, codegen). Hardcoded to LP64 (Linux + macOS); Windows
+// LLP64 mapping waits on real target-triple awareness in the compiler.
+const C_ALIASES_LP64 = {
+  c_short: "int16",
+  c_ushort: "uint16",
+  c_int: "int32",
+  c_uint: "uint32",
+  c_long: "int64",
+  c_ulong: "uint64",
+  c_size_t: "usize",
+  c_ssize_t: "isize",
+};
+
 // conventional name conversions go here
 export function canonicalize(name) {
   if (name === "int") return "int32";
   if (name === "float") return "float32";
+  if (C_ALIASES_LP64[name]) return C_ALIASES_LP64[name];
   return name;
 }
 

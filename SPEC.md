@@ -953,6 +953,29 @@ is a typecheck error. Pointers do not participate in kind containment: a struct
 holding `unsafe_ptr<T>` does not inherit kind obligations from `T`. `unsafe_ptr`
 is also rejected inside `pure` functions.
 
+### C-portable integer aliases
+
+Extern signatures often need to match C types whose width is platform-dependent.
+The following aliases are name-aliases that resolve to fixed-width yoop integers:
+
+| Alias | LP64 (Linux / macOS) | LLP64 (Windows, deferred) |
+| --- | --- | --- |
+| `c_short` / `c_ushort` | `int16` / `uint16` | `int16` / `uint16` |
+| `c_int` / `c_uint` | `int32` / `uint32` | `int32` / `uint32` |
+| `c_long` / `c_ulong` | `int64` / `uint64` | `int32` / `uint32` |
+| `c_size_t` / `c_ssize_t` | `usize` / `isize` (= 64-bit) | `usize` / `isize` |
+
+The aliases are typecheck-time synonyms — a `c_int` value *is* an `int32` for
+every purpose, including coercion and assignment. Using the alias in an extern
+signature documents portability intent.
+
+Phase 8.B targets **LP64** only; the LLP64 column is the future-Windows mapping.
+
+A struct mirroring a C struct should declare `layout { abi "C"; }` to mark its
+intent to match the C ABI. The marker is contractual today — yoop's natural
+struct layout (field-declaration order, per-field natural alignment) already
+matches C for trivially-aligned structs.
+
 ---
 
 ## 13. Operators
@@ -972,9 +995,12 @@ is also rejected inside `pure` functions.
 ## 14. Reserved keywords
 
 ```
-appliesTo       autoJoin         bool             break
-char            const            contains         continue
-else            export           extern           false
+abi             appliesTo        autoJoin         bool
+break           c_int            c_long           c_short
+c_size_t        c_ssize_t        c_uint           c_ulong
+c_ushort        char             const            contains
+continue        else             export           extern
+false
 float32         float64          for              forbids
 from            function         if               implements
 import          in               int8             int16

@@ -1,0 +1,31 @@
+import.unsafe;
+
+extern "C" from "time.h" {
+    function clock_gettime(clk_id: c_int, tp: unsafe_ptr<TimeSpec>): c_int;
+}
+
+type TimeSpec {
+    tv_sec: c_long,
+    tv_nsec: c_long,
+}
+
+function main(): int32 {
+    let ts: TimeSpec = { tv_sec: 0, tv_nsec: 0 };
+    let rc: c_int = clock_gettime(0, &ts);
+    if (rc != 0) {
+        printf(`clock_gettime failed: rc=${rc}\n`);
+        return 1;
+    }
+    let plausible: int32 = 0;
+    if (ts.tv_sec > 1700000000) {
+        plausible = 1;
+    }
+    let nsec_ok: int32 = 0;
+    if (ts.tv_nsec >= 0) {
+        if (ts.tv_nsec < 1000000000) {
+            nsec_ok = 1;
+        }
+    }
+    printf(`plausible=${plausible} nsec_ok=${nsec_ok}\n`);
+    return 0;
+}

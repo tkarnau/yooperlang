@@ -1,0 +1,13 @@
+kind weird {
+    appliesTo type;
+    layout { abi "Rust"; };
+}
+
+type Foo weird {
+    a: int32,
+}
+
+function main(): int32 {
+    let f: Foo = { a: 1 };
+    return f.a;
+}

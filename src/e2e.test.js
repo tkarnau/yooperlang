@@ -322,6 +322,18 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "diff=3\nsame=1\n");
   });
 
+  it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/clock_gettime.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "plausible=1 nsec_ok=1\n");
+  });
+
+  it("clock_gettime_layout.yoop: layout { abi \"C\"; } on a C-mirroring struct compiles + runs", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/clock_gettime_layout.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "ok=1\n");
+  });
+
   it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
     const { stdout, exitCode } = runFixtureWithAsset(
       "examples/pass/language_showcase.yoop",
@@ -1509,5 +1521,13 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       errors.some((e) => /cannot deref non-pointer type/.test(e.message)),
       `expected non-pointer deref error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
+  });
+
+  it("layout_abi_bad_value.yoop rejects abi values other than \"C\"", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/layout_abi_bad_value.yoop"),
+      "utf8",
+    );
+    assert.throws(() => parse(src), /abi "Rust" is not a supported ABI marker/);
   });
 });

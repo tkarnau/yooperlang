@@ -765,6 +765,10 @@ function resolveKindClauses(mod, moduleEnv, errors) {
           layoutSeen = true;
           const slot = resolveLayoutAlign(c.alignExpr, kt, errors);
           if (slot) kt.layoutAlign = slot;
+          // Phase 8.B: store the abi "C" marker. Currently contractual —
+          // no downstream consumer yet, but persisted so future codegen /
+          // ABI-validation passes can read it off the resolved kind.
+          if (c.abiC) kt.layoutAbiC = true;
           break;
         }
       }
