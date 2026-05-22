@@ -19,6 +19,7 @@ import {
   FuncType,
   KindApplication,
   KindType,
+  PrimType,
   RefType,
   StructType,
   TaskType,
@@ -358,8 +359,40 @@ function formatSig(sig) {
 
 function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   const env = moduleEnv.get(mod.id);
-  const structShell = env.structTable.get(typeDecl.name);
-  if (!structShell) return;
+  // Phase 7.x: for generic structs, build an "open" struct shell by
+  // instantiating the generic decl with its own TypeParamTypes as args.
+  // This yields a StructType whose field slots carry TypeParamType, suitable
+  // for serving as `self` during method-sig resolution and substitution.
+  const isGeneric = !!typeDecl.genericDecl;
+  const typeParamScope = isGeneric ? typeDecl.genericDecl.paramScope : null;
+  let structShell;
+  if (isGeneric) {
+    const gd = typeDecl.genericDecl;
+    // Build a throwaway open StructType to serve as `self` during impl
+    // resolution. We deliberately don't go through the instantiation registry
+    // because (a) we'd cache a frozen shell with empty traits, and (b) the
+    // registry path would then need eviction. The shell only lives long enough
+    // to substitute through trait sigs and stamp methodDecl.resolvedFuncType.
+    const openFields = (gd.genericFields ?? []).map((f) => ({
+      name: f.name,
+      type: f.type,
+      kindType: f.kindType ?? null,
+    }));
+    structShell = StructType(
+      gd.name,
+      openFields,
+      gd.moduleId,
+      [],
+      new Map(),
+      gd.propagatedKinds ?? [],
+      gd.kindApplication ?? null,
+      { declId: gd.id, args: gd.paramNames.map((pn) => gd.paramScope.get(pn)) },
+    );
+    typeDecl.openSelf = structShell;
+  } else {
+    structShell = env.structTable.get(typeDecl.name);
+    if (!structShell) return;
+  }
 
   // Step 1: resolve trait names.
   const resolvedImplements = [];
@@ -472,7 +505,11 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
     if (sigConflict) continue;
 
-    const ctxForMethod = { selfType: structShell };
+    const ctxForMethod = {
+      selfType: structShell,
+      typeParamScope,
+      registry: programState.registry,
+    };
     const params = methodDecl.params.map((p) => {
       const baseType = resolveTypeAnnotationInModule(p.typeAnnotation, mod.id, moduleEnv, ctxForMethod) ?? ErrorType();
       const t = p.isRef ? RefType(baseType) : baseType;
@@ -510,7 +547,19 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
   }
 
-  // Step 5: rebuild StructType with implements + methods set.
+  // Step 5: store the resolved impl info.
+  if (isGeneric) {
+    // For generic decls, stash impls + methods on the genericDecl so
+    // subsequent instantiateStruct calls produce concrete instances carrying
+    // implementsTraits + methods. instantiateStruct reads these fields when
+    // building each StructType (see instantiate.js).
+    typeDecl.genericDecl.implementsTraits = resolvedImplements;
+    typeDecl.genericDecl.methods = resolvedMethods;
+    for (const m of typeDecl.methods ?? []) {
+      m.implementingType = structShell;
+    }
+    return;
+  }
   // Phase 6.5: preserve propagatedKinds + kindApplication from the C-pass type.
   const prev = typeDecl.resolvedType;
   const fullStruct = StructType(
@@ -914,6 +963,51 @@ export function effectiveLayoutAlign(app) {
   return null;
 }
 
+// Builtin generic functions — `heap_alloc<T>(n: usize): T[]` and
+// `heap_free<T>(a: T[])`. These are not user-declared; they are registered
+// into every module's genericFuncTable so call-site inference + instantiation
+// flow through the existing Phase 7.1 path. Codegen intercepts by `declId`
+// (see codegen.js) and emits malloc/free directly without a body clone.
+//
+// Built once per program so the instantiation registry caches across modules.
+function makeBuiltinGenericFuncs() {
+  const allocDeclId = "$builtin__heap_alloc";
+  const allocT = new TypeParamType("T", allocDeclId);
+  const allocSig = FuncType(
+    [{ name: "n", type: PrimType("usize"), isRef: false }],
+    ArrayType(allocT),
+  );
+  const heapAlloc = {
+    id: allocDeclId,
+    name: "heap_alloc",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", allocT]]),
+    genericSig: allocSig,
+    ast: null,
+    isBuiltin: true,
+  };
+
+  const freeDeclId = "$builtin__heap_free";
+  const freeT = new TypeParamType("T", freeDeclId);
+  const freeSig = FuncType(
+    [{ name: "a", type: ArrayType(freeT), isRef: false }],
+    VoidType(),
+  );
+  const heapFree = {
+    id: freeDeclId,
+    name: "heap_free",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", freeT]]),
+    genericSig: freeSig,
+    ast: null,
+    isBuiltin: true,
+  };
+
+  return [heapAlloc, heapFree];
+}
+
 // ─── multi-module entry point ─────────────────────────────────────────────────
 
 // typecheckProgram(modules) — main entry for multi-file compilation.
@@ -929,6 +1023,10 @@ export function typecheckProgram(modules) {
   // Wire the registry-aware instantiator so substituteTypeParams can
   // re-instantiate open generic struct types into their concrete forms.
   setGlobalInstantiator(makeInstantiator(programState.registry));
+
+  // Build builtin generic func decls once and reuse across all modules so
+  // the instantiation registry caches by a stable declId.
+  const builtinGenericFuncs = makeBuiltinGenericFuncs();
 
   // Phase 7.2: install the bound checker. Every instantiate*() that hits the
   // cache for the first time calls back here with each bounded (param, arg)
@@ -1216,6 +1314,15 @@ export function typecheckProgram(modules) {
       }
     }
 
+    // Insert builtin generic funcs after user decls so a user-defined function
+    // with the same name cleanly shadows. lookupGenericFunc checks the local
+    // table first, so this is a no-op when a user has redeclared.
+    for (const bi of builtinGenericFuncs) {
+      if (!genericFuncTable.has(bi.name)) {
+        genericFuncTable.set(bi.name, bi);
+      }
+    }
+
     moduleEnv.set(mod.id, {
       localSymbols,
       structTable,
@@ -1300,6 +1407,26 @@ export function typecheckProgram(modules) {
           });
         }
         gd.genericFields = genericFields;
+        // Phase 7.x: resolve `propagates<K, ...>` on the generic struct decl
+        // and stash on the genericDecl so each instantiation inherits the
+        // propagatedKinds. Mirrors the non-generic branch below.
+        if (d.propagatesClause) {
+          const env2 = moduleEnv.get(mod.id);
+          const propagatedKinds = [];
+          for (const ref of d.propagatesClause.kindNames) {
+            const app = resolveKindAppFromPropagatesEntry(ref, env2, errors);
+            if (!app) continue;
+            if (propagatedKinds.some((a) => a.kindType === app.kindType)) {
+              errors.push({
+                message: `duplicate kind '${ref.name}' in propagates clause of struct "${d.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            propagatedKinds.push(app);
+          }
+          gd.propagatedKinds = propagatedKinds;
+        }
         // Don't continue — fall through to skip the regular TYPE_DECL handler
         // below by checking d.genericDecl there.
       }
@@ -1791,7 +1918,12 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TYPE_DECL || !d.implements?.length) continue;
-      if (d.genericDecl) continue; // generic struct impls deferred
+      // Phase 7.x: generic structs now support `implements Trait`. validateImplBlock
+      // routes to the open-self code path when d.genericDecl is set. Note: this
+      // runs *after* struct field resolution in pass C, so a struct field that
+      // references DynArray<int32> in the same module would have already been
+      // cached with empty implementsTraits. The current playground demo doesn't
+      // hit this case; broader use will need a pre-pass before field resolution.
       validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
     stampModuleId(errors, errStart, mod.id);
@@ -1860,9 +1992,18 @@ export function typecheckProgram(modules) {
           ? { ...typeContext, typeParamScope: d.genericDecl.paramScope }
           : typeContext;
         validateFunction(d, tcForFn, errors);
-      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
-        for (const method of d.methods) {
-          validateMethod(method, d.resolvedType, typeContext, errors);
+      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
+        // Phase 7.x: generic struct methods are typechecked once against the
+        // open self (with TypeParamType fields), then cloned + substituted per
+        // instantiation at codegen time.
+        const tcForMethod = d.genericDecl
+          ? { ...typeContext, typeParamScope: d.genericDecl.paramScope }
+          : typeContext;
+        const selfShell = d.genericDecl ? d.openSelf : d.resolvedType;
+        if (selfShell) {
+          for (const method of d.methods) {
+            validateMethod(method, selfShell, tcForMethod, errors);
+          }
         }
       }
     }

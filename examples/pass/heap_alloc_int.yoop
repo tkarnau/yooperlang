@@ -1,0 +1,14 @@
+function main(): int32 {
+    let buf: int32[] = heap_alloc(5);
+    let i: int32 = 0;
+    while (i < 5) {
+        buf[i] = i * 10;
+        i = i + 1;
+    }
+    printf(`buf[0]=${buf[0]} buf[2]=${buf[2]} buf[4]=${buf[4]} len=${buf.len}\n`);
+    heap_free(buf);
+    return 0;
+}
+
+// expected output:
+// buf[0]=0 buf[2]=20 buf[4]=40 len=5

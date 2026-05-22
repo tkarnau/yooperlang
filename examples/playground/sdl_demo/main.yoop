@@ -115,19 +115,21 @@ function channel(hue: float32, phase_offset: float32): uint8 {
 }
 
 type Channels {
-    // little endian
+    // little endian because I don't know how to specify endianness yet :/
     a: uint8,
     b: uint8,
     g: uint8,
     r: uint8,
 }
 
+// rgba and channels are the same memory, this is different than normal struct
+// almost like a view into the same data. Idea borrowed from C unions.
 union Color {
     rgba: uint32,
     channels: Channels,
 }
 
-// ── RNG + ball respawn ────────────────────────────────────────────────────────
+// ── ball respawn ────────────────────────────────────────────────────────
 
 // Linear congruential generator -- constants from Numerical Recipes. Wrap is
 // implicit at int32 because LLVM `mul`/`add` are two's-complement.

@@ -130,8 +130,42 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null) {
     // Phase 6.5: propagatedKinds entries are KindApplication; unwrap to KindType.
     const rt = stmt.resolvedType;
     if (rt?.kind === "struct" && rt.propagatedKinds?.length > 0) {
+      // Avoid double-emitting: if the binding already has an explicit
+      // kindPrefix matching one of the propagated kinds, skip self-propagation
+      // for that kind (the explicit branch above already emitted the
+      // obligation).
+      const explicitKind = kt;
       for (const propA of rt.propagatedKinds) {
         const propK = propA.kindType ?? propA;
+        // Phase 7.x self-propagation: if the struct *itself* satisfies the
+        // kind's `requires` (i.e. it implements every required trait), the
+        // binding inherits the kind directly — no field traversal needed.
+        // This is the natural shape for things like DynArray<T> which are
+        // themselves Disposable.
+        if (propK !== explicitKind && propK.mustCall.length > 0 && propK.requires.length > 0) {
+          const structImplsAll = propK.requires.every((reqT) =>
+            (rt.implementsTraits ?? []).some(
+              (t) =>
+                t.name === reqT.name &&
+                (t.moduleId ?? null) === (reqT.moduleId ?? null),
+            ),
+          );
+          if (structImplsAll) {
+            const mc = propK.mustCall[0];
+            out.push({
+              type: "mustCall",
+              bindingName: stmt.name,
+              methodName: mc.methodName,
+              traitName: mc.traitType?.name,
+              structType: rt,
+              moduleId: rt.moduleId,
+              sourceLoc: stmt.sourceLoc,
+            });
+            // Don't ALSO walk fields for this kind — the obligation is on
+            // the binding itself.
+            continue;
+          }
+        }
         for (const f of rt.fields ?? []) {
           if (!fieldCarriesKind(f, propK)) continue;
           if (propK.refcounted) {

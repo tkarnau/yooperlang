@@ -31,6 +31,7 @@ import { pushError, formatType } from "./errors.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
+  lookupGenericFunc,
   markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
@@ -292,10 +293,19 @@ function checkLetOrConst(node, scope, ctx) {
   node.resolvedKindApplication = kindApp;
 
   if (node.assignment) {
+    // Generic function calls need to flow through checkInitializer so the
+    // declared LHS type can drive return-type inference (e.g. heap_alloc).
+    // The eager resolveExprType inside isTaskCallReturningType would otherwise
+    // error out before bidirectional inference gets a chance.
+    const isGenericCall =
+      node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
+      typeof node.assignment.callee === "string" &&
+      lookupGenericFunc(node.assignment.callee, ctx) !== null;
     // Phase 6.3: immediate task call — `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
       !kindType &&
+      !isGenericCall &&
       node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
       isTaskCallReturningType(node.assignment, declaredType, scope, ctx)
     ) {

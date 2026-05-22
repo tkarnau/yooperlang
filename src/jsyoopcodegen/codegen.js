@@ -4,6 +4,7 @@ import { parse } from "../jsyooparser/parser.js";
 import { typecheck, typecheckProgram } from "../jsyooptypecheck/typecheck.js";
 import { ASTNodeKind } from "../contracts.js";
 import {
+  ArrayType,
   PrimType,
   VoidType,
   castInstruction,
@@ -53,6 +54,8 @@ const RUNTIME_DECLARES = [
   "declare void @yoop_task_release(ptr)",
   "declare void @yoop_handle_signal_done(ptr)",
   "declare void @yoop_task_free_sync_pair(ptr)",
+  "declare ptr @malloc(i64)",
+  "declare void @free(ptr)",
 ];
 
 export function llvmType(yoopType) {
@@ -1843,10 +1846,10 @@ function cloneAstWithSubstitution(node, sub, registry = null) {
   ) {
     const oldInst = out.genericInstantiation;
     const decl =
-      registry.funcInstancesByDecl &&
-      [...registry.funcInstancesByDecl.values()].flat().find(
+      oldInst.genericDecl ??
+      ([...registry.funcInstancesByDecl.values()].flat().find(
         (i) => i.declId === oldInst.declId,
-      )?.ast?.genericDecl;
+      )?.ast?.genericDecl ?? null);
     if (decl && oldInst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) {
       const newArgs = oldInst.argTypes.map((t) => substituteTypeParams(t, sub));
       const newInst = instantiateFunc(registry, decl, newArgs);
@@ -2160,8 +2163,37 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         // exist in the registry as caching artifacts — the concrete instances
         // produced when the outer generic is monomorphized are what get IR.
         if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
+        // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
+        // codegen inlines them at every call site (see emitCallExpr).
+        if (inst.declId?.startsWith("$builtin")) continue;
         inst.emitted = true;
         emitGenericFuncInstance(inst);
+      }
+    }
+    // Phase 7.x: emit method bodies for each concrete generic-struct instance.
+    // For `type Foo<T> implements Trait { function m(ref self): ... }`, each
+    // unique Foo<C> needs its own substituted method body, with the symbol
+    // mangled via mangleTraitMethod using the monomorphized name.
+    const emittedStructMethods =
+      programState._emittedStructMethods ??
+      (programState._emittedStructMethods = new WeakSet());
+    for (const [declId, instances] of programState.registry.structInstancesByDecl) {
+      const genericDecl = programState.registry.genericDeclById?.get(declId);
+      if (!genericDecl) continue;
+      const typeDecl = genericDecl.ast;
+      if (!typeDecl || !typeDecl.methods?.length) continue;
+      if (genericDecl.moduleId !== moduleId) continue;
+      for (const inst of instances) {
+        if (inst.moduleId !== moduleId) continue;
+        if (emittedStructMethods.has(inst)) continue;
+        // Skip open instances (still carry TypeParamType in args).
+        if (
+          inst.genericInstance?.args?.some(
+            (t) => t?.kind === typeKinds.typeParam,
+          )
+        ) continue;
+        emittedStructMethods.add(inst);
+        emitGenericStructMethods(inst, genericDecl);
       }
     }
   }
@@ -2233,6 +2265,30 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     );
     const sym = mangle(moduleId, inst.mangledName);
     emitFn(cloned, sym);
+  }
+
+  // Phase 7.x: emit method bodies for a single struct instance. Each method
+  // gets cloned with type-param substitution and routed through emitMethodFn,
+  // which already handles per-trait mangle and `ref self` plumbing. The
+  // structType passed to emitMethodFn is the concrete (monomorphized) instance
+  // so mangleTraitMethod produces e.g. `mod__DynArray__int32__Disposable__dispose`.
+  function emitGenericStructMethods(structInst, genericDecl) {
+    const typeDecl = genericDecl.ast;
+    const args = structInst.genericInstance?.args ?? [];
+    const sub = new Map();
+    const inner = new Map();
+    for (let i = 0; i < args.length; i++) {
+      inner.set(genericDecl.paramNames[i], args[i]);
+    }
+    sub.set(genericDecl.id, inner);
+    for (const method of typeDecl.methods ?? []) {
+      const cloned = cloneAstWithSubstitution(
+        method,
+        sub,
+        programState?.registry ?? null,
+      );
+      emitMethodFn(cloned, structInst);
+    }
   }
 
   function emitFn(node, symName) {
@@ -2738,7 +2794,63 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     return { val: resVal, yoopType: resultType };
   }
 
+  // Inline emission for the heap_alloc / heap_free builtin generic functions.
+  // These have `genericInstantiation.declId` starting with `$builtin` and no
+  // AST body; codegen lowers each call to a malloc/free directly.
+  function emitBuiltinHeapCall(node, fnLines) {
+    const inst = node.genericInstantiation;
+    if (inst.declId === "$builtin__heap_alloc") {
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      // Element size in bytes.
+      const elemSize = sizeOfType(elemType);
+      // Emit the count argument.
+      const nArg = emitExpr(node.args[0], fnLines);
+      // Multiply count by element size to get byte size.
+      const byteSize = freshTemp();
+      fnLines.push(`  ${byteSize} = mul i64 ${nArg.val}, ${elemSize}`);
+      // Allocate on the heap.
+      const raw = freshTemp();
+      fnLines.push(`  ${raw} = call ptr @malloc(i64 ${byteSize})`);
+      // Build fat pointer.
+      const arrayLlvmTy = llvmType(arrayType);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${raw}, ptr ${dataField}`);
+      const lenField = freshTemp();
+      fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${nArg.val}, ptr ${lenField}`);
+      const fatVal = freshTemp();
+      fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+      return { val: fatVal, yoopType: arrayType };
+    }
+    if (inst.declId === "$builtin__heap_free") {
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      const fatArg = emitExpr(node.args[0], fnLines);
+      // Extract field 0 (data pointer) from the fat pointer.
+      const arrayLlvmTy = llvmType(arrayType);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${fatSlot}`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      const dataPtr = freshTemp();
+      fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      fnLines.push(`  call void @free(ptr ${dataPtr})`);
+      return { val: "void", yoopType: VoidType() };
+    }
+    throw new Error(`codegen: unknown builtin generic declId "${inst.declId}"`);
+  }
+
   function emitCallExpr(node, fnLines) {
+    if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
+      return emitBuiltinHeapCall(node, fnLines);
+    }
     if (node.isCast) {
       const src = emitExpr(node.args[0], fnLines);
       const dstType = node.castTargetType;

@@ -113,6 +113,12 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
   // Also index by declId so the registry-aware substitution can re-instantiate.
   if (!registry.genericDeclById) registry.genericDeclById = new Map();
   registry.genericDeclById.set(genericDecl.id, genericDecl);
+  // Per-decl instance list — used by codegen to walk concrete instances and
+  // emit substituted method bodies for `type Foo<T> implements Trait` impls.
+  registry.structInstancesByDecl.set(
+    genericDecl.id,
+    [...(registry.structInstancesByDecl.get(genericDecl.id) ?? []), inst],
+  );
   return inst;
 }
 
@@ -156,6 +162,10 @@ export function instantiateFunc(registry, genericFuncDecl, argTypes) {
     declName: genericFuncDecl.name,
     moduleId: genericFuncDecl.moduleId,
     ast: genericFuncDecl.ast,
+    // Direct back-ref to the generic decl record. Used by cloneAstWithSubstitution
+    // to re-instantiate a call whose argTypes contained an outer TypeParamType,
+    // and works for builtin (`ast: null`) generics too.
+    genericDecl: genericFuncDecl,
   };
   registry.funcs.set(key, inst);
   registry.funcInstancesByDecl.set(
@@ -209,6 +219,7 @@ export function createInstantiationRegistry() {
     traits: new Map(),
     byMangledName: new Map(),
     funcInstancesByDecl: new Map(),
+    structInstancesByDecl: new Map(),
     traitArgsByInstance: new Map(),
     // Phase 7.2: callback installed by the typechecker. Receives
     // ({ genericDecl, argTypes, paramIndex, paramName, requiredTrait }) and

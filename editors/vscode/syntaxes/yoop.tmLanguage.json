@@ -131,6 +131,10 @@
           "match": "\\b(task|wait|joined|pooled)\\b"
         },
         {
+          "name": "storage.intrinsic.yoop",
+          "match": "\\b(heap_free|heap_alloc)\\b"
+        },
+        {
           "name": "invalid.deprecated.reserved.yoop",
           "match": "\\b(provides|restricts|autoJoin)\\b"
         },

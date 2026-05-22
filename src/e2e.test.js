@@ -182,6 +182,30 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "sum = 15\n");
   });
 
+  it("heap_alloc_int.yoop allocates an int32[] on the heap, indexes it, frees it", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/heap_alloc_int.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "buf[0]=0 buf[2]=20 buf[4]=40 len=5\n");
+  });
+
+  it("heap_alloc_struct.yoop allocates a heap buffer of structs and round-trips fields", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/heap_alloc_struct.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "p[0]=(1, 2.500000) p[2]=(5, 6.500000)\n");
+  });
+
+  it("dynarray_push.yoop pushes through a grow boundary in user-defined DynArray<int32>", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/dynarray_push.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len=10 cap=16 sum=55\n");
+  });
+
+  it("generic_disposable_propagates.yoop: DynArray<T> implements Disposable with propagates auto-injects dispose", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_disposable_propagates.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "len=3 arr[2]=30\ndisposing(3)\n");
+  });
+
   it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
     const { stdout, exitCode } = runFixture("examples/pass/for_break_continue.yoop");
     assert.equal(exitCode, 0);

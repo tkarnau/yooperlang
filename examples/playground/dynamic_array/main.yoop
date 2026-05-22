@@ -1,0 +1,102 @@
+// Safe, generic dynamic array.
+//
+//   - `DynArray<T> implements Disposable propagates<usedisposable>`:
+//     the type itself is the disposable thing, and its `propagates<usedisposable>`
+//     clause tells every binding of DynArray<T> to inherit the dispose obligation.
+//   - `new_dynarray<T>(...): DynArray<T> propagates<usedisposable>`:
+//     factory that pushes the obligation through its return type to the caller.
+//   - Calling `let arr: DynArray<int32> = new_dynarray(4)` is enough — no kind
+//     keyword required. The compiler auto-inserts `Disposable.dispose(ref arr)`
+//     before scope end.
+//
+// Try removing `propagates<usedisposable>` from the type and the compiler will
+// no longer auto-inject the cleanup. Try leaking `arr` out of the scope and
+// the kind's `mustNotShare acrossScopes` would (with that clause re-added) be
+// rejected too.
+
+/*
+    This demonstrates a dynamic array implementation for yooperlang
+
+
+*/
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+
+kind usedisposable {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+// The generic struct *is* the Disposable. `propagates<usedisposable>` says
+// "every binding of me inherits the dispose obligation."
+type DynArray<T> implements Disposable propagates<usedisposable> {
+    data: T[],
+    len: usize,
+    cap: usize,
+
+    function dispose(ref self): void {
+        printf(`(dispose: freeing DynArray, len=${self.len} cap=${self.cap})\n`);
+        heap_free(self.data);
+    }
+}
+
+// Factory. `propagates<usedisposable>` documents the contract; the obligation
+// is also surfaced via the type itself, so either is sufficient.
+function new_dynarray<T>(initial_cap: usize): DynArray<T> {
+    const newArr: DynArray<T> = { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
+
+    return newArr;
+}
+
+function push<T>(a: ref DynArray<T>, value: T): void {
+    if (a.len >= a.cap) {
+        let new_cap: usize = a.cap * 2;
+        let new_data: T[] = heap_alloc(new_cap);
+        let i: usize = 0;
+        while (i < a.len) {
+            new_data[i] = a.data[i];
+            i = i + 1;
+        }
+        printf(`growing capacity of array to ${new_cap}\n`);
+        heap_free(a.data);
+        a.data = new_data;
+        a.cap = new_cap;
+    }
+    a.data[a.len] = value;
+    a.len = a.len + 1;
+}
+
+function get<T>(a: ref DynArray<T>, i: usize): T {
+    return a.data[i];
+}
+
+function main(): int32 {
+    // No `usedisposable` keyword needed — propagates<usedisposable> on
+    // DynArray<T> means the binding auto-acquires the mustCall obligation.
+    let arr: DynArray<int32> = new_dynarray(4) ;
+    // Force two grow passes (4 -> 8 -> 16).
+    let i: int32 = 0;
+    while (i < 10) {
+        push(ref arr, i * i);
+        i = i + 1;
+    }
+
+    printf(`len=${arr.len} cap=${arr.cap}\n`);
+    let j: usize = 0;
+    while (j < arr.len) {
+        printf(`arr[${j}]=${get(ref arr, j)}\n`);
+        j = j + 1;
+    }
+
+    // The compiler emits `Disposable.dispose(ref arr)` right here, before return.
+    return 0;
+}

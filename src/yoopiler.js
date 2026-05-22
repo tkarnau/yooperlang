@@ -18,6 +18,7 @@ function main() {
     options: {
       inputFile: { type: "string", short: "i" },
       outputFile: { type: "string", short: "o" },
+      outputModules: { type: "boolean", short: "a" }
     },
     allowPositionals: true,
   });
@@ -33,7 +34,9 @@ function main() {
     }
   }
 
+  
   const outputFileName = values.outputFile ?? inputFile?.replace(".yoop", "") ?? "output";
+  const modulesOutputFileName = values.outputModules ? `${outputFileName}.m` : null;
   const entryAbs = fs.realpathSync(path.resolve(inputFile));
 
   let modules;
@@ -59,6 +62,7 @@ function main() {
   }
 
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
+
   if (errors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));
     console.error(`typecheck failed (${errors.length} error${errors.length === 1 ? "" : "s"}):\n`);

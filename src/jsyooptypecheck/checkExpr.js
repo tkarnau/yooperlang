@@ -19,6 +19,7 @@
 //     (we don't infer struct types from field shapes), so any context that
 //     has a target type calls pinStructLiteral via checkInitializer instead.
 
+
 import { ASTNodeKind } from "../contracts.js";
 import {
   ArrayType,
@@ -910,6 +911,26 @@ export function checkInitializer(
     checkArrayLiteralAgainstType(valueNode, expectedType, scope, ctx);
     return expectedType;
   }
+  // Bidirectional inference for generic function calls: when the callee is a
+  // generic function, hint the expected return type so type params that
+  // appear only in the return position (e.g. `heap_alloc<T>(n: usize): T[]`)
+  // can be inferred from context.
+  if (
+    valueNode.kind === ASTNodeKind.CALL_EXPRESSION &&
+    typeof valueNode.callee === "string"
+  ) {
+    const generic = lookupGenericFunc(valueNode.callee, ctx);
+    if (generic) {
+      const valueType = resolveGenericCall(valueNode, generic, scope, ctx, expectedType);
+      if (
+        valueType.kind !== typeKinds.error &&
+        !isAssignable(expectedType, valueType)
+      ) {
+        pushError(ctx.errors, valueNode, mismatchMessage(valueType));
+      }
+      return valueType;
+    }
+  }
   const valueType = resolveExprType(valueNode, scope, ctx);
   if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
     pushError(
@@ -1210,7 +1231,7 @@ function traitMethodHint(methodName, ctx) {
 
 // Phase 7.1: look up a generic function decl by name in the local + imported
 // generic func tables.
-function lookupGenericFunc(name, ctx) {
+export function lookupGenericFunc(name, ctx) {
   const tc = ctx.typeContext;
   const local = tc.genericFuncTable?.get(name);
   if (local) return local;
@@ -1298,7 +1319,13 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
 
 // Phase 7.1: handle a call to a generic function. Walks param types against
 // arg types to infer the type-arg map, then instantiates the function.
-function resolveGenericCall(node, generic, scope, ctx) {
+//
+// `expectedReturnType` (optional): if supplied (typically by `checkInitializer`
+// when the call appears in a typed binding/initializer position), the return
+// type is also unified against it. This enables type-parameters that only
+// appear in the return position to be inferred — e.g. `heap_alloc<T>(n: usize): T[]`
+// where T is bound from the LHS annotation.
+function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null) {
   const sig = generic.genericSig;
   if (!sig) {
     pushError(ctx.errors, node, `generic function "${generic.name}" has no resolved signature`);
@@ -1336,6 +1363,13 @@ function resolveGenericCall(node, generic, scope, ctx) {
         `conflicting type argument for generic function "${node.callee}": ${formatType(argT)} vs prior binding`,
       );
     }
+  }
+
+  // Return-type-driven inference (e.g. for `heap_alloc<T>(n: usize): T[]`
+  // where T appears only in the return). Only applied when a hint is
+  // available (initializer / return / arg-pinning contexts).
+  if (expectedReturnType && expectedReturnType.kind !== typeKinds.error) {
+    unifyAgainstTypeParam(sig.returnType, expectedReturnType, generic.id, subst);
   }
 
   // Every type param must be bound.
