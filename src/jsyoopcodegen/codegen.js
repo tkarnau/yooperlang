@@ -57,6 +57,8 @@ const RUNTIME_DECLARES = [
   // Phase 10.F: bounded wait + monotonic clock for deadlines.
   "declare i32 @yoop_task_wait_until_ns(ptr, i64)",
   "declare i64 @yoop_now_ns()",
+  // Phase 10.F.2: external cancellation primitive.
+  "declare void @yoop_task_cancel(ptr)",
   "declare ptr @yoop_task_alloc(i64)",
   "declare void @yoop_task_retain(ptr)",
   "declare void @yoop_task_release(ptr)",
@@ -3406,6 +3408,16 @@ function codegenWithModuleId(
       `  ${statePtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 1`,
     );
     fnLines.push(`  store i8 0, ptr ${statePtr}`);
+    // Phase 10.F.2: cancel byte at offset 9 = 0. Reuses the first byte of
+    // the `[3 x i8]` padding at field index 2 — accessed by byte offset
+    // so the struct's LLVM type stays unchanged. Pooled handles via
+    // yoop_task_alloc come from calloc and are already zeroed; joined
+    // handles via alloca are not, hence the explicit store.
+    const cancelPtr = freshTemp();
+    fnLines.push(
+      `  ${cancelPtr} = getelementptr inbounds i8, ptr ${handlePtr}, i64 9`,
+    );
+    fnLines.push(`  store i8 0, ptr ${cancelPtr}`);
     // field 4 / 5: mutex_ptr / cond_ptr = null (yoop_task_submit allocates them).
     const mPtr = freshTemp();
     fnLines.push(
@@ -4058,12 +4070,12 @@ function codegenWithModuleId(
     return { val: resVal, yoopType: resultType };
   }
 
-  // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` lowering.
-  // Mirrors emitWaitExpression's handle-ptr access, then branches on the
-  // runtime's outcome (0 = done, 1 = timeout) to build the appropriate
-  // enum variant. The result-slot byte offset is the universal task-struct
-  // prefix offset (32) so the same shape works for joined/pooled bindings
-  // and pooled parameters alike — we don't need bindingDeclTable here.
+  // Phase 10.F + 10.F.2: `wait_until(h, deadline_ns): WaitResult<T>`
+  // lowering. The runtime returns an i32 outcome — 0 done, 1 timeout, 2
+  // cancelled — and we dispatch via a switch to build the matching
+  // variant. The result-slot byte offset is the universal task-struct
+  // prefix offset (32) so the same shape works for joined/pooled
+  // bindings and pooled parameters alike.
   function emitWaitUntilCall(node, fnLines) {
     const handleVal = emitExpr(node.args[0], fnLines);
     const deadlineVal = emitExpr(node.args[1], fnLines);
@@ -4084,13 +4096,26 @@ function codegenWithModuleId(
 
     const doneVariant = waitResultType.variants.get("Done");
     const timeoutVariant = waitResultType.variants.get("Timeout");
+    const cancelledVariant = waitResultType.variants.get("Cancelled");
 
-    const isDone = freshTemp();
-    fnLines.push(`  ${isDone} = icmp eq i32 ${outcomeTmp}, 0`);
     const doneLabel = freshLabel("wu_done");
     const timeoutLabel = freshLabel("wu_timeout");
+    const cancelledLabel = freshLabel("wu_cancelled");
     const joinLabel = freshLabel("wu_join");
-    fnLines.push(`  br i1 ${isDone}, label %${doneLabel}, label %${timeoutLabel}`);
+
+    // Three-way switch on the runtime outcome — `cancelled` only appears
+    // when the Cancelled variant exists in the user's WaitResult shape,
+    // which it always does post-10.F.2 (Cancelled is now part of the
+    // canonical std/core/concurrency.yoop enum). Default branch jumps
+    // to cancelled so any future runtime extension (e.g. CancelledByPeer)
+    // falls through to a safe interpretation instead of u.b.
+    fnLines.push(
+      `  switch i32 ${outcomeTmp}, label %${cancelledLabel} [ i32 0, label %${doneLabel} i32 1, label %${timeoutLabel} ]`,
+    );
+
+    const enumId = waitResultType.moduleId
+      ? `${waitResultType.moduleId}__${waitResultType.name}`
+      : waitResultType.name;
 
     fnLines.push(`${doneLabel}:`);
     {
@@ -4110,9 +4135,6 @@ function codegenWithModuleId(
       const resVal = freshTemp();
       fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
 
-      const enumId = waitResultType.moduleId
-        ? `${waitResultType.moduleId}__${waitResultType.name}`
-        : waitResultType.name;
       const payloadPtr = freshTemp();
       fnLines.push(
         `  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 1`,
@@ -4135,10 +4157,29 @@ function codegenWithModuleId(
       fnLines.push(`  br label %${joinLabel}`);
     }
 
+    fnLines.push(`${cancelledLabel}:`);
+    {
+      const tagPtr = freshTemp();
+      fnLines.push(
+        `  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`,
+      );
+      fnLines.push(`  store i32 ${cancelledVariant.ordinal}, ptr ${tagPtr}`);
+      fnLines.push(`  br label %${joinLabel}`);
+    }
+
     fnLines.push(`${joinLabel}:`);
     const loadTmp = freshTemp();
     fnLines.push(`  ${loadTmp} = load ${enumLlvm}, ptr ${slot}`);
     return { val: loadTmp, yoopType: waitResultType };
+  }
+
+  // Phase 10.F.2: `cancel(h): void` — thin wrapper over @yoop_task_cancel.
+  // Stamped by the typechecker's resolveCancelCall; the arg is a Task<T>
+  // value which lowers to the handle ptr directly.
+  function emitCancelCall(node, fnLines) {
+    const handleVal = emitExpr(node.args[0], fnLines);
+    fnLines.push(`  call void @yoop_task_cancel(ptr ${handleVal.val})`);
+    return { val: "void", yoopType: VoidType() };
   }
 
   // Inline emission for builtin generic functions: heap_alloc / heap_free
@@ -4290,6 +4331,10 @@ function codegenWithModuleId(
     // Phase 10.F: builtin wait_until lowering (multi-module path).
     if (node.builtinWaitUntil) {
       return emitWaitUntilCall(node, fnLines);
+    }
+    // Phase 10.F.2: builtin cancel lowering.
+    if (node.builtinCancel) {
+      return emitCancelCall(node, fnLines);
     }
     if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
       return emitBuiltinGenericCall(node, fnLines);

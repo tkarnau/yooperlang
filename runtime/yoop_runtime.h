@@ -25,10 +25,25 @@ void yoop_task_wait(void* handle);
 
 // Phase 10.F: bounded wait. Returns 0 when the handle's state flipped to
 // "done" before `deadline_ns` (a monotonic-clock nanosecond reading from
-// yoop_now_ns), 1 when the deadline elapsed first. Runs the same
-// re-entrant queue-draining loop as yoop_task_wait — a worker that hits
-// wait_until participates in dispatch up to the deadline.
+// yoop_now_ns), 1 when the deadline elapsed first, 2 when an external
+// `yoop_task_cancel` was observed before either. Does not dispatch
+// queued tasks on the calling thread — see runtime/yoop_runtime.c for
+// the rationale.
 int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns);
+
+// Phase 10.F.2: external cancellation. Atomically sets the cancel byte
+// in the handle's prefix (offset 9 — reuses one of the existing pad
+// bytes between `state` and `refcount`, so no ABI/layout change) and
+// broadcasts queue_cv so any wait_until parked on the handle wakes
+// immediately and observes the cancellation.
+//
+// Cancellation is cooperative on the task-body side: the worker thread
+// still runs the body to natural completion. The semantics this
+// primitive provides is "abandon-the-wait": the caller can stop
+// waiting for the result and treat the handle as done-from-its-side.
+// In-body polling (Phase 10.F.2.b) will give task bodies a way to
+// observe the same flag and exit early.
+void yoop_task_cancel(void* handle);
 
 // Phase 10.F: monotonic clock reading in nanoseconds, suitable for
 // computing wait_until deadlines (`now_ns() + duration_ns`). The clock

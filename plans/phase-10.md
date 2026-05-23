@@ -252,11 +252,18 @@ The Phase 8.F sub-phase docs explicitly defer these to a follow-up.
 With the multiplexer + park/unpark already in, each one is a small
 typed wrapper.
 
-- **Cancellation.** Every `task fn(...)` body gets an implicit
-  `cancellation: ref Cancel` parameter the user can poll. A
-  pooled-binding form (`let pooled h = fetch(url);` then `h.cancel();`)
-  unparks the task with `REASON_CANCEL`. Runtime hook is already there;
-  surface design is the work.
+- **Cancellation.** External half ✓ landed
+  ([phase-10-f-2-a-external-cancel.md](completed/phase-10-f-2-a-external-cancel.md))
+  — `cancel(h)` is a builtin call form that sets the handle's cancel
+  byte (reuses one of the pre-existing prefix padding bytes — no ABI
+  change) and broadcasts so any `wait_until` parked on the handle wakes
+  immediately and observes a new `WaitResult.Cancelled` variant. The
+  task body keeps running to natural completion; cancellation is
+  caller-side "abandon the wait" semantics. Cooperative in-body polling
+  (the implicit `cancellation: ref Cancel` parameter) and the
+  `h.cancel()` method-style sugar from the original sketch are deferred
+  to 10.F.2.b — they need a synthesized task-body parameter + an
+  identifier-resolution special case that this sub-phase didn't tackle.
 - **Deadlines ✓ landed.** See
   [phase-10-f-1-deadlines.md](completed/phase-10-f-1-deadlines.md).
   `wait_until(h, deadline_ns): WaitResult<T>` from

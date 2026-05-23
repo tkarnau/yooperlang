@@ -33,6 +33,7 @@ function main(): int32 {
     switch (fast_result) {
         case WaitResult.Done { value: v }: { printf(`fast done=${v}\n`); }
         case WaitResult.Timeout: { printf(`fast timed out (unexpected)\n`); }
+        case WaitResult.Cancelled: { printf(`fast cancelled (unexpected)\n`); }
     }
 
     pooled lazy = slow();
@@ -41,6 +42,7 @@ function main(): int32 {
     switch (lazy_result) {
         case WaitResult.Done { value: v }: { printf(`lazy done=${v} (unexpected)\n`); }
         case WaitResult.Timeout: { printf(`lazy timed out\n`); }
+        case WaitResult.Cancelled: { printf(`lazy cancelled (unexpected)\n`); }
     }
     // Drain the still-running slow task so its handle frees cleanly
     // (a pooled task without a final wait would leak the handle alloc).

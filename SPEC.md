@@ -684,7 +684,8 @@ function main(): void {
 | Operator | Meaning |
 |---|---|
 | `wait h` | Block until the task referenced by `h` completes; evaluate to the result. `h` must name a binding of type `Task<T>`. |
-| `wait_until(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) — `Done { value: T }` on completion, `Timeout` on deadline expiry. `deadline_ns` is absolute, in the same clock space as `now_ns()`. Phase 10.F.1. |
+| `wait_until(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) — `Done { value: T }` on completion, `Timeout` on deadline expiry, `Cancelled` if `cancel(h)` was observed first. `deadline_ns` is absolute, in the same clock space as `now_ns()`. Phase 10.F.1 + 10.F.2.a. |
+| `cancel(h)` | External cancellation primitive (Phase 10.F.2.a). Sets the handle's cancel byte and broadcasts so any `wait_until` parked on `h` wakes immediately and observes `WaitResult.Cancelled`. The task body itself is not yet cooperative — it keeps running to natural completion; the caller has simply chosen to stop observing the result. Cooperative in-body polling (the `cancellation: ref Cancel` implicit parameter) lands in 10.F.2.b. |
 
 `wait` is a keyword-level operation, not a method on `Task<T>`, so the compiler can
 account for it during flow analysis (in particular, the `joined` kind's `autoJoin`

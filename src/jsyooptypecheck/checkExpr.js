@@ -318,6 +318,14 @@ function resolveCall(node, scope, ctx) {
     return resolveWaitUntilCall(node, scope, ctx);
   }
 
+  // Phase 10.F.2: `cancel(h)` is the external-cancellation primitive. Sets
+  // the cancel byte on the handle's prefix and broadcasts so any
+  // wait_until parked on the handle wakes and observes WaitResult.Cancelled.
+  // Same builtin shape as wait_until — name-reserved, void return.
+  if (callee === "cancel") {
+    return resolveCancelCall(node, scope, ctx);
+  }
+
   // printf legacy path — variadic, type-resolve each arg, no arity check.
   if (callee === "printf") {
     const sig = ctx.typeContext.moduleSymbols.get("printf");
@@ -1451,6 +1459,36 @@ function resolveWaitUntilCall(node, scope, ctx) {
   node.builtinTaskResultType = resultT;
   node.builtinWaitResultType = waitResultType;
   return setType(node, waitResultType);
+}
+
+// Phase 10.F.2: `cancel(h): void` — external cancellation primitive.
+// Recognized by callee name in resolveCall; user-defined `cancel`
+// functions are shadowed. The single arg must be a `Task<T>`; the call
+// itself returns void. Codegen lowers to `@yoop_task_cancel(handle_ptr)`.
+function resolveCancelCall(node, scope, ctx) {
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `cancel(h) takes exactly 1 argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `cancel's argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  node.builtinCancel = true;
+  return setType(node, VoidType());
 }
 
 // Phase 10.E: look for a `trait Into<T> { function into(ref self): T; }`

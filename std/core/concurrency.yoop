@@ -17,6 +17,7 @@
 export enum WaitResult<T> {
     Done { value: T },
     Timeout,
+    Cancelled,
 }
 
 extern "C" from "yoop_runtime" {

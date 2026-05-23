@@ -79,6 +79,11 @@
 static inline yoop_mutex_t** handle_mutex_slot(void* h) { return (yoop_mutex_t**)((char*)h + 16); }
 static inline yoop_cond_t**  handle_cond_slot (void* h) { return (yoop_cond_t**) ((char*)h + 24); }
 static inline void*          handle_state_ptr (void* h) { return (char*)h + 8;  }
+// Phase 10.F.2: cancel flag lives in the pre-existing pad byte at
+// offset 9 (the codegen task-struct layout reserves `[3 x i8]` at field
+// index 2 between `state` and `refcount`). No ABI change vs. pre-10.F.2
+// — the byte just stops being padding.
+static inline void*          handle_cancel_ptr(void* h) { return (char*)h + 9;  }
 static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; }
 
 // ---- queue ----------------------------------------------------------------
@@ -355,7 +360,8 @@ void yoop_task_wait(void* handle) {
     }
 }
 
-// Phase 10.F: bounded wait. Returns 0 on completion, 1 on deadline expiry.
+// Phase 10.F: bounded wait. Returns 0 on completion, 1 on deadline expiry,
+// 2 on external cancellation (Phase 10.F.2).
 //
 // Critically, this path does NOT dispatch queued tasks on the calling
 // thread the way yoop_task_wait does — a queued task that runs past the
@@ -367,6 +373,11 @@ void yoop_task_wait(void* handle) {
 // dependencies can deadlock if every worker is similarly blocked. That's
 // preferable to silently overshooting — and the deadline itself caps the
 // "stall" at exactly the value the user asked for.
+//
+// Done always wins ties: if the task completed before we noticed the
+// deadline or cancel flag, return 0. Cancel beats Timeout when both
+// happen — the user's explicit "abandon" intent is more informative
+// than a passive timer expiry.
 int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
     if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
         // 0 is the "no deadline" sentinel inside the cv wait. Bump to 1ns
@@ -376,6 +387,7 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
     }
     for (;;) {
         if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
+        if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) return 2;
         if (yoop_now_ns() >= deadline_ns) return 1;
 
         yoop_mutex_lock(&g_rt.queue_mu);
@@ -383,15 +395,39 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
             yoop_mutex_unlock(&g_rt.queue_mu);
             return 0;
         }
+        if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            return 2;
+        }
         int rc = queue_cv_wait_until_locked(deadline_ns);
         yoop_mutex_unlock(&g_rt.queue_mu);
         if (rc == ETIMEDOUT) {
-            // Last-look at state — a broadcast may have raced with the
-            // timeout; prefer Done when the result is already available.
+            // Last-look at state + cancel — a broadcast may have raced
+            // with the timeout; prefer Done, then Cancelled, over Timeout.
             if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
+            if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) return 2;
             return 1;
         }
     }
+}
+
+// Phase 10.F.2: external cancellation. Set the cancel byte atomically
+// and broadcast queue_cv so any waiter parked in
+// `yoop_task_wait_until_ns` wakes immediately and observes the flag.
+//
+// Idempotent: a second cancel on an already-cancelled handle is a no-op
+// (the byte's already 1) but still re-broadcasts, which is harmless.
+//
+// Note that this does NOT wake `yoop_task_wait` callers. Bare `wait` is
+// the "I need the result" contract — cancellation only changes whether
+// callers willing to abandon (via wait_until) see Cancelled vs. Done.
+// The task body keeps running until its natural end; in-body polling
+// (Phase 10.F.2.b) will let bodies short-circuit.
+void yoop_task_cancel(void* handle) {
+    A_STORE_U8(handle_cancel_ptr(handle), 1);
+    yoop_mutex_lock(&g_rt.queue_mu);
+    yoop_cond_broadcast(&g_rt.queue_cv);
+    yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
 void yoop_handle_signal_done(void* handle) {

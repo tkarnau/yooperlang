@@ -148,6 +148,15 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "fast done=49\nlazy timed out\n");
   });
 
+  // Phase 10.F.2: external cancellation via `cancel(h)`. A second pooled
+  // task fires the cancel mid-wait; the main thread's wait_until (with a
+  // 1s deadline that's not the path-of-success) observes WaitResult.Cancelled.
+  it("cancel_smoke: cancel(h) makes wait_until return WaitResult.Cancelled", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/cancel_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "cancelled as expected\n");
+  });
+
   it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
