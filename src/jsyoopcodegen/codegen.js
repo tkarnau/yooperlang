@@ -14,7 +14,11 @@ import {
   substituteTypeParams,
   typeKinds,
 } from "../jsyooptypecheck/types.js";
-import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
+import {
+  strippedTypeOf,
+  isFallibleEnum,
+  strippedEnumOkType,
+} from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
 import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
@@ -101,6 +105,17 @@ export function llvmType(yoopType) {
       // yoop type but never appears in the LLVM type signature.
       return "ptr";
     }
+    case typeKinds.functionPointer: {
+      // Phase 9.G: function values are LLVM `ptr` at the storage layer. The
+      // typed signature lives in the yoop type and gets recovered at each
+      // indirect-call site.
+      return "ptr";
+    }
+    case typeKinds.vtable: {
+      // Phase 9.G: vtables are nominal struct types — `%vtable.<mod>__<Name>`.
+      const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
+      return `%vtable.${id}`;
+    }
     default: {
       throw new Error(`llvmType: unhandled yooper type kind "${yoopType.kind}"`);
     }
@@ -130,6 +145,22 @@ function arrayElemLlvmName(elemType) {
   if (elemType.kind === typeKinds.prim) return elemType.name;
   if (elemType.kind === typeKinds.struct) {
     return elemType.moduleId ? `${elemType.moduleId}__${elemType.name}` : elemType.name;
+  }
+  // Phase 9.G: arrays of vtable values — `Dispatcher[]`. Each element is a
+  // small struct ({ ptr ctx, ptr m1, ... }); use the vtable's mangled name
+  // as the array element key so the standard fat-pointer array shape works.
+  if (elemType.kind === typeKinds.vtable) {
+    return elemType.moduleId
+      ? `vt_${elemType.moduleId}__${elemType.name}`
+      : `vt_${elemType.name}`;
+  }
+  // Phase 10.A: arrays of enum values — `Result<int32, int32>[]`. The mangled
+  // enum name is already unique per instantiation; prefix to distinguish
+  // from struct-element arrays.
+  if (elemType.kind === typeKinds.enum) {
+    return elemType.moduleId
+      ? `enum_${elemType.moduleId}__${elemType.name}`
+      : `enum_${elemType.name}`;
   }
   throw new Error(`arrayElemLlvmName: unsupported elem type "${elemType.kind}"`);
 }
@@ -472,14 +503,25 @@ export function codegen(ast) {
   // holds the operand's full struct value. Caller decides what to do with
   // the success value (single field load, void, or destructure).
   //
-  // shape:
+  // shape (struct-fallible):
   //   <eval operand> -> %tmp
   //   alloca + store on stack
   //   load err pointer; strlen(err) > 0 -> branch
   //   try_fail: build default fallible return value, set err, ret
   //   try_ok:  control resumes here for the success path
+  //
+  // Phase 9.H — fallible-enum shape:
+  //   <eval operand> -> %tmp
+  //   alloca + store on stack
+  //   load i32 tag at field 0; compare to Err ordinal
+  //   try_fail: GEP into Err payload, build enclosing return's Err variant
+  //             carrying the same payload bytes, ret
+  //   try_ok:  control resumes here for the Ok payload extraction
   function emitTryOpToSlot(node, fnLines) {
     const operandType = node.operand.resolvedType;
+    if (operandType.kind === typeKinds.enum) {
+      return emitTryOpEnumToSlot(node, fnLines);
+    }
     const r = emitExpr(node.operand, fnLines);
     const slot = freshTemp();
     const operandLlvmTy = llvmType(operandType);
@@ -513,6 +555,38 @@ export function codegen(ast) {
     return { ptr: slot, type: operandType };
   }
 
+  // Phase 9.H: enum-shaped `?`. Reads the i32 tag, branches on Err, builds
+  // the enclosing function's return-type Err variant carrying the operand's
+  // Err payload, and returns it. On the success path returns the on-stack
+  // slot pointing at the operand so the caller can GEP into the Ok payload.
+  function emitTryOpEnumToSlot(node, fnLines) {
+    const operandEnum = node.operand.resolvedType;
+    const r = emitExpr(node.operand, fnLines);
+    const enumLlvm = llvmType(operandEnum);
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${enumLlvm}, align ${sizeOfAlign(operandEnum)}`);
+    fnLines.push(`  store ${enumLlvm} ${r.val}, ptr ${slot}`);
+
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`);
+    const tagVal = freshTemp();
+    fnLines.push(`  ${tagVal} = load i32, ptr ${tagPtr}`);
+
+    const errVariant = operandEnum.variants.get("Err");
+    const failed = freshTemp();
+    fnLines.push(`  ${failed} = icmp eq i32 ${tagVal}, ${errVariant.ordinal}`);
+
+    const failLabel = freshLabel("try_fail");
+    const okLabel = freshLabel("try_ok");
+    fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
+
+    fnLines.push(`${failLabel}:`);
+    emitFailEnumReturn(operandEnum, slot, currentReturnType, fnLines);
+
+    fnLines.push(`${okLabel}:`);
+    return { ptr: slot, type: operandEnum };
+  }
+
   // build the failure-variant struct of the *enclosing function's* return
   // type: zeroinitializer for every field, then write `err`. Per spec, the
   // caller short-circuits on err and never reads the other fields.
@@ -537,6 +611,61 @@ export function codegen(ast) {
     );
     if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
     fnLines.push(`  ret ${retLlvmTy} ${failVal}`);
+  }
+
+  // Phase 9.H: build the enclosing function's return-type Err variant
+  // carrying the operand's Err payload, then ret. operandEnumSlot points
+  // to the operand's enum struct (tag has already been checked == Err
+  // ordinal); we GEP into its payload bytes, copy the single payload field
+  // (if any) into the return enum's payload bytes, and ret. retEnumType
+  // and operandEnum are both fallible enums whose Err payload types are
+  // typesEqual (checked by the typechecker).
+  function emitFailEnumReturn(operandEnum, operandEnumSlot, retEnumType, fnLines) {
+    const retLlvm = llvmType(retEnumType);
+    const retSlot = freshTemp();
+    fnLines.push(`  ${retSlot} = alloca ${retLlvm}, align ${sizeOfAlign(retEnumType)}`);
+    fnLines.push(`  store ${retLlvm} zeroinitializer, ptr ${retSlot}`);
+
+    const retErr = retEnumType.variants.get("Err");
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${retLlvm}, ptr ${retSlot}, i32 0, i32 0`);
+    fnLines.push(`  store i32 ${retErr.ordinal}, ptr ${tagPtr}`);
+
+    // Copy the Err payload (if any) from operand into return value.
+    const operandErr = operandEnum.variants.get("Err");
+    const hasPayload =
+      operandErr.fields !== null && operandErr.fields.length > 0
+      && retErr.fields !== null && retErr.fields.length > 0;
+    if (hasPayload) {
+      const operandEnumId = operandEnum.moduleId
+        ? `${operandEnum.moduleId}__${operandEnum.name}`
+        : operandEnum.name;
+      const retEnumId = retEnumType.moduleId
+        ? `${retEnumType.moduleId}__${retEnumType.name}`
+        : retEnumType.name;
+      const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
+      const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
+      const fieldType = operandErr.fields[0].type;
+      const fieldLlvm = llvmType(fieldType);
+
+      const opPayloadPtr = freshTemp();
+      fnLines.push(`  ${opPayloadPtr} = getelementptr inbounds ${llvmType(operandEnum)}, ptr ${operandEnumSlot}, i32 0, i32 1`);
+      const opFieldPtr = freshTemp();
+      fnLines.push(`  ${opFieldPtr} = getelementptr inbounds ${operandPayloadLlvm}, ptr ${opPayloadPtr}, i32 0, i32 0`);
+      const fieldVal = freshTemp();
+      fnLines.push(`  ${fieldVal} = load ${fieldLlvm}, ptr ${opFieldPtr}`);
+
+      const retPayloadPtr = freshTemp();
+      fnLines.push(`  ${retPayloadPtr} = getelementptr inbounds ${retLlvm}, ptr ${retSlot}, i32 0, i32 1`);
+      const retFieldPtr = freshTemp();
+      fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
+      fnLines.push(`  store ${fieldLlvm} ${fieldVal}, ptr ${retFieldPtr}`);
+    }
+
+    const retVal = freshTemp();
+    fnLines.push(`  ${retVal} = load ${retLlvm}, ptr ${retSlot}`);
+    if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
+    fnLines.push(`  ret ${retLlvm} ${retVal}`);
   }
 
   // Track the enclosing function's return type for emitFailVariantReturn.
@@ -976,6 +1105,25 @@ export function codegen(ast) {
 
       case ASTNodeKind.TRY_OP: {
         const slot = emitTryOpToSlot(node, fnLines);
+        // Phase 9.H: enum operand — extract the Ok variant payload (or void).
+        if (slot.type.kind === typeKinds.enum) {
+          const okStripped = strippedEnumOkType(slot.type);
+          if (okStripped.kind === typeKinds.void) {
+            return { val: "void", yoopType: VoidType() };
+          }
+          const enumId = slot.type.moduleId
+            ? `${slot.type.moduleId}__${slot.type.name}`
+            : slot.type.name;
+          const payloadLlvm = `%enumv.${enumId}__Ok`;
+          const fieldLlvm = llvmType(okStripped);
+          const payloadPtr = freshTemp();
+          fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
+          const fieldPtr = freshTemp();
+          fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
+          const v = freshTemp();
+          fnLines.push(`  ${v} = load ${fieldLlvm}, ptr ${fieldPtr}`);
+          return { val: v, yoopType: okStripped };
+        }
         const stripped = strippedTypeOf(node.operand.resolvedType);
         if (!stripped || stripped.kind === "strippedMulti") {
           // multi-strip in expression position is rejected by the
@@ -1297,6 +1445,10 @@ export function codegen(ast) {
         emitForLoop(node, fnLines, ctx);
         break;
 
+      case ASTNodeKind.FOR_IN_LOOP:
+        emitForInLoop(node, fnLines, ctx);
+        break;
+
       case ASTNodeKind.BREAK_STATEMENT:
         fnLines.push(`  br label %${ctx.breakLabel}`);
         break;
@@ -1426,6 +1578,80 @@ export function codegen(ast) {
     const stepType = symbols.get(node.stepIdent);
     const stepVal = emitExpr(node.stepExpr, fnLines);
     fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr %${node.stepIdent}`);
+    fnLines.push(`  br label %${condLabel}`);
+
+    fnLines.push(`${afterLabel}:`);
+  }
+
+  // Phase 9.D: `for item in xs { ... }`. Lowers to a fat-pointer walk with
+  // a hidden i64 counter — same shape as the C-style for loop a user would
+  // write today, but the index is invisible and the per-iteration value is
+  // copied into a fresh loopVar slot at the top of the body.
+  function emitForInLoop(node, fnLines, ctx) {
+    const elemType = node.resolvedElemType;
+    ensureArrayTypeDef(elemType);
+
+    // Evaluate the iterable once. emitLvalue will materialize a slot for
+    // rvalue expressions, so we always have a stable {ptr, i64} address.
+    const base = emitLvalue(node.iterExpr, fnLines);
+    const arrayLlvmTy = llvmType(base.type);
+    const elemLlvmTy = llvmType(elemType);
+    const elemAlign = elemType.kind === typeKinds.struct
+      ? alignOfStruct(elemType)
+      : alignOf(elemLlvmTy);
+
+    // Cache the data pointer and len once; matches the "evaluate bound
+    // once" semantics typical C-style for loops use.
+    const dataFieldPtr = freshTemp();
+    fnLines.push(`  ${dataFieldPtr} = getelementptr inbounds ${arrayLlvmTy}, ptr ${base.ptr}, i32 0, i32 0`);
+    const dataPtr = freshTemp();
+    fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataFieldPtr}`);
+    const lenFieldPtr = freshTemp();
+    fnLines.push(`  ${lenFieldPtr} = getelementptr inbounds ${arrayLlvmTy}, ptr ${base.ptr}, i32 0, i32 1`);
+    const lenVal = freshTemp();
+    fnLines.push(`  ${lenVal} = load i64, ptr ${lenFieldPtr}`);
+
+    const counterSlot = freshTemp();
+    fnLines.push(`  ${counterSlot} = alloca i64, align 8`);
+    fnLines.push(`  store i64 0, ptr ${counterSlot}`);
+
+    // Loop variable slot follows the LET_DECL naming convention (%name).
+    const loopVarSlot = `%${node.loopVar}`;
+    fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvmTy}, align ${elemAlign}`);
+    symbols.set(node.loopVar, elemType);
+
+    const condLabel = freshLabel("forin_cond");
+    const bodyLabel = freshLabel("forin_body");
+    const stepLabel = freshLabel("forin_step");
+    const afterLabel = freshLabel("forin_after");
+
+    fnLines.push(`  br label %${condLabel}`);
+    fnLines.push(`${condLabel}:`);
+    const counterVal = freshTemp();
+    fnLines.push(`  ${counterVal} = load i64, ptr ${counterSlot}`);
+    const doneVal = freshTemp();
+    fnLines.push(`  ${doneVal} = icmp uge i64 ${counterVal}, ${lenVal}`);
+    fnLines.push(`  br i1 ${doneVal}, label %${afterLabel}, label %${bodyLabel}`);
+
+    fnLines.push(`${bodyLabel}:`);
+    const idxVal = freshTemp();
+    fnLines.push(`  ${idxVal} = load i64, ptr ${counterSlot}`);
+    const elemPtr = freshTemp();
+    fnLines.push(`  ${elemPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${dataPtr}, i64 ${idxVal}`);
+    const elemVal = freshTemp();
+    fnLines.push(`  ${elemVal} = load ${elemLlvmTy}, ptr ${elemPtr}`);
+    fnLines.push(`  store ${elemLlvmTy} ${elemVal}, ptr ${loopVarSlot}`);
+
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: stepLabel };
+    emitBlock(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${stepLabel}`);
+
+    fnLines.push(`${stepLabel}:`);
+    const curVal = freshTemp();
+    fnLines.push(`  ${curVal} = load i64, ptr ${counterSlot}`);
+    const nextVal = freshTemp();
+    fnLines.push(`  ${nextVal} = add i64 ${curVal}, 1`);
+    fnLines.push(`  store i64 ${nextVal}, ptr ${counterSlot}`);
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
@@ -1870,6 +2096,11 @@ export function sizeOfAlign(t) {
     }
     return max;
   }
+  if (t.kind === typeKinds.vtable) {
+    // Phase 9.G: vtables are { ptr ctx, ptr m1, ptr m2, ... } — all pointer-
+    // wide, so the natural alignment is one pointer.
+    return 8;
+  }
   return 8;
 }
 
@@ -2009,6 +2240,40 @@ export function codegenProgram(modules, _moduleEnv, programState) {
         .map((f) => llvmType(f.type))
         .join(", ");
       allStructDefs.push(`${mangled} = type { ${fieldLlvm} }`);
+    }
+    // Phase 10.A: emit each generic-enum instantiation as
+    // %enum.<mod>__<Mangled> = type { i32, [P x i8] } + per-variant payload
+    // structs. Mirrors the per-module ENUM_DECL emission shape so codegen
+    // GEPs against either an instantiated or a concrete enum the same way.
+    for (const [_key, enumType] of programState.registry.enums) {
+      if (enumContainsTypeParam(enumType)) continue;
+      const mangled = llvmType(enumType);
+      if (emittedStructs.has(mangled)) continue;
+      emittedStructs.add(mangled);
+      let maxPayload = 0;
+      for (const v of enumType.variants.values()) {
+        if (v.fields === null) continue;
+        let off = 0;
+        let maxAlign = 1;
+        for (const f of v.fields) {
+          const al = sizeOfAlign(f.type);
+          if (al > maxAlign) maxAlign = al;
+          off = Math.floor((off + al - 1) / al) * al + sizeOfType(f.type);
+        }
+        const padded = Math.floor((off + maxAlign - 1) / maxAlign) * maxAlign;
+        if (padded > maxPayload) maxPayload = padded;
+      }
+      const payloadSize = Math.max(maxPayload, 1);
+      allStructDefs.push(`${mangled} = type { i32, [${payloadSize} x i8] }`);
+      const enumId = `${enumType.moduleId}__${enumType.name}`;
+      for (const v of enumType.variants.values()) {
+        if (v.fields === null) continue;
+        const variantLlvm = `%enumv.${enumId}__${v.name}`;
+        if (emittedStructs.has(variantLlvm)) continue;
+        emittedStructs.add(variantLlvm);
+        const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
+        allStructDefs.push(`${variantLlvm} = type { ${fieldLlvm} }`);
+      }
     }
   }
 
@@ -2178,6 +2443,43 @@ function structContainsTypeParam(structType) {
   return structType.fields.some((f) => hasParam(f.type));
 }
 
+// Phase 10.A: mirror of structContainsTypeParam for enum instantiations.
+// Returns true for an "open" enum whose variant payloads still mention a
+// TypeParamType — those are intermediate substitution products that must
+// not be emitted as LLVM struct defs.
+function enumContainsTypeParam(enumType) {
+  if (!enumType.variants) return false;
+  const seenStruct = new Set();
+  function hasParam(t) {
+    if (!t) return false;
+    if (t.kind === typeKinds.typeParam) return true;
+    if (t.kind === typeKinds.ref) return hasParam(t.inner);
+    if (t.kind === typeKinds.array) return hasParam(t.elem);
+    if (t.kind === typeKinds.struct) {
+      const key = (t.moduleId ? `${t.moduleId}__` : "") + t.name;
+      if (seenStruct.has(key)) return false;
+      seenStruct.add(key);
+      if (!t.fields) return false;
+      return t.fields.some((f) => hasParam(f.type));
+    }
+    if (t.kind === typeKinds.enum) {
+      // An open enum's own variants may carry typeParam.
+      if (!t.variants) return false;
+      for (const v of t.variants.values()) {
+        if (v.fields === null) continue;
+        if (v.fields.some((f) => hasParam(f.type))) return true;
+      }
+      return false;
+    }
+    return false;
+  }
+  for (const v of enumType.variants.values()) {
+    if (v.fields === null) continue;
+    if (v.fields.some((f) => hasParam(f.type))) return true;
+  }
+  return false;
+}
+
 function codegenWithModuleId(
   ast,
   moduleId,
@@ -2343,7 +2645,9 @@ function codegenWithModuleId(
     // Phase 7.5: emit enum struct + per-variant payload structs.
     //   %enum.<mod>__<E> = type { i32, [P x i8] }     (tag + payload bytes)
     //   %enumv.<mod>__<E>__<V> = type { ... fields ... }  (per-variant payload)
-    if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType) {
+    // Phase 10.A: generic enum decls have no resolvedType — they emit their
+    // instantiations from the registry walk in codegenProgram instead.
+    if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType && !d.genericDecl) {
       const enumLlvm = llvmType(d.resolvedType);
       if (!emittedStructs.has(enumLlvm)) {
         emittedStructs.add(enumLlvm);
@@ -2395,6 +2699,17 @@ function codegenWithModuleId(
         }
         const size = Math.max(maxSize, 1);
         structDefs.push(`${unionLlvm} = type { [${size} x i8] }`);
+      }
+    }
+    // Phase 9.G: emit vtable struct as { ptr ctx, ptr m1, ptr m2, ... } —
+    // one pointer slot per trait method, in trait declaration order.
+    if (d.kind === ASTNodeKind.VTABLE_DECL && d.resolvedType) {
+      const vtLlvm = llvmType(d.resolvedType);
+      if (!emittedStructs.has(vtLlvm)) {
+        emittedStructs.add(vtLlvm);
+        const slots = ["ptr"]; // ctx
+        for (const _ of d.resolvedType.methodOrder) slots.push("ptr");
+        structDefs.push(`${vtLlvm} = type { ${slots.join(", ")} }`);
       }
     }
   }
@@ -3433,6 +3748,25 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.TRY_OP: {
         const slot = emitTrySlot(node, fnLines);
+        // Phase 9.H: enum operand — extract the Ok variant payload (or void).
+        if (slot.type.kind === typeKinds.enum) {
+          const okStripped = strippedEnumOkType(slot.type);
+          if (okStripped.kind === typeKinds.void) {
+            return { val: "void", yoopType: VoidType() };
+          }
+          const enumId = slot.type.moduleId
+            ? `${slot.type.moduleId}__${slot.type.name}`
+            : slot.type.name;
+          const payloadLlvm = `%enumv.${enumId}__Ok`;
+          const fieldLlvm = llvmType(okStripped);
+          const payloadPtr = freshTemp();
+          fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
+          const fieldPtr = freshTemp();
+          fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
+          const v = freshTemp();
+          fnLines.push(`  ${v} = load ${fieldLlvm}, ptr ${fieldPtr}`);
+          return { val: v, yoopType: okStripped };
+        }
         const stripped = strippedTypeOf(node.operand.resolvedType);
         if (!stripped || stripped.kind === "strippedMulti") throw new Error("codegen: unsupported TRY_OP shape");
         if (stripped.kind === typeKinds.void) return { val: "void", yoopType: VoidType() };
@@ -3743,6 +4077,17 @@ function codegenWithModuleId(
       return { val: tmp, yoopType: methodSig.returnType };
     }
 
+    // Phase 9.G: `VTableName.from(ref x)` — synthesize the vtable struct.
+    if (node.vtableBuilder) {
+      return emitVTableFromBuilder(node, fnLines);
+    }
+    // Phase 9.G: `Trait.method(ref vt, args)` where vt is a vtable value —
+    // lower to an indirect call through the slot, threading ctx as the
+    // first argument.
+    if (node.vtableCall) {
+      return emitVTableMethodCall(node, fnLines);
+    }
+
     const sym = calleeSymbol(node);
     const argResults = node.args.map((a) => emitExpr(a, fnLines));
     // Phase 6.4: for each arg flagged by kindCheck as a pooled-to-pooled
@@ -3774,6 +4119,90 @@ function codegenWithModuleId(
     const tmp = freshTemp();
     fnLines.push(`  ${tmp} = ${callInstr}(${argList})`);
     return { val: tmp, yoopType: retType };
+  }
+
+  // Phase 9.G: lower `VTableName.from(ref x)` to a stack-allocated vtable
+  // struct populated with:
+  //   field 0 (ctx)   <- the receiver's address (`&x`, materialized via emitLval)
+  //   field i+1       <- the address of the receiver type's trait-method impl
+  //                      symbol, mangled per Phase 7.4 conventions.
+  // Returns a loaded SSA value of vtable struct type.
+  function emitVTableFromBuilder(node, fnLines) {
+    const { vtableType, implType } = node.vtableBuilder;
+    const vtLlvm = llvmType(vtableType);
+
+    // Materialize the receiver's address. The arg is REF_EXPRESSION whose
+    // operand is an IDENT or lvalue; emitLval gives us a stable pointer.
+    const refArg = node.args[0];
+    const lv = emitLval(refArg.operand, fnLines);
+    const ctxPtr = lv.ptr;
+
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${vtLlvm}, align 8`);
+
+    // ctx at index 0
+    const ctxGep = freshTemp();
+    fnLines.push(`  ${ctxGep} = getelementptr inbounds ${vtLlvm}, ptr ${slot}, i32 0, i32 0`);
+    fnLines.push(`  store ptr ${ctxPtr}, ptr ${ctxGep}`);
+
+    // One method pointer per trait method, in trait declaration order.
+    for (let i = 0; i < vtableType.methodOrder.length; i++) {
+      const methodName = vtableType.methodOrder[i];
+      const mangled = mangleTraitMethod(implType, vtableType.traitName, methodName);
+      const slotGep = freshTemp();
+      fnLines.push(`  ${slotGep} = getelementptr inbounds ${vtLlvm}, ptr ${slot}, i32 0, i32 ${i + 1}`);
+      fnLines.push(`  store ptr @${mangled}, ptr ${slotGep}`);
+    }
+
+    const loaded = freshTemp();
+    fnLines.push(`  ${loaded} = load ${vtLlvm}, ptr ${slot}`);
+    return { val: loaded, yoopType: vtableType };
+  }
+
+  // Phase 9.G: lower `Trait.method(ref vt, args...)` where vt is typed as a
+  // vtable. The first arg is the vtable itself (its address via the REF_EXPR);
+  // the rest are the user's args. Load the function pointer from the vtable's
+  // method slot, load ctx from slot 0, indirect-call passing ctx + args.
+  function emitVTableMethodCall(node, fnLines) {
+    const { vtableType, fieldIndex } = node.vtableCall;
+    const vtLlvm = llvmType(vtableType);
+
+    // The first arg is `ref vt`. Get the address of vt.
+    const refArg = node.args[0];
+    const vtPtr = emitLval(refArg.operand, fnLines).ptr;
+
+    const ctxGep = freshTemp();
+    fnLines.push(`  ${ctxGep} = getelementptr inbounds ${vtLlvm}, ptr ${vtPtr}, i32 0, i32 0`);
+    const ctxVal = freshTemp();
+    fnLines.push(`  ${ctxVal} = load ptr, ptr ${ctxGep}`);
+
+    const fnSlot = freshTemp();
+    fnLines.push(`  ${fnSlot} = getelementptr inbounds ${vtLlvm}, ptr ${vtPtr}, i32 0, i32 ${fieldIndex + 1}`);
+    const fnPtr = freshTemp();
+    fnLines.push(`  ${fnPtr} = load ptr, ptr ${fnSlot}`);
+
+    // Evaluate user args (everything after the vtable receiver).
+    const userArgResults = node.args.slice(1).map((a) => emitExpr(a, fnLines));
+    const fpt = vtableType.fields[fieldIndex].type; // FunctionPointerType
+    const userParamTypes = fpt.params;
+
+    // Build call signature. The stored function pointer's first arg is `ptr`
+    // (the ctx), followed by the FPT's declared params (which are exactly the
+    // trait method's params minus `ref self`).
+    const userArgList = userParamTypes.map((pt, i) => {
+      return `${llvmType(pt)} ${userArgResults[i].val}`;
+    }).join(", ");
+    const fullArgList = `ptr ${ctxVal}${userArgList ? ", " + userArgList : ""}`;
+    const llvmRet = llvmType(fpt.returnType);
+    const sigParamList = ["ptr", ...userParamTypes.map((p) => llvmType(p))].join(", ");
+
+    if (llvmRet === "void") {
+      fnLines.push(`  call void (${sigParamList}) ${fnPtr}(${fullArgList})`);
+      return { val: "void", yoopType: VoidType() };
+    }
+    const tmp = freshTemp();
+    fnLines.push(`  ${tmp} = call ${llvmRet} (${sigParamList}) ${fnPtr}(${fullArgList})`);
+    return { val: tmp, yoopType: fpt.returnType };
   }
 
   function emitPrintfCallInner(node, fnLines) {
@@ -3914,6 +4343,9 @@ function codegenWithModuleId(
 
   function emitTrySlot(node, fnLines) {
     const operandType = node.operand.resolvedType;
+    if (operandType.kind === typeKinds.enum) {
+      return emitTrySlotEnum(node, fnLines);
+    }
     const r = emitExpr(node.operand, fnLines);
     const slot = freshTemp();
     const operandLlvmTy = llvmType(operandType);
@@ -3939,6 +4371,85 @@ function codegenWithModuleId(
     emitFailRet(currentReturnType, errStr, fnLines);
     fnLines.push(`${okLabel}:`);
     return { ptr: slot, type: operandType };
+  }
+
+  // Phase 9.H — enum-shaped `?` (multi-module path). Mirrors emitTryOpEnumToSlot
+  // in the single-module section.
+  function emitTrySlotEnum(node, fnLines) {
+    const operandEnum = node.operand.resolvedType;
+    const r = emitExpr(node.operand, fnLines);
+    const enumLlvm = llvmType(operandEnum);
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${enumLlvm}, align ${sizeOfAlign(operandEnum)}`);
+    fnLines.push(`  store ${enumLlvm} ${r.val}, ptr ${slot}`);
+
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`);
+    const tagVal = freshTemp();
+    fnLines.push(`  ${tagVal} = load i32, ptr ${tagPtr}`);
+
+    const errVariant = operandEnum.variants.get("Err");
+    const failed = freshTemp();
+    fnLines.push(`  ${failed} = icmp eq i32 ${tagVal}, ${errVariant.ordinal}`);
+
+    const failLabel = freshLabel("try_fail");
+    const okLabel = freshLabel("try_ok");
+    fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
+
+    fnLines.push(`${failLabel}:`);
+    emitPendingCleanups(node, fnLines);
+    emitFailEnumRet(operandEnum, slot, currentReturnType, fnLines);
+
+    fnLines.push(`${okLabel}:`);
+    return { ptr: slot, type: operandEnum };
+  }
+
+  // Phase 9.H — multi-module sibling of emitFailEnumReturn.
+  function emitFailEnumRet(operandEnum, operandEnumSlot, retEnumType, fnLines) {
+    const retLlvm = llvmType(retEnumType);
+    const retSlot = freshTemp();
+    fnLines.push(`  ${retSlot} = alloca ${retLlvm}, align ${sizeOfAlign(retEnumType)}`);
+    fnLines.push(`  store ${retLlvm} zeroinitializer, ptr ${retSlot}`);
+
+    const retErr = retEnumType.variants.get("Err");
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${retLlvm}, ptr ${retSlot}, i32 0, i32 0`);
+    fnLines.push(`  store i32 ${retErr.ordinal}, ptr ${tagPtr}`);
+
+    const operandErr = operandEnum.variants.get("Err");
+    const hasPayload =
+      operandErr.fields !== null && operandErr.fields.length > 0
+      && retErr.fields !== null && retErr.fields.length > 0;
+    if (hasPayload) {
+      const operandEnumId = operandEnum.moduleId
+        ? `${operandEnum.moduleId}__${operandEnum.name}`
+        : operandEnum.name;
+      const retEnumId = retEnumType.moduleId
+        ? `${retEnumType.moduleId}__${retEnumType.name}`
+        : retEnumType.name;
+      const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
+      const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
+      const fieldType = operandErr.fields[0].type;
+      const fieldLlvm = llvmType(fieldType);
+
+      const opPayloadPtr = freshTemp();
+      fnLines.push(`  ${opPayloadPtr} = getelementptr inbounds ${llvmType(operandEnum)}, ptr ${operandEnumSlot}, i32 0, i32 1`);
+      const opFieldPtr = freshTemp();
+      fnLines.push(`  ${opFieldPtr} = getelementptr inbounds ${operandPayloadLlvm}, ptr ${opPayloadPtr}, i32 0, i32 0`);
+      const fieldVal = freshTemp();
+      fnLines.push(`  ${fieldVal} = load ${fieldLlvm}, ptr ${opFieldPtr}`);
+
+      const retPayloadPtr = freshTemp();
+      fnLines.push(`  ${retPayloadPtr} = getelementptr inbounds ${retLlvm}, ptr ${retSlot}, i32 0, i32 1`);
+      const retFieldPtr = freshTemp();
+      fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
+      fnLines.push(`  store ${fieldLlvm} ${fieldVal}, ptr ${retFieldPtr}`);
+    }
+
+    const retVal = freshTemp();
+    fnLines.push(`  ${retVal} = load ${retLlvm}, ptr ${retSlot}`);
+    if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
+    fnLines.push(`  ret ${retLlvm} ${retVal}`);
   }
 
   // Phase 6.1: emit a single CLEANUP_CALL node. The binding's alloca slot is
@@ -4217,6 +4728,7 @@ function codegenWithModuleId(
       case ASTNodeKind.IF_STATEMENT: emitIfStmt(node, fnLines, ctx); break;
       case ASTNodeKind.WHILE_STATEMENT: emitWhileStmt(node, fnLines, ctx); break;
       case ASTNodeKind.FOR_LOOP: emitForLoopStmt(node, fnLines, ctx); break;
+      case ASTNodeKind.FOR_IN_LOOP: emitForInLoopStmt(node, fnLines, ctx); break;
       case ASTNodeKind.BREAK_STATEMENT: fnLines.push(`  br label %${ctx.breakLabel}`); break;
       case ASTNodeKind.CONTINUE_STATEMENT: fnLines.push(`  br label %${ctx.continueLabel}`); break;
       case ASTNodeKind.BLOCK: node.body.forEach((s) => emitStmt(s, fnLines, ctx)); break;
@@ -4453,6 +4965,74 @@ function codegenWithModuleId(
     } else {
       emitStmt(blockOrNode, fnLines, ctx);
     }
+  }
+
+  // Phase 9.D: `for item in xs { ... }` — multi-module codegen path. Mirrors
+  // emitForInLoop in the single-module section: evaluate the iterable once,
+  // cache the data pointer and length, then walk an i64 counter.
+  function emitForInLoopStmt(node, fnLines, ctx) {
+    const elemType = node.resolvedElemType;
+    ensureArrayTypeDef(elemType);
+
+    const base = emitLval(node.iterExpr, fnLines);
+    const arrayLlvmTy = llvmType(base.type);
+    const elemLlvmTy = llvmType(elemType);
+    const elemAlign = elemType.kind === typeKinds.struct
+      ? alignOfStruct(elemType)
+      : alignOf(elemLlvmTy);
+
+    const dataFieldPtr = freshTemp();
+    fnLines.push(`  ${dataFieldPtr} = getelementptr inbounds ${arrayLlvmTy}, ptr ${base.ptr}, i32 0, i32 0`);
+    const dataPtr = freshTemp();
+    fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataFieldPtr}`);
+    const lenFieldPtr = freshTemp();
+    fnLines.push(`  ${lenFieldPtr} = getelementptr inbounds ${arrayLlvmTy}, ptr ${base.ptr}, i32 0, i32 1`);
+    const lenVal = freshTemp();
+    fnLines.push(`  ${lenVal} = load i64, ptr ${lenFieldPtr}`);
+
+    const counterSlot = freshTemp();
+    fnLines.push(`  ${counterSlot} = alloca i64, align 8`);
+    fnLines.push(`  store i64 0, ptr ${counterSlot}`);
+
+    const loopVarSlot = `%${node.loopVar}`;
+    fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvmTy}, align ${elemAlign}`);
+    symbols.set(node.loopVar, elemType);
+
+    const condLabel = freshLabel("forin_cond");
+    const bodyLabel = freshLabel("forin_body");
+    const stepLabel = freshLabel("forin_step");
+    const afterLabel = freshLabel("forin_after");
+
+    fnLines.push(`  br label %${condLabel}`);
+    fnLines.push(`${condLabel}:`);
+    const counterVal = freshTemp();
+    fnLines.push(`  ${counterVal} = load i64, ptr ${counterSlot}`);
+    const doneVal = freshTemp();
+    fnLines.push(`  ${doneVal} = icmp uge i64 ${counterVal}, ${lenVal}`);
+    fnLines.push(`  br i1 ${doneVal}, label %${afterLabel}, label %${bodyLabel}`);
+
+    fnLines.push(`${bodyLabel}:`);
+    const idxVal = freshTemp();
+    fnLines.push(`  ${idxVal} = load i64, ptr ${counterSlot}`);
+    const elemPtr = freshTemp();
+    fnLines.push(`  ${elemPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${dataPtr}, i64 ${idxVal}`);
+    const elemVal = freshTemp();
+    fnLines.push(`  ${elemVal} = load ${elemLlvmTy}, ptr ${elemPtr}`);
+    fnLines.push(`  store ${elemLlvmTy} ${elemVal}, ptr ${loopVarSlot}`);
+
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: stepLabel };
+    emitBlockStmt(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${stepLabel}`);
+
+    fnLines.push(`${stepLabel}:`);
+    const curVal = freshTemp();
+    fnLines.push(`  ${curVal} = load i64, ptr ${counterSlot}`);
+    const nextVal = freshTemp();
+    fnLines.push(`  ${nextVal} = add i64 ${curVal}, 1`);
+    fnLines.push(`  store i64 ${nextVal}, ptr ${counterSlot}`);
+    fnLines.push(`  br label %${condLabel}`);
+
+    fnLines.push(`${afterLabel}:`);
   }
 }
 

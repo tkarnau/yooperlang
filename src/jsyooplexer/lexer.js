@@ -39,6 +39,8 @@ export const TokenTags = {
   else: "else",
   while: "while",
   for: "for",
+  // Phase 9.D: `for item in xs { ... }` iteration form.
+  in: "in",
   type: "type",
   import: "import",
   export: "export",
@@ -58,6 +60,10 @@ export const TokenTags = {
   implements: "implements",
   self: "self",
   extends: "extends",
+  // Phase 9.G: `vtable Name for TraitName { ... }` — declares the
+  // type-erased shape of a trait. Pairs with the `=>` token (`fatArrow`)
+  // for field type annotations.
+  vtable: "vtable",
   kind: "kind",
   // kind stuff
   appliesTo: "appliesTo",
@@ -140,6 +146,11 @@ export const TokenTags = {
   multEq: "multEq",
   divideEq: "divideEq",
   modulusEq: "modulusEq",
+  // Phase 9.G: `=>` separator for function value types in type position.
+  // Only legal in type annotations (struct fields, parameter / return types,
+  // vtable fields). Expression-position `=>` is reserved for a future
+  // closure-literal syntax and is currently a parse error there.
+  fatArrow: "fatArrow",
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -188,6 +199,10 @@ export const tokenScanList = [
   { str: "*=", tag: TokenTags.multEq },
   { str: "/=", tag: TokenTags.divideEq },
   { str: "%=", tag: TokenTags.modulusEq },
+  // Phase 9.G: function value type separator. Longest-first sort puts this
+  // before `=` and before `>=` / `>`; the lexer's existing logic handles
+  // the disambiguation against `==`.
+  { str: "=>", tag: TokenTags.fatArrow },
   { str: ".", tag: TokenTags.dot },
   { str: "..", tag: TokenTags.dotdot },
   { str: "...", tag: TokenTags.dotdotdot },
@@ -204,6 +219,7 @@ const keywordTagList = {
   else: TokenTags.else,
   while: TokenTags.while,
   for: TokenTags.for,
+  in: TokenTags.in,
   type: TokenTags.type,
   import: TokenTags.import,
   export: TokenTags.export,
@@ -220,6 +236,7 @@ const keywordTagList = {
   implements: TokenTags.implements,
   self: TokenTags.self,
   extends: TokenTags.extends,
+  vtable: TokenTags.vtable,
   kind: TokenTags.kind,
   appliesTo: TokenTags.appliesTo,
   requires: TokenTags.requires,

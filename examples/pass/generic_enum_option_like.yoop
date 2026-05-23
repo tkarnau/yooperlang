@@ -1,0 +1,36 @@
+// Phase 10.A: generic enum with a no-payload variant. Exercises bare
+// `EnumName.Variant` promotion + pinning through a typed binding.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Maybe<T> {
+    Some { value: T },
+    None,
+}
+
+function first_positive(a: int32, b: int32): Maybe<int32> {
+    if (a > 0) { return Maybe.Some { value: a }; }
+    if (b > 0) { return Maybe.Some { value: b }; }
+    return Maybe.None;
+}
+
+function main(): int32 {
+    let m1: Maybe<int32> = first_positive(3, 7);
+    switch (m1) {
+        case Maybe.Some { value: v1 }: { printf(`m1=Some(${v1})\n`); }
+        case Maybe.None: { printf(`m1=None\n`); }
+    }
+
+    let m2: Maybe<int32> = first_positive(-1, -2);
+    switch (m2) {
+        case Maybe.Some { value: v2 }: { printf(`m2=Some(${v2})\n`); }
+        case Maybe.None: { printf(`m2=None\n`); }
+    }
+    return 0;
+}
+
+// expected output:
+// m1=Some(3)
+// m2=None

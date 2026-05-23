@@ -195,6 +195,81 @@ describe("parse: statements", () => {
   });
 });
 
+// Phase 9.D: `for ITEM in EXPR { ... }` element-walking loop. The classic
+// C-style `for (i = 0; ...)` form still parses unchanged; the dispatcher
+// looks at whether the token after `for` is `(` or `IDENT in`.
+describe("Phase 9.D: for ... in loop", () => {
+  function bodyOf(src) {
+    return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
+  }
+
+  it("parses `for x in xs { }` as FOR_IN_LOOP with loopVar + iterExpr", () => {
+    const stmts = bodyOf("let xs: int32[] = [1,2,3]; for x in xs { }");
+    const loop = stmts[1];
+    assert.equal(loop.kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(loop.loopVar, "x");
+    assert.equal(loop.iterExpr.kind, ASTNodeKind.IDENT);
+    assert.equal(loop.iterExpr.name, "xs");
+    assert.equal(loop.body.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("classic for-loop syntax still parses to FOR_LOOP", () => {
+    const stmts = bodyOf("let i: int32 = 0; for (i = 0; i < 5; i = i + 1) { }");
+    assert.equal(stmts[1].kind, ASTNodeKind.FOR_LOOP);
+  });
+
+  it("accepts an arbitrary expression on the RHS of `in`", () => {
+    const stmts = bodyOf("let xs: int32[] = [1,2,3]; for x in xs { }");
+    const loop = stmts[1];
+    assert.equal(loop.kind, ASTNodeKind.FOR_IN_LOOP);
+    // Index expressions, calls, field access etc. all flow through
+    // parseExpression — verify a call-shape RHS works.
+    const stmts2 = bodyOf("for v in build() { }");
+    assert.equal(stmts2[0].kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(stmts2[0].iterExpr.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+});
+
+// Phase 9.G.1: function value types in type position — `(p: T) => R`. The
+// annotation parses to `{ kind: "functionType", params: [...], returnType }`
+// and may appear anywhere a type annotation does.
+describe("Phase 9.G.1: `=>` function value type annotations", () => {
+  it("parses a struct field of function-pointer type", () => {
+    const ast = parse(
+      "type Handler { handle: (req: int32) => int32 }",
+    );
+    const td = ast.body[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(td.fields[0].name, "handle");
+    assert.deepEqual(td.fields[0].typeAnnotation, {
+      kind: "functionType",
+      params: [{ kind: "typeName", name: "int32" }],
+      returnType: { kind: "typeName", name: "int32" },
+    });
+  });
+
+  it("parses a function parameter typed as a function pointer", () => {
+    const ast = parse(
+      "function pick(cb: (n: int32) => int32): int32 { return cb(5); }",
+    );
+    const fn = ast.body[0];
+    assert.deepEqual(fn.params[0].typeAnnotation, {
+      kind: "functionType",
+      params: [{ kind: "typeName", name: "int32" }],
+      returnType: { kind: "typeName", name: "int32" },
+    });
+  });
+
+  it("parses an empty parameter list `() => int32`", () => {
+    const ast = parse("type T { gen: () => int32 }");
+    assert.deepEqual(ast.body[0].fields[0].typeAnnotation, {
+      kind: "functionType",
+      params: [],
+      returnType: { kind: "typeName", name: "int32" },
+    });
+  });
+});
+
 describe("parse: phase 2 — postfix '?'", () => {
   function exprOf(src) {
     const ast = parse(`function f(): int32 { return ${src}; }`);

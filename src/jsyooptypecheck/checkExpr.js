@@ -44,7 +44,13 @@ import {
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope } from "./scope.js";
-import { isFallible, strippedTypeOf } from "./fallible.js";
+import {
+  isFallible,
+  strippedTypeOf,
+  isFallibleEnum,
+  strippedEnumOkType,
+  enumErrPayloadType,
+} from "./fallible.js";
 import {
   coerceUntypedLiteralToTyped,
   isAssignable,
@@ -261,6 +267,14 @@ function resolveCall(node, scope, ctx) {
     callee.kind === ASTNodeKind.FIELD_ACCESS &&
     callee.object?.kind === ASTNodeKind.IDENT
   ) {
+    // Phase 9.G: `VTableName.from(ref x)` — builtin vtable constructor.
+    // The only legal method name is `from`; anything else is a typecheck
+    // error with a clear hint. Resolution checks that the argument is a
+    // `ref T` where T implements the vtable's trait.
+    const vt = lookupVTableByName(callee.object.name, ctx);
+    if (vt) {
+      return resolveVTableBuiltinCall(node, vt, callee.field, scope, ctx);
+    }
     const trait = lookupTraitByName(callee.object.name, ctx);
     if (trait) {
       return resolveTraitQualifiedCall(node, trait, callee.field, scope, ctx);
@@ -759,6 +773,40 @@ function resolveFieldAccess(node, scope, ctx) {
       delete node.field;
       return setType(node, maybeEnum);
     }
+    // Phase 10.A: bare `GenericEnum.Variant` (no payload). Promote in place
+    // to an unpinned VARIANT_CONSTRUCTOR; checkInitializer will pin it to a
+    // concrete instantiation against the target type. Without a target type
+    // (statement-position use), resolveVariantConstructor reports an error.
+    const maybeGenericEnum = lookupGenericEnumDecl(node.object.name, ctx);
+    if (maybeGenericEnum) {
+      const variant = maybeGenericEnum.genericVariants?.get(node.field);
+      const fieldLoc = node.fieldSourceLoc ?? node;
+      if (!variant) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `enum "${maybeGenericEnum.name}" has no variant "${node.field}"`,
+        );
+        return setType(node, ErrorType());
+      }
+      if (variant.fields !== null) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `variant "${maybeGenericEnum.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} } — write '${maybeGenericEnum.name}.${variant.name} { ... }'`,
+        );
+        return setType(node, ErrorType());
+      }
+      node.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+      node.enumName = node.object.name;
+      node.variantName = node.field;
+      node.fields = null;
+      // resolvedEnumType / resolvedVariant left unset — pinning happens in
+      // checkInitializer (or resolveVariantConstructor reports an error).
+      delete node.object;
+      delete node.field;
+      return resolveVariantConstructor(node, scope, ctx);
+    }
   }
 
   const objType = resolveExprType(node.object, scope, ctx);
@@ -1195,16 +1243,48 @@ export function markErrObservedThroughRoot(exprNode, scope) {
 }
 
 // `expr?` — postfix propagator.
+// Phase 9.H: also accepts a fallible-enum operand (an enum with exactly two
+// variants named `Ok` and `Err`). For struct-fallibles the err field is a
+// `string`; for enum-fallibles it's whatever the `Err` variant's payload
+// type is, and the enclosing function's return must be a fallible enum with
+// the same Err payload type (cross-shape propagation is deferred).
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
+
+  // Fallible-enum path.
+  if (isFallibleEnum(operandType)) {
+    const retType = ctx.funcReturnType;
+    if (!isFallibleEnum(retType)) {
+      pushError(
+        ctx.errors,
+        node,
+        `'?' on enum ${formatType(operandType)} requires the enclosing function to return a fallible enum (Ok/Err); '${ctx.funcName}' returns ${formatType(retType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    const operandErr = enumErrPayloadType(operandType);
+    const returnErr = enumErrPayloadType(retType);
+    if (!typesEqual(operandErr, returnErr)) {
+      pushError(
+        ctx.errors,
+        node,
+        `'?' cannot propagate Err of ${formatType(operandErr)} into a function returning Err of ${formatType(returnErr)} — same Err payload type is required (cross-shape propagation is deferred)`,
+      );
+      return setType(node, ErrorType());
+    }
+    markErrObservedThroughRoot(node.operand, scope);
+    node.fallibleEnum = true;
+    return setType(node, strippedEnumOkType(operandType));
+  }
+
   if (!isFallible(operandType)) {
     pushError(
       ctx.errors,
       node,
-      `'?' applied to non-fallible type ${formatType(operandType)} — only structs ending in 'err: string' are fallible`,
+      `'?' applied to non-fallible type ${formatType(operandType)} — only structs ending in 'err: string' or enums with Ok/Err variants are fallible`,
     );
     return setType(node, ErrorType());
   }
@@ -1259,6 +1339,22 @@ export function lookupEnumByName(name, ctx) {
   return null;
 }
 
+// Phase 10.A: look up a generic enum decl by name. Mirrors lookupEnumByName.
+// Returns the generic decl record (not a Type), or null.
+export function lookupGenericEnumDecl(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.genericEnumTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && (imp.kind === "generic-type" || imp.kind === "type")) {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.genericEnumTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
 // Phase 7.5: look up a union type by name. Mirrors lookupEnumByName.
 export function lookupUnionByName(name, ctx) {
   const tc = ctx.typeContext;
@@ -1277,9 +1373,26 @@ export function lookupUnionByName(name, ctx) {
 // Phase 7.5: `Shape.Circle { radius: 5.0 }` — typecheck a variant constructor
 // with a payload. The parser also emits this node for the bare no-payload form
 // `Shape.Empty`, but only after promotion inside resolveFieldAccess.
+// Phase 10.A: if `enumName` resolves to a generic enum decl rather than a
+// concrete EnumType, we can't pick an instantiation without a target type.
+// In statement position we surface "cannot determine type arguments"; the
+// pin path runs through checkInitializer instead.
 function resolveVariantConstructor(node, scope, ctx) {
   const enumType = lookupEnumByName(node.enumName, ctx);
   if (!enumType) {
+    const genericDecl = lookupGenericEnumDecl(node.enumName, ctx);
+    if (genericDecl) {
+      // Visit the field expressions so any internal type errors still surface.
+      for (const f of node.fields ?? []) {
+        resolveExprType(f.value, scope, ctx);
+      }
+      pushError(
+        ctx.errors,
+        node,
+        `cannot determine type arguments for generic enum "${genericDecl.name}" — pin via a typed binding/return/call argument`,
+      );
+      return setType(node, ErrorType());
+    }
     pushError(
       ctx.errors,
       node,
@@ -1371,6 +1484,90 @@ function resolveVariantConstructor(node, scope, ctx) {
   return setType(node, enumType);
 }
 
+// Phase 10.A: pin a generic-enum variant constructor to a concrete
+// instantiation supplied by the target type. Stamps `resolvedEnumType` and
+// `resolvedVariant` from the instantiated (already-substituted) enum so
+// codegen sees concrete field types. Diagnostics mirror the concrete path.
+function pinVariantConstructor(node, enumType, scope, ctx) {
+  const variant = enumType.variants.get(node.variantName);
+  if (!variant) {
+    pushError(
+      ctx.errors,
+      node,
+      `enum "${enumType.name}" has no variant "${node.variantName}"`,
+    );
+    for (const f of node.fields ?? []) {
+      resolveExprType(f.value, scope, ctx);
+    }
+    return setType(node, ErrorType());
+  }
+  node.resolvedEnumType = enumType;
+  node.resolvedVariant = variant;
+
+  if (variant.fields === null) {
+    if (node.fields && node.fields.length > 0) {
+      pushError(
+        ctx.errors,
+        node,
+        `variant "${enumType.name}.${variant.name}" has no payload — drop the '{ ... }'`,
+      );
+    }
+    return setType(node, enumType);
+  }
+
+  if (node.fields === null) {
+    pushError(
+      ctx.errors,
+      node,
+      `variant "${enumType.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} }`,
+    );
+    return setType(node, enumType);
+  }
+
+  const targetFieldMap = new Map();
+  for (const f of variant.fields) targetFieldMap.set(f.name, f.type);
+  const seen = new Set();
+  for (const litField of node.fields) {
+    if (seen.has(litField.name)) {
+      pushError(
+        ctx.errors,
+        litField,
+        `duplicate field "${litField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+      continue;
+    }
+    seen.add(litField.name);
+    const expected = targetFieldMap.get(litField.name);
+    if (!expected) {
+      pushError(
+        ctx.errors,
+        litField,
+        `variant "${enumType.name}.${variant.name}" has no field "${litField.name}"`,
+      );
+      resolveExprType(litField.value, scope, ctx);
+      continue;
+    }
+    checkInitializer(
+      litField.value,
+      expected,
+      scope,
+      ctx,
+      (actualType) =>
+        `cannot assign ${formatType(actualType)} to field "${litField.name}" of ${enumType.name}.${variant.name} (expected ${formatType(expected)})`,
+    );
+  }
+  for (const targetField of variant.fields) {
+    if (!node.fields.some((f) => f.name === targetField.name)) {
+      pushError(
+        ctx.errors,
+        node,
+        `missing field "${targetField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+    }
+  }
+  return setType(node, enumType);
+}
+
 // "Does this value-expression fit this target type?"
 export function checkInitializer(
   valueNode,
@@ -1382,6 +1579,47 @@ export function checkInitializer(
   if (valueNode.kind === ASTNodeKind.STRUCT_LITERAL) {
     pinStructLiteral(valueNode, expectedType, scope, ctx);
     return expectedType;
+  }
+  // Phase 10.A: pin a variant constructor whose enum name belongs to a
+  // generic enum decl and whose target type is a matching instantiation.
+  // Bare no-payload variants (fields === null with no stamped enum yet)
+  // and payload variants both flow through here.
+  if (
+    valueNode.kind === ASTNodeKind.VARIANT_CONSTRUCTOR &&
+    !valueNode.resolvedEnumType &&
+    expectedType?.kind === typeKinds.enum &&
+    expectedType.genericInstance
+  ) {
+    const genericDecl = lookupGenericEnumDecl(valueNode.enumName, ctx);
+    if (genericDecl && genericDecl.id === expectedType.genericInstance.declId) {
+      return pinVariantConstructor(valueNode, expectedType, scope, ctx);
+    }
+  }
+  // Phase 10.A: pre-promote a FIELD_ACCESS of shape `GenericEnum.Variant`
+  // (bare no-payload form) before resolveExprType has a chance to error
+  // about unpinned generic enums. The promotion stamps a VARIANT_CONSTRUCTOR
+  // with `resolvedEnumType` unset; pinVariantConstructor then attaches the
+  // target instantiation.
+  if (
+    valueNode.kind === ASTNodeKind.FIELD_ACCESS &&
+    valueNode.object?.kind === ASTNodeKind.IDENT &&
+    expectedType?.kind === typeKinds.enum &&
+    expectedType.genericInstance
+  ) {
+    const genericDecl = lookupGenericEnumDecl(valueNode.object.name, ctx);
+    if (genericDecl && genericDecl.id === expectedType.genericInstance.declId) {
+      const variantName = valueNode.field;
+      const variant = genericDecl.genericVariants?.get(variantName);
+      if (variant && variant.fields === null) {
+        valueNode.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+        valueNode.enumName = valueNode.object.name;
+        valueNode.variantName = variantName;
+        valueNode.fields = null;
+        delete valueNode.object;
+        delete valueNode.field;
+        return pinVariantConstructor(valueNode, expectedType, scope, ctx);
+      }
+    }
   }
   // Array literal with a known array target type: check elements against elem type
   if (
@@ -1609,6 +1847,43 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     return resolveCallWithSig(node, subbedSig, scope, ctx);
   }
 
+  // Phase 9.G — Case 3: receiver is a VTableType for this trait. The call
+  // lowers to an indirect call through the stored function pointer at the
+  // method's field slot, with the vtable's ctx passed as the first arg.
+  // The trait method's "ref self" lands as the ctx pointer; the function
+  // body knows how to re-interpret it as `ref T` for its concrete T.
+  if (recvType.kind === typeKinds.vtable) {
+    if (recvType.traitName !== resolvedTrait.name) {
+      pushError(
+        ctx.errors,
+        node,
+        `vtable "${recvType.name}" backs trait "${recvType.traitName}", not "${resolvedTrait.name}"`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    const fieldIdx = recvType.methodOrder.indexOf(methodName);
+    if (fieldIdx < 0) {
+      pushError(
+        ctx.errors,
+        node,
+        `vtable "${recvType.name}" has no slot for trait method "${methodName}"`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    // Substitute ref self -> ref VTableType so the first-arg ref-check passes.
+    // The vtable is the receiver — the user writes `Trait.method(ref vt, ...)`
+    // or equivalently `VTableName.method(ref vt, ...)`.
+    const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
+    node.vtableCall = {
+      vtableType: recvType,
+      methodName,
+      fieldIndex: fieldIdx,
+    };
+    return resolveCallWithSig(node, subbedSig, scope, ctx);
+  }
+
   // Case 2 (Phase 7.2): receiver is a TypeParamType whose bound is this trait.
   if (recvType.kind === typeKinds.typeParam) {
     const boundMatches =
@@ -1659,6 +1934,101 @@ function substituteSelfPlaceholder(methodSig, concreteType) {
 // For generic traits (declared as `trait Foo<T>`), returns a placeholder
 // `{ isGeneric: true, name }` — `resolveTraitQualifiedCall` matches it
 // against the receiver's instantiated trait by name.
+// Phase 9.G: VTableName lookup. Mirrors lookupEnumByName / lookupUnionByName
+// — checks the local vtableTable, then imports of nominal types.
+export function lookupVTableByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.vtableTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.vtableTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 9.G: `VTableName.method(...)` dispatch. Two cases:
+//   - `from(ref x)`: builtin constructor, returns a vtable value.
+//   - `<method>(ref v, ...)`: forwarding form for trait dispatch through
+//     the vtable. Equivalent to `Trait.method(ref v, ...)` where v is a
+//     vtable value, but lets callers use the vtable type as the dispatch
+//     namespace (matches the library-design surface in §8 q1).
+function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
+  if (methodName !== "from") {
+    // Forwarding to trait dispatch: synthesize a trait reference and route
+    // through resolveTraitQualifiedCall, which already knows how to handle
+    // vtable receivers (Case 3).
+    const trait =
+      ctx.typeContext.traitTable?.get(vtableType.traitName) ??
+      lookupTraitByName(vtableType.traitName, ctx);
+    if (!trait) {
+      pushError(
+        ctx.errors,
+        node,
+        `vtable "${vtableType.name}" backs trait "${vtableType.traitName}", but that trait is not in scope`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    return resolveTraitQualifiedCall(node, trait, methodName, scope, ctx);
+  }
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.from(ref x)\` expects exactly one ref argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  const arg = node.args[0];
+  if (arg.kind !== ASTNodeKind.REF_EXPRESSION) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.from(ref x)\` requires a 'ref' argument`,
+    );
+    resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  const operandType = resolveExprType(arg.operand, scope, ctx);
+  let recvType = operandType.kind === typeKinds.ref ? operandType.inner : operandType;
+  if (recvType.kind === typeKinds.struct && ctx.typeContext.structTable) {
+    const canonical = ctx.typeContext.structTable.get(recvType.name);
+    if (canonical) recvType = canonical;
+  }
+  if (recvType.kind !== typeKinds.struct) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.from(ref x)\` requires a struct receiver, got ${formatType(recvType)}`,
+    );
+    return setType(node, vtableType);
+  }
+  const implementsIt = (recvType.implementsTraits ?? []).some(
+    (t) => t.name === vtableType.traitName
+      && (t.moduleId ?? null) === (vtableType.traitModuleId ?? null),
+  );
+  if (!implementsIt) {
+    pushError(
+      ctx.errors,
+      node,
+      `struct "${recvType.name}" does not implement trait "${vtableType.traitName}" required by vtable "${vtableType.name}"`,
+    );
+    return setType(node, vtableType);
+  }
+  // Stamp codegen breadcrumbs: vtable to build, struct providing the impl.
+  node.vtableBuilder = {
+    vtableType,
+    implType: recvType,
+  };
+  arg.resolvedType = operandType;
+  return setType(node, vtableType);
+}
+
 function lookupTraitByName(name, ctx) {
   const tc = ctx.typeContext;
   const local = tc.traitTable?.get(name);

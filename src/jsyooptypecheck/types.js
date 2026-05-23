@@ -26,6 +26,11 @@ export const typeKinds = {
   // Phase 8.A: literal-placeholder for `null`, similar to untypedInt/Float.
   // Pinned by context (assignment target, return, call arg, equality side).
   untypedNull: "untypedNull",
+  // Phase 9.G: a value-shaped function pointer. The `=>` form in a type
+  // annotation. Distinct from `func` (which describes named function decls).
+  functionPointer: "functionPointer",
+  // Phase 9.G: a type-erased trait shape. See VTableType.
+  vtable: "vtable",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -183,13 +188,41 @@ export const TraitType = (name, methods, moduleId = null, typeParams = []) =>
 //   fields === null means a payload-less variant (e.g. `Empty`).
 //   ordinal: stable 0-indexed integer from declaration order; used as the
 //     LLVM discriminator value at codegen time.
-export const EnumType = (name, variants, moduleId = null) =>
-  freezerWrap(typeKinds.enum, { name, variants, moduleId });
+// Phase 10.A: `genericInstance: { declId, args } | null` tags instantiations
+// of a generic enum decl, mirroring StructType. Substitution re-instantiates
+// open instances via the registry.
+export const EnumType = (name, variants, moduleId = null, genericInstance = null) =>
+  freezerWrap(typeKinds.enum, { name, variants, moduleId, genericInstance });
 
 // Phase 7.5: untagged C-style union — every field starts at offset 0,
 // size = max(sizeof(field)), alignment = max(alignof(field)). No tag.
 export const UnionType = (name, fields, moduleId = null) =>
   freezerWrap(typeKinds.union, { name, fields, moduleId });
+
+// Phase 9.G: a first-class function value type — what `(p: T) => R` resolves
+// to in a type annotation. Distinct from FuncType (which describes a named
+// function decl) so call resolution can tell the two apart: FuncType callees
+// resolve to a global mangled symbol, FunctionPointerType callees lower to
+// an indirect call through a value slot.
+export const FunctionPointerType = (params, returnType) =>
+  freezerWrap(typeKinds.functionPointer, { params, returnType });
+
+// Phase 9.G: a type-erased shape for a trait. Conceptually a struct with one
+// `ctx` pointer + one function-pointer field per trait method. The compiler
+// owns the field layout; the user only writes the method-pointer fields in
+// the `vtable T for Trait { ... }` body. Two vtables are typesEqual if their
+// `(name, moduleId)` match — they are nominal types, like structs.
+//   methodOrder: list of method names in trait declaration order. Codegen
+//                uses this to pick a stable LLVM field index for each.
+export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) =>
+  freezerWrap(typeKinds.vtable, {
+    name,
+    traitName,
+    traitModuleId,
+    fields,
+    methodOrder,
+    moduleId,
+  });
 
 // Phase 8.A: raw, nullable, arithmetic-capable pointer for FFI. Gated by
 // `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the
@@ -377,6 +410,18 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     }
     return ctx.selfType;
   }
+  // Phase 9.G: `(p: T) => R` function value type.
+  if (annot.kind === "functionType") {
+    const params = [];
+    for (const p of annot.params) {
+      const pt = resolveTypeAnnotation(p, structTable, ctx);
+      if (!pt) return null;
+      params.push(pt);
+    }
+    const rt = resolveTypeAnnotation(annot.returnType, structTable, ctx);
+    if (!rt) return null;
+    return FunctionPointerType(params, rt);
+  }
   throw new Error(
     `resolveTypeAnnotation: unknown annotation kind "${annot.kind}"`,
   );
@@ -392,6 +437,10 @@ export function formatAnnotation(annot) {
   if (annot.kind === "typeApplication") {
     const args = annot.typeArgs.map(formatAnnotation).join(", ");
     return `${annot.name}<${args}>`;
+  }
+  if (annot.kind === "functionType") {
+    const params = annot.params.map(formatAnnotation).join(", ");
+    return `(${params}) => ${formatAnnotation(annot.returnType)}`;
   }
   return "unknown";
 }
@@ -516,6 +565,16 @@ export function typesEqual(a, b) {
   if (a.kind === typeKinds.typeParam) {
     return a.name === b.name && a.originDecl === b.originDecl;
   }
+  if (a.kind === typeKinds.functionPointer) {
+    if (a.params.length !== b.params.length) return false;
+    for (let i = 0; i < a.params.length; i++) {
+      if (!typesEqual(a.params[i], b.params[i])) return false;
+    }
+    return typesEqual(a.returnType, b.returnType);
+  }
+  if (a.kind === typeKinds.vtable) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
   if (a.kind === typeKinds.enum || a.kind === typeKinds.union) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
@@ -603,6 +662,23 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
         type.genericInstance ?? null,
       );
     }
+    case typeKinds.enum: {
+      // Phase 10.A: mirror the struct branch. Open instances (carrying
+      // genericInstance with TypeParamType args) re-route through the
+      // registry once their args have concrete substitutions.
+      if (type.genericInstance && inst) {
+        const newArgs = type.genericInstance.args.map((a) =>
+          substituteTypeParams(a, substitution, inst),
+        );
+        const allSame = newArgs.every(
+          (a, i) => a === type.genericInstance.args[i],
+        );
+        if (allSame) return type;
+        const fresh = inst(type.genericInstance.declId, newArgs);
+        if (fresh) return fresh;
+      }
+      return type;
+    }
     // prim/void/untyped/error/namespace/trait/kind — no nested type
     default:
       return type;
@@ -625,6 +701,14 @@ export function typeHasTypeParam(type) {
   if (type.kind === typeKinds.struct) {
     if (!type.fields) return false;
     return type.fields.some((f) => typeHasTypeParam(f.type));
+  }
+  if (type.kind === typeKinds.enum) {
+    if (!type.variants) return false;
+    for (const v of type.variants.values()) {
+      if (v.fields === null) continue;
+      if (v.fields.some((f) => typeHasTypeParam(f.type))) return true;
+    }
+    return false;
   }
   return false;
 }

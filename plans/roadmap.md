@@ -123,10 +123,22 @@ The next batch of language work, picked for the items that are still **forcing w
 
 > Detailed plan: [phase-9.md](phase-9.md)
 
-### Phase 10 — Polish, self-hosting
+### Phase 10 — Library completion, foundation generics, runtime polish, self-hosting
 
-- Optimization passes
-- Begin self-hosting: rewrite the compiler in Yooper, bootstrap through the JS one
+The next batch after Phase 9 — closes the *library* workarounds (the
+`std/collections/` story, `std/log` + `std/debug`, networking polish)
+and the long tail of small "deferred" items from Phases 5–9
+(`extends` on traits, multiple trait bounds, cancellation tokens,
+cross-shape `?`, alloca uniqueness in codegen). Optimization passes
+and the actual self-hosting bootstrap move to the *end* of Phase 10:
+the JS bootstrap isn't worth porting until the surface it implements
+is something a self-hosted compiler would also want to expose.
+
+The single biggest unlock is **generic enums** — once `Option<T>`,
+`Result<T, E>`, and `Iterable<T>` become expressible the rest of the
+phase becomes routine library work.
+
+> Detailed plan: [phase-10.md](phase-10.md)
 
 ---
 

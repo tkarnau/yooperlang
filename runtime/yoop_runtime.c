@@ -120,6 +120,17 @@ static struct {
 
 // ---- worker loop ----------------------------------------------------------
 
+// Phase 9.I: pop one task from the front of the queue and return it. Caller
+// must hold queue_mu and is responsible for free()-ing the returned node.
+// Returns NULL when the queue is empty.
+static task_node* try_pop_task_locked(void) {
+    if (!g_rt.queue_head) return NULL;
+    task_node* node = g_rt.queue_head;
+    g_rt.queue_head = node->next;
+    if (!g_rt.queue_head) g_rt.queue_tail = NULL;
+    return node;
+}
+
 static void worker_loop(void) {
     for (;;) {
         yoop_mutex_lock(&g_rt.queue_mu);
@@ -130,9 +141,7 @@ static void worker_loop(void) {
             yoop_mutex_unlock(&g_rt.queue_mu);
             return;
         }
-        task_node* node = g_rt.queue_head;
-        g_rt.queue_head = node->next;
-        if (!g_rt.queue_head) g_rt.queue_tail = NULL;
+        task_node* node = try_pop_task_locked();
         yoop_mutex_unlock(&g_rt.queue_mu);
 
         node->thunk(node->handle);
@@ -265,14 +274,81 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
     yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
-void yoop_task_wait(void* handle) {
-    yoop_mutex_t* m = *handle_mutex_slot(handle);
-    yoop_cond_t*  c = *handle_cond_slot(handle);
-    yoop_mutex_lock(m);
-    while (A_LOAD_U8(handle_state_ptr(handle)) == 0) {
-        yoop_cond_wait(c, m);
+// Phase 9.I: short polling interval (ms) for the suspendable-wait path. The
+// queue_cv wake covers new-submission events instantly; the timeout exists
+// only so handle-done signals (which broadcast on the handle's own cv, not
+// queue_cv) propagate to a thread that has parked waiting for queue work.
+#define YOOP_WAIT_POLL_MS 25
+
+#ifndef _WIN32
+// POSIX: block on queue_cv for up to ms milliseconds (or until signaled).
+// Returns 0 if woken by signal, ETIMEDOUT on timer expiry, other on error.
+static int queue_cv_timedwait_ms_locked(int ms) {
+    struct timespec deadline;
+  #if defined(__linux__)
+    clock_gettime(CLOCK_REALTIME, &deadline);
+  #else
+    clock_gettime(CLOCK_REALTIME, &deadline);
+  #endif
+    deadline.tv_sec  += ms / 1000;
+    deadline.tv_nsec += (long)(ms % 1000) * 1000000L;
+    if (deadline.tv_nsec >= 1000000000L) {
+        deadline.tv_sec  += 1;
+        deadline.tv_nsec -= 1000000000L;
     }
-    yoop_mutex_unlock(m);
+    return pthread_cond_timedwait(&g_rt.queue_cv.c, &g_rt.queue_mu.m, &deadline);
+}
+#else
+static int queue_cv_timedwait_ms_locked(int ms) {
+    BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, (DWORD)ms);
+    return ok ? 0 : (GetLastError() == ERROR_TIMEOUT ? 1 : -1);
+}
+#endif
+
+// Phase 9.I: suspendable wait. The pre-9.I implementation parked the calling
+// thread on the handle's condvar unconditionally — with N workers and N+1
+// nested-task waits, that deadlocked the pool (SPEC §8 "Safety and deadlock").
+//
+// Now the wait loop opportunistically drains the global queue on the calling
+// thread instead of blocking, so a worker that has nothing useful to do can
+// run the very task it's waiting on (or one that will eventually unblock it).
+// When the queue is empty we fall back to a bounded wait on queue_cv: new
+// submissions wake us immediately, and the YOOP_WAIT_POLL_MS timer is the
+// fallback that catches handle-done signals (which broadcast on the handle's
+// own cv, not queue_cv).
+//
+// Re-entrant task dispatch is safe: each thunk runs to completion on the
+// calling thread's stack — recursion depth is bounded by the nested-wait
+// chain. A wait from non-task code (e.g. main) participates in the same
+// dispatch path; the behavior change is transparent at the call site.
+void yoop_task_wait(void* handle) {
+    for (;;) {
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return;
+
+        // Try to grab and run a queued task on this thread first.
+        yoop_mutex_lock(&g_rt.queue_mu);
+        task_node* n = try_pop_task_locked();
+        if (n) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            n->thunk(n->handle);
+            free(n);
+            continue;
+        }
+
+        // Re-check target after taking the queue lock — yoop_handle_signal_done
+        // may have flipped state between the load above and now.
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            return;
+        }
+
+        // Queue empty AND target unfinished. Park briefly on queue_cv so a
+        // new submission wakes us instantly; the timer catches handle-done
+        // signals that aren't broadcast on queue_cv. Both paths re-enter the
+        // outer loop, which re-checks state and the queue.
+        queue_cv_timedwait_ms_locked(YOOP_WAIT_POLL_MS);
+        yoop_mutex_unlock(&g_rt.queue_mu);
+    }
 }
 
 void yoop_handle_signal_done(void* handle) {
@@ -282,6 +358,14 @@ void yoop_handle_signal_done(void* handle) {
     A_STORE_U8(handle_state_ptr(handle), 1);
     yoop_cond_broadcast(c);
     yoop_mutex_unlock(m);
+
+    // Phase 9.I: also broadcast queue_cv so suspendable yoop_task_wait callers
+    // parked on queue_cv (waiting either for new work or for state to flip)
+    // wake up immediately. Without this they'd only see the state change on
+    // the next YOOP_WAIT_POLL_MS timer tick.
+    yoop_mutex_lock(&g_rt.queue_mu);
+    yoop_cond_broadcast(&g_rt.queue_cv);
+    yoop_mutex_unlock(&g_rt.queue_mu);
 
     int32_t rc = A_LOAD_I32(handle_rc_ptr(handle));
     if (rc > 0) yoop_task_release(handle);

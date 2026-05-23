@@ -596,6 +596,15 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         restoreSat(base);
         return;
       }
+      case ASTNodeKind.FOR_IN_LOOP: {
+        if (stmt.iterExpr) walkExpr(stmt.iterExpr);
+        // Body may execute zero times; like WHILE_STATEMENT / FOR_LOOP,
+        // anything satisfied inside cannot discharge an outer obligation.
+        const base = snapshotSat();
+        walkBranchAndTrack(stmt.body);
+        restoreSat(base);
+        return;
+      }
       case ASTNodeKind.BLOCK:
         walkBlock(stmt);
         return;

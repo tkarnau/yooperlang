@@ -1,11 +1,21 @@
-// Library Phase D headline demo — a hello-world HTTP server.
-//
-// Build:  node ./src/yoopiler.js examples/pass/hello_server/main.yoop -o /tmp/hello_server
-// Run:    /tmp/hello_server
-// Test:   curl -v http://localhost:18080/
-//
+/*
+    Author: Tom Karnau
+
+    Http server proof of concept demonstration in yooperlang
+
+    The ergonomics in here are deliberately chosen to make higher level
+    feeling in the http code that we normally get from popular TS/JS libraries
+    but this is running in a systems language.
+
+    The actual network layer OS calls and such are the C system headers 
+    and we have a std/core set of yoop code that interfaces with that and
+    surfaces yooperlang modules for interacting with it.
+
+    Any of these core features could be written by hand.
+*/
+
 // The server handles N requests and then exits (serve_n's `n` arg).
-// Use n <= 0 for a forever loop.
+// Use n <= 0 for a forever loop (normal behavior)
 
 import { disposable } from "std/core/kinds.yoop";
 import { ListenResult, tcp_listen } from "std/net/tcp.yoop";
@@ -21,9 +31,11 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-// User-defined handler. Lives in main.yoop because the handler is the
+// user-defines handler. 
+// this lives in your code when writing an API because the handler is the
 // extension point — different programs supply different handlers and the
-// server is generic over them.
+// std/http/server is generic over them. Borrows from my comfort with
+// things like Express.JS
 type HelloHandler implements Handler {
     greeting: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
@@ -35,16 +47,39 @@ type HelloHandler implements Handler {
 }
 
 function main(): int32 {
+
+    // host, port, backlog
+    // backlog is the maximum pending-connection queue length
+    // backlog is passed directly to C function -> "listen" call in sys/socket.h
     let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
+
+    // there is no try/catch in this language.
+    // if we do not observe and handle this error, that is a compiler error
+    /* Output if we did not handle:
+        fallible binding "lr" of type struct ListenResult must observe its 'err' 
+        field before scope exit (read .err, destructure with err, propagate 
+        with '?', or discard with '_ = ...')
+    */
     if (lr.err.len > 0) {
         printf(`bind failed: ${lr.err}\n`);
         return 1;
     }
     printf(`listening on 127.0.0.1:18080\n`);
     let handler: HelloHandler = { greeting: "Hello, World!\n" };
-    // serve_n with n=1 → exit after one request (test-friendly).
+
+    // serve_n with n=1: exit after one request (test-friendly).
     // Switch to a large N or <=0 for a long-running server.
+    // serve_n is not an async function, this runs in a while loop and has its
+    // own async looping and timers, this is what the server is doing and looping
+    // this means that this particular function should be wrapped in async if
+    // there is any other work this program should be doing.
+    // There is no normal non-blocking loop
+    // to tap into like in other GC'd or event-looped langauges.
+    // THIS is the "long-running" process
     let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, 0);
+
+    // if there is an error or we maxed out our test number of calls the outcome
+    // will resolve and we print and exit...
     printf(`served=${outcome.served} err=${outcome.err}\n`);
     return 0;
 }

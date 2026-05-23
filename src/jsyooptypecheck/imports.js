@@ -59,6 +59,9 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcGenericStruct = srcEnv.genericStructTable?.get(spec.exportName);
       const srcGenericFunc = srcEnv.genericFuncTable?.get(spec.exportName);
       const srcGenericTrait = srcEnv.genericTraitTable?.get(spec.exportName);
+      // Phase 10.A: generic enums import-side; lookups for an instantiated
+      // generic enum go through genericEnumTable in the source module.
+      const srcGenericEnum = srcEnv.genericEnumTable?.get(spec.exportName);
       // Phase 7.5: enum / union are sibling nominal types alongside struct.
       // lookupEnumByName / lookupUnionByName walk importedNames with kind ===
       // "type", so we register them the same way (and surface the resolved
@@ -89,6 +92,11 @@ export function resolveImports(mod, moduleEnv, errors) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-func" });
       } else if (srcGenericTrait) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-trait" });
+      } else if (srcGenericEnum) {
+        // Phase 10.A: imported generic enum. resolveGenericApplication walks
+        // importedNames → genericEnumTable to find it; variant-constructor
+        // pinning uses the same path.
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-type" });
       } else if (srcEnum) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcUnion) {

@@ -351,6 +351,71 @@ function drain<T implements Iterable<T>>(ref it: T): void;
 
 Reserved syntax; semantics pinned when user generics land.
 
+### Vtables — type-erased trait dispatch (Phase 9.G)
+
+Generics give yoop **compile-time** trait polymorphism: each trait method
+call against an `<T implements Trait>` bound monomorphizes per concrete `T`.
+That's the right answer for performance, but it makes heterogeneous
+collections impossible — a `T[]` can only hold one monomorphization at a
+time.
+
+`vtable Name for TraitName { ... }` declares a **runtime-polymorphic shape**
+backing a trait: a struct of `{ ctx, methodPtr1, methodPtr2, ... }` whose
+slots match the trait's methods. The compiler owns the ctx slot; the
+user names the method slots and writes their function-pointer types using
+the `(p: T) => R` form (the **only** place `=>` is currently legal — see
+"function value types in type position" below).
+
+```js
+trait Readable {
+    function read(ref self, ref buf: uint8[]): int32;
+}
+
+vtable Reader for Readable {
+    read: (ref buf: uint8[]) => int32,
+}
+
+const r: Reader = Reader.from(ref my_tcp_stream);   // builder
+const n = Reader.read(ref r, ref buf);              // indirect dispatch
+```
+
+Two builtins on every vtable type:
+
+- **`VTableName.from(ref x)`** — constructs a vtable value from any
+  `ref T` where `T implements TraitName`. The compiler stores `&x` as
+  the ctx and pulls the method addresses from `T`'s impl.
+- **`VTableName.method(ref v, ...)`** — dispatches through the vtable's
+  method slot. Equivalent to `TraitName.method(ref v, ...)` where v is
+  the vtable value; both forms produce the same IR.
+
+Field signatures must match the trait method's signature **minus
+`ref self`**. The vtable's ctx pointer is what the impl method's
+`ref self` lands as at runtime — the impl was already written assuming
+`ref self` is a struct pointer, so no per-impl shim is needed.
+
+Heterogeneous lists work directly: a `Reader[]` can mix `TcpStream`,
+`BufferedReader`, and `FileReader` impls because every slot is a vtable
+value of the same nominal type. Pre-9.G this required hand-rolled
+`unsafe_ptr<void>` plus parallel fn-pointer fields, with no compiler help.
+
+### Function value types in type position (Phase 9.G)
+
+`(p1: T1, p2: T2, ...) => RetT` is a **function-value type annotation**. It
+is legal in struct fields, parameter type annotations, return type
+annotations, and vtable field declarations. Call sites use the same `f(args)`
+syntax whether `f` is a named function or a function-pointer value.
+
+```js
+type Handler {
+    handle: (req: Request) => Response,
+}
+```
+
+The form is **only** valid in type position — `=>` is not a closure-literal
+syntax (closures aren't planned). Function values flow into vtables today;
+broader function-value materialization (taking the address of a top-level
+function by name) is a future incremental extension.
+
 ---
 
 ## 6. Kinds
@@ -635,23 +700,29 @@ fire-and-forget idiom — it is not a task-specific operator.
 ### Safety and deadlock
 
 The MVP runtime model uses run-to-completion tasks on a fixed-size worker pool
-(see [runtime-design.md §3](plans/runtime-design.md)). A `wait` inside a `task`
-function body blocks the worker thread. With N workers and deeper-than-N nested
-waits, deadlock is possible:
+(see [runtime-design.md §3](plans/runtime-design.md)). Pre-Phase 9.I, a `wait`
+inside a `task` body blocked the worker thread; with N workers and deeper-than-N
+nested waits, the pool could deadlock — N tasks each waiting on an N+1th task
+queued behind them with no worker free to drain it.
 
-- Submitting N tasks that all `wait` on an N+1th task that's still queued behind
-  them deadlocks the pool.
+**Phase 9.I** changes the runtime so `wait` is suspendable: instead of parking
+the calling thread on the awaited handle's condvar, the wait loop
+opportunistically drains the global task queue on the calling thread until the
+target completes (or new submissions / done-signals wake a short polling
+park). The language surface is unchanged — `wait h` still has the same
+synchronous appearance — but the chain-of-N+1 deadlock above no longer
+deadlocks.
 
-Mitigations until suspendable wait lands:
+The semantics that user code can rely on:
 
-- Oversize the pool via `YOOP_NUM_WORKERS` (default is `num_cpus`).
-- Prefer composing tasks at non-task call sites (i.e., in `main` or regular
-  functions). The deadlock surface only matters when waits nest inside task
-  bodies.
-
-Suspendable `wait` inside task bodies — `wait` yielding the worker rather than
-blocking it — is a planned future capability that eliminates this hazard. The
-language surface does not change when it lands.
+- `wait h` still blocks the caller until `h` is done. From the caller's
+  perspective there is no behavioral change.
+- While the caller is "blocked", the runtime may run other queued tasks on the
+  caller's thread. Per-thread state inside a task body (e.g. errno, thread-local
+  vars) can therefore be observed in a different order than under the old
+  always-park model. Treat thread-local state as task-local for portability.
+- Recursion depth is bounded by the nested-wait chain; very deep chains can
+  exhaust the OS stack the same way deep direct recursion would.
 
 ---
 
@@ -661,6 +732,13 @@ Two loop keywords, both reserved for iteration — no extra keywords per strateg
 Iteration *strategy* is expressed as a **trait method call on the collection** in the
 RHS of `in`. This keeps the `for … in` slot recognizable as a loop while letting kinds
 and traits extend the strategy set.
+
+> **v0 status.** Phase 9.D implements the default `for ITEM in EXPR { ... }` form
+> over arrays only — the body runs once per element with a fresh `ITEM` bound to
+> a copy of the current slot. The trait-driven strategy slots below (`Iterable`,
+> `BatchIterable`, `SimdIterable`, `ParIterable`) and the user-extensible
+> machinery are the long-term shape; until those land, the only legal RHS is an
+> array expression and the only legal strategy is the implicit sequential walk.
 
 ```js
 // C-style numeric counter
@@ -840,6 +918,39 @@ function total(path: string): usize {
     return bytes.len;
 }
 ```
+
+### Fallible enums (Phase 9.H)
+
+`?` also recognizes an enum with exactly two variants named `Ok` and `Err` as a
+fallible type. The shape is structural — there is no marker trait. Each variant
+may have zero or one payload field; the `Ok` payload is what `?` yields, and
+the `Err` payload is the propagated error.
+
+```js
+enum IntResult {
+    Ok { value: int32 },
+    Err { error: int32 },
+}
+
+function add_positives(a: int32, b: int32): IntResult {
+    let x: int32 = parse_positive(a)?;
+    let y: int32 = parse_positive(b)?;
+    return IntResult.Ok { value: x + y };
+}
+```
+
+Propagation rules for the enum form:
+
+- The operand's type must be a fallible enum (two variants, `Ok` and `Err`).
+- The enclosing function's return type must also be a fallible enum.
+- The two enums' `Err` payload types must match exactly. Cross-shape
+  propagation (e.g. enum `Err: int` → struct `err: string`, or two enums with
+  different `Err` payloads) is **deferred** — it requires either an explicit
+  conversion at the `?` site or a `From`-style trait, neither of which is in
+  the language yet.
+- `Ok` with no payload yields `void` (statement-position only); `Ok` with one
+  payload field yields that field's type. Multi-field `Ok` is rejected at the
+  decl site (the recognizer requires single-field variants).
 
 ### Attaching context (optional, reserved)
 

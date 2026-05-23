@@ -247,6 +247,8 @@ export function validateStatement(node, scope, ctx) {
       return checkWhile(node, scope, ctx);
     case ASTNodeKind.FOR_LOOP:
       return checkForLoop(node, scope, ctx);
+    case ASTNodeKind.FOR_IN_LOOP:
+      return checkForInLoop(node, scope, ctx);
     case ASTNodeKind.BREAK_STATEMENT:
       return checkBreak(node, ctx);
     case ASTNodeKind.CONTINUE_STATEMENT:
@@ -725,6 +727,40 @@ function checkForLoop(node, scope, ctx) {
   validateStatement(node.body, scope, loopCtx);
 }
 
+// Phase 9.D: `for item in xs { ... }`. The RHS must currently be an array
+// expression (`T[]`); element type drives the body binding. Trait-driven
+// iteration (any type implementing Iterable<T>) is deferred to a later phase.
+function checkForInLoop(node, scope, ctx) {
+  const iterType = resolveExprType(node.iterExpr, scope, ctx);
+  let elemType = ErrorType();
+  if (iterType.kind === typeKinds.array) {
+    elemType = iterType.elem;
+  } else if (iterType.kind !== typeKinds.error) {
+    pushError(
+      ctx.errors,
+      node.iterExpr,
+      `'for ... in' currently requires an array on the right-hand side; got ${formatType(iterType)}`,
+    );
+  }
+  node.resolvedElemType = elemType;
+  node.resolvedIterType = iterType;
+
+  // The loop variable is scoped to the body only. Open a scope, declare it,
+  // walk the body's statements, then pop. This mirrors the trailing-block
+  // pattern in checkLetOrConst.
+  const inner = pushScope(scope);
+  declareInScope(inner, node.loopVar, elemType, "const", node, ctx.errors);
+  const loopCtx = { ...ctx, inLoop: true };
+  if (node.body.kind === ASTNodeKind.BLOCK) {
+    for (const s of node.body.body) {
+      validateStatement(s, inner, loopCtx);
+    }
+  } else {
+    validateStatement(node.body, inner, loopCtx);
+  }
+  popScope(inner, ctx.errors);
+}
+
 // Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
 //   - integer / bool / char prim  → arms carry LITERAL_PATTERNs
 //   - EnumType                    → arms carry VARIANT_PATTERNs
@@ -829,7 +865,19 @@ function checkSwitch(node, scope, ctx) {
           );
           continue;
         }
-        if (pat.enumName !== scrutType.name) {
+        // Phase 10.A: scrutinee may be a generic-enum instantiation whose
+        // mangled name differs from the user-written decl name. Match either
+        // the concrete name or the generic decl's source name via the
+        // registry-stamped genericInstance tag.
+        const genericInstance = scrutType.genericInstance;
+        let scrutDeclName = scrutType.name;
+        if (genericInstance) {
+          const decl = ctx.typeContext?.registry?.genericDeclById?.get(
+            genericInstance.declId,
+          );
+          if (decl) scrutDeclName = decl.name;
+        }
+        if (pat.enumName !== scrutType.name && pat.enumName !== scrutDeclName) {
           pushError(
             ctx.errors,
             pat,

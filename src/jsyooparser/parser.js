@@ -372,7 +372,18 @@ export function parse(src) {
   //   { kind: "refType", inner: <annot> }
   //   { kind: "arrayType", elem: <annot> }
   //   { kind: "typeApplication", name: "Box", typeArgs: [<annot>...] }
+  //   { kind: "functionType", params: [<annot>...], returnType: <annot> }
   function parseTypeAnnotation() {
+    // Phase 9.G: function value type `(p1: T1, p2: T2, ...) => RetT`. The
+    // disambiguator from a non-existent "parenthesized type" is that
+    // function-type annotations always start with `(` and contain either
+    // `)` (no params) or `IDENT :` (named param) right after it. The
+    // unnamed-param form `(T) => R` would be ambiguous with `(IDENT)` —
+    // we require named params for clarity and to match the function-decl
+    // surface.
+    if (peek().tag === TokenTags.lparen) {
+      return parseFunctionTypeAnnotation();
+    }
     // ref T
     if (peek().tag === TokenTags.ref) {
       advance();
@@ -423,6 +434,32 @@ export function parse(src) {
       annot = { kind: "arrayType", elem: annot };
     }
     return annot;
+  }
+
+  // Phase 9.G: parse `(p1: T1, p2: T2, ...) => RetT` as a function value
+  // type annotation. The leading `(` has already been peeked. Params are
+  // required to be named for parity with the function-decl surface; the
+  // names themselves are discarded after parse (the param list at the
+  // type level is purely positional). An empty list `() => Ret` is legal.
+  function parseFunctionTypeAnnotation() {
+    expect(TokenTags.lparen);
+    const params = [];
+    if (peek().tag !== TokenTags.rparen) {
+      while (true) {
+        expect(TokenTags.ident); // param name (discarded)
+        expect(TokenTags.colon);
+        params.push(parseTypeAnnotation());
+        if (peek().tag === TokenTags.comma) {
+          advance();
+          continue;
+        }
+        break;
+      }
+    }
+    expect(TokenTags.rparen);
+    expect(TokenTags.fatArrow);
+    const returnType = parseTypeAnnotation();
+    return { kind: "functionType", params, returnType };
   }
 
   // Phase 7.1: parse `<T, U, V>` after a decl name. Returns an array of
@@ -598,6 +635,12 @@ export function parse(src) {
             {
               seenNonImport = true;
               node.body.push(parseTraitDecl());
+            }
+            break;
+          case TokenTags.vtable:
+            {
+              seenNonImport = true;
+              node.body.push(parseVTableDecl());
             }
             break;
           case TokenTags.kind:
@@ -1211,6 +1254,9 @@ export function parse(src) {
       case TokenTags.trait:
         node.decl = parseTraitDecl();
         break;
+      case TokenTags.vtable:
+        node.decl = parseVTableDecl();
+        break;
       case TokenTags.kind:
         node.decl = parseKindDecl();
         break;
@@ -1253,6 +1299,50 @@ export function parse(src) {
       node.methods.push(parseMethodSig());
     }
 
+    expect(TokenTags.rcurly);
+    return node;
+  }
+
+  // Phase 9.G: `vtable Name for TraitName { method: (params) => ret, ... }`.
+  // Each field's type annotation must be a function-pointer type (`=>`) whose
+  // signature matches the corresponding trait method minus `ref self`. The
+  // implicit `ctx: unsafe_ptr<void>` first slot is added by codegen — the user
+  // never names it. Method order in the vtable struct follows the trait
+  // declaration order, not the order fields appear in the body.
+  function parseVTableDecl() {
+    const node = buildSourcedNode(ASTNodeKind.VTABLE_DECL);
+    expect(TokenTags.vtable);
+    node.name = parseIdentAsName();
+    expect(TokenTags.for);
+    node.traitName = parseIdentAsName();
+    expect(TokenTags.lcurly);
+    node.fields = [];
+    while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
+      const fieldNameTok = expect(TokenTags.ident);
+      const fieldName = src.substring(
+        fieldNameTok.start,
+        fieldNameTok.start + fieldNameTok.length,
+      );
+      expect(TokenTags.colon);
+      const annot = parseTypeAnnotation();
+      if (annot.kind !== "functionType") {
+        throw parseError(
+          `vtable field "${fieldName}" must have a function-pointer type — write '${fieldName}: (params) => Ret'`,
+          fieldNameTok.start,
+          fieldNameTok.length,
+        );
+      }
+      node.fields.push({
+        name: fieldName,
+        typeAnnotation: annot,
+        sourceLoc: posToSourceLocation(src, fieldNameTok.start),
+      });
+      if (peek().tag === TokenTags.comma) {
+        advance();
+      } else {
+        break;
+      }
+    }
     expect(TokenTags.rcurly);
     return node;
   }
@@ -1613,8 +1703,18 @@ export function parse(src) {
         // Capture the field name token before consuming it so we can pin
         // diagnostics (e.g. "no such variant") at the field identifier
         // rather than at the FIELD_ACCESS node's overall anchor.
+        // Phase 9.G: allow `from` here in addition to an IDENT, so
+        // `VTableName.from(ref x)` parses without making `from` non-reserved
+        // at the lexer level (it's still a keyword in `import ... from ...`
+        // and `extern "C" from ..."` contexts).
         const fieldTok = peek();
-        const fieldName = parseIdentAsName();
+        let fieldName;
+        if (fieldTok.tag === TokenTags.from) {
+          advance();
+          fieldName = "from";
+        } else {
+          fieldName = parseIdentAsName();
+        }
         const fieldAccessNode = new ASTNode(
           ASTNodeKind.FIELD_ACCESS,
           posToSourceLocation(src, node.sourceLoc?.pos ?? fieldTok.start),
@@ -2174,6 +2274,14 @@ export function parse(src) {
 
   function parseForStatement() {
     expect(TokenTags.for);
+    // Phase 9.D: dispatch between the classic C-style `for (i = ...; ...; ...)`
+    // and the new `for ITEM in EXPR { ... }` element-walking form. The
+    // disambiguator is one token of lookahead after `for`:
+    //   `for (`         -> classic
+    //   `for IDENT in`  -> for-in
+    if (peek().tag === TokenTags.ident && peekAhead(1).tag === TokenTags.in) {
+      return parseForInStatement();
+    }
     expect(TokenTags.lparen);
     const node = buildSourcedNode(ASTNodeKind.FOR_LOOP);
 
@@ -2193,6 +2301,18 @@ export function parse(src) {
     node.stepExpr = parseExpression();
 
     expect(TokenTags.rparen);
+    node.body = parseBlock();
+    return node;
+  }
+
+  // Phase 9.D: `for item in xs { ... }`. The expression after `in` is parsed
+  // with parseExpression(0); typecheck enforces it resolves to an array (and,
+  // in a later phase, to any type implementing Iterable<T>).
+  function parseForInStatement() {
+    const node = buildSourcedNode(ASTNodeKind.FOR_IN_LOOP);
+    node.loopVar = parseIdentAsName();
+    expect(TokenTags.in);
+    node.iterExpr = parseExpression();
     node.body = parseBlock();
     return node;
   }

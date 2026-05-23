@@ -117,6 +117,16 @@ Files touched: typechecker template-literal path ([checkExpr.js](../src/jsyoopty
 
 ### Phase 9.G — `vtable T for Trait` runtime polymorphism + function value types
 
+> **Status: landed.** See
+> [plans/completed/phase-9-g-vtables.md](completed/phase-9-g-vtables.md).
+> `=>` parses as a function-pointer type in type position;
+> `vtable Name for Trait { ... }` declares a type-erased shape for a
+> trait; `VTableName.from(ref x)` constructs an instance from any
+> `ref T` where `T implements Trait`; `Trait.method(ref vt, args)` (or
+> equivalently `VTableName.method(ref vt, args)`) dispatches through
+> the vtable's method slot. Demo: heterogeneous handler list in
+> [examples/pass/vtable_handlers.yoop](../examples/pass/vtable_handlers.yoop).
+
 The single biggest design-question item in [library-design.md §8](library-design.md#8-open-language-questions-the-library-exposes) (questions 1, 2, 3) — and the one that unblocks the most downstream work: streaming HTTP bodies, heterogeneous handler lists, routing tables, callbacks. The library-design doc has a concrete proposal; this phase implements it.
 
 - **Function value types in type position use `=>`**: `(req: Request) => Response`. The `function` keyword stays only at *declaration* sites; at type positions (struct fields, parameter types, return types) the `=>` arrow signals "this is a function value." Disambiguation from the `=` token and from struct literal braces is just lexer + parser work.
@@ -135,6 +145,13 @@ Files touched: lexer (`=>` token), parser (function type annotations, `vtable` d
 
 ### Phase 9.H — `?` over enum-shaped errors
 
+> **Status: landed.** See
+> [plans/completed/phase-9-h-fallible-enum-qmark.md](completed/phase-9-h-fallible-enum-qmark.md).
+> Any enum with exactly two variants named `Ok` and `Err` is recognized as a
+> fallible type; `?` propagates the `Err` payload through callers with a
+> matching `Err` payload type. Cross-shape (struct ↔ enum, mismatched `Err`
+> payload type) is rejected.
+
 [library-design.md §8 open question 7](library-design.md#8-open-language-questions-the-library-exposes). Today `?` only understands `err: string`-bearing structs ([Phase 2](completed/phase-2-errors-as-values.md)). Now that enum + variant patterns + exhaustiveness exist (Phase 7.5), the standard `enum Result<T, E> { Ok { value: T }, Err { error: E } }` shape is expressible — but `expr?` on a `Result<T, E>` is a typecheck error.
 
 - Introduce a "fallible-enum" convention: any enum with exactly two variants, one named `Ok` and one named `Err`, is recognized by the typechecker as fallible. (Spec text TBD: structural recognition vs. an explicit marker trait. Recommend structural for minimum ceremony — same approach as `err: string`.)
@@ -146,6 +163,12 @@ Files touched: typechecker ([fallible.js](../src/jsyooptypecheck/fallible.js), [
 **Today's workaround**: convert enum errors to struct-fallibles at the API boundary, or hand-roll the early-return pattern.
 
 ### Phase 9.I — Suspendable `wait` inside task bodies
+
+> **Status: landed.** See
+> [plans/completed/phase-9-i-suspendable-wait.md](completed/phase-9-i-suspendable-wait.md).
+> `yoop_task_wait` now drains the queue on the calling thread instead of
+> parking on the handle's condvar; the canonical N-deep-nested-wait deadlock
+> from SPEC §8 is gone, with no language surface change.
 
 [SPEC.md §8 Safety and deadlock](../SPEC.md#safety-and-deadlock) describes the current `wait`-inside-task hazard: with N workers and N tasks each waiting on an N+1th task, the pool deadlocks. The mitigation listed in the spec is suspendable `wait` — yielding the worker rather than blocking it. Phase 8.F.1 already shipped park/unpark in the runtime; this phase wires it into the `wait` codegen path.
 

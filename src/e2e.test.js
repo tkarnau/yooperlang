@@ -17,7 +17,7 @@ import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js"
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function runFixture(relPath) {
+function runFixture(relPath, opts = {}) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
   const ir = compileSource(src);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
@@ -32,7 +32,12 @@ function runFixture(relPath) {
     ...runtimeLinkFlags().map((f) => `-l${f}`),
   ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
-  const result = spawnSync(binPath, [], { encoding: "utf8" });
+  const env = opts.env ? { ...process.env, ...opts.env } : process.env;
+  const result = spawnSync(binPath, [], {
+    encoding: "utf8",
+    env,
+    timeout: opts.timeoutMs ?? 30000,
+  });
   return { stdout: result.stdout, exitCode: result.status };
 }
 
@@ -90,6 +95,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
         "x=6\n" +
         "pt=(15,60)\n" +
         "xs=1,102,2,4\n",
+    );
+  });
+
+  it("forin_basic.yoop walks arrays of every supported element type", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/forin_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "sum=100\n" +
+        "trues=3\n" +
+        "sumX=6 sumY=60\n" +
+        "early=40\n" +
+        "zero=0\n",
     );
   });
 
@@ -336,6 +354,54 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/enum_showcase.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "circle r=2\nrect 3x4\nsquare s=5\nempty\n");
+  });
+
+  // Phase 9.H: `?` propagates over enums with Ok/Err variants.
+  it("fallible_enum_qmark.yoop: '?' on a Result-shaped enum propagates Err and unwraps Ok", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fallible_enum_qmark.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "happy sum=7\nsad err=-7\n");
+  });
+
+  // Phase 10.A: generic enum Result<T, E> instantiates per (T, E) pair, and
+  // the Phase 9.H structural `?` recognizer fires on the instantiated shape.
+  it("generic_enum_result.yoop: Result<int32, int32> participates in switch + ? propagation", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_enum_result.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "happy sum=7\nsad err=-7\n");
+  });
+
+  // Phase 10.A: generic enum with a no-payload variant. Exercises the
+  // FIELD_ACCESS → VARIANT_CONSTRUCTOR pinning path for `Maybe.None` in
+  // return position.
+  it("generic_enum_option_like.yoop: Maybe<T> with Some/None over int32", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_enum_option_like.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "m1=Some(3)\nm2=None\n");
+  });
+
+  // Phase 9.G: heterogeneous handler list via vtable. Three different impl
+  // types ({Const, AddOffset, Scale}) all answer the same Handler trait,
+  // and a single fan_out function dispatches across the mixed array — the
+  // canonical motivating case (would have needed monomorphized generics or
+  // unsafe-pointer fields pre-9.G).
+  it("vtable_handlers.yoop: heterogeneous handler list dispatches through a vtable", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/vtable_handlers.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "req=10 sum=145\nreq=7  sum=133\nscale-only=33\n");
+  });
+
+  // Phase 9.I: a nested-wait chain deeper than the worker count must complete.
+  // Pre-9.I, YOOP_NUM_WORKERS=1 plus an inner `wait` deadlocked the lone
+  // worker; the suspendable-wait path drains the queue on the calling thread
+  // instead of pthread_cond_wait'ing.
+  it("suspendable_wait.yoop: nested task waits complete under YOOP_NUM_WORKERS=1", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/suspendable_wait.yoop", {
+      env: { YOOP_NUM_WORKERS: "1" },
+      timeoutMs: 10000,
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "chain=18\n");
   });
 
   it("union_rgba.yoop: untagged union, read via two field aliases, write through one updates the other", () => {
@@ -1103,6 +1169,36 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /'continue' is not inside a loop/.test(e.message)),
       `expected continue-outside-loop error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("forin_non_array.yoop rejects 'for ... in' on non-array RHS", () => {
+    const { errors } = typecheckFixture("examples/fail/forin_non_array.yoop");
+    assert.ok(
+      errors.some((e) => /'for ... in' currently requires an array/.test(e.message)),
+      `expected for-in non-array error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 10.A: bare `GenericEnum.Variant { ... }` outside a pinning context
+  // is unrepresentable — surface the diagnostic at the construction site.
+  it("generic_enum_unpinned.yoop rejects unpinned generic-enum variant constructor", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_unpinned.yoop");
+    assert.ok(
+      errors.some((e) =>
+        /cannot determine type arguments for generic enum "Result"/.test(e.message),
+      ),
+      `expected unpinned-generic-enum error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 10.A: arity mismatch on a generic-enum type annotation should fail
+  // type resolution rather than partial-applying or silently ignoring args.
+  it("generic_enum_arity.yoop rejects `Result<int32>` (missing E arg)", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_arity.yoop");
+    assert.ok(
+      errors.some((e) => /unknown type "Result<int32>"/.test(e.message)),
+      `expected arity-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
