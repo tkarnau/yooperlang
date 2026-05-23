@@ -23,6 +23,19 @@ void yoop_runtime_shutdown(void);
 void yoop_task_submit(void* handle, void (*thunk)(void*));
 void yoop_task_wait(void* handle);
 
+// Phase 10.F: bounded wait. Returns 0 when the handle's state flipped to
+// "done" before `deadline_ns` (a monotonic-clock nanosecond reading from
+// yoop_now_ns), 1 when the deadline elapsed first. Runs the same
+// re-entrant queue-draining loop as yoop_task_wait — a worker that hits
+// wait_until participates in dispatch up to the deadline.
+int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns);
+
+// Phase 10.F: monotonic clock reading in nanoseconds, suitable for
+// computing wait_until deadlines (`now_ns() + duration_ns`). The clock
+// source matches the one the cv timeouts use (CLOCK_MONOTONIC on Linux,
+// CLOCK_REALTIME on macOS) so deltas stay consistent across both.
+uint64_t yoop_now_ns(void);
+
 // pooled lifecycle
 void* yoop_task_alloc(size_t size);
 void  yoop_task_retain(void* handle);

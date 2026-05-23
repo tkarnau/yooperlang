@@ -1,0 +1,39 @@
+// std/core/concurrency.yoop — bounded-wait surface for Task<T>.
+//
+// Phase 10.F: `wait_until(h, deadline_ns)` is a builtin call form (same
+// shape as the `wait` keyword) recognized by the typechecker; users
+// import only `WaitResult<T>` here to destructure the outcome. The two
+// matching variants — `Done { value: T }` and `Timeout` — let the caller
+// choose between consuming the result and falling through to its own
+// timeout handling without having to switch on an external error type.
+//
+// Companion helper `now_ns()` returns the current wall-clock reading in
+// nanoseconds, suitable for computing deadlines (`now_ns() + duration`).
+// Both the deadline arithmetic and the cv timeout inside the runtime
+// use the same clock (CLOCK_REALTIME on POSIX, FILETIME-rebased on
+// Windows), so a deadline computed locally is directly usable by
+// wait_until.
+
+export enum WaitResult<T> {
+    Done { value: T },
+    Timeout,
+}
+
+extern "C" from "yoop_runtime" {
+    function yoop_now_ns(): uint64;
+    function yoop_sleep_ms(ms: uint64): int32;
+}
+
+// Current wall-clock reading in nanoseconds. The intended call shape is
+// `let deadline: uint64 = now_ns() + 250_000_000;` (250ms from now), then
+// pass `deadline` to `wait_until`.
+export function now_ns(): uint64 {
+    return yoop_now_ns();
+}
+
+// Block the calling thread for `ms` milliseconds. Returns 0 on the timer
+// firing, -1 on error. Primarily useful in tests + as a coarse pacing
+// primitive; for production code prefer `wait_until` on a real handle.
+export function sleep_ms(ms: uint64): int32 {
+    return yoop_sleep_ms(ms);
+}

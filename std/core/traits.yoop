@@ -65,3 +65,18 @@ export enum IterStep<T> {
 export trait Iterable<T> {
     function next(ref self): IterStep<T>;
 }
+
+// ----- Into ------------------------------------------------------------
+
+// Cross-shape `?` conversion (Phase 10.E). When a `?`-propagated error's
+// payload type differs from the enclosing function's Err payload type, the
+// typechecker looks for an `Into<TargetErr>` impl on the operand's error
+// type and rewrites the propagation to call `Into.into(ref operandErr)`
+// before constructing the outer `Err` variant.
+//
+// Semantically the source type is `self` and the target is the type
+// parameter, so the natural read is "IoError implements Into<AppError>"
+// ("an IoError can be converted into an AppError").
+export trait Into<T> {
+    function into(ref self): T;
+}

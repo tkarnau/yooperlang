@@ -54,6 +54,9 @@ const RUNTIME_DECLARES = [
   "declare void @yoop_runtime_shutdown()",
   "declare void @yoop_task_submit(ptr, ptr)",
   "declare void @yoop_task_wait(ptr)",
+  // Phase 10.F: bounded wait + monotonic clock for deadlines.
+  "declare i32 @yoop_task_wait_until_ns(ptr, i64)",
+  "declare i64 @yoop_now_ns()",
   "declare ptr @yoop_task_alloc(i64)",
   "declare void @yoop_task_retain(ptr)",
   "declare void @yoop_task_release(ptr)",
@@ -599,20 +602,20 @@ export function codegen(ast) {
     fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
 
     fnLines.push(`${failLabel}:`);
-    emitFailEnumReturn(operandEnum, slot, currentReturnType, fnLines);
+    emitFailEnumReturn(node, operandEnum, slot, currentReturnType, fnLines);
 
     fnLines.push(`${okLabel}:`);
     return { ptr: slot, type: operandEnum };
   }
 
-  // Phase 9.H: build the enclosing function's return-type Err variant
-  // carrying the operand's Err payload, then ret. operandEnumSlot points
-  // to the operand's enum struct (tag has already been checked == Err
-  // ordinal); we GEP into its payload bytes, copy the single payload field
-  // (if any) into the return enum's payload bytes, and ret. retEnumType
-  // and operandEnum are both fallible enums whose Err payload types are
-  // typesEqual (checked by the typechecker).
-  function emitFailEnumReturn(operandEnum, operandEnumSlot, retEnumType, fnLines) {
+  // Phase 9.H + 10.E: build the enclosing function's return-type Err
+  // variant carrying the operand's Err payload, then ret. operandEnumSlot
+  // points to the operand's enum struct (tag has already been checked ==
+  // Err ordinal); we GEP into its payload bytes and either copy the single
+  // payload field directly (Phase 9.H — typesEqual fast path) or call the
+  // operand-err type's `Into<RetErr>.into(ref self)` impl and store its
+  // result (Phase 10.E — cross-shape path, gated on `tryNode.tryConvert`).
+  function emitFailEnumReturn(tryNode, operandEnum, operandEnumSlot, retEnumType, fnLines) {
     const retLlvm = llvmType(retEnumType);
     const retSlot = freshTemp();
     fnLines.push(`  ${retSlot} = alloca ${retLlvm}, align ${sizeOfAlign(retEnumType)}`);
@@ -637,21 +640,32 @@ export function codegen(ast) {
         : retEnumType.name;
       const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
       const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
-      const fieldType = operandErr.fields[0].type;
-      const fieldLlvm = llvmType(fieldType);
+      const operandFieldType = operandErr.fields[0].type;
+      const retFieldType = retErr.fields[0].type;
 
       const opPayloadPtr = freshTemp();
       fnLines.push(`  ${opPayloadPtr} = getelementptr inbounds ${llvmType(operandEnum)}, ptr ${operandEnumSlot}, i32 0, i32 1`);
       const opFieldPtr = freshTemp();
       fnLines.push(`  ${opFieldPtr} = getelementptr inbounds ${operandPayloadLlvm}, ptr ${opPayloadPtr}, i32 0, i32 0`);
-      const fieldVal = freshTemp();
-      fnLines.push(`  ${fieldVal} = load ${fieldLlvm}, ptr ${opFieldPtr}`);
 
       const retPayloadPtr = freshTemp();
       fnLines.push(`  ${retPayloadPtr} = getelementptr inbounds ${retLlvm}, ptr ${retSlot}, i32 0, i32 1`);
       const retFieldPtr = freshTemp();
       fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
-      fnLines.push(`  store ${fieldLlvm} ${fieldVal}, ptr ${retFieldPtr}`);
+
+      if (tryNode.tryConvert) {
+        // Phase 10.E: cross-shape — call Into.into(ref operandErr) and
+        // store the returned target value.
+        const retFieldLlvm = llvmType(retFieldType);
+        const converted = freshTemp();
+        fnLines.push(`  ${converted} = call ${retFieldLlvm} @${tryNode.tryConvert.mangledName}(ptr ${opFieldPtr})`);
+        fnLines.push(`  store ${retFieldLlvm} ${converted} , ptr ${retFieldPtr}`);
+      } else {
+        const fieldLlvm = llvmType(operandFieldType);
+        const fieldVal = freshTemp();
+        fnLines.push(`  ${fieldVal} = load ${fieldLlvm}, ptr ${opFieldPtr}`);
+        fnLines.push(`  store ${fieldLlvm} ${fieldVal}, ptr ${retFieldPtr}`);
+      }
     }
 
     const retVal = freshTemp();
@@ -4044,6 +4058,89 @@ function codegenWithModuleId(
     return { val: resVal, yoopType: resultType };
   }
 
+  // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` lowering.
+  // Mirrors emitWaitExpression's handle-ptr access, then branches on the
+  // runtime's outcome (0 = done, 1 = timeout) to build the appropriate
+  // enum variant. The result-slot byte offset is the universal task-struct
+  // prefix offset (32) so the same shape works for joined/pooled bindings
+  // and pooled parameters alike — we don't need bindingDeclTable here.
+  function emitWaitUntilCall(node, fnLines) {
+    const handleVal = emitExpr(node.args[0], fnLines);
+    const deadlineVal = emitExpr(node.args[1], fnLines);
+
+    const outcomeTmp = freshTemp();
+    fnLines.push(
+      `  ${outcomeTmp} = call i32 @yoop_task_wait_until_ns(ptr ${handleVal.val}, i64 ${deadlineVal.val})`,
+    );
+
+    const waitResultType = node.builtinWaitResultType;
+    const resultT = node.builtinTaskResultType;
+    const enumLlvm = llvmType(waitResultType);
+    const slot = freshTemp();
+    fnLines.push(
+      `  ${slot} = alloca ${enumLlvm}, align ${sizeOfAlign(waitResultType)}`,
+    );
+    fnLines.push(`  store ${enumLlvm} zeroinitializer, ptr ${slot}`);
+
+    const doneVariant = waitResultType.variants.get("Done");
+    const timeoutVariant = waitResultType.variants.get("Timeout");
+
+    const isDone = freshTemp();
+    fnLines.push(`  ${isDone} = icmp eq i32 ${outcomeTmp}, 0`);
+    const doneLabel = freshLabel("wu_done");
+    const timeoutLabel = freshLabel("wu_timeout");
+    const joinLabel = freshLabel("wu_join");
+    fnLines.push(`  br i1 ${isDone}, label %${doneLabel}, label %${timeoutLabel}`);
+
+    fnLines.push(`${doneLabel}:`);
+    {
+      const tagPtr = freshTemp();
+      fnLines.push(
+        `  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`,
+      );
+      fnLines.push(`  store i32 ${doneVariant.ordinal}, ptr ${tagPtr}`);
+
+      // Copy the task's result (handle byte offset 32) into the Done variant's
+      // single payload field `value`.
+      const resPtr = freshTemp();
+      fnLines.push(
+        `  ${resPtr} = getelementptr inbounds i8, ptr ${handleVal.val}, i64 32`,
+      );
+      const resultLlvm = llvmType(resultT);
+      const resVal = freshTemp();
+      fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
+
+      const enumId = waitResultType.moduleId
+        ? `${waitResultType.moduleId}__${waitResultType.name}`
+        : waitResultType.name;
+      const payloadPtr = freshTemp();
+      fnLines.push(
+        `  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 1`,
+      );
+      const valuePtr = freshTemp();
+      fnLines.push(
+        `  ${valuePtr} = getelementptr inbounds %enumv.${enumId}__Done, ptr ${payloadPtr}, i32 0, i32 0`,
+      );
+      fnLines.push(`  store ${resultLlvm} ${resVal}, ptr ${valuePtr}`);
+      fnLines.push(`  br label %${joinLabel}`);
+    }
+
+    fnLines.push(`${timeoutLabel}:`);
+    {
+      const tagPtr = freshTemp();
+      fnLines.push(
+        `  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`,
+      );
+      fnLines.push(`  store i32 ${timeoutVariant.ordinal}, ptr ${tagPtr}`);
+      fnLines.push(`  br label %${joinLabel}`);
+    }
+
+    fnLines.push(`${joinLabel}:`);
+    const loadTmp = freshTemp();
+    fnLines.push(`  ${loadTmp} = load ${enumLlvm}, ptr ${slot}`);
+    return { val: loadTmp, yoopType: waitResultType };
+  }
+
   // Inline emission for builtin generic functions: heap_alloc / heap_free
   // (Phase 7+) and array_slice (Phase 8.H). These have `declId` starting with
   // `$builtin` and no AST body; codegen lowers each call directly.
@@ -4190,6 +4287,10 @@ function codegenWithModuleId(
   }
 
   function emitCallExpr(node, fnLines) {
+    // Phase 10.F: builtin wait_until lowering (multi-module path).
+    if (node.builtinWaitUntil) {
+      return emitWaitUntilCall(node, fnLines);
+    }
     if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
       return emitBuiltinGenericCall(node, fnLines);
     }
@@ -4547,14 +4648,14 @@ function codegenWithModuleId(
     // Phase 6.1: fire any pending cleanups in the failure branch before the
     // early `ret` produced by emitFailEnumRet.
     emitPendingCleanups(node, fnLines);
-    emitFailEnumRet(operandEnum, slot, currentReturnType, fnLines);
+    emitFailEnumRet(node, operandEnum, slot, currentReturnType, fnLines);
 
     fnLines.push(`${okLabel}:`);
     return { ptr: slot, type: operandEnum };
   }
 
-  // Phase 9.H — multi-module sibling of emitFailEnumReturn.
-  function emitFailEnumRet(operandEnum, operandEnumSlot, retEnumType, fnLines) {
+  // Phase 9.H + 10.E — multi-module sibling of emitFailEnumReturn.
+  function emitFailEnumRet(tryNode, operandEnum, operandEnumSlot, retEnumType, fnLines) {
     const retLlvm = llvmType(retEnumType);
     const retSlot = freshTemp();
     fnLines.push(`  ${retSlot} = alloca ${retLlvm}, align ${sizeOfAlign(retEnumType)}`);
@@ -4578,21 +4679,32 @@ function codegenWithModuleId(
         : retEnumType.name;
       const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
       const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
-      const fieldType = operandErr.fields[0].type;
-      const fieldLlvm = llvmType(fieldType);
+      const operandFieldType = operandErr.fields[0].type;
+      const retFieldType = retErr.fields[0].type;
 
       const opPayloadPtr = freshTemp();
       fnLines.push(`  ${opPayloadPtr} = getelementptr inbounds ${llvmType(operandEnum)}, ptr ${operandEnumSlot}, i32 0, i32 1`);
       const opFieldPtr = freshTemp();
       fnLines.push(`  ${opFieldPtr} = getelementptr inbounds ${operandPayloadLlvm}, ptr ${opPayloadPtr}, i32 0, i32 0`);
-      const fieldVal = freshTemp();
-      fnLines.push(`  ${fieldVal} = load ${fieldLlvm}, ptr ${opFieldPtr}`);
 
       const retPayloadPtr = freshTemp();
       fnLines.push(`  ${retPayloadPtr} = getelementptr inbounds ${retLlvm}, ptr ${retSlot}, i32 0, i32 1`);
       const retFieldPtr = freshTemp();
       fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
-      fnLines.push(`  store ${fieldLlvm} ${fieldVal}, ptr ${retFieldPtr}`);
+
+      if (tryNode.tryConvert) {
+        // Phase 10.E: cross-shape — call Into.into(ref operandErr) and
+        // store the returned target value.
+        const retFieldLlvm = llvmType(retFieldType);
+        const converted = freshTemp();
+        fnLines.push(`  ${converted} = call ${retFieldLlvm} @${tryNode.tryConvert.mangledName}(ptr ${opFieldPtr})`);
+        fnLines.push(`  store ${retFieldLlvm} ${converted}, ptr ${retFieldPtr}`);
+      } else {
+        const fieldLlvm = llvmType(operandFieldType);
+        const fieldVal = freshTemp();
+        fnLines.push(`  ${fieldVal} = load ${fieldLlvm}, ptr ${opFieldPtr}`);
+        fnLines.push(`  store ${fieldLlvm} ${fieldVal}, ptr ${retFieldPtr}`);
+      }
     }
 
     const retVal = freshTemp();

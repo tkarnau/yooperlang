@@ -684,12 +684,32 @@ function main(): void {
 | Operator | Meaning |
 |---|---|
 | `wait h` | Block until the task referenced by `h` completes; evaluate to the result. `h` must name a binding of type `Task<T>`. |
+| `wait_until(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) — `Done { value: T }` on completion, `Timeout` on deadline expiry. `deadline_ns` is absolute, in the same clock space as `now_ns()`. Phase 10.F.1. |
 
 `wait` is a keyword-level operation, not a method on `Task<T>`, so the compiler can
 account for it during flow analysis (in particular, the `joined` kind's `autoJoin`
 clause is implemented by inserting a synthetic `wait` at scope exit, and the
 compiler must recognize the operator to detect when an explicit user `wait` makes
 the synthetic insertion redundant).
+
+`wait_until` is the bounded sibling — same builtin-call shape, two args
+instead of one. Unlike `wait`, it does **not** dispatch queued tasks on
+the calling thread while blocked: a queued task that ran past the
+deadline would invalidate the user's "give up at time T" contract.
+Worker threads continue to drain the queue normally; the caller simply
+parks on the queue condvar with the deadline as the timeout. A typical
+call shape:
+
+```js
+import { WaitResult, now_ns } from "std/core/concurrency.yoop";
+
+pooled h = fetch(url);
+let deadline: uint64 = now_ns() + 250_000_000;  // 250ms from now
+switch (wait_until(h, deadline)) {
+    case WaitResult.Done { value: body }: { use(body); }
+    case WaitResult.Timeout: { abandon_request(); }
+}
+```
 
 `_ = expr;` is the language's generic discard form (see §4). When `expr` is a
 task call (`_ = fetch(url);`), the result handle is spawned and immediately
@@ -900,9 +920,36 @@ function total(path: string): usize {
 ```
 
 Cross-shape propagation (operand and enclosing return have *different* `Err`
-payload types — e.g. `Result<_, IoError>` into `Result<_, AppError>`) is
-**deferred** — it requires a `From`-style conversion trait, which is Phase 10.E
-work.
+payload types — e.g. `Result<_, IoError>` into `Result<_, AppError>`) works
+when the operand's `Err` payload type implements `Into<RetErr>` from
+[std/core/traits.yoop](std/core/traits.yoop):
+
+```js
+trait Into<T> {
+    function into(ref self): T;
+}
+
+type IoError implements Into<AppError> {
+    code: int32,
+    function into(ref self): AppError {
+        return { msg: "io failed", code: self.code };
+    }
+}
+
+function load(path: string): Result<Config, AppError> {
+    const bytes = read_all(path)?;   // read_all returns Result<_, IoError>
+    // ...                              the compiler inserts Into.into on the
+    //                                  failure branch before building Err
+}
+```
+
+The typechecker looks for a trait named `Into` in the operand-Err type's
+`implementsTraits` whose single type-arg is the enclosing return's `Err`
+payload type. A miss produces a fix-it pointing at the missing impl;
+a hit rewrites the `?` failure branch to call
+`Into.into(ref operandErr)` and store the returned target value into the
+outer `Err` variant. The Phase 9.H same-type fast path is unchanged — the
+conversion is paid only when the shapes actually differ.
 
 ### Attaching context (optional, reserved)
 

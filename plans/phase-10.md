@@ -235,25 +235,16 @@ Tiny modules; explicitly named as Phase-10-ish in
   9.F lifted into template literals — *if 9.F has shipped by then*; if
   not, ship it here as a prerequisite) drive value formatting.
 
-### Phase 10.E — Cross-shape `?` propagation + `From` trait
+### Phase 10.E — Cross-shape `?` propagation via `Into<T>` ✓ landed
 
-[phase-9-h-fallible-enum-qmark.md](completed/phase-9-h-fallible-enum-qmark.md)
-explicitly defers the case where `?` would have to convert between
-shapes. With `std/collections` + generic enums in, this becomes the
-single most ergonomic missing piece for a real program.
-
-- Surface: `expr? as Err::Kind` or an explicit `From<E1, E2>` trait
-  (recommend trait — composes with everything else). The plan doc
-  should make the recommendation concrete.
-- Typechecker: when `?`'s operand and the enclosing return's `Err`
-  payload types differ, look for `From<OperandErr, ReturnErr>` impl;
-  if found, the rewrite calls `From.convert(operandErr)` before
-  building the `Err` variant.
-- Reserved `? "context string"` suffix from SPEC §11 also applies here:
-  the convention becomes "every fallible Err type implements `Display`,
-  and `?` with a context string sandwiches the strings". Stays simple
-  if `Display` is in templates already (Phase 9.F or 10.D, whichever
-  ships first).
+See [phase-10-e-cross-shape-qmark.md](completed/phase-10-e-cross-shape-qmark.md).
+A new `Into<T>` trait in [std/core/traits.yoop](../std/core/traits.yoop)
+is implemented on the operand-Err type (`IoError implements
+Into<AppError>`); `resolveTryOp` looks for it whenever the operand and
+return Err payload types disagree, and codegen calls the impl's `into`
+method on the failure branch before building the outer `Err` variant.
+The earlier 9.H same-type fast path is unchanged. Reserved context-string
+suffix and bidirectional `From<S>` form remain deferred.
 
 ### Phase 10.F — Cancellation tokens, deadlines, multiplexer timers
 
@@ -266,16 +257,24 @@ typed wrapper.
   pooled-binding form (`let pooled h = fetch(url);` then `h.cancel();`)
   unparks the task with `REASON_CANCEL`. Runtime hook is already there;
   surface design is the work.
-- **Deadlines.** `wait_until(h, deadline_ms): WaitResult` — returns
-  `Done`, `Timeout`, or `Cancelled`. Composes with the existing
-  `wait h` semantics: no change to the bare form.
-- **Multiplexer-integrated timers.** Today
-  [phase-9-i-suspendable-wait.md](completed/phase-9-i-suspendable-wait.md)
-  uses a 25ms poll to bridge handle-done events into the queue-cv wait.
-  A real timer event source (`timerfd` on Linux, `EVFILT_TIMER` on
-  macOS, IOCP timer on Windows) eliminates the poll. Pure runtime
-  refactor — no language change. Important to do *before* 10.G's
-  optimization pass so we're not benchmarking the poll-bound version.
+- **Deadlines ✓ landed.** See
+  [phase-10-f-1-deadlines.md](completed/phase-10-f-1-deadlines.md).
+  `wait_until(h, deadline_ns): WaitResult<T>` from
+  [std/core/concurrency.yoop](../std/core/concurrency.yoop) is a
+  builtin call form parallel to the `wait` keyword; returns
+  `Done { value: T }` on completion or `Timeout` on deadline expiry.
+  The `Cancelled` variant from the original sketch waits for the
+  cancellation sub-phase — when it lands, `WaitResult` grows the third
+  variant additively. The 25ms safety poll inside `yoop_task_wait` also
+  came out as part of this sub-phase: handle-done broadcasts cover
+  bare-wait wakeups deterministically.
+- **Multiplexer-integrated timers.** The original bullet asked for a
+  `timerfd` / `EVFILT_TIMER` integration to drop the 25ms poll. What
+  the deadlines sub-phase actually did was eliminate the poll by
+  trusting the broadcast path; the timer-event-source integration is
+  still open and useful for sharing one I/O thread across `sleep_ms`
+  and any future deadline-driven primitive, but no longer urgent for
+  bench correctness.
 
 ### Phase 10.G — Reserved-syntax cleanup (Phase 9.J carryover)
 

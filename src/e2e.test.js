@@ -129,6 +129,25 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "h=42 same=1 diff=0\n");
   });
 
+  // Phase 10.E: cross-shape `?` propagation via `Into<T>`. IoError -> AppError
+  // conversion fires on the failure branch; the `tag=7` proves the
+  // user-written `into` method ran rather than a raw bit-copy of the
+  // operand's Err payload.
+  it("qmark_cross_shape_into: `?` calls Into.into to convert between Err payload types", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_cross_shape_into.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "happy sum=7\nsad err code=-7 tag=7\n");
+  });
+
+  // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` covers Done +
+  // Timeout. The fast task completes well inside its 1s deadline; the slow
+  // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.
+  it("wait_until_smoke: wait_until returns Done before the deadline and Timeout after it", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/wait_until_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "fast done=49\nlazy timed out\n");
+  });
+
   it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
@@ -1116,6 +1135,17 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     assert.ok(
       errors.some((e) => /unsatisfied obligation from propagates<disposable>/.test(e.message)),
       `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 10.E: cross-shape `?` is only accepted when the operand's Err type
+  // implements `Into<RetErr>` for the enclosing return's Err type. Without
+  // that impl the typechecker rejects with a fix-it pointing at the trait.
+  it("qmark_cross_shape_no_into: `?` between mismatched Err payloads without an Into<T> impl is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/qmark_cross_shape_no_into.yoop");
+    assert.ok(
+      errors.some((e) => /no `Into<struct AppError>` impl on struct IoError/.test(e.message)),
+      `expected missing-Into error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

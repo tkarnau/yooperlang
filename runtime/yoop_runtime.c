@@ -11,10 +11,12 @@
 
 #include "yoop_runtime.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -274,58 +276,58 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
     yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
-// Phase 9.I: short polling interval (ms) for the suspendable-wait path. The
-// queue_cv wake covers new-submission events instantly; the timeout exists
-// only so handle-done signals (which broadcast on the handle's own cv, not
-// queue_cv) propagate to a thread that has parked waiting for queue work.
-#define YOOP_WAIT_POLL_MS 25
+// Phase 10.F: wait_until passes its absolute monotonic deadline through to
+// the inner cv timedwait. Phase 9.I's 25ms safety poll for bare
+// yoop_task_wait is gone — yoop_handle_signal_done broadcasts queue_cv
+// after every state flip, so a parked waiter wakes the moment the handle
+// completes without polling. INFINITE means "no deadline; sleep until a
+// broadcast wakes us."
+#define YOOP_WAIT_NO_DEADLINE ((uint64_t)0)
 
 #ifndef _WIN32
-// POSIX: block on queue_cv for up to ms milliseconds (or until signaled).
-// Returns 0 if woken by signal, ETIMEDOUT on timer expiry, other on error.
-static int queue_cv_timedwait_ms_locked(int ms) {
-    struct timespec deadline;
-  #if defined(__linux__)
-    clock_gettime(CLOCK_REALTIME, &deadline);
-  #else
-    clock_gettime(CLOCK_REALTIME, &deadline);
-  #endif
-    deadline.tv_sec  += ms / 1000;
-    deadline.tv_nsec += (long)(ms % 1000) * 1000000L;
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec  += 1;
-        deadline.tv_nsec -= 1000000000L;
+// POSIX: block on queue_cv until either a broadcast wakes us or the
+// given absolute monotonic deadline elapses. deadline_ns == 0 means
+// "no deadline" — use pthread_cond_wait. Returns 0 on signal,
+// ETIMEDOUT on timer expiry, other on error.
+static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
+    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
+        return pthread_cond_wait(&g_rt.queue_cv.c, &g_rt.queue_mu.m);
     }
+    struct timespec deadline;
+    deadline.tv_sec  = (time_t)(deadline_ns / 1000000000ULL);
+    deadline.tv_nsec = (long)(deadline_ns % 1000000000ULL);
     return pthread_cond_timedwait(&g_rt.queue_cv.c, &g_rt.queue_mu.m, &deadline);
 }
 #else
-static int queue_cv_timedwait_ms_locked(int ms) {
-    BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, (DWORD)ms);
+static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
+    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
+        BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, INFINITE);
+        return ok ? 0 : -1;
+    }
+    uint64_t now = yoop_now_ns();
+    DWORD ms = now >= deadline_ns ? 0
+        : (DWORD)((deadline_ns - now + 999999ULL) / 1000000ULL);
+    BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, ms);
     return ok ? 0 : (GetLastError() == ERROR_TIMEOUT ? 1 : -1);
 }
 #endif
 
-// Phase 9.I: suspendable wait. The pre-9.I implementation parked the calling
-// thread on the handle's condvar unconditionally — with N workers and N+1
-// nested-task waits, that deadlocked the pool (SPEC §8 "Safety and deadlock").
+// Phase 9.I: suspendable wait.
 //
-// Now the wait loop opportunistically drains the global queue on the calling
-// thread instead of blocking, so a worker that has nothing useful to do can
-// run the very task it's waiting on (or one that will eventually unblock it).
-// When the queue is empty we fall back to a bounded wait on queue_cv: new
-// submissions wake us immediately, and the YOOP_WAIT_POLL_MS timer is the
-// fallback that catches handle-done signals (which broadcast on the handle's
-// own cv, not queue_cv).
+// Pre-9.I parked unconditionally on the handle's condvar — N workers + an
+// N+1-deep nested wait chain deadlocked the pool (SPEC §8). Phase 9.I
+// switched to a re-entrant loop that opportunistically drains queued work
+// on the calling thread while waiting, so a worker with nothing useful to
+// do can run the very task it's blocked on (or one that unblocks it
+// transitively).
 //
-// Re-entrant task dispatch is safe: each thunk runs to completion on the
-// calling thread's stack — recursion depth is bounded by the nested-wait
-// chain. A wait from non-task code (e.g. main) participates in the same
-// dispatch path; the behavior change is transparent at the call site.
+// Re-entrant dispatch is safe: each thunk runs to completion on the calling
+// thread's stack, so recursion depth is bounded by the nested-wait chain.
+// Non-task callers (e.g. main) participate in the same dispatch path.
 void yoop_task_wait(void* handle) {
     for (;;) {
         if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return;
 
-        // Try to grab and run a queued task on this thread first.
         yoop_mutex_lock(&g_rt.queue_mu);
         task_node* n = try_pop_task_locked();
         if (n) {
@@ -335,19 +337,60 @@ void yoop_task_wait(void* handle) {
             continue;
         }
 
-        // Re-check target after taking the queue lock — yoop_handle_signal_done
-        // may have flipped state between the load above and now.
+        // Re-check the target's state after taking the queue lock so a
+        // handle-done broadcast that arrived while we were mid-loop is
+        // observed before we park.
         if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
             yoop_mutex_unlock(&g_rt.queue_mu);
             return;
         }
 
-        // Queue empty AND target unfinished. Park briefly on queue_cv so a
-        // new submission wakes us instantly; the timer catches handle-done
-        // signals that aren't broadcast on queue_cv. Both paths re-enter the
-        // outer loop, which re-checks state and the queue.
-        queue_cv_timedwait_ms_locked(YOOP_WAIT_POLL_MS);
+        // Queue empty AND target unfinished. Park on queue_cv until
+        // yoop_handle_signal_done broadcasts (handle completed, or a new
+        // task arrived). The outer loop re-checks state + the queue
+        // regardless of why we woke. Phase 10.F: the 25ms safety poll is
+        // gone — signal_done's broadcast covers wakeups deterministically.
+        queue_cv_wait_until_locked(YOOP_WAIT_NO_DEADLINE);
         yoop_mutex_unlock(&g_rt.queue_mu);
+    }
+}
+
+// Phase 10.F: bounded wait. Returns 0 on completion, 1 on deadline expiry.
+//
+// Critically, this path does NOT dispatch queued tasks on the calling
+// thread the way yoop_task_wait does — a queued task that runs past the
+// deadline would invalidate the user's "give up at time T" contract.
+// Worker threads continue to drain the queue normally; we only block the
+// caller on a cv with the user's deadline as the timeout.
+//
+// The tradeoff: a wait_until from a worker thread with nested-task
+// dependencies can deadlock if every worker is similarly blocked. That's
+// preferable to silently overshooting — and the deadline itself caps the
+// "stall" at exactly the value the user asked for.
+int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
+    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
+        // 0 is the "no deadline" sentinel inside the cv wait. Bump to 1ns
+        // so a caller passing 0 (which is well in the past) still gets
+        // immediate-timeout semantics.
+        deadline_ns = 1;
+    }
+    for (;;) {
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
+        if (yoop_now_ns() >= deadline_ns) return 1;
+
+        yoop_mutex_lock(&g_rt.queue_mu);
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            return 0;
+        }
+        int rc = queue_cv_wait_until_locked(deadline_ns);
+        yoop_mutex_unlock(&g_rt.queue_mu);
+        if (rc == ETIMEDOUT) {
+            // Last-look at state — a broadcast may have raced with the
+            // timeout; prefer Done when the result is already available.
+            if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
+            return 1;
+        }
     }
 }
 
@@ -538,4 +581,28 @@ int yoop_sleep_ns(uint64_t ns) {
 
 int yoop_sleep_ms(uint64_t ms) {
     return yoop_sleep_ns(ms * 1000000ULL);
+}
+
+// Phase 10.F: return the current wall-clock time in nanoseconds. The clock
+// source matches what the queue_cv pthread_cond_timedwait uses (default
+// CLOCK_REALTIME on both Linux and macOS), so a deadline computed as
+// `yoop_now_ns() + duration_ns` is directly usable by
+// yoop_task_wait_until_ns. On Windows we use GetSystemTimeAsFileTime and
+// rebase off the Unix epoch — the same SleepConditionVariableCS path uses
+// relative ms anyway, so the absolute reading just needs to compare
+// monotonically with itself for deadline arithmetic.
+uint64_t yoop_now_ns(void) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t hundred_ns = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    // FILETIME epoch is 1601-01-01; rebase to Unix epoch (1970-01-01).
+    // Difference is 11644473600 seconds = 116444736000000000 100ns ticks.
+    hundred_ns -= 116444736000000000ULL;
+    return hundred_ns * 100ULL;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
 }

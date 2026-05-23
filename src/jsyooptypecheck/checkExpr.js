@@ -55,7 +55,7 @@ import {
   isNumeric,
   unifyArith,
 } from "./coerce.js";
-import { instantiateFunc, mangleType } from "./instantiate.js";
+import { instantiateEnum, instantiateFunc, mangleType } from "./instantiate.js";
 import { checkBoundSatisfied } from "./typecheck.js";
 import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
@@ -309,6 +309,13 @@ function resolveCall(node, scope, ctx) {
       return setType(node, ErrorType());
     }
     return resolveCallWithSig(node, calleeType, scope, ctx);
+  }
+
+  // Phase 10.F: `wait_until(h, deadline_ns)` is a builtin call form, the
+  // bounded-wait sibling of the `wait` keyword. The callee name is
+  // reserved; user-defined `wait_until` functions are shadowed.
+  if (callee === "wait_until") {
+    return resolveWaitUntilCall(node, scope, ctx);
   }
 
   // printf legacy path — variadic, type-resolve each arg, no arity check.
@@ -1311,11 +1318,14 @@ function resolveSliceExpression(node, scope, ctx) {
   return setType(node, objType);
 }
 
-// `expr?` — postfix propagator over a fallible enum (Phase 9.H).
+// `expr?` — postfix propagator over a fallible enum (Phase 9.H + 10.E).
 // A fallible operand is an enum with two variants named `Ok` and `Err`,
 // each with zero or one payload field. The enclosing function must also
-// return a fallible enum, and the two Err payload types must match
-// (cross-shape propagation is Phase 10.E work).
+// return a fallible enum. When the two Err payload types differ, the
+// typechecker looks for an `Into<ReturnErr>` impl on the operand's err
+// type (Phase 10.E) and stamps the conversion onto the node so codegen
+// can wrap the propagated value before constructing the outer `Err`
+// variant.
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) {
@@ -1344,16 +1354,143 @@ function resolveTryOp(node, scope, ctx) {
   const operandErr = enumErrPayloadType(operandType);
   const returnErr = enumErrPayloadType(retType);
   if (!typesEqual(operandErr, returnErr)) {
-    pushError(
-      ctx.errors,
-      node,
-      `'?' cannot propagate Err of ${formatType(operandErr)} into a function returning Err of ${formatType(returnErr)} — same Err payload type is required (cross-shape propagation is deferred)`,
-    );
-    return setType(node, ErrorType());
+    // Phase 10.E: same-type fast path failed — try the cross-shape path
+    // via `Into<ReturnErr>` on the operand's Err payload type. Only
+    // struct payloads can carry an `implementsTraits` list today, so
+    // anything else (void, prim, enum, array, ...) lands in the same
+    // diagnostic the original phase 9.H gate emitted.
+    const conversion = lookupIntoImpl(operandErr, returnErr, ctx);
+    if (!conversion) {
+      pushError(
+        ctx.errors,
+        node,
+        `'?' cannot propagate Err of ${formatType(operandErr)} into a function returning Err of ${formatType(returnErr)} — no \`Into<${formatType(returnErr)}>\` impl on ${formatType(operandErr)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    node.tryConvert = conversion;
   }
 
   node.fallibleEnum = true;
   return setType(node, strippedEnumOkType(operandType));
+}
+
+// Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` — bounded-wait
+// counterpart to the `wait` keyword. Recognized by callee name in
+// resolveCall; user-defined `wait_until` functions are shadowed.
+//
+//   - arg[0]: must resolve to a `Task<T>` (the same shape `wait` accepts);
+//     T is extracted and used to instantiate the result type.
+//   - arg[1]: deadline in nanoseconds from yoop_now_ns(); must coerce to
+//     uint64.
+//   - return: `WaitResult<T>` from std/core/concurrency.yoop, which the
+//     caller must have imported (otherwise the typechecker can't
+//     instantiate the result type and emits a fix-it pointing at the
+//     missing import).
+//
+// The node is stamped with `builtinWaitUntil = true`, `builtinTaskResultType`
+// (the T), and `builtinWaitResultType` (the instantiated enum) so codegen
+// can lower the call directly.
+function resolveWaitUntilCall(node, scope, ctx) {
+  if (node.args.length !== 2) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until(h, deadline_ns) takes exactly 2 arguments, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    resolveExprType(node.args[1], scope, ctx);
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until's first argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    resolveExprType(node.args[1], scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const resultT = handleType.resultType;
+
+  const uint64Type = PrimType(primAnnotations.uint64);
+  const deadlineType = resolveExprType(node.args[1], scope, ctx);
+  if (deadlineType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (deadlineType.kind === typeKinds.untypedInt) {
+    coerceUntypedLiteralToTyped(node.args[1], deadlineType, uint64Type, ctx.errors);
+  } else if (!typesEqual(deadlineType, uint64Type)) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until's deadline_ns argument must be uint64, got ${formatType(deadlineType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+
+  const genericDecl = lookupGenericEnumDecl("WaitResult", ctx);
+  if (!genericDecl) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until requires WaitResult<T> in scope — import it from "std/core/concurrency.yoop"`,
+    );
+    return setType(node, ErrorType());
+  }
+  const waitResultType = instantiateEnum(
+    ctx.typeContext.registry,
+    genericDecl,
+    [resultT],
+  );
+  node.builtinWaitUntil = true;
+  node.builtinTaskResultType = resultT;
+  node.builtinWaitResultType = waitResultType;
+  return setType(node, waitResultType);
+}
+
+// Phase 10.E: look for a `trait Into<T> { function into(ref self): T; }`
+// impl that converts `sourceType` into `targetType`. Returns
+// `{ mangledName, targetType }` (so codegen knows the symbol to call and
+// what to store) or null when no impl matches.
+//
+// The trait is recognized structurally by name + arity: any TraitType named
+// `Into` with a single type arg satisfying `typesEqual(arg, targetType)`
+// counts. This mirrors how `Iterable<T>` is recognized in the for-in
+// lowering — the std/core trait isn't blessed by identity, it's blessed by
+// shape.
+function lookupIntoImpl(sourceType, targetType, ctx) {
+  if (!sourceType || sourceType.kind !== typeKinds.struct) return null;
+  // The struct flowing in from an enum payload field may be the pass-A
+  // shell (empty implementsTraits) — re-fetch the canonical version from
+  // the right module's structTable so the impl list is populated. Same
+  // technique as the for-in / `Iterable` lookup.
+  let canonical = sourceType;
+  const moduleEnv = ctx.typeContext?.moduleEnv;
+  if (sourceType.moduleId && moduleEnv) {
+    const env = moduleEnv.get(sourceType.moduleId);
+    const fromTable = env?.structTable?.get(sourceType.name);
+    if (fromTable) canonical = fromTable;
+  } else if (ctx.typeContext?.structTable) {
+    const fromTable = ctx.typeContext.structTable.get(sourceType.name);
+    if (fromTable) canonical = fromTable;
+  }
+  const registry = ctx.typeContext?.registry;
+  for (const trait of canonical.implementsTraits ?? []) {
+    if (trait.name !== "Into") continue;
+    const args = registry?.traitArgsByInstance?.get(trait);
+    if (!args || args.length !== 1) continue;
+    if (!typesEqual(args[0], targetType)) continue;
+    return {
+      mangledName: mangleTraitMethod(canonical, "Into", "into"),
+      targetType,
+    };
+  }
+  return null;
 }
 
 function resolveOrphanStructLiteral(node, scope, ctx) {
