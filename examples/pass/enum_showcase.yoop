@@ -1,0 +1,40 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Shape {
+    Circle { radius: int32 },
+    Rectangle { width: int32, height: int32 },
+    Square { side: int32 },
+    Empty,
+}
+
+function describe(s: Shape): int32 {
+    switch (s) {
+        case Shape.Circle { radius }: {
+            printf(`circle r=${radius}\n`);
+            return radius;
+        }
+        case Shape.Rectangle { width: w, height: h }: {
+            printf(`rect ${w}x${h}\n`);
+            return w * h;
+        }
+        case Shape.Square { side }: {
+            printf(`square s=${side}\n`);
+            return side * side;
+        }
+        case Shape.Empty: {
+            printf(`empty\n`);
+            return 0;
+        }
+    }
+    return -1;
+}
+
+function main(): int32 {
+    let _a: int32 = describe(Shape.Circle { radius: 2 });
+    let _b: int32 = describe(Shape.Rectangle { width: 3, height: 4 });
+    let _c: int32 = describe(Shape.Square { side: 5 });
+    let _d: int32 = describe(Shape.Empty);
+    return 0;
+}

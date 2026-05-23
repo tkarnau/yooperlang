@@ -1,0 +1,33 @@
+// Phase 9.E: array slice syntax. xs[i..j] / xs[i..] / xs[..j] / xs[..]
+// produce a zero-copy fat-pointer subview — backing memory is shared with
+// the source array.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let xs: int32[] = [10, 20, 30, 40, 50, 60];
+
+    // Closed slice: xs[1..4] yields [20, 30, 40].
+    let mid: int32[] = xs[1..4];
+    printf(`mid.len=${mid.len} mid[0]=${mid[0]} mid[1]=${mid[1]} mid[2]=${mid[2]}\n`);
+
+    // Open end: xs[3..] yields [40, 50, 60].
+    let tail: int32[] = xs[3..];
+    printf(`tail.len=${tail.len} tail[0]=${tail[0]} tail[2]=${tail[2]}\n`);
+
+    // Open start: xs[..3] yields [10, 20, 30].
+    let head: int32[] = xs[..3];
+    printf(`head.len=${head.len} head[0]=${head[0]} head[2]=${head[2]}\n`);
+
+    // Fully open: xs[..] is a view over the whole array.
+    let all: int32[] = xs[..];
+    printf(`all.len=${all.len}\n`);
+
+    // Slices share storage: writing through a slice index updates xs.
+    mid[0] = 99;
+    printf(`xs[1]=${xs[1]}\n`);
+
+    return 0;
+}

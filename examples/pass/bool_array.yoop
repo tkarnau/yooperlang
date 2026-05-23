@@ -1,0 +1,57 @@
+// Phase 9.B: bool[] works through every standard array path — literal,
+// indexed read/write, conditional use, .len, and Vec<bool> / heap_alloc<bool>.
+// This regression fixture pins those guarantees so we notice if someone breaks
+// any of them in a future codegen change.
+
+import { Vec, vec_new, vec_push, vec_get } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    // Array literal of bools, indexed read.
+    let flags: bool[] = [true, false, true, false];
+    printf(`flags.len=${flags.len} flags[0]=${flags[0]} flags[1]=${flags[1]}\n`);
+
+    // Indexed write.
+    flags[1] = true;
+    printf(`flags[1]=${flags[1]}\n`);
+
+    // Conditional use straight from the array.
+    if (flags[0]) {
+        printf(`zero is true\n`);
+    }
+
+    // Phase 9.B bonus: `!` prefix operator binds tighter than postfix index.
+    if (!flags[3]) {
+        printf(`three is false\n`);
+    }
+
+    // Count trues in a loop.
+    let i: int32 = 0;
+    let count: int32 = 0;
+    while (i < 4) {
+        if (flags[i]) { count = count + 1; }
+        i = i + 1;
+    }
+    printf(`count=${count}\n`);
+
+    // heap_alloc<bool>
+    let heap: bool[] = heap_alloc(3);
+    heap[0] = true;
+    heap[1] = false;
+    heap[2] = true;
+    printf(`heap=${heap[0]},${heap[1]},${heap[2]}\n`);
+    heap_free(heap);
+
+    // Vec<bool> instantiates and runs the standard collection methods.
+    disposable v: Vec<bool> = vec_new(4);
+    vec_push(ref v, true);
+    vec_push(ref v, false);
+    vec_push(ref v, true);
+    printf(`vec=${vec_get(ref v, 0)},${vec_get(ref v, 1)},${vec_get(ref v, 2)} vlen=${v.len}\n`);
+
+    return 0;
+}

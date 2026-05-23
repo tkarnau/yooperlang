@@ -14,14 +14,19 @@ import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
 import {
   ArrayType,
+  EnumType,
   ErrorType,
   FuncType,
   KindApplication,
   KindType,
+  PrimType,
   RefType,
   StructType,
   TaskType,
   TypeParamType,
+  UnionType,
+  UnsafePtrType,
+  UntypedNullType,
   VoidType,
   primTypeFromName,
   resolveTypeAnnotation,
@@ -42,7 +47,7 @@ import { setGlobalInstantiator } from "./types.js";
 import { formatType, pushError } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
-import { validateFunction, validateMethod } from "./checkStatement.js";
+import { validateFunction, validateMethod, validateModuleInit } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
 import { runKindCheck } from "./kindCheck.js";
 import { TASK_KIND } from "./builtinKinds.js";
@@ -50,6 +55,100 @@ import { TASK_KIND } from "./builtinKinds.js";
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
 // ─── helpers ─────────────────────────────────────────────────────────────────
+
+// Phase 8.A: walks an annotation object (from parser) looking for any
+// `unsafe_ptr` reference. Returns true if any subtree names the type.
+function annotMentionsUnsafePtr(annot) {
+  if (!annot) return false;
+  if (annot.kind === "typeName") return annot.name === "unsafe_ptr";
+  if (annot.kind === "refType") return annotMentionsUnsafePtr(annot.inner);
+  if (annot.kind === "arrayType") return annotMentionsUnsafePtr(annot.elem);
+  if (annot.kind === "taskType") return annotMentionsUnsafePtr(annot.inner);
+  if (annot.kind === "unsafePtrType") return true;
+  if (annot.kind === "typeApplication") {
+    if (annot.name === "unsafe_ptr") return true;
+    return annot.typeArgs.some(annotMentionsUnsafePtr);
+  }
+  return false;
+}
+
+// Phase 8.A: scan the whole AST of a module (which did NOT opt into
+// `import.unsafe;`) for any use of the pointer surface, and emit a clear
+// diagnostic per occurrence. The walker is structural: it visits every key
+// on every plain object, recursing into arrays and child nodes. Cheap
+// enough — we do it once per module before pass C.
+function walkAstForUnsafe(node, errors, visited = new WeakSet()) {
+  if (!node) return;
+  if (typeof node !== "object") return;
+  if (visited.has(node)) return;
+  visited.add(node);
+
+  if (Array.isArray(node)) {
+    for (const item of node) walkAstForUnsafe(item, errors, visited);
+    return;
+  }
+
+  // AST nodes have a `kind` string from ASTNodeKind. Use it to flag the
+  // pointer-introducing node kinds directly.
+  if (typeof node.kind === "string") {
+    switch (node.kind) {
+      case ASTNodeKind.ADDRESS_OF_EXPRESSION:
+        errors.push({
+          message: `'&' (address-of) requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      case ASTNodeKind.DEREF_EXPRESSION:
+        errors.push({
+          message: `'*' pointer dereference requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      case ASTNodeKind.NULL_LITERAL:
+        errors.push({
+          message: `'null' requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      case ASTNodeKind.UNSAFE_PTR_CAST:
+        errors.push({
+          message: `unsafe_ptr cast requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+        break;
+      default:
+        break;
+    }
+  }
+
+  // Type annotations are plain objects with a `kind` like "typeName" /
+  // "typeApplication" / etc. — distinct from AST node kinds. Detect them
+  // via the absence of a sourceLoc-shaped property *and* a string `kind`
+  // that names a primitive/struct type or generic application. Cheap test:
+  // if walking encounters such an object, run annotMentionsUnsafePtr on it.
+  // We attach the error to the nearest enclosing AST node's sourceLoc by
+  // passing it down — but that requires extra plumbing. For an MVP we use
+  // the parent AST node's loc when we recurse from there (handled below).
+
+  for (const key of Object.keys(node)) {
+    if (key === "sourceLoc" || key === "fieldSourceLoc") continue;
+    const child = node[key];
+    if (!child || typeof child !== "object") continue;
+    // Type-annotation slot detection: parser uses `typeAnnotation` field on
+    // bindings/params/fields/returns. Flag once per occurrence with the
+    // enclosing AST node's source location.
+    if (key === "typeAnnotation" || key === "returnTypeAnnotation") {
+      if (annotMentionsUnsafePtr(child)) {
+        errors.push({
+          message: `'unsafe_ptr<T>' requires 'import.unsafe;' at module top`,
+          sourceLoc: node.sourceLoc,
+        });
+      }
+      continue; // annotations don't contain AST nodes; no further recursion
+    }
+    walkAstForUnsafe(child, errors, visited);
+  }
+}
 
 // If decl is an EXPORT_DECL wrapper, unwrap to the inner decl; otherwise
 // return the decl itself.
@@ -62,7 +161,8 @@ function innerDecl(decl) {
 // Resolve a type name within a multi-module context: checks local structs,
 // primitive types, or structs imported via named imports.
 function resolveTypeInModule(name, modId, moduleEnv) {
-  const { structTable, importedNames } = moduleEnv.get(modId);
+  const { structTable, importedNames, enumTable, unionTable } =
+    moduleEnv.get(modId);
   const local = structTable.get(name);
   // If local is a fully-resolved struct (fields !== null), use it.
   // If it's a shell (fields === null, from pass A / import copy), fall through
@@ -70,10 +170,19 @@ function resolveTypeInModule(name, modId, moduleEnv) {
   if (local && local.fields !== null) return local;
   const prim = primTypeFromName(name);
   if (prim) return prim;
+  // Phase 7.5: enum / union nominal lookup. Both are sibling nominal types
+  // alongside struct.
+  const localEnum = enumTable?.get(name);
+  if (localEnum) return localEnum;
+  const localUnion = unionTable?.get(name);
+  if (localUnion) return localUnion;
   const imp = importedNames.get(name);
   if (imp && imp.kind === "type") {
     const srcEnv = moduleEnv.get(imp.fromModuleId);
-    const resolved = srcEnv?.structTable.get(imp.exportName);
+    const resolved =
+      srcEnv?.structTable.get(imp.exportName) ??
+      srcEnv?.enumTable?.get(imp.exportName) ??
+      srcEnv?.unionTable?.get(imp.exportName);
     if (resolved) return resolved;
   }
   return local ?? null;
@@ -121,6 +230,11 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     // Bridge: built-in Task<T> stays a TaskType.
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
+    }
+    // Phase 8.A: built-in unsafe_ptr<T>. Gating is enforced where the
+    // resolved type ends up bound to source (binding/parameter/return/field).
+    if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
+      return UnsafePtrType(argTypes[0]);
     }
     return resolveGenericApplication(annot.name, argTypes, modId, moduleEnv, ctx);
   }
@@ -346,8 +460,40 @@ function formatSig(sig) {
 
 function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   const env = moduleEnv.get(mod.id);
-  const structShell = env.structTable.get(typeDecl.name);
-  if (!structShell) return;
+  // Phase 7.x: for generic structs, build an "open" struct shell by
+  // instantiating the generic decl with its own TypeParamTypes as args.
+  // This yields a StructType whose field slots carry TypeParamType, suitable
+  // for serving as `self` during method-sig resolution and substitution.
+  const isGeneric = !!typeDecl.genericDecl;
+  const typeParamScope = isGeneric ? typeDecl.genericDecl.paramScope : null;
+  let structShell;
+  if (isGeneric) {
+    const gd = typeDecl.genericDecl;
+    // Build a throwaway open StructType to serve as `self` during impl
+    // resolution. We deliberately don't go through the instantiation registry
+    // because (a) we'd cache a frozen shell with empty traits, and (b) the
+    // registry path would then need eviction. The shell only lives long enough
+    // to substitute through trait sigs and stamp methodDecl.resolvedFuncType.
+    const openFields = (gd.genericFields ?? []).map((f) => ({
+      name: f.name,
+      type: f.type,
+      kindType: f.kindType ?? null,
+    }));
+    structShell = StructType(
+      gd.name,
+      openFields,
+      gd.moduleId,
+      [],
+      new Map(),
+      gd.propagatedKinds ?? [],
+      gd.kindApplication ?? null,
+      { declId: gd.id, args: gd.paramNames.map((pn) => gd.paramScope.get(pn)) },
+    );
+    typeDecl.openSelf = structShell;
+  } else {
+    structShell = env.structTable.get(typeDecl.name);
+    if (!structShell) return;
+  }
 
   // Step 1: resolve trait names.
   const resolvedImplements = [];
@@ -460,7 +606,11 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
     if (sigConflict) continue;
 
-    const ctxForMethod = { selfType: structShell };
+    const ctxForMethod = {
+      selfType: structShell,
+      typeParamScope,
+      registry: programState.registry,
+    };
     const params = methodDecl.params.map((p) => {
       const baseType = resolveTypeAnnotationInModule(p.typeAnnotation, mod.id, moduleEnv, ctxForMethod) ?? ErrorType();
       const t = p.isRef ? RefType(baseType) : baseType;
@@ -498,7 +648,19 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     }
   }
 
-  // Step 5: rebuild StructType with implements + methods set.
+  // Step 5: store the resolved impl info.
+  if (isGeneric) {
+    // For generic decls, stash impls + methods on the genericDecl so
+    // subsequent instantiateStruct calls produce concrete instances carrying
+    // implementsTraits + methods. instantiateStruct reads these fields when
+    // building each StructType (see instantiate.js).
+    typeDecl.genericDecl.implementsTraits = resolvedImplements;
+    typeDecl.genericDecl.methods = resolvedMethods;
+    for (const m of typeDecl.methods ?? []) {
+      m.implementingType = structShell;
+    }
+    return;
+  }
   // Phase 6.5: preserve propagatedKinds + kindApplication from the C-pass type.
   const prev = typeDecl.resolvedType;
   const fullStruct = StructType(
@@ -603,6 +765,10 @@ function resolveKindClauses(mod, moduleEnv, errors) {
           layoutSeen = true;
           const slot = resolveLayoutAlign(c.alignExpr, kt, errors);
           if (slot) kt.layoutAlign = slot;
+          // Phase 8.B: store the abi "C" marker. Currently contractual —
+          // no downstream consumer yet, but persisted so future codegen /
+          // ABI-validation passes can read it off the resolved kind.
+          if (c.abiC) kt.layoutAbiC = true;
           break;
         }
       }
@@ -902,6 +1068,115 @@ export function effectiveLayoutAlign(app) {
   return null;
 }
 
+// Builtin generic functions — `heap_alloc<T>(n: usize): T[]` and
+// `heap_free<T>(a: T[])`. These are not user-declared; they are registered
+// into every module's genericFuncTable so call-site inference + instantiation
+// flow through the existing Phase 7.1 path. Codegen intercepts by `declId`
+// (see codegen.js) and emits malloc/free directly without a body clone.
+//
+// Built once per program so the instantiation registry caches across modules.
+function makeBuiltinGenericFuncs() {
+  const allocDeclId = "$builtin__heap_alloc";
+  const allocT = new TypeParamType("T", allocDeclId);
+  const allocSig = FuncType(
+    [{ name: "n", type: PrimType("usize"), isRef: false }],
+    ArrayType(allocT),
+  );
+  const heapAlloc = {
+    id: allocDeclId,
+    name: "heap_alloc",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", allocT]]),
+    genericSig: allocSig,
+    ast: null,
+    isBuiltin: true,
+  };
+
+  const freeDeclId = "$builtin__heap_free";
+  const freeT = new TypeParamType("T", freeDeclId);
+  const freeSig = FuncType(
+    [{ name: "a", type: ArrayType(freeT), isRef: false }],
+    VoidType(),
+  );
+  const heapFree = {
+    id: freeDeclId,
+    name: "heap_free",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", freeT]]),
+    genericSig: freeSig,
+    ast: null,
+    isBuiltin: true,
+  };
+
+  // Phase 8.H: string_as_bytes(s: string): uint8[]
+  // Zero-copy view of a string's UTF-8 bytes as a fat-pointer array.
+  // Sharing the string's storage; the view does not outlive the string.
+  const asBytesDeclId = "$builtin__string_as_bytes";
+  const stringAsBytes = {
+    id: asBytesDeclId,
+    name: "string_as_bytes",
+    moduleId: "$builtin",
+    paramNames: [],
+    paramScope: new Map(),
+    genericSig: FuncType(
+      [{ name: "s", type: PrimType("string"), isRef: false }],
+      ArrayType(PrimType("uint8")),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  // Phase 8.H: string_from_bytes_unchecked(buf: uint8[]): string
+  // Copies buf into a fresh malloc'd string, writes a nul terminator. Does
+  // NOT validate UTF-8 — that's the wrapping `string_from_bytes` function's
+  // job (lives in std/core/strings.yoop). This intrinsic is the building
+  // block; user code should generally prefer the validating wrapper.
+  const fromBytesDeclId = "$builtin__string_from_bytes_unchecked";
+  const stringFromBytesUnchecked = {
+    id: fromBytesDeclId,
+    name: "string_from_bytes_unchecked",
+    moduleId: "$builtin",
+    paramNames: [],
+    paramScope: new Map(),
+    genericSig: FuncType(
+      [{ name: "buf", type: ArrayType(PrimType("uint8")), isRef: false }],
+      PrimType("string"),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  // Phase 8.H: array_slice<T>(xs: T[], start: usize, end: usize): T[]
+  // Returns a borrowing fat-pointer view {xs.ptr + start, end - start}.
+  // No allocation. Caller is responsible for keeping the parent alive.
+  // Matches the naming convention "_slice = view" from the intrinsics
+  // index (see plans/phase-8-h-string-bytes-vec.md).
+  const sliceDeclId = "$builtin__array_slice";
+  const sliceT = new TypeParamType("T", sliceDeclId);
+  const sliceSig = FuncType(
+    [
+      { name: "xs", type: ArrayType(sliceT), isRef: false },
+      { name: "start", type: PrimType("usize"), isRef: false },
+      { name: "end", type: PrimType("usize"), isRef: false },
+    ],
+    ArrayType(sliceT),
+  );
+  const arraySlice = {
+    id: sliceDeclId,
+    name: "array_slice",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", sliceT]]),
+    genericSig: sliceSig,
+    ast: null,
+    isBuiltin: true,
+  };
+
+  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked];
+}
+
 // ─── multi-module entry point ─────────────────────────────────────────────────
 
 // typecheckProgram(modules) — main entry for multi-file compilation.
@@ -917,6 +1192,10 @@ export function typecheckProgram(modules) {
   // Wire the registry-aware instantiator so substituteTypeParams can
   // re-instantiate open generic struct types into their concrete forms.
   setGlobalInstantiator(makeInstantiator(programState.registry));
+
+  // Build builtin generic func decls once and reuse across all modules so
+  // the instantiation registry caches by a stable declId.
+  const builtinGenericFuncs = makeBuiltinGenericFuncs();
 
   // Phase 7.2: install the bound checker. Every instantiate*() that hits the
   // cache for the first time calls back here with each bounded (param, arg)
@@ -939,6 +1218,7 @@ export function typecheckProgram(modules) {
 
   // pass A: register struct shells so cross-module struct refs work in pass B
   for (const mod of modules) {
+    const errStart = errors.length;
     const localSymbols = new Map();
     const structTable = new Map();
     const exports = new Set();
@@ -951,12 +1231,59 @@ export function typecheckProgram(modules) {
     const genericStructTable = new Map();
     const genericFuncTable = new Map();
     const genericTraitTable = new Map();
+    // Phase 7.5: enum / union tables. Like structTable, these hold a "shell"
+    // value after pass A and are populated with field types in pass C.
+    const enumTable = new Map();
+    const unionTable = new Map();
     // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
     // the kind-name that pairs with the built-in `Task<T>` type.
     kindTable.set("Task", TASK_KIND);
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
+      // Phase 7.5: register an enum shell so pass C can resolve variant fields.
+      // Generic enums are not yet supported — reject at parse-time complement.
+      if (d.kind === ASTNodeKind.ENUM_DECL) {
+        if (d.typeParams && d.typeParams.length > 0) {
+          errors.push({
+            message: `generic enums are not yet supported (deferred)`,
+            sourceLoc: d.sourceLoc,
+          });
+          continue;
+        }
+        if (
+          enumTable.has(d.name) ||
+          structTable.has(d.name) ||
+          unionTable.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of type "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          // Shell — variants Map left empty; pass C populates fields.
+          enumTable.set(d.name, EnumType(d.name, new Map(), mod.id));
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+        continue;
+      }
+      if (d.kind === ASTNodeKind.UNION_DECL) {
+        if (
+          enumTable.has(d.name) ||
+          structTable.has(d.name) ||
+          unionTable.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of type "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          // Shell — fields filled in pass C.
+          unionTable.set(d.name, UnionType(d.name, [], mod.id));
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+        continue;
+      }
       if (d.kind === ASTNodeKind.TYPE_DECL) {
         const hasTypeParams = d.typeParams && d.typeParams.length > 0;
         if (hasTypeParams) {
@@ -1154,6 +1481,41 @@ export function typecheckProgram(modules) {
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
+
+      // Phase 8.E: register module-level let/const shells so cross-module
+      // imports and intra-module references can find the name in pass B/C.
+      // The real type is resolved in pass C; the initializer is checked in
+      // pass D.0. The decl itself is stashed onto `mod.moduleInitDecls` so
+      // codegen (and a future CTE pass) can find them in source order
+      // without re-walking the AST.
+      if (
+        (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
+        d.isModuleLevel
+      ) {
+        if (localSymbols.has(d.name)) {
+          errors.push({
+            message: `redeclaration of "${d.name}" at module top`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          // Shell: ErrorType placeholder until pass C resolves the
+          // annotation. Marker fields signal "this is a module global"
+          // to lookups + codegen.
+          localSymbols.set(d.name, ErrorType());
+          d.isModuleGlobal = true;
+          d.moduleGlobalSym = `${mod.id}__${d.name}`;
+          if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+        }
+      }
+    }
+
+    // Insert builtin generic funcs after user decls so a user-defined function
+    // with the same name cleanly shadows. lookupGenericFunc checks the local
+    // table first, so this is a no-op when a user has redeclared.
+    for (const bi of builtinGenericFuncs) {
+      if (!genericFuncTable.has(bi.name)) {
+        genericFuncTable.set(bi.name, bi);
+      }
     }
 
     moduleEnv.set(mod.id, {
@@ -1167,18 +1529,37 @@ export function typecheckProgram(modules) {
       genericStructTable,
       genericFuncTable,
       genericTraitTable,
+      enumTable,
+      unionTable,
+      // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
+      allowsUnsafe: !!mod.ast.allowsUnsafe,
     });
+    stampModuleId(errors, errStart, mod.id);
   }
 
   // pass B: wire imports (so pass C can resolve cross-module type names)
   for (const mod of modules) {
+    const errStart = errors.length;
     resolveImports(mod, moduleEnv, errors);
+    stampModuleId(errors, errStart, mod.id);
+  }
+
+  // Phase 8.A: `import.unsafe;` gating pass — scan each non-unsafe module
+  // for any unsafe_ptr type annotation, address-of/deref/null/cast node, and
+  // surface a precise diagnostic. Cheap recursive walk; runs once per module.
+  for (const mod of modules) {
+    const env = moduleEnv.get(mod.id);
+    if (env?.allowsUnsafe) continue;
+    const errStart = errors.length;
+    walkAstForUnsafe(mod.ast, errors);
+    stampModuleId(errors, errStart, mod.id);
   }
 
   // pass C: struct fields + function sigs + extern decls
   for (const mod of modules) {
+    const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
-    const { localSymbols, structTable, exports, traitTable } = env;
+    const { localSymbols, structTable, exports, traitTable, enumTable, unionTable } = env;
     // Default ctx (no typeParamScope, registry always available).
     const baseCtx = () => ({ registry: programState.registry });
     // ctx for a generic decl body — adds the type-param scope.
@@ -1234,6 +1615,26 @@ export function typecheckProgram(modules) {
           });
         }
         gd.genericFields = genericFields;
+        // Phase 7.x: resolve `propagates<K, ...>` on the generic struct decl
+        // and stash on the genericDecl so each instantiation inherits the
+        // propagatedKinds. Mirrors the non-generic branch below.
+        if (d.propagatesClause) {
+          const env2 = moduleEnv.get(mod.id);
+          const propagatedKinds = [];
+          for (const ref of d.propagatesClause.kindNames) {
+            const app = resolveKindAppFromPropagatesEntry(ref, env2, errors);
+            if (!app) continue;
+            if (propagatedKinds.some((a) => a.kindType === app.kindType)) {
+              errors.push({
+                message: `duplicate kind '${ref.name}' in propagates clause of struct "${d.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            propagatedKinds.push(app);
+          }
+          gd.propagatedKinds = propagatedKinds;
+        }
         // Don't continue — fall through to skip the regular TYPE_DECL handler
         // below by checking d.genericDecl there.
       }
@@ -1357,6 +1758,98 @@ export function typecheckProgram(modules) {
         );
         d.resolvedType = fullType;
         structTable.set(d.name, fullType);
+      }
+
+      // Phase 7.5: resolve enum variant fields.
+      if (d.kind === ASTNodeKind.ENUM_DECL) {
+        const variants = new Map();
+        let ordinal = 0;
+        for (const variantNode of d.variants ?? []) {
+          let resolvedFields = null;
+          if (variantNode.fields !== null) {
+            resolvedFields = [];
+            const seenFieldNames = new Set();
+            for (const f of variantNode.fields) {
+              if (seenFieldNames.has(f.name)) {
+                errors.push({
+                  message: `duplicate field "${f.name}" in variant "${variantNode.name}" of enum "${d.name}"`,
+                  sourceLoc: f.sourceLoc,
+                });
+                continue;
+              }
+              seenFieldNames.add(f.name);
+              let ft = resolveTypeAnnotationInModule(
+                f.typeAnnotation,
+                mod.id,
+                moduleEnv,
+                baseCtx(),
+              );
+              if (!ft) {
+                errors.push({
+                  message: `unknown type "${formatAnnotation(f.typeAnnotation)}" in variant "${variantNode.name}" of enum "${d.name}"`,
+                  sourceLoc: f.sourceLoc,
+                });
+                ft = ErrorType();
+              }
+              resolvedFields.push({ name: f.name, type: ft });
+            }
+          }
+          variants.set(variantNode.name, {
+            name: variantNode.name,
+            fields: resolvedFields,
+            ordinal,
+          });
+          variantNode.ordinal = ordinal;
+          ordinal++;
+        }
+        const fullEnum = EnumType(d.name, variants, mod.id);
+        d.resolvedType = fullEnum;
+        enumTable.set(d.name, fullEnum);
+      }
+
+      // Phase 7.5: resolve union field types.
+      if (d.kind === ASTNodeKind.UNION_DECL) {
+        const fields = [];
+        const seenNames = new Set();
+        for (const f of d.fields ?? []) {
+          if (seenNames.has(f.name)) {
+            errors.push({
+              message: `duplicate field "${f.name}" in union "${d.name}"`,
+              sourceLoc: f.sourceLoc,
+            });
+            continue;
+          }
+          seenNames.add(f.name);
+          let ft = resolveTypeAnnotationInModule(
+            f.typeAnnotation,
+            mod.id,
+            moduleEnv,
+            baseCtx(),
+          );
+          if (!ft) {
+            errors.push({
+              message: `unknown type "${formatAnnotation(f.typeAnnotation)}" in union "${d.name}"`,
+              sourceLoc: f.sourceLoc,
+            });
+            ft = ErrorType();
+          }
+          // Reject fields with disallowed layouts (refs/arrays/tasks/kinds
+          // mix poorly with raw bit-reinterpretation; structs and prims are
+          // fine).
+          if (
+            ft.kind === typeKinds.task ||
+            ft.kind === typeKinds.ref
+          ) {
+            errors.push({
+              message: `union field "${f.name}" has type ${formatAnnotation(f.typeAnnotation)} — refs and Tasks are not allowed in unions`,
+              sourceLoc: f.sourceLoc,
+            });
+          }
+          fields.push({ name: f.name, type: ft });
+        }
+        const fullUnion = UnionType(d.name, fields, mod.id);
+        d.resolvedType = fullUnion;
+        unionTable.set(d.name, fullUnion);
       }
 
       // function signatures
@@ -1633,9 +2126,56 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TYPE_DECL || !d.implements?.length) continue;
-      if (d.genericDecl) continue; // generic struct impls deferred
+      // Phase 7.x: generic structs now support `implements Trait`. validateImplBlock
+      // routes to the open-self code path when d.genericDecl is set. Note: this
+      // runs *after* struct field resolution in pass C, so a struct field that
+      // references DynArray<int32> in the same module would have already been
+      // cached with empty implementsTraits. The current playground demo doesn't
+      // hit this case; broader use will need a pre-pass before field resolution.
       validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
+
+    // Phase 8.E: pass C.4 - resolve module-level let/const declared-type
+    // annotations and stash the decls onto mod.moduleInitDecls in source
+    // order. The initializer expressions are typechecked in pass D.0 once
+    // every function signature in this module has resolved (so initializers
+    // may freely call functions defined in the same module).
+    //
+    // (Bytecode/CTE future) — mod.moduleInitDecls is the natural input to
+    // a future compile-time evaluator: each entry has a resolved type on
+    // the decl, an unresolved `.assignment` AST, and a stable order.
+    mod.moduleInitDecls = [];
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (
+        (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
+        d.isModuleLevel
+      ) {
+        const declaredType =
+          resolveTypeAnnotationInModule(
+            d.typeAnnotation,
+            mod.id,
+            moduleEnv,
+            baseCtx(),
+          ) ?? null;
+        if (!declaredType) {
+          errors.push({
+            message: `unknown type "${formatAnnotation(d.typeAnnotation)}" on module-level "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+          d.resolvedType = ErrorType();
+        } else {
+          d.resolvedType = declaredType;
+          // Update the previously-installed shell with the real type.
+          env.localSymbols.set(d.name, declaredType);
+        }
+        mod.moduleInitDecls.push(d);
+      }
+    }
+    // Mirror onto env so resolve-assignment-to-module-global (which only has
+    // the typeContext) can find the decl list without re-walking the AST.
+    env.moduleInitDecls = mod.moduleInitDecls;
+    stampModuleId(errors, errStart, mod.id);
   }
 
   // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.
@@ -1668,6 +2208,7 @@ export function typecheckProgram(modules) {
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
   for (const mod of modules) {
+    const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
     const { localSymbols, structTable, importedNames, kindTable, traitTable } = env;
     const typeContext = {
@@ -1685,7 +2226,33 @@ export function typecheckProgram(modules) {
       genericFuncTable: env.genericFuncTable,
       genericStructTable: env.genericStructTable,
       genericTraitTable: env.genericTraitTable,
+      // Phase 7.5: enum and union nominal tables.
+      enumTable: env.enumTable,
+      unionTable: env.unionTable,
+      // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
+      allowsUnsafe: env.allowsUnsafe,
+      // Phase 8.A: callback that resolves a parser-emitted type annotation
+      // to a Type in this module's scope. Used by expression-level type-arg
+      // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`).
+      resolveTypeAnnotation: (annot) =>
+        resolveTypeAnnotationInModule(annot, mod.id, moduleEnv, {
+          registry: programState.registry,
+        }),
     };
+
+    // Phase 8.E: pass D.0 — typecheck module-level let/const initializers.
+    // Runs before function bodies because module globals' types are needed
+    // by IDENT resolution inside function bodies. Inits may freely call
+    // functions defined in this module (their sigs were resolved in pass C).
+    //
+    // (Bytecode/CTE future) — each call to checkInitializer here is a
+    // discrete unit a future evaluator could intercept: if the init expr
+    // is purely constant-evaluable, emit the LLVM @global with the
+    // computed value and drop this decl from the runtime init function.
+    for (const d of mod.moduleInitDecls ?? []) {
+      if (d.resolvedType?.kind === typeKinds.error) continue;
+      validateModuleInit(d, typeContext, errors);
+    }
 
     // pass D.1: validate all functions and methods (populates resolvedKindType on params)
     for (const decl of mod.ast.body) {
@@ -1697,9 +2264,18 @@ export function typecheckProgram(modules) {
           ? { ...typeContext, typeParamScope: d.genericDecl.paramScope }
           : typeContext;
         validateFunction(d, tcForFn, errors);
-      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
-        for (const method of d.methods) {
-          validateMethod(method, d.resolvedType, typeContext, errors);
+      } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0) {
+        // Phase 7.x: generic struct methods are typechecked once against the
+        // open self (with TypeParamType fields), then cloned + substituted per
+        // instantiation at codegen time.
+        const tcForMethod = d.genericDecl
+          ? { ...typeContext, typeParamScope: d.genericDecl.paramScope }
+          : typeContext;
+        const selfShell = d.genericDecl ? d.openSelf : d.resolvedType;
+        if (selfShell) {
+          for (const method of d.methods) {
+            validateMethod(method, selfShell, tcForMethod, errors);
+          }
         }
       }
     }
@@ -1713,20 +2289,34 @@ export function typecheckProgram(modules) {
       }
     }
 
-    // pass D.2: run kind check (escape analysis) now that all param kinds are resolved
+    // pass D.2: run kind check (escape analysis) now that all param kinds are resolved.
+    // Generic function decls are included — kindCheck operates on the open
+    // (TypeParamType-bearing) body since the obligations it stamps onto AST
+    // nodes (pendingCleanups, implicitCleanups) are preserved by the
+    // per-instance `cloneAstWithSubstitution` walk in codegen.
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
-      if (d.kind === ASTNodeKind.FUNCTION_DECL && !d.genericDecl) {
-        runKindCheck(d, errors, funcDeclTable);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+        runKindCheck(d, errors, funcDeclTable, programState.registry);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
-          runKindCheck(method, errors, funcDeclTable);
+          runKindCheck(method, errors, funcDeclTable, programState.registry);
         }
       }
     }
+    stampModuleId(errors, errStart, mod.id);
   }
 
   return { modules, errors, moduleEnv, programState };
+}
+
+// Stamp `moduleId` onto error records added to `errors` since `startIdx`.
+// Used by typecheckProgram to attribute errors to the module being processed
+// without threading moduleId through every pushError call site.
+function stampModuleId(errors, startIdx, moduleId) {
+  for (let i = startIdx; i < errors.length; i++) {
+    if (errors[i].moduleId === undefined) errors[i].moduleId = moduleId;
+  }
 }
 
 // ─── single-module entry point (legacy + test path) ──────────────────────────
@@ -1742,6 +2332,18 @@ export function typecheck(ast) {
     moduleEnv: null,
     kindTable: new Map(),
   };
+  // Phase 8.A: expose a thin resolver hook so expression-level type-arg
+  // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`) can
+  // resolve their explicit type arguments.
+  typeContext.resolveTypeAnnotation = (annot) =>
+    resolveTypeAnnotation(annot, structTable, { typeParamScope: null });
+  // Phase 8.A: gating — single-module path mirrors the typecheckProgram
+  // walker. Modules that didn't opt into `import.unsafe;` cannot mention
+  // any pointer surface.
+  typeContext.allowsUnsafe = !!ast.allowsUnsafe;
+  if (!ast.allowsUnsafe) {
+    walkAstForUnsafe(ast, errors);
+  }
 
   // pass 1: struct shells
   for (const decl of ast.body) {

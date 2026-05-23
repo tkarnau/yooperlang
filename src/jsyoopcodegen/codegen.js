@@ -4,6 +4,7 @@ import { parse } from "../jsyooparser/parser.js";
 import { typecheck, typecheckProgram } from "../jsyooptypecheck/typecheck.js";
 import { ASTNodeKind } from "../contracts.js";
 import {
+  ArrayType,
   PrimType,
   VoidType,
   castInstruction,
@@ -17,6 +18,7 @@ import { strippedTypeOf } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
 import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
+import { createDebugInfo, annotateLinesWithDbg } from "./debugInfo.js";
 
 // yooperlang type names -> LLVM IR type names
 const LLVM_TYPES = {
@@ -31,6 +33,7 @@ const LLVM_TYPES = {
   uint64: "i64",
   usize: "i64",
   isize: "i64",
+  uintptr: "i64",
   float: "float",
   float32: "float",
   float64: "double",
@@ -53,6 +56,13 @@ const RUNTIME_DECLARES = [
   "declare void @yoop_task_release(ptr)",
   "declare void @yoop_handle_signal_done(ptr)",
   "declare void @yoop_task_free_sync_pair(ptr)",
+  "declare ptr @malloc(i64)",
+  "declare void @free(ptr)",
+  "declare ptr @memcpy(ptr, ptr, i64)",
+  // Phase 8.D: errno bridge — see runtime/yoop_runtime.c
+  "declare i32 @yoop_errno_get()",
+  "declare void @yoop_errno_set(i32)",
+  "declare ptr @yoop_errno_message(i32)",
 ];
 
 export function llvmType(yoopType) {
@@ -76,6 +86,19 @@ export function llvmType(yoopType) {
     case typeKinds.task: {
       // SSA values of Task<T> are pointers; the per-task struct definition
       // lives in codegen state, not in the type-system.
+      return "ptr";
+    }
+    case typeKinds.enum: {
+      const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
+      return `%enum.${id}`;
+    }
+    case typeKinds.union: {
+      const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
+      return `%union.${id}`;
+    }
+    case typeKinds.unsafePtr: {
+      // Phase 8.A: LLVM opaque pointers. The pointee type is tracked in the
+      // yoop type but never appears in the LLVM type signature.
       return "ptr";
     }
     default: {
@@ -213,6 +236,43 @@ function encodeStringBytes(inner) {
   bytes += "\\00";
   byteLen++;
   return { llvmStr: bytes, byteLen };
+}
+
+// LLVM gotcha: only allocas in a function's entry block are "static" and
+// released as part of the prologue/epilogue. An alloca emitted in any other
+// block becomes a *dynamic* alloca — it adjusts the stack pointer at runtime
+// and that adjustment isn't undone until the whole function returns. So an
+// alloca inside a loop body leaks stack on every iteration. For long-running
+// main loops (e.g. an SDL render loop) this eventually overflows the stack.
+//
+// Every Yoop alloca has a compile-time-constant size and depends on no prior
+// SSA value, so unconditionally moving them into the entry block is safe and
+// matches the canonical LLVM idiom.
+function hoistAllocasToEntry(fnLines) {
+  // fnLines[0] is `define ... {`, fnLines[1] is `entry:`. Find the entry
+  // block's terminator (the first br/ret/unreachable/switch/invoke after the
+  // entry label) and lift any alloca that appears past it into a position
+  // right before that terminator. Inserting before the label of the next
+  // block instead would land *between* the terminator and that label — which
+  // is invalid IR.
+  const terminatorRe = /^\s+(br|ret|unreachable|switch|resume|invoke)\b/;
+  let entryTerm = -1;
+  for (let i = 2; i < fnLines.length; i++) {
+    if (terminatorRe.test(fnLines[i])) { entryTerm = i; break; }
+  }
+  if (entryTerm === -1) return;
+
+  const allocaRe = /^\s+%\S+\s*=\s*alloca\b/;
+  const hoisted = [];
+  for (let i = fnLines.length - 1; i > entryTerm; i--) {
+    if (allocaRe.test(fnLines[i])) {
+      hoisted.push(fnLines[i]);
+      fnLines.splice(i, 1);
+    }
+  }
+  if (hoisted.length === 0) return;
+  hoisted.reverse();
+  fnLines.splice(entryTerm, 0, ...hoisted);
 }
 
 export function codegen(ast) {
@@ -492,6 +552,85 @@ export function codegen(ast) {
   // Names of extern functions in the current module — not mangled.
   let currentExternNames = new Set();
 
+  // Phase 8.A: pointer-arithmetic / pointer-comparison emitter. Called by
+  // BINARY_EXPRESSION when at least one operand is an unsafe_ptr<T> or null.
+  function emitPointerBinary(node, fnLines) {
+    const op = node.op;
+    if (op === "eqeq" || op === "neq") {
+      const l = emitExpr(node.left, fnLines);
+      const r = emitExpr(node.right, fnLines);
+      const cond = op === "eqeq" ? "eq" : "ne";
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = icmp ${cond} ptr ${l.val}, ${r.val}`);
+      return { val: tmp, yoopType: PrimType("bool") };
+    }
+    if (op === "plus" || op === "minus") {
+      const leftIsPtr =
+        node.left.resolvedType?.kind === typeKinds.unsafePtr;
+      const rightIsPtr =
+        node.right.resolvedType?.kind === typeKinds.unsafePtr;
+      // ptr - ptr: ptrtoint both, sub, sdiv by sizeof(pointee).
+      if (leftIsPtr && rightIsPtr && op === "minus") {
+        const l = emitExpr(node.left, fnLines);
+        const r = emitExpr(node.right, fnLines);
+        const li = freshTemp();
+        const ri = freshTemp();
+        fnLines.push(`  ${li} = ptrtoint ptr ${l.val} to i64`);
+        fnLines.push(`  ${ri} = ptrtoint ptr ${r.val} to i64`);
+        const diff = freshTemp();
+        fnLines.push(`  ${diff} = sub i64 ${li}, ${ri}`);
+        const pointee = node.left.resolvedType.pointee;
+        const elemLlvmTy = llvmType(pointee);
+        const sizeofTmp = freshTemp();
+        // `getelementptr <T>, ptr null, i32 1` gives sizeof(T) — standard trick.
+        fnLines.push(
+          `  ${sizeofTmp} = getelementptr ${elemLlvmTy}, ptr null, i32 1`,
+        );
+        const sizeInt = freshTemp();
+        fnLines.push(`  ${sizeInt} = ptrtoint ptr ${sizeofTmp} to i64`);
+        const out = freshTemp();
+        fnLines.push(`  ${out} = sdiv i64 ${diff}, ${sizeInt}`);
+        return { val: out, yoopType: PrimType("int64") };
+      }
+      // ptr +/- int (or int + ptr): emit GEP.
+      const ptrSide = leftIsPtr ? node.left : node.right;
+      const intSide = leftIsPtr ? node.right : node.left;
+      const ptrVal = emitExpr(ptrSide, fnLines);
+      const intVal = emitExpr(intSide, fnLines);
+      const pointee = ptrSide.resolvedType.pointee;
+      const elemLlvmTy = llvmType(pointee);
+      // For `p - n`, negate the offset.
+      let offsetVal = intVal.val;
+      let offsetLlvmTy = llvmType(intVal.yoopType);
+      if (
+        intVal.yoopType.kind === typeKinds.untypedInt ||
+        (intVal.yoopType.kind === typeKinds.prim &&
+          intVal.yoopType.name !== "int64")
+      ) {
+        // Widen non-int64 offsets to i64 for GEP. Sign-extend for signed
+        // ints, zero-extend for unsigned — defer that nuance, sext is fine
+        // for the integer ranges typical of FFI offsets.
+        if (offsetLlvmTy !== "i64") {
+          const widened = freshTemp();
+          fnLines.push(`  ${widened} = sext ${offsetLlvmTy} ${offsetVal} to i64`);
+          offsetVal = widened;
+          offsetLlvmTy = "i64";
+        }
+      }
+      if (op === "minus") {
+        const neg = freshTemp();
+        fnLines.push(`  ${neg} = sub i64 0, ${offsetVal}`);
+        offsetVal = neg;
+      }
+      const out = freshTemp();
+      fnLines.push(
+        `  ${out} = getelementptr ${elemLlvmTy}, ptr ${ptrVal.val}, i64 ${offsetVal}`,
+      );
+      return { val: out, yoopType: ptrSide.resolvedType };
+    }
+    throw new Error(`codegen: unsupported pointer binary op "${op}"`);
+  }
+
   // ** expression codegen ************************************************
   // each emitExpr returns { val, yoopType } where val is an SSA name or
   // an integer literal, and yoopType is the canonical yooper type.
@@ -566,6 +705,17 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // Phase 8.A: pointer arithmetic and pointer/null comparisons branch
+        // off the integer/float path. Detect via operand resolvedType.
+        const leftTy = node.left.resolvedType;
+        const rightTy = node.right.resolvedType;
+        const leftIsPtr = leftTy?.kind === typeKinds.unsafePtr;
+        const rightIsPtr = rightTy?.kind === typeKinds.unsafePtr;
+        const leftIsNull = leftTy?.kind === typeKinds.untypedNull;
+        const rightIsNull = rightTy?.kind === typeKinds.untypedNull;
+        if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
+          return emitPointerBinary(node, fnLines);
+        }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const resultType = node.resolvedType;
@@ -577,6 +727,89 @@ export function codegen(ast) {
         const instr = binaryInstruction(node.op, opType);
         fnLines.push(`  ${tmp} = ${instr} ${llvmTy} ${l.val}, ${r.val}`);
         return { val: tmp, yoopType: resultType };
+      }
+
+      case ASTNodeKind.NULL_LITERAL: {
+        // Phase 8.A: pinned to UnsafePtrType by the typechecker via
+        // resolvedType. The LLVM constant for any pointer null is `null`.
+        return { val: "null", yoopType: node.resolvedType };
+      }
+
+      case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
+        // Phase 8.A: lvalue-only operand; reuse emitLvalue to materialize
+        // the address. The yoop result type is unsafe_ptr<T>.
+        const lv = emitLvalue(node.operand, fnLines);
+        return { val: lv.ptr, yoopType: node.resolvedType };
+      }
+
+      case ASTNodeKind.DEREF_EXPRESSION: {
+        // Phase 8.A: rvalue load through an unsafe_ptr<T>.
+        const p = emitExpr(node.operand, fnLines);
+        const pointee = node.resolvedType;
+        const llvmTy = llvmType(pointee);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${p.val}`);
+        return { val: tmp, yoopType: pointee };
+      }
+
+      case ASTNodeKind.ERRNO_INTRINSIC: {
+        // Phase 8.D: lower to runtime helpers in yoop_runtime.c.
+        if (node.op === "get") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call i32 @yoop_errno_get()`);
+          return { val: tmp, yoopType: PrimType("int32") };
+        }
+        if (node.op === "set") {
+          const arg = emitExpr(node.operand, fnLines);
+          fnLines.push(`  call void @yoop_errno_set(i32 ${arg.val})`);
+          return { val: "", yoopType: VoidType() };
+        }
+        if (node.op === "message") {
+          const arg = emitExpr(node.operand, fnLines);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call ptr @yoop_errno_message(i32 ${arg.val})`);
+          return { val: tmp, yoopType: PrimType("string") };
+        }
+        throw new Error(`codegen: unknown errno intrinsic "${node.op}"`);
+      }
+
+      case ASTNodeKind.UNSAFE_PTR_CAST: {
+        // Phase 8.A: bitcast / ptrtoint / inttoptr.
+        const operand = emitExpr(node.operand, fnLines);
+        if (node.castKind === "bitcast") {
+          return { val: operand.val, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toInt") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = ptrtoint ptr ${operand.val} to i64`);
+          return { val: tmp, yoopType: PrimType("uintptr") };
+        }
+        if (node.castKind === "fromInt") {
+          const tmp = freshTemp();
+          const srcLlvmTy = llvmType(operand.yoopType);
+          fnLines.push(`  ${tmp} = inttoptr ${srcLlvmTy} ${operand.val} to ptr`);
+          return { val: tmp, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toArray") {
+          // Phase 8.C: build a fat-pointer view {data: operand, len: lenVal}.
+          // No copy — the array borrows the underlying memory.
+          const arrayType = node.resolvedType;
+          ensureArrayTypeDef(arrayType.elem);
+          const arrayLlvmTy = llvmType(arrayType);
+          const len = emitExpr(node.lengthOperand, fnLines);
+          const fatSlot = freshTemp();
+          fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+          fnLines.push(`  store ptr ${operand.val}, ptr ${dataField}`);
+          const lenField = freshTemp();
+          fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+          fnLines.push(`  store i64 ${len.val}, ptr ${lenField}`);
+          const fatVal = freshTemp();
+          fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+          return { val: fatVal, yoopType: arrayType };
+        }
+        throw new Error(`codegen: unknown unsafe_ptr cast kind "${node.castKind}"`);
       }
 
       case ASTNodeKind.UNARY_EXPRESSION: {
@@ -645,6 +878,16 @@ export function codegen(ast) {
           fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
           return rhs;
         }
+        if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+          // Phase 8.A: `*p = v` — store through an unsafe_ptr<T>.
+          const ptrExpr = emitExpr(node.target.operand, fnLines);
+          const rhs = emitExpr(node.value, fnLines);
+          const pointee = node.target.resolvedType;
+          fnLines.push(
+            `  store ${llvmType(pointee)} ${rhs.val}, ptr ${ptrExpr.val}`,
+          );
+          return rhs;
+        }
         throw new Error(
           `codegen: unsupported assignment target kind "${node.target.kind}"`,
         );
@@ -673,6 +916,16 @@ export function codegen(ast) {
           const lenVal = freshTemp();
           fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
           return { val: lenVal, yoopType: PrimType("usize") };
+        }
+        // Phase 8.C: `xs.ptr` — GEP field 0 of the fat pointer, load.
+        if (node.isArrayPtr) {
+          const lv = emitLvalue(node.object, fnLines);
+          const arrayLlvmTy = llvmType(lv.type);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${lv.ptr}, i32 0, i32 0`);
+          const dataVal = freshTemp();
+          fnLines.push(`  ${dataVal} = load ptr, ptr ${dataField}`);
+          return { val: dataVal, yoopType: node.resolvedType };
         }
         const lv = emitLvalue(node, fnLines);
         const llvmTy = llvmType(lv.type);
@@ -1248,6 +1501,7 @@ export function codegen(ast) {
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
   }
 
@@ -1280,6 +1534,9 @@ export function codegen(ast) {
     // copy params into stack slots so they're addressable like locals
     for (const p of params) {
       const ty = p.resolvedType;
+      // Phase 8.H: ensure %yoop_array.<T> is emitted for array-typed params,
+      // since the alloca below names that struct type.
+      if (ty.kind === typeKinds.array) ensureArrayTypeDef(ty.elem);
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
       const align = effectiveAlign(ty, p.resolvedKindApplication);
@@ -1299,6 +1556,7 @@ export function codegen(ast) {
     }
 
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
     inMainFn = prevInMain;
   }
@@ -1475,6 +1733,14 @@ function needsStrlen(node) {
         return;
       }
     }
+    // Phase 8.H: string_as_bytes calls strlen internally.
+    if (
+      n.kind === ASTNodeKind.CALL_EXPRESSION &&
+      n.genericInstantiation?.declId === "$builtin__string_as_bytes"
+    ) {
+      found = true;
+      return;
+    }
     for (const val of Object.values(n)) {
       if (Array.isArray(val)) val.forEach(walk);
       else if (val && typeof val === "object" && val.kind) walk(val);
@@ -1498,9 +1764,125 @@ export function alignOf(llvmTy) {
   return 8; // ptr
 }
 
+// Phase 7.5: rough byte size of a yoop type, for sizing union and enum
+// payloads. Mirrors `alignOf` — only uses natural sizes and assumes packed
+// layout (LLVM will round up to alignment in practice; we round up explicitly
+// where it matters).
+export function sizeOfType(t) {
+  if (!t) return 8;
+  if (t.kind === typeKinds.prim) {
+    switch (t.name) {
+      case "int8":
+      case "uint8":
+      case "bool":
+      case "char":
+        return 1;
+      case "int16":
+      case "uint16":
+        return 2;
+      case "int32":
+      case "uint32":
+      case "float32":
+      case "float":
+      case "int":
+        return 4;
+      case "int64":
+      case "uint64":
+      case "usize":
+      case "isize":
+      case "float64":
+        return 8;
+      case "string":
+        return 8;
+      default:
+        return 8;
+    }
+  }
+  if (t.kind === typeKinds.ref) return 8;
+  if (t.kind === typeKinds.array) return 16; // ptr + len
+  if (t.kind === typeKinds.struct) {
+    // Approximate: sum field sizes, padding each to the field's alignment.
+    let off = 0;
+    let maxAlign = 1;
+    for (const f of t.fields ?? []) {
+      const al = sizeOfAlign(f.type);
+      if (al > maxAlign) maxAlign = al;
+      off = roundUp(off, al) + sizeOfType(f.type);
+    }
+    return roundUp(off, maxAlign);
+  }
+  if (t.kind === typeKinds.union) {
+    let max = 0;
+    for (const f of t.fields ?? []) {
+      const s = sizeOfType(f.type);
+      if (s > max) max = s;
+    }
+    return max;
+  }
+  if (t.kind === typeKinds.enum) {
+    let maxPayload = 0;
+    for (const v of t.variants.values()) {
+      if (v.fields === null) continue;
+      let off = 0;
+      let maxAlign = 1;
+      for (const f of v.fields) {
+        const al = sizeOfAlign(f.type);
+        if (al > maxAlign) maxAlign = al;
+        off = roundUp(off, al) + sizeOfType(f.type);
+      }
+      const padded = roundUp(off, maxAlign);
+      if (padded > maxPayload) maxPayload = padded;
+    }
+    return 4 /* tag */ + maxPayload;
+  }
+  return 8;
+}
+
+export function sizeOfAlign(t) {
+  if (!t) return 8;
+  if (t.kind === typeKinds.prim) return alignOf(LLVM_TYPES[t.name] ?? "ptr");
+  if (t.kind === typeKinds.ref) return 8;
+  if (t.kind === typeKinds.array) return 8;
+  if (t.kind === typeKinds.struct) {
+    let max = 1;
+    for (const f of t.fields ?? []) {
+      const a = sizeOfAlign(f.type);
+      if (a > max) max = a;
+    }
+    return max;
+  }
+  if (t.kind === typeKinds.union) {
+    let max = 1;
+    for (const f of t.fields ?? []) {
+      const a = sizeOfAlign(f.type);
+      if (a > max) max = a;
+    }
+    return max;
+  }
+  if (t.kind === typeKinds.enum) {
+    let max = 4; // i32 tag
+    for (const v of t.variants.values()) {
+      if (v.fields === null) continue;
+      for (const f of v.fields) {
+        const a = sizeOfAlign(f.type);
+        if (a > max) max = a;
+      }
+    }
+    return max;
+  }
+  return 8;
+}
+
+function roundUp(x, a) {
+  return Math.floor((x + a - 1) / a) * a;
+}
+
 // ** binary op resolution ****************************
 
 // LLVM docs: https://llvm.org/docs/LangRef.html
+//
+// Signed-int op map. For unsigned integer types we substitute the
+// signedness-aware variants below in `binaryInstruction`.
 const INT_OP_MAP = {
   plus: "add",
   minus: "sub",
@@ -1516,6 +1898,10 @@ const INT_OP_MAP = {
   andand: "and",
   oror: "or",
   pipe: "or",
+  // Phase 9: bitwise AND / XOR. The token names (`amp`, `caret`) double as
+  // the op keys the parser stamps onto BINARY_EXPRESSION nodes.
+  amp: "and",
+  caret: "xor",
   lshift: "shl",
   rshift: "ashr",
 };
@@ -1534,10 +1920,36 @@ const FLOAT_OP_MAP = {
   gte: "fcmp oge",
 };
 
+// Phase 8.H: comparison/division ops must distinguish signed and unsigned
+// integer types — LLVM has separate opcodes (icmp slt vs icmp ult, sdiv vs
+// udiv, etc.). Without this, uint8 comparisons against literals > 127
+// silently produce wrong results (the byte 128 becomes -128 signed).
+const UNSIGNED_INT_OVERRIDES = {
+  divide: "udiv",
+  modulus: "urem",
+  lt: "icmp ult",
+  gt: "icmp ugt",
+  lte: "icmp ule",
+  gte: "icmp uge",
+  rshift: "lshr",
+};
+
 function binaryInstruction(op, opType) {
   const useFloat = opType.kind === typeKinds.prim && isFloatPrim(opType.name);
-  const map = useFloat ? FLOAT_OP_MAP : INT_OP_MAP;
-  const instr = map[op];
+  if (useFloat) {
+    const instr = FLOAT_OP_MAP[op];
+    if (!instr)
+      throw new Error(
+        `codegen: unknown binary op "${op}" for type ${opType.kind}/${opType.name ?? ""}`,
+      );
+    return instr;
+  }
+  const isUnsignedInt =
+    opType.kind === typeKinds.prim && isUnsignedIntPrim(opType.name);
+  if (isUnsignedInt && UNSIGNED_INT_OVERRIDES[op]) {
+    return UNSIGNED_INT_OVERRIDES[op];
+  }
+  const instr = INT_OP_MAP[op];
   if (!instr)
     throw new Error(
       `codegen: unknown binary op "${op}" for type ${opType.kind}/${opType.name ?? ""}`,
@@ -1575,6 +1987,14 @@ export function codegenProgram(modules, _moduleEnv, programState) {
   const linkFlags = new Set();
   const emittedStructs = new Set();
   const emittedArrayTypes = new Set();
+  // One DebugInfo per program. Each module registers a DIFile + DICompileUnit
+  // via beginModule and gets a `{ fileMd, cuMd }` handle threaded into its
+  // emitter. The finalize() block is appended after all per-module IR.
+  const debugInfo = createDebugInfo();
+  // llvm.dbg.declare attaches a DILocalVariable to its alloca slot. Declared
+  // once globally so per-module emitters can call it without each emitting
+  // their own forward declaration.
+  allExterns.add("declare void @llvm.dbg.declare(metadata, metadata, metadata)");
 
   // Phase 7.1: emit each generic-struct instantiation as a struct def.
   // Done before per-module codegen so call-site references resolve.
@@ -1601,13 +2021,14 @@ export function codegenProgram(modules, _moduleEnv, programState) {
     }
 
     // Run single-module codegen with this module's id set
-    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes, programState);
+    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes, programState, debugInfo);
     allStructDefs.push(...ir.structDefs);
     allGlobals.push(...ir.globals);
     for (const e of ir.externs) allExterns.add(e);
     allLines.push(...ir.lines);
   }
 
+  const diText = debugInfo.finalize();
   const parts = [
     ...allStructDefs,
     allStructDefs.length ? "" : null,
@@ -1616,6 +2037,8 @@ export function codegenProgram(modules, _moduleEnv, programState) {
     ...[...allExterns],
     allExterns.size ? "" : null,
     ...allLines,
+    "",
+    diText,
   ].filter((l) => l !== null);
 
   return { ir: parts.join("\n"), linkFlags: [...linkFlags] };
@@ -1623,8 +2046,16 @@ export function codegenProgram(modules, _moduleEnv, programState) {
 
 // Codegen a single module, returning { structDefs, globals, externs, lines }.
 // emittedStructs and emittedArrayTypes are shared across modules to deduplicate type defs.
-function codegenModule(mod, emittedStructs, emittedArrayTypes, programState) {
-  return codegenWithModuleId(mod.ast, mod.id, emittedStructs, emittedArrayTypes, programState);
+function codegenModule(mod, emittedStructs, emittedArrayTypes, programState, debugInfo) {
+  return codegenWithModuleId(
+    mod.ast,
+    mod.id,
+    emittedStructs,
+    emittedArrayTypes,
+    programState,
+    debugInfo,
+    mod.absPath,
+  );
 }
 
 // Phase 7.1: helper for codegenProgram — true iff a struct's fields contain
@@ -1683,10 +2114,10 @@ function cloneAstWithSubstitution(node, sub, registry = null) {
   ) {
     const oldInst = out.genericInstantiation;
     const decl =
-      registry.funcInstancesByDecl &&
-      [...registry.funcInstancesByDecl.values()].flat().find(
+      oldInst.genericDecl ??
+      ([...registry.funcInstancesByDecl.values()].flat().find(
         (i) => i.declId === oldInst.declId,
-      )?.ast?.genericDecl;
+      )?.ast?.genericDecl ?? null);
     if (decl && oldInst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) {
       const newArgs = oldInst.argTypes.map((t) => substituteTypeParams(t, sub));
       const newInst = instantiateFunc(registry, decl, newArgs);
@@ -1747,7 +2178,15 @@ function structContainsTypeParam(structType) {
   return structType.fields.some((f) => hasParam(f.type));
 }
 
-function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = new Set(), programState = null) {
+function codegenWithModuleId(
+  ast,
+  moduleId,
+  emittedStructs,
+  emittedArrayTypes = new Set(),
+  programState = null,
+  debugInfo = null,
+  moduleAbsPath = null,
+) {
   const lines = [];
   const globals = [];
   const structDefs = [];
@@ -1756,6 +2195,96 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   let labelCounter = 0;
   const functionSigs = new Map();
   let symbols = new Map();
+  // Per-module DWARF handles. Lazily initialized via beginModule on first
+  // function emission so callers (like compileSource) that synthesize a
+  // module without an absPath still get a stable synthetic file name.
+  let diFileMd = null;
+  let diCuMd = null;
+  function ensureDebugModule() {
+    if (!debugInfo || diFileMd) return;
+    const handle = debugInfo.beginModule(moduleAbsPath ?? `<${moduleId}>.yoop`);
+    diFileMd = handle.fileMd;
+    diCuMd = handle.cuMd;
+  }
+  // Build a DISubprogram for a function/method definition. Returns the !N ref
+  // to attach to the `define` line and to thread into ctx.subprogram for
+  // statement-level DILocation lookups. Returns null when DI is disabled (e.g.
+  // legacy callers that didn't supply a debugInfo handle).
+  function makeSubprogram(funcName, linkageName, sourceLoc) {
+    if (!debugInfo) return null;
+    ensureDebugModule();
+    const line = sourceLoc?.line && sourceLoc.line > 0 ? sourceLoc.line : 1;
+    return debugInfo.subprogram(funcName, linkageName, line, diFileMd, diCuMd);
+  }
+  // Look up a DILocation for the given AST node. Returns null when DI is off
+  // or the current scope hasn't established a subprogram yet (top-level
+  // emission). Falls back to line 1 for synthesized nodes without sourceLoc.
+  function dbgLocFor(node, ctx) {
+    if (!debugInfo || !ctx?.subprogram) return null;
+    const loc = node?.sourceLoc;
+    const line = loc?.line && loc.line > 0 ? loc.line : 1;
+    const col = loc?.column && loc.column > 0 ? loc.column : 0;
+    return debugInfo.location(line, col, ctx.subprogram);
+  }
+  // Fallback pass: LLVM's verifier requires every `call` to another debug-
+  // info-bearing function (and every `ret`/`br`/etc. inside a function with
+  // a DISubprogram) to carry a !dbg. The per-statement annotation covers
+  // user code, but implicit cleanups, runtime init/shutdown, and a few other
+  // synthesized lines emit outside emitStmt's wrapper. Sweep the whole
+  // function and attach the subprogram's first-line location to anything
+  // still unmarked.
+  function finalizeFnDbg(fnLines, subprogramRef, fnSourceLoc) {
+    if (!debugInfo || !subprogramRef) return;
+    const line = fnSourceLoc?.line && fnSourceLoc.line > 0 ? fnSourceLoc.line : 1;
+    const fallback = debugInfo.location(line, 0, subprogramRef);
+    annotateLinesWithDbg(fnLines, 0, fallback);
+  }
+
+  // Map a Yooperlang type to its DI type reference for use in a
+  // DILocalVariable. Returns null for shapes we don't yet describe — caller
+  // should skip emitting llvm.dbg.declare for that binding so lldb just
+  // omits it from `frame variable` rather than showing garbage.
+  function diTypeFor(yoopType) {
+    if (!yoopType || !debugInfo) return null;
+    switch (yoopType.kind) {
+      case typeKinds.prim:
+        return debugInfo.basicTypeForPrim(yoopType.name);
+      case typeKinds.ref:
+      case typeKinds.task:
+        // Phase MVP+1: refs and Tasks are described as opaque pointers.
+        // Once we emit DICompositeType for the pointee struct, we'll thread
+        // it through here as the DIDerivedType's baseType.
+        return debugInfo.opaquePointer();
+      default:
+        return null;
+    }
+  }
+
+  // Emit `call void @llvm.dbg.declare(metadata ptr <slot>, metadata !VAR,
+  // metadata !DIExpression()), !dbg !LOC` so lldb can map %slot -> source
+  // variable name + type. No-op when DI is off, when the type isn't
+  // describable yet, or when the binding has no usable sourceLoc.
+  function emitDbgDeclare(fnLines, { name, slotPtr, yoopType, sourceLoc, subprogramRef, argIndex }) {
+    if (!debugInfo || !subprogramRef) return;
+    const typeRef = diTypeFor(yoopType);
+    if (!typeRef) return;
+    ensureDebugModule();
+    const line = sourceLoc?.line && sourceLoc.line > 0 ? sourceLoc.line : 1;
+    const col = sourceLoc?.column && sourceLoc.column > 0 ? sourceLoc.column : 0;
+    const varRef = debugInfo.localVariable({
+      name,
+      scope: subprogramRef,
+      file: diFileMd,
+      line,
+      typeRef,
+      argIndex,
+    });
+    if (!varRef) return;
+    const locRef = debugInfo.location(line, col, subprogramRef);
+    fnLines.push(
+      `  call void @llvm.dbg.declare(metadata ptr ${slotPtr}, metadata ${varRef}, metadata !DIExpression()), !dbg ${locRef}`,
+    );
+  }
   // Phase 6.3: bindingName -> { taskFnName }. Tracks which task fn a
   // joined/pooled/immediate binding originated from, so `wait <ident>` can
   // recover the result type + struct layout at the wait site.
@@ -1809,6 +2338,63 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
           ? d.resolvedType.fields.map((f) => llvmType(f.type)).join(", ")
           : "";
         structDefs.push(`${mangled} = type { ${fieldLlvm} }`);
+      }
+    }
+    // Phase 7.5: emit enum struct + per-variant payload structs.
+    //   %enum.<mod>__<E> = type { i32, [P x i8] }     (tag + payload bytes)
+    //   %enumv.<mod>__<E>__<V> = type { ... fields ... }  (per-variant payload)
+    if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType) {
+      const enumLlvm = llvmType(d.resolvedType);
+      if (!emittedStructs.has(enumLlvm)) {
+        emittedStructs.add(enumLlvm);
+        // Payload size = max variant payload size (computed from sizeOfType).
+        let maxPayload = 0;
+        for (const v of d.resolvedType.variants.values()) {
+          if (v.fields === null) continue;
+          let off = 0;
+          let maxAlign = 1;
+          for (const f of v.fields) {
+            const al = sizeOfAlign(f.type);
+            if (al > maxAlign) maxAlign = al;
+            off = Math.floor((off + al - 1) / al) * al + sizeOfType(f.type);
+          }
+          const padded = Math.floor((off + maxAlign - 1) / maxAlign) * maxAlign;
+          if (padded > maxPayload) maxPayload = padded;
+        }
+        // Always emit a non-empty payload byte array so LLVM accepts the GEP
+        // shape uniformly. Min payload size is 1 byte to keep the indexed
+        // form `[N x i8]` legal.
+        const payloadSize = Math.max(maxPayload, 1);
+        structDefs.push(`${enumLlvm} = type { i32, [${payloadSize} x i8] }`);
+        // Per-variant payload struct (for variants that have fields).
+        const enumId = d.resolvedType.moduleId
+          ? `${d.resolvedType.moduleId}__${d.resolvedType.name}`
+          : d.resolvedType.name;
+        for (const v of d.resolvedType.variants.values()) {
+          if (v.fields === null) continue;
+          const variantLlvm = `%enumv.${enumId}__${v.name}`;
+          if (!emittedStructs.has(variantLlvm)) {
+            emittedStructs.add(variantLlvm);
+            const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
+            structDefs.push(`${variantLlvm} = type { ${fieldLlvm} }`);
+          }
+        }
+      }
+    }
+    // Phase 7.5: emit union struct as a `[N x i8]`-shaped aggregate (max
+    // field size, max field alignment). All field accesses bitcast through
+    // the byte buffer.
+    if (d.kind === ASTNodeKind.UNION_DECL && d.resolvedType) {
+      const unionLlvm = llvmType(d.resolvedType);
+      if (!emittedStructs.has(unionLlvm)) {
+        emittedStructs.add(unionLlvm);
+        let maxSize = 0;
+        for (const f of d.resolvedType.fields) {
+          const s = sizeOfType(f.type);
+          if (s > maxSize) maxSize = s;
+        }
+        const size = Math.max(maxSize, 1);
+        structDefs.push(`${unionLlvm} = type { [${size} x i8] }`);
       }
     }
   }
@@ -1874,6 +2460,41 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     }
   }
 
+  // Phase 8.E: collect module-level let/const decls and emit one LLVM
+  // `@<modid>__<name>` global per binding with `zeroinitializer`. The
+  // initializer expression itself runs in the synthesized `<modid>__module_init`
+  // function emitted at the bottom of this pass. Order is source order —
+  // matches the typechecker's mod.moduleInitDecls.
+  //
+  // (Bytecode/CTE future) — a future evaluator could classify some inits
+  // as constant-foldable, emit them as the LLVM initial value, and drop
+  // them from the runtime init function. The MVP routes everything
+  // through the runtime function.
+  const moduleLevelDecls = [];
+  for (const decl of ast.body) {
+    const d = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
+    if (
+      (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
+      d.isModuleLevel
+    ) {
+      moduleLevelDecls.push(d);
+      const sym = `@${moduleId}__${d.name}`;
+      const lty = llvmType(d.resolvedType);
+      const linkage = decl.kind === ASTNodeKind.EXPORT_DECL ? "" : "internal ";
+      globals.push(`${sym} = ${linkage}global ${lty} zeroinitializer, align 8`);
+    }
+  }
+  // Register the symbols on programState so the entry module's `main`
+  // emission can call each module's `__module_init` after yoop_runtime_init.
+  if (moduleLevelDecls.length > 0) {
+    if (programState && !programState.moduleInitSymbols) {
+      programState.moduleInitSymbols = [];
+    }
+    if (programState?.moduleInitSymbols) {
+      programState.moduleInitSymbols.push(`${moduleId}__module_init`);
+    }
+  }
+
   // Collect function sigs. Phase 7.1: skip generic decls — their
   // instantiations register their own sigs in the registry.
   for (const decl of ast.body) {
@@ -1931,6 +2552,11 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     // TRAIT_DECL: no codegen — traits are compile-time only
   }
 
+  // Phase 8.E: emit the synthesized module-init function for this module's
+  // top-level let/const initializers (after user functions so any user
+  // function called from an initializer is already declared above).
+  emitModuleInit(moduleLevelDecls);
+
   // Phase 7.1: emit one function per generic instantiation owned by this
   // module (registry tracks each instance's source module).
   if (programState?.registry) {
@@ -1943,8 +2569,37 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         // exist in the registry as caching artifacts — the concrete instances
         // produced when the outer generic is monomorphized are what get IR.
         if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
+        // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
+        // codegen inlines them at every call site (see emitCallExpr).
+        if (inst.declId?.startsWith("$builtin")) continue;
         inst.emitted = true;
         emitGenericFuncInstance(inst);
+      }
+    }
+    // Phase 7.x: emit method bodies for each concrete generic-struct instance.
+    // For `type Foo<T> implements Trait { function m(ref self): ... }`, each
+    // unique Foo<C> needs its own substituted method body, with the symbol
+    // mangled via mangleTraitMethod using the monomorphized name.
+    const emittedStructMethods =
+      programState._emittedStructMethods ??
+      (programState._emittedStructMethods = new WeakSet());
+    for (const [declId, instances] of programState.registry.structInstancesByDecl) {
+      const genericDecl = programState.registry.genericDeclById?.get(declId);
+      if (!genericDecl) continue;
+      const typeDecl = genericDecl.ast;
+      if (!typeDecl || !typeDecl.methods?.length) continue;
+      if (genericDecl.moduleId !== moduleId) continue;
+      for (const inst of instances) {
+        if (inst.moduleId !== moduleId) continue;
+        if (emittedStructMethods.has(inst)) continue;
+        // Skip open instances (still carry TypeParamType in args).
+        if (
+          inst.genericInstance?.args?.some(
+            (t) => t?.kind === typeKinds.typeParam,
+          )
+        ) continue;
+        emittedStructMethods.add(inst);
+        emitGenericStructMethods(inst, genericDecl);
       }
     }
   }
@@ -2018,6 +2673,30 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     emitFn(cloned, sym);
   }
 
+  // Phase 7.x: emit method bodies for a single struct instance. Each method
+  // gets cloned with type-param substitution and routed through emitMethodFn,
+  // which already handles per-trait mangle and `ref self` plumbing. The
+  // structType passed to emitMethodFn is the concrete (monomorphized) instance
+  // so mangleTraitMethod produces e.g. `mod__DynArray__int32__Disposable__dispose`.
+  function emitGenericStructMethods(structInst, genericDecl) {
+    const typeDecl = genericDecl.ast;
+    const args = structInst.genericInstance?.args ?? [];
+    const sub = new Map();
+    const inner = new Map();
+    for (let i = 0; i < args.length; i++) {
+      inner.set(genericDecl.paramNames[i], args[i]);
+    }
+    sub.set(genericDecl.id, inner);
+    for (const method of typeDecl.methods ?? []) {
+      const cloned = cloneAstWithSubstitution(
+        method,
+        sub,
+        programState?.registry ?? null,
+      );
+      emitMethodFn(cloned, structInst);
+    }
+  }
+
   function emitFn(node, symName) {
     tempCounter = 0;
     labelCounter = 0;
@@ -2029,17 +2708,41 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     const params = node.params ?? [];
     const llvmRet = llvmType(node.resolvedType);
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
-    const fnLines = [`define ${llvmRet} @${symName}(${paramSig}) {`, "entry:"];
-    if (inMainFn) fnLines.push("  call void @yoop_runtime_init()");
-    for (const p of params) {
+    const subprogramRef = makeSubprogram(node.name ?? symName, symName, node.sourceLoc);
+    const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
+    const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
+    if (inMainFn) {
+      fnLines.push("  call void @yoop_runtime_init()");
+      // Phase 8.E: run every module's __module_init in topological order.
+      // The list is populated as each module is codegen'd (see the
+      // moduleLevelDecls block earlier in this file). Order matches the
+      // module graph's topological order from loadModuleGraph.
+      const initSyms = programState?.moduleInitSymbols ?? [];
+      for (const sym of initSyms) {
+        fnLines.push(`  call void @${sym}()`);
+      }
+    }
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
       const ty = p.resolvedType;
+      // Phase 8.H: ensure %yoop_array.<T> is emitted for array-typed params,
+      // since the alloca below names that struct type.
+      if (ty.kind === typeKinds.array) ensureArrayTypeDef(ty.elem);
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
       const al = effectiveAlign(ty, p.resolvedKindApplication);
       fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
       fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+      emitDbgDeclare(fnLines, {
+        name: p.name,
+        slotPtr: `%${p.name}`,
+        yoopType: ty,
+        sourceLoc: p.sourceLoc ?? node.sourceLoc,
+        subprogramRef,
+        argIndex: i + 1, // DWARF arg index is 1-based
+      });
     }
-    const ctx = { fnName: symName, returnType: node.resolvedType };
+    const ctx = { fnName: symName, returnType: node.resolvedType, subprogram: subprogramRef };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(node.body, fnLines);
     if (isVoidReturn(node.resolvedType)) {
@@ -2050,8 +2753,41 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
     }
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
+    finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc);
     lines.push(...fnLines);
     inMainFn = prevInMain;
+  }
+
+  // Phase 8.E: synthesize @<modid>__module_init that runs every top-level
+  // let/const initializer in source order, storing into the corresponding
+  // @global. Called from main right after yoop_runtime_init() (see emitFn).
+  //
+  // (Bytecode/CTE future) — this is the smallest discrete codegen entity
+  // for a CTE pass: parameter-free, returns void, operates only on
+  // module-owned @globals. A future evaluator can replace this with
+  // bytecode interpretation, or skip it entirely when every init has
+  // been folded to an LLVM @global initial value.
+  function emitModuleInit(decls) {
+    if (decls.length === 0) return;
+    tempCounter = 0;
+    labelCounter = 0;
+    symbols = new Map();
+    const symName = `${moduleId}__module_init`;
+    const fnLines = [
+      `define internal void @${symName}() {`,
+      "entry:",
+    ];
+    for (const d of decls) {
+      const initVal = emitExpr(d.assignment, fnLines);
+      const lty = llvmType(d.resolvedType);
+      const gsym = `@${moduleId}__${d.name}`;
+      fnLines.push(`  store ${lty} ${initVal.val}, ptr ${gsym}`);
+    }
+    fnLines.push("  ret void");
+    fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
+    lines.push(...fnLines);
   }
 
   function emitMethodFn(methodDecl, structType) {
@@ -2076,9 +2812,12 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
 
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
     const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
-    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig}) {`, "entry:"];
+    const subprogramRef = makeSubprogram(methodDecl.name, mangled, methodDecl.sourceLoc);
+    const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
+    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig})${dbgSuffix} {`, "entry:"];
 
-    for (const p of params) {
+    for (let i = 0; i < params.length; i++) {
+      const p = params[i];
       const ty = p.resolvedType;
       if (ty.kind === typeKinds.ref) {
         fnLines.push(`  %${p.name} = alloca ptr, align 8`);
@@ -2090,9 +2829,17 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
       }
       symbols.set(p.name, ty);
+      emitDbgDeclare(fnLines, {
+        name: p.name,
+        slotPtr: `%${p.name}`,
+        yoopType: ty,
+        sourceLoc: p.sourceLoc ?? methodDecl.sourceLoc,
+        subprogramRef,
+        argIndex: i + 1,
+      });
     }
 
-    const ctx = { fnName: methodDecl.name, returnType };
+    const ctx = { fnName: methodDecl.name, returnType, subprogram: subprogramRef };
     methodDecl.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(methodDecl.body, fnLines);
 
@@ -2101,6 +2848,8 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     }
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
+    finalizeFnDbg(fnLines, subprogramRef, methodDecl.sourceLoc);
     lines.push(...fnLines);
   }
 
@@ -2147,6 +2896,7 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     fnLines.push("  call void @yoop_handle_signal_done(ptr %ts)");
     fnLines.push("  ret void");
     fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
     lines.push(...fnLines);
   }
 
@@ -2226,6 +2976,67 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     return mangle(moduleId, node.callee);
   }
 
+  // Phase 8.A: multi-module pointer-arithmetic / comparison emitter.
+  function emitPointerBinaryMM(node, fnLines) {
+    const op = node.op;
+    if (op === "eqeq" || op === "neq") {
+      const l = emitExpr(node.left, fnLines);
+      const r = emitExpr(node.right, fnLines);
+      const cond = op === "eqeq" ? "eq" : "ne";
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = icmp ${cond} ptr ${l.val}, ${r.val}`);
+      return { val: tmp, yoopType: PrimType("bool") };
+    }
+    if (op === "plus" || op === "minus") {
+      const leftIsPtr =
+        node.left.resolvedType?.kind === typeKinds.unsafePtr;
+      const rightIsPtr =
+        node.right.resolvedType?.kind === typeKinds.unsafePtr;
+      if (leftIsPtr && rightIsPtr && op === "minus") {
+        const l = emitExpr(node.left, fnLines);
+        const r = emitExpr(node.right, fnLines);
+        const li = freshTemp();
+        const ri = freshTemp();
+        fnLines.push(`  ${li} = ptrtoint ptr ${l.val} to i64`);
+        fnLines.push(`  ${ri} = ptrtoint ptr ${r.val} to i64`);
+        const diff = freshTemp();
+        fnLines.push(`  ${diff} = sub i64 ${li}, ${ri}`);
+        const pointee = node.left.resolvedType.pointee;
+        const elemLlvmTy = llvmType(pointee);
+        const sizeofTmp = freshTemp();
+        fnLines.push(`  ${sizeofTmp} = getelementptr ${elemLlvmTy}, ptr null, i32 1`);
+        const sizeInt = freshTemp();
+        fnLines.push(`  ${sizeInt} = ptrtoint ptr ${sizeofTmp} to i64`);
+        const out = freshTemp();
+        fnLines.push(`  ${out} = sdiv i64 ${diff}, ${sizeInt}`);
+        return { val: out, yoopType: PrimType("int64") };
+      }
+      const ptrSide = leftIsPtr ? node.left : node.right;
+      const intSide = leftIsPtr ? node.right : node.left;
+      const ptrVal = emitExpr(ptrSide, fnLines);
+      const intVal = emitExpr(intSide, fnLines);
+      const pointee = ptrSide.resolvedType.pointee;
+      const elemLlvmTy = llvmType(pointee);
+      let offsetVal = intVal.val;
+      let offsetLlvmTy = llvmType(intVal.yoopType);
+      if (offsetLlvmTy !== "i64") {
+        const widened = freshTemp();
+        fnLines.push(`  ${widened} = sext ${offsetLlvmTy} ${offsetVal} to i64`);
+        offsetVal = widened;
+        offsetLlvmTy = "i64";
+      }
+      if (op === "minus") {
+        const neg = freshTemp();
+        fnLines.push(`  ${neg} = sub i64 0, ${offsetVal}`);
+        offsetVal = neg;
+      }
+      const out = freshTemp();
+      fnLines.push(`  ${out} = getelementptr ${elemLlvmTy}, ptr ${ptrVal.val}, i64 ${offsetVal}`);
+      return { val: out, yoopType: ptrSide.resolvedType };
+    }
+    throw new Error(`codegen: unsupported pointer binary op "${op}"`);
+  }
+
   function emitExpr(node, fnLines) {
     switch (node.kind) {
       case ASTNodeKind.INT_LITERAL: {
@@ -2246,6 +3057,17 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         return { val: node.value ? "1" : "0", yoopType: PrimType("bool") };
       }
       case ASTNodeKind.IDENT: {
+        // Phase 8.E: module-level globals load from @<modid>__<name>.
+        // The typechecker tags every IDENT that resolves via moduleSymbols
+        // (and is not a function / namespace) with isModuleGlobal + the
+        // pre-mangled symbol so codegen doesn't have to re-derive it.
+        if (node.isModuleGlobal) {
+          const yoopType = node.resolvedType;
+          const llvmTy = llvmType(yoopType);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = load ${llvmTy}, ptr @${node.moduleGlobalSym}`);
+          return { val: tmp, yoopType };
+        }
         const yoopType = symbols.get(node.name);
         if (!yoopType) throw new Error(`codegen: unknown identifier "${node.name}"`);
         if (node.autoDeref) {
@@ -2278,6 +3100,18 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
       case ASTNodeKind.CALL_EXPRESSION: return emitCallExpr(node, fnLines);
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // Phase 8.A: route pointer arithmetic / pointer-null comparison
+        // through emitPointerBinaryMM. Same logic as single-module path.
+        const leftTy = node.left.resolvedType;
+        const rightTy = node.right.resolvedType;
+        if (
+          leftTy?.kind === typeKinds.unsafePtr ||
+          rightTy?.kind === typeKinds.unsafePtr ||
+          leftTy?.kind === typeKinds.untypedNull ||
+          rightTy?.kind === typeKinds.untypedNull
+        ) {
+          return emitPointerBinaryMM(node, fnLines);
+        }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const resultType = node.resolvedType;
@@ -2286,6 +3120,77 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = ${binaryInstruction(node.op, opType)} ${llvmType(opType)} ${l.val}, ${r.val}`);
         return { val: tmp, yoopType: resultType };
+      }
+      case ASTNodeKind.NULL_LITERAL: {
+        return { val: "null", yoopType: node.resolvedType };
+      }
+      case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
+        const lv = emitLval(node.operand, fnLines);
+        return { val: lv.ptr, yoopType: node.resolvedType };
+      }
+      case ASTNodeKind.DEREF_EXPRESSION: {
+        const p = emitExpr(node.operand, fnLines);
+        const pointee = node.resolvedType;
+        const llvmTy = llvmType(pointee);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${p.val}`);
+        return { val: tmp, yoopType: pointee };
+      }
+      case ASTNodeKind.ERRNO_INTRINSIC: {
+        // Phase 8.D: lower to runtime helpers in yoop_runtime.c.
+        if (node.op === "get") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call i32 @yoop_errno_get()`);
+          return { val: tmp, yoopType: PrimType("int32") };
+        }
+        if (node.op === "set") {
+          const arg = emitExpr(node.operand, fnLines);
+          fnLines.push(`  call void @yoop_errno_set(i32 ${arg.val})`);
+          return { val: "", yoopType: VoidType() };
+        }
+        if (node.op === "message") {
+          const arg = emitExpr(node.operand, fnLines);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call ptr @yoop_errno_message(i32 ${arg.val})`);
+          return { val: tmp, yoopType: PrimType("string") };
+        }
+        throw new Error(`codegen: unknown errno intrinsic "${node.op}"`);
+      }
+      case ASTNodeKind.UNSAFE_PTR_CAST: {
+        const operand = emitExpr(node.operand, fnLines);
+        if (node.castKind === "bitcast") {
+          return { val: operand.val, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toInt") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = ptrtoint ptr ${operand.val} to i64`);
+          return { val: tmp, yoopType: PrimType("uintptr") };
+        }
+        if (node.castKind === "fromInt") {
+          const tmp = freshTemp();
+          const srcLlvmTy = llvmType(operand.yoopType);
+          fnLines.push(`  ${tmp} = inttoptr ${srcLlvmTy} ${operand.val} to ptr`);
+          return { val: tmp, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toArray") {
+          // Phase 8.C: fat-pointer view {data, len}. No copy.
+          const arrayType = node.resolvedType;
+          ensureArrayTypeDef(arrayType.elem);
+          const arrayLlvmTy = llvmType(arrayType);
+          const len = emitExpr(node.lengthOperand, fnLines);
+          const fatSlot = freshTemp();
+          fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+          fnLines.push(`  store ptr ${operand.val}, ptr ${dataField}`);
+          const lenField = freshTemp();
+          fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+          fnLines.push(`  store i64 ${len.val}, ptr ${lenField}`);
+          const fatVal = freshTemp();
+          fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+          return { val: fatVal, yoopType: arrayType };
+        }
+        throw new Error(`codegen: unknown unsafe_ptr cast kind "${node.castKind}"`);
       }
       case ASTNodeKind.UNARY_EXPRESSION: {
         const operand = emitExpr(node.operand, fnLines);
@@ -2300,6 +3205,10 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
           }
         } else if (node.op === "not") {
           fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, 1`);
+        } else if (node.op === "bitnot") {
+          // Phase 9: `~x` lowers to `xor <ty> x, -1`. LLVM treats the -1
+          // immediate as all-ones at any integer width.
+          fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, -1`);
         } else {
           throw new Error(`codegen: unhandled unary op "${node.op}"`);
         }
@@ -2308,6 +3217,16 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       case ASTNodeKind.ASSIGNMENT: {
         if (node.target.kind === ASTNodeKind.IDENT) {
           const targetName = node.target.name;
+          // Phase 8.E: assignment to a module-level let stores into the
+          // @<modid>__<name> global. The typechecker rejected cross-
+          // module imported targets, so any isModuleGlobal here is
+          // module-local writable.
+          if (node.target.isModuleGlobal) {
+            const lhsType = node.target.resolvedType;
+            const rhs = emitExpr(node.value, fnLines);
+            fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr @${node.target.moduleGlobalSym}`);
+            return rhs;
+          }
           const lhsType = symbols.get(targetName);
           if (node.target.autoDerefWrite) {
             const innerType = lhsType.inner;
@@ -2339,7 +3258,55 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
           fnLines.push(`  store ${llvmType(lv.type)} ${rhs.val}, ptr ${lv.ptr}`);
           return rhs;
         }
+        if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+          // Phase 8.A: `*p = v` — store through an unsafe_ptr<T>.
+          const ptrExpr = emitExpr(node.target.operand, fnLines);
+          const rhs = emitExpr(node.value, fnLines);
+          const pointee = node.target.resolvedType;
+          fnLines.push(`  store ${llvmType(pointee)} ${rhs.val}, ptr ${ptrExpr.val}`);
+          return rhs;
+        }
         throw new Error(`codegen: unsupported assignment target kind "${node.target.kind}"`);
+      }
+      // Phase 9: compound assignment — addresses the lvalue exactly once,
+      // loads the current value, applies the binary op, stores the result.
+      case ASTNodeKind.COMPOUND_ASSIGNMENT: {
+        // Resolve the storage slot. Result: { ptr, type, isReg, regName? }
+        // For local IDENTs we just remember the register name and emit
+        // `%name`-relative load/store; for everything else we emit a pointer
+        // through emitLval and load/store through it.
+        let slotPtr, slotType;
+        if (node.target.kind === ASTNodeKind.IDENT && !node.target.isModuleGlobal && !node.target.autoDerefWrite) {
+          slotType = symbols.get(node.target.name);
+          slotPtr = `%${node.target.name}`;
+        } else if (node.target.kind === ASTNodeKind.IDENT && node.target.isModuleGlobal) {
+          slotType = node.target.resolvedType;
+          slotPtr = `@${node.target.moduleGlobalSym}`;
+        } else if (node.target.kind === ASTNodeKind.IDENT && node.target.autoDerefWrite) {
+          const lhsType = symbols.get(node.target.name);
+          slotType = lhsType.inner;
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.target.name}`);
+          slotPtr = ptrTmp;
+        } else if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+          const ptrExpr = emitExpr(node.target.operand, fnLines);
+          slotType = node.target.resolvedType;
+          slotPtr = ptrExpr.val;
+        } else {
+          // FIELD_ACCESS or INDEX_EXPRESSION — emitLval addresses the slot
+          // exactly once (no double-eval of e.g. xs[f()]).
+          const lv = emitLval(node.target, fnLines);
+          slotType = lv.type;
+          slotPtr = lv.ptr;
+        }
+        const llvmTy = llvmType(slotType);
+        const oldVal = freshTemp();
+        fnLines.push(`  ${oldVal} = load ${llvmTy}, ptr ${slotPtr}`);
+        const rhs = emitExpr(node.value, fnLines);
+        const newVal = freshTemp();
+        fnLines.push(`  ${newVal} = ${binaryInstruction(node.op, slotType)} ${llvmTy} ${oldVal}, ${rhs.val}`);
+        fnLines.push(`  store ${llvmTy} ${newVal}, ptr ${slotPtr}`);
+        return { val: newVal, yoopType: slotType };
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const objType = node.object.resolvedType;
@@ -2357,6 +3324,16 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
           const lenVal = freshTemp();
           fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
           return { val: lenVal, yoopType: PrimType("usize") };
+        }
+        // Phase 8.C: `xs.ptr` — GEP field 0 of the fat pointer, load.
+        if (node.isArrayPtr) {
+          const lv = emitLval(node.object, fnLines);
+          const arrayLlvmTy = llvmType(lv.type);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${lv.ptr}, i32 0, i32 0`);
+          const dataVal = freshTemp();
+          fnLines.push(`  ${dataVal} = load ptr, ptr ${dataField}`);
+          return { val: dataVal, yoopType: node.resolvedType };
         }
         const lv = emitLval(node, fnLines);
         const tmp = freshTemp();
@@ -2398,6 +3375,62 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         fnLines.push(`  ${tmp} = load ${llvmType(lv.type)}, ptr ${lv.ptr}`);
         return { val: tmp, yoopType: lv.type };
       }
+      // Phase 9.E: `xs[i..j]` — zero-copy fat-pointer subview. Builds
+      // {xs.ptr + start * sizeof(T), end - start} from the source fat
+      // pointer; open bounds default start→0, end→xs.len.
+      case ASTNodeKind.SLICE_EXPRESSION: {
+        const arrayType = node.resolvedType;
+        const elemType = arrayType.elem;
+        ensureArrayTypeDef(elemType);
+        const arrayLlvmTy = llvmType(arrayType);
+        const elemLlvmTy = llvmType(elemType);
+        const fatArg = emitExpr(node.object, fnLines);
+        // Stash the source fat pointer into an alloca so we can GEP fields.
+        const srcSlot = freshTemp();
+        fnLines.push(`  ${srcSlot} = alloca ${arrayLlvmTy}, align 8`);
+        fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${srcSlot}`);
+        const srcDataField = freshTemp();
+        fnLines.push(`  ${srcDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${srcSlot}, i32 0, i32 0`);
+        const srcDataPtr = freshTemp();
+        fnLines.push(`  ${srcDataPtr} = load ptr, ptr ${srcDataField}`);
+        const srcLenField = freshTemp();
+        fnLines.push(`  ${srcLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${srcSlot}, i32 0, i32 1`);
+        const srcLen = freshTemp();
+        fnLines.push(`  ${srcLen} = load i64, ptr ${srcLenField}`);
+        // Widen any narrower integer to i64 (signed-extend mirrors the
+        // existing pointer-arithmetic path at line ~3020).
+        const widenToI64 = (v) => {
+          const ty = llvmType(v.yoopType);
+          if (ty === "i64") return v.val;
+          const w = freshTemp();
+          fnLines.push(`  ${w} = sext ${ty} ${v.val} to i64`);
+          return w;
+        };
+        const startI64 = node.start
+          ? widenToI64(emitExpr(node.start, fnLines))
+          : "0";
+        const endI64 = node.end
+          ? widenToI64(emitExpr(node.end, fnLines))
+          : srcLen;
+        // newDataPtr = srcDataPtr + start (element units).
+        const newDataPtr = freshTemp();
+        fnLines.push(`  ${newDataPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${srcDataPtr}, i64 ${startI64}`);
+        // newLen = end - start.
+        const newLen = freshTemp();
+        fnLines.push(`  ${newLen} = sub i64 ${endI64}, ${startI64}`);
+        // Build result fat pointer.
+        const resSlot = freshTemp();
+        fnLines.push(`  ${resSlot} = alloca ${arrayLlvmTy}, align 8`);
+        const resDataField = freshTemp();
+        fnLines.push(`  ${resDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 0`);
+        fnLines.push(`  store ptr ${newDataPtr}, ptr ${resDataField}`);
+        const resLenField = freshTemp();
+        fnLines.push(`  ${resLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 1`);
+        fnLines.push(`  store i64 ${newLen}, ptr ${resLenField}`);
+        const resVal = freshTemp();
+        fnLines.push(`  ${resVal} = load ${arrayLlvmTy}, ptr ${resSlot}`);
+        return { val: resVal, yoopType: arrayType };
+      }
       case ASTNodeKind.TRY_OP: {
         const slot = emitTrySlot(node, fnLines);
         const stripped = strippedTypeOf(node.operand.resolvedType);
@@ -2430,8 +3463,51 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       case ASTNodeKind.WAIT_EXPRESSION: {
         return emitWaitExpression(node, fnLines);
       }
+      case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+        return emitVariantConstructor(node, fnLines);
+      }
       default: throw new Error(`codegen: unhandled expression kind "${node.kind}"`);
     }
+  }
+
+  // Phase 7.5: emit `Enum.Variant { f1: v1, ... }` (or no-payload `Enum.V`).
+  // Layout: alloca enum struct → store tag at field 0 → bitcast payload
+  // bytes to the per-variant payload struct and GEP/store each field → load
+  // the whole enum as the rvalue.
+  function emitVariantConstructor(node, fnLines) {
+    const enumType = node.resolvedEnumType;
+    const variant = node.resolvedVariant;
+    if (!enumType || !variant) {
+      throw new Error(`codegen: variant constructor missing resolved enum/variant`);
+    }
+    const enumLlvm = llvmType(enumType);
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${enumLlvm}, align ${sizeOfAlign(enumType)}`);
+    // tag store
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 0`);
+    fnLines.push(`  store i32 ${variant.ordinal}, ptr ${tagPtr}`);
+    // payload store (only if the variant has fields)
+    if (variant.fields !== null && node.fields !== null && node.fields.length > 0) {
+      const payloadPtr = freshTemp();
+      fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${slot}, i32 0, i32 1`);
+      const enumId = enumType.moduleId
+        ? `${enumType.moduleId}__${enumType.name}`
+        : enumType.name;
+      const variantLlvm = `%enumv.${enumId}__${variant.name}`;
+      for (const litField of node.fields) {
+        const idx = variant.fields.findIndex((f) => f.name === litField.name);
+        if (idx < 0) continue;
+        const fieldType = variant.fields[idx].type;
+        const fieldPtr = freshTemp();
+        fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${variantLlvm}, ptr ${payloadPtr}, i32 0, i32 ${idx}`);
+        const rhs = emitExpr(litField.value, fnLines);
+        fnLines.push(`  store ${llvmType(fieldType)} ${rhs.val}, ptr ${fieldPtr}`);
+      }
+    }
+    const loadTmp = freshTemp();
+    fnLines.push(`  ${loadTmp} = load ${enumLlvm}, ptr ${slot}`);
+    return { val: loadTmp, yoopType: enumType };
   }
 
   // Phase 6.3: `wait <ident>`. The operand must be a Task<T>-typed binding
@@ -2475,7 +3551,155 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
     return { val: resVal, yoopType: resultType };
   }
 
+  // Inline emission for builtin generic functions: heap_alloc / heap_free
+  // (Phase 7+) and array_slice (Phase 8.H). These have `declId` starting with
+  // `$builtin` and no AST body; codegen lowers each call directly.
+  function emitBuiltinGenericCall(node, fnLines) {
+    const inst = node.genericInstantiation;
+    if (inst.declId === "$builtin__heap_alloc") {
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      // Element size in bytes.
+      const elemSize = sizeOfType(elemType);
+      // Emit the count argument.
+      const nArg = emitExpr(node.args[0], fnLines);
+      // Multiply count by element size to get byte size.
+      const byteSize = freshTemp();
+      fnLines.push(`  ${byteSize} = mul i64 ${nArg.val}, ${elemSize}`);
+      // Allocate on the heap.
+      const raw = freshTemp();
+      fnLines.push(`  ${raw} = call ptr @malloc(i64 ${byteSize})`);
+      // Build fat pointer.
+      const arrayLlvmTy = llvmType(arrayType);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${raw}, ptr ${dataField}`);
+      const lenField = freshTemp();
+      fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${nArg.val}, ptr ${lenField}`);
+      const fatVal = freshTemp();
+      fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+      return { val: fatVal, yoopType: arrayType };
+    }
+    if (inst.declId === "$builtin__heap_free") {
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      const fatArg = emitExpr(node.args[0], fnLines);
+      // Extract field 0 (data pointer) from the fat pointer.
+      const arrayLlvmTy = llvmType(arrayType);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${fatSlot}`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      const dataPtr = freshTemp();
+      fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      fnLines.push(`  call void @free(ptr ${dataPtr})`);
+      return { val: "void", yoopType: VoidType() };
+    }
+    if (inst.declId === "$builtin__string_as_bytes") {
+      // Phase 8.H: zero-copy view {s, strlen(s)} as uint8[].
+      const arrayType = ArrayType(PrimType("uint8"));
+      ensureArrayTypeDef(PrimType("uint8"));
+      const arrayLlvmTy = llvmType(arrayType);
+      const sArg = emitExpr(node.args[0], fnLines);
+      const lenTmp = freshTemp();
+      fnLines.push(`  ${lenTmp} = call i64 @strlen(ptr ${sArg.val})`);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${sArg.val}, ptr ${dataField}`);
+      const lenField = freshTemp();
+      fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${lenTmp}, ptr ${lenField}`);
+      const fatVal = freshTemp();
+      fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+      return { val: fatVal, yoopType: arrayType };
+    }
+    if (inst.declId === "$builtin__string_from_bytes_unchecked") {
+      // Phase 8.H: malloc(buf.len + 1), memcpy from buf.ptr, write nul.
+      // Returns the malloc'd ptr as a string (zero-terminated UTF-8 by
+      // contract — caller asserts UTF-8 validity).
+      const arrayType = ArrayType(PrimType("uint8"));
+      ensureArrayTypeDef(PrimType("uint8"));
+      const arrayLlvmTy = llvmType(arrayType);
+      const bufArg = emitExpr(node.args[0], fnLines);
+      // Extract buf.ptr and buf.len from the fat pointer.
+      const bufSlot = freshTemp();
+      fnLines.push(`  ${bufSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${bufArg.val}, ptr ${bufSlot}`);
+      const bufDataField = freshTemp();
+      fnLines.push(`  ${bufDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${bufSlot}, i32 0, i32 0`);
+      const bufDataPtr = freshTemp();
+      fnLines.push(`  ${bufDataPtr} = load ptr, ptr ${bufDataField}`);
+      const bufLenField = freshTemp();
+      fnLines.push(`  ${bufLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${bufSlot}, i32 0, i32 1`);
+      const bufLenVal = freshTemp();
+      fnLines.push(`  ${bufLenVal} = load i64, ptr ${bufLenField}`);
+      // alloc len + 1 bytes for the nul terminator.
+      const allocSize = freshTemp();
+      fnLines.push(`  ${allocSize} = add i64 ${bufLenVal}, 1`);
+      const raw = freshTemp();
+      fnLines.push(`  ${raw} = call ptr @malloc(i64 ${allocSize})`);
+      // Copy the bytes in.
+      fnLines.push(`  call ptr @memcpy(ptr ${raw}, ptr ${bufDataPtr}, i64 ${bufLenVal})`);
+      // Write the nul terminator at p[len].
+      const nulPtr = freshTemp();
+      fnLines.push(`  ${nulPtr} = getelementptr inbounds i8, ptr ${raw}, i64 ${bufLenVal}`);
+      fnLines.push(`  store i8 0, ptr ${nulPtr}`);
+      return { val: raw, yoopType: PrimType("string") };
+    }
+    if (inst.declId === "$builtin__array_slice") {
+      // Phase 8.H: array_slice<T>(xs, start, end) — borrowing view, no copy.
+      // Build {xs.ptr + start * sizeof(T), end - start} as a fresh fat pointer.
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      const arrayLlvmTy = llvmType(arrayType);
+      const elemLlvmTy = llvmType(elemType);
+      // Emit args.
+      const fatArg = emitExpr(node.args[0], fnLines);
+      const startArg = emitExpr(node.args[1], fnLines);
+      const endArg = emitExpr(node.args[2], fnLines);
+      // Extract source data pointer.
+      const srcSlot = freshTemp();
+      fnLines.push(`  ${srcSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${srcSlot}`);
+      const srcDataField = freshTemp();
+      fnLines.push(`  ${srcDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${srcSlot}, i32 0, i32 0`);
+      const srcDataPtr = freshTemp();
+      fnLines.push(`  ${srcDataPtr} = load ptr, ptr ${srcDataField}`);
+      // Compute element-typed offset: srcDataPtr + start (in element units).
+      const newDataPtr = freshTemp();
+      fnLines.push(`  ${newDataPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${srcDataPtr}, i64 ${startArg.val}`);
+      // Compute new length = end - start.
+      const newLen = freshTemp();
+      fnLines.push(`  ${newLen} = sub i64 ${endArg.val}, ${startArg.val}`);
+      // Build result fat pointer.
+      const resSlot = freshTemp();
+      fnLines.push(`  ${resSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const resDataField = freshTemp();
+      fnLines.push(`  ${resDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${newDataPtr}, ptr ${resDataField}`);
+      const resLenField = freshTemp();
+      fnLines.push(`  ${resLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${newLen}, ptr ${resLenField}`);
+      const resVal = freshTemp();
+      fnLines.push(`  ${resVal} = load ${arrayLlvmTy}, ptr ${resSlot}`);
+      return { val: resVal, yoopType: arrayType };
+    }
+    throw new Error(`codegen: unknown builtin generic declId "${inst.declId}"`);
+  }
+
   function emitCallExpr(node, fnLines) {
+    if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
+      return emitBuiltinGenericCall(node, fnLines);
+    }
     if (node.isCast) {
       const src = emitExpr(node.args[0], fnLines);
       const dstType = node.castTargetType;
@@ -2612,6 +3836,13 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const base = emitLval(node.object, fnLines);
+        // Phase 7.5: union field access — every field overlaps at offset 0;
+        // the union's pointer is already the field's pointer (just retyped).
+        if (base.type.kind === typeKinds.union) {
+          const uf = base.type.fields.find((f) => f.name === node.field);
+          if (!uf) throw new Error(`codegen: union has no field ${node.field}`);
+          return { ptr: base.ptr, type: uf.type };
+        }
         const idx = base.type.fields.findIndex((f) => f.name === node.field);
         const fieldType = base.type.fields[idx].type;
         const gepTmp = freshTemp();
@@ -2645,6 +3876,22 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   }
 
   function emitStructLitInto(litNode, destPtr, structType, fnLines) {
+    // Phase 7.5: union literal — exactly one field gets stored, and it lives
+    // at byte offset 0 of the union (the field's LLVM type, treated as an
+    // overlay onto the byte buffer). All fields share offset 0, so we can
+    // ignore the lookup `idx` here.
+    if (structType.kind === typeKinds.union) {
+      for (const litField of litNode.fields) {
+        const f = structType.fields.find((ff) => ff.name === litField.name);
+        if (!f) continue;
+        const rhs = emitExpr(litField.value, fnLines);
+        // destPtr is a ptr to the union struct, which has shape [N x i8].
+        // Storing the RHS as its own LLVM type at that pointer is a valid
+        // type-pun (LLVM types are erased at the IR level).
+        fnLines.push(`  store ${llvmType(f.type)} ${rhs.val}, ptr ${destPtr}`);
+      }
+      return;
+    }
     for (const litField of litNode.fields) {
       const idx = structType.fields.findIndex((f) => f.name === litField.name);
       const fieldType = structType.fields[idx].type;
@@ -2872,6 +4119,21 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
   }
 
   function emitStmt(node, fnLines, ctx) {
+    // Post-pass !dbg annotation: record where this statement's emission
+    // starts, dispatch to the real emitter, then walk the new lines and
+    // attach `, !dbg <loc>` to every side-effecting / control-flow
+    // instruction that isn't already annotated. Nested statements
+    // (if/while/for/block) attach their own !dbg first, so this outer pass
+    // is a no-op on their lines (annotateLinesWithDbg skips them).
+    const startIdx = fnLines.length;
+    emitStmtImpl(node, fnLines, ctx);
+    if (debugInfo && ctx?.subprogram) {
+      const loc = dbgLocFor(node, ctx);
+      if (loc) annotateLinesWithDbg(fnLines, startIdx, loc);
+    }
+  }
+
+  function emitStmtImpl(node, fnLines, ctx) {
     switch (node.kind) {
       case ASTNodeKind.RETURN_STATEMENT: {
         // Compute the return value first, fire pending cleanups, then ret.
@@ -2919,6 +4181,13 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
         const llvmTy = llvmType(declType);
         const al = effectiveAlign(declType, node.resolvedKindApplication);
         fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${al}`);
+        emitDbgDeclare(fnLines, {
+          name: node.name,
+          slotPtr: `%${node.name}`,
+          yoopType: declType,
+          sourceLoc: node.sourceLoc,
+          subprogramRef: ctx.subprogram,
+        });
         if (node.assignment) {
           if (node.assignment.kind === ASTNodeKind.STRUCT_LITERAL && declType.kind === typeKinds.struct) {
             emitStructLitInto(node.assignment, `%${node.name}`, declType, fnLines);
@@ -2951,8 +4220,143 @@ function codegenWithModuleId(ast, moduleId, emittedStructs, emittedArrayTypes = 
       case ASTNodeKind.BREAK_STATEMENT: fnLines.push(`  br label %${ctx.breakLabel}`); break;
       case ASTNodeKind.CONTINUE_STATEMENT: fnLines.push(`  br label %${ctx.continueLabel}`); break;
       case ASTNodeKind.BLOCK: node.body.forEach((s) => emitStmt(s, fnLines, ctx)); break;
+      case ASTNodeKind.SWITCH_STATEMENT: emitSwitchStmt(node, fnLines, ctx); break;
       default: throw new Error(`codegen: unhandled statement kind "${node.kind}"`);
     }
+  }
+
+  // Phase 7.5: lower a `switch` statement.
+  //
+  //   Scrutinee int/bool/char:
+  //     emit scrutinee → use LLVM `switch <ty>` with a case list mapping
+  //     literal -> arm-entry label and a default label (user default body or
+  //     the merge label).
+  //
+  //   Scrutinee enum:
+  //     load tag from field 0, switch on i32 ordinal. Each variant arm gets
+  //     an arm-entry label; the arm body binds payload fields by GEP'ing into
+  //     the (allocated) enum slot's payload bytes via the variant struct.
+  function emitSwitchStmt(node, fnLines, ctx) {
+    const scrutType = node.scrutineeType;
+    const endLabel = freshLabel("switch_end");
+    const defaultLabel = freshLabel("switch_default");
+
+    // For enum scrutinees we need the underlying alloca slot so payload GEPs
+    // resolve. emitLval handles that for any lvalue; for arbitrary scrutinee
+    // expressions emitLval will materialize a temp slot for us.
+    let scrutSlot = null;
+    let scrutVal = null;
+    if (scrutType.kind === typeKinds.enum) {
+      scrutSlot = emitLval(node.scrutinee, fnLines);
+      const enumLlvm = llvmType(scrutType);
+      const tagPtr = freshTemp();
+      fnLines.push(`  ${tagPtr} = getelementptr inbounds ${enumLlvm}, ptr ${scrutSlot.ptr}, i32 0, i32 0`);
+      const tagVal = freshTemp();
+      fnLines.push(`  ${tagVal} = load i32, ptr ${tagPtr}`);
+      scrutVal = { val: tagVal, yoopType: PrimType("int32") };
+    } else {
+      scrutVal = emitExpr(node.scrutinee, fnLines);
+    }
+
+    // Build (literal, label) pairs for the LLVM switch.
+    const armEntries = []; // { label, arm }
+    const caseLines = []; // strings inside `[ ... ]`
+
+    for (const arm of node.arms) {
+      const armLabel = freshLabel("switch_arm");
+      armEntries.push({ label: armLabel, arm });
+      for (const pat of arm.patterns) {
+        if (pat.kind === ASTNodeKind.LITERAL_PATTERN) {
+          const litVal = literalPatternIRValue(pat, scrutType);
+          const ty = llvmType(scrutType);
+          caseLines.push(`${ty} ${litVal}, label %${armLabel}`);
+        } else if (pat.kind === ASTNodeKind.VARIANT_PATTERN && !pat.isWildcard) {
+          caseLines.push(`i32 ${pat.resolvedVariant.ordinal}, label %${armLabel}`);
+        }
+        // VARIANT_PATTERN { isWildcard: true } only appears as `case _:` which
+        // the parser routed through the default-arm slot already (we don't
+        // emit cases for it).
+      }
+    }
+
+    const scrutTyForSwitch =
+      scrutType.kind === typeKinds.enum ? "i32" : llvmType(scrutType);
+    fnLines.push(
+      `  switch ${scrutTyForSwitch} ${scrutVal.val}, label %${defaultLabel} [ ${caseLines.join(" ")} ]`,
+    );
+
+    for (const { label, arm } of armEntries) {
+      fnLines.push(`${label}:`);
+      // Bind any variant-pattern field bindings for this arm. We support
+      // exactly one variant pattern per arm body (multi-pattern arms are
+      // typecheck-restricted to literal-only homogeneous lists).
+      const vp = arm.patterns.find(
+        (p) => p.kind === ASTNodeKind.VARIANT_PATTERN && !p.isWildcard,
+      );
+      if (vp && vp.resolvedVariant.fields !== null && vp.fieldBindings) {
+        const enumType = vp.resolvedEnumType;
+        const enumLlvm = llvmType(enumType);
+        const enumId = enumType.moduleId
+          ? `${enumType.moduleId}__${enumType.name}`
+          : enumType.name;
+        const variantLlvm = `%enumv.${enumId}__${vp.variantName}`;
+        const payloadPtr = freshTemp();
+        fnLines.push(
+          `  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${scrutSlot.ptr}, i32 0, i32 1`,
+        );
+        for (const fb of vp.fieldBindings) {
+          if (fb.isWildcard) continue;
+          if (!fb.fieldName || !fb.bindingName) continue;
+          const idx = vp.resolvedVariant.fields.findIndex(
+            (f) => f.name === fb.fieldName,
+          );
+          if (idx < 0) continue;
+          const fieldType = vp.resolvedVariant.fields[idx].type;
+          const fieldLlvmTy = llvmType(fieldType);
+          const fieldPtr = freshTemp();
+          fnLines.push(
+            `  ${fieldPtr} = getelementptr inbounds ${variantLlvm}, ptr ${payloadPtr}, i32 0, i32 ${idx}`,
+          );
+          const valTmp = freshTemp();
+          fnLines.push(`  ${valTmp} = load ${fieldLlvmTy}, ptr ${fieldPtr}`);
+          // Materialize the binding as a normal local alloca.
+          symbols.set(fb.bindingName, fieldType);
+          fnLines.push(
+            `  %${fb.bindingName} = alloca ${fieldLlvmTy}, align ${sizeOfAlign(fieldType)}`,
+          );
+          fnLines.push(
+            `  store ${fieldLlvmTy} ${valTmp}, ptr %${fb.bindingName}`,
+          );
+        }
+      }
+      const armCtx = { ...ctx, breakLabel: endLabel };
+      emitBlockStmt(arm.body, fnLines, armCtx);
+      if (!blockIsTerminated(fnLines)) {
+        fnLines.push(`  br label %${endLabel}`);
+      }
+    }
+
+    fnLines.push(`${defaultLabel}:`);
+    if (node.defaultArm) {
+      const armCtx = { ...ctx, breakLabel: endLabel };
+      emitBlockStmt(node.defaultArm, fnLines, armCtx);
+      if (!blockIsTerminated(fnLines)) {
+        fnLines.push(`  br label %${endLabel}`);
+      }
+    } else {
+      fnLines.push(`  br label %${endLabel}`);
+    }
+    fnLines.push(`${endLabel}:`);
+  }
+
+  // Phase 7.5: format a LITERAL_PATTERN value as the LLVM constant for its
+  // case label. For bool we emit i1 0/1; for ints we emit the numeric value
+  // directly (LLVM accepts decimal constants).
+  function literalPatternIRValue(pat, scrutType) {
+    if (scrutType.kind === typeKinds.prim && scrutType.name === "bool") {
+      return pat.value ? "1" : "0";
+    }
+    return String(pat.value);
   }
 
   function emitDestrDecl(node, fnLines) {

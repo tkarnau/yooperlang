@@ -1,0 +1,28 @@
+import.unsafe;
+
+extern "C" from "stdlib.h" {
+    function malloc(n: usize): unsafe_ptr<uint8>;
+    function free(p: unsafe_ptr<uint8>): void;
+}
+
+function main(): int32 {
+    let bytes: unsafe_ptr<uint8> = malloc(4);
+    if (bytes == null) {
+        return 1;
+    }
+    let pi: unsafe_ptr<int32> = unsafe_ptr.cast<int32>(bytes);
+    *pi = 0x41424344;
+    let b0: unsafe_ptr<uint8> = bytes;
+    let b3: unsafe_ptr<uint8> = bytes + 3;
+    let diff: int64 = b3 - b0;
+    printf(`diff=${diff}\n`);
+    let n: uintptr = unsafe_ptr.toInt(bytes);
+    let same: unsafe_ptr<uint8> = unsafe_ptr.fromInt<uint8>(n);
+    let same_i: int32 = 0;
+    if (same == bytes) {
+        same_i = 1;
+    }
+    printf(`same=${same_i}\n`);
+    free(bytes);
+    return 0;
+}

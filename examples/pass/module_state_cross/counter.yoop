@@ -1,0 +1,7 @@
+export let counter: int32 = 0;
+export const STEP: int32 = 5;
+
+export function bump(): int32 {
+    counter = counter + STEP;
+    return counter;
+}

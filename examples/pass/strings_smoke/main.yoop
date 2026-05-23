@@ -1,0 +1,49 @@
+import {
+    string_eq,
+    string_starts_with,
+    string_index_of,
+    string_slice,
+    string_concat,
+    string_concat_all,
+    string_from_bytes,
+    StringSlice,
+} from "../../../std/core/strings.yoop";
+
+import { Maybe }from "../../../std/core/types.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let s: string = "Hello, World";
+
+    let eq1: bool = string_eq(s, "Hello, World");
+    let eq2: bool = string_eq(s, "Goodbye");
+    let eq1i: int32 = 0; if (eq1) { eq1i = 1; }
+    let eq2i: int32 = 0; if (eq2) { eq2i = 1; }
+    printf(`eq_match=${eq1i} eq_diff=${eq2i}\n`);
+
+    let sw: bool = string_starts_with(s, "Hello");
+    let swi: int32 = 0; if (sw) { swi = 1; }
+    printf(`starts_with_Hello=${swi}\n`);
+
+    let idx: usize = string_index_of(s, "World");
+    printf(`idx_of_World=${idx}\n`);
+
+    let sl: StringSlice = string_slice(s, 7, 12);
+    printf(`slice=${sl.value} err=${sl.err}\n`);
+
+    let cat: string = string_concat("foo", "bar");
+    printf(`cat=${cat}\n`);
+
+    let parts: string[] = ["a", "-", "b", "-", "c"];
+    let all: string = string_concat_all(parts);
+    printf(`all=${all}\n`);
+
+    let bytes: uint8[] = [72, 105];
+    let fb: Maybe<string> = string_from_bytes(bytes);
+    printf(`fb=${fb.value} err=${fb.err}\n`);
+
+    return 0;
+}

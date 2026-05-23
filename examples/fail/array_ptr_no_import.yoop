@@ -1,0 +1,6 @@
+function main(): int32 {
+    let xs: int32[] = [1, 2, 3];
+    let p: int32 = xs[0];
+    let bad: int32 = xs.ptr[0];
+    return 0;
+}

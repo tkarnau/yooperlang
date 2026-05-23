@@ -1,0 +1,23 @@
+extern "C" from "fcntl.h" {
+    function open(path: string, flags: c_int): c_int;
+    function close(fd: c_int): c_int;
+}
+
+function main(): int32 {
+    // Open a guaranteed-nonexistent path. open returns -1, errno = ENOENT (2).
+    errno.set(0);
+    let fd: c_int = open("/no/such/file/yoop-phase-8-d", 0);
+    let code: c_int = errno.get();
+    let msg: string = errno.message(code);
+
+    let saw_failure: int32 = 0;
+    if (fd < 0) {
+        saw_failure = 1;
+    }
+    let saw_enoent: int32 = 0;
+    if (code == 2) {
+        saw_enoent = 1;
+    }
+    printf(`fd=${fd} saw_failure=${saw_failure} code=${code} saw_enoent=${saw_enoent} msg=${msg}\n`);
+    return 0;
+}

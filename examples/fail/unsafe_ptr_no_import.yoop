@@ -1,0 +1,4 @@
+function main(): int32 {
+    let p: unsafe_ptr<int32> = null;
+    return 0;
+}

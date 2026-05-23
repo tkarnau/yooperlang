@@ -1,0 +1,15 @@
+let counter: int32 = 0;
+const GREETING: string = "ticked";
+
+function tick(): int32 {
+    counter = counter + 1;
+    return counter;
+}
+
+function main(): int32 {
+    let a: int32 = tick();
+    let b: int32 = tick();
+    let c: int32 = tick();
+    printf(`${GREETING}: a=${a} b=${b} c=${c} now=${counter}\n`);
+    return 0;
+}

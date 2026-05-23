@@ -1,0 +1,21 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function classify(n: int32): int32 {
+    switch (n) {
+        case 0: { return 0; }
+        case 1, 2, 3: { return 1; }
+        case 10: { return 10; }
+        default: { return -1; }
+    }
+    return -2;
+}
+
+function main(): int32 {
+    printf(`classify(0)=${classify(0)}\n`);
+    printf(`classify(2)=${classify(2)}\n`);
+    printf(`classify(10)=${classify(10)}\n`);
+    printf(`classify(99)=${classify(99)}\n`);
+    return 0;
+}

@@ -1,0 +1,22 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum E {
+    A,
+    B { x: int32 },
+}
+
+function main(): int32 {
+    let a: E = E.A;
+    let b: E = E.B { x: 42 };
+    switch (a) {
+        case E.A: { printf(`a is A\n`); }
+        case E.B { x: xa }: { printf(`a.x=${xa}\n`); }
+    }
+    switch (b) {
+        case E.A: { printf(`b is A\n`); }
+        case E.B { x: xb }: { printf(`b.x=${xb}\n`); }
+    }
+    return 0;
+}

@@ -1,0 +1,57 @@
+// Phase 9: full operator coverage — bitwise & ^ ~ << >> binary, ~ prefix,
+// and compound assignment += -= *= /= %= on IDENT / FIELD / INDEX lvalues.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Point { x: int32, y: int32 }
+
+function main(): int32 {
+    // Bitwise binary ops on a uint8 byte (mask, mix, isolate).
+    let m: uint8 = 0xCC;
+    let n: uint8 = 0xAA;
+    let a: uint8 = m & n;
+    let b: uint8 = m | n;
+    let c: uint8 = m ^ n;
+    let d: uint8 = ~m;
+    printf(`a=${a} b=${b} c=${c} d=${d}\n`);
+
+    // Shifts on int32.
+    let v: int32 = 1;
+    let lo: int32 = v << 10;
+    let hi: int32 = 0x40 >> 2;
+    printf(`lo=${lo} hi=${hi}\n`);
+
+    // Precedence sanity: `a + b * c` and `(a + b) * c` differ.
+    let p: int32 = 2 + 3 * 4;
+    let q: int32 = (2 + 3) * 4;
+    printf(`p=${p} q=${q}\n`);
+
+    // Shifts bind tighter than comparison but looser than additive.
+    let mix: int32 = 1 + 2 << 1;  // (1 + 2) << 1 = 6
+    printf(`mix=${mix}\n`);
+
+    // Compound assignments — IDENT.
+    let x: int32 = 100;
+    x += 5;
+    x -= 3;
+    x *= 2;
+    x /= 4;
+    x %= 9;
+    printf(`x=${x}\n`);
+
+    // Compound assignment — FIELD.
+    let pt: Point = { x: 10, y: 20 };
+    pt.x += 5;
+    pt.y *= 3;
+    printf(`pt=(${pt.x},${pt.y})\n`);
+
+    // Compound assignment — INDEX.
+    let xs: int32[] = [1, 2, 3, 4];
+    xs[1] += 100;
+    xs[2] -= 1;
+    printf(`xs=${xs[0]},${xs[1]},${xs[2]},${xs[3]}\n`);
+
+    return 0;
+}

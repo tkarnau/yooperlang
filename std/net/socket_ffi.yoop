@@ -1,0 +1,244 @@
+// std/net/socket_ffi.yoop — unsafe libc + runtime FFI for the net layer.
+//
+// The /only/ module under std/net that imports unsafe. Every safe wrapper
+// in std/net/socket.yoop and std/net/tcp.yoop calls into the helpers
+// exported from this file; users never reach here directly.
+//
+// Constants are hard-mirrored from <sys/socket.h>. The values below match
+// Linux + macOS + BSD for AF_INET / SOCK_STREAM / IPPROTO_TCP — they're
+// part of the stable POSIX socket constants. SOL_SOCKET / SO_REUSEADDR
+// have different numeric values across platforms, so the SO_REUSEADDR
+// call is delegated to a C helper (runtime/yoop_net.c) that resolves
+// the right constants at compile time.
+//
+// Error strings: the codegen only allows template-literal interpolation
+// inside printf calls today, so `err` strings here are the raw errno
+// message (no "bind: " / "accept: " prefix). Callers wanting a labeled
+// message printf the raw err with their own prefix.
+
+import.unsafe;
+
+import { ReadOutcome, WriteOutcome } from "../core/traits.yoop";
+
+// ----- POSIX socket constants (stable across Linux / macOS / BSD) ----------
+
+export const AF_INET:     c_int = 2;
+export const SOCK_STREAM: c_int = 1;
+export const IPPROTO_TCP: c_int = 6;
+export const INADDR_ANY:  uint32 = 0;
+
+// ----- sockaddr_in mirror (C ABI, 16 bytes) --------------------------------
+
+kind c_layout {
+    appliesTo type;
+    layout { abi "C"; };
+}
+
+// Mirrors `struct sockaddr_in` from <netinet/in.h>:
+//   uint16_t  sin_family;     // AF_INET
+//   uint16_t  sin_port;       // network byte order (use htons)
+//   uint32_t  sin_addr.s_addr;// network byte order (use htonl or inet_addr)
+//   uint8_t   sin_zero[8];    // padding required by sockaddr_in's shape
+//
+// Total: 16 bytes. We model sin_zero as a single uint64 because (a) it's
+// the right size and (b) yoop doesn't yet have fixed-size byte arrays as
+// struct fields.
+export type SockAddrIn c_layout {
+    sin_family: uint16,
+    sin_port:   uint16,
+    sin_addr:   uint32,
+    sin_zero:   uint64,
+}
+
+// ----- libc externs --------------------------------------------------------
+
+extern "C" from "sys/socket.h" {
+    function socket(domain: c_int, sock_type: c_int, proto: c_int): c_int;
+    function bind(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
+    function listen(fd: c_int, backlog: c_int): c_int;
+    function accept(fd: c_int, addr: unsafe_ptr<SockAddrIn>, addr_len: unsafe_ptr<c_int>): c_int;
+    function connect(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
+    function send(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
+    function recv(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
+}
+
+extern "C" from "unistd.h" {
+    function close(fd: c_int): c_int;
+}
+
+extern "C" from "arpa/inet.h" {
+    function htons(host_short: uint16): uint16;
+    function inet_addr(addr: string): uint32;
+}
+
+extern "C" from "yoop_runtime" {
+    function yoop_io_wait_readable(fd: c_int): c_int;
+    function yoop_io_wait_writable(fd: c_int): c_int;
+    // Cross-platform SO_REUSEADDR helper. SOL_SOCKET / SO_REUSEADDR have
+    // different numeric values on Linux vs macOS, so we resolve them in
+    // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
+    function yoop_net_set_reuseaddr(fd: c_int): c_int;
+}
+
+// ----- helpers exposed to safe wrappers ------------------------------------
+
+// Build a sockaddr_in for "host:port". host must be a numeric IPv4
+// dotted-quad ("127.0.0.1", "0.0.0.0"). inet_addr returns 0xFFFFFFFF on
+// failure; we surface that as a fallible err.
+export type AddrBuild { addr: SockAddrIn, err: string }
+
+export function build_sockaddr(host: string, port: int32): AddrBuild {
+    let ipv4: uint32 = inet_addr(host);
+    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on bad input — except
+    // "255.255.255.255" which is the broadcast address. We don't bind to
+    // that, so we treat the value as the error sentinel.
+    if (ipv4 == 4294967295) {
+        return {
+            addr: { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 },
+            err: "build_sockaddr: invalid IPv4 host",
+        };
+    }
+    let port_be: uint16 = htons(uint16(port));
+    return {
+        addr: {
+            sin_family: uint16(AF_INET),
+            sin_port:   port_be,
+            sin_addr:   ipv4,
+            sin_zero:   0,
+        },
+        err: "",
+    };
+}
+
+// Allocate a TCP/IPv4 socket. Returns the raw fd or -1 + an err string.
+export type FdResult { fd: c_int, err: string }
+
+export function ffi_socket_open(): FdResult {
+    let fd: c_int = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    if (fd < 0) {
+        return { fd: -1, err: errno.message(errno.get()) };
+    }
+    return { fd: fd, err: "" };
+}
+
+// Bind + listen sequence. Returns the fd on success (so the caller can
+// hand it to a Socket envelope) or -1 + err on any step's failure.
+// Closes the fd on bind/listen failure so we don't leak fds across error
+// returns.
+export function ffi_listen(host: string, port: int32, backlog: int32): FdResult {
+    let open: FdResult = ffi_socket_open();
+    if (open.err.len > 0) {
+        return open;
+    }
+    let fd: c_int = open.fd;
+
+    // SO_REUSEADDR: skip the TIME_WAIT papercut so the developer can
+    // restart the server immediately. setsockopt failure here is
+    // non-fatal — log and continue (errno is preserved but ignored).
+    let reuse_rc: c_int = yoop_net_set_reuseaddr(fd);
+
+    let built: AddrBuild = build_sockaddr(host, port);
+    if (built.err.len > 0) {
+        let close_rc_a: c_int = close(fd);
+        return { fd: -1, err: built.err };
+    }
+    let addr: SockAddrIn = built.addr;
+
+    let bind_rc: c_int = bind(fd, &addr, 16);
+    if (bind_rc != 0) {
+        let msg_bind: string = errno.message(errno.get());
+        let close_rc_b: c_int = close(fd);
+        return { fd: -1, err: msg_bind };
+    }
+
+    let listen_rc: c_int = listen(fd, backlog);
+    if (listen_rc != 0) {
+        let msg_listen: string = errno.message(errno.get());
+        let close_rc_c: c_int = close(fd);
+        return { fd: -1, err: msg_listen };
+    }
+
+    return { fd: fd, err: "" };
+}
+
+// Park on the listening fd's readability, then accept(). Returns the
+// new client fd plus the peer's address (parsed back out of the
+// sockaddr_in the kernel filled). On error returns -1 + err.
+//
+// Plain `function`, not `task`: yoop_io_wait_readable parks the calling
+// pthread on the multiplexer regardless of task/function context. The
+// caller is expected to spawn a task wrapping this if it wants
+// per-connection concurrency (see std/net/tcp.yoop's higher-level wrapper).
+export type AcceptFdResult { fd: c_int, peer_host: uint32, peer_port: uint16, err: string }
+
+export function ffi_accept(fd: c_int): AcceptFdResult {
+    let wait_rc: c_int = yoop_io_wait_readable(fd);
+    if (wait_rc != 0) {
+        return { fd: -1, peer_host: 0, peer_port: 0, err: errno.message(errno.get()) };
+    }
+    let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
+    let len: c_int = 16;
+    let cfd: c_int = accept(fd, &peer, &len);
+    if (cfd < 0) {
+        return { fd: -1, peer_host: 0, peer_port: 0, err: errno.message(errno.get()) };
+    }
+    return { fd: cfd, peer_host: peer.sin_addr, peer_port: peer.sin_port, err: "" };
+}
+
+// Connect a freshly opened fd to host:port. Caller owns the fd.
+export type ConnectOutcome { err: string }
+
+export function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
+    let built: AddrBuild = build_sockaddr(host, port);
+    if (built.err.len > 0) {
+        return { err: built.err };
+    }
+    let addr: SockAddrIn = built.addr;
+    let rc: c_int = connect(fd, &addr, 16);
+    if (rc != 0) {
+        return { err: errno.message(errno.get()) };
+    }
+    return { err: "" };
+}
+
+// Park on readability, then recv() once into `buf`. uint8[] is a fat
+// pointer; passing by value copies the (ptr,len) header but the bytes
+// are still the caller's storage. Returns bytes read (0 = EOF, -1 = err).
+export function ffi_recv(fd: c_int, buf: uint8[]): ReadOutcome {
+    let wait_rc: c_int = yoop_io_wait_readable(fd);
+    if (wait_rc != 0) {
+        return { n: -1, err: errno.message(errno.get()) };
+    }
+    let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+    if (n < 0) {
+        return { n: -1, err: errno.message(errno.get()) };
+    }
+    return { n: n, err: "" };
+}
+
+// Park on writability, then send() in a loop until every byte of `buf`
+// has been transmitted or an error occurs. Returns total bytes sent (=
+// buf.len on success).
+export function ffi_send_all(fd: c_int, buf: uint8[]): WriteOutcome {
+    let total: usize = 0;
+    while (total < buf.len) {
+        let wait_rc: c_int = yoop_io_wait_writable(fd);
+        if (wait_rc != 0) {
+            return { n: c_ssize_t(total), err: errno.message(errno.get()) };
+        }
+        let chunk: uint8[] = array_slice(buf, total, buf.len);
+        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        if (n < 0) {
+            return { n: c_ssize_t(total), err: errno.message(errno.get()) };
+        }
+        total = total + usize(n);
+    }
+    return { n: c_ssize_t(total), err: "" };
+}
+
+// Thin close wrapper exported for the Socket disposer. Returns the libc
+// rc as-is so the caller can log + continue (a failed close almost never
+// matters for a server).
+export function ffi_close(fd: c_int): c_int {
+    return close(fd);
+}

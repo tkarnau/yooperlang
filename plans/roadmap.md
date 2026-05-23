@@ -14,7 +14,9 @@ The decisions baked into this plan: JS bootstrap goes far before self-hosting; s
 
 The phases below are ordered so each one unlocks the next. Distant phases are intentionally sketchy — the language will evolve and locking them in now would be premature.
 
-### Phase 1 — Foundations (typechecker + structs + literals)
+> **Status**: Phases 1 through 8 (plus library phases A–D) have all landed. Per-phase plan documents have moved to [plans/completed/](completed/). The active plan document for the next batch of work is [phase-9.md](phase-9.md). See the bottom of this file for the current focus.
+
+### Phase 1 — Foundations (typechecker + structs + literals) ✓ landed
 
 The current "typecheck inside codegen with strings" approach won't extend to anything in the spec. Fix the foundation, then add structs as the first new feature.
 
@@ -24,7 +26,7 @@ The current "typecheck inside codegen with strings" approach won't extend to any
 - **Negative numeric literals** (currently parse as unary minus)
 - **Struct types** — `type Point { x: int32, y: int32 }` parsing, codegen as LLVM `%struct.Point`, field access, struct literals, struct returns
 
-### Phase 2 — Errors as values
+### Phase 2 — Errors as values ✓ landed
 
 Errors are a recognizable convention (`err: string` field) plus the `?` operator. They need structs but not traits/kinds, and exercise the typechecker hard.
 
@@ -34,7 +36,7 @@ Errors are a recognizable convention (`err: string` field) plus the `?` operator
 - `?` value semantics: strip `err` field, yield the rest (single-field -> bare value, multi-field -> struct, err-only -> `void`)
 - Destructuring sugar (`const { value, err } = f()`) as syntactic rewrite
 
-### Phase 3 — Modules and FFI
+### Phase 3 — Modules and FFI ✓ landed
 
 The "program defines itself" story. The entry file pulls in everything; no flags, no build manifest.
 
@@ -46,9 +48,9 @@ The "program defines itself" story. The entry file pulls in everything; no flags
 - **`extern "C" from library "m"`**: emits `-lm` style link flags to clang
 - **`export "C" function`**: unmangled symbols for C ABI
 
-> Detailed plan: [phase-3-modules-and-ffi.md](phase-3-modules-and-ffi.md)
+> Detailed plan: [completed/phase-3-modules-and-ffi.md](completed/phase-3-modules-and-ffi.md)
 
-### Phase 4 — Refs, arrays, control flow gaps
+### Phase 4 — Refs, arrays, control flow gaps ✓ landed
 
 Mid-level data shapes the spec leans on. None require traits/kinds to land.
 
@@ -58,9 +60,9 @@ Mid-level data shapes the spec leans on. None require traits/kinds to land.
 - `else if` chaining, `break`, `continue`
 - Casts as type-name calls: `int64(x)`, `uint8(x & 0xFF)`
 
-> Detailed plan: [phase-4-refs-arrays-control-flow.md](phase-4-refs-arrays-control-flow.md)
+> Detailed plan: [completed/phase-4-refs-arrays-control-flow.md](completed/phase-4-refs-arrays-control-flow.md)
 
-### Phase 5 — Traits
+### Phase 5 — Traits ✓ landed
 
 Capability layer. Spec §5. Methods live inside `type X implements Trait { fields; fn; }` blocks (no bare impl blocks). Phase 5 ships **non-generic traits only**, with `extends` and method-call sugar deferred — kept tight so phase 6 (kinds) can lean on it.
 
@@ -72,9 +74,9 @@ Capability layer. Spec §5. Methods live inside `type X implements Trait { field
 - Same-name method collisions (across implemented traits, and against module free functions) rejected at typecheck
 - Generic traits, `extends`, and method-call sugar deferred to a later phase
 
-> Detailed plan: [phase-5-traits.md](phase-5-traits.md)
+> Detailed plan: [completed/phase-5-traits.md](completed/phase-5-traits.md)
 
-### Phase 6 — Kinds
+### Phase 6 — Kinds ✓ landed
 
 The big one. Spec §6. Probably the hardest part of the language.
 
@@ -86,9 +88,9 @@ The big one. Spec §6. Probably the hardest part of the language.
 - `task` runtime: pthread-backed worker pool, LLVM coroutine intrinsics for forward-compat, refcounted `pooled` handles, cross-platform threading shim. The runtime contract lives in [runtime-design.md](runtime-design.md) and lands before the language-sugar phase 6.3 work.
 - Block-owning kinds with implicit-block synthesis in reverse declaration order
 
-> Detailed plan: [phase-6-kinds.md](phase-6-kinds.md)
+> Detailed plan: [completed/phase-6-kinds.md](completed/phase-6-kinds.md)
 
-### Phase 6.3-prelude — Concurrency runtime
+### Phase 6.3-prelude — Concurrency runtime ✓ landed
 
 The first piece of phase 6.3 is the runtime, separated from the language-sugar work so the two move on independent tracks. Deliverables:
 
@@ -98,22 +100,30 @@ The first piece of phase 6.3 is the runtime, separated from the language-sugar w
 
 This phase lands no surface-language changes; it's the foundation phase 6.3 (language sugar) builds on. The full contract is in [runtime-design.md](runtime-design.md).
 
-### Phase 7 — Generics, pattern matching, switch
+### Phase 7 — Generics, pattern matching, switch ✓ landed
 
 Once kinds are stable, the language is usable. From here:
 
 - User-defined generic types (deferred per spec §3)
 - Pattern matching / sum types (deferred per spec §10)
 
-> Detailed plans: [phase-7-1-generics.md](phase-7-1-generics.md), [phase-7-2-trait-bounds.md](phase-7-2-trait-bounds.md), [phase-7-3-pattern-matching.md](phase-7-3-pattern-matching.md), [phase-7-4-trait-call-syntax.md](phase-7-4-trait-call-syntax.md)
+> Detailed plans: [completed/phase-7-1-generics.md](completed/phase-7-1-generics.md), [completed/phase-7-2-trait-bounds.md](completed/phase-7-2-trait-bounds.md), [completed/phase-7-3-pattern-matching.md](completed/phase-7-3-pattern-matching.md), [completed/phase-7-4-trait-call-syntax.md](completed/phase-7-4-trait-call-syntax.md), [completed/phase-7-5-sum-types-and-unions.md](completed/phase-7-5-sum-types-and-unions.md)
 
-### Phase 8 - Beginning standard library ideas and internals
+### Phase 8 — Standard library + FFI primitives ✓ landed
 
-- Dynamic array
-- File I/O
-- Basic networking
+- Phase 8.A–F: unsafe_ptr, C ABI aliases, buffer interop, errno, module-level state, task suspension + I/O multiplexer + timers
+- Phase 8.H: string/bytes primitives + standard `Vec<T>`
+- Library Phases A–D: `std/core`, `std/net`, `std/http` types + parser, `std/http` server
 
-### Phase 9 - polish, self-hosting
+> Detailed plans live in [completed/](completed/) — [completed/phase-8-networking-prerequisites.md](completed/phase-8-networking-prerequisites.md) is the umbrella, with [completed/phase-8-a-unsafe-ptr.md](completed/phase-8-a-unsafe-ptr.md) through [completed/phase-8-h-string-bytes-vec.md](completed/phase-8-h-string-bytes-vec.md) and [completed/library-phase-a-traits.md](completed/library-phase-a-traits.md) through [completed/library-phase-d-server.md](completed/library-phase-d-server.md) as the per-slice docs.
+
+### Phase 9 — Syntax and ergonomic completion (current focus)
+
+The next batch of language work, picked for the items that are still **forcing workarounds in real yoop code** or **blocking syntax forms already in [SPEC.md](../SPEC.md)**. Highlights: parenthesized subexpressions, `bool[]` arrays, `for ... in` loops, array slice syntax, `std/` import root, `Display` in template literals, `vtable T for Trait` runtime polymorphism + function value types, `?` over enum errors, suspendable `wait`, plus a cleanup pass for `extends` / multi-bound / `mustNotShare acrossThreads`.
+
+> Detailed plan: [phase-9.md](phase-9.md)
+
+### Phase 10 — Polish, self-hosting
 
 - Optimization passes
 - Begin self-hosting: rewrite the compiler in Yooper, bootstrap through the JS one

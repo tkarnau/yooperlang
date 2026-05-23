@@ -1,0 +1,11 @@
+enum E { A, B, C }
+
+function pick(e: E): int32 {
+    switch (e) {
+        case E.A: { return 1; }
+        case E.B: { return 2; }
+    }
+    return 0;
+}
+
+function main(): int32 { return pick(E.B); }

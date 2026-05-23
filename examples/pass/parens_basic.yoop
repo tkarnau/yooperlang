@@ -1,0 +1,39 @@
+// Phase 9.A: parenthesized subexpressions override precedence and compose
+// with all the existing postfix ops (call, field, index, ?).
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Box {
+    v: int32,
+}
+
+function add(a: int32, b: int32): int32 {
+    return a + b;
+}
+
+function main(): int32 {
+    // Grouping changes precedence: without parens, 2 + 3 * 4 = 14.
+    let a: int32 = (2 + 3) * 4;
+    printf(`a=${a}\n`);
+
+    // Nested parens collapse cleanly.
+    let b: int32 = ((1 + 2) + (3 + 4)) * 2;
+    printf(`b=${b}\n`);
+
+    // The SDL-demo workaround pattern (r * 0.02 - 0.4) replaced by
+    // the natural form (r - 20) * 0.02 — integer arithmetic flavor here.
+    let r: int32 = 30;
+    let c: int32 = (r - 20) * 2;
+    printf(`c=${c}\n`);
+
+    // Postfix field and index both attach to a parenthesized expr.
+    let bx: Box = { v: 99 };
+    let e: int32 = (bx).v;
+    let xs: int32[] = [100, 200, 300];
+    let f: int32 = (xs)[1];
+    printf(`e=${e} f=${f}\n`);
+
+    return 0;
+}

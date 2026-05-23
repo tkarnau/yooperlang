@@ -31,6 +31,7 @@ import { pushError, formatType } from "./errors.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
+  lookupGenericFunc,
   markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
@@ -108,14 +109,23 @@ export function validateFunction(funcNode, typeContext, errors) {
             pushError(errors, param,
               `kind "${kt.name}" can only apply to struct values, got ${formatType(baseType)}`);
           } else {
-            // Validate required traits.
-            for (const reqTrait of kt.requires) {
-              const implementsIt = (structType.implementsTraits ?? []).some(
-                (t2) => t2.name === reqTrait.name && (t2.moduleId ?? null) === (reqTrait.moduleId ?? null),
-              );
-              if (!implementsIt) {
-                pushError(errors, param,
-                  `parameter "${param.name}" has kind "${kt.name}" which requires "${reqTrait.name}", but type ${formatType(structType)} does not implement "${reqTrait.name}"`);
+            // Phase 6.4 strict propagates: a struct that propagates this kind
+            // satisfies the kind's requirement via its propagated fields, even
+            // if it does not implement the required traits directly. Skip the
+            // direct-implements check in that case.
+            const structPropagatesThisKind = (structType.propagatedKinds ?? []).some(
+              (a) => (a.kindType ?? a) === kt,
+            );
+            if (!structPropagatesThisKind) {
+              // Validate required traits.
+              for (const reqTrait of kt.requires) {
+                const implementsIt = (structType.implementsTraits ?? []).some(
+                  (t2) => t2.name === reqTrait.name && (t2.moduleId ?? null) === (reqTrait.moduleId ?? null),
+                );
+                if (!implementsIt) {
+                  pushError(errors, param,
+                    `parameter "${param.name}" has kind "${kt.name}" which requires "${reqTrait.name}", but type ${formatType(structType)} does not implement "${reqTrait.name}"`);
+                }
               }
             }
           }
@@ -186,6 +196,36 @@ export function validateFunction(funcNode, typeContext, errors) {
   popScope(scope, errors);
 }
 
+// Phase 8.E: typecheck a single module-level let/const decl's initializer
+// against its declared type. The scope is empty (module-level inits have
+// no locals); identifier lookups fall through to moduleSymbols, which by
+// pass D.0 holds both this module's bindings and any imported ones.
+//
+// (Bytecode/CTE future) — this is the call site to swap for a CTE
+// evaluator: try evaluating decl.assignment at compile time; on success
+// stash the result on the decl for codegen to use as the @global initial
+// value; on failure keep the existing runtime-init behavior.
+export function validateModuleInit(decl, typeContext, errors) {
+  const scope = pushScope(null);
+  const ctx = {
+    funcReturnType: null,
+    funcName: "<module init>",
+    typeContext,
+    errors,
+    inLoop: false,
+    inTaskBody: false,
+  };
+  checkInitializer(
+    decl.assignment,
+    decl.resolvedType,
+    scope,
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(decl.resolvedType)} in initializer of module-level "${decl.name}"`,
+  );
+  popScope(scope, errors);
+}
+
 export function validateStatement(node, scope, ctx) {
   switch (node.kind) {
     case ASTNodeKind.BLOCK:
@@ -211,6 +251,8 @@ export function validateStatement(node, scope, ctx) {
       return checkBreak(node, ctx);
     case ASTNodeKind.CONTINUE_STATEMENT:
       return checkContinue(node, ctx);
+    case ASTNodeKind.SWITCH_STATEMENT:
+      return checkSwitch(node, scope, ctx);
     default:
       pushError(
         ctx.errors,
@@ -290,10 +332,19 @@ function checkLetOrConst(node, scope, ctx) {
   node.resolvedKindApplication = kindApp;
 
   if (node.assignment) {
+    // Generic function calls need to flow through checkInitializer so the
+    // declared LHS type can drive return-type inference (e.g. heap_alloc).
+    // The eager resolveExprType inside isTaskCallReturningType would otherwise
+    // error out before bidirectional inference gets a chance.
+    const isGenericCall =
+      node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
+      typeof node.assignment.callee === "string" &&
+      lookupGenericFunc(node.assignment.callee, ctx) !== null;
     // Phase 6.3: immediate task call — `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
       !kindType &&
+      !isGenericCall &&
       node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
       isTaskCallReturningType(node.assignment, declaredType, scope, ctx)
     ) {
@@ -477,14 +528,23 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     return;
   }
 
-  // The RHS struct must implement every required trait.
-  for (const reqTrait of kindType.requires) {
-    const implementsIt = (declaredType.implementsTraits ?? []).some(
-      (t) => t.name === reqTrait.name && (t.moduleId ?? null) === (reqTrait.moduleId ?? null),
-    );
-    if (!implementsIt) {
-      pushError(ctx.errors, node,
-        `binding "${node.name}" has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
+  // Phase 6.4 strict propagates: a struct that propagates this kind satisfies
+  // the kind's requirement via propagated fields, even if it does not
+  // implement the required traits directly. Skip the direct-implements check
+  // in that case — the obligation flows via the field walk in kindCheck.
+  const structPropagatesThisKind = (declaredType.propagatedKinds ?? []).some(
+    (a) => (a.kindType ?? a) === kindType,
+  );
+  if (!structPropagatesThisKind) {
+    // The RHS struct must implement every required trait.
+    for (const reqTrait of kindType.requires) {
+      const implementsIt = (declaredType.implementsTraits ?? []).some(
+        (t) => t.name === reqTrait.name && (t.moduleId ?? null) === (reqTrait.moduleId ?? null),
+      );
+      if (!implementsIt) {
+        pushError(ctx.errors, node,
+          `binding "${node.name}" has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
+      }
     }
   }
 
@@ -665,9 +725,261 @@ function checkForLoop(node, scope, ctx) {
   validateStatement(node.body, scope, loopCtx);
 }
 
+// Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
+//   - integer / bool / char prim  → arms carry LITERAL_PATTERNs
+//   - EnumType                    → arms carry VARIANT_PATTERNs
+// Exhaustiveness is enforced when the scrutinee is a bool or an enum.
+function checkSwitch(node, scope, ctx) {
+  const scrutType = resolveExprType(node.scrutinee, scope, ctx);
+  if (scrutType.kind === typeKinds.error) {
+    // Walk arms for cascade reporting but skip pattern-level checks.
+    for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
+    if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
+    return;
+  }
+
+  const isInt =
+    scrutType.kind === typeKinds.prim &&
+    (scrutType.name === "int8" ||
+      scrutType.name === "int16" ||
+      scrutType.name === "int32" ||
+      scrutType.name === "int64" ||
+      scrutType.name === "uint8" ||
+      scrutType.name === "uint16" ||
+      scrutType.name === "uint32" ||
+      scrutType.name === "uint64" ||
+      scrutType.name === "usize" ||
+      scrutType.name === "isize" ||
+      scrutType.name === "char");
+  const isBool = scrutType.kind === typeKinds.prim && scrutType.name === "bool";
+  const isEnum = scrutType.kind === typeKinds.enum;
+
+  if (!isInt && !isBool && !isEnum) {
+    pushError(
+      ctx.errors,
+      node.scrutinee,
+      `switch scrutinee must be int, bool, char, or an enum type; got ${formatType(scrutType)}`,
+    );
+    for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
+    if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
+    return;
+  }
+
+  node.scrutineeType = scrutType;
+  const seenLiterals = new Map(); // value -> arm index
+  const seenVariants = new Set();
+  let sawAnyWildcardCase = false;
+
+  for (const arm of node.arms) {
+    let armPatternIsWildcard = false;
+
+    for (const pat of arm.patterns) {
+      if (pat.kind === ASTNodeKind.VARIANT_PATTERN && pat.isWildcard) {
+        armPatternIsWildcard = true;
+        continue;
+      }
+      if (pat.kind === ASTNodeKind.LITERAL_PATTERN) {
+        if (!isInt && !isBool) {
+          pushError(
+            ctx.errors,
+            pat,
+            `literal patterns are only valid on int / bool / char scrutinees, not ${formatType(scrutType)}`,
+          );
+          continue;
+        }
+        if (isBool) {
+          if (pat.literalKind !== "bool") {
+            pushError(
+              ctx.errors,
+              pat,
+              `pattern must be a bool literal to match a bool scrutinee`,
+            );
+            continue;
+          }
+        } else if (isInt) {
+          if (pat.literalKind !== "int") {
+            pushError(
+              ctx.errors,
+              pat,
+              `pattern must be an integer literal to match ${formatType(scrutType)}`,
+            );
+            continue;
+          }
+        }
+        if (seenLiterals.has(pat.value)) {
+          pushError(
+            ctx.errors,
+            pat,
+            `duplicate case value ${pat.value}`,
+          );
+        } else {
+          seenLiterals.set(pat.value, true);
+        }
+        // Tag the pattern with the scrutinee's prim type so codegen knows
+        // what LLVM integer width to emit.
+        pat.resolvedType = scrutType;
+        continue;
+      }
+      if (pat.kind === ASTNodeKind.VARIANT_PATTERN) {
+        if (!isEnum) {
+          pushError(
+            ctx.errors,
+            pat,
+            `variant patterns are only valid on enum scrutinees, not ${formatType(scrutType)}`,
+          );
+          continue;
+        }
+        if (pat.enumName !== scrutType.name) {
+          pushError(
+            ctx.errors,
+            pat,
+            `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+          );
+          continue;
+        }
+        const variant = scrutType.variants.get(pat.variantName);
+        if (!variant) {
+          pushError(
+            ctx.errors,
+            pat,
+            `enum "${scrutType.name}" has no variant "${pat.variantName}"`,
+          );
+          continue;
+        }
+        if (seenVariants.has(pat.variantName)) {
+          pushError(
+            ctx.errors,
+            pat,
+            `duplicate variant pattern for "${scrutType.name}.${pat.variantName}"`,
+          );
+        }
+        seenVariants.add(pat.variantName);
+        pat.resolvedEnumType = scrutType;
+        pat.resolvedVariant = variant;
+        // Field-binding shape: must match the variant's declared shape.
+        if (variant.fields === null) {
+          if (pat.fieldBindings !== null && pat.fieldBindings.length > 0) {
+            pushError(
+              ctx.errors,
+              pat,
+              `variant "${scrutType.name}.${pat.variantName}" has no payload — drop the '{ ... }'`,
+            );
+          }
+        } else {
+          if (pat.fieldBindings === null) {
+            pushError(
+              ctx.errors,
+              pat,
+              `variant "${scrutType.name}.${pat.variantName}" requires a payload pattern { ${variant.fields.map((f) => f.name).join(", ")} }`,
+            );
+          } else {
+            const fieldMap = new Map();
+            for (const f of variant.fields) fieldMap.set(f.name, f.type);
+            const seenF = new Set();
+            for (const fb of pat.fieldBindings) {
+              if (fb.isWildcard && fb.fieldName === null) continue; // bare `_` placeholder
+              if (seenF.has(fb.fieldName)) {
+                pushError(
+                  ctx.errors,
+                  pat,
+                  `duplicate field "${fb.fieldName}" in variant pattern`,
+                );
+                continue;
+              }
+              seenF.add(fb.fieldName);
+              if (!fieldMap.has(fb.fieldName)) {
+                pushError(
+                  ctx.errors,
+                  pat,
+                  `variant "${scrutType.name}.${pat.variantName}" has no field "${fb.fieldName}"`,
+                );
+              }
+            }
+          }
+        }
+        continue;
+      }
+      pushError(
+        ctx.errors,
+        pat,
+        `unsupported switch pattern node kind ${pat.kind}`,
+      );
+    }
+
+    if (armPatternIsWildcard) sawAnyWildcardCase = true;
+
+    // Push a fresh scope for the arm body. Variant-pattern field bindings
+    // are declared in this scope before walking the body.
+    const armScope = pushScope(scope);
+    for (const pat of arm.patterns) {
+      if (pat.kind !== ASTNodeKind.VARIANT_PATTERN) continue;
+      if (pat.isWildcard) continue;
+      const variant = pat.resolvedVariant;
+      if (!variant || variant.fields === null) continue;
+      if (!pat.fieldBindings) continue;
+      for (const fb of pat.fieldBindings) {
+        if (fb.isWildcard) continue;
+        if (!fb.fieldName || !fb.bindingName) continue;
+        const fieldDef = variant.fields.find((f) => f.name === fb.fieldName);
+        if (!fieldDef) continue;
+        declareInScope(
+          armScope,
+          fb.bindingName,
+          fieldDef.type,
+          "const",
+          pat,
+          ctx.errors,
+        );
+      }
+    }
+    const armCtx = { ...ctx, inSwitch: true };
+    validateStatement(arm.body, armScope, armCtx);
+    popScope(armScope, ctx.errors);
+  }
+
+  if (node.defaultArm) {
+    const dctx = { ...ctx, inSwitch: true };
+    validateStatement(node.defaultArm, scope, dctx);
+  }
+
+  // Exhaustiveness checks.
+  if (!node.defaultArm && !sawAnyWildcardCase) {
+    if (isBool) {
+      const haveTrue = [...seenLiterals.keys()].includes(true);
+      const haveFalse = [...seenLiterals.keys()].includes(false);
+      if (!(haveTrue && haveFalse)) {
+        pushError(
+          ctx.errors,
+          node,
+          `switch over bool is not exhaustive — add 'default' or list both true and false`,
+        );
+      }
+    } else if (isEnum) {
+      const allVariants = [...scrutType.variants.keys()];
+      const missing = allVariants.filter((v) => !seenVariants.has(v));
+      if (missing.length > 0) {
+        pushError(
+          ctx.errors,
+          node,
+          `switch over ${formatType(scrutType)} is not exhaustive — missing variants: ${missing.join(", ")}`,
+        );
+      }
+    } else if (isInt) {
+      pushError(
+        ctx.errors,
+        node,
+        `switch over ${formatType(scrutType)} requires a 'default' clause`,
+      );
+    }
+  }
+}
+
 function checkBreak(node, ctx) {
-  if (!ctx.inLoop) {
-    pushError(ctx.errors, node, `'break' is not inside a loop`);
+  // Phase 7.5: `break` is also valid inside a switch arm — it falls out of the
+  // switch. We track the switch context independently from `inLoop` because
+  // `continue` inside a switch arm still targets the enclosing loop.
+  if (!ctx.inLoop && !ctx.inSwitch) {
+    pushError(ctx.errors, node, `'break' is not inside a loop or switch`);
   }
 }
 
