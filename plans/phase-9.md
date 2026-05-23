@@ -102,7 +102,14 @@ Files touched: [lexer.js](../src/jsyooplexer/lexer.js), [parser.js](../src/jsyoo
 
 **Today's workaround**: explicit `array_slice(xs, i, j)` calls. Used liberally in [std/http/parser.yoop](../std/http/parser.yoop).
 
-### Phase 9.F — `Display` trait wired into template literals
+### Phase 9.F — `Display` trait wired into template literals ✓ landed
+
+> See [plans/completed/phase-9-f-display-in-templates.md](completed/phase-9-f-display-in-templates.md).
+> `${expr}` falls through to `Display.to_string(ref expr)` when the type
+> implements Display; cross-module impls resolve. `StatusCode` /
+> `HttpMethod` impls are deferred until enum-trait-impls land and an
+> int-to-string helper exists (`SocketAddr` did get the impl —
+> `addr_to_string` is gone).
 
 [library-design.md §3.4](library-design.md#34-display--to-string-conversion-new) defines the trait; [library-design.md §8 open question 5](library-design.md#8-open-language-questions-the-library-exposes) flags that template literals don't consult it. Today `${myStruct}` is a compile error unless the type is `int`/`float`/`bool`/`string`. The fix is a typechecker-only patch.
 

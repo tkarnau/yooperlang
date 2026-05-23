@@ -162,7 +162,13 @@ and `int32_key_ops()` helpers. Phase 10.C.3
 ([phase-10-c-3-collections-rest.md](completed/phase-10-c-3-collections-rest.md))
 wrapped up the collections arc: `Set<K>`, `Deque<T>`, `for entry in
 map_iter(ref m)`, plus int64/uint64/bytes KeyOps helpers and the
-five compiler-side fixes container code surfaced.
+five compiler-side fixes container code surfaced. Phase 9.F
+([phase-9-f-display-in-templates.md](completed/phase-9-f-display-in-templates.md))
+wired `Display.to_string` into `${expr}` interpolations at typecheck
+time; Phase 10.D
+([phase-10-d-debug-log.md](completed/phase-10-d-debug-log.md))
+shipped `std/debug` (`panic`/`unreachable`/`assert`) and `std/log`
+(`info`/`warn`/`error`) backed by `runtime/yoop_debug.c`.
 
 > Detailed plan: [phase-10.md](phase-10.md).
 

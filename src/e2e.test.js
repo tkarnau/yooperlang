@@ -192,6 +192,35 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "keys_sum=10 vals_sum=1000\n");
   });
 
+  it("display_templates: Display trait wires into template literal interpolations", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/display_templates.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "p=Point x=3\naddr=127.0.0.1 port=8080\n");
+  });
+
+  it("debug_smoke: assert(true, ...) is a no-op; normal-path codegen unaffected", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/debug_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "assert ok\n");
+  });
+
+  it("log_smoke: std/log writes [info]/[warn]/[error] lines to stderr", () => {
+    const { stdout, stderr, exitCode } = runFixtureEntry("examples/pass/log_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "done\n");
+    assert.equal(
+      stderr,
+      "[info] booting\n[warn] config missing - using defaults\n[error] one item dropped\n",
+    );
+  });
+
+  it("panic_smoke: panic(msg) exits 1 after writing 'panic: ...' to stderr", () => {
+    const { stdout, stderr, exitCode } = runFixtureEntry("examples/pass/panic_smoke.yoop");
+    assert.equal(exitCode, 1);
+    assert.equal(stdout, "before panic\n");
+    assert.equal(stderr, "panic: intentional\n");
+  });
+
   it("slice_basic.yoop slices arrays in all four forms and shares storage", () => {
     const { stdout, exitCode } = runFixture("examples/pass/slice_basic.yoop");
     assert.equal(exitCode, 0);
@@ -538,7 +567,12 @@ function runFixtureEntry(relPath) {
   ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
   const result = spawnSync(binPath, [], { encoding: "utf8" });
-  return { stdout: result.stdout, exitCode: result.status, binPath };
+  return {
+    stdout: result.stdout,
+    stderr: result.stderr,
+    exitCode: result.status,
+    binPath,
+  };
 }
 
 // Typecheck a multi-file fixture (entry + imports) and return errors.
@@ -1132,6 +1166,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /is not iterable.*Iterable<T>/.test(e.message)),
       `expected non-iterable-struct error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("template_no_display.yoop rejects template interpolation of a non-Display struct", () => {
+    const { errors } = typecheckFixture("examples/fail/template_no_display.yoop");
+    assert.ok(
+      errors.some((e) => /implement Display/.test(e.message)),
+      `expected Display-hint error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

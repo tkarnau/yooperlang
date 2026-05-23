@@ -488,19 +488,31 @@ function resolveUnary(node, scope, ctx) {
 }
 
 // `` `hi ${name}` `` — every interpolation must be a printable scalar
-// (string, bool, or any numeric type). The whole expression is a string.
+// (string, bool, or any numeric type) or a type that implements
+// `Display`. For Display types we rewrite the interpolation at
+// typecheck time to call `Display.to_string(ref expr)` first and use
+// the resulting string — codegen still only sees printf-style args.
 function resolveTemplateLiteral(node, scope, ctx) {
   for (const part of node.parts) {
     if (part.kind === "STRING_PART") continue;
     if (part.kind === "EXPR_PART") {
       const exprType = resolveExprType(part.expr, scope, ctx);
-      if (!isPrintableInTemplate(exprType)) {
-        pushError(
-          ctx.errors,
-          part.expr,
-          `template literal interpolation must be a string, bool, int, or float type, found ${formatType(exprType)}`,
-        );
+      if (isPrintableInTemplate(exprType)) continue;
+      // Phase 9.F: try Display. Look for a `Display` trait on the
+      // (deref'd) struct's implementsTraits; synthesize a trait call.
+      const innerType = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
+      if (
+        innerType.kind === typeKinds.struct &&
+        (innerType.implementsTraits ?? []).some((t) => t.name === "Display")
+      ) {
+        part.expr = synthesizeDisplayCall(part.expr, innerType, exprType);
+        continue;
       }
+      pushError(
+        ctx.errors,
+        part.expr,
+        `template literal interpolation must be a string, bool, int, or float type, or implement Display; found ${formatType(exprType)}`,
+      );
       continue;
     }
     pushError(
@@ -510,6 +522,43 @@ function resolveTemplateLiteral(node, scope, ctx) {
     );
   }
   return setType(node, PrimType(primAnnotations.string));
+}
+
+// Phase 9.F: build the post-typecheck shape of `Display.to_string(ref expr)`
+// directly. We bypass the parser by stamping `calleeMethodOf` +
+// `calleeMangledName` + a synthetic REF_EXPRESSION arg, mirroring what
+// resolveTraitQualifiedCall does for source-written trait calls.
+//
+// `exprType` is the type of `originalExpr` (used to materialize the ref
+// arg if needed); `structType` is the (deref'd) struct that carries the
+// Display impl — its mangled symbol is what the call dispatches to.
+function synthesizeDisplayCall(originalExpr, structType, exprType) {
+  // Arg = `ref originalExpr` when expr isn't already a ref; pass
+  // through when it already is.
+  let argNode;
+  if (exprType.kind === typeKinds.ref) {
+    argNode = originalExpr;
+  } else {
+    argNode = {
+      kind: ASTNodeKind.REF_EXPRESSION,
+      operand: originalExpr,
+      sourceLoc: originalExpr.sourceLoc,
+      resolvedType: RefType(structType),
+    };
+  }
+  return {
+    kind: ASTNodeKind.CALL_EXPRESSION,
+    callee: "Display.to_string", // diagnostic-only; codegen reads calleeMangledName
+    args: [argNode],
+    sourceLoc: originalExpr.sourceLoc,
+    resolvedType: PrimType(primAnnotations.string),
+    calleeMethodOf: structType,
+    calleeMethodName: "to_string",
+    calleeTrait: (structType.implementsTraits ?? []).find(
+      (t) => t.name === "Display",
+    ),
+    calleeMangledName: mangleTraitMethod(structType, "Display", "to_string"),
+  };
 }
 
 function isPrintableInTemplate(t) {

@@ -1,0 +1,26 @@
+// Phase 10.D: `panic(msg)` writes `panic: <msg>\n` to stderr and
+// exits with status 1. Buffered stdout is flushed first so the
+// pre-panic printf appears in order. This fixture exits non-zero by
+// design — the e2e harness asserts on stderr + exit code instead of
+// the usual `exitCode === 0`.
+
+import { panic } from "std/debug.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    printf(`before panic\n`);
+    panic("intentional");
+    printf(`never reached\n`);
+    return 0;
+}
+
+// expected stdout:
+// before panic
+//
+// expected stderr:
+// panic: intentional
+//
+// expected exit code: 1

@@ -212,7 +212,13 @@ Once `Iterable<T>` exists, write the collections.
   with a benchmarked switchover (the small-N hot-path probably stays
   linear; only the case-insensitive form benefits from real hashing).
 
-### Phase 10.D — `std/log` + `std/debug`
+### Phase 10.D — `std/log` + `std/debug` ✓ landed
+
+See [phase-10-d-debug-log.md](completed/phase-10-d-debug-log.md).
+`std/debug` exposes `panic`/`unreachable`/`assert`; `std/log` exposes
+`info`/`warn`/`error`. Each delegates to a C helper in
+`runtime/yoop_debug.c`. Release-mode `assert` gating + structured/
+alternate-sink logging remain deferred to follow-ups.
 
 Tiny modules; explicitly named as Phase-10-ish in
 [library-design.md §9](library-design.md).

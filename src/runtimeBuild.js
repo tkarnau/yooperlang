@@ -22,6 +22,8 @@ export const RUNTIME_SOURCES = [
   RUNTIME_C,
   path.resolve(runtimeDir, "yoop_io.c"),
   path.resolve(runtimeDir, "yoop_net.c"),
+  // Phase 10.D: panic/unreachable + log_info/warn/error helpers.
+  path.resolve(runtimeDir, "yoop_debug.c"),
 ];
 
 export function runtimeLinkFlags() {
