@@ -1,0 +1,44 @@
+// std/core/traits.yoop — foundational traits used across std modules.
+//
+// Library Phase A: the staple Readable / Writable / Display traits that
+// every downstream module either implements or takes as input. Disposable
+// is intentionally NOT defined here — it lives in std/core/kinds.yoop
+// alongside the disposable kind that requires it.
+//
+// All three traits use the fallible-struct convention for their result
+// types so the `?` operator composes cleanly at call sites.
+
+// ----- Readable ----------------------------------------------------------
+
+// Result of a single read attempt. `n` is the count of bytes written into
+// the caller's buffer (0 = EOF on a stream). `err` is non-empty if the
+// underlying source failed.
+export type ReadOutcome { n: c_ssize_t, err: string }
+
+export trait Readable {
+    function read(ref self, ref buf: uint8[]): ReadOutcome;
+}
+
+// ----- Writable ----------------------------------------------------------
+
+// Result of a single write attempt. `n` is bytes actually written (may be
+// less than buf.len for partial writes on a non-blocking sink; callers
+// loop until either `n == buf.len` or `err != ""`).
+export type WriteOutcome { n: c_ssize_t, err: string }
+
+// Result of a flush attempt. No byte-count; just a success/error signal.
+export type FlushOutcome { err: string }
+
+export trait Writable {
+    function write(ref self, ref buf: uint8[]): WriteOutcome;
+    function flush(ref self): FlushOutcome;
+}
+
+// ----- Display ----------------------------------------------------------
+
+// Convert a value to its human-readable string form. Currently template
+// literals special-case int/float/bool/string; lifting Display into the
+// template path is a separate typechecker change.
+export trait Display {
+    function to_string(ref self): string;
+}

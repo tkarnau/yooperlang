@@ -836,6 +836,42 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
       "method=GET path=/path version=HTTP/1.1 err=\nbad.err=parse_request_line: missing CR\n",
     );
   });
+
+  // Library Phase A: foundational traits exported from std/core/traits.yoop.
+  it("traits_readable_writable: in-memory MemBuffer implements (Readable, Writable) — round-trips bytes", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_readable_writable/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "wrote=2 read=2 bytes=72,73\n");
+  });
+
+  // Library Phase C: HTTP/1.1 request-head parser (request line + headers
+  // + Content-Length sniff). No sockets; pure parse over a literal buffer.
+  it("http_parse_smoke: parse_request_head extracts method/path/version/cl + headers", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_parse_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "method=GET path=/hello version=HTTP/1.1 cl=0 host=localhost\n",
+    );
+  });
+
+  // Library Phase D: the hello-world HTTP server compiles end-to-end.
+  // Running it binds to localhost:18080 (out of scope for the test harness
+  // — see plans/library-phase-d-server.md). We just verify the build.
+  it("hello_server: builds end-to-end (server requires manual curl test)", () => {
+    const { ir, linkFlags } = compileEntry(
+      path.join(repoRoot, "examples/pass/hello_server/main.yoop"),
+    );
+    // The server's generic serve_n monomorphizes against HelloHandler.
+    assert.match(ir, /serve_n.*HelloHandler/);
+    // The TCP layer must call into the multiplexer.
+    assert.match(ir, /declare i32 @yoop_io_wait_readable/);
+    // The libc socket-family externs are declared.
+    assert.match(ir, /declare i32 @socket\(/);
+    assert.match(ir, /declare i32 @bind\(/);
+    assert.match(ir, /declare i32 @listen\(/);
+    assert.match(ir, /declare i32 @accept\(/);
+  });
 });
 
 describe("e2e: multi-file fail fixtures produce the right errors", () => {

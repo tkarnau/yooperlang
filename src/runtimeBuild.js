@@ -16,9 +16,12 @@ export const RUNTIME_C = path.resolve(runtimeDir, "yoop_runtime.c");
 // Phase 8.F.2: the I/O multiplexer lives in its own translation unit so
 // programs that don't use it still link cleanly. Callers that need full
 // runtime functionality should compile every entry in this list.
+// yoop_net.c (Library Phase B): a couple of platform-dependent socket
+// helpers (SOL_SOCKET / SO_REUSEADDR constants differ Linux vs macOS).
 export const RUNTIME_SOURCES = [
   RUNTIME_C,
   path.resolve(runtimeDir, "yoop_io.c"),
+  path.resolve(runtimeDir, "yoop_net.c"),
 ];
 
 export function runtimeLinkFlags() {

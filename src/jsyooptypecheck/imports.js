@@ -59,6 +59,12 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcGenericStruct = srcEnv.genericStructTable?.get(spec.exportName);
       const srcGenericFunc = srcEnv.genericFuncTable?.get(spec.exportName);
       const srcGenericTrait = srcEnv.genericTraitTable?.get(spec.exportName);
+      // Phase 7.5: enum / union are sibling nominal types alongside struct.
+      // lookupEnumByName / lookupUnionByName walk importedNames with kind ===
+      // "type", so we register them the same way (and surface the resolved
+      // type so resolveTypeAnnotation can find it via the type table).
+      const srcEnum = srcEnv.enumTable?.get(spec.exportName);
+      const srcUnion = srcEnv.unionTable?.get(spec.exportName);
 
       if (srcKind) {
         // Phase 6.4: cross-module kind import. Identity is preserved by reference —
@@ -83,6 +89,10 @@ export function resolveImports(mod, moduleEnv, errors) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-func" });
       } else if (srcGenericTrait) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-trait" });
+      } else if (srcEnum) {
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
+      } else if (srcUnion) {
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcSym) {
         // It's a value (function, const, etc.)
         localSymbols.set(spec.localName, srcSym);
