@@ -135,7 +135,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "total=112 mode=19\n");
   });
 
-  it("map_smoke: StringMap<int32> covers insert/get/remove/grow with Option<V>", () => {
+  it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/map_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -147,6 +147,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
         "remove: alpha=1 xeno=0 len=2\n" +
         "after-remove get alpha=-1\n" +
         "grown len=14 k05=50 k10=100\n",
+    );
+  });
+
+  it("map_int32_keys: Map<int32, string> via int32_key_ops covers get/remove/contains", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/map_int32_keys.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "len=3\n" +
+        "get 2 -> beta\n" +
+        "get 99 -> <none>\n" +
+        "removed 2 -> 1 len=2\n" +
+        "contains 3 -> 1\n",
     );
   });
 

@@ -154,8 +154,11 @@ fixed the long-standing codegen gap that made `case Option.Some {
 value: v }` arms collide on `%v`. Phase 10.X.2
 ([phase-10-x2-fn-ptr-fields.md](completed/phase-10-x2-fn-ptr-fields.md))
 landed the function-pointer-field lifts (func-decl → FPT coercion +
-indirect-call lowering), which unblocks a fully generic `Map<K, V>`
-keyed off a `KeyOps<K>` ops struct.
+indirect-call lowering), and Phase 10.C.2
+([phase-10-c-2-generic-map.md](completed/phase-10-c-2-generic-map.md))
+turned that into a real `Map<K, V>` in `std/collections/map.yoop`,
+keyed off a `KeyOps<K>` ops struct with pre-built `string_key_ops()`
+and `int32_key_ops()` helpers.
 
 > Detailed plan: [phase-10.md](phase-10.md).
 

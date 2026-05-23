@@ -1,0 +1,64 @@
+// Phase 10.X.2 follow-up: `Map<K, V>` keyed off int32, demonstrating
+// that the generic shape works for non-string K. Uses the pre-built
+// `int32_key_ops()` helper from std/collections/map.yoop.
+
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import {
+    Map,
+    map_new,
+    map_insert,
+    map_get,
+    map_contains_key,
+    map_remove,
+    map_len,
+    int32_key_ops,
+} from "std/collections/map.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable m: Map<int32, string> = map_new(4, int32_key_ops());
+
+    let _f1: bool = map_insert(ref m, 1, "alpha");
+    let _f2: bool = map_insert(ref m, 2, "beta");
+    let _f3: bool = map_insert(ref m, 3, "gamma");
+    printf(`len=${map_len(ref m)}\n`);
+
+    // Lookup + Option<V> dispatch.
+    let r1: Option<string> = map_get(ref m, 2);
+    let r1_v: string = "";
+    switch (r1) {
+        case Option.Some { value: v }: { r1_v = v; }
+        case Option.None: { r1_v = "<none>"; }
+    }
+    printf(`get 2 -> ${r1_v}\n`);
+
+    let r_miss: Option<string> = map_get(ref m, 99);
+    let r_miss_v: string = "";
+    switch (r_miss) {
+        case Option.Some { value: v }: { r_miss_v = v; }
+        case Option.None: { r_miss_v = "<none>"; }
+    }
+    printf(`get 99 -> ${r_miss_v}\n`);
+
+    // Remove + re-probe through the tombstone.
+    let removed: bool = map_remove(ref m, 2);
+    let ri: int32 = 0; if (removed) { ri = 1; }
+    printf(`removed 2 -> ${ri} len=${map_len(ref m)}\n`);
+
+    let has_3: bool = map_contains_key(ref m, 3);
+    let h3: int32 = 0; if (has_3) { h3 = 1; }
+    printf(`contains 3 -> ${h3}\n`);
+
+    return 0;
+}
+
+// expected output:
+// len=3
+// get 2 -> beta
+// get 99 -> <none>
+// removed 2 -> 1 len=2
+// contains 3 -> 1

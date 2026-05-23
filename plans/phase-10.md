@@ -163,8 +163,11 @@ Phase 10.X.2 ([phase-10-x2-fn-ptr-fields.md](completed/phase-10-x2-fn-ptr-fields
 then landed the two function-pointer-field lifts the original 10.C
 plan called out as the precondition for a fully generic `Map<K, V>`:
 function-decl → FPT coercion at assignment, and indirect call
-lowering for FPT-typed struct fields. Generic `Map<K, V>` is now
-pure library work; `Set<K>` and `Deque<T>` are still pending.
+lowering for FPT-typed struct fields. Phase 10.C.2
+([phase-10-c-2-generic-map.md](completed/phase-10-c-2-generic-map.md))
+then shipped generic `Map<K, V>` itself — keyed off a `KeyOps<K>`
+ops struct, with pre-built `string_key_ops()` and `int32_key_ops()`
+helpers. `Set<K>` and `Deque<T>` are still pending.
 
 Once `Iterable<T>` exists, write the collections.
 

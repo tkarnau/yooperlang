@@ -1,4 +1,7 @@
-// Phase 10.C smoke: StringMap<V> covers the marquee paths —
+// Phase 10.X.2 follow-up: `Map<K, V>` generic hash map, keyed off a
+// `KeyOps<K>` ops struct (Phase 10.X.2 enables FPT-typed struct fields).
+// This fixture exercises the string-key form via `string_key_ops()`,
+// covering the marquee paths:
 //   * insert + overwrite (return value distinguishes fresh from replace),
 //   * get returning Option<V>,
 //   * contains_key, remove (with probe-chain preservation), len,
@@ -8,13 +11,14 @@
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import {
-    StringMap,
+    Map,
     map_new,
     map_insert,
     map_get,
     map_contains_key,
     map_remove,
     map_len,
+    string_key_ops,
 } from "std/collections/map.yoop";
 
 extern "C" from "stdio.h" {
@@ -22,9 +26,9 @@ extern "C" from "stdio.h" {
 }
 
 function main(): int32 {
-    disposable m: StringMap<int32> = map_new(4);
+    disposable m: Map<string, int32> = map_new(4, string_key_ops());
 
-    // Fresh inserts. `map_insert` returns true on overwrite, false on fresh.
+    // Fresh inserts.
     let fresh_a: bool = map_insert(ref m, "alpha", 1);
     let fresh_b: bool = map_insert(ref m, "beta",  2);
     let fresh_c: bool = map_insert(ref m, "gamma", 3);
@@ -38,9 +42,8 @@ function main(): int32 {
     let ow: int32 = 0; if (overwrote) { ow = 1; }
     printf(`overwrite: ow=${ow} len=${map_len(ref m)}\n`);
 
-    // Lookup hits + miss. Phase 10.H landed alloca-name uniquification,
-    // so payload bindings may share the same source-level name across
-    // arms without colliding at the LLVM level.
+    // Lookup hits + miss. Payload bindings can share `value: v` across
+    // arms thanks to Phase 10.H alloca uniquification.
     let ga: Option<int32> = map_get(ref m, "alpha");
     let gb: Option<int32> = map_get(ref m, "beta");
     let gz: Option<int32> = map_get(ref m, "zeta");
@@ -61,14 +64,12 @@ function main(): int32 {
     }
     printf(`get: alpha=${ga_v} beta=${gb_v} zeta=${gz_v}\n`);
 
-    // contains_key.
     let has_a: bool = map_contains_key(ref m, "alpha");
     let has_z: bool = map_contains_key(ref m, "zeta");
     let hai: int32 = 0; if (has_a) { hai = 1; }
     let hzi: int32 = 0; if (has_z) { hzi = 1; }
     printf(`contains: alpha=${hai} zeta=${hzi}\n`);
 
-    // Remove, then re-insert (exercises tombstone + reuse).
     let removed_a: bool = map_remove(ref m, "alpha");
     let removed_x: bool = map_remove(ref m, "xeno");
     let ra: int32 = 0; if (removed_a) { ra = 1; }
@@ -83,12 +84,10 @@ function main(): int32 {
     }
     printf(`after-remove get alpha=${after_v}\n`);
 
-    // Force a grow: keep inserting past the 75% load-factor threshold of
-    // the initial cap (rounded to 8). 12 fresh entries cover the boundary.
+    // Force a grow.
     let i: int32 = 0;
     while (i < 12) {
         let k: string = "k";
-        // No int-to-string yet; pick the key by branching.
         if (i == 0)  { k = "k00"; }
         if (i == 1)  { k = "k01"; }
         if (i == 2)  { k = "k02"; }

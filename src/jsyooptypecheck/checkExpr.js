@@ -195,6 +195,20 @@ function resolveIdent(node, scope, ctx) {
         node.moduleGlobalImported = false;
       }
     }
+    // Phase 10.X.2 follow-up: tag imported-function IDENTs in expression
+    // position with their source module so codegen can emit the right
+    // mangled symbol when the reference is used as a function-pointer
+    // *value* (e.g. `{ hash: imported_hash }` in a KeyOps<K> literal).
+    // The call-site path stamps these on CALL_EXPRESSION at line ~342;
+    // this branch handles the non-call case.
+    if (modType.kind === typeKinds.func) {
+      const tc = ctx.typeContext;
+      const imp = tc.importedNames?.get(node.name);
+      if (imp && imp.kind === "value") {
+        node.calleeModuleId = imp.fromModuleId;
+        node.calleeExportName = imp.exportName;
+      }
+    }
     return setType(node, modType);
   }
   if (node.name === "self") {
