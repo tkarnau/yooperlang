@@ -149,6 +149,28 @@ export function isAssignable(dest, src) {
     return true;
   }
 
+  // Phase 10.X.2: a top-level function decl's FuncType is assignable to a
+  // matching FunctionPointerType. The two types track the same shape but
+  // store it differently — FuncType has `{ name, type, isRef }` params and
+  // a variadic flag; FunctionPointerType has plain-type params and no
+  // variadic. Used to seed vtable-like dispatch tables (e.g. `KeyOps<K>`)
+  // by naming functions directly in struct literals: `{ hash: int_hash }`.
+  if (
+    dest.kind === typeKinds.functionPointer &&
+    src.kind === typeKinds.func
+  ) {
+    if (src.variadic) return false;
+    const dParams = dest.params ?? [];
+    const sParams = src.params ?? [];
+    if (dParams.length !== sParams.length) return false;
+    for (let i = 0; i < dParams.length; i++) {
+      // FPT doesn't carry `ref`-marked params today; require non-ref on src.
+      if (sParams[i].isRef) return false;
+      if (!typesEqual(dParams[i], sParams[i].type)) return false;
+    }
+    return typesEqual(dest.returnType, src.returnType);
+  }
+
   return false;
 }
 

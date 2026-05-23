@@ -679,6 +679,23 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
       }
       return type;
     }
+    case typeKinds.functionPointer: {
+      // Phase 10.X.2: FPT carries plain-type params + return. Walk both.
+      const newParams = type.params.map((p) =>
+        substituteTypeParams(p, substitution, inst),
+      );
+      const newRet = substituteTypeParams(type.returnType, substitution, inst);
+      const allSame =
+        newParams.every((p, i) => p === type.params[i]) &&
+        newRet === type.returnType;
+      if (allSame) return type;
+      return FunctionPointerType(newParams, newRet);
+    }
+    case typeKinds.unsafePtr: {
+      const newPointee = substituteTypeParams(type.pointee, substitution, inst);
+      if (newPointee === type.pointee) return type;
+      return UnsafePtrType(newPointee);
+    }
     // prim/void/untyped/error/namespace/trait/kind — no nested type
     default:
       return type;
@@ -709,6 +726,15 @@ export function typeHasTypeParam(type) {
       if (v.fields.some((f) => typeHasTypeParam(f.type))) return true;
     }
     return false;
+  }
+  if (type.kind === typeKinds.functionPointer) {
+    return (
+      type.params.some((p) => typeHasTypeParam(p)) ||
+      typeHasTypeParam(type.returnType)
+    );
+  }
+  if (type.kind === typeKinds.unsafePtr) {
+    return typeHasTypeParam(type.pointee);
   }
   return false;
 }

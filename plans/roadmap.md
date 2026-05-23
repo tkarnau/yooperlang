@@ -148,7 +148,14 @@ uniformly on `Result<T, E>`. Phase 10.B (see
 shipped its first cut: `Option<T>` and a string-keyed `StringMap<V>` —
 plus two codegen fixes that container code needed (variant-record
 re-fetch in `cloneAstWithSubstitution`; fixed-point generic emission).
-Set/Deque and a fully generic `Map<K, V>` follow.
+Phase 10.H
+([phase-10-h-alloca-uniqueness.md](completed/phase-10-h-alloca-uniqueness.md))
+fixed the long-standing codegen gap that made `case Option.Some {
+value: v }` arms collide on `%v`. Phase 10.X.2
+([phase-10-x2-fn-ptr-fields.md](completed/phase-10-x2-fn-ptr-fields.md))
+landed the function-pointer-field lifts (func-decl → FPT coercion +
+indirect-call lowering), which unblocks a fully generic `Map<K, V>`
+keyed off a `KeyOps<K>` ops struct.
 
 > Detailed plan: [phase-10.md](phase-10.md).
 

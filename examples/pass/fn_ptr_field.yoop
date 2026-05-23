@@ -1,0 +1,57 @@
+// Phase 10.X.2: two small codegen + typecheck lifts unlock arbitrary
+// function-pointer-typed struct fields:
+//
+//   1. A top-level function decl's `FuncType` is assignable to a matching
+//      `(p: T) => R` `FunctionPointerType`. The function's name in
+//      expression position lowers to its mangled symbol address.
+//   2. `expr.field(args)` where `field` has function-pointer type lowers
+//      to an indirect call through the loaded slot.
+//
+// Together these let users seed vtable-like dispatch tables without
+// going through the trait machinery. The marquee shape: a generic
+// `KeyOps<K>` carrying `hash` + `eq` function pointers, used by
+// downstream containers (Map, Set, ...) without needing `Self` in trait
+// signatures.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type KeyOps<K> {
+    hash: (k: K) => uint64,
+    eq:   (a: K, b: K) => bool,
+}
+
+function int_hash(k: int32): uint64 {
+    return uint64(k);
+}
+
+function int_eq(a: int32, b: int32): bool {
+    return a == b;
+}
+
+// Use `ops.hash` / `ops.eq` through generic indirection. The inference
+// path threads K through the FPT-typed fields.
+function lookup<K>(ops: KeyOps<K>, k: K): uint64 {
+    return ops.hash(k);
+}
+
+function equals<K>(ops: KeyOps<K>, a: K, b: K): bool {
+    return ops.eq(a, b);
+}
+
+function main(): int32 {
+    let ops: KeyOps<int32> = { hash: int_hash, eq: int_eq };
+
+    let h: uint64 = lookup(ops, 42);
+    let same: bool = equals(ops, 7, 7);
+    let diff: bool = equals(ops, 7, 8);
+
+    let s: int32 = 0; if (same) { s = 1; }
+    let d: int32 = 0; if (diff) { d = 1; }
+    printf(`h=${h} same=${s} diff=${d}\n`);
+    return 0;
+}
+
+// expected output:
+// h=42 same=1 diff=0

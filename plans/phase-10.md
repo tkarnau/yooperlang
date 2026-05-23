@@ -157,9 +157,14 @@ The first sub-cut shipped `Option<T>`, a string-keyed
 `StringMap<V>` (open-addressing hash table) with `Option<V>`-returning
 lookups, and two codegen fixes that any generics-heavy module needed
 (`cloneAstWithSubstitution` variant re-fetch, fixed-point generic
-emission). `Set<K>` and `Deque<T>` are pending; a fully generic
-`Map<K, V>` is blocked on either `Self` in trait sigs or two small
-function-pointer-field codegen lifts (detailed in the completed doc).
+emission).
+
+Phase 10.X.2 ([phase-10-x2-fn-ptr-fields.md](completed/phase-10-x2-fn-ptr-fields.md))
+then landed the two function-pointer-field lifts the original 10.C
+plan called out as the precondition for a fully generic `Map<K, V>`:
+function-decl → FPT coercion at assignment, and indirect call
+lowering for FPT-typed struct fields. Generic `Map<K, V>` is now
+pure library work; `Set<K>` and `Deque<T>` are still pending.
 
 Once `Iterable<T>` exists, write the collections.
 
@@ -273,15 +278,15 @@ backlog.
 
 Items that are user-visible but never had a forcing function.
 
-- **Per-binding alloca uniqueness.** Today `let x` in two disjoint
-  blocks, or two `case ... { ... v: int32 ... }` arms in the same `switch`,
-  produce duplicate `%x = alloca` lines and LLVM rejects the module
-  with `multiple definition of local value named 'x'`. The fix is a
-  per-binding suffix-counter at codegen time (the typechecker already
-  scopes uniquely; only the emitter shares names). Surfaces in
-  [phase-9-d-for-in.md](completed/phase-9-d-for-in.md),
-  [phase-7-5-sum-types-and-unions.md](completed/phase-7-5-sum-types-and-unions.md),
-  and was the cause of an intermittent test-fixture rewrite during 9.H.
+- **Per-binding alloca uniqueness** ✓ landed — see
+  [phase-10-h-alloca-uniqueness.md](completed/phase-10-h-alloca-uniqueness.md).
+  Original problem statement, kept for reference: `let x` in two
+  disjoint blocks, or two `case ... { ... v: int32 ... }` arms in the
+  same `switch`, produced duplicate `%x = alloca` lines and LLVM
+  rejected the module with `multiple definition of local value 'x'`.
+  Fixed via `createLocalSymbols` + a scope-aware slot map; references
+  resolve via `symbols.slotFor(name)` and shadowing snaps back when an
+  inner scope exits.
 - **Pattern-binding diagnostics.** When the collision above happens,
   emit a yoop-level error pointing at both sites, not the LLVM message.
 - **Better parse-error messages.** Several `// todo better error messages`

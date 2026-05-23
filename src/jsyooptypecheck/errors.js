@@ -34,7 +34,7 @@ export function formatType(t) {
     case typeKinds.array:
       return `array ${formatType(t.elem)}`;
     case typeKinds.func:
-      return `(${t.params.map(formatType).join(", ")}) -> ${formatType(t.returnType)}`;
+      return `(${t.params.map((p) => `${p.isRef ? "ref " : ""}${formatType(p.type)}`).join(", ")}) -> ${formatType(t.returnType)}`;
     case typeKinds.void:
       return "void";
     case typeKinds.untypedInt:

@@ -305,6 +305,68 @@ function hoistAllocasToEntry(fnLines) {
   fnLines.splice(entryTerm, 0, ...hoisted);
 }
 
+// Phase 10.H: per-function local-symbol container with LLVM-slot
+// uniquification + lexical scope stacking.
+//
+// The classic symptom this addresses: two `case Option.Some { value: v }`
+// arms in the same function each emit `%v = alloca i32`, and clang
+// rejects the module with "multiple definition of local value 'v'".
+// More broadly the same shape appears for any `let x` in two disjoint
+// blocks, or any user binding name reused across non-overlapping scopes.
+//
+// Contract:
+//   * `set(name, type)` / `get(name)` / `has(name)` keep the existing
+//     Map-like surface for callers that only care about the binding's
+//     type (function-decl tracking, etc.).
+//   * `declare(name, type)` is the new combined "register a local binding
+//     and allocate a unique LLVM slot for it" — returns the slot string
+//     (with leading `%`). Use this any time an alloca is about to be
+//     emitted for a user-visible binding.
+//   * `slotFor(name)` returns the LLVM slot string. Use it any time the
+//     emitter would otherwise hard-code `%${name}`. Falls back to
+//     `%${name}` for legacy reads (so non-migrated paths still link).
+//   * `enterScope()` / `leaveScope()` bracket a lexical scope; every
+//     `declare` inside the scope is restored on `leaveScope`. The outer
+//     binding (if any was shadowed) snaps back into place.
+function createLocalSymbols() {
+  const types = new Map();        // name -> yoopType
+  const slotMap = new Map();      // name -> "%llvmSlot" (current binding)
+  const usedSlots = new Set();    // every llvm-slot name ever allocated
+  const slotScopes = [[]];        // stack of [{name, prevSlot}] frames
+
+  function declare(name, type) {
+    types.set(name, type);
+    let candidate = name;
+    if (usedSlots.has(candidate)) {
+      let n = 1;
+      while (usedSlots.has(`${name}.${n}`)) n++;
+      candidate = `${name}.${n}`;
+    }
+    usedSlots.add(candidate);
+    const slot = `%${candidate}`;
+    slotScopes[slotScopes.length - 1].push({ name, prevSlot: slotMap.get(name) });
+    slotMap.set(name, slot);
+    return slot;
+  }
+
+  return {
+    set(name, type) { types.set(name, type); },
+    get(name) { return types.get(name); },
+    has(name) { return types.has(name); },
+    declare,
+    slotFor(name) { return slotMap.get(name) ?? `%${name}`; },
+    enterScope() { slotScopes.push([]); },
+    leaveScope() {
+      const frame = slotScopes.pop();
+      for (let i = frame.length - 1; i >= 0; i--) {
+        const { name, prevSlot } = frame[i];
+        if (prevSlot !== undefined) slotMap.set(name, prevSlot);
+        else slotMap.delete(name);
+      }
+    },
+  };
+}
+
 export function codegen(ast) {
   const lines = [];
   const globals = [];
@@ -318,7 +380,7 @@ export function codegen(ast) {
   const functionSigs = new Map(); // name -> { params: [yoopType], returnType: yoopType }
 
   // populated per-function during codegen
-  let symbols = new Map(); // varName -> yoopType
+  let symbols = createLocalSymbols();
 
   function freshTemp() {
     return `%t${tempCounter++}`;
@@ -419,10 +481,10 @@ export function codegen(ast) {
         if (t.kind === typeKinds.ref) {
           // ref binding (e.g. self): load the actual pointer from its alloca slot
           const ptrTmp = freshTemp();
-          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
           return { ptr: ptrTmp, type: t.inner };
         }
-        return { ptr: `%${node.name}`, type: t };
+        return { ptr: `${symbols.slotFor(node.name)}`, type: t };
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const base = emitLvalue(node.object, fnLines);
@@ -726,14 +788,14 @@ export function codegen(ast) {
         if (node.autoDeref) {
           const innerType = yoopType.inner;
           const ptrTmp = freshTemp();
-          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
           const valTmp = freshTemp();
           fnLines.push(`  ${valTmp} = load ${llvmType(innerType)}, ptr ${ptrTmp}`);
           return { val: valTmp, yoopType: innerType };
         }
         const llvmTy = llvmType(yoopType);
         const tmp = freshTemp();
-        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr %${node.name}`);
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${symbols.slotFor(node.name)}`);
         return { val: tmp, yoopType };
       }
 
@@ -743,10 +805,10 @@ export function codegen(ast) {
           if (operandType?.kind === typeKinds.ref) {
             // ref of a ref binding (like `ref self`): forward the underlying pointer
             const ptrTmp = freshTemp();
-            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.operand.name}`);
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.operand.name)}`);
             return { val: ptrTmp, yoopType: node.resolvedType };
           }
-          return { val: `%${node.operand.name}`, yoopType: node.resolvedType };
+          return { val: `${symbols.slotFor(node.operand.name)}`, yoopType: node.resolvedType };
         }
         // field access or index: use emitLvalue to get the address
         const lv = emitLvalue(node.operand, fnLines);
@@ -896,14 +958,14 @@ export function codegen(ast) {
           if (node.target.autoDerefWrite) {
             const innerType = lhsType.inner;
             const ptrTmp = freshTemp();
-            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${targetName}`);
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(targetName)}`);
             const rhs = emitExpr(node.value, fnLines);
             fnLines.push(`  store ${llvmType(innerType)} ${rhs.val}, ptr ${ptrTmp}`);
             return rhs;
           }
           const rhs = emitExpr(node.value, fnLines);
           fnLines.push(
-            `  store ${llvmType(lhsType)} ${rhs.val}, ptr %${targetName}`,
+            `  store ${llvmType(lhsType)} ${rhs.val}, ptr ${symbols.slotFor(targetName)}`,
           );
           return rhs;
         }
@@ -1106,6 +1168,24 @@ export function codegen(ast) {
       return emitPrintfCall(node, fnLines);
     }
 
+    // Phase 10.X.2: indirect call through a fn-ptr struct field.
+    if (node.fnPointerCall) {
+      const fptType = node.callee.resolvedType;
+      const fnPtr = emitExpr(node.callee, fnLines);
+      const argResults = node.args.map((a) => emitExpr(a, fnLines));
+      const argList = argResults.map((r, i) =>
+        `${llvmType(fptType.params[i])} ${r.val}`,
+      ).join(", ");
+      const llvmRet = llvmType(fptType.returnType);
+      if (isVoidReturn(fptType.returnType)) {
+        fnLines.push(`  call void ${fnPtr.val}(${argList})`);
+        return { val: "void", yoopType: VoidType() };
+      }
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = call ${llvmRet} ${fnPtr.val}(${argList})`);
+      return { val: tmp, yoopType: fptType.returnType };
+    }
+
     // Trait method call: typechecker stamped the mangled symbol.
     if (node.calleeMethodOf) {
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
@@ -1295,10 +1375,10 @@ export function codegen(ast) {
       case ASTNodeKind.CONST_DECL: {
         const declType = node.resolvedType;
         if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
-        symbols.set(node.name, declType);
+        const slot = symbols.declare(node.name, declType);
         const llvmTy = llvmType(declType);
         const align = effectiveAlign(declType, node.resolvedKindApplication);
-        fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${align}`);
+        fnLines.push(`  ${slot} = alloca ${llvmTy}, align ${align}`);
         if (node.assignment) {
           if (
             node.assignment.kind === ASTNodeKind.STRUCT_LITERAL &&
@@ -1307,13 +1387,13 @@ export function codegen(ast) {
             // populate the alloca'd slot directly — skip the temp + load + store
             emitStructLiteralInto(
               node.assignment,
-              `%${node.name}`,
+              slot,
               declType,
               fnLines,
             );
           } else {
             const r = emitExpr(node.assignment, fnLines);
-            fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
+            fnLines.push(`  store ${llvmTy} ${r.val}, ptr ${slot}`);
           }
         }
         break;
@@ -1400,9 +1480,9 @@ export function codegen(ast) {
       const valTmp = freshTemp();
       fnLines.push(`  ${valTmp} = load ${llvmTy}, ptr ${gepTmp}`);
 
-      symbols.set(name, fieldType);
-      fnLines.push(`  %${name} = alloca ${llvmTy}, align ${align}`);
-      fnLines.push(`  store ${llvmTy} ${valTmp}, ptr %${name}`);
+      const slot = symbols.declare(name, fieldType);
+      fnLines.push(`  ${slot} = alloca ${llvmTy}, align ${align}`);
+      fnLines.push(`  store ${llvmTy} ${valTmp}, ptr ${slot}`);
     }
   }
 
@@ -1443,7 +1523,7 @@ export function codegen(ast) {
   function emitForLoop(node, fnLines, ctx) {
     const initType = symbols.get(node.initIdent);
     const initVal = emitExpr(node.initExpr, fnLines);
-    fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr %${node.initIdent}`);
+    fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr ${symbols.slotFor(node.initIdent)}`);
 
     const condLabel = freshLabel("for_cond");
     const bodyLabel = freshLabel("for_body");
@@ -1463,7 +1543,7 @@ export function codegen(ast) {
     fnLines.push(`${stepLabel}:`);
     const stepType = symbols.get(node.stepIdent);
     const stepVal = emitExpr(node.stepExpr, fnLines);
-    fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr %${node.stepIdent}`);
+    fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr ${symbols.slotFor(node.stepIdent)}`);
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
@@ -1488,14 +1568,15 @@ export function codegen(ast) {
       ? alignOfStruct(elemType)
       : alignOf(elemLlvm);
 
+    symbols.enterScope();
+
     const r = emitExpr(node.iterExpr, fnLines);
     const iterSlot = freshTemp();
     fnLines.push(`  ${iterSlot} = alloca ${iterLlvm}, align ${alignOfStruct(iterType)}`);
     fnLines.push(`  store ${iterLlvm} ${r.val}, ptr ${iterSlot}`);
 
-    const loopVarSlot = `%${node.loopVar}`;
+    const loopVarSlot = symbols.declare(node.loopVar, elemType);
     fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvm}, align ${elemAlign}`);
-    symbols.set(node.loopVar, elemType);
 
     const stepSlot = freshTemp();
     fnLines.push(`  ${stepSlot} = alloca ${stepLlvm}, align ${sizeOfAlign(iterStepType)}`);
@@ -1541,6 +1622,7 @@ export function codegen(ast) {
     fnLines.push(`  br label %${topLabel}`);
 
     fnLines.push(`${afterLabel}:`);
+    symbols.leaveScope();
   }
 
   // Phase 9.D: `for item in xs { ... }`. Lowers to a fat-pointer walk with
@@ -1585,9 +1667,9 @@ export function codegen(ast) {
     fnLines.push(`  store i64 0, ptr ${counterSlot}`);
 
     // Loop variable slot follows the LET_DECL naming convention (%name).
-    const loopVarSlot = `%${node.loopVar}`;
+    symbols.enterScope();
+    const loopVarSlot = symbols.declare(node.loopVar, elemType);
     fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvmTy}, align ${elemAlign}`);
-    symbols.set(node.loopVar, elemType);
 
     const condLabel = freshLabel("forin_cond");
     const bodyLabel = freshLabel("forin_body");
@@ -1624,6 +1706,7 @@ export function codegen(ast) {
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
+    symbols.leaveScope();
   }
 
   function blockIsTerminated(fnLines) {
@@ -1636,11 +1719,13 @@ export function codegen(ast) {
   }
 
   function emitBlock(blockOrNode, fnLines, ctx) {
+    symbols.enterScope();
     if (blockOrNode.kind === ASTNodeKind.BLOCK) {
       blockOrNode.body.forEach((s) => emitStatement(s, fnLines, ctx));
     } else {
       emitStatement(blockOrNode, fnLines, ctx);
     }
+    symbols.leaveScope();
   }
 
   // **** method codegen *********
@@ -1657,7 +1742,7 @@ export function codegen(ast) {
   function emitMethodOnce(methodDecl, structType, traitName) {
     tempCounter = 0;
     labelCounter = 0;
-    symbols = new Map();
+    symbols = createLocalSymbols();
 
     const returnType = methodDecl.resolvedFuncType.returnType;
     currentReturnType = returnType;
@@ -1676,16 +1761,16 @@ export function codegen(ast) {
 
     for (const p of params) {
       const ty = p.resolvedType;
+      const paramSlot = symbols.declare(p.name, ty);
       if (ty.kind === typeKinds.ref) {
-        fnLines.push(`  %${p.name} = alloca ptr, align 8`);
-        fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
+        fnLines.push(`  ${paramSlot} = alloca ptr, align 8`);
+        fnLines.push(`  store ptr %${p.name}.arg, ptr ${paramSlot}`);
       } else {
         const llvmTy = llvmType(ty);
         const align = effectiveAlign(ty, p.resolvedKindApplication);
-        fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${align}`);
-        fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+        fnLines.push(`  ${paramSlot} = alloca ${llvmTy}, align ${align}`);
+        fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr ${paramSlot}`);
       }
-      symbols.set(p.name, ty);
     }
 
     const ctx = { fnName: methodDecl.name, returnType };
@@ -1704,7 +1789,7 @@ export function codegen(ast) {
   function emitFunction(node, forceName = null) {
     tempCounter = 0;
     labelCounter = 0;
-    symbols = new Map();
+    symbols = createLocalSymbols();
 
     const returnType = node.resolvedType;
     currentReturnType = returnType;
@@ -1733,10 +1818,10 @@ export function codegen(ast) {
       // since the alloca below names that struct type.
       if (ty.kind === typeKinds.array) ensureArrayTypeDef(ty.elem);
       const llvmTy = llvmType(ty);
-      symbols.set(p.name, ty);
+      const paramSlot = symbols.declare(p.name, ty);
       const align = effectiveAlign(ty, p.resolvedKindApplication);
-      fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${align}`);
-      fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+      fnLines.push(`  ${paramSlot} = alloca ${llvmTy}, align ${align}`);
+      fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr ${paramSlot}`);
     }
 
     const ctx = { fnName: node.name, returnType };
@@ -2482,7 +2567,7 @@ function codegenWithModuleId(
   let tempCounter = 0;
   let labelCounter = 0;
   const functionSigs = new Map();
-  let symbols = new Map();
+  let symbols = createLocalSymbols();
   // Per-module DWARF handles. Lazily initialized via beginModule on first
   // function emission so callers (like compileSource) that synthesize a
   // module without an absPath still get a stable synthetic file name.
@@ -3013,7 +3098,7 @@ function codegenWithModuleId(
   function emitFn(node, symName) {
     tempCounter = 0;
     labelCounter = 0;
-    symbols = new Map();
+    symbols = createLocalSymbols();
     bindingDeclTable = new Map();
     currentReturnType = node.resolvedType;
     const prevInMain = inMainFn;
@@ -3042,13 +3127,13 @@ function codegenWithModuleId(
       // since the alloca below names that struct type.
       if (ty.kind === typeKinds.array) ensureArrayTypeDef(ty.elem);
       const llvmTy = llvmType(ty);
-      symbols.set(p.name, ty);
+      const paramSlot = symbols.declare(p.name, ty);
       const al = effectiveAlign(ty, p.resolvedKindApplication);
-      fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
-      fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+      fnLines.push(`  ${paramSlot} = alloca ${llvmTy}, align ${al}`);
+      fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr ${paramSlot}`);
       emitDbgDeclare(fnLines, {
         name: p.name,
-        slotPtr: `%${p.name}`,
+        slotPtr: paramSlot,
         yoopType: ty,
         sourceLoc: p.sourceLoc ?? node.sourceLoc,
         subprogramRef,
@@ -3085,7 +3170,7 @@ function codegenWithModuleId(
     if (decls.length === 0) return;
     tempCounter = 0;
     labelCounter = 0;
-    symbols = new Map();
+    symbols = createLocalSymbols();
     const symName = `${moduleId}__module_init`;
     const fnLines = [
       `define internal void @${symName}() {`,
@@ -3115,7 +3200,7 @@ function codegenWithModuleId(
   function emitMethodFnOnce(methodDecl, structType, traitName) {
     tempCounter = 0;
     labelCounter = 0;
-    symbols = new Map();
+    symbols = createLocalSymbols();
     bindingDeclTable = new Map();
     currentReturnType = methodDecl.resolvedFuncType.returnType;
 
@@ -3132,19 +3217,19 @@ function codegenWithModuleId(
     for (let i = 0; i < params.length; i++) {
       const p = params[i];
       const ty = p.resolvedType;
+      const paramSlot = symbols.declare(p.name, ty);
       if (ty.kind === typeKinds.ref) {
-        fnLines.push(`  %${p.name} = alloca ptr, align 8`);
-        fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
+        fnLines.push(`  ${paramSlot} = alloca ptr, align 8`);
+        fnLines.push(`  store ptr %${p.name}.arg, ptr ${paramSlot}`);
       } else {
         const llvmTy = llvmType(ty);
         const al = effectiveAlign(ty, p.resolvedKindApplication);
-        fnLines.push(`  %${p.name} = alloca ${llvmTy}, align ${al}`);
-        fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr %${p.name}`);
+        fnLines.push(`  ${paramSlot} = alloca ${llvmTy}, align ${al}`);
+        fnLines.push(`  store ${llvmTy} %${p.name}.arg, ptr ${paramSlot}`);
       }
-      symbols.set(p.name, ty);
       emitDbgDeclare(fnLines, {
         name: p.name,
-        slotPtr: `%${p.name}`,
+        slotPtr: paramSlot,
         yoopType: ty,
         sourceLoc: p.sourceLoc ?? methodDecl.sourceLoc,
         subprogramRef,
@@ -3381,19 +3466,29 @@ function codegenWithModuleId(
           fnLines.push(`  ${tmp} = load ${llvmTy}, ptr @${node.moduleGlobalSym}`);
           return { val: tmp, yoopType };
         }
+        // Phase 10.X.2: an IDENT in expression position whose resolved type
+        // is a FuncType denotes the function decl itself — typically used as
+        // a fn-ptr value (assigning to a `(p: T) => R`-typed struct field).
+        // Lower to the function's mangled symbol address.
+        if (node.resolvedType?.kind === typeKinds.func && !symbols.has(node.name)) {
+          const sym = node.calleeModuleId
+            ? mangle(node.calleeModuleId, node.calleeExportName ?? node.name)
+            : mangle(moduleId, node.name);
+          return { val: `@${sym}`, yoopType: node.resolvedType };
+        }
         const yoopType = symbols.get(node.name);
         if (!yoopType) throw new Error(`codegen: unknown identifier "${node.name}"`);
         if (node.autoDeref) {
           const innerType = yoopType.inner;
           const ptrTmp = freshTemp();
-          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
           const valTmp = freshTemp();
           fnLines.push(`  ${valTmp} = load ${llvmType(innerType)}, ptr ${ptrTmp}`);
           return { val: valTmp, yoopType: innerType };
         }
         const llvmTy = llvmType(yoopType);
         const tmp = freshTemp();
-        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr %${node.name}`);
+        fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${symbols.slotFor(node.name)}`);
         return { val: tmp, yoopType };
       }
       case ASTNodeKind.REF_EXPRESSION: {
@@ -3402,10 +3497,10 @@ function codegenWithModuleId(
           if (operandType?.kind === typeKinds.ref) {
             // ref of a ref binding (like `ref self`): forward the underlying pointer
             const ptrTmp = freshTemp();
-            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.operand.name}`);
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.operand.name)}`);
             return { val: ptrTmp, yoopType: node.resolvedType };
           }
-          return { val: `%${node.operand.name}`, yoopType: node.resolvedType };
+          return { val: `${symbols.slotFor(node.operand.name)}`, yoopType: node.resolvedType };
         }
         // field access or index: use emitLval to get the address
         const lv = emitLval(node.operand, fnLines);
@@ -3544,13 +3639,13 @@ function codegenWithModuleId(
           if (node.target.autoDerefWrite) {
             const innerType = lhsType.inner;
             const ptrTmp = freshTemp();
-            fnLines.push(`  ${ptrTmp} = load ptr, ptr %${targetName}`);
+            fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(targetName)}`);
             const rhs = emitExpr(node.value, fnLines);
             fnLines.push(`  store ${llvmType(innerType)} ${rhs.val}, ptr ${ptrTmp}`);
             return rhs;
           }
           const rhs = emitExpr(node.value, fnLines);
-          fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr %${targetName}`);
+          fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr ${symbols.slotFor(targetName)}`);
           return rhs;
         }
         if (node.target.kind === ASTNodeKind.FIELD_ACCESS) {
@@ -3591,7 +3686,7 @@ function codegenWithModuleId(
         let slotPtr, slotType;
         if (node.target.kind === ASTNodeKind.IDENT && !node.target.isModuleGlobal && !node.target.autoDerefWrite) {
           slotType = symbols.get(node.target.name);
-          slotPtr = `%${node.target.name}`;
+          slotPtr = `${symbols.slotFor(node.target.name)}`;
         } else if (node.target.kind === ASTNodeKind.IDENT && node.target.isModuleGlobal) {
           slotType = node.target.resolvedType;
           slotPtr = `@${node.target.moduleGlobalSym}`;
@@ -3599,7 +3694,7 @@ function codegenWithModuleId(
           const lhsType = symbols.get(node.target.name);
           slotType = lhsType.inner;
           const ptrTmp = freshTemp();
-          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.target.name}`);
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.target.name)}`);
           slotPtr = ptrTmp;
         } else if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
           const ptrExpr = emitExpr(node.target.operand, fnLines);
@@ -3843,7 +3938,7 @@ function codegenWithModuleId(
       throw new Error(`codegen: wait operand must be a binding identifier in phase 6.3`);
     }
     const handlePtr = freshTemp();
-    fnLines.push(`  ${handlePtr} = load ptr, ptr %${operand.name}`);
+    fnLines.push(`  ${handlePtr} = load ptr, ptr ${symbols.slotFor(operand.name)}`);
     fnLines.push(`  call void @yoop_task_wait(ptr ${handlePtr})`);
 
     const decl = bindingDeclTable.get(operand.name);
@@ -4047,6 +4142,26 @@ function codegenWithModuleId(
       return emitPrintfCallInner(node, fnLines);
     }
 
+    // Phase 10.X.2: indirect call through a fn-ptr struct field. The
+    // typechecker tagged the CALL_EXPRESSION with `fnPointerCall`; the
+    // callee is a FIELD_ACCESS whose rvalue evaluation loads the slot.
+    if (node.fnPointerCall) {
+      const fptType = node.callee.resolvedType;
+      const fnPtr = emitExpr(node.callee, fnLines);
+      const argResults = node.args.map((a) => emitExpr(a, fnLines));
+      const argList = argResults.map((r, i) =>
+        `${llvmType(fptType.params[i])} ${r.val}`,
+      ).join(", ");
+      const llvmRet = llvmType(fptType.returnType);
+      if (isVoidReturn(fptType.returnType)) {
+        fnLines.push(`  call void ${fnPtr.val}(${argList})`);
+        return { val: "void", yoopType: VoidType() };
+      }
+      const tmp = freshTemp();
+      fnLines.push(`  ${tmp} = call ${llvmRet} ${fnPtr.val}(${argList})`);
+      return { val: tmp, yoopType: fptType.returnType };
+    }
+
     // Trait method call: typechecker stamped the mangled symbol.
     if (node.calleeMethodOf) {
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
@@ -4246,10 +4361,10 @@ function codegenWithModuleId(
         if (t.kind === typeKinds.ref) {
           // ref binding (e.g. self): load the actual pointer from its alloca slot
           const ptrTmp = freshTemp();
-          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.name}`);
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
           return { ptr: ptrTmp, type: t.inner };
         }
-        return { ptr: `%${node.name}`, type: t };
+        return { ptr: `${symbols.slotFor(node.name)}`, type: t };
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const base = emitLval(node.object, fnLines);
@@ -4422,7 +4537,7 @@ function codegenWithModuleId(
     if (node.kind === ASTNodeKind.TASK_AUTO_WAIT) {
       // joined binding: handle ptr is stored in %<name>'s ptr slot.
       const handlePtr = freshTemp();
-      fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      fnLines.push(`  ${handlePtr} = load ptr, ptr ${symbols.slotFor(node.bindingName)}`);
       fnLines.push(`  call void @yoop_task_wait(ptr ${handlePtr})`);
       fnLines.push(`  call void @yoop_task_free_sync_pair(ptr ${handlePtr})`);
       return;
@@ -4434,14 +4549,14 @@ function codegenWithModuleId(
         const fieldPtr = emitFieldGep(node, fnLines);
         fnLines.push(`  ${handlePtr} = load ptr, ptr ${fieldPtr}`);
       } else {
-        fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+        fnLines.push(`  ${handlePtr} = load ptr, ptr ${symbols.slotFor(node.bindingName)}`);
       }
       fnLines.push(`  call void @yoop_task_release(ptr ${handlePtr})`);
       return;
     }
     if (node.kind === ASTNodeKind.TASK_RETAIN) {
       const handlePtr = freshTemp();
-      fnLines.push(`  ${handlePtr} = load ptr, ptr %${node.bindingName}`);
+      fnLines.push(`  ${handlePtr} = load ptr, ptr ${symbols.slotFor(node.bindingName)}`);
       fnLines.push(`  call void @yoop_task_retain(ptr ${handlePtr})`);
       return;
     }
@@ -4457,7 +4572,7 @@ function codegenWithModuleId(
       return;
     }
     const mangled = mangleTraitMethod(node.structType, node.traitName, node.methodName);
-    fnLines.push(`  call void @${mangled}(ptr %${node.bindingName})`);
+    fnLines.push(`  call void @${mangled}(ptr ${symbols.slotFor(node.bindingName)})`);
   }
 
   // Phase 6.4: GEP into `%<binding>.<field>`. Returns the SSA name of the
@@ -4470,7 +4585,7 @@ function codegenWithModuleId(
     }
     const tmp = freshTemp();
     fnLines.push(
-      `  ${tmp} = getelementptr inbounds ${llvmType(enclosing)}, ptr %${node.bindingName}, i32 0, i32 ${idx}`,
+      `  ${tmp} = getelementptr inbounds ${llvmType(enclosing)}, ptr ${symbols.slotFor(node.bindingName)}, i32 0, i32 ${idx}`,
     );
     return tmp;
   }
@@ -4493,10 +4608,10 @@ function codegenWithModuleId(
     emitTaskHandleInit(handleSlot, fnName, node.assignment.args ?? [], fnLines);
     fnLines.push(`  call void @yoop_task_submit(ptr ${handleSlot}, ptr @${mangle(moduleId, fnName)}__thunk)`);
     // Bind %name as a ptr slot pointing at the on-stack handle.
-    symbols.set(node.name, node.resolvedType); // TaskType
+    const slot = symbols.declare(node.name, node.resolvedType); // TaskType
     bindingDeclTable.set(node.name, { taskFnName: fnName });
-    fnLines.push(`  %${node.name} = alloca ptr, align 8`);
-    fnLines.push(`  store ptr ${handleSlot}, ptr %${node.name}`);
+    fnLines.push(`  ${slot} = alloca ptr, align 8`);
+    fnLines.push(`  store ptr ${handleSlot}, ptr ${slot}`);
   }
 
   // Phase 6.3: `pooled h = task_call();` — heap-allocate a refcounted handle.
@@ -4514,19 +4629,19 @@ function codegenWithModuleId(
     fnLines.push(`  ${heapPtr} = call ptr @yoop_task_alloc(i64 ${size})`);
     emitTaskHandleInit(heapPtr, fnName, node.assignment.args ?? [], fnLines);
     fnLines.push(`  call void @yoop_task_submit(ptr ${heapPtr}, ptr @${mangle(moduleId, fnName)}__thunk)`);
-    symbols.set(node.name, node.resolvedType); // TaskType
+    const slot = symbols.declare(node.name, node.resolvedType); // TaskType
     bindingDeclTable.set(node.name, { taskFnName: fnName });
-    fnLines.push(`  %${node.name} = alloca ptr, align 8`);
-    fnLines.push(`  store ptr ${heapPtr}, ptr %${node.name}`);
+    fnLines.push(`  ${slot} = alloca ptr, align 8`);
+    fnLines.push(`  store ptr ${heapPtr}, ptr ${slot}`);
   }
 
   // Phase 6.4: `pooled h3 = h2;` — copy the existing handle pointer and
   // retain it. The scope-exit release on h3 then balances the retain.
   function emitPooledCopyBinding(node, fnLines) {
     const rhs = emitExpr(node.assignment, fnLines);
-    symbols.set(node.name, node.resolvedType); // TaskType
-    fnLines.push(`  %${node.name} = alloca ptr, align 8`);
-    fnLines.push(`  store ptr ${rhs.val}, ptr %${node.name}`);
+    const slot = symbols.declare(node.name, node.resolvedType); // TaskType
+    fnLines.push(`  ${slot} = alloca ptr, align 8`);
+    fnLines.push(`  store ptr ${rhs.val}, ptr ${slot}`);
     fnLines.push(`  call void @yoop_task_retain(ptr ${rhs.val})`);
   }
 
@@ -4546,16 +4661,16 @@ function codegenWithModuleId(
     fnLines.push(`  call void @yoop_task_wait(ptr ${handleSlot})`);
     // Load the result from field 6.
     const declType = node.resolvedType;
-    symbols.set(node.name, declType);
+    const slot = symbols.declare(node.name, declType);
     const llvmTy = llvmType(declType);
-    fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
+    fnLines.push(`  ${slot} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
     const resPtr = freshTemp();
     fnLines.push(
       `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 6`,
     );
     const resVal = freshTemp();
     fnLines.push(`  ${resVal} = load ${llvmTy}, ptr ${resPtr}`);
-    fnLines.push(`  store ${llvmTy} ${resVal}, ptr %${node.name}`);
+    fnLines.push(`  store ${llvmTy} ${resVal}, ptr ${slot}`);
     fnLines.push(`  call void @yoop_task_free_sync_pair(ptr ${handleSlot})`);
   }
 
@@ -4631,23 +4746,23 @@ function codegenWithModuleId(
 
         const declType = node.resolvedType;
         if (declType.kind === typeKinds.array) ensureArrayTypeDef(declType.elem);
-        symbols.set(node.name, declType);
+        const slot = symbols.declare(node.name, declType);
         const llvmTy = llvmType(declType);
         const al = effectiveAlign(declType, node.resolvedKindApplication);
-        fnLines.push(`  %${node.name} = alloca ${llvmTy}, align ${al}`);
+        fnLines.push(`  ${slot} = alloca ${llvmTy}, align ${al}`);
         emitDbgDeclare(fnLines, {
           name: node.name,
-          slotPtr: `%${node.name}`,
+          slotPtr: slot,
           yoopType: declType,
           sourceLoc: node.sourceLoc,
           subprogramRef: ctx.subprogram,
         });
         if (node.assignment) {
           if (node.assignment.kind === ASTNodeKind.STRUCT_LITERAL && declType.kind === typeKinds.struct) {
-            emitStructLitInto(node.assignment, `%${node.name}`, declType, fnLines);
+            emitStructLitInto(node.assignment, slot, declType, fnLines);
           } else {
             const r = emitExpr(node.assignment, fnLines);
-            fnLines.push(`  store ${llvmTy} ${r.val}, ptr %${node.name}`);
+            fnLines.push(`  store ${llvmTy} ${r.val}, ptr ${slot}`);
           }
         }
         // Phase 6.1: kind-prefixed binding with `ownsBlock` form. Walk the
@@ -4742,6 +4857,10 @@ function codegenWithModuleId(
 
     for (const { label, arm } of armEntries) {
       fnLines.push(`${label}:`);
+      // Phase 10.H: each arm is its own lexical scope (pattern bindings +
+      // arm body). Push before emitting pattern bindings so their slot
+      // uniquification undoes when the arm exits.
+      symbols.enterScope();
       // Bind any variant-pattern field bindings for this arm. We support
       // exactly one variant pattern per arm body (multi-pattern arms are
       // typecheck-restricted to literal-only homogeneous lists).
@@ -4775,12 +4894,12 @@ function codegenWithModuleId(
           const valTmp = freshTemp();
           fnLines.push(`  ${valTmp} = load ${fieldLlvmTy}, ptr ${fieldPtr}`);
           // Materialize the binding as a normal local alloca.
-          symbols.set(fb.bindingName, fieldType);
+          const bindingSlot = symbols.declare(fb.bindingName, fieldType);
           fnLines.push(
-            `  %${fb.bindingName} = alloca ${fieldLlvmTy}, align ${sizeOfAlign(fieldType)}`,
+            `  ${bindingSlot} = alloca ${fieldLlvmTy}, align ${sizeOfAlign(fieldType)}`,
           );
           fnLines.push(
-            `  store ${fieldLlvmTy} ${valTmp}, ptr %${fb.bindingName}`,
+            `  store ${fieldLlvmTy} ${valTmp}, ptr ${bindingSlot}`,
           );
         }
       }
@@ -4789,6 +4908,7 @@ function codegenWithModuleId(
       if (!blockIsTerminated(fnLines)) {
         fnLines.push(`  br label %${endLabel}`);
       }
+      symbols.leaveScope();
     }
 
     fnLines.push(`${defaultLabel}:`);
@@ -4830,9 +4950,9 @@ function codegenWithModuleId(
       fnLines.push(`  ${gepTmp} = getelementptr inbounds ${llvmType(slotType)}, ptr ${slotPtr}, i32 0, i32 ${idx}`);
       const valTmp = freshTemp();
       fnLines.push(`  ${valTmp} = load ${llvmTy}, ptr ${gepTmp}`);
-      symbols.set(name, fieldType);
-      fnLines.push(`  %${name} = alloca ${llvmTy}, align ${al}`);
-      fnLines.push(`  store ${llvmTy} ${valTmp}, ptr %${name}`);
+      const declSlot = symbols.declare(name, fieldType);
+      fnLines.push(`  ${declSlot} = alloca ${llvmTy}, align ${al}`);
+      fnLines.push(`  store ${llvmTy} ${valTmp}, ptr ${declSlot}`);
     }
   }
 
@@ -4869,7 +4989,7 @@ function codegenWithModuleId(
   function emitForLoopStmt(node, fnLines, ctx) {
     const initType = symbols.get(node.initIdent);
     const initVal = emitExpr(node.initExpr, fnLines);
-    fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr %${node.initIdent}`);
+    fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr ${symbols.slotFor(node.initIdent)}`);
 
     const condLabel = freshLabel("for_cond");
     const bodyLabel = freshLabel("for_body");
@@ -4889,19 +5009,21 @@ function codegenWithModuleId(
     fnLines.push(`${stepLabel}:`);
     const stepType = symbols.get(node.stepIdent);
     const stepVal = emitExpr(node.stepExpr, fnLines);
-    fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr %${node.stepIdent}`);
+    fnLines.push(`  store ${llvmType(stepType)} ${stepVal.val}, ptr ${symbols.slotFor(node.stepIdent)}`);
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
   }
 
   function emitBlockStmt(blockOrNode, fnLines, ctx) {
+    symbols.enterScope();
     if (blockOrNode.kind === ASTNodeKind.BLOCK) {
       blockOrNode.body.forEach((s) => emitStmt(s, fnLines, ctx));
       emitImplicitCleanups(blockOrNode, fnLines);
     } else {
       emitStmt(blockOrNode, fnLines, ctx);
     }
+    symbols.leaveScope();
   }
 
   // Phase 9.D: `for item in xs { ... }` — multi-module codegen path. Mirrors
@@ -4920,14 +5042,15 @@ function codegenWithModuleId(
       ? alignOfStruct(elemType)
       : alignOf(elemLlvm);
 
+    symbols.enterScope();
+
     const r = emitExpr(node.iterExpr, fnLines);
     const iterSlot = freshTemp();
     fnLines.push(`  ${iterSlot} = alloca ${iterLlvm}, align ${alignOfStruct(iterType)}`);
     fnLines.push(`  store ${iterLlvm} ${r.val}, ptr ${iterSlot}`);
 
-    const loopVarSlot = `%${node.loopVar}`;
+    const loopVarSlot = symbols.declare(node.loopVar, elemType);
     fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvm}, align ${elemAlign}`);
-    symbols.set(node.loopVar, elemType);
 
     const stepSlot = freshTemp();
     fnLines.push(`  ${stepSlot} = alloca ${stepLlvm}, align ${sizeOfAlign(iterStepType)}`);
@@ -4973,6 +5096,7 @@ function codegenWithModuleId(
     fnLines.push(`  br label %${topLabel}`);
 
     fnLines.push(`${afterLabel}:`);
+    symbols.leaveScope();
   }
 
   // emitForInLoop in the single-module section: evaluate the iterable once,
@@ -5005,9 +5129,9 @@ function codegenWithModuleId(
     fnLines.push(`  ${counterSlot} = alloca i64, align 8`);
     fnLines.push(`  store i64 0, ptr ${counterSlot}`);
 
-    const loopVarSlot = `%${node.loopVar}`;
+    symbols.enterScope();
+    const loopVarSlot = symbols.declare(node.loopVar, elemType);
     fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvmTy}, align ${elemAlign}`);
-    symbols.set(node.loopVar, elemType);
 
     const condLabel = freshLabel("forin_cond");
     const bodyLabel = freshLabel("forin_body");
@@ -5044,6 +5168,7 @@ function codegenWithModuleId(
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
+    symbols.leaveScope();
   }
 }
 

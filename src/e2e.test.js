@@ -123,6 +123,18 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("fn_ptr_field: generic KeyOps<K> with function-pointer fields + indirect call", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/fn_ptr_field.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "h=42 same=1 diff=0\n");
+  });
+
+  it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "total=112 mode=19\n");
+  });
+
   it("map_smoke: StringMap<int32> covers insert/get/remove/grow with Option<V>", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/map_smoke/main.yoop");
     assert.equal(exitCode, 0);

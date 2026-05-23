@@ -283,6 +283,13 @@ function resolveCall(node, scope, ctx) {
   if (callee && typeof callee === "object") {
     const calleeType = resolveExprType(callee, scope, ctx);
     if (calleeType.kind === typeKinds.error) return setType(node, ErrorType());
+    // Phase 10.X.2: a FIELD_ACCESS resolving to a FunctionPointerType means
+    // the user is calling a function-pointer-typed struct field —
+    // `ops.hash(k)` with `hash: (k: K) => uint64`. Lower as an indirect
+    // call through the stored slot.
+    if (calleeType.kind === typeKinds.functionPointer) {
+      return resolveFunctionPointerCall(node, calleeType, scope, ctx);
+    }
     if (calleeType.kind !== typeKinds.func) {
       pushError(ctx.errors, node, `expression is not callable`);
       return setType(node, ErrorType());
@@ -354,6 +361,36 @@ function resolveCallWithSig(node, sig, scope, ctx) {
     return setType(node, sig.returnType);
   }
   return resolveCallType(node, sig, scope, ctx);
+}
+
+// Phase 10.X.2: a CALL_EXPRESSION whose callee resolves to a
+// FunctionPointerType (typically `ops.hash(k)` where `hash` is a
+// fn-ptr struct field) lowers to an indirect call through the field.
+// Arity and arg-type checks run as usual; the codegen reads
+// `node.fnPointerCall = true` to switch from symbol call to load+call.
+function resolveFunctionPointerCall(node, fptType, scope, ctx) {
+  const params = fptType.params ?? [];
+  if (node.args.length !== params.length) {
+    pushError(
+      ctx.errors,
+      node,
+      `function-pointer call: expected ${params.length} argument(s), got ${node.args.length}`,
+    );
+    for (const a of node.args) resolveExprType(a, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  for (let i = 0; i < params.length; i++) {
+    checkInitializer(
+      node.args[i],
+      params[i],
+      scope,
+      ctx,
+      (vt) =>
+        `arg ${i + 1} of function-pointer call: cannot pass ${formatType(vt)} to ${formatType(params[i])}`,
+    );
+  }
+  node.fnPointerCall = true;
+  return setType(node, fptType.returnType);
 }
 
 // `wait h` — operand must be Task<T>; result type is T. Rejected inside a
@@ -2104,6 +2141,34 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
       }
     }
     return true;
+  }
+  // Phase 10.X.2: walk function-pointer params + return so a type
+  // parameter buried inside an FPT-typed field can drive inference
+  // (e.g. `KeyOps<K> { hash: (k: K) => uint64 }` constrains K when
+  // the user passes a `KeyOps<int32>` to a generic `lookup<K>`).
+  if (
+    paramType.kind === typeKinds.functionPointer &&
+    argType?.kind === typeKinds.functionPointer
+  ) {
+    if (paramType.params.length !== argType.params.length) return true;
+    for (let i = 0; i < paramType.params.length; i++) {
+      if (
+        !unifyAgainstTypeParam(
+          paramType.params[i],
+          argType.params[i],
+          declId,
+          subst,
+        )
+      ) {
+        return false;
+      }
+    }
+    return unifyAgainstTypeParam(
+      paramType.returnType,
+      argType.returnType,
+      declId,
+      subst,
+    );
   }
   return true;
 }

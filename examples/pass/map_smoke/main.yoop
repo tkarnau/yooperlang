@@ -38,24 +38,25 @@ function main(): int32 {
     let ow: int32 = 0; if (overwrote) { ow = 1; }
     printf(`overwrite: ow=${ow} len=${map_len(ref m)}\n`);
 
-    // Lookup hits + miss. Each switch needs a distinct payload binding
-    // name (Phase 10.H alloca-uniqueness gap).
+    // Lookup hits + miss. Phase 10.H landed alloca-name uniquification,
+    // so payload bindings may share the same source-level name across
+    // arms without colliding at the LLVM level.
     let ga: Option<int32> = map_get(ref m, "alpha");
     let gb: Option<int32> = map_get(ref m, "beta");
     let gz: Option<int32> = map_get(ref m, "zeta");
     let ga_v: int32 = -1;
     switch (ga) {
-        case Option.Some { value: ga_value }: { ga_v = ga_value; }
+        case Option.Some { value: v }: { ga_v = v; }
         case Option.None: { ga_v = -1; }
     }
     let gb_v: int32 = -1;
     switch (gb) {
-        case Option.Some { value: gb_value }: { gb_v = gb_value; }
+        case Option.Some { value: v }: { gb_v = v; }
         case Option.None: { gb_v = -1; }
     }
     let gz_v: int32 = -1;
     switch (gz) {
-        case Option.Some { value: gz_value }: { gz_v = gz_value; }
+        case Option.Some { value: v }: { gz_v = v; }
         case Option.None: { gz_v = -1; }
     }
     printf(`get: alpha=${ga_v} beta=${gb_v} zeta=${gz_v}\n`);
@@ -77,7 +78,7 @@ function main(): int32 {
     let after_get: Option<int32> = map_get(ref m, "alpha");
     let after_v: int32 = -1;
     switch (after_get) {
-        case Option.Some { value: after_value }: { after_v = after_value; }
+        case Option.Some { value: v }: { after_v = v; }
         case Option.None: { after_v = -1; }
     }
     printf(`after-remove get alpha=${after_v}\n`);
@@ -108,12 +109,12 @@ function main(): int32 {
     let probe10: Option<int32> = map_get(ref m, "k10");
     let p5: int32 = -1;
     switch (probe5) {
-        case Option.Some { value: p5_value }: { p5 = p5_value; }
+        case Option.Some { value: v }: { p5 = v; }
         case Option.None: { p5 = -1; }
     }
     let p10: int32 = -1;
     switch (probe10) {
-        case Option.Some { value: p10_value }: { p10 = p10_value; }
+        case Option.Some { value: v }: { p10 = v; }
         case Option.None: { p10 = -1; }
     }
     printf(`grown len=${grown_len} k05=${p5} k10=${p10}\n`);
