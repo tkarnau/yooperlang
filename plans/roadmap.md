@@ -143,7 +143,12 @@ Phase 2 fallible-struct convention has been retired and `std/` is
 uniformly on `Result<T, E>`. Phase 10.B (see
 [phase-10-b-iterable.md](completed/phase-10-b-iterable.md)) extended
 `for ... in` to walk any struct implementing the new generic
-`Iterable<T>` trait, opening the door to Phase 10.C's collections.
+`Iterable<T>` trait. Phase 10.C
+(see [phase-10-c-collections.md](completed/phase-10-c-collections.md))
+shipped its first cut: `Option<T>` and a string-keyed `StringMap<V>` —
+plus two codegen fixes that container code needed (variant-record
+re-fetch in `cloneAstWithSubstitution`; fixed-point generic emission).
+Set/Deque and a fully generic `Map<K, V>` follow.
 
 > Detailed plan: [phase-10.md](phase-10.md).
 

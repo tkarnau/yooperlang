@@ -2389,6 +2389,23 @@ function cloneAstWithSubstitution(node, sub, registry = null) {
     );
     out.boundMethod = null;
   }
+  // Phase 10.C: VARIANT_CONSTRUCTOR / VARIANT_PATTERN carry a `resolvedVariant`
+  // pointer into their `resolvedEnumType.variants` map. The generic
+  // substitution above replaces resolvedEnumType with a fresh instantiation
+  // (via the frozen-type branch), but resolvedVariant was a plain non-frozen
+  // record that recursive-cloned — its fields may still reference the
+  // pre-substitution variant from the *original* enum's variants map.
+  // Re-fetch the variant by name from the (substituted) resolvedEnumType
+  // so codegen sees the concrete field types.
+  if (
+    (out.kind === ASTNodeKind.VARIANT_CONSTRUCTOR ||
+      out.kind === ASTNodeKind.VARIANT_PATTERN) &&
+    out.resolvedEnumType &&
+    out.variantName &&
+    out.resolvedEnumType.variants?.has?.(out.variantName)
+  ) {
+    out.resolvedVariant = out.resolvedEnumType.variants.get(out.variantName);
+  }
   return out;
 }
 
@@ -2843,21 +2860,33 @@ function codegenWithModuleId(
 
   // Phase 7.1: emit one function per generic instantiation owned by this
   // module (registry tracks each instance's source module).
+  //
+  // Phase 10.C: emit in a fixed-point loop. Cloning a generic body during
+  // emission may register additional concrete instances (e.g. `map_insert`'s
+  // body calls into `find_insert_slot`, which only gets a concrete instance
+  // when `map_insert<int32>` is cloned). The newly-registered instances
+  // belong to a different declId entry that the outer loop may have already
+  // passed — so we re-iterate until a sweep produces no new emissions.
   if (programState?.registry) {
-    for (const [_declId, instances] of programState.registry.funcInstancesByDecl) {
-      for (const inst of instances) {
-        if (inst.moduleId !== moduleId) continue;
-        if (inst.emitted) continue;
-        // Phase 7.2: skip "open" instances where some argType is still a
-        // TypeParamType (came from a generic-calls-generic site). They only
-        // exist in the registry as caching artifacts — the concrete instances
-        // produced when the outer generic is monomorphized are what get IR.
-        if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
-        // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
-        // codegen inlines them at every call site (see emitCallExpr).
-        if (inst.declId?.startsWith("$builtin")) continue;
-        inst.emitted = true;
-        emitGenericFuncInstance(inst);
+    let progressed = true;
+    while (progressed) {
+      progressed = false;
+      for (const [_declId, instances] of programState.registry.funcInstancesByDecl) {
+        for (const inst of instances) {
+          if (inst.moduleId !== moduleId) continue;
+          if (inst.emitted) continue;
+          // Phase 7.2: skip "open" instances where some argType is still a
+          // TypeParamType (came from a generic-calls-generic site). They only
+          // exist in the registry as caching artifacts — the concrete instances
+          // produced when the outer generic is monomorphized are what get IR.
+          if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
+          // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
+          // codegen inlines them at every call site (see emitCallExpr).
+          if (inst.declId?.startsWith("$builtin")) continue;
+          inst.emitted = true;
+          emitGenericFuncInstance(inst);
+          progressed = true;
+        }
       }
     }
     // Phase 7.x: emit method bodies for each concrete generic-struct instance.

@@ -150,7 +150,16 @@ Done }`). 10.A unblocks the trait; 10.B wires it in.
   (small surgery, see [phase-9-g-vtables.md:154](completed/phase-9-g-vtables.md))
   or 10.B ships with concrete iterators only and the vtable form follows.
 
-### Phase 10.C — `std/collections/`: Map, Set, Deque
+### Phase 10.C — `std/collections/`: Map, Set, Deque (partial — landed)
+
+See [phase-10-c-collections.md](completed/phase-10-c-collections.md).
+The first sub-cut shipped `Option<T>`, a string-keyed
+`StringMap<V>` (open-addressing hash table) with `Option<V>`-returning
+lookups, and two codegen fixes that any generics-heavy module needed
+(`cloneAstWithSubstitution` variant re-fetch, fixed-point generic
+emission). `Set<K>` and `Deque<T>` are pending; a fully generic
+`Map<K, V>` is blocked on either `Self` in trait sigs or two small
+function-pointer-field codegen lifts (detailed in the completed doc).
 
 Once `Iterable<T>` exists, write the collections.
 

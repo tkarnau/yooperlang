@@ -123,6 +123,21 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("map_smoke: StringMap<int32> covers insert/get/remove/grow with Option<V>", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/map_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "fresh: a=0 b=0 c=0 len=3\n" +
+        "overwrite: ow=1 len=3\n" +
+        "get: alpha=1 beta=22 zeta=-1\n" +
+        "contains: alpha=1 zeta=0\n" +
+        "remove: alpha=1 xeno=0 len=2\n" +
+        "after-remove get alpha=-1\n" +
+        "grown len=14 k05=50 k10=100\n",
+    );
+  });
+
   it("slice_basic.yoop slices arrays in all four forms and shares storage", () => {
     const { stdout, exitCode } = runFixture("examples/pass/slice_basic.yoop");
     assert.equal(exitCode, 0);

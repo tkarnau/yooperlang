@@ -104,6 +104,22 @@ export function string_slice(s: string, start: usize, end: usize): Result<string
     return Result.Ok { value: string_from_bytes_unchecked(view) };
 }
 
+// FNV-1a hash of the underlying UTF-8 bytes. Stable across runs but not
+// cryptographically secure — meant for hash-table keying, not crypto.
+// Empty string hashes to the FNV offset basis (14695981039346656037).
+export function string_hash(s: string): uint64 {
+    let bytes: uint8[] = string_as_bytes(s);
+    let h: uint64 = 14695981039346656037;
+    let prime: uint64 = 1099511628211;
+    let i: usize = 0;
+    while (i < bytes.len) {
+        h = h ^ uint64(bytes[i]);
+        h = h * prime;
+        i = i + 1;
+    }
+    return h;
+}
+
 // Concat two strings into one fresh heap-allocated string.
 export function string_concat(a: string, b: string): string {
     let a_bytes: uint8[] = string_as_bytes(a);

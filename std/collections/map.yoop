@@ -1,0 +1,258 @@
+// std/collections/map.yoop — string-keyed hash map.
+//
+// Phase 10.C ships `StringMap<V>` rather than a fully generic `Map<K, V>`
+// because the key-equality story for arbitrary `K` needs either `Self` in
+// trait sigs (Phase 5 deferred) or function-pointer struct fields with
+// FuncDecl→FPT coercion + struct-field-callable lowering (not in Phase
+// 9.G's scope). String keys cover the marquee use case — HTTP `Headers`,
+// JSON object lookups, env-style configs — so we ship that first and
+// defer the generic form to a follow-up sub-phase.
+//
+// Implementation: open-addressing with linear probing.
+//   * Backing arrays: `keys: string[]`, `values: V[]`, `states: uint8[]`.
+//     `states[i]` is one of `STATE_EMPTY` / `STATE_OCCUPIED` /
+//     `STATE_TOMBSTONE`. Lookups probe until `EMPTY`; tombstones don't
+//     stop the probe so removals don't break chains.
+//   * Load factor: grow at 75% (occupied + tombstones) of cap.
+//   * Hash: FNV-1a over the key bytes; bucket index = `hash & (cap - 1)`,
+//     so `cap` is always a power of two. `map_new` rounds up `initial_cap`
+//     to the next power of two with a floor of 8.
+//   * Disposable: owns three heap allocations; one `dispose` frees them
+//     all. Carries `propagates<disposable>` like `Vec<T>`.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Option } from "../core/types.yoop";
+import { string_eq, string_hash } from "../core/strings.yoop";
+
+const STATE_EMPTY:     uint8 = 0;
+const STATE_OCCUPIED:  uint8 = 1;
+const STATE_TOMBSTONE: uint8 = 2;
+
+export type StringMap<V> implements Disposable propagates<disposable> {
+    keys:   string[],
+    values: V[],
+    states: uint8[],
+    len:    usize,   // occupied entries (tombstones not counted)
+    used:   usize,   // occupied + tombstone slots (drives growth)
+    cap:    usize,   // always a power of two; 0 means empty/uninitialized
+    function dispose(ref self): void {
+        if (self.cap > 0) {
+            heap_free(self.keys);
+            heap_free(self.values);
+            heap_free(self.states);
+            self.cap = 0;
+        }
+    }
+}
+
+// Round `n` up to the next power of two, with a floor of 8. Used by
+// `map_new` so callers can hint a starting capacity without worrying
+// about the power-of-two constraint.
+function next_pow2_floor8(n: usize): usize {
+    let cap: usize = 8;
+    while (cap < n) {
+        cap = cap * 2;
+    }
+    return cap;
+}
+
+// Hash a key into a bucket index for this map's current capacity.
+function bucket_of(key: string, cap: usize): usize {
+    let h: uint64 = string_hash(key);
+    return usize(h) & (cap - 1);
+}
+
+// Probe starting at `start` for the slot that either holds `key` (returned
+// as `Option.Some { value: index }`) or is the first empty slot (returned
+// as `Option.None` — but the index is reachable via `lookup_for_insert`).
+// This is the read-only lookup used by `map_get` / `map_contains_key`.
+function find_slot<V>(ref m: StringMap<V>, key: string): Option<usize> {
+    if (m.cap == 0) { return Option.None; }
+    let start: usize = bucket_of(key, m.cap);
+    let i: usize = 0;
+    while (i < m.cap) {
+        let idx: usize = (start + i) & (m.cap - 1);
+        let st: uint8 = m.states[idx];
+        if (st == STATE_EMPTY) {
+            return Option.None;
+        }
+        if (st == STATE_OCCUPIED) {
+            if (string_eq(m.keys[idx], key)) {
+                return Option.Some { value: idx };
+            }
+        }
+        i = i + 1;
+    }
+    return Option.None;
+}
+
+// Probe for the slot to use when inserting `key`. Returns the index of
+// either:
+//   * an existing OCCUPIED slot for `key` (overwrite),
+//   * the first TOMBSTONE seen along the probe (re-use), or
+//   * the first EMPTY slot.
+// Cap is positive and load factor leaves at least one empty slot, so this
+// always terminates.
+function find_insert_slot<V>(ref m: StringMap<V>, key: string): usize {
+    let start: usize = bucket_of(key, m.cap);
+    let first_tomb_seen: bool = false;
+    let first_tomb_idx: usize = 0;
+    let i: usize = 0;
+    while (i < m.cap) {
+        let idx: usize = (start + i) & (m.cap - 1);
+        let st: uint8 = m.states[idx];
+        if (st == STATE_EMPTY) {
+            if (first_tomb_seen) { return first_tomb_idx; }
+            return idx;
+        }
+        if (st == STATE_TOMBSTONE) {
+            if (!first_tomb_seen) {
+                first_tomb_seen = true;
+                first_tomb_idx = idx;
+            }
+        } else {
+            if (string_eq(m.keys[idx], key)) { return idx; }
+        }
+        i = i + 1;
+    }
+    // Unreachable when load factor is maintained.
+    return 0;
+}
+
+// Construct a fresh map. `initial_cap` is a hint; the real capacity is
+// the next power of two ≥ initial_cap, floor of 8.
+export function map_new<V>(initial_cap: usize): StringMap<V> propagates<disposable> {
+    let cap: usize = next_pow2_floor8(initial_cap);
+    let keys:   string[] = heap_alloc(cap);
+    let values: V[]      = heap_alloc(cap);
+    let states: uint8[]  = heap_alloc(cap);
+    let i: usize = 0;
+    while (i < cap) {
+        states[i] = STATE_EMPTY;
+        i = i + 1;
+    }
+    return { keys: keys, values: values, states: states, len: 0, used: 0, cap: cap };
+}
+
+// Grow the map to `new_cap` buckets and rehash every occupied entry.
+// Tombstones are discarded; `used` collapses back to `len`.
+function rehash<V>(ref m: StringMap<V>, new_cap: usize): void {
+    let old_keys:   string[] = m.keys;
+    let old_values: V[]      = m.values;
+    let old_states: uint8[]  = m.states;
+    let old_cap:    usize    = m.cap;
+
+    let new_keys:   string[] = heap_alloc(new_cap);
+    let new_values: V[]      = heap_alloc(new_cap);
+    let new_states: uint8[]  = heap_alloc(new_cap);
+    let j: usize = 0;
+    while (j < new_cap) {
+        new_states[j] = STATE_EMPTY;
+        j = j + 1;
+    }
+
+    m.keys   = new_keys;
+    m.values = new_values;
+    m.states = new_states;
+    m.cap    = new_cap;
+    m.len    = 0;
+    m.used   = 0;
+
+    let i: usize = 0;
+    while (i < old_cap) {
+        if (old_states[i] == STATE_OCCUPIED) {
+            let k: string = old_keys[i];
+            let idx: usize = find_insert_slot(ref m, k);
+            m.keys[idx]   = k;
+            m.values[idx] = old_values[i];
+            m.states[idx] = STATE_OCCUPIED;
+            m.len  = m.len + 1;
+            m.used = m.used + 1;
+        }
+        i = i + 1;
+    }
+    heap_free(old_keys);
+    heap_free(old_values);
+    heap_free(old_states);
+}
+
+// Grow if (used + 1) * 4 >= cap * 3 (i.e. 75% load factor over `used`).
+// Doubling capacity each time.
+function maybe_grow<V>(ref m: StringMap<V>): void {
+    let used_after: usize = m.used + 1;
+    if (used_after * 4 >= m.cap * 3) {
+        rehash(ref m, m.cap * 2);
+    }
+}
+
+// Insert or overwrite. Returns true on overwrite (existing key), false on
+// fresh insert (new key).
+export function map_insert<V>(ref m: StringMap<V>, key: string, value: V): bool {
+    maybe_grow(ref m);
+    let idx: usize = find_insert_slot(ref m, key);
+    let st: uint8 = m.states[idx];
+    let was_present: bool = st == STATE_OCCUPIED;
+    m.keys[idx]   = key;
+    m.values[idx] = value;
+    if (st == STATE_EMPTY) {
+        m.used = m.used + 1;
+    }
+    m.states[idx] = STATE_OCCUPIED;
+    if (!was_present) {
+        m.len = m.len + 1;
+    }
+    return was_present;
+}
+
+// Lookup. Returns `Option.Some { value }` when present, `Option.None`
+// otherwise.
+export function map_get<V>(ref m: StringMap<V>, key: string): Option<V> {
+    let slot: Option<usize> = find_slot(ref m, key);
+    switch (slot) {
+        case Option.Some { value: idx }: { return Option.Some { value: m.values[idx] }; }
+        case Option.None: { return Option.None; }
+    }
+    return Option.None;
+}
+
+// Membership check.
+export function map_contains_key<V>(ref m: StringMap<V>, key: string): bool {
+    let slot: Option<usize> = find_slot(ref m, key);
+    switch (slot) {
+        case Option.Some { value: _i }: { return true; }
+        case Option.None: { return false; }
+    }
+    return false;
+}
+
+// Remove the entry for `key`. Returns true if an entry was removed.
+// Tombstone keeps probes correct; the slot will be reused on the next
+// matching insert.
+export function map_remove<V>(ref m: StringMap<V>, key: string): bool {
+    let slot: Option<usize> = find_slot(ref m, key);
+    switch (slot) {
+        case Option.Some { value: idx }: {
+            m.states[idx] = STATE_TOMBSTONE;
+            m.len = m.len - 1;
+            return true;
+        }
+        case Option.None: { return false; }
+    }
+    return false;
+}
+
+// Number of occupied entries (tombstones excluded).
+export function map_len<V>(ref m: StringMap<V>): usize {
+    return m.len;
+}
+
+// Reset to empty without shrinking the backing buffers.
+export function map_clear<V>(ref m: StringMap<V>): void {
+    let i: usize = 0;
+    while (i < m.cap) {
+        m.states[i] = STATE_EMPTY;
+        i = i + 1;
+    }
+    m.len  = 0;
+    m.used = 0;
+}

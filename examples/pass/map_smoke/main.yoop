@@ -1,0 +1,131 @@
+// Phase 10.C smoke: StringMap<V> covers the marquee paths —
+//   * insert + overwrite (return value distinguishes fresh from replace),
+//   * get returning Option<V>,
+//   * contains_key, remove (with probe-chain preservation), len,
+//   * grow + rehash (insert past the load-factor threshold),
+//   * Disposable + propagates<disposable> auto-cleanup.
+
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import {
+    StringMap,
+    map_new,
+    map_insert,
+    map_get,
+    map_contains_key,
+    map_remove,
+    map_len,
+} from "std/collections/map.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable m: StringMap<int32> = map_new(4);
+
+    // Fresh inserts. `map_insert` returns true on overwrite, false on fresh.
+    let fresh_a: bool = map_insert(ref m, "alpha", 1);
+    let fresh_b: bool = map_insert(ref m, "beta",  2);
+    let fresh_c: bool = map_insert(ref m, "gamma", 3);
+    let fa: int32 = 0; if (fresh_a) { fa = 1; }
+    let fb: int32 = 0; if (fresh_b) { fb = 1; }
+    let fc: int32 = 0; if (fresh_c) { fc = 1; }
+    printf(`fresh: a=${fa} b=${fb} c=${fc} len=${map_len(ref m)}\n`);
+
+    // Overwrite the same key.
+    let overwrote: bool = map_insert(ref m, "beta", 22);
+    let ow: int32 = 0; if (overwrote) { ow = 1; }
+    printf(`overwrite: ow=${ow} len=${map_len(ref m)}\n`);
+
+    // Lookup hits + miss. Each switch needs a distinct payload binding
+    // name (Phase 10.H alloca-uniqueness gap).
+    let ga: Option<int32> = map_get(ref m, "alpha");
+    let gb: Option<int32> = map_get(ref m, "beta");
+    let gz: Option<int32> = map_get(ref m, "zeta");
+    let ga_v: int32 = -1;
+    switch (ga) {
+        case Option.Some { value: ga_value }: { ga_v = ga_value; }
+        case Option.None: { ga_v = -1; }
+    }
+    let gb_v: int32 = -1;
+    switch (gb) {
+        case Option.Some { value: gb_value }: { gb_v = gb_value; }
+        case Option.None: { gb_v = -1; }
+    }
+    let gz_v: int32 = -1;
+    switch (gz) {
+        case Option.Some { value: gz_value }: { gz_v = gz_value; }
+        case Option.None: { gz_v = -1; }
+    }
+    printf(`get: alpha=${ga_v} beta=${gb_v} zeta=${gz_v}\n`);
+
+    // contains_key.
+    let has_a: bool = map_contains_key(ref m, "alpha");
+    let has_z: bool = map_contains_key(ref m, "zeta");
+    let hai: int32 = 0; if (has_a) { hai = 1; }
+    let hzi: int32 = 0; if (has_z) { hzi = 1; }
+    printf(`contains: alpha=${hai} zeta=${hzi}\n`);
+
+    // Remove, then re-insert (exercises tombstone + reuse).
+    let removed_a: bool = map_remove(ref m, "alpha");
+    let removed_x: bool = map_remove(ref m, "xeno");
+    let ra: int32 = 0; if (removed_a) { ra = 1; }
+    let rx: int32 = 0; if (removed_x) { rx = 1; }
+    printf(`remove: alpha=${ra} xeno=${rx} len=${map_len(ref m)}\n`);
+
+    let after_get: Option<int32> = map_get(ref m, "alpha");
+    let after_v: int32 = -1;
+    switch (after_get) {
+        case Option.Some { value: after_value }: { after_v = after_value; }
+        case Option.None: { after_v = -1; }
+    }
+    printf(`after-remove get alpha=${after_v}\n`);
+
+    // Force a grow: keep inserting past the 75% load-factor threshold of
+    // the initial cap (rounded to 8). 12 fresh entries cover the boundary.
+    let i: int32 = 0;
+    while (i < 12) {
+        let k: string = "k";
+        // No int-to-string yet; pick the key by branching.
+        if (i == 0)  { k = "k00"; }
+        if (i == 1)  { k = "k01"; }
+        if (i == 2)  { k = "k02"; }
+        if (i == 3)  { k = "k03"; }
+        if (i == 4)  { k = "k04"; }
+        if (i == 5)  { k = "k05"; }
+        if (i == 6)  { k = "k06"; }
+        if (i == 7)  { k = "k07"; }
+        if (i == 8)  { k = "k08"; }
+        if (i == 9)  { k = "k09"; }
+        if (i == 10) { k = "k10"; }
+        if (i == 11) { k = "k11"; }
+        let _f: bool = map_insert(ref m, k, i * 10);
+        i = i + 1;
+    }
+    let grown_len: usize = map_len(ref m);
+    let probe5: Option<int32> = map_get(ref m, "k05");
+    let probe10: Option<int32> = map_get(ref m, "k10");
+    let p5: int32 = -1;
+    switch (probe5) {
+        case Option.Some { value: p5_value }: { p5 = p5_value; }
+        case Option.None: { p5 = -1; }
+    }
+    let p10: int32 = -1;
+    switch (probe10) {
+        case Option.Some { value: p10_value }: { p10 = p10_value; }
+        case Option.None: { p10 = -1; }
+    }
+    printf(`grown len=${grown_len} k05=${p5} k10=${p10}\n`);
+
+    return 0;
+}
+
+// expected output:
+// fresh: a=0 b=0 c=0 len=3
+// overwrite: ow=1 len=3
+// get: alpha=1 beta=22 zeta=-1
+// contains: alpha=1 zeta=0
+// remove: alpha=1 xeno=0 len=2
+// after-remove get alpha=-1
+// grown len=14 k05=50 k10=100
