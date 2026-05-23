@@ -673,18 +673,111 @@ work around or wait on:
    "any Readable" as a parameter type. Yoop generics today require an
    explicit `<R implements Readable>` and *monomorphize*. That's fine
    for performance but means every HTTP parser instantiation is a
-   separate function. A real `dyn Trait` (vtable-dispatched) would let
-   the HTTP parser take one shape regardless of stream type.
-   Workaround: use generics + accept the code bloat.
+   separate function, and a `Readable[]` can't mix stream types.
 
-2. **Streaming bodies.** `Request.body: uint8[]` materializes the whole
-   body up front. A `Body` shape that's "this Readable, give it to me
-   on demand" needs (1) above.
+   **Direction:** Zig-style runtime polymorphism via a new `vtable`
+   keyword that names the type-erased form of an existing trait. No
+   magic `dyn` in type position; runtime polymorphism is just a
+   concrete struct shape the compiler understands.
 
-3. **Function values.** No closures or function-pointer values means a
-   router can't take `(req) -> Response` as data. Routing today has to
-   be done via a trait-object enum or via codegen-time wiring (every
-   handler is a separate type that implements Handler).
+   Three pieces compose:
+
+   - **Function types in type position use `=>`.** Declarations keep
+     `: T` for return type (`function add(a, b): int32`); function
+     *values* in type position use `(params) => Ret`. The two-shape
+     split keeps `:` unambiguous inside struct fields and signals
+     "this is a function value / pointer" at a glance.
+   - **`vtable` type declarations.** A `vtable T { ... }` declares
+     the erased shape of a trait. The compiler:
+     - inserts an implicit `ctx: unsafe ptr<void>` field,
+     - requires every other field to be a function type,
+     - threads `ctx` as the implicit first parameter of each function
+       field (the user writes the method signature; the compiler adds
+       the ctx slot in the stored function pointer's type).
+   - **The bridge: `Reader.from(ref s)`.** A built-in constructor on
+     any `vtable` type that takes `ref T where T implements <trait>`
+     and produces the erased form by looking up the impl's method
+     addresses. The trait stays the source of truth; the impl block
+     is written normally; `from` does the wiring.
+
+   ```yoop
+   trait Readable {
+       function read(ref self, ref buf: uint8[]): int32;
+   }
+
+   impl Readable for TcpStream {
+       function read(ref self, ref buf: uint8[]): int32 { ... }
+   }
+
+   vtable Reader for Readable {
+       read: (ref buf: uint8[]) => int32,
+   }
+
+   // usage
+   const r: Reader = Reader.from(ref my_tcp_stream);
+   const n = Reader.read(ref r, ref buf);
+   ```
+
+   The `for Readable` clause ties the vtable to its trait so `from`
+   knows which impls are eligible and the compiler can verify the
+   field list matches the trait's method list.
+
+   **Later sugar:** once `vtable T for Trait` is proven, the natural
+   follow-up is auto-deriving the vtable struct directly from the
+   trait (e.g. `vtable Readable` with no body, generating field names
+   from the trait's methods). That removes the need to restate the
+   method list and is the path to ergonomic `dyn Readable`-style use
+   without ever making `dyn` a magic type.
+
+   Until function values and `vtable` land, the workaround is
+   generics plus monomorphization.
+
+2. **Streaming bodies.** `Request.body: uint8[]` materializes the
+   whole body up front. Once (1) lands, `body` becomes a `Reader`
+   vtable plus a known `content_length` (or chunked-transfer marker),
+   and the handler pulls bytes on demand:
+
+   ```yoop
+   type Request {
+       method: HttpMethod,
+       path: string,
+       headers: Headers,
+       body: Reader,
+       content_length: ?usize,  // none = chunked / unknown
+   }
+   ```
+
+   The MVP HTTP parser is generic over the underlying stream
+   (monomorphized per `TcpStream` / `TlsStream` / `BufferedReader`).
+   When `vtable Reader for Readable` is in, the parser switches to
+   taking a single `Reader` and the handler can stream bodies through
+   without buffering. Until then, `body` stays a fully-materialized
+   `uint8[]`.
+
+3. **Function values.** Splits into three cases once (1) lands:
+
+   - **Plain function pointers** — top-level functions referenced by
+     name, with no captured state. Solved by `=>` types in type
+     position (introduced for vtable fields). A field typed
+     `(req: Request) => Response` holds the address of any top-level
+     function with that signature. A router can store
+     `handlers: ((Request) => Response)[]` directly.
+   - **Method bound to a struct instance** — "this `Router`'s
+     `handle`, packaged up." Solved by `vtable`: a single-method
+     vtable is exactly this shape. Each handler that needs state
+     (db handle, config, etc.) is a struct implementing
+     `HandlerTrait`; the router stores `vtable Handler for
+     HandlerTrait` values built via `Handler.from(ref h)`.
+   - **Closures** — anonymous functions that capture local variables.
+     **Not planned, and may never land.** Closures require the
+     language to synthesize a capture struct, decide capture-by-ref
+     vs by-value, and pick an allocation strategy (heap / arena /
+     stack) — a meaningful complexity tax that may not be worth it
+     given the vtable-based workaround.
+
+   Workaround for the closure case: hand-roll the capture as a
+   struct, implement the relevant trait on it, hand it to `from`. Verbose, but it's the same machinery as case 2 and stays
+   honest about where the state lives.
 
 4. **Map / hash collections.** `Headers` is a linear-scan vec. A real
    map would let lookups stop being O(n). Probably waits on a generic
