@@ -91,6 +91,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveTemplateLiteral(node, scope, ctx);
     case ASTNodeKind.ASSIGNMENT:
       return resolveAssignment(node, scope, ctx);
+    case ASTNodeKind.COMPOUND_ASSIGNMENT:
+      return resolveCompoundAssignment(node, scope, ctx);
     case ASTNodeKind.FIELD_ACCESS:
       return resolveFieldAccess(node, scope, ctx);
     case ASTNodeKind.STRUCT_LITERAL:
@@ -103,6 +105,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveArrayLiteral(node, scope, ctx);
     case ASTNodeKind.INDEX_EXPRESSION:
       return resolveIndexExpression(node, scope, ctx);
+    case ASTNodeKind.SLICE_EXPRESSION:
+      return resolveSliceExpression(node, scope, ctx);
     case ASTNodeKind.WAIT_EXPRESSION:
       return resolveWaitExpression(node, scope, ctx);
     case ASTNodeKind.VARIANT_CONSTRUCTOR:
@@ -381,6 +385,25 @@ function resolveUnary(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
+  // Phase 9: bitwise NOT — integer types only, returns the same type.
+  if (node.op === "bitnot") {
+    if (
+      operandType.kind === typeKinds.prim &&
+      isIntPrim(operandType.name)
+    ) {
+      return setType(node, operandType);
+    }
+    if (operandType.kind === typeKinds.untypedInt) {
+      return setType(node, operandType);
+    }
+    pushError(
+      ctx.errors,
+      node,
+      `bitwise NOT operator requires an integer operand, found ${formatType(operandType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+
   if (node.op === "not") {
     const boolType = resolveTypeFromName(
       primAnnotations.bool,
@@ -454,6 +477,59 @@ function resolveAssignment(node, scope, ctx) {
     `invalid assignment target kind "${node.target.kind}"`,
   );
   return setType(node, ErrorType());
+}
+
+// Phase 9: `x op= rhs`. Treated as the merge of an assignment (target must be
+// a mutable lvalue) and a binary op (target's current type must accept `op`
+// with the RHS). Codegen evaluates the lvalue exactly once.
+function resolveCompoundAssignment(node, scope, ctx) {
+  // Resolve the target as an lvalue read first to pick up its current type.
+  // resolveExprType handles IDENT / FIELD_ACCESS / INDEX_EXPRESSION /
+  // DEREF_EXPRESSION uniformly. Mutability is checked below.
+  const targetType = resolveExprType(node.target, scope, ctx);
+  if (targetType.kind === typeKinds.error) return setType(node, ErrorType());
+
+  // Block writes to a `const` binding (mirrors plain ASSIGNMENT to IDENT).
+  if (node.target.kind === ASTNodeKind.IDENT) {
+    const binding = lookupInScope(scope, node.target.name);
+    if (binding && binding.kind === "const") {
+      pushError(
+        ctx.errors,
+        node,
+        `cannot compound-assign to const "${node.target.name}"`,
+      );
+      return setType(node, ErrorType());
+    }
+  }
+
+  const rhsType = resolveExprType(node.value, scope, ctx);
+  if (rhsType.kind === typeKinds.error) return setType(node, ErrorType());
+
+  // The op must be applicable to (targetType, rhsType). unifyArith returns
+  // the result type or errors; we reuse the same path binary ops use.
+  const unified = unifyArith(targetType, rhsType, node.op);
+  if (unified.kind === typeKinds.error) {
+    pushError(
+      ctx.errors,
+      node,
+      `compound op '${node.op}=' rejects operands ${formatType(targetType)} and ${formatType(rhsType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Result must be assignable back into the target slot — guards against
+  // e.g. an untyped int RHS that would resolve to something narrower.
+  if (!isAssignable(targetType, unified)) {
+    pushError(
+      ctx.errors,
+      node,
+      `compound op '${node.op}=' yields ${formatType(unified)} which is not assignable to ${formatType(targetType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Pin any untyped-literal RHS (and any nested arithmetic with untyped
+  // intermediate types) to the target type — same helper as plain binary ops.
+  coerceUntypedLiteralToTyped(node.value, rhsType, targetType, ctx.errors);
+  return setType(node, targetType);
 }
 
 // Phase 8.A: `*p = v` — assignment through an unsafe_ptr<T>. Resolves the
@@ -1061,6 +1137,38 @@ function resolveIndexExpression(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   return setType(node, objType.elem);
+}
+
+// Phase 9.E: `xs[i..j]` / `xs[i..]` / `xs[..j]` / `xs[..]` — zero-copy
+// fat-pointer subview. Result type is the same array type as `xs`.
+function resolveSliceExpression(node, scope, ctx) {
+  const objType = resolveExprType(node.object, scope, ctx);
+  if (objType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (objType.kind !== typeKinds.array) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot slice non-array type ${formatType(objType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  const checkBound = (boundNode, label) => {
+    if (boundNode === null) return;
+    const t = resolveExprType(boundNode, scope, ctx);
+    const ok =
+      (t.kind === typeKinds.prim && isIntPrim(t.name)) ||
+      t.kind === typeKinds.untypedInt;
+    if (!ok) {
+      pushError(
+        ctx.errors,
+        boundNode,
+        `slice ${label} must be an integer type, found ${formatType(t)}`,
+      );
+    }
+  };
+  checkBound(node.start, "start");
+  checkBound(node.end, "end");
+  return setType(node, objType);
 }
 
 // Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT

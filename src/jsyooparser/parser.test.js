@@ -69,6 +69,98 @@ describe("parse: expressions", () => {
     assert.equal(e.callee, "add");
     assert.equal(e.args.length, 2);
   });
+
+  // Phase 9.A: parenthesized subexpressions
+  it("parens around a single literal", () => {
+    const e = exprOf("(42)");
+    assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.value, 42);
+  });
+
+  it("parens override precedence: (1 + 2) * 3 -> mult(plus(1,2), 3)", () => {
+    const e = exprOf("(1 + 2) * 3");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "mult");
+    assert.equal(e.left.op, "plus");
+    assert.equal(e.left.left.value, 1);
+    assert.equal(e.left.right.value, 2);
+    assert.equal(e.right.value, 3);
+  });
+
+  it("nested parens collapse to inner expression", () => {
+    const e = exprOf("((1 + 2))");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "plus");
+  });
+
+  it("postfix field access on parenthesized expression", () => {
+    const e = exprOf("(a + b).x");
+    assert.equal(e.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(e.field, "x");
+    assert.equal(e.object.kind, ASTNodeKind.BINARY_EXPRESSION);
+  });
+
+  it("postfix index on parenthesized expression", () => {
+    const e = exprOf("(xs)[0]");
+    assert.equal(e.kind, ASTNodeKind.INDEX_EXPRESSION);
+    assert.equal(e.object.kind, ASTNodeKind.IDENT);
+    assert.equal(e.index.value, 0);
+  });
+
+  it("postfix '?' on parenthesized expression", () => {
+    const e = exprOf("(f())?");
+    assert.equal(e.kind, ASTNodeKind.TRY_OP);
+    assert.equal(e.operand.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+
+  it("parens around a unary minus operand", () => {
+    const e = exprOf("-(a + b)");
+    assert.equal(e.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.op, "minus");
+    assert.equal(e.operand.kind, ASTNodeKind.BINARY_EXPRESSION);
+  });
+
+  // Phase 9.E: array slice syntax
+  it("plain index parses as INDEX_EXPRESSION", () => {
+    const e = exprOf("xs[5]");
+    assert.equal(e.kind, ASTNodeKind.INDEX_EXPRESSION);
+    assert.equal(e.index.value, 5);
+  });
+
+  it("closed slice xs[i..j] parses with both bounds", () => {
+    const e = exprOf("xs[1..3]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start.value, 1);
+    assert.equal(e.end.value, 3);
+  });
+
+  it("open-end slice xs[i..] parses with null end", () => {
+    const e = exprOf("xs[1..]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start.value, 1);
+    assert.equal(e.end, null);
+  });
+
+  it("open-start slice xs[..j] parses with null start", () => {
+    const e = exprOf("xs[..3]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start, null);
+    assert.equal(e.end.value, 3);
+  });
+
+  it("fully open slice xs[..] parses with both bounds null", () => {
+    const e = exprOf("xs[..]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start, null);
+    assert.equal(e.end, null);
+  });
+
+  it("slice bounds can be arbitrary expressions", () => {
+    const e = exprOf("xs[i + 1..j - 1]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.end.kind, ASTNodeKind.BINARY_EXPRESSION);
+  });
 });
 
 describe("parse: statements", () => {

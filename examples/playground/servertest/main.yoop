@@ -7,15 +7,15 @@
 // The server handles N requests and then exits (serve_n's `n` arg).
 // Use n <= 0 for a forever loop.
 
-import { disposable } from "../../../std/core/kinds.yoop";
-import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ListenResult, tcp_listen } from "std/net/tcp.yoop";
 import {
     Handler, HandleOutcome,
     serve_n, ServeOutcome,
-} from "../../../std/http/server.yoop";
+} from "std/http/server.yoop";
 import {
     Request, Response, ok, headers_add,
-} from "../../../std/http/types.yoop";
+} from "std/http/types.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

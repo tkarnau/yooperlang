@@ -72,6 +72,40 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("parens_basic.yoop groups subexpressions and composes with postfix ops", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/parens_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=20\nb=20\nc=20\ne=99 f=200\n");
+  });
+
+  it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/operators_full.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "a=136 b=238 c=102 d=51\n" +
+        "lo=1024 hi=16\n" +
+        "p=14 q=20\n" +
+        "mix=6\n" +
+        "x=6\n" +
+        "pt=(15,60)\n" +
+        "xs=1,102,2,4\n",
+    );
+  });
+
+  it("slice_basic.yoop slices arrays in all four forms and shares storage", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/slice_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "mid.len=3 mid[0]=20 mid[1]=30 mid[2]=40\n" +
+        "tail.len=3 tail[0]=40 tail[2]=60\n" +
+        "head.len=3 head[0]=10 head[2]=30\n" +
+        "all.len=6\n" +
+        "xs[1]=99\n",
+    );
+  });
+
   it("int_literal.yoop prints decoded hex/bin/dec/negative literals", () => {
     const { stdout, exitCode } = runFixture("examples/pass/int_literal.yoop");
     assert.equal(exitCode, 0);
@@ -477,6 +511,33 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_diamond/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=42 b=42\n");
+  });
+
+  // Phase 9.B: bool[] arrays
+  it("bool_array: bool[] literal/index/heap_alloc/Vec paths all work", () => {
+    const { stdout, exitCode } = runFixtureEntry(
+      "examples/pass/bool_array.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "flags.len=4 flags[0]=1 flags[1]=0\n" +
+        "flags[1]=1\n" +
+        "zero is true\n" +
+        "three is false\n" +
+        "count=3\n" +
+        "heap=1,0,1\n" +
+        "vec=1,0,1 vlen=3\n",
+    );
+  });
+
+  // Phase 9.C: std/ import root
+  it("std_root_import: `std/...` paths resolve against the repo std/ dir", () => {
+    const { stdout, exitCode } = runFixtureEntry(
+      "examples/pass/std_root_import.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "total=60\n");
   });
 
   it("side_effect_import: side-effect-only import succeeds", () => {

@@ -1,9 +1,21 @@
 import fs from "node:fs";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
 import { moduleIdFor } from "./moduleId.js";
+
+// Phase 9.C: the std/ import root. By default this is the std/ directory at
+// the repo root — i.e. two levels up from this file (src/jsyoopdriver/). The
+// driver can override via the options bag (useful for tests or for an
+// alternate yoopiler distribution layout).
+const DEFAULT_STD_ROOT = path.resolve(
+  path.dirname(fileURLToPath(import.meta.url)),
+  "..",
+  "..",
+  "std",
+);
 
 // Loads the full module graph starting at entryAbsPath.
 // Returns { entry: Module, modules: [Module] } where modules is topo-sorted
@@ -25,6 +37,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   const onStack = new Set(); // for cycle detection
   const order = []; // post-order (leaves first)
   const readFile = options.readFile ?? (() => null);
+  const stdRoot = options.stdRoot ?? DEFAULT_STD_ROOT;
 
   loadOne(entryAbsPath);
   return { entry: byPath.get(entryAbsPath), modules: order };
@@ -49,16 +62,24 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
       if (!sourcePath.endsWith(".yoop")) {
         throw new Error(`import path "${sourcePath}" must end in .yoop`);
       }
+      // Phase 9.C: `std/...` paths resolve against the std root, not relative
+      // to the importing file. Everything else must be `./...`, `../...`, or
+      // absolute — preserves the SPEC §1 relative-only contract for non-std
+      // imports.
+      const isStdImport = sourcePath.startsWith("std/");
       if (
+        !isStdImport &&
         !sourcePath.startsWith("./") &&
         !sourcePath.startsWith("../") &&
         !path.isAbsolute(sourcePath)
       ) {
         throw new Error(
-          `import path "${sourcePath}" must be relative (./...) or absolute`,
+          `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`,
         );
       }
-      const resolved = path.resolve(path.dirname(absPath), sourcePath);
+      const resolved = isStdImport
+        ? path.resolve(stdRoot, sourcePath.slice("std/".length))
+        : path.resolve(path.dirname(absPath), sourcePath);
       let resolvedAbs;
       try {
         resolvedAbs = fs.realpathSync(resolved);

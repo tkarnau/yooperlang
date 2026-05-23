@@ -55,12 +55,21 @@ const Precedence = {
   [TokenTags.oror]: 20,
   [TokenTags.andand]: 30,
   [TokenTags.pipe]: 35,
+  // Phase 9: bitwise XOR sits between OR and AND (C-style precedence).
+  [TokenTags.caret]: 36,
+  // Phase 9: bitwise AND. `&` is also the prefix address-of and the
+  // kind-composition operator; both of those are parsed in non-binary
+  // positions so the precedence entry doesn't conflict.
+  [TokenTags.amp]: 37,
   [TokenTags.eqeq]: 40,
   [TokenTags.neq]: 40,
   [TokenTags.lt]: 40,
   [TokenTags.gt]: 40,
   [TokenTags.lte]: 40,
   [TokenTags.gte]: 40,
+  // Phase 9: shifts bind tighter than comparisons, looser than additive.
+  [TokenTags.lshift]: 45,
+  [TokenTags.rshift]: 45,
   [TokenTags.plus]: 50,
   [TokenTags.minus]: 50,
   [TokenTags.mult]: 60,
@@ -1380,6 +1389,26 @@ export function parse(src) {
       return node;
     }
 
+    // Phase 9.B: prefix `!x` — logical NOT. High precedence so postfixes
+    // bind to the operand (e.g. `!flags[i]` parses as `!(flags[i])`).
+    if (peek().tag === TokenTags.bang) {
+      advance();
+      const notNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
+      notNode.op = "not";
+      notNode.operand = parseExpression(70);
+      return notNode;
+    }
+
+    // Phase 9: prefix `~x` — bitwise NOT. Same shape as `!`, restricted to
+    // integer operands by the typechecker.
+    if (peek().tag === TokenTags.tilde) {
+      advance();
+      const bitnotNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
+      bitnotNode.op = "bitnot";
+      bitnotNode.operand = parseExpression(70);
+      return bitnotNode;
+    }
+
     // ref x — parse lvalue address operand with high precedence so postfixes bind tightly
     if (peek().tag === TokenTags.ref) {
       advance();
@@ -1563,6 +1592,13 @@ export function parse(src) {
       advance();
       node = buildSourcedNode(ASTNodeKind.IDENT);
       node.name = "self";
+    } else if (peek().tag === TokenTags.lparen) {
+      // Phase 9.A: parenthesized subexpression — `(a + b) * c`. Plain
+      // grouping; no tuple syntax. Postfix chain (`.field`, `[i]`, `?`,
+      // `(args)`) continues to apply to the inner expression.
+      advance(); // consume (
+      node = parseExpression();
+      expect(TokenTags.rparen);
     } else {
       throw parseError(
         `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
@@ -1641,11 +1677,36 @@ export function parse(src) {
         continue;
       }
       // array indexing: xs[i]
+      // Phase 9.E: array slice xs[i..j], xs[..j], xs[i..], xs[..]
       if (peek().tag === TokenTags.lbracket) {
         advance(); // consume [
+        // Sniff the start: either expression or bare `..` for an open start.
+        let startExpr = null;
+        if (peek().tag !== TokenTags.dotdot) {
+          startExpr = parseExpression();
+        }
+        if (peek().tag === TokenTags.dotdot) {
+          advance(); // consume ..
+          const sliceNode = buildSourcedNode(ASTNodeKind.SLICE_EXPRESSION);
+          sliceNode.object = node;
+          sliceNode.start = startExpr;
+          sliceNode.end =
+            peek().tag === TokenTags.rbracket ? null : parseExpression();
+          expect(TokenTags.rbracket);
+          node = sliceNode;
+          continue;
+        }
+        // Plain index: startExpr is required.
+        if (startExpr === null) {
+          throw parseError(
+            "expected index expression or slice form 'i..j'",
+            peek().start,
+            peek().length,
+          );
+        }
         const indexNode = buildSourcedNode(ASTNodeKind.INDEX_EXPRESSION);
         indexNode.object = node;
-        indexNode.index = parseExpression();
+        indexNode.index = startExpr;
         expect(TokenTags.rbracket);
         node = indexNode;
         continue;
@@ -1677,6 +1738,37 @@ export function parse(src) {
       assignNode.target = node;
       assignNode.value = parseExpression();
       return assignNode;
+    }
+
+    // Phase 9: compound assignment — `x += y`, `x -= y`, `x *= y`, `x /= y`,
+    // `x %= y`. Stored as a dedicated AST node so codegen evaluates the
+    // lvalue once even if it contains side-effecting subexpressions.
+    const compoundOpMap = {
+      [TokenTags.plusEq]: "plus",
+      [TokenTags.minusEq]: "minus",
+      [TokenTags.multEq]: "mult",
+      [TokenTags.divideEq]: "divide",
+      [TokenTags.modulusEq]: "modulus",
+    };
+    if (compoundOpMap[peek().tag] && minPrecedence === 0) {
+      if (
+        node.kind !== ASTNodeKind.IDENT &&
+        node.kind !== ASTNodeKind.FIELD_ACCESS &&
+        node.kind !== ASTNodeKind.INDEX_EXPRESSION &&
+        node.kind !== ASTNodeKind.DEREF_EXPRESSION
+      ) {
+        throw parseError(
+          `invalid compound-assignment target: ${node.kind}`,
+          peek().start,
+          peek().length,
+        );
+      }
+      const opTok = advance();
+      const compoundNode = buildSourcedNode(ASTNodeKind.COMPOUND_ASSIGNMENT);
+      compoundNode.target = node;
+      compoundNode.op = compoundOpMap[opTok.tag];
+      compoundNode.value = parseExpression();
+      return compoundNode;
     }
 
     // handle binary ops

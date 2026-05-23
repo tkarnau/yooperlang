@@ -1898,6 +1898,10 @@ const INT_OP_MAP = {
   andand: "and",
   oror: "or",
   pipe: "or",
+  // Phase 9: bitwise AND / XOR. The token names (`amp`, `caret`) double as
+  // the op keys the parser stamps onto BINARY_EXPRESSION nodes.
+  amp: "and",
+  caret: "xor",
   lshift: "shl",
   rshift: "ashr",
 };
@@ -3201,6 +3205,10 @@ function codegenWithModuleId(
           }
         } else if (node.op === "not") {
           fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, 1`);
+        } else if (node.op === "bitnot") {
+          // Phase 9: `~x` lowers to `xor <ty> x, -1`. LLVM treats the -1
+          // immediate as all-ones at any integer width.
+          fnLines.push(`  ${tmp} = xor ${llvmTy} ${operand.val}, -1`);
         } else {
           throw new Error(`codegen: unhandled unary op "${node.op}"`);
         }
@@ -3259,6 +3267,46 @@ function codegenWithModuleId(
           return rhs;
         }
         throw new Error(`codegen: unsupported assignment target kind "${node.target.kind}"`);
+      }
+      // Phase 9: compound assignment — addresses the lvalue exactly once,
+      // loads the current value, applies the binary op, stores the result.
+      case ASTNodeKind.COMPOUND_ASSIGNMENT: {
+        // Resolve the storage slot. Result: { ptr, type, isReg, regName? }
+        // For local IDENTs we just remember the register name and emit
+        // `%name`-relative load/store; for everything else we emit a pointer
+        // through emitLval and load/store through it.
+        let slotPtr, slotType;
+        if (node.target.kind === ASTNodeKind.IDENT && !node.target.isModuleGlobal && !node.target.autoDerefWrite) {
+          slotType = symbols.get(node.target.name);
+          slotPtr = `%${node.target.name}`;
+        } else if (node.target.kind === ASTNodeKind.IDENT && node.target.isModuleGlobal) {
+          slotType = node.target.resolvedType;
+          slotPtr = `@${node.target.moduleGlobalSym}`;
+        } else if (node.target.kind === ASTNodeKind.IDENT && node.target.autoDerefWrite) {
+          const lhsType = symbols.get(node.target.name);
+          slotType = lhsType.inner;
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr %${node.target.name}`);
+          slotPtr = ptrTmp;
+        } else if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+          const ptrExpr = emitExpr(node.target.operand, fnLines);
+          slotType = node.target.resolvedType;
+          slotPtr = ptrExpr.val;
+        } else {
+          // FIELD_ACCESS or INDEX_EXPRESSION — emitLval addresses the slot
+          // exactly once (no double-eval of e.g. xs[f()]).
+          const lv = emitLval(node.target, fnLines);
+          slotType = lv.type;
+          slotPtr = lv.ptr;
+        }
+        const llvmTy = llvmType(slotType);
+        const oldVal = freshTemp();
+        fnLines.push(`  ${oldVal} = load ${llvmTy}, ptr ${slotPtr}`);
+        const rhs = emitExpr(node.value, fnLines);
+        const newVal = freshTemp();
+        fnLines.push(`  ${newVal} = ${binaryInstruction(node.op, slotType)} ${llvmTy} ${oldVal}, ${rhs.val}`);
+        fnLines.push(`  store ${llvmTy} ${newVal}, ptr ${slotPtr}`);
+        return { val: newVal, yoopType: slotType };
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const objType = node.object.resolvedType;
@@ -3326,6 +3374,62 @@ function codegenWithModuleId(
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = load ${llvmType(lv.type)}, ptr ${lv.ptr}`);
         return { val: tmp, yoopType: lv.type };
+      }
+      // Phase 9.E: `xs[i..j]` — zero-copy fat-pointer subview. Builds
+      // {xs.ptr + start * sizeof(T), end - start} from the source fat
+      // pointer; open bounds default start→0, end→xs.len.
+      case ASTNodeKind.SLICE_EXPRESSION: {
+        const arrayType = node.resolvedType;
+        const elemType = arrayType.elem;
+        ensureArrayTypeDef(elemType);
+        const arrayLlvmTy = llvmType(arrayType);
+        const elemLlvmTy = llvmType(elemType);
+        const fatArg = emitExpr(node.object, fnLines);
+        // Stash the source fat pointer into an alloca so we can GEP fields.
+        const srcSlot = freshTemp();
+        fnLines.push(`  ${srcSlot} = alloca ${arrayLlvmTy}, align 8`);
+        fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${srcSlot}`);
+        const srcDataField = freshTemp();
+        fnLines.push(`  ${srcDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${srcSlot}, i32 0, i32 0`);
+        const srcDataPtr = freshTemp();
+        fnLines.push(`  ${srcDataPtr} = load ptr, ptr ${srcDataField}`);
+        const srcLenField = freshTemp();
+        fnLines.push(`  ${srcLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${srcSlot}, i32 0, i32 1`);
+        const srcLen = freshTemp();
+        fnLines.push(`  ${srcLen} = load i64, ptr ${srcLenField}`);
+        // Widen any narrower integer to i64 (signed-extend mirrors the
+        // existing pointer-arithmetic path at line ~3020).
+        const widenToI64 = (v) => {
+          const ty = llvmType(v.yoopType);
+          if (ty === "i64") return v.val;
+          const w = freshTemp();
+          fnLines.push(`  ${w} = sext ${ty} ${v.val} to i64`);
+          return w;
+        };
+        const startI64 = node.start
+          ? widenToI64(emitExpr(node.start, fnLines))
+          : "0";
+        const endI64 = node.end
+          ? widenToI64(emitExpr(node.end, fnLines))
+          : srcLen;
+        // newDataPtr = srcDataPtr + start (element units).
+        const newDataPtr = freshTemp();
+        fnLines.push(`  ${newDataPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${srcDataPtr}, i64 ${startI64}`);
+        // newLen = end - start.
+        const newLen = freshTemp();
+        fnLines.push(`  ${newLen} = sub i64 ${endI64}, ${startI64}`);
+        // Build result fat pointer.
+        const resSlot = freshTemp();
+        fnLines.push(`  ${resSlot} = alloca ${arrayLlvmTy}, align 8`);
+        const resDataField = freshTemp();
+        fnLines.push(`  ${resDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 0`);
+        fnLines.push(`  store ptr ${newDataPtr}, ptr ${resDataField}`);
+        const resLenField = freshTemp();
+        fnLines.push(`  ${resLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 1`);
+        fnLines.push(`  store i64 ${newLen}, ptr ${resLenField}`);
+        const resVal = freshTemp();
+        fnLines.push(`  ${resVal} = load ${arrayLlvmTy}, ptr ${resSlot}`);
+        return { val: resVal, yoopType: arrayType };
       }
       case ASTNodeKind.TRY_OP: {
         const slot = emitTrySlot(node, fnLines);

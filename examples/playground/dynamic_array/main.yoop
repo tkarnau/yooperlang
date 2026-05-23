@@ -132,7 +132,7 @@ function main(): int32 {
     // depth as the binding. Hiding the call inside an `if`/`while`/etc. does
     // NOT satisfy it — that path is conditional, the obligation is not.
     let arr2: DynArray<int32> = new_dynarray(4);
-    if (2 > 1) {
+    if (2 % 1 > 0) {
         const r1: Maybe = Disposable.dispose(ref arr2);
         if (r1.err.len > 0) {
             printf(`disposal of arr2 failed (then): ${r1.err}\n`);

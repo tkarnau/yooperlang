@@ -125,6 +125,21 @@ export const TokenTags = {
   modulus: "modulus",
   dot: "dot",
   question: "question",
+  // Phase 9.E: array slice syntax — `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
+  dotdot: "dotdot",
+  // Phase 9.B: logical NOT prefix — `!flag`. Lexer's longest-first sort keeps
+  // `!=` (`neq`) winning over `!` for the binary case.
+  bang: "bang",
+  // Phase 9: bitwise XOR (`^`) binary, bitwise NOT (`~`) prefix.
+  caret: "caret",
+  tilde: "tilde",
+  // Phase 9: compound assignments — `x += y` shorthand for `x = x + y`,
+  // implemented as dedicated AST nodes so the lvalue is addressed once.
+  plusEq: "plusEq",
+  minusEq: "minusEq",
+  multEq: "multEq",
+  divideEq: "divideEq",
+  modulusEq: "modulusEq",
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -148,6 +163,9 @@ export const tokenScanList = [
   { str: "?", tag: TokenTags.question },
   { str: "==", tag: TokenTags.eqeq },
   { str: "!=", tag: TokenTags.neq },
+  { str: "!", tag: TokenTags.bang },
+  { str: "^", tag: TokenTags.caret },
+  { str: "~", tag: TokenTags.tilde },
   { str: "<=", tag: TokenTags.lte },
   { str: ">=", tag: TokenTags.gte },
   { str: "<", tag: TokenTags.lt },
@@ -163,7 +181,15 @@ export const tokenScanList = [
   { str: "*", tag: TokenTags.mult },
   { str: "/", tag: TokenTags.divide },
   { str: "%", tag: TokenTags.modulus },
+  // Phase 9: compound-assignment two-char operators. Longest-first sort puts
+  // these before the single-char arithmetic ops above.
+  { str: "+=", tag: TokenTags.plusEq },
+  { str: "-=", tag: TokenTags.minusEq },
+  { str: "*=", tag: TokenTags.multEq },
+  { str: "/=", tag: TokenTags.divideEq },
+  { str: "%=", tag: TokenTags.modulusEq },
   { str: ".", tag: TokenTags.dot },
+  { str: "..", tag: TokenTags.dotdot },
   { str: "...", tag: TokenTags.dotdotdot },
   { str: "[", tag: TokenTags.lbracket },
   { str: "]", tag: TokenTags.rbracket },

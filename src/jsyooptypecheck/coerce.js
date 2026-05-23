@@ -70,9 +70,33 @@ export function coerceUntypedLiteralToTyped(
     valueNode.kind === ASTNodeKind.FLOAT_LITERAL
   ) {
     coerceLiteralToType(valueNode, targetType, errors);
-  } else {
-    valueNode.resolvedType = targetType;
+    return;
   }
+  // Phase 9.A fix: a nested arithmetic expression whose own resolvedType is
+  // still untyped (e.g. `3 * 4` inside `let x: int32 = 2 + 3 * 4;`) needs the
+  // target type pushed all the way down — otherwise codegen reads an
+  // untypedInt at the intermediate node and crashes. Bare literals at the
+  // leaves still go through coerceLiteralToType (range-checked).
+  if (
+    valueNode.kind === ASTNodeKind.BINARY_EXPRESSION &&
+    valueNode.resolvedType &&
+    (valueNode.resolvedType.kind === typeKinds.untypedInt ||
+      valueNode.resolvedType.kind === typeKinds.untypedFloat)
+  ) {
+    coerceUntypedLiteralToTyped(
+      valueNode.left,
+      valueNode.left.resolvedType,
+      targetType,
+      errors,
+    );
+    coerceUntypedLiteralToTyped(
+      valueNode.right,
+      valueNode.right.resolvedType,
+      targetType,
+      errors,
+    );
+  }
+  valueNode.resolvedType = targetType;
 }
 
 // is source type assignable to destination type?

@@ -148,16 +148,14 @@ function hits_ball(px: float32, py: float32, ref b: Ball): bool {
 }
 
 // Re-randomize a ball's position + velocity in place. Radius is preserved so
-// the colour palette stays visually stable. Velocity ranges are distributed
-// (e.g. `r * 0.02 - 0.4` instead of `(r - 20) * 0.02`) because the parser does
-// not yet accept parenthesized subexpressions.
+// the colour palette stays visually stable.
 function respawn_ball(ref b: Ball, ref rng: int32, win_w: int32): void {
     const margin: int32 = 100;
     const spread_x: int32 = win_w - margin * 2;
     b.x = float32(next_rand(ref rng, spread_x)) + float32(margin);
     b.y = 60.0;
-    b.vx = float32(next_rand(ref rng, 40)) * 0.02 - 0.4;
-    b.vy = float32(next_rand(ref rng, 20)) * 0.02 + 0.2;
+    b.vx = (float32(next_rand(ref rng, 40)) - 20.0) * 0.02;
+    b.vy = (float32(next_rand(ref rng, 20)) - 10.0) * 0.02 + 0.2;
     b.hue = b.hue + 1.7;
 }
 
@@ -231,11 +229,11 @@ function main(): int32 {
         let player_x: float32 = float32(WIN_W) * 0.5 - PLAYER_SIZE * 0.5;
         const player_y: float32 = float32(WIN_H) - PLAYER_SIZE - BOTTOM_PADDING;
 
-        // Bullet pool as parallel arrays. `bullet_active` is 0/1 instead of a
-        // bool array because the language doesn't have a bool[] yet.
+        // Bullet pool as parallel arrays. `bullet_active[i]` marks slot i as
+        // in-flight; the index gives x/y/lifetime via the parallel arrays.
         let bullet_x: float32[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
         let bullet_y: float32[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
-        let bullet_active: int32[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        let bullet_active: bool[] = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false];
 
         // Edge-triggered firing -- only fire on the frame space transitions
         // from up to down, not every frame it's held.
@@ -280,8 +278,8 @@ function main(): int32 {
             if (space_now != 0 && space_was_down == 0) {
                 let fi: int32 = 0;
                 while (fi < BULLET_POOL) {
-                    if (bullet_active[fi] == 0) {
-                        bullet_active[fi] = 1;
+                    if (!bullet_active[fi]) {
+                        bullet_active[fi] = true;
                         bullet_x[fi] = player_x + PLAYER_SIZE * 0.5 - BULLET_W * 0.5;
                         bullet_y[fi] = player_y - BULLET_H;
                         break;
@@ -296,22 +294,22 @@ function main(): int32 {
             // retires and the ball respawns up top with a fresh velocity.
             let bi: int32 = 0;
             while (bi < BULLET_POOL) {
-                if (bullet_active[bi] != 0) {
+                if (bullet_active[bi]) {
                     bullet_y[bi] = bullet_y[bi] - BULLET_SPEED * dt;
                     if (bullet_y[bi] + BULLET_H < 0.0) {
-                        bullet_active[bi] = 0;
+                        bullet_active[bi] = false;
                     } else {
                         const bcx: float32 = bullet_x[bi] + BULLET_W * 0.5;
                         const bcy: float32 = bullet_y[bi] + BULLET_H * 0.5;
 
                         if (hits_ball(bcx, bcy, ref b1)) {
-                            bullet_active[bi] = 0;
+                            bullet_active[bi] = false;
                             respawn_ball(ref b1, ref rng_state, WIN_W);
                         } else if (hits_ball(bcx, bcy, ref b2)) {
-                            bullet_active[bi] = 0;
+                            bullet_active[bi] = false;
                             respawn_ball(ref b2, ref rng_state, WIN_W);
                         } else if (hits_ball(bcx, bcy, ref b3)) {
-                            bullet_active[bi] = 0;
+                            bullet_active[bi] = false;
                             respawn_ball(ref b3, ref rng_state, WIN_W);
                         }
                     }
@@ -375,7 +373,7 @@ function main(): int32 {
             const bullet_h_i: int32 = int32(BULLET_H);
             let dbi: int32 = 0;
             while (dbi < BULLET_POOL) {
-                if (bullet_active[dbi] != 0) {
+                if (bullet_active[dbi]) {
                     const bx: int32 = int32(bullet_x[dbi]);
                     const by: int32 = int32(bullet_y[dbi]);
                     let brow: int32 = 0;

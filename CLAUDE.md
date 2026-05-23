@@ -1,6 +1,6 @@
 # Yooperlang — Claude working notes
 
-A JS-implemented compiler for the Yooperlang language. Emits LLVM IR text, shells out to `clang` to link and produce an executable. Language spec in [SPEC.md](SPEC.md); phase-by-phase build plan in [plans/roadmap.md](plans/roadmap.md). Currently mid Phase 7 — Phase 7.1 (user-defined generics: structs, functions, traits) and Phase 7.4 (trait-qualified call syntax) have landed; trait bounds and pattern matching are next ([plans/phase-7-2-trait-bounds.md](plans/phase-7-2-trait-bounds.md), [plans/phase-7-3-pattern-matching.md](plans/phase-7-3-pattern-matching.md), [plans/phase-7-4-trait-call-syntax.md](plans/phase-7-4-trait-call-syntax.md)).
+A JS-implemented compiler for the Yooperlang language. Emits LLVM IR text, shells out to `clang` to link and produce an executable. Language spec in [SPEC.md](SPEC.md); phase-by-phase build plan in [plans/roadmap.md](plans/roadmap.md). Phases 1–8 plus library phases A–D have landed (per-phase docs in [plans/completed/](plans/completed/)). Current focus is [plans/phase-9.md](plans/phase-9.md) — the syntax/ergonomic completion pass: parenthesized subexpressions, `bool[]`, `for ... in` loops, slice syntax, `std/` import root, `Display` in templates, `vtable T for Trait`, `?` over enums, suspendable `wait`, and a cleanup of the remaining "not yet supported" parser branches.
 
 Pipeline: source `.yoop` → **lex** → **parse** → **typecheck** → **codegen** (LLVM IR) → `clang` → executable.
 
@@ -80,9 +80,9 @@ The things that aren't obvious from reading any single file — read this sectio
 
 ## Phase model
 
-Features land phase-by-phase per [plans/roadmap.md](plans/roadmap.md). Currently mid Phase 7. Recent landings: Phase 7.5 (sum types via `enum`, untagged C-style `union`, `switch` with literal + variant patterns + exhaustiveness — see [plans/phase-7-5-sum-types-and-unions.md](plans/phase-7-5-sum-types-and-unions.md)); Phase 7.4 (trait-qualified call syntax `Trait.method(ref x, ...)`); Phase 7.1 (user-defined generic structs/functions/traits, with `Task<T>` no longer special-cased in the parser); Phase 6.5 (`layout { align ... }`, kind composition with `&`); Phase 6.4 (`propagates`).
+Features land phase-by-phase per [plans/roadmap.md](plans/roadmap.md). Phases 1–8 plus library phases A–D are all in; per-phase plan docs live in [plans/completed/](plans/completed/). Recent landings: Phase 8.F (task suspension + I/O multiplexer + timers); Phase 8.H (`std/core` strings/bytes/Vec); Library Phases A–D (`std/core`, `std/net`, `std/http` types + parser, `std/http` server); Phase 7.5 (sum types via `enum`, untagged C-style `union`, `switch` with literal + variant patterns + exhaustiveness); Phase 7.4 (trait-qualified call syntax `Trait.method(ref x, ...)`); Phase 7.1 (user-defined generic structs/functions/traits, with `Task<T>` no longer special-cased in the parser); Phase 6.5 (`layout { align ... }`, kind composition with `&`); Phase 6.4 (`propagates`).
 
-Next up: Phase 7.2 (trait bounds, [plans/phase-7-2-trait-bounds.md](plans/phase-7-2-trait-bounds.md)).
+Next up: Phase 9 — syntax/ergonomic completion ([plans/phase-9.md](plans/phase-9.md)). Sub-phase 9.A (parenthesized expressions) and 9.B (`bool[]`) are the highest-leverage starting points.
 
 Code is annotated with phase comments (e.g. `// 6.5:`, `// phase 6.4:`, `// Phase 7.1:`). Treat these as load-bearing — they mark the version a piece of logic became correct and help future readers locate the spec section.
 

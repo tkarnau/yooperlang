@@ -99,6 +99,14 @@ export const ASTNodeKind = Object.freeze({
   // phase 8.D: errno intrinsics
   ERRNO_INTRINSIC: "ERRNO_INTRINSIC",
 
+  // phase 9.E: array slice syntax `xs[i..j]`
+  SLICE_EXPRESSION: "SLICE_EXPRESSION",
+
+  // phase 9: compound assignments `x += y`, `x -= y`, etc. Stored as a
+  // dedicated node so codegen can address the lvalue once (no double-eval
+  // of expressions inside `xs[f()] += 1`).
+  COMPOUND_ASSIGNMENT: "COMPOUND_ASSIGNMENT",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });
