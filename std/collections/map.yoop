@@ -27,7 +27,9 @@
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Option } from "../core/types.yoop";
+import { Iterable, IterStep } from "../core/traits.yoop";
 import { string_eq, string_hash } from "../core/strings.yoop";
+import { bytes_eq } from "../core/bytes.yoop";
 
 const STATE_EMPTY:     uint8 = 0;
 const STATE_OCCUPIED:  uint8 = 1;
@@ -273,6 +275,51 @@ export function map_clear<K, V>(ref m: Map<K, V>): void {
     m.used = 0;
 }
 
+// ----- Iteration ------------------------------------------------------
+
+// A single (key, value) pair yielded by `for entry in map_iter(ref m)`.
+export type MapEntry<K, V> { key: K, value: V }
+
+// `MapIter<K, V>` walks occupied slots in storage order, skipping
+// EMPTY/TOMBSTONE. It holds borrowing views of the map's backing
+// arrays (the fat pointers are copies; the heap data is shared). The
+// iterator is invalidated if the map mutates (a `map_insert` that
+// triggers a rehash relocates the backing buffers, leaving the
+// view dangling) — keep the iter scoped tightly around its loop.
+export type MapIter<K, V> implements Iterable<MapEntry<K, V>> {
+    keys:   K[],
+    values: V[],
+    states: uint8[],
+    cap:    usize,
+    i:      usize,
+
+    function next(ref self): IterStep<MapEntry<K, V>> {
+        while (self.i < self.cap) {
+            let cur: usize = self.i;
+            self.i = self.i + 1;
+            if (self.states[cur] == STATE_OCCUPIED) {
+                return IterStep.Yield {
+                    value: { key: self.keys[cur], value: self.values[cur] },
+                };
+            }
+        }
+        return IterStep.Done;
+    }
+}
+
+// Build a `MapIter<K, V>` snapshot for `for ... in` iteration over a
+// map. The iterator yields `MapEntry<K, V>` values via the
+// `Iterable<T>` trait (Phase 10.B).
+export function map_iter<K, V>(ref m: Map<K, V>): MapIter<K, V> {
+    return {
+        keys: m.keys,
+        values: m.values,
+        states: m.states,
+        cap: m.cap,
+        i: 0,
+    };
+}
+
 // ----- Pre-built KeyOps for common key types --------------------------
 
 // FNV-1a string hashing is in `std/core/strings.yoop`; reuse it +
@@ -296,4 +343,48 @@ function int32_eq_impl(a: int32, b: int32): bool {
 
 export function int32_key_ops(): KeyOps<int32> {
     return { hash: int32_hash_impl, eq: int32_eq_impl };
+}
+
+function int64_hash_impl(k: int64): uint64 {
+    return uint64(k) * 11400714819323198485;
+}
+
+function int64_eq_impl(a: int64, b: int64): bool {
+    return a == b;
+}
+
+export function int64_key_ops(): KeyOps<int64> {
+    return { hash: int64_hash_impl, eq: int64_eq_impl };
+}
+
+function uint64_hash_impl(k: uint64): uint64 {
+    return k * 11400714819323198485;
+}
+
+function uint64_eq_impl(a: uint64, b: uint64): bool {
+    return a == b;
+}
+
+export function uint64_key_ops(): KeyOps<uint64> {
+    return { hash: uint64_hash_impl, eq: uint64_eq_impl };
+}
+
+// Byte-buffer key (uint8[]) — FNV-1a over the bytes for hashing,
+// `bytes_eq` for equality. The keys array stores the fat pointers;
+// the caller is responsible for keeping the backing buffers alive
+// as long as they're map keys (the map holds a borrowing view).
+function bytes_hash_impl(k: uint8[]): uint64 {
+    let h: uint64 = 14695981039346656037;
+    let prime: uint64 = 1099511628211;
+    let i: usize = 0;
+    while (i < k.len) {
+        h = h ^ uint64(k[i]);
+        h = h * prime;
+        i = i + 1;
+    }
+    return h;
+}
+
+export function bytes_key_ops(): KeyOps<uint8[]> {
+    return { hash: bytes_hash_impl, eq: bytes_eq };
 }

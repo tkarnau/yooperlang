@@ -163,6 +163,35 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("set_smoke: Set<string> insert/contains/remove with dup detection", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/set_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "insert: a=0 b=0 a2=1 len=2\n" +
+        "contains: alpha=1 zeta=0\n" +
+        "remove: beta=1 zeta=0 len=1\n",
+    );
+  });
+
+  it("deque_smoke: Deque<int32> push/pop both ends, growth, empty-pop returns None", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/deque_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "len=4 at0=1 at3=20\n" +
+        "pop_front=1 pop_back=20 len=2\n" +
+        "grown len=22 at0=5 at10=108\n" +
+        "empty pop=-42\n",
+    );
+  });
+
+  it("map_iter: for entry in map_iter(ref m) walks occupied slots via Iterable<MapEntry>", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/map_iter.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "keys_sum=10 vals_sum=1000\n");
+  });
+
   it("slice_basic.yoop slices arrays in all four forms and shares storage", () => {
     const { stdout, exitCode } = runFixture("examples/pass/slice_basic.yoop");
     assert.equal(exitCode, 0);

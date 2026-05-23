@@ -150,7 +150,7 @@ Done }`). 10.A unblocks the trait; 10.B wires it in.
   (small surgery, see [phase-9-g-vtables.md:154](completed/phase-9-g-vtables.md))
   or 10.B ships with concrete iterators only and the vtable form follows.
 
-### Phase 10.C — `std/collections/`: Map, Set, Deque (partial — landed)
+### Phase 10.C — `std/collections/`: Map, Set, Deque ✓ landed
 
 See [phase-10-c-collections.md](completed/phase-10-c-collections.md).
 The first sub-cut shipped `Option<T>`, a string-keyed
@@ -165,9 +165,23 @@ plan called out as the precondition for a fully generic `Map<K, V>`:
 function-decl → FPT coercion at assignment, and indirect call
 lowering for FPT-typed struct fields. Phase 10.C.2
 ([phase-10-c-2-generic-map.md](completed/phase-10-c-2-generic-map.md))
-then shipped generic `Map<K, V>` itself — keyed off a `KeyOps<K>`
-ops struct, with pre-built `string_key_ops()` and `int32_key_ops()`
-helpers. `Set<K>` and `Deque<T>` are still pending.
+shipped generic `Map<K, V>` itself — keyed off a `KeyOps<K>` ops
+struct, with pre-built `string_key_ops()` and `int32_key_ops()`
+helpers. Phase 10.C.3
+([phase-10-c-3-collections-rest.md](completed/phase-10-c-3-collections-rest.md))
+wrapped up the rest: `Set<K>`, `Deque<T>`, `for entry in
+map_iter(ref m)` (via a new `MapEntry<K, V>` + `MapIter<K, V>`
+implementing `Iterable<MapEntry<K, V>>`), and the int64/uint64/bytes
+KeyOps helpers — plus four compiler-side fixes container code
+surfaced (cross-module per-instance fixed-point, struct
+instantiation substituting methods + traits, trait-method re-mangle
+after substitution, nested generic type-args in `implements`
+clauses, and reserving `entry` as a slot-name to avoid LLVM
+basic-block collisions).
+
+Headers migration to `Map<string, string>` remains deferred — the
+linear-scan vec is fine for small N, and the case-insensitive +
+multi-value semantics warrant their own sub-phase.
 
 Once `Iterable<T>` exists, write the collections.
 

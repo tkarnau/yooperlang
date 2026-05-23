@@ -331,7 +331,13 @@ function hoistAllocasToEntry(fnLines) {
 function createLocalSymbols() {
   const types = new Map();        // name -> yoopType
   const slotMap = new Map();      // name -> "%llvmSlot" (current binding)
-  const usedSlots = new Set();    // every llvm-slot name ever allocated
+  // Seed usedSlots with names that collide with LLVM basic-block labels
+  // the emitter always produces. Most prominently, every function starts
+  // with an `entry:` block — if the user binds `entry`, `%entry = alloca`
+  // collides with that label's `%entry` reference. By marking `entry` as
+  // already-taken, `declare` falls through to `entry.1` for the first
+  // user binding of that name.
+  const usedSlots = new Set(["entry"]);
   const slotScopes = [[]];        // stack of [{name, prevSlot}] frames
 
   function declare(name, type) {
@@ -2331,20 +2337,44 @@ export function codegenProgram(modules, _moduleEnv, programState) {
     }
   }
 
+  // Per-module emission: collects each module's structDefs/globals/lines
+  // (by reference). The per-instance emission inside each module already
+  // runs to a local fixed-point, but cloning a generic body during that
+  // sweep can register concrete instances belonging to OTHER modules
+  // (e.g. `Set<K>` in std/collections/set.yoop references generics in
+  // std/collections/map.yoop). Those land on the owning module's
+  // registry slot after its sweep finished, so we re-run all modules'
+  // flushers in a cross-module fixed-point below before extracting
+  // lines.
+  const moduleIRs = [];
   for (const mod of modules) {
-    // Collect link flags from EXTERN_BLOCKs
     for (const decl of mod.ast.body) {
       if (decl.kind === ASTNodeKind.EXTERN_BLOCK && decl.source.kind === "library") {
         linkFlags.add(decl.source.value);
       }
     }
+    moduleIRs.push(codegenModule(mod, emittedStructs, emittedArrayTypes, programState, debugInfo));
+  }
 
-    // Run single-module codegen with this module's id set
-    const ir = codegenModule(mod, emittedStructs, emittedArrayTypes, programState, debugInfo);
+  // Cross-module fixed-point: keep calling each module's flushInstances
+  // until a full pass produces no new emissions. Each flusher mutates
+  // the closure-captured `lines` array by reference, so the extraction
+  // step below sees the post-flush state.
+  const flushers = programState?._instanceFlushers ?? [];
+  let crossProgressed = true;
+  while (crossProgressed) {
+    crossProgressed = false;
+    for (const flush of flushers) {
+      if (flush()) crossProgressed = true;
+    }
+  }
+
+  for (const ir of moduleIRs) {
+    const { externs, lines } = ir.extract();
     allStructDefs.push(...ir.structDefs);
     allGlobals.push(...ir.globals);
-    for (const e of ir.externs) allExterns.add(e);
-    allLines.push(...ir.lines);
+    for (const e of externs) allExterns.add(e);
+    allLines.push(...lines);
   }
 
   const diText = debugInfo.finalize();
@@ -2442,6 +2472,28 @@ function cloneAstWithSubstitution(node, sub, registry = null) {
       const newInst = instantiateFunc(registry, decl, newArgs);
       if (newInst) out.genericInstantiation = newInst;
     }
+  }
+  // Phase 10.C.3: re-derive the trait-method mangled symbol after
+  // substitution. When the receiver is a *concrete* generic-struct
+  // instance whose type args carry an outer TypeParamType (e.g.
+  // `self.inner` inside `Set<K>`'s `dispose` method, where inner is
+  // `Map<K, bool>`), the original mangle captured the open form
+  // (`Map_set-K__bool`). After cloning the body for a concrete
+  // instantiation (Set<string>), `out.calleeMethodOf` is the
+  // substituted struct (Map<string, bool>) — but `calleeMangledName`
+  // is still the open form. Re-mangle so codegen emits the right
+  // monomorphized symbol.
+  if (
+    out.kind === ASTNodeKind.CALL_EXPRESSION &&
+    out.calleeMethodOf &&
+    out.calleeMethodOf.kind === typeKinds.struct &&
+    out.calleeTrait
+  ) {
+    out.calleeMangledName = mangleTraitMethod(
+      out.calleeMethodOf,
+      out.calleeTrait.name,
+      out.calleeMethodName,
+    );
   }
   // Phase 7.2: rewrite a bound-method call into a normal struct-method call
   // once the receiver's TypeParamType has been substituted with a concrete
@@ -2943,35 +2995,34 @@ function codegenWithModuleId(
   // function called from an initializer is already declared above).
   emitModuleInit(moduleLevelDecls);
 
-  // Phase 7.1: emit one function per generic instantiation owned by this
-  // module (registry tracks each instance's source module).
-  //
-  // Phase 10.C: emit in a fixed-point loop. Cloning a generic body during
-  // emission may register additional concrete instances (e.g. `map_insert`'s
-  // body calls into `find_insert_slot`, which only gets a concrete instance
-  // when `map_insert<int32>` is cloned). The newly-registered instances
-  // belong to a different declId entry that the outer loop may have already
-  // passed — so we re-iterate until a sweep produces no new emissions.
-  if (programState?.registry) {
-    let progressed = true;
-    while (progressed) {
-      progressed = false;
-      for (const [_declId, instances] of programState.registry.funcInstancesByDecl) {
-        for (const inst of instances) {
-          if (inst.moduleId !== moduleId) continue;
-          if (inst.emitted) continue;
-          // Phase 7.2: skip "open" instances where some argType is still a
-          // TypeParamType (came from a generic-calls-generic site). They only
-          // exist in the registry as caching artifacts — the concrete instances
-          // produced when the outer generic is monomorphized are what get IR.
-          if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
-          // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
-          // codegen inlines them at every call site (see emitCallExpr).
-          if (inst.declId?.startsWith("$builtin")) continue;
-          inst.emitted = true;
-          emitGenericFuncInstance(inst);
-          progressed = true;
-        }
+  // Phase 7.1 + 10.C.3: per-instance emission factored out as a closure so
+  // codegenProgram can re-invoke it across modules in a fixed-point sweep.
+  // Cloning a generic body during emission can register additional concrete
+  // instances belonging to OTHER modules (e.g. `Set<K>`'s body in
+  // std/collections/set.yoop references generic functions defined in
+  // std/collections/map.yoop — when Set<string> is monomorphized,
+  // map_contains_key<string, bool> lands in the map module's registry
+  // slot, which may have already finished its own per-instance sweep).
+  // The outer fixed-point in codegenProgram keeps calling each module's
+  // closure until a full pass produces no new emissions.
+  function flushInstances() {
+    if (!programState?.registry) return false;
+    let made = false;
+    for (const [_declId, instances] of programState.registry.funcInstancesByDecl) {
+      for (const inst of instances) {
+        if (inst.moduleId !== moduleId) continue;
+        if (inst.emitted) continue;
+        // Phase 7.2: skip "open" instances where some argType is still a
+        // TypeParamType (came from a generic-calls-generic site). They only
+        // exist in the registry as caching artifacts — the concrete instances
+        // produced when the outer generic is monomorphized are what get IR.
+        if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
+        // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
+        // codegen inlines them at every call site (see emitCallExpr).
+        if (inst.declId?.startsWith("$builtin")) continue;
+        inst.emitted = true;
+        emitGenericFuncInstance(inst);
+        made = true;
       }
     }
     // Phase 7.x: emit method bodies for each concrete generic-struct instance.
@@ -2998,11 +3049,36 @@ function codegenWithModuleId(
         ) continue;
         emittedStructMethods.add(inst);
         emitGenericStructMethods(inst, genericDecl);
+        made = true;
       }
     }
+    return made;
   }
 
-  return { structDefs, globals, externs: new Set(lines.filter(l => l.startsWith("declare"))), lines: lines.filter(l => !l.startsWith("declare")) };
+  // First sweep at decl-emit time so single-module callers (the legacy
+  // `codegen()` entry, tests that don't go through `codegenProgram`)
+  // still get per-instance IR alongside the per-decl IR.
+  while (flushInstances()) { /* keep sweeping until stable */ }
+
+  if (programState) {
+    programState._instanceFlushers ??= [];
+    programState._instanceFlushers.push(flushInstances);
+  }
+
+  // Return raw lines + a deferred extractor — codegenProgram may invoke
+  // flushInstances again (cross-module fixed-point), which mutates the
+  // closure-captured `lines` in place. Snapshot-on-return would miss those.
+  return {
+    structDefs,
+    globals,
+    rawLines: lines,
+    extract() {
+      return {
+        externs: new Set(lines.filter((l) => l.startsWith("declare"))),
+        lines: lines.filter((l) => !l.startsWith("declare")),
+      };
+    },
+  };
 
   // ---- inner helpers (replicated from codegen() for mangling support) ----
 

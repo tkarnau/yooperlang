@@ -1,0 +1,64 @@
+// Phase 10.C.3: Deque<T> is a power-of-two ring buffer. Smoke-tests
+// the four-end API (push_front/push_back/pop_front/pop_back), indexed
+// get, growth across the cap boundary, and Disposable auto-cleanup.
+
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import {
+    Deque, deque_new,
+    deque_push_back, deque_push_front,
+    deque_pop_front, deque_pop_back,
+    deque_get, deque_len,
+} from "std/collections/deque.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function unwrap_or(o: Option<int32>, fallback: int32): int32 {
+    switch (o) {
+        case Option.Some { value: v }: { return v; }
+        case Option.None: { return fallback; }
+    }
+    return fallback;
+}
+
+function main(): int32 {
+    disposable d: Deque<int32> = deque_new(2);
+
+    // Build [1, 5, 10, 20] using both ends.
+    deque_push_back(ref d, 10);
+    deque_push_back(ref d, 20);
+    deque_push_front(ref d, 5);
+    deque_push_front(ref d, 1);
+    printf(`len=${deque_len(ref d)} at0=${unwrap_or(deque_get(ref d, 0), -1)} at3=${unwrap_or(deque_get(ref d, 3), -1)}\n`);
+
+    let pf: int32 = unwrap_or(deque_pop_front(ref d), -1);
+    let pb: int32 = unwrap_or(deque_pop_back(ref d), -1);
+    printf(`pop_front=${pf} pop_back=${pb} len=${deque_len(ref d)}\n`);
+
+    // Force grow: keep pushing past the cap.
+    let i: int32 = 0;
+    while (i < 20) {
+        deque_push_back(ref d, 100 + i);
+        i = i + 1;
+    }
+    printf(`grown len=${deque_len(ref d)} at0=${unwrap_or(deque_get(ref d, 0), -1)} at10=${unwrap_or(deque_get(ref d, 10), -1)}\n`);
+
+    // Pop from an empty deque returns None.
+    disposable small_d: Deque<int32> = deque_new(2);
+    let none_pop: Option<int32> = deque_pop_back(ref small_d);
+    let np: int32 = -42;
+    switch (none_pop) {
+        case Option.Some { value: v }: { np = v; }
+        case Option.None: { np = -42; }
+    }
+    printf(`empty pop=${np}\n`);
+    return 0;
+}
+
+// expected output:
+// len=4 at0=1 at3=20
+// pop_front=1 pop_back=20 len=2
+// grown len=22 at0=5 at10=108
+// empty pop=-42

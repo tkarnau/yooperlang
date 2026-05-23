@@ -98,6 +98,15 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
     genericDecl.paramNames,
     argTypes,
   );
+  // Phase 10.C.3: a generic struct's methods may reference the struct
+  // itself by name (e.g. `function next(ref self): IterStep<T>` where
+  // `self` is the open `MapIter<K, V>`). Substituting through those
+  // method sigs re-instantiates the struct with concrete args — which
+  // would recurse back into us. To break the cycle, cache the new
+  // instance BEFORE substituting methods/traits; the recursive lookup
+  // then hits the cache and returns the in-progress instance.
+  const placeholderMethods = new Map();
+  const placeholderTraits = [];
   const fields = (genericDecl.genericFields ?? []).map((f) => ({
     name: f.name,
     type: substituteTypeParams(f.type, sub),
@@ -107,8 +116,8 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
     mangledName,
     fields,
     genericDecl.moduleId,
-    genericDecl.implementsTraits ?? [],
-    genericDecl.methods ?? new Map(),
+    placeholderTraits,
+    placeholderMethods,
     genericDecl.propagatedKinds ?? [],
     genericDecl.kindApplication ?? null,
     { declId: genericDecl.id, args: argTypes },
@@ -124,6 +133,14 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
     genericDecl.id,
     [...(registry.structInstancesByDecl.get(genericDecl.id) ?? []), inst],
   );
+  // Now substitute. Self-referential lookups will find the cached `inst`
+  // above and return it instead of re-entering instantiateStruct.
+  for (const t of genericDecl.implementsTraits ?? []) {
+    placeholderTraits.push(substituteTypeParams(t, sub));
+  }
+  for (const [name, sig] of (genericDecl.methods ?? new Map())) {
+    placeholderMethods.set(name, substituteTypeParams(sig, sub));
+  }
   return inst;
 }
 

@@ -688,8 +688,13 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
       const resolvedArgs = [];
       let ok = true;
       for (const a of typeArgs) {
+        // Phase 10.C.3: thread the type-decl's own paramScope so type
+        // arguments inside `implements Trait<...>` can mention the
+        // decl's type params (e.g.
+        // `MapIter<K, V> implements Iterable<MapEntry<K, V>>`).
         const t = resolveTypeAnnotationInModule(a, mod.id, moduleEnv, {
           registry: programState.registry,
+          typeParamScope,
         });
         if (!t) {
           errors.push({

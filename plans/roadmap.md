@@ -158,7 +158,11 @@ indirect-call lowering), and Phase 10.C.2
 ([phase-10-c-2-generic-map.md](completed/phase-10-c-2-generic-map.md))
 turned that into a real `Map<K, V>` in `std/collections/map.yoop`,
 keyed off a `KeyOps<K>` ops struct with pre-built `string_key_ops()`
-and `int32_key_ops()` helpers.
+and `int32_key_ops()` helpers. Phase 10.C.3
+([phase-10-c-3-collections-rest.md](completed/phase-10-c-3-collections-rest.md))
+wrapped up the collections arc: `Set<K>`, `Deque<T>`, `for entry in
+map_iter(ref m)`, plus int64/uint64/bytes KeyOps helpers and the
+five compiler-side fixes container code surfaced.
 
 > Detailed plan: [phase-10.md](phase-10.md).
 
