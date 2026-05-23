@@ -115,6 +115,8 @@ export function resolveExprType(node, scope, ctx) {
       return setType(node, UntypedNullType());
     case ASTNodeKind.UNSAFE_PTR_CAST:
       return resolveUnsafePtrCast(node, scope, ctx);
+    case ASTNodeKind.ERRNO_INTRINSIC:
+      return resolveErrnoIntrinsic(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -165,6 +167,26 @@ function resolveIdent(node, scope, ctx) {
   const modType = ctx.typeContext.moduleSymbols?.get(node.name);
   if (modType) {
     if (modType.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    // Phase 8.E: mark IDENT references that resolve to a module-level
+    // let/const binding so codegen emits a load from @<modid>__<name>
+    // rather than %<name>. Functions and namespaces stay on their own
+    // resolution paths.
+    if (
+      modType.kind !== typeKinds.func &&
+      modType.kind !== typeKinds.namespace
+    ) {
+      const tc = ctx.typeContext;
+      const imp = tc.importedNames?.get(node.name);
+      if (imp && imp.kind === "value") {
+        node.isModuleGlobal = true;
+        node.moduleGlobalSym = `${imp.fromModuleId}__${imp.exportName}`;
+        node.moduleGlobalImported = true;
+      } else if (tc.currentModId) {
+        node.isModuleGlobal = true;
+        node.moduleGlobalSym = `${tc.currentModId}__${node.name}`;
+        node.moduleGlobalImported = false;
+      }
+    }
     return setType(node, modType);
   }
   if (node.name === "self") {
@@ -464,6 +486,9 @@ function resolveAssignmentToIdent(node, scope, ctx) {
   const targetName = node.target.name;
   const binding = lookupInScope(scope, targetName);
   if (!binding) {
+    // Phase 8.E: not in lexical scope — fall back to module-level globals.
+    const moduleAssign = resolveAssignmentToModuleGlobal(node, ctx);
+    if (moduleAssign) return moduleAssign;
     pushError(ctx.errors, node, `undefined variable "${targetName}"`);
     return setType(node, ErrorType());
   }
@@ -501,6 +526,72 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     binding.errObserved = false;
   }
   return setType(node, binding.type);
+}
+
+// Phase 8.E: handle assignment to a module-level let. Returns the assignment's
+// resolved type if the target was a module global; null if the target wasn't
+// found at module scope (caller falls through to "undefined variable").
+function resolveAssignmentToModuleGlobal(node, ctx) {
+  const targetName = node.target.name;
+  const tc = ctx.typeContext;
+  const modType = tc.moduleSymbols?.get(targetName);
+  if (!modType) return null;
+  if (
+    modType.kind === typeKinds.func ||
+    modType.kind === typeKinds.namespace
+  ) {
+    return null;
+  }
+  // Imported lets are read-only across module boundaries.
+  const imp = tc.importedNames?.get(targetName);
+  if (imp && imp.kind === "value") {
+    pushError(
+      ctx.errors,
+      node,
+      `"${targetName}" is imported from module "${imp.fromModuleId}" — assignment from outside its module is not permitted`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Module-local: must be a `let` (not `const`). Find the decl in
+  // moduleInitDecls to check mutability. moduleInitDecls is stashed onto
+  // the module by typecheck pass C.4.
+  const decl = findModuleInitDecl(tc, targetName);
+  if (decl && decl.kind === ASTNodeKind.CONST_DECL) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot assign to const "${targetName}"`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Mark target so codegen emits store to @<modid>__<name>.
+  node.target.isModuleGlobal = true;
+  node.target.moduleGlobalSym = `${tc.currentModId}__${targetName}`;
+  node.target.moduleGlobalImported = false;
+  node.target.resolvedType = modType;
+  checkInitializer(
+    node.value,
+    modType,
+    null, // no scope needed — RHS resolveExprType handles its own scoping
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(modType)} in assignment to module-level "${targetName}"`,
+  );
+  return setType(node, modType);
+}
+
+// Phase 8.E: best-effort lookup of the AST decl for a module-level binding.
+// Uses mod.moduleInitDecls (set in typecheck pass C.4) reachable via the
+// moduleEnv. Returns null if the binding isn't a module-level let/const.
+function findModuleInitDecl(tc, name) {
+  if (!tc.moduleEnv || !tc.currentModId) return null;
+  const env = tc.moduleEnv.get(tc.currentModId);
+  const decls = env?.moduleInitDecls;
+  if (!decls) return null;
+  for (const d of decls) {
+    if (d.name === name) return d;
+  }
+  return null;
 }
 
 function resolveAssignmentToField(node, scope, ctx) {
@@ -637,6 +728,21 @@ function resolveFieldAccess(node, scope, ctx) {
   if (objType.kind === typeKinds.array && node.field === "len") {
     node.isArrayLen = true;
     return setType(node, PrimType(primAnnotations.usize));
+  }
+  // Phase 8.C: array.ptr intrinsic — borrow the data pointer.
+  // Gated by `import.unsafe;` because the produced unsafe_ptr<T> is itself
+  // an unsafe pointer; mirrors the Phase 8.A blanket rule.
+  if (objType.kind === typeKinds.array && node.field === "ptr") {
+    if (!ctx.typeContext.allowsUnsafe) {
+      pushError(
+        ctx.errors,
+        fieldLoc,
+        `'.ptr' on an array requires 'import.unsafe;' at module top`,
+      );
+      return setType(node, ErrorType());
+    }
+    node.isArrayPtr = true;
+    return setType(node, UnsafePtrType(objType.elem));
   }
   if (objType.kind === typeKinds.array) {
     pushError(ctx.errors, fieldLoc, `type ${formatType(objType)} has no field "${node.field}"`);
@@ -792,7 +898,104 @@ function resolveUnsafePtrCast(node, scope, ctx) {
     return setType(node, UnsafePtrType(targetPointee));
   }
 
+  // Phase 8.C: unsafe_ptr.toArray<T>(p, n) — borrow a (ptr, len) pair as T[].
+  if (node.castKind === "toArray") {
+    const targetElem = resolveTypeAnnotInCtx(node.typeArg, ctx);
+    if (!targetElem) {
+      pushError(ctx.errors, node, `unsafe_ptr.toArray: unknown element type`);
+      return setType(node, ErrorType());
+    }
+    if (operandType.kind !== typeKinds.unsafePtr) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.toArray expects unsafe_ptr<T> as the first arg, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    if (!typesEqual(operandType.pointee, targetElem)) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.toArray<${formatType(targetElem)}> expects unsafe_ptr<${formatType(targetElem)}>, got ${formatType(operandType)} — use unsafe_ptr.cast first if a reinterpret is intended`,
+      );
+      return setType(node, ErrorType());
+    }
+    const lenType = resolveExprType(node.lengthOperand, scope, ctx);
+    const isInt =
+      (lenType.kind === typeKinds.prim && isIntPrim(lenType.name)) ||
+      lenType.kind === typeKinds.untypedInt;
+    if (!isInt) {
+      pushError(
+        ctx.errors,
+        node.lengthOperand,
+        `unsafe_ptr.toArray length must be an integer, got ${formatType(lenType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    // Pin untyped-int length to usize so codegen emits an i64 store.
+    if (lenType.kind === typeKinds.untypedInt) {
+      coerceUntypedLiteralToTyped(
+        node.lengthOperand,
+        lenType,
+        PrimType(primAnnotations.usize),
+        ctx.errors,
+      );
+    }
+    return setType(node, ArrayType(targetElem));
+  }
+
   pushError(ctx.errors, node, `unknown unsafe_ptr cast kind ${node.castKind}`);
+  return setType(node, ErrorType());
+}
+
+// Phase 8.D: errno.get() / errno.set(v) / errno.message(c).
+// `get` is nullary and returns c_int. `set` takes an int and returns void.
+// `message` takes an int and returns string. Untyped int args pin to int32.
+function resolveErrnoIntrinsic(node, scope, ctx) {
+  if (node.op === "get") {
+    if (node.operand) {
+      pushError(ctx.errors, node, `errno.get() takes no arguments`);
+      return setType(node, ErrorType());
+    }
+    return setType(node, PrimType(primAnnotations.int32));
+  }
+  if (node.op === "set" || node.op === "message") {
+    if (!node.operand) {
+      pushError(
+        ctx.errors,
+        node,
+        `errno.${node.op}(...) requires one integer argument`,
+      );
+      return setType(node, ErrorType());
+    }
+    const argType = resolveExprType(node.operand, scope, ctx);
+    if (argType.kind === typeKinds.error) return setType(node, ErrorType());
+    const isInt =
+      (argType.kind === typeKinds.prim && isIntPrim(argType.name)) ||
+      argType.kind === typeKinds.untypedInt;
+    if (!isInt) {
+      pushError(
+        ctx.errors,
+        node.operand,
+        `errno.${node.op} expects an integer argument, got ${formatType(argType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    if (argType.kind === typeKinds.untypedInt) {
+      coerceUntypedLiteralToTyped(
+        node.operand,
+        argType,
+        PrimType(primAnnotations.int32),
+        ctx.errors,
+      );
+    }
+    return setType(
+      node,
+      node.op === "set" ? VoidType() : PrimType(primAnnotations.string),
+    );
+  }
+  pushError(ctx.errors, node, `unknown errno intrinsic "${node.op}"`);
   return setType(node, ErrorType());
 }
 

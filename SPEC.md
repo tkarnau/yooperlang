@@ -489,7 +489,7 @@ function make_pass(scene: Scene): RenderPass propagates<gpu_buffer>;
 1. **Auto-cleanup via the kind keyword.** Bind the value with the kind prefix and the compiler injects the cleanup at scope end:
 
    ```js
-   usedisposable arr: DynArray<int32> = new_dynarray(4);
+   disposable arr: DynArray<int32> = new_dynarray(4);
    // compiler inserts: Disposable.dispose(ref arr) before scope end
    ```
 
@@ -504,7 +504,7 @@ function make_pass(scene: Scene): RenderPass propagates<gpu_buffer>;
 3. **Transfer to the caller.** Bind with plain `let`/`const` and `return` it from a function whose return type also declares `propagates<K>`:
 
    ```js
-   function new_dynarray<T>(n: usize): DynArray<T> propagates<usedisposable> {
+   function new_dynarray<T>(n: usize): DynArray<T> propagates<disposable> {
        let a: DynArray<T> = { ... };
        return a;   // obligation flows to caller
    }
@@ -976,6 +976,172 @@ intent to match the C ABI. The marker is contractual today — yoop's natural
 struct layout (field-declaration order, per-field natural alignment) already
 matches C for trivially-aligned structs.
 
+### Buffer interop
+
+Two `import.unsafe;`-gated intrinsics bridge yoop's fat-pointer arrays and
+raw libc buffers:
+
+```js
+let xs: int32[] = [1, 2, 3];
+let dp: unsafe_ptr<int32> = xs.ptr;       // borrow the data pointer
+read(0, raw.ptr, raw.len);                 // pass yoop buffer to libc
+
+let buf: unsafe_ptr<uint8> = malloc(16);
+let view: uint8[] = unsafe_ptr.toArray<uint8>(buf, 16);
+view[0] = 42;                              // index/iterate the malloc'd buffer
+```
+
+- `xs.ptr` (intrinsic field on any array type) returns `unsafe_ptr<T>` to the
+  first element. It is a *borrow*: the array still owns its memory, the
+  pointer must not be freed through, and must not outlive the array binding.
+- `unsafe_ptr.toArray<T>(p, n)` wraps a `(ptr, len)` pair as a borrowing
+  `T[]` view — no copy, no allocation. Underlying memory must outlive the
+  view.
+
+Both raise a typecheck error in modules without `import.unsafe;`.
+
+### `errno`
+
+Most libc functions signal failure with a sentinel return value and leave
+the actual reason in `errno`. Yoop exposes three thread-local intrinsics:
+
+```js
+errno.get(): c_int                   // read the current thread's errno
+errno.set(v: c_int): void            // clear or stash a value
+errno.message(c: c_int): string      // strerror(c)
+```
+
+`errno` is thread-local on every supported platform. With the current
+run-to-completion task runtime, the value survives any sequence of FFI
+calls within a single yoop function. Once Phase 8.F lands real Task
+suspension, the suspension boundary will save and restore `errno`.
+
+Recommended pattern: extern signatures return raw C result types; a
+yoop-side wrapper converts `(rv == -1)` + `errno` into the fallible-struct
+convention.
+
+```js
+extern "C" from "fcntl.h" {
+    function open(path: string, flags: c_int): c_int;
+}
+
+type OpenResult { fd: c_int, err: string }
+
+function open_safe(path: string, flags: c_int): OpenResult {
+    let fd: c_int = open(path, flags);
+    if (fd < 0) {
+        let code: c_int = errno.get();
+        return { fd: -1, err: errno.message(code) };
+    }
+    return { fd: fd, err: "" };
+}
+```
+
+`errno` is not gated by `import.unsafe;` — reading or setting an integer
+does not surface any pointer values.
+
+### Memory (heap allocation)
+
+Two compiler-recognized generic functions are available globally — no
+import required, no `import.unsafe;` required, no extern decl required:
+
+```js
+heap_alloc<T>(n: usize): T[]    // malloc n * sizeof(T); fat-pointer view
+heap_free<T>(a: T[]): void      // free the underlying data pointer
+```
+
+`heap_alloc<T>` returns a fresh heap-backed `T[]`. The element type `T` is
+inferred from the call's context (typically the LHS annotation, e.g.
+`let xs: int32[] = heap_alloc(64);`). The result is a fat pointer view —
+indexing, `.len`, and assignment work exactly like a stack-allocated array
+literal.
+
+`heap_free<T>` frees the buffer behind a `heap_alloc`-produced array.
+Using the array after free is undefined behavior; double-free is undefined
+behavior. The yoop type system does not check either invariant — typical
+usage is through a `Disposable + propagates<disposable>` wrapper (see
+`Vec<T>` in `std/core/vec.yoop`) that ties the free to scope exit.
+
+These functions live in the `$builtin` namespace and are registered into
+every module's generic-function table, so call-site inference handles
+them uniformly with other generics.
+
+### Bytes, strings, and the conversion bridges
+
+Two compiler-recognized functions bridge yoop's `string` and `uint8[]`
+representations. Both are global (no import needed) and not gated by
+`import.unsafe;` — they produce values entirely inside yoop's type
+system:
+
+```js
+string_as_bytes(s: string): uint8[]
+    // Zero-copy view. The returned uint8[] shares the string's storage.
+    // The view does not outlive the string.
+
+string_from_bytes_unchecked(buf: uint8[]): string
+    // Fresh heap allocation: malloc(buf.len + 1), memcpy, write NUL.
+    // Does NOT validate UTF-8 — callers asserting UTF-8 should reach for
+    // the validating wrapper `string_from_bytes` in std/core/strings.yoop.
+
+array_slice<T>(xs: T[], start: usize, end: usize): T[]
+    // Zero-copy fat-pointer view {xs.ptr + start, end - start}. Caller
+    // responsible for keeping `xs` alive as long as the slice is used.
+```
+
+Higher-level operations are pure-yoop wrappers in the `std/core/` modules:
+
+- **`std/core/bytes.yoop`** — `bytes_eq`, `bytes_index_of`,
+  `bytes_index_of_seq`, `bytes_starts_with`,
+  `bytes_eq_ignore_ascii_case`, `bytes_slice`, `bytes_copy`,
+  `bytes_parse_int`.
+- **`std/core/strings.yoop`** — `string_eq`, `string_eq_ignore_ascii_case`,
+  `string_starts_with`, `string_index_of`, `string_slice`,
+  `string_concat`, `string_concat_all`, plus the validating
+  `string_from_bytes` wrapper that returns `StringFromBytes { value, err }`.
+
+Naming convention conveys allocation cost at the call site:
+
+- **`_as_*`, `_slice`** — borrowing views, no allocation.
+- **`_new`, `_copy`, `_from_*`, `_concat`, `_concat_all`** — fresh heap
+  allocations. Caller owns the returned storage.
+
+### `std/core/vec.yoop` — growable vector
+
+```js
+type Vec<T> implements Disposable propagates<disposable> {
+    data: T[],
+    len: usize,
+    cap: usize,
+    // dispose frees the backing buffer
+}
+
+vec_new<T>(initial_cap: usize): Vec<T> propagates<disposable>
+vec_push<T>(v: ref Vec<T>, value: T): void   // MAY REALLOCATE
+vec_get<T>(v: ref Vec<T>, i: usize): T
+vec_set<T>(v: ref Vec<T>, i: usize, value: T): void
+vec_clear<T>(v: ref Vec<T>): void
+vec_as_array<T>(v: ref Vec<T>): T[]          // view; valid until next mutation
+```
+
+`Vec<T>` propagates `disposable`, so every binding picks one of the
+standard discharge mechanisms:
+
+```js
+disposable v: Vec<int32> = vec_new(4);   // auto-cleanup at scope end
+// or
+let v: Vec<int32> = vec_new(4);
+// ... use ...
+Disposable.dispose(ref v);               // manual
+// or
+function build(): Vec<int32> propagates<disposable> {
+    return vec_new(4);                   // transfer up
+}
+```
+
+`vec_push` is flagged "MAY REALLOCATE" in the API contract: when
+`len == cap`, the backing buffer doubles, and any prior `vec_as_array`
+view dangles.
+
 ---
 
 ## 13. Operators
@@ -999,8 +1165,8 @@ abi             appliesTo        autoJoin         bool
 break           c_int            c_long           c_short
 c_size_t        c_ssize_t        c_uint           c_ulong
 c_ushort        char             const            contains
-continue        else             export           extern
-false
+continue        else             errno            export
+extern           false
 float32         float64          for              forbids
 from            function         if               implements
 import          in               int8             int16

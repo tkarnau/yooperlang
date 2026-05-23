@@ -1,0 +1,6 @@
+const PI: int32 = 3;
+
+function main(): int32 {
+    PI = 4;
+    return PI;
+}

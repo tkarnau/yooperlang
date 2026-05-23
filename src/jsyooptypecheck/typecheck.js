@@ -47,7 +47,7 @@ import { setGlobalInstantiator } from "./types.js";
 import { formatType, pushError } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
-import { validateFunction, validateMethod } from "./checkStatement.js";
+import { validateFunction, validateMethod, validateModuleInit } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
 import { runKindCheck } from "./kindCheck.js";
 import { TASK_KIND } from "./builtinKinds.js";
@@ -1110,7 +1110,71 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  return [heapAlloc, heapFree];
+  // Phase 8.H: string_as_bytes(s: string): uint8[]
+  // Zero-copy view of a string's UTF-8 bytes as a fat-pointer array.
+  // Sharing the string's storage; the view does not outlive the string.
+  const asBytesDeclId = "$builtin__string_as_bytes";
+  const stringAsBytes = {
+    id: asBytesDeclId,
+    name: "string_as_bytes",
+    moduleId: "$builtin",
+    paramNames: [],
+    paramScope: new Map(),
+    genericSig: FuncType(
+      [{ name: "s", type: PrimType("string"), isRef: false }],
+      ArrayType(PrimType("uint8")),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  // Phase 8.H: string_from_bytes_unchecked(buf: uint8[]): string
+  // Copies buf into a fresh malloc'd string, writes a nul terminator. Does
+  // NOT validate UTF-8 — that's the wrapping `string_from_bytes` function's
+  // job (lives in std/core/strings.yoop). This intrinsic is the building
+  // block; user code should generally prefer the validating wrapper.
+  const fromBytesDeclId = "$builtin__string_from_bytes_unchecked";
+  const stringFromBytesUnchecked = {
+    id: fromBytesDeclId,
+    name: "string_from_bytes_unchecked",
+    moduleId: "$builtin",
+    paramNames: [],
+    paramScope: new Map(),
+    genericSig: FuncType(
+      [{ name: "buf", type: ArrayType(PrimType("uint8")), isRef: false }],
+      PrimType("string"),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  // Phase 8.H: array_slice<T>(xs: T[], start: usize, end: usize): T[]
+  // Returns a borrowing fat-pointer view {xs.ptr + start, end - start}.
+  // No allocation. Caller is responsible for keeping the parent alive.
+  // Matches the naming convention "_slice = view" from the intrinsics
+  // index (see plans/phase-8-h-string-bytes-vec.md).
+  const sliceDeclId = "$builtin__array_slice";
+  const sliceT = new TypeParamType("T", sliceDeclId);
+  const sliceSig = FuncType(
+    [
+      { name: "xs", type: ArrayType(sliceT), isRef: false },
+      { name: "start", type: PrimType("usize"), isRef: false },
+      { name: "end", type: PrimType("usize"), isRef: false },
+    ],
+    ArrayType(sliceT),
+  );
+  const arraySlice = {
+    id: sliceDeclId,
+    name: "array_slice",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", sliceT]]),
+    genericSig: sliceSig,
+    ast: null,
+    isBuiltin: true,
+  };
+
+  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked];
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
@@ -1416,6 +1480,32 @@ export function typecheckProgram(modules) {
           d.resolvedKindType = kt;
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+      }
+
+      // Phase 8.E: register module-level let/const shells so cross-module
+      // imports and intra-module references can find the name in pass B/C.
+      // The real type is resolved in pass C; the initializer is checked in
+      // pass D.0. The decl itself is stashed onto `mod.moduleInitDecls` so
+      // codegen (and a future CTE pass) can find them in source order
+      // without re-walking the AST.
+      if (
+        (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
+        d.isModuleLevel
+      ) {
+        if (localSymbols.has(d.name)) {
+          errors.push({
+            message: `redeclaration of "${d.name}" at module top`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          // Shell: ErrorType placeholder until pass C resolves the
+          // annotation. Marker fields signal "this is a module global"
+          // to lookups + codegen.
+          localSymbols.set(d.name, ErrorType());
+          d.isModuleGlobal = true;
+          d.moduleGlobalSym = `${mod.id}__${d.name}`;
+          if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+        }
       }
     }
 
@@ -2044,6 +2134,47 @@ export function typecheckProgram(modules) {
       // hit this case; broader use will need a pre-pass before field resolution.
       validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
+
+    // Phase 8.E: pass C.4 - resolve module-level let/const declared-type
+    // annotations and stash the decls onto mod.moduleInitDecls in source
+    // order. The initializer expressions are typechecked in pass D.0 once
+    // every function signature in this module has resolved (so initializers
+    // may freely call functions defined in the same module).
+    //
+    // (Bytecode/CTE future) — mod.moduleInitDecls is the natural input to
+    // a future compile-time evaluator: each entry has a resolved type on
+    // the decl, an unresolved `.assignment` AST, and a stable order.
+    mod.moduleInitDecls = [];
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (
+        (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
+        d.isModuleLevel
+      ) {
+        const declaredType =
+          resolveTypeAnnotationInModule(
+            d.typeAnnotation,
+            mod.id,
+            moduleEnv,
+            baseCtx(),
+          ) ?? null;
+        if (!declaredType) {
+          errors.push({
+            message: `unknown type "${formatAnnotation(d.typeAnnotation)}" on module-level "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+          d.resolvedType = ErrorType();
+        } else {
+          d.resolvedType = declaredType;
+          // Update the previously-installed shell with the real type.
+          env.localSymbols.set(d.name, declaredType);
+        }
+        mod.moduleInitDecls.push(d);
+      }
+    }
+    // Mirror onto env so resolve-assignment-to-module-global (which only has
+    // the typeContext) can find the decl list without re-walking the AST.
+    env.moduleInitDecls = mod.moduleInitDecls;
     stampModuleId(errors, errStart, mod.id);
   }
 
@@ -2108,6 +2239,20 @@ export function typecheckProgram(modules) {
           registry: programState.registry,
         }),
     };
+
+    // Phase 8.E: pass D.0 — typecheck module-level let/const initializers.
+    // Runs before function bodies because module globals' types are needed
+    // by IDENT resolution inside function bodies. Inits may freely call
+    // functions defined in this module (their sigs were resolved in pass C).
+    //
+    // (Bytecode/CTE future) — each call to checkInitializer here is a
+    // discrete unit a future evaluator could intercept: if the init expr
+    // is purely constant-evaluable, emit the LLVM @global with the
+    // computed value and drop this decl from the runtime init function.
+    for (const d of mod.moduleInitDecls ?? []) {
+      if (d.resolvedType?.kind === typeKinds.error) continue;
+      validateModuleInit(d, typeContext, errors);
+    }
 
     // pass D.1: validate all functions and methods (populates resolvedKindType on params)
     for (const decl of mod.ast.body) {

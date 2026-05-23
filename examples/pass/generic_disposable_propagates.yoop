@@ -6,13 +6,13 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-kind usedisposable {
+kind disposable {
     appliesTo binding;
     requires Disposable;
     mustCall dispose beforeScopeEnd;
 }
 
-type DynArray<T> implements Disposable propagates<usedisposable> {
+type DynArray<T> implements Disposable propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
@@ -22,7 +22,7 @@ type DynArray<T> implements Disposable propagates<usedisposable> {
     }
 }
 
-function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<usedisposable> {
+function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
     return { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
 }
 
@@ -44,7 +44,7 @@ function push<T>(a: ref DynArray<T>, value: T): void {
 }
 
 function main(): int32 {
-    usedisposable arr: DynArray<int32> = new_dynarray(2);
+    disposable arr: DynArray<int32> = new_dynarray(2);
     push(ref arr, 10);
     push(ref arr, 20);
     push(ref arr, 30);

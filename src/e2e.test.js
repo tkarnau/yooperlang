@@ -13,7 +13,7 @@ import { parse } from "./jsyooparser/parser.js";
 import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
-import { RUNTIME_C, runtimeLinkFlags } from "./runtimeBuild.js";
+import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
@@ -26,7 +26,7 @@ function runFixture(relPath) {
   fs.writeFileSync(llPath, ir);
   const clangArgs = [
     llPath,
-    RUNTIME_C,
+    ...RUNTIME_SOURCES,
     "-o",
     binPath,
     ...runtimeLinkFlags().map((f) => `-l${f}`),
@@ -52,7 +52,7 @@ function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
   );
   const clangArgs = [
     llPath,
-    RUNTIME_C,
+    ...RUNTIME_SOURCES,
     "-o",
     binPath,
     ...runtimeLinkFlags().map((f) => `-l${f}`),
@@ -334,6 +334,36 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "ok=1\n");
   });
 
+  it("buffer_interop.yoop: xs.ptr + unsafe_ptr.toArray round-trip a malloc'd buffer through memcmp", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/buffer_interop.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "view.len=8 expect.len=8 matched=1\n");
+  });
+
+  it("errno_open.yoop: open of a nonexistent path returns -1, errno = ENOENT, message resolves", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/errno_open.yoop");
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /fd=-1 saw_failure=1 code=2 saw_enoent=1 msg=No such file/);
+  });
+
+  it("errno_fallible.yoop: fallible-wrapper pattern with errno.message propagates via '?'", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/errno_fallible.yoop");
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /propagated err: No such file/);
+  });
+
+  it("module_counter.yoop: module-level let mutates across tick() calls; const reads as expected", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/module_counter.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "ticked: a=1 b=2 c=3 now=3\n");
+  });
+
+  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleep_ms delays the producer", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/concurrent_pipe.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "got=88\n");
+  });
+
   it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
     const { stdout, exitCode } = runFixtureWithAsset(
       "examples/pass/language_showcase.yoop",
@@ -362,7 +392,7 @@ function runFixtureEntry(relPath) {
   // production yoopiler.js invocation so e2e behavior matches what users see.
   const clangArgs = [
     llPath,
-    RUNTIME_C,
+    ...RUNTIME_SOURCES,
     "-g",
     "-O0",
     "-o",
@@ -423,6 +453,12 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_struct/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len = 43\n");
+  });
+
+  it("module_state_cross: imported `let` is readable, `bump()` mutates it across calls", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/module_state_cross/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "step=5 a=5 b=10 snapshot=10\n");
   });
 
   it("extern_printf: explicit printf via extern block", () => {
@@ -759,6 +795,47 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.ok(vMatches.length >= 1, `expected %v alloca with align 32`);
     assert.ok(hMatches.length >= 1, `expected %h alloca with align 32`);
   });
+
+  // Phase 8.H: byte / string / Vec primitives and the parse_request_line
+  // smoke test. Each fixture imports from std/core/* and exercises the new
+  // intrinsics (array_slice / string_as_bytes / string_from_bytes_unchecked)
+  // through their pure-yoop wrappers.
+
+  it("bytes_smoke: bytes_eq + bytes_index_of + bytes_starts_with + bytes_slice", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/bytes_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "eq(a,b)=1 eq(a,c)=0\nidx_l=2\nstarts=1\nsub.len=3 sub[0]=101 sub[1]=108 sub[2]=108\n",
+    );
+  });
+
+  it("strings_smoke: string_eq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/strings_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "eq_match=1 eq_diff=0\nstarts_with_Hello=1\nidx_of_World=7\nslice=World err=\ncat=foobar\nall=a-b-c\nfb=Hi err=\n",
+    );
+  });
+
+  it("vec_smoke: Vec<int32> push/get/set/clear with disposable auto-cleanup", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/vec_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "len=4 cap=4\nv[2]=30\nv[0]=99\nafter_clear len=0 cap=4\n",
+    );
+  });
+
+  it("parse_request_line: pure-yoop HTTP/1.1 request-line parser using only std/core/bytes + std/core/strings", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/parse_request_line/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "method=GET path=/path version=HTTP/1.1 err=\nbad.err=parse_request_line: missing CR\n",
+    );
+  });
 });
 
 describe("e2e: multi-file fail fixtures produce the right errors", () => {
@@ -815,6 +892,14 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     assert.ok(
       errors.some((e) => /has no export "private_fn"/.test(e.message)),
       `expected namespace-private error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("vec_no_disposable: binding Vec<T> without `disposable` leaves the propagates<disposable> obligation unsatisfied", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/vec_no_disposable/main.yoop");
+    assert.ok(
+      errors.some((e) => /unsatisfied obligation from propagates<disposable>/.test(e.message)),
+      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });
@@ -1237,7 +1322,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("propagates_return_not_declared.yoop rejects a function that returns a propagating type without declaring propagates<K>", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_not_declared.yoop");
     assert.ok(
-      errors.some((e) => /carrying propagates<usedisposable>.*either declare 'propagates<usedisposable>'/.test(e.message)),
+      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
       `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1245,7 +1330,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("propagates_binding_missing_kind.yoop rejects a binding whose propagates<K> obligation is never satisfied", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_binding_missing_kind.yoop");
     assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<usedisposable>/.test(e.message)),
+      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
       `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1253,7 +1338,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("propagates_struct_literal_missing_kind.yoop rejects a struct-literal binding whose propagates<K> obligation is never satisfied", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_struct_literal_missing_kind.yoop");
     assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<usedisposable>/.test(e.message)),
+      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
       `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1261,7 +1346,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("propagates_dispose_only_then.yoop rejects a binding whose dispose appears in only one arm of an if/else", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_dispose_only_then.yoop");
     assert.ok(
-      errors.some((e) => /binding 'r' has unsatisfied obligation from propagates<usedisposable>/.test(e.message)),
+      errors.some((e) => /binding 'r' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
       `expected one-arm-only error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1529,5 +1614,33 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       "utf8",
     );
     assert.throws(() => parse(src), /abi "Rust" is not a supported ABI marker/);
+  });
+
+  it("array_ptr_no_import.yoop rejects xs.ptr without import.unsafe", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/array_ptr_no_import.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /'\.ptr' on an array requires 'import\.unsafe;'/.test(e.message)),
+      `expected array-ptr gating error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("module_const_write.yoop rejects assignment to a module-level const", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/module_const_write.yoop");
+    assert.ok(
+      errors.some((e) => /cannot assign to const "PI"/.test(e.message)),
+      `expected const-write error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("module_state_cross_write rejects writing an imported `let` from another module", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/module_state_cross_write/main.yoop");
+    assert.ok(
+      errors.some((e) => /assignment from outside its module is not permitted/.test(e.message)),
+      `expected cross-module-write error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
   });
 });

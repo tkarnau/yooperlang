@@ -196,6 +196,36 @@ export function validateFunction(funcNode, typeContext, errors) {
   popScope(scope, errors);
 }
 
+// Phase 8.E: typecheck a single module-level let/const decl's initializer
+// against its declared type. The scope is empty (module-level inits have
+// no locals); identifier lookups fall through to moduleSymbols, which by
+// pass D.0 holds both this module's bindings and any imported ones.
+//
+// (Bytecode/CTE future) — this is the call site to swap for a CTE
+// evaluator: try evaluating decl.assignment at compile time; on success
+// stash the result on the decl for codegen to use as the @global initial
+// value; on failure keep the existing runtime-init behavior.
+export function validateModuleInit(decl, typeContext, errors) {
+  const scope = pushScope(null);
+  const ctx = {
+    funcReturnType: null,
+    funcName: "<module init>",
+    typeContext,
+    errors,
+    inLoop: false,
+    inTaskBody: false,
+  };
+  checkInitializer(
+    decl.assignment,
+    decl.resolvedType,
+    scope,
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(decl.resolvedType)} in initializer of module-level "${decl.name}"`,
+  );
+  popScope(scope, errors);
+}
+
 export function validateStatement(node, scope, ctx) {
   switch (node.kind) {
     case ASTNodeKind.BLOCK:

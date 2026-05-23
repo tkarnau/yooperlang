@@ -7,7 +7,7 @@ import path from "path";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
-import { RUNTIME_C, runtimeLinkFlags } from "./runtimeBuild.js";
+import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst } from "./dumpAst.js";
 
@@ -105,7 +105,7 @@ function main() {
     const clang = "C:\\Program Files\\LLVM\\bin\\clang.exe";
     const clangArgs = [
       tmpIR,
-      RUNTIME_C,
+      ...RUNTIME_SOURCES,
       "-o",
       `${outputFileName}.exe`,
       ...debugFlags,
@@ -128,7 +128,7 @@ function main() {
     }
     const clangArgs = [
       tmpIR,
-      RUNTIME_C,
+      ...RUNTIME_SOURCES,
       "-o",
       outputFileName,
       ...debugFlags,

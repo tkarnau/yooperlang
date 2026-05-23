@@ -52,6 +52,13 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcTrait = srcEnv.traitTable?.get(spec.exportName);
       const srcStruct = srcEnv.structTable.get(spec.exportName);
       const srcSym = srcEnv.localSymbols.get(spec.exportName);
+      // Phase 8.H: also check the generic tables. The genericFuncTable
+      // lookup is the path through which call-site inference resolves an
+      // imported generic call; the genericStructTable lookup wires up
+      // imported generic types like `Vec<T>` for resolveTypeAnnotation.
+      const srcGenericStruct = srcEnv.genericStructTable?.get(spec.exportName);
+      const srcGenericFunc = srcEnv.genericFuncTable?.get(spec.exportName);
+      const srcGenericTrait = srcEnv.genericTraitTable?.get(spec.exportName);
 
       if (srcKind) {
         // Phase 6.4: cross-module kind import. Identity is preserved by reference —
@@ -65,6 +72,17 @@ export function resolveImports(mod, moduleEnv, errors) {
         // It's a struct type (possibly a shell; pass C.5 re-syncs the resolved version)
         structTable.set(spec.localName, srcStruct);
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
+      } else if (srcGenericStruct) {
+        // Phase 8.H: imported generic struct type. lookupGenericStruct
+        // (and resolveTypeAnnotation for type-applications) walks
+        // importedNames to find it.
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-type" });
+      } else if (srcGenericFunc) {
+        // Phase 8.H: imported generic function. lookupGenericFunc looks
+        // here via importedNames + the remote module's genericFuncTable.
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-func" });
+      } else if (srcGenericTrait) {
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-trait" });
       } else if (srcSym) {
         // It's a value (function, const, etc.)
         localSymbols.set(spec.localName, srcSym);

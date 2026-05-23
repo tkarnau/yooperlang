@@ -1,0 +1,22 @@
+import { Vec, vec_new, vec_push, vec_get, vec_set, vec_clear } from "../../../std/core/vec.yoop";
+import { Disposable, disposable } from "../../../std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable v: Vec<int32> = vec_new(2);
+    vec_push(ref v, 10);
+    vec_push(ref v, 20);
+    vec_push(ref v, 30);
+    vec_push(ref v, 40);
+    printf(`len=${v.len} cap=${v.cap}\n`);
+    let x: int32 = vec_get(ref v, 2);
+    printf(`v[2]=${x}\n`);
+    vec_set(ref v, 0, 99);
+    printf(`v[0]=${vec_get(ref v, 0)}\n`);
+    vec_clear(ref v);
+    printf(`after_clear len=${v.len} cap=${v.cap}\n`);
+    return 0;
+}

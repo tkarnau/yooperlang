@@ -1,0 +1,17 @@
+// std/core/kinds.yoop — foundational trait + kind shared across std.
+//
+// The `Disposable` trait and the `disposable` kind are the entry point for
+// every resource-owning type in the standard library (sockets, file
+// handles, dynamic vectors, etc). Defined once here and imported by every
+// std module that needs them, so the identity is preserved (kinds and
+// traits compare by reference; one canonical declaration per program).
+
+export trait Disposable {
+    function dispose(ref self): void;
+}
+
+export kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}

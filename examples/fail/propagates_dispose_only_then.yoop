@@ -7,18 +7,18 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-kind usedisposable {
+kind disposable {
     appliesTo binding;
     requires Disposable;
     mustCall dispose beforeScopeEnd;
 }
 
-type Resource implements Disposable propagates<usedisposable> {
+type Resource implements Disposable propagates<disposable> {
     id: int32,
     function dispose(ref self): void {}
 }
 
-function make_resource(): Resource propagates<usedisposable> {
+function make_resource(): Resource propagates<disposable> {
     return { id: 7 };
 }
 
@@ -32,4 +32,4 @@ function main(): int32 {
     return 0;
 }
 
-// Fails: binding 'r' has unsatisfied obligation from propagates<usedisposable>
+// Fails: binding 'r' has unsatisfied obligation from propagates<disposable>

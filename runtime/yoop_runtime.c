@@ -208,6 +208,10 @@ void yoop_runtime_shutdown(void) {
     init_lock();
     if (!g_rt.initialized) { init_unlock(); return; }
 
+    // Phase 8.F.2: stop the I/O multiplexer if it was lazily started. The
+    // shutdown is a no-op when nothing ever called wait_readable/writable.
+    yoop_io_shutdown();
+
     yoop_mutex_lock(&g_rt.queue_mu);
     g_rt.shutdown = 1;
     yoop_cond_broadcast(&g_rt.queue_cv);
@@ -309,4 +313,145 @@ void yoop_task_free_sync_pair(void* handle) {
     yoop_cond_t**  cp = handle_cond_slot(handle);
     if (*mp) { yoop_mutex_destroy(*mp); free(*mp); *mp = NULL; }
     if (*cp) { yoop_cond_destroy(*cp);  free(*cp); *cp = NULL; }
+}
+
+// ---- Phase 8.D: errno bridge ----------------------------------------------
+// Thin wrappers so the codegen never has to name the platform-specific
+// thread-local errno symbol directly. The C compiler picks the right
+// lvalue for the host (macOS __error, glibc/musl __errno_location, Windows
+// _errno).
+#include <errno.h>
+
+int yoop_errno_get(void) {
+    return errno;
+}
+
+void yoop_errno_set(int v) {
+    errno = v;
+}
+
+const char* yoop_errno_message(int c) {
+    // strerror returns a pointer into static storage. Not strictly
+    // thread-safe (POSIX vs glibc strerror_r divergence is the reason we
+    // skip strerror_r here), but the typical call shape is "format right
+    // before logging" where the race is benign.
+    return strerror(c);
+}
+
+// ---- Phase 8.F.1: park tokens --------------------------------------------
+// State machine (see header for the contract):
+//   0 = idle, 1 = pending wake, 2 = parking.
+
+void yoop_park_token_init(yoop_park_token_t* t) {
+    t->mu = (yoop_mutex_t*)malloc(sizeof(yoop_mutex_t));
+    t->cv = (yoop_cond_t*) malloc(sizeof(yoop_cond_t));
+    yoop_mutex_init(t->mu);
+    yoop_cond_init(t->cv);
+    t->state = 0;
+}
+
+void yoop_park_token_destroy(yoop_park_token_t* t) {
+    if (t->mu) { yoop_mutex_destroy(t->mu); free(t->mu); t->mu = NULL; }
+    if (t->cv) { yoop_cond_destroy(t->cv);  free(t->cv); t->cv = NULL; }
+    t->state = 0;
+}
+
+void yoop_park(yoop_park_token_t* t) {
+    yoop_mutex_lock(t->mu);
+    if (t->state == 1) {
+        // Pre-armed: consume the wake and return without blocking.
+        t->state = 0;
+        yoop_mutex_unlock(t->mu);
+        return;
+    }
+    t->state = 2; // parking
+    while (t->state == 2) {
+        yoop_cond_wait(t->cv, t->mu);
+    }
+    // Woken by unpark: state has been flipped to 0 by the unparker.
+    yoop_mutex_unlock(t->mu);
+}
+
+void yoop_unpark(yoop_park_token_t* t) {
+    yoop_mutex_lock(t->mu);
+    if (t->state == 2) {
+        // Parked: wake the parker. The parker's loop sees state==0
+        // and returns.
+        t->state = 0;
+        yoop_cond_signal(t->cv);
+    } else if (t->state == 0) {
+        // Pre-arm: idempotent — a second pre-arm before park is fine.
+        t->state = 1;
+    }
+    // state == 1 already → already pre-armed, nothing to do.
+    yoop_mutex_unlock(t->mu);
+}
+
+// ---- Phase 8.F.3: timers --------------------------------------------------
+#include <time.h>
+#include <errno.h>
+
+// Compute deadline.tv_sec / tv_nsec = now + ns. `clock_id` is the clock
+// that pthread_cond_timedwait will use; on Linux this is set via
+// pthread_condattr_setclock(CLOCK_MONOTONIC), on macOS it's always
+// CLOCK_REALTIME.
+static void deadline_from_now(struct timespec* deadline, uint64_t ns,
+                              clockid_t clock_id) {
+    clock_gettime(clock_id, deadline);
+    deadline->tv_sec  += (time_t)(ns / 1000000000ULL);
+    long add_ns        = (long)(ns % 1000000000ULL);
+    deadline->tv_nsec += add_ns;
+    if (deadline->tv_nsec >= 1000000000L) {
+        deadline->tv_sec  += 1;
+        deadline->tv_nsec -= 1000000000L;
+    }
+}
+
+int yoop_sleep_ns(uint64_t ns) {
+#ifdef _WIN32
+    // Windows uses sleep/SleepEx for ms granularity; ns gets rounded.
+    DWORD ms = (DWORD)((ns + 999999ULL) / 1000000ULL);
+    Sleep(ms);
+    return 0;
+#else
+    pthread_mutex_t mu;
+    pthread_cond_t  cv;
+    pthread_mutex_init(&mu, NULL);
+
+  #if defined(__linux__)
+    // Linux supports overriding the cond's clock. Use CLOCK_MONOTONIC so
+    // wall-clock jumps (NTP) don't move the deadline.
+    pthread_condattr_t attrs;
+    pthread_condattr_init(&attrs);
+    pthread_condattr_setclock(&attrs, CLOCK_MONOTONIC);
+    pthread_cond_init(&cv, &attrs);
+    pthread_condattr_destroy(&attrs);
+    clockid_t clock_id = CLOCK_MONOTONIC;
+  #else
+    // macOS / BSD: pthread_cond_timedwait always uses CLOCK_REALTIME.
+    pthread_cond_init(&cv, NULL);
+    clockid_t clock_id = CLOCK_REALTIME;
+  #endif
+
+    struct timespec deadline;
+    deadline_from_now(&deadline, ns, clock_id);
+
+    pthread_mutex_lock(&mu);
+    int rc;
+    do {
+        rc = pthread_cond_timedwait(&cv, &mu, &deadline);
+        // rc == 0 means "signaled," which can't happen since no one
+        // holds cv. Treat as a spurious wake and re-wait.
+    } while (rc == 0);
+    pthread_mutex_unlock(&mu);
+
+    pthread_cond_destroy(&cv);
+    pthread_mutex_destroy(&mu);
+
+    return rc == ETIMEDOUT ? 0 : -1;
+#endif
+}
+
+int yoop_sleep_ms(uint64_t ms) {
+    return yoop_sleep_ns(ms * 1000000ULL);
 }

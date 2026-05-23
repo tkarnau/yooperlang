@@ -1,0 +1,6 @@
+import { counter } from "./counter.yoop";
+
+function main(): int32 {
+    counter = 99;
+    return counter;
+}

@@ -597,6 +597,21 @@ export function parse(src) {
               node.body.push(parseKindDecl());
             }
             break;
+          case TokenTags.let:
+          case TokenTags.const:
+            {
+              // Phase 8.E: module-level mutable state. The full VarDecl
+              // grammar inside parseVarDecl is fine to reuse; we add a
+              // post-condition that forbids the constructs that don't
+              // make sense at module top (kind prefix, no initializer,
+              // destructuring, trailing block).
+              seenNonImport = true;
+              const decl = parseVarDecl();
+              validateModuleLevelDecl(decl);
+              decl.isModuleLevel = true;
+              node.body.push(decl);
+            }
+            break;
           default: {
             throw parseError(
               `unexpected token at top level: ${inverseTokenTags[peekTag]}`,
@@ -1177,7 +1192,12 @@ export function parse(src) {
         break;
       case TokenTags.let:
       case TokenTags.const:
+        // Phase 8.E: `export let|const` — same restrictions as the bare
+        // module-level form. Mark isModuleLevel so the typechecker can
+        // route to the global-state pass.
         node.decl = parseVarDecl();
+        validateModuleLevelDecl(node.decl);
+        node.decl.isModuleLevel = true;
         break;
       case TokenTags.trait:
         node.decl = parseTraitDecl();
@@ -1440,27 +1460,74 @@ export function parse(src) {
       // `unsafe_ptr.fromInt<T>(n)` — explicit type-arg intrinsics.
       // Recognized only by literal token shape so we don't have to weaken
       // the "no `<` in expression position" invariant elsewhere.
+      // Phase 8.D: `errno.get()` / `errno.set(v)` / `errno.message(c)` —
+      // thread-local errno bridge. Recognized as a literal token shape
+      // for the same reason the `unsafe_ptr.*` namespace below is — to
+      // avoid weakening the no-`<`-in-expression-position invariant.
       if (
+        name === "errno" &&
+        peek().tag === TokenTags.dot &&
+        peekAhead(1).tag === TokenTags.ident
+      ) {
+        const opTok = peekAhead(1);
+        const opName = src.substring(opTok.start, opTok.start + opTok.length);
+        if (opName === "get" || opName === "set" || opName === "message") {
+          advance(); // .
+          advance(); // get/set/message
+          const errNode = buildSourcedNode(ASTNodeKind.ERRNO_INTRINSIC);
+          errNode.op = opName;
+          errNode.operand = null;
+          expect(TokenTags.lparen);
+          if (opName === "set" || opName === "message") {
+            errNode.operand = parseExpression();
+          }
+          expect(TokenTags.rparen);
+          node = errNode;
+        } else {
+          throw parseError(
+            `unknown errno intrinsic 'errno.${opName}' — expected get / set / message`,
+            opTok.start,
+            opTok.length,
+          );
+        }
+      } else if (
         name === "unsafe_ptr" &&
         peek().tag === TokenTags.dot &&
         peekAhead(1).tag === TokenTags.ident
       ) {
         const opTok = peekAhead(1);
         const opName = src.substring(opTok.start, opTok.start + opTok.length);
-        if (opName === "cast" || opName === "toInt" || opName === "fromInt") {
+        if (
+          opName === "cast" ||
+          opName === "toInt" ||
+          opName === "fromInt" ||
+          opName === "toArray"
+        ) {
           advance(); // .
-          advance(); // cast/toInt/fromInt
+          advance(); // cast/toInt/fromInt/toArray
           const castNode = buildSourcedNode(ASTNodeKind.UNSAFE_PTR_CAST);
           castNode.castKind =
-            opName === "cast" ? "bitcast" : opName === "toInt" ? "toInt" : "fromInt";
+            opName === "cast"
+              ? "bitcast"
+              : opName === "toInt"
+              ? "toInt"
+              : opName === "fromInt"
+              ? "fromInt"
+              : "toArray";
           castNode.typeArg = null;
-          if (opName === "cast" || opName === "fromInt") {
+          if (opName === "cast" || opName === "fromInt" || opName === "toArray") {
             expect(TokenTags.lt);
             castNode.typeArg = parseTypeAnnotation();
             consumeClosingGt();
           }
           expect(TokenTags.lparen);
           castNode.operand = parseExpression();
+          // Phase 8.C: toArray takes a second arg — the length.
+          castNode.lengthOperand = null;
+          if (opName === "toArray") {
+            expect(TokenTags.comma);
+            castNode.lengthOperand = parseExpression();
+          }
           expect(TokenTags.rparen);
           node = castNode;
         } else {
@@ -1900,6 +1967,47 @@ export function parse(src) {
     node.assignment = parseExpression();
     expect(TokenTags.semicolon);
     return node;
+  }
+
+  // Phase 8.E: enforce MVP restrictions on module-level let/const decls.
+  // Throws a parseError on violation. The decl AST is already built; we
+  // inspect its shape and reject what we don't support yet.
+  function validateModuleLevelDecl(decl) {
+    if (decl.kind === ASTNodeKind.DESTRUCTURE_DECL) {
+      throw parseError(
+        "destructuring at module top is not supported",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (decl.kindPrefix) {
+      throw parseError(
+        "kind prefix on a module-level binding is not supported",
+        decl.kindPrefix.sourceLoc?.pos ?? decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (!decl.typeAnnotation) {
+      throw parseError(
+        "module-level binding requires an explicit type annotation",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (!decl.assignment) {
+      throw parseError(
+        "module-level binding requires an initializer (= expr)",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (decl.trailingBlock) {
+      throw parseError(
+        "trailing block is not supported on a module-level binding",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
   }
 
   // Phase 6.3: `joined h = expr;` / `pooled h = expr;` — task-builtin binding

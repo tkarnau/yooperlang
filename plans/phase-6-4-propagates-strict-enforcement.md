@@ -11,9 +11,9 @@ The intended design (per user) is that propagation chains must be **explicit at 
 
 Concrete current example — [examples/playground/dynamic_array/main.yoop](examples/playground/dynamic_array/main.yoop):
 
-- Line 54: `function new_dynarray<T>(...): DynArray<T>` — no `propagates<usedisposable>` clause; should be required.
-- Line 55: `const newArr: DynArray<T> = { ... }` — implicitly acquires obligation; should require `usedisposable` prefix.
-- Line 85: `let arr: DynArray<int32> = new_dynarray(4);` — same; should require `usedisposable` prefix.
+- Line 54: `function new_dynarray<T>(...): DynArray<T>` — no `propagates<disposable>` clause; should be required.
+- Line 55: `const newArr: DynArray<T> = { ... }` — implicitly acquires obligation; should require `disposable` prefix.
+- Line 85: `let arr: DynArray<int32> = new_dynarray(4);` — same; should require `disposable` prefix.
 
 ## Approach
 
@@ -63,16 +63,16 @@ If the user explicitly calls the cleanup method mid-scope (e.g. `Disposable.disp
 ## Files to modify
 
 - **[src/jsyooptypecheck/kindCheck.js](src/jsyooptypecheck/kindCheck.js)** — Steps 1-4. Tag obligations with `kindType`, gate `propagatedKinds` walk on explicit prefix, add LET_DECL "must declare" check, add RETURN_STATEMENT transfer/error logic, filter `transferred` from cleanup projections.
-- **[examples/playground/dynamic_array/main.yoop](examples/playground/dynamic_array/main.yoop)** — add `propagates<usedisposable>` to `new_dynarray` ([line 54](examples/playground/dynamic_array/main.yoop#L54)); add `usedisposable` prefix to `newArr` ([line 55](examples/playground/dynamic_array/main.yoop#L55)) and `arr` ([line 85](examples/playground/dynamic_array/main.yoop#L85)); update the leading comment block (lines 1-15) to reflect the new "always explicit" rule.
+- **[examples/playground/dynamic_array/main.yoop](examples/playground/dynamic_array/main.yoop)** — add `propagates<disposable>` to `new_dynarray` ([line 54](examples/playground/dynamic_array/main.yoop#L54)); add `disposable` prefix to `newArr` ([line 55](examples/playground/dynamic_array/main.yoop#L55)) and `arr` ([line 85](examples/playground/dynamic_array/main.yoop#L85)); update the leading comment block (lines 1-15) to reflect the new "always explicit" rule.
 - **[examples/pass/generic_disposable_propagates.yoop](examples/pass/generic_disposable_propagates.yoop)** — audit + add kind prefixes where bindings now need them; ensure factory functions declare `propagates<K>` on the return type. Verify the test still passes end-to-end.
 - **[examples/pass/propagates_full/main.yoop](examples/pass/propagates_full/main.yoop)** — same audit: every binding of a `propagates<K>` type needs its explicit prefix; every factory returning such a type needs the clause.
 - **Audit other pass fixtures** — grep for `propagates<` to find any fixture that relied on implicit acquisition; add prefixes as needed.
 
 ## New test fixtures
 
-- **`examples/fail/propagates_return_not_declared.yoop`** — factory returns `DynArray<int32>` (which has `propagates<usedisposable>`) but the function omits the clause. Expect the function-side error from Step 3.
+- **`examples/fail/propagates_return_not_declared.yoop`** — factory returns `DynArray<int32>` (which has `propagates<disposable>`) but the function omits the clause. Expect the function-side error from Step 3.
 - **`examples/fail/propagates_binding_missing_kind.yoop`** — `let arr: DynArray<int32> = new_dynarray(4);` with no kind prefix. Expect the LET_DECL error from Step 2.
-- **`examples/fail/propagates_struct_literal_missing_kind.yoop`** — `const x: DynArray<T> = { data: ..., len: 0, cap: 0 };` without prefix where `DynArray` propagates `usedisposable`. Same error shape as the binding-missing case but via struct literal.
+- **`examples/fail/propagates_struct_literal_missing_kind.yoop`** — `const x: DynArray<T> = { data: ..., len: 0, cap: 0 };` without prefix where `DynArray` propagates `disposable`. Same error shape as the binding-missing case but via struct literal.
 
 Fail-test discovery follows the existing convention in [src/e2e.test.js](src/e2e.test.js) — verify these are picked up automatically (or add explicit cases there if needed).
 

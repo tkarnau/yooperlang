@@ -6,13 +6,13 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-kind usedisposable {
+kind disposable {
     appliesTo binding;
     requires Disposable;
     mustCall dispose beforeScopeEnd;
 }
 
-type Widget implements Disposable propagates<usedisposable> {
+type Widget implements Disposable propagates<disposable> {
     id: int32,
     function dispose(ref self): void {}
 }
@@ -24,4 +24,4 @@ function main(): int32 {
     return 0;
 }
 
-// Fails: binding 'w' has unsatisfied obligation from propagates<usedisposable>
+// Fails: binding 'w' has unsatisfied obligation from propagates<disposable>

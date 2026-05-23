@@ -1,0 +1,16 @@
+// Vec<T> carries propagates<disposable>; binding without `disposable` (or
+// any other discharge mechanism) leaves the obligation unsatisfied. Should
+// be rejected with the standard "obligation not discharged" diagnostic.
+
+import { Vec, vec_new } from "../../../std/core/vec.yoop";
+import { disposable } from "../../../std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let v: Vec<int32> = vec_new(4);
+    printf(`leaked: ${v.cap}\n`);
+    return 0;
+}

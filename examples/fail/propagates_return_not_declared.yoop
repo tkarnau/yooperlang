@@ -6,18 +6,18 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-kind usedisposable {
+kind disposable {
     appliesTo binding;
     requires Disposable;
     mustCall dispose beforeScopeEnd;
 }
 
-type Widget implements Disposable propagates<usedisposable> {
+type Widget implements Disposable propagates<disposable> {
     id: int32,
     function dispose(ref self): void {}
 }
 
-// Missing propagates<usedisposable> on the return type — should be an error.
+// Missing propagates<disposable> on the return type — should be an error.
 function make_widget(): Widget {
     return { id: 1 };
 }
@@ -26,4 +26,4 @@ function main(): int32 {
     return 0;
 }
 
-// Fails: function returns a value of type Widget carrying propagates<usedisposable>
+// Fails: function returns a value of type Widget carrying propagates<disposable>

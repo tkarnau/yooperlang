@@ -12,20 +12,20 @@ trait Disposable {
     function dispose(ref self): void;
 }
 
-kind usedisposable {
+kind disposable {
     appliesTo binding;
     requires Disposable;
     mustCall dispose beforeScopeEnd;
 }
 
-type Resource implements Disposable propagates<usedisposable> {
+type Resource implements Disposable propagates<disposable> {
     id: int32,
     function dispose(ref self): void {
         printf(`disposed(${self.id})\n`);
     }
 }
 
-function make_resource(): Resource propagates<usedisposable> {
+function make_resource(): Resource propagates<disposable> {
     return { id: 7 };
 }
 

@@ -1,0 +1,53 @@
+import.unsafe;
+
+extern "C" from "unistd.h" {
+    function pipe(fds: unsafe_ptr<c_int>): c_int;
+    function read(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
+    function write(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
+    function close(fd: c_int): c_int;
+}
+
+extern "C" from "yoop_runtime" {
+    function yoop_io_wait_readable(fd: c_int): c_int;
+    function yoop_sleep_ms(ms: c_size_t): c_int;
+}
+
+task reader(rfd: c_int): int32 {
+    let rc: c_int = yoop_io_wait_readable(rfd);
+    if (rc != 0) {
+        return -1;
+    }
+    let buf: uint8[] = [0];
+    let n: c_ssize_t = read(rfd, buf.ptr, 1);
+    if (n != 1) {
+        return -2;
+    }
+    return int32(buf[0]);
+}
+
+function main(): int32 {
+    let fds: c_int[] = [0, 0];
+    let rc_pipe: c_int = pipe(fds.ptr);
+    if (rc_pipe != 0) {
+        printf(`pipe failed\n`);
+        return 1;
+    }
+    let rfd: c_int = fds[0];
+    let wfd: c_int = fds[1];
+
+    joined r = reader(rfd);
+
+    // Give the reader time to actually park inside the multiplexer
+    // before we write — exercises the suspend+resume path.
+    let s_rc: c_int = yoop_sleep_ms(20);
+
+    let msg: uint8[] = [88];  // ASCII 'X'
+    let wn: c_ssize_t = write(wfd, msg.ptr, 1);
+
+    let got: int32 = wait r;
+    printf(`got=${got}\n`);
+
+    let cr: c_int = close(rfd);
+    let cw: c_int = close(wfd);
+    return 0;
+}

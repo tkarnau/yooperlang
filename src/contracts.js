@@ -96,6 +96,9 @@ export const ASTNodeKind = Object.freeze({
   NULL_LITERAL: "NULL_LITERAL",
   UNSAFE_PTR_CAST: "UNSAFE_PTR_CAST",
 
+  // phase 8.D: errno intrinsics
+  ERRNO_INTRINSIC: "ERRNO_INTRINSIC",
+
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
 });

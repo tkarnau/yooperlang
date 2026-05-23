@@ -1,24 +1,24 @@
 // Safe, generic dynamic array.
 //
-//   - `DynArray<T> implements Disposable propagates<usedisposable>`:
-//     the type itself is the disposable thing, and its `propagates<usedisposable>`
+//   - `DynArray<T> implements Disposable propagates<disposable>`:
+//     the type itself is the disposable thing, and its `propagates<disposable>`
 //     clause says: every binding of `DynArray<T>` carries the dispose obligation
 //     and must either fulfil it or pass it on. There is no way to use a value
 //     of this type that silently leaks the obligation.
-//   - `new_dynarray<T>(...): DynArray<T> propagates<usedisposable>`:
+//   - `new_dynarray<T>(...): DynArray<T> propagates<disposable>`:
 //     factory that pushes the obligation through its return type to the caller.
-//     The function must declare `propagates<usedisposable>`, otherwise the
+//     The function must declare `propagates<disposable>`, otherwise the
 //     return is rejected — a helper that creates a DynArray either disposes
 //     it locally or hands the dispose obligation up to its caller.
-//   - At a call site (main) the binding's `usedisposable` keyword opts into
+//   - At a call site (main) the binding's `disposable` keyword opts into
 //     auto-cleanup: the compiler injects `Disposable.dispose(ref arr)` at
 //     scope end. A plain `let arr: DynArray<int32> = ...` is also legal but
 //     then the user must either call `Disposable.dispose(ref arr)` manually
-//     or return `arr` from a function that propagates `usedisposable`.
+//     or return `arr` from a function that propagates `disposable`.
 //
-// Try dropping `propagates<usedisposable>` from `new_dynarray` and the compiler
+// Try dropping `propagates<disposable>` from `new_dynarray` and the compiler
 // will reject the return: the kind's obligation has nowhere to go. Try dropping
-// the `usedisposable` keyword on `arr` in main without adding a manual dispose
+// the `disposable` keyword on `arr` in main without adding a manual dispose
 // call, and the compiler will reject the binding for an unsatisfied obligation.
 
 /*
@@ -40,16 +40,16 @@ trait Disposable {
 }
 
 
-kind usedisposable {
+kind disposable {
     appliesTo binding;
     requires Disposable;
     ownsBlock;
     mustCall dispose beforeScopeEnd;
 }
 
-// The generic struct *is* the Disposable. `propagates<usedisposable>` says
+// The generic struct *is* the Disposable. `propagates<disposable>` says
 // "every binding of me inherits the dispose obligation."
-type DynArray<T> implements Disposable propagates<usedisposable> {
+type DynArray<T> implements Disposable propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
@@ -66,12 +66,12 @@ type DynArray<T> implements Disposable propagates<usedisposable> {
     }
 }
 
-// Factory. `propagates<usedisposable>` on the return type transfers the
+// Factory. `propagates<disposable>` on the return type transfers the
 // dispose obligation to the caller. The local `newArr` does NOT declare the
 // kind keyword — the function's propagates clause is what allows it to escape
-// via return without local discharge. Adding `usedisposable` here would mean
+// via return without local discharge. Adding `disposable` here would mean
 // "I'll dispose this locally", which contradicts returning it.
-function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<usedisposable> {
+function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
     let newArr: DynArray<T> = { data: heap_alloc(initial_cap), len: 0, cap: initial_cap, isDisposed: false };
 
     return newArr;
@@ -100,9 +100,9 @@ function get<T>(a: ref DynArray<T>, i: usize): T {
 }
 
 function main(): int32 {
-    // `usedisposable` opts into auto-cleanup at scope end. The compiler
+    // `disposable` opts into auto-cleanup at scope end. The compiler
     // injects `Disposable.dispose(ref arr)` before this function returns.
-    usedisposable arr: DynArray<int32> = new_dynarray(4) {
+    disposable arr: DynArray<int32> = new_dynarray(4) {
         // Force two grow passes (4 -> 8 -> 16).
         let i: int32 = 0;
         while (i < 10) {

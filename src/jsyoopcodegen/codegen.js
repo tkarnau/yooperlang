@@ -58,6 +58,11 @@ const RUNTIME_DECLARES = [
   "declare void @yoop_task_free_sync_pair(ptr)",
   "declare ptr @malloc(i64)",
   "declare void @free(ptr)",
+  "declare ptr @memcpy(ptr, ptr, i64)",
+  // Phase 8.D: errno bridge — see runtime/yoop_runtime.c
+  "declare i32 @yoop_errno_get()",
+  "declare void @yoop_errno_set(i32)",
+  "declare ptr @yoop_errno_message(i32)",
 ];
 
 export function llvmType(yoopType) {
@@ -747,6 +752,27 @@ export function codegen(ast) {
         return { val: tmp, yoopType: pointee };
       }
 
+      case ASTNodeKind.ERRNO_INTRINSIC: {
+        // Phase 8.D: lower to runtime helpers in yoop_runtime.c.
+        if (node.op === "get") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call i32 @yoop_errno_get()`);
+          return { val: tmp, yoopType: PrimType("int32") };
+        }
+        if (node.op === "set") {
+          const arg = emitExpr(node.operand, fnLines);
+          fnLines.push(`  call void @yoop_errno_set(i32 ${arg.val})`);
+          return { val: "", yoopType: VoidType() };
+        }
+        if (node.op === "message") {
+          const arg = emitExpr(node.operand, fnLines);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call ptr @yoop_errno_message(i32 ${arg.val})`);
+          return { val: tmp, yoopType: PrimType("string") };
+        }
+        throw new Error(`codegen: unknown errno intrinsic "${node.op}"`);
+      }
+
       case ASTNodeKind.UNSAFE_PTR_CAST: {
         // Phase 8.A: bitcast / ptrtoint / inttoptr.
         const operand = emitExpr(node.operand, fnLines);
@@ -763,6 +789,25 @@ export function codegen(ast) {
           const srcLlvmTy = llvmType(operand.yoopType);
           fnLines.push(`  ${tmp} = inttoptr ${srcLlvmTy} ${operand.val} to ptr`);
           return { val: tmp, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toArray") {
+          // Phase 8.C: build a fat-pointer view {data: operand, len: lenVal}.
+          // No copy — the array borrows the underlying memory.
+          const arrayType = node.resolvedType;
+          ensureArrayTypeDef(arrayType.elem);
+          const arrayLlvmTy = llvmType(arrayType);
+          const len = emitExpr(node.lengthOperand, fnLines);
+          const fatSlot = freshTemp();
+          fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+          fnLines.push(`  store ptr ${operand.val}, ptr ${dataField}`);
+          const lenField = freshTemp();
+          fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+          fnLines.push(`  store i64 ${len.val}, ptr ${lenField}`);
+          const fatVal = freshTemp();
+          fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+          return { val: fatVal, yoopType: arrayType };
         }
         throw new Error(`codegen: unknown unsafe_ptr cast kind "${node.castKind}"`);
       }
@@ -871,6 +916,16 @@ export function codegen(ast) {
           const lenVal = freshTemp();
           fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
           return { val: lenVal, yoopType: PrimType("usize") };
+        }
+        // Phase 8.C: `xs.ptr` — GEP field 0 of the fat pointer, load.
+        if (node.isArrayPtr) {
+          const lv = emitLvalue(node.object, fnLines);
+          const arrayLlvmTy = llvmType(lv.type);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${lv.ptr}, i32 0, i32 0`);
+          const dataVal = freshTemp();
+          fnLines.push(`  ${dataVal} = load ptr, ptr ${dataField}`);
+          return { val: dataVal, yoopType: node.resolvedType };
         }
         const lv = emitLvalue(node, fnLines);
         const llvmTy = llvmType(lv.type);
@@ -1479,6 +1534,9 @@ export function codegen(ast) {
     // copy params into stack slots so they're addressable like locals
     for (const p of params) {
       const ty = p.resolvedType;
+      // Phase 8.H: ensure %yoop_array.<T> is emitted for array-typed params,
+      // since the alloca below names that struct type.
+      if (ty.kind === typeKinds.array) ensureArrayTypeDef(ty.elem);
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
       const align = effectiveAlign(ty, p.resolvedKindApplication);
@@ -1675,6 +1733,14 @@ function needsStrlen(node) {
         return;
       }
     }
+    // Phase 8.H: string_as_bytes calls strlen internally.
+    if (
+      n.kind === ASTNodeKind.CALL_EXPRESSION &&
+      n.genericInstantiation?.declId === "$builtin__string_as_bytes"
+    ) {
+      found = true;
+      return;
+    }
     for (const val of Object.values(n)) {
       if (Array.isArray(val)) val.forEach(walk);
       else if (val && typeof val === "object" && val.kind) walk(val);
@@ -1814,6 +1880,9 @@ function roundUp(x, a) {
 // ** binary op resolution ****************************
 
 // LLVM docs: https://llvm.org/docs/LangRef.html
+//
+// Signed-int op map. For unsigned integer types we substitute the
+// signedness-aware variants below in `binaryInstruction`.
 const INT_OP_MAP = {
   plus: "add",
   minus: "sub",
@@ -1847,10 +1916,36 @@ const FLOAT_OP_MAP = {
   gte: "fcmp oge",
 };
 
+// Phase 8.H: comparison/division ops must distinguish signed and unsigned
+// integer types — LLVM has separate opcodes (icmp slt vs icmp ult, sdiv vs
+// udiv, etc.). Without this, uint8 comparisons against literals > 127
+// silently produce wrong results (the byte 128 becomes -128 signed).
+const UNSIGNED_INT_OVERRIDES = {
+  divide: "udiv",
+  modulus: "urem",
+  lt: "icmp ult",
+  gt: "icmp ugt",
+  lte: "icmp ule",
+  gte: "icmp uge",
+  rshift: "lshr",
+};
+
 function binaryInstruction(op, opType) {
   const useFloat = opType.kind === typeKinds.prim && isFloatPrim(opType.name);
-  const map = useFloat ? FLOAT_OP_MAP : INT_OP_MAP;
-  const instr = map[op];
+  if (useFloat) {
+    const instr = FLOAT_OP_MAP[op];
+    if (!instr)
+      throw new Error(
+        `codegen: unknown binary op "${op}" for type ${opType.kind}/${opType.name ?? ""}`,
+      );
+    return instr;
+  }
+  const isUnsignedInt =
+    opType.kind === typeKinds.prim && isUnsignedIntPrim(opType.name);
+  if (isUnsignedInt && UNSIGNED_INT_OVERRIDES[op]) {
+    return UNSIGNED_INT_OVERRIDES[op];
+  }
+  const instr = INT_OP_MAP[op];
   if (!instr)
     throw new Error(
       `codegen: unknown binary op "${op}" for type ${opType.kind}/${opType.name ?? ""}`,
@@ -2361,6 +2456,41 @@ function codegenWithModuleId(
     }
   }
 
+  // Phase 8.E: collect module-level let/const decls and emit one LLVM
+  // `@<modid>__<name>` global per binding with `zeroinitializer`. The
+  // initializer expression itself runs in the synthesized `<modid>__module_init`
+  // function emitted at the bottom of this pass. Order is source order —
+  // matches the typechecker's mod.moduleInitDecls.
+  //
+  // (Bytecode/CTE future) — a future evaluator could classify some inits
+  // as constant-foldable, emit them as the LLVM initial value, and drop
+  // them from the runtime init function. The MVP routes everything
+  // through the runtime function.
+  const moduleLevelDecls = [];
+  for (const decl of ast.body) {
+    const d = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
+    if (
+      (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
+      d.isModuleLevel
+    ) {
+      moduleLevelDecls.push(d);
+      const sym = `@${moduleId}__${d.name}`;
+      const lty = llvmType(d.resolvedType);
+      const linkage = decl.kind === ASTNodeKind.EXPORT_DECL ? "" : "internal ";
+      globals.push(`${sym} = ${linkage}global ${lty} zeroinitializer, align 8`);
+    }
+  }
+  // Register the symbols on programState so the entry module's `main`
+  // emission can call each module's `__module_init` after yoop_runtime_init.
+  if (moduleLevelDecls.length > 0) {
+    if (programState && !programState.moduleInitSymbols) {
+      programState.moduleInitSymbols = [];
+    }
+    if (programState?.moduleInitSymbols) {
+      programState.moduleInitSymbols.push(`${moduleId}__module_init`);
+    }
+  }
+
   // Collect function sigs. Phase 7.1: skip generic decls — their
   // instantiations register their own sigs in the registry.
   for (const decl of ast.body) {
@@ -2417,6 +2547,11 @@ function codegenWithModuleId(
     }
     // TRAIT_DECL: no codegen — traits are compile-time only
   }
+
+  // Phase 8.E: emit the synthesized module-init function for this module's
+  // top-level let/const initializers (after user functions so any user
+  // function called from an initializer is already declared above).
+  emitModuleInit(moduleLevelDecls);
 
   // Phase 7.1: emit one function per generic instantiation owned by this
   // module (registry tracks each instance's source module).
@@ -2572,10 +2707,23 @@ function codegenWithModuleId(
     const subprogramRef = makeSubprogram(node.name ?? symName, symName, node.sourceLoc);
     const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
     const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
-    if (inMainFn) fnLines.push("  call void @yoop_runtime_init()");
+    if (inMainFn) {
+      fnLines.push("  call void @yoop_runtime_init()");
+      // Phase 8.E: run every module's __module_init in topological order.
+      // The list is populated as each module is codegen'd (see the
+      // moduleLevelDecls block earlier in this file). Order matches the
+      // module graph's topological order from loadModuleGraph.
+      const initSyms = programState?.moduleInitSymbols ?? [];
+      for (const sym of initSyms) {
+        fnLines.push(`  call void @${sym}()`);
+      }
+    }
     for (let i = 0; i < params.length; i++) {
       const p = params[i];
       const ty = p.resolvedType;
+      // Phase 8.H: ensure %yoop_array.<T> is emitted for array-typed params,
+      // since the alloca below names that struct type.
+      if (ty.kind === typeKinds.array) ensureArrayTypeDef(ty.elem);
       const llvmTy = llvmType(ty);
       symbols.set(p.name, ty);
       const al = effectiveAlign(ty, p.resolvedKindApplication);
@@ -2605,6 +2753,37 @@ function codegenWithModuleId(
     finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc);
     lines.push(...fnLines);
     inMainFn = prevInMain;
+  }
+
+  // Phase 8.E: synthesize @<modid>__module_init that runs every top-level
+  // let/const initializer in source order, storing into the corresponding
+  // @global. Called from main right after yoop_runtime_init() (see emitFn).
+  //
+  // (Bytecode/CTE future) — this is the smallest discrete codegen entity
+  // for a CTE pass: parameter-free, returns void, operates only on
+  // module-owned @globals. A future evaluator can replace this with
+  // bytecode interpretation, or skip it entirely when every init has
+  // been folded to an LLVM @global initial value.
+  function emitModuleInit(decls) {
+    if (decls.length === 0) return;
+    tempCounter = 0;
+    labelCounter = 0;
+    symbols = new Map();
+    const symName = `${moduleId}__module_init`;
+    const fnLines = [
+      `define internal void @${symName}() {`,
+      "entry:",
+    ];
+    for (const d of decls) {
+      const initVal = emitExpr(d.assignment, fnLines);
+      const lty = llvmType(d.resolvedType);
+      const gsym = `@${moduleId}__${d.name}`;
+      fnLines.push(`  store ${lty} ${initVal.val}, ptr ${gsym}`);
+    }
+    fnLines.push("  ret void");
+    fnLines.push("}");
+    hoistAllocasToEntry(fnLines);
+    lines.push(...fnLines);
   }
 
   function emitMethodFn(methodDecl, structType) {
@@ -2874,6 +3053,17 @@ function codegenWithModuleId(
         return { val: node.value ? "1" : "0", yoopType: PrimType("bool") };
       }
       case ASTNodeKind.IDENT: {
+        // Phase 8.E: module-level globals load from @<modid>__<name>.
+        // The typechecker tags every IDENT that resolves via moduleSymbols
+        // (and is not a function / namespace) with isModuleGlobal + the
+        // pre-mangled symbol so codegen doesn't have to re-derive it.
+        if (node.isModuleGlobal) {
+          const yoopType = node.resolvedType;
+          const llvmTy = llvmType(yoopType);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = load ${llvmTy}, ptr @${node.moduleGlobalSym}`);
+          return { val: tmp, yoopType };
+        }
         const yoopType = symbols.get(node.name);
         if (!yoopType) throw new Error(`codegen: unknown identifier "${node.name}"`);
         if (node.autoDeref) {
@@ -2942,6 +3132,26 @@ function codegenWithModuleId(
         fnLines.push(`  ${tmp} = load ${llvmTy}, ptr ${p.val}`);
         return { val: tmp, yoopType: pointee };
       }
+      case ASTNodeKind.ERRNO_INTRINSIC: {
+        // Phase 8.D: lower to runtime helpers in yoop_runtime.c.
+        if (node.op === "get") {
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call i32 @yoop_errno_get()`);
+          return { val: tmp, yoopType: PrimType("int32") };
+        }
+        if (node.op === "set") {
+          const arg = emitExpr(node.operand, fnLines);
+          fnLines.push(`  call void @yoop_errno_set(i32 ${arg.val})`);
+          return { val: "", yoopType: VoidType() };
+        }
+        if (node.op === "message") {
+          const arg = emitExpr(node.operand, fnLines);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = call ptr @yoop_errno_message(i32 ${arg.val})`);
+          return { val: tmp, yoopType: PrimType("string") };
+        }
+        throw new Error(`codegen: unknown errno intrinsic "${node.op}"`);
+      }
       case ASTNodeKind.UNSAFE_PTR_CAST: {
         const operand = emitExpr(node.operand, fnLines);
         if (node.castKind === "bitcast") {
@@ -2957,6 +3167,24 @@ function codegenWithModuleId(
           const srcLlvmTy = llvmType(operand.yoopType);
           fnLines.push(`  ${tmp} = inttoptr ${srcLlvmTy} ${operand.val} to ptr`);
           return { val: tmp, yoopType: node.resolvedType };
+        }
+        if (node.castKind === "toArray") {
+          // Phase 8.C: fat-pointer view {data, len}. No copy.
+          const arrayType = node.resolvedType;
+          ensureArrayTypeDef(arrayType.elem);
+          const arrayLlvmTy = llvmType(arrayType);
+          const len = emitExpr(node.lengthOperand, fnLines);
+          const fatSlot = freshTemp();
+          fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+          fnLines.push(`  store ptr ${operand.val}, ptr ${dataField}`);
+          const lenField = freshTemp();
+          fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+          fnLines.push(`  store i64 ${len.val}, ptr ${lenField}`);
+          const fatVal = freshTemp();
+          fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+          return { val: fatVal, yoopType: arrayType };
         }
         throw new Error(`codegen: unknown unsafe_ptr cast kind "${node.castKind}"`);
       }
@@ -2981,6 +3209,16 @@ function codegenWithModuleId(
       case ASTNodeKind.ASSIGNMENT: {
         if (node.target.kind === ASTNodeKind.IDENT) {
           const targetName = node.target.name;
+          // Phase 8.E: assignment to a module-level let stores into the
+          // @<modid>__<name> global. The typechecker rejected cross-
+          // module imported targets, so any isModuleGlobal here is
+          // module-local writable.
+          if (node.target.isModuleGlobal) {
+            const lhsType = node.target.resolvedType;
+            const rhs = emitExpr(node.value, fnLines);
+            fnLines.push(`  store ${llvmType(lhsType)} ${rhs.val}, ptr @${node.target.moduleGlobalSym}`);
+            return rhs;
+          }
           const lhsType = symbols.get(targetName);
           if (node.target.autoDerefWrite) {
             const innerType = lhsType.inner;
@@ -3038,6 +3276,16 @@ function codegenWithModuleId(
           const lenVal = freshTemp();
           fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
           return { val: lenVal, yoopType: PrimType("usize") };
+        }
+        // Phase 8.C: `xs.ptr` — GEP field 0 of the fat pointer, load.
+        if (node.isArrayPtr) {
+          const lv = emitLval(node.object, fnLines);
+          const arrayLlvmTy = llvmType(lv.type);
+          const dataField = freshTemp();
+          fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${lv.ptr}, i32 0, i32 0`);
+          const dataVal = freshTemp();
+          fnLines.push(`  ${dataVal} = load ptr, ptr ${dataField}`);
+          return { val: dataVal, yoopType: node.resolvedType };
         }
         const lv = emitLval(node, fnLines);
         const tmp = freshTemp();
@@ -3199,10 +3447,10 @@ function codegenWithModuleId(
     return { val: resVal, yoopType: resultType };
   }
 
-  // Inline emission for the heap_alloc / heap_free builtin generic functions.
-  // These have `genericInstantiation.declId` starting with `$builtin` and no
-  // AST body; codegen lowers each call to a malloc/free directly.
-  function emitBuiltinHeapCall(node, fnLines) {
+  // Inline emission for builtin generic functions: heap_alloc / heap_free
+  // (Phase 7+) and array_slice (Phase 8.H). These have `declId` starting with
+  // `$builtin` and no AST body; codegen lowers each call directly.
+  function emitBuiltinGenericCall(node, fnLines) {
     const inst = node.genericInstantiation;
     if (inst.declId === "$builtin__heap_alloc") {
       const elemType = inst.argTypes[0];
@@ -3249,12 +3497,104 @@ function codegenWithModuleId(
       fnLines.push(`  call void @free(ptr ${dataPtr})`);
       return { val: "void", yoopType: VoidType() };
     }
+    if (inst.declId === "$builtin__string_as_bytes") {
+      // Phase 8.H: zero-copy view {s, strlen(s)} as uint8[].
+      const arrayType = ArrayType(PrimType("uint8"));
+      ensureArrayTypeDef(PrimType("uint8"));
+      const arrayLlvmTy = llvmType(arrayType);
+      const sArg = emitExpr(node.args[0], fnLines);
+      const lenTmp = freshTemp();
+      fnLines.push(`  ${lenTmp} = call i64 @strlen(ptr ${sArg.val})`);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${sArg.val}, ptr ${dataField}`);
+      const lenField = freshTemp();
+      fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${lenTmp}, ptr ${lenField}`);
+      const fatVal = freshTemp();
+      fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+      return { val: fatVal, yoopType: arrayType };
+    }
+    if (inst.declId === "$builtin__string_from_bytes_unchecked") {
+      // Phase 8.H: malloc(buf.len + 1), memcpy from buf.ptr, write nul.
+      // Returns the malloc'd ptr as a string (zero-terminated UTF-8 by
+      // contract — caller asserts UTF-8 validity).
+      const arrayType = ArrayType(PrimType("uint8"));
+      ensureArrayTypeDef(PrimType("uint8"));
+      const arrayLlvmTy = llvmType(arrayType);
+      const bufArg = emitExpr(node.args[0], fnLines);
+      // Extract buf.ptr and buf.len from the fat pointer.
+      const bufSlot = freshTemp();
+      fnLines.push(`  ${bufSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${bufArg.val}, ptr ${bufSlot}`);
+      const bufDataField = freshTemp();
+      fnLines.push(`  ${bufDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${bufSlot}, i32 0, i32 0`);
+      const bufDataPtr = freshTemp();
+      fnLines.push(`  ${bufDataPtr} = load ptr, ptr ${bufDataField}`);
+      const bufLenField = freshTemp();
+      fnLines.push(`  ${bufLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${bufSlot}, i32 0, i32 1`);
+      const bufLenVal = freshTemp();
+      fnLines.push(`  ${bufLenVal} = load i64, ptr ${bufLenField}`);
+      // alloc len + 1 bytes for the nul terminator.
+      const allocSize = freshTemp();
+      fnLines.push(`  ${allocSize} = add i64 ${bufLenVal}, 1`);
+      const raw = freshTemp();
+      fnLines.push(`  ${raw} = call ptr @malloc(i64 ${allocSize})`);
+      // Copy the bytes in.
+      fnLines.push(`  call ptr @memcpy(ptr ${raw}, ptr ${bufDataPtr}, i64 ${bufLenVal})`);
+      // Write the nul terminator at p[len].
+      const nulPtr = freshTemp();
+      fnLines.push(`  ${nulPtr} = getelementptr inbounds i8, ptr ${raw}, i64 ${bufLenVal}`);
+      fnLines.push(`  store i8 0, ptr ${nulPtr}`);
+      return { val: raw, yoopType: PrimType("string") };
+    }
+    if (inst.declId === "$builtin__array_slice") {
+      // Phase 8.H: array_slice<T>(xs, start, end) — borrowing view, no copy.
+      // Build {xs.ptr + start * sizeof(T), end - start} as a fresh fat pointer.
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      const arrayLlvmTy = llvmType(arrayType);
+      const elemLlvmTy = llvmType(elemType);
+      // Emit args.
+      const fatArg = emitExpr(node.args[0], fnLines);
+      const startArg = emitExpr(node.args[1], fnLines);
+      const endArg = emitExpr(node.args[2], fnLines);
+      // Extract source data pointer.
+      const srcSlot = freshTemp();
+      fnLines.push(`  ${srcSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${srcSlot}`);
+      const srcDataField = freshTemp();
+      fnLines.push(`  ${srcDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${srcSlot}, i32 0, i32 0`);
+      const srcDataPtr = freshTemp();
+      fnLines.push(`  ${srcDataPtr} = load ptr, ptr ${srcDataField}`);
+      // Compute element-typed offset: srcDataPtr + start (in element units).
+      const newDataPtr = freshTemp();
+      fnLines.push(`  ${newDataPtr} = getelementptr inbounds ${elemLlvmTy}, ptr ${srcDataPtr}, i64 ${startArg.val}`);
+      // Compute new length = end - start.
+      const newLen = freshTemp();
+      fnLines.push(`  ${newLen} = sub i64 ${endArg.val}, ${startArg.val}`);
+      // Build result fat pointer.
+      const resSlot = freshTemp();
+      fnLines.push(`  ${resSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const resDataField = freshTemp();
+      fnLines.push(`  ${resDataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${newDataPtr}, ptr ${resDataField}`);
+      const resLenField = freshTemp();
+      fnLines.push(`  ${resLenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${resSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${newLen}, ptr ${resLenField}`);
+      const resVal = freshTemp();
+      fnLines.push(`  ${resVal} = load ${arrayLlvmTy}, ptr ${resSlot}`);
+      return { val: resVal, yoopType: arrayType };
+    }
     throw new Error(`codegen: unknown builtin generic declId "${inst.declId}"`);
   }
 
   function emitCallExpr(node, fnLines) {
     if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
-      return emitBuiltinHeapCall(node, fnLines);
+      return emitBuiltinGenericCall(node, fnLines);
     }
     if (node.isCast) {
       const src = emitExpr(node.args[0], fnLines);
