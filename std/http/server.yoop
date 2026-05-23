@@ -8,11 +8,11 @@
 // `ref` parameters more broadly.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
 import { Readable, Writable } from "../core/traits.yoop";
 import {
     Vec, vec_new, vec_push, vec_get, vec_as_array, vec_set,
 } from "../core/vec.yoop";
-import { ReadOutcome, WriteOutcome } from "../core/traits.yoop";
 import { SocketAddr } from "../net/addr.yoop";
 import {
     TcpListener, TcpStream, AcceptResult, ListenResult,
@@ -29,18 +29,24 @@ import {
 
 // ----- Handler trait -----------------------------------------------------
 
-// `HandleOutcome.err` distinguishes "handler ran cleanly" from "it
-// errored." A non-empty err is observed by the server; the connection
-// is closed in either case (no keep-alive in the MVP).
-export type HandleOutcome { err: string }
+// `HandleOutcome` distinguishes "handler ran cleanly" from "it errored".
+// A non-empty `error` is observed by the server; the connection is closed
+// in either case (no keep-alive in the MVP).
+export enum HandleOutcome {
+    Ok,
+    Err { error: string },
+}
 
 export trait Handler {
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
 }
 
 // ----- ServeOutcome -----------------------------------------------------
-
-export type ServeOutcome { served: int32, err: string }
+//
+// Ordinary struct, not a fallible struct: the server reports how many
+// requests it served plus an optional `error`. Caller checks both fields
+// explicitly (no `?` propagation).
+export type ServeOutcome { served: int32, error: string }
 
 // ----- int-to-decimal helper -------------------------------------------
 
@@ -162,12 +168,12 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
             // loop forever; no count check
         } else {
             if (served >= n) {
-                return { served: served, err: "" };
+                return { served: served, error: "" };
             }
         }
         let disposable ar: AcceptResult = tcp_accept(ref l);
-        if (ar.err.len > 0) {
-            return { served: served, err: ar.err };
+        if (ar.error.len > 0) {
+            return { served: served, error: ar.error };
         }
 
         // ----- per-connection read + parse + dispatch + write -----
@@ -176,17 +182,23 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
         let found: bool = false;
         let dos_limit: usize = 65536;
         while (buf.len < dos_limit) {
-            let r: ReadOutcome = Readable.read(ref ar.stream, ref scratch);
-            if (r.err.len > 0) {
-                heap_free(scratch);
-                return { served: served, err: r.err };
+            let r: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref scratch);
+            let r_n: c_ssize_t = 0;
+            let r_err: string = "";
+            switch (r) {
+                case Result.Ok { value: read_n_ok }: { r_n = read_n_ok; }
+                case Result.Err { error: read_e_ok }: { r_err = read_e_ok; }
             }
-            if (r.n == 0) {
+            if (r_err.len > 0) {
                 heap_free(scratch);
-                return { served: served, err: "client closed before request head completed" };
+                return { served: served, error: r_err };
+            }
+            if (r_n == 0) {
+                heap_free(scratch);
+                return { served: served, error: "client closed before request head completed" };
             }
             let i: usize = 0;
-            let avail: usize = usize(r.n);
+            let avail: usize = usize(r_n);
             while (i < avail) {
                 vec_push(ref buf, scratch[i]);
                 i = i + 1;
@@ -202,13 +214,13 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
         if (found) {
             // fall through to parsing
         } else {
-            return { served: served, err: "request head exceeded DoS limit" };
+            return { served: served, error: "request head exceeded DoS limit" };
         }
 
         let parse_view: uint8[] = vec_as_array(ref buf);
         let disposable pr: ParsedRequest = parse_request_head(parse_view);
-        if (pr.err.len > 0) {
-            return { served: served, err: pr.err };
+        if (pr.error.len > 0) {
+            return { served: served, error: pr.error };
         }
 
         let body_start: usize = pr.body_start;
@@ -220,17 +232,23 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
         if (have < need) {
             let extra: uint8[] = heap_alloc(2048);
             while (have < need) {
-                let rr: ReadOutcome = Readable.read(ref ar.stream, ref extra);
-                if (rr.err.len > 0) {
-                    heap_free(extra);
-                    return { served: served, err: rr.err };
+                let rr: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref extra);
+                let rr_n: c_ssize_t = 0;
+                let rr_err: string = "";
+                switch (rr) {
+                    case Result.Ok { value: rr_n_ok }: { rr_n = rr_n_ok; }
+                    case Result.Err { error: rr_e_ok }: { rr_err = rr_e_ok; }
                 }
-                if (rr.n == 0) {
+                if (rr_err.len > 0) {
                     heap_free(extra);
-                    return { served: served, err: "client closed before body complete" };
+                    return { served: served, error: rr_err };
+                }
+                if (rr_n == 0) {
+                    heap_free(extra);
+                    return { served: served, error: "client closed before body complete" };
                 }
                 let k: usize = 0;
-                let avail2: usize = usize(rr.n);
+                let avail2: usize = usize(rr_n);
                 while (k < avail2) {
                     vec_push(ref buf, extra[k]);
                     k = k + 1;
@@ -244,15 +262,22 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
 
         let disposable resp: Response = response_new();
         let outcome: HandleOutcome = Handler.handle(ref handler, ref pr.request, ref resp);
-        let handler_err: string = outcome.err;    // observe
+        // observe outcome; the server logs and continues on either branch
+        switch (outcome) {
+            case HandleOutcome.Ok: { }
+            case HandleOutcome.Err { error: _he }: { }
+        }
 
         let disposable out: Vec<uint8> = vec_new(512);
         write_response(ref resp, ref out);
         let out_view: uint8[] = vec_as_array(ref out);
-        let wo: WriteOutcome = Writable.write(ref ar.stream, ref out_view);
-        let wo_err: string = wo.err;             // observe
+        let wo: Result<c_ssize_t, string> = Writable.write(ref ar.stream, ref out_view);
+        switch (wo) {
+            case Result.Ok { value: write_n }: { }
+            case Result.Err { error: write_e }: { }
+        }
 
         served = served + 1;
     }
-    return { served: served, err: "" };
+    return { served: served, error: "" };
 }

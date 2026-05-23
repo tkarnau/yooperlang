@@ -45,8 +45,6 @@ import {
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope } from "./scope.js";
 import {
-  isFallible,
-  strippedTypeOf,
   isFallibleEnum,
   strippedEnumOkType,
   enumErrPayloadType,
@@ -612,9 +610,6 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${targetName}"`,
   );
-  if (isFallible(binding.type)) {
-    binding.errObserved = false;
-  }
   return setType(node, binding.type);
 }
 
@@ -904,9 +899,6 @@ function resolveFieldAccess(node, scope, ctx) {
       pushError(ctx.errors, fieldLoc, `type "${objType.name}" has no field "${node.field}"`);
     }
     return setType(node, ErrorType());
-  }
-  if (node.field === "err") {
-    markErrObservedThroughRoot(node.object, scope);
   }
   return setType(node, field.type);
 }
@@ -1219,92 +1211,49 @@ function resolveSliceExpression(node, scope, ctx) {
   return setType(node, objType);
 }
 
-// Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT
-// root. If we find one bound in scope, flip its `errObserved` flag so the
-// scope-exit check accepts it.
-export function markErrObservedThroughRoot(exprNode, scope) {
-  let n = exprNode;
-  while (n) {
-    if (n.kind === ASTNodeKind.IDENT) {
-      const b = lookupInScope(scope, n.name);
-      if (b) b.errObserved = true;
-      return;
-    }
-    if (n.kind === ASTNodeKind.FIELD_ACCESS) {
-      n = n.object;
-      continue;
-    }
-    if (n.kind === ASTNodeKind.TRY_OP) {
-      n = n.operand;
-      continue;
-    }
-    return;
-  }
-}
-
-// `expr?` — postfix propagator.
-// Phase 9.H: also accepts a fallible-enum operand (an enum with exactly two
-// variants named `Ok` and `Err`). For struct-fallibles the err field is a
-// `string`; for enum-fallibles it's whatever the `Err` variant's payload
-// type is, and the enclosing function's return must be a fallible enum with
-// the same Err payload type (cross-shape propagation is deferred).
+// `expr?` — postfix propagator over a fallible enum (Phase 9.H).
+// A fallible operand is an enum with two variants named `Ok` and `Err`,
+// each with zero or one payload field. The enclosing function must also
+// return a fallible enum, and the two Err payload types must match
+// (cross-shape propagation is Phase 10.E work).
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
 
-  // Fallible-enum path.
-  if (isFallibleEnum(operandType)) {
-    const retType = ctx.funcReturnType;
-    if (!isFallibleEnum(retType)) {
-      pushError(
-        ctx.errors,
-        node,
-        `'?' on enum ${formatType(operandType)} requires the enclosing function to return a fallible enum (Ok/Err); '${ctx.funcName}' returns ${formatType(retType)}`,
-      );
-      return setType(node, ErrorType());
-    }
-    const operandErr = enumErrPayloadType(operandType);
-    const returnErr = enumErrPayloadType(retType);
-    if (!typesEqual(operandErr, returnErr)) {
-      pushError(
-        ctx.errors,
-        node,
-        `'?' cannot propagate Err of ${formatType(operandErr)} into a function returning Err of ${formatType(returnErr)} — same Err payload type is required (cross-shape propagation is deferred)`,
-      );
-      return setType(node, ErrorType());
-    }
-    markErrObservedThroughRoot(node.operand, scope);
-    node.fallibleEnum = true;
-    return setType(node, strippedEnumOkType(operandType));
-  }
-
-  if (!isFallible(operandType)) {
+  if (!isFallibleEnum(operandType)) {
     pushError(
       ctx.errors,
       node,
-      `'?' applied to non-fallible type ${formatType(operandType)} — only structs ending in 'err: string' or enums with Ok/Err variants are fallible`,
-    );
-    return setType(node, ErrorType());
-  }
-  if (!isFallible(ctx.funcReturnType)) {
-    pushError(
-      ctx.errors,
-      node,
-      `'?' is only legal inside a function that returns a fallible type; '${ctx.funcName}' returns ${formatType(ctx.funcReturnType)}`,
+      `'?' applied to non-fallible type ${formatType(operandType)} — only enums with Ok/Err variants are fallible`,
     );
     return setType(node, ErrorType());
   }
 
-  markErrObservedThroughRoot(node.operand, scope);
-
-  const stripped = strippedTypeOf(operandType);
-  if (stripped && stripped.kind === "strippedMulti") {
-    node.strippedMulti = stripped;
+  const retType = ctx.funcReturnType;
+  if (!isFallibleEnum(retType)) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' is only legal inside a function that returns a fallible enum (Ok/Err); '${ctx.funcName}' returns ${formatType(retType)}`,
+    );
     return setType(node, ErrorType());
   }
-  return setType(node, stripped);
+
+  const operandErr = enumErrPayloadType(operandType);
+  const returnErr = enumErrPayloadType(retType);
+  if (!typesEqual(operandErr, returnErr)) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' cannot propagate Err of ${formatType(operandErr)} into a function returning Err of ${formatType(returnErr)} — same Err payload type is required (cross-shape propagation is deferred)`,
+    );
+    return setType(node, ErrorType());
+  }
+
+  node.fallibleEnum = true;
+  return setType(node, strippedEnumOkType(operandType));
 }
 
 function resolveOrphanStructLiteral(node, scope, ctx) {
@@ -1650,14 +1599,6 @@ export function checkInitializer(
     }
   }
   const valueType = resolveExprType(valueNode, scope, ctx);
-  if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
-    pushError(
-      ctx.errors,
-      valueNode,
-      `'?' on multi-field fallible type 'struct ${valueNode.strippedMulti.sourceName}' must be destructured (e.g. const { a, b } = f()?;)`,
-    );
-    return ErrorType();
-  }
   if (!isAssignable(expectedType, valueType)) {
     pushError(ctx.errors, valueNode, mismatchMessage(valueType));
   }

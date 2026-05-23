@@ -17,14 +17,12 @@ import {
     bytes_slice,
 } from "./bytes.yoop";
 
-import { Maybe } from "./types.yoop";
+import { Result } from "./types.yoop";
 
 // Fresh-string construction from a UTF-8 byte buffer. Validates the bytes
 // are well-formed UTF-8 (per RFC 3629, with the 4-byte-max cap). On invalid
-// input, returns "" with `err` set.
-// export type StringFromBytes { value: string, err: string }
-
-export function string_from_bytes(buf: uint8[]): Maybe<string> {
+// input, returns `Err` with a diagnostic.
+export function string_from_bytes(buf: uint8[]): Result<string, string> {
     let i: usize = 0;
     while (i < buf.len) {
         let first: uint8 = buf[i];
@@ -32,7 +30,7 @@ export function string_from_bytes(buf: uint8[]): Maybe<string> {
         if (first < 128) {
             seq_len = 1;
         } else if (first < 194) {
-            return { value: "", err: "string_from_bytes: invalid UTF-8 start byte" };
+            return Result.Err { error: "string_from_bytes: invalid UTF-8 start byte" };
         } else if (first < 224) {
             seq_len = 2;
         } else if (first < 240) {
@@ -40,22 +38,22 @@ export function string_from_bytes(buf: uint8[]): Maybe<string> {
         } else if (first < 245) {
             seq_len = 4;
         } else {
-            return { value: "", err: "string_from_bytes: invalid UTF-8 start byte" };
+            return Result.Err { error: "string_from_bytes: invalid UTF-8 start byte" };
         }
         if (i + seq_len > buf.len) {
-            return { value: "", err: "string_from_bytes: truncated UTF-8 sequence" };
+            return Result.Err { error: "string_from_bytes: truncated UTF-8 sequence" };
         }
         let j: usize = 1;
         while (j < seq_len) {
             let c: uint8 = buf[i + j];
             if (c < 128 || c >= 192) {
-                return { value: "", err: "string_from_bytes: malformed continuation byte" };
+                return Result.Err { error: "string_from_bytes: malformed continuation byte" };
             }
             j = j + 1;
         }
         i = i + seq_len;
     }
-    return { value: string_from_bytes_unchecked(buf), err: "" };
+    return Result.Ok { value: string_from_bytes_unchecked(buf) };
 }
 
 // String equality. Byte-wise comparison of the underlying UTF-8.
@@ -82,30 +80,28 @@ export function string_index_of(s: string, needle: string): usize {
 // or `end` would split a multi-byte UTF-8 codepoint (verified by checking
 // that neither lands on a continuation byte 0x80-0xBF, except at the
 // boundaries where there's nothing to split).
-export type StringSlice { value: string, err: string }
-
-export function string_slice(s: string, start: usize, end: usize): StringSlice {
+export function string_slice(s: string, start: usize, end: usize): Result<string, string> {
     let bytes: uint8[] = string_as_bytes(s);
     if (end > bytes.len) {
-        return { value: "", err: "string_slice: end > s.len" };
+        return Result.Err { error: "string_slice: end > s.len" };
     }
     if (start > end) {
-        return { value: "", err: "string_slice: start > end" };
+        return Result.Err { error: "string_slice: start > end" };
     }
     if (start > 0 && start < bytes.len) {
         let c_start: uint8 = bytes[start];
         if (c_start >= 128 && c_start < 192) {
-            return { value: "", err: "string_slice: start is mid-codepoint" };
+            return Result.Err { error: "string_slice: start is mid-codepoint" };
         }
     }
     if (end > 0 && end < bytes.len) {
         let c_end: uint8 = bytes[end];
         if (c_end >= 128 && c_end < 192) {
-            return { value: "", err: "string_slice: end is mid-codepoint" };
+            return Result.Err { error: "string_slice: end is mid-codepoint" };
         }
     }
     let view: uint8[] = bytes_slice(bytes, start, end);
-    return { value: string_from_bytes_unchecked(view), err: "" };
+    return Result.Ok { value: string_from_bytes_unchecked(view) };
 }
 
 // Concat two strings into one fresh heap-allocated string.

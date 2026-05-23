@@ -32,7 +32,6 @@ import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
   lookupGenericFunc,
-  markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
 import { lookupBuiltinKind } from "./builtinKinds.js";
@@ -46,8 +45,8 @@ function resolveKindByName(name, typeContext) {
   );
 }
 import { TaskType } from "./types.js";
-import { isFallible, } from "./fallible.js";
 import { isAssignable } from "./coerce.js";
+import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
 export function validateMethod(methodDecl, structType, typeContext, errors) {
   const scope = pushScope(null);
@@ -580,14 +579,10 @@ function checkArrayLiteralWithElemType(litNode, elemType, scope, ctx) {
   litNode.knownElemType = elemType;
 }
 
-// `const { a, err } = expr;` / `let { a, err } = expr;`
+// `const { a, b } = expr;` / `let { a, b } = expr;`
 function checkDestructureDecl(node, scope, ctx) {
   const declKind = node.declKind === ASTNodeKind.CONST_DECL ? "const" : "let";
-  let rhsType = resolveExprType(node.assignment, scope, ctx);
-  const isTryRhs = node.assignment.kind === ASTNodeKind.TRY_OP;
-  if (isTryRhs && node.assignment.strippedMulti) {
-    rhsType = StructType("__stripped", node.assignment.strippedMulti.fields);
-  }
+  const rhsType = resolveExprType(node.assignment, scope, ctx);
 
   if (rhsType.kind === typeKinds.error) {
     for (const n of node.names) {
@@ -630,31 +625,14 @@ function checkDestructureDecl(node, scope, ctx) {
     }
     declareInScope(scope, name, fieldType, declKind, node, ctx.errors);
   }
-
-  if (!isTryRhs && isFallible(rhsType) && !seenNames.has("err")) {
-    pushError(
-      ctx.errors,
-      node,
-      `destructuring a fallible type ${formatType(rhsType)} must include "err" or use '?' to propagate`,
-    );
-  }
 }
 
 function checkDiscardStatement(node, scope, ctx) {
   resolveExprType(node.value, scope, ctx);
-  markErrObservedThroughRoot(node.value, scope);
 }
 
 function checkExpressionStatement(node, scope, ctx) {
-  const t = resolveExprType(node.value, scope, ctx);
-  if (isFallible(t)) {
-    pushError(
-      ctx.errors,
-      node,
-      `fallible result of type ${formatType(t)} dropped — bind it, destructure, propagate with '?', or discard with '_ = ...'`,
-    );
-  }
-  return t;
+  return resolveExprType(node.value, scope, ctx);
 }
 
 function checkReturn(node, scope, ctx) {
@@ -727,23 +705,80 @@ function checkForLoop(node, scope, ctx) {
   validateStatement(node.body, scope, loopCtx);
 }
 
-// Phase 9.D: `for item in xs { ... }`. The RHS must currently be an array
-// expression (`T[]`); element type drives the body binding. Trait-driven
-// iteration (any type implementing Iterable<T>) is deferred to a later phase.
+// Phase 9.D + 10.B: `for item in xs { ... }`. The RHS may be either:
+//   - An array expression (`T[]`): the fast path. The element type T drives
+//     the body binding; codegen walks the fat-pointer.
+//   - A struct implementing `Iterable<U>` (Phase 10.B): the loop desugars
+//     to a `while (true) { switch (Iterable.next(ref iter)) { ... } }` over
+//     `IterStep<U>`. The U from the impl's trait args drives the body binding.
 function checkForInLoop(node, scope, ctx) {
-  const iterType = resolveExprType(node.iterExpr, scope, ctx);
+  let iterType = resolveExprType(node.iterExpr, scope, ctx);
   let elemType = ErrorType();
+  let iterableImpl = null;
   if (iterType.kind === typeKinds.array) {
     elemType = iterType.elem;
+  } else if (iterType.kind === typeKinds.struct) {
+    // The struct type captured from an expression site (e.g. a function-call
+    // return) may be the pass-A shell — re-fetch the canonical version from
+    // structTable so we see the fully-resolved implementsTraits/methods.
+    if (ctx.typeContext.structTable) {
+      const canonical = ctx.typeContext.structTable.get(iterType.name);
+      if (canonical) iterType = canonical;
+    }
+    const iterableTrait = (iterType.implementsTraits ?? []).find(
+      (t) => t.name === "Iterable",
+    );
+    if (iterableTrait) {
+      const nextSig = iterType.methods?.get("next");
+      const retType = nextSig?.returnType;
+      if (
+        retType &&
+        retType.kind === typeKinds.enum &&
+        retType.variants?.has("Yield") &&
+        retType.variants?.has("Done")
+      ) {
+        const yieldVariant = retType.variants.get("Yield");
+        if (
+          yieldVariant.fields &&
+          yieldVariant.fields.length === 1 &&
+          yieldVariant.fields[0].name === "value"
+        ) {
+          elemType = yieldVariant.fields[0].type;
+          iterableImpl = {
+            mangledNextName: mangleTraitMethod(iterType, "Iterable", "next"),
+            iterStepType: retType,
+          };
+        } else {
+          pushError(
+            ctx.errors,
+            node.iterExpr,
+            `Iterable.next must return IterStep<T> with a single-field 'Yield { value: T }' variant`,
+          );
+        }
+      } else {
+        pushError(
+          ctx.errors,
+          node.iterExpr,
+          `Iterable.next must return an IterStep<T> enum with Yield/Done variants`,
+        );
+      }
+    } else {
+      pushError(
+        ctx.errors,
+        node.iterExpr,
+        `type ${formatType(iterType)} is not iterable — expected an array or a type implementing Iterable<T>`,
+      );
+    }
   } else if (iterType.kind !== typeKinds.error) {
     pushError(
       ctx.errors,
       node.iterExpr,
-      `'for ... in' currently requires an array on the right-hand side; got ${formatType(iterType)}`,
+      `'for ... in' requires an array or a type implementing Iterable<T>; got ${formatType(iterType)}`,
     );
   }
   node.resolvedElemType = elemType;
   node.resolvedIterType = iterType;
+  node.iterableImpl = iterableImpl;
 
   // The loop variable is scoped to the body only. Open a scope, declare it,
   // walk the body's statements, then pop. This mirrors the trailing-block

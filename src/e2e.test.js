@@ -111,6 +111,18 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("forin_iterable.yoop walks a user-defined Iterable<T> via for-in", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/forin_iterable.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "n=0\nn=1\nn=2\nn=3\n" +
+        "c.cur=0\n" +
+        "sum=10\n" +
+        "k=0\nk=1\nk=2\n",
+    );
+  });
+
   it("slice_basic.yoop slices arrays in all four forms and shares storage", () => {
     const { stdout, exitCode } = runFixture("examples/pass/slice_basic.yoop");
     assert.equal(exitCode, 0);
@@ -170,44 +182,6 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a.inner.v = 42\n");
-  });
-
-  it("errors_basic.yoop reads a fallible struct and observes err via field access", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/errors_basic.yoop");
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "len = 42\n");
-  });
-
-  it("errors_propagate.yoop uses '?' to bail on err and yield the success value", () => {
-    const { stdout, exitCode } = runFixture(
-      "examples/pass/errors_propagate.yoop",
-    );
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "total = 84\n");
-  });
-
-  it("errors_propagate_failure.yoop traces an err through '?' and a destructure", () => {
-    const { stdout, exitCode } = runFixture(
-      "examples/pass/errors_propagate_failure.yoop",
-    );
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "err: empty path\n");
-  });
-
-  it("errors_discard.yoop satisfies observation via '_ = ...'", () => {
-    const { stdout, exitCode } = runFixture(
-      "examples/pass/errors_discard.yoop",
-    );
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "done\n");
-  });
-
-  it("errors_destructure_no_qmark.yoop destructures a fallible struct including err", () => {
-    const { stdout, exitCode } = runFixture(
-      "examples/pass/errors_destructure_no_qmark.yoop",
-    );
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "len = 7\n");
   });
 
   it("refs_basic.yoop passes a ref param and writes through it", () => {
@@ -444,12 +418,6 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/errno_open.yoop");
     assert.equal(exitCode, 0);
     assert.match(stdout, /fd=-1 saw_failure=1 code=2 saw_enoent=1 msg=No such file/);
-  });
-
-  it("errno_fallible.yoop: fallible-wrapper pattern with errno.message propagates via '?'", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/errno_fallible.yoop");
-    assert.equal(exitCode, 0);
-    assert.match(stdout, /propagated err: No such file/);
   });
 
   it("module_counter.yoop: module-level let mutates across tick() calls; const reads as expected", () => {
@@ -848,24 +816,6 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 
   // ---- 6.3 sugar: task / joined / pooled / wait ----
 
-  it("task_immediate: const T = task_call() auto-spawns and waits inline", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_immediate/main.yoop");
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "a=9\n");
-  });
-
-  it("task_joined: joined d = task_call(); wait d returns the result", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_joined/main.yoop");
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "d=16\n");
-  });
-
-  it("task_pooled: pooled h = task_call(); wait h returns the result", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_pooled/main.yoop");
-    assert.equal(exitCode, 0);
-    assert.equal(stdout, "h=25\n");
-  });
-
   it("task_three_forms: immediate, joined, pooled work end-to-end in the same main", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/task_three_forms/main.yoop");
     assert.equal(exitCode, 0);
@@ -1076,78 +1026,6 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.throws(() => parse(src), /expected semicolon/);
   });
 
-  it("err_dropped.yoop rejects a bare fallible call statement", () => {
-    const { errors } = typecheckFixture("examples/fail/err_dropped.yoop");
-    assert.ok(
-      errors.some((e) => /fallible result.*dropped/.test(e.message)),
-      `expected dropped-fallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
-  it("err_unobserved.yoop rejects a fallible binding whose err is never read", () => {
-    const { errors } = typecheckFixture("examples/fail/err_unobserved.yoop");
-    assert.ok(
-      errors.some((e) =>
-        /fallible binding "r".*must observe its 'err'/.test(e.message),
-      ),
-      `expected unobserved-err error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
-  it("err_destructure_missing_err.yoop rejects a destructure that omits err", () => {
-    const { errors } = typecheckFixture(
-      "examples/fail/err_destructure_missing_err.yoop",
-    );
-    assert.ok(
-      errors.some((e) => /destructuring a fallible type.*include "err"/.test(e.message)),
-      `expected missing-err error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
-  it("err_qmark_in_nonfallible.yoop rejects '?' inside a non-fallible function", () => {
-    const { errors } = typecheckFixture(
-      "examples/fail/err_qmark_in_nonfallible.yoop",
-    );
-    assert.ok(
-      errors.some((e) =>
-        /'\?' is only legal inside a function that returns a fallible type/.test(
-          e.message,
-        ),
-      ),
-      `expected ?-in-nonfallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
-  it("err_qmark_on_nonfallible.yoop rejects '?' on a non-fallible operand", () => {
-    const { errors } = typecheckFixture(
-      "examples/fail/err_qmark_on_nonfallible.yoop",
-    );
-    assert.ok(
-      errors.some((e) => /'\?' applied to non-fallible type/.test(e.message)),
-      `expected ?-on-nonfallible error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
-  it("err_destructure_unknown_field.yoop rejects an unknown destructured name", () => {
-    const { errors } = typecheckFixture(
-      "examples/fail/err_destructure_unknown_field.yoop",
-    );
-    assert.ok(
-      errors.some((e) => /no field "nope"/.test(e.message)),
-      `expected unknown-field error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
-  it("err_multi_strip_no_destructure.yoop rejects multi-field '?' outside a destructure", () => {
-    const { errors } = typecheckFixture(
-      "examples/fail/err_multi_strip_no_destructure.yoop",
-    );
-    assert.ok(
-      errors.some((e) => /multi-field.*must be destructured/.test(e.message)),
-      `expected multi-strip error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
-  });
-
   it("ref_return.yoop rejects a function whose return type is ref T", () => {
     const { errors } = typecheckFixture("examples/fail/ref_return.yoop");
     assert.ok(
@@ -1172,11 +1050,19 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("forin_non_array.yoop rejects 'for ... in' on non-array RHS", () => {
+  it("forin_non_array.yoop rejects 'for ... in' on non-array, non-iterable RHS", () => {
     const { errors } = typecheckFixture("examples/fail/forin_non_array.yoop");
     assert.ok(
-      errors.some((e) => /'for ... in' currently requires an array/.test(e.message)),
-      `expected for-in non-array error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /requires an array or a type implementing Iterable<T>/.test(e.message)),
+      `expected for-in non-iterable error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("forin_non_iterable_struct.yoop rejects 'for ... in' on a struct lacking Iterable<T>", () => {
+    const { errors } = typecheckFixture("examples/fail/forin_non_iterable_struct.yoop");
+    assert.ok(
+      errors.some((e) => /is not iterable.*Iterable<T>/.test(e.message)),
+      `expected non-iterable-struct error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

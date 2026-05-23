@@ -1,5 +1,11 @@
-// common type for possible results
-export type Maybe<T> {
-    value: T,
-    err: string
+// std/core/types.yoop — canonical algebraic types used across std.
+//
+// `Result<T, E>` is the standard fallible return shape. Phase 9.H's `?`
+// operator recognizes any enum with `Ok`/`Err` variants (one payload field
+// each) as fallible, so `Result<T, string>` propagates through `?` exactly
+// like a hand-written `enum FooResult { Ok { ... }, Err { ... } }`.
+
+export enum Result<T, E> {
+    Ok { value: T },
+    Err { error: E },
 }

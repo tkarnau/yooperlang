@@ -15,7 +15,6 @@ import {
   typeKinds,
 } from "../jsyooptypecheck/types.js";
 import {
-  strippedTypeOf,
   isFallibleEnum,
   strippedEnumOkType,
 } from "../jsyooptypecheck/fallible.js";
@@ -500,66 +499,17 @@ export function codegen(ast) {
   }
 
   // lower `expr?` up to the err check, returning the on-stack slot that
-  // holds the operand's full struct value. Caller decides what to do with
-  // the success value (single field load, void, or destructure).
-  //
-  // shape (struct-fallible):
-  //   <eval operand> -> %tmp
-  //   alloca + store on stack
-  //   load err pointer; strlen(err) > 0 -> branch
-  //   try_fail: build default fallible return value, set err, ret
-  //   try_ok:  control resumes here for the success path
-  //
-  // Phase 9.H — fallible-enum shape:
+  // holds the operand's enum value. Phase 9.H — fallible-enum shape only:
   //   <eval operand> -> %tmp
   //   alloca + store on stack
   //   load i32 tag at field 0; compare to Err ordinal
   //   try_fail: GEP into Err payload, build enclosing return's Err variant
   //             carrying the same payload bytes, ret
   //   try_ok:  control resumes here for the Ok payload extraction
+  //
+  // The Phase 2 fallible-struct shape was retired in Phase 10.X; only the
+  // enum form remains.
   function emitTryOpToSlot(node, fnLines) {
-    const operandType = node.operand.resolvedType;
-    if (operandType.kind === typeKinds.enum) {
-      return emitTryOpEnumToSlot(node, fnLines);
-    }
-    const r = emitExpr(node.operand, fnLines);
-    const slot = freshTemp();
-    const operandLlvmTy = llvmType(operandType);
-    fnLines.push(
-      `  ${slot} = alloca ${operandLlvmTy}, align ${alignOfStruct(operandType)}`,
-    );
-    fnLines.push(
-      `  store ${operandLlvmTy} ${r.val}, ptr ${slot}`,
-    );
-
-    const errIdx = operandType.fields.length - 1;
-    const errPtr = freshTemp();
-    fnLines.push(
-      `  ${errPtr} = getelementptr inbounds ${operandLlvmTy}, ptr ${slot}, i32 0, i32 ${errIdx}`,
-    );
-    const errStr = freshTemp();
-    fnLines.push(`  ${errStr} = load ptr, ptr ${errPtr}`);
-    const errLen = freshTemp();
-    fnLines.push(`  ${errLen} = call i64 @strlen(ptr ${errStr})`);
-    const failed = freshTemp();
-    fnLines.push(`  ${failed} = icmp ne i64 ${errLen}, 0`);
-
-    const failLabel = freshLabel("try_fail");
-    const okLabel = freshLabel("try_ok");
-    fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
-
-    fnLines.push(`${failLabel}:`);
-    emitFailVariantReturn(currentReturnType, errStr, fnLines);
-
-    fnLines.push(`${okLabel}:`);
-    return { ptr: slot, type: operandType };
-  }
-
-  // Phase 9.H: enum-shaped `?`. Reads the i32 tag, branches on Err, builds
-  // the enclosing function's return-type Err variant carrying the operand's
-  // Err payload, and returns it. On the success path returns the on-stack
-  // slot pointing at the operand so the caller can GEP into the Ok payload.
-  function emitTryOpEnumToSlot(node, fnLines) {
     const operandEnum = node.operand.resolvedType;
     const r = emitExpr(node.operand, fnLines);
     const enumLlvm = llvmType(operandEnum);
@@ -585,32 +535,6 @@ export function codegen(ast) {
 
     fnLines.push(`${okLabel}:`);
     return { ptr: slot, type: operandEnum };
-  }
-
-  // build the failure-variant struct of the *enclosing function's* return
-  // type: zeroinitializer for every field, then write `err`. Per spec, the
-  // caller short-circuits on err and never reads the other fields.
-  function emitFailVariantReturn(retType, errStr, fnLines) {
-    const retLlvmTy = llvmType(retType);
-    const failSlot = freshTemp();
-    fnLines.push(
-      `  ${failSlot} = alloca ${retLlvmTy}, align ${alignOfStruct(retType)}`,
-    );
-    fnLines.push(
-      `  store ${retLlvmTy} zeroinitializer, ptr ${failSlot}`,
-    );
-    const errIdx = retType.fields.length - 1;
-    const failErrPtr = freshTemp();
-    fnLines.push(
-      `  ${failErrPtr} = getelementptr inbounds ${retLlvmTy}, ptr ${failSlot}, i32 0, i32 ${errIdx}`,
-    );
-    fnLines.push(`  store ptr ${errStr}, ptr ${failErrPtr}`);
-    const failVal = freshTemp();
-    fnLines.push(
-      `  ${failVal} = load ${retLlvmTy}, ptr ${failSlot}`,
-    );
-    if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
-    fnLines.push(`  ret ${retLlvmTy} ${failVal}`);
   }
 
   // Phase 9.H: build the enclosing function's return-type Err variant
@@ -668,7 +592,7 @@ export function codegen(ast) {
     fnLines.push(`  ret ${retLlvm} ${retVal}`);
   }
 
-  // Track the enclosing function's return type for emitFailVariantReturn.
+  // Track the enclosing function's return type for emitFailEnumReturn.
   // Set in emitFunction; consumed inside emitTryOpToSlot.
   let currentReturnType = null;
 
@@ -1104,47 +1028,24 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.TRY_OP: {
-        const slot = emitTryOpToSlot(node, fnLines);
         // Phase 9.H: enum operand — extract the Ok variant payload (or void).
-        if (slot.type.kind === typeKinds.enum) {
-          const okStripped = strippedEnumOkType(slot.type);
-          if (okStripped.kind === typeKinds.void) {
-            return { val: "void", yoopType: VoidType() };
-          }
-          const enumId = slot.type.moduleId
-            ? `${slot.type.moduleId}__${slot.type.name}`
-            : slot.type.name;
-          const payloadLlvm = `%enumv.${enumId}__Ok`;
-          const fieldLlvm = llvmType(okStripped);
-          const payloadPtr = freshTemp();
-          fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
-          const fieldPtr = freshTemp();
-          fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
-          const v = freshTemp();
-          fnLines.push(`  ${v} = load ${fieldLlvm}, ptr ${fieldPtr}`);
-          return { val: v, yoopType: okStripped };
-        }
-        const stripped = strippedTypeOf(node.operand.resolvedType);
-        if (!stripped || stripped.kind === "strippedMulti") {
-          // multi-strip in expression position is rejected by the
-          // typechecker — defensive.
-          throw new Error(
-            `codegen: TRY_OP at emitExpr saw an unsupported strip shape — typechecker should have rejected`,
-          );
-        }
-        if (stripped.kind === typeKinds.void) {
+        const slot = emitTryOpToSlot(node, fnLines);
+        const okStripped = strippedEnumOkType(slot.type);
+        if (okStripped.kind === typeKinds.void) {
           return { val: "void", yoopType: VoidType() };
         }
-        // single non-err field: load it from index 0 of the on-stack source slot.
-        const valPtr = freshTemp();
-        const slotLlvmTy = llvmType(slot.type);
-        fnLines.push(
-          `  ${valPtr} = getelementptr inbounds ${slotLlvmTy}, ptr ${slot.ptr}, i32 0, i32 0`,
-        );
-        const val = freshTemp();
-        const llvmTy = llvmType(stripped);
-        fnLines.push(`  ${val} = load ${llvmTy}, ptr ${valPtr}`);
-        return { val, yoopType: stripped };
+        const enumId = slot.type.moduleId
+          ? `${slot.type.moduleId}__${slot.type.name}`
+          : slot.type.name;
+        const payloadLlvm = `%enumv.${enumId}__Ok`;
+        const fieldLlvm = llvmType(okStripped);
+        const payloadPtr = freshTemp();
+        fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
+        const fieldPtr = freshTemp();
+        fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
+        const v = freshTemp();
+        fnLines.push(`  ${v} = load ${fieldLlvm}, ptr ${fieldPtr}`);
+        return { val: v, yoopType: okStripped };
       }
 
       case ASTNodeKind.STRUCT_LITERAL: {
@@ -1466,33 +1367,18 @@ export function codegen(ast) {
     }
   }
 
-  // `const { a, b, err } = expr;`
-//
-// Two RHS shapes:
-//   - plain expression: stash the result in a slot, GEP each name out
-//   - TRY_OP: emitTryOpToSlot (handles err propagation), then GEP from the
-//     post-success slot using the *operand's* type (its fields are still
-//     all there, including err — we just won't pick err from them since
-//     the destructure names won't include it).
+  // `const { a, b } = expr;` — destructure a struct value.
   function emitDestructureDecl(node, fnLines) {
-    let slotPtr;
-    let slotType;
-    if (node.assignment.kind === ASTNodeKind.TRY_OP) {
-      const slot = emitTryOpToSlot(node.assignment, fnLines);
-      slotPtr = slot.ptr;
-      slotType = slot.type;
-    } else {
-      const r = emitExpr(node.assignment, fnLines);
-      slotType = node.assignment.resolvedType;
-      slotPtr = freshTemp();
-      const slotLlvmTy2 = llvmType(slotType);
-      fnLines.push(
-        `  ${slotPtr} = alloca ${slotLlvmTy2}, align ${alignOfStruct(slotType)}`,
-      );
-      fnLines.push(
-        `  store ${slotLlvmTy2} ${r.val}, ptr ${slotPtr}`,
-      );
-    }
+    const r = emitExpr(node.assignment, fnLines);
+    const slotType = node.assignment.resolvedType;
+    const slotPtr = freshTemp();
+    const slotLlvmTy2 = llvmType(slotType);
+    fnLines.push(
+      `  ${slotPtr} = alloca ${slotLlvmTy2}, align ${alignOfStruct(slotType)}`,
+    );
+    fnLines.push(
+      `  store ${slotLlvmTy2} ${r.val}, ptr ${slotPtr}`,
+    );
 
     for (const name of node.names) {
       const idx = slotType.fields.findIndex((f) => f.name === name);
@@ -1583,11 +1469,94 @@ export function codegen(ast) {
     fnLines.push(`${afterLabel}:`);
   }
 
+  // Phase 10.B: shared lowering for `for x in EXPR` when EXPR's type
+  // implements Iterable<U>. The loop owns a mutable copy of the iterator
+  // (we want `for x in make_iter()` to walk the freshly-created state, and
+  // `for x in my_iter` to leave the caller's binding untouched). Each
+  // iteration calls `Iterable.next(ref iter_slot) -> IterStep<U>` and
+  // pattern-matches the result.
+  function emitForInLoopIterable(node, fnLines, ctx, emitBlockFn) {
+    const iterType = node.resolvedIterType;
+    const elemType = node.resolvedElemType;
+    const iterStepType = node.iterableImpl.iterStepType;
+    const mangledNext = node.iterableImpl.mangledNextName;
+
+    const iterLlvm = llvmType(iterType);
+    const elemLlvm = llvmType(elemType);
+    const stepLlvm = llvmType(iterStepType);
+    const elemAlign = elemType.kind === typeKinds.struct
+      ? alignOfStruct(elemType)
+      : alignOf(elemLlvm);
+
+    const r = emitExpr(node.iterExpr, fnLines);
+    const iterSlot = freshTemp();
+    fnLines.push(`  ${iterSlot} = alloca ${iterLlvm}, align ${alignOfStruct(iterType)}`);
+    fnLines.push(`  store ${iterLlvm} ${r.val}, ptr ${iterSlot}`);
+
+    const loopVarSlot = `%${node.loopVar}`;
+    fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvm}, align ${elemAlign}`);
+    symbols.set(node.loopVar, elemType);
+
+    const stepSlot = freshTemp();
+    fnLines.push(`  ${stepSlot} = alloca ${stepLlvm}, align ${sizeOfAlign(iterStepType)}`);
+
+    const topLabel = freshLabel("forin_iter_top");
+    const bodyLabel = freshLabel("forin_iter_body");
+    const stepLabel = freshLabel("forin_iter_step");
+    const afterLabel = freshLabel("forin_iter_after");
+
+    fnLines.push(`  br label %${topLabel}`);
+    fnLines.push(`${topLabel}:`);
+    const stepVal = freshTemp();
+    fnLines.push(`  ${stepVal} = call ${stepLlvm} @${mangledNext}(ptr ${iterSlot})`);
+    fnLines.push(`  store ${stepLlvm} ${stepVal}, ptr ${stepSlot}`);
+
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 0`);
+    const tag = freshTemp();
+    fnLines.push(`  ${tag} = load i32, ptr ${tagPtr}`);
+    const yieldOrdinal = iterStepType.variants.get("Yield").ordinal;
+    const isYield = freshTemp();
+    fnLines.push(`  ${isYield} = icmp eq i32 ${tag}, ${yieldOrdinal}`);
+    fnLines.push(`  br i1 ${isYield}, label %${bodyLabel}, label %${afterLabel}`);
+
+    fnLines.push(`${bodyLabel}:`);
+    const stepEnumId = iterStepType.moduleId
+      ? `${iterStepType.moduleId}__${iterStepType.name}`
+      : iterStepType.name;
+    const yieldVariantLlvm = `%enumv.${stepEnumId}__Yield`;
+    const payloadPtr = freshTemp();
+    fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 1`);
+    const valuePtr = freshTemp();
+    fnLines.push(`  ${valuePtr} = getelementptr inbounds ${yieldVariantLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
+    const elemVal = freshTemp();
+    fnLines.push(`  ${elemVal} = load ${elemLlvm}, ptr ${valuePtr}`);
+    fnLines.push(`  store ${elemLlvm} ${elemVal}, ptr ${loopVarSlot}`);
+
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: stepLabel };
+    emitBlockFn(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${stepLabel}`);
+
+    fnLines.push(`${stepLabel}:`);
+    fnLines.push(`  br label %${topLabel}`);
+
+    fnLines.push(`${afterLabel}:`);
+  }
+
   // Phase 9.D: `for item in xs { ... }`. Lowers to a fat-pointer walk with
   // a hidden i64 counter — same shape as the C-style for loop a user would
   // write today, but the index is invisible and the per-iteration value is
   // copied into a fresh loopVar slot at the top of the body.
   function emitForInLoop(node, fnLines, ctx) {
+    // Phase 10.B: iterable-impl path. Lowered as
+    //   alloca iter_slot, store iter_val
+    //   loop_top:
+    //     call next(ref iter_slot) -> IterStep<U>
+    //     match tag: Yield -> body; Done -> after
+    if (node.iterableImpl) {
+      emitForInLoopIterable(node, fnLines, ctx, emitBlock);
+      return;
+    }
     const elemType = node.resolvedElemType;
     ensureArrayTypeDef(elemType);
 
@@ -3747,34 +3716,24 @@ function codegenWithModuleId(
         return { val: resVal, yoopType: arrayType };
       }
       case ASTNodeKind.TRY_OP: {
-        const slot = emitTrySlot(node, fnLines);
         // Phase 9.H: enum operand — extract the Ok variant payload (or void).
-        if (slot.type.kind === typeKinds.enum) {
-          const okStripped = strippedEnumOkType(slot.type);
-          if (okStripped.kind === typeKinds.void) {
-            return { val: "void", yoopType: VoidType() };
-          }
-          const enumId = slot.type.moduleId
-            ? `${slot.type.moduleId}__${slot.type.name}`
-            : slot.type.name;
-          const payloadLlvm = `%enumv.${enumId}__Ok`;
-          const fieldLlvm = llvmType(okStripped);
-          const payloadPtr = freshTemp();
-          fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
-          const fieldPtr = freshTemp();
-          fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
-          const v = freshTemp();
-          fnLines.push(`  ${v} = load ${fieldLlvm}, ptr ${fieldPtr}`);
-          return { val: v, yoopType: okStripped };
+        const slot = emitTrySlot(node, fnLines);
+        const okStripped = strippedEnumOkType(slot.type);
+        if (okStripped.kind === typeKinds.void) {
+          return { val: "void", yoopType: VoidType() };
         }
-        const stripped = strippedTypeOf(node.operand.resolvedType);
-        if (!stripped || stripped.kind === "strippedMulti") throw new Error("codegen: unsupported TRY_OP shape");
-        if (stripped.kind === typeKinds.void) return { val: "void", yoopType: VoidType() };
-        const valPtr = freshTemp();
-        fnLines.push(`  ${valPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 0`);
-        const val = freshTemp();
-        fnLines.push(`  ${val} = load ${llvmType(stripped)}, ptr ${valPtr}`);
-        return { val, yoopType: stripped };
+        const enumId = slot.type.moduleId
+          ? `${slot.type.moduleId}__${slot.type.name}`
+          : slot.type.name;
+        const payloadLlvm = `%enumv.${enumId}__Ok`;
+        const fieldLlvm = llvmType(okStripped);
+        const payloadPtr = freshTemp();
+        fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
+        const fieldPtr = freshTemp();
+        fnLines.push(`  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
+        const v = freshTemp();
+        fnLines.push(`  ${v} = load ${fieldLlvm}, ptr ${fieldPtr}`);
+        return { val: v, yoopType: okStripped };
       }
       case ASTNodeKind.STRUCT_LITERAL: {
         const st = node.resolvedType;
@@ -4341,41 +4300,9 @@ function codegenWithModuleId(
     }
   }
 
-  function emitTrySlot(node, fnLines) {
-    const operandType = node.operand.resolvedType;
-    if (operandType.kind === typeKinds.enum) {
-      return emitTrySlotEnum(node, fnLines);
-    }
-    const r = emitExpr(node.operand, fnLines);
-    const slot = freshTemp();
-    const operandLlvmTy = llvmType(operandType);
-    fnLines.push(`  ${slot} = alloca ${operandLlvmTy}, align ${alignOfStruct(operandType)}`);
-    fnLines.push(`  store ${operandLlvmTy} ${r.val}, ptr ${slot}`);
-    const errIdx = operandType.fields.length - 1;
-    const errPtr = freshTemp();
-    fnLines.push(`  ${errPtr} = getelementptr inbounds ${operandLlvmTy}, ptr ${slot}, i32 0, i32 ${errIdx}`);
-    const errStr = freshTemp();
-    fnLines.push(`  ${errStr} = load ptr, ptr ${errPtr}`);
-    const errLen = freshTemp();
-    fnLines.push(`  ${errLen} = call i64 @strlen(ptr ${errStr})`);
-    const failed = freshTemp();
-    fnLines.push(`  ${failed} = icmp ne i64 ${errLen}, 0`);
-    const failLabel = freshLabel("try_fail");
-    const okLabel = freshLabel("try_ok");
-    fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
-    fnLines.push(`${failLabel}:`);
-    // Phase 6.1: fire any pending cleanups in the failure branch before the
-    // early `ret` produced by emitFailRet. errStr has already been captured
-    // above, so it survives the cleanup calls.
-    emitPendingCleanups(node, fnLines);
-    emitFailRet(currentReturnType, errStr, fnLines);
-    fnLines.push(`${okLabel}:`);
-    return { ptr: slot, type: operandType };
-  }
-
-  // Phase 9.H — enum-shaped `?` (multi-module path). Mirrors emitTryOpEnumToSlot
+  // Phase 9.H — enum-shaped `?` (multi-module path). Mirrors emitTryOpToSlot
   // in the single-module section.
-  function emitTrySlotEnum(node, fnLines) {
+  function emitTrySlot(node, fnLines) {
     const operandEnum = node.operand.resolvedType;
     const r = emitExpr(node.operand, fnLines);
     const enumLlvm = llvmType(operandEnum);
@@ -4397,6 +4324,8 @@ function codegenWithModuleId(
     fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
 
     fnLines.push(`${failLabel}:`);
+    // Phase 6.1: fire any pending cleanups in the failure branch before the
+    // early `ret` produced by emitFailEnumRet.
     emitPendingCleanups(node, fnLines);
     emitFailEnumRet(operandEnum, slot, currentReturnType, fnLines);
 
@@ -4612,21 +4541,6 @@ function codegenWithModuleId(
     const cleanups = node?.pendingCleanups;
     if (!cleanups || cleanups.length === 0) return;
     for (const c of cleanups) emitCleanupCall(c, fnLines);
-  }
-
-  function emitFailRet(retType, errStr, fnLines) {
-    const retLlvmTy = llvmType(retType);
-    const failSlot = freshTemp();
-    fnLines.push(`  ${failSlot} = alloca ${retLlvmTy}, align ${alignOfStruct(retType)}`);
-    fnLines.push(`  store ${retLlvmTy} zeroinitializer, ptr ${failSlot}`);
-    const errIdx = retType.fields.length - 1;
-    const failErrPtr = freshTemp();
-    fnLines.push(`  ${failErrPtr} = getelementptr inbounds ${retLlvmTy}, ptr ${failSlot}, i32 0, i32 ${errIdx}`);
-    fnLines.push(`  store ptr ${errStr}, ptr ${failErrPtr}`);
-    const failVal = freshTemp();
-    fnLines.push(`  ${failVal} = load ${retLlvmTy}, ptr ${failSlot}`);
-    if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
-    fnLines.push(`  ret ${retLlvmTy} ${failVal}`);
   }
 
   function emitStmt(node, fnLines, ctx) {
@@ -4872,18 +4786,12 @@ function codegenWithModuleId(
   }
 
   function emitDestrDecl(node, fnLines) {
-    let slotPtr, slotType;
-    if (node.assignment.kind === ASTNodeKind.TRY_OP) {
-      const slot = emitTrySlot(node.assignment, fnLines);
-      slotPtr = slot.ptr; slotType = slot.type;
-    } else {
-      const r = emitExpr(node.assignment, fnLines);
-      slotType = node.assignment.resolvedType;
-      slotPtr = freshTemp();
-      const slotLlvmTy = llvmType(slotType);
-      fnLines.push(`  ${slotPtr} = alloca ${slotLlvmTy}, align ${alignOfStruct(slotType)}`);
-      fnLines.push(`  store ${slotLlvmTy} ${r.val}, ptr ${slotPtr}`);
-    }
+    const r = emitExpr(node.assignment, fnLines);
+    const slotType = node.assignment.resolvedType;
+    const slotPtr = freshTemp();
+    const slotLlvmTy = llvmType(slotType);
+    fnLines.push(`  ${slotPtr} = alloca ${slotLlvmTy}, align ${alignOfStruct(slotType)}`);
+    fnLines.push(`  store ${slotLlvmTy} ${r.val}, ptr ${slotPtr}`);
     for (const name of node.names) {
       const idx = slotType.fields.findIndex((f) => f.name === name);
       const fieldType = slotType.fields[idx].type;
@@ -4968,9 +4876,83 @@ function codegenWithModuleId(
   }
 
   // Phase 9.D: `for item in xs { ... }` — multi-module codegen path. Mirrors
+  // Phase 10.B: iterable-impl twin of emitForInLoopIterable in the
+  // single-module section. See that function for the lowering rationale.
+  function emitForInLoopIterableStmt(node, fnLines, ctx) {
+    const iterType = node.resolvedIterType;
+    const elemType = node.resolvedElemType;
+    const iterStepType = node.iterableImpl.iterStepType;
+    const mangledNext = node.iterableImpl.mangledNextName;
+
+    const iterLlvm = llvmType(iterType);
+    const elemLlvm = llvmType(elemType);
+    const stepLlvm = llvmType(iterStepType);
+    const elemAlign = elemType.kind === typeKinds.struct
+      ? alignOfStruct(elemType)
+      : alignOf(elemLlvm);
+
+    const r = emitExpr(node.iterExpr, fnLines);
+    const iterSlot = freshTemp();
+    fnLines.push(`  ${iterSlot} = alloca ${iterLlvm}, align ${alignOfStruct(iterType)}`);
+    fnLines.push(`  store ${iterLlvm} ${r.val}, ptr ${iterSlot}`);
+
+    const loopVarSlot = `%${node.loopVar}`;
+    fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvm}, align ${elemAlign}`);
+    symbols.set(node.loopVar, elemType);
+
+    const stepSlot = freshTemp();
+    fnLines.push(`  ${stepSlot} = alloca ${stepLlvm}, align ${sizeOfAlign(iterStepType)}`);
+
+    const topLabel = freshLabel("forin_iter_top");
+    const bodyLabel = freshLabel("forin_iter_body");
+    const stepLabel = freshLabel("forin_iter_step");
+    const afterLabel = freshLabel("forin_iter_after");
+
+    fnLines.push(`  br label %${topLabel}`);
+    fnLines.push(`${topLabel}:`);
+    const stepVal = freshTemp();
+    fnLines.push(`  ${stepVal} = call ${stepLlvm} @${mangledNext}(ptr ${iterSlot})`);
+    fnLines.push(`  store ${stepLlvm} ${stepVal}, ptr ${stepSlot}`);
+
+    const tagPtr = freshTemp();
+    fnLines.push(`  ${tagPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 0`);
+    const tag = freshTemp();
+    fnLines.push(`  ${tag} = load i32, ptr ${tagPtr}`);
+    const yieldOrdinal = iterStepType.variants.get("Yield").ordinal;
+    const isYield = freshTemp();
+    fnLines.push(`  ${isYield} = icmp eq i32 ${tag}, ${yieldOrdinal}`);
+    fnLines.push(`  br i1 ${isYield}, label %${bodyLabel}, label %${afterLabel}`);
+
+    fnLines.push(`${bodyLabel}:`);
+    const stepEnumId = iterStepType.moduleId
+      ? `${iterStepType.moduleId}__${iterStepType.name}`
+      : iterStepType.name;
+    const yieldVariantLlvm = `%enumv.${stepEnumId}__Yield`;
+    const payloadPtr = freshTemp();
+    fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 1`);
+    const valuePtr = freshTemp();
+    fnLines.push(`  ${valuePtr} = getelementptr inbounds ${yieldVariantLlvm}, ptr ${payloadPtr}, i32 0, i32 0`);
+    const elemVal = freshTemp();
+    fnLines.push(`  ${elemVal} = load ${elemLlvm}, ptr ${valuePtr}`);
+    fnLines.push(`  store ${elemLlvm} ${elemVal}, ptr ${loopVarSlot}`);
+
+    const loopCtx = { ...ctx, breakLabel: afterLabel, continueLabel: stepLabel };
+    emitBlockStmt(node.body, fnLines, loopCtx);
+    if (!blockIsTerminated(fnLines)) fnLines.push(`  br label %${stepLabel}`);
+
+    fnLines.push(`${stepLabel}:`);
+    fnLines.push(`  br label %${topLabel}`);
+
+    fnLines.push(`${afterLabel}:`);
+  }
+
   // emitForInLoop in the single-module section: evaluate the iterable once,
   // cache the data pointer and length, then walk an i64 counter.
   function emitForInLoopStmt(node, fnLines, ctx) {
+    if (node.iterableImpl) {
+      emitForInLoopIterableStmt(node, fnLines, ctx);
+      return;
+    }
     const elemType = node.resolvedElemType;
     ensureArrayTypeDef(elemType);
 

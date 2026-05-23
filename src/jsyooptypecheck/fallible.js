@@ -1,10 +1,14 @@
-import { primAnnotations, typeKinds, VoidType } from "./types.js";
+import { typeKinds, VoidType } from "./types.js";
 
 // Phase 9.H: a fallible *enum* is any enum with exactly two variants named
 // `Ok` and `Err`. The shape is structural — no marker trait — so any user-
 // defined enum that matches the naming convention plays in `?` propagation.
 // Each variant may have zero or one payload field; the Ok payload becomes
 // the stripped value, and the Err payload is the propagated error type.
+//
+// Phase 10.X: the older Phase 2 "struct ending in `err: string`" convention
+// has been retired in favor of `Result<T, E>`-shaped enums. The fallible
+// machinery now recognizes exactly one shape: this one.
 export function isFallibleEnum(enumType) {
   if (!enumType || enumType.kind !== typeKinds.enum) return false;
   const variants = enumType.variants;
@@ -35,54 +39,4 @@ export function enumErrPayloadType(enumType) {
     return VoidType();
   }
   return err.fields[0].type;
-}
-
-// a struct is fallible if and only if its fields end with 'err: string'.
-export function isFallible(structType) {
-  if (!structType || structType.kind !== typeKinds.struct) {
-    return false;
-  }
-
-  const fields = structType.fields ?? [];
-  if (fields.length === 0) {
-    return false;
-  }
-  const last = fields[fields.length - 1];
-  if (last.name !== "err") {
-    return false;
-  }
-  if (last.type.kind !== typeKinds.prim) {
-    return false;
-  }
-  if (last.type.name !== primAnnotations.string) {
-    return false;
-  }
-
-  return true;
-}
-
-// what `expr?` yields when expr has type t.
-//   - { value: T, err: string }            -> T
-//   - { f1, f2, ..., err: string }         -> { kind: "strippedMulti", fields, sourceName }
-//   - { err: string }                      -> void
-//   - non-fallible                         -> null
-//
-// the multi-field case returns a non-Type sentinel so every caller is forced
-// to handle it: destructure permits it, every other context rejects.
-export function strippedTypeOf(fallibleType) {
-  if (!isFallible(fallibleType)) {
-    return null;
-  }
-  const nonErr = fallibleType.fields.slice(0, -1);
-  if (nonErr.length === 0) {
-    return VoidType();
-  }
-  if (nonErr.length === 1) {
-    return nonErr[0].type;
-  }
-  return {
-    kind: "strippedMulti",
-    fields: nonErr,
-    sourceName: fallibleType.name,
-  };
 }

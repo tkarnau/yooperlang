@@ -9,14 +9,14 @@
 // suspension cooperates with the scheduler.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
 import {
-    Readable, Writable, ReadOutcome, WriteOutcome, FlushOutcome,
+    Readable, Writable, FlushOutcome,
 } from "../core/traits.yoop";
 import { Socket } from "./socket.yoop";
 import {
-    AcceptFdResult,
+    AcceptedFd,
     ConnectOutcome,
-    FdResult,
     ffi_accept,
     ffi_close,
     ffi_connect,
@@ -40,7 +40,7 @@ export type TcpListener implements Disposable propagates<disposable> {
 
 export type ListenResult implements Disposable propagates<disposable> {
     listener: TcpListener,
-    err:      string,
+    error:    string,
     function dispose(ref self): void {
         Disposable.dispose(ref self.listener);
     }
@@ -48,19 +48,21 @@ export type ListenResult implements Disposable propagates<disposable> {
 
 // Open a TCP socket, bind it to host:port, and put it in the listening
 // state. backlog is the maximum pending-connection queue length passed
-// to listen(). The returned listener owns the socket; the err path
+// to listen(). The returned listener owns the socket; the error path
 // leaves a TcpListener with fd=-1 (disposes are no-ops).
 export function tcp_listen(host: string, port: int32, backlog: int32): ListenResult propagates<disposable> {
-    let r: FdResult = ffi_listen(host, port, backlog);
-    if (r.err.len > 0) {
-        return {
-            listener: { socket: { fd: -1 }, bound_port: 0 },
-            err: r.err,
-        };
+    let r: Result<c_int, string> = ffi_listen(host, port, backlog);
+    let fd: c_int = -1;
+    let err_msg: string = "";
+    switch (r) {
+        case Result.Ok { value: ok_fd }: { fd = ok_fd; }
+        case Result.Err { error: e }: { err_msg = e; }
     }
+    let bound: int32 = port;
+    if (fd < 0) { bound = 0; }
     return {
-        listener: { socket: { fd: r.fd }, bound_port: port },
-        err: "",
+        listener: { socket: { fd: fd }, bound_port: bound },
+        error: err_msg,
     };
 }
 
@@ -77,17 +79,17 @@ export type TcpStream implements (Disposable, Readable, Writable) propagates<dis
         Disposable.dispose(ref self.socket);
     }
 
-    function read(ref self, ref buf: uint8[]): ReadOutcome {
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         return ffi_recv(self.socket.fd, buf);
     }
 
-    function write(ref self, ref buf: uint8[]): WriteOutcome {
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         return ffi_send_all(self.socket.fd, buf);
     }
 
     function flush(ref self): FlushOutcome {
         // Unbuffered stream — flush is a no-op.
-        return { err: "" };
+        return FlushOutcome.Ok;
     }
 }
 
@@ -97,7 +99,7 @@ export type AcceptResult implements Disposable propagates<disposable> {
     stream:    TcpStream,
     peer_host: uint32,
     peer_port: uint16,
-    err:       string,
+    error:     string,
     function dispose(ref self): void {
         Disposable.dispose(ref self.stream);
     }
@@ -108,20 +110,24 @@ export type AcceptResult implements Disposable propagates<disposable> {
 // caller is responsible for disposing it (or letting auto-cleanup at
 // scope end do so).
 export function tcp_accept(ref l: TcpListener): AcceptResult propagates<disposable> {
-    let r: AcceptFdResult = ffi_accept(l.socket.fd);
-    if (r.err.len > 0) {
-        return {
-            stream:    { socket: { fd: -1 } },
-            peer_host: 0,
-            peer_port: 0,
-            err:       r.err,
-        };
+    let r: Result<AcceptedFd, string> = ffi_accept(l.socket.fd);
+    let fd: c_int = -1;
+    let peer_host: uint32 = 0;
+    let peer_port: uint16 = 0;
+    let err_msg: string = "";
+    switch (r) {
+        case Result.Ok { value: ok }: {
+            fd = ok.fd;
+            peer_host = ok.peer_host;
+            peer_port = ok.peer_port;
+        }
+        case Result.Err { error: e }: { err_msg = e; }
     }
     return {
-        stream:    { socket: { fd: r.fd } },
-        peer_host: r.peer_host,
-        peer_port: r.peer_port,
-        err:       "",
+        stream:    { socket: { fd: fd } },
+        peer_host: peer_host,
+        peer_port: peer_port,
+        error:     err_msg,
     };
 }
 
@@ -129,32 +135,44 @@ export function tcp_accept(ref l: TcpListener): AcceptResult propagates<disposab
 
 export type ConnectResult implements Disposable propagates<disposable> {
     stream: TcpStream,
-    err:    string,
+    error:  string,
     function dispose(ref self): void {
         Disposable.dispose(ref self.stream);
     }
 }
 
 // Open a fresh socket and connect it to host:port. Returns the connected
-// stream + err. On err, the inner socket holds fd=-1.
+// stream + error. On error, the inner socket holds fd=-1.
 export function tcp_connect(host: string, port: int32): ConnectResult propagates<disposable> {
-    let open: FdResult = ffi_socket_open();
-    if (open.err.len > 0) {
+    let open: Result<c_int, string> = ffi_socket_open();
+    let fd: c_int = -1;
+    let open_err: string = "";
+    switch (open) {
+        case Result.Ok { value: ok_fd }: { fd = ok_fd; }
+        case Result.Err { error: open_e }: { open_err = open_e; }
+    }
+    if (fd < 0) {
         return {
             stream: { socket: { fd: -1 } },
-            err:    open.err,
+            error:  open_err,
         };
     }
-    let c: ConnectOutcome = ffi_connect(open.fd, host, port);
-    if (c.err.len > 0) {
-        let _rc: c_int = ffi_close(open.fd);
-        return {
-            stream: { socket: { fd: -1 } },
-            err:    c.err,
-        };
+    let c: ConnectOutcome = ffi_connect(fd, host, port);
+    switch (c) {
+        case ConnectOutcome.Ok: {
+            return {
+                stream: { socket: { fd: fd } },
+                error:  "",
+            };
+        }
+        case ConnectOutcome.Err { error: connect_e }: {
+            let _rc: c_int = ffi_close(fd);
+            return {
+                stream: { socket: { fd: -1 } },
+                error:  connect_e,
+            };
+        }
     }
-    return {
-        stream: { socket: { fd: open.fd } },
-        err:    "",
-    };
+    // Unreachable.
+    return { stream: { socket: { fd: -1 } }, error: "" };
 }

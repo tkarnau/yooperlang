@@ -827,48 +827,42 @@ error story hardens.
 
 ### The convention
 
-A **fallible** return type is a struct with a trailing `err: string` field. That's the
-only marker — there's no `Result<T, E>` wrapper, no discriminated union, no throwing.
+A **fallible** return type is an enum with exactly two variants named `Ok` and
+`Err`. Each variant carries zero or one payload field. The shape is structural —
+there is no marker trait — so any user-defined enum that matches the convention
+participates in `?` propagation. With generic enums (Phase 10.A) this collapses
+to the standard library's `Result<T, E>` in [std/core/types.yoop](std/core/types.yoop):
 
 ```js
-type Readout {
-    data: Bytes,
-    err: string,
+export enum Result<T, E> {
+    Ok { value: T },
+    Err { error: E },
 }
 
-function read_all(path: string): Readout { ... }
+function read_all(path: string): Result<Bytes, string> {
+    if (path.len == 0) {
+        return Result.Err { error: "empty path" };
+    }
+    // ...
+    return Result.Ok { value: bytes };
+}
 ```
 
-A type is fallible iff it has an `err: string` field. Nothing else needs to be marked.
-
-### Forcing rules
-
-The compiler refuses to let an error slip away silently. Every call that returns a
-fallible type falls into one of four categories — anything else is a compile error:
-
-| What you wrote | Must also | Compiler reaction |
-|---|---|---|
-| `const r = f();` then read `r.err` before scope exit | — | OK (explicit handling) |
-| `const { data, err } = f(); if (err) return;` | — | OK (destructure sugar) |
-| `const data = f()?;` | — | OK (propagate — see below) |
-| `_ = f();` | — | OK only if fn's kind allows discard |
-| `f();` (result dropped) | — | Compile error |
-| `const { data } = f();` (err not named) | — | Compile error |
-| `const r = f();` and `r.err` never read | — | Compile error at scope end |
-
-The common-case rewrite of "call something, bail if it failed" is noisy enough to
-deserve its own operator.
+A type is fallible iff it is an Ok/Err enum with at most one payload field per
+variant. Nothing else qualifies. (The older Phase 2 struct-with-trailing-`err:
+string` convention was retired in Phase 10.X — `Result<T, E>` covers the same
+use case with cleaner mechanics.)
 
 ### The `?` operator — forced propagation
 
-Postfix `?` on a fallible expression means: **if the call failed, return its error
-from the enclosing function now; otherwise produce the non-error value**.
+Postfix `?` on a fallible expression means: **if the call returned `Err`, return
+the Err from the enclosing function now; otherwise produce the `Ok` payload**.
 
 ```js
-function load_config(path: string): Config {
-    const bytes = read_all(path)?;          // bail with read_all's err, or bind data
+function load_config(path: string): Result<Config, string> {
+    const bytes  = read_all(path)?;         // bail on Err, bind Ok payload
     const parsed = parse(bytes)?;
-    return parsed;
+    return Result.Ok { value: parsed };
 }
 ```
 
@@ -877,80 +871,38 @@ The compiler rewrites `f()?` into the obvious early return:
 ```js
 // let r = f()?;   expands to:
 const _tmp = f();
-if (_tmp.err) return { ...default(EnclosingReturnType), err: _tmp.err };
-// `r` then refers to _tmp with `err` stripped
+switch (_tmp) {
+    case Result.Err { error: e }: return Result.Err { error: e };
+    case Result.Ok  { value: v }: r = v;
+}
 ```
 
 ### What `?` yields
 
-`?` produces the argument's value with the `err` field removed.
+`?` produces the `Ok` payload value.
 
 | Argument type | Result of `expr?` |
 |---|---|
-| `{ value: T, err: string }` (single non-err field) | `T` — the inner value |
-| `{ data: T, meta: M, err: string }` (multiple fields) | `{ data: T, meta: M }` — struct minus `err` |
-| `{ err: string }` (err-only) | `void` — statement-position only |
+| `Ok { value: T }` | `T` — the Ok payload value |
+| `Ok` (no payload) | `void` — statement-position only |
 | non-fallible type | compile error — nothing to propagate |
-
-This composes with destructuring sugar:
-
-```js
-const { data, meta } = fetch(url)?;         // strip err, then destructure the rest
-const bytes          = read_all(p)?;        // single-field short form
-read_config(p)?;                            // err-only, statement position
-```
-
-And with chaining:
-
-```js
-return parse(read_all(path)?)?;
-```
 
 ### What the enclosing function must look like
 
-`?` only compiles inside a function whose return type is also fallible (has an
-`err: string` field). The compiler refuses `?` in a function that returns a
-non-fallible type — you must handle the error, not propagate it.
+`?` only compiles inside a function whose return type is also a fallible enum,
+and whose `Err` payload type matches the operand's `Err` payload type exactly.
 
 ```js
 function total(path: string): usize {
-    const bytes = read_all(path)?;          // compile error: usize has no err field
+    const bytes = read_all(path)?;          // compile error: usize is not fallible
     return bytes.len;
 }
 ```
 
-### Fallible enums (Phase 9.H)
-
-`?` also recognizes an enum with exactly two variants named `Ok` and `Err` as a
-fallible type. The shape is structural — there is no marker trait. Each variant
-may have zero or one payload field; the `Ok` payload is what `?` yields, and
-the `Err` payload is the propagated error.
-
-```js
-enum IntResult {
-    Ok { value: int32 },
-    Err { error: int32 },
-}
-
-function add_positives(a: int32, b: int32): IntResult {
-    let x: int32 = parse_positive(a)?;
-    let y: int32 = parse_positive(b)?;
-    return IntResult.Ok { value: x + y };
-}
-```
-
-Propagation rules for the enum form:
-
-- The operand's type must be a fallible enum (two variants, `Ok` and `Err`).
-- The enclosing function's return type must also be a fallible enum.
-- The two enums' `Err` payload types must match exactly. Cross-shape
-  propagation (e.g. enum `Err: int` → struct `err: string`, or two enums with
-  different `Err` payloads) is **deferred** — it requires either an explicit
-  conversion at the `?` site or a `From`-style trait, neither of which is in
-  the language yet.
-- `Ok` with no payload yields `void` (statement-position only); `Ok` with one
-  payload field yields that field's type. Multi-field `Ok` is rejected at the
-  decl site (the recognizer requires single-field variants).
+Cross-shape propagation (operand and enclosing return have *different* `Err`
+payload types — e.g. `Result<_, IoError>` into `Result<_, AppError>`) is
+**deferred** — it requires a `From`-style conversion trait, which is Phase 10.E
+work.
 
 ### Attaching context (optional, reserved)
 
@@ -964,8 +916,8 @@ const bytes = read_all(path)? "loading config";
 
 ### Interaction with concurrency kinds
 
-`?` inspects the `err` field of its argument — which means it needs the result to
-exist. That constrains how it composes with `scoped` / `pooled` bindings:
+`?` inspects the discriminant of its argument — which means it needs the result
+to exist. That constrains how it composes with `scoped` / `pooled` bindings:
 
 ```js
 // Synchronous binding — result is available immediately
@@ -988,10 +940,10 @@ synchronous call's result) is.
 
 ### Why not `?? throw` or exceptions?
 
-Earlier drafts had `?? throw` as a sugar form. `?` subsumes it — one operator, tighter
-syntax, and it integrates with destructuring. There are no exceptions in Yooperlang;
-every error boundary is visible at the token level (`?`, `if (err)`, or explicit
-`_ = f();`).
+Earlier drafts had `?? throw` as a sugar form. `?` subsumes it — one operator,
+tighter syntax, and it integrates with `switch`. There are no exceptions in
+Yooperlang; every error boundary is visible at the token level (`?` or an
+explicit `switch` over `Ok`/`Err`).
 
 ---
 

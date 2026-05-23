@@ -34,8 +34,8 @@ function main(): int32 {
         13, 10,
     ];
     let disposable p: ParsedRequest = parse_request_head(raw);
-    if (p.err.len > 0) {
-        printf(`parse err: ${p.err}\n`);
+    if (p.error.len > 0) {
+        printf(`parse err: ${p.error}\n`);
         return 1;
     }
     let m: string = method_label(p.request.method);

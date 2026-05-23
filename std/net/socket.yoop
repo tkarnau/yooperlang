@@ -4,22 +4,23 @@
 // Centralizes the close() path so TcpListener / TcpStream don't each
 // re-implement disposal.
 //
-// Result types (`SocketResult`) also implement Disposable + propagate.
+// `SocketResult` is an ordinary Disposable struct (not a "fallible" struct
+// in the compiler's sense — its diagnostic lives in the `error` field).
 // The caller's typical pattern is auto-cleanup at scope end:
 //
 //   disposable r: SocketResult = open_tcp_socket();
-//   if (r.err.len > 0) { return ...; }
+//   if (r.error.len > 0) { return ...; }
 //   // operations on r.socket via `ref` borrow
 //
-// On the err path, r.socket holds fd=-1 and dispose is a no-op. On the
+// On the error path, r.socket holds fd=-1 and dispose is a no-op. On the
 // success path, the socket is alive for the binding's lifetime; when
 // `r` goes out of scope the autocleanup runs close(fd). If the caller
 // wants to extend the socket's lifetime, the FUNCTION should declare
 // `propagates<disposable>` on its return and return the result onward.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
 import {
-    FdResult,
     ffi_socket_open,
     ffi_close,
 } from "./socket_ffi.yoop";
@@ -42,16 +43,19 @@ export type Socket implements Disposable propagates<disposable> {
 // open_tcp_socket()` and let autocleanup do the right thing.
 export type SocketResult implements Disposable propagates<disposable> {
     socket: Socket,
-    err: string,
+    error:  string,
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
     }
 }
 
 export function open_tcp_socket(): SocketResult propagates<disposable> {
-    let r: FdResult = ffi_socket_open();
-    if (r.err.len > 0) {
-        return { socket: { fd: -1 }, err: r.err };
+    let r: Result<c_int, string> = ffi_socket_open();
+    let fd: c_int = -1;
+    let err_msg: string = "";
+    switch (r) {
+        case Result.Ok { value: ok_fd }: { fd = ok_fd; }
+        case Result.Err { error: e }: { err_msg = e; }
     }
-    return { socket: { fd: r.fd }, err: "" };
+    return { socket: { fd: fd }, error: err_msg };
 }

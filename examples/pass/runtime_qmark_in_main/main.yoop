@@ -2,19 +2,31 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-type Result { value: int32, err: string }
-
-function maybe(fail: bool): Result {
-    if (fail) {
-        return { value: 0, err: "boom" };
-    }
-    return { value: 42, err: "" };
+enum InnerResult {
+    Ok { value: int32 },
+    Err { error: string },
 }
 
-function main(): Result {
+function maybe(fail: bool): InnerResult {
+    if (fail) {
+        return InnerResult.Err { error: "boom" };
+    }
+    return InnerResult.Ok { value: 42 };
+}
+
+function inner(): InnerResult {
     const v: int32 = maybe(false)?;
     printf(`got ${v}\n`);
     const bad: int32 = maybe(true)?;
     printf(`unreachable ${bad}\n`);
-    return { value: v, err: "" };
+    return InnerResult.Ok { value: v };
+}
+
+function main(): int32 {
+    let r: InnerResult = inner();
+    switch (r) {
+        case InnerResult.Ok { value: ok_v }: { return 0; }
+        case InnerResult.Err { error: err_e }: { return 0; }
+    }
+    return 0;
 }

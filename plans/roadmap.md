@@ -123,7 +123,7 @@ The next batch of language work, picked for the items that are still **forcing w
 
 > Detailed plan: [phase-9.md](phase-9.md)
 
-### Phase 10 — Library completion, foundation generics, runtime polish, self-hosting
+### Phase 10 — Library completion, foundation generics, runtime polish, self-hosting (current focus)
 
 The next batch after Phase 9 — closes the *library* workarounds (the
 `std/collections/` story, `std/log` + `std/debug`, networking polish)
@@ -134,11 +134,18 @@ and the actual self-hosting bootstrap move to the *end* of Phase 10:
 the JS bootstrap isn't worth porting until the surface it implements
 is something a self-hosted compiler would also want to expose.
 
-The single biggest unlock is **generic enums** — once `Option<T>`,
-`Result<T, E>`, and `Iterable<T>` become expressible the rest of the
-phase becomes routine library work.
+The single biggest unlock — **generic enums** — landed as
+sub-phase 10.A (see [phase-10-a-generic-enums.md](completed/phase-10-a-generic-enums.md)).
+`Option<T>`, `Result<T, E>`, and `IterStep<T>` are now expressible. The
+Phase 10.X cleansing pass also landed
+(see [phase-10-x-cleansing.md](completed/phase-10-x-cleansing.md)): the
+Phase 2 fallible-struct convention has been retired and `std/` is
+uniformly on `Result<T, E>`. Phase 10.B (see
+[phase-10-b-iterable.md](completed/phase-10-b-iterable.md)) extended
+`for ... in` to walk any struct implementing the new generic
+`Iterable<T>` trait, opening the door to Phase 10.C's collections.
 
-> Detailed plan: [phase-10.md](phase-10.md)
+> Detailed plan: [phase-10.md](phase-10.md).
 
 ---
 

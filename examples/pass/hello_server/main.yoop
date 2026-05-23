@@ -30,14 +30,14 @@ type HelloHandler implements Handler {
         resp.status = ok();
         headers_add(ref resp.headers, "Content-Type", "text/plain");
         resp.body = string_as_bytes(self.greeting);
-        return { err: "" };
+        return HandleOutcome.Ok;
     }
 }
 
 function main(): int32 {
     let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
-    if (lr.err.len > 0) {
-        printf(`bind failed: ${lr.err}\n`);
+    if (lr.error.len > 0) {
+        printf(`bind failed: ${lr.error}\n`);
         return 1;
     }
     printf(`listening on 127.0.0.1:18080\n`);
@@ -45,6 +45,6 @@ function main(): int32 {
     // serve_n with n=1 → exit after one request (test-friendly).
     // Switch to a large N or <=0 for a long-running server.
     let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, 1);
-    printf(`served=${outcome.served} err=${outcome.err}\n`);
+    printf(`served=${outcome.served} err=${outcome.error}\n`);
     return 0;
 }

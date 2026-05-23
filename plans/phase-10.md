@@ -114,7 +114,14 @@ story works.
 
 Once this lands, every later item gets cheaper.
 
-### Phase 10.B — `Iterator<T>` trait + `for ... in` over user types
+### Phase 10.B — `Iterable<T>` trait + `for ... in` over user types ✓ landed
+
+See [phase-10-b-iterable.md](completed/phase-10-b-iterable.md). Generic
+`Iterable<T>` + `IterStep<T>` live in
+[std/core/traits.yoop](../std/core/traits.yoop); the typechecker accepts
+any struct with an `Iterable<U>` impl as the RHS of `for ... in` and
+codegen lowers to a `call next → tag-branch` loop. Below is the original
+spec for reference.
 
 Phase 9.D shipped `for x in xs` for arrays only because `Iterable<T>`
 needed generic enums for its return shape (`enum IterStep<T> { Yield { value: T },

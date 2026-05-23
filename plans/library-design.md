@@ -77,45 +77,50 @@ type Socket implements Disposable propagates<disposable> {
     function dispose(ref self): void { /* close(fd) */ }
 }
 
-export type SocketResult { socket: Socket, err: string }
+export type SocketResult implements Disposable propagates<disposable> {
+    socket: Socket,
+    error:  string,
+    function dispose(ref self): void { /* close inner socket */ }
+}
 
-export function open_socket(...): SocketResult { ... }
+export function open_socket(...): SocketResult propagates<disposable> { ... }
 ```
 
 The split is a strong convention, not a typecheck rule. The split makes
 it easy for users to grep their dependencies — "do I depend on any
 `*_ffi.yoop`?" answers "am I building on unsafe code?".
 
-### 2.2 Failable returns use the `err: string` convention + `?`
+### 2.2 Fallible returns use `Result<T, E>` + `?`
 
-Every library function that can fail returns a fallible struct (a struct
-ending in `err: string`). The caller propagates with `?` or destructures
-explicitly. The pattern is the same as Phase 8.D's `open_safe`:
+Every library function that can fail returns a `Result<T, E>` enum (from
+[std/core/types.yoop](../std/core/types.yoop)). The caller propagates with
+`?` or branches with `switch`.
 
 ```yoop
-type ConnectResult { conn: TcpStream, err: string }
+import { Result } from "std/core/types.yoop";
 
-export function connect(addr: string, port: int32): ConnectResult { ... }
+export function connect(addr: string, port: int32): Result<TcpStream, string> { ... }
 
 // caller:
-function fetch(url: string): FetchResult {
-    let c: TcpStream = connect("1.1.1.1", 80)?;   // err propagates
+function fetch(url: string): Result<Response, string> {
+    let c: TcpStream = connect("1.1.1.1", 80)?;   // Err propagates
     // ...
 }
 ```
 
-Library code does **not** use enums for errors (no `Result<T, E>`-style
-ADTs). The struct convention is what `?` understands today; introducing
-a parallel enum-based mechanism would split the ecosystem. If `?` ever
-grows to understand enums (a follow-up to Phase 7.5), libraries will
-inherit it automatically.
+Disposable-bearing failure shapes (`SocketResult`, `ListenResult`,
+`AcceptResult`, `ConnectResult`, `ParsedRequest`) stay as plain
+`Disposable` structs with an explicit `error: string` field that the
+caller inspects directly — `?` doesn't apply (the surrounding lifecycle
+needs to be managed before propagation). They're a small handful of
+named types, all under `std/net` and `std/http`.
 
-Error messages in `err` are user-facing strings. The standard format is
-`"<operation>: <reason>"`. For libc failures, use
+Error messages in `error` payloads are user-facing strings. The standard
+format is `"<operation>: <reason>"`. For libc failures, use
 `errno.message(errno.get())` directly:
 
 ```yoop
-return { conn: empty, err: `connect: ${errno.message(errno.get())}` };
+return Result.Err { error: `connect: ${errno.message(errno.get())}` };
 ```
 
 ### 2.3 Resources are `Disposable + propagates<disposable>`
@@ -227,13 +232,11 @@ tasks to file handles. **Already in use; documented here for completeness.**
 
 ```yoop
 trait Readable {
-    // Read into the front of `buf`, up to buf.len bytes. Returns the
-    // number of bytes actually read (0 = EOF, negative = err with the
-    // returned ReadOutcome's err field set).
-    function read(ref self, ref buf: uint8[]): ReadOutcome;
+    // Read into the front of `buf`, up to buf.len bytes. Ok payload is the
+    // count of bytes actually written (0 = EOF on a stream); Err carries a
+    // diagnostic.
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
 }
-
-type ReadOutcome { n: c_ssize_t, err: string }
 ```
 
 Every byte source (TcpStream, file, in-memory buffer for testing)
@@ -241,11 +244,11 @@ implements `Readable`. The HTTP parser and any framing layer takes
 `Readable` as input, so testing with a fake source is a one-struct
 implementation.
 
-The return shape is a fallible struct so `?` works:
+The return shape is `Result<c_ssize_t, string>` so `?` works:
 
 ```yoop
-function read_line(ref r: ref Readable, ref buf: uint8[]): ReadResult {
-    let outcome: c_ssize_t = Readable.read(ref r, ref buf)?;
+function read_line(ref r: ref Readable, ref buf: uint8[]): Result<usize, string> {
+    let n: c_ssize_t = Readable.read(ref r, ref buf)?;
     // ...
 }
 ```
@@ -260,12 +263,12 @@ hand-write a small abstraction layer if needed.)
 
 ```yoop
 trait Writable {
-    function write(ref self, ref buf: uint8[]): WriteOutcome;
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
     function flush(ref self): FlushOutcome;
 }
 
-type WriteOutcome { n: c_ssize_t, err: string }
-type FlushOutcome { err: string }
+// err-only outcome; concrete enum (no payload on Ok).
+enum FlushOutcome { Ok, Err { error: string } }
 ```
 
 Symmetric to `Readable`. `flush` is its own method because a buffering
@@ -411,8 +414,12 @@ type Socket implements Disposable propagates<disposable> {
     }
 }
 
-export type SocketResult { socket: Socket, err: string }
-export function open_tcp_socket(): SocketResult { ... }
+export type SocketResult implements Disposable propagates<disposable> {
+    socket: Socket,
+    error:  string,
+    function dispose(ref self): void { Disposable.dispose(ref self.socket); }
+}
+export function open_tcp_socket(): SocketResult propagates<disposable> { ... }
 ```
 
 A raw fd in a `Disposable` envelope. Users don't usually touch this
@@ -431,23 +438,29 @@ type TcpListener implements Disposable propagates<disposable> {
     }
 }
 
-export type ListenResult { listener: TcpListener, err: string }
+export type ListenResult implements Disposable propagates<disposable> {
+    listener: TcpListener,
+    error:    string,
+    function dispose(ref self): void { Disposable.dispose(ref self.listener); }
+}
 
-export function listen(addr: SocketAddr, backlog: int32): ListenResult { ... }
+export function listen(addr: SocketAddr, backlog: int32): ListenResult propagates<disposable> { ... }
 ```
 
 `listen` does the socket() + bind() + listen() sequence; on failure
-every intermediate fd is closed and `err` describes which call failed.
+every intermediate fd is closed and `error` describes which call failed.
 
 ```yoop
-export type AcceptResult { stream: TcpStream, peer: SocketAddr, err: string }
+export type AcceptResult implements Disposable propagates<disposable> {
+    stream:    TcpStream,
+    peer_host: uint32,
+    peer_port: uint16,
+    error:     string,
+    function dispose(ref self): void { Disposable.dispose(ref self.stream); }
+}
 
-export task accept(ref l: TcpListener): AcceptResult {
+export task accept(ref l: TcpListener): AcceptResult propagates<disposable> {
     let rc: c_int = yoop_io_wait_readable(l.socket.fd);
-    if (rc != 0) {
-        return { stream: empty_stream, peer: zero_addr, err: ... };
-    }
-    let cfd: c_int = accept(l.socket.fd, ...);
     // ...
 }
 ```
@@ -464,15 +477,19 @@ type TcpStream implements Disposable + Readable + Writable propagates<disposable
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
     }
-    function read(ref self, ref buf: uint8[]): ReadOutcome {
-        // wait_readable + read(); convert (-1, errno) to err string.
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        // wait_readable + read(); convert (-1, errno) to Err.
     }
-    function write(ref self, ref buf: uint8[]): WriteOutcome { ... }
-    function flush(ref self): FlushOutcome { return { err: "" }; }
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> { ... }
+    function flush(ref self): FlushOutcome { return FlushOutcome.Ok; }
 }
 
-export type ConnectResult { stream: TcpStream, err: string }
-export task connect(addr: SocketAddr): ConnectResult { ... }
+export type ConnectResult implements Disposable propagates<disposable> {
+    stream: TcpStream,
+    error:  string,
+    function dispose(ref self): void { Disposable.dispose(ref self.stream); }
+}
+export task connect(addr: SocketAddr): ConnectResult propagates<disposable> { ... }
 ```
 
 This is the workhorse. Implements three traits (Disposable + Readable +
@@ -552,16 +569,14 @@ type Client {
 
 export function make_client(): Client { ... }
 
-export type FetchResult { response: Response, err: string }
-
-export task send(ref c: Client, req: Request): FetchResult {
+export task send(ref c: Client, req: Request): Result<Response, string> {
     // 1. Parse URL → SocketAddr + request-target.
     // 2. connect() → TcpStream.
     // 3. Format request + write to stream.
     // 4. Read response.
     // 5. Parse response.
     // 6. Dispose stream.
-    // Returns fallible struct; caller `?`s if needed.
+    // Returns Result<Response, string>; caller `?`s if needed.
 }
 ```
 
@@ -573,10 +588,10 @@ configuration.
 
 ```yoop
 trait Handler {
-    function handle(ref self, req: Request): HandleResult;
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
 }
 
-type HandleResult { response: Response, err: string }
+enum HandleOutcome { Ok, Err { error: string } }
 
 export type Server {
     listener: TcpListener,
@@ -587,7 +602,7 @@ export type Server {
 export task serve<H implements Handler>(server: Server, ref handler: H): int32 {
     while (true) {
         let acc: AcceptResult = wait accept(ref server.listener);
-        if (acc.err.len > 0) {
+        if (acc.error.len > 0) {
             continue; // or break, depending on error policy
         }
         // Spawn a per-connection task. The handler does the request
@@ -796,11 +811,13 @@ work around or wait on:
    resolved against a configured root) is the obvious fix; doesn't
    require any language change, just a driver tweak.
 
-7. **`?` over enums.** A `Result<T, E>` enum can't be `?`-propagated
-   because `?` only understands `err: string`-bearing structs. Phase
-   7.5 introduced enums but didn't extend `?`. If we add it, library
-   code can move to enum-based error types — but the current convention
-   works and is documented.
+7. **Cross-shape `?` propagation.** `?` propagates the operand's `Err`
+   payload into the enclosing function's `Err` variant only when the two
+   payload types match exactly. Mixing `Result<_, IoError>` and
+   `Result<_, AppError>` requires an explicit conversion at the `?` site
+   (Phase 10.E will add a `From`-style trait). Phase 9.H added the
+   enum-`?` recognizer; Phase 10.X retired the struct-fallible
+   convention.
 
 None of these block the library's MVP. They're listed so future phase
 plans know where the friction is.

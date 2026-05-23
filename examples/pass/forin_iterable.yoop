@@ -1,0 +1,70 @@
+// Phase 10.B: `for x in EXPR` works over any type that implements
+// Iterable<T>. The loop desugars to a while/switch over IterStep<T>:
+//   while (true) {
+//       switch (Iterable.next(ref iter)) {
+//           case IterStep.Yield { value: x }: { <body> }
+//           case IterStep.Done: break;
+//       }
+//   }
+//
+// The loop owns a mutable copy of the iterator (so the caller's binding
+// is untouched, but a function-returned iterator works too).
+
+import { Iterable, IterStep } from "std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Counter implements Iterable<int32> {
+    cur: int32,
+    end: int32,
+    function next(ref self): IterStep<int32> {
+        if (self.cur >= self.end) {
+            return IterStep.Done;
+        }
+        let v: int32 = self.cur;
+        self.cur = self.cur + 1;
+        return IterStep.Yield { value: v };
+    }
+}
+
+function counter(start: int32, end: int32): Counter {
+    return { cur: start, end: end };
+}
+
+function main(): int32 {
+    // Walks a user-defined iterator.
+    let c: Counter = counter(0, 4);
+    for n in c {
+        printf(`n=${n}\n`);
+    }
+
+    // Original `c` is untouched — the loop walked a local copy.
+    printf(`c.cur=${c.cur}\n`);
+
+    // Iterators returned from functions work too.
+    let sum: int32 = 0;
+    for v in counter(1, 5) {
+        sum = sum + v;
+    }
+    printf(`sum=${sum}\n`);
+
+    // break works in the iterable form.
+    for k in counter(0, 100) {
+        if (k == 3) { break; }
+        printf(`k=${k}\n`);
+    }
+    return 0;
+}
+
+// expected output:
+// n=0
+// n=1
+// n=2
+// n=3
+// c.cur=0
+// sum=10
+// k=0
+// k=1
+// k=2
