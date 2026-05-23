@@ -1,0 +1,21 @@
+// Phase 9.C: `std/...` import root resolves against the std/ directory at
+// the repo root, instead of forcing a deep relative path like
+// `import { ... } from "../../../std/core/vec.yoop";`. SPEC §1's relative-only
+// rule still applies to every other import; `std/` is the only escape hatch.
+
+import { Vec, vec_new, vec_push, vec_get } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable v: Vec<int32> = vec_new(4);
+    vec_push(ref v, 10);
+    vec_push(ref v, 20);
+    vec_push(ref v, 30);
+    let total: int32 = vec_get(ref v, 0) + vec_get(ref v, 1) + vec_get(ref v, 2);
+    printf(`total=${total}\n`);
+    return 0;
+}

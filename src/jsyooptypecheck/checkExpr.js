@@ -19,6 +19,7 @@
 //     (we don't infer struct types from field shapes), so any context that
 //     has a target type calls pinStructLiteral via checkInitializer instead.
 
+
 import { ASTNodeKind } from "../contracts.js";
 import {
   ArrayType,
@@ -27,8 +28,10 @@ import {
   PrimType,
   RefType,
   TraitSelfPlaceholder,
+  UnsafePtrType,
   UntypedFloatType,
   UntypedIntType,
+  UntypedNullType,
   VoidType,
   isCastableTo,
   isIntPrim,
@@ -88,6 +91,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveTemplateLiteral(node, scope, ctx);
     case ASTNodeKind.ASSIGNMENT:
       return resolveAssignment(node, scope, ctx);
+    case ASTNodeKind.COMPOUND_ASSIGNMENT:
+      return resolveCompoundAssignment(node, scope, ctx);
     case ASTNodeKind.FIELD_ACCESS:
       return resolveFieldAccess(node, scope, ctx);
     case ASTNodeKind.STRUCT_LITERAL:
@@ -100,8 +105,22 @@ export function resolveExprType(node, scope, ctx) {
       return resolveArrayLiteral(node, scope, ctx);
     case ASTNodeKind.INDEX_EXPRESSION:
       return resolveIndexExpression(node, scope, ctx);
+    case ASTNodeKind.SLICE_EXPRESSION:
+      return resolveSliceExpression(node, scope, ctx);
     case ASTNodeKind.WAIT_EXPRESSION:
       return resolveWaitExpression(node, scope, ctx);
+    case ASTNodeKind.VARIANT_CONSTRUCTOR:
+      return resolveVariantConstructor(node, scope, ctx);
+    case ASTNodeKind.ADDRESS_OF_EXPRESSION:
+      return resolveAddressOf(node, scope, ctx);
+    case ASTNodeKind.DEREF_EXPRESSION:
+      return resolveDeref(node, scope, ctx);
+    case ASTNodeKind.NULL_LITERAL:
+      return setType(node, UntypedNullType());
+    case ASTNodeKind.UNSAFE_PTR_CAST:
+      return resolveUnsafePtrCast(node, scope, ctx);
+    case ASTNodeKind.ERRNO_INTRINSIC:
+      return resolveErrnoIntrinsic(node, scope, ctx);
     default: {
       pushError(
         ctx.errors,
@@ -127,6 +146,20 @@ function resolveIdent(node, scope, ctx) {
     if (binding.type.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
     // Phase 6.2: record the binding's lexical depth for escape analysis.
     node.bindingScopeDepth = binding.scopeDepth ?? 0;
+    // LSP: back-pointer to the declaring AST node so go-to-definition and
+    // hover can navigate from a reference to its declaration without
+    // re-running scope resolution. Stored non-enumerably so generic AST
+    // walkers (kindCheck.walkExpr, checkStatement.findScopedIdentInExpr,
+    // codegen.cloneAstWithSubstitution, etc.) don't follow the cycle this
+    // back-pointer creates from a reference to its decl and back.
+    if (binding.node) {
+      Object.defineProperty(node, "resolvedDeclNode", {
+        value: binding.node,
+        enumerable: false,
+        configurable: true,
+        writable: true,
+      });
+    }
     // Auto-deref: ref bindings transparently expose the inner type
     if (binding.type.kind === typeKinds.ref) {
       node.autoDeref = true;
@@ -138,6 +171,26 @@ function resolveIdent(node, scope, ctx) {
   const modType = ctx.typeContext.moduleSymbols?.get(node.name);
   if (modType) {
     if (modType.kind === typeKinds.namespace) node.kind = ASTNodeKind.NAMESPACE_IDENT;
+    // Phase 8.E: mark IDENT references that resolve to a module-level
+    // let/const binding so codegen emits a load from @<modid>__<name>
+    // rather than %<name>. Functions and namespaces stay on their own
+    // resolution paths.
+    if (
+      modType.kind !== typeKinds.func &&
+      modType.kind !== typeKinds.namespace
+    ) {
+      const tc = ctx.typeContext;
+      const imp = tc.importedNames?.get(node.name);
+      if (imp && imp.kind === "value") {
+        node.isModuleGlobal = true;
+        node.moduleGlobalSym = `${imp.fromModuleId}__${imp.exportName}`;
+        node.moduleGlobalImported = true;
+      } else if (tc.currentModId) {
+        node.isModuleGlobal = true;
+        node.moduleGlobalSym = `${tc.currentModId}__${node.name}`;
+        node.moduleGlobalImported = false;
+      }
+    }
     return setType(node, modType);
   }
   if (node.name === "self") {
@@ -332,6 +385,25 @@ function resolveUnary(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
+  // Phase 9: bitwise NOT — integer types only, returns the same type.
+  if (node.op === "bitnot") {
+    if (
+      operandType.kind === typeKinds.prim &&
+      isIntPrim(operandType.name)
+    ) {
+      return setType(node, operandType);
+    }
+    if (operandType.kind === typeKinds.untypedInt) {
+      return setType(node, operandType);
+    }
+    pushError(
+      ctx.errors,
+      node,
+      `bitwise NOT operator requires an integer operand, found ${formatType(operandType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+
   if (node.op === "not") {
     const boolType = resolveTypeFromName(
       primAnnotations.bool,
@@ -396,6 +468,9 @@ function resolveAssignment(node, scope, ctx) {
   if (node.target.kind === ASTNodeKind.INDEX_EXPRESSION) {
     return resolveAssignmentToIndex(node, scope, ctx);
   }
+  if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
+    return resolveAssignmentToDeref(node, scope, ctx);
+  }
   pushError(
     ctx.errors,
     node,
@@ -404,10 +479,92 @@ function resolveAssignment(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
+// Phase 9: `x op= rhs`. Treated as the merge of an assignment (target must be
+// a mutable lvalue) and a binary op (target's current type must accept `op`
+// with the RHS). Codegen evaluates the lvalue exactly once.
+function resolveCompoundAssignment(node, scope, ctx) {
+  // Resolve the target as an lvalue read first to pick up its current type.
+  // resolveExprType handles IDENT / FIELD_ACCESS / INDEX_EXPRESSION /
+  // DEREF_EXPRESSION uniformly. Mutability is checked below.
+  const targetType = resolveExprType(node.target, scope, ctx);
+  if (targetType.kind === typeKinds.error) return setType(node, ErrorType());
+
+  // Block writes to a `const` binding (mirrors plain ASSIGNMENT to IDENT).
+  if (node.target.kind === ASTNodeKind.IDENT) {
+    const binding = lookupInScope(scope, node.target.name);
+    if (binding && binding.kind === "const") {
+      pushError(
+        ctx.errors,
+        node,
+        `cannot compound-assign to const "${node.target.name}"`,
+      );
+      return setType(node, ErrorType());
+    }
+  }
+
+  const rhsType = resolveExprType(node.value, scope, ctx);
+  if (rhsType.kind === typeKinds.error) return setType(node, ErrorType());
+
+  // The op must be applicable to (targetType, rhsType). unifyArith returns
+  // the result type or errors; we reuse the same path binary ops use.
+  const unified = unifyArith(targetType, rhsType, node.op);
+  if (unified.kind === typeKinds.error) {
+    pushError(
+      ctx.errors,
+      node,
+      `compound op '${node.op}=' rejects operands ${formatType(targetType)} and ${formatType(rhsType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Result must be assignable back into the target slot — guards against
+  // e.g. an untyped int RHS that would resolve to something narrower.
+  if (!isAssignable(targetType, unified)) {
+    pushError(
+      ctx.errors,
+      node,
+      `compound op '${node.op}=' yields ${formatType(unified)} which is not assignable to ${formatType(targetType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Pin any untyped-literal RHS (and any nested arithmetic with untyped
+  // intermediate types) to the target type — same helper as plain binary ops.
+  coerceUntypedLiteralToTyped(node.value, rhsType, targetType, ctx.errors);
+  return setType(node, targetType);
+}
+
+// Phase 8.A: `*p = v` — assignment through an unsafe_ptr<T>. Resolves the
+// pointer, checks the RHS against the pointee type.
+function resolveAssignmentToDeref(node, scope, ctx) {
+  const ptrType = resolveExprType(node.target.operand, scope, ctx);
+  if (ptrType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (ptrType.kind !== typeKinds.unsafePtr) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot deref non-pointer type ${formatType(ptrType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  const pointee = ptrType.pointee;
+  node.target.resolvedType = pointee;
+  checkInitializer(
+    node.value,
+    pointee,
+    scope,
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(pointee)} through pointer`,
+  );
+  return setType(node, pointee);
+}
+
 function resolveAssignmentToIdent(node, scope, ctx) {
   const targetName = node.target.name;
   const binding = lookupInScope(scope, targetName);
   if (!binding) {
+    // Phase 8.E: not in lexical scope — fall back to module-level globals.
+    const moduleAssign = resolveAssignmentToModuleGlobal(node, ctx);
+    if (moduleAssign) return moduleAssign;
     pushError(ctx.errors, node, `undefined variable "${targetName}"`);
     return setType(node, ErrorType());
   }
@@ -445,6 +602,72 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     binding.errObserved = false;
   }
   return setType(node, binding.type);
+}
+
+// Phase 8.E: handle assignment to a module-level let. Returns the assignment's
+// resolved type if the target was a module global; null if the target wasn't
+// found at module scope (caller falls through to "undefined variable").
+function resolveAssignmentToModuleGlobal(node, ctx) {
+  const targetName = node.target.name;
+  const tc = ctx.typeContext;
+  const modType = tc.moduleSymbols?.get(targetName);
+  if (!modType) return null;
+  if (
+    modType.kind === typeKinds.func ||
+    modType.kind === typeKinds.namespace
+  ) {
+    return null;
+  }
+  // Imported lets are read-only across module boundaries.
+  const imp = tc.importedNames?.get(targetName);
+  if (imp && imp.kind === "value") {
+    pushError(
+      ctx.errors,
+      node,
+      `"${targetName}" is imported from module "${imp.fromModuleId}" — assignment from outside its module is not permitted`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Module-local: must be a `let` (not `const`). Find the decl in
+  // moduleInitDecls to check mutability. moduleInitDecls is stashed onto
+  // the module by typecheck pass C.4.
+  const decl = findModuleInitDecl(tc, targetName);
+  if (decl && decl.kind === ASTNodeKind.CONST_DECL) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot assign to const "${targetName}"`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Mark target so codegen emits store to @<modid>__<name>.
+  node.target.isModuleGlobal = true;
+  node.target.moduleGlobalSym = `${tc.currentModId}__${targetName}`;
+  node.target.moduleGlobalImported = false;
+  node.target.resolvedType = modType;
+  checkInitializer(
+    node.value,
+    modType,
+    null, // no scope needed — RHS resolveExprType handles its own scoping
+    ctx,
+    (valueType) =>
+      `cannot assign ${formatType(valueType)} to ${formatType(modType)} in assignment to module-level "${targetName}"`,
+  );
+  return setType(node, modType);
+}
+
+// Phase 8.E: best-effort lookup of the AST decl for a module-level binding.
+// Uses mod.moduleInitDecls (set in typecheck pass C.4) reachable via the
+// moduleEnv. Returns null if the binding isn't a module-level let/const.
+function findModuleInitDecl(tc, name) {
+  if (!tc.moduleEnv || !tc.currentModId) return null;
+  const env = tc.moduleEnv.get(tc.currentModId);
+  const decls = env?.moduleInitDecls;
+  if (!decls) return null;
+  for (const d of decls) {
+    if (d.name === name) return d;
+  }
+  return null;
 }
 
 function resolveAssignmentToField(node, scope, ctx) {
@@ -501,15 +724,56 @@ function resolveAssignmentToIndex(node, scope, ctx) {
 
 // `obj.field` — receiver must be a struct, namespace, string (for .len), or array (for .len).
 function resolveFieldAccess(node, scope, ctx) {
+  // Phase 7.5: bare `EnumName.Variant` (no payload). Detect before
+  // resolveExprType on the IDENT object would error with "undefined variable".
+  if (node.object.kind === ASTNodeKind.IDENT) {
+    const maybeEnum = lookupEnumByName(node.object.name, ctx);
+    if (maybeEnum) {
+      const variant = maybeEnum.variants.get(node.field);
+      const fieldLoc = node.fieldSourceLoc ?? node;
+      if (!variant) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `enum "${maybeEnum.name}" has no variant "${node.field}"`,
+        );
+        return setType(node, ErrorType());
+      }
+      if (variant.fields !== null) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `variant "${maybeEnum.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} } — write '${maybeEnum.name}.${variant.name} { ... }'`,
+        );
+        return setType(node, ErrorType());
+      }
+      // Promote in-place to a VARIANT_CONSTRUCTOR with no fields.
+      node.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+      node.enumName = node.object.name;
+      node.variantName = node.field;
+      node.fields = null;
+      node.resolvedEnumType = maybeEnum;
+      node.resolvedVariant = variant;
+      // Clean up FIELD_ACCESS-specific properties (best-effort tidiness).
+      delete node.object;
+      delete node.field;
+      return setType(node, maybeEnum);
+    }
+  }
+
   const objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
 
+  // For "no such field"-style diagnostics, prefer the field identifier's
+  // location so the squiggle lands on the field name, not the whole expr.
+  const fieldLoc = node.fieldSourceLoc ?? node;
+
   // namespace.field
   if (objType.kind === typeKinds.namespace) {
     if (!objType.exports.has(node.field)) {
-      pushError(ctx.errors, node, `namespace "${node.object.name}" has no export "${node.field}"`);
+      pushError(ctx.errors, fieldLoc, `namespace "${node.object.name}" has no export "${node.field}"`);
       return setType(node, ErrorType());
     }
     const moduleEnv = ctx.typeContext.moduleEnv;
@@ -520,7 +784,7 @@ function resolveFieldAccess(node, scope, ctx) {
     }
     const sym = srcEnv.localSymbols.get(node.field) ?? srcEnv.structTable.get(node.field);
     if (!sym) {
-      pushError(ctx.errors, node, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
+      pushError(ctx.errors, fieldLoc, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
       return setType(node, ErrorType());
     }
     node.namespaceLookup = { moduleId: objType.moduleId, exportName: node.field };
@@ -541,11 +805,41 @@ function resolveFieldAccess(node, scope, ctx) {
     node.isArrayLen = true;
     return setType(node, PrimType(primAnnotations.usize));
   }
+  // Phase 8.C: array.ptr intrinsic — borrow the data pointer.
+  // Gated by `import.unsafe;` because the produced unsafe_ptr<T> is itself
+  // an unsafe pointer; mirrors the Phase 8.A blanket rule.
+  if (objType.kind === typeKinds.array && node.field === "ptr") {
+    if (!ctx.typeContext.allowsUnsafe) {
+      pushError(
+        ctx.errors,
+        fieldLoc,
+        `'.ptr' on an array requires 'import.unsafe;' at module top`,
+      );
+      return setType(node, ErrorType());
+    }
+    node.isArrayPtr = true;
+    return setType(node, UnsafePtrType(objType.elem));
+  }
   if (objType.kind === typeKinds.array) {
-    pushError(ctx.errors, node, `type ${formatType(objType)} has no field "${node.field}"`);
+    pushError(ctx.errors, fieldLoc, `type ${formatType(objType)} has no field "${node.field}"`);
     return setType(node, ErrorType());
   }
 
+  // Phase 7.5: field access on a union type — same path as struct, just a
+  // type-punning read into the union's chosen field type. Codegen lowers via
+  // a bitcast.
+  if (objType.kind === typeKinds.union) {
+    const uf = objType.fields?.find((f) => f.name === node.field);
+    if (!uf) {
+      pushError(
+        ctx.errors,
+        fieldLoc,
+        `union "${objType.name}" has no field "${node.field}"`,
+      );
+      return setType(node, ErrorType());
+    }
+    return setType(node, uf.type);
+  }
   if (objType.kind !== typeKinds.struct) {
     pushError(ctx.errors, node, `field access on non-struct type ${formatType(objType)}`);
     return setType(node, ErrorType());
@@ -555,11 +849,11 @@ function resolveFieldAccess(node, scope, ctx) {
     if (objType.methods?.has(node.field)) {
       pushError(
         ctx.errors,
-        node,
+        fieldLoc,
         `method-call form '.${node.field}()' is not supported — use the free-function form '${node.field}(ref value)'`,
       );
     } else {
-      pushError(ctx.errors, node, `type "${objType.name}" has no field "${node.field}"`);
+      pushError(ctx.errors, fieldLoc, `type "${objType.name}" has no field "${node.field}"`);
     }
     return setType(node, ErrorType());
   }
@@ -587,6 +881,219 @@ function resolveRefExpression(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   return setType(node, RefType(operandType));
+}
+
+// Phase 8.A: `&lvalue` — address-of. Returns unsafe_ptr<T> where T is the
+// lvalue's type. Only lvalues are accepted (IDENT, FIELD_ACCESS,
+// INDEX_EXPRESSION, DEREF_EXPRESSION).
+function resolveAddressOf(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (
+    node.operand.kind !== ASTNodeKind.IDENT &&
+    node.operand.kind !== ASTNodeKind.FIELD_ACCESS &&
+    node.operand.kind !== ASTNodeKind.INDEX_EXPRESSION &&
+    node.operand.kind !== ASTNodeKind.DEREF_EXPRESSION
+  ) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot take address of an rvalue — operand of '&' must be an lvalue`,
+    );
+    return setType(node, ErrorType());
+  }
+  return setType(node, UnsafePtrType(operandType));
+}
+
+// Phase 8.A: `*p` — dereference an unsafe_ptr<T>. Returns T.
+function resolveDeref(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (operandType.kind !== typeKinds.unsafePtr) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot deref non-pointer type ${formatType(operandType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  return setType(node, operandType.pointee);
+}
+
+// Phase 8.A: unsafe_ptr.cast<U>(p), unsafe_ptr.toInt(p), unsafe_ptr.fromInt<T>(n)
+function resolveUnsafePtrCast(node, scope, ctx) {
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
+
+  if (node.castKind === "bitcast") {
+    if (operandType.kind !== typeKinds.unsafePtr) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.cast expects an unsafe_ptr<T>, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    const targetPointee = resolveTypeAnnotInCtx(node.typeArg, ctx);
+    if (!targetPointee) {
+      pushError(ctx.errors, node, `unsafe_ptr.cast: unknown target pointee type`);
+      return setType(node, ErrorType());
+    }
+    return setType(node, UnsafePtrType(targetPointee));
+  }
+
+  if (node.castKind === "toInt") {
+    if (operandType.kind !== typeKinds.unsafePtr) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.toInt expects an unsafe_ptr<T>, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    return setType(node, PrimType(primAnnotations.uintptr));
+  }
+
+  if (node.castKind === "fromInt") {
+    const isIntegerSource =
+      (operandType.kind === typeKinds.prim && isIntPrim(operandType.name)) ||
+      operandType.kind === typeKinds.untypedInt;
+    if (!isIntegerSource) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.fromInt expects an integer argument, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    const targetPointee = resolveTypeAnnotInCtx(node.typeArg, ctx);
+    if (!targetPointee) {
+      pushError(ctx.errors, node, `unsafe_ptr.fromInt: unknown target pointee type`);
+      return setType(node, ErrorType());
+    }
+    return setType(node, UnsafePtrType(targetPointee));
+  }
+
+  // Phase 8.C: unsafe_ptr.toArray<T>(p, n) — borrow a (ptr, len) pair as T[].
+  if (node.castKind === "toArray") {
+    const targetElem = resolveTypeAnnotInCtx(node.typeArg, ctx);
+    if (!targetElem) {
+      pushError(ctx.errors, node, `unsafe_ptr.toArray: unknown element type`);
+      return setType(node, ErrorType());
+    }
+    if (operandType.kind !== typeKinds.unsafePtr) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.toArray expects unsafe_ptr<T> as the first arg, got ${formatType(operandType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    if (!typesEqual(operandType.pointee, targetElem)) {
+      pushError(
+        ctx.errors,
+        node,
+        `unsafe_ptr.toArray<${formatType(targetElem)}> expects unsafe_ptr<${formatType(targetElem)}>, got ${formatType(operandType)} — use unsafe_ptr.cast first if a reinterpret is intended`,
+      );
+      return setType(node, ErrorType());
+    }
+    const lenType = resolveExprType(node.lengthOperand, scope, ctx);
+    const isInt =
+      (lenType.kind === typeKinds.prim && isIntPrim(lenType.name)) ||
+      lenType.kind === typeKinds.untypedInt;
+    if (!isInt) {
+      pushError(
+        ctx.errors,
+        node.lengthOperand,
+        `unsafe_ptr.toArray length must be an integer, got ${formatType(lenType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    // Pin untyped-int length to usize so codegen emits an i64 store.
+    if (lenType.kind === typeKinds.untypedInt) {
+      coerceUntypedLiteralToTyped(
+        node.lengthOperand,
+        lenType,
+        PrimType(primAnnotations.usize),
+        ctx.errors,
+      );
+    }
+    return setType(node, ArrayType(targetElem));
+  }
+
+  pushError(ctx.errors, node, `unknown unsafe_ptr cast kind ${node.castKind}`);
+  return setType(node, ErrorType());
+}
+
+// Phase 8.D: errno.get() / errno.set(v) / errno.message(c).
+// `get` is nullary and returns c_int. `set` takes an int and returns void.
+// `message` takes an int and returns string. Untyped int args pin to int32.
+function resolveErrnoIntrinsic(node, scope, ctx) {
+  if (node.op === "get") {
+    if (node.operand) {
+      pushError(ctx.errors, node, `errno.get() takes no arguments`);
+      return setType(node, ErrorType());
+    }
+    return setType(node, PrimType(primAnnotations.int32));
+  }
+  if (node.op === "set" || node.op === "message") {
+    if (!node.operand) {
+      pushError(
+        ctx.errors,
+        node,
+        `errno.${node.op}(...) requires one integer argument`,
+      );
+      return setType(node, ErrorType());
+    }
+    const argType = resolveExprType(node.operand, scope, ctx);
+    if (argType.kind === typeKinds.error) return setType(node, ErrorType());
+    const isInt =
+      (argType.kind === typeKinds.prim && isIntPrim(argType.name)) ||
+      argType.kind === typeKinds.untypedInt;
+    if (!isInt) {
+      pushError(
+        ctx.errors,
+        node.operand,
+        `errno.${node.op} expects an integer argument, got ${formatType(argType)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    if (argType.kind === typeKinds.untypedInt) {
+      coerceUntypedLiteralToTyped(
+        node.operand,
+        argType,
+        PrimType(primAnnotations.int32),
+        ctx.errors,
+      );
+    }
+    return setType(
+      node,
+      node.op === "set" ? VoidType() : PrimType(primAnnotations.string),
+    );
+  }
+  pushError(ctx.errors, node, `unknown errno intrinsic "${node.op}"`);
+  return setType(node, ErrorType());
+}
+
+// Resolve a type annotation node within an expression context. The caller
+// provides ctx which carries the typeContext (single-module path) and/or
+// module-resolver hooks for the multi-module path.
+function resolveTypeAnnotInCtx(annot, ctx) {
+  if (!annot) return null;
+  // Prefer the typeContext.resolveTypeAnnotation hook if installed by the
+  // caller (multi-module path threads this through ctx.typeContext).
+  if (ctx?.typeContext?.resolveTypeAnnotation) {
+    return ctx.typeContext.resolveTypeAnnotation(annot);
+  }
+  // Single-module fallback: use the static resolver.
+  if (ctx?.typeContext?.structTable) {
+    // Lazy require to avoid an import cycle.
+    // Direct delegation through the static helper exported by types.js.
+    // We import here-by-reference via globalThis to avoid circular import.
+    const fn = ctx.typeContext.resolveTypeAnnotationFallback;
+    if (fn) return fn(annot);
+  }
+  return null;
 }
 
 // `[e1, e2, e3]` — infer element type from first element, check all match.
@@ -630,6 +1137,38 @@ function resolveIndexExpression(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   return setType(node, objType.elem);
+}
+
+// Phase 9.E: `xs[i..j]` / `xs[i..]` / `xs[..j]` / `xs[..]` — zero-copy
+// fat-pointer subview. Result type is the same array type as `xs`.
+function resolveSliceExpression(node, scope, ctx) {
+  const objType = resolveExprType(node.object, scope, ctx);
+  if (objType.kind === typeKinds.error) return setType(node, ErrorType());
+  if (objType.kind !== typeKinds.array) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot slice non-array type ${formatType(objType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  const checkBound = (boundNode, label) => {
+    if (boundNode === null) return;
+    const t = resolveExprType(boundNode, scope, ctx);
+    const ok =
+      (t.kind === typeKinds.prim && isIntPrim(t.name)) ||
+      t.kind === typeKinds.untypedInt;
+    if (!ok) {
+      pushError(
+        ctx.errors,
+        boundNode,
+        `slice ${label} must be an integer type, found ${formatType(t)}`,
+      );
+    }
+  };
+  checkBound(node.start, "start");
+  checkBound(node.end, "end");
+  return setType(node, objType);
 }
 
 // Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT
@@ -704,6 +1243,134 @@ function rootIdentOf(node) {
   return node.kind === ASTNodeKind.IDENT ? node : null;
 }
 
+// Phase 7.5: look up an enum type by name. Checks the local enumTable then
+// imported names. Returns null when the name isn't an enum.
+export function lookupEnumByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.enumTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.enumTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 7.5: look up a union type by name. Mirrors lookupEnumByName.
+export function lookupUnionByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.unionTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.unionTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 7.5: `Shape.Circle { radius: 5.0 }` — typecheck a variant constructor
+// with a payload. The parser also emits this node for the bare no-payload form
+// `Shape.Empty`, but only after promotion inside resolveFieldAccess.
+function resolveVariantConstructor(node, scope, ctx) {
+  const enumType = lookupEnumByName(node.enumName, ctx);
+  if (!enumType) {
+    pushError(
+      ctx.errors,
+      node,
+      `unknown enum "${node.enumName}"`,
+    );
+    for (const f of node.fields ?? []) {
+      resolveExprType(f.value, scope, ctx);
+    }
+    return setType(node, ErrorType());
+  }
+  const variant = enumType.variants.get(node.variantName);
+  if (!variant) {
+    pushError(
+      ctx.errors,
+      node,
+      `enum "${enumType.name}" has no variant "${node.variantName}"`,
+    );
+    for (const f of node.fields ?? []) {
+      resolveExprType(f.value, scope, ctx);
+    }
+    return setType(node, ErrorType());
+  }
+  // Stash the resolved variant info for codegen.
+  node.resolvedEnumType = enumType;
+  node.resolvedVariant = variant;
+
+  if (variant.fields === null) {
+    // No-payload variant — fields must be null (or empty) on the constructor.
+    if (node.fields && node.fields.length > 0) {
+      pushError(
+        ctx.errors,
+        node,
+        `variant "${enumType.name}.${variant.name}" has no payload — drop the '{ ... }'`,
+      );
+    }
+    return setType(node, enumType);
+  }
+
+  if (node.fields === null) {
+    pushError(
+      ctx.errors,
+      node,
+      `variant "${enumType.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} }`,
+    );
+    return setType(node, enumType);
+  }
+
+  const targetFieldMap = new Map();
+  for (const f of variant.fields) targetFieldMap.set(f.name, f.type);
+  const seen = new Set();
+  for (const litField of node.fields) {
+    if (seen.has(litField.name)) {
+      pushError(
+        ctx.errors,
+        litField,
+        `duplicate field "${litField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+      continue;
+    }
+    seen.add(litField.name);
+    const expected = targetFieldMap.get(litField.name);
+    if (!expected) {
+      pushError(
+        ctx.errors,
+        litField,
+        `variant "${enumType.name}.${variant.name}" has no field "${litField.name}"`,
+      );
+      resolveExprType(litField.value, scope, ctx);
+      continue;
+    }
+    checkInitializer(
+      litField.value,
+      expected,
+      scope,
+      ctx,
+      (actualType) =>
+        `cannot assign ${formatType(actualType)} to field "${litField.name}" of ${enumType.name}.${variant.name} (expected ${formatType(expected)})`,
+    );
+  }
+  for (const targetField of variant.fields) {
+    if (!node.fields.some((f) => f.name === targetField.name)) {
+      pushError(
+        ctx.errors,
+        node,
+        `missing field "${targetField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+    }
+  }
+  return setType(node, enumType);
+}
+
 // "Does this value-expression fit this target type?"
 export function checkInitializer(
   valueNode,
@@ -723,6 +1390,26 @@ export function checkInitializer(
   ) {
     checkArrayLiteralAgainstType(valueNode, expectedType, scope, ctx);
     return expectedType;
+  }
+  // Bidirectional inference for generic function calls: when the callee is a
+  // generic function, hint the expected return type so type params that
+  // appear only in the return position (e.g. `heap_alloc<T>(n: usize): T[]`)
+  // can be inferred from context.
+  if (
+    valueNode.kind === ASTNodeKind.CALL_EXPRESSION &&
+    typeof valueNode.callee === "string"
+  ) {
+    const generic = lookupGenericFunc(valueNode.callee, ctx);
+    if (generic) {
+      const valueType = resolveGenericCall(valueNode, generic, scope, ctx, expectedType);
+      if (
+        valueType.kind !== typeKinds.error &&
+        !isAssignable(expectedType, valueType)
+      ) {
+        pushError(ctx.errors, valueNode, mismatchMessage(valueType));
+      }
+      return valueType;
+    }
   }
   const valueType = resolveExprType(valueNode, scope, ctx);
   if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
@@ -1024,7 +1711,7 @@ function traitMethodHint(methodName, ctx) {
 
 // Phase 7.1: look up a generic function decl by name in the local + imported
 // generic func tables.
-function lookupGenericFunc(name, ctx) {
+export function lookupGenericFunc(name, ctx) {
   const tc = ctx.typeContext;
   const local = tc.genericFuncTable?.get(name);
   if (local) return local;
@@ -1112,7 +1799,13 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
 
 // Phase 7.1: handle a call to a generic function. Walks param types against
 // arg types to infer the type-arg map, then instantiates the function.
-function resolveGenericCall(node, generic, scope, ctx) {
+//
+// `expectedReturnType` (optional): if supplied (typically by `checkInitializer`
+// when the call appears in a typed binding/initializer position), the return
+// type is also unified against it. This enables type-parameters that only
+// appear in the return position to be inferred — e.g. `heap_alloc<T>(n: usize): T[]`
+// where T is bound from the LHS annotation.
+function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null) {
   const sig = generic.genericSig;
   if (!sig) {
     pushError(ctx.errors, node, `generic function "${generic.name}" has no resolved signature`);
@@ -1150,6 +1843,13 @@ function resolveGenericCall(node, generic, scope, ctx) {
         `conflicting type argument for generic function "${node.callee}": ${formatType(argT)} vs prior binding`,
       );
     }
+  }
+
+  // Return-type-driven inference (e.g. for `heap_alloc<T>(n: usize): T[]`
+  // where T appears only in the return). Only applied when a hint is
+  // available (initializer / return / arg-pinning contexts).
+  if (expectedReturnType && expectedReturnType.kind !== typeKinds.error) {
+    unifyAgainstTypeParam(sig.returnType, expectedReturnType, generic.id, subst);
   }
 
   // Every type param must be bound.
@@ -1248,6 +1948,51 @@ function resolveGenericCall(node, generic, scope, ctx) {
 // struct's declared field type, reports duplicates and missing fields,
 // and stamps the literal node with its resolved type.
 export function pinStructLiteral(litNode, targetType, scope, ctx) {
+  // Phase 7.5: a union literal looks identical to a struct literal in source
+  // (`Color { rgba: 0x...}`), but only one field may be named.
+  if (targetType.kind === typeKinds.union) {
+    if (litNode.fields.length === 0) {
+      pushError(
+        ctx.errors,
+        litNode,
+        `union literal must initialize exactly one field; ${targetType.name} has [${targetType.fields.map((f) => f.name).join(", ")}]`,
+      );
+      litNode.resolvedType = targetType;
+      return;
+    }
+    if (litNode.fields.length > 1) {
+      pushError(
+        ctx.errors,
+        litNode,
+        `union literal must initialize exactly one field — found ${litNode.fields.length} (${litNode.fields.map((f) => f.name).join(", ")})`,
+      );
+    }
+    const targetFieldMap = new Map();
+    for (const tf of targetType.fields) targetFieldMap.set(tf.name, tf.type);
+    for (const litField of litNode.fields) {
+      const expected = targetFieldMap.get(litField.name);
+      if (!expected) {
+        pushError(
+          ctx.errors,
+          litField,
+          `union "${targetType.name}" has no field "${litField.name}"`,
+        );
+        resolveExprType(litField.value, scope, ctx);
+        continue;
+      }
+      checkInitializer(
+        litField.value,
+        expected,
+        scope,
+        ctx,
+        (actualType) =>
+          `cannot assign ${formatType(actualType)} to union field "${litField.name}" of union "${targetType.name}" (expected ${formatType(expected)})`,
+      );
+    }
+    litNode.resolvedType = targetType;
+    litNode.isUnionLiteral = true;
+    return;
+  }
   if (targetType.kind !== typeKinds.struct) {
     pushError(
       ctx.errors,

@@ -1,14 +1,19 @@
 {
   "name": "yoop-lang",
   "displayName": "Yooperlang",
-  "description": "Syntax highlighting for Yooperlang (.yoop) files.",
-  "version": "0.0.1",
+  "description": "Syntax highlighting, LSP diagnostics, and lldb-dap debugging for Yooperlang (.yoop) files.",
+  "version": "0.1.0",
   "publisher": "yoop-lang",
   "engines": {
-    "vscode": "^1.75.0"
+    "vscode": "^1.82.0"
   },
+  "main": "./extension.js",
   "categories": [
-    "Programming Languages"
+    "Programming Languages",
+    "Debuggers"
+  ],
+  "activationEvents": [
+    "onCommand:yoopiler.debugCurrentFile"
   ],
   "contributes": {
     "languages": [
@@ -30,6 +35,96 @@
         "scopeName": "source.yoop",
         "path": "./syntaxes/yoop.tmLanguage.json"
       }
+    ],
+    "breakpoints": [
+      { "language": "yoop" }
+    ],
+    "commands": [
+      {
+        "command": "yoopiler.debugCurrentFile",
+        "title": "Yoopiler: Debug Current File",
+        "category": "Yoopiler"
+      }
+    ],
+    "debuggers": [
+      {
+        "type": "yoop",
+        "label": "Yooperlang",
+        "languages": ["yoop"],
+        "configurationAttributes": {
+          "launch": {
+            "required": ["program"],
+            "properties": {
+              "program": {
+                "type": "string",
+                "description": "Path (absolute or ${workspaceFolder}-relative) to the .yoop entry file to compile and debug.",
+                "default": "${file}"
+              },
+              "args": {
+                "type": "array",
+                "description": "Command-line arguments passed to the compiled program.",
+                "items": { "type": "string" },
+                "default": []
+              },
+              "cwd": {
+                "type": "string",
+                "description": "Working directory for the launched program.",
+                "default": "${workspaceFolder}"
+              },
+              "stopOnEntry": {
+                "type": "boolean",
+                "description": "Pause at program entry.",
+                "default": false
+              },
+              "env": {
+                "type": "object",
+                "description": "Environment variables to set on the launched program.",
+                "default": {}
+              },
+              "yoopilerPath": {
+                "type": "string",
+                "description": "Override the yoopiler.js path used to compile before launch. Defaults to the copy bundled with this extension's repo.",
+                "default": ""
+              },
+              "lldbDapPath": {
+                "type": "string",
+                "description": "Override the path to the lldb-dap binary. Default: resolved via xcrun / PATH.",
+                "default": ""
+              },
+              "skipBuild": {
+                "type": "boolean",
+                "description": "Skip the yoopiler compile step and debug the existing binary as-is.",
+                "default": false
+              }
+            }
+          }
+        },
+        "initialConfigurations": [
+          {
+            "type": "yoop",
+            "request": "launch",
+            "name": "Debug Yooperlang program",
+            "program": "${file}",
+            "stopOnEntry": false
+          }
+        ],
+        "configurationSnippets": [
+          {
+            "label": "Yooperlang: Launch",
+            "description": "Compile and debug a .yoop entry file with lldb-dap.",
+            "body": {
+              "type": "yoop",
+              "request": "launch",
+              "name": "Debug ${1:program.yoop}",
+              "program": "^\"\\${workspaceFolder}/${1:program.yoop}\"",
+              "stopOnEntry": false
+            }
+          }
+        ]
+      }
     ]
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
   }
 }

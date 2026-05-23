@@ -1,0 +1,160 @@
+// std/net/tcp.yoop — TcpListener + TcpStream.
+//
+// Safe wrappers over std/net/socket_ffi. `TcpListener` owns a listening
+// socket and exposes `tcp_accept`. `TcpStream` owns a connected socket
+// and implements Readable + Writable + Disposable.
+//
+// All blocking operations (accept, read, write) park the calling pthread
+// on the runtime multiplexer; if the caller wraps these in a `task` the
+// suspension cooperates with the scheduler.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import {
+    Readable, Writable, ReadOutcome, WriteOutcome, FlushOutcome,
+} from "../core/traits.yoop";
+import { Socket } from "./socket.yoop";
+import {
+    AcceptFdResult,
+    ConnectOutcome,
+    FdResult,
+    ffi_accept,
+    ffi_close,
+    ffi_connect,
+    ffi_listen,
+    ffi_recv,
+    ffi_send_all,
+    ffi_socket_open,
+} from "./socket_ffi.yoop";
+
+// ----- TcpListener --------------------------------------------------------
+
+export type TcpListener implements Disposable propagates<disposable> {
+    socket: Socket,
+    bound_port: int32,    // remembered for diagnostics; the kernel may have
+                          // assigned this if port=0 was passed in (not yet
+                          // surfaced — we use the value the caller passed)
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.socket);
+    }
+}
+
+export type ListenResult implements Disposable propagates<disposable> {
+    listener: TcpListener,
+    err:      string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.listener);
+    }
+}
+
+// Open a TCP socket, bind it to host:port, and put it in the listening
+// state. backlog is the maximum pending-connection queue length passed
+// to listen(). The returned listener owns the socket; the err path
+// leaves a TcpListener with fd=-1 (disposes are no-ops).
+export function tcp_listen(host: string, port: int32, backlog: int32): ListenResult propagates<disposable> {
+    let r: FdResult = ffi_listen(host, port, backlog);
+    if (r.err.len > 0) {
+        return {
+            listener: { socket: { fd: -1 }, bound_port: 0 },
+            err: r.err,
+        };
+    }
+    return {
+        listener: { socket: { fd: r.fd }, bound_port: port },
+        err: "",
+    };
+}
+
+// ----- TcpStream ----------------------------------------------------------
+
+// TcpStream is the workhorse: a connected TCP byte stream. Implements
+// Readable + Writable + Disposable. Both read and write delegate to the
+// task-shaped ffi helpers in socket_ffi, which park on the multiplexer
+// before issuing recv/send.
+export type TcpStream implements (Disposable, Readable, Writable) propagates<disposable> {
+    socket: Socket,
+
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.socket);
+    }
+
+    function read(ref self, ref buf: uint8[]): ReadOutcome {
+        return ffi_recv(self.socket.fd, buf);
+    }
+
+    function write(ref self, ref buf: uint8[]): WriteOutcome {
+        return ffi_send_all(self.socket.fd, buf);
+    }
+
+    function flush(ref self): FlushOutcome {
+        // Unbuffered stream — flush is a no-op.
+        return { err: "" };
+    }
+}
+
+// ----- Accept --------------------------------------------------------------
+
+export type AcceptResult implements Disposable propagates<disposable> {
+    stream:    TcpStream,
+    peer_host: uint32,
+    peer_port: uint16,
+    err:       string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.stream);
+    }
+}
+
+// Park on the listener's readability and accept one inbound connection.
+// On success the returned AcceptResult.stream owns the client fd; the
+// caller is responsible for disposing it (or letting auto-cleanup at
+// scope end do so).
+export function tcp_accept(ref l: TcpListener): AcceptResult propagates<disposable> {
+    let r: AcceptFdResult = ffi_accept(l.socket.fd);
+    if (r.err.len > 0) {
+        return {
+            stream:    { socket: { fd: -1 } },
+            peer_host: 0,
+            peer_port: 0,
+            err:       r.err,
+        };
+    }
+    return {
+        stream:    { socket: { fd: r.fd } },
+        peer_host: r.peer_host,
+        peer_port: r.peer_port,
+        err:       "",
+    };
+}
+
+// ----- Connect (client-side) ----------------------------------------------
+
+export type ConnectResult implements Disposable propagates<disposable> {
+    stream: TcpStream,
+    err:    string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.stream);
+    }
+}
+
+// Open a fresh socket and connect it to host:port. Returns the connected
+// stream + err. On err, the inner socket holds fd=-1.
+export function tcp_connect(host: string, port: int32): ConnectResult propagates<disposable> {
+    let open: FdResult = ffi_socket_open();
+    if (open.err.len > 0) {
+        return {
+            stream: { socket: { fd: -1 } },
+            err:    open.err,
+        };
+    }
+    let c: ConnectOutcome = ffi_connect(open.fd, host, port);
+    if (c.err.len > 0) {
+        let _rc: c_int = ffi_close(open.fd);
+        return {
+            stream: { socket: { fd: -1 } },
+            err:    c.err,
+        };
+    }
+    return {
+        stream: { socket: { fd: open.fd } },
+        err:    "",
+    };
+}

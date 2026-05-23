@@ -1,0 +1,9 @@
+import { counter, STEP, bump } from "./counter.yoop";
+
+function main(): int32 {
+    let a: int32 = bump();
+    let b: int32 = bump();
+    let snapshot: int32 = counter;
+    printf(`step=${STEP} a=${a} b=${b} snapshot=${snapshot}\n`);
+    return 0;
+}

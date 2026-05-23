@@ -47,6 +47,16 @@ export function coerceUntypedLiteralToTyped(
   errors,
 ) {
   if (!valueType || !targetType) return;
+
+  // Phase 8.A: pin `null` literal to its target unsafe_ptr<T>.
+  if (
+    valueType.kind === typeKinds.untypedNull &&
+    targetType.kind === typeKinds.unsafePtr
+  ) {
+    valueNode.resolvedType = targetType;
+    return;
+  }
+
   if (targetType.kind !== typeKinds.prim) return;
 
   const wantsInt =
@@ -60,9 +70,33 @@ export function coerceUntypedLiteralToTyped(
     valueNode.kind === ASTNodeKind.FLOAT_LITERAL
   ) {
     coerceLiteralToType(valueNode, targetType, errors);
-  } else {
-    valueNode.resolvedType = targetType;
+    return;
   }
+  // Phase 9.A fix: a nested arithmetic expression whose own resolvedType is
+  // still untyped (e.g. `3 * 4` inside `let x: int32 = 2 + 3 * 4;`) needs the
+  // target type pushed all the way down — otherwise codegen reads an
+  // untypedInt at the intermediate node and crashes. Bare literals at the
+  // leaves still go through coerceLiteralToType (range-checked).
+  if (
+    valueNode.kind === ASTNodeKind.BINARY_EXPRESSION &&
+    valueNode.resolvedType &&
+    (valueNode.resolvedType.kind === typeKinds.untypedInt ||
+      valueNode.resolvedType.kind === typeKinds.untypedFloat)
+  ) {
+    coerceUntypedLiteralToTyped(
+      valueNode.left,
+      valueNode.left.resolvedType,
+      targetType,
+      errors,
+    );
+    coerceUntypedLiteralToTyped(
+      valueNode.right,
+      valueNode.right.resolvedType,
+      targetType,
+      errors,
+    );
+  }
+  valueNode.resolvedType = targetType;
 }
 
 // is source type assignable to destination type?
@@ -96,6 +130,25 @@ export function isAssignable(dest, src) {
     return true;
   }
 
+  // Phase 8.A: `null` is assignable to any unsafe_ptr<T>.
+  if (
+    src.kind === typeKinds.untypedNull &&
+    dest.kind === typeKinds.unsafePtr
+  ) {
+    return true;
+  }
+
+  // Phase 8.A: pointer-to-T is assignable to pointer-to-T (matching pointee).
+  // `typesEqual` would catch this if pointees share identity; the `frozen`
+  // type cache makes that usually true, but check structurally for safety.
+  if (
+    dest.kind === typeKinds.unsafePtr &&
+    src.kind === typeKinds.unsafePtr &&
+    typesEqual(dest.pointee, src.pointee)
+  ) {
+    return true;
+  }
+
   return false;
 }
 
@@ -108,6 +161,68 @@ export function unifyArith(left, right, op) {
   const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(op);
   const isLogical = op === "andand" || op === "oror";
   const isBitwise = op === "pipe";
+
+  // Phase 8.A: pointer arithmetic and comparison.
+  const leftIsPtr = left.kind === typeKinds.unsafePtr;
+  const rightIsPtr = right.kind === typeKinds.unsafePtr;
+  const leftIsNull = left.kind === typeKinds.untypedNull;
+  const rightIsNull = right.kind === typeKinds.untypedNull;
+  if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
+    // Equality against null / matching-pointee ptr.
+    if (op === "eqeq" || op === "neq") {
+      if (leftIsPtr && rightIsPtr) {
+        if (typesEqual(left.pointee, right.pointee)) {
+          return PrimType(primAnnotations.bool);
+        }
+        return null; // pointee mismatch
+      }
+      if ((leftIsPtr && rightIsNull) || (rightIsPtr && leftIsNull)) {
+        return PrimType(primAnnotations.bool);
+      }
+      if (leftIsNull && rightIsNull) return PrimType(primAnnotations.bool);
+      return null;
+    }
+    // Ordered comparison on pointers is deferred.
+    if (op === "lt" || op === "gt" || op === "lte" || op === "gte") {
+      return null;
+    }
+    // Subtraction: ptr - ptr (matching pointee) -> int64; ptr - int -> ptr.
+    if (op === "minus") {
+      if (leftIsPtr && rightIsPtr) {
+        if (typesEqual(left.pointee, right.pointee)) {
+          return PrimType(primAnnotations.int64);
+        }
+        return null;
+      }
+      if (
+        leftIsPtr &&
+        ((right.kind === typeKinds.prim && isIntPrim(right.name)) ||
+          right.kind === typeKinds.untypedInt)
+      ) {
+        return left;
+      }
+      return null;
+    }
+    if (op === "plus") {
+      if (
+        leftIsPtr &&
+        ((right.kind === typeKinds.prim && isIntPrim(right.name)) ||
+          right.kind === typeKinds.untypedInt)
+      ) {
+        return left;
+      }
+      if (
+        rightIsPtr &&
+        ((left.kind === typeKinds.prim && isIntPrim(left.name)) ||
+          left.kind === typeKinds.untypedInt)
+      ) {
+        return right;
+      }
+      return null;
+    }
+    // Mul/div/mod/bitwise/logical on pointers: not allowed.
+    return null;
+  }
 
   if (isLogical) {
     if (isBool(left) && isBool(right)) return PrimType("bool");

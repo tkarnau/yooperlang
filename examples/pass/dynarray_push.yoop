@@ -1,0 +1,51 @@
+type DynArray<T> {
+    data: T[],
+    len: usize,
+    cap: usize,
+}
+
+function new_dynarray<T>(initial_cap: usize): DynArray<T> {
+    return { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
+}
+
+function push<T>(a: ref DynArray<T>, value: T): void {
+    if (a.len >= a.cap) {
+        let new_cap: usize = a.cap * 2;
+        let new_data: T[] = heap_alloc(new_cap);
+        let i: usize = 0;
+        while (i < a.len) {
+            new_data[i] = a.data[i];
+            i = i + 1;
+        }
+        heap_free(a.data);
+        a.data = new_data;
+        a.cap = new_cap;
+    }
+    a.data[a.len] = value;
+    a.len = a.len + 1;
+}
+
+function free_all<T>(a: ref DynArray<T>): void {
+    heap_free(a.data);
+}
+
+function main(): int32 {
+    let arr: DynArray<int32> = new_dynarray(4);
+    let i: int32 = 0;
+    while (i < 10) {
+        push(ref arr, i + 1);
+        i = i + 1;
+    }
+    let sum: int32 = 0;
+    let j: usize = 0;
+    while (j < arr.len) {
+        sum = sum + arr.data[j];
+        j = j + 1;
+    }
+    printf(`len=${arr.len} cap=${arr.cap} sum=${sum}\n`);
+    free_all(ref arr);
+    return 0;
+}
+
+// expected output:
+// len=10 cap=16 sum=55

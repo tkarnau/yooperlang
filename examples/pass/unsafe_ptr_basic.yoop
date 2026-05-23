@@ -1,0 +1,20 @@
+import.unsafe;
+
+function main(): int32 {
+    let x: int32 = 42;
+    let p: unsafe_ptr<int32> = &x;
+    let v: int32 = *p;
+    *p = 99;
+    printf(`v=${v} x=${x}\n`);
+    let isnull_i: int32 = 0;
+    if (p == null) {
+        isnull_i = 1;
+    }
+    let np: unsafe_ptr<int32> = null;
+    let nb_i: int32 = 0;
+    if (np == null) {
+        nb_i = 1;
+    }
+    printf(`isnull=${isnull_i} nb=${nb_i}\n`);
+    return 0;
+}

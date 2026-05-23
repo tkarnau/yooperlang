@@ -1,0 +1,165 @@
+// std/http/types.yoop — HTTP wire-level types.
+//
+// Per library-design.md §7.1, but consolidated into one module for the
+// MVP. HttpMethod / StatusCode / Headers are first-class types; Request
+// + Response are the structured forms the handler and server work with.
+//
+// Body is `uint8[]` (fully materialized). Streaming bodies are deferred
+// until vtables/trait-objects land (library-design.md §8 question 2).
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Vec, vec_new, vec_push, vec_get, vec_as_array } from "../core/vec.yoop";
+import { string_eq_ignore_ascii_case } from "../core/strings.yoop";
+
+// ----- HttpMethod ---------------------------------------------------------
+//
+// Enum lookups are cheap (i32 tag compare); the parser converts the
+// request-line method bytes via `parse_method`. Unknown methods are
+// rejected at parse time rather than reified as a variant — keeps the
+// switch closed.
+
+export enum HttpMethod {
+    Get,
+    Post,
+    Put,
+    Delete,
+    Head,
+    Patch,
+    Options,
+}
+
+// ----- StatusCode ---------------------------------------------------------
+
+export enum StatusClass {
+    Informational,
+    Success,
+    Redirect,
+    ClientError,
+    ServerError,
+    Unknown,
+}
+
+export type StatusCode {
+    code: int32,
+    class: StatusClass,
+}
+
+export function status_class_for(code: int32): StatusClass {
+    if (code >= 100 && code < 200) { return StatusClass.Informational; }
+    if (code >= 200 && code < 300) { return StatusClass.Success; }
+    if (code >= 300 && code < 400) { return StatusClass.Redirect; }
+    if (code >= 400 && code < 500) { return StatusClass.ClientError; }
+    if (code >= 500 && code < 600) { return StatusClass.ServerError; }
+    return StatusClass.Unknown;
+}
+
+export function status(code: int32): StatusCode {
+    return { code: code, class: status_class_for(code) };
+}
+
+export function ok(): StatusCode         { return status(200); }
+export function bad_request(): StatusCode { return status(400); }
+export function not_found(): StatusCode  { return status(404); }
+export function method_not_allowed(): StatusCode { return status(405); }
+export function server_err(): StatusCode { return status(500); }
+
+// Canonical "reason phrase" for the small subset of status codes the
+// server emits. Anything else falls back to a generic phrase per class.
+export function reason_phrase(code: int32): string {
+    if (code == 200) { return "OK"; }
+    if (code == 201) { return "Created"; }
+    if (code == 204) { return "No Content"; }
+    if (code == 301) { return "Moved Permanently"; }
+    if (code == 302) { return "Found"; }
+    if (code == 400) { return "Bad Request"; }
+    if (code == 401) { return "Unauthorized"; }
+    if (code == 403) { return "Forbidden"; }
+    if (code == 404) { return "Not Found"; }
+    if (code == 405) { return "Method Not Allowed"; }
+    if (code == 500) { return "Internal Server Error"; }
+    if (code == 501) { return "Not Implemented"; }
+    if (code == 503) { return "Service Unavailable"; }
+    return "Status";
+}
+
+// ----- Headers ------------------------------------------------------------
+
+export type HeaderEntry { name: string, value: string }
+
+// Wrapped Vec<HeaderEntry> so the typechecker tracks the disposable
+// obligation on the backing vec without leaking it through HeaderEntry.
+export type Headers implements Disposable propagates<disposable> {
+    entries: Vec<HeaderEntry>,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.entries);
+    }
+}
+
+export function headers_new(cap: usize): Headers propagates<disposable> {
+    return { entries: vec_new(cap) };
+}
+
+export function headers_add(ref h: Headers, name: string, value: string): void {
+    let e: HeaderEntry = { name: name, value: value };
+    vec_push(ref h.entries, e);
+}
+
+// Case-insensitive lookup. Returns "" if absent (HTTP header values are
+// never legitimately empty *after* the colon-trim, so empty is a
+// reasonable sentinel for the simple-server MVP).
+export function headers_get(ref h: Headers, name: string): string {
+    let view: HeaderEntry[] = vec_as_array(ref h.entries);
+    let i: usize = 0;
+    while (i < view.len) {
+        if (string_eq_ignore_ascii_case(view[i].name, name)) {
+            return view[i].value;
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+export function headers_has(ref h: Headers, name: string): bool {
+    let view: HeaderEntry[] = vec_as_array(ref h.entries);
+    let i: usize = 0;
+    while (i < view.len) {
+        if (string_eq_ignore_ascii_case(view[i].name, name)) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// ----- Request ------------------------------------------------------------
+
+export type Request implements Disposable propagates<disposable> {
+    method:  HttpMethod,
+    path:    string,        // request-target only (server-side parse)
+    version: string,        // "HTTP/1.1" etc.
+    headers: Headers,
+    body:    uint8[],       // borrowed view into the read buffer
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.headers);
+    }
+}
+
+// ----- Response -----------------------------------------------------------
+
+export type Response implements Disposable propagates<disposable> {
+    status:  StatusCode,
+    headers: Headers,
+    body:    uint8[],       // caller-owned bytes (typically string_as_bytes)
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.headers);
+    }
+}
+
+export function response_new(): Response propagates<disposable> {
+    let empty: uint8[] = [];
+    return {
+        status:  server_err(),
+        headers: headers_new(8),
+        body:    empty,
+    };
+}

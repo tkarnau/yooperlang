@@ -1,0 +1,43 @@
+// Phase 6.4 path coverage: a `Disposable.dispose(ref r)` call in BOTH arms of
+// an if/else satisfies the obligation at the merge point, so a plain `let`
+// binding compiles cleanly. Mirror-image of
+// examples/fail/propagates_dispose_only_then.yoop, which omits the else-arm
+// dispose and is rejected.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Resource implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`disposed(${self.id})\n`);
+    }
+}
+
+function make_resource(): Resource propagates<disposable> {
+    return { id: 7 };
+}
+
+function main(): int32 {
+    let r: Resource = make_resource();
+    if (2 > 1) {
+        Disposable.dispose(ref r);
+    } else {
+        Disposable.dispose(ref r);
+    }
+    return 0;
+}
+
+// expected output:
+// disposed(7)

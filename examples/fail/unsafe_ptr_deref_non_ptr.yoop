@@ -1,0 +1,7 @@
+import.unsafe;
+
+function main(): int32 {
+    let x: int32 = 5;
+    let y: int32 = *x;
+    return 0;
+}

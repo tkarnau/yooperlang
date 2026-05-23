@@ -1,0 +1,29 @@
+import.unsafe;
+
+kind c_layout {
+    appliesTo type;
+    layout { abi "C"; };
+}
+
+type TimeSpec c_layout {
+    tv_sec: c_long,
+    tv_nsec: c_long,
+}
+
+extern "C" from "time.h" {
+    function clock_gettime(clk_id: c_int, tp: unsafe_ptr<TimeSpec>): c_int;
+}
+
+function main(): int32 {
+    let ts: TimeSpec = { tv_sec: 0, tv_nsec: 0 };
+    let rc: c_int = clock_gettime(0, &ts);
+    if (rc != 0) {
+        return 1;
+    }
+    let ok: int32 = 0;
+    if (ts.tv_sec > 1700000000) {
+        ok = 1;
+    }
+    printf(`ok=${ok}\n`);
+    return 0;
+}

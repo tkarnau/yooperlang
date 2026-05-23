@@ -30,8 +30,8 @@ function take_pooled(pooled h: Task<int32>): int32 {
 }
 
 function main(): int32 {
-    let s: Session = load_session("x.txt");
-    let j: Job = launch(6);
+    disposable s: Session = load_session("x.txt");
+    Task j: Job = launch(6);
     pooled h2 = fetch(5);
     pooled h3 = h2;
     const n: int32 = take_pooled(h3);

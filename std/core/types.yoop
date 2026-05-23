@@ -1,0 +1,5 @@
+// common type for possible results
+export type Maybe<T> {
+    value: T,
+    err: string
+}

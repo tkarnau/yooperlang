@@ -114,6 +114,50 @@ function channel(hue: float32, phase_offset: float32): uint8 {
     return uint8(int32(v * 255.0));
 }
 
+type Channels {
+    // little endian because I don't know how to specify endianness yet :/
+    a: uint8,
+    b: uint8,
+    g: uint8,
+    r: uint8,
+}
+
+// rgba and channels are the same memory, this is different than normal struct
+// almost like a view into the same data. Idea borrowed from C unions.
+union Color {
+    rgba: uint32,
+    channels: Channels,
+}
+
+// ── ball respawn ────────────────────────────────────────────────────────
+
+// Linear congruential generator -- constants from Numerical Recipes. Wrap is
+// implicit at int32 because LLVM `mul`/`add` are two's-complement.
+function next_rand(ref state: int32, range: int32): int32 {
+    state = state * 1103515245 + 12345;
+    let r: int32 = state % range;
+    if (r < 0) { r = r + range; }
+    return r;
+}
+
+// Point-in-circle hit test for a bullet against a ball.
+function hits_ball(px: float32, py: float32, ref b: Ball): bool {
+    const dx: float32 = px - b.x;
+    const dy: float32 = py - b.y;
+    return dx * dx + dy * dy < b.radius * b.radius;
+}
+
+// Re-randomize a ball's position + velocity in place. Radius is preserved so
+// the colour palette stays visually stable.
+function respawn_ball(ref b: Ball, ref rng: int32, win_w: int32): void {
+    const margin: int32 = 100;
+    const spread_x: int32 = win_w - margin * 2;
+    b.x = float32(next_rand(ref rng, spread_x)) + float32(margin);
+    b.y = 60.0;
+    b.vx = (float32(next_rand(ref rng, 40)) - 20.0) * 0.02;
+    b.vy = (float32(next_rand(ref rng, 20)) - 10.0) * 0.02 + 0.2;
+    b.hue = b.hue + 1.7;
+}
 
 // ── Entry point ───────────────────────────────────────────────────────────────
 
@@ -127,6 +171,18 @@ function main(): int32 {
     const DURATION_MS: uint32 = 8000;
 
     const SDL_SCANCODE_ESCAPE: int32 = 41;
+    const SDL_SCANCODE_A: int32 = 4;
+    const SDL_SCANCODE_D: int32 = 7;
+    const SDL_SCANCODE_SPACE: int32 = 44;
+
+    const PLAYER_SIZE: float32 = 24.0;
+    const PLAYER_SPEED: float32 = 0.3;
+    const BOTTOM_PADDING: float32 = 8.0;
+
+    const BULLET_W: float32 = 4.0;
+    const BULLET_H: float32 = 10.0;
+    const BULLET_SPEED: float32 = 0.6;
+    const BULLET_POOL: int32 = 16;
 
     // SDL_Init flags
     const SDL_INIT_VIDEO: uint32 = 0x00000020;
@@ -168,6 +224,25 @@ function main(): int32 {
         let b2: Ball = { x: 400.0, y: 400.0, vx: -0.19, vy:  0.25, radius: 36.0, hue: 2.094 };
         let b3: Ball = { x: 620.0, y: 250.0, vx:  0.15, vy: -0.21, radius: 50.0, hue: 4.189 };
 
+        // A/D-controlled player square. Y is locked to the bottom (top-left
+        // corner coords, so subtract PLAYER_SIZE + a few px padding).
+        let player_x: float32 = float32(WIN_W) * 0.5 - PLAYER_SIZE * 0.5;
+        const player_y: float32 = float32(WIN_H) - PLAYER_SIZE - BOTTOM_PADDING;
+
+        // Bullet pool as parallel arrays. `bullet_active[i]` marks slot i as
+        // in-flight; the index gives x/y/lifetime via the parallel arrays.
+        let bullet_x: float32[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let bullet_y: float32[] = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0];
+        let bullet_active: bool[] = [false, false, false, false, false, false, false, false, false, false, false, false, false, false, false, false];
+
+        // Edge-triggered firing -- only fire on the frame space transitions
+        // from up to down, not every frame it's held.
+        let space_was_down: int32 = 0;
+
+        // RNG state for ball respawns. OR-in 1 so the seed is never zero (a
+        // zero state on an LCG is a fixed point).
+        let rng_state: int32 = int32(SDL_GetTicks()) | 1;
+
         const start: uint32 = SDL_GetTicks();
 
         while (SDL_GetTicks() > 0/*  - start < DURATION_MS */) {
@@ -190,8 +265,61 @@ function main(): int32 {
             Steppable.step(ref b2, dt, float32(WIN_W), float32(WIN_H));
             Steppable.step(ref b3, dt, float32(WIN_W), float32(WIN_H));
 
+            // A/D movement, then clamp x to the window.
+            const move: float32 = PLAYER_SPEED * dt;
+            if (keyboardState[SDL_SCANCODE_A] != 0) { player_x = player_x - move; }
+            if (keyboardState[SDL_SCANCODE_D] != 0) { player_x = player_x + move; }
+            if (player_x < 0.0) { player_x = 0.0; }
+            if (player_x + PLAYER_SIZE > float32(WIN_W)) { player_x = float32(WIN_W) - PLAYER_SIZE; }
+
+            // Fire on rising edge of space. Scan the bullet pool for the first
+            // inactive slot; if all 16 are in flight, the shot is dropped.
+            const space_now: int32 = int32(keyboardState[SDL_SCANCODE_SPACE]);
+            if (space_now != 0 && space_was_down == 0) {
+                let fi: int32 = 0;
+                while (fi < BULLET_POOL) {
+                    if (!bullet_active[fi]) {
+                        bullet_active[fi] = true;
+                        bullet_x[fi] = player_x + PLAYER_SIZE * 0.5 - BULLET_W * 0.5;
+                        bullet_y[fi] = player_y - BULLET_H;
+                        break;
+                    }
+                    fi = fi + 1;
+                }
+            }
+            space_was_down = space_now;
+
+            // Advance bullets and check collisions against each ball. A bullet
+            // off the top of the screen retires; one that lands inside a ball
+            // retires and the ball respawns up top with a fresh velocity.
+            let bi: int32 = 0;
+            while (bi < BULLET_POOL) {
+                if (bullet_active[bi]) {
+                    bullet_y[bi] = bullet_y[bi] - BULLET_SPEED * dt;
+                    if (bullet_y[bi] + BULLET_H < 0.0) {
+                        bullet_active[bi] = false;
+                    } else {
+                        const bcx: float32 = bullet_x[bi] + BULLET_W * 0.5;
+                        const bcy: float32 = bullet_y[bi] + BULLET_H * 0.5;
+
+                        if (hits_ball(bcx, bcy, ref b1)) {
+                            bullet_active[bi] = false;
+                            respawn_ball(ref b1, ref rng_state, WIN_W);
+                        } else if (hits_ball(bcx, bcy, ref b2)) {
+                            bullet_active[bi] = false;
+                            respawn_ball(ref b2, ref rng_state, WIN_W);
+                        } else if (hits_ball(bcx, bcy, ref b3)) {
+                            bullet_active[bi] = false;
+                            respawn_ball(ref b3, ref rng_state, WIN_W);
+                        }
+                    }
+                }
+                bi = bi + 1;
+            }
+
             // Clear to near-black background.
-            SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(15), uint8(20), uint8(255));
+            const bg: Color = { rgba: 0x770F1455 };
+            SDL_SetRenderDrawColor(ren.handle, bg.channels.r, bg.channels.g, bg.channels.b, bg.channels.a);
             SDL_RenderClear(ren.handle);
 
             // Draw ball 1 -- colour based on its hue.
@@ -237,6 +365,35 @@ function main(): int32 {
                 const half3: int32 = int32(sqrt(float64(b3.radius * b3.radius) - float64(float32(row3) * float32(row3))));
                 SDL_RenderDrawLine(ren.handle, int32(b3.x) - half3, int32(b3.y) + row3, int32(b3.x) + half3, int32(b3.y) + row3);
                 row3 = row3 + 1;
+            }
+
+            // Bullets -- soft yellow, scanline-filled like the player.
+            SDL_SetRenderDrawColor(ren.handle, uint8(255), uint8(240), uint8(140), uint8(255));
+            const bullet_w_i: int32 = int32(BULLET_W);
+            const bullet_h_i: int32 = int32(BULLET_H);
+            let dbi: int32 = 0;
+            while (dbi < BULLET_POOL) {
+                if (bullet_active[dbi]) {
+                    const bx: int32 = int32(bullet_x[dbi]);
+                    const by: int32 = int32(bullet_y[dbi]);
+                    let brow: int32 = 0;
+                    while (brow < bullet_h_i) {
+                        SDL_RenderDrawLine(ren.handle, bx, by + brow, bx + bullet_w_i, by + brow);
+                        brow = brow + 1;
+                    }
+                }
+                dbi = dbi + 1;
+            }
+
+            // Player square -- scanline fill in solid white.
+            SDL_SetRenderDrawColor(ren.handle, uint8(255), uint8(255), uint8(255), uint8(255));
+            const px: int32 = int32(player_x);
+            const py: int32 = int32(player_y);
+            const psize: int32 = int32(PLAYER_SIZE);
+            let prow: int32 = 0;
+            while (prow < psize) {
+                SDL_RenderDrawLine(ren.handle, px, py + prow, px + psize, py + prow);
+                prow = prow + 1;
             }
 
             SDL_RenderPresent(ren.handle);

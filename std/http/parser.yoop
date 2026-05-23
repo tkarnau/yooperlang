@@ -1,0 +1,197 @@
+// std/http/parser.yoop — minimal HTTP/1.1 request parser.
+//
+// Consumes a uint8[] buffer accumulated from a TcpStream and parses the
+// request line + headers. Body bytes (if any) are exposed as a borrowing
+// slice into the same buffer; the parsed Request is not safe to outlive
+// the source buffer (the strings inside are bytes_slice +
+// string_from_bytes_unchecked views into it).
+//
+// This is INTERNAL — std/http/server.yoop imports from here. User code
+// touches Request / Response from std/http/types.yoop, not this file.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import {
+    bytes_eq,
+    bytes_index_of,
+    bytes_index_of_seq,
+    bytes_slice,
+    bytes_parse_int,
+    BytesParseInt,
+} from "../core/bytes.yoop";
+
+import {
+    HttpMethod,
+    HeaderEntry,
+    Headers,
+    headers_new,
+    headers_add,
+    Request,
+} from "./types.yoop";
+
+// Parsed sub-result for the request line. method_text holds the raw
+// bytes of the method (e.g. "GET"); the caller converts to HttpMethod via
+// parse_method.
+export type ParsedRequest implements Disposable propagates<disposable> {
+    request:        Request,
+    body_start:     usize,    // offset into source buf where body begins
+    content_length: usize,    // 0 if absent / unknown
+    err:            string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.request);
+    }
+}
+
+// Find the index of \r\n\r\n in `buf`, or buf.len if not present.
+// Used by the server to know when the head is fully received.
+export function find_header_end(buf: uint8[]): usize {
+    let needle: uint8[] = [13, 10, 13, 10];   // \r\n\r\n
+    return bytes_index_of_seq(buf, needle);
+}
+
+// Best-effort parse of an HTTP method token. Bytes must be the exact
+// canonical form (uppercase ASCII). On unknown, returns Get with err set
+// so the caller can decide to bail or proceed.
+export type ParsedMethod { method: HttpMethod, err: string }
+
+export function parse_method(buf: uint8[]): ParsedMethod {
+    let get_bytes: uint8[]     = [71, 69, 84];                              // GET
+    let post_bytes: uint8[]    = [80, 79, 83, 84];                          // POST
+    let put_bytes: uint8[]     = [80, 85, 84];                              // PUT
+    let delete_bytes: uint8[]  = [68, 69, 76, 69, 84, 69];                  // DELETE
+    let head_bytes: uint8[]    = [72, 69, 65, 68];                          // HEAD
+    let patch_bytes: uint8[]   = [80, 65, 84, 67, 72];                      // PATCH
+    let options_bytes: uint8[] = [79, 80, 84, 73, 79, 78, 83];              // OPTIONS
+    if (bytes_eq(buf, get_bytes))     { return { method: HttpMethod.Get,     err: "" }; }
+    if (bytes_eq(buf, post_bytes))    { return { method: HttpMethod.Post,    err: "" }; }
+    if (bytes_eq(buf, put_bytes))     { return { method: HttpMethod.Put,     err: "" }; }
+    if (bytes_eq(buf, delete_bytes))  { return { method: HttpMethod.Delete,  err: "" }; }
+    if (bytes_eq(buf, head_bytes))    { return { method: HttpMethod.Head,    err: "" }; }
+    if (bytes_eq(buf, patch_bytes))   { return { method: HttpMethod.Patch,   err: "" }; }
+    if (bytes_eq(buf, options_bytes)) { return { method: HttpMethod.Options, err: "" }; }
+    return { method: HttpMethod.Get, err: "parse_method: unknown method token" };
+}
+
+// Helper for the failure path — builds a ParsedRequest with an empty
+// Request shell and the err set.
+function fail_parsed(msg: string): ParsedRequest propagates<disposable> {
+    let empty: uint8[] = [];
+    return {
+        request: {
+            method:  HttpMethod.Get,
+            path:    "",
+            version: "",
+            headers: headers_new(0),
+            body:    empty,
+        },
+        body_start:     0,
+        content_length: 0,
+        err:            msg,
+    };
+}
+
+// Parse the request head (request-line + headers) out of `buf`. The
+// caller is expected to have already accumulated at least up through
+// \r\n\r\n; pass the full buf and we'll find the boundary internally.
+//
+// Body bytes follow the head and are NOT consumed here — caller reads
+// `content_length` and slices `buf[body_start..body_start+content_length]`.
+export function parse_request_head(buf: uint8[]): ParsedRequest propagates<disposable> {
+    let head_end: usize = find_header_end(buf);
+    if (head_end == buf.len) {
+        return fail_parsed("parse_request_head: missing CRLF CRLF");
+    }
+    let body_start: usize = head_end + 4;
+
+    // -- request line -----------------------------------------------------
+    let cr_idx: usize = bytes_index_of(buf, 13);
+    if (cr_idx == buf.len || cr_idx > head_end) {
+        return fail_parsed("parse_request_head: malformed request line");
+    }
+    let req_line: uint8[] = bytes_slice(buf, 0, cr_idx);
+    let s1: usize = bytes_index_of(req_line, 32);    // first space
+    if (s1 == req_line.len) {
+        return fail_parsed("parse_request_head: missing method separator");
+    }
+    let method_bytes: uint8[] = bytes_slice(req_line, 0, s1);
+    let pm: ParsedMethod = parse_method(method_bytes);
+    if (pm.err.len > 0) {
+        return fail_parsed(pm.err);
+    }
+    let after_method: uint8[] = bytes_slice(req_line, s1 + 1, req_line.len);
+    let s2_rel: usize = bytes_index_of(after_method, 32);
+    if (s2_rel == after_method.len) {
+        return fail_parsed("parse_request_head: missing path separator");
+    }
+    let path_bytes: uint8[] = bytes_slice(after_method, 0, s2_rel);
+    let version_bytes: uint8[] = bytes_slice(after_method, s2_rel + 1, after_method.len);
+    let path_str: string = string_from_bytes_unchecked(path_bytes);
+    let version_str: string = string_from_bytes_unchecked(version_bytes);
+
+    // Build the ParsedRequest shell up front so the Headers we populate
+    // lives inside `pr` from creation — `let headers = headers_new(...)`
+    // as a separate binding doesn't transfer cleanly through a final
+    // struct-literal return (the obligation tracker only follows IDENT
+    // returns into struct fields). With everything inside `pr`, we
+    // populate via `headers_add(ref pr.request.headers, ...)` and the
+    // final `return pr;` is an IDENT-return that transfers the
+    // propagation up to the caller.
+    let empty_body: uint8[] = [];
+    let pr: ParsedRequest = {
+        request: {
+            method:  pm.method,
+            path:    path_str,
+            version: version_str,
+            headers: headers_new(8),
+            body:    empty_body,
+        },
+        body_start:     body_start,
+        content_length: 0,
+        err:            "",
+    };
+
+    // -- headers ----------------------------------------------------------
+    // Lines after the request-line, up to head_end. Each line: "name: value".
+    let pos: usize = cr_idx + 2;    // skip past \r\n of the request line
+    while (pos < head_end) {
+        // Find end of this line (\r\n).
+        let rest: uint8[] = bytes_slice(buf, pos, head_end);
+        let line_end_rel: usize = bytes_index_of(rest, 13);
+        if (line_end_rel == rest.len) {
+            break;
+        }
+        let line: uint8[] = bytes_slice(rest, 0, line_end_rel);
+        let colon_rel: usize = bytes_index_of(line, 58);    // ':'
+        if (colon_rel != line.len) {
+            let name_bytes: uint8[] = bytes_slice(line, 0, colon_rel);
+            // Skip the colon, then skip a leading space (the only LWS
+            // we handle for the MVP). Anything more exotic (tabs, folded
+            // headers) is a future follow-up.
+            let val_start_rel: usize = colon_rel + 1;
+            if (val_start_rel < line.len && line[val_start_rel] == 32) {
+                val_start_rel = val_start_rel + 1;
+            }
+            let val_bytes: uint8[] = bytes_slice(line, val_start_rel, line.len);
+            let name_str: string = string_from_bytes_unchecked(name_bytes);
+            let val_str: string  = string_from_bytes_unchecked(val_bytes);
+            headers_add(ref pr.request.headers, name_str, val_str);
+
+            // Sniff Content-Length while we're walking.
+            let cl_name: uint8[]  = [67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104];
+            let cl_name2: uint8[] = [99, 111, 110, 116, 101, 110, 116, 45, 108, 101, 110, 103, 116, 104];
+            if (bytes_eq(name_bytes, cl_name) || bytes_eq(name_bytes, cl_name2)) {
+                let parsed: BytesParseInt = bytes_parse_int(val_bytes);
+                if (parsed.err.len == 0 && parsed.value >= 0) {
+                    pr.content_length = usize(parsed.value);
+                }
+            }
+        }
+        pos = pos + line_end_rel + 2;
+    }
+
+    pr.request.body = bytes_slice(buf, body_start, body_start + pr.content_length);
+    // Discharge the fallible-observation requirement before scope exit;
+    // the err field is empty on this code path by construction but the
+    // typechecker still requires it be observed.
+    _ = pr.err;
+    return pr;
+}

@@ -17,6 +17,15 @@ export const typeKinds = {
   task: "task",
   // Phase 7.1: a reference to a generic type parameter in a generic decl.
   typeParam: "typeParam",
+  // Phase 7.5: tagged sum and C-style overlapping union.
+  enum: "enum",
+  union: "union",
+  // Phase 8.A: raw FFI pointer. Distinct from `ref T` (which is non-null and
+  // does not participate in arithmetic).
+  unsafePtr: "unsafePtr",
+  // Phase 8.A: literal-placeholder for `null`, similar to untypedInt/Float.
+  // Pinned by context (assignment target, return, call arg, equality side).
+  untypedNull: "untypedNull",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -44,6 +53,10 @@ export const primAnnotations = {
   string: "string",
   usize: "usize",
   isize: "isize",
+  // Phase 8.A: platform pointer-width unsigned integer. Lowered to i64 on
+  // 64-bit targets (the only ones we currently support). Distinct from usize
+  // in source for documentation purposes — mirrors C uintptr_t vs size_t.
+  uintptr: "uintptr",
   void: "void",
 };
 
@@ -59,6 +72,7 @@ export function isIntPrim(name) {
     primAnnotations.uint64,
     primAnnotations.usize,
     primAnnotations.isize,
+    primAnnotations.uintptr,
   ].includes(name);
 }
 
@@ -69,6 +83,7 @@ export function isUnsignedIntPrim(name) {
     primAnnotations.uint32,
     primAnnotations.uint64,
     primAnnotations.usize,
+    primAnnotations.uintptr,
   ].includes(name);
 }
 
@@ -98,6 +113,7 @@ export function getBitWidthOfIntPrim(name) {
       return 64;
     case primAnnotations.isize:
     case primAnnotations.usize:
+    case primAnnotations.uintptr:
       // for simplicity, we'll just treat these as 64-bit for now
       return 64;
     default:
@@ -161,6 +177,30 @@ export const ErrorType = () => freezerWrap(typeKinds.error, {});
 // `typeParams` is a list of TypeParamType. For non-generic traits, it's [].
 export const TraitType = (name, methods, moduleId = null, typeParams = []) =>
   freezerWrap(typeKinds.trait, { name, methods, moduleId, typeParams });
+
+// Phase 7.5: tagged sum type.
+//   variants: Map<variantName, { fields: [{name, type}] | null, ordinal: number }>
+//   fields === null means a payload-less variant (e.g. `Empty`).
+//   ordinal: stable 0-indexed integer from declaration order; used as the
+//     LLVM discriminator value at codegen time.
+export const EnumType = (name, variants, moduleId = null) =>
+  freezerWrap(typeKinds.enum, { name, variants, moduleId });
+
+// Phase 7.5: untagged C-style union — every field starts at offset 0,
+// size = max(sizeof(field)), alignment = max(alignof(field)). No tag.
+export const UnionType = (name, fields, moduleId = null) =>
+  freezerWrap(typeKinds.union, { name, fields, moduleId });
+
+// Phase 8.A: raw, nullable, arithmetic-capable pointer for FFI. Gated by
+// `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the
+// typechecker still tracks pointee identity so arithmetic / deref are
+// strongly typed in source.
+export const UnsafePtrType = (pointee) =>
+  freezerWrap(typeKinds.unsafePtr, { pointee });
+
+// Phase 8.A: placeholder for the `null` literal. Pinned to an
+// UnsafePtrType<T> by context (similar to untypedInt/Float).
+export const UntypedNullType = () => freezerWrap(typeKinds.untypedNull, {});
 
 // Phase 7.1: TypeParamType is a placeholder appearing inside a generic decl's
 // resolved types (struct field types, function param/return types, trait
@@ -228,10 +268,26 @@ export const TraitSelfPlaceholder = Object.freeze({
   kind: "trait_self_placeholder",
 });
 
+// Phase 8.B: C-portable integer aliases. Resolution-time synonyms — the
+// alias *is* the target type for every downstream purpose (typesEqual,
+// assignability, codegen). Hardcoded to LP64 (Linux + macOS); Windows
+// LLP64 mapping waits on real target-triple awareness in the compiler.
+const C_ALIASES_LP64 = {
+  c_short: "int16",
+  c_ushort: "uint16",
+  c_int: "int32",
+  c_uint: "uint32",
+  c_long: "int64",
+  c_ulong: "uint64",
+  c_size_t: "usize",
+  c_ssize_t: "isize",
+};
+
 // conventional name conversions go here
 export function canonicalize(name) {
   if (name === "int") return "int32";
   if (name === "float") return "float32";
+  if (C_ALIASES_LP64[name]) return C_ALIASES_LP64[name];
   return name;
 }
 
@@ -302,6 +358,12 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     if (annot.name === "Task" && argTypes.length === 1) {
       return TaskType(argTypes[0]);
     }
+    // Phase 8.A: unsafe_ptr<T> is a built-in pointer type, not a generic
+    // struct. Gating against `import.unsafe;` is enforced by the caller
+    // when ctx.allowsUnsafe === false (see typecheck.js).
+    if (annot.name === "unsafe_ptr" && argTypes.length === 1) {
+      return UnsafePtrType(argTypes[0]);
+    }
     if (ctx?.instantiateGeneric) {
       return ctx.instantiateGeneric(annot.name, argTypes, annot);
     }
@@ -349,6 +411,7 @@ function bitWidthOf(name) {
     case "uint64":
     case "usize":
     case "isize":
+    case "uintptr":
       return 64;
     case "float32":
       return 32;
@@ -452,6 +515,15 @@ export function typesEqual(a, b) {
   }
   if (a.kind === typeKinds.typeParam) {
     return a.name === b.name && a.originDecl === b.originDecl;
+  }
+  if (a.kind === typeKinds.enum || a.kind === typeKinds.union) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
+  if (a.kind === typeKinds.unsafePtr) {
+    return typesEqual(a.pointee, b.pointee);
+  }
+  if (a.kind === typeKinds.untypedNull) {
+    return true;
   }
   throw new Error(`Unknown type kind: ${a.kind}`);
 }

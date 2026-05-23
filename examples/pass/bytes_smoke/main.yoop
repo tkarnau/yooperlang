@@ -1,0 +1,35 @@
+import {
+    bytes_eq,
+    bytes_index_of,
+    bytes_starts_with,
+    bytes_slice,
+} from "../../../std/core/bytes.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let a: uint8[] = [104, 101, 108, 108, 111];  // "hello"
+    let b: uint8[] = [104, 101, 108, 108, 111];
+    let c: uint8[] = [119, 111, 114, 108, 100];  // "world"
+
+    let eq1: bool = bytes_eq(a, b);
+    let eq2: bool = bytes_eq(a, c);
+    let eq1i: int32 = 0; if (eq1) { eq1i = 1; }
+    let eq2i: int32 = 0; if (eq2) { eq2i = 1; }
+    printf(`eq(a,b)=${eq1i} eq(a,c)=${eq2i}\n`);
+
+    let idx: usize = bytes_index_of(a, 108);  // 'l'
+    printf(`idx_l=${idx}\n`);
+
+    let prefix: uint8[] = [104, 101];  // "he"
+    let sw: bool = bytes_starts_with(a, prefix);
+    let swi: int32 = 0; if (sw) { swi = 1; }
+    printf(`starts=${swi}\n`);
+
+    let sub: uint8[] = bytes_slice(a, 1, 4);  // "ell"
+    printf(`sub.len=${sub.len} sub[0]=${sub[0]} sub[1]=${sub[1]} sub[2]=${sub[2]}\n`);
+
+    return 0;
+}

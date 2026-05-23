@@ -69,6 +69,98 @@ describe("parse: expressions", () => {
     assert.equal(e.callee, "add");
     assert.equal(e.args.length, 2);
   });
+
+  // Phase 9.A: parenthesized subexpressions
+  it("parens around a single literal", () => {
+    const e = exprOf("(42)");
+    assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.value, 42);
+  });
+
+  it("parens override precedence: (1 + 2) * 3 -> mult(plus(1,2), 3)", () => {
+    const e = exprOf("(1 + 2) * 3");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "mult");
+    assert.equal(e.left.op, "plus");
+    assert.equal(e.left.left.value, 1);
+    assert.equal(e.left.right.value, 2);
+    assert.equal(e.right.value, 3);
+  });
+
+  it("nested parens collapse to inner expression", () => {
+    const e = exprOf("((1 + 2))");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "plus");
+  });
+
+  it("postfix field access on parenthesized expression", () => {
+    const e = exprOf("(a + b).x");
+    assert.equal(e.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(e.field, "x");
+    assert.equal(e.object.kind, ASTNodeKind.BINARY_EXPRESSION);
+  });
+
+  it("postfix index on parenthesized expression", () => {
+    const e = exprOf("(xs)[0]");
+    assert.equal(e.kind, ASTNodeKind.INDEX_EXPRESSION);
+    assert.equal(e.object.kind, ASTNodeKind.IDENT);
+    assert.equal(e.index.value, 0);
+  });
+
+  it("postfix '?' on parenthesized expression", () => {
+    const e = exprOf("(f())?");
+    assert.equal(e.kind, ASTNodeKind.TRY_OP);
+    assert.equal(e.operand.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+
+  it("parens around a unary minus operand", () => {
+    const e = exprOf("-(a + b)");
+    assert.equal(e.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.op, "minus");
+    assert.equal(e.operand.kind, ASTNodeKind.BINARY_EXPRESSION);
+  });
+
+  // Phase 9.E: array slice syntax
+  it("plain index parses as INDEX_EXPRESSION", () => {
+    const e = exprOf("xs[5]");
+    assert.equal(e.kind, ASTNodeKind.INDEX_EXPRESSION);
+    assert.equal(e.index.value, 5);
+  });
+
+  it("closed slice xs[i..j] parses with both bounds", () => {
+    const e = exprOf("xs[1..3]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start.value, 1);
+    assert.equal(e.end.value, 3);
+  });
+
+  it("open-end slice xs[i..] parses with null end", () => {
+    const e = exprOf("xs[1..]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start.value, 1);
+    assert.equal(e.end, null);
+  });
+
+  it("open-start slice xs[..j] parses with null start", () => {
+    const e = exprOf("xs[..3]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start, null);
+    assert.equal(e.end.value, 3);
+  });
+
+  it("fully open slice xs[..] parses with both bounds null", () => {
+    const e = exprOf("xs[..]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start, null);
+    assert.equal(e.end, null);
+  });
+
+  it("slice bounds can be arbitrary expressions", () => {
+    const e = exprOf("xs[i + 1..j - 1]");
+    assert.equal(e.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(e.start.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.end.kind, ASTNodeKind.BINARY_EXPRESSION);
+  });
 });
 
 describe("parse: statements", () => {
@@ -719,5 +811,251 @@ describe("parse: phase 7.2 - trait bounds on type params", () => {
         /trait bound must be a trait name/,
       );
     });
+  });
+});
+
+describe("Phase 7.5: enum declarations", () => {
+  it("parses an enum with payload + no-payload variants", () => {
+    const ast = parse(
+      "enum Shape { Circle { radius: float32 }, Rectangle { w: float32, h: float32 }, Empty, }",
+    );
+    assert.equal(ast.body.length, 1);
+    const e = ast.body[0];
+    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.name, "Shape");
+    assert.equal(e.variants.length, 3);
+    assert.equal(e.variants[0].name, "Circle");
+    assert.equal(e.variants[0].fields.length, 1);
+    assert.equal(e.variants[0].fields[0].name, "radius");
+    assert.equal(e.variants[1].name, "Rectangle");
+    assert.equal(e.variants[1].fields.length, 2);
+    assert.equal(e.variants[2].name, "Empty");
+    assert.equal(e.variants[2].fields, null);
+  });
+
+  it("parses a generic enum", () => {
+    const ast = parse(
+      "enum Result<T, E> { Ok { value: T }, Err { error: E } }",
+    );
+    const e = ast.body[0];
+    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.typeParams.length, 2);
+    assert.equal(e.typeParams[0].name, "T");
+    assert.equal(e.typeParams[1].name, "E");
+    assert.equal(e.variants[0].name, "Ok");
+    assert.equal(e.variants[1].name, "Err");
+  });
+
+  it("rejects duplicate variant names", () => {
+    assert.throws(
+      () => parse("enum E { A, A }"),
+      /duplicate variant name 'A'/,
+    );
+  });
+
+  it("rejects empty enum", () => {
+    assert.throws(() => parse("enum E { }"), /must declare at least one variant/);
+  });
+
+  it("rejects empty payload braces", () => {
+    assert.throws(
+      () => parse("enum E { A { } }"),
+      /empty payload braces/,
+    );
+  });
+
+  it("parses an exported enum", () => {
+    const ast = parse("export enum E { A, B }");
+    assert.equal(ast.body[0].kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(ast.body[0].decl.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(ast.body[0].decl.name, "E");
+  });
+});
+
+describe("Phase 7.5: union declarations", () => {
+  it("parses a union with multiple field types", () => {
+    const ast = parse(
+      "union Color { rgba: uint32, channels: Channels }",
+    );
+    const u = ast.body[0];
+    assert.equal(u.kind, ASTNodeKind.UNION_DECL);
+    assert.equal(u.name, "Color");
+    assert.equal(u.fields.length, 2);
+    assert.equal(u.fields[0].name, "rgba");
+    assert.equal(u.fields[1].name, "channels");
+  });
+
+  it("rejects generic unions", () => {
+    assert.throws(
+      () => parse("union U<T> { x: T }"),
+      /generic unions are not yet supported/,
+    );
+  });
+
+  it("rejects union with implements", () => {
+    assert.throws(
+      () => parse("union U implements Foo { x: int32 }"),
+      /union types cannot implement traits/,
+    );
+  });
+
+  it("rejects empty union", () => {
+    assert.throws(
+      () => parse("union U { }"),
+      /must declare at least one field/,
+    );
+  });
+
+  it("parses an exported union", () => {
+    const ast = parse("export union U { x: int32, y: uint32 }");
+    assert.equal(ast.body[0].kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(ast.body[0].decl.kind, ASTNodeKind.UNION_DECL);
+  });
+});
+
+describe("Phase 7.5: switch statement", () => {
+  function switchOf(src) {
+    const ast = parse(`function f(): void { ${src} }`);
+    return ast.body[0].body.body[0];
+  }
+
+  it("parses a literal-arm switch with default", () => {
+    const sw = switchOf(
+      "switch (n) { case 1: { return; } case 2: { return; } default: { return; } }",
+    );
+    assert.equal(sw.kind, ASTNodeKind.SWITCH_STATEMENT);
+    assert.equal(sw.arms.length, 2);
+    assert.equal(sw.arms[0].patterns.length, 1);
+    assert.equal(sw.arms[0].patterns[0].kind, ASTNodeKind.LITERAL_PATTERN);
+    assert.equal(sw.arms[0].patterns[0].literalKind, "int");
+    assert.equal(sw.arms[0].patterns[0].value, 1);
+    assert.notEqual(sw.defaultArm, null);
+  });
+
+  it("parses multi-pattern arms", () => {
+    const sw = switchOf(
+      "switch (n) { case 1, 2, 3: { return; } default: { return; } }",
+    );
+    assert.equal(sw.arms[0].patterns.length, 3);
+    assert.deepEqual(
+      sw.arms[0].patterns.map((p) => p.value),
+      [1, 2, 3],
+    );
+  });
+
+  it("parses variant patterns with field bindings", () => {
+    const sw = switchOf(
+      "switch (s) { case Shape.Circle { radius }: { return; } case Shape.Rectangle { w: ww, h: _ }: { return; } case Shape.Empty: { return; } default: { return; } }",
+    );
+    assert.equal(sw.arms.length, 3);
+    const p0 = sw.arms[0].patterns[0];
+    assert.equal(p0.kind, ASTNodeKind.VARIANT_PATTERN);
+    assert.equal(p0.enumName, "Shape");
+    assert.equal(p0.variantName, "Circle");
+    assert.equal(p0.fieldBindings.length, 1);
+    assert.equal(p0.fieldBindings[0].fieldName, "radius");
+    assert.equal(p0.fieldBindings[0].bindingName, "radius");
+    assert.equal(p0.fieldBindings[0].isWildcard, false);
+    const p1 = sw.arms[1].patterns[0];
+    assert.equal(p1.fieldBindings[0].fieldName, "w");
+    assert.equal(p1.fieldBindings[0].bindingName, "ww");
+    assert.equal(p1.fieldBindings[1].fieldName, "h");
+    assert.equal(p1.fieldBindings[1].isWildcard, true);
+    const p2 = sw.arms[2].patterns[0];
+    assert.equal(p2.enumName, "Shape");
+    assert.equal(p2.variantName, "Empty");
+    assert.equal(p2.fieldBindings, null);
+  });
+
+  it("parses bool literal patterns", () => {
+    const sw = switchOf(
+      "switch (b) { case true: { return; } case false: { return; } }",
+    );
+    assert.equal(sw.arms.length, 2);
+    assert.equal(sw.arms[0].patterns[0].literalKind, "bool");
+    assert.equal(sw.arms[0].patterns[0].value, true);
+    assert.equal(sw.arms[1].patterns[0].value, false);
+  });
+
+  it("parses underscore as a synonym for default-pattern", () => {
+    const sw = switchOf(
+      "switch (n) { case _: { return; } }",
+    );
+    assert.equal(sw.arms[0].patterns[0].isWildcard, true);
+  });
+
+  it("parses negative-int literal patterns", () => {
+    const sw = switchOf("switch (n) { case -1: { return; } default: { return; } }");
+    assert.equal(sw.arms[0].patterns[0].literalKind, "int");
+    assert.equal(sw.arms[0].patterns[0].value, -1);
+  });
+
+  it("rejects duplicate default", () => {
+    assert.throws(
+      () => parse("function f(): void { switch (n) { default: { } default: { } } }"),
+      /duplicate 'default'/,
+    );
+  });
+
+  it("rejects default-not-last", () => {
+    assert.throws(
+      () =>
+        parse(
+          "function f(): void { switch (n) { default: { } case 1: { } } }",
+        ),
+      /'default' must be the last clause/,
+    );
+  });
+
+  it("rejects empty switch body", () => {
+    assert.throws(
+      () => parse("function f(): void { switch (n) { } }"),
+      /empty switch/,
+    );
+  });
+
+  it("rejects float literal in pattern", () => {
+    assert.throws(
+      () =>
+        parse("function f(): void { switch (n) { case 1.5: { } default: { } } }"),
+      /float literals are not allowed/,
+    );
+  });
+
+  it("rejects bare identifier in pattern", () => {
+    assert.throws(
+      () =>
+        parse("function f(): void { switch (n) { case foo: { } default: { } } }"),
+      /variant patterns must be written as EnumName.Variant/,
+    );
+  });
+});
+
+describe("Phase 7.5: variant constructor expression", () => {
+  function exprOf(src) {
+    const ast = parse(`function f(): void { let _x: T = ${src}; }`);
+    return ast.body[0].body.body[0].assignment;
+  }
+
+  it("parses a payload variant constructor", () => {
+    const e = exprOf("Shape.Circle { radius: 5 }");
+    assert.equal(e.kind, ASTNodeKind.VARIANT_CONSTRUCTOR);
+    assert.equal(e.enumName, "Shape");
+    assert.equal(e.variantName, "Circle");
+    assert.equal(e.fields.length, 1);
+    assert.equal(e.fields[0].name, "radius");
+  });
+
+  it("parses a multi-field variant constructor", () => {
+    const e = exprOf("Shape.Rect { w: 3, h: 4 }");
+    assert.equal(e.fields.length, 2);
+  });
+
+  it("leaves Enum.Variant without payload as a FIELD_ACCESS", () => {
+    const e = exprOf("Shape.Empty");
+    assert.equal(e.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(e.field, "Empty");
+    assert.equal(e.object.kind, ASTNodeKind.IDENT);
+    assert.equal(e.object.name, "Shape");
   });
 });

@@ -1,0 +1,57 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type DynArray<T> implements Disposable propagates<disposable> {
+    data: T[],
+    len: usize,
+    cap: usize,
+    function dispose(ref self): void {
+        printf(`disposing(${self.len})\n`);
+        heap_free(self.data);
+    }
+}
+
+function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
+    return { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
+}
+
+function push<T>(a: ref DynArray<T>, value: T): void {
+    if (a.len >= a.cap) {
+        let new_cap: usize = a.cap * 2;
+        let new_data: T[] = heap_alloc(new_cap);
+        let i: usize = 0;
+        while (i < a.len) {
+            new_data[i] = a.data[i];
+            i = i + 1;
+        }
+        heap_free(a.data);
+        a.data = new_data;
+        a.cap = new_cap;
+    }
+    a.data[a.len] = value;
+    a.len = a.len + 1;
+}
+
+function main(): int32 {
+    disposable arr: DynArray<int32> = new_dynarray(2);
+    push(ref arr, 10);
+    push(ref arr, 20);
+    push(ref arr, 30);
+    printf(`len=${arr.len} arr[2]=${arr.data[2]}\n`);
+    return 0;
+}
+
+// expected output:
+// len=3 arr[2]=30
+// disposing(3)

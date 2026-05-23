@@ -55,12 +55,21 @@ const Precedence = {
   [TokenTags.oror]: 20,
   [TokenTags.andand]: 30,
   [TokenTags.pipe]: 35,
+  // Phase 9: bitwise XOR sits between OR and AND (C-style precedence).
+  [TokenTags.caret]: 36,
+  // Phase 9: bitwise AND. `&` is also the prefix address-of and the
+  // kind-composition operator; both of those are parsed in non-binary
+  // positions so the precedence entry doesn't conflict.
+  [TokenTags.amp]: 37,
   [TokenTags.eqeq]: 40,
   [TokenTags.neq]: 40,
   [TokenTags.lt]: 40,
   [TokenTags.gt]: 40,
   [TokenTags.lte]: 40,
   [TokenTags.gte]: 40,
+  // Phase 9: shifts bind tighter than comparisons, looser than additive.
+  [TokenTags.lshift]: 45,
+  [TokenTags.rshift]: 45,
   [TokenTags.plus]: 50,
   [TokenTags.minus]: 50,
   [TokenTags.mult]: 60,
@@ -206,12 +215,21 @@ export function parse(src) {
     const lineText = src.split("\n")[line - 1] ?? "";
     const caret =
       " ".repeat(Math.max(0, column - 1)) + "^".repeat(Math.max(1, length));
-    return new Error(
+    const err = new Error(
       `${message}\n` +
         `  --> line ${line}:${column}\n` +
         `   | ${lineText}\n` +
         `   | ${caret}`,
     );
+    // Structured fields so consumers (LSP, tooling) can map the error to a
+    // source range without re-parsing the formatted text.
+    err.isParseError = true;
+    err.rawMessage = message;
+    err.pos = pos;
+    err.length = length;
+    err.line = line;
+    err.column = column;
+    return err;
   }
 
   // similar to advance but asserts that the current token is the expected one
@@ -486,6 +504,9 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.PROGRAM);
     try {
       node.body = [];
+      // Phase 8.A: `import.unsafe;` enables `unsafe_ptr<T>` and friends.
+      // Defaults to false; set true if the module opts in at top.
+      node.allowsUnsafe = false;
       let seenNonImport = false;
       while (peek().tag !== TokenTags.eof) {
         // only allow declarations
@@ -503,10 +524,60 @@ export function parse(src) {
               }
             }
             break;
+          case TokenTags.enum:
+            {
+              seenNonImport = true;
+              node.body.push(parseEnumDecl());
+            }
+            break;
+          case TokenTags.union:
+            {
+              seenNonImport = true;
+              node.body.push(parseUnionDecl());
+            }
+            break;
           case TokenTags.import:
             {
               if (seenNonImport) {
                 throw parseError("imports must come before other declarations");
+              }
+              // Phase 8.A: `import.unsafe;` — module-level opt-in for raw
+              // pointers. Sets a flag on the PROGRAM node; doesn't push a
+              // body entry (it's an attribute, not a declaration).
+              if (peekAhead(1).tag === TokenTags.dot) {
+                const importTok = peek();
+                advance(); // import
+                advance(); // .
+                if (peek().tag !== TokenTags.ident) {
+                  throw parseError(
+                    `expected identifier after 'import.'`,
+                    peek().start,
+                    peek().length,
+                  );
+                }
+                const featTok = peek();
+                const featName = src.substring(
+                  featTok.start,
+                  featTok.start + featTok.length,
+                );
+                if (featName !== "unsafe") {
+                  throw parseError(
+                    `unknown import attribute 'import.${featName}' — only 'import.unsafe' is supported`,
+                    featTok.start,
+                    featTok.length,
+                  );
+                }
+                advance(); // unsafe
+                expect(TokenTags.semicolon);
+                if (node.allowsUnsafe) {
+                  throw parseError(
+                    `duplicate 'import.unsafe;' declaration`,
+                    importTok.start,
+                    importTok.length,
+                  );
+                }
+                node.allowsUnsafe = true;
+                break;
               }
               node.body.push(parseImportDecl());
             }
@@ -533,6 +604,21 @@ export function parse(src) {
             {
               seenNonImport = true;
               node.body.push(parseKindDecl());
+            }
+            break;
+          case TokenTags.let:
+          case TokenTags.const:
+            {
+              // Phase 8.E: module-level mutable state. The full VarDecl
+              // grammar inside parseVarDecl is fine to reuse; we add a
+              // post-condition that forbids the constructs that don't
+              // make sense at module top (kind prefix, no initializer,
+              // destructuring, trailing block).
+              seenNonImport = true;
+              const decl = parseVarDecl();
+              validateModuleLevelDecl(decl);
+              decl.isModuleLevel = true;
+              node.body.push(decl);
             }
             break;
           default: {
@@ -820,7 +906,12 @@ export function parse(src) {
     expect(TokenTags.layout);
     expect(TokenTags.lcurly);
     node.alignExpr = null;
+    // Phase 8.B: opt-in marker that this layout mirrors a C struct's ABI.
+    // Currently contractual only — yoop's natural struct layout already
+    // matches C for trivially-aligned structs.
+    node.abiC = false;
     let sawAlign = false;
+    let sawAbi = false;
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
       const tok = peek();
       if (tok.tag === TokenTags.align) {
@@ -837,6 +928,38 @@ export function parse(src) {
         expect(TokenTags.semicolon);
         continue;
       }
+      // Phase 8.B: `abi "C";` — match by ident name since `abi` isn't a
+      // tokenized keyword. Reserved per SPEC §14 so user code shouldn't
+      // shadow it accidentally.
+      if (tok.tag === TokenTags.ident) {
+        const name = src.substring(tok.start, tok.start + tok.length);
+        if (name === "abi") {
+          if (sawAbi) {
+            throw parseError(
+              "duplicate 'abi' sub-clause in layout body",
+              tok.start,
+              tok.length,
+            );
+          }
+          sawAbi = true;
+          advance(); // abi
+          const valueTok = expect(TokenTags.strLiteral);
+          const abiName = src.substring(
+            valueTok.start + 1,
+            valueTok.start + valueTok.length - 1,
+          );
+          if (abiName !== "C") {
+            throw parseError(
+              `abi "${abiName}" is not a supported ABI marker — only "C" is recognized`,
+              valueTok.start,
+              valueTok.length,
+            );
+          }
+          node.abiC = true;
+          expect(TokenTags.semicolon);
+          continue;
+        }
+      }
       // Surface a precise message for any unknown sub-clause name.
       const name =
         tok.tag === TokenTags.ident
@@ -850,9 +973,9 @@ export function parse(src) {
     }
     expect(TokenTags.rcurly);
     expect(TokenTags.semicolon);
-    if (!sawAlign) {
+    if (!sawAlign && !sawAbi) {
       throw parseError(
-        "layout body must contain an 'align' sub-clause",
+        "layout body must contain at least one sub-clause ('align' or 'abi')",
         node.sourceLoc.pos,
         1,
       );
@@ -1078,13 +1201,24 @@ export function parse(src) {
         break;
       case TokenTags.let:
       case TokenTags.const:
+        // Phase 8.E: `export let|const` — same restrictions as the bare
+        // module-level form. Mark isModuleLevel so the typechecker can
+        // route to the global-state pass.
         node.decl = parseVarDecl();
+        validateModuleLevelDecl(node.decl);
+        node.decl.isModuleLevel = true;
         break;
       case TokenTags.trait:
         node.decl = parseTraitDecl();
         break;
       case TokenTags.kind:
         node.decl = parseKindDecl();
+        break;
+      case TokenTags.enum:
+        node.decl = parseEnumDecl();
+        break;
+      case TokenTags.union:
+        node.decl = parseUnionDecl();
         break;
       default:
         throw parseError(
@@ -1255,6 +1389,26 @@ export function parse(src) {
       return node;
     }
 
+    // Phase 9.B: prefix `!x` — logical NOT. High precedence so postfixes
+    // bind to the operand (e.g. `!flags[i]` parses as `!(flags[i])`).
+    if (peek().tag === TokenTags.bang) {
+      advance();
+      const notNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
+      notNode.op = "not";
+      notNode.operand = parseExpression(70);
+      return notNode;
+    }
+
+    // Phase 9: prefix `~x` — bitwise NOT. Same shape as `!`, restricted to
+    // integer operands by the typechecker.
+    if (peek().tag === TokenTags.tilde) {
+      advance();
+      const bitnotNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
+      bitnotNode.op = "bitnot";
+      bitnotNode.operand = parseExpression(70);
+      return bitnotNode;
+    }
+
     // ref x — parse lvalue address operand with high precedence so postfixes bind tightly
     if (peek().tag === TokenTags.ref) {
       advance();
@@ -1270,6 +1424,30 @@ export function parse(src) {
       waitNode.operand = parseExpression(70);
       return waitNode;
     }
+
+    // Phase 8.A: prefix `&x` — address-of an lvalue. Same tight precedence
+    // as `ref` so postfixes bind to the operand. The `&` token also serves
+    // as bitwise-AND in binary position; that's parsed by the precedence
+    // climber and never reaches this primary path. We fall through to the
+    // postfix + assignment check so address-of expressions still flow
+    // through the usual end-of-primary path.
+    if (peek().tag === TokenTags.amp) {
+      advance();
+      const addrNode = buildSourcedNode(ASTNodeKind.ADDRESS_OF_EXPRESSION);
+      addrNode.operand = parseExpression(70);
+      node = addrNode;
+    } else if (peek().tag === TokenTags.mult) {
+      // Phase 8.A: prefix `*p` — pointer dereference. Falls through so that
+      // `*p = v` and `*p.field` work via the postfix + assignment path.
+      advance();
+      const derefNode = buildSourcedNode(ASTNodeKind.DEREF_EXPRESSION);
+      derefNode.operand = parseExpression(70);
+      node = derefNode;
+    } else if (peek().tag === TokenTags.null) {
+      // Phase 8.A: `null` literal. Type pinned by context.
+      advance();
+      node = buildSourcedNode(ASTNodeKind.NULL_LITERAL);
+    } else
 
     if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
@@ -1291,7 +1469,7 @@ export function parse(src) {
     } else if (peek().tag === TokenTags.templateLiteral) {
       const tok = advance();
       const raw = src.substring(tok.start, tok.start + tok.length);
-      node = parseTemplateLiteralBody(raw);
+      node = parseTemplateLiteralBody(raw, tok.start);
     } else if (peek().tag === TokenTags.lbracket) {
       // array literal: [e1, e2, e3]
       advance(); // consume [
@@ -1307,7 +1485,86 @@ export function parse(src) {
       expect(TokenTags.rbracket);
     } else if (peek().tag === TokenTags.ident) {
       const name = parseIdentAsName();
-      if (peek().tag === TokenTags.lparen) {
+      // Phase 8.A: `unsafe_ptr.cast<U>(p)` / `unsafe_ptr.toInt(p)` /
+      // `unsafe_ptr.fromInt<T>(n)` — explicit type-arg intrinsics.
+      // Recognized only by literal token shape so we don't have to weaken
+      // the "no `<` in expression position" invariant elsewhere.
+      // Phase 8.D: `errno.get()` / `errno.set(v)` / `errno.message(c)` —
+      // thread-local errno bridge. Recognized as a literal token shape
+      // for the same reason the `unsafe_ptr.*` namespace below is — to
+      // avoid weakening the no-`<`-in-expression-position invariant.
+      if (
+        name === "errno" &&
+        peek().tag === TokenTags.dot &&
+        peekAhead(1).tag === TokenTags.ident
+      ) {
+        const opTok = peekAhead(1);
+        const opName = src.substring(opTok.start, opTok.start + opTok.length);
+        if (opName === "get" || opName === "set" || opName === "message") {
+          advance(); // .
+          advance(); // get/set/message
+          const errNode = buildSourcedNode(ASTNodeKind.ERRNO_INTRINSIC);
+          errNode.op = opName;
+          errNode.operand = null;
+          expect(TokenTags.lparen);
+          if (opName === "set" || opName === "message") {
+            errNode.operand = parseExpression();
+          }
+          expect(TokenTags.rparen);
+          node = errNode;
+        } else {
+          throw parseError(
+            `unknown errno intrinsic 'errno.${opName}' — expected get / set / message`,
+            opTok.start,
+            opTok.length,
+          );
+        }
+      } else if (
+        name === "unsafe_ptr" &&
+        peek().tag === TokenTags.dot &&
+        peekAhead(1).tag === TokenTags.ident
+      ) {
+        const opTok = peekAhead(1);
+        const opName = src.substring(opTok.start, opTok.start + opTok.length);
+        if (
+          opName === "cast" ||
+          opName === "toInt" ||
+          opName === "fromInt" ||
+          opName === "toArray"
+        ) {
+          advance(); // .
+          advance(); // cast/toInt/fromInt/toArray
+          const castNode = buildSourcedNode(ASTNodeKind.UNSAFE_PTR_CAST);
+          castNode.castKind =
+            opName === "cast"
+              ? "bitcast"
+              : opName === "toInt"
+              ? "toInt"
+              : opName === "fromInt"
+              ? "fromInt"
+              : "toArray";
+          castNode.typeArg = null;
+          if (opName === "cast" || opName === "fromInt" || opName === "toArray") {
+            expect(TokenTags.lt);
+            castNode.typeArg = parseTypeAnnotation();
+            consumeClosingGt();
+          }
+          expect(TokenTags.lparen);
+          castNode.operand = parseExpression();
+          // Phase 8.C: toArray takes a second arg — the length.
+          castNode.lengthOperand = null;
+          if (opName === "toArray") {
+            expect(TokenTags.comma);
+            castNode.lengthOperand = parseExpression();
+          }
+          expect(TokenTags.rparen);
+          node = castNode;
+        } else {
+          // fall through to regular IDENT, postfix loop handles `.`
+          node = buildSourcedNode(ASTNodeKind.IDENT);
+          node.name = name;
+        }
+      } else if (peek().tag === TokenTags.lparen) {
         // this is a function call
         node = buildSourcedNode(ASTNodeKind.CALL_EXPRESSION);
         node.callee = name;
@@ -1335,6 +1592,13 @@ export function parse(src) {
       advance();
       node = buildSourcedNode(ASTNodeKind.IDENT);
       node.name = "self";
+    } else if (peek().tag === TokenTags.lparen) {
+      // Phase 9.A: parenthesized subexpression — `(a + b) * c`. Plain
+      // grouping; no tuple syntax. Postfix chain (`.field`, `[i]`, `?`,
+      // `(args)`) continues to apply to the inner expression.
+      advance(); // consume (
+      node = parseExpression();
+      expect(TokenTags.rparen);
     } else {
       throw parseError(
         `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
@@ -1346,11 +1610,51 @@ export function parse(src) {
     while (true) {
       if (peek().tag === TokenTags.dot) {
         advance(); // consume dot
+        // Capture the field name token before consuming it so we can pin
+        // diagnostics (e.g. "no such variant") at the field identifier
+        // rather than at the FIELD_ACCESS node's overall anchor.
+        const fieldTok = peek();
         const fieldName = parseIdentAsName();
-        const fieldAccessNode = buildSourcedNode(ASTNodeKind.FIELD_ACCESS);
+        const fieldAccessNode = new ASTNode(
+          ASTNodeKind.FIELD_ACCESS,
+          posToSourceLocation(src, node.sourceLoc?.pos ?? fieldTok.start),
+        );
         fieldAccessNode.object = node;
         fieldAccessNode.field = fieldName;
+        fieldAccessNode.fieldSourceLoc = posToSourceLocation(
+          src,
+          fieldTok.start,
+          fieldTok.length,
+        );
         node = fieldAccessNode;
+        continue;
+      }
+      // phase 7.5: variant constructor — EnumName.Variant { fields }
+      // Only matches IDENT.IDENT followed by `{`. Bare `EnumName.Variant`
+      // (no payload) stays a FIELD_ACCESS; the typechecker promotes it.
+      if (
+        peek().tag === TokenTags.lcurly &&
+        node.kind === ASTNodeKind.FIELD_ACCESS &&
+        node.object?.kind === ASTNodeKind.IDENT
+      ) {
+        const vc = buildSourcedNode(ASTNodeKind.VARIANT_CONSTRUCTOR);
+        vc.enumName = node.object.name;
+        vc.variantName = node.field;
+        vc.fields = [];
+        advance(); // consume {
+        while (
+          peek().tag !== TokenTags.rcurly &&
+          peek().tag !== TokenTags.eof
+        ) {
+          const fieldNode = buildSourcedNode(ASTNodeKind.STRUCT_LITERAL_FIELD);
+          fieldNode.name = parseIdentAsName();
+          expect(TokenTags.colon);
+          fieldNode.value = parseExpression();
+          vc.fields.push(fieldNode);
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rcurly);
+        node = vc;
         continue;
       }
       // handle postfix '?' for error handle for errors as values feature
@@ -1373,11 +1677,36 @@ export function parse(src) {
         continue;
       }
       // array indexing: xs[i]
+      // Phase 9.E: array slice xs[i..j], xs[..j], xs[i..], xs[..]
       if (peek().tag === TokenTags.lbracket) {
         advance(); // consume [
+        // Sniff the start: either expression or bare `..` for an open start.
+        let startExpr = null;
+        if (peek().tag !== TokenTags.dotdot) {
+          startExpr = parseExpression();
+        }
+        if (peek().tag === TokenTags.dotdot) {
+          advance(); // consume ..
+          const sliceNode = buildSourcedNode(ASTNodeKind.SLICE_EXPRESSION);
+          sliceNode.object = node;
+          sliceNode.start = startExpr;
+          sliceNode.end =
+            peek().tag === TokenTags.rbracket ? null : parseExpression();
+          expect(TokenTags.rbracket);
+          node = sliceNode;
+          continue;
+        }
+        // Plain index: startExpr is required.
+        if (startExpr === null) {
+          throw parseError(
+            "expected index expression or slice form 'i..j'",
+            peek().start,
+            peek().length,
+          );
+        }
         const indexNode = buildSourcedNode(ASTNodeKind.INDEX_EXPRESSION);
         indexNode.object = node;
-        indexNode.index = parseExpression();
+        indexNode.index = startExpr;
         expect(TokenTags.rbracket);
         node = indexNode;
         continue;
@@ -1386,12 +1715,17 @@ export function parse(src) {
     }
 
     // assignment — lvalue is whatever the primary+postfix chain produced.
-    // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION
-    if (peek().tag === TokenTags.eq) {
+    // valid targets: IDENT, FIELD_ACCESS, INDEX_EXPRESSION, DEREF_EXPRESSION
+    // Phase 8.A: only consume assignment at top-level expression precedence.
+    // When parseExpression is called recursively (e.g. as the operand of
+    // a unary `*` with minPrecedence=70), assignment must stay outside our
+    // grammar — otherwise `*p = v` parses as `*(p = v)`.
+    if (peek().tag === TokenTags.eq && minPrecedence === 0) {
       if (
         node.kind !== ASTNodeKind.IDENT &&
         node.kind !== ASTNodeKind.FIELD_ACCESS &&
-        node.kind !== ASTNodeKind.INDEX_EXPRESSION
+        node.kind !== ASTNodeKind.INDEX_EXPRESSION &&
+        node.kind !== ASTNodeKind.DEREF_EXPRESSION
       ) {
         throw parseError(
           `invalid assignment target: ${node.kind}`,
@@ -1404,6 +1738,37 @@ export function parse(src) {
       assignNode.target = node;
       assignNode.value = parseExpression();
       return assignNode;
+    }
+
+    // Phase 9: compound assignment — `x += y`, `x -= y`, `x *= y`, `x /= y`,
+    // `x %= y`. Stored as a dedicated AST node so codegen evaluates the
+    // lvalue once even if it contains side-effecting subexpressions.
+    const compoundOpMap = {
+      [TokenTags.plusEq]: "plus",
+      [TokenTags.minusEq]: "minus",
+      [TokenTags.multEq]: "mult",
+      [TokenTags.divideEq]: "divide",
+      [TokenTags.modulusEq]: "modulus",
+    };
+    if (compoundOpMap[peek().tag] && minPrecedence === 0) {
+      if (
+        node.kind !== ASTNodeKind.IDENT &&
+        node.kind !== ASTNodeKind.FIELD_ACCESS &&
+        node.kind !== ASTNodeKind.INDEX_EXPRESSION &&
+        node.kind !== ASTNodeKind.DEREF_EXPRESSION
+      ) {
+        throw parseError(
+          `invalid compound-assignment target: ${node.kind}`,
+          peek().start,
+          peek().length,
+        );
+      }
+      const opTok = advance();
+      const compoundNode = buildSourcedNode(ASTNodeKind.COMPOUND_ASSIGNMENT);
+      compoundNode.target = node;
+      compoundNode.op = compoundOpMap[opTok.tag];
+      compoundNode.value = parseExpression();
+      return compoundNode;
     }
 
     // handle binary ops
@@ -1430,8 +1795,10 @@ export function parse(src) {
   // a template literal token still has its surrounding backticks. split it into
   // alternating string parts and embedded expressions, and re-parse each
   // ${...} chunk through the full expression parser.
-  function parseTemplateLiteralBody(raw) {
+  function parseTemplateLiteralBody(raw, templateStart) {
     const inner = raw.slice(1, -1); // strip surrounding backticks
+    // inner[k] corresponds to outer offset (templateStart + 1 + k) because
+    // the leading backtick consumes one outer char before `inner` starts.
     const parts = []; // each entry: { kind: "stringPart", value } | { kind: "exprPart", expr }
     let buf = "";
     let i = 0;
@@ -1461,11 +1828,20 @@ export function parse(src) {
           throw parseError(`unterminated \${...} in template literal`);
         }
         const exprSrc = inner.substring(i + 2, j);
-        // re-parse the expression by recursively invoking parse() on a
-        // synthetic top-level wrapper, then unwrap to the inner expression.
-        const wrappedSrc = `function __t(): int32 { return ${exprSrc}; }`;
+        // Re-parse the expression via a synthetic wrapper. The resulting
+        // sourceLocs are relative to `wrappedSrc`; we remap them to the
+        // outer source so LSP go-to-definition / hover land on the actual
+        // characters the user sees.
+        const wrapperPrefix = "function __t(): int32 { return ";
+        const wrappedSrc = `${wrapperPrefix}${exprSrc}; }`;
         const subAst = parse(wrappedSrc);
         const exprNode = subAst.body[0].body.body[0].value;
+        // Outer offset of exprSrc's first char:
+        //   templateStart (the opening backtick)
+        //   + 1 (skip backtick to reach `inner`)
+        //   + i + 2 (skip past `${`)
+        const exprOuterStart = templateStart + 1 + i + 2;
+        remapSourceLocs(exprNode, src, wrapperPrefix.length, exprOuterStart);
         parts.push({ kind: ASTNodeKind.EXPR_PART, expr: exprNode });
         i = j + 1; // skip past closing }
         continue;
@@ -1479,6 +1855,34 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.TEMPLATE_LITERAL);
     node.parts = parts;
     return node;
+  }
+
+  // Walk a sub-AST whose sourceLocs are relative to a synthetic source and
+  // rewrite each sourceLoc to be relative to the outer source. `innerStart`
+  // is the offset within the synthetic source where the user-written
+  // expression begins; `outerStart` is its corresponding offset in `outerSrc`.
+  function remapSourceLocs(node, outerSrc, innerStart, outerStart) {
+    const visited = new WeakSet();
+    function visit(n) {
+      if (!n || typeof n !== "object" || visited.has(n)) return;
+      visited.add(n);
+      if (Array.isArray(n)) { for (const c of n) visit(c); return; }
+      if (n.sourceLoc && typeof n.sourceLoc.pos === "number") {
+        const innerPos = n.sourceLoc.pos;
+        const newOuterPos = outerStart + (innerPos - innerStart);
+        if (newOuterPos >= 0 && newOuterPos <= outerSrc.length) {
+          const remapped = posToSourceLocation(outerSrc, newOuterPos);
+          if (n.sourceLoc.length != null) remapped.length = n.sourceLoc.length;
+          n.sourceLoc = remapped;
+        }
+      }
+      for (const key of Object.keys(n)) {
+        if (key === "sourceLoc" || key === "resolvedType" || key === "resolvedDeclNode") continue;
+        const v = n[key];
+        if (v && typeof v === "object") visit(v);
+      }
+    }
+    visit(node);
   }
 
   function parseCallArgs(node) {
@@ -1534,6 +1938,9 @@ export function parse(src) {
       }
       case TokenTags.continue: {
         return parseContinueStatement();
+      }
+      case TokenTags.switch: {
+        return parseSwitchStatement();
       }
       case TokenTags.ident: {
         // kind-prefixed binding form: `IDENT IDENT : ...` or
@@ -1652,6 +2059,47 @@ export function parse(src) {
     node.assignment = parseExpression();
     expect(TokenTags.semicolon);
     return node;
+  }
+
+  // Phase 8.E: enforce MVP restrictions on module-level let/const decls.
+  // Throws a parseError on violation. The decl AST is already built; we
+  // inspect its shape and reject what we don't support yet.
+  function validateModuleLevelDecl(decl) {
+    if (decl.kind === ASTNodeKind.DESTRUCTURE_DECL) {
+      throw parseError(
+        "destructuring at module top is not supported",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (decl.kindPrefix) {
+      throw parseError(
+        "kind prefix on a module-level binding is not supported",
+        decl.kindPrefix.sourceLoc?.pos ?? decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (!decl.typeAnnotation) {
+      throw parseError(
+        "module-level binding requires an explicit type annotation",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (!decl.assignment) {
+      throw parseError(
+        "module-level binding requires an initializer (= expr)",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
+    if (decl.trailingBlock) {
+      throw parseError(
+        "trailing block is not supported on a module-level binding",
+        decl.sourceLoc?.pos ?? 0,
+        1,
+      );
+    }
   }
 
   // Phase 6.3: `joined h = expr;` / `pooled h = expr;` — task-builtin binding
@@ -1961,6 +2409,310 @@ export function parse(src) {
     }
 
     return node;
+  }
+
+  // Phase 7.5: enum declaration.
+  //   enum Name<TParams?> { Variant1 { f: T, ... }, Variant2, ... }
+  function parseEnumDecl() {
+    expect(TokenTags.enum);
+    const node = buildSourcedNode(ASTNodeKind.ENUM_DECL);
+    node.name = parseIdentAsName();
+    node.typeParams = parseTypeParamList();
+    node.variants = [];
+    expect(TokenTags.lcurly);
+    const seenNames = new Set();
+    while (peek().tag === TokenTags.ident) {
+      const varTok = peek();
+      const variant = buildSourcedNode(ASTNodeKind.ENUM_VARIANT);
+      variant.name = parseIdentAsName();
+      if (seenNames.has(variant.name)) {
+        throw parseError(
+          `duplicate variant name '${variant.name}' in enum '${node.name}'`,
+          varTok.start,
+          varTok.length,
+        );
+      }
+      seenNames.add(variant.name);
+      if (peek().tag === TokenTags.lcurly) {
+        // payload variant — { field: Type, ... }
+        advance(); // consume {
+        variant.fields = [];
+        while (peek().tag === TokenTags.ident) {
+          const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+          fieldNode.name = parseIdentAsName();
+          expect(TokenTags.colon);
+          fieldNode.typeAnnotation = parseTypeAnnotation();
+          fieldNode.kindPrefix = null;
+          variant.fields.push(fieldNode);
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rcurly);
+        if (variant.fields.length === 0) {
+          throw parseError(
+            `variant '${variant.name}' has empty payload braces — write '${variant.name}' for a no-payload variant`,
+            varTok.start,
+            varTok.length,
+          );
+        }
+      } else {
+        // no-payload variant
+        variant.fields = null;
+      }
+      node.variants.push(variant);
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rcurly);
+    if (node.variants.length === 0) {
+      throw parseError(
+        `enum '${node.name}' must declare at least one variant`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 7.5: union declaration — untagged overlapping-memory aggregate.
+  //   union Name { field: Type, ... }
+  function parseUnionDecl() {
+    expect(TokenTags.union);
+    const node = buildSourcedNode(ASTNodeKind.UNION_DECL);
+    node.name = parseIdentAsName();
+    // Reject generics on unions — deferred (see plans/phase-7-5-sum-types-and-unions.md).
+    if (peek().tag === TokenTags.lt) {
+      throw parseError(
+        `generic unions are not yet supported (deferred)`,
+        peek().start,
+        peek().length,
+      );
+    }
+    // Reject `implements` on unions — deferred.
+    if (peek().tag === TokenTags.implements) {
+      throw parseError(
+        `union types cannot implement traits in this phase (deferred)`,
+        peek().start,
+        peek().length,
+      );
+    }
+    node.fields = [];
+    expect(TokenTags.lcurly);
+    while (peek().tag === TokenTags.ident) {
+      const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+      fieldNode.name = parseIdentAsName();
+      expect(TokenTags.colon);
+      fieldNode.typeAnnotation = parseTypeAnnotation();
+      fieldNode.kindPrefix = null;
+      node.fields.push(fieldNode);
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rcurly);
+    if (node.fields.length === 0) {
+      throw parseError(
+        `union '${node.name}' must declare at least one field`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 7.5: switch statement with optional variant patterns.
+  //   switch (expr) { case Pat: { ... }  default: { ... } }
+  function parseSwitchStatement() {
+    expect(TokenTags.switch);
+    const node = buildSourcedNode(ASTNodeKind.SWITCH_STATEMENT);
+    expect(TokenTags.lparen);
+    node.scrutinee = parseExpression();
+    expect(TokenTags.rparen);
+    expect(TokenTags.lcurly);
+    node.arms = [];
+    node.defaultArm = null;
+    let sawDefault = false;
+    while (
+      peek().tag !== TokenTags.rcurly &&
+      peek().tag !== TokenTags.eof
+    ) {
+      const armStartTok = peek();
+      if (peek().tag === TokenTags.default) {
+        if (sawDefault) {
+          throw parseError(
+            `duplicate 'default' clause in switch`,
+            armStartTok.start,
+            armStartTok.length,
+          );
+        }
+        advance(); // consume default
+        expect(TokenTags.colon);
+        node.defaultArm = parseBlock();
+        sawDefault = true;
+        continue;
+      }
+      if (peek().tag !== TokenTags.case) {
+        throw parseError(
+          `expected 'case' or 'default' in switch body, got ${inverseTokenTags[peek().tag]}`,
+          armStartTok.start,
+          armStartTok.length,
+        );
+      }
+      if (sawDefault) {
+        throw parseError(
+          `'default' must be the last clause in a switch`,
+          armStartTok.start,
+          armStartTok.length,
+        );
+      }
+      advance(); // consume case
+      const arm = buildSourcedNode(ASTNodeKind.SWITCH_ARM);
+      arm.patterns = [parseSwitchPattern()];
+      while (peek().tag === TokenTags.comma) {
+        advance();
+        arm.patterns.push(parseSwitchPattern());
+      }
+      expect(TokenTags.colon);
+      arm.body = parseBlock();
+      node.arms.push(arm);
+    }
+    expect(TokenTags.rcurly);
+    if (node.arms.length === 0 && node.defaultArm === null) {
+      throw parseError(
+        `empty switch — must have at least one case or default`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 7.5: parse a single arm pattern. Accepts:
+  //   - INT_LITERAL / BOOL_LITERAL                       → LITERAL_PATTERN
+  //   - `_`                                              → VARIANT_PATTERN { isWildcard: true }
+  //   - IDENT.IDENT { fieldBindings? }                   → VARIANT_PATTERN
+  //   - IDENT.IDENT                                      → VARIANT_PATTERN (no-payload form)
+  // (Char literals tokenize as strLiterals today; reject string and float
+  // literals at pattern position with explicit diagnostics.)
+  function parseSwitchPattern() {
+    const tok = peek();
+    if (tok.tag === TokenTags.discard) {
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.VARIANT_PATTERN);
+      p.isWildcard = true;
+      p.enumName = null;
+      p.variantName = null;
+      p.fieldBindings = null;
+      return p;
+    }
+    // negative-literal sugar: `-N` consumed as a single INT/FLOAT literal value.
+    if (tok.tag === TokenTags.minus) {
+      advance();
+      const num = peek();
+      if (num.tag !== TokenTags.intLiteral) {
+        throw parseError(
+          `expected integer literal after '-' in pattern`,
+          num.start,
+          num.length,
+        );
+      }
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
+      p.literalKind = "int";
+      p.value = -num.intVal;
+      return p;
+    }
+    if (tok.tag === TokenTags.intLiteral) {
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
+      p.literalKind = "int";
+      p.value = tok.intVal;
+      return p;
+    }
+    if (tok.tag === TokenTags.true || tok.tag === TokenTags.false) {
+      advance();
+      const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
+      p.literalKind = "bool";
+      p.value = tok.tag === TokenTags.true;
+      return p;
+    }
+    if (tok.tag === TokenTags.floatLiteral) {
+      throw parseError(
+        `float literals are not allowed in switch patterns`,
+        tok.start,
+        tok.length,
+      );
+    }
+    if (tok.tag === TokenTags.strLiteral) {
+      throw parseError(
+        `string literals are not allowed in switch patterns`,
+        tok.start,
+        tok.length,
+      );
+    }
+    if (tok.tag === TokenTags.ident) {
+      const enumName = parseIdentAsName();
+      if (peek().tag !== TokenTags.dot) {
+        throw parseError(
+          `variant patterns must be written as EnumName.Variant; bare identifier '${enumName}' is not allowed in a pattern`,
+          tok.start,
+          tok.length,
+        );
+      }
+      advance(); // consume dot
+      const variantName = parseIdentAsName();
+      const p = buildSourcedNode(ASTNodeKind.VARIANT_PATTERN);
+      p.isWildcard = false;
+      p.enumName = enumName;
+      p.variantName = variantName;
+      p.fieldBindings = null;
+      if (peek().tag === TokenTags.lcurly) {
+        advance();
+        p.fieldBindings = [];
+        while (
+          peek().tag !== TokenTags.rcurly &&
+          peek().tag !== TokenTags.eof
+        ) {
+          const fb = {};
+          if (peek().tag === TokenTags.discard) {
+            // bare _ inside braces — placeholder field-ignore (positional-style)
+            const dtok = advance();
+            fb.fieldName = null;
+            fb.bindingName = null;
+            fb.isWildcard = true;
+            fb.sourceLoc = posToSourceLocation(src, dtok.start);
+          } else {
+            const fnameTok = expect(TokenTags.ident);
+            fb.fieldName = src.substring(
+              fnameTok.start,
+              fnameTok.start + fnameTok.length,
+            );
+            fb.sourceLoc = posToSourceLocation(src, fnameTok.start);
+            fb.isWildcard = false;
+            fb.bindingName = fb.fieldName; // shorthand: bind to same name
+            if (peek().tag === TokenTags.colon) {
+              advance();
+              if (peek().tag === TokenTags.discard) {
+                advance();
+                fb.isWildcard = true;
+                fb.bindingName = null;
+              } else {
+                const renameTok = expect(TokenTags.ident);
+                fb.bindingName = src.substring(
+                  renameTok.start,
+                  renameTok.start + renameTok.length,
+                );
+              }
+            }
+          }
+          p.fieldBindings.push(fb);
+          if (peek().tag === TokenTags.comma) advance();
+        }
+        expect(TokenTags.rcurly);
+      }
+      return p;
+    }
+    throw parseError(
+      `unexpected token in switch pattern: ${inverseTokenTags[tok.tag]}`,
+      tok.start,
+      tok.length,
+    );
   }
 
   function parseMethodDecl() {

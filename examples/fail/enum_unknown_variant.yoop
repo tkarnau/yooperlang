@@ -1,0 +1,6 @@
+enum E { A, B }
+
+function main(): int32 {
+    let x: E = E.NotThere;
+    return 0;
+}
