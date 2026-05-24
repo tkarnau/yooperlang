@@ -1,0 +1,41 @@
+// Phase 11.E.3: comptime printf. Inside a `@precompile { ... }`
+// block, `printf(...)` writes to stderr with a `[comptime] ` prefix
+// so debug output from the comptime evaluator doesn't intermingle
+// with the compiler's own output (or with the compiled program's
+// stdout). The intended idiom is template-literal printf:
+//
+//   @precompile {
+//     printf(`computed ${RESULT}\n`);
+//   }
+//
+// where the template-literal interpolation runs through the comptime
+// stringifier (which matches what the runtime printf would print for
+// primitive args).
+//
+// The fixture exercises the path twice: once interpolating a
+// folded module-level binding the block just computed, once
+// interpolating block-local ints. The runtime printout below is
+// the compiled program's stdout — the comptime stderr trace is
+// observed elsewhere (the e2e test captures it via `compileSource`
+// and asserts on the `[comptime]` prefixed line).
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+let RESULT: int32 = 0;
+
+@precompile {
+    let a: int32 = 6;
+    let b: int32 = 7;
+    RESULT = a * b;
+    printf(`computed RESULT=${RESULT} (a=${a} b=${b})\n`);
+}
+
+function main(): int32 {
+    printf(`RESULT=${RESULT}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   RESULT=42

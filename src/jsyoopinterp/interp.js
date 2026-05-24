@@ -16,7 +16,20 @@ import { ComptimeError } from "./diagnostics.js";
 import { coerceNumeric, usesBigInt, valueCopy } from "./values.js";
 import { typeKinds } from "../jsyooptypecheck/types.js";
 
-const MAX_FRAMES = 1024;
+// Phase 11.E.5: recursion limit configurable via env var.
+// YOOP_COMPTIME_MAX_FRAMES caps the comptime call-stack depth — past
+// this point the interpreter aborts with a "runaway recursion"
+// ComptimeError. The default is high enough to fold the SDL demo's
+// pure logic but low enough to keep a real infinite-recursion bug
+// from spinning the compiler. Set to "0" to disable the cap (for
+// debugging or for known-recursion-heavy folds).
+const MAX_FRAMES = (() => {
+  const raw = typeof process !== "undefined" ? process.env?.YOOP_COMPTIME_MAX_FRAMES : null;
+  if (raw == null || raw === "") return 1024;
+  const n = Number(raw);
+  if (!Number.isFinite(n) || n < 0) return 1024;
+  return n;
+})();
 
 // Frame holds one in-flight function's state.
 //   fn        - the BytecodeFunction being executed
@@ -647,6 +660,27 @@ export function evaluate(fn, opts = {}) {
         break;
       }
 
+      case OP.TEMPLATE_FORMAT: {
+        // Walk the part descriptors; for each "str" descriptor
+        // append the literal text, for each "expr" descriptor pop
+        // the next register from args and stringify its wrapped
+        // value. The order of "expr" descriptors matches the order
+        // of args, so we use a parallel cursor.
+        const descriptors = inst.immediate;
+        let argCursor = 0;
+        let out = "";
+        for (const part of descriptors) {
+          if (part.kind === "str") {
+            out += part.value;
+          } else {
+            const reg = inst.args[argCursor++];
+            out += stringifyForTemplate(frame.registers[reg]);
+          }
+        }
+        frame.registers[inst.dst] = { ty: inst.type, v: out };
+        break;
+      }
+
       default:
         throw new ComptimeError(
           `comptime: unsupported opcode '${inst.op}'`,
@@ -654,9 +688,9 @@ export function evaluate(fn, opts = {}) {
         );
     }
 
-    if (stack.length > MAX_FRAMES) {
+    if (MAX_FRAMES > 0 && stack.length > MAX_FRAMES) {
       throw new ComptimeError(
-        `comptime: frame stack depth exceeded ${MAX_FRAMES} — likely runaway recursion`,
+        `comptime: frame stack depth exceeded ${MAX_FRAMES} — likely runaway recursion (raise YOOP_COMPTIME_MAX_FRAMES to override)`,
         inst.sourceLoc,
       );
     }
@@ -674,6 +708,39 @@ export function evaluate(fn, opts = {}) {
   }
 
   return pendingResult;
+}
+
+// Phase 11.E.3: stringify a wrapped value for template-literal
+// interpolation. Mirrors what runtime printf does via the format
+// spec table — strings pass through unchanged; bools as
+// "true"/"false"; ints in base-10 (BigInt or Number); floats with
+// six-digit precision matching `%f`. Aggregates are formatted
+// permissively rather than rejected — at comptime we'd rather print
+// a debug-y representation than blow up, since this is debug
+// output. (The typechecker has already enforced printable-or-Display
+// rules at the source level.)
+function stringifyForTemplate(wrapped) {
+  if (wrapped == null) return "<null>";
+  const v = wrapped.v;
+  const ty = wrapped.ty;
+  if (ty?.kind === "prim") {
+    if (ty.name === "string") return String(v);
+    if (ty.name === "bool") return v ? "true" : "false";
+    if (
+      ty.name === "float32" ||
+      ty.name === "float64" ||
+      ty.name === "double"
+    ) {
+      return Number(v).toFixed(6);
+    }
+    // Integer prims (int8/16/32/64, uint*, char, usize) — base-10.
+    if (typeof v === "bigint") return v.toString();
+    return String(v | 0);
+  }
+  if (typeof v === "string") return v;
+  if (typeof v === "bigint") return v.toString();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return "<value>";
 }
 
 // Integer bitwise/shift ops. BigInt path for 64-bit-wide; Number path

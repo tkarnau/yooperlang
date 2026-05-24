@@ -8,6 +8,7 @@ import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
+import { knownAttributeNames } from "./jsyoopattributes/registry.js";
 import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
@@ -24,9 +25,25 @@ function main() {
       outputModules: { type: "boolean", short: "a" },
       "dump-ast": { type: "boolean" },
       "dump-bc": { type: "boolean" },
+      "list-attributes": { type: "boolean" },
     },
     allowPositionals: true,
   });
+
+  // Phase 11.E.4: --list-attributes — dump the registry's known
+  // attribute names + each entry's handler phases. Useful for
+  // tooling (editor LSP completions, doc generation) and the
+  // human-typing-an-@-by-mistake workflow.
+  if (values["list-attributes"]) {
+    const names = knownAttributeNames();
+    if (names.length === 0) {
+      process.stdout.write("no attributes registered\n");
+    } else {
+      process.stdout.write(`known attributes (${names.length}):\n`);
+      for (const n of names) process.stdout.write(`  @${n}\n`);
+    }
+    return;
+  }
 
   let inputFile;
   if (phaseMode) {

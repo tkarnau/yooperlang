@@ -279,6 +279,16 @@ export const OP = Object.freeze({
   // form of `@precompile` to commit folded values to module-level
   // mutable lets.
   MODULE_STORE: "module_store",
+
+  // Phase 11.E.3: assemble a string from a TEMPLATE_LITERAL's parts.
+  // `args` is the ordered list of EXPR_PART value registers; the
+  // `immediate` is an array of part descriptors interleaved with the
+  // args — each entry is `{ kind: "str", value }` (literal substring)
+  // or `{ kind: "expr" }` (consume one register from args in order).
+  // The result is a string-typed wrapped value. Used inside
+  // `@precompile { ... }` blocks for debug output via comptime printf
+  // and any other place a template literal appears in folded code.
+  TEMPLATE_FORMAT: "template_format",
 });
 
 export function instruction(op, opts = {}) {

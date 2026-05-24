@@ -894,6 +894,37 @@ function lowerExpr(node, ctx, scope) {
       return dst;
     }
 
+    case ASTNodeKind.TEMPLATE_LITERAL: {
+      // Phase 11.E.3: lower each EXPR_PART into a register; build a
+      // parts descriptor that interleaves the original STRING_PARTs
+      // (literal text) with `{ kind: "expr" }` markers consuming the
+      // EXPR_PART registers in source order. TEMPLATE_FORMAT walks
+      // both at execution time and concatenates them into a string.
+      const argRegs = [];
+      const descriptors = [];
+      for (const part of node.parts ?? []) {
+        if (part.kind === ASTNodeKind.STRING_PART) {
+          descriptors.push({ kind: "str", value: decodeStringEscapes(part.value) });
+        } else if (part.kind === ASTNodeKind.EXPR_PART) {
+          const reg = lowerExpr(part.expr, ctx, scope);
+          argRegs.push(reg);
+          descriptors.push({ kind: "expr" });
+        }
+      }
+      const ty = node.resolvedType;
+      const dst = ctx.allocReg(ty);
+      ctx.emit(
+        instruction(OP.TEMPLATE_FORMAT, {
+          dst,
+          args: argRegs,
+          type: ty,
+          immediate: descriptors,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      return dst;
+    }
+
     case ASTNodeKind.STRING_LITERAL: {
       // The parser stores STRING_LITERAL.value INCLUDING the surrounding
       // double-quotes; strip them here. Escape-sequence decoding happens
@@ -1810,4 +1841,40 @@ function lowerExpr(node, ctx, scope) {
         node.sourceLoc,
       );
   }
+}
+
+// Phase 11.E.3: decode the C-style escape sequences the parser left
+// untouched in STRING_PART payloads. Codegen relies on printf to do
+// this at runtime; the comptime interpreter resolves them here so
+// the formatted output matches what the runtime version would emit.
+// Covers the escapes the lexer actually preserves: \n, \t, \r, \0,
+// \\, \", \', \x{NN}, \u{NNNN}. Unknown escapes pass through with
+// the backslash preserved — same as printf's permissive behavior.
+function decodeStringEscapes(s) {
+  let out = "";
+  let i = 0;
+  while (i < s.length) {
+    const ch = s[i];
+    if (ch !== "\\" || i + 1 >= s.length) {
+      out += ch;
+      i++;
+      continue;
+    }
+    const next = s[i + 1];
+    switch (next) {
+      case "n": out += "\n"; i += 2; break;
+      case "t": out += "\t"; i += 2; break;
+      case "r": out += "\r"; i += 2; break;
+      case "0": out += "\0"; i += 2; break;
+      case "\\": out += "\\"; i += 2; break;
+      case '"': out += '"'; i += 2; break;
+      case "'": out += "'"; i += 2; break;
+      case "`": out += "`"; i += 2; break;
+      default:
+        out += ch + next;
+        i += 2;
+        break;
+    }
+  }
+  return out;
 }

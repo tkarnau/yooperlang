@@ -1334,6 +1334,27 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
+  it("at_precompile_printf.yoop: comptime printf writes to stderr with a `[comptime]` prefix and the block's computed values land in the @global", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_printf.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "RESULT=42\n");
+    // The comptime printf path runs during compileSource → capture
+    // stderr and assert the `[comptime]` line appeared with the
+    // expected interpolations resolved by the template-lowerer.
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_printf.yoop"),
+      "utf8",
+    );
+    const origWrite = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    process.stderr.write = (chunk) => { captured += String(chunk); return true; };
+    let ir;
+    try { ir = compileSource(src); } finally { process.stderr.write = origWrite; }
+    assert.match(captured, /\[comptime\] computed RESULT=42 \(a=6 b=7\)\n/);
+    assert.match(ir, /RESULT = internal global i32 42,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
   it("at_precompile_block_unfoldable.yoop: block form hitting a non-whitelisted extern surfaces as a hard build error", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/at_precompile_block_unfoldable.yoop"),

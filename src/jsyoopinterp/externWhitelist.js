@@ -152,6 +152,61 @@ WHITELIST.set("yoop_runtime_shutdown", {
   },
 });
 
+// Phase 11.E.3: comptime printf. Writes to stderr with a
+// `[comptime] ` prefix so debug output from a `@precompile { ... }`
+// block doesn't intermingle with the compiler's own diagnostics or
+// the compiled program's stdout. Format-spec strings ("%d\n", "%s")
+// are *not* parsed at comptime — every printable arg goes through
+// `stringifyForTemplate`'s rules and is concatenated. The intended
+// idiom is template-literal printf:
+//
+//     printf(`x=${x} y=${y}\n`);
+//
+// where the TEMPLATE_LITERAL has already been lowered to a single
+// string register by the time printf sees its arg. Legacy
+// `printf("%d\n", x)` lands here too — each arg gets concatenated
+// with the literal `%d` left in place, so the output is approximate
+// but functional. A future sub-phase could parse the format spec
+// properly if a real need shows up.
+WHITELIST.set("printf", {
+  impl(args, _loc, returnType) {
+    let out = "";
+    for (const a of args) {
+      out += stringifyArgForPrintf(a);
+    }
+    // Use process.stderr.write directly so the comptime banner
+    // prefixes only the first line (the rest of the message can
+    // span lines via a trailing \n). The Node runtime is the only
+    // thing executing here.
+    if (typeof process !== "undefined" && process.stderr) {
+      process.stderr.write(`[comptime] ${out}`);
+    }
+    // Return the number of "characters written" — printf semantics.
+    // returnType is int32; coerceNumeric handles the wrap.
+    return wrapAs(returnType, out.length);
+  },
+});
+
+// Permissive arg formatter for the printf whitelist. Mirrors
+// stringifyForTemplate in interp.js but lives here so the whitelist
+// file is self-contained.
+function stringifyArgForPrintf(wrapped) {
+  if (wrapped == null) return "<null>";
+  const v = wrapped.v;
+  const ty = wrapped.ty;
+  if (ty?.kind === typeKinds.prim) {
+    if (ty.name === "string") return String(v);
+    if (ty.name === "bool") return v ? "true" : "false";
+    if (isFloatPrim(ty.name)) return Number(v).toFixed(6);
+    if (typeof v === "bigint") return v.toString();
+    return String(v | 0);
+  }
+  if (typeof v === "string") return v;
+  if (typeof v === "bigint") return v.toString();
+  if (typeof v === "number" || typeof v === "boolean") return String(v);
+  return "<value>";
+}
+
 export function lookupExtern(name) {
   return WHITELIST.get(name) ?? null;
 }

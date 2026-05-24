@@ -74,16 +74,21 @@ describe("comptime: int32 literal + arithmetic fold", () => {
 
 describe("comptime: refuses to lower unsupported AST shapes", () => {
   it("throws ComptimeError for an unsupported node kind", () => {
-    // Template literals aren't handled by lower.js yet — should
-    // produce a clear 'not supported' error, not a crash. (When
-    // TEMPLATE_LITERAL lands in a later 11.B sub-phase, pick another
-    // unsupported kind here so the fallback path keeps a real test.)
-    const { ast, declType } = firstModuleInitExpr(
-      "const G: string = `hello`; function main(): int32 { return 0; }",
-    );
+    // Hand-crafted AST node with a kind the lowerer doesn't handle.
+    // Originally this used TEMPLATE_LITERAL (which now lowers as of
+    // 11.E.3); the fallback path keeps a real test by reaching for
+    // a kind the interpreter is unlikely to ever support directly
+    // (DISCARD_STATEMENT belongs to the statement dispatcher, never
+    // appears in expression position — exactly the kind of shape
+    // the catch-all guard exists to reject).
+    const fakeNode = {
+      kind: "DISCARD_STATEMENT",
+      resolvedType: { kind: "prim", name: "int32" },
+      sourceLoc: null,
+    };
     assert.throws(
-      () => lowerExpressionAsFunction(ast, declType),
-      (err) => err instanceof ComptimeError && /TEMPLATE_LITERAL.*not supported/.test(err.message),
+      () => lowerExpressionAsFunction(fakeNode, fakeNode.resolvedType),
+      (err) => err instanceof ComptimeError && /DISCARD_STATEMENT.*not supported/.test(err.message),
     );
   });
 });
