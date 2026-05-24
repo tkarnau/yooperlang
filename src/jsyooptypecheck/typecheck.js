@@ -154,10 +154,21 @@ function walkAstForUnsafe(node, errors, visited = new WeakSet()) {
 }
 
 // If decl is an EXPORT_DECL wrapper, unwrap to the inner decl; otherwise
-// return the decl itself.
+// return the decl itself. ATTRIBUTE nodes (phase 11.A) that decorate a
+// concrete decl are also unwrapped so every existing decl-walking pass
+// sees the inner decl without having to know about attributes — the
+// attribute metadata stays on the wrapper, which downstream pieces
+// (e.g. the comptime pass, codegen) read through `decl.attributes`
+// if they care. Today only `@precompile` decorates decls, and the
+// metadata it needs is "this fold must succeed or hard-error" which
+// the comptime pass reads off the inner decl via a flag stamped
+// during pass C.4.
 function innerDecl(decl) {
   if (decl.kind === ASTNodeKind.EXPORT_DECL) return decl.decl;
   if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) return decl.fn;
+  if (decl.kind === ASTNodeKind.ATTRIBUTE && decl.target) {
+    return innerDecl(decl.target);
+  }
   return decl;
 }
 

@@ -13,7 +13,7 @@
 
 import { OP } from "./bytecode.js";
 import { ComptimeError } from "./diagnostics.js";
-import { coerceNumeric, usesBigInt } from "./values.js";
+import { coerceNumeric, usesBigInt, valueCopy } from "./values.js";
 import { typeKinds } from "../jsyooptypecheck/types.js";
 
 const MAX_FRAMES = 1024;
@@ -206,7 +206,23 @@ export function evaluate(fn) {
       }
 
       case OP.MOVE: {
-        frame.registers[inst.dst] = frame.registers[inst.args[0]];
+        // Yoop struct semantics are value-typed; valueCopy
+        // deep-copies on struct values so `let a = b; a.x = ...` doesn't
+        // mutate `b`. Primitives and arrays pass through unchanged.
+        frame.registers[inst.dst] = valueCopy(frame.registers[inst.args[0]]);
+        break;
+      }
+
+      case OP.CAST: {
+        // Read source value, coerce to destination type. coerceNumeric
+        // handles int↔int (mask/sign-extend), int↔float, float↔float.
+        // bool casts are intentionally rejected (yoop today requires
+        // explicit comparison; the typechecker already enforces this).
+        const src = frame.registers[inst.args[0]];
+        const dstTy = inst.type;
+        const raw = src.v;
+        const v = coerceNumeric(dstTy, typeof raw === "bigint" ? raw : Number(raw));
+        frame.registers[inst.dst] = { ty: dstTy, v };
         break;
       }
 
@@ -251,7 +267,11 @@ export function evaluate(fn) {
           );
         }
         for (let i = 0; i < inst.args.length; i++) {
-          newFrame.registers[i] = frame.registers[inst.args[i]];
+          // valueCopy deep-copies struct args to honor yoop's
+          // value-typed struct semantics — mutating a struct param
+          // inside the callee must not flow back into the caller's
+          // copy of that arg.
+          newFrame.registers[i] = valueCopy(frame.registers[inst.args[i]]);
         }
         stack.push(newFrame);
         break;
@@ -302,6 +322,135 @@ export function evaluate(fn) {
           );
         }
         frame.registers[inst.dst] = buf[idx];
+        break;
+      }
+
+      case OP.VARIANT_CONSTRUCT: {
+        const { variantName, ordinal, fieldNames } = inst.immediate;
+        const payload = Object.create(null);
+        for (let i = 0; i < fieldNames.length; i++) {
+          payload[fieldNames[i]] = frame.registers[inst.args[i]];
+        }
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { tag: ordinal, variantName, payload },
+        };
+        break;
+      }
+
+      case OP.VARIANT_TAG: {
+        const enumVal = frame.registers[inst.args[0]];
+        const tag = enumVal?.v?.tag ?? 0;
+        frame.registers[inst.dst] = { ty: inst.type, v: tag | 0 };
+        break;
+      }
+
+      case OP.VARIANT_PAYLOAD_FIELD: {
+        const enumVal = frame.registers[inst.args[0]];
+        const fieldName = inst.immediate;
+        const v = enumVal?.v?.payload?.[fieldName];
+        if (v == null) {
+          throw new ComptimeError(
+            `comptime: variant payload field '${fieldName}' not present on enum value`,
+            inst.sourceLoc,
+          );
+        }
+        frame.registers[inst.dst] = v;
+        break;
+      }
+
+      case OP.REF_LOCAL: {
+        // Store the frame.registers array + the slot index in the
+        // ref's payload. The slot index was emitted as `immediate`
+        // (a JS number) so we don't have to read it out of a register.
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { container: frame.registers, key: inst.immediate },
+        };
+        break;
+      }
+
+      case OP.REF_FIELD: {
+        const obj = frame.registers[inst.args[0]];
+        if (obj?.v == null) {
+          throw new ComptimeError(
+            `comptime: ref-field on null struct value`,
+            inst.sourceLoc,
+          );
+        }
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { container: obj.v, key: inst.immediate },
+        };
+        break;
+      }
+
+      case OP.REF_INDEX: {
+        const arr = frame.registers[inst.args[0]];
+        const idxVal = frame.registers[inst.args[1]];
+        const idx = typeof idxVal.v === "bigint" ? Number(idxVal.v) : Number(idxVal.v);
+        const buf = arr?.v?.buf;
+        if (!Array.isArray(buf) || idx < 0 || idx >= buf.length) {
+          throw new ComptimeError(
+            `comptime: ref-index ${idx} out of bounds (len ${buf?.length ?? 0})`,
+            inst.sourceLoc,
+          );
+        }
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { container: buf, key: idx },
+        };
+        break;
+      }
+
+      case OP.REF_LOAD: {
+        const ref = frame.registers[inst.args[0]];
+        // Share JS identity with the referent — that's the whole
+        // point of a ref. The downstream consumer is responsible for
+        // copying when value semantics demand it:
+        //   - MOVE into a let-slot will deep-copy a struct value.
+        //   - CALL_DIRECT arg binding will deep-copy a struct value.
+        //   - REF_STORE writing back will deep-copy on insert.
+        // Mutating writes (FIELD_STORE / INDEX_STORE / REF_STORE on
+        // *this* reg's payload) are how the ref's mutation semantics
+        // propagate back to the caller.
+        frame.registers[inst.dst] = ref.v.container[ref.v.key];
+        break;
+      }
+
+      case OP.REF_STORE: {
+        const ref = frame.registers[inst.args[0]];
+        const newVal = frame.registers[inst.args[1]];
+        ref.v.container[ref.v.key] = valueCopy(newVal);
+        break;
+      }
+
+      case OP.FIELD_STORE: {
+        const obj = frame.registers[inst.args[0]];
+        const newVal = frame.registers[inst.args[1]];
+        if (obj?.v == null) {
+          throw new ComptimeError(
+            `comptime: field store on missing struct value`,
+            inst.sourceLoc,
+          );
+        }
+        obj.v[inst.immediate] = newVal;
+        break;
+      }
+
+      case OP.INDEX_STORE: {
+        const arr = frame.registers[inst.args[0]];
+        const idxVal = frame.registers[inst.args[1]];
+        const newVal = frame.registers[inst.args[2]];
+        const idx = typeof idxVal.v === "bigint" ? Number(idxVal.v) : Number(idxVal.v);
+        const buf = arr?.v?.buf;
+        if (!Array.isArray(buf) || idx < 0 || idx >= buf.length) {
+          throw new ComptimeError(
+            `comptime: array index ${idx} out of bounds (len ${buf?.length ?? 0})`,
+            inst.sourceLoc,
+          );
+        }
+        buf[idx] = newVal;
         break;
       }
 

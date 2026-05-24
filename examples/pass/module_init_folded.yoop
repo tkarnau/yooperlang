@@ -3,7 +3,7 @@
 // LLVM @global with the literal value baked in, skipping the
 // runtime `<modid>__module_init` path entirely for that decl.
 //
-// Folded today (11.B.0 through 11.B.8):
+// Folded today (11.B.0 through 11.B.12):
 //   - integer literal arithmetic                            (i32)
 //   - bool literals                                         (i1)
 //   - string literals                                       (ptr → [N x i8])
@@ -14,6 +14,10 @@
 //   - struct field reads, array index reads, array `.len`   (over folded structs / arrays)
 //   - direct calls to user functions, single + nested       (params bound; cached per-decl)
 //   - local `let` / `const` + `if` / `while` inside fns     (full straight-line + branching algos)
+//   - numeric casts (`int32(x)`, `float32(y)`, ...)         (single CAST opcode + coerceNumeric)
+//   - struct field assignment + array index assignment      (`obj.x = ...`, `arr[i] = ...`)
+//   - `ref T` params with mutation through auto-deref       (callee mutates caller's binding)
+//   - `for x in arr` over folded arrays                      (desugars to idx-counter while loop)
 //
 // Verification: the compiled binary prints the expected values.
 // The IR-level verification (literal value baked into @global,
@@ -94,6 +98,59 @@ function abs_diff(a: int32, b: int32): int32 {
 }
 const ABS_DIFF: int32 = abs_diff(3, 10);  // 7
 
+// Cast fold: int32 → float32 (decimal literal added by the LLVM
+// formatter so `42` becomes `42.0` in IR).
+const CAST_F: float32 = float32(42);      // 42.0
+// Cast fold: int32 → uint8 (truncates).
+const CAST_U8: uint8 = uint8(255);        // 255
+
+// Struct field assignment + array index assignment fold. The body
+// mutates a local through FIELD_STORE / INDEX_STORE and returns the
+// resulting struct/value, which then lands as the global's literal init.
+function build_point(): Point {
+    let p: Point = { x: 0, y: 0 };
+    p.x = 17;
+    p.y = 42;
+    return p;
+}
+const BUILT: Point = build_point();      // {x: 17, y: 42}
+
+function sum_after_bump(): int32 {
+    let arr: int32[] = [10, 20, 30];
+    arr[1] = arr[1] * 5;                  // arr = [10, 100, 30]
+    return arr[0] + arr[1] + arr[2];
+}
+const BUMPED_SUM: int32 = sum_after_bump();  // 140
+
+// Ref-param mutation: the callee takes `ref p: Point` and writes
+// through `p.x = ...`, mutating the caller's binding. Comptime
+// interpreter models this via REF_LOCAL + REF_LOAD / FIELD_STORE on
+// the shared struct payload (no deep-copy on REF_LOAD — that would
+// break the mutation semantics).
+function offset_point(ref p: Point, dx: int32, dy: int32): void {
+    p.x = p.x + dx;
+    p.y = p.y + dy;
+}
+function bumped_origin(): Point {
+    let p: Point = { x: 1, y: 2 };
+    offset_point(ref p, 3, 4);
+    return p;
+}
+const BUMPED_PT: Point = bumped_origin();  // {x: 4, y: 6}
+
+// for-in over a folded array. Desugars (in the lowerer) to a
+// while-loop with idx counter + INDEX_LOAD per iteration; same
+// bytecode primitives as everything else.
+function sum_for_in(): int32 {
+    let arr: int32[] = [1, 2, 3, 4, 5];
+    let total: int32 = 0;
+    for x in arr {
+        total = total + x;
+    }
+    return total;
+}
+const FORIN_SUM: int32 = sum_for_in();  // 15
+
 function main(): int32 {
     printf(`SUM=${SUM}\n`);
     printf(`PRODUCT=${PRODUCT}\n`);
@@ -115,6 +172,12 @@ function main(): int32 {
     printf(`ORIGIN_X=${ORIGIN_X} NUMS_FIRST=${NUMS_FIRST} NUMS_LEN=${NUMS_LEN}\n`);
     printf(`SQUARED=${SQUARED} NESTED=${NESTED}\n`);
     printf(`FACT_5=${FACT_5} FACT_8=${FACT_8} ABS_DIFF=${ABS_DIFF}\n`);
+    printf(`CAST_F=${CAST_F} CAST_U8=${CAST_U8}\n`);
+    let bu: Point = BUILT;
+    printf(`BUILT=(${bu.x},${bu.y}) BUMPED_SUM=${BUMPED_SUM}\n`);
+    let bp: Point = BUMPED_PT;
+    printf(`BUMPED_PT=(${bp.x},${bp.y})\n`);
+    printf(`FORIN_SUM=${FORIN_SUM}\n`);
     return 0;
 }
 
@@ -132,3 +195,7 @@ function main(): int32 {
 //   ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3
 //   SQUARED=36 NESTED=16
 //   FACT_5=120 FACT_8=40320 ABS_DIFF=7
+//   CAST_F=42.000000 CAST_U8=255
+//   BUILT=(17,42) BUMPED_SUM=140
+//   BUMPED_PT=(4,6)
+//   FORIN_SUM=15

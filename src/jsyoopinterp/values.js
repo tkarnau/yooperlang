@@ -73,6 +73,27 @@ export function coerceNumeric(ty, raw) {
   return Number(BigInt.asIntN(bits, big));
 }
 
+// Deep-copy a wrapped value when yoop's value semantics demand it
+// (today: struct values, since `let a = b; a.x = 5;` must not mutate
+// `b.x`). For value-typed primitives — int, bool, float, string — the
+// payload is already immutable in JS, so we return the input unchanged
+// to avoid the allocation. For arrays we *don't* deep-copy: yoop array
+// semantics are fat-pointer + shared backing buffer, so aliases
+// legitimately see each other's mutations. Refs and Tasks are also
+// reference-like and pass through unchanged.
+export function valueCopy(wrapped) {
+  if (wrapped == null) return wrapped;
+  const ty = wrapped.ty;
+  if (ty.kind !== typeKinds.struct) return wrapped;
+  // Recursive struct copy: every field walked via valueCopy.
+  const fields = ty.fields ?? [];
+  const obj = Object.create(null);
+  for (const f of fields) {
+    obj[f.name] = valueCopy(wrapped.v[f.name]);
+  }
+  return { ty, v: obj };
+}
+
 // Pretty-print a wrapped value for diagnostics. Not meant for round-trip.
 export function formatValue(wrapped) {
   if (wrapped == null) return "<null>";

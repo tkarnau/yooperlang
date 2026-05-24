@@ -658,7 +658,22 @@ export function parse(src) {
             {
               // Phase 11.A: `@<name>(args?) target` attribute at top level.
               seenNonImport = true;
-              node.body.push(parseAttribute());
+              const attrNode = parseAttribute();
+              // Phase 11.C: an attribute decorating a let/const decl
+              // at the top level still produces a module-level decl
+              // from the typechecker's perspective. Forward the
+              // `isModuleLevel` flag through the wrapper so symbol
+              // collection picks it up.
+              const tgt = attrNode.target;
+              if (
+                tgt &&
+                (tgt.kind === ASTNodeKind.LET_DECL ||
+                  tgt.kind === ASTNodeKind.CONST_DECL)
+              ) {
+                validateModuleLevelDecl(tgt);
+                tgt.isModuleLevel = true;
+              }
+              node.body.push(attrNode);
             }
             break;
           case TokenTags.let:

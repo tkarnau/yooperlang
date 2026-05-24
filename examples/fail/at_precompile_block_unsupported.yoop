@@ -1,0 +1,12 @@
+// Phase 11.C: the `@precompile { ... }` block form is reserved for a
+// future sub-phase that wires comptime writes to module-level state.
+// For now the attribute pass surfaces a clear "not yet supported"
+// diagnostic so the user knows the syntax is recognized but the
+// engine behind it isn't wired yet. Once the block form lands, this
+// fixture moves out of fail/ or gets replaced.
+
+@precompile {
+    let x: int32 = 1 + 2;
+}
+
+function main(): int32 { return 0; }

@@ -1,0 +1,19 @@
+// Phase 11.C: `@precompile` on an initializer that can't be folded
+// is a hard build error. Distinct from the opportunistic module-init
+// fold path (which silently falls back to runtime init when it
+// can't evaluate something) — the user explicitly marked this
+// decl with `@precompile`, so the fold is a contract the compiler
+// must surface a failure on if it can't honor.
+//
+// Here the failure mode is "calls a non-whitelisted extern":
+// `getenv` isn't in the interpreter's pure-extern allowlist, so
+// the fold attempt errors out and the attribute handler turns
+// that into a build-time diagnostic naming the decl.
+
+extern "C" from "stdio.h" {
+    function getenv(name: string): string;
+}
+
+@precompile const HOME: string = getenv("HOME");
+
+function main(): int32 { return 0; }

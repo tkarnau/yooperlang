@@ -14,6 +14,7 @@ import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.j
 import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
+import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -1166,6 +1167,33 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
 // skips the runtime module_init for that decl. Failures are silent
 // (existing programs unaffected).
 describe("e2e: Phase 11.B opportunistic module-init folding", () => {
+  it("comptime_enum_fold.yoop: enum variant + switch + payload-bindings fold via the comptime interpreter", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/comptime_enum_fold.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "AREAS C=96 S=50 T=0\nCLASS 0=100 2=20 99=-1\n",
+    );
+  });
+
+  it("comptime_enum_fold.yoop: consumer area_doubled/classify fold to literal i32 globals", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/comptime_enum_fold.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    // The function-call results fold even though the enum producers
+    // themselves stay at zeroinitializer (enum payload-as-bytes
+    // constant encoding isn't wired yet — runtime module_init still
+    // constructs the enum globals).
+    assert.match(ir, /C_AREA = internal global i32 96,/);
+    assert.match(ir, /S_AREA = internal global i32 50,/);
+    assert.match(ir, /T_AREA = internal global i32 0,/);
+    assert.match(ir, /CLASS_0 = internal global i32 100,/);
+    assert.match(ir, /CLASS_2 = internal global i32 20,/);
+    assert.match(ir, /CLASS_99 = internal global i32 -1,/);
+  });
+
   it("module_init_folded.yoop: int/bool/string/struct/array/ops fold and print expected values", () => {
     const { stdout, exitCode } = runFixture("examples/pass/module_init_folded.yoop");
     assert.equal(exitCode, 0);
@@ -1183,7 +1211,11 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
         "HIGH_BIT\n" +
         "ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3\n" +
         "SQUARED=36 NESTED=16\n" +
-        "FACT_5=120 FACT_8=40320 ABS_DIFF=7\n",
+        "FACT_5=120 FACT_8=40320 ABS_DIFF=7\n" +
+        "CAST_F=42.000000 CAST_U8=255\n" +
+        "BUILT=(17,42) BUMPED_SUM=140\n" +
+        "BUMPED_PT=(4,6)\n" +
+        "FORIN_SUM=15\n",
     );
   });
 
@@ -1241,17 +1273,31 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
     assert.match(ir, /FACT_5 = internal global i32 120,/);
     assert.match(ir, /FACT_8 = internal global i32 40320,/);
     assert.match(ir, /ABS_DIFF = internal global i32 7,/);
+    // Cast fold: int32 → float32 lands with the LLVM-required
+    // decimal point, int32 → uint8 truncates.
+    assert.match(ir, /CAST_F = internal global float 42\.0,/);
+    assert.match(ir, /CAST_U8 = internal global i8 255,/);
+    // Field-store + index-store folds: the local mutation flows
+    // through to the final returned struct/value and lands as the
+    // global's literal init.
+    assert.match(ir, /BUILT = internal global %struct\.[^ ]+ \{ i32 17, i32 42 \},/);
+    assert.match(ir, /BUMPED_SUM = internal global i32 140,/);
+    // Ref-param mutation fold: the callee mutated the caller's
+    // binding through `ref p`, and the resulting struct survives
+    // out of the fold.
+    assert.match(ir, /BUMPED_PT = internal global %struct\.[^ ]+ \{ i32 4, i32 6 \},/);
+    // for-in fold: the iterating function returns 1+2+3+4+5 = 15.
+    assert.match(ir, /FORIN_SUM = internal global i32 15,/);
     // No module_init function gets emitted since every decl folded.
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 });
 
-// Phase 11.A: `@`-attribute syntax + registry skeleton. The first
-// inaugural consumer (`@precompile`) parses + typechecks fine; the
-// post-typecheck attribute pass errors out with "not yet implemented"
-// until 11.C wires the interpreter. Once 11.C ships, the
-// at_precompile_pending fixture moves out of fail and is replaced by
-// at_precompile_block / at_precompile_expr in examples/pass.
+// Phase 11.A: `@`-attribute syntax + registry skeleton. Phase 11.C
+// wires `@precompile`'s comptimePhase to the interpreter — init-form
+// folds become hard errors when the comptime evaluator can't honor
+// the user's directive, and the block form is reserved for a later
+// sub-phase with a clear "not yet supported" diagnostic.
 describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
   it("at_unknown_attribute.yoop: unknown `@foo` errors with a Levenshtein 'did you mean' hint", () => {
     const src = fs.readFileSync(
@@ -1264,24 +1310,59 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_pending.yoop: `@precompile` parses + typechecks; attribute pass errors with the Phase 11.C gating message", () => {
+  it("at_precompile_block_unsupported.yoop: block form errors at the attribute pass with a clear reservation message", () => {
     const src = fs.readFileSync(
-      path.join(repoRoot, "examples/fail/at_precompile_pending.yoop"),
+      path.join(repoRoot, "examples/fail/at_precompile_block_unsupported.yoop"),
       "utf8",
     );
-    // Parses cleanly.
     const ast = parse(src);
-    // Typechecks cleanly.
     const mod = { id: "fixture", absPath: "fixture", src, ast };
     const { errors: tcErrors } = typecheckProgram([mod]);
     assert.equal(tcErrors.length, 0, `unexpected typecheck errors: ${tcErrors.map((e) => e.message).join(" | ")}`);
-    // Attribute pass surfaces the "comptime engine not yet implemented" diagnostic.
     const attrErrors = [];
     runAttributePass([mod], attrErrors);
     assert.ok(
-      attrErrors.some((e) => /compile-time interpreter lands in Phase 11\.C/.test(e.message)),
-      `expected Phase 11.C gating error, got: ${attrErrors.map((e) => e.message).join(" | ")}`,
+      attrErrors.some((e) => /block form is not yet supported/.test(e.message)),
+      `expected block-form-reserved error, got: ${attrErrors.map((e) => e.message).join(" | ")}`,
     );
+  });
+
+  it("at_precompile_unfoldable.yoop: init form whose RHS can't be folded surfaces as a hard build error", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/at_precompile_unfoldable.yoop"),
+      "utf8",
+    );
+    const ast = parse(src);
+    const mod = { id: "fixture", absPath: "fixture", src, ast };
+    const { errors: tcErrors } = typecheckProgram([mod]);
+    assert.equal(tcErrors.length, 0, `unexpected typecheck errors: ${tcErrors.map((e) => e.message).join(" | ")}`);
+    // Comptime pass first (so the @precompile handler can read the
+    // unfolded state), then attribute pass.
+    runComptimePass([mod]);
+    const attrErrors = [];
+    runAttributePass([mod], attrErrors);
+    assert.ok(
+      attrErrors.some((e) => /@precompile fold failed for 'HOME'/.test(e.message)),
+      `expected fold-failure error, got: ${attrErrors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("at_precompile_basic.yoop: init-form folds run end-to-end with literal globals + no module_init", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "SQR_7=49 FACT_6=720\nTBL=1,4,9,16,25\n");
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_basic.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    assert.match(ir, /SQR_7 = internal global i32 49,/);
+    assert.match(ir, /FACT_6 = internal global i32 720,/);
+    assert.match(
+      ir,
+      /TBL = internal global %yoop_array\.int32 \{ ptr @\.arr_[^,]+, i64 5 \},/,
+    );
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 });
 

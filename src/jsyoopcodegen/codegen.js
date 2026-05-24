@@ -22,6 +22,7 @@ import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
 import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
 import { runComptimePass } from "../jsyoopinterp/comptimePass.js";
+import { runAttributePass } from "../jsyoopattributes/pass.js";
 import { createDebugInfo, annotateLinesWithDbg } from "./debugInfo.js";
 
 // yooperlang type names -> LLVM IR type names
@@ -245,13 +246,15 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
   const name = ty.name;
   if (name === "bool") return wrapped.v ? "1" : "0";
   if (isFloatPrim(name)) {
-    // LLVM accepts ordinary decimal for `float` / `double` in IR text;
-    // converting via `Number.toString()` covers the common cases the
-    // typechecker has range-checked. Special values (NaN, Inf) would
-    // need LLVM-specific spellings — punt by refusing to fold them.
+    // LLVM accepts ordinary decimal for `float` / `double` in IR text,
+    // but rejects bare integers in float position (`42` won't parse as
+    // a float; `42.0` will). Force a fractional digit when JS's default
+    // toString omits one. Special values (NaN, Inf) would need
+    // LLVM-specific spellings — refuse to fold them.
     const n = Number(wrapped.v);
     if (!Number.isFinite(n)) return null;
-    return n.toString();
+    const s = n.toString();
+    return /[.eE]/.test(s) ? s : `${s}.0`;
   }
   if (isIntPrim(name)) {
     // BigInt and Number both stringify into LLVM-acceptable integer
@@ -2392,10 +2395,19 @@ export function compileSource(src) {
         errors.map((e) => `  ${e.message}`).join("\n"),
     );
   }
-  // Phase 11.B: run the comptime pass before codegen so this entry
-  // matches the driver path. Silent fallback on unfoldable inits keeps
-  // behavior identical to today for every existing fixture.
+  // Phase 11.B / 11.C: run the comptime pass + attribute pass in the
+  // same order the driver does so this test entry mirrors the real
+  // pipeline. Comptime runs first so `@precompile`'s comptimePhase
+  // can read each decl's `comptimeFolded` flag.
   runComptimePass([mod]);
+  const attrErrors = [];
+  runAttributePass([mod], attrErrors);
+  if (attrErrors.length > 0) {
+    throw new Error(
+      `compileSource: attribute pass failed with ${attrErrors.length} error(s):\n` +
+        attrErrors.map((e) => `  ${e.message}`).join("\n"),
+    );
+  }
   const { ir } = codegenProgram([mod], null, programState);
   return ir;
 }
@@ -3061,7 +3073,17 @@ function codegenWithModuleId(
   // through the existing `zeroinitializer` + runtime init path.
   const moduleLevelDecls = [];      // decls that still need runtime init
   for (const decl of ast.body) {
-    const d = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
+    // Phase 11.C: an ATTRIBUTE node (e.g. `@precompile const X = ...`)
+    // wraps a let/const decl; unwrap it for the standard
+    // module-level-decl path. The attribute's runtime effects (none
+    // for @precompile — its sole purpose is to demand the fold
+    // succeed) are handled by the attribute pass, which runs before
+    // codegen.
+    const outer = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
+    const d =
+      outer.kind === ASTNodeKind.ATTRIBUTE && outer.target
+        ? outer.target
+        : outer;
     if (
       (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
       d.isModuleLevel

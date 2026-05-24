@@ -149,6 +149,76 @@ export const OP = Object.freeze({
   // No-op marker; carries `immediate = labelName` so the interpreter
   // can build a labelName → ip map for use by BR / BRCOND.
   LABEL: "label",
+
+  // Numeric cast — `int32(x)`, `float32(y)`, etc. The destination
+  // register is typed via `inst.type`, which is also stamped as the
+  // `castTargetType` from the AST. The interpreter routes the source
+  // value through `coerceNumeric`, which handles every legal pairing:
+  // int↔int (truncate / sign-extend), int↔float (round / floor),
+  // float↔float (precision conversion).
+  CAST: "cast",
+
+  // Write a struct field by name. `args[0]` is the struct-value
+  // register; `args[1]` is the new field value; `immediate` is the
+  // field name string. Mutates the struct's wrapped `v` object in
+  // place — yoop struct semantics are value-typed, so the
+  // interpreter's MOVE handler deep-copies struct values to keep
+  // aliases from sharing state.
+  FIELD_STORE: "field_store",
+
+  // Write an array element by index. `args[0]` is the array-value
+  // register; `args[1]` is the index register; `args[2]` is the new
+  // element value. Arrays in yoop are fat-pointers (the buf is
+  // shared), so aliases legitimately see each other's writes — no
+  // deep-copy on assignment.
+  INDEX_STORE: "index_store",
+
+  // Construct a reference to a local-register slot. `args[0]` is the
+  // slot reg index (passed as a JS Number in immediate, since the
+  // interpreter stores it as the JS array key). The resulting ref
+  // value is `{ ty: RefType(inner), v: { container, key } }` where
+  // container is the frame's `registers` array. Lifetime is bounded
+  // by the enclosing frame — yoop's kind checks enforce that refs
+  // don't escape, and the interpreter doesn't need a separate check.
+  REF_LOCAL: "ref_local",
+
+  // Construct a reference to a struct field. `args[0]` is the
+  // struct-value register; `immediate` is the field name string.
+  REF_FIELD: "ref_field",
+
+  // Construct a reference to an array element. `args[0]` is the
+  // array-value register; `args[1]` is the index register.
+  REF_INDEX: "ref_index",
+
+  // Build an enum variant value from per-payload-field registers.
+  // `immediate` carries `{ variantName, ordinal, fieldNames }`; `args`
+  // are the payload field regs in declared order (lowering normalizes
+  // source order to declared order, same as STRUCT_CONSTRUCT).
+  // `type` is the EnumType.
+  VARIANT_CONSTRUCT: "variant_construct",
+
+  // Read the variant tag (i32 ordinal) from an enum value. `args[0]`
+  // is the enum register; `dst` receives an int32 wrapped value.
+  VARIANT_TAG: "variant_tag",
+
+  // Read a named payload field from an enum value's variant. `args[0]`
+  // is the enum register; `immediate` is the field name string; `type`
+  // is the field's type. The interpreter assumes the variant is the
+  // expected one — lowering only emits this inside arm bodies after a
+  // tag-match branch.
+  VARIANT_PAYLOAD_FIELD: "variant_payload_field",
+
+  // Read through a reference (auto-deref). `args[0]` is the ref
+  // register. Yoop is value-typed for structs, so struct reads
+  // through a ref copy out — matches the deep-copy semantics MOVE /
+  // CALL_DIRECT use elsewhere.
+  REF_LOAD: "ref_load",
+
+  // Write through a reference. `args[0]` is the ref register;
+  // `args[1]` is the new value. Struct writes also copy in (so
+  // mutating the value at the source after a ref-store doesn't
+  // mutate the referent).
+  REF_STORE: "ref_store",
 });
 
 export function instruction(op, opts = {}) {

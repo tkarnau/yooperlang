@@ -37,15 +37,26 @@
 
 const REGISTRY = new Map();
 
-// Phase 11.A inaugural consumer. Parses fine; everything else stubbed
-// until the interpreter lands in Phase 11.B/C. The error message names
-// the gating phase so the user knows the syntax is wired but the engine
-// behind it isn't yet.
+// Phase 11.A inaugural consumer; Phase 11.C wires its comptimePhase
+// to the interpreter. Two target shapes are accepted today:
+//
+//   @precompile const X: T = expr;     ← let/const initializer
+//   @precompile let   X: T = expr;     ← (mutable not very useful yet)
+//
+// The block form (`@precompile { ... }`) parses but isn't evaluated
+// yet — supporting it cleanly needs a notion of comptime-visible
+// module-level state writes that the current interpreter doesn't
+// have. Today it errors with a clear "block form not yet supported"
+// at the comptimePhase so the surface is reserved for a later
+// sub-phase without changing the parser's grammar.
+//
+// Unlike the opportunistic module-init fold (which silently falls
+// back to runtime init on any failure), `@precompile` makes the
+// fold *required*: if the decl doesn't end up with
+// `comptimeFolded === true`, the attribute pass surfaces a hard
+// build error so the user knows their comptime contract wasn't met.
 REGISTRY.set("precompile", {
   parsePhase(attrNode, ctx) {
-    // The target must be a block (statement form) or a let/const decl
-    // (initializer form). Other shapes are rejected so we surface the
-    // intent mismatch before downstream confusion.
     if (attrNode.args && attrNode.args.length !== 0) {
       ctx.throwError(
         `@precompile takes no arguments; remove the '(...)'`,
@@ -59,15 +70,46 @@ REGISTRY.set("precompile", {
       );
     }
   },
-  // Phase 11.C wires this up to the interpreter. Until then the
-  // typechecker walks the target normally (so the body is still
-  // typechecked even though it won't be evaluated), and the comptime
-  // pass errors out.
   comptimePhase(attrNode, ctx) {
+    const tgt = attrNode.target;
+    // Block form: not yet supported. Reserve the surface for a
+    // future sub-phase that wires comptime-visible writes into
+    // module-level state.
+    if (tgt && tgt.kind === "BLOCK") {
+      ctx.error(
+        attrNode,
+        `@precompile { ... } block form is not yet supported — the ` +
+          `comptime interpreter doesn't yet track writes to module-level ` +
+          `state from inside a block. Use @precompile on a 'let' / 'const' ` +
+          `initializer in the meantime.`,
+      );
+      return;
+    }
+    // let/const form: the comptime pass has already run; the decl
+    // either folded (comptimeFolded === true + comptimeValue set)
+    // or didn't. We surface the latter as a hard build error.
+    if (
+      tgt &&
+      (tgt.kind === "LET_DECL" || tgt.kind === "CONST_DECL")
+    ) {
+      if (!tgt.comptimeFolded) {
+        ctx.error(
+          attrNode,
+          `@precompile fold failed for '${tgt.name}' — the initializer ` +
+            `references something the comptime interpreter cannot evaluate ` +
+            `(unsupported AST node, non-whitelisted extern, runtime-only ` +
+            `task, etc.). Inspect the initializer expression for shapes ` +
+            `outside Phase 11.B's supported set.`,
+        );
+      }
+      return;
+    }
+    // Unrecognized target shape. Parse phase already screens out
+    // null targets; this branch catches anything else slipping
+    // through.
     ctx.error(
       attrNode,
-      `@precompile cannot run yet — the compile-time interpreter lands in Phase 11.C. ` +
-        `The attribute parses and typechecks; evaluation is pending.`,
+      `@precompile target shape '${tgt?.kind}' is not supported`,
     );
   },
 });

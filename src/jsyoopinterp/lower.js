@@ -151,15 +151,20 @@ export function lowerFunction(funcDecl, opts = {}) {
     scope.declare(param.name, reg);
   }
   lowerStatement(funcDecl.body, ctx, scope);
-  // Defensive: a function whose body lacks a return must trip a
-  // ComptimeError rather than fall off the end of the instruction
-  // stream silently. The typechecker should have caught missing
-  // returns for non-void functions, but the interpreter's "fell off
-  // the end" diagnostic is a sharper signal during dev.
+  // Synthesize a trailing `ret void` for void-returning functions
+  // whose body doesn't explicitly end in RET. Matches codegen's
+  // implicit-return behavior so void fns the user wrote without a
+  // trailing `return;` still terminate cleanly under the interpreter.
+  const returnType = funcDecl.resolvedType ?? funcDecl.declaredReturnType ?? null;
+  const last = ctx.instructions[ctx.instructions.length - 1];
+  const isVoid = returnType?.kind === typeKinds.void;
+  if (isVoid && (!last || last.op !== OP.RET)) {
+    ctx.emit(instruction(OP.RET, { args: [], sourceLoc: funcDecl.sourceLoc }));
+  }
   return bytecodeFunction({
     name: funcDecl.name,
     params: paramTypes,
-    returnType: funcDecl.resolvedType ?? funcDecl.declaredReturnType ?? null,
+    returnType,
     registerTypes: ctx.registerTypes,
     instructions: ctx.instructions,
     sourceLoc: funcDecl.sourceLoc ?? null,
@@ -255,6 +260,365 @@ function lowerStatement(node, ctx, scope) {
       ctx.emit(instruction(OP.LABEL, { immediate: endLabel }));
       return;
     }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      // Trait-driven iteration (Phase 10.B `Iterable<T>`) needs more
+      // plumbing — defer to the silent-fallback path until 11.D.
+      if (node.iterableImpl) {
+        throw new ComptimeError(
+          `comptime: for-in over user-defined Iterable<T> is not supported yet (Phase 11.D)`,
+          node.sourceLoc,
+        );
+      }
+      // Desugar `for x in arr { body }` to:
+      //   let __iter = arr;
+      //   let __len = __iter.len;
+      //   let __idx: usize = 0;
+      //   while (__idx < __len) {
+      //       let x = __iter[__idx];
+      //       <body>
+      //       __idx = __idx + 1;
+      //   }
+      // The same bytecode primitives (MOVE, ARRAY_LEN, INDEX_LOAD,
+      // LABEL/BR/BRCOND) handle this; nothing new at the opcode level.
+      const inner = new Scope(scope);
+
+      const iterReg = lowerExpr(node.iterExpr, ctx, scope);
+      const iterTy = ctx.registerTypes[iterReg];
+      if (iterTy.kind !== typeKinds.array) {
+        throw new ComptimeError(
+          `comptime: for-in over '${iterTy.kind}' is not supported`,
+          node.sourceLoc,
+        );
+      }
+      const elemTy = iterTy.elem;
+
+      // __len = iter.len
+      // Use a synthetic primitive type for the usize counter so the
+      // ARRAY_LEN op and counter share the same dispatching path.
+      const usizeTy = { kind: typeKinds.prim, name: "usize" };
+      const lenReg = ctx.allocReg(usizeTy);
+      ctx.emit(
+        instruction(OP.ARRAY_LEN, {
+          dst: lenReg,
+          args: [iterReg],
+          type: usizeTy,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      // __idx: usize = 0
+      const zeroReg = ctx.allocReg(usizeTy);
+      ctx.emit(
+        instruction(OP.LITERAL, {
+          dst: zeroReg,
+          type: usizeTy,
+          immediate: { ty: usizeTy, v: 0n },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      const idxSlotReg = ctx.allocReg(usizeTy);
+      ctx.emit(
+        instruction(OP.MOVE, {
+          dst: idxSlotReg,
+          args: [zeroReg],
+          type: usizeTy,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      // Loop variable slot — declared into the inner scope so the
+      // body sees `x` as the current element.
+      const loopVarSlot = ctx.allocReg(elemTy);
+      inner.declare(node.loopVar, loopVarSlot);
+
+      const headLabel = ctx.freshLabel("forin_head");
+      const bodyLabel = ctx.freshLabel("forin_body");
+      const exitLabel = ctx.freshLabel("forin_exit");
+
+      ctx.emit(instruction(OP.LABEL, { immediate: headLabel }));
+
+      // __idx < __len
+      const condReg = ctx.allocReg({ kind: typeKinds.prim, name: "bool" });
+      ctx.emit(
+        instruction(OP.ICMP_LT, {
+          dst: condReg,
+          args: [idxSlotReg, lenReg],
+          type: { kind: typeKinds.prim, name: "bool" },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      ctx.emit(
+        instruction(OP.BRCOND, {
+          args: [condReg],
+          immediate: { then: bodyLabel, else: exitLabel },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      ctx.emit(instruction(OP.LABEL, { immediate: bodyLabel }));
+
+      // x = __iter[__idx]
+      const elemReg = ctx.allocReg(elemTy);
+      ctx.emit(
+        instruction(OP.INDEX_LOAD, {
+          dst: elemReg,
+          args: [iterReg, idxSlotReg],
+          type: elemTy,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      ctx.emit(
+        instruction(OP.MOVE, {
+          dst: loopVarSlot,
+          args: [elemReg],
+          type: elemTy,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      // body
+      lowerStatement(node.body, ctx, inner);
+
+      // __idx = __idx + 1
+      const oneReg = ctx.allocReg(usizeTy);
+      ctx.emit(
+        instruction(OP.LITERAL, {
+          dst: oneReg,
+          type: usizeTy,
+          immediate: { ty: usizeTy, v: 1n },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      const newIdxReg = ctx.allocReg(usizeTy);
+      ctx.emit(
+        instruction(OP.IADD, {
+          dst: newIdxReg,
+          args: [idxSlotReg, oneReg],
+          type: usizeTy,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      ctx.emit(
+        instruction(OP.MOVE, {
+          dst: idxSlotReg,
+          args: [newIdxReg],
+          type: usizeTy,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      ctx.emit(
+        instruction(OP.BR, {
+          immediate: headLabel,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      ctx.emit(instruction(OP.LABEL, { immediate: exitLabel }));
+      return;
+    }
+
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      // Lower switch as a linear chain of arm-match-checks. Each
+      // pattern compiles to a tag/literal comparison; on match we
+      // jump to the arm body (binding payload fields as locals if
+      // it's a variant pattern with fieldBindings) and on mismatch
+      // fall through to the next pattern / arm / default. Multiple
+      // patterns per arm produce an OR chain of compares all
+      // targeting the same arm body.
+      const scrutReg = lowerExpr(node.scrutinee, ctx, scope);
+      const scrutTy = ctx.registerTypes[scrutReg];
+      const isEnum = scrutTy.kind === typeKinds.enum;
+      const exitLabel = ctx.freshLabel("switch_exit");
+
+      // Pre-allocate per-arm labels so we can branch into them from
+      // the pattern-check chain regardless of order.
+      const armLabels = node.arms.map((_, i) => ctx.freshLabel(`switch_arm_${i}`));
+      const defaultLabel = ctx.freshLabel("switch_default");
+
+      // Materialize the scrutinee's tag once for variant patterns.
+      let tagReg = null;
+      if (isEnum) {
+        tagReg = ctx.allocReg({ kind: typeKinds.prim, name: "int32" });
+        ctx.emit(
+          instruction(OP.VARIANT_TAG, {
+            dst: tagReg,
+            args: [scrutReg],
+            type: { kind: typeKinds.prim, name: "int32" },
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+      }
+
+      // Emit the pattern-check chain. Each per-arm chain ends with a
+      // BR to that arm's body label (on match) or falls through to
+      // the next arm's checks.
+      for (let i = 0; i < node.arms.length; i++) {
+        const arm = node.arms[i];
+        const armLabel = armLabels[i];
+        for (const pat of arm.patterns) {
+          if (pat.kind === ASTNodeKind.VARIANT_PATTERN && pat.isWildcard) {
+            // `case _:` — unconditional match. Emit a direct BR.
+            ctx.emit(instruction(OP.BR, { immediate: armLabel, sourceLoc: pat.sourceLoc }));
+            continue;
+          }
+          if (pat.kind === ASTNodeKind.LITERAL_PATTERN) {
+            // Compare scrutinee value against the literal.
+            const litTy = scrutTy;
+            const litReg = ctx.allocReg(litTy);
+            const v =
+              pat.literalKind === "int"
+                ? (litTy.kind === typeKinds.prim && /int64|uint64|isize|usize|uintptr/.test(litTy.name)
+                  ? BigInt(pat.value)
+                  : Number(pat.value))
+                : pat.literalKind === "bool"
+                  ? !!pat.value
+                  : pat.value;
+            ctx.emit(
+              instruction(OP.LITERAL, {
+                dst: litReg,
+                type: litTy,
+                immediate: { ty: litTy, v },
+                sourceLoc: pat.sourceLoc,
+              }),
+            );
+            const cmpReg = ctx.allocReg({ kind: typeKinds.prim, name: "bool" });
+            ctx.emit(
+              instruction(OP.ICMP_EQ, {
+                dst: cmpReg,
+                args: [scrutReg, litReg],
+                type: { kind: typeKinds.prim, name: "bool" },
+                sourceLoc: pat.sourceLoc,
+              }),
+            );
+            const nextLabel = ctx.freshLabel(`switch_pat_${i}_next`);
+            ctx.emit(
+              instruction(OP.BRCOND, {
+                args: [cmpReg],
+                immediate: { then: armLabel, else: nextLabel },
+                sourceLoc: pat.sourceLoc,
+              }),
+            );
+            ctx.emit(instruction(OP.LABEL, { immediate: nextLabel }));
+            continue;
+          }
+          if (pat.kind === ASTNodeKind.VARIANT_PATTERN) {
+            // Compare scrutinee.tag against the variant's ordinal.
+            const ordReg = ctx.allocReg({ kind: typeKinds.prim, name: "int32" });
+            ctx.emit(
+              instruction(OP.LITERAL, {
+                dst: ordReg,
+                type: { kind: typeKinds.prim, name: "int32" },
+                immediate: {
+                  ty: { kind: typeKinds.prim, name: "int32" },
+                  v: pat.resolvedVariant.ordinal | 0,
+                },
+                sourceLoc: pat.sourceLoc,
+              }),
+            );
+            const cmpReg = ctx.allocReg({ kind: typeKinds.prim, name: "bool" });
+            ctx.emit(
+              instruction(OP.ICMP_EQ, {
+                dst: cmpReg,
+                args: [tagReg, ordReg],
+                type: { kind: typeKinds.prim, name: "bool" },
+                sourceLoc: pat.sourceLoc,
+              }),
+            );
+            const nextLabel = ctx.freshLabel(`switch_pat_${i}_next`);
+            ctx.emit(
+              instruction(OP.BRCOND, {
+                args: [cmpReg],
+                immediate: { then: armLabel, else: nextLabel },
+                sourceLoc: pat.sourceLoc,
+              }),
+            );
+            ctx.emit(instruction(OP.LABEL, { immediate: nextLabel }));
+            continue;
+          }
+          throw new ComptimeError(
+            `comptime: switch pattern kind '${pat.kind}' is not supported yet`,
+            pat.sourceLoc,
+          );
+        }
+      }
+
+      // Default arm (or fall-through to exit if no default).
+      ctx.emit(instruction(OP.BR, { immediate: defaultLabel, sourceLoc: node.sourceLoc }));
+
+      // Emit each arm body. Variant patterns with fieldBindings
+      // extract their payload fields into per-binding slot regs in
+      // the arm's local scope. Each arm BRs to exitLabel after the
+      // body (the body may also early-return / break).
+      for (let i = 0; i < node.arms.length; i++) {
+        const arm = node.arms[i];
+        ctx.emit(instruction(OP.LABEL, { immediate: armLabels[i] }));
+        const armScope = new Scope(scope);
+        // For variant patterns, find the (non-wildcard) one to bind from.
+        const bindingPat = arm.patterns.find(
+          (p) => p.kind === ASTNodeKind.VARIANT_PATTERN && !p.isWildcard && p.fieldBindings,
+        );
+        if (bindingPat) {
+          // Each binding is `{ fieldName, bindingName, isWildcard,
+          // resolvedType? }`. fieldName is the variant's payload
+          // field; bindingName is the local-scope name to bind.
+          // `_` bindings (isWildcard) skip the bind entirely.
+          for (const binding of bindingPat.fieldBindings) {
+            if (binding.isWildcard) continue;
+            const fieldName = binding.fieldName;
+            const localName = binding.bindingName;
+            // Look up the payload field's declared type from the
+            // variant; the binding itself doesn't carry a resolvedType.
+            const variant = bindingPat.resolvedVariant;
+            const variantField = (variant?.fields ?? []).find(
+              (f) => f.name === fieldName,
+            );
+            const ty = binding.resolvedType ?? variantField?.type;
+            if (!ty) {
+              throw new ComptimeError(
+                `comptime: variant pattern binding '${localName}' has no resolved type`,
+                bindingPat.sourceLoc,
+              );
+            }
+            const fieldReg = ctx.allocReg(ty);
+            ctx.emit(
+              instruction(OP.VARIANT_PAYLOAD_FIELD, {
+                dst: fieldReg,
+                args: [scrutReg],
+                type: ty,
+                immediate: fieldName,
+                sourceLoc: bindingPat.sourceLoc,
+              }),
+            );
+            // Bind to a stable slot (LET_DECL-shaped) so the body
+            // can re-read freely.
+            const slotReg = ctx.allocReg(ty);
+            ctx.emit(
+              instruction(OP.MOVE, {
+                dst: slotReg,
+                args: [fieldReg],
+                type: ty,
+                sourceLoc: bindingPat.sourceLoc,
+              }),
+            );
+            armScope.declare(localName, slotReg);
+          }
+        }
+        lowerStatement(arm.body, ctx, armScope);
+        ctx.emit(instruction(OP.BR, { immediate: exitLabel, sourceLoc: arm.sourceLoc }));
+      }
+
+      // Default arm body. If absent, just jump straight to exit so
+      // the switch falls through when no pattern matches.
+      ctx.emit(instruction(OP.LABEL, { immediate: defaultLabel }));
+      if (node.defaultArm) {
+        lowerStatement(node.defaultArm, ctx, new Scope(scope));
+      }
+      ctx.emit(instruction(OP.BR, { immediate: exitLabel, sourceLoc: node.sourceLoc }));
+
+      ctx.emit(instruction(OP.LABEL, { immediate: exitLabel }));
+      return;
+    }
+
     case ASTNodeKind.WHILE_STATEMENT: {
       const headLabel = ctx.freshLabel("while_head");
       const bodyLabel = ctx.freshLabel("while_body");
@@ -444,7 +808,25 @@ function lowerExpr(node, ctx, scope) {
       // unsupported and surfaces as a ComptimeError (silent
       // module-init fallback path).
       const scopeReg = scope ? scope.lookup(node.name) : null;
-      if (scopeReg != null) return scopeReg;
+      if (scopeReg != null) {
+        // Auto-deref: when the typechecker has marked this read as
+        // going through a ref-typed binding, emit REF_LOAD so the
+        // returned register holds the deref'd value rather than the
+        // ref itself.
+        if (node.autoDeref) {
+          const dst = ctx.allocReg(node.resolvedType);
+          ctx.emit(
+            instruction(OP.REF_LOAD, {
+              dst,
+              args: [scopeReg],
+              type: node.resolvedType,
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+          return dst;
+        }
+        return scopeReg;
+      }
       const folded = ctx.moduleConsts.get(node.name);
       if (folded == null) {
         throw new ComptimeError(
@@ -464,38 +846,159 @@ function lowerExpr(node, ctx, scope) {
       return dst;
     }
 
-    case ASTNodeKind.ASSIGNMENT: {
-      // Assignment is parsed as an expression (the AST distinguishes
-      // it from LET_DECL — see parser line ~1933). Lower the RHS,
-      // MOVE into the target's slot, return the value register so an
-      // outer expression context can use the assigned value if it
-      // wants (yoop allows `if ((x = f()) > 0) { ... }`).
-      if (node.target?.kind !== ASTNodeKind.IDENT) {
-        throw new ComptimeError(
-          `comptime: assignment to non-identifier targets ('${node.target?.kind}') is not supported yet`,
-          node.sourceLoc,
+    case ASTNodeKind.REF_EXPRESSION: {
+      // Three legal operand shapes today:
+      //   ref ident         → ref a local register slot
+      //   ref obj.field     → ref a struct field
+      //   ref arr[i]        → ref an array element
+      // `ref` of an already-ref-typed value forwards the existing ref.
+      const operand = node.operand;
+      if (operand.kind === ASTNodeKind.IDENT) {
+        const slotReg = scope ? scope.lookup(operand.name) : null;
+        if (slotReg == null) {
+          throw new ComptimeError(
+            `comptime: ref of unknown binding '${operand.name}'`,
+            node.sourceLoc,
+          );
+        }
+        // If the IDENT's resolved type is itself a ref, the binding
+        // already holds a ref — forward it directly without rewrapping.
+        const slotTy = ctx.registerTypes[slotReg];
+        if (slotTy.kind === typeKinds.ref) return slotReg;
+        const dst = ctx.allocReg(node.resolvedType);
+        ctx.emit(
+          instruction(OP.REF_LOCAL, {
+            dst,
+            args: [slotReg],
+            type: node.resolvedType,
+            immediate: slotReg,
+            sourceLoc: node.sourceLoc,
+          }),
         );
+        return dst;
       }
-      const slotReg = scope ? scope.lookup(node.target.name) : null;
-      if (slotReg == null) {
-        throw new ComptimeError(
-          `comptime: assignment to unknown binding '${node.target.name}'`,
-          node.sourceLoc,
+      if (operand.kind === ASTNodeKind.FIELD_ACCESS) {
+        const objReg = lowerExpr(operand.object, ctx, scope);
+        const dst = ctx.allocReg(node.resolvedType);
+        ctx.emit(
+          instruction(OP.REF_FIELD, {
+            dst,
+            args: [objReg],
+            type: node.resolvedType,
+            immediate: operand.field,
+            sourceLoc: node.sourceLoc,
+          }),
         );
+        return dst;
       }
-      const valReg = lowerExpr(node.value, ctx, scope);
-      ctx.emit(
-        instruction(OP.MOVE, {
-          dst: slotReg,
-          args: [valReg],
-          type: ctx.registerTypes[slotReg],
-          sourceLoc: node.sourceLoc,
-        }),
+      if (operand.kind === ASTNodeKind.INDEX_EXPRESSION) {
+        const arrReg = lowerExpr(operand.object, ctx, scope);
+        const idxReg = lowerExpr(operand.index, ctx, scope);
+        const dst = ctx.allocReg(node.resolvedType);
+        ctx.emit(
+          instruction(OP.REF_INDEX, {
+            dst,
+            args: [arrReg, idxReg],
+            type: node.resolvedType,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return dst;
+      }
+      throw new ComptimeError(
+        `comptime: 'ref' operand shape '${operand.kind}' is not supported yet`,
+        node.sourceLoc,
       );
-      return slotReg;
+    }
+
+    case ASTNodeKind.ASSIGNMENT: {
+      // Three target shapes today: bare identifier, struct field, and
+      // array index. Function-param ref deref + nested chains land in
+      // later sub-phases.
+      const tgt = node.target;
+      if (tgt?.kind === ASTNodeKind.IDENT) {
+        const slotReg = scope ? scope.lookup(tgt.name) : null;
+        if (slotReg == null) {
+          throw new ComptimeError(
+            `comptime: assignment to unknown binding '${tgt.name}'`,
+            node.sourceLoc,
+          );
+        }
+        // Auto-deref-write: when the typechecker has marked the IDENT
+        // as a write through a ref binding, lower as REF_STORE rather
+        // than MOVE on the ref reg itself.
+        if (tgt.autoDerefWrite) {
+          const valReg = lowerExpr(node.value, ctx, scope);
+          ctx.emit(
+            instruction(OP.REF_STORE, {
+              args: [slotReg, valReg],
+              type: ctx.registerTypes[valReg],
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+          return valReg;
+        }
+        const valReg = lowerExpr(node.value, ctx, scope);
+        ctx.emit(
+          instruction(OP.MOVE, {
+            dst: slotReg,
+            args: [valReg],
+            type: ctx.registerTypes[slotReg],
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return slotReg;
+      }
+      if (tgt?.kind === ASTNodeKind.FIELD_ACCESS) {
+        const objReg = lowerExpr(tgt.object, ctx, scope);
+        const valReg = lowerExpr(node.value, ctx, scope);
+        ctx.emit(
+          instruction(OP.FIELD_STORE, {
+            args: [objReg, valReg],
+            type: ctx.registerTypes[valReg],
+            immediate: tgt.field,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return valReg;
+      }
+      if (tgt?.kind === ASTNodeKind.INDEX_EXPRESSION) {
+        const arrReg = lowerExpr(tgt.object, ctx, scope);
+        const idxReg = lowerExpr(tgt.index, ctx, scope);
+        const valReg = lowerExpr(node.value, ctx, scope);
+        ctx.emit(
+          instruction(OP.INDEX_STORE, {
+            args: [arrReg, idxReg, valReg],
+            type: ctx.registerTypes[valReg],
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return valReg;
+      }
+      throw new ComptimeError(
+        `comptime: assignment target shape '${tgt?.kind}' is not supported yet`,
+        node.sourceLoc,
+      );
     }
 
     case ASTNodeKind.CALL_EXPRESSION: {
+      // Numeric casts are parsed as CALL_EXPRESSION nodes; the
+      // typechecker stamps `isCast = true` + `castTargetType`. Route
+      // them through the dedicated CAST opcode rather than the
+      // function-call infrastructure.
+      if (node.isCast) {
+        const srcReg = lowerExpr(node.args[0], ctx, scope);
+        const dst = ctx.allocReg(node.castTargetType);
+        ctx.emit(
+          instruction(OP.CAST, {
+            dst,
+            args: [srcReg],
+            type: node.castTargetType,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return dst;
+      }
       if (!ctx.fnResolver) {
         throw new ComptimeError(
           `comptime: function call requires a function resolver`,
@@ -545,6 +1048,49 @@ function lowerExpr(node, ctx, scope) {
           dst,
           args: elemRegs,
           type: arrType,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      return dst;
+    }
+
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      const enumType = node.resolvedEnumType;
+      const variant = node.resolvedVariant;
+      if (!enumType || !variant) {
+        throw new ComptimeError(
+          `comptime: variant constructor missing resolved enum/variant`,
+          node.sourceLoc,
+        );
+      }
+      // Normalize source-order field assignments to the variant's
+      // declared field order — same shape as STRUCT_LITERAL.
+      const litFieldByName = new Map();
+      for (const f of node.fields ?? []) litFieldByName.set(f.name, f);
+      const orderedRegs = [];
+      const orderedNames = [];
+      for (const declared of variant.fields ?? []) {
+        const lf = litFieldByName.get(declared.name);
+        if (!lf) {
+          throw new ComptimeError(
+            `comptime: variant '${variant.name}' missing payload field "${declared.name}"`,
+            node.sourceLoc,
+          );
+        }
+        orderedRegs.push(lowerExpr(lf.value, ctx, scope));
+        orderedNames.push(declared.name);
+      }
+      const dst = ctx.allocReg(enumType);
+      ctx.emit(
+        instruction(OP.VARIANT_CONSTRUCT, {
+          dst,
+          args: orderedRegs,
+          type: enumType,
+          immediate: {
+            variantName: variant.name,
+            ordinal: variant.ordinal,
+            fieldNames: orderedNames,
+          },
           sourceLoc: node.sourceLoc,
         }),
       );

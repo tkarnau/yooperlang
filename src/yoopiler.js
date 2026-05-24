@@ -92,11 +92,24 @@ function main() {
   }
   console.log("typecheck: ok");
 
-  // Phase 11.A: attribute dispatch pass. Currently only `@precompile`
-  // is registered, and its handler errors out with "comptime engine
-  // not yet implemented (Phase 11.C pending)". Adding the pass here
-  // makes the integration point real even before the interpreter
-  // lands — future attribute consumers will plug into this same hook.
+  // Phase 11.B: opportunistic module-init folding. Each module-level
+  // `let` / `const` whose initializer the interpreter can evaluate is
+  // stamped with `decl.comptimeFolded = true` + `decl.comptimeValue`;
+  // codegen consumes those to emit an LLVM `@global` with a literal
+  // initial value (skipping the runtime `module_init` call entirely
+  // for that decl). Failures are silent — the existing runtime path
+  // handles the unfoldable cases the same way it does today.
+  //
+  // Phase 11.C: this pass runs BEFORE the attribute pass so the
+  // `@precompile` consumer can read each decl's `comptimeFolded` flag
+  // and surface a hard error if the user-declared comptime
+  // requirement wasn't met.
+  runComptimePass(modules);
+
+  // Phase 11.A + 11.C: attribute dispatch pass. `@precompile` now
+  // surfaces fold failures as hard errors (the opportunistic
+  // fallback was the wrong shape for an explicitly user-marked
+  // comptime decl). Future attribute consumers plug into this hook.
   const attrErrors = [];
   runAttributePass(modules, attrErrors);
   if (attrErrors.length > 0) {
@@ -116,15 +129,6 @@ function main() {
     }
     process.exit(1);
   }
-
-  // Phase 11.B: opportunistic module-init folding. Each module-level
-  // `let` / `const` whose initializer the interpreter can evaluate is
-  // stamped with `decl.comptimeFolded = true` + `decl.comptimeValue`;
-  // codegen consumes those to emit an LLVM `@global` with a literal
-  // initial value (skipping the runtime `module_init` call entirely
-  // for that decl). Failures are silent — the existing runtime path
-  // handles the unfoldable cases the same way it does today.
-  runComptimePass(modules);
 
   const { ir, linkFlags } = codegenProgram(modules, moduleEnv, programState);
   console.log("llvm IR: ok");
