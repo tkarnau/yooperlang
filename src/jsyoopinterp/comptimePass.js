@@ -15,9 +15,83 @@
 // Explicit `@precompile` (Phase 11.C) takes the opposite policy —
 // failures there are hard errors.
 
-import { lowerExpressionAsFunction } from "./lower.js";
+import { ASTNodeKind } from "../contracts.js";
+import { lowerExpressionAsFunction, lowerFunction } from "./lower.js";
 import { evaluate } from "./interp.js";
 import { ComptimeError } from "./diagnostics.js";
+
+// Build a `(calleeName, calleeModuleId, calleeExportName) →
+// BytecodeFunction | null` resolver for the comptime lowerer. It
+// resolves first within the calling module (function defined in this
+// file), then through the typechecker's import metadata when the
+// callee was annotated cross-module.
+//
+// Lowered function bytecode is cached on `fnCache` (keyed by FUNCTION_DECL
+// AST node identity) so repeated calls don't re-lower. Generic-instance
+// dispatch isn't supported here — the interpreter will return null for
+// any callee that needs monomorphization, surfacing as a comptime
+// fallback at the call site.
+function makeFnResolver(modules, currentMod, fnCache) {
+  const modById = new Map(modules.map((m) => [m.id, m]));
+
+  // Per-module function-name → FUNCTION_DECL lookup. Built lazily on
+  // first use to keep startup cheap.
+  const fnTablesByMod = new Map();
+  function fnTableFor(mod) {
+    if (fnTablesByMod.has(mod.id)) return fnTablesByMod.get(mod.id);
+    const tbl = new Map();
+    for (const decl of mod.ast.body) {
+      // EXPORT_DECL wraps the inner decl; EXPORT_C_FUNCTION_DECL has
+      // a .fn slot pointing at the actual FUNCTION_DECL. Walk both.
+      const inner =
+        decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl :
+        decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn :
+        decl;
+      if (
+        inner?.kind === ASTNodeKind.FUNCTION_DECL &&
+        !inner.genericDecl &&
+        !inner.isTask
+      ) {
+        tbl.set(inner.name, inner);
+      }
+    }
+    fnTablesByMod.set(mod.id, tbl);
+    return tbl;
+  }
+
+  return function fnResolver(calleeName, calleeModuleId, calleeExportName) {
+    const lookupMod = calleeModuleId
+      ? modById.get(calleeModuleId)
+      : currentMod;
+    if (!lookupMod) return null;
+    const declName = calleeExportName ?? calleeName;
+    const decl = fnTableFor(lookupMod).get(declName);
+    if (!decl) return null;
+    if (fnCache.has(decl)) return fnCache.get(decl);
+    // Recursively lower the callee's body. The callee's lowering uses
+    // its own module-const map (empty for now — callee body sees its
+    // module's already-folded consts via the same fnResolver) and the
+    // same fnCache so deeper nested calls reuse this work.
+    try {
+      const bc = lowerFunction(decl, {
+        moduleConsts: new Map(), // callee doesn't see caller's consts
+        fnResolver,                // self-reference for nested calls
+      });
+      fnCache.set(decl, bc);
+      return bc;
+    } catch (err) {
+      // A callee whose body has an unsupported kind is treated as
+      // not-comptime-evaluable for now; cache the null so we don't
+      // retry on every call site, but only if the failure was a
+      // ComptimeError (other errors propagate).
+      if (err instanceof ComptimeError) {
+        fnCache.set(decl, null);
+        return null;
+      }
+      throw err;
+    }
+  };
+}
 
 // Tries to fold every module-init in every module. Returns nothing —
 // mutates decls in place. Caller is the driver (yoopiler.js).
@@ -27,6 +101,10 @@ import { ComptimeError } from "./diagnostics.js";
 // default is silent.
 export function runComptimePass(modules, options = {}) {
   const onSkip = options.onSkip ?? (() => {});
+  // Per-program function-bytecode cache. Each FUNCTION_DECL gets
+  // lowered at most once and reused across every call site that
+  // references it (including from inside other folded inits).
+  const fnCache = new Map();
   for (const mod of modules) {
     // Module-local symbol table threaded into the lowerer so an init
     // can reference earlier (already-folded) module-level consts in
@@ -36,6 +114,7 @@ export function runComptimePass(modules, options = {}) {
     // references aren't supported in this sub-phase; they fall back
     // through the same silent path as any other unsupported lookup.
     const moduleConsts = new Map();
+    const fnResolver = makeFnResolver(modules, mod, fnCache);
     for (const decl of mod.moduleInitDecls ?? []) {
       if (decl.comptimeFolded) {
         // Earlier pass already folded this one — make it visible to
@@ -47,6 +126,7 @@ export function runComptimePass(modules, options = {}) {
         const fn = lowerExpressionAsFunction(decl.assignment, decl.resolvedType, {
           fnName: `<${mod.id}__${decl.name}__init>`,
           moduleConsts,
+          fnResolver,
         });
         const result = evaluate(fn);
         decl.comptimeValue = result;

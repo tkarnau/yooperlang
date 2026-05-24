@@ -19,11 +19,29 @@ import { typeKinds } from "../jsyooptypecheck/types.js";
 const MAX_FRAMES = 1024;
 
 // Frame holds one in-flight function's state.
-function makeFrame(fn) {
+//   fn        - the BytecodeFunction being executed
+//   ip        - instruction pointer (next instruction to dispatch)
+//   registers - per-register wrapped-value array, indexed by reg id
+//   returnDst - when this frame is a sub-call, the parent frame's
+//               destination register for the call's result. Null for
+//               the top-level frame so RET signals overall completion.
+function makeFrame(fn, returnDst = null) {
+  // Build a label-to-ip index once at push time so BR / BRCOND are
+  // O(1). Cached on the fn so a recursive call doesn't re-scan; the
+  // cache is on the immutable fn so it's safe across all frames.
+  if (!fn._labelMap) {
+    const map = new Map();
+    for (let i = 0; i < fn.instructions.length; i++) {
+      const inst = fn.instructions[i];
+      if (inst.op === OP.LABEL) map.set(inst.immediate, i);
+    }
+    fn._labelMap = map;
+  }
   return {
     fn,
     ip: 0,
     registers: new Array(fn.registerTypes.length).fill(null),
+    returnDst,
   };
 }
 
@@ -175,9 +193,67 @@ export function evaluate(fn) {
 
       case OP.RET: {
         pendingResult = inst.args.length > 0 ? frame.registers[inst.args[0]] : null;
-        stack.pop();
+        const completed = stack.pop();
         if (stack.length === 0) return pendingResult;
-        // Caller will pick this up once call_direct lands.
+        // Frame returned to caller — write the result into the
+        // caller's pending-call dst register so the calling
+        // instruction's `inst.dst` reads the right value.
+        const caller = stack[stack.length - 1];
+        if (completed.returnDst != null) {
+          caller.registers[completed.returnDst] = pendingResult;
+        }
+        break;
+      }
+
+      case OP.MOVE: {
+        frame.registers[inst.dst] = frame.registers[inst.args[0]];
+        break;
+      }
+
+      case OP.LABEL: {
+        // No-op at execution time; only meaningful as a target.
+        break;
+      }
+
+      case OP.BR: {
+        const target = frame.fn._labelMap.get(inst.immediate);
+        if (target == null) {
+          throw new ComptimeError(
+            `comptime: BR to unknown label '${inst.immediate}'`,
+            inst.sourceLoc,
+          );
+        }
+        frame.ip = target;
+        break;
+      }
+
+      case OP.BRCOND: {
+        const cond = frame.registers[inst.args[0]]?.v;
+        const labelName = cond ? inst.immediate.then : inst.immediate.else;
+        const target = frame.fn._labelMap.get(labelName);
+        if (target == null) {
+          throw new ComptimeError(
+            `comptime: BRCOND to unknown label '${labelName}'`,
+            inst.sourceLoc,
+          );
+        }
+        frame.ip = target;
+        break;
+      }
+
+      case OP.CALL_DIRECT: {
+        const calleeFn = inst.immediate; // BytecodeFunction
+        const newFrame = makeFrame(calleeFn, inst.dst);
+        if (inst.args.length !== calleeFn.params.length) {
+          throw new ComptimeError(
+            `comptime: arg count mismatch calling '${calleeFn.name}' — got ${inst.args.length}, expected ${calleeFn.params.length}`,
+            inst.sourceLoc,
+          );
+        }
+        for (let i = 0; i < inst.args.length; i++) {
+          newFrame.registers[i] = frame.registers[inst.args[i]];
+        }
+        stack.push(newFrame);
         break;
       }
 

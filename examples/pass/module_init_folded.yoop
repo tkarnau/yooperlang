@@ -3,7 +3,7 @@
 // LLVM @global with the literal value baked in, skipping the
 // runtime `<modid>__module_init` path entirely for that decl.
 //
-// Folded today (11.B.0 through 11.B.6):
+// Folded today (11.B.0 through 11.B.8):
 //   - integer literal arithmetic                            (i32)
 //   - bool literals                                         (i1)
 //   - string literals                                       (ptr → [N x i8])
@@ -12,6 +12,8 @@
 //   - bitwise / shift / comparison / logical / unary ops    (all primitive-typed)
 //   - same-module IDENT references to earlier folded consts (e.g. `const M = N + 1;`)
 //   - struct field reads, array index reads, array `.len`   (over folded structs / arrays)
+//   - direct calls to user functions, single + nested       (params bound; cached per-decl)
+//   - local `let` / `const` + `if` / `while` inside fns     (full straight-line + branching algos)
 //
 // Verification: the compiled binary prints the expected values.
 // The IR-level verification (literal value baked into @global,
@@ -55,6 +57,43 @@ const ORIGIN_X: int32 = ORIGIN.x;       // 3
 const NUMS_FIRST: int32 = NUMS[0];      // 10
 const NUMS_LEN: usize = NUMS.len;       // 3
 
+// Direct call into a user-defined function — the interpreter lowers
+// `square`'s body once, pushes a frame at the call site, binds `x` to
+// the literal arg, runs `x * x`, then writes the result into the
+// caller's dst register. Cached per FUNCTION_DECL so a second call
+// reuses the same bytecode.
+function square(x: int32): int32 { return x * x; }
+const SQUARED: int32 = square(6);       // 36
+// Nested calls compose — the inner call frame returns before the
+// outer one starts.
+const NESTED: int32 = square(square(2));  // 16
+
+// `factorial` exercises everything 11.B.8 added: `let` allocs a slot
+// reg, the `while` lowering emits LABEL/BRCOND/BR with back-patched
+// targets, the assignment overwrites the slot. The whole thing runs
+// to completion at comptime and the result lands as a literal global.
+function factorial(n: int32): int32 {
+    let result: int32 = 1;
+    let i: int32 = 1;
+    while (i <= n) {
+        result = result * i;
+        i = i + 1;
+    }
+    return result;
+}
+const FACT_5: int32 = factorial(5);     // 120
+const FACT_8: int32 = factorial(8);     // 40320
+
+// `if` / `else` lowers to a brcond pair around two basic blocks
+// joining at a merge label. Both arms write the same slot so the
+// post-merge code sees the correct value.
+function abs_diff(a: int32, b: int32): int32 {
+    let r: int32 = 0;
+    if (a >= b) { r = a - b; } else { r = b - a; }
+    return r;
+}
+const ABS_DIFF: int32 = abs_diff(3, 10);  // 7
+
 function main(): int32 {
     printf(`SUM=${SUM}\n`);
     printf(`PRODUCT=${PRODUCT}\n`);
@@ -74,6 +113,8 @@ function main(): int32 {
     if (EQ_FLAG) { printf(`EQ\n`); }
     if (HAS_HIGH_BIT) { printf(`HIGH_BIT\n`); }
     printf(`ORIGIN_X=${ORIGIN_X} NUMS_FIRST=${NUMS_FIRST} NUMS_LEN=${NUMS_LEN}\n`);
+    printf(`SQUARED=${SQUARED} NESTED=${NESTED}\n`);
+    printf(`FACT_5=${FACT_5} FACT_8=${FACT_8} ABS_DIFF=${ABS_DIFF}\n`);
     return 0;
 }
 
@@ -89,3 +130,5 @@ function main(): int32 {
 //   EQ
 //   HIGH_BIT
 //   ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3
+//   SQUARED=36 NESTED=16
+//   FACT_5=120 FACT_8=40320 ABS_DIFF=7

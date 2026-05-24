@@ -1181,7 +1181,9 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
         "MASK=254 SHIFTED=1024 NEGATED=-16\n" +
         "EQ\n" +
         "HIGH_BIT\n" +
-        "ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3\n",
+        "ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3\n" +
+        "SQUARED=36 NESTED=16\n" +
+        "FACT_5=120 FACT_8=40320 ABS_DIFF=7\n",
     );
   });
 
@@ -1232,6 +1234,13 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
     assert.match(ir, /ORIGIN_X = internal global i32 3,/);
     assert.match(ir, /NUMS_FIRST = internal global i32 10,/);
     assert.match(ir, /NUMS_LEN = internal global i64 3,/);
+    // Direct-call fold + nested call fold.
+    assert.match(ir, /SQUARED = internal global i32 36,/);
+    assert.match(ir, /NESTED = internal global i32 16,/);
+    // Locals + control flow folds: while-loop factorial, if/else branch.
+    assert.match(ir, /FACT_5 = internal global i32 120,/);
+    assert.match(ir, /FACT_8 = internal global i32 40320,/);
+    assert.match(ir, /ABS_DIFF = internal global i32 7,/);
     // No module_init function gets emitted since every decl folded.
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });

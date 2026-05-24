@@ -119,6 +119,36 @@ export const OP = Object.freeze({
   // pointer). `args[0]` is the array-value register; `type` is the
   // dst register's type (typically `usize` / `int64`).
   ARRAY_LEN: "array_len",
+
+  // Direct function call. `immediate` is the callee `BytecodeFunction`
+  // (resolved at lower time via the fnResolver callback); `args` is
+  // the source register list for the call's arguments, in declared
+  // parameter order. `dst` receives the callee's return value.
+  // The interpreter pushes a new frame, binds args to the callee's
+  // first N registers, runs until RET, and writes the result back
+  // into the caller's `dst`.
+  CALL_DIRECT: "call_direct",
+
+  // Copy a value between registers. Used by LET_DECL / CONST_DECL to
+  // park the init expression's result into a stable "slot reg" the
+  // binding's IDENT references resolve to, and by ASSIGNMENT to
+  // overwrite that slot. The slot reg's value is mutable in the
+  // interpreter (we're not SSA-strict — see lower.js LowerCtx for
+  // discussion). `args[0]` is the source reg; `dst` is the slot.
+  MOVE: "move",
+
+  // Unconditional branch to the labeled instruction. `immediate` is
+  // the label name (string). The interpreter precomputes a
+  // labelName → instructionIndex map per frame at push time.
+  BR: "br",
+
+  // Conditional branch. `args[0]` is the bool-valued condition
+  // register; `immediate` is `{ then: labelName, else: labelName }`.
+  BRCOND: "brcond",
+
+  // No-op marker; carries `immediate = labelName` so the interpreter
+  // can build a labelName → ip map for use by BR / BRCOND.
+  LABEL: "label",
 });
 
 export function instruction(op, opts = {}) {
