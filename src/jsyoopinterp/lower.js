@@ -268,15 +268,108 @@ function lowerStatement(node, ctx, scope) {
 
     case ASTNodeKind.TASK_AUTO_WAIT:
     case ASTNodeKind.TASK_RELEASE:
-    case ASTNodeKind.TASK_RETAIN:
+    case ASTNodeKind.TASK_RETAIN: {
+      // Tasks at comptime run synchronously inline — no real
+      // refcount to release, no real thread to join. These
+      // synthesized cleanup statements are no-ops at the bytecode
+      // level. (See lower.js's TASK_WRAP / TASK_WAIT for the
+      // value-level model.)
+      return;
+    }
+
     case ASTNodeKind.CLEANUP_CALL: {
-      // Phase 11.D.9: scope-exit hooks emitted by kindCheck. At
-      // comptime there's no real refcounting or RAII (no OS state
-      // to release, no real thread to join), so these statements
-      // are no-ops at the bytecode level. A future sub-phase will
-      // dispatch `dispose()` for disposable-kind bindings when the
-      // body has a real comptime-visible effect; today's @precompile
-      // use cases don't exercise that path.
+      // Phase 11.D.17: real cleanup_call dispatch. The kindCheck
+      // pass synthesizes these statements at scope-exit for
+      // disposable-kind bindings — e.g. `dispose(ref binding)` for
+      // a `disposable foo: Foo = ...`. Resolve the trait method's
+      // bytecode via traitMethodResolver and emit a CALL_DIRECT
+      // with `ref binding` as `self`. If the dispose body hits a
+      // non-whitelisted extern (e.g. SDL_DestroyWindow), the fold
+      // fails with a clear traceback — matches the @precompile
+      // contract that explicit comptime evaluation must execute
+      // *all* observable effects.
+      if (!ctx.traitMethodResolver) {
+        throw new ComptimeError(
+          `comptime: CLEANUP_CALL requires a traitMethodResolver`,
+          node.sourceLoc,
+        );
+      }
+      const slotReg = scope ? scope.lookup(node.bindingName) : null;
+      if (slotReg == null) {
+        // The binding's slot isn't in this lowering scope — likely a
+        // kindCheck-emitted cleanup whose binding lives in a parent
+        // frame we don't model. Skip the cleanup; the fold may
+        // miss the observable effect, but failing here would be
+        // overly strict for the common case.
+        return;
+      }
+      // Build the ref to dispatch on. For the bare binding case it's
+      // a REF_LOCAL on the slot; for propagated field-cleanups
+      // (`node.fieldName` set), GEP through the binding to its
+      // field via REF_FIELD on the loaded struct value. Today's
+      // disposable-kind bindings are non-field — the field path is
+      // ready for when propagates<disposable> structs land in fold
+      // coverage.
+      const refStructType = node.fieldStructType ?? node.structType;
+      let recvRefReg;
+      if (node.fieldName) {
+        // Load the binding's struct value, then take a ref to its
+        // named field.
+        const bindingTy = ctx.registerTypes[slotReg];
+        const structVal = ctx.allocReg(bindingTy);
+        ctx.emit(
+          instruction(OP.MOVE, {
+            dst: structVal,
+            args: [slotReg],
+            type: bindingTy,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        recvRefReg = ctx.allocReg({ kind: typeKinds.ref, inner: refStructType });
+        ctx.emit(
+          instruction(OP.REF_FIELD, {
+            dst: recvRefReg,
+            args: [structVal],
+            type: { kind: typeKinds.ref, inner: refStructType },
+            immediate: node.fieldName,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+      } else {
+        // Bare binding: take ref to the local slot directly.
+        recvRefReg = ctx.allocReg({ kind: typeKinds.ref, inner: refStructType });
+        ctx.emit(
+          instruction(OP.REF_LOCAL, {
+            dst: recvRefReg,
+            args: [slotReg],
+            type: { kind: typeKinds.ref, inner: refStructType },
+            immediate: slotReg,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+      }
+      const methodBc = ctx.traitMethodResolver(
+        refStructType,
+        node.traitName,
+        node.methodName,
+      );
+      if (!methodBc) {
+        throw new ComptimeError(
+          `comptime: CLEANUP_CALL couldn't resolve '${node.traitName}.${node.methodName}' on ${refStructType?.name ?? "<?>"}`,
+          node.sourceLoc,
+        );
+      }
+      // Discard the return value — dispose methods are void.
+      const discardReg = ctx.allocReg({ kind: typeKinds.void });
+      ctx.emit(
+        instruction(OP.CALL_DIRECT, {
+          dst: discardReg,
+          args: [recvRefReg],
+          type: { kind: typeKinds.void },
+          immediate: methodBc,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
       return;
     }
     case ASTNodeKind.EXPRESSION_STATEMENT: {

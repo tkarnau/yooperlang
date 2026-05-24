@@ -1347,6 +1347,25 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_dispose.yoop: disposable-kind CLEANUP_CALL dispatches the trait method through the interpreter", () => {
+    // Multi-module fixture (imports std/core/kinds for disposable + Disposable).
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/at_precompile_dispose.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "R_FIVE=6 R_HUNDRED=100\n");
+    const entryAbs = path.join(repoRoot, "examples/pass/at_precompile_dispose.yoop");
+    const { ir } = compileEntry(entryAbs);
+    assert.match(ir, /R_FIVE = internal global i32 6,/);
+    assert.match(ir, /R_HUNDRED = internal global i32 100,/);
+    // The folded inits don't need a module_init function for these
+    // decls (every initializer evaluated at fold time). The std/core
+    // module may have its own module_init for things it initializes
+    // at runtime, but the entry-module's @precompile decls don't.
+    assert.doesNotMatch(
+      ir,
+      /define internal void @at_precompile_dispose_[0-9a-f]+__module_init\(\)/,
+    );
+  });
+
   it("at_precompile_qmark_into.yoop: cross-shape `?` propagation calls Into.into in the err branch at fold time", () => {
     // Multi-module fixture (imports std/core/types + std/core/traits)
     // so it must go through the full module-graph compile path.
