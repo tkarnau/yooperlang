@@ -188,13 +188,60 @@ function isWideInt(name) {
 // value can't be expressed as a static LLVM constant; the caller
 // falls back to `zeroinitializer` + runtime init for those.
 //
-// Today: primitives (int, bool, float). Aggregates (struct, array,
-// enum) land in later 11.B sub-phases — those will return LLVM
+// Today: primitives (int, bool, float, string). Aggregates (struct,
+// array, enum) land in later 11.B sub-phases — those will return LLVM
 // `{i32 5, i32 6}` / `[3 x i32] [i32 1, i32 2, i32 3]` style
 // constants, but require materializing the comptime value tree into
 // LLVM constant syntax which is its own pass.
-function comptimeValueAsLlvmInit(wrapped, ty) {
-  if (wrapped == null || ty.kind !== typeKinds.prim) return null;
+//
+// String folding produces a private `[N x i8]` constant alongside the
+// caller's global; we don't have direct access to the closure's
+// `globals` array from this top-level helper, so the caller passes an
+// `emitRawStringGlobal` callback that does the append. When the
+// callback is missing (e.g. unit-testing the formatter in isolation),
+// string folding falls back to null and the decl stays on the runtime
+// init path.
+function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
+  if (wrapped == null) return null;
+  if (ty.kind === typeKinds.array) {
+    // Yoop arrays are fat-pointers `{ ptr, i64 }`. The init has two
+    // pieces: a private `[N x <elem>]` backing buffer, and the
+    // fat-pointer constant `{ ptr @.arr.X, i64 N }`.
+    if (typeof opts.emitRawArrayGlobal !== "function") return null;
+    const elemTy = ty.elem;
+    const buf = wrapped.v?.buf ?? [];
+    const len = buf.length;
+    const elemLlvm = llvmType(elemTy);
+    const elemInits = [];
+    for (const elem of buf) {
+      const elemInit = comptimeValueAsLlvmInit(elem, elemTy, opts);
+      if (elemInit == null) return null;
+      elemInits.push(`${elemLlvm} ${elemInit}`);
+    }
+    const backingSym = opts.emitRawArrayGlobal({
+      elemLlvm,
+      count: len,
+      elemInits,
+    });
+    return `{ ptr ${backingSym}, i64 ${len} }`;
+  }
+  if (ty.kind === typeKinds.struct) {
+    // Each field is rendered as `<fieldTy> <init>` and wrapped in
+    // braces. The outer struct type is supplied by the global's
+    // `<Type>` slot, so the constant itself doesn't need a type
+    // prefix. Field order follows the declared StructType.fields
+    // order (lowering already normalized into it).
+    const fields = ty.fields ?? [];
+    const parts = [];
+    for (const f of fields) {
+      const inner = wrapped.v?.[f.name];
+      const innerInit = comptimeValueAsLlvmInit(inner, f.type, opts);
+      if (innerInit == null) return null;
+      parts.push(`${llvmType(f.type)} ${innerInit}`);
+    }
+    return `{ ${parts.join(", ")} }`;
+  }
+  if (ty.kind !== typeKinds.prim) return null;
   const name = ty.name;
   if (name === "bool") return wrapped.v ? "1" : "0";
   if (isFloatPrim(name)) {
@@ -212,7 +259,38 @@ function comptimeValueAsLlvmInit(wrapped, ty) {
     // values; calling .toString() avoids that.
     return wrapped.v.toString();
   }
+  if (name === "string") {
+    if (typeof opts.emitRawStringGlobal !== "function") return null;
+    // Comptime string values store the unquoted, unescaped JS string.
+    // Re-encode through the same path as inline literals so escape
+    // sequences (\n, \t, ...) round-trip identically to today.
+    const inner = encodeStringForRawGlobal(wrapped.v);
+    const { name: strSym } = opts.emitRawStringGlobal(inner);
+    return strSym;
+  }
   return null;
+}
+
+// Convert a JS-side string (from a comptime-folded value) into the
+// "inner" form that emitRawStringGlobal/encodeStringBytes expects —
+// i.e. with literal escape sequences re-escaped so encodeStringBytes
+// emits them as LLVM byte-array escape codes. JS already decoded \n
+// to a newline character; we need to re-encode it as the two-char
+// sequence `\n` so encodeStringBytes can map it back to `\0A`.
+function encodeStringForRawGlobal(s) {
+  let out = "";
+  for (let i = 0; i < s.length; i++) {
+    const ch = s[i];
+    const code = ch.charCodeAt(0);
+    if (ch === "\\") { out += "\\\\"; continue; }
+    if (ch === '"')  { out += '\\"';  continue; }
+    if (ch === "\n") { out += "\\n";  continue; }
+    if (ch === "\t") { out += "\\t";  continue; }
+    if (ch === "\r") { out += "\\r";  continue; }
+    if (code === 0)  { out += "\\0";  continue; }
+    out += ch; // encodeStringBytes handles non-printables via hex
+  }
+  return out;
 }
 
 // pick a printf format specifier for a yooper type
@@ -2801,6 +2879,19 @@ function codegenWithModuleId(
     return emitRawStringGlobal(quotedValue.slice(1, -1));
   }
 
+  // Phase 11.B.3: append a private `[N x elem]` global backing a
+  // comptime-folded array's fat pointer, and return its symbol so the
+  // outer `{ ptr <backing>, i64 N }` fat-pointer constant can reference
+  // it. Reuses the string-global counter for naming since both produce
+  // private aggregates in the same flat namespace.
+  function emitRawArrayGlobal({ elemLlvm, count, elemInits }) {
+    const name = `@.arr_${moduleId}_${strConstCounter++}`;
+    globals.push(
+      `${name} = private unnamed_addr constant [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
+    );
+    return name;
+  }
+
   let currentReturnType = null;
   let inMainFn = false;
 
@@ -2976,10 +3067,21 @@ function codegenWithModuleId(
       d.isModuleLevel
     ) {
       const sym = `@${moduleId}__${d.name}`;
+      // Array-typed globals need their `%yoop_array.<T>` type def
+      // emitted before any reference to it (LLVM verifier rejects
+      // forward references to unknown named types). Today the runtime
+      // module_init path triggers this via emitExpr; for folded
+      // array globals nothing else calls it, so do it here unconditionally.
+      if (d.resolvedType.kind === typeKinds.array) {
+        ensureArrayTypeDef(d.resolvedType.elem);
+      }
       const lty = llvmType(d.resolvedType);
       const linkage = decl.kind === ASTNodeKind.EXPORT_DECL ? "" : "internal ";
       const initLiteral = d.comptimeFolded
-        ? comptimeValueAsLlvmInit(d.comptimeValue, d.resolvedType)
+        ? comptimeValueAsLlvmInit(d.comptimeValue, d.resolvedType, {
+            emitRawStringGlobal,
+            emitRawArrayGlobal,
+          })
         : null;
       if (initLiteral != null) {
         globals.push(`${sym} = ${linkage}global ${lty} ${initLiteral}, align 8`);

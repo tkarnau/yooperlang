@@ -1166,10 +1166,23 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
 // skips the runtime module_init for that decl. Failures are silent
 // (existing programs unaffected).
 describe("e2e: Phase 11.B opportunistic module-init folding", () => {
-  it("module_init_folded.yoop: int literal arithmetic initializers fold to @global constants", () => {
+  it("module_init_folded.yoop: int/bool/string/struct/array/ops fold and print expected values", () => {
     const { stdout, exitCode } = runFixture("examples/pass/module_init_folded.yoop");
     assert.equal(exitCode, 0);
-    assert.equal(stdout, "SUM=5\nPRODUCT=14\nDIFFERENCE=-3\n");
+    assert.equal(
+      stdout,
+      "SUM=5\n" +
+        "PRODUCT=14\n" +
+        "DIFFERENCE=-3\n" +
+        "FLAG\n" +
+        "GREETING=yoop\n" +
+        "ORIGIN=(3,4)\n" +
+        "NUMS=10,20,30 len=3\n" +
+        "MASK=254 SHIFTED=1024 NEGATED=-16\n" +
+        "EQ\n" +
+        "HIGH_BIT\n" +
+        "ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3\n",
+    );
   });
 
   it("module_init_folded.yoop: IR has literal-initialized globals and no module_init function", () => {
@@ -1186,6 +1199,39 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
     assert.match(ir, /SUM = internal global i32 5,/);
     assert.match(ir, /PRODUCT = internal global i32 14,/);
     assert.match(ir, /DIFFERENCE = internal global i32 -3,/);
+    assert.match(ir, /FLAG = internal global i1 1,/);
+    // String folds emit a pointer-to-aux-global; the aux global's name
+    // is freshly minted by emitRawStringGlobal so it's not stable
+    // across runs — match by shape (`ptr @<str-sym>`) rather than
+    // exact name.
+    assert.match(ir, /GREETING = internal global ptr @\.str_[^,]+,/);
+    // Struct fold: declared-order normalization means the
+    // out-of-source-order `{ y: 4, x: 3 }` lands as `{i32 3, i32 4}`
+    // in the LLVM aggregate constant (x first, then y).
+    assert.match(
+      ir,
+      /ORIGIN = internal global %struct\.[^ ]+ \{ i32 3, i32 4 \},/,
+    );
+    // Array fold: the global is a fat-pointer `{ ptr @<backing>, i64 N }`
+    // pointing at a private `[N x i32]` backing constant.
+    assert.match(
+      ir,
+      /@\.arr_[^ ]+ = private unnamed_addr constant \[3 x i32\] \[i32 10, i32 20, i32 30\],/,
+    );
+    assert.match(
+      ir,
+      /NUMS = internal global %yoop_array\.int32 \{ ptr @\.arr_[^,]+, i64 3 \},/,
+    );
+    // Bitwise/shift/cmp/logical/unary fold: each as a literal global.
+    assert.match(ir, /MASK = internal global i32 254,/);
+    assert.match(ir, /SHIFTED = internal global i32 1024,/);
+    assert.match(ir, /NEGATED = internal global i32 -16,/);
+    assert.match(ir, /EQ_FLAG = internal global i1 1,/);
+    assert.match(ir, /HAS_HIGH_BIT = internal global i1 1,/);
+    // Field / index / array.len reads fold to literal primitive globals.
+    assert.match(ir, /ORIGIN_X = internal global i32 3,/);
+    assert.match(ir, /NUMS_FIRST = internal global i32 10,/);
+    assert.match(ir, /NUMS_LEN = internal global i64 3,/);
     // No module_init function gets emitted since every decl folded.
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });

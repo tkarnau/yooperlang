@@ -3,27 +3,77 @@
 // LLVM @global with the literal value baked in, skipping the
 // runtime `<modid>__module_init` path entirely for that decl.
 //
-// All three constants below should fold:
-//   - SUM produces a folded i32 (literal arithmetic)
-//   - PRODUCT produces a folded i32 (precedence handling)
-//   - DIFFERENCE produces a folded i32 (subtraction)
+// Folded today (11.B.0 through 11.B.6):
+//   - integer literal arithmetic                            (i32)
+//   - bool literals                                         (i1)
+//   - string literals                                       (ptr → [N x i8])
+//   - struct literals with primitive fields                 (named-struct aggregate)
+//   - array literals with primitive elements                (fat-pointer to private backing buffer)
+//   - bitwise / shift / comparison / logical / unary ops    (all primitive-typed)
+//   - same-module IDENT references to earlier folded consts (e.g. `const M = N + 1;`)
+//   - struct field reads, array index reads, array `.len`   (over folded structs / arrays)
 //
 // Verification: the compiled binary prints the expected values.
-// The IR-level verification (literal value baked into @global) is
-// covered by the e2e fold-shape assertion in src/e2e.test.js.
+// The IR-level verification (literal value baked into @global,
+// zero `module_init` function emitted) is covered by the e2e
+// fold-shape assertion in src/e2e.test.js.
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
+type Point { x: int32, y: int32 }
+
 const SUM: int32 = 2 + 3;
 const PRODUCT: int32 = 2 + 3 * 4;
 const DIFFERENCE: int32 = 7 - 10;
+const FLAG: bool = true;
+const GREETING: string = "yoop";
+// Struct literal with declared-out-of-order fields — lowering
+// normalizes to the StructType.fields order so the LLVM aggregate
+// constant matches the struct layout regardless of source order.
+const ORIGIN: Point = { y: 4, x: 3 };
+// Array literal — folds into a fat-pointer `{ ptr <backing>, i64 N }`
+// where `<backing>` is a private `[N x i32]` global initialized to
+// the listed elements.
+const NUMS: int32[] = [10, 20, 30];
+
+// Bitwise + shift + comparison + logical folds. Each lands as a
+// literal-initialized global with no module_init footprint.
+const MASK: int32 = 0xFF & 0xCAFE;            // 254
+const SHIFTED: int32 = 1 << 10;               // 1024
+const NEGATED: int32 = ~0xF;                  // -16
+const EQ_FLAG: bool = (1 + 2) == 3;           // true
+// Cross-decl IDENT reference — `SHIFTED` was folded above, the
+// comptime pass threads its value into this expression's lowering.
+const HAS_HIGH_BIT: bool = (SHIFTED & 0x400) != 0; // true
+
+// Field access + array index + array `.len` read folded-aggregate
+// values directly at comptime. Each lands as a literal-initialized
+// primitive global.
+const ORIGIN_X: int32 = ORIGIN.x;       // 3
+const NUMS_FIRST: int32 = NUMS[0];      // 10
+const NUMS_LEN: usize = NUMS.len;       // 3
 
 function main(): int32 {
     printf(`SUM=${SUM}\n`);
     printf(`PRODUCT=${PRODUCT}\n`);
     printf(`DIFFERENCE=${DIFFERENCE}\n`);
+    if (FLAG) { printf(`FLAG\n`); }
+    printf(`GREETING=${GREETING}\n`);
+    // Module-level struct globals can't be field-accessed directly
+    // (pre-existing limitation around module-level identifier
+    // resolution in field access); copy through a local first.
+    let p: Point = ORIGIN;
+    printf(`ORIGIN=(${p.x},${p.y})\n`);
+    // Same module-level-identifier-in-expression limitation for
+    // arrays: copy first, then index.
+    let n: int32[] = NUMS;
+    printf(`NUMS=${n[0]},${n[1]},${n[2]} len=${n.len}\n`);
+    printf(`MASK=${MASK} SHIFTED=${SHIFTED} NEGATED=${NEGATED}\n`);
+    if (EQ_FLAG) { printf(`EQ\n`); }
+    if (HAS_HIGH_BIT) { printf(`HIGH_BIT\n`); }
+    printf(`ORIGIN_X=${ORIGIN_X} NUMS_FIRST=${NUMS_FIRST} NUMS_LEN=${NUMS_LEN}\n`);
     return 0;
 }
 
@@ -31,3 +81,11 @@ function main(): int32 {
 //   SUM=5
 //   PRODUCT=14
 //   DIFFERENCE=-3
+//   FLAG
+//   GREETING=yoop
+//   ORIGIN=(3,4)
+//   NUMS=10,20,30 len=3
+//   MASK=254 SHIFTED=1024 NEGATED=-16
+//   EQ
+//   HIGH_BIT
+//   ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3

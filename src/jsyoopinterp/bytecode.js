@@ -49,9 +49,76 @@ export const OP = Object.freeze({
   FDIV: "fdiv",
   FNEG: "fneg",
 
+  // Bitwise integer ops. The typechecker already validates the
+  // operand type is an integer prim; the interpreter dispatches on
+  // BigInt vs Number based on operand width the same way iadd etc. do.
+  BIT_AND: "bit_and",
+  BIT_OR:  "bit_or",
+  BIT_XOR: "bit_xor",
+  BIT_NOT: "bit_not",
+  SHL:     "shl",
+  SHR:     "shr",
+
+  // Integer + float comparison ops. All produce bool. The signed-ness
+  // is implicit in the operand type (icmp_lt is signed when operands
+  // are signed; the interpreter handles that via JS native compare,
+  // which is signed for numbers and signed for BigInt).
+  ICMP_EQ: "icmp_eq",
+  ICMP_NE: "icmp_ne",
+  ICMP_LT: "icmp_lt",
+  ICMP_LE: "icmp_le",
+  ICMP_GT: "icmp_gt",
+  ICMP_GE: "icmp_ge",
+  FCMP_EQ: "fcmp_eq",
+  FCMP_NE: "fcmp_ne",
+  FCMP_LT: "fcmp_lt",
+  FCMP_LE: "fcmp_le",
+  FCMP_GT: "fcmp_gt",
+  FCMP_GE: "fcmp_ge",
+
+  // Bool ops. `LNOT` is unary; `LAND`/`LOR` are both binary AND
+  // short-circuiting at lowering time (the lowerer emits a brcond
+  // chain rather than calling these once control flow lands in a
+  // later sub-phase). For 11.B.4 lowering emits direct LAND/LOR
+  // since we don't yet have br/label and operands are simple enough
+  // that always-evaluating both sides is observable only on
+  // diagnostics, not behavior.
+  LAND: "land",
+  LOR:  "lor",
+  LNOT: "lnot",
+
   // Returns from the current function. If `dst` is non-null, the
   // result is the value in `args[0]`; otherwise it's a void return.
   RET: "ret",
+
+  // Build a struct value from per-field registers. `type` is the
+  // StructType; `args` lists the source registers in *declared*
+  // field order (lowering normalizes from source-order, since
+  // `Foo { y: 1, x: 2 }` is legal yoop). `immediate` carries the
+  // ordered field-name list so the interpreter can build the
+  // wrapped-value's `v: { fieldName → wrapped }` map without
+  // re-deriving the order at eval time.
+  STRUCT_CONSTRUCT: "struct_construct",
+
+  // Build an array (yoop fat-pointer) value from per-element
+  // registers. `type` is the ArrayType; `args` lists the source
+  // registers in source order. Length is `args.length`.
+  ARRAY_CONSTRUCT: "array_construct",
+
+  // Read a struct field by name. `args[0]` is the struct-value
+  // register; `immediate` is the string field name; `type` is the
+  // field's type (== `inst.dst`'s register type).
+  FIELD_LOAD: "field_load",
+
+  // Read an array element by index. `args[0]` is the array-value
+  // register; `args[1]` is the index-value register; `type` is the
+  // element type. Out-of-bounds is a comptime error.
+  INDEX_LOAD: "index_load",
+
+  // Read the `len` field of a yoop array (the i64 half of the fat
+  // pointer). `args[0]` is the array-value register; `type` is the
+  // dst register's type (typically `usize` / `int64`).
+  ARRAY_LEN: "array_len",
 });
 
 export function instruction(op, opts = {}) {
