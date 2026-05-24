@@ -1347,6 +1347,32 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_externs.yoop: whitelisted libc externs (sqrt/pow/floor/strlen/strcmp) fold under @precompile", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_externs.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "ROOT_2=1.414214\nHYPOT=5.000000\nFLOOR_PI=3.000000\nNAME_LEN=12\nCMP_EQ=0 CMP_LT=-1\n",
+    );
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_externs.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    // sqrt(2) folded as the literal double; libc's printf converts
+    // it to "1.414214" at runtime, but the IR carries the full
+    // double precision.
+    assert.match(ir, /ROOT_2 = internal global double 1\.4142135623730951,/);
+    // sqrt(3^2 + 4^2) = 5 (LLVM uses `5` for `5.0`-equivalent
+    // because Number.toString() drops a trailing `.0` we re-add).
+    assert.match(ir, /HYPOT = internal global double 5\.0,/);
+    assert.match(ir, /FLOOR_PI = internal global double 3\.0,/);
+    assert.match(ir, /NAME_LEN = internal global i64 12,/);
+    assert.match(ir, /CMP_EQ = internal global i32 0,/);
+    assert.match(ir, /CMP_LT = internal global i32 -1,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
   it("at_precompile_basic.yoop: init-form folds run end-to-end with literal globals + no module_init", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_basic.yoop");
     assert.equal(exitCode, 0);

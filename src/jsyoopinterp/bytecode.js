@@ -129,6 +129,15 @@ export const OP = Object.freeze({
   // into the caller's `dst`.
   CALL_DIRECT: "call_direct",
 
+  // Pure-extern call dispatched through the whitelist. `immediate`
+  // carries `{ name, impl }`; the JS `impl` takes wrapped arg values
+  // + the call's sourceLoc + the resolved return type and returns a
+  // wrapped value. Used when CALL_EXPRESSION resolves to an
+  // EXTERN_FUNCTION_DECL whose name is in
+  // `src/jsyoopinterp/externWhitelist.js`. Non-whitelisted externs
+  // surface as a ComptimeError at lower time.
+  CALL_EXTERN: "call_extern",
+
   // Copy a value between registers. Used by LET_DECL / CONST_DECL to
   // park the init expression's result into a stable "slot reg" the
   // binding's IDENT references resolve to, and by ASSIGNMENT to

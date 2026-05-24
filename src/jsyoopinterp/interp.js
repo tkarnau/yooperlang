@@ -257,6 +257,32 @@ export function evaluate(fn) {
         break;
       }
 
+      case OP.CALL_EXTERN: {
+        // Pure-extern: resolved at lower time to a JS impl in the
+        // whitelist. Pass the wrapped args + sourceLoc + return type
+        // to the impl, which produces a wrapped result we store into
+        // `inst.dst`. The impl may throw ComptimeError to abort
+        // (the comptime pass catches that and either surfaces it as
+        // a hard error under `@precompile` or silently falls back
+        // for opportunistic folds).
+        const { impl, name } = inst.immediate;
+        const argWraps = inst.args.map((reg) => frame.registers[reg]);
+        let result;
+        try {
+          result = impl(argWraps, inst.sourceLoc, inst.type);
+        } catch (err) {
+          if (err instanceof ComptimeError) throw err;
+          throw new ComptimeError(
+            `comptime: extern '${name}' threw during evaluation: ${err.message}`,
+            inst.sourceLoc,
+          );
+        }
+        if (inst.dst != null) {
+          frame.registers[inst.dst] = result;
+        }
+        break;
+      }
+
       case OP.CALL_DIRECT: {
         const calleeFn = inst.immediate; // BytecodeFunction
         const newFrame = makeFrame(calleeFn, inst.dst);

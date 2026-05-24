@@ -1005,14 +1005,14 @@ function lowerExpr(node, ctx, scope) {
           node.sourceLoc,
         );
       }
-      const calleeFn = ctx.fnResolver(
+      const resolved = ctx.fnResolver(
         node.callee,
         node.calleeModuleId ?? null,
         node.calleeExportName ?? null,
       );
-      if (!calleeFn) {
+      if (!resolved) {
         throw new ComptimeError(
-          `comptime: function '${node.callee}' is not comptime-evaluable (extern, generic-unresolved, or in a not-yet-lowered module)`,
+          `comptime: function '${node.callee}' is not comptime-evaluable (non-whitelisted extern, generic-unresolved, or in a not-yet-lowered module)`,
           node.sourceLoc,
         );
       }
@@ -1021,15 +1021,31 @@ function lowerExpr(node, ctx, scope) {
       // arity + types.
       const argRegs = (node.args ?? []).map((a) => lowerExpr(a, ctx, scope));
       const dst = ctx.allocReg(node.resolvedType);
-      ctx.emit(
-        instruction(OP.CALL_DIRECT, {
-          dst,
-          args: argRegs,
-          type: node.resolvedType,
-          immediate: calleeFn,
-          sourceLoc: node.sourceLoc,
-        }),
-      );
+      // Resolver returns either a BytecodeFunction (user fn) or an
+      // extern marker `{ kind: "extern", impl, name }`. Dispatch
+      // accordingly. The interpreter has dedicated opcodes for each
+      // so the call-time path stays type-checked.
+      if (resolved.kind === "extern") {
+        ctx.emit(
+          instruction(OP.CALL_EXTERN, {
+            dst,
+            args: argRegs,
+            type: node.resolvedType,
+            immediate: { name: resolved.name, impl: resolved.impl },
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+      } else {
+        ctx.emit(
+          instruction(OP.CALL_DIRECT, {
+            dst,
+            args: argRegs,
+            type: node.resolvedType,
+            immediate: resolved,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+      }
       return dst;
     }
 

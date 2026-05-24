@@ -19,6 +19,7 @@ import { ASTNodeKind } from "../contracts.js";
 import { lowerExpressionAsFunction, lowerFunction } from "./lower.js";
 import { evaluate } from "./interp.js";
 import { ComptimeError } from "./diagnostics.js";
+import { lookupExtern } from "./externWhitelist.js";
 
 // Build a `(calleeName, calleeModuleId, calleeExportName) →
 // BytecodeFunction | null` resolver for the comptime lowerer. It
@@ -63,33 +64,38 @@ function makeFnResolver(modules, currentMod, fnCache) {
     const lookupMod = calleeModuleId
       ? modById.get(calleeModuleId)
       : currentMod;
-    if (!lookupMod) return null;
     const declName = calleeExportName ?? calleeName;
-    const decl = fnTableFor(lookupMod).get(declName);
-    if (!decl) return null;
-    if (fnCache.has(decl)) return fnCache.get(decl);
-    // Recursively lower the callee's body. The callee's lowering uses
-    // its own module-const map (empty for now — callee body sees its
-    // module's already-folded consts via the same fnResolver) and the
-    // same fnCache so deeper nested calls reuse this work.
-    try {
-      const bc = lowerFunction(decl, {
-        moduleConsts: new Map(), // callee doesn't see caller's consts
-        fnResolver,                // self-reference for nested calls
-      });
-      fnCache.set(decl, bc);
-      return bc;
-    } catch (err) {
-      // A callee whose body has an unsupported kind is treated as
-      // not-comptime-evaluable for now; cache the null so we don't
-      // retry on every call site, but only if the failure was a
-      // ComptimeError (other errors propagate).
-      if (err instanceof ComptimeError) {
-        fnCache.set(decl, null);
-        return null;
+    // First try a user FUNCTION_DECL in the calling module (or the
+    // named cross-module callee).
+    if (lookupMod) {
+      const decl = fnTableFor(lookupMod).get(declName);
+      if (decl) {
+        if (fnCache.has(decl)) return fnCache.get(decl);
+        try {
+          const bc = lowerFunction(decl, {
+            moduleConsts: new Map(),
+            fnResolver,
+          });
+          fnCache.set(decl, bc);
+          return bc;
+        } catch (err) {
+          if (err instanceof ComptimeError) {
+            fnCache.set(decl, null);
+            return null;
+          }
+          throw err;
+        }
       }
-      throw err;
     }
+    // Fall through to the extern whitelist by name. Cross-module
+    // externs share the same whitelist (the impl is keyed on the
+    // callee's source name, not its declaring module) — adding a
+    // new pure extern is a one-line PR in externWhitelist.js.
+    const externEntry = lookupExtern(declName);
+    if (externEntry) {
+      return { kind: "extern", impl: externEntry.impl, name: declName };
+    }
+    return null;
   };
 }
 
