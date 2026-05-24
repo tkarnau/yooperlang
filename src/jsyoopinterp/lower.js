@@ -57,13 +57,22 @@ const BIN_OP_MAP = {
 // it at every CALL_EXPRESSION; null means "this call can't be folded"
 // and surfaces as a ComptimeError (silent module-init fallback).
 class LowerCtx {
-  constructor(fnName, sourceLoc, moduleConsts, fnResolver) {
+  constructor(fnName, sourceLoc, moduleConsts, fnResolver, traitMethodResolver, genericInstanceResolver) {
     this.fnName = fnName;
     this.sourceLoc = sourceLoc;
     this.instructions = [];
     this.registerTypes = [];
     this.moduleConsts = moduleConsts ?? new Map();
     this.fnResolver = fnResolver ?? null;
+    // Phase 11.D.5: looks up a trait method's BytecodeFunction given
+    // the receiver struct type + trait name + method name. Returns
+    // null when the method can't be lowered at comptime (unsupported
+    // body shape, generic-unresolved, etc.).
+    this.traitMethodResolver = traitMethodResolver ?? null;
+    // Phase 11.D.7: looks up a generic-fn instance's BytecodeFunction
+    // given the Phase-7.1 registry instance object. Used when
+    // CALL_EXPRESSION's `genericInstantiation` slot is populated.
+    this.genericInstanceResolver = genericInstanceResolver ?? null;
     this.labelCounter = 0;
   }
   allocReg(ty) {
@@ -110,6 +119,8 @@ export function lowerExpressionAsFunction(exprAst, returnType, opts = {}) {
     exprAst.sourceLoc ?? null,
     opts.moduleConsts,
     opts.fnResolver,
+    opts.traitMethodResolver,
+    opts.genericInstanceResolver,
   );
   const scope = new Scope(null);
   const resultReg = lowerExpr(exprAst, ctx, scope);
@@ -141,6 +152,8 @@ export function lowerFunction(funcDecl, opts = {}) {
     funcDecl.sourceLoc ?? null,
     opts.moduleConsts,
     opts.fnResolver,
+    opts.traitMethodResolver,
+    opts.genericInstanceResolver,
   );
   const scope = new Scope(null);
   const paramTypes = [];
@@ -999,22 +1012,68 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
-      if (!ctx.fnResolver) {
-        throw new ComptimeError(
-          `comptime: function call requires a function resolver`,
-          node.sourceLoc,
+      // Phase 11.D.5: trait method call. The typechecker stamps
+      // `calleeMethodOf` (receiver struct type) + `calleeTrait`
+      // (trait type) + `calleeMethodName` on these. We dispatch to a
+      // dedicated trait-method resolver which finds the method's
+      // AST decl in the receiver's TYPE_DECL and lowers its body.
+      // Phase 11.D.7: generic function call. The typechecker stamps
+      // `genericInstantiation` pointing at the Phase-7.1 registry
+      // instance. We use that instance to look up (or build) the
+      // monomorphized bytecode body for these args.
+      // Falls through to the regular function resolver only for
+      // plain CALL_EXPRESSION nodes.
+      let resolved;
+      if (node.genericInstantiation) {
+        if (!ctx.genericInstanceResolver) {
+          throw new ComptimeError(
+            `comptime: generic function call requires a genericInstanceResolver`,
+            node.sourceLoc,
+          );
+        }
+        resolved = ctx.genericInstanceResolver(node.genericInstantiation);
+        if (!resolved) {
+          throw new ComptimeError(
+            `comptime: generic function '${node.callee}' instance is not comptime-evaluable (open instance, unsupported body shape, or failed to lower)`,
+            node.sourceLoc,
+          );
+        }
+      } else if (node.calleeMethodOf) {
+        if (!ctx.traitMethodResolver) {
+          throw new ComptimeError(
+            `comptime: trait method call requires a traitMethodResolver`,
+            node.sourceLoc,
+          );
+        }
+        resolved = ctx.traitMethodResolver(
+          node.calleeMethodOf,
+          node.calleeTrait?.name ?? null,
+          node.calleeMethodName,
         );
-      }
-      const resolved = ctx.fnResolver(
-        node.callee,
-        node.calleeModuleId ?? null,
-        node.calleeExportName ?? null,
-      );
-      if (!resolved) {
-        throw new ComptimeError(
-          `comptime: function '${node.callee}' is not comptime-evaluable (non-whitelisted extern, generic-unresolved, or in a not-yet-lowered module)`,
-          node.sourceLoc,
+        if (!resolved) {
+          throw new ComptimeError(
+            `comptime: trait method '${node.calleeTrait?.name ?? "?"}.${node.calleeMethodName}' is not comptime-evaluable`,
+            node.sourceLoc,
+          );
+        }
+      } else {
+        if (!ctx.fnResolver) {
+          throw new ComptimeError(
+            `comptime: function call requires a function resolver`,
+            node.sourceLoc,
+          );
+        }
+        resolved = ctx.fnResolver(
+          node.callee,
+          node.calleeModuleId ?? null,
+          node.calleeExportName ?? null,
         );
+        if (!resolved) {
+          throw new ComptimeError(
+            `comptime: function '${node.callee}' is not comptime-evaluable (non-whitelisted extern, generic-unresolved, or in a not-yet-lowered module)`,
+            node.sourceLoc,
+          );
+        }
       }
       // Lower arguments left-to-right, collect their result regs in
       // declared-param order. The typechecker has already validated

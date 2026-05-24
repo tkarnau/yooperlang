@@ -104,7 +104,7 @@ function main() {
   // `@precompile` consumer can read each decl's `comptimeFolded` flag
   // and surface a hard error if the user-declared comptime
   // requirement wasn't met.
-  runComptimePass(modules);
+  runComptimePass(modules, { programState });
 
   // Phase 11.A + 11.C: attribute dispatch pass. `@precompile` now
   // surfaces fold failures as hard errors (the opportunistic

@@ -1347,6 +1347,40 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_generics.yoop: generic function instantiations fold via the registry's substituted AST + interpreter", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_generics.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "A=99 C=7 W=10\n");
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_generics.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    assert.match(ir, /A = internal global i32 99,/);
+    assert.match(ir, /C = internal global i32 7,/);
+    assert.match(ir, /W = internal global i32 10,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
+  it("at_precompile_traits.yoop: trait method calls dispatch through the interpreter + cache at fold time", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_traits.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "RECT_AREA=28\nRECT_PERIM=22\nSQR_AREA=81\nTOTAL=19\n",
+    );
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_traits.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    assert.match(ir, /RECT_AREA = internal global i32 28,/);
+    assert.match(ir, /RECT_PERIM = internal global i32 22,/);
+    assert.match(ir, /SQR_AREA = internal global i32 81,/);
+    assert.match(ir, /TOTAL = internal global i32 19,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
   it("at_precompile_externs.yoop: whitelisted libc externs (sqrt/pow/floor/strlen/strcmp) fold under @precompile", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_externs.yoop");
     assert.equal(exitCode, 0);

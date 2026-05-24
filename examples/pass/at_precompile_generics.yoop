@@ -1,0 +1,46 @@
+// Phase 11.D.7: generic function instantiations fold through the
+// comptime interpreter. When a CALL_EXPRESSION carries a
+// `genericInstantiation` (stamped by the Phase 7.1 instantiation
+// registry), the lowerer clones the original generic AST with the
+// concrete type-arg substitution applied (same `cloneAstWithSubstitution`
+// codegen uses for IR emission), lowers the substituted body into
+// bytecode, and dispatches CALL_DIRECT against it. Each (declId,
+// argTypes) instance gets its own cached BytecodeFunction so a
+// second call to the same instance reuses the work.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Identity over any T. Each call-site instantiation produces its
+// own monomorphized body — `identity(42)` and `identity(99)` share
+// declId but have different mangled names through the registry.
+function identity<T>(x: T): T { return x; }
+
+// Wrapper takes a `T` and runs a comptime-eligible computation on
+// it. The body uses concrete int32 arithmetic against the param,
+// which monomorphizes when called with T = int32.
+function wrap_int<T>(x: T, k: int32): int32 {
+    let result: int32 = 0;
+    if (k > 0) {
+        result = identity(k) * 2;
+    }
+    return result;
+}
+
+const B_SEED: int32 = 99;
+const SEVEN: int32 = 7;
+const ZERO: int32 = 0;
+const FIVE: int32 = 5;
+
+@precompile const A: int32 = identity(B_SEED);          // 99
+@precompile const C: int32 = identity(identity(SEVEN)); // 7 (nested generic)
+@precompile const W: int32 = wrap_int(ZERO, FIVE);      // identity(5) * 2 = 10
+
+function main(): int32 {
+    printf(`A=${A} C=${C} W=${W}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   A=99 C=7 W=10

@@ -20,6 +20,11 @@ import { lowerExpressionAsFunction, lowerFunction } from "./lower.js";
 import { evaluate } from "./interp.js";
 import { ComptimeError } from "./diagnostics.js";
 import { lookupExtern } from "./externWhitelist.js";
+// Codegen exports the AST-cloner used to monomorphize a generic
+// function body for a specific instantiation. We reuse it verbatim
+// at comptime to produce the same substituted AST codegen would
+// later emit, then lower that AST into bytecode.
+import { cloneAstWithSubstitution } from "../jsyoopcodegen/codegen.js";
 
 // Build a `(calleeName, calleeModuleId, calleeExportName) →
 // BytecodeFunction | null` resolver for the comptime lowerer. It
@@ -32,7 +37,7 @@ import { lookupExtern } from "./externWhitelist.js";
 // dispatch isn't supported here — the interpreter will return null for
 // any callee that needs monomorphization, surfacing as a comptime
 // fallback at the call site.
-function makeFnResolver(modules, currentMod, fnCache) {
+function makeResolvers(modules, currentMod, fnCache, programState) {
   const modById = new Map(modules.map((m) => [m.id, m]));
 
   // Per-module function-name → FUNCTION_DECL lookup. Built lazily on
@@ -60,7 +65,111 @@ function makeFnResolver(modules, currentMod, fnCache) {
     return tbl;
   }
 
-  return function fnResolver(calleeName, calleeModuleId, calleeExportName) {
+  // Per-module typeName → TYPE_DECL lookup. Lets the trait-method
+  // resolver find the AST method decls (the StructType only carries
+  // method signatures, not bodies).
+  const typeTablesByMod = new Map();
+  function typeTableFor(mod) {
+    if (typeTablesByMod.has(mod.id)) return typeTablesByMod.get(mod.id);
+    const tbl = new Map();
+    for (const decl of mod.ast.body) {
+      const inner =
+        decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
+      if (inner?.kind === ASTNodeKind.TYPE_DECL) {
+        tbl.set(inner.name, inner);
+      }
+    }
+    typeTablesByMod.set(mod.id, tbl);
+    return tbl;
+  }
+
+  function traitMethodResolver(structType, traitName, methodName) {
+    if (!structType || structType.kind !== "struct") return null;
+    const ownerMod = structType.moduleId
+      ? modById.get(structType.moduleId)
+      : currentMod;
+    if (!ownerMod) return null;
+    const typeDecl = typeTableFor(ownerMod).get(structType.name);
+    if (!typeDecl) return null;
+    // Find the method decl matching `methodName` AND implementing
+    // the named trait. Two impls of same-named methods on different
+    // traits coexist legally; the (name, trait) pair disambiguates.
+    const methodDecl = (typeDecl.methods ?? []).find(
+      (m) =>
+        m.name === methodName &&
+        (m.implementsTraits ?? []).includes(traitName),
+    );
+    if (!methodDecl) return null;
+    if (fnCache.has(methodDecl)) return fnCache.get(methodDecl);
+    try {
+      const bc = lowerFunction(methodDecl, {
+        moduleConsts: new Map(),
+        fnResolver,
+        traitMethodResolver,
+      });
+      fnCache.set(methodDecl, bc);
+      return bc;
+    } catch (err) {
+      if (err instanceof ComptimeError) {
+        fnCache.set(methodDecl, null);
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  function genericInstanceResolver(inst, programState) {
+    // The instance object is the cache key — codegen caches its own
+    // `inst.emitted` flag separately, so the comptime-side cache lives
+    // in `fnCache` keyed on the inst itself rather than the inst.ast
+    // (which is the still-generic decl, shared across instances).
+    if (!inst) return null;
+    if (fnCache.has(inst)) return fnCache.get(inst);
+    // Reject open instantiations (still contain TypeParamType in any
+    // argType). These exist as registry artifacts from
+    // generic-calls-generic sites; codegen also skips them.
+    if (inst.argTypes?.some((t) => t?.kind === "typeParam")) {
+      fnCache.set(inst, null);
+      return null;
+    }
+    // Build the substitution: declId → { paramName → argType }.
+    const sub = new Map();
+    const inner = new Map();
+    const paramNames = inst.ast?.genericDecl?.paramNames ?? [];
+    for (let i = 0; i < paramNames.length; i++) {
+      inner.set(paramNames[i], inst.argTypes[i]);
+    }
+    sub.set(inst.declId, inner);
+    let cloned;
+    try {
+      cloned = cloneAstWithSubstitution(inst.ast, sub, programState?.registry ?? null);
+    } catch (err) {
+      fnCache.set(inst, null);
+      return null;
+    }
+    try {
+      const bc = lowerFunction(cloned, {
+        moduleConsts: new Map(),
+        fnResolver,
+        traitMethodResolver,
+        genericInstanceResolver: (subInst) =>
+          genericInstanceResolver(subInst, programState),
+      });
+      // Use the monomorphized name so traceback frames disambiguate
+      // separate instantiations.
+      bc.name = inst.mangledName ?? bc.name;
+      fnCache.set(inst, bc);
+      return bc;
+    } catch (err) {
+      if (err instanceof ComptimeError) {
+        fnCache.set(inst, null);
+        return null;
+      }
+      throw err;
+    }
+  }
+
+  function fnResolver(calleeName, calleeModuleId, calleeExportName) {
     const lookupMod = calleeModuleId
       ? modById.get(calleeModuleId)
       : currentMod;
@@ -75,6 +184,7 @@ function makeFnResolver(modules, currentMod, fnCache) {
           const bc = lowerFunction(decl, {
             moduleConsts: new Map(),
             fnResolver,
+            traitMethodResolver,
           });
           fnCache.set(decl, bc);
           return bc;
@@ -96,6 +206,16 @@ function makeFnResolver(modules, currentMod, fnCache) {
       return { kind: "extern", impl: externEntry.impl, name: declName };
     }
     return null;
+  }
+
+  // Also pass `traitMethodResolver` to user-fn lowering so a regular
+  // function body that itself contains trait calls (very common —
+  // e.g. `Display.to_string(ref x)`) resolves correctly. The
+  // `fnResolver` closure references it via lexical scope.
+  return {
+    fnResolver,
+    traitMethodResolver,
+    genericInstanceResolver: (inst) => genericInstanceResolver(inst, programState),
   };
 }
 
@@ -107,6 +227,7 @@ function makeFnResolver(modules, currentMod, fnCache) {
 // default is silent.
 export function runComptimePass(modules, options = {}) {
   const onSkip = options.onSkip ?? (() => {});
+  const programState = options.programState ?? null;
   // Per-program function-bytecode cache. Each FUNCTION_DECL gets
   // lowered at most once and reused across every call site that
   // references it (including from inside other folded inits).
@@ -120,7 +241,8 @@ export function runComptimePass(modules, options = {}) {
     // references aren't supported in this sub-phase; they fall back
     // through the same silent path as any other unsupported lookup.
     const moduleConsts = new Map();
-    const fnResolver = makeFnResolver(modules, mod, fnCache);
+    const { fnResolver, traitMethodResolver, genericInstanceResolver } =
+      makeResolvers(modules, mod, fnCache, programState);
     for (const decl of mod.moduleInitDecls ?? []) {
       if (decl.comptimeFolded) {
         // Earlier pass already folded this one — make it visible to
@@ -133,6 +255,8 @@ export function runComptimePass(modules, options = {}) {
           fnName: `<${mod.id}__${decl.name}__init>`,
           moduleConsts,
           fnResolver,
+          traitMethodResolver,
+          genericInstanceResolver,
         });
         const result = evaluate(fn);
         decl.comptimeValue = result;

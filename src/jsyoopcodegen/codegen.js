@@ -2399,7 +2399,7 @@ export function compileSource(src) {
   // same order the driver does so this test entry mirrors the real
   // pipeline. Comptime runs first so `@precompile`'s comptimePhase
   // can read each decl's `comptimeFolded` flag.
-  runComptimePass([mod]);
+  runComptimePass([mod], { programState });
   const attrErrors = [];
   runAttributePass([mod], attrErrors);
   if (attrErrors.length > 0) {
@@ -2563,7 +2563,11 @@ const CLONE_SKIP_FIELDS = new Set([
   "sourceLoc",
   "implementingType", // back-ref to a frozen StructType
 ]);
-function cloneAstWithSubstitution(node, sub, registry = null) {
+// Phase 11.D.7: exported so the comptime interpreter can reuse the
+// same per-instance substituted-AST builder codegen uses for
+// generic-fn emission. The comptime path is "lower the substituted
+// AST into bytecode" — identical input requirement, different output.
+export function cloneAstWithSubstitution(node, sub, registry = null) {
   if (node === null || node === undefined) return node;
   if (typeof node !== "object") return node;
   if (Array.isArray(node)) {
