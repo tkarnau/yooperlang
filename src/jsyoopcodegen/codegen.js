@@ -5610,5 +5610,18 @@ export function compileEntry(entryAbsPath) {
         errors.map((e) => `  ${e.message}`).join("\n"),
     );
   }
+  // Phase 11.B/C: mirror the driver pipeline so multi-module e2e
+  // fixtures see the same fold behavior as `node src/yoopiler.js ...`.
+  // Comptime pass runs first (sets decl.comptimeFolded), then the
+  // attribute pass surfaces `@precompile` failures as hard errors.
+  runComptimePass(modules, { programState });
+  const attrErrors = [];
+  runAttributePass(modules, attrErrors);
+  if (attrErrors.length > 0) {
+    throw new Error(
+      `compileEntry: attribute pass failed with ${attrErrors.length} error(s):\n` +
+        attrErrors.map((e) => `  ${e.message}`).join("\n"),
+    );
+  }
   return codegenProgram(modules, moduleEnv, programState);
 }

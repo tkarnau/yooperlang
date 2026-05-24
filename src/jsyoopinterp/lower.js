@@ -1261,12 +1261,8 @@ function lowerExpr(node, ctx, scope) {
       //   ok_branch:
       //     okPayload = VARIANT_PAYLOAD_FIELD operandReg "value"
       //     dst = okPayload
-      if (node.tryConvert) {
-        throw new ComptimeError(
-          `comptime: cross-shape '?' propagation (Into.into dispatch) is not supported yet`,
-          node.sourceLoc,
-        );
-      }
+      // Cross-shape `?` is handled below by calling Into.into on
+      // the operand's Err payload in the err branch.
       const operandEnum = node.operand.resolvedType;
       if (operandEnum?.kind !== typeKinds.enum) {
         throw new ComptimeError(
@@ -1340,24 +1336,84 @@ function lowerExpr(node, ctx, scope) {
       const retPayloadFields = returnErr?.fields ?? [];
       const fieldRegs = [];
       const fieldNames = [];
-      // Same-shape: the operand's Err fields map 1:1 to the return Err's
-      // fields. The typechecker has already enforced this in the
-      // non-tryConvert path.
-      for (let i = 0; i < retPayloadFields.length; i++) {
-        const declared = retPayloadFields[i];
-        const opField = errPayloadFields[i] ?? declared;
-        const reg = ctx.allocReg(opField.type);
+      if (node.tryConvert) {
+        // Phase 10.E cross-shape: operandErr.error → returnErr.error
+        // through `Into<TargetType>.into(ref self)` on the operand
+        // payload's struct type. Resolve the Into.into bytecode at
+        // lower time via the trait method resolver, then emit a
+        // call with `ref payload.error` as `ref self`.
+        const opErrField = errPayloadFields[0];
+        const retErrField = retPayloadFields[0];
+        if (!opErrField || !retErrField) {
+          throw new ComptimeError(
+            `comptime: cross-shape '?' expects single-field Err on both sides`,
+            node.sourceLoc,
+          );
+        }
+        const opErrStruct = opErrField.type;
+        if (opErrStruct.kind !== typeKinds.struct) {
+          throw new ComptimeError(
+            `comptime: cross-shape '?' source Err payload must be a struct (got ${opErrStruct.kind})`,
+            node.sourceLoc,
+          );
+        }
+        if (!ctx.traitMethodResolver) {
+          throw new ComptimeError(
+            `comptime: cross-shape '?' requires a traitMethodResolver to find Into.into`,
+            node.sourceLoc,
+          );
+        }
+        const intoBc = ctx.traitMethodResolver(opErrStruct, "Into", "into");
+        if (!intoBc) {
+          throw new ComptimeError(
+            `comptime: cross-shape '?' couldn't resolve Into.into on ${opErrStruct.name}`,
+            node.sourceLoc,
+          );
+        }
+        // Build `ref payload.error` (a ref to the enum's payload
+        // slot for the err field) and pass as self.
+        const selfRefReg = ctx.allocReg({ kind: typeKinds.ref, inner: opErrStruct });
         ctx.emit(
-          instruction(OP.VARIANT_PAYLOAD_FIELD, {
-            dst: reg,
+          instruction(OP.VARIANT_PAYLOAD_REF, {
+            dst: selfRefReg,
             args: [operandReg],
-            type: opField.type,
-            immediate: opField.name,
+            type: { kind: typeKinds.ref, inner: opErrStruct },
+            immediate: opErrField.name,
             sourceLoc: node.sourceLoc,
           }),
         );
-        fieldRegs.push(reg);
-        fieldNames.push(declared.name);
+        const convertedReg = ctx.allocReg(retErrField.type);
+        ctx.emit(
+          instruction(OP.CALL_DIRECT, {
+            dst: convertedReg,
+            args: [selfRefReg],
+            type: retErrField.type,
+            immediate: intoBc,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        fieldRegs.push(convertedReg);
+        fieldNames.push(retErrField.name);
+      } else {
+        // Same-shape: the operand's Err fields map 1:1 to the return
+        // Err's fields. The typechecker has already enforced this in
+        // the non-tryConvert path.
+        for (let i = 0; i < retPayloadFields.length; i++) {
+          const declared = retPayloadFields[i];
+          const opField = errPayloadFields[i] ?? declared;
+          const reg = ctx.allocReg(opField.type);
+          ctx.emit(
+            instruction(OP.VARIANT_PAYLOAD_FIELD, {
+              dst: reg,
+              args: [operandReg],
+              type: opField.type,
+              immediate: opField.name,
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+          fieldRegs.push(reg);
+          fieldNames.push(declared.name);
+        }
       }
       const errReg = ctx.allocReg(returnEnum);
       ctx.emit(

@@ -1347,6 +1347,25 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_qmark_into.yoop: cross-shape `?` propagation calls Into.into in the err branch at fold time", () => {
+    // Multi-module fixture (imports std/core/types + std/core/traits)
+    // so it must go through the full module-graph compile path.
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/at_precompile_qmark_into.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "HAPPY=7 SAD=63\n");
+    const entryAbs = path.join(repoRoot, "examples/pass/at_precompile_qmark_into.yoop");
+    const { ir } = compileEntry(entryAbs);
+    assert.match(ir, /HAPPY = internal global i32 7,/);
+    // SAD = (0 - (-7)) * 10 - tag = 70 - 7 = 63. The tag=7 proves
+    // Into.into ran (a bit-copy of the source IoError{-7} would
+    // leave tag at 0 and the result would be 70).
+    assert.match(ir, /SAD = internal global i32 63,/);
+    assert.doesNotMatch(
+      ir,
+      /define internal void @at_precompile_qmark_into_[0-9a-f]+__module_init\(\)/,
+    );
+  });
+
   it("at_precompile_vtable.yoop: vtable construct + indirect dispatch fold through the trait method resolver", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_vtable.yoop");
     assert.equal(exitCode, 0);

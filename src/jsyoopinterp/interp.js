@@ -461,6 +461,30 @@ export function evaluate(fn) {
         break;
       }
 
+      case OP.VARIANT_PAYLOAD_REF: {
+        // Build a ref `{ container, key }` pointing at the named
+        // payload slot of the enum value. The container is the
+        // variant's payload object (a mutable JS dict in the
+        // interpreter); the key is the field name. A subsequent
+        // REF_LOAD on this returns the wrapped field value;
+        // REF_STORE writes back through it (rare, but consistent
+        // with how struct-field refs behave).
+        const enumVal = frame.registers[inst.args[0]];
+        const fieldName = inst.immediate;
+        const payload = enumVal?.v?.payload;
+        if (!payload) {
+          throw new ComptimeError(
+            `comptime: variant payload-ref on a value with no payload`,
+            inst.sourceLoc,
+          );
+        }
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { container: payload, key: fieldName },
+        };
+        break;
+      }
+
       case OP.VARIANT_PAYLOAD_FIELD: {
         const enumVal = frame.registers[inst.args[0]];
         const fieldName = inst.immediate;

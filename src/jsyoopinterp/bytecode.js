@@ -246,6 +246,13 @@ export const OP = Object.freeze({
   // tag-match branch.
   VARIANT_PAYLOAD_FIELD: "variant_payload_field",
 
+  // Take a ref to a named payload field on an enum value. `args[0]`
+  // is the enum register; `immediate` is the field name; `type` is
+  // `RefType(<fieldType>)`. Used by cross-shape `?` to construct a
+  // `ref self` arg for `Into.into(ref err)` without copying the
+  // payload struct first.
+  VARIANT_PAYLOAD_REF: "variant_payload_ref",
+
   // Read through a reference (auto-deref). `args[0]` is the ref
   // register. Yoop is value-typed for structs, so struct reads
   // through a ref copy out — matches the deep-copy semantics MOVE /
