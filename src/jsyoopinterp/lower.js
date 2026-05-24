@@ -57,13 +57,20 @@ const BIN_OP_MAP = {
 // it at every CALL_EXPRESSION; null means "this call can't be folded"
 // and surfaces as a ComptimeError (silent module-init fallback).
 class LowerCtx {
-  constructor(fnName, sourceLoc, moduleConsts, fnResolver, traitMethodResolver, genericInstanceResolver) {
+  constructor(fnName, sourceLoc, moduleConsts, fnResolver, traitMethodResolver, genericInstanceResolver, moduleStateNames) {
     this.fnName = fnName;
     this.sourceLoc = sourceLoc;
     this.instructions = [];
     this.registerTypes = [];
     this.moduleConsts = moduleConsts ?? new Map();
     this.fnResolver = fnResolver ?? null;
+    // Phase 11.D.18: set of module-level mangled syms (`<modid>__<name>`)
+    // that the block lowerer treats as live module state. IDENT
+    // reads against these names lower to MODULE_LOAD; ASSIGNMENT
+    // targets lower to MODULE_STORE. Null/undefined disables the
+    // module-state path (the default for module-init folds and
+    // user-function lowering).
+    this.moduleStateNames = moduleStateNames ?? null;
     // Phase 11.D.11: the enclosing function's return type. Used by
     // TRY_OP lowering to build the correct Err variant for early
     // returns. Set by lowerFunction / lowerExpressionAsFunction
@@ -126,6 +133,7 @@ export function lowerExpressionAsFunction(exprAst, returnType, opts = {}) {
     opts.fnResolver,
     opts.traitMethodResolver,
     opts.genericInstanceResolver,
+    opts.moduleStateNames,
   );
   ctx.currentReturnType = returnType;
   const scope = new Scope(null);
@@ -160,6 +168,7 @@ export function lowerFunction(funcDecl, opts = {}) {
     opts.fnResolver,
     opts.traitMethodResolver,
     opts.genericInstanceResolver,
+    opts.moduleStateNames,
   );
   const scope = new Scope(null);
   const paramTypes = [];
@@ -189,6 +198,44 @@ export function lowerFunction(funcDecl, opts = {}) {
     registerTypes: ctx.registerTypes,
     instructions: ctx.instructions,
     sourceLoc: funcDecl.sourceLoc ?? null,
+  });
+}
+
+// Phase 11.D.18: lower an `@precompile { ... }` block as a void
+// no-param function. The block's BLOCK statement is walked exactly
+// like a normal function body, but `moduleStateNames` is non-null so
+// any IDENT read or ASSIGNMENT target that the typechecker tagged
+// `isModuleGlobal` lowers through MODULE_LOAD / MODULE_STORE rather
+// than through a local scope slot. Locals declared inside the block
+// (`let x: ... = ...`) still go through the regular scope path.
+//
+// Returns the synthesized BytecodeFunction. The comptime pass
+// evaluates it once with the shared `moduleState` map, then reads
+// back the final values to commit them to module-level decls.
+export function lowerBlockAsFunction(blockAst, opts = {}) {
+  const ctx = new LowerCtx(
+    opts.fnName ?? "<precompile-block>",
+    blockAst.sourceLoc ?? null,
+    opts.moduleConsts,
+    opts.fnResolver,
+    opts.traitMethodResolver,
+    opts.genericInstanceResolver,
+    opts.moduleStateNames,
+  );
+  ctx.currentReturnType = { kind: typeKinds.void };
+  const scope = new Scope(null);
+  lowerStatement(blockAst, ctx, scope);
+  const last = ctx.instructions[ctx.instructions.length - 1];
+  if (!last || last.op !== OP.RET) {
+    ctx.emit(instruction(OP.RET, { args: [], sourceLoc: blockAst.sourceLoc }));
+  }
+  return bytecodeFunction({
+    name: ctx.fnName,
+    params: [],
+    returnType: { kind: typeKinds.void },
+    registerTypes: ctx.registerTypes,
+    instructions: ctx.instructions,
+    sourceLoc: ctx.sourceLoc,
   });
 }
 
@@ -951,7 +998,9 @@ function lowerExpr(node, ctx, scope) {
 
     case ASTNodeKind.IDENT: {
       // Resolution order: lexical scope (function params + locals)
-      // first, then module-level folded consts. A miss in both is
+      // first, then module-level mutable state (only inside an
+      // `@precompile { ... }` block — see lowerBlockAsFunction),
+      // then module-level folded consts. A miss in all three is
       // unsupported and surfaces as a ComptimeError (silent
       // module-init fallback path).
       const scopeReg = scope ? scope.lookup(node.name) : null;
@@ -973,6 +1022,22 @@ function lowerExpr(node, ctx, scope) {
           return dst;
         }
         return scopeReg;
+      }
+      // Phase 11.D.18: read a module-level binding via MODULE_LOAD
+      // when the block lowerer has opted-in. The typechecker
+      // already tagged the IDENT with `isModuleGlobal +
+      // moduleGlobalSym` in checkExpr; we re-use those marks.
+      if (ctx.moduleStateNames && node.isModuleGlobal && ctx.moduleStateNames.has(node.moduleGlobalSym)) {
+        const dst = ctx.allocReg(node.resolvedType);
+        ctx.emit(
+          instruction(OP.MODULE_LOAD, {
+            dst,
+            type: node.resolvedType,
+            immediate: { sym: node.moduleGlobalSym, name: node.name },
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return dst;
       }
       const folded = ctx.moduleConsts.get(node.name);
       if (folded == null) {
@@ -1064,6 +1129,27 @@ function lowerExpr(node, ctx, scope) {
       // later sub-phases.
       const tgt = node.target;
       if (tgt?.kind === ASTNodeKind.IDENT) {
+        // Phase 11.D.18: assignment to a module-level binding from
+        // inside an `@precompile { ... }` block. The typechecker
+        // already stamped `isModuleGlobal + moduleGlobalSym` on
+        // the assignment target; emit MODULE_STORE rather than a
+        // local-slot MOVE.
+        if (
+          ctx.moduleStateNames &&
+          tgt.isModuleGlobal &&
+          ctx.moduleStateNames.has(tgt.moduleGlobalSym)
+        ) {
+          const valReg = lowerExpr(node.value, ctx, scope);
+          ctx.emit(
+            instruction(OP.MODULE_STORE, {
+              args: [valReg],
+              type: ctx.registerTypes[valReg],
+              immediate: { sym: tgt.moduleGlobalSym, name: tgt.name },
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+          return valReg;
+        }
         const slotReg = scope ? scope.lookup(tgt.name) : null;
         if (slotReg == null) {
           throw new ComptimeError(

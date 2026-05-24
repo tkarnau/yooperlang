@@ -5206,6 +5206,14 @@ function codegenWithModuleId(
       case ASTNodeKind.CONTINUE_STATEMENT: fnLines.push(`  br label %${ctx.continueLabel}`); break;
       case ASTNodeKind.BLOCK: node.body.forEach((s) => emitStmt(s, fnLines, ctx)); break;
       case ASTNodeKind.SWITCH_STATEMENT: emitSwitchStmt(node, fnLines, ctx); break;
+      case ASTNodeKind.ATTRIBUTE: {
+        // Phase 11.D.18: an ATTRIBUTE node inside a function body
+        // (e.g. `@precompile { ... }` as a statement). The
+        // attribute / comptime pass already consumed it. No runtime
+        // code is emitted — the block's side effects are baked into
+        // the module-level @globals during the comptime pass.
+        break;
+      }
       default: throw new Error(`codegen: unhandled statement kind "${node.kind}"`);
     }
   }

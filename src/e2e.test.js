@@ -1310,20 +1310,45 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_block_unsupported.yoop: block form errors at the attribute pass with a clear reservation message", () => {
+  it("at_precompile_block.yoop: block form executes at comptime and commits writes to module-level @globals", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_block.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "SQUARES=0,1,4,9,16,25,36,49\nSUM=140\nTIP=(140,-140)\n",
+    );
     const src = fs.readFileSync(
-      path.join(repoRoot, "examples/fail/at_precompile_block_unsupported.yoop"),
+      path.join(repoRoot, "examples/pass/at_precompile_block.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    // SUM is a primitive — the block-written value lands directly
+    // as the LLVM @global's initial value.
+    assert.match(ir, /SUM = internal global i32 140,/);
+    // TIP is a struct — the block-written struct literal becomes
+    // the @global aggregate initializer (named-struct form).
+    assert.match(ir, /TIP = internal global %[^ ]+ \{ i32 140, i32 -140 \},/);
+    // No module_init function should be emitted: every module-level
+    // let either pre-folded to its default or was overwritten by
+    // the block, so codegen has nothing left for runtime init.
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
+  it("at_precompile_block_unfoldable.yoop: block form hitting a non-whitelisted extern surfaces as a hard build error", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/at_precompile_block_unfoldable.yoop"),
       "utf8",
     );
     const ast = parse(src);
     const mod = { id: "fixture", absPath: "fixture", src, ast };
     const { errors: tcErrors } = typecheckProgram([mod]);
     assert.equal(tcErrors.length, 0, `unexpected typecheck errors: ${tcErrors.map((e) => e.message).join(" | ")}`);
+    runComptimePass([mod]);
     const attrErrors = [];
     runAttributePass([mod], attrErrors);
     assert.ok(
-      attrErrors.some((e) => /block form is not yet supported/.test(e.message)),
-      `expected block-form-reserved error, got: ${attrErrors.map((e) => e.message).join(" | ")}`,
+      attrErrors.some((e) => /@precompile \{ \.\.\. \} block failed to evaluate/.test(e.message)),
+      `expected block-fold-failure error, got: ${attrErrors.map((e) => e.message).join(" | ")}`,
     );
   });
 

@@ -225,6 +225,26 @@ export function validateModuleInit(decl, typeContext, errors) {
   popScope(scope, errors);
 }
 
+// Phase 11.D.18: typecheck a top-level `@precompile { ... }` block.
+// The block has no params and no return type (its only effects are
+// writes to module-level state); local bindings declared inside the
+// block live only during comptime evaluation. Otherwise it's a
+// normal block — IDENT resolution falls through to module symbols
+// the same way validateModuleInit does.
+export function validatePrecompileBlock(blockAst, typeContext, errors) {
+  const scope = pushScope(null);
+  const ctx = {
+    funcReturnType: null,
+    funcName: "<precompile block>",
+    typeContext,
+    errors,
+    inLoop: false,
+    inTaskBody: false,
+  };
+  validateStatement(blockAst, scope, ctx);
+  popScope(scope, errors);
+}
+
 export function validateStatement(node, scope, ctx) {
   switch (node.kind) {
     case ASTNodeKind.BLOCK:

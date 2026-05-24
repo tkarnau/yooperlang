@@ -690,7 +690,7 @@ function resolveAssignmentToIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, targetName);
   if (!binding) {
     // Phase 8.E: not in lexical scope — fall back to module-level globals.
-    const moduleAssign = resolveAssignmentToModuleGlobal(node, ctx);
+    const moduleAssign = resolveAssignmentToModuleGlobal(node, scope, ctx);
     if (moduleAssign) return moduleAssign;
     pushError(ctx.errors, node, `undefined variable "${targetName}"`);
     return setType(node, ErrorType());
@@ -731,7 +731,14 @@ function resolveAssignmentToIdent(node, scope, ctx) {
 // Phase 8.E: handle assignment to a module-level let. Returns the assignment's
 // resolved type if the target was a module global; null if the target wasn't
 // found at module scope (caller falls through to "undefined variable").
-function resolveAssignmentToModuleGlobal(node, ctx) {
+//
+// Phase 11.D.18: `scope` is now threaded through so that a `@precompile
+// { ... }` block can assign to a module-level binding from a RHS that
+// references local block bindings (`SUM = acc;` where `acc` is a local
+// `let` declared earlier in the block). Module-init decls still call
+// this with a fresh scope (no locals), so the existing behavior is a
+// no-op there.
+function resolveAssignmentToModuleGlobal(node, scope, ctx) {
   const targetName = node.target.name;
   const tc = ctx.typeContext;
   const modType = tc.moduleSymbols?.get(targetName);
@@ -772,7 +779,7 @@ function resolveAssignmentToModuleGlobal(node, ctx) {
   checkInitializer(
     node.value,
     modType,
-    null, // no scope needed — RHS resolveExprType handles its own scoping
+    scope,
     ctx,
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(modType)} in assignment to module-level "${targetName}"`,

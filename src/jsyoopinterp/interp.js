@@ -71,7 +71,14 @@ function captureTraceback(stack, instIp) {
   return frames;
 }
 
-export function evaluate(fn) {
+export function evaluate(fn, opts = {}) {
+  // Phase 11.D.18: shared module-state map for `@precompile { ... }`
+  // block evaluation. Keys are mangled module-global symbols
+  // (`<modid>__<name>`); values are wrapped yoop values. Reads via
+  // MODULE_LOAD; writes via MODULE_STORE. Caller (comptimePass)
+  // owns the map's lifetime so block-side mutations are visible to
+  // it after evaluate() returns.
+  const moduleState = opts.moduleState ?? null;
   const stack = [makeFrame(fn)];
   // Result of the innermost ret. Used to bubble back to the top frame
   // when call_direct lands.
@@ -603,6 +610,40 @@ export function evaluate(fn) {
           ty: inst.type,
           v: coerceNumeric(inst.type, len),
         };
+        break;
+      }
+
+      case OP.MODULE_LOAD: {
+        if (!moduleState) {
+          throw new ComptimeError(
+            `comptime: MODULE_LOAD emitted but no moduleState was provided to evaluate()`,
+            inst.sourceLoc,
+          );
+        }
+        const { sym, name } = inst.immediate;
+        const cur = moduleState.get(sym);
+        if (cur == null) {
+          throw new ComptimeError(
+            `comptime: module-level '${name}' is not comptime-known at this point (its initializer didn't fold, and no @precompile block has written to it yet)`,
+            inst.sourceLoc,
+          );
+        }
+        // Deep-copy so a local-side mutation through this register
+        // doesn't accidentally alias the module slot.
+        frame.registers[inst.dst] = valueCopy(cur);
+        break;
+      }
+
+      case OP.MODULE_STORE: {
+        if (!moduleState) {
+          throw new ComptimeError(
+            `comptime: MODULE_STORE emitted but no moduleState was provided to evaluate()`,
+            inst.sourceLoc,
+          );
+        }
+        const { sym } = inst.immediate;
+        const newVal = frame.registers[inst.args[0]];
+        moduleState.set(sym, valueCopy(newVal));
         break;
       }
 

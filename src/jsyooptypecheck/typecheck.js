@@ -50,7 +50,12 @@ import { setGlobalInstantiator } from "./types.js";
 import { formatType, pushError } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
-import { validateFunction, validateMethod, validateModuleInit } from "./checkStatement.js";
+import {
+  validateFunction,
+  validateMethod,
+  validateModuleInit,
+  validatePrecompileBlock,
+} from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
 import { runKindCheck } from "./kindCheck.js";
 import { TASK_KIND } from "./builtinKinds.js";
@@ -2553,6 +2558,22 @@ export function typecheckProgram(modules) {
     for (const d of mod.moduleInitDecls ?? []) {
       if (d.resolvedType?.kind === typeKinds.error) continue;
       validateModuleInit(d, typeContext, errors);
+    }
+
+    // Phase 11.D.18 pass D.0.5: typecheck `@precompile { ... }`
+    // block-form bodies. These blocks are top-level, see only
+    // module scope, and have no return type — same shape as
+    // validateModuleInit but on a BLOCK statement. Done before
+    // pass D.1 (function bodies) so the block's calls into module
+    // functions resolve against fully-typechecked sigs.
+    for (const decl of mod.ast.body) {
+      if (
+        decl.kind === ASTNodeKind.ATTRIBUTE &&
+        decl.name === "precompile" &&
+        decl.target?.kind === ASTNodeKind.BLOCK
+      ) {
+        validatePrecompileBlock(decl.target, typeContext, errors);
+      }
     }
 
     // pass D.1: validate all functions and methods (populates resolvedKindType on params)

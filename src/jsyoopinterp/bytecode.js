@@ -264,6 +264,21 @@ export const OP = Object.freeze({
   // mutating the value at the source after a ref-store doesn't
   // mutate the referent).
   REF_STORE: "ref_store",
+
+  // Phase 11.D.18: read a module-level binding into a register.
+  // `immediate` carries `{ sym, name }` — the mangled symbol
+  // (`<modid>__<name>`) is the key into the shared `moduleState`
+  // map; `name` is retained for diagnostics. The interpreter
+  // deep-copies struct/array values out so the local register
+  // doesn't alias the module slot for value-typed mutations.
+  MODULE_LOAD: "module_load",
+
+  // Phase 11.D.18: write a register back into a module-level
+  // binding. `args[0]` is the source register; `immediate` is the
+  // same `{ sym, name }` shape as MODULE_LOAD. Used by the block
+  // form of `@precompile` to commit folded values to module-level
+  // mutable lets.
+  MODULE_STORE: "module_store",
 });
 
 export function instruction(op, opts = {}) {

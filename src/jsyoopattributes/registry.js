@@ -72,16 +72,38 @@ REGISTRY.set("precompile", {
   },
   comptimePhase(attrNode, ctx) {
     const tgt = attrNode.target;
-    // Block form: not yet supported. Reserve the surface for a
-    // future sub-phase that wires comptime-visible writes into
-    // module-level state.
+    // Block form: Phase 11.D.18 runs these in the comptime pass.
+    // The pass sets `attrNode.blockExecuted = true` on success, or
+    // stashes a `blockFoldError` ComptimeError on failure (same
+    // shape as the let/const path's `comptimeFoldError`). We
+    // surface failures here as hard build errors so the user's
+    // explicit `@precompile` commitment is never silently
+    // dropped.
     if (tgt && tgt.kind === "BLOCK") {
+      if (attrNode.blockExecuted) return;
+      const inner = attrNode.blockFoldError;
+      let suffix = "";
+      if (inner) {
+        suffix = `\n  reason: ${inner.message}`;
+        if (inner.traceback && inner.traceback.length > 0) {
+          suffix += `\n  traceback (innermost first):\n` +
+            inner.traceback
+              .map((f) => {
+                const loc = f.sourceLoc;
+                const where = loc
+                  ? `line ${loc.line}:${loc.column}`
+                  : "<unknown>";
+                return `    at ${f.fnName} (${where})`;
+              })
+              .join("\n");
+        }
+      }
       ctx.error(
         attrNode,
-        `@precompile { ... } block form is not yet supported — the ` +
-          `comptime interpreter doesn't yet track writes to module-level ` +
-          `state from inside a block. Use @precompile on a 'let' / 'const' ` +
-          `initializer in the meantime.`,
+        `@precompile { ... } block failed to evaluate at comptime — the ` +
+          `block references something the comptime interpreter cannot ` +
+          `evaluate (unsupported AST node, non-whitelisted extern, ` +
+          `runtime-only task, etc.).${suffix}`,
       );
       return;
     }

@@ -16,7 +16,11 @@
 // failures there are hard errors.
 
 import { ASTNodeKind } from "../contracts.js";
-import { lowerExpressionAsFunction, lowerFunction } from "./lower.js";
+import {
+  lowerExpressionAsFunction,
+  lowerFunction,
+  lowerBlockAsFunction,
+} from "./lower.js";
 import { evaluate } from "./interp.js";
 import { ComptimeError } from "./diagnostics.js";
 import { dumpBytecode } from "./bytecode.js";
@@ -292,6 +296,84 @@ export function runComptimePass(modules, options = {}) {
         // re-throw so the driver surfaces them rather than silently
         // suppressing a crash.
         throw err;
+      }
+    }
+
+    // Phase 11.D.18: now run any `@precompile { ... }` block-form
+    // attributes in this module. Each block executes with read +
+    // write access to module-level state via MODULE_LOAD/STORE; the
+    // initial value of each module-level binding comes from its
+    // already-folded init (above). After the block runs, any
+    // binding whose final value differs from the initial value
+    // (or that didn't have a comptime-folded init) gets its decl
+    // stamped with comptimeFolded + comptimeValue so codegen
+    // emits the result as the LLVM @global initial value and
+    // skips the runtime module-init path.
+    const declBySym = new Map();
+    for (const d of mod.moduleInitDecls ?? []) {
+      declBySym.set(`${mod.id}__${d.name}`, d);
+    }
+    // Initial moduleState: every already-folded decl's value,
+    // keyed by mangled sym. Reads of unfolded module decls fail
+    // with a clear ComptimeError at MODULE_LOAD time.
+    const moduleState = new Map();
+    for (const d of mod.moduleInitDecls ?? []) {
+      if (d.comptimeFolded) {
+        moduleState.set(`${mod.id}__${d.name}`, d.comptimeValue);
+      }
+    }
+    const moduleStateNames = new Set(declBySym.keys());
+    for (const decl of mod.ast.body) {
+      if (
+        decl.kind !== ASTNodeKind.ATTRIBUTE ||
+        decl.name !== "precompile"
+      ) {
+        continue;
+      }
+      const tgt = decl.target;
+      if (!tgt || tgt.kind !== ASTNodeKind.BLOCK) continue;
+      try {
+        const fn = lowerBlockAsFunction(tgt, {
+          fnName: `<${mod.id}__precompile_block_at_${decl.sourceLoc?.line ?? "?"}>`,
+          moduleConsts,
+          fnResolver,
+          traitMethodResolver,
+          genericInstanceResolver,
+          moduleStateNames,
+        });
+        if (dumpBC) {
+          process.stderr.write(`\n; --dump-bc: @precompile block (line ${decl.sourceLoc?.line ?? "?"})\n`);
+          process.stderr.write(dumpBytecode(fn) + "\n");
+        }
+        evaluate(fn, { moduleState });
+        decl.blockExecuted = true;
+      } catch (err) {
+        if (err instanceof ComptimeError) {
+          // Stash the error on the ATTRIBUTE node so the registry's
+          // comptimePhase can surface a hard build error with the
+          // full traceback. Hard error semantics here match the
+          // `@precompile const` form: an explicit comptime
+          // commitment that failed is never silently dropped.
+          decl.blockFoldError = err;
+          continue;
+        }
+        throw err;
+      }
+    }
+    // Commit the block-form's writes back to their owning decls so
+    // codegen picks them up as LLVM @global initial values.
+    for (const [sym, val] of moduleState) {
+      const d = declBySym.get(sym);
+      if (!d) continue;
+      // If a value differs from the pre-block folded value, the
+      // block wrote to it. If the decl wasn't folded before but is
+      // now, that also means the block wrote to it.
+      if (!d.comptimeFolded || d.comptimeValue !== val) {
+        d.comptimeValue = val;
+        d.comptimeFolded = true;
+        // Clear any stale fold-error from before the block wrote.
+        d.comptimeFoldError = null;
+        moduleConsts.set(d.name, val);
       }
     }
   }
