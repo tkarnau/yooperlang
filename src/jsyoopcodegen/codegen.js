@@ -21,6 +21,7 @@ import {
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
 import { mangleTraitMethod } from "../jsyooptypecheck/mangleTraitMethod.js";
+import { runComptimePass } from "../jsyoopinterp/comptimePass.js";
 import { createDebugInfo, annotateLinesWithDbg } from "./debugInfo.js";
 
 // yooperlang type names -> LLVM IR type names
@@ -179,6 +180,39 @@ function isFloatType(t) {
 
 function isWideInt(name) {
   return name === "int64" || name === "uint64" || name === "isize" || name === "usize";
+}
+
+// Phase 11.B: format a wrapped comptime value as an LLVM constant
+// initializer text — the literal that follows the type in a
+// `@<sym> = global <type> <literal>` line. Returns null when the
+// value can't be expressed as a static LLVM constant; the caller
+// falls back to `zeroinitializer` + runtime init for those.
+//
+// Today: primitives (int, bool, float). Aggregates (struct, array,
+// enum) land in later 11.B sub-phases — those will return LLVM
+// `{i32 5, i32 6}` / `[3 x i32] [i32 1, i32 2, i32 3]` style
+// constants, but require materializing the comptime value tree into
+// LLVM constant syntax which is its own pass.
+function comptimeValueAsLlvmInit(wrapped, ty) {
+  if (wrapped == null || ty.kind !== typeKinds.prim) return null;
+  const name = ty.name;
+  if (name === "bool") return wrapped.v ? "1" : "0";
+  if (isFloatPrim(name)) {
+    // LLVM accepts ordinary decimal for `float` / `double` in IR text;
+    // converting via `Number.toString()` covers the common cases the
+    // typechecker has range-checked. Special values (NaN, Inf) would
+    // need LLVM-specific spellings — punt by refusing to fold them.
+    const n = Number(wrapped.v);
+    if (!Number.isFinite(n)) return null;
+    return n.toString();
+  }
+  if (isIntPrim(name)) {
+    // BigInt and Number both stringify into LLVM-acceptable integer
+    // literal syntax. `Number(BigInt)` would lose range for 64-bit
+    // values; calling .toString() avoids that.
+    return wrapped.v.toString();
+  }
+  return null;
 }
 
 // pick a printf format specifier for a yooper type
@@ -2280,6 +2314,10 @@ export function compileSource(src) {
         errors.map((e) => `  ${e.message}`).join("\n"),
     );
   }
+  // Phase 11.B: run the comptime pass before codegen so this entry
+  // matches the driver path. Silent fallback on unfoldable inits keeps
+  // behavior identical to today for every existing fixture.
+  runComptimePass([mod]);
   const { ir } = codegenProgram([mod], null, programState);
   return ir;
 }
@@ -2924,22 +2962,38 @@ function codegenWithModuleId(
   // as constant-foldable, emit them as the LLVM initial value, and drop
   // them from the runtime init function. The MVP routes everything
   // through the runtime function.
-  const moduleLevelDecls = [];
+  // Phase 11.B: a module-level decl that the comptime pass managed to
+  // fold carries `decl.comptimeFolded = true` + `decl.comptimeValue`.
+  // We emit its `@global` with the literal value baked in and skip it
+  // when synthesizing the runtime `module_init` — the value is already
+  // there at load time, no init call needed. Unfolded decls still go
+  // through the existing `zeroinitializer` + runtime init path.
+  const moduleLevelDecls = [];      // decls that still need runtime init
   for (const decl of ast.body) {
     const d = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
     if (
       (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
       d.isModuleLevel
     ) {
-      moduleLevelDecls.push(d);
       const sym = `@${moduleId}__${d.name}`;
       const lty = llvmType(d.resolvedType);
       const linkage = decl.kind === ASTNodeKind.EXPORT_DECL ? "" : "internal ";
-      globals.push(`${sym} = ${linkage}global ${lty} zeroinitializer, align 8`);
+      const initLiteral = d.comptimeFolded
+        ? comptimeValueAsLlvmInit(d.comptimeValue, d.resolvedType)
+        : null;
+      if (initLiteral != null) {
+        globals.push(`${sym} = ${linkage}global ${lty} ${initLiteral}, align 8`);
+      } else {
+        globals.push(`${sym} = ${linkage}global ${lty} zeroinitializer, align 8`);
+        moduleLevelDecls.push(d);
+      }
     }
   }
   // Register the symbols on programState so the entry module's `main`
   // emission can call each module's `__module_init` after yoop_runtime_init.
+  // Only register when there's actually a function to call — if every
+  // module-level decl folded, emitModuleInit emits nothing and a
+  // registered symbol would dangle as an undefined reference.
   if (moduleLevelDecls.length > 0) {
     if (programState && !programState.moduleInitSymbols) {
       programState.moduleInitSymbols = [];

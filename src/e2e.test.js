@@ -1160,6 +1160,37 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
   });
 });
 
+// Phase 11.B: opportunistic module-init folding. The comptime pass
+// tries to evaluate each module-level let/const initializer; on success
+// codegen emits the literal value as the LLVM @global initial and
+// skips the runtime module_init for that decl. Failures are silent
+// (existing programs unaffected).
+describe("e2e: Phase 11.B opportunistic module-init folding", () => {
+  it("module_init_folded.yoop: int literal arithmetic initializers fold to @global constants", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/module_init_folded.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "SUM=5\nPRODUCT=14\nDIFFERENCE=-3\n");
+  });
+
+  it("module_init_folded.yoop: IR has literal-initialized globals and no module_init function", () => {
+    // Re-emit the IR and inspect — the load-bearing claim is that the
+    // fold actually happened, not just that the runtime produced the
+    // same number. (A regression that fell back to runtime init would
+    // still print the right number but defeat the whole feature.)
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/module_init_folded.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    // Each folded global appears with its literal value, not zeroinitializer.
+    assert.match(ir, /SUM = internal global i32 5,/);
+    assert.match(ir, /PRODUCT = internal global i32 14,/);
+    assert.match(ir, /DIFFERENCE = internal global i32 -3,/);
+    // No module_init function gets emitted since every decl folded.
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+});
+
 // Phase 11.A: `@`-attribute syntax + registry skeleton. The first
 // inaugural consumer (`@precompile`) parses + typechecks fine; the
 // post-typecheck attribute pass errors out with "not yet implemented"

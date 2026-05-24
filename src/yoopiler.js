@@ -8,6 +8,7 @@ import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
+import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst } from "./dumpAst.js";
@@ -115,6 +116,15 @@ function main() {
     }
     process.exit(1);
   }
+
+  // Phase 11.B: opportunistic module-init folding. Each module-level
+  // `let` / `const` whose initializer the interpreter can evaluate is
+  // stamped with `decl.comptimeFolded = true` + `decl.comptimeValue`;
+  // codegen consumes those to emit an LLVM `@global` with a literal
+  // initial value (skipping the runtime `module_init` call entirely
+  // for that decl). Failures are silent — the existing runtime path
+  // handles the unfoldable cases the same way it does today.
+  runComptimePass(modules);
 
   const { ir, linkFlags } = codegenProgram(modules, moduleEnv, programState);
   console.log("llvm IR: ok");

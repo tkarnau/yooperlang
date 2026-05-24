@@ -1,0 +1,33 @@
+// Phase 11.B: opportunistic module-init folding. The interpreter
+// evaluates the initializer at compile time and codegen emits the
+// LLVM @global with the literal value baked in, skipping the
+// runtime `<modid>__module_init` path entirely for that decl.
+//
+// All three constants below should fold:
+//   - SUM produces a folded i32 (literal arithmetic)
+//   - PRODUCT produces a folded i32 (precedence handling)
+//   - DIFFERENCE produces a folded i32 (subtraction)
+//
+// Verification: the compiled binary prints the expected values.
+// The IR-level verification (literal value baked into @global) is
+// covered by the e2e fold-shape assertion in src/e2e.test.js.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const SUM: int32 = 2 + 3;
+const PRODUCT: int32 = 2 + 3 * 4;
+const DIFFERENCE: int32 = 7 - 10;
+
+function main(): int32 {
+    printf(`SUM=${SUM}\n`);
+    printf(`PRODUCT=${PRODUCT}\n`);
+    printf(`DIFFERENCE=${DIFFERENCE}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   SUM=5
+//   PRODUCT=14
+//   DIFFERENCE=-3
