@@ -257,6 +257,34 @@ export function evaluate(fn) {
         break;
       }
 
+      case OP.TASK_WRAP: {
+        // Tasks execute synchronously inline at comptime — the body's
+        // CALL_DIRECT already produced the inner T. TASK_WRAP just
+        // tags it as a Task<T> wrapper so the typed register slot
+        // matches the call site's resolvedType.
+        const inner = frame.registers[inst.args[0]];
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { state: "done", result: inner },
+        };
+        break;
+      }
+
+      case OP.TASK_WAIT: {
+        // Wait on a Task<T> that already finished (inline-eval'd at
+        // spawn time). Pulls the cached result out of the wrapper.
+        const task = frame.registers[inst.args[0]];
+        const result = task?.v?.result;
+        if (!result) {
+          throw new ComptimeError(
+            `comptime: TASK_WAIT on a value that doesn't look like a Task<T>`,
+            inst.sourceLoc,
+          );
+        }
+        frame.registers[inst.dst] = result;
+        break;
+      }
+
       case OP.CALL_EXTERN: {
         // Pure-extern: resolved at lower time to a JS impl in the
         // whitelist. Pass the wrapped args + sourceLoc + return type

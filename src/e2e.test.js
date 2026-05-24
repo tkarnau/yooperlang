@@ -1347,6 +1347,22 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_tasks.yoop: task fns execute synchronously inline at comptime (immediate / joined+wait / pooled+wait)", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_tasks.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "IMM=50 JOIN=66 POOL=84 MULTI=42\n");
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_tasks.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    assert.match(ir, /IMM = internal global i32 50,/);
+    assert.match(ir, /JOIN = internal global i32 66,/);
+    assert.match(ir, /POOL = internal global i32 84,/);
+    assert.match(ir, /MULTI = internal global i32 42,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
   it("at_precompile_generics.yoop: generic function instantiations fold via the registry's substituted AST + interpreter", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_generics.yoop");
     assert.equal(exitCode, 0);

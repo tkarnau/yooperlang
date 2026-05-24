@@ -53,10 +53,15 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
         decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl :
         decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn :
         decl;
+      // Phase 11.D.9: include task fns in the resolver table. The
+      // call-site lowering detects a task call (via the CALL_EXPRESSION's
+      // resolvedType being Task<T>) and wraps the body's T return in
+      // a Task<T> at the bytecode level — see lower.js's
+      // CALL_EXPRESSION case. Generic decls stay excluded since they
+      // need monomorphization first.
       if (
         inner?.kind === ASTNodeKind.FUNCTION_DECL &&
-        !inner.genericDecl &&
-        !inner.isTask
+        !inner.genericDecl
       ) {
         tbl.set(inner.name, inner);
       }

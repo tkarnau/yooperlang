@@ -224,7 +224,26 @@ function lowerStatement(node, ctx, scope) {
           node.sourceLoc,
         );
       }
-      const valReg = lowerExpr(node.assignment, ctx, scope);
+      let valReg = lowerExpr(node.assignment, ctx, scope);
+      // Phase 11.D.9: `immediateTaskCall` is the typechecker's flag
+      // for `const x: T = compute(...);` where compute returns
+      // Task<T>. The CALL_EXPRESSION produced a Task<T> register;
+      // unwrap it to T before the MOVE so the slot holds the inner
+      // value (matching the binding's declared type).
+      if (node.immediateTaskCall) {
+        const taskTy = ctx.registerTypes[valReg];
+        const innerTy = taskTy.resultType ?? node.resolvedType;
+        const unwrapped = ctx.allocReg(innerTy);
+        ctx.emit(
+          instruction(OP.TASK_WAIT, {
+            dst: unwrapped,
+            args: [valReg],
+            type: innerTy,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        valReg = unwrapped;
+      }
       const ty = node.resolvedType ?? ctx.registerTypes[valReg];
       const slotReg = ctx.allocReg(ty);
       ctx.emit(
@@ -236,6 +255,20 @@ function lowerStatement(node, ctx, scope) {
         }),
       );
       scope.declare(node.name, slotReg);
+      return;
+    }
+
+    case ASTNodeKind.TASK_AUTO_WAIT:
+    case ASTNodeKind.TASK_RELEASE:
+    case ASTNodeKind.TASK_RETAIN:
+    case ASTNodeKind.CLEANUP_CALL: {
+      // Phase 11.D.9: scope-exit hooks emitted by kindCheck. At
+      // comptime there's no real refcounting or RAII (no OS state
+      // to release, no real thread to join), so these statements
+      // are no-ops at the bytecode level. A future sub-phase will
+      // dispatch `dispose()` for disposable-kind bindings when the
+      // body has a real comptime-visible effect; today's @precompile
+      // use cases don't exercise that path.
       return;
     }
     case ASTNodeKind.EXPRESSION_STATEMENT: {
@@ -1094,17 +1127,60 @@ function lowerExpr(node, ctx, scope) {
             sourceLoc: node.sourceLoc,
           }),
         );
-      } else {
+        return dst;
+      }
+      // Phase 11.D.9: a call to a task fn has resolvedType Task<T>
+      // but the function body returns the inner T. Run the body
+      // synchronously inline (CALL_DIRECT) into a fresh T register,
+      // then TASK_WRAP that into Task<T> so the dst slot's type
+      // matches the AST's stamped resolvedType.
+      if (node.resolvedType?.kind === typeKinds.task) {
+        const innerTy = node.resolvedType.resultType;
+        const innerReg = ctx.allocReg(innerTy);
         ctx.emit(
           instruction(OP.CALL_DIRECT, {
-            dst,
+            dst: innerReg,
             args: argRegs,
-            type: node.resolvedType,
+            type: innerTy,
             immediate: resolved,
             sourceLoc: node.sourceLoc,
           }),
         );
+        ctx.emit(
+          instruction(OP.TASK_WRAP, {
+            dst,
+            args: [innerReg],
+            type: node.resolvedType,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return dst;
       }
+      ctx.emit(
+        instruction(OP.CALL_DIRECT, {
+          dst,
+          args: argRegs,
+          type: node.resolvedType,
+          immediate: resolved,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      return dst;
+    }
+
+    case ASTNodeKind.WAIT_EXPRESSION: {
+      // `wait expr` unwraps a Task<T> to T. The operand reg holds
+      // the Task<T> (already inline-evaluated at TASK_WRAP time).
+      const taskReg = lowerExpr(node.operand, ctx, scope);
+      const dst = ctx.allocReg(node.resolvedType);
+      ctx.emit(
+        instruction(OP.TASK_WAIT, {
+          dst,
+          args: [taskReg],
+          type: node.resolvedType,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
       return dst;
     }
 

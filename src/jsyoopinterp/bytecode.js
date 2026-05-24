@@ -138,6 +138,19 @@ export const OP = Object.freeze({
   // surface as a ComptimeError at lower time.
   CALL_EXTERN: "call_extern",
 
+  // Wrap a value reg of type T as a Task<T> wrapped value. Used at
+  // the call site of a task fn — the body's CALL_DIRECT returns T,
+  // and TASK_WRAP turns it into the Task<T> the caller's
+  // resolvedType expects. At comptime tasks execute synchronously
+  // inline (the plan calls this out explicitly), so the Task<T>
+  // wrapper is just a tag — there's no scheduler.
+  TASK_WRAP: "task_wrap",
+
+  // Unwrap a Task<T> reg back to T. Used by WAIT_EXPRESSION and by
+  // LET_DECL's `immediateTaskCall` path. The dst register's type is
+  // the inner T.
+  TASK_WAIT: "task_wait",
+
   // Copy a value between registers. Used by LET_DECL / CONST_DECL to
   // park the init expression's result into a stable "slot reg" the
   // binding's IDENT references resolve to, and by ASSIGNMENT to
