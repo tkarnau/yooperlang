@@ -64,6 +64,11 @@ class LowerCtx {
     this.registerTypes = [];
     this.moduleConsts = moduleConsts ?? new Map();
     this.fnResolver = fnResolver ?? null;
+    // Phase 11.D.11: the enclosing function's return type. Used by
+    // TRY_OP lowering to build the correct Err variant for early
+    // returns. Set by lowerFunction / lowerExpressionAsFunction
+    // before walking the body; consulted in the TRY_OP case.
+    this.currentReturnType = null;
     // Phase 11.D.5: looks up a trait method's BytecodeFunction given
     // the receiver struct type + trait name + method name. Returns
     // null when the method can't be lowered at comptime (unsupported
@@ -122,6 +127,7 @@ export function lowerExpressionAsFunction(exprAst, returnType, opts = {}) {
     opts.traitMethodResolver,
     opts.genericInstanceResolver,
   );
+  ctx.currentReturnType = returnType;
   const scope = new Scope(null);
   const resultReg = lowerExpr(exprAst, ctx, scope);
   ctx.emit(
@@ -163,12 +169,14 @@ export function lowerFunction(funcDecl, opts = {}) {
     const reg = ctx.allocReg(ty);
     scope.declare(param.name, reg);
   }
+  ctx.currentReturnType =
+    funcDecl.resolvedType ?? funcDecl.declaredReturnType ?? null;
   lowerStatement(funcDecl.body, ctx, scope);
   // Synthesize a trailing `ret void` for void-returning functions
   // whose body doesn't explicitly end in RET. Matches codegen's
   // implicit-return behavior so void fns the user wrote without a
   // trailing `return;` still terminate cleanly under the interpreter.
-  const returnType = funcDecl.resolvedType ?? funcDecl.declaredReturnType ?? null;
+  const returnType = ctx.currentReturnType;
   const last = ctx.instructions[ctx.instructions.length - 1];
   const isVoid = returnType?.kind === typeKinds.void;
   if (isVoid && (!last || last.op !== OP.RET)) {
@@ -1162,6 +1170,174 @@ function lowerExpr(node, ctx, scope) {
           args: argRegs,
           type: node.resolvedType,
           immediate: resolved,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      return dst;
+    }
+
+    case ASTNodeKind.TRY_OP: {
+      // Phase 11.D.11: enum-shaped `?` propagation. Same-shape only
+      // for now — cross-shape needs `Into.into` trait dispatch which
+      // lands later. Lower as:
+      //   operandReg = <operand>
+      //   tag = VARIANT_TAG operandReg
+      //   match = tag == Err.ordinal
+      //   brcond match → err_branch, else ok_branch
+      //   err_branch:
+      //     payload = VARIANT_PAYLOAD_FIELD operandReg "error"
+      //     errEnum = VARIANT_CONSTRUCT(<return Err shape>, payload)
+      //     ret errEnum
+      //   ok_branch:
+      //     okPayload = VARIANT_PAYLOAD_FIELD operandReg "value"
+      //     dst = okPayload
+      if (node.tryConvert) {
+        throw new ComptimeError(
+          `comptime: cross-shape '?' propagation (Into.into dispatch) is not supported yet`,
+          node.sourceLoc,
+        );
+      }
+      const operandEnum = node.operand.resolvedType;
+      if (operandEnum?.kind !== typeKinds.enum) {
+        throw new ComptimeError(
+          `comptime: '?' operand must be enum-shaped at the bytecode lowerer (got ${operandEnum?.kind})`,
+          node.sourceLoc,
+        );
+      }
+      const operandReg = lowerExpr(node.operand, ctx, scope);
+      const operandErr = operandEnum.variants.get("Err");
+      const operandOk = operandEnum.variants.get("Ok");
+      if (!operandErr || !operandOk) {
+        throw new ComptimeError(
+          `comptime: '?' operand enum doesn't look Result-shaped (missing Ok or Err variant)`,
+          node.sourceLoc,
+        );
+      }
+
+      // Read the tag.
+      const tagReg = ctx.allocReg({ kind: typeKinds.prim, name: "int32" });
+      ctx.emit(
+        instruction(OP.VARIANT_TAG, {
+          dst: tagReg,
+          args: [operandReg],
+          type: { kind: typeKinds.prim, name: "int32" },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      const ordReg = ctx.allocReg({ kind: typeKinds.prim, name: "int32" });
+      ctx.emit(
+        instruction(OP.LITERAL, {
+          dst: ordReg,
+          type: { kind: typeKinds.prim, name: "int32" },
+          immediate: {
+            ty: { kind: typeKinds.prim, name: "int32" },
+            v: operandErr.ordinal | 0,
+          },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      const isErrReg = ctx.allocReg({ kind: typeKinds.prim, name: "bool" });
+      ctx.emit(
+        instruction(OP.ICMP_EQ, {
+          dst: isErrReg,
+          args: [tagReg, ordReg],
+          type: { kind: typeKinds.prim, name: "bool" },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      const errLabel = ctx.freshLabel("try_err");
+      const okLabel = ctx.freshLabel("try_ok");
+      ctx.emit(
+        instruction(OP.BRCOND, {
+          args: [isErrReg],
+          immediate: { then: errLabel, else: okLabel },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      // Err branch: extract operand's Err payload (if any), build
+      // a new Err of the enclosing return type, and RET.
+      ctx.emit(instruction(OP.LABEL, { immediate: errLabel }));
+      const returnEnum = ctx.currentReturnType;
+      if (returnEnum?.kind !== typeKinds.enum) {
+        throw new ComptimeError(
+          `comptime: '?' used in a function whose return type isn't an enum (current is ${returnEnum?.kind})`,
+          node.sourceLoc,
+        );
+      }
+      const returnErr = returnEnum.variants.get("Err");
+      const errPayloadFields = operandErr.fields ?? [];
+      const retPayloadFields = returnErr?.fields ?? [];
+      const fieldRegs = [];
+      const fieldNames = [];
+      // Same-shape: the operand's Err fields map 1:1 to the return Err's
+      // fields. The typechecker has already enforced this in the
+      // non-tryConvert path.
+      for (let i = 0; i < retPayloadFields.length; i++) {
+        const declared = retPayloadFields[i];
+        const opField = errPayloadFields[i] ?? declared;
+        const reg = ctx.allocReg(opField.type);
+        ctx.emit(
+          instruction(OP.VARIANT_PAYLOAD_FIELD, {
+            dst: reg,
+            args: [operandReg],
+            type: opField.type,
+            immediate: opField.name,
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        fieldRegs.push(reg);
+        fieldNames.push(declared.name);
+      }
+      const errReg = ctx.allocReg(returnEnum);
+      ctx.emit(
+        instruction(OP.VARIANT_CONSTRUCT, {
+          dst: errReg,
+          args: fieldRegs,
+          type: returnEnum,
+          immediate: {
+            variantName: returnErr.name,
+            ordinal: returnErr.ordinal,
+            fieldNames,
+          },
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+      ctx.emit(
+        instruction(OP.RET, {
+          args: [errReg],
+          type: returnEnum,
+          sourceLoc: node.sourceLoc,
+        }),
+      );
+
+      // Ok branch: extract the Ok payload (or no-op for void-Ok) and
+      // return that as the TRY_OP's result register.
+      ctx.emit(instruction(OP.LABEL, { immediate: okLabel }));
+      const okFields = operandOk.fields ?? [];
+      if (okFields.length === 0) {
+        // void-Ok: the typechecker has typed this as void. Allocate
+        // a placeholder register; nothing reads it.
+        const dst = ctx.allocReg({ kind: typeKinds.void });
+        return dst;
+      }
+      // Single-field Ok (the common Result-shaped case): unwrap to
+      // the field's value. Multi-field Ok payloads would need a
+      // wrapper struct here; punt to a later sub-phase.
+      if (okFields.length > 1) {
+        throw new ComptimeError(
+          `comptime: multi-field Ok payload in '?' is not supported yet`,
+          node.sourceLoc,
+        );
+      }
+      const okField = okFields[0];
+      const dst = ctx.allocReg(okField.type);
+      ctx.emit(
+        instruction(OP.VARIANT_PAYLOAD_FIELD, {
+          dst,
+          args: [operandReg],
+          type: okField.type,
+          immediate: okField.name,
           sourceLoc: node.sourceLoc,
         }),
       );

@@ -1347,6 +1347,20 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_qmark.yoop: `?` propagation over Result-shaped enums folds Ok-path + Err-path", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_qmark.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "GOOD=13 BAD=0\n");
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_qmark.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    assert.match(ir, /GOOD = internal global i32 13,/);
+    assert.match(ir, /BAD = internal global i32 0,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
   it("at_precompile_tasks.yoop: task fns execute synchronously inline at comptime (immediate / joined+wait / pooled+wait)", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_tasks.yoop");
     assert.equal(exitCode, 0);
