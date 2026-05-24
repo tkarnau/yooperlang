@@ -1347,6 +1347,20 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
+  it("at_precompile_vtable.yoop: vtable construct + indirect dispatch fold through the trait method resolver", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_vtable.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "DBL=35 ADD=107\n");
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/pass/at_precompile_vtable.yoop"),
+      "utf8",
+    );
+    const ir = compileSource(src);
+    assert.match(ir, /DBL = internal global i32 35,/);
+    assert.match(ir, /ADD = internal global i32 107,/);
+    assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
   it("at_precompile_qmark.yoop: `?` propagation over Result-shaped enums folds Ok-path + Err-path", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_qmark.yoop");
     assert.equal(exitCode, 0);

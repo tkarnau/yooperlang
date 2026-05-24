@@ -19,6 +19,7 @@ import { ASTNodeKind } from "../contracts.js";
 import { lowerExpressionAsFunction, lowerFunction } from "./lower.js";
 import { evaluate } from "./interp.js";
 import { ComptimeError } from "./diagnostics.js";
+import { dumpBytecode } from "./bytecode.js";
 import { lookupExtern } from "./externWhitelist.js";
 // Codegen exports the AST-cloner used to monomorphize a generic
 // function body for a specific instantiation. We reuse it verbatim
@@ -96,16 +97,15 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
     if (!ownerMod) return null;
     const typeDecl = typeTableFor(ownerMod).get(structType.name);
     if (!typeDecl) return null;
-    // Find the method decl matching `methodName` AND implementing
-    // the named trait. Two impls of same-named methods on different
-    // traits coexist legally; the (name, trait) pair disambiguates.
     const methodDecl = (typeDecl.methods ?? []).find(
       (m) =>
         m.name === methodName &&
         (m.implementsTraits ?? []).includes(traitName),
     );
     if (!methodDecl) return null;
-    if (fnCache.has(methodDecl)) return fnCache.get(methodDecl);
+    const cached = fnCache.get(methodDecl);
+    if (cached instanceof ComptimeError) throw cached;
+    if (cached !== undefined) return cached;
     try {
       const bc = lowerFunction(methodDecl, {
         moduleConsts: new Map(),
@@ -115,9 +115,12 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
       fnCache.set(methodDecl, bc);
       return bc;
     } catch (err) {
+      // Phase 11.E.1: re-throw the inner ComptimeError so the
+      // call chain's deeper failure surfaces in the @precompile
+      // diagnostic + traceback. Cache the error so subsequent
+      // lookups of the same method short-circuit.
       if (err instanceof ComptimeError) {
-        fnCache.set(methodDecl, null);
-        return null;
+        fnCache.set(methodDecl, err);
       }
       throw err;
     }
@@ -129,7 +132,9 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
     // in `fnCache` keyed on the inst itself rather than the inst.ast
     // (which is the still-generic decl, shared across instances).
     if (!inst) return null;
-    if (fnCache.has(inst)) return fnCache.get(inst);
+    const cached = fnCache.get(inst);
+    if (cached instanceof ComptimeError) throw cached;
+    if (cached !== undefined) return cached;
     // Reject open instantiations (still contain TypeParamType in any
     // argType). These exist as registry artifacts from
     // generic-calls-generic sites; codegen also skips them.
@@ -167,8 +172,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
       return bc;
     } catch (err) {
       if (err instanceof ComptimeError) {
-        fnCache.set(inst, null);
-        return null;
+        fnCache.set(inst, err);
       }
       throw err;
     }
@@ -184,7 +188,9 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
     if (lookupMod) {
       const decl = fnTableFor(lookupMod).get(declName);
       if (decl) {
-        if (fnCache.has(decl)) return fnCache.get(decl);
+        const cached = fnCache.get(decl);
+        if (cached instanceof ComptimeError) throw cached;
+        if (cached !== undefined) return cached;
         try {
           const bc = lowerFunction(decl, {
             moduleConsts: new Map(),
@@ -195,8 +201,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
           return bc;
         } catch (err) {
           if (err instanceof ComptimeError) {
-            fnCache.set(decl, null);
-            return null;
+            fnCache.set(decl, err);
           }
           throw err;
         }
@@ -233,6 +238,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
 export function runComptimePass(modules, options = {}) {
   const onSkip = options.onSkip ?? (() => {});
   const programState = options.programState ?? null;
+  const dumpBC = !!options.dumpBC;
   // Per-program function-bytecode cache. Each FUNCTION_DECL gets
   // lowered at most once and reused across every call site that
   // references it (including from inside other folded inits).
@@ -263,12 +269,22 @@ export function runComptimePass(modules, options = {}) {
           traitMethodResolver,
           genericInstanceResolver,
         });
+        if (dumpBC) {
+          process.stderr.write(`\n; --dump-bc: ${decl.name} (init fold)\n`);
+          process.stderr.write(dumpBytecode(fn) + "\n");
+        }
         const result = evaluate(fn);
         decl.comptimeValue = result;
         decl.comptimeFolded = true;
         moduleConsts.set(decl.name, result);
       } catch (err) {
         if (err instanceof ComptimeError) {
+          // Stash the error on the decl so the `@precompile`
+          // attribute handler can read its traceback when surfacing
+          // the failure as a hard build error. The opportunistic
+          // fold path discards this and silently falls back, but
+          // recording it costs nothing.
+          decl.comptimeFoldError = err;
           onSkip(decl, mod, err);
           continue;
         }
@@ -276,6 +292,18 @@ export function runComptimePass(modules, options = {}) {
         // re-throw so the driver surfaces them rather than silently
         // suppressing a crash.
         throw err;
+      }
+    }
+  }
+  // Phase 11.E.2: also dump every callee bytecode the fold pulled
+  // into the cache. Order is "discovery order" (insertion order of
+  // the Map). Skipped error-cache entries so the dump shows only
+  // bytecode that actually exists.
+  if (dumpBC) {
+    for (const bc of fnCache.values()) {
+      if (bc && !(bc instanceof ComptimeError)) {
+        process.stderr.write(`\n; --dump-bc: ${bc.name}\n`);
+        process.stderr.write(dumpBytecode(bc) + "\n");
       }
     }
   }

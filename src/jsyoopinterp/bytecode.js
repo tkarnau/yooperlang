@@ -151,6 +151,22 @@ export const OP = Object.freeze({
   // the inner T.
   TASK_WAIT: "task_wait",
 
+  // Build a vtable wrapped value from a struct ref. `args[0]` is the
+  // struct-ref register (the `ref x` operand from `VTable.from(ref x)`);
+  // `immediate` carries `{ methodFns: BytecodeFunction[] }` — pre-resolved
+  // at lower time via traitMethodResolver, in vtable methodOrder. The
+  // resulting value holds the ctx ref + the methodFns array so
+  // VTABLE_CALL can dispatch by index without re-resolving.
+  VTABLE_CONSTRUCT: "vtable_construct",
+
+  // Dispatch a trait method through a vtable. `immediate` is the
+  // field index (into vtableType.methodOrder); `args[0]` is the
+  // vtable register; `args[1..N]` are the user args. The interpreter
+  // looks up `methodFns[fieldIndex]`, pushes a frame with `ctx` as
+  // register 0 (matching the method's `ref self` param) + user args
+  // in subsequent registers.
+  VTABLE_CALL: "vtable_call",
+
   // Copy a value between registers. Used by LET_DECL / CONST_DECL to
   // park the init expression's result into a stable "slot reg" the
   // binding's IDENT references resolve to, and by ASSIGNMENT to
@@ -267,4 +283,81 @@ export function bytecodeFunction({
   sourceLoc = null,
 }) {
   return { name, params, returnType, registerTypes, instructions, sourceLoc };
+}
+
+// Phase 11.E.2: pretty-printer for a BytecodeFunction. Output shape:
+//
+//   function <name>(<paramTypes>) -> <returnType>:
+//     0: <op> $<dst>, $<arg>, ... ; <type> [<immediate>] @<line>:<col>
+//     1: ...
+//
+// Used by the `--dump-bc` driver flag to inspect what the comptime
+// interpreter is actually running. Not part of the runtime path —
+// safe to leave out of perf-sensitive code.
+export function dumpBytecode(fn) {
+  const lines = [];
+  const paramSig = (fn.params ?? [])
+    .map((t, i) => `${i}: ${formatType(t)}`)
+    .join(", ");
+  const retSig = fn.returnType ? formatType(fn.returnType) : "<?>";
+  lines.push(`function ${fn.name ?? "<anon>"}(${paramSig}) -> ${retSig}:`);
+  for (let i = 0; i < fn.instructions.length; i++) {
+    const inst = fn.instructions[i];
+    const idx = String(i).padStart(4, " ");
+    const dst = inst.dst != null ? `$${inst.dst}` : "_";
+    const argList = (inst.args ?? []).map((r) => `$${r}`).join(", ");
+    const head = inst.op === "label"
+      ? `  ${idx}: label ${JSON.stringify(inst.immediate)}`
+      : `  ${idx}: ${inst.op} ${dst}${argList ? ", " + argList : ""}`;
+    const annot = [];
+    if (inst.type) annot.push(formatType(inst.type));
+    if (inst.immediate != null && inst.op !== "label") {
+      annot.push(formatImmediate(inst.immediate));
+    }
+    if (inst.sourceLoc?.line) {
+      annot.push(`@${inst.sourceLoc.line}:${inst.sourceLoc.column}`);
+    }
+    lines.push(annot.length ? `${head}  ; ${annot.join(" ")}` : head);
+  }
+  return lines.join("\n");
+}
+
+function formatType(t) {
+  if (!t) return "<?>";
+  if (t.kind === "prim") return t.name;
+  if (t.kind === "ref") return `ref ${formatType(t.inner)}`;
+  if (t.kind === "array") return `${formatType(t.elem)}[]`;
+  if (t.kind === "struct") return `struct ${t.name ?? "?"}`;
+  if (t.kind === "enum") return `enum ${t.name ?? "?"}`;
+  if (t.kind === "task") return `Task<${formatType(t.resultType)}>`;
+  if (t.kind === "void") return "void";
+  return `<${t.kind}>`;
+}
+
+function formatImmediate(imm) {
+  if (imm == null) return "";
+  // Wrapped value literal: print its type + payload concisely.
+  if (typeof imm === "object" && "ty" in imm && "v" in imm) {
+    const v = imm.v;
+    if (typeof v === "string") return JSON.stringify(v);
+    if (typeof v === "bigint") return `${v}n`;
+    return String(v);
+  }
+  // STRUCT_CONSTRUCT / VARIANT_CONSTRUCT field-name lists.
+  if (Array.isArray(imm)) return `[${imm.join(", ")}]`;
+  // BRCOND label pair.
+  if (imm.then && imm.else) return `then=${imm.then} else=${imm.else}`;
+  // CALL_EXTERN { name, impl } — only print the name.
+  if (imm.name && typeof imm.impl === "function") return `extern ${imm.name}`;
+  // CALL_DIRECT — a BytecodeFunction; print just its name.
+  if (typeof imm === "object" && imm.name && Array.isArray(imm.instructions)) {
+    return `fn ${imm.name}`;
+  }
+  // VARIANT_CONSTRUCT shape.
+  if (imm.variantName) {
+    return `${imm.variantName}#${imm.ordinal}`;
+  }
+  // BR target.
+  if (typeof imm === "string") return imm;
+  return JSON.stringify(imm);
 }

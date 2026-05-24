@@ -93,13 +93,37 @@ REGISTRY.set("precompile", {
       (tgt.kind === "LET_DECL" || tgt.kind === "CONST_DECL")
     ) {
       if (!tgt.comptimeFolded) {
+        // Phase 11.E.1: if the comptime pass captured a
+        // ComptimeError + traceback, include both in the
+        // diagnostic. The originating error is usually deeper than
+        // the @precompile site itself (e.g. "unsupported extern
+        // called from <fn> called from <init>"), so the traceback
+        // is the difference between "fold failed for X" and "fold
+        // failed for X because Y at line Z called by W at line V".
+        const inner = tgt.comptimeFoldError;
+        let suffix = "";
+        if (inner) {
+          suffix = `\n  reason: ${inner.message}`;
+          if (inner.traceback && inner.traceback.length > 0) {
+            suffix += `\n  traceback (innermost first):\n` +
+              inner.traceback
+                .map((f) => {
+                  const loc = f.sourceLoc;
+                  const where = loc
+                    ? `line ${loc.line}:${loc.column}`
+                    : "<unknown>";
+                  return `    at ${f.fnName} (${where})`;
+                })
+                .join("\n");
+          }
+        }
         ctx.error(
           attrNode,
           `@precompile fold failed for '${tgt.name}' — the initializer ` +
             `references something the comptime interpreter cannot evaluate ` +
             `(unsupported AST node, non-whitelisted extern, runtime-only ` +
             `task, etc.). Inspect the initializer expression for shapes ` +
-            `outside Phase 11.B's supported set.`,
+            `outside Phase 11.B's supported set.${suffix}`,
         );
       }
       return;

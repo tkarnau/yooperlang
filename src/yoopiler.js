@@ -23,6 +23,7 @@ function main() {
       outputFile: { type: "string", short: "o" },
       outputModules: { type: "boolean", short: "a" },
       "dump-ast": { type: "boolean" },
+      "dump-bc": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -104,7 +105,10 @@ function main() {
   // `@precompile` consumer can read each decl's `comptimeFolded` flag
   // and surface a hard error if the user-declared comptime
   // requirement wasn't met.
-  runComptimePass(modules, { programState });
+  runComptimePass(modules, {
+    programState,
+    dumpBC: !!values["dump-bc"],
+  });
 
   // Phase 11.A + 11.C: attribute dispatch pass. `@precompile` now
   // surfaces fold failures as hard errors (the opportunistic

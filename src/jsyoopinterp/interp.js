@@ -48,13 +48,37 @@ function makeFrame(fn, returnDst = null) {
 // `evaluate(fn) → wrappedValue`. Throws ComptimeError on failure.
 // Currently the function takes no arguments; later sub-phases will
 // accept positional args via `evaluate(fn, args)`.
+// Build a traceback array (innermost frame first) from the live
+// interpreter stack. Each entry captures `{ fnName, sourceLoc }` —
+// the function's name and the source location of the instruction
+// that was about to dispatch when the error fired. The diagnostics
+// module formats this for display.
+function captureTraceback(stack, instIp) {
+  const frames = [];
+  for (let i = stack.length - 1; i >= 0; i--) {
+    const fr = stack[i];
+    // For the innermost frame, the "current instruction" is the one
+    // we just advanced past via `frame.ip++` — i.e. `ip - 1`. For
+    // frames further down, the saved `ip` is the resume point, so
+    // the in-flight CALL_DIRECT is at `ip - 1` there too.
+    const ip = i === stack.length - 1 ? instIp : fr.ip - 1;
+    const inst = fr.fn.instructions[Math.max(0, ip)];
+    frames.push({
+      fnName: fr.fn.name ?? "<anon>",
+      sourceLoc: inst?.sourceLoc ?? fr.fn.sourceLoc ?? null,
+    });
+  }
+  return frames;
+}
+
 export function evaluate(fn) {
   const stack = [makeFrame(fn)];
   // Result of the innermost ret. Used to bubble back to the top frame
   // when call_direct lands.
   let pendingResult = null;
+  let lastIp = 0;
 
-  while (stack.length > 0) {
+  try { while (stack.length > 0) {
     const frame = stack[stack.length - 1];
     if (frame.ip >= frame.fn.instructions.length) {
       throw new ComptimeError(
@@ -63,6 +87,7 @@ export function evaluate(fn) {
       );
     }
     const inst = frame.fn.instructions[frame.ip++];
+    lastIp = frame.ip - 1;
 
     switch (inst.op) {
       case OP.LITERAL: {
@@ -267,6 +292,43 @@ export function evaluate(fn) {
           ty: inst.type,
           v: { state: "done", result: inner },
         };
+        break;
+      }
+
+      case OP.VTABLE_CONSTRUCT: {
+        // The struct ref came in via REF_LOCAL/REF_FIELD/REF_INDEX —
+        // its `v` already encodes (container, key). Store the ref
+        // itself as the vtable's ctx so VTABLE_CALL can pass it
+        // through as the method's `ref self` param.
+        const ctxRef = frame.registers[inst.args[0]];
+        frame.registers[inst.dst] = {
+          ty: inst.type,
+          v: { ctx: ctxRef, methodFns: inst.immediate.methodFns },
+        };
+        break;
+      }
+
+      case OP.VTABLE_CALL: {
+        // Look up the method's bytecode at the cached field index;
+        // push a new frame with ctx (the original ref) at reg 0 and
+        // the user args at regs 1..N. Same shape as CALL_DIRECT for
+        // a method with `ref self`.
+        const vt = frame.registers[inst.args[0]];
+        const fieldIndex = inst.immediate.fieldIndex;
+        const methodFn = vt?.v?.methodFns?.[fieldIndex];
+        if (!methodFn) {
+          throw new ComptimeError(
+            `comptime: vtable method index ${fieldIndex} has no resolved bytecode`,
+            inst.sourceLoc,
+          );
+        }
+        const newFrame = makeFrame(methodFn, inst.dst);
+        // reg 0 = ctx (the ref); subsequent regs = user args.
+        newFrame.registers[0] = vt.v.ctx;
+        for (let i = 1; i < inst.args.length; i++) {
+          newFrame.registers[i] = valueCopy(frame.registers[inst.args[i]]);
+        }
+        stack.push(newFrame);
         break;
       }
 
@@ -533,6 +595,17 @@ export function evaluate(fn) {
         inst.sourceLoc,
       );
     }
+  } } catch (err) {
+    // Attach a traceback to ComptimeErrors so the comptime pass
+    // (and `@precompile`'s hard-error path) can render call chains
+    // when the failure was deep. Non-ComptimeError exceptions
+    // propagate unchanged — those are interpreter bugs.
+    if (err instanceof ComptimeError) {
+      if (err.traceback == null) {
+        err.traceback = captureTraceback(stack, lastIp);
+      }
+    }
+    throw err;
   }
 
   return pendingResult;

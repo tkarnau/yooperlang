@@ -1053,6 +1053,76 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
+      // Phase 11.D.13: VTable.from(ref x) — typechecker stamped
+      // `vtableBuilder = { vtableType, implType }`. Pre-resolve each
+      // method's bytecode (via the trait method resolver against
+      // implType) so the runtime VTABLE_CONSTRUCT just bakes the
+      // array into the wrapped value.
+      if (node.vtableBuilder) {
+        if (!ctx.traitMethodResolver) {
+          throw new ComptimeError(
+            `comptime: VTable.from() requires a traitMethodResolver`,
+            node.sourceLoc,
+          );
+        }
+        const { vtableType, implType } = node.vtableBuilder;
+        const methodFns = [];
+        for (const methodName of vtableType.methodOrder) {
+          const bc = ctx.traitMethodResolver(
+            implType,
+            vtableType.traitName,
+            methodName,
+          );
+          if (!bc) {
+            throw new ComptimeError(
+              `comptime: vtable "${vtableType.name}" method "${methodName}" not comptime-evaluable on ${implType.name}`,
+              node.sourceLoc,
+            );
+          }
+          methodFns.push(bc);
+        }
+        const refArg = node.args[0]; // REF_EXPRESSION
+        const refReg = lowerExpr(refArg, ctx, scope);
+        const dst = ctx.allocReg(vtableType);
+        ctx.emit(
+          instruction(OP.VTABLE_CONSTRUCT, {
+            dst,
+            args: [refReg],
+            type: vtableType,
+            immediate: { methodFns },
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return dst;
+      }
+      // Phase 11.D.13: trait method dispatch through a vtable. The
+      // typechecker stamped `vtableCall = { vtableType, methodName,
+      // fieldIndex }`. The first arg is the vtable receiver (`ref vt`);
+      // the rest are user args. Use VTABLE_CALL to look up
+      // methodFns[fieldIndex] at runtime and push a frame with ctx
+      // as the method's `ref self` param.
+      if (node.vtableCall) {
+        const { fieldIndex } = node.vtableCall;
+        // First arg is `ref vt`; we want the vtable value itself,
+        // not the ref. Since REF_EXPRESSION on an IDENT to a
+        // vt-typed binding returns the slot reg directly (see
+        // lower.js REF_EXPRESSION case), this gives us the vtable
+        // wrapped value.
+        const vtRefExpr = node.args[0];
+        const vtReg = lowerExpr(vtRefExpr.operand, ctx, scope);
+        const userArgRegs = (node.args.slice(1)).map((a) => lowerExpr(a, ctx, scope));
+        const dst = ctx.allocReg(node.resolvedType);
+        ctx.emit(
+          instruction(OP.VTABLE_CALL, {
+            dst,
+            args: [vtReg, ...userArgRegs],
+            type: node.resolvedType,
+            immediate: { fieldIndex },
+            sourceLoc: node.sourceLoc,
+          }),
+        );
+        return dst;
+      }
       // Phase 11.D.5: trait method call. The typechecker stamps
       // `calleeMethodOf` (receiver struct type) + `calleeTrait`
       // (trait type) + `calleeMethodName` on these. We dispatch to a
