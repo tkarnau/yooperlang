@@ -7,6 +7,11 @@ import {
 
 import { ASTNode, ASTNodeKind } from "../contracts.js";
 import { posToSourceLocation } from "../helpers.js";
+import {
+  getAttributeHandler,
+  knownAttributeNames,
+  suggestAttributeName,
+} from "../jsyoopattributes/registry.js";
 
 function isBinaryOp(tag) {
   return (
@@ -649,6 +654,13 @@ export function parse(src) {
               node.body.push(parseKindDecl());
             }
             break;
+          case TokenTags.at:
+            {
+              // Phase 11.A: `@<name>(args?) target` attribute at top level.
+              seenNonImport = true;
+              node.body.push(parseAttribute());
+            }
+            break;
           case TokenTags.let:
           case TokenTags.const:
             {
@@ -683,6 +695,90 @@ export function parse(src) {
   // Strip surrounding quotes from a strLiteral token value.
   function unquoteStringLiteral(tok) {
     return src.substring(tok.start + 1, tok.start + tok.length - 1);
+  }
+
+  // Phase 11.A: `@<name>(args?) target` attribute. Parses the prefix,
+  // optional arg list, and the decorated target (block, let/const decl,
+  // or bare ; for argless statement-shaped attributes). Looks up the
+  // attribute in the registry and runs its parsePhase handler; unknown
+  // attribute names produce a "did you mean" diagnostic.
+  function parseAttribute() {
+    const atTok = expect(TokenTags.at);
+    const node = buildSourcedNode(ASTNodeKind.ATTRIBUTE);
+    node.sourceLoc = posToSourceLocation(src, atTok.start);
+    node.sourceLoc.length = 1;
+
+    const nameTok = expect(TokenTags.ident);
+    node.name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    node.nameSourceLoc = posToSourceLocation(src, nameTok.start);
+    node.nameSourceLoc.length = nameTok.length;
+
+    node.args = [];
+    if (peek().tag === TokenTags.lparen) {
+      const lparenTok = advance();
+      node.argsSourceLoc = posToSourceLocation(src, lparenTok.start);
+      while (
+        peek().tag !== TokenTags.rparen &&
+        peek().tag !== TokenTags.eof
+      ) {
+        node.args.push(parseExpression());
+        if (peek().tag === TokenTags.comma) {
+          advance();
+          continue;
+        }
+        break;
+      }
+      expect(TokenTags.rparen);
+    }
+
+    // Target. Three accepted shapes today; future attribute consumers
+    // can extend the dispatch (e.g. decorate a function decl).
+    const nextTag = peek().tag;
+    if (nextTag === TokenTags.lcurly) {
+      node.target = parseBlock();
+    } else if (
+      nextTag === TokenTags.let ||
+      nextTag === TokenTags.const
+    ) {
+      node.target = parseVarDecl();
+    } else if (nextTag === TokenTags.semicolon) {
+      advance();
+      node.target = null;
+    } else {
+      throw parseError(
+        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, or ';' (got ${inverseTokenTags[nextTag]})`,
+        peek().start,
+        peek().length,
+      );
+    }
+
+    const handler = getAttributeHandler(node.name);
+    if (!handler) {
+      const suggestion = suggestAttributeName(node.name);
+      const known = knownAttributeNames()
+        .map((n) => `@${n}`)
+        .join(", ");
+      const hint = suggestion
+        ? ` Did you mean @${suggestion}?`
+        : known.length
+          ? ` Known attributes: ${known}.`
+          : "";
+      throw parseError(
+        `unknown attribute @${node.name}.${hint}`,
+        nameTok.start,
+        nameTok.length,
+      );
+    }
+
+    if (handler.parsePhase) {
+      handler.parsePhase(node, {
+        throwError: (msg, loc) => {
+          throw parseError(msg, loc?.pos ?? nameTok.start, loc?.length ?? 1);
+        },
+      });
+    }
+
+    return node;
   }
 
   function parseKindDecl() {
@@ -2041,6 +2137,12 @@ export function parse(src) {
       }
       case TokenTags.switch: {
         return parseSwitchStatement();
+      }
+      case TokenTags.at: {
+        // Phase 11.A: `@<name>(args?) target` attribute at statement
+        // position. Body of `@precompile { ... }` etc. lives inside a
+        // function body via this path.
+        return parseAttribute();
       }
       case TokenTags.ident: {
         // kind-prefixed binding form: `IDENT IDENT : ...` or

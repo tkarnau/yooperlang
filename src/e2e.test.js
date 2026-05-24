@@ -13,6 +13,7 @@ import { parse } from "./jsyooparser/parser.js";
 import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
+import { runAttributePass } from "./jsyoopattributes/pass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
@@ -1155,6 +1156,45 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     assert.ok(
       errors.some((e) => /no `Into<struct AppError>` impl on struct IoError/.test(e.message)),
       `expected missing-Into error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+});
+
+// Phase 11.A: `@`-attribute syntax + registry skeleton. The first
+// inaugural consumer (`@precompile`) parses + typechecks fine; the
+// post-typecheck attribute pass errors out with "not yet implemented"
+// until 11.C wires the interpreter. Once 11.C ships, the
+// at_precompile_pending fixture moves out of fail and is replaced by
+// at_precompile_block / at_precompile_expr in examples/pass.
+describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
+  it("at_unknown_attribute.yoop: unknown `@foo` errors with a Levenshtein 'did you mean' hint", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/at_unknown_attribute.yoop"),
+      "utf8",
+    );
+    assert.throws(
+      () => parse(src),
+      /unknown attribute @precompil\. Did you mean @precompile\?/,
+    );
+  });
+
+  it("at_precompile_pending.yoop: `@precompile` parses + typechecks; attribute pass errors with the Phase 11.C gating message", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/at_precompile_pending.yoop"),
+      "utf8",
+    );
+    // Parses cleanly.
+    const ast = parse(src);
+    // Typechecks cleanly.
+    const mod = { id: "fixture", absPath: "fixture", src, ast };
+    const { errors: tcErrors } = typecheckProgram([mod]);
+    assert.equal(tcErrors.length, 0, `unexpected typecheck errors: ${tcErrors.map((e) => e.message).join(" | ")}`);
+    // Attribute pass surfaces the "comptime engine not yet implemented" diagnostic.
+    const attrErrors = [];
+    runAttributePass([mod], attrErrors);
+    assert.ok(
+      attrErrors.some((e) => /compile-time interpreter lands in Phase 11\.C/.test(e.message)),
+      `expected Phase 11.C gating error, got: ${attrErrors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

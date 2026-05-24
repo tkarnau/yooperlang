@@ -116,6 +116,15 @@ export const ASTNodeKind = Object.freeze({
 
   // test undefined kind handling for iteration tests
   FAIL_TEST_KIND: "FAIL_TEST_KIND",
+
+  // phase 11.A: `@<name>(args?) target` compile-time / static-analysis
+  // attribute. The `target` field carries the AST node the attribute
+  // decorates (a decl, statement, block, or null for bare attribute
+  // statements). Per-attribute behavior lives in
+  // src/jsyoopattributes/registry.js — the AST node itself is just the
+  // carrier. Codegen must consume every ATTRIBUTE node before emission;
+  // any that survive are an internal-error.
+  ATTRIBUTE: "ATTRIBUTE",
 });
 
 export function SourceLocation(pos, line, column, length) {

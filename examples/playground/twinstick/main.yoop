@@ -1,0 +1,509 @@
+// Twin-stick shooter demo: WASD moves a player square, arrow keys fire
+// bullets in the held direction (hold-to-fire at a fixed cadence), and
+// destroyed enemies schedule their own respawn through a Task<int32>
+// timer that the main loop polls without blocking.
+//
+// The point is to exercise the newer language features end to end —
+// trait-qualified dispatch, the `disposable` kind for RAII, enum sum
+// types with payload destructuring (WaitResult<T>), pooled tasks +
+// `wait_until` for cooperative timers, and `cancel(...)` to clean up
+// background work at shutdown.
+//
+// Ergonomics callouts are sprinkled throughout in `// ERGO:` comments —
+// places where the code is more verbose than it would need to be once
+// a particular bit of syntactic sugar / abstraction lands.
+
+// ERGO: `WaitResult<int32>` + `wait_until` were going to drive per-enemy
+// respawn polling but we can't store Task<int32> handles in an array yet
+// (see ERGO #1 on the Enemy type below). Only `now_ns` + `sleep_ms` are
+// in active use — `now_ns` for deadlines and the firing cooldown,
+// `sleep_ms` inside the wave_announcer task body.
+import { now_ns, sleep_ms } from "std/core/concurrency.yoop";
+
+// ── External libs ────────────────────────────────────────────────────────────
+
+extern "C" from library "m" {
+    function sqrt(x: float64): float64;
+    function printf(fmt: string, ...): int32;
+}
+
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_Renderer;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+
+    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+
+    function SDL_CreateWindow(
+        title: string,
+        x: int32, y: int32,
+        w: int32, h: int32,
+        flags: uint32
+    ): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+
+    function SDL_CreateRenderer(
+        ref win: SDL_Window,
+        index: int32,
+        flags: uint32
+    ): ref SDL_Renderer;
+    function SDL_DestroyRenderer(ref ren: SDL_Renderer): void;
+
+    function SDL_SetRenderDrawColor(
+        ref ren: SDL_Renderer,
+        r: uint8, g: uint8, b: uint8, a: uint8
+    ): int32;
+    function SDL_RenderClear(ref ren: SDL_Renderer): int32;
+    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
+    function SDL_RenderDrawLine(
+        ref ren: SDL_Renderer,
+        x1: int32, y1: int32,
+        x2: int32, y2: int32
+    ): int32;
+
+    function SDL_GetTicks(): uint32;
+    function SDL_Delay(ms: uint32): void;
+    function SDL_PumpEvents(): void;
+}
+
+// ── Disposable kind for SDL handles ──────────────────────────────────────────
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void {
+        SDL_DestroyWindow(self.handle);
+    }
+}
+
+type Renderer implements Disposable {
+    handle: ref SDL_Renderer,
+    function dispose(ref self): void {
+        SDL_DestroyRenderer(self.handle);
+    }
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+// ── Cheap LCG for spawn positions ────────────────────────────────────────────
+
+// Numerical Recipes constants. State is mutated in place via `ref`.
+function next_rand(ref state: int32, range: int32): int32 {
+    state = state * 1103515245 + 12345;
+    let r: int32 = state % range;
+    if (r < 0) { r = r + range; }
+    return r;
+}
+
+// ── Background task ─────────────────────────────────────────────────────────
+//
+// One-shot per-kill announce task. Fired with `pooled t = announce_kill(s);`
+// at the collision site — the binding falls out of scope on the next
+// statement and the refcount goes to 1 (the worker's own ref). The
+// worker prints, returns, and releases. Total task lifetime ≈ 20ms.
+//
+// ERGO: the *previous* shape of this demo had a single long-running
+// `wave_announcer` task that slept 4s between prints. That hangs on
+// shutdown because:
+//   1. `cancel(h)` only wakes `wait_until` parkers, never the task
+//      body — `sleep_ms` is not cancel-aware.
+//   2. `yoop_runtime_shutdown` is injected at every `ret` from `main`
+//      and `pthread_join`s every worker, which won't return until the
+//      task it's running finishes naturally.
+// So a long-sleeping task gates process exit on its sleep finishing.
+// Short-lived per-event tasks sidestep both issues. The pieces that
+// would let a long-running task shut down promptly are an exposed
+// `is_cancelled` extern (or implicit polling in `sleep_ms`) so the
+// body can early-return, plus a non-blocking handle release that
+// doesn't require `wait`.
+task announce_kill(score: int32): int32 {
+    sleep_ms(20);
+    printf("kill #%d!\n", score);
+    return 0;
+}
+
+// ── Enemy model ──────────────────────────────────────────────────────────────
+//
+// ERGO #1: the natural shape for enemy state is
+//
+//     enum EnemyState {
+//         Alive,
+//         Respawning { ready_at_ns: uint64 },
+//     }
+//
+// ...but I wanted to go further, and store the actual respawn Task<int32>
+// handle in the Respawning variant. That doesn't work today:
+//   - `Task<int32>` is not allowed as an array element type at codegen
+//     time (the compiler errors with `arrayElemLlvmName: unsupported
+//     elem type "task"`). So even a parallel `respawn_handles: Task<int32>[]`
+//     can't be expressed.
+//   - Storing handles in enum payloads would also need the `pooled`/Task
+//     kind to flow through variant construction + switch — not yet wired.
+//
+// Workaround: per-enemy respawn is a wall-clock deadline (`ready_at_ns`),
+// not a polled Task. Each frame we just compare against `now_ns()`. The
+// task/timer primitives still get a real workout via `wave_announcer`
+// below, which is the cleanest place a `Task<T>` survives end-to-end.
+type Enemy {
+    x: float32,
+    y: float32,
+    radius: float32,
+}
+
+function spawn_enemy(ref e: Enemy, ref rng: int32, win_w: int32, win_h: int32): void {
+    const margin: int32 = 60;
+    e.x = float32(next_rand(ref rng, win_w  - margin * 2)) + float32(margin);
+    e.y = float32(next_rand(ref rng, win_h / 2 - margin)) + float32(margin);
+    e.radius = 20.0 + float32(next_rand(ref rng, 16));
+}
+
+function dist_sq(ax: float32, ay: float32, bx: float32, by: float32): float32 {
+    const dx: float32 = ax - bx;
+    const dy: float32 = ay - by;
+    return dx * dx + dy * dy;
+}
+
+// ── Drawing helpers ─────────────────────────────────────────────────────────
+//
+// ERGO: fill_rect / fill_circle are inlined at every call site below
+// rather than factored into functions taking `ref SDL_Renderer`. A user
+// function with `ref T` where T is an opaque `extern "C" type` errors
+// at codegen ("loading unsized types is not allowed") because codegen
+// emits a `load %T` on the parameter slot even though T has no LLVM
+// representation. Workarounds today: redeclare every helper inline,
+// or wrap the handle in a user struct first. Either way, opaque-extern
+// `ref` params in non-extern functions need first-class support before
+// drawing utilities can be deduplicated.
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+function main(): int32 {
+    const WIN_W: int32 = 800;
+    const WIN_H: int32 = 600;
+    const FPS_TARGET: uint32 = 60;
+    const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+
+    // USB HID scancodes — same set SDL surfaces through SDL_GetKeyboardState.
+    // ERGO: would be much nicer to pull these from an `SDL_Scancode` enum
+    // exported by an SDL bindings module rather than redeclare per file.
+    const SC_ESCAPE: int32 = 41;
+    const SC_W: int32 = 26;
+    const SC_A: int32 = 4;
+    const SC_S: int32 = 22;
+    const SC_D: int32 = 7;
+    const SC_UP: int32 = 82;
+    const SC_DOWN: int32 = 81;
+    const SC_LEFT: int32 = 80;
+    const SC_RIGHT: int32 = 79;
+
+    const PLAYER_SIZE: float32 = 22.0;
+    const PLAYER_SPEED: float32 = 0.30;
+
+    const BULLET_W: float32 = 5.0;
+    const BULLET_H: float32 = 5.0;
+    const BULLET_SPEED: float32 = 0.55;
+    // ERGO: every `heap_alloc(usize(BULLET_POOL))` below needs an explicit
+    // `usize(...)` cast because pool sizes naturally read as `int32`
+    // but the allocator's element-count param is `usize`. Either
+    // implicit widening from a non-negative int32 literal/const to
+    // usize, or a separate index/count primitive type, would erase
+    // the cast churn — and would dovetail with index-position pinning
+    // already used for untyped int literals.
+    const BULLET_POOL: int32 = 32;
+
+    // ~6 shots per second when an arrow is held.
+    const FIRE_COOLDOWN_NS: uint64 = 160_000_000;
+    // Respawn 2.5s after an enemy is destroyed.
+    const RESPAWN_DELAY_MS: uint64 = 2500;
+
+    const N_ENEMIES: int32 = 5;
+
+    const SDL_INIT_VIDEO: uint32 = 0x00000020;
+    const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+    const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+    const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
+    const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        printf("SDL_Init failed\n");
+        return 1;
+    }
+
+    disposable win: Window = {
+        handle: SDL_CreateWindow(
+            "yooperlang twin-stick",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            WIN_W, WIN_H,
+            SDL_WINDOW_SHOWN
+        )
+    } {
+        disposable ren: Renderer = {
+            handle: SDL_CreateRenderer(
+                win.handle, -1,
+                SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+            )
+        };
+
+        let rng_state: int32 = int32(SDL_GetTicks()) | 1;
+
+        // Player — full 2D position, no Y lock.
+        // ERGO: a built-in `Vec2 { x, y }` plus + - * scalar overloads would
+        // shrink most of the movement/firing math by ~50%. Right now every
+        // operation walks the components separately.
+        let player_x: float32 = float32(WIN_W) * 0.5;
+        let player_y: float32 = float32(WIN_H) * 0.5;
+
+        // Bullet pool as parallel arrays. Direction is unit (dx, dy).
+        // ERGO: a SoA helper like `struct Bullet { ... }; let bullets: Bullet[N]`
+        // with sized array literals + `for b in bullets { ... }` over a fixed
+        // capacity would beat hand-writing five parallel buffers. Today
+        // `T[]` is fat-pointer-only, so we have to heap_alloc per slot type.
+        let bullet_x: float32[] = heap_alloc(usize(BULLET_POOL));
+        let bullet_y: float32[] = heap_alloc(usize(BULLET_POOL));
+        let bullet_dx: float32[] = heap_alloc(usize(BULLET_POOL));
+        let bullet_dy: float32[] = heap_alloc(usize(BULLET_POOL));
+        let bullet_active: bool[] = heap_alloc(usize(BULLET_POOL));
+        let bi_init: int32 = 0;
+        while (bi_init < BULLET_POOL) {
+            bullet_active[bi_init] = false;
+            bi_init = bi_init + 1;
+        }
+
+        // Enemy state. `enemy_alive[i]` flips false on kill, and the
+        // matching slot in `enemy_ready_at_ns[i]` gets set to the
+        // absolute nanosecond timestamp at which the enemy may respawn.
+        let enemies: Enemy[] = heap_alloc(usize(N_ENEMIES));
+        let enemy_alive: bool[] = heap_alloc(usize(N_ENEMIES));
+        let enemy_ready_at_ns: uint64[] = heap_alloc(usize(N_ENEMIES));
+        let ei_init: int32 = 0;
+        while (ei_init < N_ENEMIES) {
+            spawn_enemy(ref enemies[ei_init], ref rng_state, WIN_W, WIN_H);
+            enemy_alive[ei_init] = true;
+            enemy_ready_at_ns[ei_init] = 0;
+            ei_init = ei_init + 1;
+        }
+
+        // Cooldown gate for held-arrow autofire. `last_fire_ns == 0`
+        // means "fire-eligible immediately"; otherwise we wait until
+        // `now_ns() >= last_fire_ns + FIRE_COOLDOWN_NS`.
+        let last_fire_ns: uint64 = 0;
+
+        let score: int32 = 0;
+
+        let running: bool = true;
+        while (running) {
+            const frame_start: uint32 = SDL_GetTicks();
+            const t_ns: uint64 = now_ns();
+
+            let kbRef: int = 0;
+            const keys: uint8[] = SDL_GetKeyboardState(ref kbRef);
+            if (keys[SC_ESCAPE] != 0) {
+                running = false;
+            }
+            SDL_PumpEvents();
+
+            const dt: float32 = float32(MS_PER_FRAME);
+            const move: float32 = PLAYER_SPEED * dt;
+
+            // WASD movement. Diagonals are intentionally faster (no
+            // normalization) so the demo stays one screen of arithmetic.
+            // ERGO: with a Vec2 + length / normalize this would be
+            //   let dir = vec_from_keys(keys); player += normalize(dir) * move;
+            if (keys[SC_W] != 0) { player_y = player_y - move; }
+            if (keys[SC_S] != 0) { player_y = player_y + move; }
+            if (keys[SC_A] != 0) { player_x = player_x - move; }
+            if (keys[SC_D] != 0) { player_x = player_x + move; }
+            if (player_x < 0.0) { player_x = 0.0; }
+            if (player_y < 0.0) { player_y = 0.0; }
+            if (player_x + PLAYER_SIZE > float32(WIN_W)) { player_x = float32(WIN_W) - PLAYER_SIZE; }
+            if (player_y + PLAYER_SIZE > float32(WIN_H)) { player_y = float32(WIN_H) - PLAYER_SIZE; }
+
+            // Arrow-key fire direction. Held = continuous fire, gated
+            // by the cooldown. No edge detection — that's what the
+            // cooldown gate is for.
+            let fire_dx: float32 = 0.0;
+            let fire_dy: float32 = 0.0;
+            if (keys[SC_UP]    != 0) { fire_dy = fire_dy - 1.0; }
+            if (keys[SC_DOWN]  != 0) { fire_dy = fire_dy + 1.0; }
+            if (keys[SC_LEFT]  != 0) { fire_dx = fire_dx - 1.0; }
+            if (keys[SC_RIGHT] != 0) { fire_dx = fire_dx + 1.0; }
+            const firing: bool = fire_dx != 0.0 || fire_dy != 0.0;
+
+            if (firing && t_ns >= last_fire_ns + FIRE_COOLDOWN_NS) {
+                // Normalize direction so diagonal shots don't fly √2× faster.
+                const mag: float32 = float32(sqrt(float64(fire_dx * fire_dx + fire_dy * fire_dy)));
+                const ndx: float32 = fire_dx / mag;
+                const ndy: float32 = fire_dy / mag;
+
+                let fi: int32 = 0;
+                while (fi < BULLET_POOL) {
+                    if (!bullet_active[fi]) {
+                        bullet_active[fi] = true;
+                        bullet_x[fi] = player_x + PLAYER_SIZE * 0.5 - BULLET_W * 0.5;
+                        bullet_y[fi] = player_y + PLAYER_SIZE * 0.5 - BULLET_H * 0.5;
+                        bullet_dx[fi] = ndx;
+                        bullet_dy[fi] = ndy;
+                        break;
+                    }
+                    fi = fi + 1;
+                }
+                last_fire_ns = t_ns;
+            }
+
+            // Advance bullets, retire any that leave the screen.
+            let mi: int32 = 0;
+            while (mi < BULLET_POOL) {
+                if (bullet_active[mi]) {
+                    bullet_x[mi] = bullet_x[mi] + bullet_dx[mi] * BULLET_SPEED * dt;
+                    bullet_y[mi] = bullet_y[mi] + bullet_dy[mi] * BULLET_SPEED * dt;
+                    if (bullet_x[mi] < -BULLET_W || bullet_x[mi] > float32(WIN_W) ||
+                        bullet_y[mi] < -BULLET_H || bullet_y[mi] > float32(WIN_H)) {
+                        bullet_active[mi] = false;
+                    }
+                }
+                mi = mi + 1;
+            }
+
+            // Bullet ↔ enemy collisions.
+            let ci: int32 = 0;
+            while (ci < N_ENEMIES) {
+                if (enemy_alive[ci]) {
+                    const bcx: float32 = enemies[ci].x;
+                    const bcy: float32 = enemies[ci].y;
+                    const br2: float32 = enemies[ci].radius * enemies[ci].radius;
+
+                    let cb: int32 = 0;
+                    while (cb < BULLET_POOL) {
+                        if (bullet_active[cb]) {
+                            const cx: float32 = bullet_x[cb] + BULLET_W * 0.5;
+                            const cy: float32 = bullet_y[cb] + BULLET_H * 0.5;
+                            if (dist_sq(cx, cy, bcx, bcy) < br2) {
+                                bullet_active[cb] = false;
+                                enemy_alive[ci] = false;
+                                // Schedule respawn as a wall-clock deadline.
+                                // ERGO: if Task<T>[] were a supported array
+                                // element type, this branch would spawn a
+                                // `pooled t = respawn_timer(RESPAWN_DELAY_MS);`
+                                // and stash `t` in a parallel array — the
+                                // poll below would then be a real
+                                // `wait_until(handle, now_ns())` instead of
+                                // a deadline compare.
+                                enemy_ready_at_ns[ci] = t_ns + RESPAWN_DELAY_MS * 1_000_000;
+                                score = score + 1;
+                                // Fire-and-forget announce task: print
+                                // "kill #N!" off the main thread. The
+                                // pooled handle drops to refcount 1 at
+                                // the next statement (the worker still
+                                // holds its own ref), the body runs to
+                                // completion on a worker, and the
+                                // handle is freed when both refs drop.
+                                pooled announce_h = announce_kill(score);
+                                break;
+                            }
+                        }
+                        cb = cb + 1;
+                    }
+                }
+                ci = ci + 1;
+            }
+
+            // Respawn any dead enemy whose deadline has passed.
+            let pi: int32 = 0;
+            while (pi < N_ENEMIES) {
+                if ((!enemy_alive[pi]) && t_ns >= enemy_ready_at_ns[pi]) {
+                    spawn_enemy(ref enemies[pi], ref rng_state, WIN_W, WIN_H);
+                    enemy_alive[pi] = true;
+                }
+                pi = pi + 1;
+            }
+
+            // ── Render ──
+
+            // Dark background.
+            SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(18), uint8(28), uint8(255));
+            SDL_RenderClear(ren.handle);
+
+            // Enemies — red circles. Scanline fill, inlined per the
+            // ERGO note above the Drawing helpers section.
+            SDL_SetRenderDrawColor(ren.handle, uint8(220), uint8(60), uint8(60), uint8(255));
+            let di: int32 = 0;
+            while (di < N_ENEMIES) {
+                if (enemy_alive[di]) {
+                    const ecx: int32 = int32(enemies[di].x);
+                    const ecy: int32 = int32(enemies[di].y);
+                    const er: int32 = int32(enemies[di].radius);
+                    let erow: int32 = -er;
+                    while (erow <= er) {
+                        const ehalf: int32 = int32(sqrt(float64(er * er - erow * erow)));
+                        SDL_RenderDrawLine(ren.handle, ecx - ehalf, ecy + erow, ecx + ehalf, ecy + erow);
+                        erow = erow + 1;
+                    }
+                }
+                di = di + 1;
+            }
+
+            // Bullets — soft yellow. Scanline-filled rectangles.
+            SDL_SetRenderDrawColor(ren.handle, uint8(255), uint8(240), uint8(140), uint8(255));
+            const bw_i: int32 = int32(BULLET_W);
+            const bh_i: int32 = int32(BULLET_H);
+            let dbi: int32 = 0;
+            while (dbi < BULLET_POOL) {
+                if (bullet_active[dbi]) {
+                    const bx: int32 = int32(bullet_x[dbi]);
+                    const by: int32 = int32(bullet_y[dbi]);
+                    let brow: int32 = 0;
+                    while (brow < bh_i) {
+                        SDL_RenderDrawLine(ren.handle, bx, by + brow, bx + bw_i, by + brow);
+                        brow = brow + 1;
+                    }
+                }
+                dbi = dbi + 1;
+            }
+
+            // Player — cyan square.
+            SDL_SetRenderDrawColor(ren.handle, uint8(120), uint8(220), uint8(255), uint8(255));
+            const px_i: int32 = int32(player_x);
+            const py_i: int32 = int32(player_y);
+            const psize_i: int32 = int32(PLAYER_SIZE);
+            let prow: int32 = 0;
+            while (prow < psize_i) {
+                SDL_RenderDrawLine(ren.handle, px_i, py_i + prow, px_i + psize_i, py_i + prow);
+                prow = prow + 1;
+            }
+
+            SDL_RenderPresent(ren.handle);
+
+            const elapsed: uint32 = SDL_GetTicks() - frame_start;
+            if (elapsed < MS_PER_FRAME) {
+                SDL_Delay(MS_PER_FRAME - elapsed);
+            }
+        }
+
+        // Shutdown. `pooled` handles are refcounted — there are no
+        // long-running tasks to drain (the per-kill announce tasks each
+        // live ~20ms), so `yoop_runtime_shutdown` (injected at every
+        // `ret` from main) joins workers promptly.
+
+        heap_free(bullet_x);
+        heap_free(bullet_y);
+        heap_free(bullet_dx);
+        heap_free(bullet_dy);
+        heap_free(bullet_active);
+        heap_free(enemies);
+        heap_free(enemy_alive);
+        heap_free(enemy_ready_at_ns);
+
+        SDL_Quit();
+    }
+    return 0;
+}

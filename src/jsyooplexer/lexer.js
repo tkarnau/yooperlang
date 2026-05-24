@@ -151,6 +151,10 @@ export const TokenTags = {
   // vtable fields). Expression-position `=>` is reserved for a future
   // closure-literal syntax and is currently a parse error there.
   fatArrow: "fatArrow",
+  // Phase 11.A: `@` prefix introducing a compile-time / static-analysis
+  // attribute (e.g. `@precompile`, `@test`, `@verify`). Always a
+  // compile-time directive — never queryable from runtime code.
+  at: "at",
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -208,6 +212,8 @@ export const tokenScanList = [
   { str: "...", tag: TokenTags.dotdotdot },
   { str: "[", tag: TokenTags.lbracket },
   { str: "]", tag: TokenTags.rbracket },
+  // Phase 11.A: attribute prefix `@`.
+  { str: "@", tag: TokenTags.at },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
 const keywordTagList = {

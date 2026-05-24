@@ -7,6 +7,7 @@ import path from "path";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { typecheckProgram } from "./jsyooptypecheck/typecheck.js";
 import { codegenProgram } from "./jsyoopcodegen/codegen.js";
+import { runAttributePass } from "./jsyoopattributes/pass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst } from "./dumpAst.js";
@@ -89,6 +90,31 @@ function main() {
     process.exit(1);
   }
   console.log("typecheck: ok");
+
+  // Phase 11.A: attribute dispatch pass. Currently only `@precompile`
+  // is registered, and its handler errors out with "comptime engine
+  // not yet implemented (Phase 11.C pending)". Adding the pass here
+  // makes the integration point real even before the interpreter
+  // lands — future attribute consumers will plug into this same hook.
+  const attrErrors = [];
+  runAttributePass(modules, attrErrors);
+  if (attrErrors.length > 0) {
+    const modById = new Map(modules.map((m) => [m.id, m]));
+    console.error(`attribute pass failed (${attrErrors.length} error${attrErrors.length === 1 ? "" : "s"}):\n`);
+    for (const error of attrErrors) {
+      const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
+      console.error(
+        formatDiagnostic({
+          filePath: mod?.absPath ?? inputFile,
+          src: mod?.src ?? "",
+          loc: error.sourceLoc,
+          message: error.message,
+        }),
+      );
+      console.error("");
+    }
+    process.exit(1);
+  }
 
   const { ir, linkFlags } = codegenProgram(modules, moduleEnv, programState);
   console.log("llvm IR: ok");
