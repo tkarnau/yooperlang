@@ -292,7 +292,7 @@ function main(): int32 {
       });
       assert.ok(resp.result, "expected a tokens result");
       assert.ok(Array.isArray(resp.result.data));
-      // Quintuple-encoded — length must be a multiple of 5.
+      // Quintuple-encoded - length must be a multiple of 5.
       assert.equal(resp.result.data.length % 5, 0);
       assert.ok(resp.result.data.length >= 5, "expected at least one token");
     });

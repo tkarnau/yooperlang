@@ -20,25 +20,34 @@ kind disposable {
     mustCall dispose beforeScopeEnd;
 }
 
-type Result { value: int32, err: string }
-
-function readOne(ref h: FileHandle, fail: bool): Result {
-    if (fail) {
-        return { value: 0, err: "boom" };
-    }
-    return { value: h.fd, err: "" };
+enum ReadResult {
+    Ok { value: int32 },
+    Err { error: string },
 }
 
-function go(fail: bool): Result {
+function readOne(ref h: FileHandle, fail: bool): ReadResult {
+    if (fail) {
+        return ReadResult.Err { error: "boom" };
+    }
+    return ReadResult.Ok { value: h.fd };
+}
+
+function go(fail: bool): ReadResult {
     disposable a: FileHandle = { fd: 5 };
     const v: int32 = readOne(ref a, fail)?;
-    return { value: v, err: "" };
+    return ReadResult.Ok { value: v };
 }
 
 function main(): int32 {
-    const r1: Result = go(false);
-    printf(`ok r1=${r1.value} err='${r1.err}'\n`);
-    const r2: Result = go(true);
-    printf(`fail r2=${r2.value} err='${r2.err}'\n`);
+    const r1: ReadResult = go(false);
+    switch (r1) {
+        case ReadResult.Ok { value: v1 }: { printf(`ok r1=${v1} err=''\n`); }
+        case ReadResult.Err { error: e1 }: { printf(`ok r1=0 err='${e1}'\n`); }
+    }
+    const r2: ReadResult = go(true);
+    switch (r2) {
+        case ReadResult.Ok { value: v2 }: { printf(`fail r2=${v2} err=''\n`); }
+        case ReadResult.Err { error: e2 }: { printf(`fail r2=0 err='${e2}'\n`); }
+    }
     return 0;
 }

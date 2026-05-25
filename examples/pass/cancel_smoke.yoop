@@ -1,0 +1,57 @@
+// Phase 10.F.2: external cancellation via `cancel(h)`.
+//
+// A `cancel(h)` call sets the cancel byte in h's handle prefix and
+// broadcasts so any `wait_until` parked on the handle wakes immediately
+// and observes `WaitResult.Cancelled`. The task body itself is not yet
+// cooperative (in-body polling lands in 10.F.2.b) - the worker keeps
+// running it to natural completion. The cancellation semantics this
+// sub-phase provides is "abandon-the-wait": the caller stops waiting,
+// the task's result (when it eventually arrives) is unobserved.
+//
+// Fixture shape:
+//   1. Spawn `slow()` (sleeps 200ms then returns 99).
+//   2. From a second pooled task, sleep 30ms then `cancel(slow)`.
+//   3. Main calls `conc.wait_until(slow, now+1s)` - the 1s deadline is huge,
+//      so the only path to Cancelled is through the cancel(h) at t≈30ms.
+// Final `wait slow` drains the still-running task so its handle frees
+// cleanly (same pattern as the wait_until_smoke fixture).
+
+import { WaitResult } from "std/core/concurrency.yoop";
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+task slow(): int32 {
+    conc.sleep_ms(200);
+    return 99;
+}
+
+task canceller(target: Task<int32>): int32 {
+    conc.sleep_ms(30);
+    conc.cancel(target);
+    return 0;
+}
+
+function main(): int32 {
+    pooled target = slow();
+    pooled killer = canceller(target);
+
+    let deadline: uint64 = conc.now_ns() + 1_000_000_000;
+    let r: WaitResult<int32> = conc.wait_until(target, deadline);
+    switch (r) {
+        case WaitResult.Done { value: v }: { printf(`unexpected done=${v}\n`); }
+        case WaitResult.Timeout: { printf(`unexpected timeout\n`); }
+        case WaitResult.Cancelled: { printf(`cancelled as expected\n`); }
+    }
+
+    // Drain both pooled handles cleanly - the slow task is still
+    // running until its 200ms sleep finishes.
+    let _slow_final: int32 = wait target;
+    let _killer_final: int32 = wait killer;
+    return 0;
+}
+
+// expected output:
+// cancelled as expected

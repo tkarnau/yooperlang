@@ -1,0 +1,44 @@
+// Phase 10.A: generic enums. Result<T, E> instantiates per (T, E) pair and
+// participates in switch + `?` propagation the same way struct-fallibles and
+// concrete `Ok`/`Err` enums do.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Result<T, E> {
+    Ok { value: T },
+    Err { error: E },
+}
+
+function parse_positive(n: int32): Result<int32, int32> {
+    if (n < 0) {
+        return Result.Err { error: n };
+    }
+    return Result.Ok { value: n };
+}
+
+function add_two(a: int32, b: int32): Result<int32, int32> {
+    let x: int32 = parse_positive(a)?;
+    let y: int32 = parse_positive(b)?;
+    return Result.Ok { value: x + y };
+}
+
+function main(): int32 {
+    let happy: Result<int32, int32> = add_two(3, 4);
+    switch (happy) {
+        case Result.Ok { value: hv }: { printf(`happy sum=${hv}\n`); }
+        case Result.Err { error: he }: { printf(`happy err=${he}\n`); }
+    }
+
+    let sad: Result<int32, int32> = add_two(3, -7);
+    switch (sad) {
+        case Result.Ok { value: sv }: { printf(`sad sum=${sv}\n`); }
+        case Result.Err { error: se }: { printf(`sad err=${se}\n`); }
+    }
+    return 0;
+}
+
+// expected output:
+// happy sum=7
+// sad err=-7

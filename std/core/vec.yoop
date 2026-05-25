@@ -1,9 +1,9 @@
-// std/core/vec.yoop — Phase 8.H growable vector type.
+// std/core/vec.yoop - Phase 8.H growable vector type.
 //
 // `Vec<T>` is the blessed growable-array primitive that std modules and
 // user code build collections out of. Owns a heap-allocated backing buffer
 // and grows on demand. Carries `propagates<disposable>` so the underlying
-// memory cannot be silently dropped — the user must pick auto-cleanup
+// memory cannot be silently dropped - the user must pick auto-cleanup
 // (`disposable v: Vec<T> = vec_new(8);`), manual `Disposable.dispose`, or
 // transfer-up via return.
 //
@@ -17,6 +17,7 @@
 //   * `dispose`       -> frees the backing buffer
 
 import { Disposable, disposable } from "./kinds.yoop";
+import * as intr from "./intrinsics.yoop";
 
 export type Vec<T> implements Disposable propagates<disposable> {
     data: T[],
@@ -24,7 +25,7 @@ export type Vec<T> implements Disposable propagates<disposable> {
     cap: usize,
     function dispose(ref self): void {
         if (self.cap > 0) {
-            heap_free(self.data);
+            intr.heap_free(self.data);
             self.cap = 0;
         }
     }
@@ -33,24 +34,24 @@ export type Vec<T> implements Disposable propagates<disposable> {
 // Construct a fresh Vec with `initial_cap` capacity. Caller must discharge
 // the disposable obligation (auto-cleanup, manual dispose, or transfer up).
 export function vec_new<T>(initial_cap: usize): Vec<T> propagates<disposable> {
-    return { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
+    return { data: intr.heap_alloc(initial_cap), len: 0, cap: initial_cap };
 }
 
 // Append `value`, growing the backing buffer if necessary (doubling
-// strategy). MAY REALLOCATE when len == cap — callers holding views from
+// strategy). MAY REALLOCATE when len == cap - callers holding views from
 // `vec_as_array` should re-fetch after a push.
 export function vec_push<T>(v: ref Vec<T>, value: T): void {
     if (v.len >= v.cap) {
         let new_cap: usize = v.cap * 2;
         if (new_cap == 0) { new_cap = 4; }
-        let new_data: T[] = heap_alloc(new_cap);
+        let new_data: T[] = intr.heap_alloc(new_cap);
         let i: usize = 0;
         while (i < v.len) {
             new_data[i] = v.data[i];
             i = i + 1;
         }
         if (v.cap > 0) {
-            heap_free(v.data);
+            intr.heap_free(v.data);
         }
         v.data = new_data;
         v.cap = new_cap;
@@ -59,7 +60,7 @@ export function vec_push<T>(v: ref Vec<T>, value: T): void {
     v.len = v.len + 1;
 }
 
-// Read `v[i]`. Traps via the underlying array indexing if i >= v.len —
+// Read `v[i]`. Traps via the underlying array indexing if i >= v.len -
 // matches the existing yoop array-indexing convention (no bounds check;
 // caller's responsibility).
 export function vec_get<T>(v: ref Vec<T>, i: usize): T {
@@ -78,8 +79,8 @@ export function vec_clear<T>(v: ref Vec<T>): void {
 }
 
 // Borrowing view of the populated prefix as a regular yoop array. The view
-// is valid until the next mutation (push/clear/dispose) — the underlying
+// is valid until the next mutation (push/clear/dispose) - the underlying
 // fat-pointer may dangle if vec_push reallocates.
 export function vec_as_array<T>(v: ref Vec<T>): T[] {
-    return array_slice(v.data, 0, v.len);
+    return intr.array_slice(v.data, 0, v.len);
 }

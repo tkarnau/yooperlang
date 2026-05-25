@@ -1,0 +1,54 @@
+// Phase 10.I: `vtable Reader for Readable` lets a function take a
+// type-erased view over any Readable impl - no monomorphization per
+// stream type. The HTTP parser is the canonical consumer; this fixture
+// proves the wiring end-to-end against a simple in-memory cursor.
+
+import { Result } from "../../../std/core/types.yoop";
+import { Readable, Reader, FlushOutcome } from "../../../std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type MemReader implements Readable {
+    storage: uint8[],
+    pos:     usize,
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        let avail: usize = self.storage.len - self.pos;
+        let take:  usize = buf.len;
+        if (avail < take) { take = avail; }
+        let i: usize = 0;
+        while (i < take) {
+            buf[i] = self.storage[self.pos + i];
+            i = i + 1;
+        }
+        self.pos = self.pos + take;
+        return Result.Ok { value: c_ssize_t(take) };
+    }
+}
+
+// Indirect dispatch through the Reader vtable. The caller passes a
+// Reader value; this function has zero knowledge of what concrete
+// stream backs it.
+function drain_one(ref r: Reader, ref buf: uint8[]): c_ssize_t {
+    let ro: Result<c_ssize_t, string> = Readable.read(ref r, ref buf);
+    switch (ro) {
+        case Result.Ok { value: n }: { return n; }
+        case Result.Err { error: _e }: { return -1; }
+    }
+    return -1;
+}
+
+function main(): int32 {
+    let storage: uint8[] = [72, 73, 33];   // "HI!"
+    let mr: MemReader = { storage: storage, pos: 0 };
+    let r: Reader = Reader.from(ref mr);
+
+    let buf: uint8[] = [0, 0, 0];
+    let n: c_ssize_t = drain_one(ref r, ref buf);
+    printf(`n=${n} bytes=${buf[0]},${buf[1]},${buf[2]}\n`);
+    return 0;
+}
+
+// expected output:
+// n=3 bytes=72,73,33

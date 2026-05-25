@@ -1,0 +1,7 @@
+// Phase 11.A: unknown `@` attribute names are parse-time errors with
+// a Levenshtein-based "did you mean" suggestion against the registered
+// attribute set.
+
+@precompil { let x: int32 = 1; }
+
+function main(): int32 { return 0; }

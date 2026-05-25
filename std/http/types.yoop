@@ -1,4 +1,4 @@
-// std/http/types.yoop — HTTP wire-level types.
+// std/http/types.yoop - HTTP wire-level types.
 //
 // Per library-design.md §7.1, but consolidated into one module for the
 // MVP. HttpMethod / StatusCode / Headers are first-class types; Request
@@ -15,7 +15,7 @@ import { string_eq_ignore_ascii_case } from "../core/strings.yoop";
 //
 // Enum lookups are cheap (i32 tag compare); the parser converts the
 // request-line method bytes via `parse_method`. Unknown methods are
-// rejected at parse time rather than reified as a variant — keeps the
+// rejected at parse time rather than reified as a variant - keeps the
 // switch closed.
 
 export enum HttpMethod {
@@ -26,6 +26,107 @@ export enum HttpMethod {
     Head,
     Patch,
     Options,
+}
+
+// Yoop enums don't yet support `==` directly. `http_method_eq` is the
+// helper consumers use when they need to compare two HttpMethod values
+// (e.g. router dispatch, client request-line construction).
+export function http_method_eq(a: HttpMethod, b: HttpMethod): bool {
+    switch (a) {
+        case HttpMethod.Get: {
+            switch (b) {
+                case HttpMethod.Get:     { return true;  }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Post: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return true;  }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Put: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return true;  }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Delete: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return true;  }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Head: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return true;  }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Patch: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return true;  }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Options: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return true;  }
+            }
+        }
+    }
+    return false;
+}
+
+// Canonical uppercase ASCII byte form of a method, used by the client
+// to construct request lines.
+export function http_method_label(m: HttpMethod): string {
+    switch (m) {
+        case HttpMethod.Get:     { return "GET";     }
+        case HttpMethod.Post:    { return "POST";    }
+        case HttpMethod.Put:     { return "PUT";     }
+        case HttpMethod.Delete:  { return "DELETE";  }
+        case HttpMethod.Head:    { return "HEAD";    }
+        case HttpMethod.Patch:   { return "PATCH";   }
+        case HttpMethod.Options: { return "OPTIONS"; }
+    }
+    return "GET";
 }
 
 // ----- StatusCode ---------------------------------------------------------

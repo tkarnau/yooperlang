@@ -1,0 +1,33 @@
+// std/log.yoop - leveled logging to stderr.
+//
+// Three free functions corresponding to the standard severity levels.
+// Each prefixes the message with `[info]` / `[warn]` / `[error]` and
+// writes a newline-terminated line to stderr (via the
+// `runtime/yoop_debug.c` helpers). Composable with `${}` template
+// literals: `info(`served ${count} requests in ${elapsed}ms`)`.
+//
+// The structured-JSON sink + alternate-destination env switch
+// (`YOOP_LOG_SINK=file:/...` or `tcp:host:port`) called out in the
+// 10.D plan are follow-ups - today the sink is stderr, fixed.
+
+extern "C" from "yoop_runtime" {
+    function yoop_log_info(msg: string): void;
+    function yoop_log_warn(msg: string): void;
+    function yoop_log_error(msg: string): void;
+}
+
+// Informational: progress messages, startup banners, periodic stats.
+export function info(msg: string): void {
+    yoop_log_info(msg);
+}
+
+// Warnings: recoverable degradations, deprecations, retries.
+export function warn(msg: string): void {
+    yoop_log_warn(msg);
+}
+
+// Errors: operational failures the program survives but the caller
+// should see (e.g. one failed request in a serve loop).
+export function error(msg: string): void {
+    yoop_log_error(msg);
+}

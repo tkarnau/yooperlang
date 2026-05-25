@@ -1,0 +1,55 @@
+// Phase 11.D.11: `?` propagation over Result-shaped enums folds at
+// comptime. The lowerer decomposes `expr?` into a tag-equality
+// branch - on Err, build the enclosing function's Err variant from
+// the operand's Err payload + RET; on Ok, extract the Ok payload as
+// the expression's result register. Same-shape only for now
+// (operand and return enum types share their Err payload layout);
+// cross-shape `Into.into` dispatch lands in a follow-up.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum IntResult {
+    Ok { value: int32 },
+    Err { error: int32 },
+}
+
+// Each call may Err out. The `?` chain folds away the explicit
+// match-on-Result boilerplate the user would otherwise write.
+function double_or_fail(x: int32): IntResult {
+    if (x < 0) {
+        return IntResult.Err { error: -1 };
+    }
+    return IntResult.Ok { value: x * 2 };
+}
+
+function pipeline(x: int32): IntResult {
+    let a: int32 = double_or_fail(x)?;       // x ≥ 0 → 2x
+    let b: int32 = double_or_fail(a)?;       // 2x → 4x
+    return IntResult.Ok { value: b + 1 };    // 4x + 1
+}
+
+function unwrap_or_zero(r: IntResult): int32 {
+    let out: int32 = 0;
+    switch (r) {
+        case IntResult.Ok { value: v }: { out = v; }
+        case IntResult.Err { error: _e }: { out = 0; }
+    }
+    return out;
+}
+
+// Ok path: 3 → 6 → 12 → +1 = 13. Both `?` succeed; pipeline returns Ok{13}.
+@precompile const GOOD: int32 = unwrap_or_zero(pipeline(3));
+
+// Err path: first `?` sees Err{-1} and early-returns. pipeline
+// returns Err{-1}; unwrap_or_zero sees Err and returns 0.
+@precompile const BAD: int32 = unwrap_or_zero(pipeline(-5));
+
+function main(): int32 {
+    printf(`GOOD=${GOOD} BAD=${BAD}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   GOOD=13 BAD=0

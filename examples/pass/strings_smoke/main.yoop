@@ -6,10 +6,9 @@ import {
     string_concat,
     string_concat_all,
     string_from_bytes,
-    StringSlice,
 } from "../../../std/core/strings.yoop";
 
-import { Maybe }from "../../../std/core/types.yoop";
+import { Result } from "../../../std/core/types.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -31,8 +30,14 @@ function main(): int32 {
     let idx: usize = string_index_of(s, "World");
     printf(`idx_of_World=${idx}\n`);
 
-    let sl: StringSlice = string_slice(s, 7, 12);
-    printf(`slice=${sl.value} err=${sl.err}\n`);
+    let sl: Result<string, string> = string_slice(s, 7, 12);
+    let sl_val: string = "";
+    let sl_err: string = "";
+    switch (sl) {
+        case Result.Ok { value: sl_ok }: { sl_val = sl_ok; }
+        case Result.Err { error: sl_e }: { sl_err = sl_e; }
+    }
+    printf(`slice=${sl_val} err=${sl_err}\n`);
 
     let cat: string = string_concat("foo", "bar");
     printf(`cat=${cat}\n`);
@@ -42,8 +47,14 @@ function main(): int32 {
     printf(`all=${all}\n`);
 
     let bytes: uint8[] = [72, 105];
-    let fb: Maybe<string> = string_from_bytes(bytes);
-    printf(`fb=${fb.value} err=${fb.err}\n`);
+    let fb: Result<string, string> = string_from_bytes(bytes);
+    let fb_val: string = "";
+    let fb_err: string = "";
+    switch (fb) {
+        case Result.Ok { value: fb_ok }: { fb_val = fb_ok; }
+        case Result.Err { error: fb_e }: { fb_err = fb_e; }
+    }
+    printf(`fb=${fb_val} err=${fb_err}\n`);
 
     return 0;
 }

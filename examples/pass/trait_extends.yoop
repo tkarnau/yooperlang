@@ -1,0 +1,35 @@
+// Phase 9.J: a trait extends another trait. A struct implementing the child
+// must provide every parent method too; both `Parent.method(...)` and
+// `Child.method(...)` dispatch to the same impl.
+
+trait Greeter {
+    function greet(ref self): int32;
+}
+
+trait LoudGreeter extends Greeter {
+    function shout(ref self): int32;
+}
+
+type Megaphone implements LoudGreeter {
+    n: int32,
+    function greet(ref self): int32 {
+        return self.n;
+    }
+    function shout(ref self): int32 {
+        return self.n * 10;
+    }
+}
+
+function main(): int32 {
+    let m: Megaphone = { n: 5 };
+    // Qualifying through the child trait calls into the parent's method.
+    let g: int32 = LoudGreeter.greet(ref m);
+    let s: int32 = LoudGreeter.shout(ref m);
+    // Qualifying through the parent works on a child impl too.
+    let g2: int32 = Greeter.greet(ref m);
+    printf(`greet=${g} shout=${s} parent_greet=${g2}\n`);
+    return 0;
+}
+
+// expected output:
+// greet=5 shout=50 parent_greet=5

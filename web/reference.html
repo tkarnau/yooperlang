@@ -1,0 +1,1251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Language Reference - Yooperlang</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="reference-page">
+    <header class="site-header">
+        <div class="container header-inner">
+            <a class="brand" href="index.html">
+                <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
+            </a>
+            <nav class="site-nav">
+                <a href="reference.html" class="active">Language Reference</a>
+                <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <div class="reference-shell container">
+        <aside class="sidebar">
+            <h2 class="sidebar-title">Reference</h2>
+            <nav class="toc">
+                <ol>
+                    <li><a href="#overview">Overview</a></li>
+                    <li><a href="#modules">Modules &amp; imports</a></li>
+                    <li><a href="#types">Types</a>
+                        <ol>
+                            <li><a href="#primitives">Primitives</a></li>
+                            <li><a href="#structs">Structs</a></li>
+                            <li><a href="#enums">Enums &amp; unions</a></li>
+                            <li><a href="#arrays">Arrays</a></li>
+                            <li><a href="#refs">References</a></li>
+                        </ol>
+                    </li>
+                    <li><a href="#functions">Functions</a></li>
+                    <li><a href="#control-flow">Control flow</a></li>
+                    <li><a href="#traits">Traits</a></li>
+                    <li><a href="#kinds">Kinds</a>
+                        <ol>
+                            <li><a href="#kind-clauses">Clause reference</a></li>
+                        </ol>
+                    </li>
+                    <li><a href="#generics">Generics</a></li>
+                    <li><a href="#tasks">Tasks &amp; concurrency</a></li>
+                    <li><a href="#errors">Fallible values &amp; <code>?</code></a></li>
+                    <li><a href="#intrinsics">Intrinsics</a></li>
+                    <li><a href="#stdlib">Standard library</a>
+                        <ol>
+                            <li><a href="#std-core"><code>std/core</code></a></li>
+                            <li><a href="#std-collections"><code>std/collections</code></a></li>
+                            <li><a href="#std-net"><code>std/net</code></a></li>
+                            <li><a href="#std-http"><code>std/http</code></a></li>
+                            <li><a href="#std-log-debug"><code>std/log</code>, <code>std/debug</code></a></li>
+                        </ol>
+                    </li>
+                </ol>
+            </nav>
+        </aside>
+
+        <article class="reference-content">
+            <header class="page-head">
+                <h1>Language Reference</h1>
+                <p class="muted">
+                    Heads up - this fills in as the language stabilizes. The
+                    authoritative source is
+                    <a href="https://github.com/">SPEC.md</a> in the repo; this page
+                    is the readable distillation.
+                </p>
+            </header>
+
+            <section id="overview">
+                <h2>Overview</h2>
+                <p>
+                    Yooperlang separates three ideas that other languages tend to conflate:
+                    <strong>types</strong> (what a value is), <strong>traits</strong>
+                    (what it can do), and <strong>kinds</strong> (how a binding must be used).
+                </p>
+                <p>
+                    A <em>type</em> describes data - <code>int32</code>,
+                    <code>Point</code>, <code>FileHandle</code>. A <em>trait</em> is a set
+                    of operations a type provides - <code>Disposable</code>,
+                    <code>Iterable&lt;T&gt;</code>. A <em>kind</em> is a usage contract
+                    attached to a binding - <code>disposable</code>,
+                    <code>scoped</code>, <code>pooled</code>.
+                </p>
+                <pre><code class="yoop">type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        close_fd(self.fd);
+    }
+}
+
+function main(): int32 {
+    // `disposable` is the kind. FileHandle is the type. Disposable is the trait.
+    // The kind requires the trait, and emits dispose() at scope end.
+    disposable f: FileHandle = open_file("notes.txt");
+    return 0;
+}</code></pre>
+                <p>
+                    Most languages bundle these together: an <code>AutoCloseable</code> is
+                    a type that does close-on-scope-exit, baked in. Splitting them lets the
+                    same <code>FileHandle</code> be passed around <code>const</code>,
+                    cleaned up via <code>disposable</code>, or pooled in a thread -
+                    without the type itself knowing about lifecycle.
+                </p>
+            </section>
+
+            <section id="modules">
+                <h2>Modules &amp; imports</h2>
+                <p>
+                    Every <code>.yoop</code> file is a module. Imports take a path string
+                    and a binding form. Paths are either relative
+                    (<code>./</code>, <code>../</code>) or rooted at <code>std/</code> for
+                    the standard library.
+                </p>
+                <pre><code class="yoop">import { parse, lex } from "./lexer.yoop";
+import * as lex        from "./lexer.yoop";
+import { parse as p }  from "./ast.yoop";
+import "./init.yoop";                          // side-effect only
+
+// Standard library uses the `std/` root.
+import { Vec, vec_push } from "std/core/vec.yoop";
+import { Request, Response, ok } from "std/http/types.yoop";</code></pre>
+                <p>
+                    Symbols must be explicitly exported to be importable. Everything else
+                    is module-private.
+                </p>
+                <pre><code class="yoop">// math.yoop
+export function add(a: int32, b: int32): int32 { return a + b; }
+export type Point { x: int32, y: int32 }
+
+function helper(): void { ... }     // not exported - private to this module</code></pre>
+                <p>
+                    Re-exports use the same <code>export</code> keyword in front of a
+                    re-imported binding. The module graph is walked from the entry file,
+                    cycles are an error, and each module is type-checked once.
+                </p>
+            </section>
+
+            <section id="types">
+                <h2>Types</h2>
+                <p>
+                    Types appear on the right of a colon. The compiler does no implicit
+                    narrowing or widening between named numeric types - you reach for
+                    an explicit cast when you mean one.
+                </p>
+
+                <h3 id="primitives">Primitives</h3>
+                <p>Integer types are two's-complement signed or unsigned, fixed width:</p>
+                <pre><code class="yoop">let a: int8;       let u: uint8;       // byte-sized
+let b: int16;      let v: uint16;
+let c: int32;      let w: uint32;      // int32 is also spelled `int`
+let d: int64;      let x: uint64;
+let n: usize;      let m: isize;       // pointer-width - used for sizes / indices</code></pre>
+                <p>Floats follow IEEE-754:</p>
+                <pre><code class="yoop">let f: float32;     // also spelled `float`
+let g: float64;</code></pre>
+                <p>Other primitives:</p>
+                <pre><code class="yoop">let ok: bool      = true;
+let nl: char      = '\n';            // evaluates to a uint32 codepoint
+let s:  string    = "hello";          // immutable, UTF-8, zero-terminated for C interop
+let b:  byte      = 0xFF;             // alias for uint8</code></pre>
+                <p>
+                    Numeric literals are <strong>untyped until they reach a typed
+                    context</strong> - then they're range-checked and pinned. Out-of-range
+                    literals fail at compile time. Underscores can separate digits.
+                </p>
+                <pre><code class="yoop">let hp: int32   = 100;
+let mask: uint8 = 0xFF;
+let big: uint64 = 1_000_000_000;
+let dt: float32 = 1.0 / 60.0;
+let bits: uint8 = 0b1111_0000;
+let mode: uint16 = 0o755;
+
+let a: int32 = 10;
+let b: int64 = a;                    // compile error - explicit cast required
+let b: int64 = int64(a);             // ok</code></pre>
+                <p>
+                    Casts use the type name as a call. Narrowing truncates; float ↔ int
+                    truncates toward zero.
+                </p>
+
+                <h3 id="structs">Structs</h3>
+                <p>
+                    Plain data. No inheritance. All fields are public. Field order in the
+                    declaration is the layout order.
+                </p>
+                <pre><code class="yoop">type Point {
+    x: int32,
+    y: int32,
+}
+
+type Rect {
+    origin: Point,                   // nested struct field
+    width:  int32,
+    height: int32,
+}
+
+let p: Point = { x: 3, y: 4 };
+let r: Rect  = { origin: { x: 0, y: 0 }, width: 10, height: 20 };
+let dx: int32 = r.origin.x;          // field access chains</code></pre>
+                <p>
+                    A bare struct literal <code>{ x: 1, y: 2 }</code> has no standalone
+                    type - it must be <em>pinned</em> by an assignment target, a return
+                    type, or a call argument. The compiler uses that target to decide
+                    which struct it's building.
+                </p>
+                <pre><code class="yoop">let p: Point = { x: 1, y: 2 };           // pinned by `let p: Point`
+return { origin: p, width: 4, height: 4 };  // pinned by the function's return type
+draw({ x: 0, y: 0 });                    // pinned by the parameter type</code></pre>
+                <p>
+                    Methods live in trait impl blocks, not in <code>type</code> bodies
+                    directly - see <a href="#traits">Traits</a>.
+                </p>
+
+                <h3 id="enums">Enums &amp; unions</h3>
+                <p>
+                    <code>enum</code> is a tagged sum type. Each variant is either bare
+                    or carries a record-style payload. Variants are referenced as
+                    <code>EnumName.VariantName</code>; the tag is an <code>i32</code>
+                    in declaration order, so reordering variants is an ABI change.
+                </p>
+                <pre><code class="yoop">enum Shape {
+    Circle  { radius: float32 },
+    Square  { side: float32 },
+    Empty,                            // no payload
+}
+
+let s: Shape = Shape.Circle { radius: 1.5 };
+let e: Shape = Shape.Empty;</code></pre>
+                <p>
+                    <code>switch</code> matches on the variant and binds payload fields by
+                    name. The compiler enforces exhaustiveness - every variant must
+                    be covered, or a <code>default</code> arm provided.
+                </p>
+                <pre><code class="yoop">switch (s) {
+    case Shape.Circle { radius: r }: { printf(`circle r=${r}\n`); }
+    case Shape.Square { side: a }:   { printf(`square a=${a}\n`); }
+    case Shape.Empty:                { printf(`empty\n`); }
+}</code></pre>
+                <p>
+                    <code>union</code> is the untagged C-style sibling: a single byte
+                    buffer the size of its largest field, with overlapping access. Useful
+                    for FFI where you're modelling a real C union. The compiler does no
+                    discriminant tracking - you do.
+                </p>
+                <pre><code class="yoop">union IntFloatBits {
+    i: int32,
+    f: float32,
+}
+
+let bits: IntFloatBits = { i: 0x40490FDB };
+printf(`pi-ish=${bits.f}\n`);</code></pre>
+
+                <h3 id="arrays">Arrays</h3>
+                <p>
+                    Array types are written <code>T[]</code>. Arrays are fat pointers
+                    (data + length); <code>xs.len</code> reads the length.
+                </p>
+                <pre><code class="yoop">let xs: int32[] = [1, 2, 3];
+let zs: Point[] = [{ x: 1, y: 2 }, { x: 3, y: 4 }];
+let flags: bool[] = [true, false, true];
+
+let first: int32 = xs[0];
+let n: usize     = xs.len;</code></pre>
+                <p>
+                    Slice syntax produces a zero-copy view over a range - the result
+                    is itself a <code>T[]</code>, sharing storage with the source.
+                </p>
+                <pre><code class="yoop">let xs: int32[] = [10, 20, 30, 40, 50, 60];
+
+let mid:  int32[] = xs[1..4];        // [20, 30, 40]
+let tail: int32[] = xs[3..];         // [40, 50, 60]
+let head: int32[] = xs[..3];         // [10, 20, 30]
+let all:  int32[] = xs[..];          // view over the whole array
+
+mid[0] = 99;                         // mutates xs[1] too - shared storage</code></pre>
+                <p>
+                    Growable arrays live in the standard library as
+                    <code>Vec&lt;T&gt;</code> - see <a href="#stdlib">Standard library</a>.
+                </p>
+
+                <h3 id="refs">References</h3>
+                <p>
+                    <code>ref T</code> is a non-null reference to a <code>T</code>. There
+                    is no pointer arithmetic and no null. Both the parameter declaration
+                    and the call site spell <code>ref</code> - aliasing is visible
+                    wherever it happens.
+                </p>
+                <pre><code class="yoop">function increment(ref counter: int32): void {
+    counter = counter + 1;            // auto-deref on read and write
+}
+
+let n: int32 = 0;
+increment(ref n);                     // call-site `ref` is required
+printf(`n=${n}\n`);                   // n=1</code></pre>
+                <p>
+                    References are how you mutate or pass-by-pointer without copying.
+                    Methods take <code>ref self</code>; trait-qualified calls take
+                    <code>ref receiver</code> as the first argument.
+                </p>
+            </section>
+
+            <section id="functions">
+                <h2>Functions</h2>
+                <p>
+                    A plain function uses the <code>function</code> keyword, a parameter
+                    list with required type annotations, and a required return type
+                    (or <code>void</code>).
+                </p>
+                <pre><code class="yoop">function distance_sq(p: Point): int32 {
+    return p.x * p.x + p.y * p.y;
+}
+
+function noop(): void { return; }</code></pre>
+                <p>
+                    <strong>Kind-prefixed functions</strong> let you drop the
+                    <code>function</code> keyword. A kind like <code>task</code> (or a
+                    user-defined function-kind) sits where <code>function</code> would.
+                </p>
+                <pre><code class="yoop">task fetch(url: string): Bytes { ... }              // idiomatic
+task function fetch(url: string): Bytes { ... }     // explicit; equivalent
+
+task disposable open_remote(url: string): Handle { ... }   // multiple kinds</code></pre>
+                <p>
+                    Parameters can be passed by reference with <code>ref</code> (see
+                    <a href="#refs">References</a>). Function values in type position
+                    use the <code>(p: T) =&gt; R</code> arrow form - legal in field,
+                    parameter, return, and vtable slot annotations.
+                </p>
+                <pre><code class="yoop">type Handler {
+    handle: (req: Request) =&gt; Response,
+}</code></pre>
+                <p>
+                    The <code>=&gt;</code> form is <em>only</em> a type annotation. There
+                    are no closure literals - function values come from named
+                    top-level functions or vtables (see <a href="#traits">Traits</a>).
+                </p>
+            </section>
+
+            <section id="control-flow">
+                <h2>Control flow</h2>
+                <p>Conditionals chain with <code>else if</code> / <code>else</code>:</p>
+                <pre><code class="yoop">if (x &lt; 0) {
+    printf(`negative\n`);
+} else if (x == 0) {
+    printf(`zero\n`);
+} else {
+    printf(`positive\n`);
+}</code></pre>
+                <p>
+                    <code>while</code> is the unconditional loop. <code>for ... in</code>
+                    walks an array element-by-element, binding a fresh copy each
+                    iteration. C-style <code>for (init; cond; step)</code> is available
+                    for index-driven loops.
+                </p>
+                <pre><code class="yoop">let i: int32 = 0;
+while (i &lt; 10) {
+    i = i + 1;
+}
+
+let xs: int32[] = [10, 20, 30];
+let sum: int32 = 0;
+for x in xs {
+    sum = sum + x;
+}
+
+for (j = 0; j &lt; xs.len; j = j + 1) {
+    printf(`xs[${j}]=${xs[j]}\n`);
+}</code></pre>
+                <p>
+                    <code>break</code> and <code>continue</code> jump out of / past the
+                    nearest enclosing loop. <code>switch</code> matches literals and enum
+                    variant patterns and is checked for exhaustiveness - see
+                    <a href="#enums">Enums</a>.
+                </p>
+                <pre><code class="yoop">for v in xs {
+    if (v == 20) { continue; }
+    if (v == 40) { break; }
+    sum = sum + v;
+}
+
+switch (code) {
+    case 200: { printf(`ok\n`); }
+    case 404: { printf(`not found\n`); }
+    default:  { printf(`other: ${code}\n`); }
+}</code></pre>
+            </section>
+
+            <section id="traits">
+                <h2>Traits</h2>
+                <p>
+                    A trait describes a set of operations. <code>self</code> is always
+                    passed as <code>ref</code> - methods never take the receiver
+                    by value.
+                </p>
+                <pre><code class="yoop">trait Disposable {
+    function dispose(ref self): void;
+}
+
+trait Iterable&lt;T&gt; {
+    function next(ref self): { value: T, done: bool };
+}</code></pre>
+                <p>
+                    A type implements a trait by declaring <code>implements</code> after
+                    its name and providing the method bodies inside the
+                    <code>type</code> block. Multiple traits are grouped in parentheses.
+                </p>
+                <pre><code class="yoop">type FileHandle implements Disposable {
+    fd: int32,
+    function dispose(ref self): void {
+        close_fd(self.fd);
+    }
+}
+
+type Channel implements (Disposable, Iterable&lt;Message&gt;) {
+    ...
+}</code></pre>
+                <p>
+                    <strong>Trait-qualified call syntax.</strong> Method calls are written
+                    <code>Trait.method(ref receiver, ...)</code>, never
+                    <code>receiver.method(...)</code> or bare <code>method(...)</code>.
+                    Two impls of the same method name on different traits never collide,
+                    because the call site says which trait it means.
+                </p>
+                <pre><code class="yoop">let f: FileHandle = open_file("notes.txt");
+Disposable.dispose(ref f);            // explicit, qualified</code></pre>
+                <p>
+                    <strong>Vtables</strong> give you runtime-polymorphic trait dispatch
+                    when you need a heterogeneous collection. A <code>vtable</code> declares
+                    a struct-shaped value with one slot per trait method:
+                </p>
+                <pre><code class="yoop">trait Op {
+    function apply(ref self, x: int32): int32;
+}
+
+type Doubler implements Op {
+    factor: int32,
+    function apply(ref self, x: int32): int32 { return x * self.factor; }
+}
+
+type Adder implements Op {
+    bias: int32,
+    function apply(ref self, x: int32): int32 { return x + self.bias; }
+}
+
+vtable OpVT for Op {
+    apply: (x: int32) =&gt; int32,
+}
+
+function dispatch(ref v: OpVT, x: int32): int32 {
+    return Op.apply(ref v, x);        // indirect dispatch through the vtable
+}
+
+let d: Doubler = { factor: 5 };
+let vt: OpVT   = OpVT.from(ref d);    // builder - captures the receiver
+let n: int32   = dispatch(ref vt, 7); // 35</code></pre>
+                <p>
+                    A <code>Reader[]</code> can mix any types whose impls were used to
+                    build the vtable values - each slot is the same nominal vtable
+                    type, even though the underlying struct differs.
+                </p>
+            </section>
+
+            <section id="kinds">
+                <h2>Kinds</h2>
+                <p>
+                    A kind attaches a usage contract to a binding - lifecycle,
+                    scoping, sharing, or layout rules. The kind prefix sits between
+                    <code>let</code> / <code>const</code> and the binding name; the
+                    keyword is optional when a kind prefix is present, defaulting to
+                    <code>const</code>.
+                </p>
+                <pre><code class="yoop">let disposable f: FileHandle = open_file("x.txt");
+disposable f: FileHandle = open_file("x.txt");     // implicit const
+let scoped result = fetch(url);
+let pooled h      = fetch(url);</code></pre>
+                <p>
+                    The built-in kinds:
+                </p>
+                <ul>
+                    <li>
+                        <code>disposable</code> - requires the binding's type to
+                        implement <code>Disposable</code>, and emits
+                        <code>Disposable.dispose(ref x)</code> at scope end. Pairs with
+                        <code>?</code> - cleanup also runs on early-return propagation.
+                    </li>
+                    <li>
+                        <code>scoped</code> - for task handles. The compiler waits on
+                        the task at scope end and forbids the handle from escaping the
+                        declaring scope.
+                    </li>
+                    <li>
+                        <code>pooled</code> - for task handles you want to keep around.
+                        Heap-allocated, refcounted, returnable. No auto-wait - you call
+                        <code>wait h</code> yourself.
+                    </li>
+                    <li>
+                        <code>joined</code> - like <code>scoped</code>, but specifically
+                        forces the wait at the enclosing block's <code>}</code>.
+                    </li>
+                </ul>
+                <p>
+                    <strong>User-defined kinds.</strong> A kind is a contract built from a
+                    closed set of clauses - <code>requires Trait</code>,
+                    <code>ownsBlock</code>, <code>mustCall fn beforeScopeEnd</code>,
+                    <code>mustNotEscape scope</code>, <code>layout { align N; }</code>,
+                    and so on. Each clause is one statement.
+                </p>
+                <pre><code class="yoop">kind disposable {
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+kind simd_aligned {
+    appliesTo type binding;
+    layout { align 32; };
+}</code></pre>
+                <p>
+                    <strong><code>propagates&lt;K&gt;</code></strong> is the contract that
+                    says &ldquo;this value carries another kind's obligation, and the
+                    obligation can't be silently dropped.&rdquo; A binding of such a type
+                    has three legal exits:
+                </p>
+                <ol>
+                    <li>
+                        Declare the kind keyword on the binding
+                        (<code>disposable arr: T = ...</code>) and the compiler injects
+                        cleanup at scope end.
+                    </li>
+                    <li>
+                        Call the cleanup method directly
+                        (<code>Disposable.dispose(ref arr)</code>) before scope end.
+                    </li>
+                    <li>
+                        Return it from a function whose return type also declares
+                        <code>propagates&lt;K&gt;</code> - the obligation flows to the
+                        caller.
+                    </li>
+                </ol>
+                <p>
+                    Drop the value on the floor with none of these and the compiler
+                    rejects the program. Composition uses <code>&amp;</code> to combine
+                    kinds (<code>disposable &amp; scoped</code>).
+                </p>
+
+                <h3 id="kind-clauses">Clause reference</h3>
+                <p>
+                    A kind body is a sequence of clauses drawn from a closed,
+                    compiler-owned set. There is no extension point; every clause is
+                    one of the forms below. Each clause is one <code>;</code>-terminated
+                    statement of the form <code>keyword args</code> or <code>keyword
+                    args { sub-clauses }</code>.
+                </p>
+                <ul class="clause-list">
+                    <li>
+                        <code>appliesTo binding | parameter | field | function | type</code>:
+                        which declaration sites accept this kind. Defaults to any
+                        value site.
+                    </li>
+                    <li>
+                        <code>requires Trait</code>: the bound value's type must
+                        implement <code>Trait</code>. Repeat the clause for multiple
+                        traits; there is no list form.
+                    </li>
+                    <li>
+                        <code>provides Trait</code>: the kind itself supplies the
+                        implementation of <code>Trait</code> for any value it's
+                        applied to (used by <code>task</code> to make calls return
+                        <code>Task&lt;T&gt;</code>).
+                    </li>
+                    <li>
+                        <code>ownsBlock</code>: the bound name may take a trailing
+                        <code>{ ... }</code> that narrows its scope. Without an
+                        explicit block the compiler synthesizes one at the tail of
+                        the enclosing scope; multiple block-owning bindings nest in
+                        reverse declaration order (LIFO cleanup).
+                    </li>
+                    <li>
+                        <code>mustCall fn beforeScopeEnd</code>: <code>fn</code> must
+                        run before the binding's scope exits. The compiler emits the
+                        call on every exit path, including <code>?</code> early
+                        returns and <code>return</code>.
+                    </li>
+                    <li>
+                        <code>mustNotEscape scope</code>: the value cannot be
+                        returned from the declaring scope or stored where it would
+                        outlive that scope.
+                    </li>
+                    <li>
+                        <code>mustNotShare acrossScopes</code>: the value cannot
+                        cross into a concurrent task.
+                    </li>
+                    <li>
+                        <code>autoJoin beforeScopeEnd</code>: the compiler inserts a
+                        synthetic <code>wait</code> at scope exit. Used by
+                        <code>joined</code> for task handles.
+                    </li>
+                    <li>
+                        <code>restricts iteration { allow X; allow Y; forbid Z; }</code>:
+                        which <code>for ... in</code> strategies are legal on this
+                        value (sequential, batched, simd, parallel). A
+                        contradiction-free intersection of allow/forbid clauses.
+                    </li>
+                    <li>
+                        <code>layout { align N; }</code>: memory layout contract.
+                        Currently <code>align</code> is the only landed sub-clause;
+                        packing / SoA reservations are syntactic only.
+                    </li>
+                    <li>
+                        <code>propagates&lt;K&gt;</code>: this value carries another
+                        kind's obligation, and that obligation must be discharged.
+                        See the section above for the three legal exits.
+                    </li>
+                    <li>
+                        <code>contains&lt;K&gt;</code>: reserved syntax. A
+                        propagating value can be silently absorbed by a wrapper
+                        type that declares <code>contains&lt;K&gt;</code>. Not yet
+                        enforced; the workaround today is to discharge the
+                        obligation locally and not re-declare propagation on the
+                        return.
+                    </li>
+                    <li>
+                        <code>forbids io | globalState | ...</code>: categories the
+                        function body may not touch. Reserved; syntax in place,
+                        enforcement landing alongside the effects work.
+                    </li>
+                </ul>
+                <p>
+                    Reserved clause forms that are syntactically accepted but not
+                    yet enforced: <code>mustCall fn beforeAny</code>, <code>mustCall
+                    fn afterAny</code>, and <code>mustCall { a; b; }
+                    beforeScopeEnd</code>. The parser recognizes them and the
+                    typechecker emits a "not yet supported" note; the surface stays
+                    stable so user kinds written against them keep parsing.
+                </p>
+            </section>
+
+            <section id="generics">
+                <h2>Generics</h2>
+                <p>
+                    Structs, functions, and traits can be parameterized over types
+                    with angle brackets. Type parameters appear after the declaration
+                    name and propagate into the body wherever the bare name is used.
+                </p>
+                <pre><code class="yoop">type Pair&lt;A, B&gt; {
+    first: A,
+    second: B,
+}
+
+function swap&lt;A, B&gt;(p: Pair&lt;A, B&gt;): Pair&lt;B, A&gt; {
+    return { first: p.second, second: p.first };
+}
+
+let p: Pair&lt;int32, string&gt; = { first: 1, second: "one" };
+let q: Pair&lt;string, int32&gt; = swap(p);</code></pre>
+                <p>
+                    <strong>Call-site inference.</strong> Generic function calls infer
+                    type arguments from the argument types. There is no turbofish; if a
+                    parameter can't be inferred, the diagnostic tells you to constrain it
+                    elsewhere.
+                </p>
+                <pre><code class="yoop">function first&lt;T&gt;(xs: T[]): T {
+    return xs[0];
+}
+
+let xs: int32[] = [10, 20, 30];
+let n: int32    = first(xs);          // T inferred as int32 from xs</code></pre>
+                <p>
+                    <strong>Trait bounds</strong> constrain a type parameter to types
+                    that implement a given trait. Inside the function body, calls of the
+                    trait's methods on the bound parameter compile to direct trait
+                    dispatch - each concrete instantiation gets its own monomorphic
+                    copy.
+                </p>
+                <pre><code class="yoop">function dispose_all&lt;T implements Disposable&gt;(ref items: T[]): void {
+    for it in items {
+        Disposable.dispose(ref it);
+    }
+}</code></pre>
+                <p>
+                    Generic instantiation is lazy and cached: the compiler emits one
+                    monomorphic struct/function per concrete argument list,
+                    name-mangled by argument types. Codegen never sees an open type
+                    parameter.
+                </p>
+            </section>
+
+            <section id="tasks">
+                <h2>Tasks &amp; concurrency</h2>
+                <p>
+                    Concurrency is a kind story - there are no <code>async</code> /
+                    <code>await</code> keywords. <code>task</code> is a kind applied to a
+                    function declaration; each call to that function is semantically a
+                    spawn that returns a <code>Task&lt;T&gt;</code>.
+                </p>
+                <pre><code class="yoop">task fetch(url: string): Bytes { ... }
+
+function main(): int32 {
+    let data     = fetch(url);        // synchronous-looking - wait inserted inline
+    let joined d = fetch(url);        // concurrent - wait inserted at the next `}`
+    let pooled h = fetch(url);        // returnable handle
+    let result   = wait h;            // block on h, read the result
+
+    _ = fetch(url);                   // fire-and-forget - result discarded
+    return 0;
+}</code></pre>
+                <p>
+                    The binding's kind decides when the <code>wait</code> happens.
+                    Plain <code>let x = f()</code> with no kind inserts <code>wait</code>
+                    inline at that statement. <code>joined</code> defers until scope end.
+                    <code>pooled</code> never inserts a wait automatically - you call
+                    <code>wait h</code> yourself.
+                </p>
+                <p>
+                    <strong><code>wait</code> is suspendable.</strong> A waiting task
+                    drains the task queue on the calling thread until its target
+                    completes, so N-deep nested waits don't deadlock a fixed-size worker
+                    pool. The surface syntax is unchanged.
+                </p>
+                <p>
+                    <strong>Bounded wait.</strong> <code>wait_until(h, deadline_ns)</code>
+                    returns a <code>WaitResult&lt;T&gt;</code> enum -
+                    <code>Done</code>, <code>Timeout</code>, or <code>Cancelled</code>.
+                    External cancellation lives behind <code>cancel(h)</code>.
+                </p>
+                <pre><code class="yoop">import { WaitResult, now_ns } from "std/core/concurrency.yoop";
+
+pooled h = fetch(url);
+let deadline: uint64 = now_ns() + 250_000_000;   // 250ms
+switch (wait_until(h, deadline)) {
+    case WaitResult.Done { value: body }: { use(body); }
+    case WaitResult.Timeout:              { abandon_request(); }
+    case WaitResult.Cancelled:            { ... }
+}</code></pre>
+            </section>
+
+            <section id="errors">
+                <h2>Fallible values &amp; <code>?</code></h2>
+                <p>
+                    A type is <strong>fallible</strong> if it's an enum with exactly two
+                    variants named <code>Ok</code> and <code>Err</code>, each carrying
+                    zero or one payload field. No marker trait - the shape itself
+                    is the contract.
+                </p>
+                <pre><code class="yoop">enum IntResult {
+    Ok  { value: int32 },
+    Err { error: int32 },
+}
+
+function parse_positive(n: int32): IntResult {
+    if (n &lt; 0) { return IntResult.Err { error: n }; }
+    return IntResult.Ok { value: n };
+}</code></pre>
+                <p>
+                    The standard library defines <code>Result&lt;T, E&gt;</code> in
+                    <code>std/core/types.yoop</code> for the common case.
+                </p>
+                <p>
+                    The postfix <code>?</code> operator propagates an <code>Err</code>
+                    out of the enclosing function and binds the <code>Ok</code> payload
+                    locally:
+                </p>
+                <pre><code class="yoop">function add_two_positives(a: int32, b: int32): IntResult {
+    let x: int32 = parse_positive(a)?;     // bail on Err, bind Ok.value to x
+    let y: int32 = parse_positive(b)?;
+    return IntResult.Ok { value: x + y };
+}</code></pre>
+                <p>
+                    <code>?</code> only compiles inside a function whose return type is
+                    also fallible. The default rule is <em>same-shape</em> - the
+                    <code>Err</code> payload types must match. For different
+                    <code>Err</code> payloads, the operand's type can declare
+                    <code>implements Into&lt;OuterErr&gt;</code> and the compiler inserts
+                    the conversion on the failure branch.
+                </p>
+                <pre><code class="yoop">type IoError implements Into&lt;AppError&gt; {
+    code: int32,
+    function into(ref self): AppError {
+        return { msg: "io failed", code: self.code };
+    }
+}
+
+function load(path: string): Result&lt;Config, AppError&gt; {
+    const bytes = read_all(path)?;     // read_all: Result&lt;_, IoError&gt;
+    // compiler calls IoError.into on the Err branch before building AppError
+    ...
+}</code></pre>
+                <p>
+                    Live <code>disposable</code> bindings still get their cleanup
+                    inserted before the <code>?</code> early return - you don't
+                    need <code>try</code>/<code>finally</code> machinery.
+                </p>
+            </section>
+
+            <section id="intrinsics">
+                <h2>Intrinsics</h2>
+                <p>
+                    Intrinsics are operations the compiler lowers directly, rather
+                    than calling out to a Yooperlang function body. They're declared
+                    in <code>std/core/intrinsics.yoop</code> inside an
+                    <code>extern "intrinsic" from "compiler"</code> block, so the
+                    user-facing surface is exactly the import:
+                </p>
+                <pre><code class="yoop">import * as intr from "std/core/intrinsics.yoop";
+
+let buf: int32[] = intr.heap_alloc(8);     // 8-slot heap-allocated int32[]
+intr.heap_free(buf);                       // matching free</code></pre>
+                <p>
+                    Std value imports must use the namespace form (<code>import *
+                    as intr</code>) so short names like <code>heap_alloc</code>
+                    can't shadow user identifiers. The full intrinsic surface:
+                </p>
+                <pre><code class="yoop">// std/core/intrinsics.yoop
+extern "intrinsic" from "compiler" {
+    function heap_alloc&lt;T&gt;(n: usize): T[];
+    function heap_free&lt;T&gt;(a: T[]): void;
+    function string_as_bytes(s: string): uint8[];
+    function string_from_bytes_unchecked(buf: uint8[]): string;
+    function array_slice&lt;T&gt;(xs: T[], start: usize, end: usize): T[];
+}</code></pre>
+                <p>
+                    What each one does:
+                </p>
+                <ul>
+                    <li>
+                        <code>heap_alloc&lt;T&gt;(n)</code>: allocate a fresh
+                        <code>T[]</code> of length <code>n</code> on the heap.
+                        Storage is zero-initialized. The returned fat pointer is
+                        owned by the caller until <code>heap_free</code>.
+                    </li>
+                    <li>
+                        <code>heap_free&lt;T&gt;(a)</code>: free a fat pointer
+                        previously returned by <code>heap_alloc</code>. Calling
+                        with anything else (a stack slice, a slice view) is
+                        undefined behavior.
+                    </li>
+                    <li>
+                        <code>string_as_bytes(s)</code>: zero-copy view over the
+                        UTF-8 storage of a <code>string</code> as
+                        <code>uint8[]</code>. The view shares storage with the
+                        source string; mutating it is undefined behavior since
+                        strings are immutable.
+                    </li>
+                    <li>
+                        <code>string_from_bytes_unchecked(buf)</code>: reinterpret a
+                        <code>uint8[]</code> as a <code>string</code> without
+                        validating UTF-8. Use the checked
+                        <code>string_from_bytes</code> in
+                        <code>std/core/strings.yoop</code> for untrusted input;
+                        this form exists for FFI hot paths where the producer
+                        already guarantees validity.
+                    </li>
+                    <li>
+                        <code>array_slice&lt;T&gt;(xs, start, end)</code>: explicit
+                        slice form. Equivalent to <code>xs[start..end]</code> in
+                        user code; provided as a callable for generic code that
+                        builds slice ranges dynamically.
+                    </li>
+                </ul>
+                <p>
+                    Two more intrinsics come in through
+                    <code>std/core/concurrency.yoop</code>; they're the bounded-wait
+                    and external-cancel forms for <code>Task&lt;T&gt;</code>:
+                </p>
+                <pre><code class="yoop">// std/core/concurrency.yoop
+extern "intrinsic" from "compiler" {
+    function wait_until&lt;T&gt;(h: Task&lt;T&gt;, deadline_ns: uint64): WaitResult&lt;T&gt;;
+    function cancel&lt;T&gt;(h: Task&lt;T&gt;): void;
+}</code></pre>
+                <p>
+                    <code>printf</code> is the one exception to the namespace rule:
+                    it's globally callable without an import, since the name is
+                    distinctive enough that shadowing isn't a real risk. Everything
+                    else routes through <code>import * as ...</code>.
+                </p>
+            </section>
+
+            <section id="stdlib">
+                <h2>Standard library</h2>
+                <p>
+                    The standard library lives under the <code>std/</code> import
+                    root, the only path prefix the resolver accepts besides relative
+                    paths. Each module below is grouped by directory; signatures are
+                    transcribed from the actual <code>.yoop</code> sources, so this
+                    is the inventory, not a wish list. Generic types and functions
+                    keep their <code>&lt;T&gt;</code> parameters in the listing.
+                </p>
+                <p class="muted">
+                    Value imports from <code>std/</code> must use the namespace
+                    form (<code>import * as ns from "std/..."</code>); type, trait,
+                    kind, and enum imports may keep the named form. Both are shown
+                    in the examples.
+                </p>
+
+                <h3 id="std-core"><code>std/core</code></h3>
+                <p>
+                    The foundation that every other module imports from. Result and
+                    Option types, the staple traits, the <code>disposable</code>
+                    kind, strings, bytes, vectors, formatting, intrinsics, and the
+                    concurrency primitives.
+                </p>
+
+                <h4><code>std/core/types.yoop</code></h4>
+                <p>
+                    The two canonical algebraic types. <code>Result</code> is the
+                    fallible shape <code>?</code> recognizes; <code>Option</code> is
+                    the value-or-absent shape that lookups return.
+                </p>
+                <pre><code class="yoop">export enum Result&lt;T, E&gt; {
+    Ok  { value: T },
+    Err { error: E },
+}
+
+export enum Option&lt;T&gt; {
+    Some { value: T },
+    None,
+}</code></pre>
+
+                <h4><code>std/core/traits.yoop</code></h4>
+                <p>
+                    The shared trait surface. <code>Readable</code> and
+                    <code>Writable</code> are the byte-stream traits;
+                    <code>Display</code> is the human-string conversion;
+                    <code>Iterable</code> is the trait <code>for ... in</code>
+                    desugars onto; <code>Into</code> is the cross-shape error
+                    conversion the <code>?</code> operator looks up.
+                </p>
+                <pre><code class="yoop">export trait Readable {
+    function read(ref self, ref buf: uint8[]): Result&lt;c_ssize_t, string&gt;;
+}
+
+export trait Writable {
+    function write(ref self, ref buf: uint8[]): Result&lt;c_ssize_t, string&gt;;
+    function flush(ref self): FlushOutcome;
+}
+
+export enum FlushOutcome {
+    Ok,
+    Err { error: string },
+}
+
+export trait Display {
+    function to_string(ref self): string;
+}
+
+export enum IterStep&lt;T&gt; {
+    Yield { value: T },
+    Done,
+}
+
+export trait Iterable&lt;T&gt; {
+    function next(ref self): IterStep&lt;T&gt;;
+}
+
+export trait Into&lt;T&gt; {
+    function into(ref self): T;
+}</code></pre>
+
+                <h4><code>std/core/kinds.yoop</code></h4>
+                <p>
+                    The <code>Disposable</code> trait and the <code>disposable</code>
+                    kind live together, since the kind is what makes the trait
+                    automatic at scope end.
+                </p>
+                <pre><code class="yoop">export trait Disposable {
+    function dispose(ref self): void;
+}
+
+export kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}</code></pre>
+
+                <h4><code>std/core/vec.yoop</code></h4>
+                <p>
+                    Growable typed vector. <code>Vec&lt;T&gt;</code> owns a backing
+                    buffer and implements <code>Disposable</code>; the
+                    <code>propagates&lt;disposable&gt;</code> on every returning
+                    function means the caller has to decide how to discharge cleanup.
+                </p>
+                <pre><code class="yoop">export type Vec&lt;T&gt; implements Disposable propagates&lt;disposable&gt;;
+
+export function vec_new&lt;T&gt;(initial_cap: usize): Vec&lt;T&gt; propagates&lt;disposable&gt;;
+export function vec_push&lt;T&gt;(v: ref Vec&lt;T&gt;, value: T): void;
+export function vec_get&lt;T&gt;(v: ref Vec&lt;T&gt;, i: usize): T;
+export function vec_set&lt;T&gt;(v: ref Vec&lt;T&gt;, i: usize, value: T): void;
+export function vec_clear&lt;T&gt;(v: ref Vec&lt;T&gt;): void;
+export function vec_as_array&lt;T&gt;(v: ref Vec&lt;T&gt;): T[];</code></pre>
+
+                <h4><code>std/core/strings.yoop</code></h4>
+                <p>
+                    String comparison, search, slicing, concatenation, and the
+                    checked UTF-8 conversion from <code>uint8[]</code>.
+                </p>
+                <pre><code class="yoop">export function string_from_bytes(buf: uint8[]): Result&lt;string, string&gt;;
+export function string_eq(a: string, b: string): bool;
+export function string_eq_ignore_ascii_case(a: string, b: string): bool;
+export function string_starts_with(s: string, prefix: string): bool;
+export function string_index_of(s: string, needle: string): usize;
+export function string_slice(s: string, start: usize, end: usize): Result&lt;string, string&gt;;
+export function string_hash(s: string): uint64;
+export function string_concat(a: string, b: string): string;
+export function string_concat_all(parts: string[]): string;</code></pre>
+
+                <h4><code>std/core/bytes.yoop</code></h4>
+                <p>
+                    Byte-buffer counterparts for the string ops, plus an integer
+                    parser that reports how many bytes it consumed.
+                </p>
+                <pre><code class="yoop">export type BytesParsed { value: int64, consumed: usize }
+
+export function bytes_eq(a: uint8[], b: uint8[]): bool;
+export function bytes_eq_ignore_ascii_case(a: uint8[], b: uint8[]): bool;
+export function bytes_index_of(buf: uint8[], needle: uint8): usize;
+export function bytes_index_of_seq(buf: uint8[], needle: uint8[]): usize;
+export function bytes_starts_with(buf: uint8[], prefix: uint8[]): bool;
+export function bytes_slice(buf: uint8[], start: usize, end: usize): uint8[];
+export function bytes_copy(buf: uint8[]): uint8[];
+export function bytes_parse_int(buf: uint8[]): Result&lt;BytesParsed, string&gt;;</code></pre>
+
+                <h4><code>std/core/format.yoop</code></h4>
+                <p>
+                    Primitive-to-string conversions. Template literals special-case
+                    these today; calling the function directly is useful when you
+                    need the result as a <code>string</code> value rather than
+                    inside a template.
+                </p>
+                <pre><code class="yoop">export function bool_to_string(b: bool): string;
+export function uint_to_string(x: uint64): string;
+export function int_to_string(x: int64): string;
+export function float_to_string(x: float64): string;</code></pre>
+
+                <h4><code>std/core/concurrency.yoop</code></h4>
+                <p>
+                    The bounded-wait surface for <code>Task&lt;T&gt;</code> plus the
+                    wall clock. <code>wait_until</code> and <code>cancel</code> are
+                    intrinsics declared here; importing the module brings the names
+                    into scope.
+                </p>
+                <pre><code class="yoop">export enum WaitResult&lt;T&gt; {
+    Done { value: T },
+    Timeout,
+    Cancelled,
+}
+
+export function now_ns(): uint64;
+export function sleep_ms(ms: uint64): int32;
+
+// Intrinsic declarations also exported from this module:
+//   function wait_until&lt;T&gt;(h: Task&lt;T&gt;, deadline_ns: uint64): WaitResult&lt;T&gt;;
+//   function cancel&lt;T&gt;(h: Task&lt;T&gt;): void;</code></pre>
+
+                <h3 id="std-collections"><code>std/collections</code></h3>
+                <p>
+                    Generic data structures. All three are
+                    <code>Disposable</code> and propagate their cleanup obligation
+                    to the caller via <code>propagates&lt;disposable&gt;</code>.
+                    Maps and sets use a <code>KeyOps&lt;K&gt;</code> witness for
+                    hashing and equality; the most common key types ship with
+                    pre-built ops.
+                </p>
+
+                <h4><code>std/collections/map.yoop</code></h4>
+                <pre><code class="yoop">export type KeyOps&lt;K&gt; {
+    hash: (k: K) =&gt; uint64,
+    eq:   (a: K, b: K) =&gt; bool,
+}
+
+export type Map&lt;K, V&gt; implements Disposable propagates&lt;disposable&gt;;
+export type MapEntry&lt;K, V&gt; { key: K, value: V }
+export type MapIter&lt;K, V&gt; implements Iterable&lt;MapEntry&lt;K, V&gt;&gt;;
+
+export function map_new&lt;K, V&gt;(initial_cap: usize, ops: KeyOps&lt;K&gt;): Map&lt;K, V&gt; propagates&lt;disposable&gt;;
+export function map_insert&lt;K, V&gt;(ref m: Map&lt;K, V&gt;, key: K, value: V): bool;
+export function map_get&lt;K, V&gt;(ref m: Map&lt;K, V&gt;, key: K): Option&lt;V&gt;;
+export function map_contains_key&lt;K, V&gt;(ref m: Map&lt;K, V&gt;, key: K): bool;
+export function map_remove&lt;K, V&gt;(ref m: Map&lt;K, V&gt;, key: K): bool;
+export function map_len&lt;K, V&gt;(ref m: Map&lt;K, V&gt;): usize;
+export function map_clear&lt;K, V&gt;(ref m: Map&lt;K, V&gt;): void;
+export function map_iter&lt;K, V&gt;(ref m: Map&lt;K, V&gt;): MapIter&lt;K, V&gt;;
+
+// Prebuilt KeyOps for the common key types:
+export function string_key_ops(): KeyOps&lt;string&gt;;
+export function int32_key_ops(): KeyOps&lt;int32&gt;;
+export function int64_key_ops(): KeyOps&lt;int64&gt;;
+export function uint64_key_ops(): KeyOps&lt;uint64&gt;;
+export function bytes_key_ops(): KeyOps&lt;uint8[]&gt;;</code></pre>
+
+                <h4><code>std/collections/set.yoop</code></h4>
+                <pre><code class="yoop">export type Set&lt;K&gt; implements Disposable propagates&lt;disposable&gt;;
+
+export function set_new&lt;K&gt;(initial_cap: usize, ops: KeyOps&lt;K&gt;): Set&lt;K&gt; propagates&lt;disposable&gt;;
+export function set_insert&lt;K&gt;(ref s: Set&lt;K&gt;, k: K): bool;
+export function set_contains&lt;K&gt;(ref s: Set&lt;K&gt;, k: K): bool;
+export function set_remove&lt;K&gt;(ref s: Set&lt;K&gt;, k: K): bool;
+export function set_len&lt;K&gt;(ref s: Set&lt;K&gt;): usize;</code></pre>
+
+                <h4><code>std/collections/deque.yoop</code></h4>
+                <pre><code class="yoop">export type Deque&lt;T&gt; implements Disposable propagates&lt;disposable&gt;;
+
+export function deque_new&lt;T&gt;(initial_cap: usize): Deque&lt;T&gt; propagates&lt;disposable&gt;;
+export function deque_push_back&lt;T&gt;(ref d: Deque&lt;T&gt;, value: T): void;
+export function deque_push_front&lt;T&gt;(ref d: Deque&lt;T&gt;, value: T): void;
+export function deque_pop_front&lt;T&gt;(ref d: Deque&lt;T&gt;): Option&lt;T&gt;;
+export function deque_pop_back&lt;T&gt;(ref d: Deque&lt;T&gt;): Option&lt;T&gt;;
+export function deque_get&lt;T&gt;(ref d: Deque&lt;T&gt;, i: usize): Option&lt;T&gt;;
+export function deque_len&lt;T&gt;(ref d: Deque&lt;T&gt;): usize;
+export function deque_clear&lt;T&gt;(ref d: Deque&lt;T&gt;): void;</code></pre>
+
+                <h3 id="std-net"><code>std/net</code></h3>
+                <p>
+                    TCP sockets through the host OS. The disposable handles
+                    (<code>TcpListener</code>, <code>TcpStream</code>) hold the
+                    underlying file descriptor; the <code>Result</code>-shaped
+                    return types (<code>ListenResult</code>, <code>AcceptResult</code>,
+                    <code>ConnectResult</code>) carry either a connected handle or
+                    an error string. <code>TcpStream</code> implements
+                    <code>Readable</code> and <code>Writable</code>, so it slots
+                    straight into the byte-stream traits.
+                </p>
+
+                <h4><code>std/net/tcp.yoop</code></h4>
+                <pre><code class="yoop">export type TcpListener implements Disposable propagates&lt;disposable&gt;;
+export type TcpStream   implements (Disposable, Readable, Writable) propagates&lt;disposable&gt;;
+
+export type ListenResult  implements Disposable propagates&lt;disposable&gt;;
+export type AcceptResult  implements Disposable propagates&lt;disposable&gt;;
+export type ConnectResult implements Disposable propagates&lt;disposable&gt;;
+
+export function tcp_listen(host: string, port: int32, backlog: int32): ListenResult propagates&lt;disposable&gt;;
+export function tcp_accept(ref l: TcpListener): AcceptResult propagates&lt;disposable&gt;;
+export function tcp_connect(host: string, port: int32): ConnectResult propagates&lt;disposable&gt;;</code></pre>
+
+                <h4><code>std/net/socket.yoop</code> and <code>std/net/addr.yoop</code></h4>
+                <p>
+                    Lower-level socket primitives used by <code>tcp.yoop</code>;
+                    most user code calls the <code>tcp_*</code> entries above
+                    rather than these directly.
+                </p>
+                <pre><code class="yoop">// std/net/socket.yoop
+export type Socket       implements Disposable propagates&lt;disposable&gt;;
+export type SocketResult implements Disposable propagates&lt;disposable&gt;;
+export function open_tcp_socket(): SocketResult propagates&lt;disposable&gt;;
+
+// std/net/addr.yoop
+export type SocketAddr implements Display;
+export function localhost(port: int32): SocketAddr;
+export function any_addr(port: int32): SocketAddr;</code></pre>
+
+                <h3 id="std-http"><code>std/http</code></h3>
+                <p>
+                    A minimal HTTP/1.1 surface. Request and response types, a status
+                    code helper layer, header storage, and a server loop that takes
+                    any type implementing <code>Handler</code>. Parser and server
+                    are written in Yooperlang on top of <code>std/net</code>.
+                </p>
+
+                <h4><code>std/http/types.yoop</code></h4>
+                <pre><code class="yoop">export enum HttpMethod  { Get, Head, Post, Put, Delete, Options, Patch, Other }
+export enum StatusClass { Informational, Success, Redirection, ClientError, ServerError, Unknown }
+export type StatusCode  { code: int32 }
+
+export function status(code: int32): StatusCode;
+export function status_class_for(code: int32): StatusClass;
+export function reason_phrase(code: int32): string;
+
+export function ok(): StatusCode;                  // 200
+export function bad_request(): StatusCode;         // 400
+export function not_found(): StatusCode;           // 404
+export function method_not_allowed(): StatusCode;  // 405
+export function server_err(): StatusCode;          // 500
+
+export type HeaderEntry { name: string, value: string }
+export type Headers  implements Disposable propagates&lt;disposable&gt;;
+export type Request  implements Disposable propagates&lt;disposable&gt;;
+export type Response implements Disposable propagates&lt;disposable&gt;;
+
+export function headers_new(cap: usize): Headers propagates&lt;disposable&gt;;
+export function headers_add(ref h: Headers, name: string, value: string): void;
+export function headers_get(ref h: Headers, name: string): string;
+export function headers_has(ref h: Headers, name: string): bool;
+
+export function response_new(): Response propagates&lt;disposable&gt;;</code></pre>
+
+                <h4><code>std/http/server.yoop</code></h4>
+                <pre><code class="yoop">export enum HandleOutcome { Ok, Err }
+
+export trait Handler {
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
+}
+
+export type ServeOutcome { served: int32, error: string }
+
+export function serve_n&lt;H implements Handler&gt;(
+    ref l: TcpListener,
+    ref handler: H,
+    n: int32,
+): ServeOutcome;</code></pre>
+                <p>
+                    <code>serve_n</code> runs the handler up to <code>n</code>
+                    times (or forever when <code>n == 0</code>). Because
+                    <code>H</code> is a generic type parameter constrained to
+                    <code>Handler</code>, each call site monomorphizes into a
+                    direct call - no vtable indirection in the hot path.
+                </p>
+
+                <h3 id="std-log-debug"><code>std/log</code> and <code>std/debug</code></h3>
+                <p>
+                    Two small top-level modules. Logging routes to stderr with a
+                    level prefix; debug panics print and abort.
+                </p>
+                <pre><code class="yoop">// std/log.yoop
+export function info(msg: string): void;
+export function warn(msg: string): void;
+export function error(msg: string): void;
+
+// std/debug.yoop
+export function panic(msg: string): void;
+export function unreachable(msg: string): void;
+export function assert(cond: bool, msg: string): void;</code></pre>
+                <p>
+                    Call shape (namespace form required):
+                </p>
+                <pre><code class="yoop">import * as log from "std/log.yoop";
+import * as dbg from "std/debug.yoop";
+
+log.info("listening on 18080");
+dbg.assert(buf.len &gt; 0, "buffer must be non-empty");</code></pre>
+                <p class="placeholder">
+                    This page tracks what's actually in the repo at the time of
+                    writing. As phases land, signatures get added here.
+                </p>
+            </section>
+        </article>
+    </div>
+
+    <footer class="site-footer">
+        <div class="container">
+            <p>Yooperlang - built slowly, one phase at a time.</p>
+        </div>
+    </footer>
+
+    <script src="highlight.js"></script>
+</body>
+</html>

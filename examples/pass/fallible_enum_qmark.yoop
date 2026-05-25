@@ -1,0 +1,45 @@
+// Phase 9.H: `?` propagation works on any enum with two variants named
+// `Ok` and `Err`. The same convention drives propagation that struct-fallibles
+// have used since Phase 2; the typechecker recognizes the shape structurally,
+// no marker trait required.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum IntResult {
+    Ok { value: int32 },
+    Err { error: int32 },
+}
+
+function parse_positive(n: int32): IntResult {
+    if (n < 0) {
+        return IntResult.Err { error: n };
+    }
+    return IntResult.Ok { value: n };
+}
+
+function add_two_positives(a: int32, b: int32): IntResult {
+    let x: int32 = parse_positive(a)?;
+    let y: int32 = parse_positive(b)?;
+    return IntResult.Ok { value: x + y };
+}
+
+function main(): int32 {
+    let happy: IntResult = add_two_positives(3, 4);
+    switch (happy) {
+        case IntResult.Ok { value: hv }: { printf(`happy sum=${hv}\n`); }
+        case IntResult.Err { error: he }: { printf(`happy err=${he}\n`); }
+    }
+
+    let sad: IntResult = add_two_positives(3, -7);
+    switch (sad) {
+        case IntResult.Ok { value: sv }: { printf(`sad sum=${sv}\n`); }
+        case IntResult.Err { error: se }: { printf(`sad err=${se}\n`); }
+    }
+    return 0;
+}
+
+// expected output:
+// happy sum=7
+// sad err=-7

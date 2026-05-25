@@ -1,0 +1,6 @@
+kind base { appliesTo binding; }
+kind bad = base & { appliesTo binding; mustNotEscape scope; };
+
+function main(): int32 {
+    return 0;
+}

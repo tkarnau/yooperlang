@@ -195,7 +195,82 @@ describe("parse: statements", () => {
   });
 });
 
-describe("parse: phase 2 — postfix '?'", () => {
+// Phase 9.D: `for ITEM in EXPR { ... }` element-walking loop. The classic
+// C-style `for (i = 0; ...)` form still parses unchanged; the dispatcher
+// looks at whether the token after `for` is `(` or `IDENT in`.
+describe("Phase 9.D: for ... in loop", () => {
+  function bodyOf(src) {
+    return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
+  }
+
+  it("parses `for x in xs { }` as FOR_IN_LOOP with loopVar + iterExpr", () => {
+    const stmts = bodyOf("let xs: int32[] = [1,2,3]; for x in xs { }");
+    const loop = stmts[1];
+    assert.equal(loop.kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(loop.loopVar, "x");
+    assert.equal(loop.iterExpr.kind, ASTNodeKind.IDENT);
+    assert.equal(loop.iterExpr.name, "xs");
+    assert.equal(loop.body.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("classic for-loop syntax still parses to FOR_LOOP", () => {
+    const stmts = bodyOf("let i: int32 = 0; for (i = 0; i < 5; i = i + 1) { }");
+    assert.equal(stmts[1].kind, ASTNodeKind.FOR_LOOP);
+  });
+
+  it("accepts an arbitrary expression on the RHS of `in`", () => {
+    const stmts = bodyOf("let xs: int32[] = [1,2,3]; for x in xs { }");
+    const loop = stmts[1];
+    assert.equal(loop.kind, ASTNodeKind.FOR_IN_LOOP);
+    // Index expressions, calls, field access etc. all flow through
+    // parseExpression - verify a call-shape RHS works.
+    const stmts2 = bodyOf("for v in build() { }");
+    assert.equal(stmts2[0].kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(stmts2[0].iterExpr.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+});
+
+// Phase 9.G.1: function value types in type position - `(p: T) => R`. The
+// annotation parses to `{ kind: "functionType", params: [...], returnType }`
+// and may appear anywhere a type annotation does.
+describe("Phase 9.G.1: `=>` function value type annotations", () => {
+  it("parses a struct field of function-pointer type", () => {
+    const ast = parse(
+      "type Handler { handle: (req: int32) => int32 }",
+    );
+    const td = ast.body[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(td.fields[0].name, "handle");
+    assert.deepEqual(td.fields[0].typeAnnotation, {
+      kind: "functionType",
+      params: [{ kind: "typeName", name: "int32" }],
+      returnType: { kind: "typeName", name: "int32" },
+    });
+  });
+
+  it("parses a function parameter typed as a function pointer", () => {
+    const ast = parse(
+      "function pick(cb: (n: int32) => int32): int32 { return cb(5); }",
+    );
+    const fn = ast.body[0];
+    assert.deepEqual(fn.params[0].typeAnnotation, {
+      kind: "functionType",
+      params: [{ kind: "typeName", name: "int32" }],
+      returnType: { kind: "typeName", name: "int32" },
+    });
+  });
+
+  it("parses an empty parameter list `() => int32`", () => {
+    const ast = parse("type T { gen: () => int32 }");
+    assert.deepEqual(ast.body[0].fields[0].typeAnnotation, {
+      kind: "functionType",
+      params: [],
+      returnType: { kind: "typeName", name: "int32" },
+    });
+  });
+});
+
+describe("parse: phase 2 - postfix '?'", () => {
   function exprOf(src) {
     const ast = parse(`function f(): int32 { return ${src}; }`);
     return ast.body[0].body.body[0].value;
@@ -222,7 +297,7 @@ describe("parse: phase 2 — postfix '?'", () => {
     assert.equal(t.operand.name, "r");
   });
 
-  it("'f().a?' parses as ((f().a)?) — '?' applies to the field access", () => {
+  it("'f().a?' parses as ((f().a)?) - '?' applies to the field access", () => {
     const t = exprOf("f().a?");
     assert.equal(t.kind, ASTNodeKind.TRY_OP);
     assert.equal(t.operand.kind, ASTNodeKind.FIELD_ACCESS);
@@ -230,7 +305,7 @@ describe("parse: phase 2 — postfix '?'", () => {
     assert.equal(t.operand.object.kind, ASTNodeKind.CALL_EXPRESSION);
   });
 
-  it("'f()?.a' parses as ((f()?).a) — field access on the TRY_OP result", () => {
+  it("'f()?.a' parses as ((f()?).a) - field access on the TRY_OP result", () => {
     const e = exprOf("f()?.a");
     assert.equal(e.kind, ASTNodeKind.FIELD_ACCESS);
     assert.equal(e.field, "a");
@@ -245,12 +320,12 @@ describe("parse: phase 2 — postfix '?'", () => {
     assert.equal(t.operand.object.kind, ASTNodeKind.TRY_OP);
   });
 
-  it("'r? = 5' is rejected — TRY_OP is not a valid lvalue", () => {
+  it("'r? = 5' is rejected - TRY_OP is not a valid lvalue", () => {
     assert.throws(() => bodyOf("r? = 5;"), /invalid assignment target: TRY_OP/);
   });
 });
 
-describe("parse: phase 2 — destructuring decl", () => {
+describe("parse: phase 2 - destructuring decl", () => {
   function bodyOf(src) {
     return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
   }
@@ -278,7 +353,7 @@ describe("parse: phase 2 — destructuring decl", () => {
     assert.deepEqual(stmts[0].names, ["a", "err"]);
   });
 
-  it("destructure RHS can be a TRY_OP — '{ a, b } = f()?;'", () => {
+  it("destructure RHS can be a TRY_OP - '{ a, b } = f()?;'", () => {
     const stmts = bodyOf("const { a, b } = f()?;");
     const node = stmts[0];
     assert.equal(node.kind, ASTNodeKind.DESTRUCTURE_DECL);
@@ -288,7 +363,7 @@ describe("parse: phase 2 — destructuring decl", () => {
   });
 });
 
-describe("parse: phase 2 — discard statement", () => {
+describe("parse: phase 2 - discard statement", () => {
   function bodyOf(src) {
     return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body;
   }
@@ -448,7 +523,7 @@ describe("parse: phase 5 - traits", () => {
     assert.equal(stmt.value.value, 0);
   });
   it("method calls another method parses as call expression", () => {
-    // A method that calls another method: `function f(ref self): void { g(ref self); } function g(ref self): void { }` — the `g(ref self)` is just a `CALL_EXPRESSION`, no special parser handling.
+    // A method that calls another method: `function f(ref self): void { g(ref self); } function g(ref self): void { }` - the `g(ref self)` is just a `CALL_EXPRESSION`, no special parser handling.
     const stmts = parse(
       "type myType implements MyTrait { function f(ref self): void { g(ref self); } function g(ref self): void { } }",
     ).body;
@@ -496,13 +571,41 @@ describe("parse: phase 5 - traits", () => {
       assert.equal(tr.typeParams.length, 1);
       assert.equal(tr.typeParams[0].name, "T");
     });
-    it("rejects extends, not yet supported", () => {
+    // Phase 9.J: `extends` is supported.
+    it("parses single extends", () => {
+      const ast = parse(
+        "trait MyTrait extends BaseTrait { function method(ref self): void; }",
+      );
+      const tr = ast.body[0];
+      assert.equal(tr.kind, "TRAIT_DECL");
+      assert.equal(tr.name, "MyTrait");
+      assert.equal(tr.extends.length, 1);
+      assert.equal(tr.extends[0].kind, "typeName");
+      assert.equal(tr.extends[0].name, "BaseTrait");
+    });
+    it("parses multiple extends", () => {
+      const ast = parse(
+        "trait Child extends A, B { function method(ref self): void; }",
+      );
+      const tr = ast.body[0];
+      assert.equal(tr.extends.length, 2);
+      assert.equal(tr.extends[0].name, "A");
+      assert.equal(tr.extends[1].name, "B");
+    });
+    it("parses generic extends", () => {
+      const ast = parse(
+        "trait BatchIterable<T> extends Iterable<T> { function next_batch(ref self): T; }",
+      );
+      const tr = ast.body[0];
+      assert.equal(tr.extends.length, 1);
+      assert.equal(tr.extends[0].kind, "typeApplication");
+      assert.equal(tr.extends[0].name, "Iterable");
+      assert.equal(tr.extends[0].typeArgs[0].name, "T");
+    });
+    it("rejects extends with no trait name", () => {
       assert.throws(
-        () =>
-          parse(
-            "trait MyTrait extends BaseTrait { function method(ref self): void; }",
-          ),
-        /extends not yet supported/,
+        () => parse("trait MyTrait extends { function m(ref self): void; }"),
+        /expected trait name after 'extends'/,
       );
     });
     it("rejects missing ref self in trait method", () => {
@@ -666,6 +769,31 @@ describe("parse: phase 6.1 - kind decls", () => {
       assert.equal(k.composition.kindRefs[0].name, "a");
       assert.equal(k.composition.kindRefs[1].name, "b");
     });
+    it("accepts inline kind body in composition", () => {
+      const ast = parse("kind slow = a & { mustNotEscape scope; };");
+      const k = ast.body[0];
+      assert.equal(k.composition.kindRefs.length, 2);
+      assert.equal(k.composition.kindRefs[0].inline, false);
+      assert.equal(k.composition.kindRefs[0].name, "a");
+      assert.equal(k.composition.kindRefs[1].inline, true);
+      assert.equal(k.composition.kindRefs[1].clauses.length, 1);
+      assert.equal(
+        k.composition.kindRefs[1].clauses[0].kind,
+        ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE,
+      );
+    });
+    it("rejects appliesTo inside an inline composition body", () => {
+      assert.throws(
+        () => parse("kind bad = a & { appliesTo binding; };"),
+        /inline kind body in composition cannot declare 'appliesTo'/,
+      );
+    });
+    it("rejects empty inline composition body", () => {
+      assert.throws(
+        () => parse("kind bad = a & { };"),
+        /inline kind body must contain at least one clause/,
+      );
+    });
     it("rejects provides clause", () => {
       assert.throws(
         () =>
@@ -678,6 +806,35 @@ describe("parse: phase 6.1 - kind decls", () => {
         () =>
           parse("kind k { appliesTo binding; mustNotEscape; }"),
         /mustNotEscape semicolon not yet supported/,
+      );
+    });
+    // Phase 9.J: `mustNotShare acrossThreads` joins `acrossScopes` as a legal
+    // target.
+    it("accepts mustNotShare acrossThreads", () => {
+      const ast = parse(
+        "kind k { appliesTo binding; mustNotShare acrossThreads; }",
+      );
+      const k = ast.body[0];
+      const c = k.clauses.find(
+        (c) => c.kind === ASTNodeKind.KIND_MUST_NOT_SHARE_CLAUSE,
+      );
+      assert.equal(c.target, "acrossThreads");
+    });
+    it("accepts mustNotShare acrossScopes", () => {
+      const ast = parse(
+        "kind k { appliesTo binding; mustNotShare acrossScopes; }",
+      );
+      const k = ast.body[0];
+      const c = k.clauses.find(
+        (c) => c.kind === ASTNodeKind.KIND_MUST_NOT_SHARE_CLAUSE,
+      );
+      assert.equal(c.target, "acrossScopes");
+    });
+    it("rejects mustNotShare with unrecognized target", () => {
+      assert.throws(
+        () =>
+          parse("kind k { appliesTo binding; mustNotShare acrossPlanets; }"),
+        /unrecognized mustNotShare target/,
       );
     });
   });
@@ -747,7 +904,7 @@ describe("parse: phase 6.1 - kind-prefixed bindings", () => {
   });
 });
 
-describe("parse: phase 7.2 - trait bounds on type params", () => {
+describe("parse: phase 7.2 / 9.J - trait bounds on type params", () => {
   it("parses single bound on a generic function param", () => {
     const ast = parse(
       "function drain<T implements Iterable<T>>(ref it: T): void { }",
@@ -755,11 +912,11 @@ describe("parse: phase 7.2 - trait bounds on type params", () => {
     const fn = ast.body[0];
     assert.equal(fn.typeParams.length, 1);
     assert.equal(fn.typeParams[0].name, "T");
-    assert.ok(fn.typeParams[0].bound);
-    assert.equal(fn.typeParams[0].bound.kind, "typeApplication");
-    assert.equal(fn.typeParams[0].bound.name, "Iterable");
-    assert.equal(fn.typeParams[0].bound.typeArgs.length, 1);
-    assert.equal(fn.typeParams[0].bound.typeArgs[0].name, "T");
+    assert.equal(fn.typeParams[0].bounds.length, 1);
+    assert.equal(fn.typeParams[0].bounds[0].kind, "typeApplication");
+    assert.equal(fn.typeParams[0].bounds[0].name, "Iterable");
+    assert.equal(fn.typeParams[0].bounds[0].typeArgs.length, 1);
+    assert.equal(fn.typeParams[0].bounds[0].typeArgs[0].name, "T");
   });
   it("parses simple (non-generic) trait bound", () => {
     const ast = parse(
@@ -767,8 +924,8 @@ describe("parse: phase 7.2 - trait bounds on type params", () => {
     );
     const td = ast.body[0];
     assert.equal(td.typeParams[0].name, "T");
-    assert.equal(td.typeParams[0].bound.kind, "typeName");
-    assert.equal(td.typeParams[0].bound.name, "Ord");
+    assert.equal(td.typeParams[0].bounds[0].kind, "typeName");
+    assert.equal(td.typeParams[0].bounds[0].name, "Ord");
   });
   it("parses bound on a generic trait's type param", () => {
     const ast = parse(
@@ -776,11 +933,11 @@ describe("parse: phase 7.2 - trait bounds on type params", () => {
     );
     const tr = ast.body[0];
     assert.equal(tr.typeParams[0].name, "T");
-    assert.equal(tr.typeParams[0].bound.name, "Display");
+    assert.equal(tr.typeParams[0].bounds[0].name, "Display");
   });
-  it("unbounded type params still parse with bound: null", () => {
+  it("unbounded type params still parse with empty bounds list", () => {
     const ast = parse("function id<T>(x: T): T { return x; }");
-    assert.equal(ast.body[0].typeParams[0].bound, null);
+    assert.deepEqual(ast.body[0].typeParams[0].bounds, []);
   });
   it("parses multiple type params with mixed bounds", () => {
     const ast = parse(
@@ -788,9 +945,20 @@ describe("parse: phase 7.2 - trait bounds on type params", () => {
     );
     const params = ast.body[0].typeParams;
     assert.equal(params.length, 3);
-    assert.equal(params[0].bound.name, "Display");
-    assert.equal(params[1].bound, null);
-    assert.equal(params[2].bound.name, "Iterable");
+    assert.equal(params[0].bounds[0].name, "Display");
+    assert.deepEqual(params[1].bounds, []);
+    assert.equal(params[2].bounds[0].name, "Iterable");
+  });
+  // Phase 9.J: parenthesized multi-bound form.
+  it("parses multiple trait bounds on one param", () => {
+    const ast = parse(
+      "function f<T implements (Display, Iterable<T>)>(ref x: T): void { }",
+    );
+    const params = ast.body[0].typeParams;
+    assert.equal(params.length, 1);
+    assert.equal(params[0].bounds.length, 2);
+    assert.equal(params[0].bounds[0].name, "Display");
+    assert.equal(params[0].bounds[1].name, "Iterable");
   });
   describe("reject cases", () => {
     it("rejects missing trait after implements", () => {
@@ -799,10 +967,10 @@ describe("parse: phase 7.2 - trait bounds on type params", () => {
         /expected trait name after 'implements'/,
       );
     });
-    it("rejects empty parenthesized bound list (multiple bounds reserved)", () => {
+    it("rejects empty parenthesized bound list", () => {
       assert.throws(
-        () => parse("function f<T implements (Foo, Bar)>(): void { }"),
-        /multiple trait bounds.*not yet supported/,
+        () => parse("function f<T implements ()>(): void { }"),
+        /empty trait bound list/,
       );
     });
     it("rejects ref-type as bound", () => {

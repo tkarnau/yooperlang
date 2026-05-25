@@ -1,5 +1,5 @@
 // Phase 9.E: array slice syntax. xs[i..j] / xs[i..] / xs[..j] / xs[..]
-// produce a zero-copy fat-pointer subview — backing memory is shared with
+// produce a zero-copy fat-pointer subview - backing memory is shared with
 // the source array.
 
 extern "C" from "stdio.h" {

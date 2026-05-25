@@ -1,0 +1,83 @@
+// Phase 10.I: an HTTP server that uses std/http/router.yoop to dispatch
+// across three handlers behind one type-erased route table.
+//
+// Build: node ./src/yoopiler.js examples/pass/http_router/main.yoop -o /tmp/http_router
+// Run:   /tmp/http_router
+// Test:  curl http://localhost:18081/hello
+//        curl http://localhost:18081/healthz
+//        curl http://localhost:18081/anything-else
+//
+// Each curl exits the server after one request (serve_n with n=1).
+
+import { disposable } from "../../../std/core/kinds.yoop";
+import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
+import {
+    serve_n, ServeOutcome,
+    Handler, HandleOutcome, Dispatcher,
+} from "../../../std/http/server.yoop";
+import {
+    Request, Response, HttpMethod,
+    ok, headers_add,
+} from "../../../std/http/types.yoop";
+import {
+    Router,
+    router_new, router_add, router_set_fallback,
+} from "../../../std/http/router.yoop";
+import * as intr from "../../../std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Three handlers, each with its own state.
+type HelloHandler implements Handler {
+    greeting: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        resp.status = ok();
+        headers_add(ref resp.headers, "Content-Type", "text/plain");
+        resp.body = intr.string_as_bytes(self.greeting);
+        return HandleOutcome.Ok;
+    }
+}
+
+type HealthHandler implements Handler {
+    status_text: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        resp.status = ok();
+        headers_add(ref resp.headers, "Content-Type", "text/plain");
+        resp.body = intr.string_as_bytes(self.status_text);
+        return HandleOutcome.Ok;
+    }
+}
+
+type EchoHandler implements Handler {
+    prefix: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        resp.status = ok();
+        headers_add(ref resp.headers, "Content-Type", "text/plain");
+        resp.body = intr.string_as_bytes(self.prefix);
+        return HandleOutcome.Ok;
+    }
+}
+
+function main(): int32 {
+    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18081, 128);
+    if (lr.error.len > 0) {
+        printf(`bind failed: ${lr.error}\n`);
+        return 1;
+    }
+
+    let hello: HelloHandler   = { greeting:    "Hello via router!\n" };
+    let health: HealthHandler = { status_text: "ok\n" };
+    let echo: EchoHandler     = { prefix:      "fallback\n" };
+
+    let disposable r: Router = router_new();
+    router_add(ref r, HttpMethod.Get, "/hello",   Dispatcher.from(ref hello));
+    router_add(ref r, HttpMethod.Get, "/healthz", Dispatcher.from(ref health));
+    router_set_fallback(ref r, Dispatcher.from(ref echo));
+
+    printf(`router listening on 127.0.0.1:18081\n`);
+    let outcome: ServeOutcome = serve_n(ref lr.listener, ref r, 1);
+    printf(`served=${outcome.served} err=${outcome.error}\n`);
+    return 0;
+}

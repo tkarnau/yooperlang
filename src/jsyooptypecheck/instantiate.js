@@ -16,8 +16,10 @@
 
 import {
   ArrayType,
+  EnumType,
   ErrorType,
   FuncType,
+  FunctionPointerType,
   RefType,
   StructType,
   TaskType,
@@ -36,6 +38,8 @@ export function mangleType(t) {
     case typeKinds.prim:
       return t.name;
     case typeKinds.struct:
+      return t.moduleId ? `${t.moduleId}__${t.name}` : t.name;
+    case typeKinds.enum:
       return t.moduleId ? `${t.moduleId}__${t.name}` : t.name;
     case typeKinds.ref:
       return `ref_${mangleType(t.inner)}`;
@@ -75,7 +79,7 @@ function buildSubstitution(declId, paramNames, argTypes) {
 //     propagatedKinds: [...], kindApplication: ...
 //   }
 // Returns a fully-frozen monomorphic StructType (or an "open" instantiation
-// when argTypes contain TypeParamType — substitution will canonicalize it).
+// when argTypes contain TypeParamType - substitution will canonicalize it).
 export function instantiateStruct(registry, genericDecl, argTypes) {
   const key = `S:${genericDecl.id}:${cacheKeyForArgs(argTypes)}`;
   const cached = registry.structs.get(key);
@@ -94,6 +98,15 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
     genericDecl.paramNames,
     argTypes,
   );
+  // Phase 10.C.3: a generic struct's methods may reference the struct
+  // itself by name (e.g. `function next(ref self): IterStep<T>` where
+  // `self` is the open `MapIter<K, V>`). Substituting through those
+  // method sigs re-instantiates the struct with concrete args - which
+  // would recurse back into us. To break the cycle, cache the new
+  // instance BEFORE substituting methods/traits; the recursive lookup
+  // then hits the cache and returns the in-progress instance.
+  const placeholderMethods = new Map();
+  const placeholderTraits = [];
   const fields = (genericDecl.genericFields ?? []).map((f) => ({
     name: f.name,
     type: substituteTypeParams(f.type, sub),
@@ -103,8 +116,8 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
     mangledName,
     fields,
     genericDecl.moduleId,
-    genericDecl.implementsTraits ?? [],
-    genericDecl.methods ?? new Map(),
+    placeholderTraits,
+    placeholderMethods,
     genericDecl.propagatedKinds ?? [],
     genericDecl.kindApplication ?? null,
     { declId: genericDecl.id, args: argTypes },
@@ -114,21 +127,85 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
   // Also index by declId so the registry-aware substitution can re-instantiate.
   if (!registry.genericDeclById) registry.genericDeclById = new Map();
   registry.genericDeclById.set(genericDecl.id, genericDecl);
-  // Per-decl instance list — used by codegen to walk concrete instances and
+  // Per-decl instance list - used by codegen to walk concrete instances and
   // emit substituted method bodies for `type Foo<T> implements Trait` impls.
   registry.structInstancesByDecl.set(
     genericDecl.id,
     [...(registry.structInstancesByDecl.get(genericDecl.id) ?? []), inst],
+  );
+  // Now substitute. Self-referential lookups will find the cached `inst`
+  // above and return it instead of re-entering instantiateStruct.
+  for (const t of genericDecl.implementsTraits ?? []) {
+    placeholderTraits.push(substituteTypeParams(t, sub));
+  }
+  for (const [name, sig] of (genericDecl.methods ?? new Map())) {
+    placeholderMethods.set(name, substituteTypeParams(sig, sub));
+  }
+  return inst;
+}
+
+// Phase 10.A: instantiate a generic enum decl at concrete `argTypes`.
+// Mirrors instantiateStruct - substitutes type params in variant payload
+// fields, returns a frozen monomorphic EnumType, caches by (declId, argKey).
+//   genericDecl: {
+//     id, name, moduleId, paramNames: [string], paramScope,
+//     genericVariants: Map<vname, { name, fields: [{name,type}] | null, ordinal }>,
+//     ast
+//   }
+export function instantiateEnum(registry, genericDecl, argTypes) {
+  const key = `E:${genericDecl.id}:${cacheKeyForArgs(argTypes)}`;
+  const cached = registry.enums.get(key);
+  if (cached) return cached;
+
+  if (argTypes.length !== genericDecl.paramNames.length) {
+    return ErrorType();
+  }
+  runBoundChecks(registry, genericDecl, argTypes);
+
+  const mangledName = monomorphizedName(genericDecl.name, argTypes);
+  const sub = buildSubstitution(
+    genericDecl.id,
+    genericDecl.paramNames,
+    argTypes,
+  );
+  const variants = new Map();
+  for (const [vname, v] of genericDecl.genericVariants ?? []) {
+    let fields = null;
+    if (v.fields !== null) {
+      fields = v.fields.map((f) => ({
+        name: f.name,
+        type: substituteTypeParams(f.type, sub),
+      }));
+    }
+    variants.set(vname, { name: vname, fields, ordinal: v.ordinal });
+  }
+  const inst = EnumType(mangledName, variants, genericDecl.moduleId, {
+    declId: genericDecl.id,
+    args: argTypes,
+  });
+  registry.enums.set(key, inst);
+  registry.byMangledName.set(`${genericDecl.moduleId}__${mangledName}`, inst);
+  if (!registry.genericDeclById) registry.genericDeclById = new Map();
+  registry.genericDeclById.set(genericDecl.id, genericDecl);
+  registry.enumInstancesByDecl.set(
+    genericDecl.id,
+    [...(registry.enumInstancesByDecl.get(genericDecl.id) ?? []), inst],
   );
   return inst;
 }
 
 // Phase 7.1: a registry-aware instantiator closure suitable for the
 // `instantiator` argument of substituteTypeParams.
+// Phase 10.A: dispatches on the recorded `genericKind` slot of the genericDecl
+// so enums route to instantiateEnum and structs to instantiateStruct. The
+// field is named `genericKind` (not `kind`) to avoid colliding with the
+// generic AST-walking heuristic in codegen.
 export function makeInstantiator(registry) {
   return (declId, argTypes) => {
     const decl = registry.genericDeclById?.get(declId);
     if (!decl) return null;
+    if (decl.genericKind === "enum")
+      return instantiateEnum(registry, decl, argTypes);
     return instantiateStruct(registry, decl, argTypes);
   };
 }
@@ -191,7 +268,20 @@ export function instantiateTrait(registry, genericTraitDecl, argTypes) {
   for (const [name, sig] of genericTraitDecl.genericMethods) {
     methods.set(name, substituteTypeParams(sig, sub));
   }
-  // Build a TraitType. We keep the original name + moduleId — the type-args
+  // Phase 9.J: generic-trait extends - `BatchIterable<T> extends Iterable<T>`
+  // means the BatchIterable<int32> instance must extend Iterable<int32>.
+  // The genericDecl stores the parent as a (possibly-open) TraitType whose
+  // type args reference the decl's own TypeParamType. To substitute, look up
+  // the (already-resolved) generic-trait decl by moduleId+name and re-
+  // instantiate at the substituted arg list. Bare extends of a non-generic
+  // trait carries through unchanged.
+  const extendsTraits = [];
+  for (const parent of genericTraitDecl.extendsTraits ?? []) {
+    extendsTraits.push(
+      substituteParentTrait(parent, sub, registry),
+    );
+  }
+  // Build a TraitType. We keep the original name + moduleId - the type-args
   // are recorded separately on the instance (in a registry side-map) but
   // typesEqual on TraitType still compares by (name, moduleId).
   const inst = TraitType(
@@ -199,10 +289,47 @@ export function instantiateTrait(registry, genericTraitDecl, argTypes) {
     methods,
     genericTraitDecl.moduleId,
     [],
+    extendsTraits,
   );
   registry.traits.set(key, inst);
   registry.traitArgsByInstance.set(inst, argTypes);
+  // Phase 9.J: index the generic-trait decl by id so substituteParentTrait
+  // can re-instantiate the parent when child args change.
+  if (!registry.genericDeclById) registry.genericDeclById = new Map();
+  registry.genericDeclById.set(genericTraitDecl.id, genericTraitDecl);
   return inst;
+}
+
+// Phase 9.J: substitute type params in a parent-trait reference and re-route
+// generic-trait parents through the instantiation cache. The parent was
+// resolved during pass C as either:
+//   - a non-generic TraitType - no type args, just carry through; OR
+//   - a generic TraitType instance with `traitArgsByInstance` entries that
+//     mention the child's own TypeParamTypes - substitute through and
+//     re-instantiate so the child instance gets the concrete parent.
+function substituteParentTrait(parent, sub, registry) {
+  if (!parent || parent.kind !== "trait") return parent;
+  const parentArgs = registry.traitArgsByInstance.get(parent);
+  if (!parentArgs || parentArgs.length === 0) return parent;
+  const newArgs = parentArgs.map((a) => substituteTypeParams(a, sub));
+  const allSame = newArgs.every((a, i) => a === parentArgs[i]);
+  if (allSame) return parent;
+  // Look up the generic-trait decl by walking back through the registry.
+  // The decl id isn't stamped on the TraitType, so we recover it by scanning
+  // the cache for the matching (name, moduleId) generic decl. This only fires
+  // when an open parent needs reinstantiation - rare enough that the linear
+  // walk is fine.
+  for (const [k, v] of registry.traits) {
+    if (v !== parent) continue;
+    // key shape: `T:${declId}:...` - extract declId.
+    const m = k.match(/^T:([^:]+):/);
+    if (!m) break;
+    const declId = m[1];
+    const decl = registry.genericDeclById?.get(declId);
+    if (!decl) break;
+    return instantiateTrait(registry, decl, newArgs);
+  }
+  return parent;
 }
 
 // Build a stable monomorphized name suffix from the type arg list.
@@ -218,9 +345,15 @@ export function createInstantiationRegistry() {
     structs: new Map(),
     funcs: new Map(),
     traits: new Map(),
+    // Phase 10.A: per-instantiation enum cache, parallel to `structs`.
+    enums: new Map(),
     byMangledName: new Map(),
     funcInstancesByDecl: new Map(),
     structInstancesByDecl: new Map(),
+    // Phase 10.A: per-decl enum instance list - used by codegen to walk
+    // concrete instances and emit one LLVM enum struct + per-variant payload
+    // struct per instantiation.
+    enumInstancesByDecl: new Map(),
     traitArgsByInstance: new Map(),
     // Phase 7.2: callback installed by the typechecker. Receives
     // ({ genericDecl, argTypes, paramIndex, paramName, requiredTrait }) and
@@ -229,11 +362,11 @@ export function createInstantiationRegistry() {
   };
 }
 
-// Phase 7.2: walk a generic decl's typeParam AST nodes and call the
-// registry's `boundChecker` for any param whose TypeParamType carries a bound.
-// Bound checking is best-effort here — even on failure we proceed with the
-// instantiation so dependent type checking can still progress. The diagnostic
-// surfaces via the typechecker's error array.
+// Phase 7.2 / 9.J: walk a generic decl's typeParam AST nodes and call the
+// registry's `boundChecker` for every bound the param carries. With multiple
+// bounds, the arg must satisfy each - fire one check per bound. Best-effort:
+// even on failure we proceed with the instantiation so dependent type checking
+// can still progress.
 function runBoundChecks(registry, genericDecl, argTypes) {
   const check = registry.boundChecker;
   if (!check) return;
@@ -242,13 +375,16 @@ function runBoundChecks(registry, genericDecl, argTypes) {
   for (let i = 0; i < genericDecl.paramNames.length; i++) {
     const pn = genericDecl.paramNames[i];
     const tpType = paramScope.get(pn);
-    if (!tpType?.bound) continue;
-    check({
-      genericDecl,
-      argType: argTypes[i],
-      paramName: pn,
-      requiredTrait: tpType.bound,
-    });
+    const bounds = tpType?.bounds ?? [];
+    if (bounds.length === 0) continue;
+    for (const requiredTrait of bounds) {
+      check({
+        genericDecl,
+        argType: argTypes[i],
+        paramName: pn,
+        requiredTrait,
+      });
+    }
   }
 }
 
@@ -266,7 +402,7 @@ export function resolveTypeInCtx(annot, typeContext, extraScope) {
     // Multi-module path
     return resolveAnnotMulti(annot, typeContext, extraScope);
   }
-  // Single-module fallback — minimal: support primitives, refs, arrays,
+  // Single-module fallback - minimal: support primitives, refs, arrays,
   // taskType. Generic applications fail because there's no registry/decl.
   return resolveAnnotSingle(annot, typeContext, extraScope);
 }
@@ -288,16 +424,32 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
     if (localEnum) return localEnum;
     const localUnion = env.unionTable?.get(annot.name);
     if (localUnion) return localUnion;
+    // Phase 9.G: vtable nominal lookup.
+    const localVtable = env.vtableTable?.get(annot.name);
+    if (localVtable) return localVtable;
     const imp = env.importedNames?.get(annot.name);
     if (imp && imp.kind === "type") {
       const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
       const resolved =
         srcEnv?.structTable.get(imp.exportName) ??
         srcEnv?.enumTable?.get(imp.exportName) ??
-        srcEnv?.unionTable?.get(imp.exportName);
+        srcEnv?.unionTable?.get(imp.exportName) ??
+        srcEnv?.vtableTable?.get(imp.exportName);
       if (resolved) return resolved;
     }
     return local ?? null;
+  }
+  // Phase 9.G: function value type - `(p: T, ...) => R`.
+  if (annot.kind === "functionType") {
+    const params = [];
+    for (const p of annot.params) {
+      const pt = resolveAnnotMulti(p, typeContext, extraScope);
+      if (!pt) return null;
+      params.push(pt);
+    }
+    const rt = resolveAnnotMulti(annot.returnType, typeContext, extraScope);
+    if (!rt) return null;
+    return FunctionPointerType(params, rt);
   }
   if (annot.kind === "refType") {
     const inner = resolveAnnotMulti(annot.inner, typeContext, extraScope);
@@ -340,6 +492,11 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       if (argTypes.length !== localTrait.paramNames.length) return null;
       return instantiateTrait(typeContext.registry, localTrait, argTypes);
     }
+    const localEnum = env.genericEnumTable?.get(annot.name);
+    if (localEnum) {
+      if (argTypes.length !== localEnum.paramNames.length) return null;
+      return instantiateEnum(typeContext.registry, localEnum, argTypes);
+    }
     const imp = env.importedNames?.get(annot.name);
     if (imp) {
       const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
@@ -353,6 +510,11 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
         if (rt) {
           if (argTypes.length !== rt.paramNames.length) return null;
           return instantiateTrait(typeContext.registry, rt, argTypes);
+        }
+        const re = srcEnv.genericEnumTable?.get(imp.exportName);
+        if (re) {
+          if (argTypes.length !== re.paramNames.length) return null;
+          return instantiateEnum(typeContext.registry, re, argTypes);
         }
       }
     }

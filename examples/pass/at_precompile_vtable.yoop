@@ -1,0 +1,69 @@
+// Phase 11.D.13: vtable construct + indirect dispatch fold at
+// comptime. The interpreter:
+//   - At `VTable.from(ref x)`: pre-resolves each method's bytecode
+//     via the trait method resolver against the impl type, bakes
+//     the BytecodeFunction array into the wrapped vtable value
+//     alongside the ctx ref.
+//   - At `Trait.method(ref vt, args)` through a vtable: looks up
+//     methodFns[fieldIndex] on the receiver, pushes a frame with
+//     ctx as the method's `ref self` param + user args.
+//
+// This is the comptime equivalent of LLVM's indirect-call-through-
+// fn-ptr-field shape codegen emits, but the resolution happens at
+// fold time so the runtime is just CALL_DIRECT-style frame pushes.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Op {
+    function apply(ref self, x: int32): int32;
+}
+
+type Doubler implements Op {
+    factor: int32,
+    function apply(ref self, x: int32): int32 {
+        return x * self.factor;
+    }
+}
+
+type Adder implements Op {
+    bias: int32,
+    function apply(ref self, x: int32): int32 {
+        return x + self.bias;
+    }
+}
+
+vtable OpVT for Op {
+    apply: (x: int32) => int32,
+}
+
+// Indirect dispatch helper. Takes any OpVT - the actual struct
+// type behind it is opaque at this call site. The interpreter
+// reads methodFns[0] off the vtable and dispatches there.
+function dispatch(ref v: OpVT, x: int32): int32 {
+    return Op.apply(ref v, x);
+}
+
+function via_doubler(x: int32, factor: int32): int32 {
+    let d: Doubler = { factor: factor };
+    let vt: OpVT = OpVT.from(ref d);
+    return dispatch(ref vt, x);
+}
+
+function via_adder(x: int32, bias: int32): int32 {
+    let a: Adder = { bias: bias };
+    let vt: OpVT = OpVT.from(ref a);
+    return dispatch(ref vt, x);
+}
+
+@precompile const DBL: int32 = via_doubler(7, 5);     // 7 * 5 = 35
+@precompile const ADD: int32 = via_adder(7, 100);     // 7 + 100 = 107
+
+function main(): int32 {
+    printf(`DBL=${DBL} ADD=${ADD}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   DBL=35 ADD=107

@@ -1,4 +1,4 @@
-// Yooperlang runtime — worker pool, task submit/wait, and pooled refcount
+// Yooperlang runtime - worker pool, task submit/wait, and pooled refcount
 // lifecycle. See plans/runtime-design.md and plans/phase-6-3-prelude.md.
 //
 // The Task<T> handle layout (set in stone by the compiler / runtime contract):
@@ -11,10 +11,12 @@
 
 #include "yoop_runtime.h"
 
+#include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #ifdef _WIN32
   #include <windows.h>
@@ -77,6 +79,11 @@
 static inline yoop_mutex_t** handle_mutex_slot(void* h) { return (yoop_mutex_t**)((char*)h + 16); }
 static inline yoop_cond_t**  handle_cond_slot (void* h) { return (yoop_cond_t**) ((char*)h + 24); }
 static inline void*          handle_state_ptr (void* h) { return (char*)h + 8;  }
+// Phase 10.F.2: cancel flag lives in the pre-existing pad byte at
+// offset 9 (the codegen task-struct layout reserves `[3 x i8]` at field
+// index 2 between `state` and `refcount`). No ABI change vs. pre-10.F.2
+// - the byte just stops being padding.
+static inline void*          handle_cancel_ptr(void* h) { return (char*)h + 9;  }
 static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; }
 
 // ---- queue ----------------------------------------------------------------
@@ -120,6 +127,17 @@ static struct {
 
 // ---- worker loop ----------------------------------------------------------
 
+// Phase 9.I: pop one task from the front of the queue and return it. Caller
+// must hold queue_mu and is responsible for free()-ing the returned node.
+// Returns NULL when the queue is empty.
+static task_node* try_pop_task_locked(void) {
+    if (!g_rt.queue_head) return NULL;
+    task_node* node = g_rt.queue_head;
+    g_rt.queue_head = node->next;
+    if (!g_rt.queue_head) g_rt.queue_tail = NULL;
+    return node;
+}
+
 static void worker_loop(void) {
     for (;;) {
         yoop_mutex_lock(&g_rt.queue_mu);
@@ -130,9 +148,7 @@ static void worker_loop(void) {
             yoop_mutex_unlock(&g_rt.queue_mu);
             return;
         }
-        task_node* node = g_rt.queue_head;
-        g_rt.queue_head = node->next;
-        if (!g_rt.queue_head) g_rt.queue_tail = NULL;
+        task_node* node = try_pop_task_locked();
         yoop_mutex_unlock(&g_rt.queue_mu);
 
         node->thunk(node->handle);
@@ -265,14 +281,153 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
     yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
-void yoop_task_wait(void* handle) {
-    yoop_mutex_t* m = *handle_mutex_slot(handle);
-    yoop_cond_t*  c = *handle_cond_slot(handle);
-    yoop_mutex_lock(m);
-    while (A_LOAD_U8(handle_state_ptr(handle)) == 0) {
-        yoop_cond_wait(c, m);
+// Phase 10.F: wait_until passes its absolute monotonic deadline through to
+// the inner cv timedwait. Phase 9.I's 25ms safety poll for bare
+// yoop_task_wait is gone - yoop_handle_signal_done broadcasts queue_cv
+// after every state flip, so a parked waiter wakes the moment the handle
+// completes without polling. INFINITE means "no deadline; sleep until a
+// broadcast wakes us."
+#define YOOP_WAIT_NO_DEADLINE ((uint64_t)0)
+
+#ifndef _WIN32
+// POSIX: block on queue_cv until either a broadcast wakes us or the
+// given absolute monotonic deadline elapses. deadline_ns == 0 means
+// "no deadline" - use pthread_cond_wait. Returns 0 on signal,
+// ETIMEDOUT on timer expiry, other on error.
+static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
+    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
+        return pthread_cond_wait(&g_rt.queue_cv.c, &g_rt.queue_mu.m);
     }
-    yoop_mutex_unlock(m);
+    struct timespec deadline;
+    deadline.tv_sec  = (time_t)(deadline_ns / 1000000000ULL);
+    deadline.tv_nsec = (long)(deadline_ns % 1000000000ULL);
+    return pthread_cond_timedwait(&g_rt.queue_cv.c, &g_rt.queue_mu.m, &deadline);
+}
+#else
+static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
+    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
+        BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, INFINITE);
+        return ok ? 0 : -1;
+    }
+    uint64_t now = yoop_now_ns();
+    DWORD ms = now >= deadline_ns ? 0
+        : (DWORD)((deadline_ns - now + 999999ULL) / 1000000ULL);
+    BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, ms);
+    return ok ? 0 : (GetLastError() == ERROR_TIMEOUT ? 1 : -1);
+}
+#endif
+
+// Phase 9.I: suspendable wait.
+//
+// Pre-9.I parked unconditionally on the handle's condvar - N workers + an
+// N+1-deep nested wait chain deadlocked the pool (SPEC §8). Phase 9.I
+// switched to a re-entrant loop that opportunistically drains queued work
+// on the calling thread while waiting, so a worker with nothing useful to
+// do can run the very task it's blocked on (or one that unblocks it
+// transitively).
+//
+// Re-entrant dispatch is safe: each thunk runs to completion on the calling
+// thread's stack, so recursion depth is bounded by the nested-wait chain.
+// Non-task callers (e.g. main) participate in the same dispatch path.
+void yoop_task_wait(void* handle) {
+    for (;;) {
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return;
+
+        yoop_mutex_lock(&g_rt.queue_mu);
+        task_node* n = try_pop_task_locked();
+        if (n) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            n->thunk(n->handle);
+            free(n);
+            continue;
+        }
+
+        // Re-check the target's state after taking the queue lock so a
+        // handle-done broadcast that arrived while we were mid-loop is
+        // observed before we park.
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            return;
+        }
+
+        // Queue empty AND target unfinished. Park on queue_cv until
+        // yoop_handle_signal_done broadcasts (handle completed, or a new
+        // task arrived). The outer loop re-checks state + the queue
+        // regardless of why we woke. Phase 10.F: the 25ms safety poll is
+        // gone - signal_done's broadcast covers wakeups deterministically.
+        queue_cv_wait_until_locked(YOOP_WAIT_NO_DEADLINE);
+        yoop_mutex_unlock(&g_rt.queue_mu);
+    }
+}
+
+// Phase 10.F: bounded wait. Returns 0 on completion, 1 on deadline expiry,
+// 2 on external cancellation (Phase 10.F.2).
+//
+// Critically, this path does NOT dispatch queued tasks on the calling
+// thread the way yoop_task_wait does - a queued task that runs past the
+// deadline would invalidate the user's "give up at time T" contract.
+// Worker threads continue to drain the queue normally; we only block the
+// caller on a cv with the user's deadline as the timeout.
+//
+// The tradeoff: a wait_until from a worker thread with nested-task
+// dependencies can deadlock if every worker is similarly blocked. That's
+// preferable to silently overshooting - and the deadline itself caps the
+// "stall" at exactly the value the user asked for.
+//
+// Done always wins ties: if the task completed before we noticed the
+// deadline or cancel flag, return 0. Cancel beats Timeout when both
+// happen - the user's explicit "abandon" intent is more informative
+// than a passive timer expiry.
+int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
+    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
+        // 0 is the "no deadline" sentinel inside the cv wait. Bump to 1ns
+        // so a caller passing 0 (which is well in the past) still gets
+        // immediate-timeout semantics.
+        deadline_ns = 1;
+    }
+    for (;;) {
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
+        if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) return 2;
+        if (yoop_now_ns() >= deadline_ns) return 1;
+
+        yoop_mutex_lock(&g_rt.queue_mu);
+        if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            return 0;
+        }
+        if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) {
+            yoop_mutex_unlock(&g_rt.queue_mu);
+            return 2;
+        }
+        int rc = queue_cv_wait_until_locked(deadline_ns);
+        yoop_mutex_unlock(&g_rt.queue_mu);
+        if (rc == ETIMEDOUT) {
+            // Last-look at state + cancel - a broadcast may have raced
+            // with the timeout; prefer Done, then Cancelled, over Timeout.
+            if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
+            if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) return 2;
+            return 1;
+        }
+    }
+}
+
+// Phase 10.F.2: external cancellation. Set the cancel byte atomically
+// and broadcast queue_cv so any waiter parked in
+// `yoop_task_wait_until_ns` wakes immediately and observes the flag.
+//
+// Idempotent: a second cancel on an already-cancelled handle is a no-op
+// (the byte's already 1) but still re-broadcasts, which is harmless.
+//
+// Note that this does NOT wake `yoop_task_wait` callers. Bare `wait` is
+// the "I need the result" contract - cancellation only changes whether
+// callers willing to abandon (via wait_until) see Cancelled vs. Done.
+// The task body keeps running until its natural end; in-body polling
+// (Phase 10.F.2.b) will let bodies short-circuit.
+void yoop_task_cancel(void* handle) {
+    A_STORE_U8(handle_cancel_ptr(handle), 1);
+    yoop_mutex_lock(&g_rt.queue_mu);
+    yoop_cond_broadcast(&g_rt.queue_cv);
+    yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
 void yoop_handle_signal_done(void* handle) {
@@ -282,6 +437,14 @@ void yoop_handle_signal_done(void* handle) {
     A_STORE_U8(handle_state_ptr(handle), 1);
     yoop_cond_broadcast(c);
     yoop_mutex_unlock(m);
+
+    // Phase 9.I: also broadcast queue_cv so suspendable yoop_task_wait callers
+    // parked on queue_cv (waiting either for new work or for state to flip)
+    // wake up immediately. Without this they'd only see the state change on
+    // the next YOOP_WAIT_POLL_MS timer tick.
+    yoop_mutex_lock(&g_rt.queue_mu);
+    yoop_cond_broadcast(&g_rt.queue_cv);
+    yoop_mutex_unlock(&g_rt.queue_mu);
 
     int32_t rc = A_LOAD_I32(handle_rc_ptr(handle));
     if (rc > 0) yoop_task_release(handle);
@@ -380,7 +543,7 @@ void yoop_unpark(yoop_park_token_t* t) {
         t->state = 0;
         yoop_cond_signal(t->cv);
     } else if (t->state == 0) {
-        // Pre-arm: idempotent — a second pre-arm before park is fine.
+        // Pre-arm: idempotent - a second pre-arm before park is fine.
         t->state = 1;
     }
     // state == 1 already → already pre-armed, nothing to do.
@@ -454,4 +617,28 @@ int yoop_sleep_ns(uint64_t ns) {
 
 int yoop_sleep_ms(uint64_t ms) {
     return yoop_sleep_ns(ms * 1000000ULL);
+}
+
+// Phase 10.F: return the current wall-clock time in nanoseconds. The clock
+// source matches what the queue_cv pthread_cond_timedwait uses (default
+// CLOCK_REALTIME on both Linux and macOS), so a deadline computed as
+// `yoop_now_ns() + duration_ns` is directly usable by
+// yoop_task_wait_until_ns. On Windows we use GetSystemTimeAsFileTime and
+// rebase off the Unix epoch - the same SleepConditionVariableCS path uses
+// relative ms anyway, so the absolute reading just needs to compare
+// monotonically with itself for deadline arithmetic.
+uint64_t yoop_now_ns(void) {
+#ifdef _WIN32
+    FILETIME ft;
+    GetSystemTimeAsFileTime(&ft);
+    uint64_t hundred_ns = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    // FILETIME epoch is 1601-01-01; rebase to Unix epoch (1970-01-01).
+    // Difference is 11644473600 seconds = 116444736000000000 100ns ticks.
+    hundred_ns -= 116444736000000000ULL;
+    return hundred_ns * 100ULL;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_REALTIME, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
 }

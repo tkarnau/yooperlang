@@ -2,7 +2,7 @@
 
 Syntax highlighting, bracket matching, comment toggling, **and live parse / typecheck diagnostics** for `.yoop` files.
 
-The diagnostics come from a Node-based LSP server at [../../src/lsp/server.js](../../src/lsp/server.js) that the extension launches on demand. It reuses the compiler's lexer, parser, and typechecker — no separate implementation to drift.
+The diagnostics come from a Node-based LSP server at [../../src/lsp/server.js](../../src/lsp/server.js) that the extension launches on demand. It reuses the compiler's lexer, parser, and typechecker - no separate implementation to drift.
 
 ## Install locally
 
@@ -26,7 +26,7 @@ rm ~/.vscode/extensions/yoop-lang-0.0.1
 ## What it highlights
 
 - All keywords from `src/jsyooplexer/lexer.js` (`keywordTagList`), grouped into control flow, declarations, modifiers, kind clauses, and concurrency.
-- Reserved-but-unimplemented keywords (`provides`, `restricts`, `autoJoin`) are flagged with the `invalid.deprecated` scope so themes draw them distinctly — a visual reminder that they're not yet usable.
+- Reserved-but-unimplemented keywords (`provides`, `restricts`, `autoJoin`) are flagged with the `invalid.deprecated` scope so themes draw them distinctly - a visual reminder that they're not yet usable.
 - Primitive types (`int32`, `uint64`, `float32`, `bool`, `string`, `void`, …) as `support.type.primitive`.
 - User types (any PascalCase identifier) as `entity.name.type`.
 - Function declarations and call sites as `entity.name.function`.
@@ -40,14 +40,14 @@ The language server treats the currently-open `.yoop` file as the program entry,
 
 Capabilities advertised today:
 
-- **Diagnostics** — parse + typecheck errors as inline squiggles, with cross-module attribution.
-- **Hover** — type info for any identifier (locals, params, function calls, fields). Reads the `resolvedType` the typechecker stamps on every expression.
-- **Go to definition** — jumps from an identifier to its declaring `let` / `const` / parameter / `function` / `type` / `enum` / `union` / `trait` / `kind`. Cross-module calls follow imports via the `calleeModuleId` annotation. Struct field accesses jump to the `FIELD_DECL`. Trait-qualified method calls jump to the implementing method. Identifiers inside template-literal interpolations (``` `${arr.len}` ```) resolve correctly thanks to a sourceLoc-remap pass after the parser re-parses each interpolation via a synthetic wrapper.
-- **Find all references** (Shift-F12) — every reference to a local, parameter, top-level function, type / enum / union / trait / kind, struct field, or method. Cross-module references are followed via the typechecker's import resolution. References inside `//` comments, block comments, and string / template-literal text are filtered out.
-- **Rename** (F2) — built on find-references; produces a `WorkspaceEdit` that updates every reference atomically. Rejects invalid identifiers (digits-leading / non-identifier chars) and refuses to rename enum variants (variant ordinals are ABI-significant — see CLAUDE.md Phase 7.5).
-- **Completion** (Ctrl-Space) — suggests locals + parameters in the enclosing function, top-level decls in the current module, imported names, and primitive types. Each suggestion carries a CompletionItemKind icon and a `detail` line with the formatted type when known.
-- **Document symbols** — outline view (Cmd-Shift-O / ⌘-T) lists functions, types, fields, methods, enum variants, and traits.
-- **Semantic tokens** — type-aware coloring driven by the typechecker (variables vs. parameters vs. types vs. functions vs. methods vs. enum members vs. namespaces). Replaces the regex-based PascalCase heuristic in the TextMate grammar; the editor blends the two.
+- **Diagnostics** - parse + typecheck errors as inline squiggles, with cross-module attribution.
+- **Hover** - type info for any identifier (locals, params, function calls, fields). Reads the `resolvedType` the typechecker stamps on every expression.
+- **Go to definition** - jumps from an identifier to its declaring `let` / `const` / parameter / `function` / `type` / `enum` / `union` / `trait` / `kind`. Cross-module calls follow imports via the `calleeModuleId` annotation. Struct field accesses jump to the `FIELD_DECL`. Trait-qualified method calls jump to the implementing method. Identifiers inside template-literal interpolations (``` `${arr.len}` ```) resolve correctly thanks to a sourceLoc-remap pass after the parser re-parses each interpolation via a synthetic wrapper.
+- **Find all references** (Shift-F12) - every reference to a local, parameter, top-level function, type / enum / union / trait / kind, struct field, or method. Cross-module references are followed via the typechecker's import resolution. References inside `//` comments, block comments, and string / template-literal text are filtered out.
+- **Rename** (F2) - built on find-references; produces a `WorkspaceEdit` that updates every reference atomically. Rejects invalid identifiers (digits-leading / non-identifier chars) and refuses to rename enum variants (variant ordinals are ABI-significant - see CLAUDE.md Phase 7.5).
+- **Completion** (Ctrl-Space) - suggests locals + parameters in the enclosing function, top-level decls in the current module, imported names, and primitive types. Each suggestion carries a CompletionItemKind icon and a `detail` line with the formatted type when known.
+- **Document symbols** - outline view (Cmd-Shift-O / ⌘-T) lists functions, types, fields, methods, enum variants, and traits.
+- **Semantic tokens** - type-aware coloring driven by the typechecker (variables vs. parameters vs. types vs. functions vs. methods vs. enum members vs. namespaces). Replaces the regex-based PascalCase heuristic in the TextMate grammar; the editor blends the two.
 
 Caveats:
 
@@ -67,7 +67,7 @@ file with `yoopiler` and launches the resulting binary under
 [`lldb-dap`](https://lldb.llvm.org/use/dap.html). Source-line breakpoints,
 stepping (`step` / `next` / `continue`), call stacks, and primitive-typed
 variable inspection (params, `let`/`const` bindings) all work today. Struct,
-ref, enum, and union locals don't yet appear in the Variables pane —
+ref, enum, and union locals don't yet appear in the Variables pane -
 composite DWARF types are a follow-up milestone.
 
 ### Prerequisites
@@ -140,5 +140,5 @@ captures `yoopiler` stdout/stderr and the resolved `lldb-dap` path.
 
 ## Known limitations (highlighting)
 
-- Template-literal interpolation handles one level of nested braces inside `${...}`. Deeply nested object literals inside an interpolation may close the interpolation early visually. This is display-only — the lexer and parser handle arbitrary nesting correctly.
+- Template-literal interpolation handles one level of nested braces inside `${...}`. Deeply nested object literals inside an interpolation may close the interpolation early visually. This is display-only - the lexer and parser handle arbitrary nesting correctly.
 - PascalCase-as-type and `name(`-as-function are syntactic heuristics, not type-aware. (The LSP doesn't yet feed semantic tokens back to the editor.)

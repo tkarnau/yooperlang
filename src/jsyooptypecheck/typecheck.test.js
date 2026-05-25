@@ -85,7 +85,7 @@ describe("typecheckSource: ill-typed programs report positioned errors", () => {
   });
 });
 
-describe("typecheckProgram: trait shells — pass A", () => {
+describe("typecheckProgram: trait shells - pass A", () => {
   it("registers a trait in traitTable after pass A", () => {
     const { moduleEnv, errors } = typecheckProgram(
       singleModule("trait Disposable { function dispose(ref self): void; }"),
@@ -108,7 +108,7 @@ describe("typecheckProgram: trait shells — pass A", () => {
   });
 });
 
-describe("typecheckProgram: trait method sigs — pass C.1", () => {
+describe("typecheckProgram: trait method sigs - pass C.1", () => {
   it("populates trait.methods with the resolved FuncType for each method sig", () => {
     const { moduleEnv, errors } = typecheckProgram(
       singleModule(
@@ -138,7 +138,7 @@ describe("typecheckProgram: trait method sigs — pass C.1", () => {
   });
 });
 
-describe("typecheckProgram: impl block validation — pass C.3", () => {
+describe("typecheckProgram: impl block validation - pass C.3", () => {
   it("well-formed impl produces no errors", () => {
     const { errors } = typecheckProgram(
       singleModule(`
@@ -227,7 +227,7 @@ describe("typecheckProgram: impl block validation — pass C.3", () => {
   });
 
   // Phase 7.4: a trait method name may now coincide with a module-level
-  // free function name — the trait-qualified call site disambiguates.
+  // free function name - the trait-qualified call site disambiguates.
   it("trait method name coinciding with a module-level free function is allowed", () => {
     const { errors } = typecheckProgram(
       singleModule(`

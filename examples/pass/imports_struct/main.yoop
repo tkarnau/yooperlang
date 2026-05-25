@@ -2,12 +2,14 @@ import { read_all, Bytes } from "./io.yoop";
 
 function load(p: string): Bytes {
     const n: int32 = read_all(p)?;
-    return { len: n + 1, err: "" };
+    return Bytes.Ok { value: n + 1 };
 }
 
 function main(): int32 {
-    const { len, err } = load("foo");
-    if (err.len > 0) { printf(`err: ${err}\n`); return 1; }
-    printf(`len = ${len}\n`);
+    const r: Bytes = load("foo");
+    switch (r) {
+        case Bytes.Ok { value: len }: { printf(`len = ${len}\n`); return 0; }
+        case Bytes.Err { error: e }: { printf(`err: ${e}\n`); return 1; }
+    }
     return 0;
 }

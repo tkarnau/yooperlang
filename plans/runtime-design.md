@@ -1,10 +1,10 @@
-# Runtime design — concurrency
+# Runtime design - concurrency
 
 > Implementation contract for Yooper's concurrency runtime. The language surface (kinds, `task`, `wait`, binding forms) is described in [SPEC.md §6](../SPEC.md#L356) and [§8](../SPEC.md#L532); this document describes what the compiler emits, what gets linked, and how the pieces interact at runtime.
 
 ## 1. Purpose and scope
 
-Phase 6.3 of the [roadmap](./roadmap.md) introduces tasks — values whose work may be performed on another thread. This is the first language feature with execution-time semantics that aren't trivially lowered to a single C call. To keep the design tractable and the language stable, the runtime contract is captured here as a separate document from the language spec.
+Phase 6.3 of the [roadmap](./roadmap.md) introduces tasks - values whose work may be performed on another thread. This is the first language feature with execution-time semantics that aren't trivially lowered to a single C call. To keep the design tractable and the language stable, the runtime contract is captured here as a separate document from the language spec.
 
 In scope:
 
@@ -26,14 +26,14 @@ Out of scope (future runtime work):
 
 ## 2. Concurrency model
 
-- **Long-term target**: full async — worker thread pool plus I/O multiplexing.
+- **Long-term target**: full async - worker thread pool plus I/O multiplexing.
 - **MVP** (what 6.3 ships): run-to-completion tasks on pthreads. Once a task body starts on a worker, it runs straight through. No suspension.
-- **Forward compatibility**: every `task` function compiles through LLVM's coroutine intrinsics from day one. MVP tasks never actually suspend — they execute their single body and end — but the IR shape is the same one suspendable tasks will use. When suspension lands later, user `wait` inside a task body becomes a `coro.suspend`; no IR re-shape required.
+- **Forward compatibility**: every `task` function compiles through LLVM's coroutine intrinsics from day one. MVP tasks never actually suspend - they execute their single body and end - but the IR shape is the same one suspendable tasks will use. When suspension lands later, user `wait` inside a task body becomes a `coro.suspend`; no IR re-shape required.
 
 ## 3. Worker pool
 
 - **Structure**: central FIFO queue plus N worker threads. Workers pop from the queue and execute. Simple, suited to run-to-completion workloads. Forward-compatible with work-stealing later if profiling justifies it.
-- **Pool size**: at `yoop_runtime_init()`, the runtime queries the OS for online CPUs (`sysconf(_SC_NPROCESSORS_ONLN)` on POSIX; `GetSystemInfo` on Windows). The `YOOP_NUM_WORKERS` env var overrides at runtime — set to `1` to serialize for debugging.
+- **Pool size**: at `yoop_runtime_init()`, the runtime queries the OS for online CPUs (`sysconf(_SC_NPROCESSORS_ONLN)` on POSIX; `GetSystemInfo` on Windows). The `YOOP_NUM_WORKERS` env var overrides at runtime - set to `1` to serialize for debugging.
 - **Queue**: a single shared FIFO protected by one mutex + one condvar. Workers `cond_wait` while empty; submitters `cond_signal` on push. Stays simple for the MVP; can swap to a lock-free MPMC queue later without changing the ABI.
 
 ## 4. Handle allocation
@@ -44,7 +44,7 @@ The binding kind chosen at the call site decides where the `Task<T>` struct live
 |---|---|---|---|
 | `let x = f()` (immediate) | stack alloca | no | spawn + inline wait happen in the same statement; no escape, single owner. |
 | `let joined d = f()` | stack alloca | no | autoJoin guarantees wait fires before scope exit; the binding and worker release at the same point. |
-| `let pooled h = f()` | `yoop_task_alloc` (heap) | yes | the handle is a value-typed citizen — returnable, storable, copyable. Lifetime can exceed the declaring scope. |
+| `let pooled h = f()` | `yoop_task_alloc` (heap) | yes | the handle is a value-typed citizen - returnable, storable, copyable. Lifetime can exceed the declaring scope. |
 
 For `pooled`, codegen special-cases `Task<T>` in every assignment, return, parameter pass, and scope-exit to emit retain/release pairs. This is a small ARC-like mechanism scoped to `Task<T>` only; no other type in the language is refcounted in 6.3.
 
@@ -54,13 +54,13 @@ The compiler emits **one** `%Task_<TMangled>` struct type per unique result type
 
 ```llvm
 %Task_<TMangled> = type {
-  ptr,            ; 0: thunk function pointer — void (*)(ptr task_struct)
-  i8,             ; 1: state — 0 = unstarted, 1 = done. Atomic.
-  i32,            ; 2: refcount — atomic. Used by pooled handles; unused for joined/immediate.
+  ptr,            ; 0: thunk function pointer - void (*)(ptr task_struct)
+  i8,             ; 1: state - 0 = unstarted, 1 = done. Atomic.
+  i32,            ; 2: refcount - atomic. Used by pooled handles; unused for joined/immediate.
   ptr,            ; 3: opaque pointer to platform mutex (from yoop_runtime.h)
   ptr,            ; 4: opaque pointer to platform condvar (from yoop_runtime.h)
-  <T>,            ; 5: result slot — sized and aligned to T
-  [N x i8]        ; 6: args blob — N is the max args-blob size for any task function returning T, padded to 8-byte alignment
+  <T>,            ; 5: result slot - sized and aligned to T
+  [N x i8]        ; 6: args blob - N is the max args-blob size for any task function returning T, padded to 8-byte alignment
 }
 ```
 
@@ -124,11 +124,11 @@ worker thunk finishes -> yoop_task_release (atomic dec, after storing result + s
 refcount == 0         -> free mutex, condvar, handle
 ```
 
-`yoop_task_wait` does *not* release the caller's ref — the caller's binding still owns it; the binding's scope-exit handles the release. This means waiting and then dropping costs two ref ops, intentional for compositional correctness (the user can wait, inspect the result, then keep the handle alive if they want to copy it elsewhere).
+`yoop_task_wait` does *not* release the caller's ref - the caller's binding still owns it; the binding's scope-exit handles the release. This means waiting and then dropping costs two ref ops, intentional for compositional correctness (the user can wait, inspect the result, then keep the handle alive if they want to copy it elsewhere).
 
 ### 6.b Why not heap-allocate everything
 
-Heap-allocating `joined` and immediate would be uniform but wasteful: their lifetimes are statically known and bounded by the function frame. Stack alloca is one instruction; heap alloc is a malloc + later free, plus contention on the allocator. The kind system already proves these handles can't escape — leverage that proof.
+Heap-allocating `joined` and immediate would be uniform but wasteful: their lifetimes are statically known and bounded by the function frame. Stack alloca is one instruction; heap alloc is a malloc + later free, plus contention on the allocator. The kind system already proves these handles can't escape - leverage that proof.
 
 ## 7. LLVM coroutine intrinsics
 
@@ -138,13 +138,13 @@ Every `task` function compiles to an LLVM coroutine. Even in the MVP where bodie
 
 For a task function `task f(args): T { body }`, codegen emits an LLVM coroutine with the standard intrinsics:
 
-- `@llvm.coro.id` — declare a coroutine; returns a token used by other intrinsics.
-- `@llvm.coro.size.i64` / `@llvm.coro.alloc` — coroutine frame allocation (the size is computed by LLVM after the splitter runs; for MVP the size is small because nothing crosses suspend points).
-- `@llvm.coro.begin` — enters the coroutine, returns the handle.
-- `@llvm.coro.suspend` — at every yield point. **MVP has zero of these inside the body**; the only suspend is the implicit "final suspend" (`@llvm.coro.suspend` with `final = true`) at the end so the runtime can read the result before the coroutine destroys itself.
-- `@llvm.coro.end` — terminates the coroutine.
-- `@llvm.coro.resume` — invoked by `yoop_task_wait` (via the thunk) to drive the coroutine forward. MVP resume runs the whole body and reaches the final suspend.
-- `@llvm.coro.destroy` — called by `yoop_task_release` to tear down the coroutine frame.
+- `@llvm.coro.id` - declare a coroutine; returns a token used by other intrinsics.
+- `@llvm.coro.size.i64` / `@llvm.coro.alloc` - coroutine frame allocation (the size is computed by LLVM after the splitter runs; for MVP the size is small because nothing crosses suspend points).
+- `@llvm.coro.begin` - enters the coroutine, returns the handle.
+- `@llvm.coro.suspend` - at every yield point. **MVP has zero of these inside the body**; the only suspend is the implicit "final suspend" (`@llvm.coro.suspend` with `final = true`) at the end so the runtime can read the result before the coroutine destroys itself.
+- `@llvm.coro.end` - terminates the coroutine.
+- `@llvm.coro.resume` - invoked by `yoop_task_wait` (via the thunk) to drive the coroutine forward. MVP resume runs the whole body and reaches the final suspend.
+- `@llvm.coro.destroy` - called by `yoop_task_release` to tear down the coroutine frame.
 
 ### 7.b Sample IR sketch for `task compute(x: int32): int32 { return x * x }`
 
@@ -158,7 +158,7 @@ entry:
   %hdl   = call ptr @llvm.coro.begin(token %id, ptr %mem)
 
   %r     = mul i32 %x, %x
-  ; Store result via the task handle pointer (passed-in side channel — see 7.c).
+  ; Store result via the task handle pointer (passed-in side channel - see 7.c).
 
   ; Final suspend so the resumer can observe completion before destroy.
   %final = call i8 @llvm.coro.suspend(token none, i1 true)
@@ -228,7 +228,7 @@ clang program.ll runtime/yoop_runtime.c \
 
 Strictly, the MVP could emit plain functions (no coroutine intrinsics) and call the body directly from the thunk. The coroutine wrapper is overhead for the run-to-completion case. We accept this overhead because:
 
-1. **The optimizer eliminates most of it.** A coroutine with no real suspend points and a `final = true` suspend is heavily simplified by LLVM's coro passes — much of the frame allocation collapses.
+1. **The optimizer eliminates most of it.** A coroutine with no real suspend points and a `final = true` suspend is heavily simplified by LLVM's coro passes - much of the frame allocation collapses.
 2. **Future-compat.** When suspension lands, every existing `task` function works without re-codegen. User code that adds a mid-body `wait` becomes a real `coro.suspend`, the runtime drives `coro.resume` from the worker pool, and nothing else changes.
 3. **One IR shape to test.** Two paths (plain functions for MVP, coroutines for the suspend-aware future) doubles the testing surface and risks the future migration breaking subtle invariants.
 
@@ -239,7 +239,7 @@ yoopiler injects two calls into the user's `main`:
 - `call void @yoop_runtime_init()` at the top of `main`'s entry block, before any user code.
 - `call void @yoop_runtime_shutdown()` immediately before every `ret` in `main` (including those reached via `?` early-return).
 
-`yoop_runtime_init` is idempotent (a static initialized flag guards re-entry); calling it twice is a no-op. `yoop_runtime_shutdown` joins all worker threads and drains the queue. Programs that exit via `exit(...)` from FFI never reach `yoop_runtime_shutdown` — the OS reaps the worker threads. This is acceptable for the MVP; the worker threads have no resources outside their own stacks.
+`yoop_runtime_init` is idempotent (a static initialized flag guards re-entry); calling it twice is a no-op. `yoop_runtime_shutdown` joins all worker threads and drains the queue. Programs that exit via `exit(...)` from FFI never reach `yoop_runtime_shutdown` - the OS reaps the worker threads. This is acceptable for the MVP; the worker threads have no resources outside their own stacks.
 
 Programs without a `main` function are rejected at typecheck (Yooper requires a `main` returning `int32`). No standalone-library builds in 6.3.
 
@@ -284,7 +284,7 @@ The MVP **accepts this risk**. Mitigations:
 - Prefer composing tasks at non-task call sites (in `main` or in regular functions). The deadlock only bites when waits stack inside task bodies.
 - Document the risk in SPEC.md §8.
 
-The clean fix is suspendable wait inside task bodies — which is what the coroutine IR shape enables. When that lands, a `wait` inside a task body becomes a `coro.suspend` that returns the worker to the pool until the awaited handle is ready. No code in 6.3 paints us into a corner here.
+The clean fix is suspendable wait inside task bodies - which is what the coroutine IR shape enables. When that lands, a `wait` inside a task body becomes a `coro.suspend` that returns the worker to the pool until the awaited handle is ready. No code in 6.3 paints us into a corner here.
 
 ## 11. What this design does NOT do
 
@@ -292,31 +292,31 @@ The clean fix is suspendable wait inside task bodies — which is what the corou
 - **No abandon or cancellation.** Tasks always run to completion. `_ = task_call()` lowers to spawn-then-drop-ref; the worker still runs the body and discards the result. If the language needs cancellation later, it'll be its own sub-phase (likely cancellation tokens passed as parameters).
 - **No work-stealing.** Central FIFO queue. Workers contend on one mutex. Acceptable until profiling shows contention; then we'd swap the queue for a lock-free MPMC or per-worker queues + stealing.
 - **No suspendable bodies.** Run-to-completion only. The coroutine IR shape is the forward-compat investment for this.
-- **No structured exception handling.** A task body that crashes (segfault, abort, unhandled FFI error) leaves its handle's state at 0 forever. Anyone calling `wait` on it blocks forever. Phase 7 runtime work addresses this — likely by reserving a `state = 2 (crashed)` value and propagating to the waiter.
+- **No structured exception handling.** A task body that crashes (segfault, abort, unhandled FFI error) leaves its handle's state at 0 forever. Anyone calling `wait` on it blocks forever. Phase 7 runtime work addresses this - likely by reserving a `state = 2 (crashed)` value and propagating to the waiter.
 - **No introspection.** No `yoop_runtime_stats()`, no per-task tracing hooks. Add when there's a user need.
 
 ## 12. Glossary
 
-- **task function** — a function declared with the `task` kind prefix (e.g., `task fetch(url: string): Bytes { ... }`). Its return type at call sites is `Task<T>`.
-- **Task<T>** — the compiler-builtin handle type produced by a task call. Carries a thunk pointer, state, optional refcount, mutex/condvar pointers, result slot, and args blob.
-- **handle** — a `Task<T>` value. Storage is stack or heap depending on the binding kind.
-- **immediate** — `let x = f()` with no kind prefix; compiler inserts wait inline, user-facing type is `T`.
-- **pooled** — `let pooled h = f()`; user gets a `Task<T>` value (refcounted, copyable, returnable).
-- **joined** — `let joined d = f()`; compiler inserts wait at scope end (autoJoin); user-facing type is `T` (materialized on first read or scope-end, whichever comes first).
-- **autoJoin** — kind clause that registers a compiler-inserted `wait` at scope exit.
-- **worker** — one of N pthread (or CreateThread) threads running the central queue loop.
-- **thunk** — per-task-function helper that unpacks args, drives the coroutine, stores the result, signals completion.
-- **submit** — push a handle + thunk onto the queue; a worker eventually pops and runs the thunk.
+- **task function** - a function declared with the `task` kind prefix (e.g., `task fetch(url: string): Bytes { ... }`). Its return type at call sites is `Task<T>`.
+- **Task<T>** - the compiler-builtin handle type produced by a task call. Carries a thunk pointer, state, optional refcount, mutex/condvar pointers, result slot, and args blob.
+- **handle** - a `Task<T>` value. Storage is stack or heap depending on the binding kind.
+- **immediate** - `let x = f()` with no kind prefix; compiler inserts wait inline, user-facing type is `T`.
+- **pooled** - `let pooled h = f()`; user gets a `Task<T>` value (refcounted, copyable, returnable).
+- **joined** - `let joined d = f()`; compiler inserts wait at scope end (autoJoin); user-facing type is `T` (materialized on first read or scope-end, whichever comes first).
+- **autoJoin** - kind clause that registers a compiler-inserted `wait` at scope exit.
+- **worker** - one of N pthread (or CreateThread) threads running the central queue loop.
+- **thunk** - per-task-function helper that unpacks args, drives the coroutine, stores the result, signals completion.
+- **submit** - push a handle + thunk onto the queue; a worker eventually pops and runs the thunk.
 
 ## 13. Critical files (for implementation)
 
-- **New**: `runtime/yoop_runtime.h` — type declarations, function prototypes.
-- **New**: `runtime/yoop_runtime.c` — worker pool, queue, mutex/condvar shims, refcount lifecycle.
-- **Edit**: `src/yoopiler.js` (driver) — add `runtime/yoop_runtime.c` to the clang invocation; pass coroutine-enabling flags.
-- **Edit**: `src/jsyoopcodegen/codegen.js` — per-task-function thunk + coroutine emission; per-result-type `Task_<T>` struct emission; call-site lowering; retain/release insertion for pooled; main-entry init/shutdown injection.
-- **Edit**: `src/jsyooptypecheck/types.js` — `TaskType { resultType }` as a compiler builtin.
-- **Edit**: `src/jsyooptypecheck/checkExpr.js` — task-call return-type rewrite to `Task<T>`; `wait` expression check.
-- **Edit**: `src/jsyooptypecheck/checkStatement.js` — kind-prefixed function decl handling; pooled / joined / immediate binding shapes.
-- **Edit**: `src/jsyooptypecheck/kindCheck.js` — autoJoin obligation insertion; refcount-pair planning for pooled bindings (the flow walker tracks which Task<T>-typed identifiers need retain on copy / release on scope exit).
+- **New**: `runtime/yoop_runtime.h` - type declarations, function prototypes.
+- **New**: `runtime/yoop_runtime.c` - worker pool, queue, mutex/condvar shims, refcount lifecycle.
+- **Edit**: `src/yoopiler.js` (driver) - add `runtime/yoop_runtime.c` to the clang invocation; pass coroutine-enabling flags.
+- **Edit**: `src/jsyoopcodegen/codegen.js` - per-task-function thunk + coroutine emission; per-result-type `Task_<T>` struct emission; call-site lowering; retain/release insertion for pooled; main-entry init/shutdown injection.
+- **Edit**: `src/jsyooptypecheck/types.js` - `TaskType { resultType }` as a compiler builtin.
+- **Edit**: `src/jsyooptypecheck/checkExpr.js` - task-call return-type rewrite to `Task<T>`; `wait` expression check.
+- **Edit**: `src/jsyooptypecheck/checkStatement.js` - kind-prefixed function decl handling; pooled / joined / immediate binding shapes.
+- **Edit**: `src/jsyooptypecheck/kindCheck.js` - autoJoin obligation insertion; refcount-pair planning for pooled bindings (the flow walker tracks which Task<T>-typed identifiers need retain on copy / release on scope exit).
 
 The language-sugar work above is detailed separately in the revised `phase-6-3-task.md` plan (to be written after this doc, SPEC.md, and roadmap.md are updated).

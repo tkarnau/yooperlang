@@ -7,5 +7,5 @@ function main(): int32 {
 }
 
 // Fails at parse time because trait method signatures must end with `;`, not
-// a body block `{ }`. Default method bodies are not supported — trait declarations
+// a body block `{ }`. Default method bodies are not supported - trait declarations
 // carry only signatures, and all implementations live in the type's impl block.

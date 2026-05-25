@@ -1,0 +1,391 @@
+// std/collections/map.yoop - generic hash map.
+//
+// `Map<K, V>` is keyed off a `KeyOps<K>` ops struct carrying the
+// hash + equality function pointers - the caller supplies the
+// behavior at construction time. This pattern is the language's
+// stand-in for a `Hashable` trait with `Self`-typed `eq`, which yoop
+// doesn't have yet (Phase 5 deferred). Phase 10.X.2 landed the two
+// function-pointer-field lifts (func-decl → FPT coercion at
+// assignment, indirect call through `ops.hash(k)` / `ops.eq(a, b)`)
+// that make this work end-to-end.
+//
+// Implementation: open-addressing with linear probing.
+//   * Backing arrays: `keys: K[]`, `values: V[]`, `states: uint8[]`.
+//     `states[i]` is one of `STATE_EMPTY` / `STATE_OCCUPIED` /
+//     `STATE_TOMBSTONE`. Lookups probe until `EMPTY`; tombstones don't
+//     stop the probe so removals don't break chains.
+//   * Load factor: grow at 75% (occupied + tombstones) of cap.
+//   * Hash: caller's `ops.hash`; bucket index = `hash & (cap - 1)`,
+//     so `cap` is always a power of two. `map_new` rounds up
+//     `initial_cap` to the next power of two with a floor of 8.
+//   * Disposable: owns three heap allocations; one `dispose` frees
+//     them all. Carries `propagates<disposable>` like `Vec<T>`.
+//
+// Pre-built ops for common key types ship below: `string_key_ops()`
+// and `int32_key_ops()`. Users with custom key types provide their
+// own `KeyOps<K>` by naming a pair of free-function decls.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Option } from "../core/types.yoop";
+import { Iterable, IterStep } from "../core/traits.yoop";
+import { string_eq, string_hash } from "../core/strings.yoop";
+import { bytes_eq } from "../core/bytes.yoop";
+import * as intr from "../core/intrinsics.yoop";
+
+const STATE_EMPTY:     uint8 = 0;
+const STATE_OCCUPIED:  uint8 = 1;
+const STATE_TOMBSTONE: uint8 = 2;
+
+// Behavior pack handed to `map_new`. Two function-pointer fields:
+//   * `hash(ref k)` - yields the key's `uint64` hash.
+//   * `eq(a, b)`    - returns true iff the two keys are equal.
+//
+// Defined here rather than in `std/core/traits.yoop` because the
+// language doesn't yet model `Self` in trait sigs (`eq(ref self,
+// ref other: Self)`), and a generic `Hashable` trait wouldn't carry
+// its weight with only `Map<K, V>` as a consumer. If `Self` lands
+// later, `KeyOps<K>` becomes a thin shim over `trait Hashable`.
+export type KeyOps<K> {
+    hash: (k: K) => uint64,
+    eq:   (a: K, b: K) => bool,
+}
+
+export type Map<K, V> implements Disposable propagates<disposable> {
+    keys:   K[],
+    values: V[],
+    states: uint8[],
+    len:    usize,
+    used:   usize,
+    cap:    usize,
+    ops:    KeyOps<K>,
+    function dispose(ref self): void {
+        if (self.cap > 0) {
+            intr.heap_free(self.keys);
+            intr.heap_free(self.values);
+            intr.heap_free(self.states);
+            self.cap = 0;
+        }
+    }
+}
+
+// Round `n` up to the next power of two, with a floor of 8.
+function next_pow2_floor8(n: usize): usize {
+    let cap: usize = 8;
+    while (cap < n) {
+        cap = cap * 2;
+    }
+    return cap;
+}
+
+// Hash a key into a bucket index for this map's current capacity.
+function bucket_of<K, V>(ref m: Map<K, V>, key: K): usize {
+    let h: uint64 = m.ops.hash(key);
+    return usize(h) & (m.cap - 1);
+}
+
+// Probe starting at `start` for the slot that either holds `key`
+// (returned as `Option.Some { value: index }`) or is the first empty
+// slot (returned as `Option.None` - see `find_insert_slot` for the
+// insert-time variant). Used by `map_get` / `map_contains_key`.
+function find_slot<K, V>(ref m: Map<K, V>, key: K): Option<usize> {
+    if (m.cap == 0) { return Option.None; }
+    let start: usize = bucket_of(ref m, key);
+    let i: usize = 0;
+    while (i < m.cap) {
+        let idx: usize = (start + i) & (m.cap - 1);
+        let st: uint8 = m.states[idx];
+        if (st == STATE_EMPTY) {
+            return Option.None;
+        }
+        if (st == STATE_OCCUPIED) {
+            if (m.ops.eq(m.keys[idx], key)) {
+                return Option.Some { value: idx };
+            }
+        }
+        i = i + 1;
+    }
+    return Option.None;
+}
+
+// Probe for the slot to use when inserting `key`. Returns the index of
+// either:
+//   * an existing OCCUPIED slot for `key` (overwrite),
+//   * the first TOMBSTONE seen along the probe (re-use), or
+//   * the first EMPTY slot.
+// Cap is positive and load factor leaves at least one empty slot, so
+// this always terminates.
+function find_insert_slot<K, V>(ref m: Map<K, V>, key: K): usize {
+    let start: usize = bucket_of(ref m, key);
+    let first_tomb_seen: bool = false;
+    let first_tomb_idx: usize = 0;
+    let i: usize = 0;
+    while (i < m.cap) {
+        let idx: usize = (start + i) & (m.cap - 1);
+        let st: uint8 = m.states[idx];
+        if (st == STATE_EMPTY) {
+            if (first_tomb_seen) { return first_tomb_idx; }
+            return idx;
+        }
+        if (st == STATE_TOMBSTONE) {
+            if (!first_tomb_seen) {
+                first_tomb_seen = true;
+                first_tomb_idx = idx;
+            }
+        } else {
+            if (m.ops.eq(m.keys[idx], key)) { return idx; }
+        }
+        i = i + 1;
+    }
+    return 0; // unreachable when load factor maintained
+}
+
+// Construct a fresh map. `initial_cap` is a hint; the real capacity
+// is the next power of two ≥ initial_cap, floor of 8.
+export function map_new<K, V>(initial_cap: usize, ops: KeyOps<K>): Map<K, V> propagates<disposable> {
+    let cap: usize = next_pow2_floor8(initial_cap);
+    let keys:   K[]      = intr.heap_alloc(cap);
+    let values: V[]      = intr.heap_alloc(cap);
+    let states: uint8[]  = intr.heap_alloc(cap);
+    let i: usize = 0;
+    while (i < cap) {
+        states[i] = STATE_EMPTY;
+        i = i + 1;
+    }
+    return { keys: keys, values: values, states: states, len: 0, used: 0, cap: cap, ops: ops };
+}
+
+// Grow the map to `new_cap` buckets and rehash every occupied entry.
+// Tombstones are discarded; `used` collapses back to `len`.
+function rehash<K, V>(ref m: Map<K, V>, new_cap: usize): void {
+    let old_keys:   K[]      = m.keys;
+    let old_values: V[]      = m.values;
+    let old_states: uint8[]  = m.states;
+    let old_cap:    usize    = m.cap;
+
+    let new_keys:   K[]      = intr.heap_alloc(new_cap);
+    let new_values: V[]      = intr.heap_alloc(new_cap);
+    let new_states: uint8[]  = intr.heap_alloc(new_cap);
+    let j: usize = 0;
+    while (j < new_cap) {
+        new_states[j] = STATE_EMPTY;
+        j = j + 1;
+    }
+
+    m.keys   = new_keys;
+    m.values = new_values;
+    m.states = new_states;
+    m.cap    = new_cap;
+    m.len    = 0;
+    m.used   = 0;
+
+    let i: usize = 0;
+    while (i < old_cap) {
+        if (old_states[i] == STATE_OCCUPIED) {
+            let k: K = old_keys[i];
+            let idx: usize = find_insert_slot(ref m, k);
+            m.keys[idx]   = k;
+            m.values[idx] = old_values[i];
+            m.states[idx] = STATE_OCCUPIED;
+            m.len  = m.len + 1;
+            m.used = m.used + 1;
+        }
+        i = i + 1;
+    }
+    intr.heap_free(old_keys);
+    intr.heap_free(old_values);
+    intr.heap_free(old_states);
+}
+
+// Grow if (used + 1) * 4 >= cap * 3 (i.e. 75% load factor over `used`).
+function maybe_grow<K, V>(ref m: Map<K, V>): void {
+    let used_after: usize = m.used + 1;
+    if (used_after * 4 >= m.cap * 3) {
+        rehash(ref m, m.cap * 2);
+    }
+}
+
+// Insert or overwrite. Returns true on overwrite (existing key),
+// false on fresh insert.
+export function map_insert<K, V>(ref m: Map<K, V>, key: K, value: V): bool {
+    maybe_grow(ref m);
+    let idx: usize = find_insert_slot(ref m, key);
+    let st: uint8 = m.states[idx];
+    let was_present: bool = st == STATE_OCCUPIED;
+    m.keys[idx]   = key;
+    m.values[idx] = value;
+    if (st == STATE_EMPTY) {
+        m.used = m.used + 1;
+    }
+    m.states[idx] = STATE_OCCUPIED;
+    if (!was_present) {
+        m.len = m.len + 1;
+    }
+    return was_present;
+}
+
+// Lookup. Returns `Option.Some { value }` when present, `Option.None`
+// otherwise.
+export function map_get<K, V>(ref m: Map<K, V>, key: K): Option<V> {
+    let slot: Option<usize> = find_slot(ref m, key);
+    switch (slot) {
+        case Option.Some { value: idx }: { return Option.Some { value: m.values[idx] }; }
+        case Option.None: { return Option.None; }
+    }
+    return Option.None;
+}
+
+// Membership check.
+export function map_contains_key<K, V>(ref m: Map<K, V>, key: K): bool {
+    let slot: Option<usize> = find_slot(ref m, key);
+    switch (slot) {
+        case Option.Some { value: _i }: { return true; }
+        case Option.None: { return false; }
+    }
+    return false;
+}
+
+// Remove the entry for `key`. Returns true if an entry was removed.
+// Tombstone keeps probes correct; the slot will be reused on the next
+// matching insert.
+export function map_remove<K, V>(ref m: Map<K, V>, key: K): bool {
+    let slot: Option<usize> = find_slot(ref m, key);
+    switch (slot) {
+        case Option.Some { value: idx }: {
+            m.states[idx] = STATE_TOMBSTONE;
+            m.len = m.len - 1;
+            return true;
+        }
+        case Option.None: { return false; }
+    }
+    return false;
+}
+
+// Number of occupied entries (tombstones excluded).
+export function map_len<K, V>(ref m: Map<K, V>): usize {
+    return m.len;
+}
+
+// Reset to empty without shrinking the backing buffers.
+export function map_clear<K, V>(ref m: Map<K, V>): void {
+    let i: usize = 0;
+    while (i < m.cap) {
+        m.states[i] = STATE_EMPTY;
+        i = i + 1;
+    }
+    m.len  = 0;
+    m.used = 0;
+}
+
+// ----- Iteration ------------------------------------------------------
+
+// A single (key, value) pair yielded by `for entry in map_iter(ref m)`.
+export type MapEntry<K, V> { key: K, value: V }
+
+// `MapIter<K, V>` walks occupied slots in storage order, skipping
+// EMPTY/TOMBSTONE. It holds borrowing views of the map's backing
+// arrays (the fat pointers are copies; the heap data is shared). The
+// iterator is invalidated if the map mutates (a `map_insert` that
+// triggers a rehash relocates the backing buffers, leaving the
+// view dangling) - keep the iter scoped tightly around its loop.
+export type MapIter<K, V> implements Iterable<MapEntry<K, V>> {
+    keys:   K[],
+    values: V[],
+    states: uint8[],
+    cap:    usize,
+    i:      usize,
+
+    function next(ref self): IterStep<MapEntry<K, V>> {
+        while (self.i < self.cap) {
+            let cur: usize = self.i;
+            self.i = self.i + 1;
+            if (self.states[cur] == STATE_OCCUPIED) {
+                return IterStep.Yield {
+                    value: { key: self.keys[cur], value: self.values[cur] },
+                };
+            }
+        }
+        return IterStep.Done;
+    }
+}
+
+// Build a `MapIter<K, V>` snapshot for `for ... in` iteration over a
+// map. The iterator yields `MapEntry<K, V>` values via the
+// `Iterable<T>` trait (Phase 10.B).
+export function map_iter<K, V>(ref m: Map<K, V>): MapIter<K, V> {
+    return {
+        keys: m.keys,
+        values: m.values,
+        states: m.states,
+        cap: m.cap,
+        i: 0,
+    };
+}
+
+// ----- Pre-built KeyOps for common key types --------------------------
+
+// FNV-1a string hashing is in `std/core/strings.yoop`; reuse it +
+// `string_eq` directly. The two function decls coerce into the FPT
+// fields by the Phase 10.X.2 assignability lift.
+export function string_key_ops(): KeyOps<string> {
+    return { hash: string_hash, eq: string_eq };
+}
+
+// Cheap integer hash: a Knuth-style multiplicative scrambler over a
+// zero-extended uint64. Adequate for the open-addressing scheme; not
+// crypto-grade. Wrapping multiplication is the LLVM default.
+function int32_hash_impl(k: int32): uint64 {
+    let h: uint64 = uint64(uint32(k));
+    return h * 11400714819323198485;
+}
+
+function int32_eq_impl(a: int32, b: int32): bool {
+    return a == b;
+}
+
+export function int32_key_ops(): KeyOps<int32> {
+    return { hash: int32_hash_impl, eq: int32_eq_impl };
+}
+
+function int64_hash_impl(k: int64): uint64 {
+    return uint64(k) * 11400714819323198485;
+}
+
+function int64_eq_impl(a: int64, b: int64): bool {
+    return a == b;
+}
+
+export function int64_key_ops(): KeyOps<int64> {
+    return { hash: int64_hash_impl, eq: int64_eq_impl };
+}
+
+function uint64_hash_impl(k: uint64): uint64 {
+    return k * 11400714819323198485;
+}
+
+function uint64_eq_impl(a: uint64, b: uint64): bool {
+    return a == b;
+}
+
+export function uint64_key_ops(): KeyOps<uint64> {
+    return { hash: uint64_hash_impl, eq: uint64_eq_impl };
+}
+
+// Byte-buffer key (uint8[]) - FNV-1a over the bytes for hashing,
+// `bytes_eq` for equality. The keys array stores the fat pointers;
+// the caller is responsible for keeping the backing buffers alive
+// as long as they're map keys (the map holds a borrowing view).
+function bytes_hash_impl(k: uint8[]): uint64 {
+    let h: uint64 = 14695981039346656037;
+    let prime: uint64 = 1099511628211;
+    let i: usize = 0;
+    while (i < k.len) {
+        h = h ^ uint64(k[i]);
+        h = h * prime;
+        i = i + 1;
+    }
+    return h;
+}
+
+export function bytes_key_ops(): KeyOps<uint8[]> {
+    return { hash: bytes_hash_impl, eq: bytes_eq };
+}

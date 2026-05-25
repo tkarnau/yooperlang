@@ -13,4 +13,4 @@ function main(): int32 {
 }
 
 // Fails because `mustCall close` references a method that is not declared by
-// any of the kind's required traits — Disposable only declares `dispose`.
+// any of the kind's required traits - Disposable only declares `dispose`.

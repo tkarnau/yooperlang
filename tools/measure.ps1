@@ -1,7 +1,7 @@
-# measure.ps1 — time and peak RSS for any process
+# measure.ps1 - time and peak RSS for any process
 #
 # Uses GetProcessMemoryInfo (psapi.dll) via P/Invoke.
-# The handle must be cached before WaitForExit() — that's why
+# The handle must be cached before WaitForExit() - that's why
 # $proc.Handle is read first; it keeps the OS handle alive.
 #
 # Usage:
@@ -47,7 +47,7 @@ public class WinProcMem {
 "@
 }
 
-# Resolve to a full path — try the filesystem first, then PATH
+# Resolve to a full path - try the filesystem first, then PATH
 if (Test-Path $Exe) {
     $resolved = (Resolve-Path $Exe).Path
 } else {
@@ -66,7 +66,7 @@ $proc.StartInfo = $psi
 
 $sw = [System.Diagnostics.Stopwatch]::StartNew()
 $proc.Start() | Out-Null
-$handle = $proc.Handle      # cache handle now — WaitForExit may release it
+$handle = $proc.Handle      # cache handle now - WaitForExit may release it
 $proc.WaitForExit()
 $sw.Stop()
 

@@ -1,0 +1,66 @@
+// Phase 11.D.18: `@precompile { ... }` block form. The block runs
+// at compile time with read + write access to module-level state;
+// each binding the block writes to gets its decl stamped as
+// `comptimeFolded`, and codegen emits the LLVM `@global` with the
+// final post-block value baked in.
+//
+// Differences from the initializer form (`@precompile const X = ...;`):
+//   - Initializer form: the RHS expression must fold; the decl
+//     itself takes the folded value as its global init.
+//   - Block form: the entire block runs at comptime. Local bindings
+//     inside the block (`let cap = 256;`, `let i = 0;`) live only
+//     during the comptime evaluation - they never reach codegen.
+//     Module-level bindings the block writes (`PRIMES = ...`) take
+//     the post-block value as their global init.
+//
+// This exercises every primitive the block form needs in one pass:
+// module-level `let` declarations with default-shape inits that get
+// overwritten by the block, local loop counters, array index
+// writes, struct field writes, calls to user-defined functions, and
+// reads of one module global from another comptime expression.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Point { x: int32, y: int32 }
+
+// Module-level mutable lets. Their default initializers fold to
+// "empty" placeholder values via the opportunistic-fold pass -
+// then the `@precompile` block below overwrites them with the
+// real comptime-computed values.
+let SQUARES: int32[] = [0, 0, 0, 0, 0, 0, 0, 0];
+let SUM: int32 = 0;
+let TIP: Point = { x: 0, y: 0 };
+
+function square(x: int32): int32 { return x * x; }
+
+@precompile {
+    // Local bindings exist only inside the comptime evaluator.
+    // Yoop type inference doesn't reach into block bodies the way
+    // it does for function bodies, so type annotations are
+    // mandatory. Same shape as a regular function body otherwise.
+    let i: int32 = 0;
+    let acc: int32 = 0;
+    while (i < 8) {
+        SQUARES[i] = square(i);   // writes the module-level array buf
+        acc = acc + SQUARES[i];   // reads it back
+        i = i + 1;
+    }
+    SUM = acc;                    // commits the total to SUM
+    TIP = { x: SUM, y: 0 - SUM };  // writes a folded struct literal
+}
+
+function main(): int32 {
+    let s: int32[] = SQUARES;
+    printf(`SQUARES=${s[0]},${s[1]},${s[2]},${s[3]},${s[4]},${s[5]},${s[6]},${s[7]}\n`);
+    printf(`SUM=${SUM}\n`);
+    let t: Point = TIP;
+    printf(`TIP=(${t.x},${t.y})\n`);
+    return 0;
+}
+
+// expected stdout:
+//   SQUARES=0,1,4,9,16,25,36,49
+//   SUM=140
+//   TIP=(140,-140)

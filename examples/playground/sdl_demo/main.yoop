@@ -159,41 +159,41 @@ function respawn_ball(ref b: Ball, ref rng: int32, win_w: int32): void {
     b.hue = b.hue + 1.7;
 }
 
+// ── Constants ─────────────────────────────────────────────────────────────────
+const WIN_W: int32 = 800;
+const WIN_H: int32 = 600;
+const FPS_TARGET: uint32 = 60;
+const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+const DURATION_MS: uint32 = 8000;
+
+const SDL_SCANCODE_ESCAPE: int32 = 41;
+const SDL_SCANCODE_A: int32 = 4;
+const SDL_SCANCODE_D: int32 = 7;
+const SDL_SCANCODE_SPACE: int32 = 44;
+
+const PLAYER_SIZE: float32 = 24.0;
+const PLAYER_SPEED: float32 = 0.3;
+const BOTTOM_PADDING: float32 = 8.0;
+
+const BULLET_W: float32 = 4.0;
+const BULLET_H: float32 = 10.0;
+const BULLET_SPEED: float32 = 0.6;
+const BULLET_POOL: int32 = 16;
+
+// SDL_Init flags
+const SDL_INIT_VIDEO: uint32 = 0x00000020;
+
+// SDL_CreateWindow position / flags
+const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+
+// SDL_CreateRenderer flags
+const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
+const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
+
 // ── Entry point ───────────────────────────────────────────────────────────────
-
 function main(): int32 {
-    // ── Constants ─────────────────────────────────────────────────────────────────
 
-    const WIN_W: int32 = 800;
-    const WIN_H: int32 = 600;
-    const FPS_TARGET: uint32 = 60;
-    const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
-    const DURATION_MS: uint32 = 8000;
-
-    const SDL_SCANCODE_ESCAPE: int32 = 41;
-    const SDL_SCANCODE_A: int32 = 4;
-    const SDL_SCANCODE_D: int32 = 7;
-    const SDL_SCANCODE_SPACE: int32 = 44;
-
-    const PLAYER_SIZE: float32 = 24.0;
-    const PLAYER_SPEED: float32 = 0.3;
-    const BOTTOM_PADDING: float32 = 8.0;
-
-    const BULLET_W: float32 = 4.0;
-    const BULLET_H: float32 = 10.0;
-    const BULLET_SPEED: float32 = 0.6;
-    const BULLET_POOL: int32 = 16;
-
-    // SDL_Init flags
-    const SDL_INIT_VIDEO: uint32 = 0x00000020;
-
-    // SDL_CreateWindow position / flags
-    const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
-    const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
-
-    // SDL_CreateRenderer flags
-    const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
-    const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
 
     if (SDL_Init(SDL_INIT_VIDEO) != 0) {
         printf("SDL_Init failed\n");

@@ -1,7 +1,7 @@
-// std/core/bytes.yoop — Phase 8.H byte-buffer primitives.
+// std/core/bytes.yoop - Phase 8.H byte-buffer primitives.
 //
 // Pure-yoop operations on top of the `$builtin__array_slice` and
-// `$builtin__heap_alloc` intrinsics. No `import.unsafe;` — these are the
+// `$builtin__heap_alloc` intrinsics. No `import.unsafe;` - these are the
 // safe surface library code reaches for to parse and shuffle bytes.
 //
 // Naming convention (see plans/phase-8-h-string-bytes-vec.md "Intrinsics as
@@ -9,6 +9,9 @@
 //   * `_slice` -> borrowing view, no allocation
 //   * `_copy` -> fresh heap allocation
 //   * everything else here is read-only over its inputs.
+
+import { Result } from "./types.yoop";
+import * as intr from "./intrinsics.yoop";
 
 // Byte-wise equality. Returns true iff lengths match and every byte matches.
 export function bytes_eq(a: uint8[], b: uint8[]): bool {
@@ -86,14 +89,14 @@ export function bytes_eq_ignore_ascii_case(a: uint8[], b: uint8[]): bool {
 // storage as `buf`. The caller is responsible for keeping `buf` alive as
 // long as the slice is used.
 export function bytes_slice(buf: uint8[], start: usize, end: usize): uint8[] {
-    return array_slice(buf, start, end);
+    return intr.array_slice(buf, start, end);
 }
 
 // Copy buf into a fresh heap-allocated uint8[]. Caller owns the result and
-// is responsible for freeing it (via heap_free) — though typical use is to
+// is responsible for freeing it (via heap_free) - though typical use is to
 // hand it off to string_from_bytes_unchecked which retains the bytes.
 export function bytes_copy(buf: uint8[]): uint8[] {
-    let result: uint8[] = heap_alloc(buf.len);
+    let result: uint8[] = intr.heap_alloc(buf.len);
     let i: usize = 0;
     while (i < buf.len) {
         result[i] = buf[i];
@@ -103,14 +106,14 @@ export function bytes_copy(buf: uint8[]): uint8[] {
 }
 
 // Parse a decimal ASCII integer at the start of `buf`. Stops at the first
-// non-digit. Returns the value and how many bytes were consumed. The `err`
-// field is non-empty if no leading digits were found.
+// non-digit. The `Ok` payload holds the parsed value plus how many bytes
+// were consumed. `Err` is returned if no leading digits were found.
 //
 // Overflow is not detected (the multiplication wraps in int64); a defense
 // against pathological inputs is the caller's responsibility today.
-export type BytesParseInt { value: int64, consumed: usize, err: string }
+export type BytesParsed { value: int64, consumed: usize }
 
-export function bytes_parse_int(buf: uint8[]): BytesParseInt {
+export function bytes_parse_int(buf: uint8[]): Result<BytesParsed, string> {
     let i: usize = 0;
     let val: int64 = 0;
     while (i < buf.len) {
@@ -123,7 +126,7 @@ export function bytes_parse_int(buf: uint8[]): BytesParseInt {
         i = i + 1;
     }
     if (i == 0) {
-        return { value: 0, consumed: 0, err: "bytes_parse_int: no leading digits" };
+        return Result.Err { error: "bytes_parse_int: no leading digits" };
     }
-    return { value: val, consumed: i, err: "" };
+    return Result.Ok { value: { value: val, consumed: i } };
 }

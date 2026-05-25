@@ -1,4 +1,4 @@
-# Phase 8.F.3 — Timers
+# Phase 8.F.3 - Timers
 
 ## Context
 
@@ -6,7 +6,7 @@ Phase 8.F.1 added park/unpark. F2 added the I/O multiplexer. F3 adds the
 last primitive yoop programs need before a real server can be written:
 *sleep for N nanoseconds, then resume*. Servers use this for
 back-pressure, retry backoff, periodic housekeeping, heartbeat
-intervals — everything.
+intervals - everything.
 
 The MVP implementation is intentionally **independent of the F2
 multiplexer**: `pthread_cond_timedwait` against `CLOCK_MONOTONIC` on a
@@ -35,10 +35,10 @@ extern "C" from "yoop_runtime" {
 - `yoop_sleep_ms(ms)`: convenience wrapper computing
   `yoop_sleep_ns(ms * 1_000_000ULL)`.
 
-Both are safe to call from any thread — including a worker thread
+Both are safe to call from any thread - including a worker thread
 running a yoop task. The pthread blocks; other workers continue picking
 up other tasks. With the F2 multiplexer in flight, a thread sleeping is
-just "not consuming the multiplexer" — the multiplexer keeps polling.
+just "not consuming the multiplexer" - the multiplexer keeps polling.
 
 ### Implementation
 
@@ -77,7 +77,7 @@ int yoop_sleep_ns(uint64_t ns) {
 }
 ```
 
-On macOS, `pthread_condattr_setclock` doesn't exist — `pthread_cond_timedwait`
+On macOS, `pthread_condattr_setclock` doesn't exist - `pthread_cond_timedwait`
 already uses absolute `CLOCK_REALTIME` time. Workaround: compute the
 deadline using `CLOCK_REALTIME` on macOS, `CLOCK_MONOTONIC` on Linux. Both
 are monotonic-enough for sleep duration (CLOCK_REALTIME can step backward
@@ -94,22 +94,22 @@ extra flags. No additional libc dependency.
 Out of scope for F3 MVP. A future `yoop_sleep_ns_cancellable` would take
 a park token, allowing a "cancel" wake from outside. Even today, the
 calling task is free to ignore the result of `yoop_sleep_ns` and return
-early — the sleep just keeps running on its worker until completion.
+early - the sleep just keeps running on its worker until completion.
 Wasteful but correct.
 
 ## Sub-phase steps
 
-### F3.0 — Declarations
+### F3.0 - Declarations
 
 Add `yoop_sleep_ns` and `yoop_sleep_ms` to
 [runtime/yoop_runtime.h](../runtime/yoop_runtime.h).
 
-### F3.1 — Implementation
+### F3.1 - Implementation
 
 Add the bodies to [runtime/yoop_runtime.c](../runtime/yoop_runtime.c).
 Platform-branch on Linux vs everyone-else for the clock id.
 
-### F3.2 — Runtime test
+### F3.2 - Runtime test
 
 C-level test in `runtime/tests/`:
 
@@ -120,10 +120,10 @@ C-level test in `runtime/tests/`:
 
 ## Files touched
 
-- [runtime/yoop_runtime.h](../runtime/yoop_runtime.h) — two new
+- [runtime/yoop_runtime.h](../runtime/yoop_runtime.h) - two new
   declarations.
-- [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) — implementations.
-- `runtime/tests/test_runtime.c` — sleep timing test.
+- [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) - implementations.
+- `runtime/tests/test_runtime.c` - sleep timing test.
 
 ## Out of scope
 
@@ -133,5 +133,5 @@ C-level test in `runtime/tests/`:
 - Cancellable sleep. Needs the park-token-with-reason work also called
   out in F1's "Out of scope."
 - Deadline-aware scheduling. The current model is "first-come,
-  first-served" via the worker pool — a high-priority sleep doesn't
+  first-served" via the worker pool - a high-priority sleep doesn't
   preempt a lower-priority compute task.

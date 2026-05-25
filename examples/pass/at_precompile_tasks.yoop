@@ -1,0 +1,69 @@
+// Phase 11.D.9: tasks execute synchronously inline at compile time.
+// A `task fn` declaration is treated like a normal function whose
+// body returns the inner T; the call-site lowering inserts a
+// TASK_WRAP to tag the result as Task<T> so the typed register
+// matches the AST's stamped resolvedType. WAIT_EXPRESSION and the
+// `immediateTaskCall` LET_DECL path emit TASK_WAIT to pull the
+// inner value back out.
+//
+// At runtime tasks run on a thread pool with refcounted handles;
+// the comptime model is much simpler - no scheduler, no
+// concurrency, just run-and-cache. Kind-flow synthesized cleanup
+// statements (TASK_AUTO_WAIT, TASK_RELEASE, TASK_RETAIN,
+// CLEANUP_CALL) are no-ops at the bytecode level since there's
+// no OS state to release or thread to join.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+task compute(x: int32): int32 { return x * x; }
+
+task sum_two(a: int32, b: int32): int32 {
+    let s: int32 = a + b;
+    return s;
+}
+
+// Immediate task call - the binding's type is the inner int32, so
+// the typechecker stamps `immediateTaskCall = true` on the
+// LET_DECL/CONST_DECL. Lowering emits CALL_DIRECT (body) +
+// TASK_WRAP + TASK_WAIT (to unwrap into the slot).
+function via_immediate(n: int32): int32 {
+    const r: int32 = compute(n);
+    return r + 1;
+}
+
+// Joined / wait shape - the binding type is Task<int32>, the user
+// explicitly waits later. `joined` and `pooled` differ in handle
+// lifetime at runtime, but at comptime both are just "named binding
+// holding a Task<T>".
+function via_joined(n: int32): int32 {
+    joined h = compute(n);
+    const v: int32 = wait h;
+    return v + 2;
+}
+
+function via_pooled(n: int32): int32 {
+    pooled h = compute(n);
+    const v: int32 = wait h;
+    return v + 3;
+}
+
+// Multi-arg task - exercises the param-binding path through CALL_DIRECT.
+function via_multi(): int32 {
+    const r: int32 = sum_two(11, 31);
+    return r;
+}
+
+@precompile const IMM: int32 = via_immediate(7);   // 49 + 1 = 50
+@precompile const JOIN: int32 = via_joined(8);     // 64 + 2 = 66
+@precompile const POOL: int32 = via_pooled(9);     // 81 + 3 = 84
+@precompile const MULTI: int32 = via_multi();      // 11 + 31 = 42
+
+function main(): int32 {
+    printf(`IMM=${IMM} JOIN=${JOIN} POOL=${POOL} MULTI=${MULTI}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   IMM=50 JOIN=66 POOL=84 MULTI=42

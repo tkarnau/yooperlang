@@ -1,14 +1,14 @@
-# Phase 6.3-prelude — Concurrency runtime
+# Phase 6.3-prelude - Concurrency runtime
 
-Part of [phase 6 — kinds](./phase-6-kinds.md). Phase 6.1 landed `disposable` (kind decls, `binding`-site flow analysis, LIFO cleanup emission). Phase 6.2 landed `scoped` (multi-site `appliesTo`, parameter kinds, `mustNotEscape`). Both are pure compile-time analyses — the runtime side of the language is still the same single-threaded C ABI the compiler has emitted since phase 1. Phase 6.3 (the big one) adds `task` functions, `Task<T>` handles, and `wait`. Those land in two halves: this prelude builds the C runtime and the build pipeline; phase 6.3 (language sugar) builds the syntax and the codegen that drives the runtime.
+Part of [phase 6 - kinds](./phase-6-kinds.md). Phase 6.1 landed `disposable` (kind decls, `binding`-site flow analysis, LIFO cleanup emission). Phase 6.2 landed `scoped` (multi-site `appliesTo`, parameter kinds, `mustNotEscape`). Both are pure compile-time analyses - the runtime side of the language is still the same single-threaded C ABI the compiler has emitted since phase 1. Phase 6.3 (the big one) adds `task` functions, `Task<T>` handles, and `wait`. Those land in two halves: this prelude builds the C runtime and the build pipeline; phase 6.3 (language sugar) builds the syntax and the codegen that drives the runtime.
 
 The full implementation contract for the runtime is in [runtime-design.md](runtime-design.md); this plan is the step-by-step landing of that contract.
 
 ## Goal
 
-Land the entire C runtime described in [runtime-design.md §3-§10](runtime-design.md#L34), wire it into the build pipeline, and inject `yoop_runtime_init` / `yoop_runtime_shutdown` around `main`. Ship **no** surface-language changes — there is no `task` keyword yet, no `Task<T>` type, no `wait` operator. Verification is: an existing phase-1 program still compiles, still runs, and now links against the runtime; codegen-injected init/shutdown calls execute cleanly with zero tasks submitted.
+Land the entire C runtime described in [runtime-design.md §3-§10](runtime-design.md#L34), wire it into the build pipeline, and inject `yoop_runtime_init` / `yoop_runtime_shutdown` around `main`. Ship **no** surface-language changes - there is no `task` keyword yet, no `Task<T>` type, no `wait` operator. Verification is: an existing phase-1 program still compiles, still runs, and now links against the runtime; codegen-injected init/shutdown calls execute cleanly with zero tasks submitted.
 
-Goal program — the existing [examples/test.yoop](../examples/test.yoop) (or any pass fixture from phases 1-6.2), unchanged:
+Goal program - the existing [examples/test.yoop](../examples/test.yoop) (or any pass fixture from phases 1-6.2), unchanged:
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -45,9 +45,9 @@ These two checks together prove: (1) the worker pool initializes and tears down 
 
 Two reasons.
 
-1. **The C runtime is independently testable.** A worker pool with submit / wait / refcount lifecycle has zero dependence on the compiler. It can be written, exercised under sanitizers, and validated against the contract in [runtime-design.md](runtime-design.md) without a single `.yoop` file. Splitting it out of phase 6.3 means the language-sugar work in 6.3 begins with a known-good runtime — the only thing 6.3 has to debug is the LLVM IR it emits, not the C it links against.
+1. **The C runtime is independently testable.** A worker pool with submit / wait / refcount lifecycle has zero dependence on the compiler. It can be written, exercised under sanitizers, and validated against the contract in [runtime-design.md](runtime-design.md) without a single `.yoop` file. Splitting it out of phase 6.3 means the language-sugar work in 6.3 begins with a known-good runtime - the only thing 6.3 has to debug is the LLVM IR it emits, not the C it links against.
 
-2. **It de-risks 6.3's IR work.** Phase 6.3 emits coroutine intrinsics, a per-result-type `Task_<T>` struct, per-task-function thunks, and call-site refcount pairs. Each of those is a non-trivial new pattern in `codegen.js`. Doing them in the same phase as building the runtime and the build pipeline would interleave three concerns — IR shape, C ABI, linker invocation — and any failure would touch all three. With the prelude in place, 6.3 turns into "make codegen emit IR that calls these symbols correctly," which is one concern.
+2. **It de-risks 6.3's IR work.** Phase 6.3 emits coroutine intrinsics, a per-result-type `Task_<T>` struct, per-task-function thunks, and call-site refcount pairs. Each of those is a non-trivial new pattern in `codegen.js`. Doing them in the same phase as building the runtime and the build pipeline would interleave three concerns - IR shape, C ABI, linker invocation - and any failure would touch all three. With the prelude in place, 6.3 turns into "make codegen emit IR that calls these symbols correctly," which is one concern.
 
 The prelude also lets us land the build-pipeline change (yoopiler invokes clang with an additional C file) in isolation. Today the driver compiles a single `.ll` file; after the prelude it compiles the `.ll` plus `runtime/yoop_runtime.c` in one clang invocation. That's a small but non-trivial driver change; doing it without the IR-emission noise of 6.3 makes the diff readable.
 
@@ -58,8 +58,8 @@ The prelude also lets us land the build-pipeline change (yoopiler invokes clang 
 - **No per-task-function thunk emission.** Codegen never emits `@<modId>__<fn>__thunk` symbols. The runtime declares `yoop_task_submit(void*, void(*)(void*))` and is ready to receive thunk pointers, but no thunks exist yet.
 - **No LLVM coroutine intrinsic emission.** The build pipeline is configured so coroutine passes are available (clang flag wired up, LLVM ≥ 16 assumed), but codegen does not emit `@llvm.coro.*` calls. Phase 6.3 turns those on per-`task`-function.
 - **No `joined` / `pooled` / `wait` binding/operator codegen.** Those depend on `Task<T>`; deferred to 6.3.
-- **No call-site refcount-pair insertion.** `yoop_task_retain` / `yoop_task_release` exist in the runtime, are declared in the IR, and have unit tests via the C smoke test. Codegen never inserts calls to them — there are no pooled handles yet.
-- **No I/O multiplexing, no work stealing, no cancellation, no suspendable bodies, no introspection** — all permanently out of 6.3's scope per [runtime-design.md §11](runtime-design.md#L289), and certainly out of the prelude.
+- **No call-site refcount-pair insertion.** `yoop_task_retain` / `yoop_task_release` exist in the runtime, are declared in the IR, and have unit tests via the C smoke test. Codegen never inserts calls to them - there are no pooled handles yet.
+- **No I/O multiplexing, no work stealing, no cancellation, no suspendable bodies, no introspection** - all permanently out of 6.3's scope per [runtime-design.md §11](runtime-design.md#L289), and certainly out of the prelude.
 - **No ABI versioning.** The runtime exposes a flat set of C symbols. If a future phase needs to change them, callers re-link against the matching runtime. There is no compatibility surface to maintain in 6.3-prelude.
 - **No init injection outside `main`.** Programs without a `main` are already rejected at typecheck ([roadmap.md](roadmap.md#L243), [SPEC.md](../SPEC.md)); the prelude doesn't relax this. Standalone libraries are a phase 7 concern.
 - **No env-var documentation in SPEC.md.** `YOOP_NUM_WORKERS` is a runtime knob, not a language feature; it lives in `runtime-design.md` only.
@@ -70,27 +70,27 @@ After phases 1-6.2, the compiler has the hooks the prelude needs:
 
 - **Single clang invocation.** [yoopiler.js:51-60](../src/yoopiler.js#L51-L60) calls `clang` with the temp `.ll` and the `linkFlags` collected from `extern "C" from library "..."` directives. Adding the runtime is one extra file in the argv array and one extra link flag (`-lpthread` on POSIX).
 - **`main` is special-cased in codegen.** [codegen.js:1594](../src/jsyoopcodegen/codegen.js#L1594) and [codegen.js:1598](../src/jsyoopcodegen/codegen.js#L1598) detect `main` and emit it with an unmangled symbol. The same detection is the hook for "if this function is `main`, inject init at entry and shutdown before every ret."
-- **`declare` line emission.** [codegen.js:1226-1238](../src/jsyoopcodegen/codegen.js#L1226-L1238) emits `declare` lines for every extern. The runtime ABI is six symbols ([runtime-design.md §6](runtime-design.md#L74)) — they get emitted from the same path, hardcoded into codegen as "always declare these six, regardless of user code."
+- **`declare` line emission.** [codegen.js:1226-1238](../src/jsyoopcodegen/codegen.js#L1226-L1238) emits `declare` lines for every extern. The runtime ABI is six symbols ([runtime-design.md §6](runtime-design.md#L74)) - they get emitted from the same path, hardcoded into codegen as "always declare these six, regardless of user code."
 - **Return-statement codegen has one site.** Every `ret` in `main` flows through one helper that emits the `ret <ty> <val>` instruction. Inserting the `call void @yoop_runtime_shutdown()` immediately before that instruction, only when the enclosing function is `main`, is one conditional.
 - **Test harness.** [roadmap.md:228](roadmap.md#L228) plans an `examples/{pass,fail}/` regression runner. Phase 6.3-prelude extends it with a `runtime/tests/` directory for C-level smoke tests run via `make` or a small node script.
 
 ## Files touched
 
-- **New** `runtime/yoop_runtime.h` — type declarations (`yoop_mutex_t`, `yoop_cond_t`, `yoop_thread_t`), function prototypes for the ABI. ~80 lines.
-- **New** `runtime/yoop_runtime.c` — worker pool, FIFO queue, mutex/condvar shim (POSIX + Windows `#ifdef`s), refcount lifecycle, init/shutdown. ~300-400 lines.
-- **New** `runtime/tests/smoke.c` — C-level no-op test (init / shutdown round-trip).
-- **New** `runtime/tests/submit_one.c` — C-level test that submits one no-op task, waits, releases. Verifies the full happy path without compiler involvement.
-- **New** `runtime/tests/submit_many.c` — C-level test that submits N (~1000) no-op tasks, waits each. Exercises queue contention.
-- **New** `runtime/tests/refcount.c` — C-level test that exercises retain / release pairs, including the release-from-worker-thread path.
-- **New** `runtime/tests/run_tests.sh` (or a node script) — drives the C tests; runs each under valgrind on Linux and under TSan when available.
-- **Edit** [src/yoopiler.js](../src/yoopiler.js) — extend the clang invocation to include `runtime/yoop_runtime.c`; add `-lpthread` to the link flags on POSIX; add `-mllvm -enable-coroutines` defensively.
-- **Edit** [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — emit runtime-ABI `declare` lines unconditionally at module top; inject `call void @yoop_runtime_init()` at `main`'s entry block; inject `call void @yoop_runtime_shutdown()` before every `ret` in `main`.
-- **New** `examples/pass/runtime_linked/` — minimal yoop fixture that proves a no-task program still works with the runtime linked in.
-- **Edit** [plans/roadmap.md](roadmap.md) — clarify that 6.3-prelude lands C runtime + build pipeline + init/shutdown injection only; Task<T>/thunk/coroutine emission moves to 6.3 (sugar). (Already noted in [phase-6-kinds.md](phase-6-kinds.md#L52); a one-line edit in roadmap.md to mirror the split.)
+- **New** `runtime/yoop_runtime.h` - type declarations (`yoop_mutex_t`, `yoop_cond_t`, `yoop_thread_t`), function prototypes for the ABI. ~80 lines.
+- **New** `runtime/yoop_runtime.c` - worker pool, FIFO queue, mutex/condvar shim (POSIX + Windows `#ifdef`s), refcount lifecycle, init/shutdown. ~300-400 lines.
+- **New** `runtime/tests/smoke.c` - C-level no-op test (init / shutdown round-trip).
+- **New** `runtime/tests/submit_one.c` - C-level test that submits one no-op task, waits, releases. Verifies the full happy path without compiler involvement.
+- **New** `runtime/tests/submit_many.c` - C-level test that submits N (~1000) no-op tasks, waits each. Exercises queue contention.
+- **New** `runtime/tests/refcount.c` - C-level test that exercises retain / release pairs, including the release-from-worker-thread path.
+- **New** `runtime/tests/run_tests.sh` (or a node script) - drives the C tests; runs each under valgrind on Linux and under TSan when available.
+- **Edit** [src/yoopiler.js](../src/yoopiler.js) - extend the clang invocation to include `runtime/yoop_runtime.c`; add `-lpthread` to the link flags on POSIX; add `-mllvm -enable-coroutines` defensively.
+- **Edit** [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - emit runtime-ABI `declare` lines unconditionally at module top; inject `call void @yoop_runtime_init()` at `main`'s entry block; inject `call void @yoop_runtime_shutdown()` before every `ret` in `main`.
+- **New** `examples/pass/runtime_linked/` - minimal yoop fixture that proves a no-task program still works with the runtime linked in.
+- **Edit** [plans/roadmap.md](roadmap.md) - clarify that 6.3-prelude lands C runtime + build pipeline + init/shutdown injection only; Task<T>/thunk/coroutine emission moves to 6.3 (sugar). (Already noted in [phase-6-kinds.md](phase-6-kinds.md#L52); a one-line edit in roadmap.md to mirror the split.)
 
-## 1. The runtime header — `runtime/yoop_runtime.h`
+## 1. The runtime header - `runtime/yoop_runtime.h`
 
-The header is the single source of truth for both the C runtime's internal compilation unit and the LLVM `declare` lines codegen emits. Keep it minimal — type aliases plus function prototypes — so the LLVM-side and C-side stay in lockstep.
+The header is the single source of truth for both the C runtime's internal compilation unit and the LLVM `declare` lines codegen emits. Keep it minimal - type aliases plus function prototypes - so the LLVM-side and C-side stay in lockstep.
 
 ```c
 // runtime/yoop_runtime.h
@@ -125,7 +125,7 @@ void  yoop_task_release(void* handle);
 
 // --- thunk-callable helper (called from per-task thunks emitted by 6.3) ---
 // Sets state=1 under the handle's mutex, signals the condvar, and (if the
-// handle's refcount field is nonzero — i.e. pooled) calls yoop_task_release.
+// handle's refcount field is nonzero - i.e. pooled) calls yoop_task_release.
 void yoop_handle_signal_done(void* handle);
 
 #ifdef __cplusplus
@@ -138,30 +138,30 @@ void yoop_handle_signal_done(void* handle);
 Notes:
 
 - **No `Task_<T>` struct in the header.** That layout is the compiler's responsibility ([runtime-design.md §5](runtime-design.md#L51)); the runtime touches only field offsets it can compute from a `void*` plus codegen-known offsets, *or* via small accessor helpers the C runtime exposes. To keep the runtime layout-agnostic, the contract is: the first three fields of any `Task_<T>` struct are always `(thunk ptr, state i8, refcount i32)` in that order, at offsets 0, 8, 12 with natural alignment. The runtime reads those offsets directly; everything past field 2 is the compiler's problem.
-- **`yoop_handle_signal_done` is the only ABI symbol that didn't appear in the prose of [runtime-design.md §6](runtime-design.md#L74).** It's referenced in [§7.c](runtime-design.md#L180) as the thunk's "signal done" helper. Promoting it to a named ABI symbol means the thunks emitted by 6.3 don't have to inline mutex/condvar bookkeeping — they just `call void @yoop_handle_signal_done(ptr %ts)` after storing the result. This is a small but real simplification of phase 6.3's IR emission.
+- **`yoop_handle_signal_done` is the only ABI symbol that didn't appear in the prose of [runtime-design.md §6](runtime-design.md#L74).** It's referenced in [§7.c](runtime-design.md#L180) as the thunk's "signal done" helper. Promoting it to a named ABI symbol means the thunks emitted by 6.3 don't have to inline mutex/condvar bookkeeping - they just `call void @yoop_handle_signal_done(ptr %ts)` after storing the result. This is a small but real simplification of phase 6.3's IR emission.
 - **All handles are `void*` across the ABI.** The struct layout differs per result type, but the runtime never dereferences past the layout-stable prefix. This keeps the runtime free of `Task_<T>` knowledge.
 
 ### 1.a Handle prefix layout (load-bearing for the runtime)
 
-The runtime relies on this fixed prefix; codegen in 6.3 must lay every `Task_<T>` struct out compatibly. Field byte offsets are normative — the runtime hardcodes them.
+The runtime relies on this fixed prefix; codegen in 6.3 must lay every `Task_<T>` struct out compatibly. Field byte offsets are normative - the runtime hardcodes them.
 
 | Offset | Size | Field | Atomicity |
 |---|---|---|---|
-| 0 | 8 | `thunk` (`void (*)(void*)`) | unsynchronized — written once before submit |
+| 0 | 8 | `thunk` (`void (*)(void*)`) | unsynchronized - written once before submit |
 | 8 | 1 | `state` (`uint8_t`, 0=unstarted, 1=done) | atomic; written under mutex by worker, read under mutex by waiter |
-| 9 | 3 | padding | — |
+| 9 | 3 | padding | - |
 | 12 | 4 | `refcount` (`int32_t`) | atomic; 0 in stack-allocated handles, ≥1 in pooled |
-| 16 | 8 | `mutex_ptr` (`yoop_mutex_t*`) | unsynchronized — written once by `yoop_task_submit`, freed once on last release |
-| 24 | 8 | `cond_ptr` (`yoop_cond_t*`) | unsynchronized — same lifecycle as `mutex_ptr` |
-| 32 | … | result slot + args blob (compiler-owned) | — |
+| 16 | 8 | `mutex_ptr` (`yoop_mutex_t*`) | unsynchronized - written once by `yoop_task_submit`, freed once on last release |
+| 24 | 8 | `cond_ptr` (`yoop_cond_t*`) | unsynchronized - same lifecycle as `mutex_ptr` |
+| 32 | … | result slot + args blob (compiler-owned) | - |
 
 Phase 6.3's codegen must emit `Task_<T>` types whose `result_slot` starts at offset 32 and whose args blob follows. Mismatch is a runtime UB. Stretch: have the runtime expose `yoop_task_prefix_size()` returning `32` and assert at startup; cheaper than adding ABI versioning.
 
-## 2. The runtime body — `runtime/yoop_runtime.c`
+## 2. The runtime body - `runtime/yoop_runtime.c`
 
 Single compilation unit; `#ifdef _WIN32` carves out the platform code. Targeted size ~300-400 lines.
 
-### 2.a Platform shim — types and primitives
+### 2.a Platform shim - types and primitives
 
 ```c
 #ifdef _WIN32
@@ -220,10 +220,10 @@ Single compilation unit; `#ifdef _WIN32` carves out the platform code. Targeted 
 
 Notes:
 
-- **The mutex/cond structs are heap-allocated.** `yoop_task_submit` allocates them via `malloc` and stores the pointers in the handle prefix at offsets 16 and 24. Embedding `pthread_mutex_t` directly in the `Task_<T>` struct is rejected (different sizes per platform) — [runtime-design.md §5](runtime-design.md#L67) is explicit. The heap-allocated pair adds two `malloc`s per submit; acceptable for the MVP, and revisitable if profiling shows it hurts.
+- **The mutex/cond structs are heap-allocated.** `yoop_task_submit` allocates them via `malloc` and stores the pointers in the handle prefix at offsets 16 and 24. Embedding `pthread_mutex_t` directly in the `Task_<T>` struct is rejected (different sizes per platform) - [runtime-design.md §5](runtime-design.md#L67) is explicit. The heap-allocated pair adds two `malloc`s per submit; acceptable for the MVP, and revisitable if profiling shows it hurts.
 - **`stdatomic.h` is required.** MSVC supports `<stdatomic.h>` in recent versions; if support is missing on a target Windows toolchain, fall back to `_Interlocked*` intrinsics (file-local `#ifdef`, not exposed to the ABI). For 6.3-prelude we require a `<stdatomic.h>`-capable compiler and document it in [runtime-design.md §9](runtime-design.md#L246).
 
-### 2.b Worker pool — globals, init, shutdown
+### 2.b Worker pool - globals, init, shutdown
 
 ```c
 typedef struct task_node {
@@ -330,7 +330,7 @@ void yoop_runtime_shutdown(void) {
 
 #### Race-on-shutdown note
 
-If user code calls `yoop_task_submit` *after* `yoop_runtime_shutdown` has been called (e.g. via FFI in a destructor-like context), the submit silently no-ops — but for 6.3-prelude this can't actually happen, because shutdown injection is at every `ret` in `main`, which is the last user-reachable code. Don't add a guard for this in 6.3-prelude; document it as a future-work consideration in [runtime-design.md §11](runtime-design.md#L289) if it ever matters.
+If user code calls `yoop_task_submit` *after* `yoop_runtime_shutdown` has been called (e.g. via FFI in a destructor-like context), the submit silently no-ops - but for 6.3-prelude this can't actually happen, because shutdown injection is at every `ret` in `main`, which is the last user-reachable code. Don't add a guard for this in 6.3-prelude; document it as a future-work consideration in [runtime-design.md §11](runtime-design.md#L289) if it ever matters.
 
 ### 2.c Worker loop
 
@@ -359,7 +359,7 @@ static void worker_loop(void) {
 Notes:
 
 - The worker pops, releases the queue mutex, **then** invokes the thunk. The thunk is allowed to take the handle's per-handle mutex (in `yoop_handle_signal_done`); doing it without the queue mutex held prevents priority inversion between unrelated tasks.
-- The thunk is responsible for storing the result, signaling done, and (for pooled) releasing. The worker doesn't touch the handle once it's invoked the thunk — the thunk owns it.
+- The thunk is responsible for storing the result, signaling done, and (for pooled) releasing. The worker doesn't touch the handle once it's invoked the thunk - the thunk owns it.
 - Spurious wakeups: the `while` predicate handles them. Textbook condvar pattern.
 - Per-platform wrappers: on POSIX `spawn_worker` and `join_worker` use `pthread_create` / `pthread_join`; on Windows they use `CreateThread` / `WaitForSingleObject` + `CloseHandle`. `worker_loop` is the same on both; on Windows it's wrapped in a `DWORD WINAPI worker_thunk(LPVOID)` that just calls `worker_loop()` and returns 0.
 
@@ -405,7 +405,7 @@ void yoop_task_wait(void* handle) {
 }
 ```
 
-`yoop_task_wait` does **not** release the caller's refcount ([runtime-design.md §6.a](runtime-design.md#L116)) — that's the caller's binding's scope-exit responsibility. The wait is purely "block until state==1."
+`yoop_task_wait` does **not** release the caller's refcount ([runtime-design.md §6.a](runtime-design.md#L116)) - that's the caller's binding's scope-exit responsibility. The wait is purely "block until state==1."
 
 ### 2.e `yoop_handle_signal_done`
 
@@ -417,7 +417,7 @@ void yoop_handle_signal_done(void* handle) {
     yoop_cond_t*  c = *(yoop_cond_t**) ((char*)handle + 24);
     yoop_mutex_lock(m);
     A_STORE_U8((char*)handle + 8, 1);
-    yoop_cond_broadcast(c);  // broadcast, not signal — multiple waiters legal for pooled
+    yoop_cond_broadcast(c);  // broadcast, not signal - multiple waiters legal for pooled
     yoop_mutex_unlock(m);
 
     // If this is a pooled handle (refcount > 0), the worker releases its ref.
@@ -429,14 +429,14 @@ void yoop_handle_signal_done(void* handle) {
 }
 ```
 
-Broadcast over signal: in 6.3-prelude only one waiter ever exists per handle (the language doesn't yet let you wait twice), so `signal` would suffice — but broadcast costs nothing for one waiter and matches the long-term semantics ([runtime-design.md §11](runtime-design.md#L289) leaves multi-waiter open). Don't optimize prematurely.
+Broadcast over signal: in 6.3-prelude only one waiter ever exists per handle (the language doesn't yet let you wait twice), so `signal` would suffice - but broadcast costs nothing for one waiter and matches the long-term semantics ([runtime-design.md §11](runtime-design.md#L289) leaves multi-waiter open). Don't optimize prematurely.
 
-### 2.f Pooled lifecycle — alloc / retain / release
+### 2.f Pooled lifecycle - alloc / retain / release
 
 ```c
 void* yoop_task_alloc(size_t size) {
     void* p = calloc(1, size);  // zero-init so state=0, refcount untouched-but-zeroed.
-    // Initial refcount = 2 (caller + worker). The "worker" half is logical —
+    // Initial refcount = 2 (caller + worker). The "worker" half is logical -
     // the worker thunk will call yoop_task_release after signaling.
     atomic_store_explicit((_Atomic int32_t*)((char*)p + 12), 2,
                           memory_order_release);
@@ -460,13 +460,13 @@ void yoop_task_release(void* handle) {
 }
 ```
 
-For stack-allocated handles (`joined` / immediate in 6.3 sugar), `refcount` stays at 0 and `yoop_task_release` is never called. The mutex/cond pair allocated by `yoop_task_submit` is freed by codegen-inserted cleanup at scope exit (6.3 sugar handles this via a dedicated `yoop_task_cleanup_stack(void*)` helper — added in 6.3, not in the prelude). For now, the C runtime only handles pooled cleanup; stack-handle cleanup symbols are not part of the 6.3-prelude ABI surface.
+For stack-allocated handles (`joined` / immediate in 6.3 sugar), `refcount` stays at 0 and `yoop_task_release` is never called. The mutex/cond pair allocated by `yoop_task_submit` is freed by codegen-inserted cleanup at scope exit (6.3 sugar handles this via a dedicated `yoop_task_cleanup_stack(void*)` helper - added in 6.3, not in the prelude). For now, the C runtime only handles pooled cleanup; stack-handle cleanup symbols are not part of the 6.3-prelude ABI surface.
 
 ### 2.g Deadlock surface
 
-[runtime-design.md §10.a](runtime-design.md#L278) acknowledges the nested-wait deadlock and accepts it for the MVP. 6.3-prelude does nothing to mitigate it — the prelude has no concept of "task body" yet (no thunks emitted, no user-reachable `wait`). Mitigations land in 6.3 sugar (oversize pool via `YOOP_NUM_WORKERS`, docs in SPEC.md §8).
+[runtime-design.md §10.a](runtime-design.md#L278) acknowledges the nested-wait deadlock and accepts it for the MVP. 6.3-prelude does nothing to mitigate it - the prelude has no concept of "task body" yet (no thunks emitted, no user-reachable `wait`). Mitigations land in 6.3 sugar (oversize pool via `YOOP_NUM_WORKERS`, docs in SPEC.md §8).
 
-## 3. Build pipeline — driver changes ([yoopiler.js](../src/yoopiler.js))
+## 3. Build pipeline - driver changes ([yoopiler.js](../src/yoopiler.js))
 
 Single edit to the clang invocation at [yoopiler.js:51-60](../src/yoopiler.js#L51-L60). Resolve the runtime source path relative to the yoopiler script (so the driver works regardless of the user's cwd):
 
@@ -512,7 +512,7 @@ Notes:
 
 ### 3.a A small wart: precompiled object option
 
-If clang-compile-from-source on every run becomes painful for development cycles, an optional optimization is to ship `runtime/yoop_runtime.o` (built once via a `Makefile` or build script) and link the `.o` instead of recompiling the `.c`. The driver can probe for the `.o` first and fall back to the `.c` if absent. This is **deferred** for the prelude — measure first, only add if it bites.
+If clang-compile-from-source on every run becomes painful for development cycles, an optional optimization is to ship `runtime/yoop_runtime.o` (built once via a `Makefile` or build script) and link the `.o` instead of recompiling the `.c`. The driver can probe for the `.o` first and fall back to the `.c` if absent. This is **deferred** for the prelude - measure first, only add if it bites.
 
 ## 4. Codegen changes ([codegen.js](../src/jsyoopcodegen/codegen.js))
 
@@ -576,31 +576,31 @@ At every `ret` emission site, before pushing the `ret` line, push the shutdown c
   if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
   fnLines.push(`  ret ${llvmRet} ${val}`);
   ```
-- **Implicit void return at function fall-through** ([codegen.js:1176-1178](../src/jsyoopcodegen/codegen.js#L1176-L1178)): `main` returns `int32`, not void, so this branch is never taken for `main` — but defensively, gate it the same way.
+- **Implicit void return at function fall-through** ([codegen.js:1176-1178](../src/jsyoopcodegen/codegen.js#L1176-L1178)): `main` returns `int32`, not void, so this branch is never taken for `main` - but defensively, gate it the same way.
 - **`?` early-return** via `emitFailVariantReturn`: in 6.3-prelude, `main` returning fallible is legal (it's `int32`, not a fallible-shaped struct), so `?` doesn't apply in `main`'s body directly. **But**: a `?` *can* appear inside `main`. Phase 2's `?` operator at [codegen.js:381](../src/jsyoopcodegen/codegen.js#L381) emits a `ret` for the early-return path. Audit: when `inMainFn` is true, the failVariantReturn's `ret` must be preceded by `call void @yoop_runtime_shutdown()`. Edit `emitFailVariantReturn` to consult `inMainFn` and emit the shutdown call before its own `ret`. This is exactly analogous to phase 6.1's cleanup-before-`?`-ret edit ([phase-6-1-disposable.md §7.d](phase-6-1-disposable.md#L676)) and uses the same insertion site.
 
 ### 4.d Interaction with phase 6.1 / 6.2 cleanup emission
 
-Phase 6.1 inserts `CLEANUP_CALL` nodes before every exit in `main` (if `main` declares `disposable` bindings). Phase 6.3-prelude inserts `call void @yoop_runtime_shutdown()` before every `ret` in `main`. **Order matters**: shutdown must come *after* all cleanups (the cleanups may freely call user functions, FFI, or printf — all of which work because the runtime is still up). Concretely, the emission order at every `ret` in `main`:
+Phase 6.1 inserts `CLEANUP_CALL` nodes before every exit in `main` (if `main` declares `disposable` bindings). Phase 6.3-prelude inserts `call void @yoop_runtime_shutdown()` before every `ret` in `main`. **Order matters**: shutdown must come *after* all cleanups (the cleanups may freely call user functions, FFI, or printf - all of which work because the runtime is still up). Concretely, the emission order at every `ret` in `main`:
 
 1. Phase 6.1 / 6.2 cleanups (in their LIFO order).
 2. `call void @yoop_runtime_shutdown()`.
 3. `ret <ty> <val>`.
 
-Implementation: in the helper that emits the `ret`, fire any `node.pendingCleanups` first, then (if `inMainFn`) the shutdown, then the `ret`. This is one extra conditional sandwiched between two existing emissions — no new helper needed.
+Implementation: in the helper that emits the `ret`, fire any `node.pendingCleanups` first, then (if `inMainFn`) the shutdown, then the `ret`. This is one extra conditional sandwiched between two existing emissions - no new helper needed.
 
 A fail-fixture exists in 6.1 (`disposable_qmark.yoop`); add a 6.3-prelude pass fixture that combines `disposable` *in main* with a `?` to prove the order works end-to-end (§7).
 
-## 5. Lexer / parser / typechecker — no changes
+## 5. Lexer / parser / typechecker - no changes
 
-There are no new keywords, no new AST node kinds, no new types, no new flow-pass extensions. The lexer, parser, and typechecker pass through unchanged. This is the cleanest signal that the prelude is purely runtime + codegen-injection + build-pipeline — anything that *would* require lexer / parser changes belongs to 6.3 (sugar).
+There are no new keywords, no new AST node kinds, no new types, no new flow-pass extensions. The lexer, parser, and typechecker pass through unchanged. This is the cleanest signal that the prelude is purely runtime + codegen-injection + build-pipeline - anything that *would* require lexer / parser changes belongs to 6.3 (sugar).
 
 ## 6. Driver wiring summary
 
 Files modified end-to-end:
 
-- [src/yoopiler.js](../src/yoopiler.js) — runtime path resolution; clang argv update; platform-specific `-lpthread`; defensive coroutine flag.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — runtime ABI declare block; init injection at `main` entry; shutdown injection at every `ret` in `main` (including `?`-induced); `inMainFn` flag plumbing.
+- [src/yoopiler.js](../src/yoopiler.js) - runtime path resolution; clang argv update; platform-specific `-lpthread`; defensive coroutine flag.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - runtime ABI declare block; init injection at `main` entry; shutdown injection at every `ret` in `main` (including `?`-induced); `inMainFn` flag plumbing.
 
 Files created end-to-end:
 
@@ -615,11 +615,11 @@ Files created end-to-end:
 
 ## 7. Tests
 
-### 7.1 C-level smoke tests — `runtime/tests/`
+### 7.1 C-level smoke tests - `runtime/tests/`
 
 These tests run the runtime *without involving the compiler*. They prove the runtime contract independently. Each is a tiny standalone C program built as `clang runtime/yoop_runtime.c runtime/tests/<name>.c -lpthread -o /tmp/<name> && /tmp/<name>`.
 
-#### `smoke.c` — init + shutdown round-trip
+#### `smoke.c` - init + shutdown round-trip
 
 ```c
 #include "yoop_runtime.h"
@@ -632,9 +632,9 @@ int main(void) {
 
 Verifies: pool spawns N workers, every worker exits cleanly on `shutdown=1` broadcast, `pthread_join` succeeds on every worker, all queue resources freed.
 
-#### `submit_one.c` — one task end-to-end
+#### `submit_one.c` - one task end-to-end
 
-Fake handle: a 32-byte buffer with the correct prefix layout (thunk ptr at 0, state at 8, refcount=0 at 12, mutex/cond at 16/24 — left null, filled by submit). A trivial thunk that just calls `yoop_handle_signal_done`.
+Fake handle: a 32-byte buffer with the correct prefix layout (thunk ptr at 0, state at 8, refcount=0 at 12, mutex/cond at 16/24 - left null, filled by submit). A trivial thunk that just calls `yoop_handle_signal_done`.
 
 ```c
 #include "yoop_runtime.h"
@@ -672,9 +672,9 @@ int main(void) {
 
 Verifies: submit pushes onto the queue, a worker pops and invokes the thunk, the thunk's `signal_done` flips state to 1 and signals the condvar, and the main thread's wait returns. Run under TSan to verify the mutex/condvar dance is race-free.
 
-#### `submit_many.c` — queue contention, no leaks
+#### `submit_many.c` - queue contention, no leaks
 
-Submit N=1000 fake handles; wait each in order. Verifies queue FIFO behavior and that the per-handle mutex/cond pairs are freed on every wait → release path. (For stack-allocated handles like these, mutex/cond are leaked in the current ABI — see §2.f. For 6.3-prelude we accept this and document; or add a small `yoop_task_free_sync_pair(handle)` helper to the ABI and call it from the test after each wait. Decision: add the helper. It's one cheap addition that makes the smoke tests leak-clean and gives 6.3 sugar a clean primitive for stack-handle cleanup.)
+Submit N=1000 fake handles; wait each in order. Verifies queue FIFO behavior and that the per-handle mutex/cond pairs are freed on every wait → release path. (For stack-allocated handles like these, mutex/cond are leaked in the current ABI - see §2.f. For 6.3-prelude we accept this and document; or add a small `yoop_task_free_sync_pair(handle)` helper to the ABI and call it from the test after each wait. Decision: add the helper. It's one cheap addition that makes the smoke tests leak-clean and gives 6.3 sugar a clean primitive for stack-handle cleanup.)
 
 ```c
 // Add to yoop_runtime.h:
@@ -691,7 +691,7 @@ void yoop_task_free_sync_pair(void* handle) {
 
 This brings the runtime ABI to 9 symbols. Codegen adds the `declare void @yoop_task_free_sync_pair(ptr)` line to the block in §4.a.
 
-#### `refcount.c` — alloc / retain / release lifecycle
+#### `refcount.c` - alloc / retain / release lifecycle
 
 ```c
 void* h = yoop_task_alloc(32);  // refcount = 2
@@ -722,11 +722,11 @@ done
 echo "all runtime tests passed"
 ```
 
-Hook this into the existing test runner that walks `examples/pass/` and `examples/fail/`. The C tests run before the yoop fixtures; if the runtime is broken, every yoop fixture would fail downstream — fail fast at the C layer.
+Hook this into the existing test runner that walks `examples/pass/` and `examples/fail/`. The C tests run before the yoop fixtures; if the runtime is broken, every yoop fixture would fail downstream - fail fast at the C layer.
 
-### 7.2 End-to-end pass fixtures — `examples/pass/`
+### 7.2 End-to-end pass fixtures - `examples/pass/`
 
-#### `runtime_linked/main.yoop` — the goal program
+#### `runtime_linked/main.yoop` - the goal program
 
 The trivial program from §Goal:
 
@@ -745,7 +745,7 @@ Expected output: `hello`. IR-level checks (spot via `--keep-ir` flag or by readi
 2. `main`'s `entry:` block's first instruction (after any param alloca, but there are none for `main`) is `call void @yoop_runtime_init()`.
 3. Immediately before `ret i32 0`, the IR shows `call void @yoop_runtime_shutdown()`.
 
-#### `runtime_qmark_in_main/main.yoop` — `?` from inside `main` exits cleanly through shutdown
+#### `runtime_qmark_in_main/main.yoop` - `?` from inside `main` exits cleanly through shutdown
 
 Build on phase 2's `?` machinery: `main` calls a fallible function and propagates with `?`, requiring `main`'s return type to be fallible. Verify that the shutdown call is emitted before the `?`-induced early `ret`.
 
@@ -768,7 +768,7 @@ function main(): Result {
 
 IR-level check: the `?` failure block in `main` contains `call void @yoop_runtime_shutdown()` immediately before its `ret`.
 
-#### `runtime_disposable_in_main/main.yoop` — 6.1 cleanups + shutdown ordering
+#### `runtime_disposable_in_main/main.yoop` - 6.1 cleanups + shutdown ordering
 
 Bring phase 6.1 back: a `disposable` binding in `main`, exiting via `return`. Verify the emission order is `dispose(...)` → `shutdown` → `ret`.
 
@@ -813,11 +813,11 @@ Every existing `examples/pass/*` fixture must continue to pass. This is the broa
 
 Run order:
 
-1. **C runtime tests** — `sh runtime/tests/run_tests.sh`. Must all pass, including under valgrind. On Linux with TSan available, also run `CC="clang -fsanitize=thread"` once and confirm zero data races.
-2. **Phase-1-through-6.2 regression** — every existing `examples/pass/` fixture compiles, runs, and prints its expected output. Every `examples/fail/` fixture rejects with its expected error.
-3. **6.3-prelude pass fixtures** — `runtime_linked`, `runtime_qmark_in_main`, `runtime_disposable_in_main` all build, run, produce expected output, and pass the spot-check IR assertions in §7.2.
-4. **Cross-platform** — repeat on Windows if available (no current Windows CI in the repo; document the manual step in [runtime-design.md §9](runtime-design.md#L246)).
-5. **Smoke under load** — manual: build `examples/pass/runtime_linked` and run it 10,000 times in a loop (`for i in $(seq 1 10000); do ./output || break; done`). Any crash, hang, or non-zero exit indicates a runtime race or refcount bug.
+1. **C runtime tests** - `sh runtime/tests/run_tests.sh`. Must all pass, including under valgrind. On Linux with TSan available, also run `CC="clang -fsanitize=thread"` once and confirm zero data races.
+2. **Phase-1-through-6.2 regression** - every existing `examples/pass/` fixture compiles, runs, and prints its expected output. Every `examples/fail/` fixture rejects with its expected error.
+3. **6.3-prelude pass fixtures** - `runtime_linked`, `runtime_qmark_in_main`, `runtime_disposable_in_main` all build, run, produce expected output, and pass the spot-check IR assertions in §7.2.
+4. **Cross-platform** - repeat on Windows if available (no current Windows CI in the repo; document the manual step in [runtime-design.md §9](runtime-design.md#L246)).
+5. **Smoke under load** - manual: build `examples/pass/runtime_linked` and run it 10,000 times in a loop (`for i in $(seq 1 10000); do ./output || break; done`). Any crash, hang, or non-zero exit indicates a runtime race or refcount bug.
 
 Phase 6.3-prelude is considered landed when all five checks pass and the runtime-design.md contract is implemented end-to-end (every symbol in [§6](runtime-design.md#L74) plus `yoop_handle_signal_done` and `yoop_task_free_sync_pair`).
 
@@ -833,6 +833,6 @@ Phase 6.3-prelude is considered landed when all five checks pass and the runtime
 - `joined` `mustCall wait beforeScopeEnd` clause, `autoJoin beforeScopeEnd` semantics ([SPEC.md §8](../SPEC.md#L532)).
 - Stack-handle cleanup at scope exit (calls `yoop_task_free_sync_pair`).
 - The deadlock-mitigation `YOOP_NUM_WORKERS` documentation in SPEC.md §8.
-- Suspendable task bodies, I/O multiplexing, cancellation, work-stealing, crash propagation, introspection — all out of 6.3 entirely.
+- Suspendable task bodies, I/O multiplexing, cancellation, work-stealing, crash propagation, introspection - all out of 6.3 entirely.
 
-The split between this prelude and 6.3 sugar is sharp: anything that requires *a source-language change* (lexer keyword, parser rule, AST kind, type-system entry) belongs to 6.3 sugar. Anything that requires *a runtime contract* (C ABI, build-pipeline change, init/shutdown injection) belongs to this prelude. When in doubt, lean toward keeping it in 6.3 sugar — the prelude should stay narrow.
+The split between this prelude and 6.3 sugar is sharp: anything that requires *a source-language change* (lexer keyword, parser rule, AST kind, type-system entry) belongs to 6.3 sugar. Anything that requires *a runtime contract* (C ABI, build-pipeline change, init/shutdown injection) belongs to this prelude. When in doubt, lean toward keeping it in 6.3 sugar - the prelude should stay narrow.

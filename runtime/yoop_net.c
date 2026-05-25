@@ -1,4 +1,4 @@
-// Yooperlang runtime — small socket helpers whose underlying constants
+// Yooperlang runtime - small socket helpers whose underlying constants
 // differ across platforms (SOL_SOCKET and SO_REUSEADDR have different
 // numeric values on Linux vs macOS, even though their behavior is the
 // same). Centralizing in C lets the headers resolve the right numbers

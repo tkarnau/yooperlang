@@ -1,4 +1,4 @@
-// MVP DWARF metadata emitter — enough for `lldb` backtraces, source-line
+// MVP DWARF metadata emitter - enough for `lldb` backtraces, source-line
 // breakpoints, and `step`/`next` over .yoop source. No DI for locals, params,
 // or composite types yet (see plans/i-want-to-add-goofy-cloud.md "Out of
 // scope" for the follow-on milestones).
@@ -10,7 +10,7 @@
 // codegen call `finalize()` and append its output to the IR text.
 //
 // LLVM gotcha: the IR MUST declare `!llvm.dbg.cu` and `!llvm.module.flags`
-// with the Dwarf Version + Debug Info Version entries — otherwise clang
+// with the Dwarf Version + Debug Info Version entries - otherwise clang
 // silently strips all the DI and emits a warning. `finalize()` always emits
 // them.
 
@@ -64,7 +64,7 @@ export function createDebugInfo() {
     const subId = reserve();
     // distinct: each subprogram is its own node (LLVM verifier requirement
     // for definitions). spFlags: DISPFlagDefinition. We don't have a
-    // DISubroutineType emitted (would require typed DI for params/return) —
+    // DISubroutineType emitted (would require typed DI for params/return) -
     // for line-only DWARF, an empty `!DISubroutineType(types: !{})` works.
     const subroutineTypeId = reserve();
     emit(subroutineTypeId, `!DISubroutineType(types: !{})`);
@@ -77,9 +77,9 @@ export function createDebugInfo() {
 
   // Per-program cache of DIBasicType nodes by Yooperlang prim name. Primitive
   // shapes don't depend on the module they're used in, so one node per name is
-  // enough — referenced from any DILocalVariable that needs it.
+  // enough - referenced from any DILocalVariable that needs it.
   const basicTypeByPrim = new Map();
-  // Opaque pointer DI node — shared for every `ref T` / Task<T> / array we
+  // Opaque pointer DI node - shared for every `ref T` / Task<T> / array we
   // can't yet describe structurally. lldb shows it as "(void *)".
   let opaquePointerId = null;
 
@@ -104,7 +104,7 @@ export function createDebugInfo() {
     return ref;
   }
 
-  // DIDerivedType DW_TAG_pointer_type pointing at nothing — a generic
+  // DIDerivedType DW_TAG_pointer_type pointing at nothing - a generic
   // 64-bit pointer. Used for refs / arrays / Task<T> until we emit proper
   // composite DI for them.
   function opaquePointer() {
@@ -218,7 +218,7 @@ function jsonStr(s) {
 // Regex used by codegen to decide which IR lines should carry `!dbg`. Match
 // the start of a side-effecting / control-flow instruction (call, invoke,
 // ret, br, store, load, switch, resume, unreachable). Pure arithmetic /
-// GEP / cast / cmp / phi instructions are skipped — MVP only needs enough
+// GEP / cast / cmp / phi instructions are skipped - MVP only needs enough
 // `!dbg` coverage for breakpoints and backtraces, not single-step over every
 // SSA temp.
 //

@@ -1,5 +1,5 @@
 // C-level smoke tests for the yoop runtime. Each one is a tiny standalone C
-// program that exercises the runtime without involving the compiler — proves
+// program that exercises the runtime without involving the compiler - proves
 // the runtime contract independently of any LLVM IR we emit.
 //
 // See plans/phase-6-3-prelude.md §7.1.

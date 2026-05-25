@@ -1,0 +1,77 @@
+// Phase 11.D.5: trait method calls fold through the comptime
+// interpreter. The interpreter's traitMethodResolver walks the
+// receiver struct's TYPE_DECL to find the method's AST, lowers it
+// like any other function (with `self` bound to register 0 as a
+// `ref T` param), and dispatches CALL_DIRECT against the resulting
+// bytecode. Lowering is cached per FUNCTION_DECL so repeated calls
+// to the same impl reuse the work.
+//
+// Two impls of same-named methods on different traits coexist -
+// the `(name, trait)` pair disambiguates at the lookup step.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Area {
+    function area(ref self): int32;
+}
+
+trait Perimeter {
+    function perimeter(ref self): int32;
+}
+
+type Rect implements (Area, Perimeter) {
+    w: int32,
+    h: int32,
+    function area(ref self): int32 {
+        return self.w * self.h;
+    }
+    function perimeter(ref self): int32 {
+        return 2 * (self.w + self.h);
+    }
+}
+
+type Square implements Area {
+    side: int32,
+    function area(ref self): int32 {
+        return self.side * self.side;
+    }
+}
+
+// Helper functions that call trait methods. Used in @precompile
+// initializers below - the comptime fold walks the trait dispatch
+// transparently.
+function rect_area(w: int32, h: int32): int32 {
+    let r: Rect = { w: w, h: h };
+    return Area.area(ref r);
+}
+
+function rect_perim(w: int32, h: int32): int32 {
+    let r: Rect = { w: w, h: h };
+    return Perimeter.perimeter(ref r);
+}
+
+function square_area(s: int32): int32 {
+    let sq: Square = { side: s };
+    return Area.area(ref sq);
+}
+
+@precompile const RECT_AREA: int32 = rect_area(4, 7);          // 28
+@precompile const RECT_PERIM: int32 = rect_perim(4, 7);         // 22
+@precompile const SQR_AREA: int32 = square_area(9);             // 81
+@precompile const TOTAL: int32 = rect_area(3, 5) + square_area(2);  // 15 + 4 = 19
+
+function main(): int32 {
+    printf(`RECT_AREA=${RECT_AREA}\n`);
+    printf(`RECT_PERIM=${RECT_PERIM}\n`);
+    printf(`SQR_AREA=${SQR_AREA}\n`);
+    printf(`TOTAL=${TOTAL}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   RECT_AREA=28
+//   RECT_PERIM=22
+//   SQR_AREA=81
+//   TOTAL=19

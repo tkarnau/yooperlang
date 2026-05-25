@@ -1,0 +1,48 @@
+// Phase 11.C: `@precompile` consumer wired to the interpreter. The
+// initializer form forces the comptime fold (silently-falling-back
+// would defeat the user's explicit comptime contract). On success
+// the decl lands as a literal LLVM `@global` initial value - same
+// shape as Phase 11.B's opportunistic folds, but originated from
+// an explicit user directive.
+//
+// Differences from opportunistic module-init folding:
+//   - Opportunistic: silent fallback to runtime init if the fold
+//     can't be done. Existing programs unaffected by the comptime
+//     engine's coverage gaps.
+//   - `@precompile`: hard build error if the fold fails. The user
+//     opted into compile-time evaluation; a fallback would be a
+//     silent semantics change.
+//
+// In this fixture every `@precompile` decl folds successfully, so
+// the behaviors are observationally identical - but the explicit
+// `@precompile` is what guarantees the result is comptime-computed
+// rather than runtime-computed.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function square(x: int32): int32 { return x * x; }
+function fact(n: int32): int32 {
+    let r: int32 = 1;
+    let i: int32 = 1;
+    while (i <= n) { r = r * i; i = i + 1; }
+    return r;
+}
+
+// Initializer-form folds. Each lands as a literal LLVM global with
+// no module_init footprint.
+@precompile const SQR_7: int32 = square(7);          // 49
+@precompile const FACT_6: int32 = fact(6);           // 720
+@precompile const TBL: int32[] = [1, 4, 9, 16, 25];  // fat-ptr to private backing buffer
+
+function main(): int32 {
+    printf(`SQR_7=${SQR_7} FACT_6=${FACT_6}\n`);
+    let t: int32[] = TBL;
+    printf(`TBL=${t[0]},${t[1]},${t[2]},${t[3]},${t[4]}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   SQR_7=49 FACT_6=720
+//   TBL=1,4,9,16,25

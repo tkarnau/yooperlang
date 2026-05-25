@@ -1,0 +1,498 @@
+// std/http/client.yoop - minimal HTTP/1.1 client.
+//
+// Phase 10.I: a `Client.send` that takes an absolute URL + method,
+// opens a TCP connection, writes the request, reads the response head
+// + body, and returns it as a `ClientResponse`. One connection per
+// call - keep-alive / pipelining / pooling all wait for follow-up.
+//
+// Limitations (deferred):
+//   * No TLS. https:// URLs are parsed but `tcp_connect` is plain TCP.
+//   * No chunked transfer encoding response support. The client trusts
+//     `Content-Length` and falls back to reading until the peer closes
+//     when the header is absent.
+//   * No redirects. The handler that receives a 3xx response sees it
+//     unmodified; following the `Location` header is the caller's job.
+//   * No connection reuse. Pooling per `(scheme, host, port)` is the
+//     follow-up sketched in plans/phase-10.md.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result, Option } from "../core/types.yoop";
+import { Readable, Writable } from "../core/traits.yoop";
+import { Vec, vec_new, vec_push, vec_as_array, vec_set } from "../core/vec.yoop";
+import { string_eq_ignore_ascii_case, string_eq } from "../core/strings.yoop";
+import * as intr from "../core/intrinsics.yoop";
+import {
+    bytes_eq, bytes_index_of, bytes_index_of_seq, bytes_slice, bytes_parse_int,
+    BytesParsed,
+} from "../core/bytes.yoop";
+
+import { Uri, parse_uri } from "../net/uri.yoop";
+import { TcpStream, ConnectResult, tcp_connect } from "../net/tcp.yoop";
+import {
+    HttpMethod, Headers, HeaderEntry, headers_new, headers_add, headers_get,
+    StatusCode, status_class_for, http_method_label,
+} from "./types.yoop";
+
+// ----- ClientRequest ---------------------------------------------------
+
+// What the caller hands to `client_send`. Only the bits that are
+// genuinely per-call are here; the HTTP/1.1 wire format is the client's
+// job. `body` is `uint8[]` because the client is generally producing
+// short request bodies (form data, JSON); streaming request bodies are
+// deferred along with the parser-side `Reader` switch.
+export type ClientRequest implements Disposable propagates<disposable> {
+    method:       HttpMethod,
+    url:          string,
+    headers:      Headers,
+    body:         uint8[],     // empty for GET / HEAD / etc.
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.headers);
+    }
+}
+
+export function client_request(method: HttpMethod, url: string): ClientRequest propagates<disposable> {
+    let empty: uint8[] = [];
+    return {
+        method:  method,
+        url:     url,
+        headers: headers_new(8),
+        body:    empty,
+    };
+}
+
+// ----- ClientResponse --------------------------------------------------
+
+// What `client_send` returns on success. `body` is a `Vec<uint8>`
+// because we read it off the wire incrementally; the caller can view it
+// via `vec_as_array(ref resp.body)`.
+export type ClientResponse implements Disposable propagates<disposable> {
+    status:  StatusCode,
+    headers: Headers,
+    body:    Vec<uint8>,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.headers);
+        Disposable.dispose(ref self.body);
+    }
+}
+
+// `client_send` returns this directly rather than `Result<ClientResponse,
+// string>` so the propagating obligation on the response transfers
+// cleanly through an IDENT return (the obligation tracker doesn't yet
+// follow propagating values into enum-variant payloads - same pattern
+// std/http/parser.yoop's `ParsedRequest` uses for its `error` slot).
+export type ClientSendResult implements Disposable propagates<disposable> {
+    response: ClientResponse,
+    error:    string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.response);
+    }
+}
+
+// ----- Wire-format helpers (private) -----------------------------------
+
+function push_str(ref out: Vec<uint8>, s: string): void {
+    let bs: uint8[] = intr.string_as_bytes(s);
+    let i: usize = 0;
+    while (i < bs.len) {
+        vec_push(ref out, bs[i]);
+        i = i + 1;
+    }
+}
+
+function push_bytes(ref out: Vec<uint8>, bs: uint8[]): void {
+    let i: usize = 0;
+    while (i < bs.len) {
+        vec_push(ref out, bs[i]);
+        i = i + 1;
+    }
+}
+
+function push_decimal(ref out: Vec<uint8>, n: usize): void {
+    if (n == 0) {
+        vec_push(ref out, 48);
+        return;
+    }
+    let digits: usize = 0;
+    let count: usize = n;
+    while (count > 0) {
+        count = count / 10;
+        digits = digits + 1;
+    }
+    let start: usize = out.len;
+    let i: usize = 0;
+    while (i < digits) {
+        vec_push(ref out, 0);
+        i = i + 1;
+    }
+    let val: usize = n;
+    let j: usize = digits;
+    while (val > 0) {
+        j = j - 1;
+        let q: usize = val / 10;
+        let rem: usize = val - q * 10;
+        vec_set(ref out, start + j, uint8(48 + rem));
+        val = q;
+    }
+}
+
+// Serialize the request into `out`. The wire format is:
+//   METHOD target HTTP/1.1
+//   Host: host[:port]
+//   Content-Length: N (if body is non-empty)
+//   Connection: close
+//   <user headers>
+//   \r\n
+//   <body>
+function serialize_request(ref req: ClientRequest, ref u: Uri, ref out: Vec<uint8>): void {
+    push_str(ref out, http_method_label(req.method));
+    vec_push(ref out, 32);
+    push_str(ref out, u.target);
+    push_str(ref out, " HTTP/1.1\r\n");
+
+    // Host header. RFC says always include host, with `:port` when not
+    // the scheme's default. We always include the port to keep the wire
+    // format deterministic.
+    push_str(ref out, "Host: ");
+    push_str(ref out, u.host);
+    vec_push(ref out, 58);    // ':'
+    push_decimal(ref out, usize(u.port));
+    push_str(ref out, "\r\n");
+
+    if (req.body.len > 0) {
+        push_str(ref out, "Content-Length: ");
+        push_decimal(ref out, req.body.len);
+        push_str(ref out, "\r\n");
+    }
+
+    // Connection: close so the server signals end-of-body by closing
+    // the socket. Keep-alive parsing is a follow-up.
+    push_str(ref out, "Connection: close\r\n");
+
+    let entries: HeaderEntry[] = vec_as_array(ref req.headers.entries);
+    let i: usize = 0;
+    while (i < entries.len) {
+        push_str(ref out, entries[i].name);
+        push_str(ref out, ": ");
+        push_str(ref out, entries[i].value);
+        push_str(ref out, "\r\n");
+    i = i + 1;
+    }
+
+    push_str(ref out, "\r\n");
+    push_bytes(ref out, req.body);
+}
+
+// ----- Response head parsing ------------------------------------------
+
+// Mirrors `parsed_request_head` shape but for HTTP responses. Returns
+// the resolved status code + headers + the body byte-offset into the
+// raw buffer + the optional Content-Length value.
+type ParsedResponseHead implements Disposable propagates<disposable> {
+    status:         StatusCode,
+    headers:        Headers,
+    body_start:     usize,
+    content_length: Option<usize>,
+    error:          string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.headers);
+    }
+}
+
+function parse_response_head(buf: uint8[]): ParsedResponseHead propagates<disposable> {
+    let crlfcrlf: uint8[] = [13, 10, 13, 10];
+    let head_end: usize = bytes_index_of_seq(buf, crlfcrlf);
+    let empty_status: StatusCode = { code: 0, class: status_class_for(0) };
+    if (head_end == buf.len) {
+        return {
+            status: empty_status,
+            headers: headers_new(0),
+            body_start: 0,
+            content_length: Option.None,
+            error: "parse_response_head: missing CRLF CRLF",
+        };
+    }
+    let body_start: usize = head_end + 4;
+
+    // -- status line: "HTTP/1.1 200 OK" -------------------------------
+    let cr_idx: usize = bytes_index_of(buf, 13);
+    if (cr_idx == buf.len || cr_idx > head_end) {
+        return {
+            status: empty_status, headers: headers_new(0),
+            body_start: 0, content_length: Option.None,
+            error: "parse_response_head: malformed status line",
+        };
+    }
+    let status_line: uint8[] = bytes_slice(buf, 0, cr_idx);
+    let s1: usize = bytes_index_of(status_line, 32);
+    if (s1 == status_line.len) {
+        return {
+            status: empty_status, headers: headers_new(0),
+            body_start: 0, content_length: Option.None,
+            error: "parse_response_head: missing version separator",
+        };
+    }
+    let after_version: uint8[] = bytes_slice(status_line, s1 + 1, status_line.len);
+    let s2_rel: usize = bytes_index_of(after_version, 32);
+    let code_bytes: uint8[] = bytes_slice(after_version, 0, s2_rel);
+    let code_val: int32 = 0;
+    let parsed: Result<BytesParsed, string> = bytes_parse_int(code_bytes);
+    switch (parsed) {
+        case Result.Ok { value: bp }: { code_val = int32(bp.value); }
+        case Result.Err { error: e }: {
+            return {
+                status: empty_status, headers: headers_new(0),
+                body_start: 0, content_length: Option.None,
+                error: e,
+            };
+        }
+    }
+    let st: StatusCode = { code: code_val, class: status_class_for(code_val) };
+
+    // -- headers (same shape as parse_request_head) -------------------
+    let pr: ParsedResponseHead = {
+        status:         st,
+        headers:        headers_new(8),
+        body_start:     body_start,
+        content_length: Option.None,
+        error:          "",
+    };
+    let pos: usize = cr_idx + 2;
+    while (pos < head_end) {
+        let rest: uint8[] = bytes_slice(buf, pos, head_end);
+        let line_end_rel: usize = bytes_index_of(rest, 13);
+        if (line_end_rel == rest.len) {
+            break;
+        }
+        let line: uint8[] = bytes_slice(rest, 0, line_end_rel);
+        let colon_rel: usize = bytes_index_of(line, 58);
+        if (colon_rel != line.len) {
+            let name_bytes: uint8[] = bytes_slice(line, 0, colon_rel);
+            let val_start_rel: usize = colon_rel + 1;
+            if (val_start_rel < line.len && line[val_start_rel] == 32) {
+                val_start_rel = val_start_rel + 1;
+            }
+            let val_bytes: uint8[] = bytes_slice(line, val_start_rel, line.len);
+            let name_str: string = intr.string_from_bytes_unchecked(name_bytes);
+            let val_str:  string = intr.string_from_bytes_unchecked(val_bytes);
+            headers_add(ref pr.headers, name_str, val_str);
+
+            let cl_name:  uint8[] = [67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104];
+            let cl_name2: uint8[] = [99, 111, 110, 116, 101, 110, 116, 45, 108, 101, 110, 103, 116, 104];
+            if (bytes_eq(name_bytes, cl_name) || bytes_eq(name_bytes, cl_name2)) {
+                let pp: Result<BytesParsed, string> = bytes_parse_int(val_bytes);
+                switch (pp) {
+                    case Result.Ok { value: bp2 }: {
+                        if (bp2.value >= 0) {
+                            pr.content_length = Option.Some { value: usize(bp2.value) };
+                        }
+                    }
+                    case Result.Err { error: _e }: { }
+                }
+            }
+        }
+        pos = pos + line_end_rel + 2;
+    }
+    return pr;
+}
+
+// ----- Client ---------------------------------------------------------
+
+// `Client` is currently a placeholder for per-client configuration
+// (default headers, future connection pool). Built via `make_client()`
+// and threaded into `client_send`; for now it has no fields beyond a
+// signal value so future additions are non-breaking.
+export type Client {
+    _unused: int32,
+}
+
+export function make_client(): Client {
+    return { _unused: 0 };
+}
+
+// Send the request and return the response. Opens one TCP connection,
+// writes the serialized request, reads the response head + body
+// (trusting Content-Length when present, otherwise reading until EOF),
+// and closes the connection.
+//
+// `https://` URLs parse successfully but `tcp_connect` only speaks
+// plain TCP - the connection attempt will likely fail at the TLS
+// handshake step on the peer.
+// Helper for failure paths: builds an empty ClientSendResult shell
+// with `error` set.
+function fail_send(msg: string): ClientSendResult propagates<disposable> {
+    return {
+        response: {
+            status:  { code: 0, class: status_class_for(0) },
+            headers: headers_new(0),
+            body:    vec_new(0),
+        },
+        error: msg,
+    };
+}
+
+export function client_send(ref c: Client, ref req: ClientRequest): ClientSendResult propagates<disposable> {
+    let parsed: Result<Uri, string> = parse_uri(req.url);
+    let u: Uri = { scheme: "", host: "", port: 0, target: "/" };
+    switch (parsed) {
+        case Result.Ok { value: parsed_u }: { u = parsed_u; }
+        case Result.Err { error: e }: { return fail_send(e); }
+    }
+
+    let disposable cr: ConnectResult = tcp_connect(u.host, u.port);
+    if (cr.error.len > 0) {
+        return fail_send(cr.error);
+    }
+
+    // Write the request.
+    let disposable out: Vec<uint8> = vec_new(512);
+    serialize_request(ref req, ref u, ref out);
+    let out_view: uint8[] = vec_as_array(ref out);
+    let w: Result<c_ssize_t, string> = Writable.write(ref cr.stream, ref out_view);
+    switch (w) {
+        case Result.Ok { value: _wn }: { }
+        case Result.Err { error: we }: { return fail_send(we); }
+    }
+
+    // Read until we see CRLF CRLF, capped at the DoS limit.
+    let disposable buf: Vec<uint8> = vec_new(2048);
+    let scratch: uint8[] = intr.heap_alloc(2048);
+    let dos_limit: usize = 65536;
+    let head_done: bool = false;
+    while (buf.len < dos_limit) {
+        let r: Result<c_ssize_t, string> = Readable.read(ref cr.stream, ref scratch);
+        let r_n: c_ssize_t = 0;
+        let r_err: string = "";
+        switch (r) {
+            case Result.Ok { value: rn }: { r_n = rn; }
+            case Result.Err { error: re }: { r_err = re; }
+        }
+        if (r_err.len > 0) {
+            intr.heap_free(scratch);
+            return fail_send(r_err);
+        }
+        if (r_n == 0) {
+            // EOF before we saw CRLF CRLF.
+            break;
+        }
+        let i: usize = 0;
+        let avail: usize = usize(r_n);
+        while (i < avail) {
+            vec_push(ref buf, scratch[i]);
+            i = i + 1;
+        }
+        let view: uint8[] = vec_as_array(ref buf);
+        let crlfcrlf: uint8[] = [13, 10, 13, 10];
+        if (bytes_index_of_seq(view, crlfcrlf) != view.len) {
+            head_done = true;
+            break;
+        }
+    }
+    if (head_done) {
+        // fall through to parse
+    } else {
+        intr.heap_free(scratch);
+        return fail_send("client_send: response head incomplete (EOF or DoS limit)");
+    }
+
+    let head_view: uint8[] = vec_as_array(ref buf);
+    let disposable head: ParsedResponseHead = parse_response_head(head_view);
+    if (head.error.len > 0) {
+        intr.heap_free(scratch);
+        return fail_send(head.error);
+    }
+
+    // Build the result shell up front so the propagating `body` Vec lives
+    // inside `out_result.response` from creation. Subsequent reads push
+    // into `out_result.response.body` directly - the obligation tracker
+    // then transfers everything through a single IDENT return at the
+    // end. Mirrors the `pr.request.headers` pattern in parser.yoop.
+    let out_result: ClientSendResult = {
+        response: {
+            status:  head.status,
+            headers: headers_new(8),
+            body:    vec_new(512),
+        },
+        error: "",
+    };
+
+    // Body: read either `Content-Length` bytes, or until EOF.
+    let body_start: usize = head.body_start;
+    if (head_view.len > body_start) {
+        let view2: uint8[] = vec_as_array(ref buf);
+        let already_view: uint8[] = bytes_slice(view2, body_start, view2.len);
+        push_bytes(ref out_result.response.body, already_view);
+    }
+    let need: usize = 0;
+    let have_cl: bool = false;
+    switch (head.content_length) {
+        case Option.Some { value: cl }: { need = cl; have_cl = true; }
+        case Option.None: { }
+    }
+    if (have_cl) {
+        while (out_result.response.body.len < need) {
+            let r2: Result<c_ssize_t, string> = Readable.read(ref cr.stream, ref scratch);
+            let r2_n: c_ssize_t = 0;
+            let r2_err: string = "";
+            switch (r2) {
+                case Result.Ok { value: rn2 }: { r2_n = rn2; }
+                case Result.Err { error: re2 }: { r2_err = re2; }
+            }
+            if (r2_err.len > 0) {
+                intr.heap_free(scratch);
+                out_result.error = r2_err;
+                return out_result;
+            }
+            if (r2_n == 0) {
+                break;
+            }
+            let k: usize = 0;
+            let avail2: usize = usize(r2_n);
+            while (k < avail2) {
+                vec_push(ref out_result.response.body, scratch[k]);
+                k = k + 1;
+            }
+        }
+    } else {
+        // No Content-Length - read until EOF.
+        while (true) {
+            let r3: Result<c_ssize_t, string> = Readable.read(ref cr.stream, ref scratch);
+            let r3_n: c_ssize_t = 0;
+            let r3_err: string = "";
+            switch (r3) {
+                case Result.Ok { value: rn3 }: { r3_n = rn3; }
+                case Result.Err { error: re3 }: { r3_err = re3; }
+            }
+            if (r3_err.len > 0) {
+                intr.heap_free(scratch);
+                out_result.error = r3_err;
+                return out_result;
+            }
+            if (r3_n == 0) {
+                break;
+            }
+            let kk: usize = 0;
+            let availk: usize = usize(r3_n);
+            while (kk < availk) {
+                vec_push(ref out_result.response.body, scratch[kk]);
+                kk = kk + 1;
+            }
+        }
+    }
+    intr.heap_free(scratch);
+
+    // Copy header entries over from the parsed head into the response.
+    let entries: HeaderEntry[] = vec_as_array(ref head.headers.entries);
+    let h: usize = 0;
+    while (h < entries.len) {
+        headers_add(ref out_result.response.headers, entries[h].name, entries[h].value);
+        h = h + 1;
+    }
+    return out_result;
+}
+
+// Convenience: GET. Builds a ClientRequest with no body and ships it
+// through `client_send`.
+export function http_get(ref c: Client, url: string): ClientSendResult propagates<disposable> {
+    let disposable req: ClientRequest = client_request(HttpMethod.Get, url);
+    return client_send(ref c, ref req);
+}

@@ -32,9 +32,26 @@ import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
   lookupGenericFunc,
-  markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
+
+// True if `callExpr` is `ns.method(...)` where `ns` resolves to a namespace
+// import and the source module has a generic function by that name. Lets
+// checkLetOrConst route the call through checkInitializer so the LHS type
+// drives return-position type-param inference (e.g. `intr.heap_alloc(8)`).
+function isNamespaceGenericCall(callExpr, ctx) {
+  const callee = callExpr.callee;
+  if (!callee || typeof callee !== "object") return false;
+  if (callee.kind !== ASTNodeKind.FIELD_ACCESS) return false;
+  if (
+    callee.object?.kind !== ASTNodeKind.IDENT &&
+    callee.object?.kind !== ASTNodeKind.NAMESPACE_IDENT
+  ) return false;
+  const ns = ctx.typeContext.moduleSymbols?.get(callee.object.name);
+  if (!ns || ns.kind !== typeKinds.namespace) return false;
+  const srcEnv = ctx.typeContext.moduleEnv?.get(ns.moduleId);
+  return !!srcEnv?.genericFuncTable?.has(callee.field);
+}
 import { lookupBuiltinKind } from "./builtinKinds.js";
 
 // Phase 6.4: kind-prefix resolution walks both the local kindTable (user
@@ -46,8 +63,8 @@ function resolveKindByName(name, typeContext) {
   );
 }
 import { TaskType } from "./types.js";
-import { isFallible, } from "./fallible.js";
 import { isAssignable } from "./coerce.js";
+import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
 export function validateMethod(methodDecl, structType, typeContext, errors) {
   const scope = pushScope(null);
@@ -174,7 +191,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   // Reject ref return types
   if (funcReturnType.kind === typeKinds.ref) {
     pushError(errors, funcNode,
-      `functions may not return 'ref T' — returning a reference to a local binding is unsafe`);
+      `functions may not return 'ref T' - returning a reference to a local binding is unsafe`);
   }
   funcNode.resolvedType = funcReturnType;
 
@@ -192,7 +209,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   // params + the synthetic outer body share `scope`. Block-statement
   // bodies open their own inner scope and pop it themselves; this catches
   // the function-level scope (params and any locals declared at function
-  // top — there usually are none, but it's the right shape).
+  // top - there usually are none, but it's the right shape).
   popScope(scope, errors);
 }
 
@@ -201,7 +218,7 @@ export function validateFunction(funcNode, typeContext, errors) {
 // no locals); identifier lookups fall through to moduleSymbols, which by
 // pass D.0 holds both this module's bindings and any imported ones.
 //
-// (Bytecode/CTE future) — this is the call site to swap for a CTE
+// (Bytecode/CTE future) - this is the call site to swap for a CTE
 // evaluator: try evaluating decl.assignment at compile time; on success
 // stash the result on the decl for codegen to use as the @global initial
 // value; on failure keep the existing runtime-init behavior.
@@ -226,6 +243,26 @@ export function validateModuleInit(decl, typeContext, errors) {
   popScope(scope, errors);
 }
 
+// Phase 11.D.18: typecheck a top-level `@precompile { ... }` block.
+// The block has no params and no return type (its only effects are
+// writes to module-level state); local bindings declared inside the
+// block live only during comptime evaluation. Otherwise it's a
+// normal block - IDENT resolution falls through to module symbols
+// the same way validateModuleInit does.
+export function validatePrecompileBlock(blockAst, typeContext, errors) {
+  const scope = pushScope(null);
+  const ctx = {
+    funcReturnType: null,
+    funcName: "<precompile block>",
+    typeContext,
+    errors,
+    inLoop: false,
+    inTaskBody: false,
+  };
+  validateStatement(blockAst, scope, ctx);
+  popScope(scope, errors);
+}
+
 export function validateStatement(node, scope, ctx) {
   switch (node.kind) {
     case ASTNodeKind.BLOCK:
@@ -247,6 +284,8 @@ export function validateStatement(node, scope, ctx) {
       return checkWhile(node, scope, ctx);
     case ASTNodeKind.FOR_LOOP:
       return checkForLoop(node, scope, ctx);
+    case ASTNodeKind.FOR_IN_LOOP:
+      return checkForInLoop(node, scope, ctx);
     case ASTNodeKind.BREAK_STATEMENT:
       return checkBreak(node, ctx);
     case ASTNodeKind.CONTINUE_STATEMENT:
@@ -262,7 +301,7 @@ export function validateStatement(node, scope, ctx) {
   }
 }
 
-// `{ ... }` — opens a fresh child scope, walks each inner statement, then
+// `{ ... }` - opens a fresh child scope, walks each inner statement, then
 // enforces fallible-binding observation on every binding declared in this
 // scope before letting them go out.
 function checkBlock(node, scope, ctx) {
@@ -285,7 +324,7 @@ function checkBlock(node, scope, ctx) {
 //   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
 //     the name in the trailing block's scope rather than the enclosing one
 function checkLetOrConst(node, scope, ctx) {
-  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` —
+  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
   const builtinName = node.kindPrefix?.builtin ?? null;
   if (builtinName === "joined" || builtinName === "pooled") {
@@ -338,9 +377,10 @@ function checkLetOrConst(node, scope, ctx) {
     // error out before bidirectional inference gets a chance.
     const isGenericCall =
       node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
-      typeof node.assignment.callee === "string" &&
-      lookupGenericFunc(node.assignment.callee, ctx) !== null;
-    // Phase 6.3: immediate task call — `const x: T = compute(...);` where
+      ((typeof node.assignment.callee === "string" &&
+        lookupGenericFunc(node.assignment.callee, ctx) !== null) ||
+        isNamespaceGenericCall(node.assignment, ctx));
+    // Phase 6.3: immediate task call - `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
       !kindType &&
@@ -458,7 +498,7 @@ function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
 // Returns true iff `callExpr` is a CALL_EXPRESSION whose resolved return type
 // is Task<targetType>. resolveExprType is invoked as a side effect.
 function isTaskCallReturningType(callExpr, targetType, scope, ctx) {
-  // Lookahead-only check based on the callee — does the named function have
+  // Lookahead-only check based on the callee - does the named function have
   // a TaskType return? We must invoke resolveExprType for arity/type checking,
   // but we want to avoid emitting a spurious "Task<T> not assignable to T" error.
   const rhsType = resolveExprType(callExpr, scope, ctx);
@@ -531,7 +571,7 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
   // Phase 6.4 strict propagates: a struct that propagates this kind satisfies
   // the kind's requirement via propagated fields, even if it does not
   // implement the required traits directly. Skip the direct-implements check
-  // in that case — the obligation flows via the field walk in kindCheck.
+  // in that case - the obligation flows via the field walk in kindCheck.
   const structPropagatesThisKind = (declaredType.propagatedKinds ?? []).some(
     (a) => (a.kindType ?? a) === kindType,
   );
@@ -578,14 +618,10 @@ function checkArrayLiteralWithElemType(litNode, elemType, scope, ctx) {
   litNode.knownElemType = elemType;
 }
 
-// `const { a, err } = expr;` / `let { a, err } = expr;`
+// `const { a, b } = expr;` / `let { a, b } = expr;`
 function checkDestructureDecl(node, scope, ctx) {
   const declKind = node.declKind === ASTNodeKind.CONST_DECL ? "const" : "let";
-  let rhsType = resolveExprType(node.assignment, scope, ctx);
-  const isTryRhs = node.assignment.kind === ASTNodeKind.TRY_OP;
-  if (isTryRhs && node.assignment.strippedMulti) {
-    rhsType = StructType("__stripped", node.assignment.strippedMulti.fields);
-  }
+  const rhsType = resolveExprType(node.assignment, scope, ctx);
 
   if (rhsType.kind === typeKinds.error) {
     for (const n of node.names) {
@@ -628,31 +664,14 @@ function checkDestructureDecl(node, scope, ctx) {
     }
     declareInScope(scope, name, fieldType, declKind, node, ctx.errors);
   }
-
-  if (!isTryRhs && isFallible(rhsType) && !seenNames.has("err")) {
-    pushError(
-      ctx.errors,
-      node,
-      `destructuring a fallible type ${formatType(rhsType)} must include "err" or use '?' to propagate`,
-    );
-  }
 }
 
 function checkDiscardStatement(node, scope, ctx) {
   resolveExprType(node.value, scope, ctx);
-  markErrObservedThroughRoot(node.value, scope);
 }
 
 function checkExpressionStatement(node, scope, ctx) {
-  const t = resolveExprType(node.value, scope, ctx);
-  if (isFallible(t)) {
-    pushError(
-      ctx.errors,
-      node,
-      `fallible result of type ${formatType(t)} dropped — bind it, destructure, propagate with '?', or discard with '_ = ...'`,
-    );
-  }
-  return t;
+  return resolveExprType(node.value, scope, ctx);
 }
 
 function checkReturn(node, scope, ctx) {
@@ -695,7 +714,7 @@ function checkForLoop(node, scope, ctx) {
   const initBinding = lookupInScope(scope, node.initIdent);
   if (!initBinding) {
     pushError(ctx.errors, node,
-      `for-loop variable "${node.initIdent}" is not declared — declare it before the loop`);
+      `for-loop variable "${node.initIdent}" is not declared - declare it before the loop`);
   } else {
     const initExprType = resolveExprType(node.initExpr, scope, ctx);
     checkAssignable(initBinding.type, initExprType, node, ctx);
@@ -723,6 +742,97 @@ function checkForLoop(node, scope, ctx) {
   // body with inLoop: true
   const loopCtx = { ...ctx, inLoop: true };
   validateStatement(node.body, scope, loopCtx);
+}
+
+// Phase 9.D + 10.B: `for item in xs { ... }`. The RHS may be either:
+//   - An array expression (`T[]`): the fast path. The element type T drives
+//     the body binding; codegen walks the fat-pointer.
+//   - A struct implementing `Iterable<U>` (Phase 10.B): the loop desugars
+//     to a `while (true) { switch (Iterable.next(ref iter)) { ... } }` over
+//     `IterStep<U>`. The U from the impl's trait args drives the body binding.
+function checkForInLoop(node, scope, ctx) {
+  let iterType = resolveExprType(node.iterExpr, scope, ctx);
+  let elemType = ErrorType();
+  let iterableImpl = null;
+  if (iterType.kind === typeKinds.array) {
+    elemType = iterType.elem;
+  } else if (iterType.kind === typeKinds.struct) {
+    // The struct type captured from an expression site (e.g. a function-call
+    // return) may be the pass-A shell - re-fetch the canonical version from
+    // structTable so we see the fully-resolved implementsTraits/methods.
+    if (ctx.typeContext.structTable) {
+      const canonical = ctx.typeContext.structTable.get(iterType.name);
+      if (canonical) iterType = canonical;
+    }
+    const iterableTrait = (iterType.implementsTraits ?? []).find(
+      (t) => t.name === "Iterable",
+    );
+    if (iterableTrait) {
+      const nextSig = iterType.methods?.get("next");
+      const retType = nextSig?.returnType;
+      if (
+        retType &&
+        retType.kind === typeKinds.enum &&
+        retType.variants?.has("Yield") &&
+        retType.variants?.has("Done")
+      ) {
+        const yieldVariant = retType.variants.get("Yield");
+        if (
+          yieldVariant.fields &&
+          yieldVariant.fields.length === 1 &&
+          yieldVariant.fields[0].name === "value"
+        ) {
+          elemType = yieldVariant.fields[0].type;
+          iterableImpl = {
+            mangledNextName: mangleTraitMethod(iterType, "Iterable", "next"),
+            iterStepType: retType,
+          };
+        } else {
+          pushError(
+            ctx.errors,
+            node.iterExpr,
+            `Iterable.next must return IterStep<T> with a single-field 'Yield { value: T }' variant`,
+          );
+        }
+      } else {
+        pushError(
+          ctx.errors,
+          node.iterExpr,
+          `Iterable.next must return an IterStep<T> enum with Yield/Done variants`,
+        );
+      }
+    } else {
+      pushError(
+        ctx.errors,
+        node.iterExpr,
+        `type ${formatType(iterType)} is not iterable - expected an array or a type implementing Iterable<T>`,
+      );
+    }
+  } else if (iterType.kind !== typeKinds.error) {
+    pushError(
+      ctx.errors,
+      node.iterExpr,
+      `'for ... in' requires an array or a type implementing Iterable<T>; got ${formatType(iterType)}`,
+    );
+  }
+  node.resolvedElemType = elemType;
+  node.resolvedIterType = iterType;
+  node.iterableImpl = iterableImpl;
+
+  // The loop variable is scoped to the body only. Open a scope, declare it,
+  // walk the body's statements, then pop. This mirrors the trailing-block
+  // pattern in checkLetOrConst.
+  const inner = pushScope(scope);
+  declareInScope(inner, node.loopVar, elemType, "const", node, ctx.errors);
+  const loopCtx = { ...ctx, inLoop: true };
+  if (node.body.kind === ASTNodeKind.BLOCK) {
+    for (const s of node.body.body) {
+      validateStatement(s, inner, loopCtx);
+    }
+  } else {
+    validateStatement(node.body, inner, loopCtx);
+  }
+  popScope(inner, ctx.errors);
 }
 
 // Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
@@ -829,7 +939,19 @@ function checkSwitch(node, scope, ctx) {
           );
           continue;
         }
-        if (pat.enumName !== scrutType.name) {
+        // Phase 10.A: scrutinee may be a generic-enum instantiation whose
+        // mangled name differs from the user-written decl name. Match either
+        // the concrete name or the generic decl's source name via the
+        // registry-stamped genericInstance tag.
+        const genericInstance = scrutType.genericInstance;
+        let scrutDeclName = scrutType.name;
+        if (genericInstance) {
+          const decl = ctx.typeContext?.registry?.genericDeclById?.get(
+            genericInstance.declId,
+          );
+          if (decl) scrutDeclName = decl.name;
+        }
+        if (pat.enumName !== scrutType.name && pat.enumName !== scrutDeclName) {
           pushError(
             ctx.errors,
             pat,
@@ -862,7 +984,7 @@ function checkSwitch(node, scope, ctx) {
             pushError(
               ctx.errors,
               pat,
-              `variant "${scrutType.name}.${pat.variantName}" has no payload — drop the '{ ... }'`,
+              `variant "${scrutType.name}.${pat.variantName}" has no payload - drop the '{ ... }'`,
             );
           }
         } else {
@@ -951,7 +1073,7 @@ function checkSwitch(node, scope, ctx) {
         pushError(
           ctx.errors,
           node,
-          `switch over bool is not exhaustive — add 'default' or list both true and false`,
+          `switch over bool is not exhaustive - add 'default' or list both true and false`,
         );
       }
     } else if (isEnum) {
@@ -961,7 +1083,7 @@ function checkSwitch(node, scope, ctx) {
         pushError(
           ctx.errors,
           node,
-          `switch over ${formatType(scrutType)} is not exhaustive — missing variants: ${missing.join(", ")}`,
+          `switch over ${formatType(scrutType)} is not exhaustive - missing variants: ${missing.join(", ")}`,
         );
       }
     } else if (isInt) {
@@ -975,7 +1097,7 @@ function checkSwitch(node, scope, ctx) {
 }
 
 function checkBreak(node, ctx) {
-  // Phase 7.5: `break` is also valid inside a switch arm — it falls out of the
+  // Phase 7.5: `break` is also valid inside a switch arm - it falls out of the
   // switch. We track the switch context independently from `inLoop` because
   // `continue` inside a switch arm still targets the enclosing loop.
   if (!ctx.inLoop && !ctx.inSwitch) {

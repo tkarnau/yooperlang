@@ -1,14 +1,14 @@
-# Phase 6.4 — Containment and propagation
+# Phase 6.4 - Containment and propagation
 
-Part of [phase 6 — kinds](./phase-6-kinds.md). Sub-phases 6.1–6.3 landed the kind-declaration syntax, flow analysis for `mustCall`/`mustNotEscape`/`mustNotShare`, the task runtime, and the `task`/`joined`/`pooled` language sugar. Each of those sub-phases left explicit deferrals waiting for *cross-type kind flow*: a binding whose type carries a kind obligation. 6.4 is that piece.
+Part of [phase 6 - kinds](./phase-6-kinds.md). Sub-phases 6.1–6.3 landed the kind-declaration syntax, flow analysis for `mustCall`/`mustNotEscape`/`mustNotShare`, the task runtime, and the `task`/`joined`/`pooled` language sugar. Each of those sub-phases left explicit deferrals waiting for *cross-type kind flow*: a binding whose type carries a kind obligation. 6.4 is that piece.
 
 ## Context
 
 The single-binding case is handled. `disposable f = open(p)` works; `joined d = compute(5)` works. The break point is when a kind-carrying value moves through a struct field or a function return:
 
-- 6.2 rejects `field: scoped FileHandle,` with the literal message *"kind-bearing fields require `propagates<K>` or `contains<K>` on the enclosing struct (phase 6.4)"* — see [phase-6-2-escape.md:86](./phase-6-2-escape.md#L86).
-- 6.3 rejects `pooled`-to-`pooled` assignment and `pooled`-as-argument with *"Lift in 6.4 alongside `propagates<Task>` containers"* — see [phase-6-3-task.md:519](./phase-6-3-task.md#L519).
-- 6.1 rejects cross-module kind import with *"6.4 concern; it pairs with `propagates<K>` across module boundaries"* — see [phase-6-1-disposable.md:87](./phase-6-1-disposable.md#L87).
+- 6.2 rejects `field: scoped FileHandle,` with the literal message *"kind-bearing fields require `propagates<K>` or `contains<K>` on the enclosing struct (phase 6.4)"* - see [phase-6-2-escape.md:86](./phase-6-2-escape.md#L86).
+- 6.3 rejects `pooled`-to-`pooled` assignment and `pooled`-as-argument with *"Lift in 6.4 alongside `propagates<Task>` containers"* - see [phase-6-3-task.md:519](./phase-6-3-task.md#L519).
+- 6.1 rejects cross-module kind import with *"6.4 concern; it pairs with `propagates<K>` across module boundaries"* - see [phase-6-1-disposable.md:87](./phase-6-1-disposable.md#L87).
 
 6.4 is the smallest scope cut that retires all three at once.
 
@@ -16,7 +16,7 @@ The single-binding case is handled. `disposable f = open(p)` works; `joined d = 
 
 A reasonable worry: the SPEC's headline example for this section is `conn: disposable net<Bytes>` ([SPEC.md §6](../SPEC.md#L454)), which is generic. Generics are deferred to phase 7. Does 6.4 still make sense?
 
-Yes. `propagates<K>` and `contains<K>` look generic-shaped but `K` is a **kind name** — an identifier resolved against the kind table, not a type parameter. The angle-bracket syntax is purely cosmetic from the typechecker's perspective. Every concrete struct in 6.4 is monomorphic: it holds a `FileHandle`, or a `Task<int32>` (compiler builtin from 6.3), or another concrete struct. No type-variable substitution is needed. When user generics arrive in phase 7, `Vec<T> propagates<disposable>` will reuse 6.4's machinery unchanged — the kind-name slot stays the kind-name slot.
+Yes. `propagates<K>` and `contains<K>` look generic-shaped but `K` is a **kind name** - an identifier resolved against the kind table, not a type parameter. The angle-bracket syntax is purely cosmetic from the typechecker's perspective. Every concrete struct in 6.4 is monomorphic: it holds a `FileHandle`, or a `Task<int32>` (compiler builtin from 6.3), or another concrete struct. No type-variable substitution is needed. When user generics arrive in phase 7, `Vec<T> propagates<disposable>` will reuse 6.4's machinery unchanged - the kind-name slot stays the kind-name slot.
 
 ## Goal program
 
@@ -97,12 +97,12 @@ What this proves:
 1. **`propagates<K1, K2, ...>` clause on struct decls.** After `type Name`, before `{`. Comma-separated, angle-bracketed, one or more kind-name identifiers. Lowered to a list on the `typeDecl` AST node.
 2. **`propagates<K1, K2, ...>` on function return types.** After `: ReturnType`, before `{` or `;`. Same shape. Lowered to a list on the `functionDecl` node.
 3. **Field kind prefix.** Already accepted by the parser in 6.2 (rejected at typecheck). 6.4 keeps the parser unchanged here; the typechecker stops rejecting.
-4. **`pooled` parameter prefix.** The kind-on-parameter parser from 6.2 (`function f(scoped x: ...)`) already covers this — `pooled` is now legal at the parameter site once the built-in kind table grants it `appliesTo binding parameter`.
+4. **`pooled` parameter prefix.** The kind-on-parameter parser from 6.2 (`function f(scoped x: ...)`) already covers this - `pooled` is now legal at the parameter site once the built-in kind table grants it `appliesTo binding parameter`.
 5. **`contains<K>` parses but is rejected** at typecheck with *"contains not yet supported (phase 6.5 or later)"*. The parser shape is identical to `propagates`, so the work is one shared production.
 
 ### Typechecker
 
-1. **Cross-module kind import.** Extend [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) to recognize `KindType` entries in the exported-symbols table; export `kind disposable { ... }` when prefixed with `export`. A `KindType` imported into module M is reachable under its bare name in M's `kindTable`. Identity is by `(originModuleId, name)` — re-importing the same kind into a third module preserves identity.
+1. **Cross-module kind import.** Extend [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) to recognize `KindType` entries in the exported-symbols table; export `kind disposable { ... }` when prefixed with `export`. A `KindType` imported into module M is reachable under its bare name in M's `kindTable`. Identity is by `(originModuleId, name)` - re-importing the same kind into a third module preserves identity.
 2. **`propagates<K>` validation on struct decls.** For each kind named, resolve against the module's kind table. Then walk the struct's fields: every field whose type or kind-prefix carries an obligation matching one of the propagated kinds is now legal. A field whose obligation is *not* in the propagated set is rejected (the struct silently absorbing an obligation is exactly the case `contains<K>` is reserved for).
 3. **`propagates<K>` on function return types.** Validate that the kind is in scope. The function's resolved return type gains a `propagatedKinds: KindType[]` slot.
 4. **Binding-kind inheritance.** When a binding's RHS resolves to a struct type with `propagates<K1, K2>`, or to a call of a function with `propagates<K1, K2>` on its return type, the binding behaves as if the user had written `K1 K2 binding: T = ...`. Specifically: for each propagated kind, register the same obligations the explicit-prefix path registers (the `validateKindBinding` machinery from 6.1/6.2). The plumbing is in [src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js).
@@ -112,10 +112,10 @@ What this proves:
 
 ### Codegen
 
-The cleanup-emission path already exists ([src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js); each `CLEANUP_CALL` / `TASK_AUTO_WAIT` / `TASK_RELEASE` / `TASK_RETAIN` node is lowered at every exit point). 6.4 emits the same node kinds with no new variants — only the *insertion sites* and *target expressions* change:
+The cleanup-emission path already exists ([src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js); each `CLEANUP_CALL` / `TASK_AUTO_WAIT` / `TASK_RELEASE` / `TASK_RETAIN` node is lowered at every exit point). 6.4 emits the same node kinds with no new variants - only the *insertion sites* and *target expressions* change:
 
 1. **Propagated dispose**: `CLEANUP_CALL` with callee `dispose` and argument `ref binding.field` (GEP into the struct, then ref). The walker enumerates propagated kinds × matching fields per binding.
-2. **Pooled return through struct**: when a function returns a struct whose `propagates<Task>` field is a `Task<T>`, the return path is already balanced by 6.3's retain-before-return rule — extend the rule to walk struct-literal field-values and retain each `pooled` it contains.
+2. **Pooled return through struct**: when a function returns a struct whose `propagates<Task>` field is a `Task<T>`, the return path is already balanced by 6.3's retain-before-return rule - extend the rule to walk struct-literal field-values and retain each `pooled` it contains.
 3. **Pooled parameter and pooled-to-pooled assignment**: emit `TASK_RETAIN` at the call site / RHS, `TASK_RELEASE` at the new binding's (or parameter's) scope exit.
 
 No new LLVM intrinsics, no new runtime ABI symbols.
@@ -131,14 +131,14 @@ No new LLVM intrinsics, no new runtime ABI symbols.
 
 ## Critical files
 
-- [SPEC.md §6.5](../SPEC.md#L470) — containment and propagation surface syntax.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — add `propagates`, `contains` keyword tokens (reserved in SPEC §15; not yet lexed).
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parsePropagatesClause` shared between struct decls and function return types; reject `contains` at the same call site with the deferral message.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `StructType` gains `propagatedKinds: KindType[]`; `FuncType` gains `returnPropagatedKinds: KindType[]`.
-- [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) — kind export/import.
-- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — field-with-kind-prefix now validated (was rejected); binding-kind inheritance from RHS struct/call.
-- [src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js) — propagated-obligation registration; `pooled` parameter/assignment retain/release tracking.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `CLEANUP_CALL` against struct-field GEP; struct-literal-return retain walking; `pooled` parameter prologue/epilogue retain/release.
+- [SPEC.md §6.5](../SPEC.md#L470) - containment and propagation surface syntax.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - add `propagates`, `contains` keyword tokens (reserved in SPEC §15; not yet lexed).
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - `parsePropagatesClause` shared between struct decls and function return types; reject `contains` at the same call site with the deferral message.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - `StructType` gains `propagatedKinds: KindType[]`; `FuncType` gains `returnPropagatedKinds: KindType[]`.
+- [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) - kind export/import.
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) - field-with-kind-prefix now validated (was rejected); binding-kind inheritance from RHS struct/call.
+- [src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js) - propagated-obligation registration; `pooled` parameter/assignment retain/release tracking.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - `CLEANUP_CALL` against struct-field GEP; struct-literal-return retain walking; `pooled` parameter prologue/epilogue retain/release.
 
 ## Verification
 
@@ -155,16 +155,16 @@ End-to-end against the goal program above (placed at `examples/pass/propagates_f
 
 Negative fixtures under `examples/fail/`:
 
-- `propagates_missing.yoop` — `type S { f: disposable FileHandle, }` without a `propagates<disposable>` clause. Expect: *"field 'f' carries kind 'disposable' but enclosing struct 'S' does not propagate it"*.
-- `propagates_unknown_kind.yoop` — `type S propagates<bogus> { ... }`. Expect: *"unknown kind 'bogus'"*.
-- `contains_deferred.yoop` — `type S contains<disposable> { ... }`. Expect: *"contains not yet supported (phase 6.5 or later)"*.
-- `pooled_to_int.yoop` — `let n: int32 = h;` where `h` is `pooled`. Expect: existing 6.3 type error (not a regression).
-- `cross_module_kind_unexported.yoop` — `import { disposable } from "./io.yoop";` where `io.yoop` declared the kind without `export`. Expect: *"'disposable' is not exported from './io.yoop'"*.
+- `propagates_missing.yoop` - `type S { f: disposable FileHandle, }` without a `propagates<disposable>` clause. Expect: *"field 'f' carries kind 'disposable' but enclosing struct 'S' does not propagate it"*.
+- `propagates_unknown_kind.yoop` - `type S propagates<bogus> { ... }`. Expect: *"unknown kind 'bogus'"*.
+- `contains_deferred.yoop` - `type S contains<disposable> { ... }`. Expect: *"contains not yet supported (phase 6.5 or later)"*.
+- `pooled_to_int.yoop` - `let n: int32 = h;` where `h` is `pooled`. Expect: existing 6.3 type error (not a regression).
+- `cross_module_kind_unexported.yoop` - `import { disposable } from "./io.yoop";` where `io.yoop` declared the kind without `export`. Expect: *"'disposable' is not exported from './io.yoop'"*.
 
 Full regression: every fixture under `examples/pass/` and `examples/fail/` for sub-phases 6.1, 6.2, 6.3 continues to pass with no changes.
 
 ## What carries to 6.5
 
-- The kind-list on `StructType.propagatedKinds` is the slot 6.5's parameterized kinds (`propagates<batchable(8)>`) extends — the slot stores a `KindRef { kind: KindType, args: KindArg[] }` rather than a bare `KindType` once parameters land.
+- The kind-list on `StructType.propagatedKinds` is the slot 6.5's parameterized kinds (`propagates<batchable(8)>`) extends - the slot stores a `KindRef { kind: KindType, args: KindArg[] }` rather than a bare `KindType` once parameters land.
 - `contains<K>` parser shape is already written (rejected at typecheck); 6.5 (or whenever a use case appears) only needs to wire the semantic.
 - Cross-module kind import is the path 6.5's `simd_aligned` and other library-shipped kinds will travel.

@@ -1,0 +1,51 @@
+// Phase 11.D: pure externs run through the comptime interpreter via
+// an explicit whitelist of JS implementations
+// (src/jsyoopinterp/externWhitelist.js). Anything outside the
+// whitelist surfaces as a ComptimeError; for `@precompile` decls
+// that becomes a hard build error naming the call site.
+//
+// Today's whitelist covers libc math (sqrt, pow, floor, ceil, fabs,
+// abs, labs), string helpers (strlen, strcmp), and yoop runtime
+// intrinsics that are trivially comptime-safe (yoop_now_ns,
+// yoop_errno_get, yoop_runtime_init/shutdown as no-ops).
+//
+// The library declaration in source is unchanged - the same `extern
+// "C" from library "m"` block produces a linkable extern in normal
+// codegen and a comptime-callable entry under the interpreter.
+
+extern "C" from library "m" {
+    function sqrt(x: float64): float64;
+    function pow(base: float64, exp: float64): float64;
+    function floor(x: float64): float64;
+}
+
+extern "C" from "stdio.h" {
+    function strlen(s: string): int64;
+    function strcmp(a: string, b: string): int32;
+    function printf(fmt: string, ...): int32;
+}
+
+// Initializer folds. Each lands as a literal LLVM global with no
+// module_init footprint.
+@precompile const ROOT_2: float64 = sqrt(2.0);
+@precompile const HYPOT: float64 = sqrt(pow(3.0, 2.0) + pow(4.0, 2.0));
+@precompile const FLOOR_PI: float64 = floor(3.14159);
+@precompile const NAME_LEN: int64 = strlen("yoopalicious");
+@precompile const CMP_EQ: int32 = strcmp("alpha", "alpha");
+@precompile const CMP_LT: int32 = strcmp("alpha", "beta");
+
+function main(): int32 {
+    printf(`ROOT_2=${ROOT_2}\n`);
+    printf(`HYPOT=${HYPOT}\n`);
+    printf(`FLOOR_PI=${FLOOR_PI}\n`);
+    printf(`NAME_LEN=${NAME_LEN}\n`);
+    printf(`CMP_EQ=${CMP_EQ} CMP_LT=${CMP_LT}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   ROOT_2=1.414214
+//   HYPOT=5.000000
+//   FLOOR_PI=3.000000
+//   NAME_LEN=12
+//   CMP_EQ=0 CMP_LT=-1

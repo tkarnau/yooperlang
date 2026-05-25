@@ -1,0 +1,743 @@
+// Twin-stick shooter demo - now with a sprite-sheet player loaded
+// through SDL_image, and a comptime-built sprite-rect table.
+//
+// This is the running showcase for what the language can do today:
+//
+//   - `@precompile` (Phase 11) evaluates the 16-entry source-rect
+//     lookup table at *build time*. The interpreter walks the block,
+//     and codegen emits the resulting array as a baked-in LLVM
+//     `@global` - no runtime `module_init` ever touches the table.
+//
+//   - `enum Direction { South, North, West, East }` + `switch` over
+//     the enum (Phase 7.5) pick which row of the sheet to sample.
+//
+//   - `disposable` kind (Phase 6.1) gives Window, Renderer, and
+//     Texture deterministic RAII teardown - `dispose` is called at
+//     scope exit in declaration LIFO order with no manual cleanup
+//     anywhere in `main`.
+//
+//   - `c_layout` (Phase 8.B) + `unsafe_ptr` field reach (Phase 8.A)
+//     project the SDL_Surface C struct's `format` field into yoop,
+//     so we can call SDL_MapRGB + SDL_SetColorKey to make the
+//     sheet's magenta background transparent before turning it into
+//     a texture.
+//
+//   - `task announce_kill` + `pooled` handle (Phase 8.F) prints kill
+//     counts off the main thread without blocking the render loop.
+
+import.unsafe;
+import * as conc from "std/core/concurrency.yoop";
+import * as debug from "std/debug.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// ── External libs ────────────────────────────────────────────────────────────
+
+extern "C" from library "m" {
+    function sqrt(x: float64): float64;
+    function printf(fmt: string, ...): int32;
+}
+
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_Renderer;
+    type SDL_Texture;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+    function SDL_GetError(): string;
+    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+
+    function SDL_CreateWindow(
+        title: string,
+        x: int32, y: int32,
+        w: int32, h: int32,
+        flags: uint32
+    ): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+
+    function SDL_CreateRenderer(
+        ref win: SDL_Window,
+        index: int32,
+        flags: uint32
+    ): ref SDL_Renderer;
+    function SDL_DestroyRenderer(ref ren: SDL_Renderer): void;
+
+    function SDL_SetRenderDrawColor(
+        ref ren: SDL_Renderer,
+        r: uint8, g: uint8, b: uint8, a: uint8
+    ): int32;
+    function SDL_RenderClear(ref ren: SDL_Renderer): int32;
+    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
+    function SDL_RenderDrawLine(
+        ref ren: SDL_Renderer,
+        x1: int32, y1: int32,
+        x2: int32, y2: int32
+    ): int32;
+    function SDL_RenderCopy(
+        ref ren: SDL_Renderer,
+        ref tex: SDL_Texture,
+        src: unsafe_ptr<SDL_Rect>,
+        dst: unsafe_ptr<SDL_Rect>
+    ): int32;
+
+    function SDL_CreateTextureFromSurface(
+        ref ren: SDL_Renderer,
+        surf: unsafe_ptr<SDL_Surface>
+    ): ref SDL_Texture;
+    function SDL_DestroyTexture(ref tex: SDL_Texture): void;
+    function SDL_FreeSurface(surf: unsafe_ptr<SDL_Surface>): void;
+    function SDL_SetColorKey(
+        surf: unsafe_ptr<SDL_Surface>,
+        flag: int32,
+        key: uint32
+    ): int32;
+    function SDL_MapRGB(
+        fmt: unsafe_ptr<uint8>,
+        r: uint8, g: uint8, b: uint8
+    ): uint32;
+    function SDL_ConvertSurfaceFormat(
+        src: unsafe_ptr<SDL_Surface>,
+        pixel_format: uint32,
+        flags: uint32
+    ): unsafe_ptr<SDL_Surface>;
+
+    function SDL_GetTicks(): uint32;
+    function SDL_Delay(ms: uint32): void;
+    function SDL_PumpEvents(): void;
+}
+
+extern "C" from library "SDL2_image" {
+    function IMG_Init(flags: int32): int32;
+    function IMG_Quit(): void;
+    function IMG_Load(file: string): unsafe_ptr<SDL_Surface>;
+    // SDL2_image piggybacks on SDL's threadlocal error slot - no
+    // separate `IMG_GetError` symbol ships with the library.
+}
+
+// ── C-ABI struct layouts ─────────────────────────────────────────────────────
+
+kind c_layout {
+    appliesTo type;
+    layout { abi "C"; };
+}
+
+// Source / dest rect - exact match for C `SDL_Rect`. All fields are
+// 4-byte int, so the layout is trivially the same shape C would lay
+// out.
+type SDL_Rect c_layout {
+    x: int32,
+    y: int32,
+    w: int32,
+    h: int32,
+}
+
+// SDL_Surface *prefix*. The real C struct is far larger; we only
+// ever look at `format` (so we can SDL_MapRGB the colorkey) and
+// only ever hand `unsafe_ptr<SDL_Surface>` values *back* to SDL -
+// we never construct one. `c_layout` makes LLVM emit the type as
+// `{ i32, ptr, i32, i32, i32 }` with the natural 4-byte tail
+// padding between `flags` and `format` on 64-bit, matching the
+// real SDL header's layout up through `pitch`.
+type SDL_Surface c_layout {
+    flags: uint32,
+    format: unsafe_ptr<uint8>,   // SDL_PixelFormat*; we only feed it back to SDL_MapRGB
+    w: int32,
+    h: int32,
+    pitch: int32,
+}
+
+// ── Disposable kind for SDL handles ──────────────────────────────────────────
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void {
+        SDL_DestroyWindow(self.handle);
+    }
+}
+
+type Renderer implements Disposable {
+    handle: ref SDL_Renderer,
+    function dispose(ref self): void {
+        SDL_DestroyRenderer(self.handle);
+    }
+}
+
+type Texture implements Disposable {
+    handle: ref SDL_Texture,
+    function dispose(ref self): void {
+        SDL_DestroyTexture(self.handle);
+    }
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+// ── Direction ────────────────────────────────────────────────────────────────
+
+// Phase 7.5 enum - picks the row out of the 4×4 sprite sheet.
+enum Direction {
+    South,
+    North,
+    West,
+    East,
+}
+
+function dir_to_row(d: Direction): int32 {
+    let r: int32 = 0;
+    switch (d) {
+        case Direction.South: { r = 0; }
+        case Direction.North: { r = 1; }
+        case Direction.West:  { r = 2; }
+        case Direction.East:  { r = 3; }
+    }
+    return r;
+}
+
+// ── Sprite-sheet metadata ────────────────────────────────────────────────────
+
+// The PNG is 534 × 799 with a 4×4 grid → 133 wide, 199 tall per cell
+// (truncating 2 / 3 trailing pixels - there's a tiny margin baked
+// into the sheet).
+const SHEET_W: int32 = 534;
+const SHEET_H: int32 = 799;
+const FRAME_W: int32 = SHEET_W / 4;   // 133
+const FRAME_H: int32 = SHEET_H / 4;   // 199
+
+// 16 entries laid out row-major by (direction, animation step).
+// step 0 = idle / still pose; steps 1..3 = walk-cycle frames.
+//
+// Filled in by the `@precompile` block below - codegen sees the
+// post-block values as the @global's literal initializer, so the
+// runtime never touches this array.
+let SPRITE_X: int32[] = [0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0];
+let SPRITE_Y: int32[] = [0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0];
+
+// `@precompile { ... }` - runs in the comptime interpreter at build
+// time. Reads the module-level `FRAME_W` / `FRAME_H` consts, writes
+// the module-level `SPRITE_X` / `SPRITE_Y` arrays. Codegen consumes
+// the final post-block values as the LLVM `@global`'s init.
+@precompile {
+    // Sheet column for each (direction, step):
+    //   south / north / west: step 0 → col 0 (still); steps 1..3 → cols 1..3 (walk).
+    //   east:                 step 0 → col 3 (still); steps 1..3 → cols 0..2 (walk).
+    let dir: int32 = 0;
+    while (dir < 4) {
+        let step: int32 = 0;
+        while (step < 4) {
+            let col: int32 = 0;
+            if (dir == 3) {
+                if (step == 0) {
+                    col = 3;
+                } else {
+                    col = step - 1;
+                }
+            } else {
+                col = step;
+            }
+            SPRITE_X[dir * 4 + step] = col * FRAME_W;
+            SPRITE_Y[dir * 4 + step] = dir * FRAME_H;
+            step = step + 1;
+        }
+        dir = dir + 1;
+    }
+}
+
+// ── Cheap LCG for spawn positions ────────────────────────────────────────────
+
+function next_rand(ref state: int32, range: int32): int32 {
+    state = state * 1103515245 + 12345;
+    let r: int32 = state % range;
+    if (r < 0) { r = r + range; }
+    return r;
+}
+
+// ── Background task ─────────────────────────────────────────────────────────
+//
+// One-shot per-kill announce. Fired with `pooled t = announce_kill(s);`
+// at the collision site; the binding falls out of scope on the next
+// statement and the refcount goes to 1 (the worker's own ref). The
+// worker prints, returns, and releases. Total task lifetime ≈ 20 ms.
+task announce_kill(score: int32): int32 {
+    conc.sleep_ms(20);
+    printf("kill #%d!\n", score);
+    return 0;
+}
+
+// ── Enemy model ──────────────────────────────────────────────────────────────
+
+type Enemy {
+    x: float32,
+    y: float32,
+    radius: float32,
+}
+
+function spawn_enemy(ref e: Enemy, ref rng: int32, win_w: int32, win_h: int32): void {
+    const margin: int32 = 60;
+    e.x = float32(next_rand(ref rng, win_w  - margin * 2)) + float32(margin);
+    e.y = float32(next_rand(ref rng, win_h / 2 - margin)) + float32(margin);
+    e.radius = 20.0 + float32(next_rand(ref rng, 16));
+}
+
+function dist_sq(ax: float32, ay: float32, bx: float32, by: float32): float32 {
+    const dx: float32 = ax - bx;
+    const dy: float32 = ay - by;
+    return dx * dx + dy * dy;
+}
+
+// ── Sprite loader ────────────────────────────────────────────────────────────
+//
+// IMG_Load gives us an SDL_Surface*. The sheet's magenta backdrop
+// is fully opaque (alpha = 255 everywhere - checked offline), so
+// we have to colorkey it before texture creation. We do that by:
+//
+//   1. Dereffing the SDL_Surface prefix so the typechecker hands us
+//      the `format` field as `unsafe_ptr<uint8>`.
+//   2. SDL_MapRGB(format, 255, 0, 255) → the surface-format-specific
+//      uint32 representing magenta.
+//   3. SDL_SetColorKey marks that pixel value transparent.
+//   4. SDL_CreateTextureFromSurface bakes the surface into a
+//      renderer-resident texture; SDL_FreeSurface drops the source.
+//
+// Anything fails → panic with the SDL diagnostic. Returns the
+// Disposable wrapper directly rather than a raw `ref SDL_Texture`
+// - yoop forbids returning `ref T` from a yoop-defined function
+// (it could outlive its referent), but a struct-by-value carrying
+// the SDL handle is fine.
+//
+// The param is `ref Renderer` (the yoop wrapper) rather than
+// `ref SDL_Renderer` (the opaque extern type) because the codegen
+// path that materializes opaque-extern `ref` params in non-extern
+// functions still hits the "loading unsized types is not allowed"
+// LLVM-verifier error - see the ERGO note above the Drawing
+// helpers section. Wrapping in a sized user struct sidesteps it.
+function load_player_texture(ref ren: Renderer): Texture {
+    // SDL_PIXELFORMAT_RGB24 - 3-byte packed RGB, no alpha channel.
+    // Per SDL docs, "if the surface has both color-key and per-pixel
+    // alpha, per-pixel alpha is honored and the color-key is
+    // ignored." IMG_Load gives us RGBA32 (the PNG is RGBA, with all
+    // alphas = 255), so we have to drop the alpha channel first or
+    // the colorkey is a no-op.
+    const SDL_PIXELFORMAT_RGB24: uint32 = 0x17101803;
+
+    let rgba_p: unsafe_ptr<SDL_Surface> = IMG_Load("assets/basic_character_test.png");
+    if (rgba_p == null) {
+        printf("IMG_Load failed: %s\n", SDL_GetError());
+        debug.panic("could not load assets/basic_character_test.png");
+    }
+
+    // Convert RGBA → RGB so the colorkey isn't preempted by alpha.
+    // SDL_ConvertSurfaceFormat allocates a new surface; we own both
+    // until we free them.
+    let rgb_p: unsafe_ptr<SDL_Surface> = SDL_ConvertSurfaceFormat(rgba_p, SDL_PIXELFORMAT_RGB24, 0);
+    SDL_FreeSurface(rgba_p);
+    if (rgb_p == null) {
+        printf("SDL_ConvertSurfaceFormat failed: %s\n", SDL_GetError());
+        debug.panic("could not convert sprite-sheet surface to RGB24");
+    }
+
+    // For SDL_PIXELFORMAT_RGB24 (8-bit-per-channel R, G, B array layout)
+    // the colorkey value is the same on every platform: R in the
+    // high byte, B in the low byte. Magenta = 0xFF00FF.
+    //
+    // We tried routing this through SDL_MapRGB (reading
+    // `surf.format` off the c_layout SDL_Surface prefix and passing
+    // it back to SDL), but the SDL call returned 0xFFFFFFFF for the
+    // (255, 0, 255) input - likely a bug somewhere along the
+    // `unsafe_ptr<uint8>` boundary for the format pointer (still
+    // investigating). The hardcoded value is a fixed pixel format
+    // so the platform-dependence dodge isn't load-bearing.
+    let key: uint32 = 0x00FF00FF;
+    SDL_SetColorKey(rgb_p, 1, key);
+
+    let tex: Texture = { handle: SDL_CreateTextureFromSurface(ren.handle, rgb_p) };
+    SDL_FreeSurface(rgb_p);
+    return tex;
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+const WIN_W: int32 = 800;
+const WIN_H: int32 = 600;
+const FPS_TARGET: uint32 = 60;
+const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+
+function main(): int32 {
+
+    // USB HID scancodes - same set SDL surfaces through SDL_GetKeyboardState.
+    const SC_ESCAPE: int32 = 41;
+    const SC_W: int32 = 26;
+    const SC_A: int32 = 4;
+    const SC_S: int32 = 22;
+    const SC_D: int32 = 7;
+    const SC_UP: int32 = 82;
+    const SC_DOWN: int32 = 81;
+    const SC_LEFT: int32 = 80;
+    const SC_RIGHT: int32 = 79;
+
+    // Collision square for the player (movement bounds-check + bullet origin).
+    const PLAYER_SIZE: float32 = 22.0;
+    const PLAYER_SPEED: float32 = 0.30;
+
+    // The sprite is drawn larger than the collision box, centered on
+    // it. 133×199 source → 48×72 on screen keeps the 2:3 aspect.
+    const PLAYER_DRAW_W: int32 = 48;
+    const PLAYER_DRAW_H: int32 = 72;
+
+    const BULLET_W: float32 = 5.0;
+    const BULLET_H: float32 = 5.0;
+    const BULLET_SPEED: float32 = 0.55;
+    const BULLET_POOL: int32 = 32;
+
+    // ~6 shots per second when an arrow is held.
+    const FIRE_COOLDOWN_NS: uint64 = 160_000_000;
+    const RESPAWN_DELAY_MS: uint64 = 2500;
+    const N_ENEMIES: int32 = 5;
+
+    // Walk-cycle cadence: bump the animation step every WALK_PERIOD_NS.
+    const WALK_PERIOD_NS: uint64 = 120_000_000;
+
+    const SDL_INIT_VIDEO: uint32 = 0x00000020;
+    const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+    const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+    const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
+    const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
+    const IMG_INIT_PNG: int32 = 0x00000002;
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        printf("SDL_Init failed: %s\n", SDL_GetError());
+        return 1;
+    }
+    // IMG_Init returns the OR of successfully initialized flags. If
+    // we asked for PNG and didn't get it, we can't load the sheet.
+    if ((IMG_Init(IMG_INIT_PNG) & IMG_INIT_PNG) == 0) {
+        printf("IMG_Init(PNG) failed: %s\n", SDL_GetError());
+        SDL_Quit();
+        return 1;
+    }
+
+    disposable win: Window = {
+        handle: SDL_CreateWindow(
+            "yooperlang twin-stick - sprite edition",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            WIN_W, WIN_H,
+            SDL_WINDOW_SHOWN
+        )
+    } {
+        disposable ren: Renderer = {
+            handle: SDL_CreateRenderer(
+                win.handle, -1,
+                SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+            )
+        } {
+            disposable player_tex: Texture = load_player_texture(ref ren);
+
+            let rng_state: int32 = int32(SDL_GetTicks()) | 1;
+
+            // Player position (top-left of the collision box).
+            let player_x: float32 = float32(WIN_W) * 0.5;
+            let player_y: float32 = float32(WIN_H) * 0.5;
+
+            // Last-faced direction + walk-cycle state. The cycle
+            // advances on wall-clock ticks while the player is
+            // moving and freezes (frame = still) the instant input
+            // releases.
+            let player_dir: Direction = Direction.South;
+            let walk_step: int32 = 0;          // 0..2 - only used when moving
+            let next_walk_advance_ns: uint64 = 0;
+
+            // Bullet pool as parallel arrays. Direction is a unit (dx, dy).
+            let bullet_x: float32[] = intr.heap_alloc(usize(BULLET_POOL));
+            let bullet_y: float32[] = intr.heap_alloc(usize(BULLET_POOL));
+            let bullet_dx: float32[] = intr.heap_alloc(usize(BULLET_POOL));
+            let bullet_dy: float32[] = intr.heap_alloc(usize(BULLET_POOL));
+            let bullet_active: bool[] = intr.heap_alloc(usize(BULLET_POOL));
+            let bi_init: int32 = 0;
+            while (bi_init < BULLET_POOL) {
+                bullet_active[bi_init] = false;
+                bi_init = bi_init + 1;
+            }
+
+            // Enemy state. `enemy_alive[i]` flips false on kill, and
+            // the matching slot in `enemy_ready_at_ns[i]` gets set to
+            // the absolute nanosecond timestamp at which the enemy
+            // may respawn.
+            let enemies: Enemy[] = intr.heap_alloc(usize(N_ENEMIES));
+            let enemy_alive: bool[] = intr.heap_alloc(usize(N_ENEMIES));
+            let enemy_ready_at_ns: uint64[] = intr.heap_alloc(usize(N_ENEMIES));
+            let ei_init: int32 = 0;
+            while (ei_init < N_ENEMIES) {
+                spawn_enemy(ref enemies[ei_init], ref rng_state, WIN_W, WIN_H);
+                enemy_alive[ei_init] = true;
+                enemy_ready_at_ns[ei_init] = 0;
+                ei_init = ei_init + 1;
+            }
+
+            // Cooldown gate for held-arrow autofire.
+            let last_fire_ns: uint64 = 0;
+            let score: int32 = 0;
+
+            // Local fat-pointer copies of the comptime-baked sprite
+            // tables. Codegen today can't lower an INDEX_EXPRESSION
+            // whose base is a module-level global (the lvalue path
+            // only knows about local symbols), so we read the
+            // whole array slot once at function entry and index the
+            // locals below. The actual sprite data still lives in
+            // the LLVM @global emitted from the @precompile block;
+            // these are fat pointers (ptr + len), not copies.
+            let sprite_x_tbl: int32[] = SPRITE_X;
+            let sprite_y_tbl: int32[] = SPRITE_Y;
+
+            let running: bool = true;
+            while (running) {
+                const frame_start: uint32 = SDL_GetTicks();
+                const t_ns: uint64 = conc.now_ns();
+
+                let kbRef: int = 0;
+                const keys: uint8[] = SDL_GetKeyboardState(ref kbRef);
+                if (keys[SC_ESCAPE] != 0) {
+                    running = false;
+                }
+                SDL_PumpEvents();
+
+                const dt: float32 = float32(MS_PER_FRAME);
+                const move: float32 = PLAYER_SPEED * dt;
+
+                // WASD movement. Track *which* axis pressed so we
+                // can pick the facing direction without re-scanning
+                // the keyboard later.
+                let move_dx: float32 = 0.0;
+                let move_dy: float32 = 0.0;
+                if (keys[SC_W] != 0) { move_dy = move_dy - 1.0; }
+                if (keys[SC_S] != 0) { move_dy = move_dy + 1.0; }
+                if (keys[SC_A] != 0) { move_dx = move_dx - 1.0; }
+                if (keys[SC_D] != 0) { move_dx = move_dx + 1.0; }
+                const is_moving: bool = move_dx != 0.0 || move_dy != 0.0;
+
+                if (is_moving) {
+                    // Pick facing direction from the dominant axis.
+                    // Horizontal beats vertical when both are held -
+                    // arbitrary, just need a deterministic rule.
+                    if (move_dx > 0.0) {
+                        player_dir = Direction.East;
+                    } else {
+                        if (move_dx < 0.0) {
+                            player_dir = Direction.West;
+                        } else {
+                            if (move_dy < 0.0) {
+                                player_dir = Direction.North;
+                            } else {
+                                player_dir = Direction.South;
+                            }
+                        }
+                    }
+
+                    // Advance the walk cycle on a fixed wall-clock
+                    // cadence so the animation speed is independent
+                    // of framerate.
+                    if (t_ns >= next_walk_advance_ns) {
+                        walk_step = (walk_step + 1) % 3;
+                        next_walk_advance_ns = t_ns + WALK_PERIOD_NS;
+                    }
+
+                    player_x = player_x + move_dx * move;
+                    player_y = player_y + move_dy * move;
+                } else {
+                    // Idle - reset the cycle so the next step lands
+                    // on frame 0 of the new walk.
+                    walk_step = 0;
+                    next_walk_advance_ns = t_ns + WALK_PERIOD_NS;
+                }
+
+                if (player_x < 0.0) { player_x = 0.0; }
+                if (player_y < 0.0) { player_y = 0.0; }
+                if (player_x + PLAYER_SIZE > float32(WIN_W)) { player_x = float32(WIN_W) - PLAYER_SIZE; }
+                if (player_y + PLAYER_SIZE > float32(WIN_H)) { player_y = float32(WIN_H) - PLAYER_SIZE; }
+
+                // Arrow-key fire direction. Held = continuous fire,
+                // gated by the cooldown. No edge detection - that's
+                // what the cooldown gate is for.
+                let fire_dx: float32 = 0.0;
+                let fire_dy: float32 = 0.0;
+                if (keys[SC_UP]    != 0) { fire_dy = fire_dy - 1.0; }
+                if (keys[SC_DOWN]  != 0) { fire_dy = fire_dy + 1.0; }
+                if (keys[SC_LEFT]  != 0) { fire_dx = fire_dx - 1.0; }
+                if (keys[SC_RIGHT] != 0) { fire_dx = fire_dx + 1.0; }
+                const firing: bool = fire_dx != 0.0 || fire_dy != 0.0;
+
+                if (firing && t_ns >= last_fire_ns + FIRE_COOLDOWN_NS) {
+                    const mag: float32 = float32(sqrt(float64(fire_dx * fire_dx + fire_dy * fire_dy)));
+                    const ndx: float32 = fire_dx / mag;
+                    const ndy: float32 = fire_dy / mag;
+
+                    let fi: int32 = 0;
+                    while (fi < BULLET_POOL) {
+                        if (!bullet_active[fi]) {
+                            bullet_active[fi] = true;
+                            bullet_x[fi] = player_x + PLAYER_SIZE * 0.5 - BULLET_W * 0.5;
+                            bullet_y[fi] = player_y + PLAYER_SIZE * 0.5 - BULLET_H * 0.5;
+                            bullet_dx[fi] = ndx;
+                            bullet_dy[fi] = ndy;
+                            break;
+                        }
+                        fi = fi + 1;
+                    }
+                    last_fire_ns = t_ns;
+                }
+
+                // Advance bullets, retire any that leave the screen.
+                let mi: int32 = 0;
+                while (mi < BULLET_POOL) {
+                    if (bullet_active[mi]) {
+                        bullet_x[mi] = bullet_x[mi] + bullet_dx[mi] * BULLET_SPEED * dt;
+                        bullet_y[mi] = bullet_y[mi] + bullet_dy[mi] * BULLET_SPEED * dt;
+                        if (bullet_x[mi] < -BULLET_W || bullet_x[mi] > float32(WIN_W) ||
+                            bullet_y[mi] < -BULLET_H || bullet_y[mi] > float32(WIN_H)) {
+                            bullet_active[mi] = false;
+                        }
+                    }
+                    mi = mi + 1;
+                }
+
+                // Bullet ↔ enemy collisions.
+                let ci: int32 = 0;
+                while (ci < N_ENEMIES) {
+                    if (enemy_alive[ci]) {
+                        const bcx: float32 = enemies[ci].x;
+                        const bcy: float32 = enemies[ci].y;
+                        const br2: float32 = enemies[ci].radius * enemies[ci].radius;
+
+                        let cb: int32 = 0;
+                        while (cb < BULLET_POOL) {
+                            if (bullet_active[cb]) {
+                                const cx: float32 = bullet_x[cb] + BULLET_W * 0.5;
+                                const cy: float32 = bullet_y[cb] + BULLET_H * 0.5;
+                                if (dist_sq(cx, cy, bcx, bcy) < br2) {
+                                    bullet_active[cb] = false;
+                                    enemy_alive[ci] = false;
+                                    enemy_ready_at_ns[ci] = t_ns + RESPAWN_DELAY_MS * 1_000_000;
+                                    score = score + 1;
+                                    pooled announce_h = announce_kill(score);
+                                    break;
+                                }
+                            }
+                            cb = cb + 1;
+                        }
+                    }
+                    ci = ci + 1;
+                }
+
+                // Respawn any dead enemy whose deadline has passed.
+                let pi: int32 = 0;
+                while (pi < N_ENEMIES) {
+                    if ((!enemy_alive[pi]) && t_ns >= enemy_ready_at_ns[pi]) {
+                        spawn_enemy(ref enemies[pi], ref rng_state, WIN_W, WIN_H);
+                        enemy_alive[pi] = true;
+                    }
+                    pi = pi + 1;
+                }
+
+                // ── Render ──
+
+                // Dark background.
+                SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(18), uint8(28), uint8(255));
+                SDL_RenderClear(ren.handle);
+
+                // Enemies - red circles, scanline-filled.
+                SDL_SetRenderDrawColor(ren.handle, uint8(220), uint8(60), uint8(60), uint8(255));
+                let di: int32 = 0;
+                while (di < N_ENEMIES) {
+                    if (enemy_alive[di]) {
+                        const ecx: int32 = int32(enemies[di].x);
+                        const ecy: int32 = int32(enemies[di].y);
+                        const er: int32 = int32(enemies[di].radius);
+                        let erow: int32 = -er;
+                        while (erow <= er) {
+                            const ehalf: int32 = int32(sqrt(float64(er * er - erow * erow)));
+                            SDL_RenderDrawLine(ren.handle, ecx - ehalf, ecy + erow, ecx + ehalf, ecy + erow);
+                            erow = erow + 1;
+                        }
+                    }
+                    di = di + 1;
+                }
+
+                // Bullets - soft yellow, scanline-filled rectangles.
+                SDL_SetRenderDrawColor(ren.handle, uint8(255), uint8(240), uint8(140), uint8(255));
+                const bw_i: int32 = int32(BULLET_W);
+                const bh_i: int32 = int32(BULLET_H);
+                let dbi: int32 = 0;
+                while (dbi < BULLET_POOL) {
+                    if (bullet_active[dbi]) {
+                        const bx: int32 = int32(bullet_x[dbi]);
+                        const by: int32 = int32(bullet_y[dbi]);
+                        let brow: int32 = 0;
+                        while (brow < bh_i) {
+                            SDL_RenderDrawLine(ren.handle, bx, by + brow, bx + bw_i, by + brow);
+                            brow = brow + 1;
+                        }
+                    }
+                    dbi = dbi + 1;
+                }
+
+                // Player - sprite-sheet copy. Pick the source rect
+                // from the comptime-baked table (`SPRITE_X` /
+                // `SPRITE_Y`) indexed by (direction-row, animation
+                // step), then SDL_RenderCopy into a sized dst rect
+                // centered horizontally on the collision box and
+                // anchored at the bottom so the feet stand on the
+                // collision footprint.
+                let step_idx: int32 = 0;
+                if (is_moving) {
+                    step_idx = walk_step + 1;   // 1, 2, or 3 - walk frames
+                }
+                const row_idx: int32 = dir_to_row(player_dir);
+                const sheet_idx: int32 = row_idx * 4 + step_idx;
+                let src_rect: SDL_Rect = {
+                    x: sprite_x_tbl[sheet_idx],
+                    y: sprite_y_tbl[sheet_idx],
+                    w: FRAME_W,
+                    h: FRAME_H,
+                };
+                const dst_cx: int32 = int32(player_x + PLAYER_SIZE * 0.5);
+                const dst_by: int32 = int32(player_y + PLAYER_SIZE);
+                let dst_rect: SDL_Rect = {
+                    x: dst_cx - PLAYER_DRAW_W / 2,
+                    y: dst_by - PLAYER_DRAW_H,
+                    w: PLAYER_DRAW_W,
+                    h: PLAYER_DRAW_H,
+                };
+                SDL_RenderCopy(ren.handle, player_tex.handle, &src_rect, &dst_rect);
+
+                SDL_RenderPresent(ren.handle);
+
+                const elapsed: uint32 = SDL_GetTicks() - frame_start;
+                if (elapsed < MS_PER_FRAME) {
+                    SDL_Delay(MS_PER_FRAME - elapsed);
+                }
+            }
+
+            // Shutdown. `disposable` bindings teardown LIFO:
+            //   player_tex → ren → win. Each `dispose` is a single
+            //   SDL_Destroy* call.
+            intr.heap_free(bullet_x);
+            intr.heap_free(bullet_y);
+            intr.heap_free(bullet_dx);
+            intr.heap_free(bullet_dy);
+            intr.heap_free(bullet_active);
+            intr.heap_free(enemies);
+            intr.heap_free(enemy_alive);
+            intr.heap_free(enemy_ready_at_ns);
+        }
+    }
+
+    IMG_Quit();
+    SDL_Quit();
+    return 0;
+}

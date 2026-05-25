@@ -1,0 +1,9 @@
+// Phase 9.D: `for ... in EXPR` requires an array RHS in v0. Trait-driven
+// iteration via Iterable<T> is reserved for a later phase.
+function main(): int32 {
+    let x: int32 = 5;
+    for v in x {
+        _ = v;
+    }
+    return 0;
+}

@@ -1,0 +1,28 @@
+// std/core/format - direct calls into the primitive `to_string`
+// shims, prior to the template-literal lowering picking them up.
+// Verifies digit assembly across zero, single-digit, multi-digit,
+// and negative ints; the boolean labels; and the snprintf-backed
+// float formatter.
+
+import * as fmt from "std/core/format.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    printf(`${fmt.int_to_string(0)}\n`);
+    printf(`${fmt.int_to_string(7)}\n`);
+    printf(`${fmt.int_to_string(12345)}\n`);
+    printf(`${fmt.int_to_string(-42)}\n`);
+
+    printf(`${fmt.uint_to_string(0)}\n`);
+    printf(`${fmt.uint_to_string(255)}\n`);
+
+    printf(`${fmt.bool_to_string(true)}\n`);
+    printf(`${fmt.bool_to_string(false)}\n`);
+
+    printf(`${fmt.float_to_string(1.5)}\n`);
+    printf(`${fmt.float_to_string(0.0)}\n`);
+    return 0;
+}

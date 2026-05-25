@@ -1,0 +1,18 @@
+// Phase 9.G: a vtable field's function-pointer signature must match the
+// underlying trait method's signature (minus `ref self`). The compiler
+// rejects vtables whose field signatures don't line up.
+
+trait Handler {
+    function handle(ref self, req: int32): int32;
+}
+
+vtable BadDispatcher for Handler {
+    // Mismatch: trait param is int32, vtable field uses bool.
+    handle: (req: bool) => int32,
+}
+
+function main(): int32 {
+    return 0;
+}
+
+// expected error: vtable field "handle" parameter 1 type bool does not match trait "Handler.handle" expected int32

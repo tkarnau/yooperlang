@@ -1,0 +1,11 @@
+// Phase 10.A: `Result<int32>` is missing the `E` arg - should not resolve.
+
+enum Result<T, E> {
+    Ok { value: T },
+    Err { error: E },
+}
+
+function main(): int32 {
+    let r: Result<int32> = Result.Ok { value: 5 }; // expected: unknown type "Result<int32>"
+    return 0;
+}

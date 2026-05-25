@@ -1,4 +1,4 @@
-// Phase 8.F.2 — I/O multiplexer for the Yooperlang runtime.
+// Phase 8.F.2 - I/O multiplexer for the Yooperlang runtime.
 //
 // One dedicated pthread (the "I/O thread") runs a kqueue (macOS) or
 // epoll (Linux) loop. yoop_io_wait_readable / wait_writable register a
@@ -19,7 +19,7 @@
 #include <unistd.h>
 
 #ifdef _WIN32
-  // Stub for now — no IOCP backend. Public API returns ENOSYS.
+  // Stub for now - no IOCP backend. Public API returns ENOSYS.
   int yoop_io_wait_readable(int fd) { (void)fd; errno = ENOSYS; return -1; }
   int yoop_io_wait_writable(int fd) { (void)fd; errno = ENOSYS; return -1; }
   void yoop_io_shutdown(void) {}
@@ -35,7 +35,7 @@
   #define YOOP_IO_EPOLL 1
   #include <sys/epoll.h>
 #else
-  #error "Unsupported platform — add a yoop_io.c backend"
+  #error "Unsupported platform - add a yoop_io.c backend"
 #endif
 
 // Per-wait state. Lives on the caller's stack; the multiplexer
@@ -77,7 +77,7 @@ static void* io_thread_main(void* arg) {
         int n = kevent(io_kq, NULL, 0, events, 64, NULL);
         if (n < 0) {
             if (errno == EINTR) continue;
-            // Fatal — log and exit the loop. The runtime is shutting down.
+            // Fatal - log and exit the loop. The runtime is shutting down.
             break;
         }
         int should_exit = 0;
@@ -120,7 +120,7 @@ static void* io_thread_main(void* arg) {
             }
             yoop_io_wait_t* w = (yoop_io_wait_t*)ev->data.ptr;
             // Remove the fd from the set (one-shot semantics). We don't
-            // know the fd off the bat — but epoll's data.ptr is the
+            // know the fd off the bat - but epoll's data.ptr is the
             // token, not the fd. The fd is recoverable only if we stash
             // it; for one-shot we just rely on EPOLLONESHOT having
             // disarmed the fd. The caller re-arms on next wait_*.
@@ -258,7 +258,7 @@ static int io_wait_common(int fd, int want_write) {
 
 #ifdef YOOP_IO_EPOLL
     // One-shot: explicitly remove so a future wait can ADD freshly.
-    // Ignore failures — the fd may already have been closed by the
+    // Ignore failures - the fd may already have been closed by the
     // caller.
     epoll_ctl(io_ep, EPOLL_CTL_DEL, fd, NULL);
 #endif

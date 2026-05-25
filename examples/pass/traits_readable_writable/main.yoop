@@ -3,22 +3,23 @@
 // the result. Validates that the traits in std/core/traits.yoop carry
 // the correct identity across module boundaries.
 
+import { Result } from "../../../std/core/types.yoop";
 import {
-    Readable, Writable, ReadOutcome, WriteOutcome, FlushOutcome,
+    Readable, Writable, FlushOutcome,
 } from "../../../std/core/traits.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-// A trivial in-memory cursor — appends to an internal buffer on write,
+// A trivial in-memory cursor - appends to an internal buffer on write,
 // pops from the head on read. The buffer is fixed-size for simplicity.
 type MemBuffer implements (Readable, Writable) {
     storage: uint8[],
     write_pos: usize,
     read_pos: usize,
 
-    function read(ref self, ref buf: uint8[]): ReadOutcome {
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         let want: usize = buf.len;
         let avail: usize = self.write_pos - self.read_pos;
         let take: usize = want;
@@ -31,10 +32,10 @@ type MemBuffer implements (Readable, Writable) {
             i = i + 1;
         }
         self.read_pos = self.read_pos + take;
-        return { n: c_ssize_t(take), err: "" };
+        return Result.Ok { value: c_ssize_t(take) };
     }
 
-    function write(ref self, ref buf: uint8[]): WriteOutcome {
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         let cap: usize = self.storage.len;
         let free: usize = cap - self.write_pos;
         let take: usize = buf.len;
@@ -47,11 +48,11 @@ type MemBuffer implements (Readable, Writable) {
             i = i + 1;
         }
         self.write_pos = self.write_pos + take;
-        return { n: c_ssize_t(take), err: "" };
+        return Result.Ok { value: c_ssize_t(take) };
     }
 
     function flush(ref self): FlushOutcome {
-        return { err: "" };
+        return FlushOutcome.Ok;
     }
 }
 
@@ -60,13 +61,21 @@ function main(): int32 {
     let mb: MemBuffer = { storage: storage, write_pos: 0, read_pos: 0 };
 
     let payload: uint8[] = [72, 73];        // "HI"
-    let wo: WriteOutcome = Writable.write(ref mb, ref payload);
-    let we: string = wo.err;                // observe
+    let wo: Result<c_ssize_t, string> = Writable.write(ref mb, ref payload);
+    let wrote: c_ssize_t = 0;
+    switch (wo) {
+        case Result.Ok { value: wn }: { wrote = wn; }
+        case Result.Err { error: we }: { }
+    }
 
     let out: uint8[] = [0, 0];
-    let ro: ReadOutcome = Readable.read(ref mb, ref out);
-    let re: string = ro.err;                // observe
+    let ro: Result<c_ssize_t, string> = Readable.read(ref mb, ref out);
+    let read_n: c_ssize_t = 0;
+    switch (ro) {
+        case Result.Ok { value: rn }: { read_n = rn; }
+        case Result.Err { error: re }: { }
+    }
 
-    printf(`wrote=${wo.n} read=${ro.n} bytes=${out[0]},${out[1]}\n`);
+    printf(`wrote=${wrote} read=${read_n} bytes=${out[0]},${out[1]}\n`);
     return 0;
 }

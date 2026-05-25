@@ -1,0 +1,32 @@
+// Phase 9.J: a generic function bounded on a parent trait can be called with
+// a type that only declares it implements the child trait — the extends chain
+// satisfies the bound. The function body invokes the parent trait's method
+// directly via `Parent.method(ref t)`.
+
+trait Animal {
+    function legs(ref self): int32;
+}
+
+trait Mammal extends Animal {
+    function fur_count(ref self): int32;
+}
+
+type Cat implements Mammal {
+    function legs(ref self): int32 { return 4; }
+    function fur_count(ref self): int32 { return 1000; }
+}
+
+// Bounded on Animal — Cat satisfies it via extends.
+function count_legs<T implements Animal>(ref t: T): int32 {
+    return Animal.legs(ref t);
+}
+
+function main(): int32 {
+    let c: Cat = { };
+    let legs: int32 = count_legs(ref c);
+    printf(`legs=${legs}\n`);
+    return 0;
+}
+
+// expected output:
+// legs=4

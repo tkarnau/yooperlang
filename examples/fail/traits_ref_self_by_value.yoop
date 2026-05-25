@@ -14,4 +14,4 @@ function main(): int32 {
 
 // Fails at parse time because the trait method signature writes `self` without
 // the required `ref` keyword. Every trait method's first parameter must be
-// `ref self` — value-mode self is not supported.
+// `ref self` - value-mode self is not supported.

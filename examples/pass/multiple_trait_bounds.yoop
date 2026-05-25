@@ -1,0 +1,34 @@
+// Phase 9.J: a type parameter with multiple trait bounds
+// `<T implements (A, B)>`. Inside the body, methods from both bounds are
+// callable; at the call site, the concrete type must implement every bound.
+
+trait Renderable {
+    function render(ref self): int32;
+}
+
+trait Named {
+    function name_len(ref self): int32;
+}
+
+type Widget implements (Renderable, Named) {
+    w: int32,
+    function render(ref self): int32 { return self.w; }
+    function name_len(ref self): int32 { return 6; }
+}
+
+// `T` must implement BOTH Renderable AND Named.
+function summarize<T implements (Renderable, Named)>(ref t: T): int32 {
+    let r: int32 = Renderable.render(ref t);
+    let n: int32 = Named.name_len(ref t);
+    return r + n;
+}
+
+function main(): int32 {
+    let w: Widget = { w: 12 };
+    let s: int32 = summarize(ref w);
+    printf(`summary=${s}\n`);
+    return 0;
+}
+
+// expected output:
+// summary=18

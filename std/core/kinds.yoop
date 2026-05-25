@@ -1,4 +1,4 @@
-// std/core/kinds.yoop — foundational trait + kind shared across std.
+// std/core/kinds.yoop - foundational trait + kind shared across std.
 //
 // The `Disposable` trait and the `disposable` kind are the entry point for
 // every resource-owning type in the standard library (sockets, file

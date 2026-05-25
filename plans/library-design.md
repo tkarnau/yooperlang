@@ -1,4 +1,4 @@
-# Library design — patterns and the networking story
+# Library design - patterns and the networking story
 
 > Design contract for "batteries-included" Yooperlang libraries. Parallel
 > to [runtime-design.md](runtime-design.md), but for the *library* layer
@@ -10,16 +10,16 @@
 Phase 8.A–F gave yoop the language and runtime primitives to talk to libc
 (pointers, C aliases, errno, multiplexer). This document describes the
 **library layer** that turns those primitives into something a user
-actually wants to call — a `TcpListener`, an `HttpRequest`, a `Client`.
+actually wants to call - a `TcpListener`, an `HttpRequest`, a `Client`.
 
 The goal is one consistent set of conventions so every standard module
 looks like every other. Three concrete deliverables:
 
-1. **Library principles** — the rules every `std/*` module follows.
-2. **Staple traits and kinds** — the small foundational set that
+1. **Library principles** - the rules every `std/*` module follows.
+2. **Staple traits and kinds** - the small foundational set that
    downstream modules build *on top of*. Currently: `Disposable`
    (existing), `Readable`, `Writable`, `Display`. Kinds: `disposable`
-   (existing). New: none required at the foundational layer — the
+   (existing). New: none required at the foundational layer - the
    existing kind machinery is enough.
 3. **The networking + HTTP layer** designed to fit those rules:
    `std/net/socket`, `std/net/tcp`, `std/http/request`,
@@ -40,7 +40,7 @@ Out of scope (real follow-ups):
 - HTTP/2 + HTTP/3. The library design accommodates a future binary
   framing layer but the MVP is HTTP/1.1 only.
 - A full collections library (`Map`, `Set`, growable `Vec`). Required
-  for some HTTP features (headers in particular) — see §8.
+  for some HTTP features (headers in particular) - see §8.
 - A logging framework (the "Debugging/Console" category the user
   mentioned). Covered briefly in §9, but its design is a separate doc.
 
@@ -48,15 +48,15 @@ Out of scope (real follow-ups):
 
 ### 2.1 Pure-yoop public API; unsafe-yoop guts allowed
 
-A library module's **public** surface — the names other yoop programs
-import — must compile without `import.unsafe;`. Implementation modules
+A library module's **public** surface - the names other yoop programs
+import - must compile without `import.unsafe;`. Implementation modules
 that use `unsafe_ptr<T>`, libc externs, or `xs.ptr` are fine *as long as*
 they don't surface pointer types in their exported signatures.
 
 Concretely:
 
 ```yoop
-// std/net/socket_ffi.yoop  — unsafe, not directly imported by users
+// std/net/socket_ffi.yoop  - unsafe, not directly imported by users
 import.unsafe;
 
 extern "C" from "sys/socket.h" {
@@ -68,7 +68,7 @@ export function ll_socket(domain: c_int, type: c_int, proto: c_int): c_int {
     return socket(domain, type, proto);
 }
 
-// std/net/socket.yoop  — safe, this is what users import
+// std/net/socket.yoop  - safe, this is what users import
 import { ll_socket } from "./socket_ffi.yoop";
 
 type Socket implements Disposable propagates<disposable> {
@@ -77,45 +77,50 @@ type Socket implements Disposable propagates<disposable> {
     function dispose(ref self): void { /* close(fd) */ }
 }
 
-export type SocketResult { socket: Socket, err: string }
+export type SocketResult implements Disposable propagates<disposable> {
+    socket: Socket,
+    error:  string,
+    function dispose(ref self): void { /* close inner socket */ }
+}
 
-export function open_socket(...): SocketResult { ... }
+export function open_socket(...): SocketResult propagates<disposable> { ... }
 ```
 
 The split is a strong convention, not a typecheck rule. The split makes
-it easy for users to grep their dependencies — "do I depend on any
+it easy for users to grep their dependencies - "do I depend on any
 `*_ffi.yoop`?" answers "am I building on unsafe code?".
 
-### 2.2 Failable returns use the `err: string` convention + `?`
+### 2.2 Fallible returns use `Result<T, E>` + `?`
 
-Every library function that can fail returns a fallible struct (a struct
-ending in `err: string`). The caller propagates with `?` or destructures
-explicitly. The pattern is the same as Phase 8.D's `open_safe`:
+Every library function that can fail returns a `Result<T, E>` enum (from
+[std/core/types.yoop](../std/core/types.yoop)). The caller propagates with
+`?` or branches with `switch`.
 
 ```yoop
-type ConnectResult { conn: TcpStream, err: string }
+import { Result } from "std/core/types.yoop";
 
-export function connect(addr: string, port: int32): ConnectResult { ... }
+export function connect(addr: string, port: int32): Result<TcpStream, string> { ... }
 
 // caller:
-function fetch(url: string): FetchResult {
-    let c: TcpStream = connect("1.1.1.1", 80)?;   // err propagates
+function fetch(url: string): Result<Response, string> {
+    let c: TcpStream = connect("1.1.1.1", 80)?;   // Err propagates
     // ...
 }
 ```
 
-Library code does **not** use enums for errors (no `Result<T, E>`-style
-ADTs). The struct convention is what `?` understands today; introducing
-a parallel enum-based mechanism would split the ecosystem. If `?` ever
-grows to understand enums (a follow-up to Phase 7.5), libraries will
-inherit it automatically.
+Disposable-bearing failure shapes (`SocketResult`, `ListenResult`,
+`AcceptResult`, `ConnectResult`, `ParsedRequest`) stay as plain
+`Disposable` structs with an explicit `error: string` field that the
+caller inspects directly - `?` doesn't apply (the surrounding lifecycle
+needs to be managed before propagation). They're a small handful of
+named types, all under `std/net` and `std/http`.
 
-Error messages in `err` are user-facing strings. The standard format is
-`"<operation>: <reason>"`. For libc failures, use
+Error messages in `error` payloads are user-facing strings. The standard
+format is `"<operation>: <reason>"`. For libc failures, use
 `errno.message(errno.get())` directly:
 
 ```yoop
-return { conn: empty, err: `connect: ${errno.message(errno.get())}` };
+return Result.Err { error: `connect: ${errno.message(errno.get())}` };
 ```
 
 ### 2.3 Resources are `Disposable + propagates<disposable>`
@@ -134,7 +139,7 @@ type Socket implements Disposable propagates<disposable> {
 
 The user picks one of the three legal exits (Phase 6.4 spec §):
 
-- **`disposable s: Socket = open_socket(...)?;`** — auto-cleanup at
+- **`disposable s: Socket = open_socket(...)?;`** - auto-cleanup at
   scope end.
 - **Manual `Disposable.dispose(ref s);`** before scope end.
 - **`return s`** out of an enclosing function that itself
@@ -208,10 +213,10 @@ infrastructure is needed.
 ## 3. Staple traits
 
 These are the foundational traits standard library types implement. Keep
-the set small — every additional trait is a thing every library author
+the set small - every additional trait is a thing every library author
 needs to know.
 
-### 3.1 `Disposable` (existing — Phase 6.1)
+### 3.1 `Disposable` (existing - Phase 6.1)
 
 ```yoop
 trait Disposable {
@@ -223,17 +228,15 @@ The one trait every resource type implements. Paired with the
 `disposable` kind that requires it. Used everywhere from sockets to
 tasks to file handles. **Already in use; documented here for completeness.**
 
-### 3.2 `Readable` — byte-stream input source (new)
+### 3.2 `Readable` - byte-stream input source (new)
 
 ```yoop
 trait Readable {
-    // Read into the front of `buf`, up to buf.len bytes. Returns the
-    // number of bytes actually read (0 = EOF, negative = err with the
-    // returned ReadOutcome's err field set).
-    function read(ref self, ref buf: uint8[]): ReadOutcome;
+    // Read into the front of `buf`, up to buf.len bytes. Ok payload is the
+    // count of bytes actually written (0 = EOF on a stream); Err carries a
+    // diagnostic.
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
 }
-
-type ReadOutcome { n: c_ssize_t, err: string }
 ```
 
 Every byte source (TcpStream, file, in-memory buffer for testing)
@@ -241,37 +244,37 @@ implements `Readable`. The HTTP parser and any framing layer takes
 `Readable` as input, so testing with a fake source is a one-struct
 implementation.
 
-The return shape is a fallible struct so `?` works:
+The return shape is `Result<c_ssize_t, string>` so `?` works:
 
 ```yoop
-function read_line(ref r: ref Readable, ref buf: uint8[]): ReadResult {
-    let outcome: c_ssize_t = Readable.read(ref r, ref buf)?;
+function read_line(ref r: ref Readable, ref buf: uint8[]): Result<usize, string> {
+    let n: c_ssize_t = Readable.read(ref r, ref buf)?;
     // ...
 }
 ```
 
-(Note: the parameter form `ref Readable` here is sketchy — yoop's
+(Note: the parameter form `ref Readable` here is sketchy - yoop's
 generics don't quite express "anything implementing Readable" as a
 function parameter yet. See §8 "Open questions."  In the meantime,
 library code can take a concrete struct that implements Readable and
 hand-write a small abstraction layer if needed.)
 
-### 3.3 `Writable` — byte-stream output sink (new)
+### 3.3 `Writable` - byte-stream output sink (new)
 
 ```yoop
 trait Writable {
-    function write(ref self, ref buf: uint8[]): WriteOutcome;
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
     function flush(ref self): FlushOutcome;
 }
 
-type WriteOutcome { n: c_ssize_t, err: string }
-type FlushOutcome { err: string }
+// err-only outcome; concrete enum (no payload on Ok).
+enum FlushOutcome { Ok, Err { error: string } }
 ```
 
 Symmetric to `Readable`. `flush` is its own method because a buffering
 writer needs it; for an unbuffered TcpStream it's a no-op.
 
-### 3.4 `Display` — to-string conversion (new)
+### 3.4 `Display` - to-string conversion (new)
 
 ```yoop
 trait Display {
@@ -281,7 +284,7 @@ trait Display {
 
 Used by template literals (eventually) and by any "format this for
 humans" path. Currently template literals special-case `int`/`float`/
-`bool`/`string` — generalizing to `Display`-implementing types is a
+`bool`/`string` - generalizing to `Display`-implementing types is a
 follow-up.
 
 Library types that have a sensible string form (`SocketAddr`,
@@ -303,12 +306,12 @@ enum IterStep<T> {
 ```
 
 Listed here so future libraries know where it's going to land. Don't
-implement custom iteration today — for the staple library, all "iterate
+implement custom iteration today - for the staple library, all "iterate
 over a collection" cases use plain `for (i = 0; i < len; ...)` loops.
 
 ## 4. Staple kinds
 
-### 4.1 `disposable` (existing — Phase 6.4)
+### 4.1 `disposable` (existing - Phase 6.4)
 
 The only foundational kind library types reach for today. Bound to
 `Disposable.dispose` via `mustCall`. Every resource-owning struct
@@ -328,11 +331,11 @@ that produces a resource type.)
 
 ### 4.2 Future kinds, listed but deferred
 
-- **`pinned`** — value cannot escape its declaring scope. Useful for
+- **`pinned`** - value cannot escape its declaring scope. Useful for
   references that the multiplexer thread holds during a wait. Phase 6.2
   has `mustNotEscape` which is the underlying machinery; a `pinned`
   shorthand could be a follow-up.
-- **`exclusive`** — value cannot be shared across tasks. Sockets are
+- **`exclusive`** - value cannot be shared across tasks. Sockets are
   exclusive in practice (only one task should `recv` on a given fd at
   a time). `mustNotShare` from Phase 6.2 is the machinery; a sugary
   `exclusive` kind would express the intent.
@@ -358,7 +361,7 @@ std/
   net/
     addr.yoop           # SocketAddr type + Display impl
     socket.yoop         # Socket (raw fd wrapper)
-    socket_ffi.yoop     # unsafe — extern declarations
+    socket_ffi.yoop     # unsafe - extern declarations
     tcp.yoop            # TcpListener, TcpStream
   http/
     method.yoop         # HttpMethod enum
@@ -377,7 +380,7 @@ libraries don't collide with.
 
 For now the path is just `import { ... } from "../std/net/tcp.yoop";`.
 Yoop's module-resolver is path-based and doesn't yet have a "std"
-search root — adding one is a small follow-up (see §8).
+search root - adding one is a small follow-up (see §8).
 
 ## 6. Networking layer
 
@@ -411,12 +414,16 @@ type Socket implements Disposable propagates<disposable> {
     }
 }
 
-export type SocketResult { socket: Socket, err: string }
-export function open_tcp_socket(): SocketResult { ... }
+export type SocketResult implements Disposable propagates<disposable> {
+    socket: Socket,
+    error:  string,
+    function dispose(ref self): void { Disposable.dispose(ref self.socket); }
+}
+export function open_tcp_socket(): SocketResult propagates<disposable> { ... }
 ```
 
 A raw fd in a `Disposable` envelope. Users don't usually touch this
-directly — `TcpListener` / `TcpStream` wrap it. Exposed because the
+directly - `TcpListener` / `TcpStream` wrap it. Exposed because the
 network library should have an "escape hatch": if the user needs to
 call `setsockopt` directly, they can.
 
@@ -431,30 +438,36 @@ type TcpListener implements Disposable propagates<disposable> {
     }
 }
 
-export type ListenResult { listener: TcpListener, err: string }
+export type ListenResult implements Disposable propagates<disposable> {
+    listener: TcpListener,
+    error:    string,
+    function dispose(ref self): void { Disposable.dispose(ref self.listener); }
+}
 
-export function listen(addr: SocketAddr, backlog: int32): ListenResult { ... }
+export function listen(addr: SocketAddr, backlog: int32): ListenResult propagates<disposable> { ... }
 ```
 
 `listen` does the socket() + bind() + listen() sequence; on failure
-every intermediate fd is closed and `err` describes which call failed.
+every intermediate fd is closed and `error` describes which call failed.
 
 ```yoop
-export type AcceptResult { stream: TcpStream, peer: SocketAddr, err: string }
+export type AcceptResult implements Disposable propagates<disposable> {
+    stream:    TcpStream,
+    peer_host: uint32,
+    peer_port: uint16,
+    error:     string,
+    function dispose(ref self): void { Disposable.dispose(ref self.stream); }
+}
 
-export task accept(ref l: TcpListener): AcceptResult {
+export task accept(ref l: TcpListener): AcceptResult propagates<disposable> {
     let rc: c_int = yoop_io_wait_readable(l.socket.fd);
-    if (rc != 0) {
-        return { stream: empty_stream, peer: zero_addr, err: ... };
-    }
-    let cfd: c_int = accept(l.socket.fd, ...);
     // ...
 }
 ```
 
 `accept` is `task` because it always blocks until a connection arrives.
 The task suspends on `yoop_io_wait_readable` and resumes when the
-listening fd is readable — the standard reactor pattern.
+listening fd is readable - the standard reactor pattern.
 
 ### 6.4 `TcpStream`
 
@@ -464,15 +477,19 @@ type TcpStream implements Disposable + Readable + Writable propagates<disposable
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
     }
-    function read(ref self, ref buf: uint8[]): ReadOutcome {
-        // wait_readable + read(); convert (-1, errno) to err string.
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        // wait_readable + read(); convert (-1, errno) to Err.
     }
-    function write(ref self, ref buf: uint8[]): WriteOutcome { ... }
-    function flush(ref self): FlushOutcome { return { err: "" }; }
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> { ... }
+    function flush(ref self): FlushOutcome { return FlushOutcome.Ok; }
 }
 
-export type ConnectResult { stream: TcpStream, err: string }
-export task connect(addr: SocketAddr): ConnectResult { ... }
+export type ConnectResult implements Disposable propagates<disposable> {
+    stream: TcpStream,
+    error:  string,
+    function dispose(ref self): void { Disposable.dispose(ref self.stream); }
+}
+export task connect(addr: SocketAddr): ConnectResult propagates<disposable> { ... }
 ```
 
 This is the workhorse. Implements three traits (Disposable + Readable +
@@ -480,7 +497,7 @@ Writable) because that's exactly how a TCP byte stream behaves. Every
 HTTP-layer abstraction takes a `TcpStream` (or any `Readable + Writable`
 when the language allows that constraint).
 
-`connect` is `task` for the same reason `accept` is — it may block.
+`connect` is `task` for the same reason `accept` is - it may block.
 
 ## 7. HTTP layer
 
@@ -516,7 +533,7 @@ type HeaderEntry { name: string, value: string }
 
 type Headers {
     items: HeaderEntry[],
-    // No hash table — linear scan over `items` is fine for typical
+    // No hash table - linear scan over `items` is fine for typical
     // HTTP requests (< 30 headers). A Vec<HeaderEntry> equivalent or
     // a real Map<string, string> can replace this when the language
     // grows them.
@@ -552,31 +569,29 @@ type Client {
 
 export function make_client(): Client { ... }
 
-export type FetchResult { response: Response, err: string }
-
-export task send(ref c: Client, req: Request): FetchResult {
+export task send(ref c: Client, req: Request): Result<Response, string> {
     // 1. Parse URL → SocketAddr + request-target.
     // 2. connect() → TcpStream.
     // 3. Format request + write to stream.
     // 4. Read response.
     // 5. Parse response.
     // 6. Dispose stream.
-    // Returns fallible struct; caller `?`s if needed.
+    // Returns Result<Response, string>; caller `?`s if needed.
 }
 ```
 
 `Client` holds defaults; per-call state lives in `Request` / `Response`.
-No mutation of `Client` across calls — it's effectively a struct of
+No mutation of `Client` across calls - it's effectively a struct of
 configuration.
 
 ### 7.3 Server
 
 ```yoop
 trait Handler {
-    function handle(ref self, req: Request): HandleResult;
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
 }
 
-type HandleResult { response: Response, err: string }
+enum HandleOutcome { Ok, Err { error: string } }
 
 export type Server {
     listener: TcpListener,
@@ -587,7 +602,7 @@ export type Server {
 export task serve<H implements Handler>(server: Server, ref handler: H): int32 {
     while (true) {
         let acc: AcceptResult = wait accept(ref server.listener);
-        if (acc.err.len > 0) {
+        if (acc.error.len > 0) {
             continue; // or break, depending on error policy
         }
         // Spawn a per-connection task. The handler does the request
@@ -640,7 +655,7 @@ A first-cut implementation:
 
 State-machine driven, takes a `Readable` (once the language can
 express that constraint cleanly). Designed so the same parser works
-client-side (parsing responses) and server-side (parsing requests) —
+client-side (parsing responses) and server-side (parsing requests) -
 the request-line vs status-line difference is one branch at the top.
 
 The parser is **not** part of the public surface. Users get a parsed
@@ -669,7 +684,7 @@ function values or trait-object dispatch (§8 open question 3).
 Writing this design surfaces a few gaps the library needs to either
 work around or wait on:
 
-1. **Trait-object parameters.** `function read(ref r: ref Readable)` —
+1. **Trait-object parameters.** `function read(ref r: ref Readable)` -
    "any Readable" as a parameter type. Yoop generics today require an
    explicit `<R implements Readable>` and *monomorphize*. That's fine
    for performance but means every HTTP parser instantiation is a
@@ -756,23 +771,23 @@ work around or wait on:
 
 3. **Function values.** Splits into three cases once (1) lands:
 
-   - **Plain function pointers** — top-level functions referenced by
+   - **Plain function pointers** - top-level functions referenced by
      name, with no captured state. Solved by `=>` types in type
      position (introduced for vtable fields). A field typed
      `(req: Request) => Response` holds the address of any top-level
      function with that signature. A router can store
      `handlers: ((Request) => Response)[]` directly.
-   - **Method bound to a struct instance** — "this `Router`'s
+   - **Method bound to a struct instance** - "this `Router`'s
      `handle`, packaged up." Solved by `vtable`: a single-method
      vtable is exactly this shape. Each handler that needs state
      (db handle, config, etc.) is a struct implementing
      `HandlerTrait`; the router stores `vtable Handler for
      HandlerTrait` values built via `Handler.from(ref h)`.
-   - **Closures** — anonymous functions that capture local variables.
+   - **Closures** - anonymous functions that capture local variables.
      **Not planned, and may never land.** Closures require the
      language to synthesize a capture struct, decide capture-by-ref
      vs by-value, and pick an allocation strategy (heap / arena /
-     stack) — a meaningful complexity tax that may not be worth it
+     stack) - a meaningful complexity tax that may not be worth it
      given the vtable-based workaround.
 
    Workaround for the closure case: hand-roll the capture as a
@@ -791,16 +806,18 @@ work around or wait on:
    isn't an int/float/bool/string).
 
 6. **`std/` import root.** Today, importing the library means
-   `import { ... } from "../../std/net/tcp.yoop";` — relative-path
+   `import { ... } from "../../std/net/tcp.yoop";` - relative-path
    ugly. A search-root mechanism (`import { ... } from "std/net/tcp";`
    resolved against a configured root) is the obvious fix; doesn't
    require any language change, just a driver tweak.
 
-7. **`?` over enums.** A `Result<T, E>` enum can't be `?`-propagated
-   because `?` only understands `err: string`-bearing structs. Phase
-   7.5 introduced enums but didn't extend `?`. If we add it, library
-   code can move to enum-based error types — but the current convention
-   works and is documented.
+7. **Cross-shape `?` propagation.** `?` propagates the operand's `Err`
+   payload into the enclosing function's `Err` variant only when the two
+   payload types match exactly. Mixing `Result<_, IoError>` and
+   `Result<_, AppError>` requires an explicit conversion at the `?` site
+   (Phase 10.E will add a `From`-style trait). Phase 9.H added the
+   enum-`?` recognizer; Phase 10.X retired the struct-fallible
+   convention.
 
 None of these block the library's MVP. They're listed so future phase
 plans know where the friction is.
@@ -822,7 +839,7 @@ both exist, the `std/collections/` module grows `Vec<T>`, `Deque<T>`,
 
 A `std/log/` module with leveled loggers (`info`, `warn`, `error`),
 formatted output via `Display`, and an optional structured-log JSON
-sink. The hard part isn't the library — it's deciding where logs *go*
+sink. The hard part isn't the library - it's deciding where logs *go*
 (stderr by default, a file via env var, a network sink for production).
 The library should expose a `Logger` trait and a `default_logger`
 module-level let. **Design when we need it; not before.**
@@ -844,8 +861,14 @@ A realistic order, each its own phase doc:
   print the body.
 - **Library Phase D**: `std/http/server` (Server, Handler). Demo:
   Hello-World server that handles N requests in sequence.
-- **Library Phase E**: routing, streaming bodies, connection pooling —
-  whichever the §8 language work has unblocked by then.
+- **Library Phase E**: routing, a client, and URL parsing landed as
+  Phase 10.I ([plans/completed/phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md)).
+  `std/http/router.yoop` carries the `Router` + `Dispatcher` vtable;
+  `std/http/client.yoop` ships `client_send` + `http_get`;
+  `std/net/uri.yoop` does the URL parsing. Streaming bodies (Reader-
+  backed `Request.body`), connection pooling / keep-alive, and TLS
+  remain follow-ups - the `Reader`/`Writer` vtables added in 10.I are
+  the language foundation; the parser switch is the next move.
 
 Each phase is small enough to scope into a single PR, has a runnable
 demo, and doesn't depend on the next.

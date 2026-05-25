@@ -1,0 +1,38 @@
+// Phase 9.F: a type that implements `Display` is interpolatable in a
+// template literal. `${value}` rewrites at typecheck time to
+// `Display.to_string(ref value)` and uses the resulting string. Works
+// for both same-module types (Point below) and cross-module types
+// (SocketAddr from std/net/addr.yoop).
+
+import { Display } from "std/core/traits.yoop";
+import { SocketAddr } from "std/net/addr.yoop";
+import * as addr from "std/net/addr.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Point implements Display {
+    x: int32,
+    y: int32,
+    function to_string(ref self): string {
+        // A real impl would assemble "(x, y)" via string_concat; for
+        // the demo we hand back a fixed string so the test asserts the
+        // *trait dispatch* worked, not the string content.
+        return "Point";
+    }
+}
+
+function main(): int32 {
+    let p: Point = { x: 3, y: 4 };
+    let addr: SocketAddr = addr.localhost(8080);
+
+    // Mix Display + primitive interpolations in the same template.
+    printf(`p=${p} x=${p.x}\n`);
+    printf(`addr=${addr} port=${addr.port}\n`);
+    return 0;
+}
+
+// expected output:
+// p=Point x=3
+// addr=127.0.0.1 port=8080

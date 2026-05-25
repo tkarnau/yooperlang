@@ -1,4 +1,4 @@
-// Unit tests for nav.js — the position-resolution and definition lookup
+// Unit tests for nav.js - the position-resolution and definition lookup
 // layer shared by hover / definition / documentSymbol. Drives analyze()
 // against a temp on-disk fixture so the module graph + typecheck run
 // end-to-end and resolvedType / resolvedDeclNode are stamped on the AST.

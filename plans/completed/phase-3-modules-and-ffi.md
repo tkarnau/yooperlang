@@ -1,10 +1,10 @@
-# Phase 3 — Modules and FFI
+# Phase 3 - Modules and FFI
 
 Part of the [roadmap](./roadmap.md). Phase 1 landed structs and a real type system; phase 2 landed errors-as-values. Up to now the compiler has been single-file and printf has been a hardcoded built-in. This phase delivers the "program defines itself" story from [SPEC.md §1](../SPEC.md) and [§12](../SPEC.md): the entry file pulls in everything else through `import`, and FFI declarations (`extern "C" from "stdio.h"` etc.) replace the printf hack and let the program declare its link flags inline. After this phase, real programs that need to call C functions through their headers will work end-to-end with no driver-side knowledge of the C library.
 
 ## Goal
 
-Land a working subset of [SPEC.md §1 — Files, modules, imports, exports](../SPEC.md) and [§12 — Foreign interop](../SPEC.md):
+Land a working subset of [SPEC.md §1 - Files, modules, imports, exports](../SPEC.md) and [§12 - Foreign interop](../SPEC.md):
 
 ```yoop
 // math.yoop
@@ -52,16 +52,16 @@ function main(): int32 {
 - `import * as ns from "./x.yoop"` exposes the module under a single namespace identifier.
 - `import "./x.yoop";` runs the module's top-level decls without binding anything.
 - `export` may prefix any top-level decl (`export function`, `export const`, `export type`). Unprefixed decls are private to the module.
-- `extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; type FILE; }` declares C symbols as if they were yooperlang functions/types — the typechecker treats them as in-scope module-level symbols, and codegen emits the matching `declare` lines.
+- `extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; type FILE; }` declares C symbols as if they were yooperlang functions/types - the typechecker treats them as in-scope module-level symbols, and codegen emits the matching `declare` lines.
 - `extern "C" from library "m" { ... }` does the same and adds `-lm` to the clang link line.
 - `export "C" function on_tick(ms: int32): int32 { ... }` emits an unmangled C-ABI symbol.
 - The compiler refuses cycles between modules (a → b → a), missing imports, missing exports, name collisions across imports, and `?` / observation rules continue to work across module boundaries unchanged.
 
 ## Why this is next
 
-Errors as values in phase 2 use the convention "fallible struct", but the structs that real programs care about — `Bytes` from `read_all`, `Config` from `parse_toml`, etc. — live in libraries and call into C through `fopen` / `fread` / `fclose` etc. Without imports, every program is a single file; without externs, every C function has to be hardcoded into codegen the way printf is today. Both ceilings hit the same way: you can write toy fallible programs but you can't write a real one.
+Errors as values in phase 2 use the convention "fallible struct", but the structs that real programs care about - `Bytes` from `read_all`, `Config` from `parse_toml`, etc. - live in libraries and call into C through `fopen` / `fread` / `fclose` etc. Without imports, every program is a single file; without externs, every C function has to be hardcoded into codegen the way printf is today. Both ceilings hit the same way: you can write toy fallible programs but you can't write a real one.
 
-This phase also unlocks the JAI/nob.h-style "no manifest, no flags" model from the roadmap. Once a `.yoop` file can declare its own link flags via `extern "C" from library "m"`, the driver's CLI can stay at exactly one positional argument — the entry file — through phase 6 at least. That property is worth investing in early because every later phase will sit on top of it.
+This phase also unlocks the JAI/nob.h-style "no manifest, no flags" model from the roadmap. Once a `.yoop` file can declare its own link flags via `extern "C" from library "m"`, the driver's CLI can stay at exactly one positional argument - the entry file - through phase 6 at least. That property is worth investing in early because every later phase will sit on top of it.
 
 Phase 3 has no hard dependency on phase 2 (errors don't need imports), but they were ordered this way because phase 2 is small and self-contained while phase 3 touches every layer of the compiler. Doing 2 first kept the foundation clean.
 
@@ -72,13 +72,13 @@ Phase 3 has no hard dependency on phase 2 (errors don't need imports), but they 
 - **No glob exports.** No `export *`. Every exported name is spelled out.
 - **No package / project root resolution.** Imports resolve relative to the *importing file's directory*, not a project root or `node_modules`-style lookup. Absolute paths and `..` walks are allowed (the spec doesn't forbid them) but no search-path logic.
 - **No `extern "Rust"` / `extern "Zig"`.** The grammar accepts them as reserved syntax (per spec §12) but the typechecker rejects with "only \"C\" externs are supported in v0".
-- **No header parsing.** `extern "C" from "stdio.h" { ... }` doesn't read `stdio.h`. The block contents are the source of truth — yooper-style fn decls that the user writes by hand. The header path is only used as a documentation/grouping affordance for now (it might also drive `-include` flags in a later phase, but not yet).
+- **No header parsing.** `extern "C" from "stdio.h" { ... }` doesn't read `stdio.h`. The block contents are the source of truth - yooper-style fn decls that the user writes by hand. The header path is only used as a documentation/grouping affordance for now (it might also drive `-include` flags in a later phase, but not yet).
 - **No mangled-name override syntax.** The C interop functions inside an `extern "C"` block use their declared name verbatim as the LLVM symbol. There's no `extern "C" function printf as @my_printf`.
-- **No type aliases inside extern blocks beyond opaque `type FILE;` shells.** `type FILE;` (no body) declares an opaque C type that yooper code can hold as `ref FILE` — but we have no `ref T` in the language until phase 4. So in this phase, opaque externs typecheck but you can't *use* a `ref FILE` value yet. The declaration itself works (round-trips through typecheck and codegen). Real consumption arrives with phase 4.
-- **No diamond-dependency deduping bugs to chase down.** A diamond (a→b, a→c, b→d, c→d) loads `d` exactly once; this is the easy property. We do not handle the *multi-version diamond* (a wants d-v1, c wants d-v2) — there are no versions. The compiler just loads each unique absolute path once.
+- **No type aliases inside extern blocks beyond opaque `type FILE;` shells.** `type FILE;` (no body) declares an opaque C type that yooper code can hold as `ref FILE` - but we have no `ref T` in the language until phase 4. So in this phase, opaque externs typecheck but you can't *use* a `ref FILE` value yet. The declaration itself works (round-trips through typecheck and codegen). Real consumption arrives with phase 4.
+- **No diamond-dependency deduping bugs to chase down.** A diamond (a→b, a→c, b→d, c→d) loads `d` exactly once; this is the easy property. We do not handle the *multi-version diamond* (a wants d-v1, c wants d-v2) - there are no versions. The compiler just loads each unique absolute path once.
 - **No incremental compilation.** Every `yoopiler` invocation reparses and retypechecks the full graph. Caching is a phase 7+ concern.
 - **No C-ABI struct-passing rules.** `export "C" function` rejects functions that take or return struct values until phase 4 brings refs in. Primitive params + primitive return only.
-- **No printf-format string validation across modules.** printf's variadic typing is what it was in phase 1 — codegen drives format specifiers from arg types. No new analysis here.
+- **No printf-format string validation across modules.** printf's variadic typing is what it was in phase 1 - codegen drives format specifiers from arg types. No new analysis here.
 
 ---
 
@@ -90,7 +90,7 @@ Nothing for phase 3 has been built yet. Phase 1 + 2 leave:
 - Driver ([yoopiler.js](../src/yoopiler.js)) reads one file, calls clang with no link flags.
 - printf, fprintf, puts, exit, strlen are baked into [externDecl()](../src/jsyoopcodegen/codegen.js#L962) and [KNOWN_EXTERNS](../src/jsyooptypecheck/checkStatement.js#L47) respectively. Calling any other unknown name codegens to a stub `declare i32 @<name>(...)`.
 - `parse()` only accepts `function` and `type` decls at the top level; everything else throws.
-- Symbol resolution is one flat `moduleSymbols` map per parse — there's no concept of "another module".
+- Symbol resolution is one flat `moduleSymbols` map per parse - there's no concept of "another module".
 
 Phase 3 reshapes the pipeline:
 
@@ -105,21 +105,21 @@ Phase 3 reshapes the pipeline:
 
 ## Files touched
 
-- [src/contracts.js](../src/contracts.js) — new AST kinds: `IMPORT_DECL`, `EXPORT_DECL`, `EXTERN_BLOCK`, `EXTERN_FUNCTION_DECL`, `EXTERN_TYPE_DECL`, `EXPORT_C_FUNCTION_DECL`, `NAMESPACE_IDENT`.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — `import`, `export`, `extern`, `from`, `as`, `library` keywords. `...` (rest token) for variadic externs.
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — top-level dispatch grows: `parseImportDecl`, `parseExportDecl`, `parseExternBlock`, `parseExportCFunctionDecl`. Inside extern blocks: `parseExternFunctionDecl`, `parseExternTypeDecl`.
-- New file `src/jsyoopdriver/moduleGraph.js` — `loadModuleGraph(entryPath)` walks imports, dedupes by canonical path, detects cycles. Returns `[Module]`.
-- New file `src/jsyoopdriver/moduleId.js` — `moduleIdFor(absPath, repoRoot)` returns a stable, valid-LLVM-symbol identifier. Pure.
-- [src/yoopiler.js](../src/yoopiler.js) — replace single-file flow with module-graph flow; thread `linkFlags` to clang.
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — new entry point `typecheckProgram(modules)`; per-module typecheck pass.
-- New file `src/jsyooptypecheck/imports.js` — `resolveImports(module, allModules, errors)`: validates every import binds to a real export and returns a per-module symbol overlay.
-- [src/jsyooptypecheck/scope.js](../src/jsyooptypecheck/scope.js) — extend bindings with `kind: "namespace"` so `lookupInScope` can return a namespace value.
-- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — extend `resolveFieldAccess` to handle namespace identifiers (`io.greet`).
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `NamespaceType { moduleId, exports }`. `resolveTypeFromName` learns to consult imported types via the per-module overlay.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — new entry point `codegenProgram(modules)`; mangling helper `mangle(moduleId, name)`; extern emit now sourced from the AST instead of `KNOWN_EXTERNS`. Track and return `linkFlags`.
-- [src/e2e.test.js](../src/e2e.test.js) — new pass + fail fixtures (see §11).
-- [examples/pass/](../examples/pass/) — multi-file fixtures land as directories: each fixture's entry is the `main.yoop` inside a folder.
-- [examples/fail/](../examples/fail/) — single-file *or* directory fail fixtures with expected typecheck-error patterns.
+- [src/contracts.js](../src/contracts.js) - new AST kinds: `IMPORT_DECL`, `EXPORT_DECL`, `EXTERN_BLOCK`, `EXTERN_FUNCTION_DECL`, `EXTERN_TYPE_DECL`, `EXPORT_C_FUNCTION_DECL`, `NAMESPACE_IDENT`.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - `import`, `export`, `extern`, `from`, `as`, `library` keywords. `...` (rest token) for variadic externs.
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - top-level dispatch grows: `parseImportDecl`, `parseExportDecl`, `parseExternBlock`, `parseExportCFunctionDecl`. Inside extern blocks: `parseExternFunctionDecl`, `parseExternTypeDecl`.
+- New file `src/jsyoopdriver/moduleGraph.js` - `loadModuleGraph(entryPath)` walks imports, dedupes by canonical path, detects cycles. Returns `[Module]`.
+- New file `src/jsyoopdriver/moduleId.js` - `moduleIdFor(absPath, repoRoot)` returns a stable, valid-LLVM-symbol identifier. Pure.
+- [src/yoopiler.js](../src/yoopiler.js) - replace single-file flow with module-graph flow; thread `linkFlags` to clang.
+- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) - new entry point `typecheckProgram(modules)`; per-module typecheck pass.
+- New file `src/jsyooptypecheck/imports.js` - `resolveImports(module, allModules, errors)`: validates every import binds to a real export and returns a per-module symbol overlay.
+- [src/jsyooptypecheck/scope.js](../src/jsyooptypecheck/scope.js) - extend bindings with `kind: "namespace"` so `lookupInScope` can return a namespace value.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - extend `resolveFieldAccess` to handle namespace identifiers (`io.greet`).
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - `NamespaceType { moduleId, exports }`. `resolveTypeFromName` learns to consult imported types via the per-module overlay.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - new entry point `codegenProgram(modules)`; mangling helper `mangle(moduleId, name)`; extern emit now sourced from the AST instead of `KNOWN_EXTERNS`. Track and return `linkFlags`.
+- [src/e2e.test.js](../src/e2e.test.js) - new pass + fail fixtures (see §11).
+- [examples/pass/](../examples/pass/) - multi-file fixtures land as directories: each fixture's entry is the `main.yoop` inside a folder.
+- [examples/fail/](../examples/fail/) - single-file *or* directory fail fixtures with expected typecheck-error patterns.
 
 ---
 
@@ -151,7 +151,7 @@ EXTERN_FUNCTION_DECL: "EXTERN_FUNCTION_DECL",
 //   { name, params: [PARAM], variadic: bool, returnType: string, sourceLoc }
 
 EXTERN_TYPE_DECL: "EXTERN_TYPE_DECL",
-//   { name, sourceLoc }              // opaque — no fields
+//   { name, sourceLoc }              // opaque - no fields
 
 EXPORT_C_FUNCTION_DECL: "EXPORT_C_FUNCTION_DECL",
 //   { fn: FUNCTION_DECL, sourceLoc } // wraps a normal FUNCTION_DECL with the
@@ -167,8 +167,8 @@ NAMESPACE_IDENT: "NAMESPACE_IDENT",
 Why each is a new kind, not a reuse:
 
 - `IMPORT_DECL` and `EXPORT_DECL` are *declarations*, not statements. Reusing `LET_DECL` would mean carrying around `kind === "let"` plus side-fields that don't apply.
-- `EXTERN_BLOCK` is a *grouped* container — it lifts the `from "stdio.h"` / `from library "m"` info up so codegen can attribute every contained extern back to a header/lib without re-walking. Modeling it as a flat list of externs would lose that grouping.
-- `EXTERN_FUNCTION_DECL` could in principle be a `FUNCTION_DECL` with `body: null`, but the variadic flag (`...`) doesn't exist on yooper functions — only on externs. Plus codegen treats `EXTERN_FUNCTION_DECL` very differently (just emits `declare ...`, no body).
+- `EXTERN_BLOCK` is a *grouped* container - it lifts the `from "stdio.h"` / `from library "m"` info up so codegen can attribute every contained extern back to a header/lib without re-walking. Modeling it as a flat list of externs would lose that grouping.
+- `EXTERN_FUNCTION_DECL` could in principle be a `FUNCTION_DECL` with `body: null`, but the variadic flag (`...`) doesn't exist on yooper functions - only on externs. Plus codegen treats `EXTERN_FUNCTION_DECL` very differently (just emits `declare ...`, no body).
 - `EXPORT_C_FUNCTION_DECL` wraps rather than flagging because the wrapper carries the codegen instruction "emit unmangled" without polluting `FUNCTION_DECL`'s shape.
 - `NAMESPACE_IDENT` is *synthesized* by the typechecker when it sees `IDENT { name: "io" }` and the binding is a namespace. Keeping it distinct from `IDENT` lets codegen reject `io` in any context that's not the LHS of a `FIELD_ACCESS`.
 
@@ -207,11 +207,11 @@ library: TokenTags.library,
 
 The list re-sorts by length, so `...` lands before `.`. Verify with a unit test that `a...b` (which would never occur in real source but is a sanity check) lexes as three tokens, and that `a.b.c` still lexes as five tokens (no greedy `...` match across an identifier).
 
-> **`library` as a keyword.** The spec lists "library" only inside `extern "C" from library "m"`. Making it a hard keyword would steal a perfectly good identifier name. The trade-off: contextual keywords need parser help. We make it a hard keyword for now (it's listed in the reserved-words table at SPEC §14 implicitly via `from`'s context — and the alternative is fragile). If users complain we can demote later by parsing `from <ident>` and special-casing `<ident>.value === "library"` in `parseExternBlock`. Not in v0.
+> **`library` as a keyword.** The spec lists "library" only inside `extern "C" from library "m"`. Making it a hard keyword would steal a perfectly good identifier name. The trade-off: contextual keywords need parser help. We make it a hard keyword for now (it's listed in the reserved-words table at SPEC §14 implicitly via `from`'s context - and the alternative is fragile). If users complain we can demote later by parsing `from <ident>` and special-casing `<ident>.value === "library"` in `parseExternBlock`. Not in v0.
 
 > **`as` as a keyword.** Same trade-off; same decision. It's used in two places: `import { x as y }` and `import * as ns`. Both are syntactically distinguishable and `as` doesn't show up in expressions, so making it a keyword is safe.
 
-> **`...` for variadic externs only.** The token is rejected by the parser everywhere except inside an `EXTERN_FUNCTION_DECL`'s param list. We don't have first-class variadics in yooper — printf is the only function that uses them and it's defined inside an extern block.
+> **`...` for variadic externs only.** The token is rejected by the parser everywhere except inside an `EXTERN_FUNCTION_DECL`'s param list. We don't have first-class variadics in yooper - printf is the only function that uses them and it's defined inside an extern block.
 
 ---
 
@@ -239,7 +239,7 @@ case TokenTags.extern:
 - `export type ...` → wrap a `parseTypeDecl()` result
 - `export const ...` / `export let ...` → wrap a `parseVarDecl()` result
 
-> **Source ordering rule.** Spec §1 doesn't fix import position, but to keep the parser simple, **imports must precede all other top-level decls**. Mixing imports between functions parses cleanly enough today, but the typechecker assumes "imports are all collected up front" — see §5.b. Enforce in the parser: once we've seen any non-import top-level decl, an `import` keyword is a syntax error ("imports must come before other declarations").
+> **Source ordering rule.** Spec §1 doesn't fix import position, but to keep the parser simple, **imports must precede all other top-level decls**. Mixing imports between functions parses cleanly enough today, but the typechecker assumes "imports are all collected up front" - see §5.b. Enforce in the parser: once we've seen any non-import top-level decl, an `import` keyword is a syntax error ("imports must come before other declarations").
 
 ### 3.b `parseImportDecl`
 
@@ -304,7 +304,7 @@ function parseImportDecl() {
 }
 ```
 
-Helper `unquoteStringLiteral(src, tok)` strips the surrounding `"` from a strLiteral token. Reuse-friendly — `parseExternBlock` needs it too.
+Helper `unquoteStringLiteral(src, tok)` strips the surrounding `"` from a strLiteral token. Reuse-friendly - `parseExternBlock` needs it too.
 
 ### 3.c `parseExportDecl`
 
@@ -318,7 +318,7 @@ function parseExportDecl() {
     const abiTok = advance();
     const abi = unquoteStringLiteral(src, abiTok);
     if (abi !== "C") {
-      throw new Error(`unsupported export ABI "${abi}" — only "C" is supported`);
+      throw new Error(`unsupported export ABI "${abi}" - only "C" is supported`);
     }
     return parseExportCFunctionDecl(sourceLoc);
   }
@@ -357,7 +357,7 @@ function parseExternBlock() {
   const abiTok = expect(TokenTags.strLiteral);
   node.abi = unquoteStringLiteral(src, abiTok);
   if (node.abi !== "C") {
-    throw new Error(`unsupported extern ABI "${node.abi}" — only "C" is supported in v0`);
+    throw new Error(`unsupported extern ABI "${node.abi}" - only "C" is supported in v0`);
   }
   expect(TokenTags.from);
   if (peek().tag === TokenTags.library) {
@@ -430,17 +430,17 @@ Add to [parser.test.js](../src/jsyooparser/parser.test.js):
 - `function f(): int32 {}\nimport ...` (import after non-import top-level) → "imports must come before other declarations"
 - `extern "Rust" from "..."` → "unsupported extern ABI \"Rust\""
 - `import * from "./m.yoop";` (missing `as` clause) → parse error
-- `extern "C" from library "m" { function f(...): int32; }` (variadic with no preceding params) — actually allowed (printf-shape). Make sure this parses without throwing.
+- `extern "C" from library "m" { function f(...): int32; }` (variadic with no preceding params) - actually allowed (printf-shape). Make sure this parses without throwing.
 
 ---
 
-## 4. Driver — module graph walker (`src/jsyoopdriver/moduleGraph.js`, new file)
+## 4. Driver - module graph walker (`src/jsyoopdriver/moduleGraph.js`, new file)
 
 The shape:
 
 ```js
 // Module
-//   id: string                  // "main", "math__a8c1", etc — see moduleId.js
+//   id: string                  // "main", "math__a8c1", etc - see moduleId.js
 //   absPath: string             // canonicalized via fs.realpathSync
 //   sourcePath: string          // as the user typed it (only for the entry)
 //   src: string                 // file contents
@@ -457,7 +457,7 @@ Algorithm:
 function loadModuleGraph(entryAbsPath) {
   const byPath = new Map();         // absPath -> Module
   const onStack = new Set();         // absPath in current DFS path (cycle detection)
-  const order = [];                  // post-order — leaves first
+  const order = [];                  // post-order - leaves first
   loadOne(entryAbsPath);
   return { entry: byPath.get(entryAbsPath), modules: order };
 
@@ -499,7 +499,7 @@ Notes:
 - **Cycle policy**: hard error in v0. Programs that need cycles can split shared declarations into a third module. The error is "import cycle detected" with the ring of paths reported. (Mutual recursion *within* a single module already works because typecheck pre-passes function signatures before bodies.)
 - **Path canonicalization** uses `fs.realpathSync` so `./foo.yoop` and `./bar/../foo.yoop` dedupe correctly. Casing on macOS / Windows is the OS's call.
 - **Topological order** of returned `modules` is leaves-first, which is the order codegen wants (so a module's emitted IR can reference the symbols of any module it imports).
-- **Errors during walk** throw immediately; there's no error-collection mode here. Users get one error message and a stack — typecheck-error collection comes later, after the graph is loaded.
+- **Errors during walk** throw immediately; there's no error-collection mode here. Users get one error message and a stack - typecheck-error collection comes later, after the graph is loaded.
 
 ### 4.a `moduleIdFor(absPath)` (`src/jsyoopdriver/moduleId.js`, new file)
 
@@ -544,11 +544,11 @@ const clangArgs = [tmpIR, "-o", outputFileName, ...linkFlags.map(f => `-l${f}`)]
 execFileSync(clangArg0, clangArgs, { stdio: "inherit" });
 ```
 
-Existing single-file callers (`compileSource`, `typecheckSource`) remain — they wrap a fake one-module graph for unit-test convenience.
+Existing single-file callers (`compileSource`, `typecheckSource`) remain - they wrap a fake one-module graph for unit-test convenience.
 
 ---
 
-## 5. Typechecker — module-aware ([typecheck.js](../src/jsyooptypecheck/typecheck.js))
+## 5. Typechecker - module-aware ([typecheck.js](../src/jsyooptypecheck/typecheck.js))
 
 ### 5.a Surface
 
@@ -565,7 +565,7 @@ export function typecheckProgram(modules) {
   // pass B: struct fields, extern symbols
   for (const mod of modules) resolveStructFields(mod, moduleEnv, errors);
 
-  // pass C: import resolution — wire imported names into each module's overlay
+  // pass C: import resolution - wire imported names into each module's overlay
   for (const mod of modules) resolveImports(mod, moduleEnv, errors);
 
   // pass D: function bodies (typechecked against each module's local + imported overlay)
@@ -586,7 +586,7 @@ export function typecheck(ast) {
 }
 ```
 
-### 5.b Per-module symbol table — `moduleEnv.get(id)`
+### 5.b Per-module symbol table - `moduleEnv.get(id)`
 
 ```js
 {
@@ -601,7 +601,7 @@ export function typecheck(ast) {
 
 Why per-module:
 - Two modules can both define `function helper()` privately. Without per-module tables they'd collide.
-- A module's `import { x }` must resolve to a specific other module's exports — not "every module's exports".
+- A module's `import { x }` must resolve to a specific other module's exports - not "every module's exports".
 
 ### 5.c Pass A: shells
 
@@ -687,7 +687,7 @@ function resolveImports(mod, moduleEnv, errors) {
 ```
 
 Notes:
-- Importing a struct *type* makes the local name available both as a type (annotation) and at runtime — but yooper has no type-as-value, so only the annotation use matters.
+- Importing a struct *type* makes the local name available both as a type (annotation) and at runtime - but yooper has no type-as-value, so only the annotation use matters.
 - Importing a `function` makes its `FuncType` visible to call resolution but doesn't import any private symbols transitively. No re-export.
 - Renaming (`as`) only affects local lookup; the source module sees no difference.
 
@@ -714,7 +714,7 @@ function resolveFieldAccess(node, scope, ctx) {
 }
 ```
 
-A `NAMESPACE_IDENT` outside a `FIELD_ACCESS` LHS is an error: "namespace identifier `io` cannot be used as a value — access a member with `io.<name>`".
+A `NAMESPACE_IDENT` outside a `FIELD_ACCESS` LHS is an error: "namespace identifier `io` cannot be used as a value - access a member with `io.<name>`".
 
 ### 5.g `resolveCall` updates
 
@@ -723,13 +723,13 @@ Currently `resolveCall` routes by `node.callee` (a string) into `KNOWN_EXTERNS`,
 1. If `node.callee` is a string and lives in the current module's `localSymbols`, use that.
 2. If `node.callee` is a `FIELD_ACCESS` on a namespace, resolve through that.
 3. If `node.callee` is in `importedNames` with kind `"value"`, use the source module's symbol.
-4. If `node.callee` is one of the legacy `KNOWN_EXTERNS` (`puts`, `exit`) AND the current module has *no* explicit extern decl for that name, fall back to it. **This is a transitional kindness** — once stdlib-ish files exist, `KNOWN_EXTERNS` gets removed entirely. For phase 3 we keep the fallback so existing single-file fixtures don't break.
+4. If `node.callee` is one of the legacy `KNOWN_EXTERNS` (`puts`, `exit`) AND the current module has *no* explicit extern decl for that name, fall back to it. **This is a transitional kindness** - once stdlib-ish files exist, `KNOWN_EXTERNS` gets removed entirely. For phase 3 we keep the fallback so existing single-file fixtures don't break.
 
 > **printf transition.** [SPEC.md §15](../SPEC.md) shows printf used freely without an extern import in many places. The transitional kindness above keeps the existing fixtures (which call `printf` directly) working: if `printf` is not declared, codegen falls back to the existing `extern declaration` emission. Once we have an `io.yoop` stdlib module the user can `import` from, we delete the fallback. That deletion is a follow-up, not part of phase 3 exit criteria.
 
 ### 5.h Variadic externs
 
-Variadic flag travels on the FuncType (new field `variadic: bool`) and `resolveCall` skips arity / param-type checking past the declared params. printf's existing check at [codegen.js:569+](../src/jsyoopcodegen/codegen.js#L569) already drives format spec from arg types — that path is unchanged; the typechecker just stops policing it after the fixed args. (Currently the typechecker doesn't policed printf at all — it's special-cased in codegen. With variadic externs the typechecker validates the *fixed* prefix and walks arg types but emits no errors for variadic tail.)
+Variadic flag travels on the FuncType (new field `variadic: bool`) and `resolveCall` skips arity / param-type checking past the declared params. printf's existing check at [codegen.js:569+](../src/jsyoopcodegen/codegen.js#L569) already drives format spec from arg types - that path is unchanged; the typechecker just stops policing it after the fixed args. (Currently the typechecker doesn't policed printf at all - it's special-cased in codegen. With variadic externs the typechecker validates the *fixed* prefix and walks arg types but emits no errors for variadic tail.)
 
 ### 5.i Mutating `validateFunction`
 
@@ -737,7 +737,7 @@ The `ctx` passed into `validateFunction` already carries `typeContext`. Add `mod
 
 ---
 
-## 6. Codegen — multi-module ([codegen.js](../src/jsyoopcodegen/codegen.js))
+## 6. Codegen - multi-module ([codegen.js](../src/jsyoopcodegen/codegen.js))
 
 ### 6.a Surface
 
@@ -770,8 +770,8 @@ function mangle(moduleId, localName) {
 
 Rules:
 - Every yooper-internal function and global is mangled.
-- Every `extern "C"` symbol is **NOT** mangled — it's whatever the user wrote (`@printf`, `@cos`, `@strlen`).
-- Every `export "C" function` is **NOT** mangled — the user's name is the C ABI symbol.
+- Every `extern "C"` symbol is **NOT** mangled - it's whatever the user wrote (`@printf`, `@cos`, `@strlen`).
+- Every `export "C" function` is **NOT** mangled - the user's name is the C ABI symbol.
 - Every `import { x } from "./other.yoop"` call site emits `@<other_module_id>__x`.
 - `import * as ns; ns.x()` → also `@<other_module_id>__x`.
 
@@ -798,7 +798,7 @@ function emitExternDecls(mod, externs) {
 }
 ```
 
-`KNOWN_EXTERNS` and the per-name lookup table at [codegen.js:962-971](../src/jsyoopcodegen/codegen.js#L962-L971) shrink dramatically — only the legacy printf-without-extern fallback remains. Eventually it goes away once an io.yoop stdlib module is in.
+`KNOWN_EXTERNS` and the per-name lookup table at [codegen.js:962-971](../src/jsyoopcodegen/codegen.js#L962-L971) shrink dramatically - only the legacy printf-without-extern fallback remains. Eventually it goes away once an io.yoop stdlib module is in.
 
 ### 6.d Link flags
 
@@ -838,9 +838,9 @@ Cleanest: pre-walk lowers `FIELD_ACCESS { object: NAMESPACE_IDENT, namespaceLook
 
 If `math.yoop` exports `type Vec2`, and `main.yoop` does `import { Vec2 }`, both modules end up referencing the same `StructType` object (same name `Vec2`). But codegen must emit `%struct.Vec2 = type { ... }` exactly once. Solve by:
 - Tracking emitted struct names in a module-set scope (`emittedStructs: Set<string>`) shared across all modules in `codegenProgram`.
-- The struct's name in IR is `%struct.<moduleId>__<typeName>` — i.e., struct names are also mangled. `Vec2` from `math.yoop` becomes `%struct.math_a8c1f203__Vec2`. Imports in `main.yoop` reference *that* name, not a re-emitted local one.
+- The struct's name in IR is `%struct.<moduleId>__<typeName>` - i.e., struct names are also mangled. `Vec2` from `math.yoop` becomes `%struct.math_a8c1f203__Vec2`. Imports in `main.yoop` reference *that* name, not a re-emitted local one.
 
-This means `llvmType` for a struct type needs the source module's id, not just the type name. Add `moduleId` to the StructType payload during the typecheck struct-shell pass — the same field already exists conceptually as part of the type's identity.
+This means `llvmType` for a struct type needs the source module's id, not just the type name. Add `moduleId` to the StructType payload during the typecheck struct-shell pass - the same field already exists conceptually as part of the type's identity.
 
 ### 6.h Test-runner test surface
 
@@ -865,11 +865,11 @@ The diff:
 
 ### 8.a Importing a name that doesn't exist
 
-`import { nope } from "./m.yoop";` where `m.yoop` doesn't export `nope`. Error at pass C: `module "./m.yoop" has no export "nope"`. Source location is the specifier inside the import block — point at the right name, not the whole line.
+`import { nope } from "./m.yoop";` where `m.yoop` doesn't export `nope`. Error at pass C: `module "./m.yoop" has no export "nope"`. Source location is the specifier inside the import block - point at the right name, not the whole line.
 
 ### 8.b Importing a private name
 
-Same shape as 8.a — non-exported names are not in the source module's `exports` set, so the lookup fails the same way.
+Same shape as 8.a - non-exported names are not in the source module's `exports` set, so the lookup fails the same way.
 
 ### 8.c Re-importing the same name twice
 
@@ -896,11 +896,11 @@ function main(): int32 {
 }
 ```
 
-`resolveFieldAccess` checks `ns.exports.has(field)`. Reject with: `namespace "m" has no export "private"`. Don't leak the fact that there's a private function with that name — but the error message is still clear.
+`resolveFieldAccess` checks `ns.exports.has(field)`. Reject with: `namespace "m" has no export "private"`. Don't leak the fact that there's a private function with that name - but the error message is still clear.
 
 ### 8.e Cycles
 
-`a.yoop` imports `b.yoop`; `b.yoop` imports `a.yoop`. Detected at graph load (`onStack` check) → throw `import cycle detected: a.yoop -> b.yoop -> a.yoop`. Hard error — split the shared declarations into a third module.
+`a.yoop` imports `b.yoop`; `b.yoop` imports `a.yoop`. Detected at graph load (`onStack` check) → throw `import cycle detected: a.yoop -> b.yoop -> a.yoop`. Hard error - split the shared declarations into a third module.
 
 ### 8.f File path canonicalization
 
@@ -908,7 +908,7 @@ function main(): int32 {
 
 ### 8.g Imports of files outside the entry's tree
 
-`import "../shared/u.yoop";` is allowed. Filesystem says it's there or not. If absent, `fs.readFileSync` throws — bubble up as a parse error with the importing file's source location.
+`import "../shared/u.yoop";` is allowed. Filesystem says it's there or not. If absent, `fs.readFileSync` throws - bubble up as a parse error with the importing file's source location.
 
 ### 8.h An `extern` declaration that shadows a local
 
@@ -923,23 +923,23 @@ extern "C" from "stdio.h" { type FILE; }
 function f(p: FILE): int32 { return 0; }
 ```
 
-Reject: `cannot use opaque extern type "FILE" as a value parameter — use ref FILE (refs land in phase 4)`. Until phase 4, opaque externs are declaration-only — they parse and typecheck but every code-position use is rejected. This keeps the symbol available so `extern "C" from "stdio.h" { function fopen(...): ref FILE; }` parses; the rejection moves into the call-site type check.
+Reject: `cannot use opaque extern type "FILE" as a value parameter - use ref FILE (refs land in phase 4)`. Until phase 4, opaque externs are declaration-only - they parse and typecheck but every code-position use is rejected. This keeps the symbol available so `extern "C" from "stdio.h" { function fopen(...): ref FILE; }` parses; the rejection moves into the call-site type check.
 
 ### 8.j Variadic extern called with zero variadic args
 
-`printf("hello\n")` (no `${...}` parts) — fine, just one fixed arg, zero variadic. Existing printf logic already handles this.
+`printf("hello\n")` (no `${...}` parts) - fine, just one fixed arg, zero variadic. Existing printf logic already handles this.
 
 ### 8.k `export "C" function` with an `int` return
 
-`export "C" function on_tick(ms: int32): int32 { return ms + 1; }` — emits `define i32 @on_tick(i32 %ms) { ... }`. No mangling. Should be callable from C code that links against the produced object. (We don't test this in v0 — the test fixtures all have a yooper `main`. But the IR shape should be right.)
+`export "C" function on_tick(ms: int32): int32 { return ms + 1; }` - emits `define i32 @on_tick(i32 %ms) { ... }`. No mangling. Should be callable from C code that links against the produced object. (We don't test this in v0 - the test fixtures all have a yooper `main`. But the IR shape should be right.)
 
 ### 8.l `export "C" function` whose name collides with an `extern` declaration
 
-`extern "C" from "stdio.h" { function foo(): int32; }` plus `export "C" function foo(): int32 { return 0; }`. Both want symbol `@foo` unmangled — link error at clang time. We *can* catch this at typecheck (both register `foo` in localSymbols → collision). Do so.
+`extern "C" from "stdio.h" { function foo(): int32; }` plus `export "C" function foo(): int32 { return 0; }`. Both want symbol `@foo` unmangled - link error at clang time. We *can* catch this at typecheck (both register `foo` in localSymbols → collision). Do so.
 
 ### 8.m Side-effect-only imports run nothing yet
 
-`import "./init.yoop";` — yooper has no top-level code outside functions. So a side-effect-only import contributes only its struct/extern/library decls to the link, not any executed code. The driver's job is to load and typecheck the module so its declarations are registered. Codegen still emits the module's function bodies as defined-but-uncalled — clang won't dead-strip them by default, but that's fine for v0.
+`import "./init.yoop";` - yooper has no top-level code outside functions. So a side-effect-only import contributes only its struct/extern/library decls to the link, not any executed code. The driver's job is to load and typecheck the module so its declarations are registered. Codegen still emits the module's function bodies as defined-but-uncalled - clang won't dead-strip them by default, but that's fine for v0.
 
 ### 8.n Imported struct in destructure target
 
@@ -948,11 +948,11 @@ import { Bytes } from "./io.yoop";
 function consume(b: Bytes): int32 { const { len, err } = b; ... }
 ```
 
-The imported `Bytes` is a fully-resolved StructType (same object, due to pass A sharing). `checkDestructureDecl` already handles this — no new code.
+The imported `Bytes` is a fully-resolved StructType (same object, due to pass A sharing). `checkDestructureDecl` already handles this - no new code.
 
 ### 8.o A namespace import used as a function call
 
-`import * as io from "./io.yoop"; io();` — `io` resolves to a NamespaceType, `resolveCall` rejects: `cannot call namespace "io" — use io.<name>`.
+`import * as io from "./io.yoop"; io();` - `io` resolves to a NamespaceType, `resolveCall` rejects: `cannot call namespace "io" - use io.<name>`.
 
 ### 8.p A `?` across module boundaries
 
@@ -969,13 +969,13 @@ function load(): Bytes {
 }
 ```
 
-`read_all` returns the *imported* `Bytes`, which is the same StructType object as in `io.yoop`. `isFallible(t)` returns true. The `?` lowering proceeds normally and returns the *enclosing function's* return type — also `Bytes`, which happens to be the same struct. Good.
+`read_all` returns the *imported* `Bytes`, which is the same StructType object as in `io.yoop`. `isFallible(t)` returns true. The `?` lowering proceeds normally and returns the *enclosing function's* return type - also `Bytes`, which happens to be the same struct. Good.
 
-The pathological case: `function load(): MainBytes { const n = read_all("foo")?; ... }` where `MainBytes` is a *different* fallible type. The `?` semantics already say "fail-variant return uses the *enclosing* function's return type, with err copied across". Cross-module doesn't change that. Just make sure codegen reads the enclosing return type correctly — it already does.
+The pathological case: `function load(): MainBytes { const n = read_all("foo")?; ... }` where `MainBytes` is a *different* fallible type. The `?` semantics already say "fail-variant return uses the *enclosing* function's return type, with err copied across". Cross-module doesn't change that. Just make sure codegen reads the enclosing return type correctly - it already does.
 
 ### 8.q Forward-referencing exports across modules
 
-`a.yoop` imports `Vec2` from `b.yoop`; `b.yoop` declares `Vec2` after declaring something that references `Vec2`. The two passes (A: shells, B: fields) decouple this: shells are registered before any field types resolve, so cross-module forward references work too — provided no *cycle* is involved.
+`a.yoop` imports `Vec2` from `b.yoop`; `b.yoop` declares `Vec2` after declaring something that references `Vec2`. The two passes (A: shells, B: fields) decouple this: shells are registered before any field types resolve, so cross-module forward references work too - provided no *cycle* is involved.
 
 ### 8.r Non-`.yoop` file paths
 
@@ -989,11 +989,11 @@ Allowed. `extern "C" from library "m" { ... }` in a module that's transitively i
 
 ## 9. Tests
 
-### 9.1 Pass fixtures — [examples/pass/](../examples/pass/)
+### 9.1 Pass fixtures - [examples/pass/](../examples/pass/)
 
 Multi-file fixtures live in their own directories; each has a `main.yoop` that's the entry. The e2e harness invokes the entry path.
 
-#### `imports_basic/` — named import + use
+#### `imports_basic/` - named import + use
 
 ```
 imports_basic/
@@ -1018,7 +1018,7 @@ function main(): int32 {
 
 Expected: `9 = 9`.
 
-#### `imports_namespace/` — `import * as` + dotted call
+#### `imports_namespace/` - `import * as` + dotted call
 
 ```yoop
 // main.yoop
@@ -1032,7 +1032,7 @@ function main(): int32 {
 
 Expected: `5 = 5`.
 
-#### `imports_renamed/` — `import { x as y }` works
+#### `imports_renamed/` - `import { x as y }` works
 
 ```yoop
 // main.yoop
@@ -1046,7 +1046,7 @@ function main(): int32 {
 
 Expected: `16 = 16`.
 
-#### `imports_struct/` — exported struct + cross-module fallible flow
+#### `imports_struct/` - exported struct + cross-module fallible flow
 
 ```yoop
 // io.yoop
@@ -1074,7 +1074,7 @@ function main(): int32 {
 
 Expected: `len = 43`. Exercises imported struct, `?` across modules, cross-module fallible composition.
 
-#### `extern_printf/` — explicit printf via extern
+#### `extern_printf/` - explicit printf via extern
 
 ```yoop
 // main.yoop
@@ -1090,7 +1090,7 @@ function main(): int32 {
 
 Expected: `hello`. Verifies the extern path emits the same `declare i32 @printf(ptr, ...)` as the legacy hardcoded path.
 
-#### `extern_library/` — `-lm` link flag
+#### `extern_library/` - `-lm` link flag
 
 ```yoop
 // main.yoop
@@ -1110,7 +1110,7 @@ function main(): int32 {
 
 Expected: `cos(0) = 1.000000`. Asserts `linkFlags` contains `m` and clang receives `-lm`.
 
-#### `imports_diamond/` — diamond loads each module once
+#### `imports_diamond/` - diamond loads each module once
 
 ```
 diamond/
@@ -1150,7 +1150,7 @@ function main(): int32 {
 
 Expected: `a=42 b=42`. Asserts the IR contains exactly one `define i32 @util_<hash>__answer` (not two).
 
-#### `side_effect_import/` — module loaded only for its decls
+#### `side_effect_import/` - module loaded only for its decls
 
 ```yoop
 // init.yoop
@@ -1168,13 +1168,13 @@ function main(): int32 {
 }
 ```
 
-Wait — `cos` is a *symbol* in `init.yoop`, and a side-effect import does NOT bind that symbol into `main.yoop`. So `main.yoop`'s call to `cos` is unresolved.
+Wait - `cos` is a *symbol* in `init.yoop`, and a side-effect import does NOT bind that symbol into `main.yoop`. So `main.yoop`'s call to `cos` is unresolved.
 
 Two interpretations:
-- (A) Side-effect imports propagate library link flags but no symbols. Then this fixture *doesn't* compile — `cos` is unresolved in `main.yoop`. Move the extern block into `main.yoop` itself.
+- (A) Side-effect imports propagate library link flags but no symbols. Then this fixture *doesn't* compile - `cos` is unresolved in `main.yoop`. Move the extern block into `main.yoop` itself.
 - (B) Side-effect imports also propagate extern declarations into the current scope (because externs are "module-private declarations of symbols available at link time, not module values"). Then this fixture compiles.
 
-The spec is silent. (A) is cleaner and what we adopt — externs are private to their module like everything else. The fixture's `main.yoop` should declare `cos` itself, and `init.yoop` is renamed to be a module that *re-exports* a wrapper or simply be a yooper-side noop. Replace this fixture with one that genuinely tests side-effect imports. For now, use:
+The spec is silent. (A) is cleaner and what we adopt - externs are private to their module like everything else. The fixture's `main.yoop` should declare `cos` itself, and `init.yoop` is renamed to be a module that *re-exports* a wrapper or simply be a yooper-side noop. Replace this fixture with one that genuinely tests side-effect imports. For now, use:
 
 ```yoop
 // init.yoop
@@ -1191,9 +1191,9 @@ function main(): int32 {
 }
 ```
 
-Expected: `init loaded`. Verifies the parser/driver/typecheck happy path for side-effect imports — no failure modes.
+Expected: `init loaded`. Verifies the parser/driver/typecheck happy path for side-effect imports - no failure modes.
 
-#### `export_c/` — unmangled C ABI symbol
+#### `export_c/` - unmangled C ABI symbol
 
 ```yoop
 // main.yoop
@@ -1209,11 +1209,11 @@ function main(): int32 {
 
 Expected: `add_one(5) = 6`. The fixture also asserts the IR contains exactly `define i32 @add_one(i32 %n)` (no mangling).
 
-### 9.2 Fail fixtures — [examples/fail/](../examples/fail/)
+### 9.2 Fail fixtures - [examples/fail/](../examples/fail/)
 
 | File | Snippet | Expected error |
 |---|---|---|
-| `import_missing.yoop` | `import { x } from "./does_not_exist.yoop";` | filesystem error bubbled — message contains `does_not_exist.yoop` |
+| `import_missing.yoop` | `import { x } from "./does_not_exist.yoop";` | filesystem error bubbled - message contains `does_not_exist.yoop` |
 | `import_no_yoop_ext.yoop` | `import { x } from "./m.txt";` | `import path "./m.txt" must end in .yoop` |
 | `import_unknown_export/` | `import { nope } from "./m.yoop";` where `m.yoop` doesn't export `nope` | `module "./m.yoop" has no export "nope"` |
 | `import_collision/` | Two `import { x } from ...` lines | `local name "x" collides` |
@@ -1240,9 +1240,9 @@ Fail fixtures use `typecheckProgram` (not `compileEntry`) and assert `errors[0].
 
 ### 9.4 Unit tests
 
-- `src/jsyoopdriver/moduleId.test.js` — same path → same id; different paths → different ids; identifier-safe characters only.
-- `src/jsyoopdriver/moduleGraph.test.js` — happy path, dedup, cycle detection, missing file, non-`.yoop` extension. Uses an in-memory or tmp directory — no real fs writes in the user's tree.
-- `src/jsyooptypecheck/imports.test.js` — `resolveImports` with mocked `moduleEnv`; unknown export, collision, namespace shape.
+- `src/jsyoopdriver/moduleId.test.js` - same path → same id; different paths → different ids; identifier-safe characters only.
+- `src/jsyoopdriver/moduleGraph.test.js` - happy path, dedup, cycle detection, missing file, non-`.yoop` extension. Uses an in-memory or tmp directory - no real fs writes in the user's tree.
+- `src/jsyooptypecheck/imports.test.js` - `resolveImports` with mocked `moduleEnv`; unknown export, collision, namespace shape.
 
 ### 9.5 Codegen IR-shape tests
 
@@ -1260,16 +1260,16 @@ In [codegen.test.js](../src/jsyoopcodegen/codegen.test.js):
 The order minimizes time spent in a broken intermediate state. Each step keeps prior tests green.
 
 1. **Lexer**: keywords + `...` token. Add unit tests. After this, source files containing the new keywords lex but the parser still throws "unexpected token at top level".
-2. **AST kinds + parser** for `import`, `export`, `extern "C"`, `export "C"`. Plus parser tests in §3.e/f. Typechecker still throws on the new kinds — that's fine because no fixture uses them yet.
+2. **AST kinds + parser** for `import`, `export`, `extern "C"`, `export "C"`. Plus parser tests in §3.e/f. Typechecker still throws on the new kinds - that's fine because no fixture uses them yet.
 3. **moduleId.js + moduleGraph.js**: the driver-side graph walker. Unit tests in §9.4. Wire into `yoopiler.js` *behind a flag* so the existing single-file fixtures keep working: if no imports are present, fall through to the legacy single-file flow. Once typecheck/codegen are graph-aware, remove the flag.
-4. **Typechecker — `typecheckProgram`**: passes A/B/C/D structure described in §5.a. For now, pass A handles only `FUNCTION_DECL`, `TYPE_DECL`, `EXPORT_DECL`, `IMPORT_DECL`; passes B and D reuse the existing logic. After this step, `imports_basic/` works end-to-end.
+4. **Typechecker - `typecheckProgram`**: passes A/B/C/D structure described in §5.a. For now, pass A handles only `FUNCTION_DECL`, `TYPE_DECL`, `EXPORT_DECL`, `IMPORT_DECL`; passes B and D reuse the existing logic. After this step, `imports_basic/` works end-to-end.
 5. **Namespace identifiers**: `NamespaceType`, `NAMESPACE_IDENT` synthesis in `resolveIdent`, `FIELD_ACCESS` namespace path. After this step, `imports_namespace/` works.
 6. **Imported structs**: the cross-module struct-table sharing in §5.d. After this step, `imports_struct/` works.
 7. **Diamond/dedup**: verify in `imports_diamond/`. Should be free if §6.g is implemented correctly.
 8. **`extern "C"`**: AST → typechecker symbol routing → codegen `declare` emission. Drop printf from `KNOWN_EXTERNS` and verify all phase 1/2 fixtures still pass via the legacy fallback. After this, `extern_printf/` works.
 9. **Library externs + link flags**: `linkLibraries` set in moduleEnv → returned from `codegenProgram` → driver passes to clang. After this, `extern_library/` works.
 10. **`export "C" function`**: unmangled-symbol path. Reject struct params/returns. After this, `export_c/` works.
-11. **Side-effect imports**: should be free at this point — already covered by graph walker + typecheck pass A. Verify with `side_effect_import/`.
+11. **Side-effect imports**: should be free at this point - already covered by graph walker + typecheck pass A. Verify with `side_effect_import/`.
 12. **All fail fixtures** in §9.2.
 13. **Test runner**: `runFixtureEntry` for the multi-file shape; `compileEntry` API; CI runs on every pass/fail fixture.
 14. **Cleanup**: delete `KNOWN_EXTERNS` if every fixture now uses an explicit extern. Add a follow-up issue to delete the printf legacy fallback once `io.yoop` stdlib lands.
@@ -1280,19 +1280,19 @@ Each step is independently bisect-able. Steps 1–3 land plumbing without changi
 
 ## 11. Critical files reference
 
-- [SPEC.md §1 — Modules and imports](../SPEC.md), [§12 — Foreign interop](../SPEC.md) — re-read before each step.
-- [src/contracts.js](../src/contracts.js) — new AST kinds.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — new keywords, `...` token.
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — top-level dispatch + new `parse*` helpers.
-- `src/jsyoopdriver/moduleGraph.js` (new) — `loadModuleGraph(entryAbsPath)`.
-- `src/jsyoopdriver/moduleId.js` (new) — `moduleIdFor(absPath)`.
-- [src/yoopiler.js](../src/yoopiler.js) — driver replaces single-file flow with graph flow; passes `-l<flag>` to clang.
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — `typecheckProgram(modules)`.
-- `src/jsyooptypecheck/imports.js` (new) — `resolveImports(mod, moduleEnv, errors)`.
-- [src/jsyooptypecheck/scope.js](../src/jsyooptypecheck/scope.js) — `kind: "namespace"` binding.
-- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — namespace-aware `resolveIdent`, `resolveFieldAccess`, `resolveCall`.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `NamespaceType`, struct mangling-aware `llvmType` callers.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `codegenProgram(modules)`, `mangle()`, extern emission from AST, `linkFlags`.
-- [src/e2e.test.js](../src/e2e.test.js) — `runFixtureEntry`, multi-file fixtures.
+- [SPEC.md §1 - Modules and imports](../SPEC.md), [§12 - Foreign interop](../SPEC.md) - re-read before each step.
+- [src/contracts.js](../src/contracts.js) - new AST kinds.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - new keywords, `...` token.
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - top-level dispatch + new `parse*` helpers.
+- `src/jsyoopdriver/moduleGraph.js` (new) - `loadModuleGraph(entryAbsPath)`.
+- `src/jsyoopdriver/moduleId.js` (new) - `moduleIdFor(absPath)`.
+- [src/yoopiler.js](../src/yoopiler.js) - driver replaces single-file flow with graph flow; passes `-l<flag>` to clang.
+- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) - `typecheckProgram(modules)`.
+- `src/jsyooptypecheck/imports.js` (new) - `resolveImports(mod, moduleEnv, errors)`.
+- [src/jsyooptypecheck/scope.js](../src/jsyooptypecheck/scope.js) - `kind: "namespace"` binding.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - namespace-aware `resolveIdent`, `resolveFieldAccess`, `resolveCall`.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - `NamespaceType`, struct mangling-aware `llvmType` callers.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - `codegenProgram(modules)`, `mangle()`, extern emission from AST, `linkFlags`.
+- [src/e2e.test.js](../src/e2e.test.js) - `runFixtureEntry`, multi-file fixtures.
 - `examples/pass/imports_basic/`, `imports_namespace/`, `imports_renamed/`, `imports_struct/`, `imports_diamond/`, `extern_printf/`, `extern_library/`, `side_effect_import/`, `export_c/`.
-- `examples/fail/` — `import_missing`, `import_no_yoop_ext`, `import_unknown_export/`, `import_collision/`, `import_cycle/`, `extern_unsupported_abi`, `export_c_struct`, `namespace_call`, `namespace_private`, `import_after_decl`.
+- `examples/fail/` - `import_missing`, `import_no_yoop_ext`, `import_unknown_export/`, `import_collision/`, `import_cycle/`, `extern_unsupported_abi`, `export_c_struct`, `namespace_call`, `namespace_private`, `import_after_decl`.

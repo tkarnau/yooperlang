@@ -1,0 +1,63 @@
+// Phase 10.E: cross-shape `?` propagation via the `Into<T>` trait.
+//
+// `parse_positive` returns `Result<int32, IoError>`; `add_two_positives`
+// returns `Result<int32, AppError>`. The `?` operator inside the outer
+// function would normally reject because the Err payload types differ.
+// With `IoError implements Into<AppError>` in scope, the typechecker
+// rewrites each `?` to call `Into.into(ref io_err)` before constructing
+// the outer `Err` variant, so the propagation type-checks and codegen
+// emits the conversion call on the failure branch.
+
+import { Result } from "std/core/types.yoop";
+import { Into } from "std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type AppError {
+    code: int32,
+    tag: int32,
+}
+
+type IoError implements Into<AppError> {
+    code: int32,
+    function into(ref self): AppError {
+        // Tag = 7 marks "rewrapped from IoError" so the test can prove
+        // the conversion ran rather than a bit-copy of the original
+        // payload sneaking through.
+        return { code: self.code, tag: 7 };
+    }
+}
+
+function parse_positive(n: int32): Result<int32, IoError> {
+    if (n < 0) {
+        return Result.Err { error: { code: n } };
+    }
+    return Result.Ok { value: n };
+}
+
+function add_two_positives(a: int32, b: int32): Result<int32, AppError> {
+    let x: int32 = parse_positive(a)?;
+    let y: int32 = parse_positive(b)?;
+    return Result.Ok { value: x + y };
+}
+
+function main(): int32 {
+    let happy: Result<int32, AppError> = add_two_positives(3, 4);
+    switch (happy) {
+        case Result.Ok { value: hv }: { printf(`happy sum=${hv}\n`); }
+        case Result.Err { error: he }: { printf(`happy err code=${he.code} tag=${he.tag}\n`); }
+    }
+
+    let sad: Result<int32, AppError> = add_two_positives(3, -7);
+    switch (sad) {
+        case Result.Ok { value: sv }: { printf(`sad sum=${sv}\n`); }
+        case Result.Err { error: se }: { printf(`sad err code=${se.code} tag=${se.tag}\n`); }
+    }
+    return 0;
+}
+
+// expected output:
+// happy sum=7
+// sad err code=-7 tag=7

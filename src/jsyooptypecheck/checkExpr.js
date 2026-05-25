@@ -9,7 +9,7 @@
 // "checking an expression against a known target type":
 //
 //   - checkInitializer: the one place that handles every "value must fit
-//     this type" check in the language — let/const initializers, return
+//     this type" check in the language - let/const initializers, return
 //     values, assignments, call args, and struct-literal field values. It
 //     folds (1) struct-literal pinning OR plain expression resolution, (2)
 //     assignability checking, and (3) untyped-literal coercion into one call.
@@ -44,15 +44,19 @@ import {
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope } from "./scope.js";
-import { isFallible, strippedTypeOf } from "./fallible.js";
+import {
+  isFallibleEnum,
+  strippedEnumOkType,
+  enumErrPayloadType,
+} from "./fallible.js";
 import {
   coerceUntypedLiteralToTyped,
   isAssignable,
   isNumeric,
   unifyArith,
 } from "./coerce.js";
-import { instantiateFunc, mangleType } from "./instantiate.js";
-import { checkBoundSatisfied } from "./typecheck.js";
+import { instantiateEnum, instantiateFunc, mangleType } from "./instantiate.js";
+import { checkBoundSatisfied, walkTraitExtends } from "./typecheck.js";
 import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
 // Built-in C-runtime functions the typechecker accepts even when the
@@ -121,6 +125,10 @@ export function resolveExprType(node, scope, ctx) {
       return resolveUnsafePtrCast(node, scope, ctx);
     case ASTNodeKind.ERRNO_INTRINSIC:
       return resolveErrnoIntrinsic(node, scope, ctx);
+    case ASTNodeKind.NAMESPACE_IDENT:
+      // resolveIdent already mutated this node from IDENT and stamped its
+      // resolved namespace type - re-resolving it should be a no-op.
+      return node.resolvedType ?? ErrorType();
     default: {
       pushError(
         ctx.errors,
@@ -138,7 +146,7 @@ function setType(node, type) {
   return type;
 }
 
-// `x` — looks up the variable in the lexical scope chain.
+// `x` - looks up the variable in the lexical scope chain.
 // If the binding type is RefType, sets autoDeref and returns the inner type.
 function resolveIdent(node, scope, ctx) {
   const binding = lookupInScope(scope, node.name);
@@ -191,6 +199,20 @@ function resolveIdent(node, scope, ctx) {
         node.moduleGlobalImported = false;
       }
     }
+    // Phase 10.X.2 follow-up: tag imported-function IDENTs in expression
+    // position with their source module so codegen can emit the right
+    // mangled symbol when the reference is used as a function-pointer
+    // *value* (e.g. `{ hash: imported_hash }` in a KeyOps<K> literal).
+    // The call-site path stamps these on CALL_EXPRESSION at line ~342;
+    // this branch handles the non-call case.
+    if (modType.kind === typeKinds.func) {
+      const tc = ctx.typeContext;
+      const imp = tc.importedNames?.get(node.name);
+      if (imp && imp.kind === "value") {
+        node.calleeModuleId = imp.fromModuleId;
+        node.calleeExportName = imp.exportName;
+      }
+    }
     return setType(node, modType);
   }
   if (node.name === "self") {
@@ -201,7 +223,7 @@ function resolveIdent(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
-// `a + b`, `a == b`, `a && b` — recurses into both sides, then asks
+// `a + b`, `a == b`, `a && b` - recurses into both sides, then asks
 // unifyArith for the resulting type given the operator.
 function resolveBinary(node, scope, ctx) {
   const leftType = resolveExprType(node.left, scope, ctx);
@@ -217,7 +239,24 @@ function resolveBinary(node, scope, ctx) {
   return setType(node, resultType);
 }
 
-// `f(a, b, c)` or `ns.f(a, b, c)` — looks up the function (local, imported
+// Render the callee expression as a short string for use in diagnostics.
+// Bare identifiers stay as-is; FIELD_ACCESS (namespace / trait-qualified
+// calls) renders as `ns.name`. Anything more exotic falls back to "call".
+function calleeDisplayName(callee) {
+  if (typeof callee === "string") return callee;
+  if (
+    callee &&
+    callee.kind === ASTNodeKind.FIELD_ACCESS &&
+    (callee.object?.kind === ASTNodeKind.IDENT ||
+      callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT) &&
+    typeof callee.field === "string"
+  ) {
+    return `${callee.object.name}.${callee.field}`;
+  }
+  return "call";
+}
+
+// `f(a, b, c)` or `ns.f(a, b, c)` - looks up the function (local, imported
 // namespace, or known C extern), then checks arity + arg types.
 function resolveCall(node, scope, ctx) {
   const callee = node.callee;
@@ -239,7 +278,7 @@ function resolveCall(node, scope, ctx) {
         : argType;
       if (!isCastableTo(effectiveArgType, primType)) {
         pushError(ctx.errors, node,
-          `cannot cast ${formatType(argType)} to ${formatType(primType)} — only numeric primitive casts are supported`);
+          `cannot cast ${formatType(argType)} to ${formatType(primType)} - only numeric primitive casts are supported`);
         return setType(node, primType);
       }
       node.isCast = true;
@@ -252,25 +291,100 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
-  // Phase 7.4: trait-qualified call — `Steppable.step(ref b1, ...)`. Intercept
+  // Phase 7.4: trait-qualified call - `Steppable.step(ref b1, ...)`. Intercept
   // before the namespace-call branch below: a FIELD_ACCESS whose object IDENT
   // resolves to a TraitType dispatches through the trait's method table.
   if (
     callee &&
     typeof callee === "object" &&
     callee.kind === ASTNodeKind.FIELD_ACCESS &&
-    callee.object?.kind === ASTNodeKind.IDENT
+    (callee.object?.kind === ASTNodeKind.IDENT ||
+      callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT)
   ) {
+    // Phase 9.G: `VTableName.from(ref x)` - builtin vtable constructor.
+    // The only legal method name is `from`; anything else is a typecheck
+    // error with a clear hint. Resolution checks that the argument is a
+    // `ref T` where T implements the vtable's trait.
+    const vt = lookupVTableByName(callee.object.name, ctx);
+    if (vt) {
+      return resolveVTableBuiltinCall(node, vt, callee.field, scope, ctx);
+    }
     const trait = lookupTraitByName(callee.object.name, ctx);
     if (trait) {
       return resolveTraitQualifiedCall(node, trait, callee.field, scope, ctx);
     }
+    // Generic function call via namespace: `intr.heap_alloc(8)` or
+    // `vec.vec_new(...)`. The source module's genericFuncTable holds the
+    // canonical decl; namespace lookups otherwise only check localSymbols
+    // and structTable, so generic funcs need an explicit hop here.
+    // Also covers intrinsic special-cases (`conc.wait_until`, `conc.cancel`)
+    // where the special-case branches do the typing work - bare-callee form
+    // and namespace-prefixed form should land in the same checker.
+    //
+    // Peek at the binding without going through resolveExprType (which would
+    // mutate `callee.object.kind` to NAMESPACE_IDENT and break the regular
+    // namespace-call dispatch below if we fall through).
+    const objBinding =
+      lookupInScope(scope, callee.object.name) ??
+      (ctx.typeContext.moduleSymbols?.get(callee.object.name)
+        ? { type: ctx.typeContext.moduleSymbols.get(callee.object.name) }
+        : null);
+    const nsType = objBinding?.type;
+    if (nsType && nsType.kind === typeKinds.namespace) {
+      const srcEnv = ctx.typeContext.moduleEnv?.get(nsType.moduleId);
+      const srcBuiltins = srcEnv?.builtinIntrinsicNames;
+      if (srcBuiltins?.has(callee.field)) {
+        if (callee.field === "wait_until") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveWaitUntilCall(node, scope, ctx);
+        }
+        if (callee.field === "cancel") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveCancelCall(node, scope, ctx);
+        }
+      }
+      const remoteGeneric = srcEnv?.genericFuncTable?.get(callee.field);
+      if (remoteGeneric) {
+        if (!nsType.exports.has(callee.field)) {
+          pushError(
+            ctx.errors,
+            callee,
+            `namespace "${callee.object.name}" has no export "${callee.field}"`,
+          );
+          return setType(node, ErrorType());
+        }
+        callee.namespaceLookup = {
+          moduleId: nsType.moduleId,
+          exportName: callee.field,
+        };
+        callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+        callee.object.resolvedType = nsType;
+        return resolveGenericCall(node, remoteGeneric, scope, ctx);
+      }
+    }
   }
 
-  // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
+  // Namespace call: io.greet("hello") - callee is a FIELD_ACCESS node
   if (callee && typeof callee === "object") {
     const calleeType = resolveExprType(callee, scope, ctx);
     if (calleeType.kind === typeKinds.error) return setType(node, ErrorType());
+    // Phase 10.X.2: a FIELD_ACCESS resolving to a FunctionPointerType means
+    // the user is calling a function-pointer-typed struct field -
+    // `ops.hash(k)` with `hash: (k: K) => uint64`. Lower as an indirect
+    // call through the stored slot.
+    if (calleeType.kind === typeKinds.functionPointer) {
+      return resolveFunctionPointerCall(node, calleeType, scope, ctx);
+    }
     if (calleeType.kind !== typeKinds.func) {
       pushError(ctx.errors, node, `expression is not callable`);
       return setType(node, ErrorType());
@@ -278,18 +392,34 @@ function resolveCall(node, scope, ctx) {
     return resolveCallWithSig(node, calleeType, scope, ctx);
   }
 
-  // printf legacy path — variadic, type-resolve each arg, no arity check.
+  // `wait_until(h, deadline_ns)` and `cancel(h)` are builtin call forms (the
+  // bounded-wait sibling of the `wait` keyword and its cancellation
+  // counterpart). They're only special-cased when the current module has
+  // imported them via an `extern "intrinsic"` block in std/core/concurrency
+  // - user code that hasn't imported the intrinsics module is free to define
+  // and call its own `wait_until` / `cancel` functions.
+  const builtinIntrinsicNames = ctx.typeContext.builtinIntrinsicNames;
+  if (callee === "wait_until" && builtinIntrinsicNames?.has("wait_until")) {
+    return resolveWaitUntilCall(node, scope, ctx);
+  }
+  if (callee === "cancel" && builtinIntrinsicNames?.has("cancel")) {
+    return resolveCancelCall(node, scope, ctx);
+  }
+
+  // printf legacy path - variadic, type-resolve each arg, no arity check.
+  // Stays a magic builtin: the name doesn't compete with user identifiers
+  // and is used pervasively; gating it on import would multiply churn.
   if (callee === "printf") {
     const sig = ctx.typeContext.moduleSymbols.get("printf");
     if (sig) {
-      // Declared via extern block — use variadic path
+      // Declared via extern block - use variadic path
     } else {
       for (const arg of node.args) resolveExprType(arg, scope, ctx);
       return setType(node, PrimType(primAnnotations.int32));
     }
   }
 
-  // Phase 7.1: generic function call — look up in the genericFuncTable
+  // Phase 7.1: generic function call - look up in the genericFuncTable
   // (local or imported) and run call-site inference.
   if (typeof callee === "string") {
     const generic = lookupGenericFunc(callee, ctx);
@@ -308,7 +438,7 @@ function resolveCall(node, scope, ctx) {
       pushError(
         ctx.errors,
         node,
-        `unknown function "${callee}" — did you mean ${hint}? Trait methods must be called via the qualified form 'Trait.method(ref x, ...)'.`,
+        `unknown function "${callee}" - did you mean ${hint}? Trait methods must be called via the qualified form 'Trait.method(ref x, ...)'.`,
       );
     } else {
       pushError(ctx.errors, node, `unknown function "${callee}"`);
@@ -344,7 +474,37 @@ function resolveCallWithSig(node, sig, scope, ctx) {
   return resolveCallType(node, sig, scope, ctx);
 }
 
-// `wait h` — operand must be Task<T>; result type is T. Rejected inside a
+// Phase 10.X.2: a CALL_EXPRESSION whose callee resolves to a
+// FunctionPointerType (typically `ops.hash(k)` where `hash` is a
+// fn-ptr struct field) lowers to an indirect call through the field.
+// Arity and arg-type checks run as usual; the codegen reads
+// `node.fnPointerCall = true` to switch from symbol call to load+call.
+function resolveFunctionPointerCall(node, fptType, scope, ctx) {
+  const params = fptType.params ?? [];
+  if (node.args.length !== params.length) {
+    pushError(
+      ctx.errors,
+      node,
+      `function-pointer call: expected ${params.length} argument(s), got ${node.args.length}`,
+    );
+    for (const a of node.args) resolveExprType(a, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  for (let i = 0; i < params.length; i++) {
+    checkInitializer(
+      node.args[i],
+      params[i],
+      scope,
+      ctx,
+      (vt) =>
+        `arg ${i + 1} of function-pointer call: cannot pass ${formatType(vt)} to ${formatType(params[i])}`,
+    );
+  }
+  node.fnPointerCall = true;
+  return setType(node, fptType.returnType);
+}
+
+// `wait h` - operand must be Task<T>; result type is T. Rejected inside a
 // task function body (no nested waits in 6.3; future suspension lifts it).
 function resolveWaitExpression(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
@@ -385,7 +545,7 @@ function resolveUnary(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // Phase 9: bitwise NOT — integer types only, returns the same type.
+  // Phase 9: bitwise NOT - integer types only, returns the same type.
   if (node.op === "bitnot") {
     if (
       operandType.kind === typeKinds.prim &&
@@ -424,20 +584,32 @@ function resolveUnary(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
-// `` `hi ${name}` `` — every interpolation must be a printable scalar
-// (string, bool, or any numeric type). The whole expression is a string.
+// `` `hi ${name}` `` - every interpolation must be a printable scalar
+// (string, bool, or any numeric type) or a type that implements
+// `Display`. For Display types we rewrite the interpolation at
+// typecheck time to call `Display.to_string(ref expr)` first and use
+// the resulting string - codegen still only sees printf-style args.
 function resolveTemplateLiteral(node, scope, ctx) {
   for (const part of node.parts) {
     if (part.kind === "STRING_PART") continue;
     if (part.kind === "EXPR_PART") {
       const exprType = resolveExprType(part.expr, scope, ctx);
-      if (!isPrintableInTemplate(exprType)) {
-        pushError(
-          ctx.errors,
-          part.expr,
-          `template literal interpolation must be a string, bool, int, or float type, found ${formatType(exprType)}`,
-        );
+      if (isPrintableInTemplate(exprType)) continue;
+      // Phase 9.F: try Display. Look for a `Display` trait on the
+      // (deref'd) struct's implementsTraits; synthesize a trait call.
+      const innerType = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
+      if (
+        innerType.kind === typeKinds.struct &&
+        (innerType.implementsTraits ?? []).some((t) => t.name === "Display")
+      ) {
+        part.expr = synthesizeDisplayCall(part.expr, innerType, exprType);
+        continue;
       }
+      pushError(
+        ctx.errors,
+        part.expr,
+        `template literal interpolation must be a string, bool, int, or float type, or implement Display; found ${formatType(exprType)}`,
+      );
       continue;
     }
     pushError(
@@ -447,6 +619,43 @@ function resolveTemplateLiteral(node, scope, ctx) {
     );
   }
   return setType(node, PrimType(primAnnotations.string));
+}
+
+// Phase 9.F: build the post-typecheck shape of `Display.to_string(ref expr)`
+// directly. We bypass the parser by stamping `calleeMethodOf` +
+// `calleeMangledName` + a synthetic REF_EXPRESSION arg, mirroring what
+// resolveTraitQualifiedCall does for source-written trait calls.
+//
+// `exprType` is the type of `originalExpr` (used to materialize the ref
+// arg if needed); `structType` is the (deref'd) struct that carries the
+// Display impl - its mangled symbol is what the call dispatches to.
+function synthesizeDisplayCall(originalExpr, structType, exprType) {
+  // Arg = `ref originalExpr` when expr isn't already a ref; pass
+  // through when it already is.
+  let argNode;
+  if (exprType.kind === typeKinds.ref) {
+    argNode = originalExpr;
+  } else {
+    argNode = {
+      kind: ASTNodeKind.REF_EXPRESSION,
+      operand: originalExpr,
+      sourceLoc: originalExpr.sourceLoc,
+      resolvedType: RefType(structType),
+    };
+  }
+  return {
+    kind: ASTNodeKind.CALL_EXPRESSION,
+    callee: "Display.to_string", // diagnostic-only; codegen reads calleeMangledName
+    args: [argNode],
+    sourceLoc: originalExpr.sourceLoc,
+    resolvedType: PrimType(primAnnotations.string),
+    calleeMethodOf: structType,
+    calleeMethodName: "to_string",
+    calleeTrait: (structType.implementsTraits ?? []).find(
+      (t) => t.name === "Display",
+    ),
+    calleeMangledName: mangleTraitMethod(structType, "Display", "to_string"),
+  };
 }
 
 function isPrintableInTemplate(t) {
@@ -516,7 +725,7 @@ function resolveCompoundAssignment(node, scope, ctx) {
     );
     return setType(node, ErrorType());
   }
-  // Result must be assignable back into the target slot — guards against
+  // Result must be assignable back into the target slot - guards against
   // e.g. an untyped int RHS that would resolve to something narrower.
   if (!isAssignable(targetType, unified)) {
     pushError(
@@ -527,12 +736,12 @@ function resolveCompoundAssignment(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   // Pin any untyped-literal RHS (and any nested arithmetic with untyped
-  // intermediate types) to the target type — same helper as plain binary ops.
+  // intermediate types) to the target type - same helper as plain binary ops.
   coerceUntypedLiteralToTyped(node.value, rhsType, targetType, ctx.errors);
   return setType(node, targetType);
 }
 
-// Phase 8.A: `*p = v` — assignment through an unsafe_ptr<T>. Resolves the
+// Phase 8.A: `*p = v` - assignment through an unsafe_ptr<T>. Resolves the
 // pointer, checks the RHS against the pointee type.
 function resolveAssignmentToDeref(node, scope, ctx) {
   const ptrType = resolveExprType(node.target.operand, scope, ctx);
@@ -562,8 +771,8 @@ function resolveAssignmentToIdent(node, scope, ctx) {
   const targetName = node.target.name;
   const binding = lookupInScope(scope, targetName);
   if (!binding) {
-    // Phase 8.E: not in lexical scope — fall back to module-level globals.
-    const moduleAssign = resolveAssignmentToModuleGlobal(node, ctx);
+    // Phase 8.E: not in lexical scope - fall back to module-level globals.
+    const moduleAssign = resolveAssignmentToModuleGlobal(node, scope, ctx);
     if (moduleAssign) return moduleAssign;
     pushError(ctx.errors, node, `undefined variable "${targetName}"`);
     return setType(node, ErrorType());
@@ -598,16 +807,20 @@ function resolveAssignmentToIdent(node, scope, ctx) {
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(binding.type)} in assignment to "${targetName}"`,
   );
-  if (isFallible(binding.type)) {
-    binding.errObserved = false;
-  }
   return setType(node, binding.type);
 }
 
 // Phase 8.E: handle assignment to a module-level let. Returns the assignment's
 // resolved type if the target was a module global; null if the target wasn't
 // found at module scope (caller falls through to "undefined variable").
-function resolveAssignmentToModuleGlobal(node, ctx) {
+//
+// Phase 11.D.18: `scope` is now threaded through so that a `@precompile
+// { ... }` block can assign to a module-level binding from a RHS that
+// references local block bindings (`SUM = acc;` where `acc` is a local
+// `let` declared earlier in the block). Module-init decls still call
+// this with a fresh scope (no locals), so the existing behavior is a
+// no-op there.
+function resolveAssignmentToModuleGlobal(node, scope, ctx) {
   const targetName = node.target.name;
   const tc = ctx.typeContext;
   const modType = tc.moduleSymbols?.get(targetName);
@@ -624,7 +837,7 @@ function resolveAssignmentToModuleGlobal(node, ctx) {
     pushError(
       ctx.errors,
       node,
-      `"${targetName}" is imported from module "${imp.fromModuleId}" — assignment from outside its module is not permitted`,
+      `"${targetName}" is imported from module "${imp.fromModuleId}" - assignment from outside its module is not permitted`,
     );
     return setType(node, ErrorType());
   }
@@ -648,7 +861,7 @@ function resolveAssignmentToModuleGlobal(node, ctx) {
   checkInitializer(
     node.value,
     modType,
-    null, // no scope needed — RHS resolveExprType handles its own scoping
+    scope,
     ctx,
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(modType)} in assignment to module-level "${targetName}"`,
@@ -680,7 +893,7 @@ function resolveAssignmentToField(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `invalid assignment target — root of field chain is not an identifier`,
+      `invalid assignment target - root of field chain is not an identifier`,
     );
     return setType(node, ErrorType());
   }
@@ -722,7 +935,7 @@ function resolveAssignmentToIndex(node, scope, ctx) {
   return setType(node, elemType);
 }
 
-// `obj.field` — receiver must be a struct, namespace, string (for .len), or array (for .len).
+// `obj.field` - receiver must be a struct, namespace, string (for .len), or array (for .len).
 function resolveFieldAccess(node, scope, ctx) {
   // Phase 7.5: bare `EnumName.Variant` (no payload). Detect before
   // resolveExprType on the IDENT object would error with "undefined variable".
@@ -743,7 +956,7 @@ function resolveFieldAccess(node, scope, ctx) {
         pushError(
           ctx.errors,
           fieldLoc,
-          `variant "${maybeEnum.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} } — write '${maybeEnum.name}.${variant.name} { ... }'`,
+          `variant "${maybeEnum.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} } - write '${maybeEnum.name}.${variant.name} { ... }'`,
         );
         return setType(node, ErrorType());
       }
@@ -758,6 +971,40 @@ function resolveFieldAccess(node, scope, ctx) {
       delete node.object;
       delete node.field;
       return setType(node, maybeEnum);
+    }
+    // Phase 10.A: bare `GenericEnum.Variant` (no payload). Promote in place
+    // to an unpinned VARIANT_CONSTRUCTOR; checkInitializer will pin it to a
+    // concrete instantiation against the target type. Without a target type
+    // (statement-position use), resolveVariantConstructor reports an error.
+    const maybeGenericEnum = lookupGenericEnumDecl(node.object.name, ctx);
+    if (maybeGenericEnum) {
+      const variant = maybeGenericEnum.genericVariants?.get(node.field);
+      const fieldLoc = node.fieldSourceLoc ?? node;
+      if (!variant) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `enum "${maybeGenericEnum.name}" has no variant "${node.field}"`,
+        );
+        return setType(node, ErrorType());
+      }
+      if (variant.fields !== null) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `variant "${maybeGenericEnum.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} } - write '${maybeGenericEnum.name}.${variant.name} { ... }'`,
+        );
+        return setType(node, ErrorType());
+      }
+      node.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+      node.enumName = node.object.name;
+      node.variantName = node.field;
+      node.fields = null;
+      // resolvedEnumType / resolvedVariant left unset - pinning happens in
+      // checkInitializer (or resolveVariantConstructor reports an error).
+      delete node.object;
+      delete node.field;
+      return resolveVariantConstructor(node, scope, ctx);
     }
   }
 
@@ -805,7 +1052,7 @@ function resolveFieldAccess(node, scope, ctx) {
     node.isArrayLen = true;
     return setType(node, PrimType(primAnnotations.usize));
   }
-  // Phase 8.C: array.ptr intrinsic — borrow the data pointer.
+  // Phase 8.C: array.ptr intrinsic - borrow the data pointer.
   // Gated by `import.unsafe;` because the produced unsafe_ptr<T> is itself
   // an unsafe pointer; mirrors the Phase 8.A blanket rule.
   if (objType.kind === typeKinds.array && node.field === "ptr") {
@@ -825,7 +1072,7 @@ function resolveFieldAccess(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // Phase 7.5: field access on a union type — same path as struct, just a
+  // Phase 7.5: field access on a union type - same path as struct, just a
   // type-punning read into the union's chosen field type. Codegen lowers via
   // a bitcast.
   if (objType.kind === typeKinds.union) {
@@ -850,25 +1097,22 @@ function resolveFieldAccess(node, scope, ctx) {
       pushError(
         ctx.errors,
         fieldLoc,
-        `method-call form '.${node.field}()' is not supported — use the free-function form '${node.field}(ref value)'`,
+        `method-call form '.${node.field}()' is not supported - use the free-function form '${node.field}(ref value)'`,
       );
     } else {
       pushError(ctx.errors, fieldLoc, `type "${objType.name}" has no field "${node.field}"`);
     }
     return setType(node, ErrorType());
   }
-  if (node.field === "err") {
-    markErrObservedThroughRoot(node.object, scope);
-  }
   return setType(node, field.type);
 }
 
-// `ref x` — takes the address of an lvalue.
+// `ref x` - takes the address of an lvalue.
 function resolveRefExpression(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
   if (operandType.kind === typeKinds.ref) {
-    pushError(ctx.errors, node, `cannot take ref of a ref — 'ref ref T' is not supported`);
+    pushError(ctx.errors, node, `cannot take ref of a ref - 'ref ref T' is not supported`);
     return setType(node, ErrorType());
   }
   // Only lvalues can be ref'd
@@ -883,7 +1127,7 @@ function resolveRefExpression(node, scope, ctx) {
   return setType(node, RefType(operandType));
 }
 
-// Phase 8.A: `&lvalue` — address-of. Returns unsafe_ptr<T> where T is the
+// Phase 8.A: `&lvalue` - address-of. Returns unsafe_ptr<T> where T is the
 // lvalue's type. Only lvalues are accepted (IDENT, FIELD_ACCESS,
 // INDEX_EXPRESSION, DEREF_EXPRESSION).
 function resolveAddressOf(node, scope, ctx) {
@@ -898,14 +1142,14 @@ function resolveAddressOf(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `cannot take address of an rvalue — operand of '&' must be an lvalue`,
+      `cannot take address of an rvalue - operand of '&' must be an lvalue`,
     );
     return setType(node, ErrorType());
   }
   return setType(node, UnsafePtrType(operandType));
 }
 
-// Phase 8.A: `*p` — dereference an unsafe_ptr<T>. Returns T.
+// Phase 8.A: `*p` - dereference an unsafe_ptr<T>. Returns T.
 function resolveDeref(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
@@ -974,7 +1218,7 @@ function resolveUnsafePtrCast(node, scope, ctx) {
     return setType(node, UnsafePtrType(targetPointee));
   }
 
-  // Phase 8.C: unsafe_ptr.toArray<T>(p, n) — borrow a (ptr, len) pair as T[].
+  // Phase 8.C: unsafe_ptr.toArray<T>(p, n) - borrow a (ptr, len) pair as T[].
   if (node.castKind === "toArray") {
     const targetElem = resolveTypeAnnotInCtx(node.typeArg, ctx);
     if (!targetElem) {
@@ -993,7 +1237,7 @@ function resolveUnsafePtrCast(node, scope, ctx) {
       pushError(
         ctx.errors,
         node,
-        `unsafe_ptr.toArray<${formatType(targetElem)}> expects unsafe_ptr<${formatType(targetElem)}>, got ${formatType(operandType)} — use unsafe_ptr.cast first if a reinterpret is intended`,
+        `unsafe_ptr.toArray<${formatType(targetElem)}> expects unsafe_ptr<${formatType(targetElem)}>, got ${formatType(operandType)} - use unsafe_ptr.cast first if a reinterpret is intended`,
       );
       return setType(node, ErrorType());
     }
@@ -1096,7 +1340,7 @@ function resolveTypeAnnotInCtx(annot, ctx) {
   return null;
 }
 
-// `[e1, e2, e3]` — infer element type from first element, check all match.
+// `[e1, e2, e3]` - infer element type from first element, check all match.
 function resolveArrayLiteral(node, scope, ctx) {
   if (node.elements.length === 0) {
     pushError(ctx.errors, node, `empty array literal requires explicit type annotation`);
@@ -1119,7 +1363,7 @@ function resolveArrayLiteral(node, scope, ctx) {
   return setType(node, ArrayType(firstType));
 }
 
-// `xs[i]` — object must be an array, index must be an integer type.
+// `xs[i]` - object must be an array, index must be an integer type.
 function resolveIndexExpression(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
   const idxType = resolveExprType(node.index, scope, ctx);
@@ -1139,7 +1383,7 @@ function resolveIndexExpression(node, scope, ctx) {
   return setType(node, objType.elem);
 }
 
-// Phase 9.E: `xs[i..j]` / `xs[i..]` / `xs[..j]` / `xs[..]` — zero-copy
+// Phase 9.E: `xs[i..j]` / `xs[i..]` / `xs[..j]` / `xs[..]` - zero-copy
 // fat-pointer subview. Result type is the same array type as `xs`.
 function resolveSliceExpression(node, scope, ctx) {
   const objType = resolveExprType(node.object, scope, ctx);
@@ -1171,60 +1415,209 @@ function resolveSliceExpression(node, scope, ctx) {
   return setType(node, objType);
 }
 
-// Walk down through TRY_OP and FIELD_ACCESS chains looking for an IDENT
-// root. If we find one bound in scope, flip its `errObserved` flag so the
-// scope-exit check accepts it.
-export function markErrObservedThroughRoot(exprNode, scope) {
-  let n = exprNode;
-  while (n) {
-    if (n.kind === ASTNodeKind.IDENT) {
-      const b = lookupInScope(scope, n.name);
-      if (b) b.errObserved = true;
-      return;
-    }
-    if (n.kind === ASTNodeKind.FIELD_ACCESS) {
-      n = n.object;
-      continue;
-    }
-    if (n.kind === ASTNodeKind.TRY_OP) {
-      n = n.operand;
-      continue;
-    }
-    return;
-  }
-}
-
-// `expr?` — postfix propagator.
+// `expr?` - postfix propagator over a fallible enum (Phase 9.H + 10.E).
+// A fallible operand is an enum with two variants named `Ok` and `Err`,
+// each with zero or one payload field. The enclosing function must also
+// return a fallible enum. When the two Err payload types differ, the
+// typechecker looks for an `Into<ReturnErr>` impl on the operand's err
+// type (Phase 10.E) and stamps the conversion onto the node so codegen
+// can wrap the propagated value before constructing the outer `Err`
+// variant.
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
-  if (!isFallible(operandType)) {
+
+  if (!isFallibleEnum(operandType)) {
     pushError(
       ctx.errors,
       node,
-      `'?' applied to non-fallible type ${formatType(operandType)} — only structs ending in 'err: string' are fallible`,
-    );
-    return setType(node, ErrorType());
-  }
-  if (!isFallible(ctx.funcReturnType)) {
-    pushError(
-      ctx.errors,
-      node,
-      `'?' is only legal inside a function that returns a fallible type; '${ctx.funcName}' returns ${formatType(ctx.funcReturnType)}`,
+      `'?' applied to non-fallible type ${formatType(operandType)} - only enums with Ok/Err variants are fallible`,
     );
     return setType(node, ErrorType());
   }
 
-  markErrObservedThroughRoot(node.operand, scope);
-
-  const stripped = strippedTypeOf(operandType);
-  if (stripped && stripped.kind === "strippedMulti") {
-    node.strippedMulti = stripped;
+  const retType = ctx.funcReturnType;
+  if (!isFallibleEnum(retType)) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' is only legal inside a function that returns a fallible enum (Ok/Err); '${ctx.funcName}' returns ${formatType(retType)}`,
+    );
     return setType(node, ErrorType());
   }
-  return setType(node, stripped);
+
+  const operandErr = enumErrPayloadType(operandType);
+  const returnErr = enumErrPayloadType(retType);
+  if (!typesEqual(operandErr, returnErr)) {
+    // Phase 10.E: same-type fast path failed - try the cross-shape path
+    // via `Into<ReturnErr>` on the operand's Err payload type. Only
+    // struct payloads can carry an `implementsTraits` list today, so
+    // anything else (void, prim, enum, array, ...) lands in the same
+    // diagnostic the original phase 9.H gate emitted.
+    const conversion = lookupIntoImpl(operandErr, returnErr, ctx);
+    if (!conversion) {
+      pushError(
+        ctx.errors,
+        node,
+        `'?' cannot propagate Err of ${formatType(operandErr)} into a function returning Err of ${formatType(returnErr)} - no \`Into<${formatType(returnErr)}>\` impl on ${formatType(operandErr)}`,
+      );
+      return setType(node, ErrorType());
+    }
+    node.tryConvert = conversion;
+  }
+
+  node.fallibleEnum = true;
+  return setType(node, strippedEnumOkType(operandType));
+}
+
+// Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` - bounded-wait
+// counterpart to the `wait` keyword. Recognized by callee name in
+// resolveCall; user-defined `wait_until` functions are shadowed.
+//
+//   - arg[0]: must resolve to a `Task<T>` (the same shape `wait` accepts);
+//     T is extracted and used to instantiate the result type.
+//   - arg[1]: deadline in nanoseconds from yoop_now_ns(); must coerce to
+//     uint64.
+//   - return: `WaitResult<T>` from std/core/concurrency.yoop, which the
+//     caller must have imported (otherwise the typechecker can't
+//     instantiate the result type and emits a fix-it pointing at the
+//     missing import).
+//
+// The node is stamped with `builtinWaitUntil = true`, `builtinTaskResultType`
+// (the T), and `builtinWaitResultType` (the instantiated enum) so codegen
+// can lower the call directly.
+function resolveWaitUntilCall(node, scope, ctx) {
+  if (node.args.length !== 2) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until(h, deadline_ns) takes exactly 2 arguments, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    resolveExprType(node.args[1], scope, ctx);
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until's first argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    resolveExprType(node.args[1], scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const resultT = handleType.resultType;
+
+  const uint64Type = PrimType(primAnnotations.uint64);
+  const deadlineType = resolveExprType(node.args[1], scope, ctx);
+  if (deadlineType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (deadlineType.kind === typeKinds.untypedInt) {
+    coerceUntypedLiteralToTyped(node.args[1], deadlineType, uint64Type, ctx.errors);
+  } else if (!typesEqual(deadlineType, uint64Type)) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until's deadline_ns argument must be uint64, got ${formatType(deadlineType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+
+  const genericDecl = lookupGenericEnumDecl("WaitResult", ctx);
+  if (!genericDecl) {
+    pushError(
+      ctx.errors,
+      node,
+      `wait_until requires WaitResult<T> in scope - import it from "std/core/concurrency.yoop"`,
+    );
+    return setType(node, ErrorType());
+  }
+  const waitResultType = instantiateEnum(
+    ctx.typeContext.registry,
+    genericDecl,
+    [resultT],
+  );
+  node.builtinWaitUntil = true;
+  node.builtinTaskResultType = resultT;
+  node.builtinWaitResultType = waitResultType;
+  return setType(node, waitResultType);
+}
+
+// Phase 10.F.2: `cancel(h): void` - external cancellation primitive.
+// Recognized by callee name in resolveCall; user-defined `cancel`
+// functions are shadowed. The single arg must be a `Task<T>`; the call
+// itself returns void. Codegen lowers to `@yoop_task_cancel(handle_ptr)`.
+function resolveCancelCall(node, scope, ctx) {
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `cancel(h) takes exactly 1 argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `cancel's argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  node.builtinCancel = true;
+  return setType(node, VoidType());
+}
+
+// Phase 10.E: look for a `trait Into<T> { function into(ref self): T; }`
+// impl that converts `sourceType` into `targetType`. Returns
+// `{ mangledName, targetType }` (so codegen knows the symbol to call and
+// what to store) or null when no impl matches.
+//
+// The trait is recognized structurally by name + arity: any TraitType named
+// `Into` with a single type arg satisfying `typesEqual(arg, targetType)`
+// counts. This mirrors how `Iterable<T>` is recognized in the for-in
+// lowering - the std/core trait isn't blessed by identity, it's blessed by
+// shape.
+function lookupIntoImpl(sourceType, targetType, ctx) {
+  if (!sourceType || sourceType.kind !== typeKinds.struct) return null;
+  // The struct flowing in from an enum payload field may be the pass-A
+  // shell (empty implementsTraits) - re-fetch the canonical version from
+  // the right module's structTable so the impl list is populated. Same
+  // technique as the for-in / `Iterable` lookup.
+  let canonical = sourceType;
+  const moduleEnv = ctx.typeContext?.moduleEnv;
+  if (sourceType.moduleId && moduleEnv) {
+    const env = moduleEnv.get(sourceType.moduleId);
+    const fromTable = env?.structTable?.get(sourceType.name);
+    if (fromTable) canonical = fromTable;
+  } else if (ctx.typeContext?.structTable) {
+    const fromTable = ctx.typeContext.structTable.get(sourceType.name);
+    if (fromTable) canonical = fromTable;
+  }
+  const registry = ctx.typeContext?.registry;
+  for (const trait of canonical.implementsTraits ?? []) {
+    if (trait.name !== "Into") continue;
+    const args = registry?.traitArgsByInstance?.get(trait);
+    if (!args || args.length !== 1) continue;
+    if (!typesEqual(args[0], targetType)) continue;
+    return {
+      mangledName: mangleTraitMethod(canonical, "Into", "into"),
+      targetType,
+    };
+  }
+  return null;
 }
 
 function resolveOrphanStructLiteral(node, scope, ctx) {
@@ -1259,6 +1652,22 @@ export function lookupEnumByName(name, ctx) {
   return null;
 }
 
+// Phase 10.A: look up a generic enum decl by name. Mirrors lookupEnumByName.
+// Returns the generic decl record (not a Type), or null.
+export function lookupGenericEnumDecl(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.genericEnumTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && (imp.kind === "generic-type" || imp.kind === "type")) {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.genericEnumTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
 // Phase 7.5: look up a union type by name. Mirrors lookupEnumByName.
 export function lookupUnionByName(name, ctx) {
   const tc = ctx.typeContext;
@@ -1274,12 +1683,29 @@ export function lookupUnionByName(name, ctx) {
   return null;
 }
 
-// Phase 7.5: `Shape.Circle { radius: 5.0 }` — typecheck a variant constructor
+// Phase 7.5: `Shape.Circle { radius: 5.0 }` - typecheck a variant constructor
 // with a payload. The parser also emits this node for the bare no-payload form
 // `Shape.Empty`, but only after promotion inside resolveFieldAccess.
+// Phase 10.A: if `enumName` resolves to a generic enum decl rather than a
+// concrete EnumType, we can't pick an instantiation without a target type.
+// In statement position we surface "cannot determine type arguments"; the
+// pin path runs through checkInitializer instead.
 function resolveVariantConstructor(node, scope, ctx) {
   const enumType = lookupEnumByName(node.enumName, ctx);
   if (!enumType) {
+    const genericDecl = lookupGenericEnumDecl(node.enumName, ctx);
+    if (genericDecl) {
+      // Visit the field expressions so any internal type errors still surface.
+      for (const f of node.fields ?? []) {
+        resolveExprType(f.value, scope, ctx);
+      }
+      pushError(
+        ctx.errors,
+        node,
+        `cannot determine type arguments for generic enum "${genericDecl.name}" - pin via a typed binding/return/call argument`,
+      );
+      return setType(node, ErrorType());
+    }
     pushError(
       ctx.errors,
       node,
@@ -1307,12 +1733,96 @@ function resolveVariantConstructor(node, scope, ctx) {
   node.resolvedVariant = variant;
 
   if (variant.fields === null) {
-    // No-payload variant — fields must be null (or empty) on the constructor.
+    // No-payload variant - fields must be null (or empty) on the constructor.
     if (node.fields && node.fields.length > 0) {
       pushError(
         ctx.errors,
         node,
-        `variant "${enumType.name}.${variant.name}" has no payload — drop the '{ ... }'`,
+        `variant "${enumType.name}.${variant.name}" has no payload - drop the '{ ... }'`,
+      );
+    }
+    return setType(node, enumType);
+  }
+
+  if (node.fields === null) {
+    pushError(
+      ctx.errors,
+      node,
+      `variant "${enumType.name}.${variant.name}" requires fields { ${variant.fields.map((f) => f.name).join(", ")} }`,
+    );
+    return setType(node, enumType);
+  }
+
+  const targetFieldMap = new Map();
+  for (const f of variant.fields) targetFieldMap.set(f.name, f.type);
+  const seen = new Set();
+  for (const litField of node.fields) {
+    if (seen.has(litField.name)) {
+      pushError(
+        ctx.errors,
+        litField,
+        `duplicate field "${litField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+      continue;
+    }
+    seen.add(litField.name);
+    const expected = targetFieldMap.get(litField.name);
+    if (!expected) {
+      pushError(
+        ctx.errors,
+        litField,
+        `variant "${enumType.name}.${variant.name}" has no field "${litField.name}"`,
+      );
+      resolveExprType(litField.value, scope, ctx);
+      continue;
+    }
+    checkInitializer(
+      litField.value,
+      expected,
+      scope,
+      ctx,
+      (actualType) =>
+        `cannot assign ${formatType(actualType)} to field "${litField.name}" of ${enumType.name}.${variant.name} (expected ${formatType(expected)})`,
+    );
+  }
+  for (const targetField of variant.fields) {
+    if (!node.fields.some((f) => f.name === targetField.name)) {
+      pushError(
+        ctx.errors,
+        node,
+        `missing field "${targetField.name}" in variant constructor for ${enumType.name}.${variant.name}`,
+      );
+    }
+  }
+  return setType(node, enumType);
+}
+
+// Phase 10.A: pin a generic-enum variant constructor to a concrete
+// instantiation supplied by the target type. Stamps `resolvedEnumType` and
+// `resolvedVariant` from the instantiated (already-substituted) enum so
+// codegen sees concrete field types. Diagnostics mirror the concrete path.
+function pinVariantConstructor(node, enumType, scope, ctx) {
+  const variant = enumType.variants.get(node.variantName);
+  if (!variant) {
+    pushError(
+      ctx.errors,
+      node,
+      `enum "${enumType.name}" has no variant "${node.variantName}"`,
+    );
+    for (const f of node.fields ?? []) {
+      resolveExprType(f.value, scope, ctx);
+    }
+    return setType(node, ErrorType());
+  }
+  node.resolvedEnumType = enumType;
+  node.resolvedVariant = variant;
+
+  if (variant.fields === null) {
+    if (node.fields && node.fields.length > 0) {
+      pushError(
+        ctx.errors,
+        node,
+        `variant "${enumType.name}.${variant.name}" has no payload - drop the '{ ... }'`,
       );
     }
     return setType(node, enumType);
@@ -1383,6 +1893,47 @@ export function checkInitializer(
     pinStructLiteral(valueNode, expectedType, scope, ctx);
     return expectedType;
   }
+  // Phase 10.A: pin a variant constructor whose enum name belongs to a
+  // generic enum decl and whose target type is a matching instantiation.
+  // Bare no-payload variants (fields === null with no stamped enum yet)
+  // and payload variants both flow through here.
+  if (
+    valueNode.kind === ASTNodeKind.VARIANT_CONSTRUCTOR &&
+    !valueNode.resolvedEnumType &&
+    expectedType?.kind === typeKinds.enum &&
+    expectedType.genericInstance
+  ) {
+    const genericDecl = lookupGenericEnumDecl(valueNode.enumName, ctx);
+    if (genericDecl && genericDecl.id === expectedType.genericInstance.declId) {
+      return pinVariantConstructor(valueNode, expectedType, scope, ctx);
+    }
+  }
+  // Phase 10.A: pre-promote a FIELD_ACCESS of shape `GenericEnum.Variant`
+  // (bare no-payload form) before resolveExprType has a chance to error
+  // about unpinned generic enums. The promotion stamps a VARIANT_CONSTRUCTOR
+  // with `resolvedEnumType` unset; pinVariantConstructor then attaches the
+  // target instantiation.
+  if (
+    valueNode.kind === ASTNodeKind.FIELD_ACCESS &&
+    valueNode.object?.kind === ASTNodeKind.IDENT &&
+    expectedType?.kind === typeKinds.enum &&
+    expectedType.genericInstance
+  ) {
+    const genericDecl = lookupGenericEnumDecl(valueNode.object.name, ctx);
+    if (genericDecl && genericDecl.id === expectedType.genericInstance.declId) {
+      const variantName = valueNode.field;
+      const variant = genericDecl.genericVariants?.get(variantName);
+      if (variant && variant.fields === null) {
+        valueNode.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+        valueNode.enumName = valueNode.object.name;
+        valueNode.variantName = variantName;
+        valueNode.fields = null;
+        delete valueNode.object;
+        delete valueNode.field;
+        return pinVariantConstructor(valueNode, expectedType, scope, ctx);
+      }
+    }
+  }
   // Array literal with a known array target type: check elements against elem type
   if (
     valueNode.kind === ASTNodeKind.ARRAY_LITERAL &&
@@ -1411,15 +1962,47 @@ export function checkInitializer(
       return valueType;
     }
   }
-  const valueType = resolveExprType(valueNode, scope, ctx);
-  if (valueNode.kind === ASTNodeKind.TRY_OP && valueNode.strippedMulti) {
-    pushError(
-      ctx.errors,
-      valueNode,
-      `'?' on multi-field fallible type 'struct ${valueNode.strippedMulti.sourceName}' must be destructured (e.g. const { a, b } = f()?;)`,
-    );
-    return ErrorType();
+  // Same bidirectional inference, but for namespace-prefixed generic calls
+  // like `intr.heap_alloc(8)`. The remote module's genericFuncTable carries
+  // the canonical decl; we route through resolveGenericCall directly so the
+  // expectedType hint reaches return-position type params.
+  if (
+    valueNode.kind === ASTNodeKind.CALL_EXPRESSION &&
+    valueNode.callee &&
+    typeof valueNode.callee === "object" &&
+    valueNode.callee.kind === ASTNodeKind.FIELD_ACCESS &&
+    (valueNode.callee.object?.kind === ASTNodeKind.IDENT ||
+      valueNode.callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT)
+  ) {
+    const callee = valueNode.callee;
+    const objBinding =
+      lookupInScope(scope, callee.object.name) ??
+      (ctx.typeContext.moduleSymbols?.get(callee.object.name)
+        ? { type: ctx.typeContext.moduleSymbols.get(callee.object.name) }
+        : null);
+    const nsType = objBinding?.type;
+    if (nsType && nsType.kind === typeKinds.namespace) {
+      const srcEnv = ctx.typeContext.moduleEnv?.get(nsType.moduleId);
+      const remoteGeneric = srcEnv?.genericFuncTable?.get(callee.field);
+      if (remoteGeneric && nsType.exports.has(callee.field)) {
+        callee.namespaceLookup = {
+          moduleId: nsType.moduleId,
+          exportName: callee.field,
+        };
+        callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+        callee.object.resolvedType = nsType;
+        const valueType = resolveGenericCall(valueNode, remoteGeneric, scope, ctx, expectedType);
+        if (
+          valueType.kind !== typeKinds.error &&
+          !isAssignable(expectedType, valueType)
+        ) {
+          pushError(ctx.errors, valueNode, mismatchMessage(valueType));
+        }
+        return valueType;
+      }
+    }
   }
+  const valueType = resolveExprType(valueNode, scope, ctx);
   if (!isAssignable(expectedType, valueType)) {
     pushError(ctx.errors, valueNode, mismatchMessage(valueType));
   }
@@ -1449,14 +2032,14 @@ function checkArrayLiteralAgainstType(litNode, arrayType, scope, ctx) {
   litNode.knownElemType = elemType;
 }
 
-// `f(a, b)` — checks arity, then runs each arg through checkInitializer
+// `f(a, b)` - checks arity, then runs each arg through checkInitializer
 // against the parameter's declared type.
 export function resolveCallType(node, sig, scope, ctx) {
   if (sig.params.length !== node.args.length) {
     pushError(
       ctx.errors,
       node,
-      `wrong arg count to "${node.callee}" — expected ${sig.params.length}, got ${node.args.length}`,
+      `wrong arg count to "${calleeDisplayName(node.callee)}" - expected ${sig.params.length}, got ${node.args.length}`,
     );
     return setType(node, sig.returnType);
   }
@@ -1498,7 +2081,7 @@ export function resolveCallType(node, sig, scope, ctx) {
       if (node.args[i].kind !== ASTNodeKind.REF_EXPRESSION) {
         const hint = node.args[i].kind === ASTNodeKind.IDENT ? node.args[i].name : "...";
         pushError(ctx.errors, node.args[i],
-          `parameter "${param.name}" expects a ref argument — pass with 'ref ${hint}'`);
+          `parameter "${param.name}" expects a ref argument - pass with 'ref ${hint}'`);
         resolveExprType(node.args[i], scope, ctx);
         continue;
       }
@@ -1524,15 +2107,51 @@ export function resolveCallType(node, sig, scope, ctx) {
         scope,
         ctx,
         (argType) =>
-          `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
+          `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
       );
     }
+  }
+
+  // Phase 9.J: `mustNotShare acrossThreads` enforcement at task-spawn sites.
+  // A call whose return type is a TaskType is the entry point for handing
+  // work off to a worker thread; any argument that resolves to a binding
+  // carrying a kind with `mustNotShare acrossThreads` cannot flow across the
+  // task boundary.
+  if (sig.returnType?.kind === typeKinds.task) {
+    enforceMustNotShareAcrossThreads(node, scope, ctx);
   }
 
   return setType(node, sig.returnType);
 }
 
-// Phase 7.4: trait-qualified call resolution — `Steppable.step(ref b1, ...)`.
+// Phase 9.J: walk a call's args at a task-spawn site and reject any that
+// resolve to an IDENT (or `ref IDENT`) whose binding carries a kindType with
+// `mustNotShare acrossThreads`. Diagnostics point at the offending arg so the
+// user sees which value is the problem.
+function enforceMustNotShareAcrossThreads(node, scope, _ctx) {
+  for (const arg of node.args ?? []) {
+    const ident =
+      arg.kind === ASTNodeKind.IDENT
+        ? arg
+        : arg.kind === ASTNodeKind.REF_EXPRESSION &&
+          arg.operand?.kind === ASTNodeKind.IDENT
+        ? arg.operand
+        : null;
+    if (!ident) continue;
+    const binding = lookupInScope(scope, ident.name);
+    const kt = binding?.kindType;
+    if (!kt) continue;
+    if ((kt.mustNotShare ?? []).includes("acrossThreads")) {
+      pushError(
+        _ctx.errors,
+        arg,
+        `binding "${ident.name}" has kind "${kt.name}" with 'mustNotShare acrossThreads' — cannot pass into a task spawn`,
+      );
+    }
+  }
+}
+
+// Phase 7.4: trait-qualified call resolution - `Steppable.step(ref b1, ...)`.
 // The trait is looked up by name; the method's first param must be `ref self`
 // and receives a struct (or, inside a generic body, a TypeParamType whose
 // bound matches `trait`). Tags the node with `calleeMangledName` for codegen.
@@ -1561,12 +2180,15 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
   // receiver's concrete instantiation by name. The receiver's
   // implementsTraits already contains the substituted TraitType with the
   // concrete method sigs.
+  // Phase 9.J: TypeParamType bounds is a list; multi-bound dispatch picks the
+  // bound matching `trait.name`. Empty bounds = unbounded type-param can't
+  // dispatch a trait method.
   let resolvedTrait = trait;
   if (trait.isGenericTraitRef) {
     const implTraits = recvType.kind === typeKinds.struct
       ? (recvType.implementsTraits ?? [])
-      : recvType.kind === typeKinds.typeParam && recvType.bound
-      ? [recvType.bound]
+      : recvType.kind === typeKinds.typeParam
+      ? recvType.bounds ?? []
       : [];
     resolvedTrait = implTraits.find((t) => t.name === trait.name) ?? null;
     if (!resolvedTrait) {
@@ -1580,7 +2202,23 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     }
   }
 
-  const methodSig = resolvedTrait.methods?.get(methodName);
+  // Phase 9.J: the qualifying trait may inherit `methodName` from an ancestor
+  // - `BatchIterable.next(...)` where `BatchIterable extends Iterable` and
+  // `next` is declared on `Iterable`. Walk the extends chain to find the
+  // declaring trait; mangling uses that ancestor's name so dispatch lines up
+  // with the LLVM define emitted by validateImplBlock.
+  let methodSig = resolvedTrait.methods?.get(methodName);
+  let declaringTrait = resolvedTrait;
+  if (!methodSig) {
+    for (const anc of walkTraitExtends(resolvedTrait)) {
+      const sig = anc.methods?.get(methodName);
+      if (sig) {
+        methodSig = sig;
+        declaringTrait = anc;
+        break;
+      }
+    }
+  }
   if (!methodSig) {
     pushError(ctx.errors, node, `trait "${resolvedTrait.name}" has no method "${methodName}"`);
     for (const arg of node.args) resolveExprType(arg, scope, ctx);
@@ -1588,6 +2226,10 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
   }
 
   // Case 1: receiver is a struct implementing the trait.
+  // Phase 9.J: extends chain - a type that implements a sub-trait `Child`
+  // implicitly implements every ancestor; `validateImplBlock` flattens
+  // ancestors into `implementsTraits`, so this check still trips when a struct
+  // implements `Child` and the user qualifies via `Parent.method(...)`.
   if (recvType.kind === typeKinds.struct) {
     const implementsIt = (recvType.implementsTraits ?? []).some(
       (t) => t === resolvedTrait || (trait.isGenericTraitRef && t.name === resolvedTrait.name),
@@ -1603,31 +2245,83 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     }
     const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
     node.calleeMethodOf = recvType;
-    node.calleeTrait = resolvedTrait;
+    node.calleeTrait = declaringTrait;
     node.calleeMethodName = methodName;
-    node.calleeMangledName = mangleTraitMethod(recvType, resolvedTrait.name, methodName);
+    // Phase 9.J: mangle by the declaring trait, not the qualifying trait, so
+    // `BatchIterable.next(...)` lines up with the `Iterable.next` define.
+    node.calleeMangledName = mangleTraitMethod(recvType, declaringTrait.name, methodName);
     return resolveCallWithSig(node, subbedSig, scope, ctx);
   }
 
-  // Case 2 (Phase 7.2): receiver is a TypeParamType whose bound is this trait.
+  // Phase 9.G - Case 3: receiver is a VTableType for this trait. The call
+  // lowers to an indirect call through the stored function pointer at the
+  // method's field slot, with the vtable's ctx passed as the first arg.
+  // The trait method's "ref self" lands as the ctx pointer; the function
+  // body knows how to re-interpret it as `ref T` for its concrete T.
+  if (recvType.kind === typeKinds.vtable) {
+    if (recvType.traitName !== resolvedTrait.name) {
+      pushError(
+        ctx.errors,
+        node,
+        `vtable "${recvType.name}" backs trait "${recvType.traitName}", not "${resolvedTrait.name}"`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    const fieldIdx = recvType.methodOrder.indexOf(methodName);
+    if (fieldIdx < 0) {
+      pushError(
+        ctx.errors,
+        node,
+        `vtable "${recvType.name}" has no slot for trait method "${methodName}"`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    // Substitute ref self -> ref VTableType so the first-arg ref-check passes.
+    // The vtable is the receiver - the user writes `Trait.method(ref vt, ...)`
+    // or equivalently `VTableName.method(ref vt, ...)`.
+    const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
+    node.vtableCall = {
+      vtableType: recvType,
+      methodName,
+      fieldIndex: fieldIdx,
+    };
+    return resolveCallWithSig(node, subbedSig, scope, ctx);
+  }
+
+  // Case 2 (Phase 7.2): receiver is a TypeParamType whose bound list contains
+  // this trait - or extends it (Phase 9.J).
   if (recvType.kind === typeKinds.typeParam) {
-    const boundMatches =
-      recvType.bound === resolvedTrait ||
-      (trait.isGenericTraitRef && recvType.bound?.name === resolvedTrait.name);
+    const bounds = recvType.bounds ?? [];
+    const boundMatchesAncestor = (b) => {
+      if (!b) return false;
+      if (b === resolvedTrait) return true;
+      if (trait.isGenericTraitRef && b.name === resolvedTrait.name) return true;
+      for (const t of walkTraitExtends(b)) {
+        if (t === resolvedTrait) return true;
+        if (trait.isGenericTraitRef && t.name === resolvedTrait.name) return true;
+      }
+      return false;
+    };
+    const boundMatches = bounds.some(boundMatchesAncestor);
     if (!boundMatches) {
       pushError(
         ctx.errors,
         node,
-        `type parameter "${recvType.name}" is not bound to trait "${resolvedTrait.name}" — add 'implements ${resolvedTrait.name}' to ${recvType.name}'s declaration`,
+        `type parameter "${recvType.name}" is not bound to trait "${resolvedTrait.name}" - add 'implements ${resolvedTrait.name}' to ${recvType.name}'s declaration`,
       );
       for (const arg of node.args) resolveExprType(arg, scope, ctx);
       return setType(node, ErrorType());
     }
     const subbedSig = substituteSelfPlaceholder(methodSig, recvType);
+    // Phase 9.J: tag with the declaring trait so codegen's post-substitution
+    // rewrite picks the right mangled symbol when `Child.method(...)` lands on
+    // a method declared on `Parent`.
     node.boundMethod = {
       methodName,
-      traitName: resolvedTrait.name,
-      traitModuleId: resolvedTrait.moduleId,
+      traitName: declaringTrait.name,
+      traitModuleId: declaringTrait.moduleId,
       receiverParamName: recvType.name,
       receiverOriginDecl: recvType.originDecl,
     };
@@ -1657,8 +2351,103 @@ function substituteSelfPlaceholder(methodSig, concreteType) {
 
 // Look up a trait by name in the current module's trait table or its imports.
 // For generic traits (declared as `trait Foo<T>`), returns a placeholder
-// `{ isGeneric: true, name }` — `resolveTraitQualifiedCall` matches it
+// `{ isGeneric: true, name }` - `resolveTraitQualifiedCall` matches it
 // against the receiver's instantiated trait by name.
+// Phase 9.G: VTableName lookup. Mirrors lookupEnumByName / lookupUnionByName
+// - checks the local vtableTable, then imports of nominal types.
+export function lookupVTableByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.vtableTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.vtableTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 9.G: `VTableName.method(...)` dispatch. Two cases:
+//   - `from(ref x)`: builtin constructor, returns a vtable value.
+//   - `<method>(ref v, ...)`: forwarding form for trait dispatch through
+//     the vtable. Equivalent to `Trait.method(ref v, ...)` where v is a
+//     vtable value, but lets callers use the vtable type as the dispatch
+//     namespace (matches the library-design surface in §8 q1).
+function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
+  if (methodName !== "from") {
+    // Forwarding to trait dispatch: synthesize a trait reference and route
+    // through resolveTraitQualifiedCall, which already knows how to handle
+    // vtable receivers (Case 3).
+    const trait =
+      ctx.typeContext.traitTable?.get(vtableType.traitName) ??
+      lookupTraitByName(vtableType.traitName, ctx);
+    if (!trait) {
+      pushError(
+        ctx.errors,
+        node,
+        `vtable "${vtableType.name}" backs trait "${vtableType.traitName}", but that trait is not in scope`,
+      );
+      for (const arg of node.args) resolveExprType(arg, scope, ctx);
+      return setType(node, ErrorType());
+    }
+    return resolveTraitQualifiedCall(node, trait, methodName, scope, ctx);
+  }
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.from(ref x)\` expects exactly one ref argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  const arg = node.args[0];
+  if (arg.kind !== ASTNodeKind.REF_EXPRESSION) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.from(ref x)\` requires a 'ref' argument`,
+    );
+    resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  const operandType = resolveExprType(arg.operand, scope, ctx);
+  let recvType = operandType.kind === typeKinds.ref ? operandType.inner : operandType;
+  if (recvType.kind === typeKinds.struct && ctx.typeContext.structTable) {
+    const canonical = ctx.typeContext.structTable.get(recvType.name);
+    if (canonical) recvType = canonical;
+  }
+  if (recvType.kind !== typeKinds.struct) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.from(ref x)\` requires a struct receiver, got ${formatType(recvType)}`,
+    );
+    return setType(node, vtableType);
+  }
+  const implementsIt = (recvType.implementsTraits ?? []).some(
+    (t) => t.name === vtableType.traitName
+      && (t.moduleId ?? null) === (vtableType.traitModuleId ?? null),
+  );
+  if (!implementsIt) {
+    pushError(
+      ctx.errors,
+      node,
+      `struct "${recvType.name}" does not implement trait "${vtableType.traitName}" required by vtable "${vtableType.name}"`,
+    );
+    return setType(node, vtableType);
+  }
+  // Stamp codegen breadcrumbs: vtable to build, struct providing the impl.
+  node.vtableBuilder = {
+    vtableType,
+    implType: recvType,
+  };
+  arg.resolvedType = operandType;
+  return setType(node, vtableType);
+}
+
 function lookupTraitByName(name, ctx) {
   const tc = ctx.typeContext;
   const local = tc.traitTable?.get(name);
@@ -1726,7 +2515,7 @@ export function lookupGenericFunc(name, ctx) {
 
 // Phase 7.1: unify a generic param type against a concrete arg type, filling
 // the `subst` map (paramName -> Type). Returns true on success, false on
-// conflict. Untyped literals do NOT pin a type param — only concrete types do.
+// conflict. Untyped literals do NOT pin a type param - only concrete types do.
 function unifyAgainstTypeParam(paramType, argType, declId, subst) {
   if (!paramType) return true;
   // If paramType is a TypeParamType belonging to our decl, capture argType.
@@ -1734,7 +2523,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
     paramType.kind === typeKinds.typeParam &&
     paramType.originDecl === declId
   ) {
-    // Skip untyped literals — don't pin a param to "untypedInt".
+    // Skip untyped literals - don't pin a param to "untypedInt".
     if (
       argType.kind === typeKinds.untypedInt ||
       argType.kind === typeKinds.untypedFloat
@@ -1778,7 +2567,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
   ) {
     // Same generic instantiation? Walk field by field.
     if ((paramType.fields ?? []).length !== (argType.fields ?? []).length) {
-      return true; // arity differs — caller handles via assignability
+      return true; // arity differs - caller handles via assignability
     }
     for (let i = 0; i < (paramType.fields ?? []).length; i++) {
       if (
@@ -1794,6 +2583,34 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
     }
     return true;
   }
+  // Phase 10.X.2: walk function-pointer params + return so a type
+  // parameter buried inside an FPT-typed field can drive inference
+  // (e.g. `KeyOps<K> { hash: (k: K) => uint64 }` constrains K when
+  // the user passes a `KeyOps<int32>` to a generic `lookup<K>`).
+  if (
+    paramType.kind === typeKinds.functionPointer &&
+    argType?.kind === typeKinds.functionPointer
+  ) {
+    if (paramType.params.length !== argType.params.length) return true;
+    for (let i = 0; i < paramType.params.length; i++) {
+      if (
+        !unifyAgainstTypeParam(
+          paramType.params[i],
+          argType.params[i],
+          declId,
+          subst,
+        )
+      ) {
+        return false;
+      }
+    }
+    return unifyAgainstTypeParam(
+      paramType.returnType,
+      argType.returnType,
+      declId,
+      subst,
+    );
+  }
   return true;
 }
 
@@ -1803,7 +2620,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
 // `expectedReturnType` (optional): if supplied (typically by `checkInitializer`
 // when the call appears in a typed binding/initializer position), the return
 // type is also unified against it. This enables type-parameters that only
-// appear in the return position to be inferred — e.g. `heap_alloc<T>(n: usize): T[]`
+// appear in the return position to be inferred - e.g. `heap_alloc<T>(n: usize): T[]`
 // where T is bound from the LHS annotation.
 function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null) {
   const sig = generic.genericSig;
@@ -1815,7 +2632,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     pushError(
       ctx.errors,
       node,
-      `wrong arg count to "${node.callee}" — expected ${sig.params.length}, got ${node.args.length}`,
+      `wrong arg count to "${calleeDisplayName(node.callee)}" - expected ${sig.params.length}, got ${node.args.length}`,
     );
     return setType(node, ErrorType());
   }
@@ -1840,7 +2657,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         node.args[i],
-        `conflicting type argument for generic function "${node.callee}": ${formatType(argT)} vs prior binding`,
+        `conflicting type argument for generic function "${calleeDisplayName(node.callee)}": ${formatType(argT)} vs prior binding`,
       );
     }
   }
@@ -1860,28 +2677,32 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         node,
-        `cannot infer type argument "${pn}" for generic function "${node.callee}"`,
+        `cannot infer type argument "${pn}" for generic function "${calleeDisplayName(node.callee)}"`,
       );
       return setType(node, ErrorType());
     }
     concreteArgs.push(bound);
   }
 
-  // Phase 7.2: call-site bound check. Runs before instantiation so the
-  // diagnostic points at the call site, not the registry side-channel.
+  // Phase 7.2 / 9.J: call-site bound check. Runs before instantiation so the
+  // diagnostic points at the call site, not the registry side-channel. With
+  // multi-bound type params, every bound must be satisfied - fire one check
+  // per bound.
   let boundCheckFailed = false;
   for (let i = 0; i < generic.paramNames.length; i++) {
     const pn = generic.paramNames[i];
     const tpType = generic.paramScope?.get(pn);
-    if (!tpType?.bound) continue;
-    const res = checkBoundSatisfied(concreteArgs[i], tpType.bound);
-    if (!res.ok) {
-      pushError(
-        ctx.errors,
-        node,
-        `call to "${node.callee}": type argument "${pn}" = ${formatType(concreteArgs[i])} does not satisfy bound — ${res.message}`,
-      );
-      boundCheckFailed = true;
+    const bounds = tpType?.bounds ?? [];
+    for (const requiredTrait of bounds) {
+      const res = checkBoundSatisfied(concreteArgs[i], requiredTrait);
+      if (!res.ok) {
+        pushError(
+          ctx.errors,
+          node,
+          `call to "${calleeDisplayName(node.callee)}": type argument "${pn}" = ${formatType(concreteArgs[i])} does not satisfy bound - ${res.message}`,
+        );
+        boundCheckFailed = true;
+      }
     }
   }
   if (boundCheckFailed) {
@@ -1895,7 +2716,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     concreteArgs,
   );
   if (!inst) {
-    pushError(ctx.errors, node, `internal: failed to instantiate generic "${node.callee}"`);
+    pushError(ctx.errors, node, `internal: failed to instantiate generic "${calleeDisplayName(node.callee)}"`);
     return setType(node, ErrorType());
   }
 
@@ -1930,7 +2751,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         argNode,
-        `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argTypes[i])} to ${formatType(param.type)}`,
+        `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": cannot pass ${formatType(argTypes[i])} to ${formatType(param.type)}`,
       );
     } else {
       coerceUntypedLiteralToTyped(argNode, argTypes[i], param.type, ctx.errors);
@@ -1944,7 +2765,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
   return setType(node, inst.funcType.returnType);
 }
 
-// `Foo { x: 1, y: 2 }` — type-checks each field value against the target
+// `Foo { x: 1, y: 2 }` - type-checks each field value against the target
 // struct's declared field type, reports duplicates and missing fields,
 // and stamps the literal node with its resolved type.
 export function pinStructLiteral(litNode, targetType, scope, ctx) {
@@ -1964,7 +2785,7 @@ export function pinStructLiteral(litNode, targetType, scope, ctx) {
       pushError(
         ctx.errors,
         litNode,
-        `union literal must initialize exactly one field — found ${litNode.fields.length} (${litNode.fields.map((f) => f.name).join(", ")})`,
+        `union literal must initialize exactly one field - found ${litNode.fields.length} (${litNode.fields.map((f) => f.name).join(", ")})`,
       );
     }
     const targetFieldMap = new Map();

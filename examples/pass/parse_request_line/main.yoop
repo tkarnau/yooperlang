@@ -1,11 +1,11 @@
 // Phase 8.H headline demo: parse an HTTP/1.1 request line into method,
-// path, and version using only std/core/bytes + std/core/strings — no
+// path, and version using only std/core/bytes + std/core/strings - no
 // `import.unsafe;`. This is the smoke test for "the library prereqs are
 // done" per plans/phase-8-h-string-bytes-vec.md.
 
 import { bytes_index_of, bytes_slice } from "../../../std/core/bytes.yoop";
 import { string_from_bytes } from "../../../std/core/strings.yoop";
-import { Maybe } from "../../../std/core/types.yoop";
+import { Result } from "../../../std/core/types.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -15,11 +15,11 @@ type RequestLine {
     method: string,
     path: string,
     version: string,
-    err: string,
+    error: string,
 }
 
 function empty_request_line(msg: string): RequestLine {
-    return { method: "", path: "", version: "", err: msg };
+    return { method: "", path: "", version: "", error: msg };
 }
 
 function parse_request_line(buf: uint8[]): RequestLine {
@@ -44,17 +44,33 @@ function parse_request_line(buf: uint8[]): RequestLine {
     let method_bytes: uint8[] = bytes_slice(buf, 0, s1);
     let path_bytes: uint8[] = bytes_slice(buf, s1 + 1, s2);
     let version_bytes: uint8[] = bytes_slice(buf, s2 + 1, cr);
-    let method_str: Maybe<string> = string_from_bytes(method_bytes);
-    if (method_str.err.len > 0) { return empty_request_line(method_str.err); }
-    let path_str: Maybe<string> = string_from_bytes(path_bytes);
-    if (path_str.err.len > 0) { return empty_request_line(path_str.err); }
-    let version_str: Maybe<string> = string_from_bytes(version_bytes);
-    if (version_str.err.len > 0) { return empty_request_line(version_str.err); }
+
+    let method_r: Result<string, string> = string_from_bytes(method_bytes);
+    let method_val: string = "";
+    switch (method_r) {
+        case Result.Ok { value: mv }: { method_val = mv; }
+        case Result.Err { error: me }: { return empty_request_line(me); }
+    }
+
+    let path_r: Result<string, string> = string_from_bytes(path_bytes);
+    let path_val: string = "";
+    switch (path_r) {
+        case Result.Ok { value: pv }: { path_val = pv; }
+        case Result.Err { error: pe }: { return empty_request_line(pe); }
+    }
+
+    let version_r: Result<string, string> = string_from_bytes(version_bytes);
+    let version_val: string = "";
+    switch (version_r) {
+        case Result.Ok { value: vv }: { version_val = vv; }
+        case Result.Err { error: ve }: { return empty_request_line(ve); }
+    }
+
     return {
-        method: method_str.value,
-        path: path_str.value,
-        version: version_str.value,
-        err: "",
+        method: method_val,
+        path: path_val,
+        version: version_val,
+        error: "",
     };
 }
 
@@ -69,12 +85,12 @@ function main(): int32 {
         13, 10,                                // CRLF
     ];
     let rl: RequestLine = parse_request_line(raw);
-    printf(`method=${rl.method} path=${rl.path} version=${rl.version} err=${rl.err}\n`);
+    printf(`method=${rl.method} path=${rl.path} version=${rl.version} err=${rl.error}\n`);
 
     // Malformed: missing CRLF.
     let bad: uint8[] = [71, 69, 84, 32, 47];  // "GET /"
     let bad_rl: RequestLine = parse_request_line(bad);
-    printf(`bad.err=${bad_rl.err}\n`);
+    printf(`bad.err=${bad_rl.error}\n`);
 
     return 0;
 }

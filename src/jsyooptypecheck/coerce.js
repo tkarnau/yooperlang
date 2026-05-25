@@ -22,7 +22,7 @@ export function isBool(t) {
   return t.kind === typeKinds.prim && t.name === primAnnotations.bool;
 }
 
-// True if t is any int-like or float-like type — typed int prims, typed float
+// True if t is any int-like or float-like type - typed int prims, typed float
 // prims, or the "untyped" literal kinds. Used wherever the language accepts
 // "any number" (unary minus, template-literal interpolation, etc).
 export function isNumeric(t) {
@@ -74,7 +74,7 @@ export function coerceUntypedLiteralToTyped(
   }
   // Phase 9.A fix: a nested arithmetic expression whose own resolvedType is
   // still untyped (e.g. `3 * 4` inside `let x: int32 = 2 + 3 * 4;`) needs the
-  // target type pushed all the way down — otherwise codegen reads an
+  // target type pushed all the way down - otherwise codegen reads an
   // untypedInt at the intermediate node and crashes. Bare literals at the
   // leaves still go through coerceLiteralToType (range-checked).
   if (
@@ -107,7 +107,7 @@ export function isAssignable(dest, src) {
   if (typesEqual(dest, src)) {
     return true;
   }
-  // if either is an error type, suppress cascading errors — the real error
+  // if either is an error type, suppress cascading errors - the real error
   // was reported at the source of the error type, and propagating beyond
   // that obscures which spot the user needs to fix.
   if (dest.kind === typeKinds.error || src.kind === typeKinds.error) {
@@ -147,6 +147,28 @@ export function isAssignable(dest, src) {
     typesEqual(dest.pointee, src.pointee)
   ) {
     return true;
+  }
+
+  // Phase 10.X.2: a top-level function decl's FuncType is assignable to a
+  // matching FunctionPointerType. The two types track the same shape but
+  // store it differently - FuncType has `{ name, type, isRef }` params and
+  // a variadic flag; FunctionPointerType has plain-type params and no
+  // variadic. Used to seed vtable-like dispatch tables (e.g. `KeyOps<K>`)
+  // by naming functions directly in struct literals: `{ hash: int_hash }`.
+  if (
+    dest.kind === typeKinds.functionPointer &&
+    src.kind === typeKinds.func
+  ) {
+    if (src.variadic) return false;
+    const dParams = dest.params ?? [];
+    const sParams = src.params ?? [];
+    if (dParams.length !== sParams.length) return false;
+    for (let i = 0; i < dParams.length; i++) {
+      // FPT doesn't carry `ref`-marked params today; require non-ref on src.
+      if (sParams[i].isRef) return false;
+      if (!typesEqual(dParams[i], sParams[i].type)) return false;
+    }
+    return typesEqual(dest.returnType, src.returnType);
   }
 
   return false;

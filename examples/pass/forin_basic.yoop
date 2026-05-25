@@ -1,0 +1,83 @@
+// Phase 9.D: `for ITEM in EXPR { ... }` element-walking loop over arrays.
+// Replaces the C-style `for (i = 0; i < n; i = i + 1)` boilerplate that
+// dominates every yoop program working with arrays today.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Point {
+    x: int32,
+    y: int32,
+}
+
+function main(): int32 {
+    // Primitive element type - int32[].
+    let xs: int32[] = [10, 20, 30, 40];
+    let sum: int32 = 0;
+    for x in xs {
+        sum = sum + x;
+    }
+    printf(`sum=${sum}\n`);
+
+    // bool[] element type (depends on Phase 9.B).
+    let flags: bool[] = [true, false, true, true, false];
+    let trues: int32 = 0;
+    for f in flags {
+        if (f) {
+            trues = trues + 1;
+        }
+    }
+    printf(`trues=${trues}\n`);
+
+    // Struct element type - iteration copies each element into the loop var.
+    let pts: Point[] = intr.heap_alloc(3);
+    pts[0] = { x: 1, y: 10 };
+    pts[1] = { x: 2, y: 20 };
+    pts[2] = { x: 3, y: 30 };
+    let sumX: int32 = 0;
+    let sumY: int32 = 0;
+    for p in pts {
+        sumX = sumX + p.x;
+        sumY = sumY + p.y;
+    }
+    printf(`sumX=${sumX} sumY=${sumY}\n`);
+
+    // break + continue compose with for-in the same as with while / classic for.
+    // (Loop variable is renamed per iteration site because each LET-style
+    // alloca currently uses the user-visible name as its LLVM SSA name and
+    // sibling re-use would collide - same issue today's `let x` in sibling
+    // blocks hits.)
+    let early: int32 = 0;
+    for v in xs {
+        if (v == 20) {
+            continue;
+        }
+        if (v == 40) {
+            break;
+        }
+        early = early + v;
+    }
+    printf(`early=${early}\n`);
+
+    // Empty array - body must not execute.
+    let empty: int32[] = intr.heap_alloc(0);
+    let zero: int32 = 0;
+    for e in empty {
+        zero = zero + 1;
+    }
+    printf(`zero=${zero}\n`);
+
+    intr.heap_free(pts);
+    intr.heap_free(empty);
+    return 0;
+}
+
+// expected output:
+// sum=100
+// trues=3
+// sumX=6 sumY=60
+// early=40
+// zero=0

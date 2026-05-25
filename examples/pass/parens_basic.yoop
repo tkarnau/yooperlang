@@ -23,7 +23,7 @@ function main(): int32 {
     printf(`b=${b}\n`);
 
     // The SDL-demo workaround pattern (r * 0.02 - 0.4) replaced by
-    // the natural form (r - 20) * 0.02 — integer arithmetic flavor here.
+    // the natural form (r - 20) * 0.02 - integer arithmetic flavor here.
     let r: int32 = 30;
     let c: int32 = (r - 20) * 2;
     printf(`c=${c}\n`);
