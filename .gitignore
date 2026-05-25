@@ -6,3 +6,5 @@ examples/**
 examples/**/*.exe
 !**/*.yoop
 !examples/**/*.js
+**/*dSYM/
+
