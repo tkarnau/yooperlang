@@ -1,0 +1,180 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Language Reference — Yooperlang</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body class="reference-page">
+    <header class="site-header">
+        <div class="container header-inner">
+            <a class="brand" href="index.html">
+                <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
+            </a>
+            <nav class="site-nav">
+                <a href="reference.html" class="active">Language Reference</a>
+                <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <div class="reference-shell container">
+        <aside class="sidebar">
+            <h2 class="sidebar-title">Reference</h2>
+            <nav class="toc">
+                <ol>
+                    <li><a href="#overview">Overview</a></li>
+                    <li><a href="#modules">Modules &amp; imports</a></li>
+                    <li><a href="#types">Types</a>
+                        <ol>
+                            <li><a href="#primitives">Primitives</a></li>
+                            <li><a href="#structs">Structs</a></li>
+                            <li><a href="#enums">Enums &amp; unions</a></li>
+                            <li><a href="#arrays">Arrays</a></li>
+                            <li><a href="#refs">References</a></li>
+                        </ol>
+                    </li>
+                    <li><a href="#functions">Functions</a></li>
+                    <li><a href="#control-flow">Control flow</a></li>
+                    <li><a href="#traits">Traits</a></li>
+                    <li><a href="#kinds">Kinds</a></li>
+                    <li><a href="#generics">Generics</a></li>
+                    <li><a href="#tasks">Tasks &amp; concurrency</a></li>
+                    <li><a href="#errors">Fallible values &amp; <code>?</code></a></li>
+                    <li><a href="#stdlib">Standard library</a></li>
+                </ol>
+            </nav>
+        </aside>
+
+        <article class="reference-content">
+            <header class="page-head">
+                <h1>Language Reference</h1>
+                <p class="muted">
+                    Work in progress. This document is a skeleton; sections will fill in as
+                    features stabilize. The authoritative spec is
+                    <a href="https://github.com/">SPEC.md</a> in the repo.
+                </p>
+            </header>
+
+            <section id="overview">
+                <h2>Overview</h2>
+                <p>
+                    Yooperlang separates three ideas that other languages tend to conflate:
+                    <strong>types</strong> (what a value is), <strong>traits</strong>
+                    (what it can do), and <strong>kinds</strong> (how a binding must be used).
+                </p>
+                <p class="placeholder">TODO: expand the three-layer model with a couple of concrete examples.</p>
+            </section>
+
+            <section id="modules">
+                <h2>Modules &amp; imports</h2>
+                <p>Every <code>.yoop</code> file is a module. Imports use relative paths only.</p>
+                <pre><code class="yoop">import { parse, lex } from "./lexer.yoop";
+import * as lex        from "./lexer.yoop";
+import { parse as p }  from "./ast.yoop";
+import "./init.yoop";                    // side-effect only</code></pre>
+                <p class="placeholder">TODO: cover <code>export</code>, the <code>std/</code> root, and re-exports.</p>
+            </section>
+
+            <section id="types">
+                <h2>Types</h2>
+                <p>Types appear on the right of a colon. The compiler does no implicit narrowing.</p>
+
+                <h3 id="primitives">Primitives</h3>
+                <p class="placeholder">TODO: <code>int8/16/32/64</code>, <code>uint*</code>, <code>float32/64</code>, <code>bool</code>, <code>byte</code>, <code>string</code>.</p>
+
+                <h3 id="structs">Structs</h3>
+                <pre><code class="yoop">type Point {
+    x: int32,
+    y: int32,
+}
+
+let p: Point = { x: 3, y: 4 };</code></pre>
+                <p class="placeholder">TODO: nested literals, field access rules, struct literal pinning.</p>
+
+                <h3 id="enums">Enums &amp; unions</h3>
+                <p class="placeholder">TODO: sum types via <code>enum</code>, C-style <code>union</code>, <code>switch</code> with variant patterns.</p>
+
+                <h3 id="arrays">Arrays</h3>
+                <p class="placeholder">TODO: fixed-size arrays, dynamic arrays, slice syntax.</p>
+
+                <h3 id="refs">References</h3>
+                <p class="placeholder">TODO: <code>ref</code> parameters and call-site <code>ref</code>.</p>
+            </section>
+
+            <section id="functions">
+                <h2>Functions</h2>
+                <pre><code class="yoop">function distance_sq(p: Point): int32 {
+    return p.x * p.x + p.y * p.y;
+}</code></pre>
+                <p class="placeholder">TODO: parameter modes, return types, function values, the <code>=&gt;</code> arrow type.</p>
+            </section>
+
+            <section id="control-flow">
+                <h2>Control flow</h2>
+                <p class="placeholder">TODO: <code>if</code>, <code>while</code>, <code>for ... in</code>, <code>switch</code>, <code>break</code>/<code>continue</code>.</p>
+            </section>
+
+            <section id="traits">
+                <h2>Traits</h2>
+                <p>A trait describes operations a value supports.</p>
+                <pre><code class="yoop">trait Disposable {
+    function dispose(ref self): void;
+}</code></pre>
+                <p class="placeholder">TODO: trait impls, trait-qualified calls (<code>Trait.method(ref x, ...)</code>), <code>vtable T for Trait</code>.</p>
+            </section>
+
+            <section id="kinds">
+                <h2>Kinds</h2>
+                <p>
+                    A kind attaches a usage contract to a binding — scope, lifecycle, or
+                    obligations the user must discharge.
+                </p>
+                <p class="placeholder">TODO: built-in kinds (<code>disposable</code>, <code>scoped</code>, <code>pooled</code>), user-defined kinds, kind composition, <code>propagates&lt;K&gt;</code>.</p>
+            </section>
+
+            <section id="generics">
+                <h2>Generics</h2>
+                <pre><code class="yoop">type Pair&lt;A, B&gt; {
+    first: A,
+    second: B,
+}
+
+function swap&lt;A, B&gt;(p: Pair&lt;A, B&gt;): Pair&lt;B, A&gt; {
+    return { first: p.second, second: p.first };
+}</code></pre>
+                <p class="placeholder">TODO: type parameters, call-site inference, <code>implements</code> bounds.</p>
+            </section>
+
+            <section id="tasks">
+                <h2>Tasks &amp; concurrency</h2>
+                <p class="placeholder">TODO: <code>task</code> functions, <code>Task&lt;T&gt;</code>, <code>wait</code>, the I/O multiplexer.</p>
+            </section>
+
+            <section id="errors">
+                <h2>Fallible values &amp; <code>?</code></h2>
+                <p>
+                    Any enum with <code>Ok</code> / <code>Err</code> variants is fallible. The
+                    <code>?</code> operator propagates the <code>Err</code> payload through callers
+                    of the same enum shape.
+                </p>
+                <p class="placeholder">TODO: examples, cross-shape rules, struct-form fallibles.</p>
+            </section>
+
+            <section id="stdlib">
+                <h2>Standard library</h2>
+                <p class="placeholder">TODO: <code>std/core</code>, <code>std/net</code>, <code>std/http</code>.</p>
+            </section>
+        </article>
+    </div>
+
+    <footer class="site-footer">
+        <div class="container">
+            <p>Yooperlang — Yooper is a person from the Upper Peninsula of Michigan.</p>
+        </div>
+    </footer>
+
+    <script src="highlight.js"></script>
+</body>
+</html>

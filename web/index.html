@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Yooperlang</title>
+    <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+    <header class="site-header">
+        <div class="container header-inner">
+            <a class="brand" href="index.html">
+                <span class="brand-mark">yoop</span><span class="brand-tail">erlang</span>
+            </a>
+            <nav class="site-nav">
+                <a href="reference.html">Language Reference</a>
+                <a href="https://github.com/" target="_blank" rel="noopener">GitHub</a>
+            </nav>
+        </div>
+    </header>
+
+    <main>
+        <section class="hero">
+            <div class="container">
+                <h1>A systems language with a TypeScript feel.</h1>
+                <p class="lede">
+                    No garbage collector. No classes. Structs and free functions.
+                    Behavior expressed through two orthogonal mechanisms: <strong>traits</strong> and <strong>kinds</strong>.
+                </p>
+                <div class="hero-actions">
+                    <a class="btn btn-primary" href="reference.html">Read the Language Reference</a>
+                    <a class="btn btn-ghost" href="#sample">See an example</a>
+                </div>
+            </div>
+        </section>
+
+        <section id="sample" class="sample">
+            <div class="container">
+                <h2>A taste of Yooperlang</h2>
+                <p class="muted">
+                    Types on the right. Templates with <code>${...}</code>. <code>main</code> returns
+                    an <code>int32</code> exit status.
+                </p>
+                <pre><code class="yoop">type Point {
+    x: int32,
+    y: int32,
+}
+
+type Rect {
+    pos: Point,
+    length: int32,
+    width: int32,
+}
+
+function is_intersecting(a: Rect, b: Rect): bool {
+    return a.pos.x &lt; b.pos.x + b.width
+        &amp;&amp; b.pos.x &lt; a.pos.x + a.width
+        &amp;&amp; a.pos.y &lt; b.pos.y + b.length
+        &amp;&amp; b.pos.y &lt; a.pos.y + a.length;
+}
+
+function main(): int32 {
+    let r1: Rect = { pos: { x: 5, y: 9 }, length: 10, width: 10 };
+    let r2: Rect = { pos: { x: 2, y: 2 }, length: 10, width: 10 };
+
+    const hit: bool = is_intersecting(r1, r2);
+    printf(`is intersecting: ${hit}\n`);
+    return 0;
+}</code></pre>
+            </div>
+        </section>
+
+        <section class="pillars">
+            <div class="container">
+                <h2>Three layers, kept separate</h2>
+                <div class="grid-3">
+                    <div class="card">
+                        <h3>Type</h3>
+                        <p>What the value <em>is</em> — the concrete shape of data. <code>int32</code>, <code>Point</code>, <code>FileHandle</code>.</p>
+                    </div>
+                    <div class="card">
+                        <h3>Trait</h3>
+                        <p>What the value <em>can do</em> — operations it supports. <code>Disposable</code>, <code>Iterable&lt;T&gt;</code>, <code>Task&lt;T&gt;</code>.</p>
+                    </div>
+                    <div class="card">
+                        <h3>Kind</h3>
+                        <p>How the binding <em>must be used</em> — lifecycle and scoping rules. <code>disposable</code>, <code>scoped</code>, <code>pooled</code>.</p>
+                    </div>
+                </div>
+            </div>
+        </section>
+    </main>
+
+    <footer class="site-footer">
+        <div class="container">
+            <p>Yooperlang — Yooper is a person from the Upper Peninsula of Michigan.</p>
+        </div>
+    </footer>
+
+    <script src="highlight.js"></script>
+</body>
+</html>
