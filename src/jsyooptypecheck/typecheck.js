@@ -1248,13 +1248,32 @@ export function effectiveLayoutAlign(app) {
   return null;
 }
 
-// Builtin generic functions — `heap_alloc<T>(n: usize): T[]` and
-// `heap_free<T>(a: T[])`. These are not user-declared; they are registered
-// into every module's genericFuncTable so call-site inference + instantiation
-// flow through the existing Phase 7.1 path. Codegen intercepts by `declId`
-// (see codegen.js) and emits malloc/free directly without a body clone.
+// Canonical declIds for every compiler-recognized intrinsic. The keys are
+// the names a user writes inside an `extern "intrinsic" from "compiler"`
+// block; the values are the stable declIds codegen dispatches on.
 //
-// Built once per program so the instantiation registry caches across modules.
+// An extern "intrinsic" declaration whose name isn't in this map is rejected
+// in pass A. A user-defined function with one of these names is allowed —
+// the auto-injection that used to shadow such names was removed when these
+// became opt-in via import.
+export const INTRINSIC_DECL_IDS = new Map([
+  ["heap_alloc", "$builtin__heap_alloc"],
+  ["heap_free", "$builtin__heap_free"],
+  ["string_as_bytes", "$builtin__string_as_bytes"],
+  ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
+  ["array_slice", "$builtin__array_slice"],
+  ["wait_until", "$builtin__wait_until"],
+  ["cancel", "$builtin__cancel"],
+  // Note: `printf` stays magic — it's used by ~all examples and the name
+  // never collides with user identifiers in practice. Lives outside this
+  // map so it isn't subject to the import-required rule.
+]);
+
+// Builtin generic functions — `heap_alloc<T>(n: usize): T[]` and friends.
+// Built once per program, then installed into a module's genericFuncTable
+// only when the module imports them (via the std/core/intrinsics.yoop
+// extern "intrinsic" block). Codegen intercepts by `declId` (see codegen.js)
+// and emits malloc/free/bitcast/etc directly without a body clone.
 function makeBuiltinGenericFuncs() {
   const allocDeclId = "$builtin__heap_alloc";
   const allocT = new TypeParamType("T", allocDeclId);
@@ -1374,8 +1393,11 @@ export function typecheckProgram(modules) {
   setGlobalInstantiator(makeInstantiator(programState.registry));
 
   // Build builtin generic func decls once and reuse across all modules so
-  // the instantiation registry caches by a stable declId.
-  const builtinGenericFuncs = makeBuiltinGenericFuncs();
+  // the instantiation registry caches by a stable declId. Indexed by name
+  // for lookup from extern "intrinsic" declarations in pass A.
+  const builtinGenericDeclsByName = new Map(
+    makeBuiltinGenericFuncs().map((d) => [d.name, d]),
+  );
 
   // Phase 7.2: install the bound checker. Every instantiate*() that hits the
   // cache for the first time calls back here with each bounded (param, arg)
@@ -1421,6 +1443,11 @@ export function typecheckProgram(modules) {
     // Phase 9.G: vtable type table. Like structTable, the shell only carries
     // a name in pass A; pass C resolves field types and trait references.
     const vtableTable = new Map();
+    // Names this module brought into scope via an `extern "intrinsic"`
+    // block. checkExpr.js's special-case paths for `wait_until` / `cancel`
+    // gate on membership here so that user code that hasn't imported the
+    // intrinsics module can freely shadow these names.
+    const builtinIntrinsicNames = new Set();
     // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
     // the kind-name that pairs with the built-in `Task<T>` type.
     kindTable.set("Task", TASK_KIND);
@@ -1604,6 +1631,7 @@ export function typecheckProgram(modules) {
         }
       }
       if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+        const isIntrinsic = decl.abi === "intrinsic";
         for (const ext of decl.decls) {
           if (
             ext.kind === ASTNodeKind.EXTERN_TYPE_DECL &&
@@ -1612,6 +1640,44 @@ export function typecheckProgram(modules) {
             structTable.set(ext.name, StructType(ext.name, [], mod.id));
           }
           if (ext.kind === ASTNodeKind.EXTERN_FUNCTION_DECL) {
+            if (isIntrinsic) {
+              // Reject unknown intrinsics — user code can't fabricate fake ones.
+              const canonicalDeclId = INTRINSIC_DECL_IDS.get(ext.name);
+              if (!canonicalDeclId) {
+                errors.push({
+                  message: `unknown intrinsic "${ext.name}" — see std/core/intrinsics.yoop for the full list`,
+                  sourceLoc: ext.sourceLoc,
+                });
+                continue;
+              }
+              ext.intrinsicDeclId = canonicalDeclId;
+              builtinIntrinsicNames.add(ext.name);
+
+              // Generic intrinsic — install the pre-built canonical decl so
+              // the instantiation registry can cache by its stable declId.
+              // Pass C will skip the type-resolution step for these.
+              const canonicalGenericDecl = builtinGenericDeclsByName.get(ext.name);
+              if (canonicalGenericDecl) {
+                if (
+                  genericFuncTable.has(ext.name) ||
+                  localSymbols.has(ext.name)
+                ) {
+                  errors.push({
+                    message: `redeclaration of "${ext.name}"`,
+                    sourceLoc: ext.sourceLoc,
+                  });
+                  continue;
+                }
+                genericFuncTable.set(ext.name, canonicalGenericDecl);
+                exports.add(ext.name);
+                continue;
+              }
+
+              // Non-generic intrinsic (printf, wait_until, cancel) — fall
+              // through to the regular extern shell path. Pass C resolves
+              // the user-written parameter/return types; checkExpr.js
+              // recognizes the name via builtinIntrinsicNames.
+            }
             if (localSymbols.has(ext.name)) {
               errors.push({
                 message: `redeclaration of "${ext.name}"`,
@@ -1619,10 +1685,11 @@ export function typecheckProgram(modules) {
               });
             } else {
               localSymbols.set(ext.name, FuncType([], ErrorType()));
+              if (isIntrinsic) exports.add(ext.name);
             }
           }
         }
-        if (decl.source.kind === "library")
+        if (!isIntrinsic && decl.source.kind === "library")
           linkLibraries.add(decl.source.value);
       }
 
@@ -1751,14 +1818,10 @@ export function typecheckProgram(modules) {
       }
     }
 
-    // Insert builtin generic funcs after user decls so a user-defined function
-    // with the same name cleanly shadows. lookupGenericFunc checks the local
-    // table first, so this is a no-op when a user has redeclared.
-    for (const bi of builtinGenericFuncs) {
-      if (!genericFuncTable.has(bi.name)) {
-        genericFuncTable.set(bi.name, bi);
-      }
-    }
+    // Intrinsics are no longer auto-injected — they enter genericFuncTable /
+    // localSymbols only via an `extern "intrinsic" from "compiler"` block,
+    // which user code triggers by importing std/core/intrinsics.yoop (or, for
+    // wait_until/cancel, std/core/concurrency.yoop).
 
     moduleEnv.set(mod.id, {
       localSymbols,
@@ -1775,6 +1838,7 @@ export function typecheckProgram(modules) {
       enumTable,
       unionTable,
       vtableTable,
+      builtinIntrinsicNames,
       // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
       allowsUnsafe: !!mod.ast.allowsUnsafe,
     });
@@ -1803,7 +1867,7 @@ export function typecheckProgram(modules) {
   for (const mod of modules) {
     const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
-    const { localSymbols, structTable, exports, traitTable, enumTable, unionTable } = env;
+    const { localSymbols, structTable, exports, traitTable, enumTable, unionTable, genericFuncTable } = env;
     // Default ctx (no typeParamScope, registry always available).
     const baseCtx = () => ({ registry: programState.registry });
     // ctx for a generic decl body — adds the type-param scope.
@@ -2267,10 +2331,15 @@ export function typecheckProgram(modules) {
         }
       }
 
-      // extern function decls — overwrite shells placed in pass A
+      // extern function decls — overwrite shells placed in pass A.
+      // Generic intrinsics are skipped: pass A installed the canonical
+      // pre-built decl into genericFuncTable and that signature is the
+      // source of truth (the user-written annotations are documentation).
       if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+        const isIntrinsic = decl.abi === "intrinsic";
         for (const ext of decl.decls) {
           if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
+          if (isIntrinsic && genericFuncTable.has(ext.name)) continue;
           const paramTypes = ext.params.map((p) => {
             const baseType =
               resolveTypeAnnotationInModule(
@@ -2535,6 +2604,9 @@ export function typecheckProgram(modules) {
       unionTable: env.unionTable,
       // Phase 9.G: vtable nominal table.
       vtableTable: env.vtableTable,
+      // Names imported into this module via an `extern "intrinsic"` block.
+      // Gates wait_until/cancel special-cases in checkExpr.js.
+      builtinIntrinsicNames: env.builtinIntrinsicNames,
       // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
       allowsUnsafe: env.allowsUnsafe,
       // Phase 8.A: callback that resolves a parser-emitted type annotation

@@ -19,6 +19,7 @@
 import.unsafe;
 
 import { Result } from "../core/types.yoop";
+import * as intr from "../core/intrinsics.yoop";
 
 // ----- POSIX socket constants (stable across Linux / macOS / BSD) ----------
 
@@ -233,7 +234,7 @@ export function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string>
         if (wait_rc != 0) {
             return Result.Err { error: errno.message(errno.get()) };
         }
-        let chunk: uint8[] = array_slice(buf, total, buf.len);
+        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
         let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
         if (n < 0) {
             return Result.Err { error: errno.message(errno.get()) };

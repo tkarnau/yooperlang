@@ -1,3 +1,5 @@
+import * as intr from "std/core/intrinsics.yoop";
+
 type DynArray<T> {
     data: T[],
     len: usize,
@@ -5,19 +7,19 @@ type DynArray<T> {
 }
 
 function new_dynarray<T>(initial_cap: usize): DynArray<T> {
-    return { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };
+    return { data: intr.heap_alloc(initial_cap), len: 0, cap: initial_cap };
 }
 
 function push<T>(a: ref DynArray<T>, value: T): void {
     if (a.len >= a.cap) {
         let new_cap: usize = a.cap * 2;
-        let new_data: T[] = heap_alloc(new_cap);
+        let new_data: T[] = intr.heap_alloc(new_cap);
         let i: usize = 0;
         while (i < a.len) {
             new_data[i] = a.data[i];
             i = i + 1;
         }
-        heap_free(a.data);
+        intr.heap_free(a.data);
         a.data = new_data;
         a.cap = new_cap;
     }
@@ -26,7 +28,7 @@ function push<T>(a: ref DynArray<T>, value: T): void {
 }
 
 function free_all<T>(a: ref DynArray<T>): void {
-    heap_free(a.data);
+    intr.heap_free(a.data);
 }
 
 function main(): int32 {

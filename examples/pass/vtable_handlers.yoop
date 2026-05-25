@@ -9,6 +9,8 @@
 // hand-rolled function-pointer-plus-void-context fields with no
 // compiler help. The vtable form is the compiler-supported one.
 
+import * as intr from "std/core/intrinsics.yoop";
+
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
@@ -74,7 +76,7 @@ function main(): int32 {
     let s: Scale = { factor: 3 };
 
     // Build the heterogeneous handler list. Each slot wraps a different impl.
-    let handlers: Dispatcher[] = heap_alloc(3);
+    let handlers: Dispatcher[] = intr.heap_alloc(3);
     handlers[0] = Dispatcher.from(ref c);
     handlers[1] = Dispatcher.from(ref a);
     handlers[2] = Dispatcher.from(ref s);
@@ -94,7 +96,7 @@ function main(): int32 {
     let only: int32 = Dispatcher.handle(ref direct, 11);
     printf(`scale-only=${only}\n`);
 
-    heap_free(handlers);
+    intr.heap_free(handlers);
     return 0;
 }
 

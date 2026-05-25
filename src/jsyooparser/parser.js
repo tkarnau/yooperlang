@@ -1497,9 +1497,9 @@ export function parse(src) {
     expect(TokenTags.extern);
     const abiTok = expect(TokenTags.strLiteral);
     node.abi = unquoteStringLiteral(abiTok);
-    if (node.abi !== "C") {
+    if (node.abi !== "C" && node.abi !== "intrinsic") {
       throw parseError(
-        `unsupported extern ABI "${node.abi}" — only "C" is supported in v0`,
+        `unsupported extern ABI "${node.abi}" — supported: "C", "intrinsic"`,
         abiTok.start,
         abiTok.length,
       );
@@ -1539,6 +1539,15 @@ export function parse(src) {
     expect(TokenTags.function);
     const node = buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
     node.name = parseIdentAsName();
+    // Optional type params, e.g. `function heap_alloc<T>(n: usize): T[];`.
+    // Only useful inside `extern "intrinsic"` blocks where the canonical
+    // builtin decl carries the real (generic) signature — the annotations
+    // here are documentation. The typechecker skips resolution for canonical
+    // intrinsic decls, so unresolved TypeParamType references in T[]-style
+    // return types don't reach codegen.
+    if (peek().tag === TokenTags.lt) {
+      node.typeParams = parseTypeParamList();
+    }
     expect(TokenTags.lparen);
     node.params = [];
     node.variadic = false;

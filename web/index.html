@@ -41,34 +41,37 @@
             <div class="container">
                 <h2>A taste</h2>
                 <p class="muted">
-                    Types on the right. Templates with <code>${...}</code>. <code>main</code> returns
-                    an <code>int32</code>. If you've written TypeScript, you can probably read this
-                    already.
+                    Two concurrent <code>task</code> calls, errors as
+                    values with <code>?</code>, a <code>switch</code> over
+                    the result variants &mdash; and not an
+                    <code>async</code> or <code>await</code> in sight.
+                    Still compiles to a native binary with no garbage
+                    collector. If you've written TypeScript, the shapes
+                    should still feel familiar.
                 </p>
-                <pre><code class="yoop">type Point {
-    x: int32,
-    y: int32,
+                <pre><code class="yoop">import { Result } from "std/core/types.yoop";
+
+// `task` says every call to fetch() spawns a concurrent worker.
+// The return type is a Result &mdash; any Ok/Err enum participates in `?`.
+task fetch(url: string): Result&lt;int32, string&gt; {
+    if (url.len == 0) {
+        return Result.Err { error: "empty url" };
+    }
+    return Result.Ok { value: url.len };   // pretend network here
 }
 
-type Rect {
-    pos: Point,
-    length: int32,
-    width: int32,
-}
-
-function is_intersecting(a: Rect, b: Rect): bool {
-    return a.pos.x &lt; b.pos.x + b.width
-        &amp;&amp; b.pos.x &lt; a.pos.x + a.width
-        &amp;&amp; a.pos.y &lt; b.pos.y + b.length
-        &amp;&amp; b.pos.y &lt; a.pos.y + a.length;
+function total(a: string, b: string): Result&lt;int32, string&gt; {
+    joined ra = fetch(a);                  // spawned now
+    joined rb = fetch(b);                  // also spawned &mdash; running in parallel
+    // `wait` reads each task's result; `?` bails to the caller on Err.
+    return Result.Ok { value: (wait ra)? + (wait rb)? };
 }
 
 function main(): int32 {
-    let r1: Rect = { pos: { x: 5, y: 9 }, length: 10, width: 10 };
-    let r2: Rect = { pos: { x: 2, y: 2 }, length: 10, width: 10 };
-
-    const hit: bool = is_intersecting(r1, r2);
-    printf(`is intersecting: ${hit}\n`);
+    switch (total("hello", "yoop")) {
+        case Result.Ok  { value: n }: printf(`total=${n}\n`);
+        case Result.Err { error: e }: printf(`failed: ${e}\n`);
+    }
     return 0;
 }</code></pre>
             </div>
@@ -120,6 +123,157 @@ function main(): int32 {
                         <p>How the binding <em>must be used</em> — lifecycle and scoping rules. <code>disposable</code>, <code>scoped</code>, <code>pooled</code>.</p>
                     </div>
                 </div>
+            </div>
+        </section>
+
+        <section class="compare">
+            <div class="container">
+                <h2>How it stacks up against languages you might already know</h2>
+                <p class="muted">
+                    Yooperlang isn't trying to dethrone anything. It sits
+                    in the gap between languages I already use. Here's the
+                    short version of what's different.
+                </p>
+
+                <div class="compare-row">
+                    <h3>vs TypeScript</h3>
+                    <p>
+                        The syntax feel is on purpose &mdash; types on the
+                        right, structs, no classes, template literals with
+                        <code>${...}</code>. But TypeScript erases types at
+                        runtime and rides on a garbage-collected VM. Yooper
+                        compiles to a native binary, keeps types around for
+                        codegen and lifecycle enforcement, and ships no
+                        runtime worth mentioning.
+                    </p>
+                    <p>
+                        Also: types are <strong>nominal</strong>, not
+                        structural &mdash; <code>type Meters { v: int32 }</code>
+                        and <code>type Seconds { v: int32 }</code> aren't
+                        the same type, even though they have the same
+                        shape. And there's no <code>null</code> or
+                        <code>undefined</code>; absence is modeled
+                        explicitly with an enum variant or a validity
+                        field.
+                    </p>
+                </div>
+
+                <div class="compare-row">
+                    <h3>vs C++</h3>
+                    <p>
+                        Same target &mdash; native, fast, low-level access
+                        when you need it &mdash; without the surface area
+                        that pushes web folks away. No header files. No
+                        preprocessor. No template metaprogramming maze. No
+                        rule of five.
+                    </p>
+                    <p>
+                        Memory cleanup is <em>declarative</em>: tag a
+                        binding with the <code>disposable</code> kind and
+                        the compiler emits the cleanup call at scope end.
+                        You write <code>dispose</code> once on the type
+                        that owns the resource; every caller gets the
+                        cleanup for free. No constructor / destructor
+                        pairs, no RAII wrapper types, no <code>std::unique_ptr</code>
+                        ceremony.
+                    </p>
+                </div>
+
+                <div class="compare-row">
+                    <h3>vs Rust</h3>
+                    <p>
+                        A lot of the good Rust stuff is here on purpose:
+                        errors as values via <code>Result&lt;T, E&gt;</code>,
+                        the <code>?</code> operator with
+                        <code>Into&lt;T&gt;</code> conversions on mismatched
+                        error types, traits without inheritance, no GC,
+                        monomorphized generics, sum types via
+                        <code>enum</code>.
+                    </p>
+                    <p>
+                        What's not here: the borrow checker, named
+                        lifetimes, and the <code>Box&lt;dyn Trait&gt;</code>
+                        dance. <strong>Kinds</strong> do a lot of what
+                        lifetimes do in Rust &mdash; they're a usage
+                        contract on the binding
+                        (<code>disposable</code>, <code>joined</code>,
+                        <code>pooled</code>, <code>propagates&lt;K&gt;</code>)
+                        rather than an inferred lifetime parameter that
+                        travels with every reference. Runtime trait
+                        polymorphism is opt-in via a named
+                        <code>vtable Reader for Readable { ... }</code>
+                        shape, not a magic <code>dyn</code>.
+                    </p>
+                    <p>
+                        The trade is honest: Yooper accepts some
+                        memory-safety responsibility back onto the
+                        developer in exchange for a much shorter on-ramp.
+                        If you've bounced off Rust's borrow checker and
+                        wanted the rest of Rust without the fight, that's
+                        the lane.
+                    </p>
+                </div>
+            </div>
+        </section>
+
+        <section class="borrowed">
+            <div class="container">
+                <h2>Ideas borrowed from other languages</h2>
+                <p>
+                    None of this is original research. I'm a working
+                    developer who liked some ideas in other modern
+                    languages and stitched them together into something
+                    that fits the way I want to write code. Credit where
+                    it's due:
+                </p>
+                <ul class="borrow-list">
+                    <li>
+                        <strong>Zig</strong> &mdash; compile-time evaluation
+                        with <code>@precompile</code> (constants and small
+                        tables folded into the binary), direct C ABI
+                        interop with no FFI shim, and the idea that "async
+                        coloring" shouldn't infect the type system. Yooper
+                        expresses "this function spawns" via the
+                        <code>task</code> kind instead of an
+                        <code>async</code> keyword, and call sites pick the
+                        wait strategy on the binding
+                        (<code>let joined</code>, <code>let pooled</code>).
+                    </li>
+                    <li>
+                        <strong>Rust</strong> &mdash; <code>Result&lt;T, E&gt;</code>,
+                        the <code>?</code> operator, traits as the only
+                        polymorphism mechanism, no nulls, and the general
+                        attitude that errors should be visible at the call
+                        site.
+                    </li>
+                    <li>
+                        <strong>TypeScript</strong> &mdash; types on the
+                        right, inferred when obvious, optional when not.
+                        The whole expression-level feel of a modern web
+                        language.
+                    </li>
+                    <li>
+                        <strong>Swift</strong> &mdash; value semantics by
+                        default, <code>ref</code> only where you mean it,
+                        and the convention that capability-shaped things
+                        (<code>Disposable</code>, <code>Iterable&lt;T&gt;</code>)
+                        live in a separate layer from data.
+                    </li>
+                    <li>
+                        <strong>Go</strong> &mdash; small core,
+                        unsurprising standard library, and the conviction
+                        that fast compiles are worth designing the
+                        language around.
+                    </li>
+                </ul>
+                <p class="muted aside-note">
+                    The actual original-ish piece is the <strong>kind</strong>
+                    layer &mdash; treating lifecycle, scoping, concurrency
+                    mode, and propagation as one orthogonal mechanism
+                    instead of five unrelated keywords. Whether that turns
+                    out to be a good idea is something I'm figuring out as
+                    I go.
+                </p>
             </div>
         </section>
 

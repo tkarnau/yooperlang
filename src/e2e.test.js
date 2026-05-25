@@ -21,7 +21,18 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 
 function runFixture(relPath, opts = {}) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
-  const ir = compileSource(src);
+  // Single-file fixtures that import from `std/` (e.g. for intrinsics)
+  // need the module-graph resolver — fall back to compileEntry in that
+  // case. Otherwise compileSource keeps the test path lean.
+  const usesImport = /^\s*import(\s|\.)/m.test(src);
+  let ir, extraLinkFlags = [];
+  if (usesImport) {
+    const result = compileEntry(path.join(repoRoot, relPath));
+    ir = result.ir;
+    extraLinkFlags = result.linkFlags ?? [];
+  } else {
+    ir = compileSource(src);
+  }
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
   const binPath = path.join(tmpDir, "out");
@@ -32,6 +43,7 @@ function runFixture(relPath, opts = {}) {
     "-o",
     binPath,
     ...runtimeLinkFlags().map((f) => `-l${f}`),
+    ...extraLinkFlags.map((f) => `-l${f}`),
   ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
@@ -242,6 +254,27 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
       stderr,
       "[info] booting\n[warn] config missing - using defaults\n[error] one item dropped\n",
     );
+  });
+
+  it("format_smoke: std/core/format renders ints, bools, and floats", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/format_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "0\n7\n12345\n-42\n0\n255\ntrue\nfalse\n1.5\n0\n",
+    );
+  });
+
+  it("template_to_string: interpolated template literals work as plain strings", () => {
+    const { stdout, stderr, exitCode } = runFixtureEntry(
+      "examples/pass/template_to_string.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stderr,
+      "[info] hello world\n[info] count=7 ratio=1.5 ok=true\n",
+    );
+    assert.equal(stdout, "count is 7\n");
   });
 
   it("panic_smoke: panic(msg) exits 1 after writing 'panic: ...' to stderr", () => {
@@ -913,7 +946,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
   it("dwarf: emitted IR carries required DWARF metadata for lldb backtraces", () => {
     const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_linked/main.yoop"));
     // Required named metadata — without these clang silently strips DI.
-    assert.match(ir, /!llvm\.dbg\.cu = !\{!\d+\}/);
+    assert.match(ir, /!llvm\.dbg\.cu = !\{!\d+(?:, !\d+)*\}/);
     assert.match(ir, /!llvm\.module\.flags = !\{[^}]+\}/);
     assert.match(ir, /!\d+ = !\{i32 \d+, !"Dwarf Version", i32 \d+\}/);
     assert.match(ir, /!\d+ = !\{i32 \d+, !"Debug Info Version", i32 \d+\}/);
@@ -1099,6 +1132,14 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
       "utf8",
     );
     assert.throws(() => parse(src), /unsupported extern ABI "Rust"/);
+  });
+
+  it("std_named_value_import.yoop: importing a std/ value by name is rejected with a fix-it", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/std_named_value_import.yoop");
+    assert.ok(
+      errors.some((e) => /imports of value "info" from "std\/log\.yoop" must use the namespace form/.test(e.message)),
+      `expected std named-value import error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
   });
 
   it("import_after_decl.yoop: import after non-import decl is a parse error", () => {

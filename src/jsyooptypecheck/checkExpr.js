@@ -125,6 +125,10 @@ export function resolveExprType(node, scope, ctx) {
       return resolveUnsafePtrCast(node, scope, ctx);
     case ASTNodeKind.ERRNO_INTRINSIC:
       return resolveErrnoIntrinsic(node, scope, ctx);
+    case ASTNodeKind.NAMESPACE_IDENT:
+      // resolveIdent already mutated this node from IDENT and stamped its
+      // resolved namespace type — re-resolving it should be a no-op.
+      return node.resolvedType ?? ErrorType();
     default: {
       pushError(
         ctx.errors,
@@ -235,6 +239,23 @@ function resolveBinary(node, scope, ctx) {
   return setType(node, resultType);
 }
 
+// Render the callee expression as a short string for use in diagnostics.
+// Bare identifiers stay as-is; FIELD_ACCESS (namespace / trait-qualified
+// calls) renders as `ns.name`. Anything more exotic falls back to "call".
+function calleeDisplayName(callee) {
+  if (typeof callee === "string") return callee;
+  if (
+    callee &&
+    callee.kind === ASTNodeKind.FIELD_ACCESS &&
+    (callee.object?.kind === ASTNodeKind.IDENT ||
+      callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT) &&
+    typeof callee.field === "string"
+  ) {
+    return `${callee.object.name}.${callee.field}`;
+  }
+  return "call";
+}
+
 // `f(a, b, c)` or `ns.f(a, b, c)` — looks up the function (local, imported
 // namespace, or known C extern), then checks arity + arg types.
 function resolveCall(node, scope, ctx) {
@@ -277,7 +298,8 @@ function resolveCall(node, scope, ctx) {
     callee &&
     typeof callee === "object" &&
     callee.kind === ASTNodeKind.FIELD_ACCESS &&
-    callee.object?.kind === ASTNodeKind.IDENT
+    (callee.object?.kind === ASTNodeKind.IDENT ||
+      callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT)
   ) {
     // Phase 9.G: `VTableName.from(ref x)` — builtin vtable constructor.
     // The only legal method name is `from`; anything else is a typecheck
@@ -290,6 +312,65 @@ function resolveCall(node, scope, ctx) {
     const trait = lookupTraitByName(callee.object.name, ctx);
     if (trait) {
       return resolveTraitQualifiedCall(node, trait, callee.field, scope, ctx);
+    }
+    // Generic function call via namespace: `intr.heap_alloc(8)` or
+    // `vec.vec_new(...)`. The source module's genericFuncTable holds the
+    // canonical decl; namespace lookups otherwise only check localSymbols
+    // and structTable, so generic funcs need an explicit hop here.
+    // Also covers intrinsic special-cases (`conc.wait_until`, `conc.cancel`)
+    // where the special-case branches do the typing work — bare-callee form
+    // and namespace-prefixed form should land in the same checker.
+    //
+    // Peek at the binding without going through resolveExprType (which would
+    // mutate `callee.object.kind` to NAMESPACE_IDENT and break the regular
+    // namespace-call dispatch below if we fall through).
+    const objBinding =
+      lookupInScope(scope, callee.object.name) ??
+      (ctx.typeContext.moduleSymbols?.get(callee.object.name)
+        ? { type: ctx.typeContext.moduleSymbols.get(callee.object.name) }
+        : null);
+    const nsType = objBinding?.type;
+    if (nsType && nsType.kind === typeKinds.namespace) {
+      const srcEnv = ctx.typeContext.moduleEnv?.get(nsType.moduleId);
+      const srcBuiltins = srcEnv?.builtinIntrinsicNames;
+      if (srcBuiltins?.has(callee.field)) {
+        if (callee.field === "wait_until") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveWaitUntilCall(node, scope, ctx);
+        }
+        if (callee.field === "cancel") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveCancelCall(node, scope, ctx);
+        }
+      }
+      const remoteGeneric = srcEnv?.genericFuncTable?.get(callee.field);
+      if (remoteGeneric) {
+        if (!nsType.exports.has(callee.field)) {
+          pushError(
+            ctx.errors,
+            callee,
+            `namespace "${callee.object.name}" has no export "${callee.field}"`,
+          );
+          return setType(node, ErrorType());
+        }
+        callee.namespaceLookup = {
+          moduleId: nsType.moduleId,
+          exportName: callee.field,
+        };
+        callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+        callee.object.resolvedType = nsType;
+        return resolveGenericCall(node, remoteGeneric, scope, ctx);
+      }
     }
   }
 
@@ -311,22 +392,23 @@ function resolveCall(node, scope, ctx) {
     return resolveCallWithSig(node, calleeType, scope, ctx);
   }
 
-  // Phase 10.F: `wait_until(h, deadline_ns)` is a builtin call form, the
-  // bounded-wait sibling of the `wait` keyword. The callee name is
-  // reserved; user-defined `wait_until` functions are shadowed.
-  if (callee === "wait_until") {
+  // `wait_until(h, deadline_ns)` and `cancel(h)` are builtin call forms (the
+  // bounded-wait sibling of the `wait` keyword and its cancellation
+  // counterpart). They're only special-cased when the current module has
+  // imported them via an `extern "intrinsic"` block in std/core/concurrency
+  // — user code that hasn't imported the intrinsics module is free to define
+  // and call its own `wait_until` / `cancel` functions.
+  const builtinIntrinsicNames = ctx.typeContext.builtinIntrinsicNames;
+  if (callee === "wait_until" && builtinIntrinsicNames?.has("wait_until")) {
     return resolveWaitUntilCall(node, scope, ctx);
   }
-
-  // Phase 10.F.2: `cancel(h)` is the external-cancellation primitive. Sets
-  // the cancel byte on the handle's prefix and broadcasts so any
-  // wait_until parked on the handle wakes and observes WaitResult.Cancelled.
-  // Same builtin shape as wait_until — name-reserved, void return.
-  if (callee === "cancel") {
+  if (callee === "cancel" && builtinIntrinsicNames?.has("cancel")) {
     return resolveCancelCall(node, scope, ctx);
   }
 
   // printf legacy path — variadic, type-resolve each arg, no arity check.
+  // Stays a magic builtin: the name doesn't compete with user identifiers
+  // and is used pervasively; gating it on import would multiply churn.
   if (callee === "printf") {
     const sig = ctx.typeContext.moduleSymbols.get("printf");
     if (sig) {
@@ -1880,6 +1962,46 @@ export function checkInitializer(
       return valueType;
     }
   }
+  // Same bidirectional inference, but for namespace-prefixed generic calls
+  // like `intr.heap_alloc(8)`. The remote module's genericFuncTable carries
+  // the canonical decl; we route through resolveGenericCall directly so the
+  // expectedType hint reaches return-position type params.
+  if (
+    valueNode.kind === ASTNodeKind.CALL_EXPRESSION &&
+    valueNode.callee &&
+    typeof valueNode.callee === "object" &&
+    valueNode.callee.kind === ASTNodeKind.FIELD_ACCESS &&
+    (valueNode.callee.object?.kind === ASTNodeKind.IDENT ||
+      valueNode.callee.object?.kind === ASTNodeKind.NAMESPACE_IDENT)
+  ) {
+    const callee = valueNode.callee;
+    const objBinding =
+      lookupInScope(scope, callee.object.name) ??
+      (ctx.typeContext.moduleSymbols?.get(callee.object.name)
+        ? { type: ctx.typeContext.moduleSymbols.get(callee.object.name) }
+        : null);
+    const nsType = objBinding?.type;
+    if (nsType && nsType.kind === typeKinds.namespace) {
+      const srcEnv = ctx.typeContext.moduleEnv?.get(nsType.moduleId);
+      const remoteGeneric = srcEnv?.genericFuncTable?.get(callee.field);
+      if (remoteGeneric && nsType.exports.has(callee.field)) {
+        callee.namespaceLookup = {
+          moduleId: nsType.moduleId,
+          exportName: callee.field,
+        };
+        callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+        callee.object.resolvedType = nsType;
+        const valueType = resolveGenericCall(valueNode, remoteGeneric, scope, ctx, expectedType);
+        if (
+          valueType.kind !== typeKinds.error &&
+          !isAssignable(expectedType, valueType)
+        ) {
+          pushError(ctx.errors, valueNode, mismatchMessage(valueType));
+        }
+        return valueType;
+      }
+    }
+  }
   const valueType = resolveExprType(valueNode, scope, ctx);
   if (!isAssignable(expectedType, valueType)) {
     pushError(ctx.errors, valueNode, mismatchMessage(valueType));
@@ -1917,7 +2039,7 @@ export function resolveCallType(node, sig, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wrong arg count to "${node.callee}" — expected ${sig.params.length}, got ${node.args.length}`,
+      `wrong arg count to "${calleeDisplayName(node.callee)}" — expected ${sig.params.length}, got ${node.args.length}`,
     );
     return setType(node, sig.returnType);
   }
@@ -1985,7 +2107,7 @@ export function resolveCallType(node, sig, scope, ctx) {
         scope,
         ctx,
         (argType) =>
-          `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
+          `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
       );
     }
   }
@@ -2436,7 +2558,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     pushError(
       ctx.errors,
       node,
-      `wrong arg count to "${node.callee}" — expected ${sig.params.length}, got ${node.args.length}`,
+      `wrong arg count to "${calleeDisplayName(node.callee)}" — expected ${sig.params.length}, got ${node.args.length}`,
     );
     return setType(node, ErrorType());
   }
@@ -2461,7 +2583,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         node.args[i],
-        `conflicting type argument for generic function "${node.callee}": ${formatType(argT)} vs prior binding`,
+        `conflicting type argument for generic function "${calleeDisplayName(node.callee)}": ${formatType(argT)} vs prior binding`,
       );
     }
   }
@@ -2481,7 +2603,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         node,
-        `cannot infer type argument "${pn}" for generic function "${node.callee}"`,
+        `cannot infer type argument "${pn}" for generic function "${calleeDisplayName(node.callee)}"`,
       );
       return setType(node, ErrorType());
     }
@@ -2500,7 +2622,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         node,
-        `call to "${node.callee}": type argument "${pn}" = ${formatType(concreteArgs[i])} does not satisfy bound — ${res.message}`,
+        `call to "${calleeDisplayName(node.callee)}": type argument "${pn}" = ${formatType(concreteArgs[i])} does not satisfy bound — ${res.message}`,
       );
       boundCheckFailed = true;
     }
@@ -2516,7 +2638,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     concreteArgs,
   );
   if (!inst) {
-    pushError(ctx.errors, node, `internal: failed to instantiate generic "${node.callee}"`);
+    pushError(ctx.errors, node, `internal: failed to instantiate generic "${calleeDisplayName(node.callee)}"`);
     return setType(node, ErrorType());
   }
 
@@ -2551,7 +2673,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         argNode,
-        `arg ${i + 1}(${param.name}) of "${node.callee}": cannot pass ${formatType(argTypes[i])} to ${formatType(param.type)}`,
+        `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": cannot pass ${formatType(argTypes[i])} to ${formatType(param.type)}`,
       );
     } else {
       coerceUntypedLiteralToTyped(argNode, argTypes[i], param.type, ctx.errors);

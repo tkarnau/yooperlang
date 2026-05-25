@@ -5,7 +5,8 @@
 // (SocketAddr from std/net/addr.yoop).
 
 import { Display } from "std/core/traits.yoop";
-import { SocketAddr, localhost } from "std/net/addr.yoop";
+import { SocketAddr } from "std/net/addr.yoop";
+import * as addr from "std/net/addr.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -24,7 +25,7 @@ type Point implements Display {
 
 function main(): int32 {
     let p: Point = { x: 3, y: 4 };
-    let addr: SocketAddr = localhost(8080);
+    let addr: SocketAddr = addr.localhost(8080);
 
     // Mix Display + primitive interpolations in the same template.
     printf(`p=${p} x=${p.x}\n`);

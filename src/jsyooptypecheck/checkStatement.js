@@ -34,6 +34,24 @@ import {
   lookupGenericFunc,
   resolveExprType,
 } from "./checkExpr.js";
+
+// True if `callExpr` is `ns.method(...)` where `ns` resolves to a namespace
+// import and the source module has a generic function by that name. Lets
+// checkLetOrConst route the call through checkInitializer so the LHS type
+// drives return-position type-param inference (e.g. `intr.heap_alloc(8)`).
+function isNamespaceGenericCall(callExpr, ctx) {
+  const callee = callExpr.callee;
+  if (!callee || typeof callee !== "object") return false;
+  if (callee.kind !== ASTNodeKind.FIELD_ACCESS) return false;
+  if (
+    callee.object?.kind !== ASTNodeKind.IDENT &&
+    callee.object?.kind !== ASTNodeKind.NAMESPACE_IDENT
+  ) return false;
+  const ns = ctx.typeContext.moduleSymbols?.get(callee.object.name);
+  if (!ns || ns.kind !== typeKinds.namespace) return false;
+  const srcEnv = ctx.typeContext.moduleEnv?.get(ns.moduleId);
+  return !!srcEnv?.genericFuncTable?.has(callee.field);
+}
 import { lookupBuiltinKind } from "./builtinKinds.js";
 
 // Phase 6.4: kind-prefix resolution walks both the local kindTable (user
@@ -359,8 +377,9 @@ function checkLetOrConst(node, scope, ctx) {
     // error out before bidirectional inference gets a chance.
     const isGenericCall =
       node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
-      typeof node.assignment.callee === "string" &&
-      lookupGenericFunc(node.assignment.callee, ctx) !== null;
+      ((typeof node.assignment.callee === "string" &&
+        lookupGenericFunc(node.assignment.callee, ctx) !== null) ||
+        isNamespaceGenericCall(node.assignment, ctx));
     // Phase 6.3: immediate task call — `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (

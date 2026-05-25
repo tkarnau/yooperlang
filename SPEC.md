@@ -37,13 +37,17 @@ binding site (`scoped`, `pooled`) decide when the compiler forces the `wait`.
 
 ## 1. Files, modules, imports, and exports
 
-Every `.yoop` file is a module. Imports use **relative paths** only.
+Every `.yoop` file is a module. Imports use **relative paths** by default; the
+`std/` prefix resolves against the bundled standard library.
 
 ```js
 import { parse, lex } from "./lexer.yoop";
 import * as lex        from "./lexer.yoop";
 import { parse as p }  from "./ast.yoop";
 import "./init.yoop";                    // side-effect only
+
+import { Vec } from "std/core/vec.yoop";  // type imports stay named
+import * as vec from "std/core/vec.yoop"; // value imports require namespace
 ```
 
 The `.yoop` extension is required. Any top-level declaration can be exported:
@@ -58,6 +62,49 @@ export { parse, lex, Token };            // grouped at bottom of file
 ```
 
 No `default` exports. Explicit names only.
+
+### Std imports must use the namespace form for values
+
+Function imports from any `std/` path must use `import * as <ns> from "std/..."`
+— short names like `info`, `error`, `panic`, or `vec_new` would otherwise
+shadow user identifiers across every module that touched the library. Types,
+traits, kinds, and other declaration-position names (e.g. `Vec`, `Result`,
+`disposable`) can keep their named-import form because their capitalization
+(or syntactic position) separates them from value identifiers.
+
+```js
+// REJECTED — std value import in named form
+import { info, error } from "std/log.yoop";
+
+// CORRECT — namespace form, calls become `log.info(...)`, `log.error(...)`
+import * as log from "std/log.yoop";
+```
+
+### Intrinsics live in `std/core/intrinsics.yoop`
+
+The compiler-recognized intrinsics — `heap_alloc<T>`, `heap_free<T>`,
+`string_as_bytes`, `string_from_bytes_unchecked`, `array_slice<T>` — are
+declared inside an `extern "intrinsic" from "compiler" { ... }` block in
+[std/core/intrinsics.yoop](std/core/intrinsics.yoop). They are not in scope
+by default; import the module to use them:
+
+```js
+import * as intr from "std/core/intrinsics.yoop";
+
+function main(): int32 {
+    let buf: int32[] = intr.heap_alloc(8);
+    intr.heap_free(buf);
+    return 0;
+}
+```
+
+`wait_until<T>` and `cancel<T>` are intrinsics declared in
+[std/core/concurrency.yoop](std/core/concurrency.yoop) (next to `now_ns` and
+`sleep_ms`); import that module as `conc` to use them.
+
+`printf` is an exception — it stays globally callable without an import
+because the name is specific enough not to collide with user identifiers,
+and ~every example file would otherwise need an extra line.
 
 ---
 

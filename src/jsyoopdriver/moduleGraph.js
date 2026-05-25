@@ -40,7 +40,29 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   const stdRoot = options.stdRoot ?? DEFAULT_STD_ROOT;
 
   loadOne(entryAbsPath);
-  return { entry: byPath.get(entryAbsPath), modules: order };
+  // Always pull std/core/format.yoop and std/core/strings.yoop into the
+  // graph so codegen can lower interpolated template literals to
+  // `string_concat_all([..., int_to_string(x), ...])` without requiring
+  // user code to import them explicitly. Loading is idempotent — if
+  // the entry transitively imports either, this is a no-op.
+  const autoload = [
+    path.resolve(stdRoot, "core", "format.yoop"),
+    path.resolve(stdRoot, "core", "strings.yoop"),
+  ];
+  for (const p of autoload) {
+    let resolvedAbs;
+    try {
+      resolvedAbs = fs.realpathSync(p);
+    } catch {
+      continue; // tests that point stdRoot at a stub directory may not have these
+    }
+    loadOne(resolvedAbs);
+  }
+  return {
+    entry: byPath.get(entryAbsPath),
+    modules: order,
+    autoloadedStdModuleIds: collectAutoloadIds(byPath, autoload),
+  };
 
   function loadOne(absPath) {
     if (onStack.has(absPath)) {
@@ -98,4 +120,21 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     order.push(mod);
     return mod;
   }
+}
+
+function collectAutoloadIds(byPath, autoloadPaths) {
+  const out = {};
+  for (const p of autoloadPaths) {
+    let resolvedAbs;
+    try {
+      resolvedAbs = fs.realpathSync(p);
+    } catch {
+      continue;
+    }
+    const mod = byPath.get(resolvedAbs);
+    if (!mod) continue;
+    const base = path.basename(resolvedAbs, ".yoop");
+    out[base] = mod.id;
+  }
+  return out;
 }

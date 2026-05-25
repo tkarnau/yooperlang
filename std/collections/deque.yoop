@@ -14,6 +14,7 @@
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Option } from "../core/types.yoop";
+import * as intr from "../core/intrinsics.yoop";
 
 export type Deque<T> implements Disposable propagates<disposable> {
     data: T[],
@@ -22,7 +23,7 @@ export type Deque<T> implements Disposable propagates<disposable> {
     cap:  usize,
     function dispose(ref self): void {
         if (self.cap > 0) {
-            heap_free(self.data);
+            intr.heap_free(self.data);
             self.cap = 0;
         }
     }
@@ -38,21 +39,21 @@ function next_pow2_floor8(n: usize): usize {
 
 export function deque_new<T>(initial_cap: usize): Deque<T> propagates<disposable> {
     let cap: usize = next_pow2_floor8(initial_cap);
-    return { data: heap_alloc(cap), head: 0, len: 0, cap: cap };
+    return { data: intr.heap_alloc(cap), head: 0, len: 0, cap: cap };
 }
 
 // Linearize into a fresh buffer at twice the capacity. The new head is
 // 0; existing elements move to their natural offsets.
 function grow<T>(ref d: Deque<T>): void {
     let new_cap: usize = d.cap * 2;
-    let new_data: T[] = heap_alloc(new_cap);
+    let new_data: T[] = intr.heap_alloc(new_cap);
     let i: usize = 0;
     let mask: usize = d.cap - 1;
     while (i < d.len) {
         new_data[i] = d.data[(d.head + i) & mask];
         i = i + 1;
     }
-    heap_free(d.data);
+    intr.heap_free(d.data);
     d.data = new_data;
     d.head = 0;
     d.cap  = new_cap;

@@ -18,14 +18,13 @@
 // Use n <= 0 for a forever loop (normal behavior)
 
 import { disposable } from "std/core/kinds.yoop";
-import { ListenResult, tcp_listen } from "std/net/tcp.yoop";
-import {
-    Handler, HandleOutcome,
-    serve_n, ServeOutcome,
-} from "std/http/server.yoop";
-import {
-    Request, Response, ok, headers_add,
-} from "std/http/types.yoop";
+import { ListenResult } from "std/net/tcp.yoop";
+import * as tcp from "std/net/tcp.yoop";
+import { Handler, HandleOutcome, ServeOutcome } from "std/http/server.yoop";
+import * as http_server from "std/http/server.yoop";
+import { Request, Response } from "std/http/types.yoop";
+import * as http_types from "std/http/types.yoop";
+import * as intr from "std/core/intrinsics.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -39,9 +38,9 @@ extern "C" from "stdio.h" {
 type HelloHandler implements Handler {
     greeting: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain");
-        resp.body = string_as_bytes(self.greeting);
+        resp.status = http_types.ok();
+        http_types.headers_add(ref resp.headers, "Content-Type", "text/plain");
+        resp.body = intr.string_as_bytes(self.greeting);
         return HandleOutcome.Ok;
     }
 }
@@ -51,7 +50,7 @@ function main(): int32 {
     // host, port, backlog
     // backlog is the maximum pending-connection queue length
     // backlog is passed directly to C function -> "listen" call in sys/socket.h
-    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
+    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128);
 
     // there is no try/catch in this language.
     // explicitly inspect the `error` field on the disposable result.
@@ -71,7 +70,7 @@ function main(): int32 {
     // There is no normal non-blocking loop
     // to tap into like in other GC'd or event-looped langauges.
     // THIS is the "long-running" process
-    let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, 0);
+    let outcome: ServeOutcome = http_server.serve_n(ref lr.listener, ref handler, 0);
 
     // if there is an error or we maxed out our test number of calls the outcome
     // will resolve and we print and exit...

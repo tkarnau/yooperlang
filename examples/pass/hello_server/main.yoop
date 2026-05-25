@@ -16,6 +16,7 @@ import {
 import {
     Request, Response, ok, headers_add,
 } from "../../../std/http/types.yoop";
+import * as intr from "../../../std/core/intrinsics.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -29,7 +30,7 @@ type HelloHandler implements Handler {
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         resp.status = ok();
         headers_add(ref resp.headers, "Content-Type", "text/plain");
-        resp.body = string_as_bytes(self.greeting);
+        resp.body = intr.string_as_bytes(self.greeting);
         return HandleOutcome.Ok;
     }
 }

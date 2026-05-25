@@ -11,6 +11,7 @@
 //   * everything else here is read-only over its inputs.
 
 import { Result } from "./types.yoop";
+import * as intr from "./intrinsics.yoop";
 
 // Byte-wise equality. Returns true iff lengths match and every byte matches.
 export function bytes_eq(a: uint8[], b: uint8[]): bool {
@@ -88,14 +89,14 @@ export function bytes_eq_ignore_ascii_case(a: uint8[], b: uint8[]): bool {
 // storage as `buf`. The caller is responsible for keeping `buf` alive as
 // long as the slice is used.
 export function bytes_slice(buf: uint8[], start: usize, end: usize): uint8[] {
-    return array_slice(buf, start, end);
+    return intr.array_slice(buf, start, end);
 }
 
 // Copy buf into a fresh heap-allocated uint8[]. Caller owns the result and
 // is responsible for freeing it (via heap_free) — though typical use is to
 // hand it off to string_from_bytes_unchecked which retains the bytes.
 export function bytes_copy(buf: uint8[]): uint8[] {
-    let result: uint8[] = heap_alloc(buf.len);
+    let result: uint8[] = intr.heap_alloc(buf.len);
     let i: usize = 0;
     while (i < buf.len) {
         result[i] = buf[i];

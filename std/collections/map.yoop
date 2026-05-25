@@ -30,6 +30,7 @@ import { Option } from "../core/types.yoop";
 import { Iterable, IterStep } from "../core/traits.yoop";
 import { string_eq, string_hash } from "../core/strings.yoop";
 import { bytes_eq } from "../core/bytes.yoop";
+import * as intr from "../core/intrinsics.yoop";
 
 const STATE_EMPTY:     uint8 = 0;
 const STATE_OCCUPIED:  uint8 = 1;
@@ -59,9 +60,9 @@ export type Map<K, V> implements Disposable propagates<disposable> {
     ops:    KeyOps<K>,
     function dispose(ref self): void {
         if (self.cap > 0) {
-            heap_free(self.keys);
-            heap_free(self.values);
-            heap_free(self.states);
+            intr.heap_free(self.keys);
+            intr.heap_free(self.values);
+            intr.heap_free(self.states);
             self.cap = 0;
         }
     }
@@ -142,9 +143,9 @@ function find_insert_slot<K, V>(ref m: Map<K, V>, key: K): usize {
 // is the next power of two ≥ initial_cap, floor of 8.
 export function map_new<K, V>(initial_cap: usize, ops: KeyOps<K>): Map<K, V> propagates<disposable> {
     let cap: usize = next_pow2_floor8(initial_cap);
-    let keys:   K[]      = heap_alloc(cap);
-    let values: V[]      = heap_alloc(cap);
-    let states: uint8[]  = heap_alloc(cap);
+    let keys:   K[]      = intr.heap_alloc(cap);
+    let values: V[]      = intr.heap_alloc(cap);
+    let states: uint8[]  = intr.heap_alloc(cap);
     let i: usize = 0;
     while (i < cap) {
         states[i] = STATE_EMPTY;
@@ -161,9 +162,9 @@ function rehash<K, V>(ref m: Map<K, V>, new_cap: usize): void {
     let old_states: uint8[]  = m.states;
     let old_cap:    usize    = m.cap;
 
-    let new_keys:   K[]      = heap_alloc(new_cap);
-    let new_values: V[]      = heap_alloc(new_cap);
-    let new_states: uint8[]  = heap_alloc(new_cap);
+    let new_keys:   K[]      = intr.heap_alloc(new_cap);
+    let new_values: V[]      = intr.heap_alloc(new_cap);
+    let new_states: uint8[]  = intr.heap_alloc(new_cap);
     let j: usize = 0;
     while (j < new_cap) {
         new_states[j] = STATE_EMPTY;
@@ -190,9 +191,9 @@ function rehash<K, V>(ref m: Map<K, V>, new_cap: usize): void {
         }
         i = i + 1;
     }
-    heap_free(old_keys);
-    heap_free(old_values);
-    heap_free(old_states);
+    intr.heap_free(old_keys);
+    intr.heap_free(old_values);
+    intr.heap_free(old_states);
 }
 
 // Grow if (used + 1) * 4 >= cap * 3 (i.e. 75% load factor over `used`).

@@ -68,8 +68,9 @@ function main() {
   }
 
   let modules;
+  let autoloadedStdModuleIds;
   try {
-    ({ modules } = loadModuleGraph(entryAbs));
+    ({ modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbs));
   } catch (err) {
     if (err && err.isParseError) {
       // Parse error from the lexer/parser: it has line/column/length and
@@ -90,6 +91,7 @@ function main() {
   }
 
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
+  programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
 
   if (errors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));

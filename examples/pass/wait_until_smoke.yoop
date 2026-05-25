@@ -1,4 +1,4 @@
-// Phase 10.F: `wait_until(h, deadline_ns)` is the bounded-wait counterpart
+// Phase 10.F: `conc.wait_until(h, deadline_ns)` is the bounded-wait counterpart
 // to the `wait` keyword. It returns a `WaitResult<T>` enum with two
 // variants: `Done { value: T }` carrying the task's result, or `Timeout`
 // when the absolute deadline elapsed before the task completed.
@@ -11,7 +11,8 @@
 // Each switch arm prints a distinct line so the test can assert on
 // stdout without flakiness around exact timing.
 
-import { WaitResult, now_ns, sleep_ms } from "std/core/concurrency.yoop";
+import { WaitResult } from "std/core/concurrency.yoop";
+import * as conc from "std/core/concurrency.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -22,14 +23,14 @@ task compute(x: int32): int32 {
 }
 
 task slow(): int32 {
-    sleep_ms(200);
+    conc.sleep_ms(200);
     return 99;
 }
 
 function main(): int32 {
     pooled fast = compute(7);
-    let fast_deadline: uint64 = now_ns() + 1_000_000_000;
-    let fast_result: WaitResult<int32> = wait_until(fast, fast_deadline);
+    let fast_deadline: uint64 = conc.now_ns() + 1_000_000_000;
+    let fast_result: WaitResult<int32> = conc.wait_until(fast, fast_deadline);
     switch (fast_result) {
         case WaitResult.Done { value: v }: { printf(`fast done=${v}\n`); }
         case WaitResult.Timeout: { printf(`fast timed out (unexpected)\n`); }
@@ -37,8 +38,8 @@ function main(): int32 {
     }
 
     pooled lazy = slow();
-    let lazy_deadline: uint64 = now_ns() + 50_000_000;
-    let lazy_result: WaitResult<int32> = wait_until(lazy, lazy_deadline);
+    let lazy_deadline: uint64 = conc.now_ns() + 50_000_000;
+    let lazy_result: WaitResult<int32> = conc.wait_until(lazy, lazy_deadline);
     switch (lazy_result) {
         case WaitResult.Done { value: v }: { printf(`lazy done=${v} (unexpected)\n`); }
         case WaitResult.Timeout: { printf(`lazy timed out\n`); }

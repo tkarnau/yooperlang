@@ -2,6 +2,8 @@
 // Replaces the C-style `for (i = 0; i < n; i = i + 1)` boilerplate that
 // dominates every yoop program working with arrays today.
 
+import * as intr from "std/core/intrinsics.yoop";
+
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
@@ -31,7 +33,7 @@ function main(): int32 {
     printf(`trues=${trues}\n`);
 
     // Struct element type — iteration copies each element into the loop var.
-    let pts: Point[] = heap_alloc(3);
+    let pts: Point[] = intr.heap_alloc(3);
     pts[0] = { x: 1, y: 10 };
     pts[1] = { x: 2, y: 20 };
     pts[2] = { x: 3, y: 30 };
@@ -61,15 +63,15 @@ function main(): int32 {
     printf(`early=${early}\n`);
 
     // Empty array — body must not execute.
-    let empty: int32[] = heap_alloc(0);
+    let empty: int32[] = intr.heap_alloc(0);
     let zero: int32 = 0;
     for e in empty {
         zero = zero + 1;
     }
     printf(`zero=${zero}\n`);
 
-    heap_free(pts);
-    heap_free(empty);
+    intr.heap_free(pts);
+    intr.heap_free(empty);
     return 0;
 }
 

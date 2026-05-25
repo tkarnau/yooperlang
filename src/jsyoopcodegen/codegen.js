@@ -1284,10 +1284,14 @@ export function codegen(ast) {
       fnLines.push(`  ${tmp} = ${opcode} ${llvmType(src.yoopType)} ${src.val} to ${llvmType(dstType)}`);
       return { val: tmp, yoopType: dstType };
     }
-    // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node
+    // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node.
+    // For generic calls (`vec.vec_new(...)`), node.genericInstantiation
+    // holds the monomorphic mangled name; otherwise we mangle the bare
+    // export name.
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
-      const { moduleId, exportName } = node.callee.namespaceLookup;
-      const mangledName = `${moduleId}__${exportName}`;
+      const mangledName = node.genericInstantiation
+        ? `${node.genericInstantiation.moduleId}__${node.genericInstantiation.mangledName}`
+        : `${node.callee.namespaceLookup.moduleId}__${node.callee.namespaceLookup.exportName}`;
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
       const argList = argResults.map((r) => `${llvmType(r.yoopType)} ${r.val}`).join(", ");
       const retType = node.resolvedType;
@@ -2006,9 +2010,14 @@ export function codegen(ast) {
         });
       }
       if (decl.kind === ASTNodeKind.EXTERN_BLOCK) {
+        const isIntrinsic = decl.abi === "intrinsic";
         for (const ext of decl.decls) {
           if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
           externFnNames.add(ext.name);
+          // Generic intrinsics have no resolved param/return types — pass C
+          // skips them since the canonical decl carries the signature. Don't
+          // build a functionSigs entry for them; codegen dispatches by declId.
+          if (isIntrinsic && ext.resolvedType === undefined) continue;
           functionSigs.set(ext.name, {
             params: ext.params.map((p) => p.resolvedType),
             returnType: ext.resolvedType,
@@ -2019,9 +2028,12 @@ export function codegen(ast) {
     }
     currentExternNames = externFnNames;
 
-    // second pass: emit extern declarations from EXTERN_BLOCKs, then legacy auto-detect
+    // second pass: emit extern declarations from EXTERN_BLOCKs, then legacy auto-detect.
+    // `extern "intrinsic"` blocks are compiler-recognized — their lowerings
+    // live in codegen / the runtime, not in LLVM `declare`s, so we skip them.
     for (const decl of node.body) {
       if (decl.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
+      if (decl.abi === "intrinsic") continue;
       for (const ext of decl.decls) {
         if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
         const params = ext.params.map((p) => llvmType(p.resolvedType)).join(", ");
@@ -3004,13 +3016,17 @@ function codegenWithModuleId(
     if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) cExportNames.add(decl.fn.name);
   }
 
-  // Collect extern function names and emit declares
+  // Collect extern function names and emit declares. `extern "intrinsic"`
+  // blocks are compiler-recognized — see the note in the legacy path above
+  // — so we skip emitting LLVM declares for them.
   const externFnNames = new Set();
   for (const decl of ast.body) {
     if (decl.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
+    const isIntrinsic = decl.abi === "intrinsic";
     for (const ext of decl.decls) {
       if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
       externFnNames.add(ext.name);
+      if (isIntrinsic) continue;
       const params = ext.params.map((p) => llvmType(p.resolvedType)).join(", ");
       const ret = llvmType(ext.resolvedType);
       const sig = ext.variadic
@@ -4154,7 +4170,9 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.TEMPLATE_LITERAL: {
         const hasInterp = node.parts.some((p) => p.kind === ASTNodeKind.EXPR_PART);
-        if (hasInterp) throw new Error("codegen: template literal with interpolation only supported inside printf");
+        if (hasInterp) {
+          return emitInterpolatedTemplateLiteral(node, fnLines);
+        }
         const inner = node.parts.map((p) => p.value).join("");
         const { name, byteLen } = emitRawStringGlobal(inner);
         const tmp = freshTemp();
@@ -4509,6 +4527,109 @@ function codegenWithModuleId(
     throw new Error(`codegen: unknown builtin generic declId "${inst.declId}"`);
   }
 
+  // Lower an interpolated template literal to a string by routing each
+  // `${expr}` through the matching `<prim>_to_string` shim (or the
+  // Display.to_string call the typechecker pre-synthesized for struct
+  // operands), collecting the parts into a `string[]` fat pointer, and
+  // feeding that to `string_concat_all`. Requires the driver to have
+  // autoloaded std/core/format.yoop + std/core/strings.yoop.
+  function emitInterpolatedTemplateLiteral(node, fnLines) {
+    const std = programState?.autoloadedStdModuleIds;
+    if (!std || !std.format || !std.strings) {
+      throw new Error(
+        "codegen: template literals with ${...} interpolation require the multi-module driver (autoloaded std/core/format.yoop + strings.yoop missing)",
+      );
+    }
+    const fmtMod = std.format;
+    const strMod = std.strings;
+    const stringTy = PrimType("string");
+    const arrType = { kind: typeKinds.array, elem: stringTy };
+    ensureArrayTypeDef(stringTy);
+
+    const partVals = [];
+    for (const part of node.parts) {
+      if (part.kind === ASTNodeKind.STRING_PART) {
+        const { name, byteLen } = emitRawStringGlobal(part.value);
+        const tmp = freshTemp();
+        fnLines.push(
+          `  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`,
+        );
+        partVals.push(tmp);
+        continue;
+      }
+      const r = emitExpr(part.expr, fnLines);
+      const t = r.yoopType;
+      if (t.kind === typeKinds.prim && t.name === "string") {
+        partVals.push(r.val);
+        continue;
+      }
+      if (t.kind === typeKinds.prim && t.name === "bool") {
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__bool_to_string(i1 ${r.val})`);
+        partVals.push(tmp);
+        continue;
+      }
+      if (isIntType(t)) {
+        const unsigned = isUnsignedIntPrim(t.name);
+        const llvm = llvmType(t);
+        let widened = r.val;
+        if (llvm !== "i64") {
+          const w = freshTemp();
+          fnLines.push(`  ${w} = ${unsigned ? "zext" : "sext"} ${llvm} ${r.val} to i64`);
+          widened = w;
+        }
+        const fn = unsigned ? "uint_to_string" : "int_to_string";
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__${fn}(i64 ${widened})`);
+        partVals.push(tmp);
+        continue;
+      }
+      if (isFloatType(t)) {
+        const llvm = llvmType(t);
+        let widened = r.val;
+        if (llvm !== "double") {
+          const w = freshTemp();
+          fnLines.push(`  ${w} = fpext ${llvm} ${r.val} to double`);
+          widened = w;
+        }
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__float_to_string(double ${widened})`);
+        partVals.push(tmp);
+        continue;
+      }
+      throw new Error(
+        `codegen: template literal interpolation produced unexpected type "${t.kind}/${t.name ?? ""}"`,
+      );
+    }
+
+    const n = partVals.length;
+    const storage = freshTemp();
+    fnLines.push(`  ${storage} = alloca [${n} x ptr], align 8`);
+    for (let i = 0; i < n; i++) {
+      const slot = freshTemp();
+      fnLines.push(`  ${slot} = getelementptr [${n} x ptr], ptr ${storage}, i32 0, i32 ${i}`);
+      fnLines.push(`  store ptr ${partVals[i]}, ptr ${slot}`);
+    }
+    const dataPtr = freshTemp();
+    fnLines.push(`  ${dataPtr} = getelementptr [${n} x ptr], ptr ${storage}, i32 0, i32 0`);
+
+    const arrLlvm = llvmType(arrType);
+    const fatSlot = freshTemp();
+    fnLines.push(`  ${fatSlot} = alloca ${arrLlvm}, align 8`);
+    const dataField = freshTemp();
+    fnLines.push(`  ${dataField} = getelementptr inbounds ${arrLlvm}, ptr ${fatSlot}, i32 0, i32 0`);
+    fnLines.push(`  store ptr ${dataPtr}, ptr ${dataField}`);
+    const lenField = freshTemp();
+    fnLines.push(`  ${lenField} = getelementptr inbounds ${arrLlvm}, ptr ${fatSlot}, i32 0, i32 1`);
+    fnLines.push(`  store i64 ${n}, ptr ${lenField}`);
+    const fatVal = freshTemp();
+    fnLines.push(`  ${fatVal} = load ${arrLlvm}, ptr ${fatSlot}`);
+
+    const result = freshTemp();
+    fnLines.push(`  ${result} = call ptr @${strMod}__string_concat_all(${arrLlvm} ${fatVal})`);
+    return { val: result, yoopType: stringTy };
+  }
+
   function emitCallExpr(node, fnLines) {
     // Phase 10.F: builtin wait_until lowering (multi-module path).
     if (node.builtinWaitUntil) {
@@ -4531,8 +4652,13 @@ function codegenWithModuleId(
       return { val: tmp, yoopType: dstType };
     }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
-      const { moduleId: nsModId, exportName } = node.callee.namespaceLookup;
-      const mangledName = mangle(nsModId, exportName);
+      // Generic-namespace calls (`vec.vec_new(...)`) carry a
+      // `genericInstantiation` from the typechecker — its mangled name
+      // includes the type-arg suffix so we land on the concrete monomorphic
+      // function rather than the (non-existent) base symbol.
+      const mangledName = node.genericInstantiation
+        ? mangle(node.genericInstantiation.moduleId, node.genericInstantiation.mangledName)
+        : mangle(node.callee.namespaceLookup.moduleId, node.callee.namespaceLookup.exportName);
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
       const argList = argResults.map((r) => `${llvmType(r.yoopType)} ${r.val}`).join(", ");
       const retType = node.resolvedType;
@@ -5610,8 +5736,12 @@ function usesLegacyPrintf(ast) {
 }
 
 export function compileEntry(entryAbsPath) {
-  const { modules } = loadModuleGraph(entryAbsPath);
+  const { modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbsPath);
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
+  // Thread the well-known std module ids through programState so codegen
+  // can mint mangled symbols (`<fmtModId>__int_to_string`, etc.) when
+  // lowering interpolated template literals.
+  programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
   if (errors.length > 0) {
     throw new Error(
       `compileEntry: typecheck failed with ${errors.length} error(s):\n` +

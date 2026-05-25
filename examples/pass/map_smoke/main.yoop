@@ -1,6 +1,6 @@
 // Phase 10.X.2 follow-up: `Map<K, V>` generic hash map, keyed off a
 // `KeyOps<K>` ops struct (Phase 10.X.2 enables FPT-typed struct fields).
-// This fixture exercises the string-key form via `string_key_ops()`,
+// This fixture exercises the string-key form via `map.string_key_ops()`,
 // covering the marquee paths:
 //   * insert + overwrite (return value distinguishes fresh from replace),
 //   * get returning Option<V>,
@@ -10,43 +10,35 @@
 
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
-import {
-    Map,
-    map_new,
-    map_insert,
-    map_get,
-    map_contains_key,
-    map_remove,
-    map_len,
-    string_key_ops,
-} from "std/collections/map.yoop";
+import { Map } from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
 function main(): int32 {
-    disposable m: Map<string, int32> = map_new(4, string_key_ops());
+    disposable m: Map<string, int32> = map.map_new(4, map.string_key_ops());
 
     // Fresh inserts.
-    let fresh_a: bool = map_insert(ref m, "alpha", 1);
-    let fresh_b: bool = map_insert(ref m, "beta",  2);
-    let fresh_c: bool = map_insert(ref m, "gamma", 3);
+    let fresh_a: bool = map.map_insert(ref m, "alpha", 1);
+    let fresh_b: bool = map.map_insert(ref m, "beta",  2);
+    let fresh_c: bool = map.map_insert(ref m, "gamma", 3);
     let fa: int32 = 0; if (fresh_a) { fa = 1; }
     let fb: int32 = 0; if (fresh_b) { fb = 1; }
     let fc: int32 = 0; if (fresh_c) { fc = 1; }
-    printf(`fresh: a=${fa} b=${fb} c=${fc} len=${map_len(ref m)}\n`);
+    printf(`fresh: a=${fa} b=${fb} c=${fc} len=${map.map_len(ref m)}\n`);
 
     // Overwrite the same key.
-    let overwrote: bool = map_insert(ref m, "beta", 22);
+    let overwrote: bool = map.map_insert(ref m, "beta", 22);
     let ow: int32 = 0; if (overwrote) { ow = 1; }
-    printf(`overwrite: ow=${ow} len=${map_len(ref m)}\n`);
+    printf(`overwrite: ow=${ow} len=${map.map_len(ref m)}\n`);
 
     // Lookup hits + miss. Payload bindings can share `value: v` across
     // arms thanks to Phase 10.H alloca uniquification.
-    let ga: Option<int32> = map_get(ref m, "alpha");
-    let gb: Option<int32> = map_get(ref m, "beta");
-    let gz: Option<int32> = map_get(ref m, "zeta");
+    let ga: Option<int32> = map.map_get(ref m, "alpha");
+    let gb: Option<int32> = map.map_get(ref m, "beta");
+    let gz: Option<int32> = map.map_get(ref m, "zeta");
     let ga_v: int32 = -1;
     switch (ga) {
         case Option.Some { value: v }: { ga_v = v; }
@@ -64,19 +56,19 @@ function main(): int32 {
     }
     printf(`get: alpha=${ga_v} beta=${gb_v} zeta=${gz_v}\n`);
 
-    let has_a: bool = map_contains_key(ref m, "alpha");
-    let has_z: bool = map_contains_key(ref m, "zeta");
+    let has_a: bool = map.map_contains_key(ref m, "alpha");
+    let has_z: bool = map.map_contains_key(ref m, "zeta");
     let hai: int32 = 0; if (has_a) { hai = 1; }
     let hzi: int32 = 0; if (has_z) { hzi = 1; }
     printf(`contains: alpha=${hai} zeta=${hzi}\n`);
 
-    let removed_a: bool = map_remove(ref m, "alpha");
-    let removed_x: bool = map_remove(ref m, "xeno");
+    let removed_a: bool = map.map_remove(ref m, "alpha");
+    let removed_x: bool = map.map_remove(ref m, "xeno");
     let ra: int32 = 0; if (removed_a) { ra = 1; }
     let rx: int32 = 0; if (removed_x) { rx = 1; }
-    printf(`remove: alpha=${ra} xeno=${rx} len=${map_len(ref m)}\n`);
+    printf(`remove: alpha=${ra} xeno=${rx} len=${map.map_len(ref m)}\n`);
 
-    let after_get: Option<int32> = map_get(ref m, "alpha");
+    let after_get: Option<int32> = map.map_get(ref m, "alpha");
     let after_v: int32 = -1;
     switch (after_get) {
         case Option.Some { value: v }: { after_v = v; }
@@ -100,12 +92,12 @@ function main(): int32 {
         if (i == 9)  { k = "k09"; }
         if (i == 10) { k = "k10"; }
         if (i == 11) { k = "k11"; }
-        let _f: bool = map_insert(ref m, k, i * 10);
+        let _f: bool = map.map_insert(ref m, k, i * 10);
         i = i + 1;
     }
-    let grown_len: usize = map_len(ref m);
-    let probe5: Option<int32> = map_get(ref m, "k05");
-    let probe10: Option<int32> = map_get(ref m, "k10");
+    let grown_len: usize = map.map_len(ref m);
+    let probe5: Option<int32> = map.map_get(ref m, "k05");
+    let probe10: Option<int32> = map.map_get(ref m, "k10");
     let p5: int32 = -1;
     switch (probe5) {
         case Option.Some { value: v }: { p5 = v; }

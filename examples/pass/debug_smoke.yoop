@@ -1,4 +1,4 @@
-// Phase 10.D: `std/debug` provides `assert(cond, msg)` (no-op when
+// Phase 10.D: `std/debug` provides `debug.assert(cond, msg)` (no-op when
 // the condition holds) plus the unconditional `panic(msg)` and
 // `unreachable(msg)` exits. This fixture exercises the no-op path —
 // the always-true assert returns without writing anything — and a
@@ -7,14 +7,14 @@
 // `examples/fail_runtime/` fixtures so the e2e harness can assert the
 // non-zero exit code.
 
-import { assert } from "std/debug.yoop";
+import * as debug from "std/debug.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
 function main(): int32 {
-    assert(true, "this never fires");
+    debug.assert(true, "this never fires");
     printf(`assert ok\n`);
     return 0;
 }

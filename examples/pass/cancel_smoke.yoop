@@ -11,25 +11,26 @@
 // Fixture shape:
 //   1. Spawn `slow()` (sleeps 200ms then returns 99).
 //   2. From a second pooled task, sleep 30ms then `cancel(slow)`.
-//   3. Main calls `wait_until(slow, now+1s)` — the 1s deadline is huge,
+//   3. Main calls `conc.wait_until(slow, now+1s)` — the 1s deadline is huge,
 //      so the only path to Cancelled is through the cancel(h) at t≈30ms.
 // Final `wait slow` drains the still-running task so its handle frees
 // cleanly (same pattern as the wait_until_smoke fixture).
 
-import { WaitResult, now_ns, sleep_ms } from "std/core/concurrency.yoop";
+import { WaitResult } from "std/core/concurrency.yoop";
+import * as conc from "std/core/concurrency.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
 task slow(): int32 {
-    sleep_ms(200);
+    conc.sleep_ms(200);
     return 99;
 }
 
 task canceller(target: Task<int32>): int32 {
-    sleep_ms(30);
-    cancel(target);
+    conc.sleep_ms(30);
+    conc.cancel(target);
     return 0;
 }
 
@@ -37,8 +38,8 @@ function main(): int32 {
     pooled target = slow();
     pooled killer = canceller(target);
 
-    let deadline: uint64 = now_ns() + 1_000_000_000;
-    let r: WaitResult<int32> = wait_until(target, deadline);
+    let deadline: uint64 = conc.now_ns() + 1_000_000_000;
+    let r: WaitResult<int32> = conc.wait_until(target, deadline);
     switch (r) {
         case WaitResult.Done { value: v }: { printf(`unexpected done=${v}\n`); }
         case WaitResult.Timeout: { printf(`unexpected timeout\n`); }

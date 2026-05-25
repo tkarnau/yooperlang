@@ -1,0 +1,86 @@
+// std/core/format.yoop — primitive `to_string` shims.
+//
+// Used by the compiler when lowering template literals: each `${x}`
+// interpolation gets routed to the matching `<type>_to_string` here
+// before being passed to `string_concat_all`. Callers can use these
+// directly too if they want an explicit conversion.
+//
+// Integer formatting is pure yoop (a divmod loop into a fresh byte
+// buffer). Float formatting bottoms out at a tiny snprintf-based C
+// helper — pure-yoop float-to-string isn't worth the surface area.
+
+import * as intr from "./intrinsics.yoop";
+
+// "true" / "false".
+export function bool_to_string(b: bool): string {
+    if (b) {
+        return "true";
+    }
+    return "false";
+}
+
+// Decimal digits of an unsigned 64-bit value.
+export function uint_to_string(x: uint64): string {
+    if (x == 0) {
+        return "0";
+    }
+    let digits: usize = 0;
+    let n: uint64 = x;
+    while (n > 0) {
+        digits = digits + 1;
+        n = n / 10;
+    }
+    let buf: uint8[] = intr.heap_alloc(digits);
+    let i: usize = digits;
+    let v: uint64 = x;
+    while (v > 0) {
+        i = i - 1;
+        buf[i] = uint8((v % 10) + 48);
+        v = v / 10;
+    }
+    let result: string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
+    return result;
+}
+
+// Decimal digits of a signed 64-bit value. INT64_MIN is a known
+// edge case (its absolute value doesn't fit in int64) — callers
+// passing it get the same overflow surface as any other arithmetic
+// hitting the wrap; not worth a branch in the hot path.
+export function int_to_string(x: int64): string {
+    if (x == 0) {
+        return "0";
+    }
+    if (x > 0) {
+        return uint_to_string(uint64(x));
+    }
+    let positive: uint64 = uint64(-x);
+    let digits: usize = 0;
+    let n: uint64 = positive;
+    while (n > 0) {
+        digits = digits + 1;
+        n = n / 10;
+    }
+    let total: usize = digits + 1;
+    let buf: uint8[] = intr.heap_alloc(total);
+    buf[0] = uint8(45);
+    let i: usize = total;
+    let v: uint64 = positive;
+    while (v > 0) {
+        i = i - 1;
+        buf[i] = uint8((v % 10) + 48);
+        v = v / 10;
+    }
+    let result: string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
+    return result;
+}
+
+extern "C" from "yoop_runtime" {
+    function yoop_float_to_string(x: float64): string;
+}
+
+// Compact decimal (`%g`-style) with no trailing zeros.
+export function float_to_string(x: float64): string {
+    return yoop_float_to_string(x);
+}

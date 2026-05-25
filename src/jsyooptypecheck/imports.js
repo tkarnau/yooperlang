@@ -89,6 +89,16 @@ export function resolveImports(mod, moduleEnv, errors) {
       } else if (srcGenericFunc) {
         // Phase 8.H: imported generic function. lookupGenericFunc looks
         // here via importedNames + the remote module's genericFuncTable.
+        // Generic functions from std/ also fall under the namespace-only
+        // rule (see the srcSym branch below for the full rationale).
+        if (imp.sourcePath?.startsWith("std/")) {
+          pushError(
+            errors,
+            imp,
+            `imports of value "${spec.exportName}" from "${imp.sourcePath}" must use the namespace form: write \`import * as <ns> from "${imp.sourcePath}"\` and call as \`<ns>.${spec.exportName}(...)\``,
+          );
+          continue;
+        }
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-func" });
       } else if (srcGenericTrait) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-trait" });
@@ -102,7 +112,20 @@ export function resolveImports(mod, moduleEnv, errors) {
       } else if (srcUnion) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcSym) {
-        // It's a value (function, const, etc.)
+        // It's a value (function, const, etc.). Imports from std/ modules
+        // must use the namespace form so common function names ("info",
+        // "error", "panic", ...) don't compete with user identifiers.
+        // Types/traits/kinds are exempt — they're capitalized (or, for
+        // `disposable`, used in declaration-position syntax) and can keep
+        // their named-import form.
+        if (imp.sourcePath?.startsWith("std/")) {
+          pushError(
+            errors,
+            imp,
+            `imports of value "${spec.exportName}" from "${imp.sourcePath}" must use the namespace form: write \`import * as <ns> from "${imp.sourcePath}"\` and call as \`<ns>.${spec.exportName}(...)\``,
+          );
+          continue;
+        }
         localSymbols.set(spec.localName, srcSym);
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "value" });
       } else {

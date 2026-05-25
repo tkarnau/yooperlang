@@ -10,6 +10,7 @@
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result } from "../core/types.yoop";
 import { Readable, Writable } from "../core/traits.yoop";
+import * as intr from "../core/intrinsics.yoop";
 import {
     Vec, vec_new, vec_push, vec_get, vec_as_array, vec_set,
 } from "../core/vec.yoop";
@@ -89,7 +90,7 @@ function push_decimal_i32(ref out: Vec<uint8>, n: int32): void {
 }
 
 function push_str(ref out: Vec<uint8>, s: string): void {
-    let bs: uint8[] = string_as_bytes(s);
+    let bs: uint8[] = intr.string_as_bytes(s);
     let i: usize = 0;
     while (i < bs.len) {
         vec_push(ref out, bs[i]);
@@ -178,7 +179,7 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
 
         // ----- per-connection read + parse + dispatch + write -----
         let disposable buf: Vec<uint8> = vec_new(2048);
-        let scratch: uint8[] = heap_alloc(2048);
+        let scratch: uint8[] = intr.heap_alloc(2048);
         let found: bool = false;
         let dos_limit: usize = 65536;
         while (buf.len < dos_limit) {
@@ -190,11 +191,11 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
                 case Result.Err { error: read_e_ok }: { r_err = read_e_ok; }
             }
             if (r_err.len > 0) {
-                heap_free(scratch);
+                intr.heap_free(scratch);
                 return { served: served, error: r_err };
             }
             if (r_n == 0) {
-                heap_free(scratch);
+                intr.heap_free(scratch);
                 return { served: served, error: "client closed before request head completed" };
             }
             let i: usize = 0;
@@ -210,7 +211,7 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
                 break;
             }
         }
-        heap_free(scratch);
+        intr.heap_free(scratch);
         if (found) {
             // fall through to parsing
         } else {
@@ -230,7 +231,7 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
             have = parse_view.len - body_start;
         }
         if (have < need) {
-            let extra: uint8[] = heap_alloc(2048);
+            let extra: uint8[] = intr.heap_alloc(2048);
             while (have < need) {
                 let rr: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref extra);
                 let rr_n: c_ssize_t = 0;
@@ -240,11 +241,11 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
                     case Result.Err { error: rr_e_ok }: { rr_err = rr_e_ok; }
                 }
                 if (rr_err.len > 0) {
-                    heap_free(extra);
+                    intr.heap_free(extra);
                     return { served: served, error: rr_err };
                 }
                 if (rr_n == 0) {
-                    heap_free(extra);
+                    intr.heap_free(extra);
                     return { served: served, error: "client closed before body complete" };
                 }
                 let k: usize = 0;
@@ -255,10 +256,10 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
                 }
                 have = have + avail2;
             }
-            heap_free(extra);
+            intr.heap_free(extra);
         }
         let final_view: uint8[] = vec_as_array(ref buf);
-        pr.request.body = array_slice(final_view, body_start, body_start + need);
+        pr.request.body = intr.array_slice(final_view, body_start, body_start + need);
 
         let disposable resp: Response = response_new();
         let outcome: HandleOutcome = Handler.handle(ref handler, ref pr.request, ref resp);
