@@ -10,6 +10,7 @@
         "ref", "task", "wait", "implements", "provides", "restricts",
         "propagates", "layout", "align",
         "disposable", "scoped", "pooled", "joined", "batchable",
+        "extern", "library",
     ]);
 
     const PRIMITIVES = new Set([

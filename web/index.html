@@ -22,24 +22,28 @@
     <main>
         <section class="hero">
             <div class="container">
-                <h1>A systems language with a TypeScript feel.</h1>
+                <h1>A systems language for folks who got stuck writing web apps.</h1>
                 <p class="lede">
-                    No garbage collector. No classes. Structs and free functions.
-                    Behavior expressed through two orthogonal mechanisms: <strong>traits</strong> and <strong>kinds</strong>.
+                    I've spent my career in JavaScript, TypeScript, C#, and Node — shipping CRUD apps
+                    and APIs. Every time I tried to pick up a real systems language, I bounced off the
+                    cliff face of dense syntax and missing context. So I'm building Yooperlang:
+                    a systems language with a TypeScript feel, no garbage collector, and code that's
+                    actually readable if you came up on the web side.
                 </p>
                 <div class="hero-actions">
                     <a class="btn btn-primary" href="reference.html">Read the Language Reference</a>
-                    <a class="btn btn-ghost" href="#sample">See an example</a>
+                    <a class="btn btn-ghost" href="#sample">See some code</a>
                 </div>
             </div>
         </section>
 
         <section id="sample" class="sample">
             <div class="container">
-                <h2>A taste of Yooperlang</h2>
+                <h2>A taste</h2>
                 <p class="muted">
                     Types on the right. Templates with <code>${...}</code>. <code>main</code> returns
-                    an <code>int32</code> exit status.
+                    an <code>int32</code>. If you've written TypeScript, you can probably read this
+                    already.
                 </p>
                 <pre><code class="yoop">type Point {
     x: int32,
@@ -70,9 +74,38 @@ function main(): int32 {
             </div>
         </section>
 
+        <section class="why">
+            <div class="container">
+                <h2>Why bother?</h2>
+                <p>
+                    The gap between web devs and systems devs keeps getting wider. Every year there's
+                    another framework, another runtime, another layer of abstraction — and every year
+                    the machine underneath gets a little further away. Performance gets traded for
+                    ergonomics, and ergonomics gets traded for "developer experience" that mostly
+                    means more layers.
+                </p>
+                <p>
+                    I miss the idea that one person could write the whole thing. Yooperlang is a
+                    small push in that direction — a language that web folks can pick up without
+                    feeling like a simpleton, and that's still close enough to the metal to actually
+                    be fast.
+                </p>
+                <p class="aside">
+                    About the name: the author is from the Upper Peninsula of Michigan, and "yooper"
+                    is a funny word. That's the whole story.
+                </p>
+                <p class="disclaimer">
+                    Heads up: I'm not a compiler designer. This is my first real swing at a language
+                    beyond a toy project. The pitch isn't "this is the best systems language ever
+                    made" — it's "maybe folks like me deserve a path back to the fun stuff." If that
+                    resonates, stick around. It's more fun with company.
+                </p>
+            </div>
+        </section>
+
         <section class="pillars">
             <div class="container">
-                <h2>Three layers, kept separate</h2>
+                <h2>Three layers, kept honest</h2>
                 <div class="grid-3">
                     <div class="card">
                         <h3>Type</h3>
@@ -89,11 +122,119 @@ function main(): int32 {
                 </div>
             </div>
         </section>
+
+        <section class="examples">
+            <div class="container">
+                <h2>What you can build today</h2>
+                <p class="muted">
+                    These aren't promises about a future version &mdash; the snippets below are
+                    excerpts from real programs in the repo.
+                </p>
+
+                <div class="example">
+                    <h3>An HTTP server</h3>
+                    <p>
+                        The handler shape borrows the comfort of Express-style request/response
+                        objects, but everything underneath compiles down to native code. The
+                        <code>disposable</code> kind on the listener means cleanup happens at scope
+                        end, automatically &mdash; no try/finally, no defer.
+                    </p>
+                    <pre><code class="yoop">import { disposable } from "std/core/kinds.yoop";
+import { tcp_listen, ListenResult } from "std/net/tcp.yoop";
+import { serve_n, Handler, HandleOutcome } from "std/http/server.yoop";
+import { Request, Response, ok, headers_add } from "std/http/types.yoop";
+
+// User-defined handler. std/http/server is generic over any type
+// that implements the Handler trait.
+type HelloHandler implements Handler {
+    greeting: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        resp.status = ok();
+        headers_add(ref resp.headers, "Content-Type", "text/plain");
+        resp.body = string_as_bytes(self.greeting);
+        return HandleOutcome.Ok;
+    }
+}
+
+function main(): int32 {
+    // host, port, backlog. `disposable` drops the socket at scope end.
+    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
+
+    // No try/catch in this language &mdash; inspect the error field directly.
+    if (lr.error.len &gt; 0) {
+        printf(`bind failed: ${lr.error}\n`);
+        return 1;
+    }
+
+    let handler: HelloHandler = { greeting: "Hello, World!\n" };
+    serve_n(ref lr.listener, ref handler, 0);  // 0 = serve forever
+    return 0;
+}</code></pre>
+                </div>
+
+                <div class="example">
+                    <h3>Use any C library &mdash; right now</h3>
+                    <p>
+                        You don't have to wait for the ecosystem to catch up. The
+                        <code>extern "C" from library</code> block declares the C ABI you want to
+                        call into, and the linker does the rest. Wrap the opaque handle in a thin
+                        type that implements <code>Disposable</code> and the cleanup call disappears
+                        from your code &mdash; the <code>disposable</code> kind emits it at scope end.
+                    </p>
+                    <pre><code class="yoop">// Pull SDL2 in directly &mdash; no bindings crate, no shim, no rewrite.
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_Renderer;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+    function SDL_CreateWindow(
+        title: string,
+        x: int32, y: int32, w: int32, h: int32,
+        flags: uint32
+    ): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
+}
+
+// Thin yoop wrapper so the `disposable` kind manages the handle.
+// No manual SDL_DestroyWindow at the bottom of main().
+type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void {
+        SDL_DestroyWindow(self.handle);
+    }
+}
+
+const SDL_INIT_VIDEO: uint32 = 0x00000020;
+const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+
+function main(): int32 {
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) { return 1; }
+
+    disposable win: Window = {
+        handle: SDL_CreateWindow("hello", 0, 0, 800, 600, SDL_WINDOW_SHOWN)
+    };
+
+    // ... render loop here ...
+
+    SDL_Quit();
+    return 0;  // win.dispose() fires here, automatically.
+}</code></pre>
+                    <p class="example-note">
+                        The point: you can start writing real programs today by reaching into
+                        anything C already exposes &mdash; graphics, audio, databases, crypto. The
+                        Yooperlang-native ecosystem grows over time; the C ABI is the bridge in the
+                        meantime.
+                    </p>
+                </div>
+            </div>
+        </section>
     </main>
 
     <footer class="site-footer">
         <div class="container">
-            <p>Yooperlang — Yooper is a person from the Upper Peninsula of Michigan.</p>
+            <p>Yooperlang &mdash; built slowly, one phase at a time.</p>
         </div>
     </footer>
 
