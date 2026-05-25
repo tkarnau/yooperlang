@@ -577,6 +577,18 @@ task fetch(url: string): Bytes { ... }
 kind slow_batch = throughput_capped(8) & mustNotEscape;
 ```
 
+Operands can also be inline `{ ... }` bodies - anonymous bags of clauses
+for tacking a single restriction onto a composition without declaring a
+named kind for it:
+
+```js
+kind scoped_alt = disposable_base & { mustNotEscape scope; };
+```
+
+An inline body may contain any kind clause except `appliesTo` (the
+composition's `appliesTo` is the intersection of its named operands; inline
+operands inherit it). Inline bodies must contain at least one clause.
+
 Contradictory compositions are compile errors (`align: 32` & `align: 64`,
 `allow parallel` & `mustNotShare acrossScopes`, …).
 

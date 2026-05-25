@@ -1063,6 +1063,12 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.ok(hMatches.length >= 1, `expected %h alloca with align 32`);
   });
 
+  it("kind_compose_inline: inline `{ ... }` operand contributes mustNotEscape and triggers dispose at scope exit", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/kind_compose_inline/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "h.x=1.000000\nbye vec3\n");
+  });
+
   // Phase 8.H: byte / string / Vec primitives and the parse_request_line
   // smoke test. Each fixture imports from std/core/* and exercises the new
   // intrinsics (array_slice / string_as_bytes / string_from_bytes_unchecked)
@@ -2170,6 +2176,13 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /composition has no common application site/.test(e.message)),
       `expected no-common-site error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("kind_compose_inline_appliesto.yoop rejects an inline kind body that declares appliesTo", () => {
+    assert.throws(
+      () => parseFixture("examples/fail/kind_compose_inline_appliesto.yoop"),
+      /inline kind body in composition cannot declare 'appliesTo'/,
     );
   });
 

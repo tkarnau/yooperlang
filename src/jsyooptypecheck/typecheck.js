@@ -928,11 +928,118 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
 
 // ─── kind clause resolution (phase 6.1) ──────────────────────────────────────
 
+// Populate a KindType from a list of clause AST nodes. Used by named-kind
+// resolution (pass C.2) and by inline-kind operands in compositions
+// (pass C.2b). `displayName` appears in diagnostics; for inline kinds it's
+// a placeholder like "(inline kind)".
+function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, errors) {
+  const env = moduleEnv.get(mod.id);
+  let mustCallSeen = false;
+  let ownsBlockSeen = false;
+  let mustNotEscapeSeen = false;
+  let mustNotShareSeen = false;
+  let layoutSeen = false;
+  let mustCallClause = null;
+  for (const c of clauses) {
+    switch (c.kind) {
+      case ASTNodeKind.KIND_APPLIES_TO_CLAUSE:
+        // Store all sites from the multi-site list (parser validated at least one).
+        for (const s of c.sites) kt.appliesTo.add(s);
+        break;
+      case ASTNodeKind.KIND_REQUIRES_CLAUSE: {
+        const trait =
+          env.traitTable.get(c.traitName) ??
+          lookupImportedTrait(c.traitName, mod, moduleEnv);
+        if (!trait) {
+          pushError(errors, c, `unknown trait '${c.traitName}' in requires clause of kind '${displayName}'`);
+          break;
+        }
+        kt.requires.push(trait);
+        break;
+      }
+      case ASTNodeKind.KIND_MUSTCALL_CLAUSE:
+        if (mustCallSeen) {
+          pushError(errors, c, `duplicate mustCall clause in kind '${displayName}'`);
+          break;
+        }
+        mustCallSeen = true;
+        mustCallClause = c;
+        break;
+      case ASTNodeKind.KIND_OWNSBLOCK_CLAUSE:
+        if (ownsBlockSeen) {
+          pushError(errors, c, `duplicate ownsBlock clause in kind '${displayName}'`);
+          break;
+        }
+        ownsBlockSeen = true;
+        kt.ownsBlock = true;
+        break;
+      case ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE:
+        if (mustNotEscapeSeen) {
+          pushError(errors, c, `duplicate mustNotEscape clause in kind '${displayName}'`);
+          break;
+        }
+        mustNotEscapeSeen = true;
+        kt.mustNotEscape = true;
+        break;
+      case ASTNodeKind.KIND_MUST_NOT_SHARE_CLAUSE:
+        if (mustNotShareSeen) {
+          pushError(errors, c, `duplicate mustNotShare clause in kind '${displayName}'`);
+          break;
+        }
+        mustNotShareSeen = true;
+        kt.mustNotShare.push(c.target);
+        break;
+      case ASTNodeKind.KIND_FORBIDS_CLAUSE:
+        for (const cat of c.categories) {
+          if (kt.forbids.includes(cat)) {
+            pushError(errors, c, `duplicate forbids category '${cat}' in kind '${displayName}'`);
+          } else {
+            kt.forbids.push(cat);
+          }
+        }
+        break;
+      case ASTNodeKind.KIND_LAYOUT_CLAUSE: {
+        if (layoutSeen) {
+          pushError(errors, c, `duplicate layout clause in kind '${displayName}'`);
+          break;
+        }
+        layoutSeen = true;
+        const slot = resolveLayoutAlign(c.alignExpr, kt, errors);
+        if (slot) kt.layoutAlign = slot;
+        // Phase 8.B: store the abi "C" marker. Currently contractual -
+        // no downstream consumer yet, but persisted so future codegen /
+        // ABI-validation passes can read it off the resolved kind.
+        if (c.abiC) kt.layoutAbiC = true;
+        break;
+      }
+    }
+  }
+  // mustCall resolution runs after requires have been collected so we can
+  // search the full trait set.
+  if (mustCallClause) {
+    if (kt.requires.length === 0) {
+      pushError(errors, mustCallClause,
+        `mustCall requires at least one 'requires' clause to resolve method '${mustCallClause.methodName}' in kind '${displayName}'`);
+    } else {
+      const traitWithMethod = kt.requires.find((t) => t.methods.has(mustCallClause.methodName));
+      if (!traitWithMethod) {
+        pushError(errors, mustCallClause,
+          `mustCall ${mustCallClause.methodName}: no required trait declares this method in kind '${displayName}'`);
+      } else {
+        kt.mustCall.push({
+          methodName: mustCallClause.methodName,
+          timing: mustCallClause.timing,
+          traitType: traitWithMethod,
+        });
+      }
+    }
+  }
+}
+
 // Pass C.2: walk each kind decl and resolve its clauses against the module's
 // trait table. `requires` clauses populate kt.requires; `mustCall` clauses
 // resolve their method name against the union of required-trait method sets.
 function resolveKindClauses(mod, moduleEnv, errors) {
-  const env = moduleEnv.get(mod.id);
   for (const decl of mod.ast.body) {
     const d = innerDecl(decl);
     if (d.kind !== ASTNodeKind.KIND_DECL) continue;
@@ -940,106 +1047,7 @@ function resolveKindClauses(mod, moduleEnv, errors) {
     if (!kt) continue; // rejected in pass A
     // Composition decls have no clauses - they get merged in C.2b.
     if (d.composition) continue;
-    let mustCallSeen = false;
-    let ownsBlockSeen = false;
-    let mustNotEscapeSeen = false;
-    let mustNotShareSeen = false;
-    let layoutSeen = false;
-    let mustCallClause = null;
-    for (const c of d.clauses) {
-      switch (c.kind) {
-        case ASTNodeKind.KIND_APPLIES_TO_CLAUSE:
-          // Store all sites from the multi-site list (parser validated at least one).
-          for (const s of c.sites) kt.appliesTo.add(s);
-          break;
-        case ASTNodeKind.KIND_REQUIRES_CLAUSE: {
-          const trait =
-            env.traitTable.get(c.traitName) ??
-            lookupImportedTrait(c.traitName, mod, moduleEnv);
-          if (!trait) {
-            pushError(errors, c, `unknown trait '${c.traitName}' in requires clause of kind '${kt.name}'`);
-            break;
-          }
-          kt.requires.push(trait);
-          break;
-        }
-        case ASTNodeKind.KIND_MUSTCALL_CLAUSE:
-          if (mustCallSeen) {
-            pushError(errors, c, `duplicate mustCall clause in kind '${kt.name}'`);
-            break;
-          }
-          mustCallSeen = true;
-          mustCallClause = c;
-          break;
-        case ASTNodeKind.KIND_OWNSBLOCK_CLAUSE:
-          if (ownsBlockSeen) {
-            pushError(errors, c, `duplicate ownsBlock clause in kind '${kt.name}'`);
-            break;
-          }
-          ownsBlockSeen = true;
-          kt.ownsBlock = true;
-          break;
-        case ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE:
-          if (mustNotEscapeSeen) {
-            pushError(errors, c, `duplicate mustNotEscape clause in kind '${kt.name}'`);
-            break;
-          }
-          mustNotEscapeSeen = true;
-          kt.mustNotEscape = true;
-          break;
-        case ASTNodeKind.KIND_MUST_NOT_SHARE_CLAUSE:
-          if (mustNotShareSeen) {
-            pushError(errors, c, `duplicate mustNotShare clause in kind '${kt.name}'`);
-            break;
-          }
-          mustNotShareSeen = true;
-          kt.mustNotShare.push(c.target);
-          break;
-        case ASTNodeKind.KIND_FORBIDS_CLAUSE:
-          for (const cat of c.categories) {
-            if (kt.forbids.includes(cat)) {
-              pushError(errors, c, `duplicate forbids category '${cat}' in kind '${kt.name}'`);
-            } else {
-              kt.forbids.push(cat);
-            }
-          }
-          break;
-        case ASTNodeKind.KIND_LAYOUT_CLAUSE: {
-          if (layoutSeen) {
-            pushError(errors, c, `duplicate layout clause in kind '${kt.name}'`);
-            break;
-          }
-          layoutSeen = true;
-          const slot = resolveLayoutAlign(c.alignExpr, kt, errors);
-          if (slot) kt.layoutAlign = slot;
-          // Phase 8.B: store the abi "C" marker. Currently contractual -
-          // no downstream consumer yet, but persisted so future codegen /
-          // ABI-validation passes can read it off the resolved kind.
-          if (c.abiC) kt.layoutAbiC = true;
-          break;
-        }
-      }
-    }
-    // mustCall resolution runs after requires have been collected so we can
-    // search the full trait set.
-    if (mustCallClause) {
-      if (kt.requires.length === 0) {
-        pushError(errors, mustCallClause,
-          `mustCall requires at least one 'requires' clause to resolve method '${mustCallClause.methodName}' in kind '${kt.name}'`);
-      } else {
-        const traitWithMethod = kt.requires.find((t) => t.methods.has(mustCallClause.methodName));
-        if (!traitWithMethod) {
-          pushError(errors, mustCallClause,
-            `mustCall ${mustCallClause.methodName}: no required trait declares this method in kind '${kt.name}'`);
-        } else {
-          kt.mustCall.push({
-            methodName: mustCallClause.methodName,
-            timing: mustCallClause.timing,
-            traitType: traitWithMethod,
-          });
-        }
-      }
-    }
+    populateKindFromClauses(kt, d.clauses, kt.name, mod, moduleEnv, errors);
   }
 }
 
@@ -1151,9 +1159,17 @@ function resolveKindComposition(mod, moduleEnv, errors) {
     const kt = d.resolvedKindType;
     if (!kt) continue;
 
-    // Resolve each reference.
+    // Resolve each reference. Inline operands `{ ... }` produce an anonymous
+    // KindType populated from their clauses; named operands are looked up in
+    // the kindTable. Both shapes flow through the same flatten loop below.
     const refs = [];
     for (const ref of d.composition.kindRefs) {
+      if (ref.inline) {
+        const anon = new KindType(`(inline kind in '${kt.name}')`, mod.id);
+        populateKindFromClauses(anon, ref.clauses, anon.name, mod, moduleEnv, errors);
+        refs.push({ target: anon, args: [], sourceLoc: ref.sourceLoc, inline: true });
+        continue;
+      }
       const target = env.kindTable.get(ref.name);
       if (!target) {
         pushError(errors, { sourceLoc: ref.sourceLoc },
@@ -1182,16 +1198,22 @@ function resolveKindComposition(mod, moduleEnv, errors) {
       if (!argOk) continue;
       refs.push({ target, args: resolvedArgs, sourceLoc: ref.sourceLoc });
     }
-    kt.composedFrom = refs.map((r) => ({ name: r.target.name, args: r.args }));
+    kt.composedFrom = refs.map((r) =>
+      r.inline ? { inline: true } : { name: r.target.name, args: r.args },
+    );
 
     if (refs.length === 0) {
       // Nothing to merge; leave kt with empty slots.
       continue;
     }
 
-    // Compute appliesTo as the intersection of components'.
+    // Compute appliesTo as the intersection of components'. Inline operands
+    // with no explicit appliesTo are treated as "applies anywhere" and don't
+    // constrain the intersection - parser rejects inline appliesTo today so
+    // every inline op falls into this branch in practice.
     let intersected = null;
     for (const r of refs) {
+      if (r.inline && r.target.appliesTo.size === 0) continue;
       const set = r.target.appliesTo;
       if (intersected === null) {
         intersected = new Set(set);

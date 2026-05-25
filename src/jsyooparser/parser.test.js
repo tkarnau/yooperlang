@@ -769,6 +769,31 @@ describe("parse: phase 6.1 - kind decls", () => {
       assert.equal(k.composition.kindRefs[0].name, "a");
       assert.equal(k.composition.kindRefs[1].name, "b");
     });
+    it("accepts inline kind body in composition", () => {
+      const ast = parse("kind slow = a & { mustNotEscape scope; };");
+      const k = ast.body[0];
+      assert.equal(k.composition.kindRefs.length, 2);
+      assert.equal(k.composition.kindRefs[0].inline, false);
+      assert.equal(k.composition.kindRefs[0].name, "a");
+      assert.equal(k.composition.kindRefs[1].inline, true);
+      assert.equal(k.composition.kindRefs[1].clauses.length, 1);
+      assert.equal(
+        k.composition.kindRefs[1].clauses[0].kind,
+        ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE,
+      );
+    });
+    it("rejects appliesTo inside an inline composition body", () => {
+      assert.throws(
+        () => parse("kind bad = a & { appliesTo binding; };"),
+        /inline kind body in composition cannot declare 'appliesTo'/,
+      );
+    });
+    it("rejects empty inline composition body", () => {
+      assert.throws(
+        () => parse("kind bad = a & { };"),
+        /inline kind body must contain at least one clause/,
+      );
+    });
     it("rejects provides clause", () => {
       assert.throws(
         () =>

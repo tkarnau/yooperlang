@@ -848,35 +848,89 @@ export function parse(src) {
       expect(TokenTags.rparen);
     }
 
-    // composition - `kind foo = a & b(args) & c;`
+    // composition - `kind foo = a & b(args) & { clauses } & c;`
+    // Inline operands `{ clauses }` are anonymous bags of clauses; they may
+    // not declare `appliesTo` (the composition's appliesTo is the intersection
+    // of the named operands' sets).
     if (peek().tag === TokenTags.eq) {
       advance(); // =
       const kindRefs = [];
       while (true) {
-        const refTok = expect(TokenTags.ident);
-        const refName = src.substring(
-          refTok.start,
-          refTok.start + refTok.length,
-        );
-        const args = [];
-        let hasArgs = false;
-        if (peek().tag === TokenTags.lparen) {
-          hasArgs = true;
-          advance(); // (
+        if (peek().tag === TokenTags.lcurly) {
+          const startTok = peek();
+          advance(); // {
+          const clauses = [];
           while (
-            peek().tag !== TokenTags.rparen &&
+            peek().tag !== TokenTags.rcurly &&
             peek().tag !== TokenTags.eof
           ) {
-            args.push(parseExpression());
-            if (peek().tag === TokenTags.comma) advance();
+            if (peek().tag === TokenTags.appliesTo) {
+              throw parseError(
+                "inline kind body in composition cannot declare 'appliesTo'; the composition inherits appliesTo from its named operands",
+                peek().start,
+                peek().length,
+              );
+            }
+            if (isKindClauseStartTag(peek().tag)) {
+              clauses.push(parseKindClause());
+              continue;
+            }
+            if (peek().tag === TokenTags.ident) {
+              const text = src.substring(
+                peek().start,
+                peek().start + peek().length,
+              );
+              const msg = DeferredKindClauseMessages[text];
+              if (msg) {
+                throw parseError(msg, peek().start, peek().length);
+              }
+            }
+            throw parseError(
+              `unexpected token in inline kind body: ${inverseTokenTags[peek().tag]}`,
+              peek().start,
+              peek().length,
+            );
           }
-          expect(TokenTags.rparen);
+          expect(TokenTags.rcurly);
+          if (clauses.length === 0) {
+            throw parseError(
+              "inline kind body must contain at least one clause",
+              startTok.start,
+              startTok.length,
+            );
+          }
+          kindRefs.push({
+            inline: true,
+            clauses,
+            sourceLoc: posToSourceLocation(src, startTok.start),
+          });
+        } else {
+          const refTok = expect(TokenTags.ident);
+          const refName = src.substring(
+            refTok.start,
+            refTok.start + refTok.length,
+          );
+          const args = [];
+          let hasArgs = false;
+          if (peek().tag === TokenTags.lparen) {
+            hasArgs = true;
+            advance(); // (
+            while (
+              peek().tag !== TokenTags.rparen &&
+              peek().tag !== TokenTags.eof
+            ) {
+              args.push(parseExpression());
+              if (peek().tag === TokenTags.comma) advance();
+            }
+            expect(TokenTags.rparen);
+          }
+          kindRefs.push({
+            inline: false,
+            name: refName,
+            args: hasArgs ? args : null,
+            sourceLoc: posToSourceLocation(src, refTok.start),
+          });
         }
-        kindRefs.push({
-          name: refName,
-          args: hasArgs ? args : null,
-          sourceLoc: posToSourceLocation(src, refTok.start),
-        });
         if (peek().tag === TokenTags.amp) {
           advance();
           continue;

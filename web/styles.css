@@ -366,6 +366,31 @@ pre code {
     text-align: center;
 }
 
+/* Reference: kind clause list */
+.clause-list {
+    list-style: none;
+    padding: 0;
+    margin: 0.75rem 0 1.25rem;
+}
+
+.clause-list li {
+    padding: 0.5rem 0 0.5rem 1rem;
+    border-left: 2px solid var(--border);
+    margin-bottom: 0.4rem;
+    color: var(--fg);
+}
+
+.clause-list li code:first-child {
+    color: var(--accent);
+}
+
+.reference-content h4 {
+    font-size: 1rem;
+    margin: 1.5rem 0 0.4rem;
+    color: var(--fg);
+    font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+}
+
 /* Reference page */
 .reference-shell {
     display: grid;
