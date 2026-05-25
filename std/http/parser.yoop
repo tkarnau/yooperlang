@@ -10,7 +10,7 @@
 // touches Request / Response from std/http/types.yoop, not this file.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
-import { Result } from "../core/types.yoop";
+import { Result, Option } from "../core/types.yoop";
 import * as intr from "../core/intrinsics.yoop";
 import {
     bytes_eq,
@@ -33,10 +33,17 @@ import {
 // Parsed request head. `error` non-empty indicates a parse failure;
 // callers check explicitly. This is a Disposable wrapper around `Request`
 // so the caller can scope-bind the entire result.
+//
+// Phase 10.I: `content_length` is `Option<usize>` so callers can
+// distinguish "header absent / chunked / unknown" (`None`) from
+// "explicit Content-Length: 0" (`Some { value: 0 }`). Chunked transfer
+// encoding is still not supported - the server falls back to reading
+// until the peer closes, which is wrong for chunked but matches the
+// MVP shape.
 export type ParsedRequest implements Disposable propagates<disposable> {
     request:        Request,
     body_start:     usize,    // offset into source buf where body begins
-    content_length: usize,    // 0 if absent / unknown
+    content_length: Option<usize>,
     error:          string,
     function dispose(ref self): void {
         Disposable.dispose(ref self.request);
@@ -83,7 +90,7 @@ function fail_parsed(msg: string): ParsedRequest propagates<disposable> {
             body:    empty,
         },
         body_start:     0,
-        content_length: 0,
+        content_length: Option.None,
         error:          msg,
     };
 }
@@ -150,7 +157,7 @@ export function parse_request_head(buf: uint8[]): ParsedRequest propagates<dispo
             body:    empty_body,
         },
         body_start:     body_start,
-        content_length: 0,
+        content_length: Option.None,
         error:          "",
     };
 
@@ -188,7 +195,7 @@ export function parse_request_head(buf: uint8[]): ParsedRequest propagates<dispo
                 switch (parsed) {
                     case Result.Ok { value: bp }: {
                         if (bp.value >= 0) {
-                            pr.content_length = usize(bp.value);
+                            pr.content_length = Option.Some { value: usize(bp.value) };
                         }
                     }
                     case Result.Err { error: _e }: { }
@@ -198,6 +205,26 @@ export function parse_request_head(buf: uint8[]): ParsedRequest propagates<dispo
         pos = pos + line_end_rel + 2;
     }
 
-    pr.request.body = bytes_slice(buf, body_start, body_start + pr.content_length);
+    // Slice in the body bytes that are already present in the head buffer.
+    // If Content-Length was absent (`None`), the body view is empty - the
+    // caller decides what to do (e.g. reject, or read until close).
+    let cl_known: usize = 0;
+    switch (pr.content_length) {
+        case Option.Some { value: cl }: { cl_known = cl; }
+        case Option.None: { }
+    }
+    pr.request.body = bytes_slice(buf, body_start, body_start + cl_known);
     return pr;
+}
+
+// Phase 10.I: `parsed_content_length(ref pr)` returns the resolved
+// `Content-Length` value or `0` when the header was absent. The
+// streaming-aware caller uses the raw `Option` form; this helper exists
+// for the materialize-all path (e.g. the current `serve_n` loop).
+export function parsed_content_length(ref pr: ParsedRequest): usize {
+    switch (pr.content_length) {
+        case Option.Some { value: cl }: { return cl; }
+        case Option.None: { return 0; }
+    }
+    return 0;
 }

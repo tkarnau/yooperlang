@@ -861,8 +861,14 @@ A realistic order, each its own phase doc:
   print the body.
 - **Library Phase D**: `std/http/server` (Server, Handler). Demo:
   Hello-World server that handles N requests in sequence.
-- **Library Phase E**: routing, streaming bodies, connection pooling -
-  whichever the §8 language work has unblocked by then.
+- **Library Phase E**: routing, a client, and URL parsing landed as
+  Phase 10.I ([plans/completed/phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md)).
+  `std/http/router.yoop` carries the `Router` + `Dispatcher` vtable;
+  `std/http/client.yoop` ships `client_send` + `http_get`;
+  `std/net/uri.yoop` does the URL parsing. Streaming bodies (Reader-
+  backed `Request.body`), connection pooling / keep-alive, and TLS
+  remain follow-ups - the `Reader`/`Writer` vtables added in 10.I are
+  the language foundation; the parser switch is the next move.
 
 Each phase is small enough to scope into a single PR, has a runnable
 demo, and doesn't depend on the next.

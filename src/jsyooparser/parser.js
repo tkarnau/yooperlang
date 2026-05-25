@@ -451,9 +451,21 @@ export function parse(src) {
     const params = [];
     if (peek().tag !== TokenTags.rparen) {
       while (true) {
+        // Phase 10.I: optional `ref` modifier on the param. Required when
+        // mirroring a trait method's `ref T` arg in a vtable field FPT
+        // (e.g. `Reader.read: (ref buf: uint8[]) => ...`).
+        let isRef = false;
+        if (peek().tag === TokenTags.ref) {
+          advance();
+          isRef = true;
+        }
         expect(TokenTags.ident); // param name (discarded)
         expect(TokenTags.colon);
-        params.push(parseTypeAnnotation());
+        let annot = parseTypeAnnotation();
+        if (isRef) {
+          annot = { kind: "refType", inner: annot };
+        }
+        params.push(annot);
         if (peek().tag === TokenTags.comma) {
           advance();
           continue;
@@ -2479,11 +2491,15 @@ export function parse(src) {
     node.body = parseBlock();
     if (peek().tag === TokenTags.else) {
       advance();
-      if (peek().tag === TokenTags.lcurly) {
-        node.elseBody = parseBlock();
-      }
+      // `else if (...)` chains as a nested IF_STATEMENT in the elseBody slot.
+      // `else { ... }` consumes a single block. Without the if/else if
+      // discrimination here, `if (a) { ... } else { ... } if (b) { ... }`
+      // (two consecutive statements) would parse as `if (a) { ... } else if
+      // (b) { ... }` and silently drop the original else block.
       if (peek().tag === TokenTags.if) {
         node.elseBody = parseIfStatement();
+      } else {
+        node.elseBody = parseBlock();
       }
     }
 

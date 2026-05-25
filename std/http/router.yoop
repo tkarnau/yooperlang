@@ -1,0 +1,141 @@
+// std/http/router.yoop - method + path routing on top of `Handler`.
+//
+// Phase 10.I: a `Router` holds a heterogeneous list of route handlers
+// behind the Phase 9.G `Dispatcher` vtable for `Handler`. Each route
+// matches a fixed (method, path) pair; the first match wins.
+// Unmatched requests fall through to the router's default handler or
+// produce a 404.
+//
+// The router itself implements `Handler`, so it slots straight into
+// `serve_n(ref l, ref router, n)` without any new server surface.
+//
+// Limitations (deferred):
+//   * Exact-path match only; no trie / parameter capture / wildcards.
+//     The plan doc names trie matching as a follow-up - exact match
+//     covers the canonical demo and is the right MVP shape.
+//   * One handler per (method, path) pair. The `Dispatcher` slot is
+//     shared across method+path tuples; duplicate routes simply mean
+//     the earlier one wins (no diagnostic).
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Vec, vec_new, vec_push, vec_as_array } from "../core/vec.yoop";
+import { string_eq } from "../core/strings.yoop";
+import * as intr from "../core/intrinsics.yoop";
+
+import {
+    Request, Response, HttpMethod,
+    StatusCode, status, not_found, ok, server_err, method_not_allowed,
+    Headers, headers_new, headers_add,
+    http_method_eq,
+} from "./types.yoop";
+import { Handler, HandleOutcome, Dispatcher } from "./server.yoop";
+
+// ----- Route entry -------------------------------------------------------
+
+// One entry in the route table. `dispatcher` is the type-erased handler
+// the router built at registration time via `Dispatcher.from(ref h)`.
+export type Route {
+    method: HttpMethod,
+    path:   string,
+    dispatcher: Dispatcher,
+}
+
+// ----- Router ------------------------------------------------------------
+
+// A small route table. Routes are matched in registration order; the
+// first (method, path) match wins. `fallback` is dispatched when no
+// route matches; if `has_fallback` is false the router writes a 404.
+//
+// `Router` implements `Handler`, so:
+//
+//   let mut r: Router = router_new();
+//   router_add(ref r, HttpMethod.Get, "/hello", Dispatcher.from(ref hello_h));
+//   router_set_fallback(ref r, Dispatcher.from(ref fallback_h));
+//   serve_n(ref listener, ref r, 1);
+//
+// drops in unchanged against the existing serve_n loop.
+export type Router implements (Disposable, Handler) propagates<disposable> {
+    routes:       Vec<Route>,
+    fallback:     Dispatcher,
+    has_fallback: bool,
+
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.routes);
+    }
+
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let entries: Route[] = vec_as_array(ref self.routes);
+        let i: usize = 0;
+        let any_method_match: bool = false;
+        while (i < entries.len) {
+            let r: Route = entries[i];
+            let method_matches: bool = http_method_eq(req.method, r.method);
+            let path_matches:   bool = string_eq(req.path, r.path);
+            if (path_matches) {
+                if (method_matches) {
+                    return Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
+                }
+                any_method_match = true;
+            }
+            i = i + 1;
+        }
+        if (any_method_match) {
+            // The path was registered but not for this method.
+            resp.status = method_not_allowed();
+            resp.body   = intr.string_as_bytes("405 Method Not Allowed\n");
+            return HandleOutcome.Ok;
+        }
+        if (self.has_fallback) {
+            return Dispatcher.handle(ref self.fallback, ref req, ref resp);
+        }
+        resp.status = not_found();
+        resp.body   = intr.string_as_bytes("404 Not Found\n");
+        return HandleOutcome.Ok;
+    }
+}
+
+// Build an empty router. The caller registers routes via `router_add`
+// and optionally a fallback via `router_set_fallback`.
+export function router_new(): Router propagates<disposable> {
+    // The fallback slot is initialized to a default-constructed
+    // Dispatcher value; it's never dispatched unless `has_fallback`
+    // is set, so the underlying ctx pointer is irrelevant.
+    return {
+        routes:       vec_new(8),
+        fallback:     empty_dispatcher(),
+        has_fallback: false,
+    };
+}
+
+// Used to seed the fallback slot before the caller sets one. Never
+// invoked unless the user enables it via `router_set_fallback`.
+function empty_dispatcher(): Dispatcher {
+    let placeholder: PlaceholderHandler = { _unused: 0 };
+    return Dispatcher.from(ref placeholder);
+}
+
+// A no-op handler used only to initialize the fallback slot. The
+// `_unused` field is required because empty structs aren't currently
+// expressible.
+type PlaceholderHandler implements Handler {
+    _unused: int32,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        resp.status = server_err();
+        return HandleOutcome.Ok;
+    }
+}
+
+// Register a route. The dispatcher is built via `Dispatcher.from(ref h)`
+// at the call site so the router doesn't have to know the concrete
+// handler type.
+export function router_add(ref r: Router, method: HttpMethod, path: string, dispatcher: Dispatcher): void {
+    let entry: Route = { method: method, path: path, dispatcher: dispatcher };
+    vec_push(ref r.routes, entry);
+}
+
+// Install a fallback handler. Called for any request whose path didn't
+// match a registered route AND whose method also didn't.
+export function router_set_fallback(ref r: Router, dispatcher: Dispatcher): void {
+    r.fallback = dispatcher;
+    r.has_fallback = true;
+}

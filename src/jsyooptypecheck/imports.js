@@ -68,6 +68,10 @@ export function resolveImports(mod, moduleEnv, errors) {
       // type so resolveTypeAnnotation can find it via the type table).
       const srcEnum = srcEnv.enumTable?.get(spec.exportName);
       const srcUnion = srcEnv.unionTable?.get(spec.exportName);
+      // Phase 9.G / 10.I: vtable nominal lookup. Treated as a "type" kind
+      // import - resolveTypeAnnotation walks importedNames and consults
+      // the source module's vtableTable when the kind is "type".
+      const srcVtable = srcEnv.vtableTable?.get(spec.exportName);
 
       if (srcKind) {
         // Phase 6.4: cross-module kind import. Identity is preserved by reference -
@@ -110,6 +114,8 @@ export function resolveImports(mod, moduleEnv, errors) {
       } else if (srcEnum) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcUnion) {
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
+      } else if (srcVtable) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcSym) {
         // It's a value (function, const, etc.). Imports from std/ modules

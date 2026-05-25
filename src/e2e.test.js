@@ -1145,6 +1145,63 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.match(ir, /declare i32 @listen\(/);
     assert.match(ir, /declare i32 @accept\(/);
   });
+
+  // Phase 10.I: `vtable Reader for Readable` round-trips through a
+  // type-erased in-memory cursor.
+  it("reader_vtable_smoke: Reader.from(ref MemReader) then Readable.read through the vtable", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/reader_vtable_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "n=3 bytes=72,73,33\n");
+  });
+
+  // Phase 10.I: pure URL parser - no sockets.
+  it("uri_parse_smoke: parse_uri handles http/https/ipv6 + error cases", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/uri_parse_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "plain     scheme=http host=example.com port=80 target=/\n" +
+      "with-port scheme=http host=example.com port=8080 target=/foo\n" +
+      "https     scheme=https host=api.example.com port=443 target=/v1?x=1\n" +
+      "ipv6      scheme=http host=::1 port=18080 target=/\n" +
+      "no-host   err=parse_uri: empty authority\n" +
+      "no-scheme err=parse_uri: missing \"://\"\n" +
+      "bad-port  err=parse_uri: trailing garbage in port\n",
+    );
+  });
+
+  // Phase 10.I: the http_router example exercises std/http/router.yoop.
+  // Building requires that the `Dispatcher` vtable type-checks and that
+  // a Router whose impl carries a vtable field instantiates cleanly.
+  // Running binds a port + needs curl - manual test.
+  it("http_router: builds end-to-end (manual curl test against /hello + /healthz)", () => {
+    const { ir } = compileEntry(
+      path.join(repoRoot, "examples/pass/http_router/main.yoop"),
+    );
+    // The Dispatcher vtable must materialize in the IR.
+    assert.match(ir, /%vtable\..*__Dispatcher/);
+    // The router must be threaded into serve_n.
+    assert.match(ir, /serve_n.*Router/);
+  });
+
+  // Phase 10.I: end-to-end client+server in one process. A background
+  // task serves one request; the main thread issues an http_get and
+  // prints the response body.
+  it("http_client_loopback: in-process server task + client.send round-trip prints body", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_client_loopback/main.yoop");
+    assert.equal(exitCode, 0);
+    // The two task threads can interleave their stdout writes; the
+    // server's "server done" line and the client's "status= body=" line
+    // are the only writes, so a contains-check is robust to ordering.
+    assert.ok(
+      stdout.includes("status=200 body=ping-pong"),
+      `expected response in stdout, got: ${stdout}`,
+    );
+    assert.ok(
+      stdout.includes("server done served=1"),
+      `expected server-done in stdout, got: ${stdout}`,
+    );
+  });
 });
 
 describe("e2e: multi-file fail fixtures produce the right errors", () => {

@@ -174,7 +174,14 @@ wired `Display.to_string` into `${expr}` interpolations at typecheck
 time; Phase 10.D
 ([phase-10-d-debug-log.md](completed/phase-10-d-debug-log.md))
 shipped `std/debug` (`panic`/`unreachable`/`assert`) and `std/log`
-(`info`/`warn`/`error`) backed by `runtime/yoop_debug.c`.
+(`info`/`warn`/`error`) backed by `runtime/yoop_debug.c`. Phase 10.I
+([phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md))
+closed the networking surface: `Reader`/`Writer` vtables in
+`std/core/traits.yoop`, `parse_uri` in `std/net/uri.yoop`, a
+`Router` over the Phase 9.G `Dispatcher` vtable in
+`std/http/router.yoop`, and a minimal HTTP/1.1 `Client` in
+`std/http/client.yoop` (round-tripping against an in-process
+`serve_n` task in the loopback e2e fixture).
 
 > Detailed plan: [phase-10.md](phase-10.md).
 

@@ -1,0 +1,41 @@
+// Phase 10.I: smoke test for std/net/uri.yoop. Parses a small handful of
+// URL shapes and prints the components so the e2e test can pattern-match.
+
+import { Result } from "../../../std/core/types.yoop";
+import { Uri, parse_uri } from "../../../std/net/uri.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function show(label: string, url: string): void {
+    let p: Result<Uri, string> = parse_uri(url);
+    switch (p) {
+        case Result.Ok { value: u }: {
+            printf(`${label} scheme=${u.scheme} host=${u.host} port=${u.port} target=${u.target}\n`);
+        }
+        case Result.Err { error: e }: {
+            printf(`${label} err=${e}\n`);
+        }
+    }
+}
+
+function main(): int32 {
+    show("plain    ", "http://example.com/");
+    show("with-port", "http://example.com:8080/foo");
+    show("https    ", "https://api.example.com/v1?x=1");
+    show("ipv6     ", "http://[::1]:18080/");
+    show("no-host  ", "http:///path");
+    show("no-scheme", "example.com/path");
+    show("bad-port ", "http://example.com:80abc/");
+    return 0;
+}
+
+// expected output:
+// plain     scheme=http host=example.com port=80 target=/
+// with-port scheme=http host=example.com port=8080 target=/foo
+// https     scheme=https host=api.example.com port=443 target=/v1?x=1
+// ipv6      scheme=http host=::1 port=18080 target=/
+// no-host   err=parse_uri: empty authority
+// no-scheme err=parse_uri: missing "://"
+// bad-port  err=parse_uri: trailing garbage in port

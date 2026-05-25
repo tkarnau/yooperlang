@@ -26,6 +26,7 @@ import {
 } from "./types.yoop";
 import {
     ParsedRequest, parse_request_head, find_header_end,
+    parsed_content_length,
 } from "./parser.yoop";
 
 // ----- Handler trait -----------------------------------------------------
@@ -40,6 +41,14 @@ export enum HandleOutcome {
 
 export trait Handler {
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
+}
+
+// Phase 10.I: the Phase 9.G vtable for `Handler`. Built once at the
+// trait's home so `Dispatcher.from(ref h)` works from anywhere a Handler
+// impl is in scope. Routers and middleware compose handlers by holding
+// `Dispatcher` values rather than monomorphizing per impl type.
+export vtable Dispatcher for Handler {
+    handle: (ref req: Request, ref resp: Response) => HandleOutcome,
 }
 
 // ----- ServeOutcome -----------------------------------------------------
@@ -225,7 +234,7 @@ export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H
         }
 
         let body_start: usize = pr.body_start;
-        let need: usize = pr.content_length;
+        let need: usize = parsed_content_length(ref pr);
         let have: usize = 0;
         if (parse_view.len > body_start) {
             have = parse_view.len - body_start;

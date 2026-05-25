@@ -1,0 +1,151 @@
+// std/net/uri.yoop - minimal URI / URL parser.
+//
+// Phase 10.I: extract scheme, host, port, path+query from absolute
+// HTTP/HTTPS URLs. The HTTP client and any future fetch helpers want
+// "split this URL" without pulling in a heavyweight URL crate.
+//
+// Supported shapes:
+//   scheme://host[:port][/path[?query]]
+//
+// Examples:
+//   http://example.com/             -> scheme=http,  host=example.com, port=80, target=/
+//   http://example.com:8080/foo     -> scheme=http,  host=example.com, port=8080, target=/foo
+//   https://api.example.com/v1?x=1  -> scheme=https, host=api.example.com, port=443, target=/v1?x=1
+//   http://[::1]:18080/             -> scheme=http,  host=::1, port=18080, target=/
+//                                      (bracketed IPv6 form parses; tcp_connect
+//                                       is still IPv4-only for now)
+//
+// Limitations (all deferred):
+//   * userinfo (`user:pass@host`) not parsed.
+//   * fragments (`#frag`) not split out.
+//   * percent-decoding of the path/query is the caller's job.
+//   * Only schemes with default ports `http` and `https` get a port
+//     inferred when absent; unknown schemes need `:port` explicit.
+
+import { Result } from "../core/types.yoop";
+import { string_eq_ignore_ascii_case, string_index_of } from "../core/strings.yoop";
+import * as intr from "../core/intrinsics.yoop";
+import {
+    bytes_index_of, bytes_slice, bytes_index_of_seq, bytes_parse_int,
+    BytesParsed,
+} from "../core/bytes.yoop";
+
+// Parsed URI components. `target` is the request-target the HTTP
+// client puts on the request-line (path + optional `?query`). `port`
+// is the explicit port if present, or the scheme's default (80/443).
+// `host` is the bare authority host (brackets stripped for IPv6).
+export type Uri {
+    scheme: string,
+    host:   string,
+    port:   int32,
+    target: string,
+}
+
+// Default port for the given scheme, or 0 if no default is known.
+function default_port_for(scheme: string): int32 {
+    if (string_eq_ignore_ascii_case(scheme, "http"))  { return 80;  }
+    if (string_eq_ignore_ascii_case(scheme, "https")) { return 443; }
+    return 0;
+}
+
+// Parse an absolute URL. Returns `Err` if the input is malformed.
+export function parse_uri(url: string): Result<Uri, string> {
+    let buf: uint8[] = intr.string_as_bytes(url);
+
+    // -- scheme ------------------------------------------------------------
+    let sep: uint8[] = [58, 47, 47];   // "://"
+    let scheme_end: usize = bytes_index_of_seq(buf, sep);
+    if (scheme_end == buf.len) {
+        return Result.Err { error: "parse_uri: missing \"://\"" };
+    }
+    if (scheme_end == 0) {
+        return Result.Err { error: "parse_uri: empty scheme" };
+    }
+    let scheme_bytes: uint8[] = bytes_slice(buf, 0, scheme_end);
+    let scheme_str:   string  = intr.string_from_bytes_unchecked(scheme_bytes);
+
+    // -- authority + path --------------------------------------------------
+    let auth_start: usize = scheme_end + 3;
+    if (auth_start > buf.len) {
+        return Result.Err { error: "parse_uri: truncated after \"://\"" };
+    }
+    let rest: uint8[] = bytes_slice(buf, auth_start, buf.len);
+
+    // Split authority from path-and-query. The first `/` AFTER the
+    // authority terminates it; an authority with no path implies "/".
+    let path_rel: usize = bytes_index_of(rest, 47);    // '/'
+    let auth_bytes: uint8[] = bytes_slice(rest, 0, path_rel);
+    let target_str: string = "/";
+    if (path_rel != rest.len) {
+        let target_bytes: uint8[] = bytes_slice(rest, path_rel, rest.len);
+        target_str = intr.string_from_bytes_unchecked(target_bytes);
+    }
+    if (auth_bytes.len == 0) {
+        return Result.Err { error: "parse_uri: empty authority" };
+    }
+
+    // -- host + port -------------------------------------------------------
+    // Bracketed IPv6 form: `[::1]` or `[::1]:port`.
+    let host_str: string = "";
+    let port_val: int32 = 0;
+    if (auth_bytes[0] == 91) {   // '['
+        let rbr: usize = bytes_index_of(auth_bytes, 93);   // ']'
+        if (rbr == auth_bytes.len) {
+            return Result.Err { error: "parse_uri: missing \"]\" in IPv6 authority" };
+        }
+        let host_bytes: uint8[] = bytes_slice(auth_bytes, 1, rbr);
+        host_str = intr.string_from_bytes_unchecked(host_bytes);
+        let after_br: usize = rbr + 1;
+        if (after_br < auth_bytes.len) {
+            if (auth_bytes[after_br] != 58) {    // ':'
+                return Result.Err { error: "parse_uri: unexpected char after IPv6 \"]\"" };
+            }
+            let port_bytes: uint8[] = bytes_slice(auth_bytes, after_br + 1, auth_bytes.len);
+            let pp: Result<BytesParsed, string> = bytes_parse_int(port_bytes);
+            switch (pp) {
+                case Result.Ok { value: bp }: {
+                    if (bp.consumed != port_bytes.len) {
+                        return Result.Err { error: "parse_uri: trailing garbage in port" };
+                    }
+                    port_val = int32(bp.value);
+                }
+                case Result.Err { error: pe }: { return Result.Err { error: pe }; }
+            }
+        }
+    } else {
+        let colon: usize = bytes_index_of(auth_bytes, 58);   // ':'
+        let host_bytes: uint8[] = bytes_slice(auth_bytes, 0, colon);
+        host_str = intr.string_from_bytes_unchecked(host_bytes);
+        if (colon != auth_bytes.len) {
+            let port_bytes: uint8[] = bytes_slice(auth_bytes, colon + 1, auth_bytes.len);
+            let pp: Result<BytesParsed, string> = bytes_parse_int(port_bytes);
+            switch (pp) {
+                case Result.Ok { value: bp }: {
+                    if (bp.consumed != port_bytes.len) {
+                        return Result.Err { error: "parse_uri: trailing garbage in port" };
+                    }
+                    port_val = int32(bp.value);
+                }
+                case Result.Err { error: pe }: { return Result.Err { error: pe }; }
+            }
+        }
+    }
+    if (host_str.len == 0) {
+        return Result.Err { error: "parse_uri: empty host" };
+    }
+    if (port_val == 0) {
+        port_val = default_port_for(scheme_str);
+    }
+    if (port_val <= 0 || port_val > 65535) {
+        return Result.Err { error: "parse_uri: port out of range (1-65535)" };
+    }
+
+    return Result.Ok {
+        value: {
+            scheme: scheme_str,
+            host:   host_str,
+            port:   port_val,
+            target: target_str,
+        },
+    };
+}

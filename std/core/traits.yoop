@@ -34,6 +34,28 @@ export trait Writable {
     function flush(ref self): FlushOutcome;
 }
 
+// ----- Reader / Writer vtables ------------------------------------------
+//
+// Phase 10.I: type-erased views over Readable / Writable. Callers that
+// want to mix concrete impl types behind one parameter (e.g. an HTTP
+// parser that doesn't care whether it's reading from a TcpStream, a
+// TlsStream, or an in-memory buffer) take a `Reader` / `Writer` rather
+// than a generic `<R implements Readable>`. The trait stays the source
+// of truth; `Reader.from(ref s)` builds the erased view from any impl.
+//
+// The vtables intentionally don't carry Disposable - the caller still
+// owns the underlying stream and is responsible for disposing it. Use
+// the concrete-type / generic-bound form when ownership transfers.
+
+export vtable Reader for Readable {
+    read: (ref buf: uint8[]) => Result<c_ssize_t, string>,
+}
+
+export vtable Writer for Writable {
+    write: (ref buf: uint8[]) => Result<c_ssize_t, string>,
+    flush: () => FlushOutcome,
+}
+
 // ----- Display ----------------------------------------------------------
 
 // Convert a value to its human-readable string form. Currently template
