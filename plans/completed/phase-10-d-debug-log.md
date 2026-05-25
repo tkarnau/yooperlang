@@ -1,4 +1,4 @@
-# Phase 10.D — `std/debug` + `std/log` ✓ landed
+# Phase 10.D - `std/debug` + `std/log` ✓ landed
 
 > Two tiny modules + a runtime helper. `std/debug` exposes
 > `panic`/`unreachable`/`assert`; `std/log` exposes `info`/`warn`/`error`.
@@ -9,13 +9,13 @@
 
 ### Runtime helper
 
-[runtime/yoop_debug.c](../../runtime/yoop_debug.c) — five C functions:
+[runtime/yoop_debug.c](../../runtime/yoop_debug.c) - five C functions:
 
-- `yoop_panic(msg)` — `fflush(stdout)` (so buffered prior output
+- `yoop_panic(msg)` - `fflush(stdout)` (so buffered prior output
   appears in order), `fprintf(stderr, "panic: %s\n", msg)`, `exit(1)`.
-- `yoop_unreachable(msg)` — same shape with the `unreachable:` prefix.
+- `yoop_unreachable(msg)` - same shape with the `unreachable:` prefix.
 - `yoop_log_info(msg)` / `yoop_log_warn(msg)` / `yoop_log_error(msg)`
-  — `fprintf(stderr, "[level] %s\n", msg)`, no exit.
+  - `fprintf(stderr, "[level] %s\n", msg)`, no exit.
 
 Wired into [src/runtimeBuild.js](../../src/runtimeBuild.js) so the
 e2e harness and the production `yoopiler.js` driver link it into
@@ -25,11 +25,11 @@ the link-time symbol cost of a few small fns.
 
 ### yoop side
 
-- [std/debug.yoop](../../std/debug.yoop) — exports
+- [std/debug.yoop](../../std/debug.yoop) - exports
   `panic(msg: string): void`, `unreachable(msg: string): void`,
   `assert(cond: bool, msg: string): void`. Each is a one-line wrapper
   around the C helper; `assert` adds the `if (!cond)` guard.
-- [std/log.yoop](../../std/log.yoop) — exports
+- [std/log.yoop](../../std/log.yoop) - exports
   `info(msg: string): void`, `warn(msg: string): void`,
   `error(msg: string): void`.
 
@@ -48,12 +48,12 @@ fixture assert on both streams + the exit code.
 ## Verification
 
 - [examples/pass/debug_smoke.yoop](../../examples/pass/debug_smoke.yoop)
-  — `assert(true, ...)` is a no-op; normal-path codegen is unaffected.
+  - `assert(true, ...)` is a no-op; normal-path codegen is unaffected.
 - [examples/pass/log_smoke.yoop](../../examples/pass/log_smoke.yoop)
-  — three log levels write to stderr; an interleaved stdout printf
+  - three log levels write to stderr; an interleaved stdout printf
   confirms streams don't interfere.
 - [examples/pass/panic_smoke.yoop](../../examples/pass/panic_smoke.yoop)
-  — `panic("intentional")` after a buffered stdout printf. Asserts
+  - `panic("intentional")` after a buffered stdout printf. Asserts
   exit code 1, exact stderr line, and that the pre-panic stdout
   appears (proving the `fflush(stdout)` ordering).
 - Full suite green: **556 tests**.
@@ -83,13 +83,13 @@ fixture assert on both streams + the exit code.
 
 ## Critical files touched
 
-- [runtime/yoop_debug.c](../../runtime/yoop_debug.c) — new.
-- [src/runtimeBuild.js](../../src/runtimeBuild.js) — list extended.
+- [runtime/yoop_debug.c](../../runtime/yoop_debug.c) - new.
+- [src/runtimeBuild.js](../../src/runtimeBuild.js) - list extended.
 - [std/debug.yoop](../../std/debug.yoop),
-  [std/log.yoop](../../std/log.yoop) — new modules.
+  [std/log.yoop](../../std/log.yoop) - new modules.
 - [examples/pass/debug_smoke.yoop](../../examples/pass/debug_smoke.yoop),
   [examples/pass/log_smoke.yoop](../../examples/pass/log_smoke.yoop),
   [examples/pass/panic_smoke.yoop](../../examples/pass/panic_smoke.yoop)
-  — fixtures.
-- [src/e2e.test.js](../../src/e2e.test.js) — three new entries +
+  - fixtures.
+- [src/e2e.test.js](../../src/e2e.test.js) - three new entries +
   `runFixtureEntry` returns `stderr`.

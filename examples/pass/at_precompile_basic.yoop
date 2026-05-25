@@ -1,7 +1,7 @@
 // Phase 11.C: `@precompile` consumer wired to the interpreter. The
 // initializer form forces the comptime fold (silently-falling-back
 // would defeat the user's explicit comptime contract). On success
-// the decl lands as a literal LLVM `@global` initial value — same
+// the decl lands as a literal LLVM `@global` initial value - same
 // shape as Phase 11.B's opportunistic folds, but originated from
 // an explicit user directive.
 //
@@ -14,7 +14,7 @@
 //     silent semantics change.
 //
 // In this fixture every `@precompile` decl folds successfully, so
-// the behaviors are observationally identical — but the explicit
+// the behaviors are observationally identical - but the explicit
 // `@precompile` is what guarantees the result is comptime-computed
 // rather than runtime-computed.
 

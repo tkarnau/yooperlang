@@ -1,4 +1,4 @@
-// Library Phase D — HTTP server (`Handler`, `serve_forever`)
+// Library Phase D - HTTP server (`Handler`, `serve_forever`)
 
 > Fourth and final slice of the library-design rollout. Glues
 > Phase B (TCP) and Phase C (HTTP types + parser) into a hello-world
@@ -77,14 +77,14 @@ type HelloHandler implements Handler {
 
 `Connection: close` is the canonical hello-world response header. Each
 accepted connection is read, parsed, dispatched, written, and closed in
-sequence — no per-connection task fan-out at the server level. The
+sequence - no per-connection task fan-out at the server level. The
 runtime multiplexer still gives us cooperative concurrency *within* a
 connection (the recv waits and send waits don't block the worker
 thread), but two simultaneous clients are handled sequentially.
 
 This is the *correct* MVP shape. Per-connection task spawning is in the
 library design but lifts the bar from "first server" to "production
-shape" — leave it to a follow-up so the surface this phase has to
+shape" - leave it to a follow-up so the surface this phase has to
 defend is small.
 
 ### 2.3 `serve_one` for tests, `serve_n` for demos, no `serve_forever`
@@ -106,7 +106,7 @@ then exit cleanly.
 
 Per connection:
 
-1. `disposable buf: Vec<uint8> = vec_new(4096);` — accumulator.
+1. `disposable buf: Vec<uint8> = vec_new(4096);` - accumulator.
 2. Loop: `tcp_read` into a 1KB scratch slice, push into `buf`, look for
    `\r\n\r\n`. Bail with err if buffer grows past 64KB without finding
    it (DoS guard).
@@ -135,11 +135,11 @@ let outcome: ServeOutcome = wait serve_n(ref server, ref handler, 1);
 ```
 
 When vtables land, `Server` can grow a stored handler field and
-`bind_server` can take it directly — backwards-compatible with the
+`bind_server` can take it directly - backwards-compatible with the
 current free-handler shape.
 
 **Implementation note**: generic *functions* are well-supported (Phase
-7.1). Generic *tasks* may need verification — the parser accepts the
+7.1). Generic *tasks* may need verification - the parser accepts the
 syntax (`parseFunctionDeclBody` calls `parseTypeParamList` regardless of
 `isTask`) but codegen / kindcheck paths might require small fixes. **If
 generic tasks turn out not to typecheck cleanly**, the workaround is to
@@ -220,7 +220,7 @@ it("hello_server: bind + serve 1 request + curl returns 200 + body matches", asy
 Port `8080` may be in use on a CI runner; the test picks an ephemeral
 port by reading it back from the server's stdout, or hard-codes a
 high-numbered port that's typically free (`18080`). The fixture is
-parameterized via an env var read at runtime — keeps the fixture
+parameterized via an env var read at runtime - keeps the fixture
 deterministic when run standalone.
 
 ## 5. Files touched

@@ -8,7 +8,7 @@
 //   - newName empty / starts with a digit / contains non-identifier chars
 //   - target kind we don't support yet (e.g. struct fields are renameable
 //     by name match, but enum variants currently aren't because variant
-//     ordinals are ABI-significant — see CLAUDE.md Phase 7.5 invariant)
+//     ordinals are ABI-significant - see CLAUDE.md Phase 7.5 invariant)
 //
 // On rejection we return { error } and the server surfaces it via the
 // LSP error response so the user gets a clear "rename not allowed"
@@ -25,11 +25,11 @@ const IDENT_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 // either { workspaceEdit } or { error } on validation failure.
 //
 // `ctx`:
-//   modules        — analyze().modules
-//   modById        — analyze().modById
-//   moduleEnv      — analyze().moduleEnv
-//   programState   — analyze().programState
-//   getModuleText  — (absPath) => string. Used to render TextEdit ranges
+//   modules        - analyze().modules
+//   modById        - analyze().modById
+//   moduleEnv      - analyze().moduleEnv
+//   programState   - analyze().programState
+//   getModuleText  - (absPath) => string. Used to render TextEdit ranges
 //                    against the right document content; pass the
 //                    server's overlay-aware text lookup.
 export function prepareRename(target, newName, ctx) {
@@ -37,7 +37,7 @@ export function prepareRename(target, newName, ctx) {
   if (!IDENT_RE.test(newName)) return { error: `not a valid identifier: ${newName}` };
   if (target.kind === TargetKind.variant) {
     return {
-      error: "renaming an enum variant changes its ABI tag — not supported via LSP rename",
+      error: "renaming an enum variant changes its ABI tag - not supported via LSP rename",
     };
   }
 

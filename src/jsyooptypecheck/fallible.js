@@ -1,7 +1,7 @@
 import { typeKinds, VoidType } from "./types.js";
 
 // Phase 9.H: a fallible *enum* is any enum with exactly two variants named
-// `Ok` and `Err`. The shape is structural — no marker trait — so any user-
+// `Ok` and `Err`. The shape is structural - no marker trait - so any user-
 // defined enum that matches the naming convention plays in `?` propagation.
 // Each variant may have zero or one payload field; the Ok payload becomes
 // the stripped value, and the Err payload is the propagated error type.
@@ -31,7 +31,7 @@ export function strippedEnumOkType(enumType) {
   return ok.fields[0].type;
 }
 
-// The Err payload type — what the enclosing function's Err variant must
+// The Err payload type - what the enclosing function's Err variant must
 // accept for propagation to be type-safe. void when Err has no payload.
 export function enumErrPayloadType(enumType) {
   const err = enumType.variants.get("Err");

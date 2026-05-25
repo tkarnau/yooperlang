@@ -1,5 +1,5 @@
 // Phase 6.4 path coverage: a dispose call in only ONE arm of an if/else does
-// not satisfy the obligation — the other path still leaks. The mirror-image
+// not satisfy the obligation - the other path still leaks. The mirror-image
 // pass test (`examples/pass/propagates_dispose_both_branches.yoop`) has
 // dispose in both arms and compiles cleanly.
 
@@ -27,7 +27,7 @@ function main(): int32 {
     if (2 > 1) {
         Disposable.dispose(ref r);
     } else {
-        // missing dispose — `r` leaks down this path
+        // missing dispose - `r` leaks down this path
     }
     return 0;
 }

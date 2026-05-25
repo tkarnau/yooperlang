@@ -1,4 +1,4 @@
-// Phase 11.B.0: typed bytecode lowering for the minimum slice —
+// Phase 11.B.0: typed bytecode lowering for the minimum slice -
 // integer/float literals and arithmetic binary operators, wrapped in a
 // synthesized `return <expr>` function so the interpreter has a real
 // function to evaluate.
@@ -316,7 +316,7 @@ function lowerStatement(node, ctx, scope) {
     case ASTNodeKind.TASK_AUTO_WAIT:
     case ASTNodeKind.TASK_RELEASE:
     case ASTNodeKind.TASK_RETAIN: {
-      // Tasks at comptime run synchronously inline — no real
+      // Tasks at comptime run synchronously inline - no real
       // refcount to release, no real thread to join. These
       // synthesized cleanup statements are no-ops at the bytecode
       // level. (See lower.js's TASK_WRAP / TASK_WAIT for the
@@ -327,12 +327,12 @@ function lowerStatement(node, ctx, scope) {
     case ASTNodeKind.CLEANUP_CALL: {
       // Phase 11.D.17: real cleanup_call dispatch. The kindCheck
       // pass synthesizes these statements at scope-exit for
-      // disposable-kind bindings — e.g. `dispose(ref binding)` for
+      // disposable-kind bindings - e.g. `dispose(ref binding)` for
       // a `disposable foo: Foo = ...`. Resolve the trait method's
       // bytecode via traitMethodResolver and emit a CALL_DIRECT
       // with `ref binding` as `self`. If the dispose body hits a
       // non-whitelisted extern (e.g. SDL_DestroyWindow), the fold
-      // fails with a clear traceback — matches the @precompile
+      // fails with a clear traceback - matches the @precompile
       // contract that explicit comptime evaluation must execute
       // *all* observable effects.
       if (!ctx.traitMethodResolver) {
@@ -343,7 +343,7 @@ function lowerStatement(node, ctx, scope) {
       }
       const slotReg = scope ? scope.lookup(node.bindingName) : null;
       if (slotReg == null) {
-        // The binding's slot isn't in this lowering scope — likely a
+        // The binding's slot isn't in this lowering scope - likely a
         // kindCheck-emitted cleanup whose binding lives in a parent
         // frame we don't model. Skip the cleanup; the fold may
         // miss the observable effect, but failing here would be
@@ -354,7 +354,7 @@ function lowerStatement(node, ctx, scope) {
       // a REF_LOCAL on the slot; for propagated field-cleanups
       // (`node.fieldName` set), GEP through the binding to its
       // field via REF_FIELD on the loaded struct value. Today's
-      // disposable-kind bindings are non-field — the field path is
+      // disposable-kind bindings are non-field - the field path is
       // ready for when propagates<disposable> structs land in fold
       // coverage.
       const refStructType = node.fieldStructType ?? node.structType;
@@ -406,7 +406,7 @@ function lowerStatement(node, ctx, scope) {
           node.sourceLoc,
         );
       }
-      // Discard the return value — dispose methods are void.
+      // Discard the return value - dispose methods are void.
       const discardReg = ctx.allocReg({ kind: typeKinds.void });
       ctx.emit(
         instruction(OP.CALL_DIRECT, {
@@ -422,7 +422,7 @@ function lowerStatement(node, ctx, scope) {
     case ASTNodeKind.EXPRESSION_STATEMENT: {
       // The parser wraps a bare `x = y;` as EXPRESSION_STATEMENT
       // { value: ASSIGNMENT }. The result reg of the lowered
-      // expression is discarded — the side effect lives in MOVE / other
+      // expression is discarded - the side effect lives in MOVE / other
       // mutation instructions emitted during lowering.
       lowerExpr(node.value, ctx, scope);
       return;
@@ -456,7 +456,7 @@ function lowerStatement(node, ctx, scope) {
     }
     case ASTNodeKind.FOR_IN_LOOP: {
       // Trait-driven iteration (Phase 10.B `Iterable<T>`) needs more
-      // plumbing — defer to the silent-fallback path until 11.D.
+      // plumbing - defer to the silent-fallback path until 11.D.
       if (node.iterableImpl) {
         throw new ComptimeError(
           `comptime: for-in over user-defined Iterable<T> is not supported yet (Phase 11.D)`,
@@ -520,7 +520,7 @@ function lowerStatement(node, ctx, scope) {
         }),
       );
 
-      // Loop variable slot — declared into the inner scope so the
+      // Loop variable slot - declared into the inner scope so the
       // body sees `x` as the current element.
       const loopVarSlot = ctx.allocReg(elemTy);
       inner.declare(node.loopVar, loopVarSlot);
@@ -651,7 +651,7 @@ function lowerStatement(node, ctx, scope) {
         const armLabel = armLabels[i];
         for (const pat of arm.patterns) {
           if (pat.kind === ASTNodeKind.VARIANT_PATTERN && pat.isWildcard) {
-            // `case _:` — unconditional match. Emit a direct BR.
+            // `case _:` - unconditional match. Emit a direct BR.
             ctx.emit(instruction(OP.BR, { immediate: armLabel, sourceLoc: pat.sourceLoc }));
             continue;
           }
@@ -929,7 +929,7 @@ function lowerExpr(node, ctx, scope) {
       // The parser stores STRING_LITERAL.value INCLUDING the surrounding
       // double-quotes; strip them here. Escape-sequence decoding happens
       // later when the interpreter formats the value or codegen emits the
-      // bytes — at the comptime layer we keep the raw inner content.
+      // bytes - at the comptime layer we keep the raw inner content.
       const ty = node.resolvedType;
       const raw = String(node.value);
       const inner =
@@ -1030,7 +1030,7 @@ function lowerExpr(node, ctx, scope) {
     case ASTNodeKind.IDENT: {
       // Resolution order: lexical scope (function params + locals)
       // first, then module-level mutable state (only inside an
-      // `@precompile { ... }` block — see lowerBlockAsFunction),
+      // `@precompile { ... }` block - see lowerBlockAsFunction),
       // then module-level folded consts. A miss in all three is
       // unsupported and surfaces as a ComptimeError (silent
       // module-init fallback path).
@@ -1105,7 +1105,7 @@ function lowerExpr(node, ctx, scope) {
           );
         }
         // If the IDENT's resolved type is itself a ref, the binding
-        // already holds a ref — forward it directly without rewrapping.
+        // already holds a ref - forward it directly without rewrapping.
         const slotTy = ctx.registerTypes[slotReg];
         if (slotTy.kind === typeKinds.ref) return slotReg;
         const dst = ctx.allocReg(node.resolvedType);
@@ -1263,7 +1263,7 @@ function lowerExpr(node, ctx, scope) {
         );
         return dst;
       }
-      // Phase 11.D.13: VTable.from(ref x) — typechecker stamped
+      // Phase 11.D.13: VTable.from(ref x) - typechecker stamped
       // `vtableBuilder = { vtableType, implType }`. Pre-resolve each
       // method's bytecode (via the trait method resolver against
       // implType) so the runtime VTABLE_CONSTRUCT just bakes the
@@ -1458,7 +1458,7 @@ function lowerExpr(node, ctx, scope) {
 
     case ASTNodeKind.TRY_OP: {
       // Phase 11.D.11: enum-shaped `?` propagation. Same-shape only
-      // for now — cross-shape needs `Into.into` trait dispatch which
+      // for now - cross-shape needs `Into.into` trait dispatch which
       // lands later. Lower as:
       //   operandReg = <operand>
       //   tag = VARIANT_TAG operandReg
@@ -1700,7 +1700,7 @@ function lowerExpr(node, ctx, scope) {
       const arrType = node.resolvedType;
       if (arrType?.kind !== typeKinds.array) {
         throw new ComptimeError(
-          `comptime: array literal without a resolved ArrayType — typechecker bug?`,
+          `comptime: array literal without a resolved ArrayType - typechecker bug?`,
           node.sourceLoc,
         );
       }
@@ -1727,7 +1727,7 @@ function lowerExpr(node, ctx, scope) {
         );
       }
       // Normalize source-order field assignments to the variant's
-      // declared field order — same shape as STRUCT_LITERAL.
+      // declared field order - same shape as STRUCT_LITERAL.
       const litFieldByName = new Map();
       for (const f of node.fields ?? []) litFieldByName.set(f.name, f);
       const orderedRegs = [];
@@ -1764,7 +1764,7 @@ function lowerExpr(node, ctx, scope) {
       const structType = node.resolvedType;
       if (structType?.kind !== typeKinds.struct) {
         throw new ComptimeError(
-          `comptime: struct literal without a resolved StructType — typechecker bug?`,
+          `comptime: struct literal without a resolved StructType - typechecker bug?`,
           node.sourceLoc,
         );
       }
@@ -1849,7 +1849,7 @@ function lowerExpr(node, ctx, scope) {
 // the formatted output matches what the runtime version would emit.
 // Covers the escapes the lexer actually preserves: \n, \t, \r, \0,
 // \\, \", \', \x{NN}, \u{NNNN}. Unknown escapes pass through with
-// the backslash preserved — same as printf's permissive behavior.
+// the backslash preserved - same as printf's permissive behavior.
 function decodeStringEscapes(s) {
   let out = "";
   let i = 0;

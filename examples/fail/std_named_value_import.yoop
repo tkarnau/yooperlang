@@ -1,6 +1,6 @@
 // Std-module value imports must use the namespace form. Named-import of a
 // function like `info` from std/log.yoop is rejected with a fix-it pointing
-// at the equivalent `import * as log from "std/log.yoop";` shape — see
+// at the equivalent `import * as log from "std/log.yoop";` shape - see
 // imports.js for the rule.
 
 import { info } from "std/log.yoop";

@@ -1,8 +1,8 @@
-// std/collections/set.yoop — generic hash set.
+// std/collections/set.yoop - generic hash set.
 //
 // `Set<K>` is a thin wrapper over `Map<K, bool>`. yoop doesn't have
 // `void` as a type-arg (you can't write `Map<K, void>`), and the bool
-// dummy values cost one byte per slot — negligible next to the
+// dummy values cost one byte per slot - negligible next to the
 // power-of-two-keyed arrays the map already maintains.
 //
 // All methods forward straight to the underlying Map. The wrapping

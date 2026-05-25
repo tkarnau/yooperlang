@@ -1,4 +1,4 @@
-# Phase 9.D — `for ... in` loop (arrays)
+# Phase 9.D - `for ... in` loop (arrays)
 
 ## Context
 
@@ -7,7 +7,7 @@ Plan: [plans/phase-9.md §9.D](../phase-9.md#phase-9d--for--in--loop--iterable-t
 Every example in the codebase (and across `std/`) uses the C-style
 `for (i = 0; i < n; i = i + 1) { use(xs[i]); }` pattern to walk an array.
 The [SDL demo](../../examples/playground/sdl_demo/main.yoop) is the canonical
-case — three nearly-identical 8-line `for` blocks for three balls, with a
+case - three nearly-identical 8-line `for` blocks for three balls, with a
 running comment apologizing for the lack of `for ball in balls`. This phase
 adds the form for arrays and retires the boilerplate.
 
@@ -33,7 +33,7 @@ adds the form for arrays and retires the boilerplate.
 ## Verification
 
 - Parser tests: [parser.test.js](../../src/jsyooparser/parser.test.js) under
-  *"Phase 9.D: for ... in loop"* — shape of the new node, classic-form
+  *"Phase 9.D: for ... in loop"* - shape of the new node, classic-form
   regression, arbitrary-expression RHS.
 - E2E pass: [examples/pass/forin_basic.yoop](../../examples/pass/forin_basic.yoop)
   walks `int32[]`, `bool[]`, and a struct array, plus exercises `break` /
@@ -46,7 +46,7 @@ adds the form for arrays and retires the boilerplate.
 
 - **`Iterable<T>` trait + `IterStep<T>` enum in `std/core/traits.yoop`.**
   The plan calls for them, but generic enums (`enum IterStep<T> { ... }`)
-  are still rejected by the typechecker — the parser parses the type
+  are still rejected by the typechecker - the parser parses the type
   parameter list and then immediately errors with *"generic enums are not
   yet supported (deferred)"*. Lifting that deferral is a prerequisite for
   the trait-form, which doesn't carry its weight until non-array iterables
@@ -57,8 +57,8 @@ adds the form for arrays and retires the boilerplate.
   `Iterable.next(ref it)`. The current AST + typecheck slot
   (`resolvedElemType` / `resolvedIterType`) is the natural attach point.
 - **Strategy traits** (`xs.batched(n)`, `xs.parallel()`, `xs.simd(n)`)
-  — explicitly deferred by the plan; same AST overlays cleanly when added.
-- **`for ref ball in balls`** — yielding by reference so the body can
+  - explicitly deferred by the plan; same AST overlays cleanly when added.
+- **`for ref ball in balls`** - yielding by reference so the body can
   mutate in place. The current form copies each element into a fresh
   loop-var slot. The plan defers this to the strategy-trait phase.
 
@@ -67,26 +67,26 @@ adds the form for arrays and retires the boilerplate.
 The loop variable's storage uses the LET_DECL naming convention
 (`%<name>` LLVM SSA local). Two `for x in ...` loops in the same function
 collide at link time with `multiple definition of local value named 'x'`
-— the same collision two sibling `let x` declarations have always hit.
+- the same collision two sibling `let x` declarations have always hit.
 Fixing this needs a per-binding slot-pointer map at codegen time and is a
 language-wide cleanup, not in scope for 9.D. Workaround: rename the loop
 variable per call site (e.g. `for ball in balls`, then `for b in bullets`).
 
 ## Files touched
 
-- [src/jsyooplexer/lexer.js](../../src/jsyooplexer/lexer.js) — `in` keyword.
-- [src/contracts.js](../../src/contracts.js) — `FOR_IN_LOOP` AST kind.
-- [src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) — dispatch +
+- [src/jsyooplexer/lexer.js](../../src/jsyooplexer/lexer.js) - `in` keyword.
+- [src/contracts.js](../../src/contracts.js) - `FOR_IN_LOOP` AST kind.
+- [src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) - dispatch +
   `parseForInStatement`.
 - [src/jsyooptypecheck/checkStatement.js](../../src/jsyooptypecheck/checkStatement.js)
-  — `checkForInLoop`.
+  - `checkForInLoop`.
 - [src/jsyooptypecheck/kindCheck.js](../../src/jsyooptypecheck/kindCheck.js)
-  — branch handling parallels `FOR_LOOP`.
-- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) —
+  - branch handling parallels `FOR_LOOP`.
+- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) -
   `emitForInLoop` (single-module) + `emitForInLoopStmt` (multi-module).
-- [SPEC.md](../../SPEC.md) §9 — v0 status note added.
+- [SPEC.md](../../SPEC.md) §9 - v0 status note added.
 - [examples/pass/forin_basic.yoop](../../examples/pass/forin_basic.yoop),
   [examples/fail/forin_non_array.yoop](../../examples/fail/forin_non_array.yoop),
   [src/e2e.test.js](../../src/e2e.test.js),
   [src/jsyooparser/parser.test.js](../../src/jsyooparser/parser.test.js)
-  — tests and fixtures.
+  - tests and fixtures.

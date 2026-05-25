@@ -13,7 +13,7 @@ extern "C" from "stdio.h" {
 }
 
 // Identity over any T. Each call-site instantiation produces its
-// own monomorphized body — `identity(42)` and `identity(99)` share
+// own monomorphized body - `identity(42)` and `identity(99)` share
 // declId but have different mangled names through the registry.
 function identity<T>(x: T): T { return x; }
 

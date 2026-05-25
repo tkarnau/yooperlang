@@ -28,7 +28,7 @@ function maybe(n: int32): Option<int32> {
 function main(): int32 {
     let total: int32 = 0;
 
-    // Four switch arms in the same function, all binding `value: v` —
+    // Four switch arms in the same function, all binding `value: v` -
     // would have collided pre-10.H.
     let a: Option<int32> = maybe(1);
     switch (a) {
@@ -51,7 +51,7 @@ function main(): int32 {
         case Option.None: { }
     }
 
-    // Two disjoint if-blocks each declaring `let x` — also a former
+    // Two disjoint if-blocks each declaring `let x` - also a former
     // collision shape.
     let mode: int32 = 0;
     if (total > 0) { let x: int32 = total * 2; mode = x; }

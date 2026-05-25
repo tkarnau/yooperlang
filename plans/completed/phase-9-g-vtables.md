@@ -1,4 +1,4 @@
-# Phase 9.G — `vtable T for Trait` runtime polymorphism + function value types
+# Phase 9.G - `vtable T for Trait` runtime polymorphism + function value types
 
 ## Context
 
@@ -6,18 +6,18 @@ Plan: [plans/phase-9.md §9.G](../phase-9.md#phase-9g--vtable-t-for-trait-runtim
 Library rationale: [library-design.md §8 questions 1–3](../library-design.md#8-open-language-questions-the-library-exposes).
 
 Before 9.G, the only polymorphism yoop had was generics + trait bounds
-(Phase 7.1/7.2) — every trait-dispatching function monomorphized per
+(Phase 7.1/7.2) - every trait-dispatching function monomorphized per
 concrete impl type. That meant **heterogeneous handler lists were
 impossible**: a `Handler[]` couldn't hold three structurally-distinct
 impls of `trait Handler` because each monomorphization was a distinct
-type. The natural shape — a router whose slots are a mix of stateful
-handlers — had to be hand-rolled with `unsafe_ptr<void>` plus parallel
+type. The natural shape - a router whose slots are a mix of stateful
+handlers - had to be hand-rolled with `unsafe_ptr<void>` plus parallel
 function-pointer fields, with no compiler help.
 
 This phase adds Zig-style runtime polymorphism: function value types in
 type position via `=>`, and a `vtable T for Trait { ... }` decl that
 declares a type-erased shape backing a trait. No magic `dyn`, no
-separate type category — a vtable is a normal nominal struct the
+separate type category - a vtable is a normal nominal struct the
 compiler builds for you.
 
 ## What landed
@@ -48,7 +48,7 @@ function main(): int32 {
 
 Two new tokens (`fatArrow` for `=>`, `vtable` keyword) and one new
 top-level decl (`VTABLE_DECL`). The implicit `ctx: unsafe_ptr<void>`
-first field is added by codegen — the user never names it. Field order
+first field is added by codegen - the user never names it. Field order
 in the vtable's body is irrelevant; method-slot indices follow the
 trait's method declaration order.
 
@@ -56,13 +56,13 @@ trait's method declaration order.
 
 Two new entries in `typeKinds`:
 
-- `FunctionPointerType { params, returnType }` — what `(p: T) => R`
+- `FunctionPointerType { params, returnType }` - what `(p: T) => R`
   resolves to in any type-annotation slot. Distinct from `FuncType`
   (which describes named function decls) so call resolution can tell
   the two apart: FuncType callees resolve to a global mangled symbol,
   FunctionPointerType callees lower to an indirect call.
 - `VTableType { name, traitName, traitModuleId, fields, methodOrder,
-  moduleId }` — a nominal struct-like type whose `fields` are
+  moduleId }` - a nominal struct-like type whose `fields` are
   FPT-typed entries in trait declaration order. Compared by
   `(name, moduleId)` like structs/enums/unions.
 
@@ -73,7 +73,7 @@ Two new entries in `typeKinds`:
 ### Pass A / Pass C wiring
 
 - Pass A registers a `VTableType` shell carrying only the trait
-  *name* — the trait reference + field FPTs resolve in pass C.3b
+  *name* - the trait reference + field FPTs resolve in pass C.3b
   (`validateVTableDecl`) after impl blocks are validated and trait
   method sigs are populated. Validation enforces: trait exists, every
   trait method has a matching vtable field, FPT signature matches the
@@ -90,7 +90,7 @@ Two new entries in `typeKinds`:
   for codegen.
 - `VTableName.<method>(ref v, ...)`: forwarded to
   `resolveTraitQualifiedCall` (with the trait looked up via the
-  vtable's `traitName`) — Case 3 in that function handles vtable
+  vtable's `traitName`) - Case 3 in that function handles vtable
   receivers, substitutes the placeholder self, and stamps
   `node.vtableCall = { vtableType, methodName, fieldIndex }`.
 - `Trait.<method>(ref v, ...)` where `v: VTableType` also routes
@@ -99,22 +99,22 @@ Two new entries in `typeKinds`:
 ### Codegen
 
 - LLVM type def: `%vtable.<mod>__<Name> = type { ptr, ptr, ptr, ... }`
-  — one pointer slot for ctx + one per trait method, in trait
+  - one pointer slot for ctx + one per trait method, in trait
   declaration order. Emitted at the module-init pass alongside the
   existing struct/enum/union type defs.
 - `arrayElemLlvmName` accepts vtable element types so `Dispatcher[]`
-  works through the standard fat-pointer array shape — that's what
+  works through the standard fat-pointer array shape - that's what
   makes heterogeneous arrays land cleanly.
 - `emitVTableFromBuilder`: alloca the vtable, store the operand's
   pointer (`emitLval` on the REF_EXPRESSION's inner lvalue) at field
   0, then for each method in `methodOrder` store
   `ptr @<mangled trait method symbol>` (using the existing
-  Phase 7.4 `mangleTraitMethod` scheme — no new mangling
+  Phase 7.4 `mangleTraitMethod` scheme - no new mangling
   conventions needed).
 - `emitVTableMethodCall`: GEP+load ctx (field 0) and the function
   pointer (field methodIndex+1), emit
   `call <ret> (ptr, <argTys>) %fnptr(ptr %ctx, args)`. The impl
-  function expects `ref self` (a struct `ptr`) as its first arg —
+  function expects `ref self` (a struct `ptr`) as its first arg -
   ctx is exactly that, so the indirect-call signature matches the
   direct-call signature byte for byte.
 
@@ -129,7 +129,7 @@ reserved everywhere else.
 ## Verification
 
 - E2E pass: [examples/pass/vtable_handlers.yoop](../../examples/pass/vtable_handlers.yoop)
-  — three different impl types (`Const` / `AddOffset` / `Scale`)
+  - three different impl types (`Const` / `AddOffset` / `Scale`)
   registered into one heterogeneous `Dispatcher[]`, dispatched
   through a single `fan_out(ref Dispatcher[], int32)` function that
   has zero knowledge of the underlying impl types. This is the
@@ -144,7 +144,7 @@ reserved everywhere else.
 
 ## Deferred
 
-- **`vtable Trait` sugar** (auto-derived field list — no `for`-clause
+- **`vtable Trait` sugar** (auto-derived field list - no `for`-clause
   body). Lands as a follow-up once the explicit form has shipped.
 - **Closures.** The hand-rolled capture-struct + `vtable T for Trait`
   workaround remains the official answer; synthesizing capture
@@ -158,6 +158,6 @@ reserved everywhere else.
   clear "deferred" diagnostic.
 - **Trait bounds quantifying over a vtable** (`<T implements Reader>`
   where `Reader` is a vtable). The current pattern is to take
-  `ref r: Reader` directly — concrete type, monomorphization-free.
-- **Trait-object parameters via `dyn Trait`**. Out — the vtable form
+  `ref r: Reader` directly - concrete type, monomorphization-free.
+- **Trait-object parameters via `dyn Trait`**. Out - the vtable form
   is the official surface for type-erased polymorphism.

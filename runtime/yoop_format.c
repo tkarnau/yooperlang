@@ -1,4 +1,4 @@
-// yoop_format.c — runtime helper backing std/core/format.yoop.
+// yoop_format.c - runtime helper backing std/core/format.yoop.
 //
 // Float-to-string is the only formatter that bottoms out in C; the
 // integer/bool versions are pure yoop. The returned buffer is malloc'd

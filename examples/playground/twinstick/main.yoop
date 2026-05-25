@@ -1,4 +1,4 @@
-// Twin-stick shooter demo — now with a sprite-sheet player loaded
+// Twin-stick shooter demo - now with a sprite-sheet player loaded
 // through SDL_image, and a comptime-built sprite-rect table.
 //
 // This is the running showcase for what the language can do today:
@@ -6,13 +6,13 @@
 //   - `@precompile` (Phase 11) evaluates the 16-entry source-rect
 //     lookup table at *build time*. The interpreter walks the block,
 //     and codegen emits the resulting array as a baked-in LLVM
-//     `@global` — no runtime `module_init` ever touches the table.
+//     `@global` - no runtime `module_init` ever touches the table.
 //
 //   - `enum Direction { South, North, West, East }` + `switch` over
 //     the enum (Phase 7.5) pick which row of the sheet to sample.
 //
 //   - `disposable` kind (Phase 6.1) gives Window, Renderer, and
-//     Texture deterministic RAII teardown — `dispose` is called at
+//     Texture deterministic RAII teardown - `dispose` is called at
 //     scope exit in declaration LIFO order with no manual cleanup
 //     anywhere in `main`.
 //
@@ -110,7 +110,7 @@ extern "C" from library "SDL2_image" {
     function IMG_Init(flags: int32): int32;
     function IMG_Quit(): void;
     function IMG_Load(file: string): unsafe_ptr<SDL_Surface>;
-    // SDL2_image piggybacks on SDL's threadlocal error slot — no
+    // SDL2_image piggybacks on SDL's threadlocal error slot - no
     // separate `IMG_GetError` symbol ships with the library.
 }
 
@@ -121,7 +121,7 @@ kind c_layout {
     layout { abi "C"; };
 }
 
-// Source / dest rect — exact match for C `SDL_Rect`. All fields are
+// Source / dest rect - exact match for C `SDL_Rect`. All fields are
 // 4-byte int, so the layout is trivially the same shape C would lay
 // out.
 type SDL_Rect c_layout {
@@ -133,7 +133,7 @@ type SDL_Rect c_layout {
 
 // SDL_Surface *prefix*. The real C struct is far larger; we only
 // ever look at `format` (so we can SDL_MapRGB the colorkey) and
-// only ever hand `unsafe_ptr<SDL_Surface>` values *back* to SDL —
+// only ever hand `unsafe_ptr<SDL_Surface>` values *back* to SDL -
 // we never construct one. `c_layout` makes LLVM emit the type as
 // `{ i32, ptr, i32, i32, i32 }` with the natural 4-byte tail
 // padding between `flags` and `format` on 64-bit, matching the
@@ -182,7 +182,7 @@ kind disposable {
 
 // ── Direction ────────────────────────────────────────────────────────────────
 
-// Phase 7.5 enum — picks the row out of the 4×4 sprite sheet.
+// Phase 7.5 enum - picks the row out of the 4×4 sprite sheet.
 enum Direction {
     South,
     North,
@@ -204,7 +204,7 @@ function dir_to_row(d: Direction): int32 {
 // ── Sprite-sheet metadata ────────────────────────────────────────────────────
 
 // The PNG is 534 × 799 with a 4×4 grid → 133 wide, 199 tall per cell
-// (truncating 2 / 3 trailing pixels — there's a tiny margin baked
+// (truncating 2 / 3 trailing pixels - there's a tiny margin baked
 // into the sheet).
 const SHEET_W: int32 = 534;
 const SHEET_H: int32 = 799;
@@ -214,13 +214,13 @@ const FRAME_H: int32 = SHEET_H / 4;   // 199
 // 16 entries laid out row-major by (direction, animation step).
 // step 0 = idle / still pose; steps 1..3 = walk-cycle frames.
 //
-// Filled in by the `@precompile` block below — codegen sees the
+// Filled in by the `@precompile` block below - codegen sees the
 // post-block values as the @global's literal initializer, so the
 // runtime never touches this array.
 let SPRITE_X: int32[] = [0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0];
 let SPRITE_Y: int32[] = [0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0,  0, 0, 0, 0];
 
-// `@precompile { ... }` — runs in the comptime interpreter at build
+// `@precompile { ... }` - runs in the comptime interpreter at build
 // time. Reads the module-level `FRAME_W` / `FRAME_H` consts, writes
 // the module-level `SPRITE_X` / `SPRITE_Y` arrays. Codegen consumes
 // the final post-block values as the LLVM `@global`'s init.
@@ -295,7 +295,7 @@ function dist_sq(ax: float32, ay: float32, bx: float32, by: float32): float32 {
 // ── Sprite loader ────────────────────────────────────────────────────────────
 //
 // IMG_Load gives us an SDL_Surface*. The sheet's magenta backdrop
-// is fully opaque (alpha = 255 everywhere — checked offline), so
+// is fully opaque (alpha = 255 everywhere - checked offline), so
 // we have to colorkey it before texture creation. We do that by:
 //
 //   1. Dereffing the SDL_Surface prefix so the typechecker hands us
@@ -308,7 +308,7 @@ function dist_sq(ax: float32, ay: float32, bx: float32, by: float32): float32 {
 //
 // Anything fails → panic with the SDL diagnostic. Returns the
 // Disposable wrapper directly rather than a raw `ref SDL_Texture`
-// — yoop forbids returning `ref T` from a yoop-defined function
+// - yoop forbids returning `ref T` from a yoop-defined function
 // (it could outlive its referent), but a struct-by-value carrying
 // the SDL handle is fine.
 //
@@ -316,10 +316,10 @@ function dist_sq(ax: float32, ay: float32, bx: float32, by: float32): float32 {
 // `ref SDL_Renderer` (the opaque extern type) because the codegen
 // path that materializes opaque-extern `ref` params in non-extern
 // functions still hits the "loading unsized types is not allowed"
-// LLVM-verifier error — see the ERGO note above the Drawing
+// LLVM-verifier error - see the ERGO note above the Drawing
 // helpers section. Wrapping in a sized user struct sidesteps it.
 function load_player_texture(ref ren: Renderer): Texture {
-    // SDL_PIXELFORMAT_RGB24 — 3-byte packed RGB, no alpha channel.
+    // SDL_PIXELFORMAT_RGB24 - 3-byte packed RGB, no alpha channel.
     // Per SDL docs, "if the surface has both color-key and per-pixel
     // alpha, per-pixel alpha is honored and the color-key is
     // ignored." IMG_Load gives us RGBA32 (the PNG is RGBA, with all
@@ -350,7 +350,7 @@ function load_player_texture(ref ren: Renderer): Texture {
     // We tried routing this through SDL_MapRGB (reading
     // `surf.format` off the c_layout SDL_Surface prefix and passing
     // it back to SDL), but the SDL call returned 0xFFFFFFFF for the
-    // (255, 0, 255) input — likely a bug somewhere along the
+    // (255, 0, 255) input - likely a bug somewhere along the
     // `unsafe_ptr<uint8>` boundary for the format pointer (still
     // investigating). The hardcoded value is a fixed pixel format
     // so the platform-dependence dodge isn't load-bearing.
@@ -371,7 +371,7 @@ const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
 
 function main(): int32 {
 
-    // USB HID scancodes — same set SDL surfaces through SDL_GetKeyboardState.
+    // USB HID scancodes - same set SDL surfaces through SDL_GetKeyboardState.
     const SC_ESCAPE: int32 = 41;
     const SC_W: int32 = 26;
     const SC_A: int32 = 4;
@@ -450,7 +450,7 @@ function main(): int32 {
             // moving and freezes (frame = still) the instant input
             // releases.
             let player_dir: Direction = Direction.South;
-            let walk_step: int32 = 0;          // 0..2 — only used when moving
+            let walk_step: int32 = 0;          // 0..2 - only used when moving
             let next_walk_advance_ns: uint64 = 0;
 
             // Bullet pool as parallel arrays. Direction is a unit (dx, dy).
@@ -523,7 +523,7 @@ function main(): int32 {
 
                 if (is_moving) {
                     // Pick facing direction from the dominant axis.
-                    // Horizontal beats vertical when both are held —
+                    // Horizontal beats vertical when both are held -
                     // arbitrary, just need a deterministic rule.
                     if (move_dx > 0.0) {
                         player_dir = Direction.East;
@@ -550,7 +550,7 @@ function main(): int32 {
                     player_x = player_x + move_dx * move;
                     player_y = player_y + move_dy * move;
                 } else {
-                    // Idle — reset the cycle so the next step lands
+                    // Idle - reset the cycle so the next step lands
                     // on frame 0 of the new walk.
                     walk_step = 0;
                     next_walk_advance_ns = t_ns + WALK_PERIOD_NS;
@@ -562,7 +562,7 @@ function main(): int32 {
                 if (player_y + PLAYER_SIZE > float32(WIN_H)) { player_y = float32(WIN_H) - PLAYER_SIZE; }
 
                 // Arrow-key fire direction. Held = continuous fire,
-                // gated by the cooldown. No edge detection — that's
+                // gated by the cooldown. No edge detection - that's
                 // what the cooldown gate is for.
                 let fire_dx: float32 = 0.0;
                 let fire_dy: float32 = 0.0;
@@ -650,7 +650,7 @@ function main(): int32 {
                 SDL_SetRenderDrawColor(ren.handle, uint8(15), uint8(18), uint8(28), uint8(255));
                 SDL_RenderClear(ren.handle);
 
-                // Enemies — red circles, scanline-filled.
+                // Enemies - red circles, scanline-filled.
                 SDL_SetRenderDrawColor(ren.handle, uint8(220), uint8(60), uint8(60), uint8(255));
                 let di: int32 = 0;
                 while (di < N_ENEMIES) {
@@ -668,7 +668,7 @@ function main(): int32 {
                     di = di + 1;
                 }
 
-                // Bullets — soft yellow, scanline-filled rectangles.
+                // Bullets - soft yellow, scanline-filled rectangles.
                 SDL_SetRenderDrawColor(ren.handle, uint8(255), uint8(240), uint8(140), uint8(255));
                 const bw_i: int32 = int32(BULLET_W);
                 const bh_i: int32 = int32(BULLET_H);
@@ -686,7 +686,7 @@ function main(): int32 {
                     dbi = dbi + 1;
                 }
 
-                // Player — sprite-sheet copy. Pick the source rect
+                // Player - sprite-sheet copy. Pick the source rect
                 // from the comptime-baked table (`SPRITE_X` /
                 // `SPRITE_Y`) indexed by (direction-row, animation
                 // step), then SDL_RenderCopy into a sized dst rect
@@ -695,7 +695,7 @@ function main(): int32 {
                 // collision footprint.
                 let step_idx: int32 = 0;
                 if (is_moving) {
-                    step_idx = walk_step + 1;   // 1, 2, or 3 — walk frames
+                    step_idx = walk_step + 1;   // 1, 2, or 3 - walk frames
                 }
                 const row_idx: int32 = dir_to_row(player_dir);
                 const sheet_idx: int32 = row_idx * 4 + step_idx;

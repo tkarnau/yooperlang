@@ -6,7 +6,7 @@
 // bytecode. Lowering is cached per FUNCTION_DECL so repeated calls
 // to the same impl reuse the work.
 //
-// Two impls of same-named methods on different traits coexist —
+// Two impls of same-named methods on different traits coexist -
 // the `(name, trait)` pair disambiguates at the lookup step.
 
 extern "C" from "stdio.h" {
@@ -40,7 +40,7 @@ type Square implements Area {
 }
 
 // Helper functions that call trait methods. Used in @precompile
-// initializers below — the comptime fold walks the trait dispatch
+// initializers below - the comptime fold walks the trait dispatch
 // transparently.
 function rect_area(w: int32, h: int32): int32 {
     let r: Rect = { w: w, h: h };

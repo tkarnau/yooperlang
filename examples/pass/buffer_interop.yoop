@@ -18,7 +18,7 @@ function main(): int32 {
         view[i] = uint8(i * 2);
     }
 
-    // yoop-local literal — uses .ptr to expose its data buffer to libc.
+    // yoop-local literal - uses .ptr to expose its data buffer to libc.
     let expect: uint8[] = [0, 2, 4, 6, 8, 10, 12, 14];
 
     // memcmp(view.ptr, expect.ptr, 8) should be 0 if the writes round-tripped.

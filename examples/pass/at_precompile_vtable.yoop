@@ -38,7 +38,7 @@ vtable OpVT for Op {
     apply: (x: int32) => int32,
 }
 
-// Indirect dispatch helper. Takes any OpVT — the actual struct
+// Indirect dispatch helper. Takes any OpVT - the actual struct
 // type behind it is opaque at this call site. The interpreter
 // reads methodFns[0] off the vtable and dispatches there.
 function dispatch(ref v: OpVT, x: int32): int32 {

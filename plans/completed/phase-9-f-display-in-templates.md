@@ -1,10 +1,10 @@
-# Phase 9.F — `Display` trait wired into template literals ✓ landed
+# Phase 9.F - `Display` trait wired into template literals ✓ landed
 
 > A typechecker-only patch: when `${expr}` in a template literal has a
 > type that doesn't satisfy the existing primitive whitelist, look up
 > `Display.to_string(ref expr)` on the type and rewrite the
 > interpolation to call it. Codegen still sees only printf-style format
-> args — the rewrite happens in the typecheck pass and stamps a
+> args - the rewrite happens in the typecheck pass and stamps a
 > synthetic CALL_EXPRESSION carrying the post-resolution metadata.
 
 ## What landed
@@ -30,14 +30,14 @@ gained a Display fallback. The check now reads:
 
 The rewrite is the natural shape because the codegen's
 `emitPrintfCall` path already handles CALL_EXPRESSION args inside
-template parts — it dispatches through `emitExpr`, which finds the
+template parts - it dispatches through `emitExpr`, which finds the
 trait-method-call branch via `calleeMethodOf` and emits the indirect
 mangled-symbol call. Then `fmtSpec += printfSpec(stringType)` adds
 the `%s` for the returned string. No codegen changes needed.
 
 ### `Display` on `SocketAddr`
 
-[std/net/addr.yoop](../../std/net/addr.yoop) — `SocketAddr` now
+[std/net/addr.yoop](../../std/net/addr.yoop) - `SocketAddr` now
 `implements Display` with a `to_string` that returns the host. The
 old free function `addr_to_string` is gone (no callers in the tree).
 Once an int-to-string helper lands in `std/core`, the `to_string`
@@ -59,11 +59,11 @@ Notes on the other types the original plan listed:
 ## Verification
 
 - [examples/pass/display_templates.yoop](../../examples/pass/display_templates.yoop)
-  — same-module `Point implements Display` and cross-module
+  - same-module `Point implements Display` and cross-module
   `SocketAddr` in one template, mixed with primitive interpolations.
   Confirms trait dispatch fires across module boundaries.
 - [examples/fail/template_no_display.yoop](../../examples/fail/template_no_display.yoop)
-  — a struct without `Display` still fails with a diagnostic that
+  - a struct without `Display` still fails with a diagnostic that
   now mentions Display so the fix-it is one trait impl away.
 - Full suite green: **553 tests**.
 
@@ -75,11 +75,11 @@ Notes on the other types the original plan listed:
   Display impls.
 - **Display on primitives via auto-impls.** Today `${42}` works via
   the primitive whitelist + printf format specs. There's no mechanism
-  for "all numeric types implement Display by default" — they
+  for "all numeric types implement Display by default" - they
   short-circuit before reaching the trait dispatch. Not a problem in
   practice; primitives already format correctly.
 - **`Display` on `Result<T, E>` / `Option<T>` via blanket impls.**
-  yoop has no `where`-clause / conditional impl story — this is
+  yoop has no `where`-clause / conditional impl story - this is
   unblocked only when Self-bounded traits exist alongside generic
   enum trait impls.
 - **Bare-form Display.to_string at non-template call sites.** Already
@@ -89,12 +89,12 @@ Notes on the other types the original plan listed:
 ## Critical files touched
 
 - [src/jsyooptypecheck/checkExpr.js](../../src/jsyooptypecheck/checkExpr.js)
-  — `resolveTemplateLiteral` Display fallback +
+  - `resolveTemplateLiteral` Display fallback +
   `synthesizeDisplayCall` helper.
-- [std/net/addr.yoop](../../std/net/addr.yoop) — `SocketAddr`
+- [std/net/addr.yoop](../../std/net/addr.yoop) - `SocketAddr`
   `implements Display`, replacing the old `addr_to_string` free
   function.
 - [examples/pass/display_templates.yoop](../../examples/pass/display_templates.yoop),
   [examples/fail/template_no_display.yoop](../../examples/fail/template_no_display.yoop)
-  — new fixtures.
-- [src/e2e.test.js](../../src/e2e.test.js) — fixture entries.
+  - new fixtures.
+- [src/e2e.test.js](../../src/e2e.test.js) - fixture entries.

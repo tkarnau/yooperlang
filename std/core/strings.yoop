@@ -1,4 +1,4 @@
-// std/core/strings.yoop — Phase 8.H string primitives and bridges.
+// std/core/strings.yoop - Phase 8.H string primitives and bridges.
 //
 // Built on the `string_as_bytes` / `string_from_bytes_unchecked` builtins
 // and on top of std/core/bytes.yoop. `string_from_bytes` validates UTF-8
@@ -106,7 +106,7 @@ export function string_slice(s: string, start: usize, end: usize): Result<string
 }
 
 // FNV-1a hash of the underlying UTF-8 bytes. Stable across runs but not
-// cryptographically secure — meant for hash-table keying, not crypto.
+// cryptographically secure - meant for hash-table keying, not crypto.
 // Empty string hashes to the FNV offset basis (14695981039346656037).
 export function string_hash(s: string): uint64 {
     let bytes: uint8[] = intr.string_as_bytes(s);

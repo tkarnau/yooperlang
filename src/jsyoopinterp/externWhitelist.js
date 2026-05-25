@@ -1,7 +1,7 @@
 // Phase 11.D: comptime-allowed extern functions.
 //
 // The interpreter cannot call into real libc / OS extern functions at
-// compile time — the user's program is being compiled, not run; the
+// compile time - the user's program is being compiled, not run; the
 // runtime doesn't exist yet. For *pure* externs whose behavior is
 // trivially modeled in JS, we maintain a whitelist of implementations
 // the comptime interpreter substitutes in at call sites. Anything
@@ -9,9 +9,9 @@
 // opportunistic module-init path; hard error under `@precompile`).
 //
 // Each entry's `impl` takes:
-//   args      — wrapped values for each positional argument
-//   sourceLoc — call-site source location (for error reporting)
-//   returnType— the call's resolved yoop return type
+//   args      - wrapped values for each positional argument
+//   sourceLoc - call-site source location (for error reporting)
+//   returnType- the call's resolved yoop return type
 // and returns a wrapped value of `returnType`. The implementation is
 // responsible for unwrapping its JS payloads and producing a sensible
 // JS result; the interpreter routes any thrown ComptimeError up to
@@ -43,7 +43,7 @@ function wrapAs(returnType, raw) {
   );
 }
 
-// Whitelist entries. Keyed on the extern name as declared in source —
+// Whitelist entries. Keyed on the extern name as declared in source -
 // for libc we use the canonical libc name; for yoop runtime intrinsics
 // we use the `yoop_*` name. Adding an entry is a one-line PR.
 const WHITELIST = new Map();
@@ -125,7 +125,7 @@ WHITELIST.set("labs", {
 
 WHITELIST.set("yoop_now_ns", {
   impl(_args, _loc, returnType) {
-    // Use the host's wall clock. Determinism caveats apply — once
+    // Use the host's wall clock. Determinism caveats apply - once
     // we have a "deterministic comptime" flag we should reject
     // calls to yoop_now_ns under it.
     return wrapAs(returnType, BigInt(Math.floor(Date.now() * 1_000_000)));
@@ -141,7 +141,7 @@ WHITELIST.set("yoop_errno_get", {
 
 WHITELIST.set("yoop_runtime_init", {
   impl(_args, _loc, _returnType) {
-    // Runtime never starts at comptime — the call is a no-op.
+    // Runtime never starts at comptime - the call is a no-op.
     return null;
   },
 });
@@ -156,7 +156,7 @@ WHITELIST.set("yoop_runtime_shutdown", {
 // `[comptime] ` prefix so debug output from a `@precompile { ... }`
 // block doesn't intermingle with the compiler's own diagnostics or
 // the compiled program's stdout. Format-spec strings ("%d\n", "%s")
-// are *not* parsed at comptime — every printable arg goes through
+// are *not* parsed at comptime - every printable arg goes through
 // `stringifyForTemplate`'s rules and is concatenated. The intended
 // idiom is template-literal printf:
 //
@@ -164,7 +164,7 @@ WHITELIST.set("yoop_runtime_shutdown", {
 //
 // where the TEMPLATE_LITERAL has already been lowered to a single
 // string register by the time printf sees its arg. Legacy
-// `printf("%d\n", x)` lands here too — each arg gets concatenated
+// `printf("%d\n", x)` lands here too - each arg gets concatenated
 // with the literal `%d` left in place, so the output is approximate
 // but functional. A future sub-phase could parse the format spec
 // properly if a real need shows up.
@@ -181,7 +181,7 @@ WHITELIST.set("printf", {
     if (typeof process !== "undefined" && process.stderr) {
       process.stderr.write(`[comptime] ${out}`);
     }
-    // Return the number of "characters written" — printf semantics.
+    // Return the number of "characters written" - printf semantics.
     // returnType is int32; coerceNumeric handles the wrap.
     return wrapAs(returnType, out.length);
   },

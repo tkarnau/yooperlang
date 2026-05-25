@@ -1,4 +1,4 @@
-# Phase 10.A — Generic enums
+# Phase 10.A - Generic enums
 
 > Lift the typechecker rejection of `enum Foo<T> { ... }` and wire generic
 > enums through the same Phase 7.1 monomorphization machinery that already
@@ -37,8 +37,8 @@ i.e. all of:
 - `Result.Ok { value: 5 }` in expression position pinned by a target type
   selects the right instantiation.
 - `Result.Err`/`Result.Ok` no-payload bare form (when applicable) still works.
-- `switch` over `Result<int32, int32>` — including variant patterns with
-  field bindings — type-checks and lowers cleanly.
+- `switch` over `Result<int32, int32>` - including variant patterns with
+  field bindings - type-checks and lowers cleanly.
 - Phase 9.H's `?` operator detects the `Ok`/`Err`-shape instantiation as
   fallible and propagates through it.
 - Codegen emits one LLVM enum struct per instantiation, mangled exactly
@@ -55,19 +55,19 @@ i.e. all of:
 - **VARIANT_CONSTRUCTOR shape**: parser produces `{ enumName: string,
   variantName: string, fields: [...] | null }`. The `enumName` is the
   generic decl name (`"Result"`), not an instantiated form. We will keep
-  that — the existing inference path through `checkInitializer` is where the
+  that - the existing inference path through `checkInitializer` is where the
   concrete type gets picked.
-- **VARIANT_PATTERN shape**: same — pattern carries `enumName`/`variantName`
+- **VARIANT_PATTERN shape**: same - pattern carries `enumName`/`variantName`
   and the typechecker stamps `resolvedEnumType` + `resolvedVariant` on it
   during the switch resolution. We just need that stamp to be the
   *instantiated* enum, not the (open) generic decl.
 - **`switch`**: `scrutType` comes from `resolveExprType` on the scrutinee.
   When the scrutinee is a `Result<int32, int32>`-typed binding, scrutType
   is the instantiated EnumType. Pattern resolution looks up
-  `enumTable.get(pat.enumName)` today — we'll need to also reach into the
+  `enumTable.get(pat.enumName)` today - we'll need to also reach into the
   generic table and instantiate to match.
 - **Phase 9.H `?`**: `isFallibleEnum()` in [fallible.js](../src/jsyooptypecheck/fallible.js)
-  is purely structural — any EnumType with `Ok`/`Err` variants qualifies.
+  is purely structural - any EnumType with `Ok`/`Err` variants qualifies.
   Instantiated `Result<T, E>` is an EnumType with those variants, so the
   recognizer should fire unchanged.
 - **Codegen `llvmType` for enum** at
@@ -77,7 +77,7 @@ i.e. all of:
   (`Result__int32__int32`) the same way generic structs are
   (`Box__int32`), so this routine needs no change.
 - **Codegen `sizeOfAlign` / payload sizing** for enums already walks
-  `variants` and reads field types — runs identically on an instantiated
+  `variants` and reads field types - runs identically on an instantiated
   EnumType.
 - **`structContainsTypeParam`** at
   [codegen.js:2384](../src/jsyoopcodegen/codegen.js#L2384) is the gate used
@@ -90,7 +90,7 @@ i.e. all of:
 
 Three small additions to the type system + one to the registry.
 
-**1. `EnumType.genericInstance`** — mirror the StructType slot.
+**1. `EnumType.genericInstance`** - mirror the StructType slot.
 
 ```js
 // types.js
@@ -102,7 +102,7 @@ export const EnumType = (name, variants, moduleId = null, genericInstance = null
 re-instantiate an open `Result<T, E>` into the canonical
 `Result<int32, int32>` when the outer T/E gets pinned.
 
-**2. `genericEnumTable`** per module env — sibling of `genericStructTable`.
+**2. `genericEnumTable`** per module env - sibling of `genericStructTable`.
 Holds the genericDecl record:
 
 ```js
@@ -120,11 +120,11 @@ Holds the genericDecl record:
 }
 ```
 
-**3. `registry.enums`** — `Map<key, EnumType>` keyed `E:<declId>:<argkey>`,
+**3. `registry.enums`** - `Map<key, EnumType>` keyed `E:<declId>:<argkey>`,
 parallel to `registry.structs`. Plus `registry.enumInstancesByDecl` for
 codegen-side walking, parallel to `structInstancesByDecl`.
 
-**4. `substituteTypeParams` extension** — same shape as the struct branch.
+**4. `substituteTypeParams` extension** - same shape as the struct branch.
 When an EnumType has a `genericInstance`, substitute its args and
 re-instantiate via the global instantiator. Cross-decl `genericInstantiator`
 is already a registered Map; we extend `makeInstantiator` to dispatch on
@@ -132,7 +132,7 @@ the cached decl-id prefix or by lookup in `genericDeclById`. (Cleaner:
 each genericDecl record gets a `kind: "struct" | "enum"` field; the
 instantiator dispatches on that.)
 
-### Pass A — registration
+### Pass A - registration
 
 In [typecheck.js:1395-1402](../src/jsyooptypecheck/typecheck.js#L1395-L1402),
 replace the "generic enums are not yet supported (deferred)" branch with
@@ -182,7 +182,7 @@ Wire `genericEnumTable` into the env returned at line 1700, into
 redeclaration checks for structs/traits/funcs at this layer (any name
 collision should be one error, not none-then-strange-error-later).
 
-### Pass C — resolve variant fields with type-param scope
+### Pass C - resolve variant fields with type-param scope
 
 After the existing TYPE_DECL/generic-struct branch, add:
 
@@ -220,7 +220,7 @@ if (d.kind === ASTNodeKind.ENUM_DECL && d.genericDecl) {
     ordinal++;
   }
   gd.genericVariants = genericVariants;
-  // Don't set d.resolvedType — there isn't one type, just a decl.
+  // Don't set d.resolvedType - there isn't one type, just a decl.
 }
 ```
 
@@ -243,7 +243,7 @@ export function instantiateEnum(registry, genericDecl, argTypes) {
   if (argTypes.length !== genericDecl.paramNames.length) {
     return ErrorType();
   }
-  runBoundChecks(registry, genericDecl, argTypes); // works generically — already param-scoped
+  runBoundChecks(registry, genericDecl, argTypes); // works generically - already param-scoped
 
   const mangledName = monomorphizedName(genericDecl.name, argTypes);
   const sub = buildSubstitution(genericDecl.id, genericDecl.paramNames, argTypes);
@@ -278,7 +278,7 @@ export function instantiateEnum(registry, genericDecl, argTypes) {
 
 `createInstantiationRegistry` grows `enums: new Map()` and
 `enumInstancesByDecl: new Map()` slots. `makeInstantiator` needs to know
-whether a declId is a struct or enum — we'll mark each genericDecl with a
+whether a declId is a struct or enum - we'll mark each genericDecl with a
 `kind: "struct" | "enum"` (or look up by id-prefix) so substitution can
 dispatch correctly.
 
@@ -323,7 +323,7 @@ export function makeInstantiator(registry) {
 ```
 
 Stamp `genericDecl.kind = "struct"` / `"enum"` at the registration site.
-Existing struct decls have no `kind` slot — we add it during pass A so the
+Existing struct decls have no `kind` slot - we add it during pass A so the
 dispatch is unambiguous.
 
 ### `resolveAnnotMulti` / `resolveGenericApplication`
@@ -361,8 +361,8 @@ looks only in `enumTable` (concrete). Two paths to handle generic enums:
    - If generic, the constructor isn't pinned → return `ErrorType()` like
      unpinned struct literals do (but only if `checkInitializer` won't pin
      it). Actually: we *cannot* know the instantiation without context, so
-     we leave the node "open" — return ErrorType + push an error
-     "cannot determine type arguments for generic enum X — pin via a
+     we leave the node "open" - return ErrorType + push an error
+     "cannot determine type arguments for generic enum X - pin via a
      typed binding/return/call argument". Mirrors the bare struct-literal
      diagnostic.
 
@@ -389,7 +389,7 @@ looks only in `enumTable` (concrete). Two paths to handle generic enums:
      Sets `node.resolvedVariant` to the substituted variant.
    - The non-generic path stays in `resolveVariantConstructor` as today.
 
-**3. Bare no-payload form `Result.Err`** — already promoted in
+**3. Bare no-payload form `Result.Err`** - already promoted in
    `resolveFieldAccess` ([checkExpr.js:743](../src/jsyooptypecheck/checkExpr.js#L743)).
    The same generic-vs-concrete fork applies: we need `lookupEnumByName`
    to fall through to `lookupGenericEnumByName`. If generic, defer pinning
@@ -409,13 +409,13 @@ but the scrutinee type is an instantiation (with `name:
 "Result__int32__int32"`), accept the match if the scrutinee's
 `genericInstance.declId` corresponds to a generic decl whose name equals
 `pat.enumName`. Stamp `pat.resolvedEnumType = scrutType`,
-`pat.resolvedVariant = scrutType.variants.get(pat.variantName)` —
+`pat.resolvedVariant = scrutType.variants.get(pat.variantName)` -
 already substituted. Field bindings get their types from the instantiated
 variant, same as today.
 
 (There's also the case of `Result<int32, int32>` written in the pattern
-itself. That's not supported in current syntax — patterns are
-`EnumName.Variant { ... }` — so the user *must* write the bare decl name
+itself. That's not supported in current syntax - patterns are
+`EnumName.Variant { ... }` - so the user *must* write the bare decl name
 and rely on scrutinee-side inference. This is a non-issue.)
 
 ### Codegen
@@ -429,7 +429,7 @@ In [codegen.js:2569](../src/jsyoopcodegen/codegen.js#L2569), add the same
 if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType && !d.genericDecl) { ... }
 ```
 
-(Generic ENUM_DECLs have no `d.resolvedType` set — but belt-and-suspenders.)
+(Generic ENUM_DECLs have no `d.resolvedType` set - but belt-and-suspenders.)
 
 **2. Emit per-instantiation enum struct + per-variant payload structs from
 the registry.**
@@ -445,7 +445,7 @@ if (programState?.registry) {
     const mangled = llvmType(enumType);
     if (emittedStructs.has(mangled)) continue;
     emittedStructs.add(mangled);
-    // payload size — same calculation as the per-module ENUM_DECL branch
+    // payload size - same calculation as the per-module ENUM_DECL branch
     let maxPayload = 0;
     for (const v of enumType.variants.values()) {
       if (v.fields === null) continue;
@@ -482,23 +482,23 @@ and per-instantiation branches don't drift.)
 variant fields, return true on any TypeParamType. Open instantiations
 (snapshotted before substitution) are filtered out.
 
-**3. `emitVariantConstructor` / switch payload GEP** — no change needed.
+**3. `emitVariantConstructor` / switch payload GEP** - no change needed.
 Both read `node.resolvedEnumType` and `node.resolvedVariant`. As long as
 the typechecker stamps the *instantiated* enum (which it will, because
 checkInitializer pins to the target type), codegen already does the right
 thing. The `enumId` derivation
 (`${moduleId}__${name}`) becomes
-`${moduleId}__Result__int32__int32` for instantiated names — matches
+`${moduleId}__Result__int32__int32` for instantiated names - matches
 the struct defs emitted above.
 
 **4. `arrayElemLlvmName` for arrays of generic-enum instantiations.** Add
-an enum branch identical to the struct one — the array `Result<...>[]`
+an enum branch identical to the struct one - the array `Result<...>[]`
 needs a stable element key.
 
 ### Fallible enum recognition (Phase 9.H)
 
 [fallible.js: isFallibleEnum](../src/jsyooptypecheck/fallible.js#L8) is
-structural — it checks `enumType.kind === typeKinds.enum` and looks for
+structural - it checks `enumType.kind === typeKinds.enum` and looks for
 `Ok`/`Err` variants. Instantiated `Result<T, E>` is an EnumType with those
 variants, so the check fires unchanged. Verify and add an e2e test.
 
@@ -507,7 +507,7 @@ an instantiated `Result<int32, string>`, that's `string`, since the
 substitution already ran.
 
 Cross-shape propagation across two *different* generic enums (e.g.
-`Result<T, IOError>` into `Result<T, AppError>`) is out of scope — that
+`Result<T, IOError>` into `Result<T, AppError>`) is out of scope - that
 falls under Phase 10.E. Same-shape (same generic decl, same type args) is
 in scope.
 
@@ -515,27 +515,27 @@ in scope.
 
 A short, complete list of new error messages:
 
-- `redeclaration of type "Foo"` — already covered by extending the
+- `redeclaration of type "Foo"` - already covered by extending the
   redeclaration check chain.
-- `unknown type "T" in variant "X" of generic enum "Foo"` — pass C with
+- `unknown type "T" in variant "X" of generic enum "Foo"` - pass C with
   type-param scope misses (typically a typo).
-- `cannot determine type arguments for generic enum "Foo" — pin via a
-  typed binding/return/call argument` — bare unpinned use.
-- `enum "Foo" has no variant "X"` — already exists for concrete; reuse.
+- `cannot determine type arguments for generic enum "Foo" - pin via a
+  typed binding/return/call argument` - bare unpinned use.
+- `enum "Foo" has no variant "X"` - already exists for concrete; reuse.
 - `arity mismatch instantiating "Foo": expected N type arguments, got M`
-  — already exists for generic structs; reuse the same wording.
+  - already exists for generic structs; reuse the same wording.
 
 ## Verification
 
-- **Negative**: `examples/fail/generic_enum_unpinned.yoop` — bare
+- **Negative**: `examples/fail/generic_enum_unpinned.yoop` - bare
   `Result.Ok { value: 5 };` as a statement, expects the "cannot determine
   type arguments" diagnostic.
-- **Negative**: `examples/fail/generic_enum_arity.yoop` —
+- **Negative**: `examples/fail/generic_enum_arity.yoop` -
   `Result<int32>` (missing `E`), expects an arity error.
-- **Positive**: `examples/pass/generic_enum_result.yoop` — the Goal block
+- **Positive**: `examples/pass/generic_enum_result.yoop` - the Goal block
   above. Round-trips through lex → parse → typecheck → codegen → clang
   → runtime; expected stdout `happy=7\nsad err=-7\n`.
-- **Positive**: `examples/pass/generic_enum_option_like.yoop` —
+- **Positive**: `examples/pass/generic_enum_option_like.yoop` -
   `Option<T>` with `Some { value: T }` / `None`, exercises the no-payload
   variant path on a generic enum.
 - **Unit** (`src/jsyooptypecheck/typecheck.test.js`): pass-A
@@ -553,13 +553,13 @@ A short, complete list of new error messages:
   `Result<int32, AppError>`). Lands in Phase 10.E with the `From` trait.
 - **Generic enums with bounded type params** (`<T implements Hashable>`).
   The Phase 7.2 bound-check machinery is generic over decl kind, so this
-  should work for free once `runBoundChecks` is wired — but it's not the
+  should work for free once `runBoundChecks` is wired - but it's not the
   primary goal and may surface latent issues in the bound checker. Allow
   it; defer test fixtures to Phase 10.C.
-- **`Iterable<T>` trait + `IterStep<T>`** — that's Phase 10.B, blocked on
+- **`Iterable<T>` trait + `IterStep<T>`** - that's Phase 10.B, blocked on
   this.
-- **`match` as an expression** — still Phase 7.5 deferred.
-- **`vtable<T>` for generic traits via generic enums** — Phase 9.G's
+- **`match` as an expression** - still Phase 7.5 deferred.
+- **`vtable<T>` for generic traits via generic enums** - Phase 9.G's
   vtable restrictions are independent; revisit in 10.B.
 
 ## Estimated scope
@@ -573,23 +573,23 @@ A short, complete list of new error messages:
 
 ## Critical files
 
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) —
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) -
   EnumType.genericInstance, substituteTypeParams enum branch,
   typeHasTypeParam enum branch.
 - [src/jsyooptypecheck/instantiate.js](../src/jsyooptypecheck/instantiate.js)
-  — instantiateEnum, registry slots, makeInstantiator dispatch,
+  - instantiateEnum, registry slots, makeInstantiator dispatch,
   resolveAnnotMulti typeApplication enum branch, mangleType enum branch.
 - [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js)
-  — pass A registration, pass C variant resolution, env wiring,
+  - pass A registration, pass C variant resolution, env wiring,
   resolveGenericApplication.
 - [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js)
-  — variant-constructor pinning, generic-enum lookup in
+  - variant-constructor pinning, generic-enum lookup in
   lookupEnumByName, bare no-payload form promotion.
 - [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js)
-  — variant-pattern resolution accepting generic decl name against an
+  - variant-pattern resolution accepting generic decl name against an
   instantiated scrutinee.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) —
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) -
   registry-driven enum + payload-struct emission,
   enumContainsTypeParam, arrayElemLlvmName enum branch, ENUM_DECL gate.
 - [examples/pass/generic_enum_result.yoop](../examples/pass/), etc.
-- [src/e2e.test.js](../src/e2e.test.js) — fixtures registered.
+- [src/e2e.test.js](../src/e2e.test.js) - fixtures registered.

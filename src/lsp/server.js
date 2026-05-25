@@ -9,10 +9,10 @@
 //   - Full text-document sync (client sends the whole file on every change).
 //   - publishDiagnostics on open / change / save.
 //   - clear diagnostics on close.
-//   - textDocument/hover  — type info from resolvedType.
-//   - textDocument/definition — back-pointers stamped during typecheck.
-//   - textDocument/documentSymbol — outline view.
-//   - textDocument/semanticTokens/full — type-aware coloring.
+//   - textDocument/hover  - type info from resolvedType.
+//   - textDocument/definition - back-pointers stamped during typecheck.
+//   - textDocument/documentSymbol - outline view.
+//   - textDocument/semanticTokens/full - type-aware coloring.
 
 import { fileURLToPath, pathToFileURL } from "node:url";
 import fs from "node:fs";
@@ -64,7 +64,7 @@ function processBuffer() {
     const header = stdinBuffer.slice(0, headerEnd).toString("utf8");
     const match = /Content-Length:\s*(\d+)/i.exec(header);
     if (!match) {
-      // Malformed header — drop everything up to the separator and retry.
+      // Malformed header - drop everything up to the separator and retry.
       stdinBuffer = stdinBuffer.slice(headerEnd + 4);
       continue;
     }
@@ -262,7 +262,7 @@ function handleMessage(msg) {
         referencesProvider: true,
         renameProvider: { prepareProvider: false },
         completionProvider: {
-          // No trigger characters yet — VSCode fires completion on
+          // No trigger characters yet - VSCode fires completion on
           // identifier-char input by default, which is enough for now.
           resolveProvider: false,
         },
@@ -322,7 +322,7 @@ function handleMessage(msg) {
     if (!at) { sendResponse(msg.id, null); return; }
     let text = at.node ? getHoverInfo(at.node, at.module) : null;
     // Fall back to a type/kind hover when the cursor is on a type
-    // annotation (parser object, not an AST node) — getHoverInfo on the
+    // annotation (parser object, not an AST node) - getHoverInfo on the
     // enclosing decl wouldn't show anything useful about the type name.
     if (!text) {
       const tok = identTokenAt(at.src, at.offset);
@@ -341,7 +341,7 @@ function handleMessage(msg) {
     if (!at) { sendResponse(msg.id, null); return; }
     // Compute the identifier under the cursor so findDefinition can fall
     // back to a name lookup when the AST hit is null (type annotations,
-    // kind references — these aren't AST nodes with sourceLocs).
+    // kind references - these aren't AST nodes with sourceLocs).
     const tok = identTokenAt(at.src, at.offset);
     const def = findDefinition(at.node, {
       module: at.module,
@@ -458,6 +458,6 @@ function handleMessage(msg) {
 }
 
 // Keep `offsetToPos` reachable so importing modules can use it via this
-// barrel — currently only nav.js does, but server.js also exposes it for
+// barrel - currently only nav.js does, but server.js also exposes it for
 // future ad-hoc helpers.
 export { offsetToPos };

@@ -1,4 +1,4 @@
-// std/http/types.yoop — HTTP wire-level types.
+// std/http/types.yoop - HTTP wire-level types.
 //
 // Per library-design.md §7.1, but consolidated into one module for the
 // MVP. HttpMethod / StatusCode / Headers are first-class types; Request
@@ -15,7 +15,7 @@ import { string_eq_ignore_ascii_case } from "../core/strings.yoop";
 //
 // Enum lookups are cheap (i32 tag compare); the parser converts the
 // request-line method bytes via `parse_method`. Unknown methods are
-// rejected at parse time rather than reified as a variant — keeps the
+// rejected at parse time rather than reified as a variant - keeps the
 // switch closed.
 
 export enum HttpMethod {

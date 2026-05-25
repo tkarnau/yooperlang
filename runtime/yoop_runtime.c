@@ -1,4 +1,4 @@
-// Yooperlang runtime — worker pool, task submit/wait, and pooled refcount
+// Yooperlang runtime - worker pool, task submit/wait, and pooled refcount
 // lifecycle. See plans/runtime-design.md and plans/phase-6-3-prelude.md.
 //
 // The Task<T> handle layout (set in stone by the compiler / runtime contract):
@@ -82,7 +82,7 @@ static inline void*          handle_state_ptr (void* h) { return (char*)h + 8;  
 // Phase 10.F.2: cancel flag lives in the pre-existing pad byte at
 // offset 9 (the codegen task-struct layout reserves `[3 x i8]` at field
 // index 2 between `state` and `refcount`). No ABI change vs. pre-10.F.2
-// — the byte just stops being padding.
+// - the byte just stops being padding.
 static inline void*          handle_cancel_ptr(void* h) { return (char*)h + 9;  }
 static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; }
 
@@ -283,7 +283,7 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
 
 // Phase 10.F: wait_until passes its absolute monotonic deadline through to
 // the inner cv timedwait. Phase 9.I's 25ms safety poll for bare
-// yoop_task_wait is gone — yoop_handle_signal_done broadcasts queue_cv
+// yoop_task_wait is gone - yoop_handle_signal_done broadcasts queue_cv
 // after every state flip, so a parked waiter wakes the moment the handle
 // completes without polling. INFINITE means "no deadline; sleep until a
 // broadcast wakes us."
@@ -292,7 +292,7 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
 #ifndef _WIN32
 // POSIX: block on queue_cv until either a broadcast wakes us or the
 // given absolute monotonic deadline elapses. deadline_ns == 0 means
-// "no deadline" — use pthread_cond_wait. Returns 0 on signal,
+// "no deadline" - use pthread_cond_wait. Returns 0 on signal,
 // ETIMEDOUT on timer expiry, other on error.
 static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
     if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
@@ -319,7 +319,7 @@ static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
 
 // Phase 9.I: suspendable wait.
 //
-// Pre-9.I parked unconditionally on the handle's condvar — N workers + an
+// Pre-9.I parked unconditionally on the handle's condvar - N workers + an
 // N+1-deep nested wait chain deadlocked the pool (SPEC §8). Phase 9.I
 // switched to a re-entrant loop that opportunistically drains queued work
 // on the calling thread while waiting, so a worker with nothing useful to
@@ -354,7 +354,7 @@ void yoop_task_wait(void* handle) {
         // yoop_handle_signal_done broadcasts (handle completed, or a new
         // task arrived). The outer loop re-checks state + the queue
         // regardless of why we woke. Phase 10.F: the 25ms safety poll is
-        // gone — signal_done's broadcast covers wakeups deterministically.
+        // gone - signal_done's broadcast covers wakeups deterministically.
         queue_cv_wait_until_locked(YOOP_WAIT_NO_DEADLINE);
         yoop_mutex_unlock(&g_rt.queue_mu);
     }
@@ -364,19 +364,19 @@ void yoop_task_wait(void* handle) {
 // 2 on external cancellation (Phase 10.F.2).
 //
 // Critically, this path does NOT dispatch queued tasks on the calling
-// thread the way yoop_task_wait does — a queued task that runs past the
+// thread the way yoop_task_wait does - a queued task that runs past the
 // deadline would invalidate the user's "give up at time T" contract.
 // Worker threads continue to drain the queue normally; we only block the
 // caller on a cv with the user's deadline as the timeout.
 //
 // The tradeoff: a wait_until from a worker thread with nested-task
 // dependencies can deadlock if every worker is similarly blocked. That's
-// preferable to silently overshooting — and the deadline itself caps the
+// preferable to silently overshooting - and the deadline itself caps the
 // "stall" at exactly the value the user asked for.
 //
 // Done always wins ties: if the task completed before we noticed the
 // deadline or cancel flag, return 0. Cancel beats Timeout when both
-// happen — the user's explicit "abandon" intent is more informative
+// happen - the user's explicit "abandon" intent is more informative
 // than a passive timer expiry.
 int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
     if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
@@ -402,7 +402,7 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
         int rc = queue_cv_wait_until_locked(deadline_ns);
         yoop_mutex_unlock(&g_rt.queue_mu);
         if (rc == ETIMEDOUT) {
-            // Last-look at state + cancel — a broadcast may have raced
+            // Last-look at state + cancel - a broadcast may have raced
             // with the timeout; prefer Done, then Cancelled, over Timeout.
             if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
             if (A_LOAD_U8(handle_cancel_ptr(handle)) != 0) return 2;
@@ -419,7 +419,7 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
 // (the byte's already 1) but still re-broadcasts, which is harmless.
 //
 // Note that this does NOT wake `yoop_task_wait` callers. Bare `wait` is
-// the "I need the result" contract — cancellation only changes whether
+// the "I need the result" contract - cancellation only changes whether
 // callers willing to abandon (via wait_until) see Cancelled vs. Done.
 // The task body keeps running until its natural end; in-body polling
 // (Phase 10.F.2.b) will let bodies short-circuit.
@@ -543,7 +543,7 @@ void yoop_unpark(yoop_park_token_t* t) {
         t->state = 0;
         yoop_cond_signal(t->cv);
     } else if (t->state == 0) {
-        // Pre-arm: idempotent — a second pre-arm before park is fine.
+        // Pre-arm: idempotent - a second pre-arm before park is fine.
         t->state = 1;
     }
     // state == 1 already → already pre-armed, nothing to do.
@@ -624,7 +624,7 @@ int yoop_sleep_ms(uint64_t ms) {
 // CLOCK_REALTIME on both Linux and macOS), so a deadline computed as
 // `yoop_now_ns() + duration_ns` is directly usable by
 // yoop_task_wait_until_ns. On Windows we use GetSystemTimeAsFileTime and
-// rebase off the Unix epoch — the same SleepConditionVariableCS path uses
+// rebase off the Unix epoch - the same SleepConditionVariableCS path uses
 // relative ms anyway, so the absolute reading just needs to compare
 // monotonically with itself for deadline arithmetic.
 uint64_t yoop_now_ns(void) {

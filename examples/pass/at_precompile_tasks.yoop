@@ -7,7 +7,7 @@
 // inner value back out.
 //
 // At runtime tasks run on a thread pool with refcounted handles;
-// the comptime model is much simpler — no scheduler, no
+// the comptime model is much simpler - no scheduler, no
 // concurrency, just run-and-cache. Kind-flow synthesized cleanup
 // statements (TASK_AUTO_WAIT, TASK_RELEASE, TASK_RETAIN,
 // CLEANUP_CALL) are no-ops at the bytecode level since there's
@@ -24,7 +24,7 @@ task sum_two(a: int32, b: int32): int32 {
     return s;
 }
 
-// Immediate task call — the binding's type is the inner int32, so
+// Immediate task call - the binding's type is the inner int32, so
 // the typechecker stamps `immediateTaskCall = true` on the
 // LET_DECL/CONST_DECL. Lowering emits CALL_DIRECT (body) +
 // TASK_WRAP + TASK_WAIT (to unwrap into the slot).
@@ -33,7 +33,7 @@ function via_immediate(n: int32): int32 {
     return r + 1;
 }
 
-// Joined / wait shape — the binding type is Task<int32>, the user
+// Joined / wait shape - the binding type is Task<int32>, the user
 // explicitly waits later. `joined` and `pooled` differ in handle
 // lifetime at runtime, but at comptime both are just "named binding
 // holding a Task<T>".
@@ -49,7 +49,7 @@ function via_pooled(n: int32): int32 {
     return v + 3;
 }
 
-// Multi-arg task — exercises the param-binding path through CALL_DIRECT.
+// Multi-arg task - exercises the param-binding path through CALL_DIRECT.
 function via_multi(): int32 {
     const r: int32 = sum_two(11, 31);
     return r;

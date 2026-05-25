@@ -1,7 +1,7 @@
 // Phase 10.D: `std/debug` provides `debug.assert(cond, msg)` (no-op when
 // the condition holds) plus the unconditional `panic(msg)` and
-// `unreachable(msg)` exits. This fixture exercises the no-op path —
-// the always-true assert returns without writing anything — and a
+// `unreachable(msg)` exits. This fixture exercises the no-op path -
+// the always-true assert returns without writing anything - and a
 // short subsequent printf to confirm normal-path codegen still works.
 // Panic + unreachable are covered separately by the
 // `examples/fail_runtime/` fixtures so the e2e harness can assert the

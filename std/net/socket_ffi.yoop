@@ -1,11 +1,11 @@
-// std/net/socket_ffi.yoop — unsafe libc + runtime FFI for the net layer.
+// std/net/socket_ffi.yoop - unsafe libc + runtime FFI for the net layer.
 //
 // The /only/ module under std/net that imports unsafe. Every safe wrapper
 // in std/net/socket.yoop and std/net/tcp.yoop calls into the helpers
 // exported from this file; users never reach here directly.
 //
 // Constants are hard-mirrored from <sys/socket.h>. The values below match
-// Linux + macOS + BSD for AF_INET / SOCK_STREAM / IPPROTO_TCP — they're
+// Linux + macOS + BSD for AF_INET / SOCK_STREAM / IPPROTO_TCP - they're
 // part of the stable POSIX socket constants. SOL_SOCKET / SO_REUSEADDR
 // have different numeric values across platforms, so the SO_REUSEADDR
 // call is delegated to a C helper (runtime/yoop_net.c) that resolves
@@ -88,7 +88,7 @@ extern "C" from "yoop_runtime" {
 // failure; we surface that as `Err`.
 export function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
     let ipv4: uint32 = inet_addr(host);
-    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on bad input — except
+    // inet_addr returns INADDR_NONE (0xFFFFFFFF) on bad input - except
     // "255.255.255.255" which is the broadcast address. We don't bind to
     // that, so we treat the value as the error sentinel.
     if (ipv4 == 4294967295) {
@@ -129,7 +129,7 @@ export function ffi_listen(host: string, port: int32, backlog: int32): Result<c_
 
     // SO_REUSEADDR: skip the TIME_WAIT papercut so the developer can
     // restart the server immediately. setsockopt failure here is
-    // non-fatal — log and continue (errno is preserved but ignored).
+    // non-fatal - log and continue (errno is preserved but ignored).
     let reuse_rc: c_int = yoop_net_set_reuseaddr(fd);
 
     let built: Result<SockAddrIn, string> = build_sockaddr(host, port);
@@ -159,7 +159,7 @@ export function ffi_listen(host: string, port: int32, backlog: int32): Result<c_
     return Result.Ok { value: fd };
 }
 
-// Multi-field success payload for `ffi_accept` — bundles the new client
+// Multi-field success payload for `ffi_accept` - bundles the new client
 // fd with the peer's address. Named so it can ride inside Result.Ok.
 export type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
 

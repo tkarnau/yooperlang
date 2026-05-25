@@ -40,7 +40,7 @@ function main(): int32 {
         printf(`n=${n}\n`);
     }
 
-    // Original `c` is untouched — the loop walked a local copy.
+    // Original `c` is untouched - the loop walked a local copy.
     printf(`c.cur=${c.cur}\n`);
 
     // Iterators returned from functions work too.

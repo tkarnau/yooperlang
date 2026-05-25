@@ -1,5 +1,5 @@
-// Phase 6.1 — flow-analysis pass for `mustCall fn beforeScopeEnd` obligations.
-// Phase 6.2 — escape-analysis extension: tracks `mustNotEscape scope` sentinels
+// Phase 6.1 - flow-analysis pass for `mustCall fn beforeScopeEnd` obligations.
+// Phase 6.2 - escape-analysis extension: tracks `mustNotEscape scope` sentinels
 //             and rejects escape via return, field store, or ref-pass to non-scoped param.
 //
 // Runs after Pass D has populated `resolvedType` and `resolvedKindType` on
@@ -17,7 +17,7 @@
 // share their enclosing scope's frame.
 //
 // Phase 6.2 sentinel tracking:
-// Each frame also carries `escapeSentinels` — the names of scoped bindings/
+// Each frame also carries `escapeSentinels` - the names of scoped bindings/
 // parameters whose escape must be detected. The walker checks three escape paths:
 //   1. RETURN: expression names a sentinel whose resolved type is non-primitive
 //   2. ASSIGNMENT to outer.field: outer's scopeDepth < sentinel's declScope
@@ -59,7 +59,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // snapshot/restore around if/else branches to compute "satisfied on every
   // reaching path". After both arms of an if/else, the post-merge sat state
   // is the intersection of each arm's sat state. Branches that diverged
-  // (returned, etc.) are excluded from the intersection — they don't reach
+  // (returned, etc.) are excluded from the intersection - they don't reach
   // the merge point. Loops (while/for) discard inner sat changes since the
   // body may execute zero times. `walkDiverged` is set when control flow
   // exits the current branch via `return`; subsequent statements in the
@@ -121,17 +121,17 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // it to the caller via the enclosing function's `propagates<K>` clause.
   //
   // Every obligation carries:
-  //   - `kindType`        — the K it represents.
-  //   - `autoCleanup`     — true if the binding's kind keyword authorises
+  //   - `kindType`        - the K it represents.
+  //   - `autoCleanup`     - true if the binding's kind keyword authorises
   //                         the compiler to inject the cleanup call at
   //                         scope exit; false if the user is on the hook.
-  //   - `transferred`     — flipped by RETURN_STATEMENT when the enclosing
+  //   - `transferred`     - flipped by RETURN_STATEMENT when the enclosing
   //                         function declares `propagates<K>` and the
   //                         returned value carries the obligation.
-  //   - `satisfied`       — flipped by `walkExpr` when it sees a direct call
+  //   - `satisfied`       - flipped by `walkExpr` when it sees a direct call
   //                         to the obligation's cleanup method on the
   //                         tracked binding (linear flow-insensitive).
-  //   - `reported`        — dedupes the unsatisfied-at-scope-exit error so
+  //   - `reported`        - dedupes the unsatisfied-at-scope-exit error so
   //                         the same obligation doesn't fire twice across a
   //                         return + block-end pair.
   function obligationsFor(stmt) {
@@ -139,7 +139,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const kt = stmt.resolvedKindType;
     const rt = stmt.resolvedType;
 
-    // Phase 6.3: builtin kinds bound directly to Task<T> — joined / pooled.
+    // Phase 6.3: builtin kinds bound directly to Task<T> - joined / pooled.
     // These are always opt-in via keyword, so `autoCleanup` is true.
     if (kt?.builtin && rt?.kind === "task") {
       if (kt.autoJoin) {
@@ -319,7 +319,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // obligation was marked.
   //
   // Bindings that declared the kind keyword (`autoCleanup === true`) are
-  // committed to local cleanup — declaring the keyword IS the user's
+  // committed to local cleanup - declaring the keyword IS the user's
   // statement that the lifetime ends in this scope. Even if the enclosing
   // function declares `propagates<K>`, the keyword wins: cleanup fires
   // before return, and the obligation is NOT transferred.
@@ -411,7 +411,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       const operand = expr.operand;
       if (operand?.kind === ASTNodeKind.IDENT) {
         const s = sentinels.find((s) => s.bindingName === operand.name);
-        if (s) return s; // ref always escapes — the pointer itself carries the reference
+        if (s) return s; // ref always escapes - the pointer itself carries the reference
       }
       return null;
     }
@@ -514,7 +514,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
                   markIdentObligationsTransferred(identName, propK);
                 }
                 // If not declared: the IDENT's binding-side obligation will
-                // be reported by `reportUnsatisfied` below — no need for a
+                // be reported by `reportUnsatisfied` below - no need for a
                 // separate function-side error.
               } else if (!declaredPropagates.has(propK)) {
                 pushError(errors, stmt,
@@ -554,7 +554,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           const elseDiverged = walkBranchAndTrack(stmt.elseBody);
           const elseSnap = snapshotSat();
           if (thenDiverged && elseDiverged) {
-            // Both arms exit via return — code after the if is unreachable.
+            // Both arms exit via return - code after the if is unreachable.
             walkDiverged = true;
             restoreSat(base);
           } else if (thenDiverged) {
@@ -721,7 +721,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // `satisfied` flag. The walker uses path coverage (snapshot/restore around
   // branches in walkStatement) to ensure a dispose inside one arm of an
   // if/else doesn't satisfy an obligation unless the other arm also
-  // disposes — that logic lives in the IF_STATEMENT handler, not here.
+  // disposes - that logic lives in the IF_STATEMENT handler, not here.
   function markManualCleanupSatisfies(callNode) {
     const method = callNode.calleeMethodName;
     if (!method) return;

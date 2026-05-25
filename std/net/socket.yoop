@@ -1,11 +1,11 @@
-// std/net/socket.yoop — safe envelope around a TCP socket fd.
+// std/net/socket.yoop - safe envelope around a TCP socket fd.
 //
 // `Socket` is a thin Disposable around the raw fd returned by socket_ffi.
 // Centralizes the close() path so TcpListener / TcpStream don't each
 // re-implement disposal.
 //
 // `SocketResult` is an ordinary Disposable struct (not a "fallible" struct
-// in the compiler's sense — its diagnostic lives in the `error` field).
+// in the compiler's sense - its diagnostic lives in the `error` field).
 // The caller's typical pattern is auto-cleanup at scope end:
 //
 //   disposable r: SocketResult = open_tcp_socket();
@@ -37,7 +37,7 @@ export type Socket implements Disposable propagates<disposable> {
     }
 }
 
-// SocketResult / open_tcp_socket are the safe surface — callers that
+// SocketResult / open_tcp_socket are the safe surface - callers that
 // need a raw socket reach through this rather than going to socket_ffi.
 // Implements Disposable so the caller can `disposable r: SocketResult =
 // open_tcp_socket()` and let autocleanup do the right thing.

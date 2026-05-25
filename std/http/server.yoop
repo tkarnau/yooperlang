@@ -1,8 +1,8 @@
-// std/http/server.yoop — HTTP server loop + Handler trait.
+// std/http/server.yoop - HTTP server loop + Handler trait.
 //
 // Glues std/net (TCP) and std/http/parser (request parse) +
 // std/http/types (Request, Response). Per-connection processing is
-// sequential — one request at a time. Spawning a task per connection
+// sequential - one request at a time. Spawning a task per connection
 // for true concurrency is the obvious next step (library-design.md
 // §7.3 follow-ups) and becomes straightforward once `task` accepts
 // `ref` parameters more broadly.
@@ -152,13 +152,13 @@ function write_response(ref resp: Response, ref out: Vec<uint8>): void {
 // All per-connection processing is inlined here. We previously had a
 // `handle_one_connection<H>` helper that serve_n called recursively,
 // but generic-calls-generic across module-instantiation boundaries
-// doesn't yet emit the second instantiation cleanly — until that's
+// doesn't yet emit the second instantiation cleanly - until that's
 // fixed in the registry walk, keeping the per-connection body in serve_n
 // is the simplest path.
 //
 // serve_n takes the listener by ref so the listener's lifetime stays
 // with the caller (typical pattern is `disposable lr: ListenResult =
-// tcp_listen(...);` — see examples/pass/hello_server). `n <= 0` loops
+// tcp_listen(...);` - see examples/pass/hello_server). `n <= 0` loops
 // forever; n > 0 handles exactly N requests then returns.
 
 export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H, n: int32): ServeOutcome {

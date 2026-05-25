@@ -1,6 +1,6 @@
 // End-to-end tests: compile a .yoop fixture all the way to a binary, run it,
 // compare stdout/exit code. Each fixture has its own it() with the
-// expectation written inline — no comment parsing, no sidecar files.
+// expectation written inline - no comment parsing, no sidecar files.
 
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
@@ -22,7 +22,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 function runFixture(relPath, opts = {}) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
   // Single-file fixtures that import from `std/` (e.g. for intrinsics)
-  // need the module-graph resolver — fall back to compileEntry in that
+  // need the module-graph resolver - fall back to compileEntry in that
   // case. Otherwise compileSource keeps the test path lean.
   const usesImport = /^\s*import(\s|\.)/m.test(src);
   let ir, extraLinkFlags = [];
@@ -462,6 +462,30 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "IntBox\nnamed\nIntBox\nIntBox\n");
   });
 
+  // ---- 9.J trait extends + multi-bound type params ----
+
+  it("trait_extends.yoop: a struct impl of a child trait covers parent methods", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/trait_extends.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "greet=5 shout=50 parent_greet=5\n");
+  });
+
+  it("trait_extends_generic_bound.yoop: child impl satisfies a parent bound on a generic fn", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/trait_extends_generic_bound.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "legs=4\n");
+  });
+
+  it("multiple_trait_bounds.yoop: <T implements (A, B)> dispatches both bounds inside the body", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/multiple_trait_bounds.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "summary=18\n");
+  });
+
   // ---- 7.5 sum types, unions, switch / pattern matching ----
 
   it("switch_int.yoop: literal-only switch with multi-pattern arms + default", () => {
@@ -517,7 +541,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
 
   // Phase 9.G: heterogeneous handler list via vtable. Three different impl
   // types ({Const, AddOffset, Scale}) all answer the same Handler trait,
-  // and a single fan_out function dispatches across the mixed array — the
+  // and a single fan_out function dispatches across the mixed array - the
   // canonical motivating case (would have needed monomorphized generics or
   // unsafe-pointer fields pre-9.G).
   it("vtable_handlers.yoop: heterogeneous handler list dispatches through a vtable", () => {
@@ -794,7 +818,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "n=3\nn=2\nn=1\n");
   });
 
-  // Phase 7.4: cross-trait same-name impl — one method body, two emitted
+  // Phase 7.4: cross-trait same-name impl - one method body, two emitted
   // LLVM symbols, each callable via its respective trait qualifier.
   it("traits_cross_trait_same_name: one impl satisfies two traits with the same method name", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_trait_same_name/main.yoop");
@@ -910,7 +934,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
   it("runtime_qmark_in_main: `?`-induced early return in main flows through yoop_runtime_shutdown", () => {
     const { stdout } = runFixtureEntry("examples/pass/runtime_qmark_in_main/main.yoop");
     // First call succeeds (`got 42`); second call fails and propagates via `?`
-    // — the unreachable printf never fires. Shutdown is injected at every ret,
+    // - the unreachable printf never fires. Shutdown is injected at every ret,
     // including the qmark-fail branch.
     assert.equal(stdout, "got 42\n");
   });
@@ -935,7 +959,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 
   it("runtime_disposable_in_main: emitted IR orders cleanup → shutdown → ret", () => {
     const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_disposable_in_main/main.yoop"));
-    // dispose call, then shutdown, then ret — in that order, with no other
+    // dispose call, then shutdown, then ret - in that order, with no other
     // instructions between them.
     assert.match(
       ir,
@@ -945,7 +969,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 
   it("dwarf: emitted IR carries required DWARF metadata for lldb backtraces", () => {
     const { ir } = compileEntry(path.join(repoRoot, "examples/pass/runtime_linked/main.yoop"));
-    // Required named metadata — without these clang silently strips DI.
+    // Required named metadata - without these clang silently strips DI.
     assert.match(ir, /!llvm\.dbg\.cu = !\{!\d+(?:, !\d+)*\}/);
     assert.match(ir, /!llvm\.module\.flags = !\{[^}]+\}/);
     assert.match(ir, /!\d+ = !\{i32 \d+, !"Dwarf Version", i32 \d+\}/);
@@ -962,7 +986,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 
   // Requires `lldb` on PATH. On systems without it (or where DWARF was
   // stripped at link time), the assertions confirm that DI survived clang and
-  // is consumable by an actual debugger — not just that the IR text looks
+  // is consumable by an actual debugger - not just that the IR text looks
   // right. We use `image lookup` (no process attach) so this works in CI
   // without debugger-attach permissions.
   it("dwarf: lldb resolves main to its .yoop source file and line", (t) => {
@@ -998,7 +1022,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 
   it("propagates_full: emitted IR shows propagated dispose + release at scope exit", () => {
     const { ir } = compileEntry(path.join(repoRoot, "examples/pass/propagates_full/main.yoop"));
-    // Propagated release on `j.work` — GEP into Job then yoop_task_release.
+    // Propagated release on `j.work` - GEP into Job then yoop_task_release.
     assert.match(ir, /call void @yoop_task_release\(/);
     // Pooled-to-pooled retain on h2 -> h3 transfer.
     assert.match(ir, /call void @yoop_task_retain\(/);
@@ -1081,7 +1105,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
   });
 
   // Library Phase A: foundational traits exported from std/core/traits.yoop.
-  it("traits_readable_writable: in-memory MemBuffer implements (Readable, Writable) — round-trips bytes", () => {
+  it("traits_readable_writable: in-memory MemBuffer implements (Readable, Writable) - round-trips bytes", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_readable_writable/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "wrote=2 read=2 bytes=72,73\n");
@@ -1100,7 +1124,7 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 
   // Library Phase D: the hello-world HTTP server compiles end-to-end.
   // Running it binds to localhost:18080 (out of scope for the test harness
-  // — see plans/library-phase-d-server.md). We just verify the build.
+  // - see plans/library-phase-d-server.md). We just verify the build.
   it("hello_server: builds end-to-end (server requires manual curl test)", () => {
     const { ir, linkFlags } = compileEntry(
       path.join(repoRoot, "examples/pass/hello_server/main.yoop"),
@@ -1225,7 +1249,7 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
     const ir = compileSource(src);
     // The function-call results fold even though the enum producers
     // themselves stay at zeroinitializer (enum payload-as-bytes
-    // constant encoding isn't wired yet — runtime module_init still
+    // constant encoding isn't wired yet - runtime module_init still
     // constructs the enum globals).
     assert.match(ir, /C_AREA = internal global i32 96,/);
     assert.match(ir, /S_AREA = internal global i32 50,/);
@@ -1261,7 +1285,7 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
   });
 
   it("module_init_folded.yoop: IR has literal-initialized globals and no module_init function", () => {
-    // Re-emit the IR and inspect — the load-bearing claim is that the
+    // Re-emit the IR and inspect - the load-bearing claim is that the
     // fold actually happened, not just that the runtime produced the
     // same number. (A regression that fell back to runtime init would
     // still print the right number but defeat the whole feature.)
@@ -1277,7 +1301,7 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
     assert.match(ir, /FLAG = internal global i1 1,/);
     // String folds emit a pointer-to-aux-global; the aux global's name
     // is freshly minted by emitRawStringGlobal so it's not stable
-    // across runs — match by shape (`ptr @<str-sym>`) rather than
+    // across runs - match by shape (`ptr @<str-sym>`) rather than
     // exact name.
     assert.match(ir, /GREETING = internal global ptr @\.str_[^,]+,/);
     // Struct fold: declared-order normalization means the
@@ -1335,7 +1359,7 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
 });
 
 // Phase 11.A: `@`-attribute syntax + registry skeleton. Phase 11.C
-// wires `@precompile`'s comptimePhase to the interpreter — init-form
+// wires `@precompile`'s comptimePhase to the interpreter - init-form
 // folds become hard errors when the comptime evaluator can't honor
 // the user's directive, and the block form is reserved for a later
 // sub-phase with a clear "not yet supported" diagnostic.
@@ -1363,10 +1387,10 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
       "utf8",
     );
     const ir = compileSource(src);
-    // SUM is a primitive — the block-written value lands directly
+    // SUM is a primitive - the block-written value lands directly
     // as the LLVM @global's initial value.
     assert.match(ir, /SUM = internal global i32 140,/);
-    // TIP is a struct — the block-written struct literal becomes
+    // TIP is a struct - the block-written struct literal becomes
     // the @global aggregate initializer (named-struct form).
     assert.match(ir, /TIP = internal global %[^ ]+ \{ i32 140, i32 -140 \},/);
     // No module_init function should be emitted: every module-level
@@ -1653,7 +1677,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   });
 
   // Phase 10.A: bare `GenericEnum.Variant { ... }` outside a pinning context
-  // is unrepresentable — surface the diagnostic at the construction site.
+  // is unrepresentable - surface the diagnostic at the construction site.
   it("generic_enum_unpinned.yoop rejects unpinned generic-enum variant constructor", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_unpinned.yoop");
     assert.ok(
@@ -1722,7 +1746,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  // Phase 7.4: these two scenarios are no longer errors — cross-trait same-
+  // Phase 7.4: these two scenarios are no longer errors - cross-trait same-
   // name impls and trait-method/free-function name collisions are both
   // allowed, because every trait call site qualifies through the trait name.
   // The old fail-fixtures stay on disk as ground truth that they typecheck
@@ -1806,12 +1830,15 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.throws(() => parse(src), /expected semicolon, got lcurly/);
   });
 
-  it("traits_extends_rejected.yoop rejects trait extends clause", () => {
-    const src = fs.readFileSync(
-      path.join(repoRoot, "examples/fail/traits_extends_rejected.yoop"),
-      "utf8",
+  // Phase 9.J: `extends` is supported; the SCC rejection is the new failure case.
+  it("traits_extends_cycle.yoop rejects a cycle in the extends graph", () => {
+    const { errors } = typecheckFixtureProgram(
+      "examples/fail/traits_extends_cycle.yoop",
     );
-    assert.throws(() => parse(src), /extends not yet supported/);
+    assert.ok(
+      errors.some((e) => /cyclic extends chain/.test(e.message)),
+      `expected cyclic extends chain error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
   });
 
   it("traits_method_call_sugar.yoop rejects method-call syntax on a trait method", () => {
@@ -1923,10 +1950,16 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("kind_mustnotshare_acrossthreads.yoop rejects mustNotShare acrossThreads", () => {
-    assert.throws(
-      () => parseFixture("examples/fail/kind_mustnotshare_acrossthreads.yoop"),
-      /acrossThreads not yet supported/,
+  // Phase 9.J: `mustNotShare acrossThreads` is now a real language feature.
+  // The fail fixture asserts a binding carrying the kind cannot flow into a
+  // task spawn site.
+  it("kind_mustnotshare_acrossthreads.yoop rejects passing a thread-local binding into a task spawn", () => {
+    const { errors } = typecheckFixtureProgram(
+      "examples/fail/kind_mustnotshare_acrossthreads.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /mustNotShare acrossThreads/.test(e.message)),
+      `expected mustNotShare acrossThreads error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

@@ -8,7 +8,7 @@
 //   - `new_dynarray<T>(...): DynArray<T> propagates<disposable>`:
 //     factory that pushes the obligation through its return type to the caller.
 //     The function must declare `propagates<disposable>`, otherwise the
-//     return is rejected — a helper that creates a DynArray either disposes
+//     return is rejected - a helper that creates a DynArray either disposes
 //     it locally or hands the dispose obligation up to its caller.
 //   - At a call site (main) the binding's `disposable` keyword opts into
 //     auto-cleanup: the compiler injects `Disposable.dispose(ref arr)` at
@@ -70,7 +70,7 @@ type DynArray<T> implements Disposable propagates<disposable> {
 
 // Factory. `propagates<disposable>` on the return type transfers the
 // dispose obligation to the caller. The local `newArr` does NOT declare the
-// kind keyword — the function's propagates clause is what allows it to escape
+// kind keyword - the function's propagates clause is what allows it to escape
 // via return without local discharge. Adding `disposable` here would mean
 // "I'll dispose this locally", which contradicts returning it.
 function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
@@ -132,7 +132,7 @@ function main(): int32 {
     // Manual discharge route: plain `let` of a propagating type is fine if
     // the user satisfies the obligation themselves at the same conditional
     // depth as the binding. Hiding the call inside an `if`/`while`/etc. does
-    // NOT satisfy it — that path is conditional, the obligation is not.
+    // NOT satisfy it - that path is conditional, the obligation is not.
     let arr2: DynArray<int32> = new_dynarray(4);
     if (2 % 1 > 0) {
         const r1: Maybe = Disposable.dispose(ref arr2);

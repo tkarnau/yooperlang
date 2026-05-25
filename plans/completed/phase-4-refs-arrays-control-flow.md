@@ -1,10 +1,10 @@
-# Phase 4 — Refs, arrays, control flow gaps
+# Phase 4 - Refs, arrays, control flow gaps
 
-Part of the [roadmap](./roadmap.md). Phase 3 landed modules and FFI. Programs can now call C functions and compose across files, but they still can't pass mutable output parameters, work with collections of values, or use a numeric for-loop. This phase fills those gaps — none requiring traits or kinds — and adds explicit casts to make cross-type arithmetic practical.
+Part of the [roadmap](./roadmap.md). Phase 3 landed modules and FFI. Programs can now call C functions and compose across files, but they still can't pass mutable output parameters, work with collections of values, or use a numeric for-loop. This phase fills those gaps - none requiring traits or kinds - and adds explicit casts to make cross-type arithmetic practical.
 
 ## Goal
 
-Land working support for [SPEC.md §3 — refs and arrays](../SPEC.md), [§9 — loops](../SPEC.md), [§10 — control flow](../SPEC.md), and [§2 — casts](../SPEC.md):
+Land working support for [SPEC.md §3 - refs and arrays](../SPEC.md), [§9 - loops](../SPEC.md), [§10 - control flow](../SPEC.md), and [§2 - casts](../SPEC.md):
 
 ```yoop
 // refs.yoop
@@ -61,7 +61,7 @@ Concretely:
 - `T[]` as an array type. Array literals `[e1, e2, e3]`. `xs[i]` indexing. `xs.len` intrinsic returning `usize`. Arrays are fat pointers (ptr + len) passed by value.
 - `for (ident = expr; cond; ident = expr) { ... }` where the loop variable is pre-declared.
 - `break` and `continue` inside `while` and `for` loops.
-- `else if` chaining — already implemented in the parser; this phase adds tests and confirms the full pipeline handles it.
+- `else if` chaining - already implemented in the parser; this phase adds tests and confirms the full pipeline handles it.
 - Numeric casts as type-name calls: `int64(x)`, `float32(x)`, `uint8(x & 0xFF)`.
 
 ## Why this is next
@@ -74,16 +74,16 @@ None of these features require traits, kinds, or generics. Phase 5 (traits) need
 
 ## Scope (what this phase does NOT do)
 
-- **No heap allocation.** Arrays are stack-allocated in v0. `malloc` is available via an extern, but the language has no `new` keyword and no garbage collector. Users who need heap buffers call `malloc`/`free` through externs and use the raw pointer with extern functions directly — no fat-pointer wrapping.
+- **No heap allocation.** Arrays are stack-allocated in v0. `malloc` is available via an extern, but the language has no `new` keyword and no garbage collector. Users who need heap buffers call `malloc`/`free` through externs and use the raw pointer with extern functions directly - no fat-pointer wrapping.
 - **No bounds checking.** `xs[i]` emits a bare GEP + load. Out-of-bounds is UB in v0. Bounds checks come in a future quality pass.
 - **No arrays of arrays** (`int32[][]`). The parser and type system accept the syntax but the typechecker rejects at phase 4 with a clear "nested arrays not yet supported" error.
 - **No slices / subarray syntax.** `xs[a..b]` is reserved syntax per the spec; not in v0.
-- **No `for item in xs` iteration** — that requires the `Iterable` trait (phase 5).
+- **No `for item in xs` iteration** - that requires the `Iterable` trait (phase 5).
 - **No `ref ref T`.** Double refs are rejected by the typechecker.
-- **No `ref T` return type.** Functions may not return a ref — the referenced binding could have expired. This restriction can be loosened when lifetime analysis lands (phase 7+).
+- **No `ref T` return type.** Functions may not return a ref - the referenced binding could have expired. This restriction can be loosened when lifetime analysis lands (phase 7+).
 - **No struct auto-ref unpacking.** `ref point: Point` is not supported as a param modifier in phase 4. `ref` params must have a primitive or array base type. Struct refs come in phase 5 when `self: ref T` is wired up.
 - **No unsafe pointer arithmetic.** The `unsafe_ptr` kind is phase 6.
-- **No cast from/to `string`, `bool`, or struct types** — only numeric primitive ↔ numeric primitive casts.
+- **No cast from/to `string`, `bool`, or struct types** - only numeric primitive ↔ numeric primitive casts.
 - **No array assignment** (`xs[i] = v` is implemented; but `xs = ys` replaces the fat pointer, which works naturally since arrays are value types in the fat-pointer model).
 
 ---
@@ -94,7 +94,7 @@ After phase 3, the compiler has:
 
 - Full module graph, imports/exports, extern FFI.
 - `for` keyword already in the lexer (`for: 20`) but no parser for it.
-- `else if` already works in the parser — `parseIfStatement` recurses via `else if` lookahead at [parser.js:641-643](../src/jsyooparser/parser.js#L641-L643). The typechecker and codegen already handle an IF_STATEMENT whose `elseBody` is itself an IF_STATEMENT.
+- `else if` already works in the parser - `parseIfStatement` recurses via `else if` lookahead at [parser.js:641-643](../src/jsyooparser/parser.js#L641-L643). The typechecker and codegen already handle an IF_STATEMENT whose `elseBody` is itself an IF_STATEMENT.
 - `RefType { inner }` and `ArrayType { elem }` constructors exist in [types.js](../src/jsyooptypecheck/types.js#L112-L113) as placeholders but the typechecker never produces them.
 - Type annotations are stored as plain strings everywhere (`node.type`, `param.type`, `node.returnType`). `resolveTypeFromName(str, structTable)` converts a string to a `Type` object.
 
@@ -110,16 +110,16 @@ Phase 4 needs to:
 
 ## Files touched
 
-- [src/contracts.js](../src/contracts.js) — six new AST node kinds.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — five new tokens.
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parseTypeAnnotation`, for-loop, break, continue, `ref` expressions, array literals, array indexing.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — extend `resolveTypeFromName` to handle annotation objects; add `isCastableTo(src, dst)`, `castInstruction(src, dst)`.
-- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — ref expression, array literal, index expression, cast detection in call resolution.
-- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — for-loop, break, continue; loop-depth tracking on `ctx`.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — ref LLVM emit, array fat-pointer LLVM emit, for-loop LLVM emit, break/continue label threading, cast instruction emit.
-- [src/e2e.test.js](../src/e2e.test.js) — new pass + fail fixtures.
-- [examples/pass/](../examples/pass/) — new programs (§9).
-- [examples/fail/](../examples/fail/) — new negative test programs (§9).
+- [src/contracts.js](../src/contracts.js) - six new AST node kinds.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - five new tokens.
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - `parseTypeAnnotation`, for-loop, break, continue, `ref` expressions, array literals, array indexing.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - extend `resolveTypeFromName` to handle annotation objects; add `isCastableTo(src, dst)`, `castInstruction(src, dst)`.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - ref expression, array literal, index expression, cast detection in call resolution.
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) - for-loop, break, continue; loop-depth tracking on `ctx`.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - ref LLVM emit, array fat-pointer LLVM emit, for-loop LLVM emit, break/continue label threading, cast instruction emit.
+- [src/e2e.test.js](../src/e2e.test.js) - new pass + fail fixtures.
+- [examples/pass/](../examples/pass/) - new programs (§9).
+- [examples/fail/](../examples/fail/) - new negative test programs (§9).
 
 ---
 
@@ -154,7 +154,7 @@ REF_EXPRESSION: "REF_EXPRESSION",
 Why each is separate:
 - `FOR_LOOP` carries three init/cond/step sub-ASTs that a `WHILE_STATEMENT` doesn't have. Reusing `WHILE_STATEMENT` would require nullable fields and special-casing everywhere.
 - `BREAK_STATEMENT` and `CONTINUE_STATEMENT` are zero-payload statements; distinct kinds let the typechecker reject them outside loops without touching unrelated statement handling.
-- `ARRAY_LITERAL` is not a struct literal and not a call — it has an ordered element list with no field names.
+- `ARRAY_LITERAL` is not a struct literal and not a call - it has an ordered element list with no field names.
 - `INDEX_EXPRESSION` is syntactically similar to `FIELD_ACCESS` but takes an expression index, not a name. Sharing the same node kind would pollute every downstream pass.
 - `REF_EXPRESSION` is a unary operator with specific type semantics (`T` → `ref T`). Modeling as `UNARY_EXPRESSION { op: "ref" }` works but makes `resolveUnary` a catch-all for a semantically special form.
 
@@ -189,7 +189,7 @@ Punctuation in `tokenScanList`:
 
 `[` and `]` are single-character and sort correctly among the existing punctuation. No length-ordering issues.
 
-> **`ref` as a keyword.** The spec uses `ref` as both a keyword in parameter lists (`ref n: int32`) and as an expression prefix (`ref n`). Making it a hard keyword removes it as a valid identifier name; the spec implies this — `ref` appears in the reserved-words table (§14). Lock it down now.
+> **`ref` as a keyword.** The spec uses `ref` as both a keyword in parameter lists (`ref n: int32`) and as an expression prefix (`ref n`). Making it a hard keyword removes it as a valid identifier name; the spec implies this - `ref` appears in the reserved-words table (§14). Lock it down now.
 
 > **`break` / `continue` as keywords.** Both appear in the spec's reserved-words table. Hard keywords.
 
@@ -239,7 +239,7 @@ function parseTypeAnnotation() {
 }
 ```
 
-`lookAhead(n)` peeks `n` tokens ahead without consuming — needed here to distinguish `T[` (array type) from `xs[i]` (index expression, but that's in expression position, not type-annotation position — so this lookahead isn't needed, just `lbracket` followed immediately by `rbracket` disambiguates). Actually: in type-annotation position, seeing `[` always means it's an array type, because we only call `parseTypeAnnotation` where a type is expected. So just check for `lbracket` and consume both brackets:
+`lookAhead(n)` peeks `n` tokens ahead without consuming - needed here to distinguish `T[` (array type) from `xs[i]` (index expression, but that's in expression position, not type-annotation position - so this lookahead isn't needed, just `lbracket` followed immediately by `rbracket` disambiguates). Actually: in type-annotation position, seeing `[` always means it's an array type, because we only call `parseTypeAnnotation` where a type is expected. So just check for `lbracket` and consume both brackets:
 
 ```js
 if (peek().tag === TokenTags.lbracket) {
@@ -253,12 +253,12 @@ if (peek().tag === TokenTags.lbracket) {
 
 | Call site | Old field | New field |
 |---|---|---|
-| `parseFunctionParam` — param type | `param.type` | `param.typeAnnotation` |
-| `parseFunctionDecl` / `parseExternFunctionDecl` — return type | `node.returnType` | `node.returnTypeAnnotation` |
-| `parseVarDecl` — let/const type | `node.type` | `node.typeAnnotation` |
-| `parseTypeDecl` — struct field type | `fieldNode.type` | `fieldNode.typeAnnotation` |
+| `parseFunctionParam` - param type | `param.type` | `param.typeAnnotation` |
+| `parseFunctionDecl` / `parseExternFunctionDecl` - return type | `node.returnType` | `node.returnTypeAnnotation` |
+| `parseVarDecl` - let/const type | `node.type` | `node.typeAnnotation` |
+| `parseTypeDecl` - struct field type | `fieldNode.type` | `fieldNode.typeAnnotation` |
 
-`parseIdentAsName()` continues to be used wherever a plain identifier name is needed (declaration names, import specifiers, namespace names) — only type-annotation call sites switch.
+`parseIdentAsName()` continues to be used wherever a plain identifier name is needed (declaration names, import specifiers, namespace names) - only type-annotation call sites switch.
 
 The typechecker's `resolveTypeFromName(name: string, structTable)` is joined by a new function:
 
@@ -277,7 +277,7 @@ export function resolveTypeAnnotation(annot, structTable) {
 }
 ```
 
-Everywhere in the typechecker that previously called `resolveTypeFromName(node.type, ...)`, replace with `resolveTypeAnnotation(node.typeAnnotation, ...)`. The old `resolveTypeFromName` stays for any callers that still pass plain strings (extern decls continue to use `parseIdentAsName` for their type fields — keep those as strings for now; phase 5 can migrate them).
+Everywhere in the typechecker that previously called `resolveTypeFromName(node.type, ...)`, replace with `resolveTypeAnnotation(node.typeAnnotation, ...)`. The old `resolveTypeFromName` stays for any callers that still pass plain strings (extern decls continue to use `parseIdentAsName` for their type fields - keep those as strings for now; phase 5 can migrate them).
 
 ### 3.b `ref` parameter modifier
 
@@ -310,7 +310,7 @@ Slot into `parseAtom` before the general ident path:
 if (peek().tag === TokenTags.ref) {
   advance();
   const node = buildSourcedNode(ASTNodeKind.REF_EXPRESSION);
-  node.operand = parseAtom();   // ref of a field access or ident — no recursive ref
+  node.operand = parseAtom();   // ref of a field access or ident - no recursive ref
   return node;
 }
 ```
@@ -406,7 +406,7 @@ if (peek().tag === TokenTags.lbracket) {
 
 Precedence: array indexing binds tighter than binary operators, same level as field access. Adding it to the postfix loop (which already handles `.field`) is correct.
 
-### 3.g `xs[i] = v` — index assignment
+### 3.g `xs[i] = v` - index assignment
 
 After the postfix loop, the assignment branch already handles `ASSIGNMENT`. An `INDEX_EXPRESSION` as the LHS of an assignment (`xs[i] = v`) is a valid lvalue. The assignment branch currently checks `if the accumulated node is an IDENT or FIELD_ACCESS` before returning an ASSIGNMENT node. Extend the lvalue check to also accept `INDEX_EXPRESSION`:
 
@@ -443,13 +443,13 @@ Additions to [parser.test.js](../src/jsyooparser/parser.test.js):
 
 Reject cases:
 
-- `break;` outside any block — parse succeeds, typechecks fails (not a parser error)
-- `[1, 2,]` (trailing comma) — should be accepted (trailing commas are fine)
-- `for (let i: int32 = 0; ...)` — parse error: expected ident, got `let`
+- `break;` outside any block - parse succeeds, typechecks fails (not a parser error)
+- `[1, 2,]` (trailing comma) - should be accepted (trailing commas are fine)
+- `for (let i: int32 = 0; ...)` - parse error: expected ident, got `let`
 
 ---
 
-## 4. Type system — `resolveTypeAnnotation` ([types.js](../src/jsyooptypecheck/types.js))
+## 4. Type system - `resolveTypeAnnotation` ([types.js](../src/jsyooptypecheck/types.js))
 
 `resolveTypeAnnotation` (described in §3.a) joins the existing `resolveTypeFromName`. All typechecker call sites that previously read `node.type` now read `node.typeAnnotation` and call `resolveTypeAnnotation`.
 
@@ -498,7 +498,7 @@ export function castInstruction(srcType, dstType) {
 
 ---
 
-## 5. Typechecker — `ref` ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js) + [checkStatement.js](../src/jsyooptypecheck/checkStatement.js))
+## 5. Typechecker - `ref` ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js) + [checkStatement.js](../src/jsyooptypecheck/checkStatement.js))
 
 ### 5.a `REF_EXPRESSION` resolution
 
@@ -507,7 +507,7 @@ case ASTNodeKind.REF_EXPRESSION: {
   const operandType = resolveExprType(node.operand, scope, ctx);
   if (operandType.kind === typeKinds.error) return setType(node, ErrorType());
   if (operandType.kind === typeKinds.ref) {
-    pushError(ctx.errors, node, `cannot take ref of a ref — 'ref ref T' is not supported`);
+    pushError(ctx.errors, node, `cannot take ref of a ref - 'ref ref T' is not supported`);
     return setType(node, ErrorType());
   }
   // Only lvalues can be ref'd: IDENT, FIELD_ACCESS, INDEX_EXPRESSION
@@ -527,13 +527,13 @@ case ASTNodeKind.REF_EXPRESSION: {
 
 In `resolveCall`, when checking each argument against the corresponding param type:
 
-- If `param.isRef` is true: the resolved param type is `RefType { inner: baseType }`. The argument must be a `REF_EXPRESSION` whose operand resolves to `baseType`. Plain values are not implicitly ref'd — the user must write `ref x` at every call site.
+- If `param.isRef` is true: the resolved param type is `RefType { inner: baseType }`. The argument must be a `REF_EXPRESSION` whose operand resolves to `baseType`. Plain values are not implicitly ref'd - the user must write `ref x` at every call site.
 
 ```js
 if (param.isRef) {
   if (arg.kind !== ASTNodeKind.REF_EXPRESSION) {
     pushError(ctx.errors, arg,
-      `parameter "${param.name}" expects a ref — pass with 'ref ${arg.kind === ASTNodeKind.IDENT ? arg.name : "..."}'`);
+      `parameter "${param.name}" expects a ref - pass with 'ref ${arg.kind === ASTNodeKind.IDENT ? arg.name : "..."}'`);
     continue;
   }
   const innerType = arg.operand.resolvedType;
@@ -581,20 +581,20 @@ if (binding.type.kind === typeKinds.ref) {
 }
 ```
 
-### 5.d `ref T` return type — rejected
+### 5.d `ref T` return type - rejected
 
 If a function's `returnTypeAnnotation` resolves to `RefType`, reject it at function-validation time:
 
 ```js
 if (resolvedReturnType.kind === typeKinds.ref) {
   pushError(ctx.errors, funcNode,
-    `functions may not return 'ref T' — returning a reference to a local binding is unsafe`);
+    `functions may not return 'ref T' - returning a reference to a local binding is unsafe`);
 }
 ```
 
 ---
 
-## 6. Typechecker — arrays ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js))
+## 6. Typechecker - arrays ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js))
 
 ### 6.a `ARRAY_LITERAL`
 
@@ -668,7 +668,7 @@ For simplicity in v0: both `let` and `const` array bindings allow element assign
 
 ---
 
-## 7. Typechecker — casts ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js))
+## 7. Typechecker - casts ([checkExpr.js](../src/jsyooptypecheck/checkExpr.js))
 
 Casts look like function calls: `int64(x)`. The typechecker intercepts `CALL_EXPRESSION` nodes where the callee is an IDENT whose name resolves to a primitive type name:
 
@@ -690,7 +690,7 @@ function resolveCall(node, scope, ctx) {
       const coerced = coerceLiteralIfNeeded(argType, primType);
       if (!isCastableTo(coerced ?? argType, primType)) {
         pushError(ctx.errors, node,
-          `cannot cast ${formatType(argType)} to ${formatType(primType)} — only numeric primitive casts are supported`);
+          `cannot cast ${formatType(argType)} to ${formatType(primType)} - only numeric primitive casts are supported`);
         return setType(node, primType);
       }
       node.isCast = true;
@@ -708,7 +708,7 @@ function resolveCall(node, scope, ctx) {
 
 ---
 
-## 8. Typechecker — for-loop, break, continue ([checkStatement.js](../src/jsyooptypecheck/checkStatement.js))
+## 8. Typechecker - for-loop, break, continue ([checkStatement.js](../src/jsyooptypecheck/checkStatement.js))
 
 ### 8.a Loop context on `ctx`
 
@@ -736,7 +736,7 @@ case ASTNodeKind.FOR_LOOP: {
   const initBinding = lookupInScope(scope, node.initIdent);
   if (!initBinding) {
     pushError(ctx.errors, node,
-      `for-loop variable "${node.initIdent}" is not declared — declare it before the loop`);
+      `for-loop variable "${node.initIdent}" is not declared - declare it before the loop`);
   } else {
     const initExprType = resolveExprType(node.initExpr, scope, ctx);
     checkAssignable(initBinding.type, initExprType, node, ctx);
@@ -786,7 +786,7 @@ case ASTNodeKind.CONTINUE_STATEMENT:
 
 `WHILE_STATEMENT` must also set `inLoop: true` on the body context. Update `checkWhileStatement` to propagate `loopCtx`.
 
-### 8.d `else if` — already working
+### 8.d `else if` - already working
 
 The parser already recurses for `else if` at [parser.js:641-643](../src/jsyooparser/parser.js#L641-L643). The typechecker's `IF_STATEMENT` handler recursively calls `validateStatement(node.elseBody, ...)` which handles any statement kind, including a nested `IF_STATEMENT`. The codegen similarly recurses. No code changes needed; phase 4 adds tests to confirm.
 
@@ -814,9 +814,9 @@ For each distinct array element type used in a module, emit a named struct type 
 %yoop_array.i64 = type { ptr, i64 }
 ```
 
-These are all the same shape `{ ptr, i64 }` (pointer to elements + length as 64-bit integer). The named types improve IR readability. Track emitted array types in a set (similar to struct deduplication in phase 3) — emit each distinct element-type variant at most once.
+These are all the same shape `{ ptr, i64 }` (pointer to elements + length as 64-bit integer). The named types improve IR readability. Track emitted array types in a set (similar to struct deduplication in phase 3) - emit each distinct element-type variant at most once.
 
-### 9.b `ref` bindings and params — LLVM emit
+### 9.b `ref` bindings and params - LLVM emit
 
 **`ref` local binding** (`let p: ref int32 = ref n`):
 
@@ -885,7 +885,7 @@ if (target.autoDerefWrite) {
 }
 ```
 
-**`ref` params** — when emitting a function definition, a `ref` param uses `ptr` as its LLVM type. The param is stored as a `ptr` in its alloca slot:
+**`ref` params** - when emitting a function definition, a `ref` param uses `ptr` as its LLVM type. The param is stored as a `ptr` in its alloca slot:
 
 ```llvm
 define void @main__increment(ptr %n) {
@@ -895,7 +895,7 @@ define void @main__increment(ptr %n) {
 }
 ```
 
-**`ref` arg at call site** — when `emitCall` sees a `REF_EXPRESSION` arg:
+**`ref` arg at call site** - when `emitCall` sees a `REF_EXPRESSION` arg:
 
 ```js
 if (arg.kind === ASTNodeKind.REF_EXPRESSION) {
@@ -906,7 +906,7 @@ if (arg.kind === ASTNodeKind.REF_EXPRESSION) {
 }
 ```
 
-### 9.c Array fat pointer — LLVM emit
+### 9.c Array fat pointer - LLVM emit
 
 **Array literal** `[1, 2, 3]: int32[]`:
 
@@ -957,9 +957,9 @@ For index types smaller than `i64` (e.g. `int32`), zero/sign-extend to `i64` bef
 store i32 %v_val, ptr %elem_ptr
 ```
 
-`emitLvalueAddress` for INDEX_EXPRESSION extracts the data pointer and returns the GEP result — reused by both the index-expression emitter and the ref-of-index case.
+`emitLvalueAddress` for INDEX_EXPRESSION extracts the data pointer and returns the GEP result - reused by both the index-expression emitter and the ref-of-index case.
 
-### 9.d `FOR_LOOP` — LLVM emit
+### 9.d `FOR_LOOP` - LLVM emit
 
 ```llvm
 ; init
@@ -1011,7 +1011,7 @@ function emitStatement(node, fnLines, ctx) {
     const cond = emitExpr(node.cond, fnLines, ctx);
     fnLines.push(`  br i1 ${cond.val}, label %${bodyLabel}, label %${exitLabel}`);
 
-    // body — with break/continue labels set
+    // body - with break/continue labels set
     fnLines.push(`${bodyLabel}:`);
     const loopCtx = { ...ctx, loopExitLabel: exitLabel, loopContinueLabel: stepLabel };
     emitBlock(node.body, fnLines, loopCtx);
@@ -1075,7 +1075,7 @@ if (node.isCast) {
 
 ## 10. Tests
 
-### 10.1 Pass fixtures — [examples/pass/](../examples/pass/)
+### 10.1 Pass fixtures - [examples/pass/](../examples/pass/)
 
 #### `refs_basic.yoop`
 
@@ -1231,7 +1231,7 @@ function main(): int32 {
 
 Expected: `small=44` (300 & 0xFF = 44). Exercises truncating cast.
 
-### 10.2 Fail fixtures — [examples/fail/](../examples/fail/)
+### 10.2 Fail fixtures - [examples/fail/](../examples/fail/)
 
 | File | Snippet | Expected error |
 |---|---|---|
@@ -1304,7 +1304,7 @@ for (i = 0; i < 10; i = i + 1) {
 }
 ```
 
-The `ctx.inLoop` is `true` inside the `if` body because `inLoop` is carried through recursively. `ctx.loopContinueLabel` points at `for_step_N`. The `continue` emits `br label %for_step_N` — correct.
+The `ctx.inLoop` is `true` inside the `if` body because `inLoop` is carried through recursively. `ctx.loopContinueLabel` points at `for_step_N`. The `continue` emits `br label %for_step_N` - correct.
 
 ### 11.d Dead code after `break` / `continue`
 
@@ -1319,11 +1319,11 @@ The parser accepts this. The typechecker does not reject it (dead-code eliminati
 
 ### 11.e `for` loop with no body execution
 
-`for (i = 0; i < 0; i = i + 1) { ... }` — the condition is false immediately. The emitted IR jumps from `for_cond_N` to `for_exit_N` without executing the body. The step `i = i + 1` also never executes. Correct by the cond-first structure.
+`for (i = 0; i < 0; i = i + 1) { ... }` - the condition is false immediately. The emitted IR jumps from `for_cond_N` to `for_exit_N` without executing the body. The step `i = i + 1` also never executes. Correct by the cond-first structure.
 
 ### 11.f Cast of an untyped literal
 
-`int64(42)` — the literal `42` is `UntypedIntType`. The typechecker coerces it to `int64` directly (same as `let x: int64 = 42`). The cast is a no-op at the IR level. This is fine; codegen emits an `int64` constant directly.
+`int64(42)` - the literal `42` is `UntypedIntType`. The typechecker coerces it to `int64` directly (same as `let x: int64 = 42`). The cast is a no-op at the IR level. This is fine; codegen emits an `int64` constant directly.
 
 ### 11.g `xs.len` used as a `usize` in arithmetic
 
@@ -1331,7 +1331,7 @@ The parser accepts this. The typechecker does not reject it (dead-code eliminati
 let half: usize = xs.len / 2;
 ```
 
-`xs.len` has type `usize` (`i64` in LLVM). The literal `2` is `UntypedIntType`. `unifyArith(usize, untypedInt, "/")` returns `usize`, coercing the literal. Codegen emits `udiv i64 %len, 2`. Correct — `usize` is unsigned, use unsigned division.
+`xs.len` has type `usize` (`i64` in LLVM). The literal `2` is `UntypedIntType`. `unifyArith(usize, untypedInt, "/")` returns `usize`, coercing the literal. Codegen emits `udiv i64 %len, 2`. Correct - `usize` is unsigned, use unsigned division.
 
 ### 11.h `for` step variable different from init variable
 
@@ -1341,7 +1341,7 @@ let j: int32 = 0;
 for (i = 0; i < 10; j = j + 1) { ... }  // step updates j, not i
 ```
 
-This is syntactically valid. The typechecker accepts it (each ident is independently verified to exist). The result is a loop that increments `j` but tests `i` — probably not what the user wanted, but the compiler doesn't enforce that init/step use the same variable. Document this as a known gotcha.
+This is syntactically valid. The typechecker accepts it (each ident is independently verified to exist). The result is a loop that increments `j` but tests `i` - probably not what the user wanted, but the compiler doesn't enforce that init/step use the same variable. Document this as a known gotcha.
 
 ### 11.i Empty array literal in a typed context
 
@@ -1349,13 +1349,13 @@ This is syntactically valid. The typechecker accepts it (each ident is independe
 let xs: int32[] = [];
 ```
 
-The array literal has no elements — element type cannot be inferred from the literal alone. But the declared type `int32[]` provides the context. `checkLetOrConst` passes the declared element type into `checkArrayLiteral(node, elemType, ctx)`. For an empty literal, just check `node.elements.length === 0` and emit a zero-length fat pointer: `insertvalue { undef, i64 0 }`. No buffer alloca needed.
+The array literal has no elements - element type cannot be inferred from the literal alone. But the declared type `int32[]` provides the context. `checkLetOrConst` passes the declared element type into `checkArrayLiteral(node, elemType, ctx)`. For an empty literal, just check `node.elements.length === 0` and emit a zero-length fat pointer: `insertvalue { undef, i64 0 }`. No buffer alloca needed.
 
 Empty arrays without a type annotation (e.g., as an argument to a function or in a struct literal) are rejected with "empty array literal requires explicit type annotation".
 
 ### 11.j Passing an array to a function by value
 
-Arrays are fat pointers `{ ptr, i64 }`. When passed to a function, the fat pointer struct is passed by value (copied). The backing buffer is not copied — the callee gets a fat pointer pointing to the same buffer. This is intentional and per spec ("arrays are fat pointers … passed by value"). Document this: mutating `xs[i]` inside the called function mutates the caller's buffer.
+Arrays are fat pointers `{ ptr, i64 }`. When passed to a function, the fat pointer struct is passed by value (copied). The backing buffer is not copied - the callee gets a fat pointer pointing to the same buffer. This is intentional and per spec ("arrays are fat pointers … passed by value"). Document this: mutating `xs[i]` inside the called function mutates the caller's buffer.
 
 ---
 
@@ -1364,7 +1364,7 @@ Arrays are fat pointers `{ ptr, i64 }`. When passed to a function, the fat point
 - **Heap-allocated arrays.** `malloc` is available via extern; no language-level array heap allocation.
 - **Slice syntax** `xs[a..b]`. Reserved per spec.
 - **Bounds checking.** Out-of-bounds is UB in v0.
-- **`for item in xs`** — trait-driven iteration; phase 5.
+- **`for item in xs`** - trait-driven iteration; phase 5.
 - **Array length change / push / pop.** Arrays are fixed-size once created.
 - **`ref T` return values.** Lifetime tracking needed; phase 7+.
 - **`ref` params on struct types.** Phase 5 (`self` params).
@@ -1390,19 +1390,19 @@ Arrays are fat pointers `{ ptr, i64 }`. When passed to a function, the fat point
 
 Each step keeps prior tests green and is independently bisect-able.
 
-1. **Lexer**: add `ref`, `break`, `continue`, `[`, `]` tokens. Unit test in `lexer.test.js`. No semantic change yet — the parser throws on the new keywords.
+1. **Lexer**: add `ref`, `break`, `continue`, `[`, `]` tokens. Unit test in `lexer.test.js`. No semantic change yet - the parser throws on the new keywords.
 2. **AST kinds**: add six new kinds. No logic change.
-3. **Parser — `parseTypeAnnotation`**: introduce the structured annotation object, migrate all type-annotation call sites. Update typechecker call sites (`resolveTypeAnnotation`). This is the largest change and the riskiest regression — run all existing tests after this step before proceeding. The observable behavior should be identical since `{ kind: "typeName", name: "int32" }` resolves to the same `PrimType("int32")` as before.
-4. **Parser — for / break / continue**: `parseForStatement`, `parseBreakStatement`, `parseContinueStatement`, add to `parseStatement` switch. Parser unit tests from §3.h.
-5. **Parser — ref expression, array literal, array indexing**: extend `parseAtom` and the postfix loop. Parser unit tests.
-6. **Typechecker — casts**: detect type-name calls in `resolveCall`, annotate `node.isCast`. Add `isCastableTo`/`castInstruction` to `types.js`. Unit tests for the helpers. End-to-end `casts.yoop` works.
-7. **Typechecker — `ref`**: `REF_EXPRESSION`, `isRef` param handling, `autoDeref` flags, ref-return rejection. End-to-end `refs_basic.yoop` compiles but codegen not yet wired — it will crash at codegen. That's fine — we can write the typecheck tests first.
-8. **Typechecker — arrays**: `ARRAY_LITERAL`, `xs.len`, `INDEX_EXPRESSION`, `checkLetOrConst` with declared-array-type context. End-to-end `arrays_basic.yoop` not yet compiled.
-9. **Typechecker — for/break/continue**: `inLoop` context, validation. Fail fixtures `break_outside_loop` and `continue_outside_loop` start working.
-10. **Codegen — casts**: `node.isCast` path in `emitCall`. `casts.yoop` works end-to-end.
-11. **Codegen — `ref`**: `emitLvalueAddress`, `REF_EXPRESSION` emitter, `autoDeref` / `autoDerefWrite` paths in `emitIdent` / `emitAssignment`, `ref` param LLVM type. `refs_basic.yoop` and `refs_binding.yoop` work end-to-end.
-12. **Codegen — arrays**: array type registration, `ARRAY_LITERAL` emit, `isArrayLen` in field access, `INDEX_EXPRESSION` emit, index assignment. `arrays_basic.yoop` works end-to-end.
-13. **Codegen — for/break/continue**: `FOR_LOOP` label structure, `loopExitLabel` / `loopContinueLabel` threading, `BREAK_STATEMENT` / `CONTINUE_STATEMENT` emit, wire `loopCtx` into `WHILE_STATEMENT`. `arrays_loop.yoop` and `for_break_continue.yoop` work end-to-end.
+3. **Parser - `parseTypeAnnotation`**: introduce the structured annotation object, migrate all type-annotation call sites. Update typechecker call sites (`resolveTypeAnnotation`). This is the largest change and the riskiest regression - run all existing tests after this step before proceeding. The observable behavior should be identical since `{ kind: "typeName", name: "int32" }` resolves to the same `PrimType("int32")` as before.
+4. **Parser - for / break / continue**: `parseForStatement`, `parseBreakStatement`, `parseContinueStatement`, add to `parseStatement` switch. Parser unit tests from §3.h.
+5. **Parser - ref expression, array literal, array indexing**: extend `parseAtom` and the postfix loop. Parser unit tests.
+6. **Typechecker - casts**: detect type-name calls in `resolveCall`, annotate `node.isCast`. Add `isCastableTo`/`castInstruction` to `types.js`. Unit tests for the helpers. End-to-end `casts.yoop` works.
+7. **Typechecker - `ref`**: `REF_EXPRESSION`, `isRef` param handling, `autoDeref` flags, ref-return rejection. End-to-end `refs_basic.yoop` compiles but codegen not yet wired - it will crash at codegen. That's fine - we can write the typecheck tests first.
+8. **Typechecker - arrays**: `ARRAY_LITERAL`, `xs.len`, `INDEX_EXPRESSION`, `checkLetOrConst` with declared-array-type context. End-to-end `arrays_basic.yoop` not yet compiled.
+9. **Typechecker - for/break/continue**: `inLoop` context, validation. Fail fixtures `break_outside_loop` and `continue_outside_loop` start working.
+10. **Codegen - casts**: `node.isCast` path in `emitCall`. `casts.yoop` works end-to-end.
+11. **Codegen - `ref`**: `emitLvalueAddress`, `REF_EXPRESSION` emitter, `autoDeref` / `autoDerefWrite` paths in `emitIdent` / `emitAssignment`, `ref` param LLVM type. `refs_basic.yoop` and `refs_binding.yoop` work end-to-end.
+12. **Codegen - arrays**: array type registration, `ARRAY_LITERAL` emit, `isArrayLen` in field access, `INDEX_EXPRESSION` emit, index assignment. `arrays_basic.yoop` works end-to-end.
+13. **Codegen - for/break/continue**: `FOR_LOOP` label structure, `loopExitLabel` / `loopContinueLabel` threading, `BREAK_STATEMENT` / `CONTINUE_STATEMENT` emit, wire `loopCtx` into `WHILE_STATEMENT`. `arrays_loop.yoop` and `for_break_continue.yoop` work end-to-end.
 14. **All fail fixtures** in §10.2.
 15. **Test cleanup**: ensure `e2e.test.js` covers all new pass/fail fixtures; run full suite.
 16. **`else if` test**: add `else_if.yoop` to confirm the existing implementation is complete.
@@ -1411,14 +1411,14 @@ Each step keeps prior tests green and is independently bisect-able.
 
 ## 15. Critical files reference
 
-- [SPEC.md §2 — Literals and casts](../SPEC.md), [§3 — Types: refs and arrays](../SPEC.md), [§9 — Loops](../SPEC.md), [§10 — Control flow](../SPEC.md) — re-read before each step.
-- [src/contracts.js](../src/contracts.js) — six new AST node kinds.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — five new tokens.
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parseTypeAnnotation`, type-annotation call-site migration, `parseForStatement`, `parseBreakStatement`, `parseContinueStatement`, ref expression, array literal/indexing.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `resolveTypeAnnotation`, `isCastableTo`, `castInstruction`.
-- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — `REF_EXPRESSION`, `ARRAY_LITERAL`, `INDEX_EXPRESSION`, cast detection in `resolveCall`, `xs.len` in `resolveFieldAccess`.
-- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — `FOR_LOOP`, `BREAK_STATEMENT`, `CONTINUE_STATEMENT`, `inLoop` context, `WHILE_STATEMENT` loop-ctx propagation.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `emitLvalueAddress`, `ref` LLVM patterns, array fat-pointer emit, for-loop label structure, break/continue label threading, cast instruction emit.
-- [src/e2e.test.js](../src/e2e.test.js) — new pass + fail fixtures.
+- [SPEC.md §2 - Literals and casts](../SPEC.md), [§3 - Types: refs and arrays](../SPEC.md), [§9 - Loops](../SPEC.md), [§10 - Control flow](../SPEC.md) - re-read before each step.
+- [src/contracts.js](../src/contracts.js) - six new AST node kinds.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - five new tokens.
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - `parseTypeAnnotation`, type-annotation call-site migration, `parseForStatement`, `parseBreakStatement`, `parseContinueStatement`, ref expression, array literal/indexing.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - `resolveTypeAnnotation`, `isCastableTo`, `castInstruction`.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - `REF_EXPRESSION`, `ARRAY_LITERAL`, `INDEX_EXPRESSION`, cast detection in `resolveCall`, `xs.len` in `resolveFieldAccess`.
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) - `FOR_LOOP`, `BREAK_STATEMENT`, `CONTINUE_STATEMENT`, `inLoop` context, `WHILE_STATEMENT` loop-ctx propagation.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - `emitLvalueAddress`, `ref` LLVM patterns, array fat-pointer emit, for-loop label structure, break/continue label threading, cast instruction emit.
+- [src/e2e.test.js](../src/e2e.test.js) - new pass + fail fixtures.
 - `examples/pass/refs_basic.yoop`, `refs_binding.yoop`, `arrays_basic.yoop`, `arrays_loop.yoop`, `for_break_continue.yoop`, `else_if.yoop`, `casts.yoop`, `casts_truncate.yoop`.
-- `examples/fail/` — `ref_of_literal`, `ref_ref`, `ref_return`, `ref_no_keyword`, `array_wrong_elem`, `array_non_int_index`, `array_nested`, `break_outside_loop`, `continue_outside_loop`, `for_undeclared_var`, `cast_to_string`, `cast_wrong_arity`.
+- `examples/fail/` - `ref_of_literal`, `ref_ref`, `ref_return`, `ref_no_keyword`, `array_wrong_elem`, `array_non_int_index`, `array_nested`, `break_outside_loop`, `continue_outside_loop`, `for_undeclared_var`, `cast_to_string`, `cast_wrong_arity`.

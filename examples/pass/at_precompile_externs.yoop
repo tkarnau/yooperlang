@@ -9,7 +9,7 @@
 // intrinsics that are trivially comptime-safe (yoop_now_ns,
 // yoop_errno_get, yoop_runtime_init/shutdown as no-ops).
 //
-// The library declaration in source is unchanged — the same `extern
+// The library declaration in source is unchanged - the same `extern
 // "C" from library "m"` block produces a linkable extern in normal
 // codegen and a comptime-callable entry under the interpreter.
 

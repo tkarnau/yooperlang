@@ -1,4 +1,4 @@
-// Phase 10.D: `std/log` writes leveled lines to stderr — no special
+// Phase 10.D: `std/log` writes leveled lines to stderr - no special
 // handler registration, no JSON sink yet (those are 10.D follow-ups).
 // The fixture exercises the three free functions and confirms the
 // labels render alongside primitive interpolation.

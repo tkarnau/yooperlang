@@ -1,7 +1,7 @@
-// std/collections/map.yoop — generic hash map.
+// std/collections/map.yoop - generic hash map.
 //
 // `Map<K, V>` is keyed off a `KeyOps<K>` ops struct carrying the
-// hash + equality function pointers — the caller supplies the
+// hash + equality function pointers - the caller supplies the
 // behavior at construction time. This pattern is the language's
 // stand-in for a `Hashable` trait with `Self`-typed `eq`, which yoop
 // doesn't have yet (Phase 5 deferred). Phase 10.X.2 landed the two
@@ -37,8 +37,8 @@ const STATE_OCCUPIED:  uint8 = 1;
 const STATE_TOMBSTONE: uint8 = 2;
 
 // Behavior pack handed to `map_new`. Two function-pointer fields:
-//   * `hash(ref k)` — yields the key's `uint64` hash.
-//   * `eq(a, b)`    — returns true iff the two keys are equal.
+//   * `hash(ref k)` - yields the key's `uint64` hash.
+//   * `eq(a, b)`    - returns true iff the two keys are equal.
 //
 // Defined here rather than in `std/core/traits.yoop` because the
 // language doesn't yet model `Self` in trait sigs (`eq(ref self,
@@ -85,7 +85,7 @@ function bucket_of<K, V>(ref m: Map<K, V>, key: K): usize {
 
 // Probe starting at `start` for the slot that either holds `key`
 // (returned as `Option.Some { value: index }`) or is the first empty
-// slot (returned as `Option.None` — see `find_insert_slot` for the
+// slot (returned as `Option.None` - see `find_insert_slot` for the
 // insert-time variant). Used by `map_get` / `map_contains_key`.
 function find_slot<K, V>(ref m: Map<K, V>, key: K): Option<usize> {
     if (m.cap == 0) { return Option.None; }
@@ -286,7 +286,7 @@ export type MapEntry<K, V> { key: K, value: V }
 // arrays (the fat pointers are copies; the heap data is shared). The
 // iterator is invalidated if the map mutates (a `map_insert` that
 // triggers a rehash relocates the backing buffers, leaving the
-// view dangling) — keep the iter scoped tightly around its loop.
+// view dangling) - keep the iter scoped tightly around its loop.
 export type MapIter<K, V> implements Iterable<MapEntry<K, V>> {
     keys:   K[],
     values: V[],
@@ -370,7 +370,7 @@ export function uint64_key_ops(): KeyOps<uint64> {
     return { hash: uint64_hash_impl, eq: uint64_eq_impl };
 }
 
-// Byte-buffer key (uint8[]) — FNV-1a over the bytes for hashing,
+// Byte-buffer key (uint8[]) - FNV-1a over the bytes for hashing,
 // `bytes_eq` for equality. The keys array stores the fat pointers;
 // the caller is responsible for keeping the backing buffers alive
 // as long as they're map keys (the map holds a borrowing view).

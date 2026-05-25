@@ -1,10 +1,10 @@
-# Phase 5 — Traits
+# Phase 5 - Traits
 
-Part of the [roadmap](./roadmap.md). Phase 4 landed `ref T` for primitives, fat-pointer arrays, the C-style for-loop, `break`/`continue`, and numeric casts. The compiler now has every primitive ingredient it needs to express the **capability layer** described in [SPEC.md §5](../SPEC.md): a way to declare what operations a type supports (`trait Disposable`), a way to attach those operations to a type (`type FileHandle implements Disposable { ... }`), and a way to call them through an explicit `self` parameter (`dispose(ref h)`). This phase is the one place where method-like binding meets static type-driven dispatch — without classes, vtables, or any runtime machinery.
+Part of the [roadmap](./roadmap.md). Phase 4 landed `ref T` for primitives, fat-pointer arrays, the C-style for-loop, `break`/`continue`, and numeric casts. The compiler now has every primitive ingredient it needs to express the **capability layer** described in [SPEC.md §5](../SPEC.md): a way to declare what operations a type supports (`trait Disposable`), a way to attach those operations to a type (`type FileHandle implements Disposable { ... }`), and a way to call them through an explicit `self` parameter (`dispose(ref h)`). This phase is the one place where method-like binding meets static type-driven dispatch - without classes, vtables, or any runtime machinery.
 
 ## Goal
 
-Land a working subset of [SPEC.md §5 — Traits](../SPEC.md) and the call form pinned in [SPEC.md §17.2](../SPEC.md):
+Land a working subset of [SPEC.md §5 - Traits](../SPEC.md) and the call form pinned in [SPEC.md §17.2](../SPEC.md):
 
 ```yoop
 // disposable.yoop
@@ -53,39 +53,39 @@ rc=0 is_open=false
 
 Concretely:
 
-- `trait Foo { function m(ref self): T; ... }` declares a capability — a set of method **signatures** with no bodies. Every method's first parameter is named `self` and must be prefixed `ref`. There are no bare functions, no fields, no associated constants — just signatures.
+- `trait Foo { function m(ref self): T; ... }` declares a capability - a set of method **signatures** with no bodies. Every method's first parameter is named `self` and must be prefixed `ref`. There are no bare functions, no fields, no associated constants - just signatures.
 - `type T implements Foo { fields; function m(ref self): T { body } }` attaches the trait to a struct. Method bodies live inside the type-decl block. Every required trait method must appear with a matching signature; no extra methods are allowed.
 - `type T implements (Foo, Bar) { ... }` (the parenthesized form) implements multiple traits on one type. Every required method of every listed trait must appear; the same method name may not appear in two implemented traits.
 - A trait method is invoked through the **free-function form**: `dispose(ref h)`. The compiler statically resolves the call to a mangled per-type symbol (`@<modId>__FileHandle__dispose`). There is no method-call sugar (`h.dispose()`) in this phase; that's deferred indefinitely.
-- A method body sees `self` as a binding of type `ref T` — exactly like a `ref` parameter from phase 4, except `T` may now be a struct (which phase 4 explicitly deferred, see [phase-4-refs-arrays-control-flow.md §11.b](phase-4-refs-arrays-control-flow.md)). `self.fieldName` reads/writes through the auto-deref.
+- A method body sees `self` as a binding of type `ref T` - exactly like a `ref` parameter from phase 4, except `T` may now be a struct (which phase 4 explicitly deferred, see [phase-4-refs-arrays-control-flow.md §11.b](phase-4-refs-arrays-control-flow.md)). `self.fieldName` reads/writes through the auto-deref.
 - `extends` is rejected with a clear "extends not yet supported" parse error. Generic traits (`trait Foo<T>`) are rejected with "generic traits not yet supported" at the same point.
 
 ## Why this is next
 
-Three reasons — each independently sufficient.
+Three reasons - each independently sufficient.
 
 1. **The kind layer in phase 6 is built on traits.** Spec §6 defines kinds in terms of `requires Trait` and `provides Trait` clauses; the entire `disposable` / `task` / `pooled` story collapses without traits. We need the trait machinery before we can do anything kind-shaped.
 
-2. **Phase 4 left struct-ref machinery on the floor.** Phase 4 deferred `ref T`-where-T-is-a-struct ("ref params on struct types") to phase 5 explicitly because the only motivating use case for them was `ref self`. Pulling them in now keeps the design coherent — the same `emitLvalue` infrastructure that already supports `ref` of an array index becomes the natural way to handle `ref` of a struct.
+2. **Phase 4 left struct-ref machinery on the floor.** Phase 4 deferred `ref T`-where-T-is-a-struct ("ref params on struct types") to phase 5 explicitly because the only motivating use case for them was `ref self`. Pulling them in now keeps the design coherent - the same `emitLvalue` infrastructure that already supports `ref` of an array index becomes the natural way to handle `ref` of a struct.
 
 3. **Disposable is the gateway pattern for FFI safety.** A real program using phase-3 externs (`fopen`, `malloc`, `pthread_create`) needs a way to express "this handle must be cleaned up." Without traits there's no language-level way to say "any value of this type supports `dispose`," so cleanup is hand-rolled on every site. Traits are a prerequisite for the `disposable` kind, but they're already useful on their own.
 
-Phase 5 has a deliberate hard scope cut to keep it tractable: **non-generic, non-extending, no-method-sugar, no-vtables**. Every trait call is statically resolved at compile time to a single mangled symbol; there is no dispatch, no fat pointer, no type erasure. This isn't a stepping-stone toward dynamic dispatch — spec §16 is explicit that classes/inheritance are intentionally absent, and dynamic dispatch is intentionally absent forever in v2. Yooper's polymorphism story is generic functions over trait-bounded type parameters, which lands in phase 7+.
+Phase 5 has a deliberate hard scope cut to keep it tractable: **non-generic, non-extending, no-method-sugar, no-vtables**. Every trait call is statically resolved at compile time to a single mangled symbol; there is no dispatch, no fat pointer, no type erasure. This isn't a stepping-stone toward dynamic dispatch - spec §16 is explicit that classes/inheritance are intentionally absent, and dynamic dispatch is intentionally absent forever in v2. Yooper's polymorphism story is generic functions over trait-bounded type parameters, which lands in phase 7+.
 
 ## Scope (what this phase does NOT do)
 
 - **No generic traits.** `trait Iterable<T>` and `trait Task<T>` are rejected with `generic traits not yet supported` at parse time. Reasoning: every generic trait method's signature would need substitution, and the substitution machinery is shared with user-defined generic types (deferred per spec §3). Doing both at once is a quagmire; doing neither means a much smaller phase 5.
 - **No `extends` chaining.** `trait BatchIterable<T> extends Iterable<T>` is rejected with `extends not yet supported`. Reasoning: `extends` requires the same generic substitution path *and* introduces a sub-trait obligation. Dropping it costs us nothing for `Disposable`/`Closable`-shaped traits and removes a tier of complexity from the resolver.
 - **No method-call sugar.** `h.dispose()` is rejected at typecheck. Per [SPEC.md §17.2](../SPEC.md) the v2 picks free-function form; revisit only if it feels wrong in practice.
-- **No same-name collisions.** A type cannot implement two traits whose method names overlap, even if the signatures match. The free-function call form has no path syntax to disambiguate (`Trait::method(x)` is not a valid form), so the only sane option is to forbid the collision at typecheck. Same rule applies between trait method names and module-level free-function names — the call site `dispose(ref x)` must resolve unambiguously.
+- **No same-name collisions.** A type cannot implement two traits whose method names overlap, even if the signatures match. The free-function call form has no path syntax to disambiguate (`Trait::method(x)` is not a valid form), so the only sane option is to forbid the collision at typecheck. Same rule applies between trait method names and module-level free-function names - the call site `dispose(ref x)` must resolve unambiguously.
 - **No bare impl block / no methods on types without `implements`.** Spec §7 is explicit: "There is no bare `impl` block; a method always implements a trait." Writing `type T { fields; function m(ref self): void { ... } }` (no `implements` clause) is a parse error: `methods are only allowed inside an 'implements' block`.
 - **No `Self` keyword.** A method whose return type or param refers to the implementing type uses the explicit type name (`function clone(ref self): FileHandle`), not `Self`. Generic `Self` is bundled with generic traits and lands together later.
-- **No dynamic dispatch / no trait objects.** Per spec §16 — there is no `dyn Disposable`, no fat pointer with vtable. Every trait call resolves to exactly one mangled symbol at compile time.
+- **No dynamic dispatch / no trait objects.** Per spec §16 - there is no `dyn Disposable`, no fat pointer with vtable. Every trait call resolves to exactly one mangled symbol at compile time.
 - **No default method bodies.** Trait declarations only carry signatures. A method with a body inside `trait Foo { ... }` is rejected.
 - **No `provides` semantics for kinds.** That's phase 6.
 - **No trait-bound generics (`function f<T implements Foo>(...)`).** Phase 7+, when user generics land.
 - **No introspection / "does T implement Foo".** No syntactic form for it.
-- **No orphan impls.** A trait may only be implemented on a struct declared in the same module — `type T implements Trait` declares a *new* type, not an extension of an imported one (see §8.j).
+- **No orphan impls.** A trait may only be implemented on a struct declared in the same module - `type T implements Trait` declares a *new* type, not an extension of an imported one (see §8.j).
 
 ---
 
@@ -96,17 +96,17 @@ After phase 4, the compiler has everything it needs:
 - Full module graph + extern FFI from phase 3.
 - `ref T` lvalues, fat-pointer arrays, for-loops, casts from phase 4. `RefType { inner }` already produces correct LLVM `ptr` lowering for primitive `inner`.
 - `emitLvalue` ([codegen.js:246](../src/jsyoopcodegen/codegen.js#L246)) returns `{ ptr, type }` for `IDENT`, `FIELD_ACCESS`, `INDEX_EXPRESSION`. Field-GEP machinery is already in place.
-- `resolveCall` ([checkExpr.js:145](../src/jsyooptypecheck/checkExpr.js#L145)) and `resolveCallType` ([checkExpr.js:674](../src/jsyooptypecheck/checkExpr.js#L674)) already understand `param.isRef` — they require an explicit `REF_EXPRESSION` at the call site and verify the inner type. This logic is reused unchanged for trait method calls.
+- `resolveCall` ([checkExpr.js:145](../src/jsyooptypecheck/checkExpr.js#L145)) and `resolveCallType` ([checkExpr.js:674](../src/jsyooptypecheck/checkExpr.js#L674)) already understand `param.isRef` - they require an explicit `REF_EXPRESSION` at the call site and verify the inner type. This logic is reused unchanged for trait method calls.
 - Multi-module typechecking is multi-pass with shells in pass A, struct fields in pass C, and bodies in pass D ([typecheck.js](../src/jsyooptypecheck/typecheck.js)). Trait decls slot in cleanly as a new shell-then-resolve-then-validate triple.
 - LLVM struct-name mangling is already moduleId-prefixed. The same mangle pattern extends naturally to method symbols.
 
 The five things that don't yet exist:
 
-1. The keywords `trait`, `implements`, `self`, and `extends` — none are in `keywordTagList` ([lexer.js:124-144](../src/jsyooplexer/lexer.js#L124)).
+1. The keywords `trait`, `implements`, `self`, and `extends` - none are in `keywordTagList` ([lexer.js:124-144](../src/jsyooplexer/lexer.js#L124)).
 2. AST kinds for trait declarations and method blocks ([contracts.js](../src/contracts.js) has no `TRAIT_DECL` / `METHOD_DECL` / `METHOD_SIG`).
 3. A `TraitType` in the type system ([types.js](../src/jsyooptypecheck/types.js) has no `typeKinds.trait`).
 4. The `implements` clause and the body extension on `parseTypeDecl` ([parser.js:795](../src/jsyooparser/parser.js#L795) currently only parses fields).
-5. The `ref T` codegen path for *struct* `T` — `emitLvalue` works for `T` = struct already, but `emitIdent` ([codegen.js:436](../src/jsyoopcodegen/codegen.js#L436)) only emits auto-deref load for primitive `inner`. We need to also handle struct `inner` (load the pointer once, then either return it as a struct value or use it as the base of a field GEP).
+5. The `ref T` codegen path for *struct* `T` - `emitLvalue` works for `T` = struct already, but `emitIdent` ([codegen.js:436](../src/jsyoopcodegen/codegen.js#L436)) only emits auto-deref load for primitive `inner`. We need to also handle struct `inner` (load the pointer once, then either return it as a struct value or use it as the base of a field GEP).
 
 Phase 5 fills exactly those five gaps. Everything else builds on what's already there.
 
@@ -114,17 +114,17 @@ Phase 5 fills exactly those five gaps. Everything else builds on what's already 
 
 ## Files touched
 
-- [src/contracts.js](../src/contracts.js) — three new AST kinds: `TRAIT_DECL`, `METHOD_SIG`, `METHOD_DECL`. Plus an `implements` array and `methods` array on `TYPE_DECL`.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — three new keywords (`trait`, `implements`, `self`); one keyword added solely to reject (`extends`).
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parseTraitDecl`, extended `parseTypeDecl`, `parseMethodSig`, `parseMethodDecl`, top-level dispatch grows.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `TraitType`, extended `StructType` (carries `implementsTraits: [TraitType]` and `methods: Map<name, FuncType>`).
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — new pass for trait shells; extended struct-shell pass for `implements`; new `validateImplBlock` invoked during pass C; extended pass D walks each impl method body.
-- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — `validateMethod(decl, structType, ctx, ...)` parallel to `validateFunction`. Pushes `self` into scope as a `ref T` binding before walking body.
-- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — `resolveCall` learns to dispatch to a per-type method when the free-function lookup misses; `resolveIdent` rejects `self` outside trait/impl context.
-- [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) — `kind: "trait"` import classification.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `emitMethod()` parallel to `emitFunction`, mangled `${moduleId}__${TypeName}__${methodName}`. `emitIdent` and `emitLvalue` extended to read `ref T` for struct `T`. `emitCall` looks at a new `node.calleeMethodOf` field set by the typechecker.
-- [src/e2e.test.js](../src/e2e.test.js) — new pass + fail fixtures.
-- [examples/pass/](../examples/pass/) and [examples/fail/](../examples/fail/) — see §7.
+- [src/contracts.js](../src/contracts.js) - three new AST kinds: `TRAIT_DECL`, `METHOD_SIG`, `METHOD_DECL`. Plus an `implements` array and `methods` array on `TYPE_DECL`.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - three new keywords (`trait`, `implements`, `self`); one keyword added solely to reject (`extends`).
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - `parseTraitDecl`, extended `parseTypeDecl`, `parseMethodSig`, `parseMethodDecl`, top-level dispatch grows.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - `TraitType`, extended `StructType` (carries `implementsTraits: [TraitType]` and `methods: Map<name, FuncType>`).
+- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) - new pass for trait shells; extended struct-shell pass for `implements`; new `validateImplBlock` invoked during pass C; extended pass D walks each impl method body.
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) - `validateMethod(decl, structType, ctx, ...)` parallel to `validateFunction`. Pushes `self` into scope as a `ref T` binding before walking body.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - `resolveCall` learns to dispatch to a per-type method when the free-function lookup misses; `resolveIdent` rejects `self` outside trait/impl context.
+- [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) - `kind: "trait"` import classification.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - `emitMethod()` parallel to `emitFunction`, mangled `${moduleId}__${TypeName}__${methodName}`. `emitIdent` and `emitLvalue` extended to read `ref T` for struct `T`. `emitCall` looks at a new `node.calleeMethodOf` field set by the typechecker.
+- [src/e2e.test.js](../src/e2e.test.js) - new pass + fail fixtures.
+- [examples/pass/](../examples/pass/) and [examples/fail/](../examples/fail/) - see §7.
 
 ---
 
@@ -170,7 +170,7 @@ Existing `TYPE_DECL` grows two fields:
 ```js
 TYPE_DECL: {
   // ... existing: name, fields, targetType
-  implements: [string],        // raw trait names from the source — empty array if no implements clause
+  implements: [string],        // raw trait names from the source - empty array if no implements clause
   methods:    [METHOD_DECL],   // empty array if no methods
   // ... resolvedType still set in pass C; will now carry implementsTraits + methods on the StructType too
 }
@@ -202,7 +202,7 @@ self:       TokenTags.self,
 extends:    TokenTags.extends,
 ```
 
-> **`self` as a hard keyword.** The framing called `self` "contextual." After looking at how this lexer works — keywords are a flat lookup from `keywordTagList` — making `self` contextual would require either threading parser state into `lex()` (a layering inversion) or running a post-lex sweep that re-tags `self` based on syntactic position. Both are more code than promoting `self` to a hard keyword and tolerating the cost of one fewer identifier name. Anyone trying to use `self` as an unrelated identifier gets a parse error, which is friendlier than a confusing typecheck error 200 lines later. The spec's reserved-words list at [SPEC.md §14](../SPEC.md) doesn't mention `self`, but it doesn't mention `function` either — the table is incomplete. Lock `self` down now. See §11.a for the design discussion.
+> **`self` as a hard keyword.** The framing called `self` "contextual." After looking at how this lexer works - keywords are a flat lookup from `keywordTagList` - making `self` contextual would require either threading parser state into `lex()` (a layering inversion) or running a post-lex sweep that re-tags `self` based on syntactic position. Both are more code than promoting `self` to a hard keyword and tolerating the cost of one fewer identifier name. Anyone trying to use `self` as an unrelated identifier gets a parse error, which is friendlier than a confusing typecheck error 200 lines later. The spec's reserved-words list at [SPEC.md §14](../SPEC.md) doesn't mention `self`, but it doesn't mention `function` either - the table is incomplete. Lock `self` down now. See §11.a for the design discussion.
 
 > **`extends` as a hard keyword.** Lex it so the parser can produce `extends not yet supported` instead of the generic `unexpected token: ident "extends"`. Negligible cost.
 
@@ -281,7 +281,7 @@ function parseMethodSig() {
   node.name = parseIdentAsName();
   expect(TokenTags.lparen);
 
-  // First param MUST be `ref self` — enforced syntactically.
+  // First param MUST be `ref self` - enforced syntactically.
   if (peek().tag !== TokenTags.ref) {
     throw parseError(
       `trait method "${node.name}" must take 'ref self' as its first parameter`,
@@ -317,7 +317,7 @@ function parseMethodSig() {
 }
 ```
 
-The `{ kind: "selfType" }` placeholder is recognized by `resolveTypeAnnotation` only inside trait/method context — outside that context it's a typecheck bug. In a trait, `selfType` resolves to a `TraitSelfPlaceholder`; in a method body, `selfType` resolves to the implementing struct type itself.
+The `{ kind: "selfType" }` placeholder is recognized by `resolveTypeAnnotation` only inside trait/method context - outside that context it's a typecheck bug. In a trait, `selfType` resolves to a `TraitSelfPlaceholder`; in a method body, `selfType` resolves to the implementing struct type itself.
 
 ### 3.c `parseTypeDecl` extension
 
@@ -329,7 +329,7 @@ function parseTypeDecl() {
   const node = buildSourcedNode(ASTNodeKind.TYPE_DECL);
   node.name = parseIdentAsName();
 
-  // implements clause — single name OR parenthesized list
+  // implements clause - single name OR parenthesized list
   node.implements = [];
   if (peek().tag === TokenTags.implements) {
     advance();
@@ -365,14 +365,14 @@ function parseTypeDecl() {
     }
     expect(TokenTags.rcurly);
   } else {
-    // type alias path — preserved from before.
+    // type alias path - preserved from before.
     node.targetType = parseIdentAsName();
   }
 
   // Constraint: methods only allowed when implements is non-empty.
   if (node.methods?.length > 0 && node.implements.length === 0) {
     throw parseError(
-      `methods are only allowed inside an 'implements' block — type "${node.name}" has methods but no 'implements' clause`,
+      `methods are only allowed inside an 'implements' block - type "${node.name}" has methods but no 'implements' clause`,
     );
   }
 
@@ -418,13 +418,13 @@ function parseMethodDecl() {
 }
 ```
 
-A subtle point: a `field` can only start with an ident, and a `method` can only start with `function`. There's no ambiguity between `fd: int32,` (field) and `function dispose(ref self): void { ... }` (method) — the keyword distinguishes them. Trailing commas after fields keep the existing flexibility.
+A subtle point: a `field` can only start with an ident, and a `method` can only start with `function`. There's no ambiguity between `fd: int32,` (field) and `function dispose(ref self): void { ... }` (method) - the keyword distinguishes them. Trailing commas after fields keep the existing flexibility.
 
-### 3.d Method-call sugar — typecheck reject
+### 3.d Method-call sugar - typecheck reject
 
-`h.dispose()` parses as `CALL_EXPRESSION { callee: FIELD_ACCESS { object: IDENT("h"), field: "dispose" }, args: [] }` — already a parseable shape after phase 3 (namespace calls). Phase 5 needs the typechecker (not the parser) to recognize this and reject it cleanly:
+`h.dispose()` parses as `CALL_EXPRESSION { callee: FIELD_ACCESS { object: IDENT("h"), field: "dispose" }, args: [] }` - already a parseable shape after phase 3 (namespace calls). Phase 5 needs the typechecker (not the parser) to recognize this and reject it cleanly:
 
-> "method-call form `h.dispose()` is not supported in this version — write `dispose(ref h)` instead"
+> "method-call form `h.dispose()` is not supported in this version - write `dispose(ref h)` instead"
 
 Doing this at typecheck rather than at parse is necessary because the same parse shape is used legitimately for namespace calls (`io.greet("hi")`); only at typecheck do we know whether the LHS is a namespace (allowed) or a struct (rejected). See §5.g.
 
@@ -444,9 +444,9 @@ if (peek().tag === TokenTags.self) {
 
 The typechecker enforces the rule that `self` is only legal as an identifier inside a method-decl context (§5.f). Outside that context, `self` parses fine but typecheck-fails with a clear message.
 
-> **Why parse `self` as an IDENT-shaped node?** The downstream code already handles `IDENT { name: ... }` everywhere — `resolveIdent`, `resolveAssignmentToIdent`, `resolveFieldAccess` of `IDENT`. Giving `self` a special AST kind would force every one of those functions to switch on it. Treating it as IDENT and gating its use in `resolveIdent` is one extra branch.
+> **Why parse `self` as an IDENT-shaped node?** The downstream code already handles `IDENT { name: ... }` everywhere - `resolveIdent`, `resolveAssignmentToIdent`, `resolveFieldAccess` of `IDENT`. Giving `self` a special AST kind would force every one of those functions to switch on it. Treating it as IDENT and gating its use in `resolveIdent` is one extra branch.
 
-### 3.f Parser test cases — accept
+### 3.f Parser test cases - accept
 
 Add to [parser.test.js](../src/jsyooparser/parser.test.js):
 
@@ -455,10 +455,10 @@ Add to [parser.test.js](../src/jsyooparser/parser.test.js):
 - `type FileHandle implements Disposable { fd: int32, function dispose(ref self): void { } }` produces `TYPE_DECL { implements: ["Disposable"], fields: [FIELD_DECL { name: "fd" }], methods: [METHOD_DECL { name: "dispose", body: BLOCK }] }`.
 - `type Channel implements (Disposable, Closable) { ... }` produces `implements: ["Disposable", "Closable"]`.
 - A method body using `self.count`: parses as `FIELD_ACCESS { object: IDENT { name: "self" }, field: "count" }`.
-- A method that calls another method: `function f(ref self): void { g(ref self); } function g(ref self): void { }` — the `g(ref self)` is just a `CALL_EXPRESSION`, no special parser handling.
+- A method that calls another method: `function f(ref self): void { g(ref self); } function g(ref self): void { }` - the `g(ref self)` is just a `CALL_EXPRESSION`, no special parser handling.
 - Trailing comma between fields and methods: `type T implements Foo { x: int32, function m(ref self): void { } }` parses cleanly.
 
-### 3.g Parser test cases — reject
+### 3.g Parser test cases - reject
 
 - `trait Iter<T> { ... }` → `generic traits not yet supported`
 - `trait Sub extends Super { ... }` → `extends not yet supported`
@@ -467,7 +467,7 @@ Add to [parser.test.js](../src/jsyooparser/parser.test.js):
 - `trait Foo { function dispose(ref self): void { /* body */ } }` → `expected semicolon, got lcurly` (from `parseMethodSig`'s trailing `expect(semicolon)`).
 - `type T { function m(ref self): void { } }` (methods without `implements`) → `methods are only allowed inside an 'implements' block`.
 - `type T implements Foo { function m(self): void { } }` → `method "m" must take 'ref self' as its first parameter`.
-- `type T implements (A,) { ... }` (trailing comma in implements list) — accepted, mirrors the struct field trailing-comma rule.
+- `type T implements (A,) { ... }` (trailing comma in implements list) - accepted, mirrors the struct field trailing-comma rule.
 
 ---
 
@@ -483,7 +483,7 @@ export const typeKinds = {
   trait: "trait",   // new
 };
 
-// methods: Map<string, FuncType> — every trait method has signature
+// methods: Map<string, FuncType> - every trait method has signature
 // (params: [{name, type, isRef}], returnType, variadic: false)
 // where params[0] is { name: "self", type: RefType { inner: TraitSelfPlaceholder }, isRef: true }
 export const TraitSelfPlaceholder = Object.freeze({ kind: "trait_self_placeholder" });
@@ -497,8 +497,8 @@ The `TraitSelfPlaceholder` is **only** legal inside a `RefType { inner }` slot o
 ### 4.b `StructType` extension
 
 ```js
-// implementsTraits: [TraitType] — set in pass C.3 from TYPE_DECL.implements
-// methods: Map<string, FuncType> — for each method this type implements,
+// implementsTraits: [TraitType] - set in pass C.3 from TYPE_DECL.implements
+// methods: Map<string, FuncType> - for each method this type implements,
 //   the resolved per-type signature (with self-substitution applied).
 //   The Map keys are method names; codegen uses them with the type's name to
 //   build the mangled symbol "<modId>__<TypeName>__<methodName>".
@@ -506,11 +506,11 @@ export const StructType = (name, fields, moduleId = null, implementsTraits = [],
   freezerWrap(typeKinds.struct, { name, fields, moduleId, implementsTraits, methods });
 ```
 
-Backwards-compat: existing call sites (phase 1–4 single-arg or 3-arg calls) get empty `implementsTraits` and empty `methods`. `typesEqual` doesn't change for structs — struct identity is still nominal-by-name + module.
+Backwards-compat: existing call sites (phase 1–4 single-arg or 3-arg calls) get empty `implementsTraits` and empty `methods`. `typesEqual` doesn't change for structs - struct identity is still nominal-by-name + module.
 
 > **Why a `Map<string, FuncType>` and not just an array?** Lookup-by-name dominates: every trait call site asks "does this type have a method named `dispose`?" An O(1) map keeps the resolver simple.
 
-### 4.c `resolveTypeAnnotation` — `selfType` sentinel
+### 4.c `resolveTypeAnnotation` - `selfType` sentinel
 
 ```js
 export function resolveTypeAnnotation(annot, structTable, ctx) {
@@ -543,7 +543,7 @@ The `ctx.selfType` is:
 - `TraitSelfPlaceholder` when resolving a `METHOD_SIG` inside a `TRAIT_DECL`.
 - the `StructType` `T` when resolving a `METHOD_DECL` inside `type T implements Foo { ... }`.
 
-The existing 2-arg call sites stay as-is — `ctx` is optional.
+The existing 2-arg call sites stay as-is - `ctx` is optional.
 
 ### 4.d `formatType` for traits
 
@@ -565,7 +565,7 @@ if (a.kind === typeKinds.trait) {
 }
 ```
 
-Trait method comparing for sig-equivalence (during impl-block validation) uses `typesEqual` on each param type and the return type — that path already works.
+Trait method comparing for sig-equivalence (during impl-block validation) uses `typesEqual` on each param type and the return type - that path already works.
 
 ---
 
@@ -580,7 +580,7 @@ The current pass structure is A (shells) → B (imports) → C (struct fields, f
   - **C.1**: struct field resolution + trait method signature resolution (uses `TraitSelfPlaceholder`).
   - **C.2**: function signature resolution + extern function resolution. Functions need fully-resolved struct types as parameter types.
   - **C.3**: `validateImplBlock` for every `TYPE_DECL` with non-empty `implements`. Needs both struct fields (C.1) and trait method sigs (C.1) resolved, *and* `localSymbols` populated for the no-collision-with-free-functions rule (C.2).
-- **Pass C.5** continues to handle imported names — extended to also re-sync imported `TraitType`s.
+- **Pass C.5** continues to handle imported names - extended to also re-sync imported `TraitType`s.
 - **Pass D** is unchanged for free functions; for each `TYPE_DECL` with `implements` non-empty, walks each `METHOD_DECL` body via a new `validateMethod()`.
 
 Order: A → B → C.1 → C.2 → C.3 → C.5 → D.
@@ -595,7 +595,7 @@ Concretely, `moduleEnv` per module grows:
 }
 ```
 
-### 5.b Pass A — trait shells
+### 5.b Pass A - trait shells
 
 Walk each `mod.ast.body`. For each `TRAIT_DECL d` (or `EXPORT_DECL { decl: TRAIT_DECL }`):
 
@@ -610,9 +610,9 @@ if (d.kind === ASTNodeKind.TRAIT_DECL) {
 }
 ```
 
-A trait name shares the same namespace as struct names and free function names — the redeclaration check is a flat "any name already exists?" guard. This is consistent with how `function foo` and `type foo` collide today.
+A trait name shares the same namespace as struct names and free function names - the redeclaration check is a flat "any name already exists?" guard. This is consistent with how `function foo` and `type foo` collide today.
 
-### 5.c Pass C.1 — trait method signatures
+### 5.c Pass C.1 - trait method signatures
 
 For each `TRAIT_DECL`, build a per-trait `FuncType` for each `METHOD_SIG`, with the self-inner set to `TraitSelfPlaceholder`. Store on the trait's `methods` map:
 
@@ -644,7 +644,7 @@ for (const decl of mod.ast.body) {
 
 The trait's `methods` map after this pass holds `FuncType`s where `params[0].type === RefType { inner: TraitSelfPlaceholder }`. Substitution happens later.
 
-### 5.d Pass C.3 — impl-block validation
+### 5.d Pass C.3 - impl-block validation
 
 For each `TYPE_DECL` with non-empty `implements`:
 
@@ -685,7 +685,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
       if (requiredMethods.has(methodName) &&
           requiredMethods.get(methodName).traitName !== trait.name) {
         errors.push({
-          message: `type "${typeDecl.name}" cannot implement both "${requiredMethods.get(methodName).traitName}" and "${trait.name}" — both require method "${methodName}"`,
+          message: `type "${typeDecl.name}" cannot implement both "${requiredMethods.get(methodName).traitName}" and "${trait.name}" - both require method "${methodName}"`,
           sourceLoc: typeDecl.sourceLoc,
         });
         continue;
@@ -710,7 +710,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors) {
     // Collision with free function in same module:
     if (env.localSymbols.has(methodDecl.name)) {
       errors.push({
-        message: `method "${methodDecl.name}" on type "${typeDecl.name}" collides with module-level function "${methodDecl.name}" — rename one`,
+        message: `method "${methodDecl.name}" on type "${typeDecl.name}" collides with module-level function "${methodDecl.name}" - rename one`,
         sourceLoc: methodDecl.sourceLoc,
       });
     }
@@ -778,7 +778,7 @@ function substituteSelfInSig(traitSig, thisStruct) {
 
 `sigsEqual(a, b)` compares two `FuncType`s (param types in order + return type). The existing `typesEqual` already handles `FuncType`.
 
-### 5.e Pass C.5 — re-sync imported traits
+### 5.e Pass C.5 - re-sync imported traits
 
 The current pass C.5 re-syncs imported value and type names. Add a third branch for imported traits:
 
@@ -792,11 +792,11 @@ The current pass C.5 re-syncs imported value and type names. Add a third branch 
 }
 ```
 
-The `imports.js` module (`resolveImports`) gets a parallel branch when classifying imported export kinds: if `sourceMod.traitTable.has(exportName)`, set `kind: "trait"`. The receiving module's import overlay treats trait imports as type-position-only — a trait name appears only after `implements`, never as a value or annotation.
+The `imports.js` module (`resolveImports`) gets a parallel branch when classifying imported export kinds: if `sourceMod.traitTable.has(exportName)`, set `kind: "trait"`. The receiving module's import overlay treats trait imports as type-position-only - a trait name appears only after `implements`, never as a value or annotation.
 
-### 5.f Pass D — body validation (`validateMethod`)
+### 5.f Pass D - body validation (`validateMethod`)
 
-`validateMethod(decl, structType, ctx, errors)` — parallel to `validateFunction` in [checkStatement.js](../src/jsyooptypecheck/checkStatement.js). Before walking the body, push a `self` binding into the function-body scope:
+`validateMethod(decl, structType, ctx, errors)` - parallel to `validateFunction` in [checkStatement.js](../src/jsyooptypecheck/checkStatement.js). Before walking the body, push a `self` binding into the function-body scope:
 
 ```js
 export function validateMethod(decl, structType, ctx, errors) {
@@ -826,12 +826,12 @@ export function validateMethod(decl, structType, ctx, errors) {
 
 Where the body uses `self`:
 
-- **`self` as a bare ident** — `resolveIdent` finds the `self` binding, sees `type.kind === typeKinds.ref`, sets `node.autoDeref = true` (existing infrastructure from phase 4), returns the inner struct type. Same path that already works for `let p: ref int32`.
-- **`self.field`** — `FIELD_ACCESS` against an IDENT whose resolved type is the struct type (post auto-deref). Existing `resolveFieldAccess` handles this without modification.
-- **`self.field = expr`** — `resolveAssignmentToField` traces the field root, sees `self`'s binding type is `ref T`, applies the auto-deref-write logic that already exists for primitive `ref` bindings ([checkExpr.js:336](../src/jsyooptypecheck/checkExpr.js#L336)). Codegen handles the dereference at emit time (§6.b).
-- **`self` outside a method body** — `resolveIdent` finds no `self` in scope. Improve the error: in `resolveIdent`, if the lookup miss is on the literal name `"self"`, push a more specific message: "the keyword 'self' can only be used inside a trait method body".
+- **`self` as a bare ident** - `resolveIdent` finds the `self` binding, sees `type.kind === typeKinds.ref`, sets `node.autoDeref = true` (existing infrastructure from phase 4), returns the inner struct type. Same path that already works for `let p: ref int32`.
+- **`self.field`** - `FIELD_ACCESS` against an IDENT whose resolved type is the struct type (post auto-deref). Existing `resolveFieldAccess` handles this without modification.
+- **`self.field = expr`** - `resolveAssignmentToField` traces the field root, sees `self`'s binding type is `ref T`, applies the auto-deref-write logic that already exists for primitive `ref` bindings ([checkExpr.js:336](../src/jsyooptypecheck/checkExpr.js#L336)). Codegen handles the dereference at emit time (§6.b).
+- **`self` outside a method body** - `resolveIdent` finds no `self` in scope. Improve the error: in `resolveIdent`, if the lookup miss is on the literal name `"self"`, push a more specific message: "the keyword 'self' can only be used inside a trait method body".
 
-### 5.g `resolveCall` — trait method dispatch
+### 5.g `resolveCall` - trait method dispatch
 
 `resolveCall` ([checkExpr.js:145](../src/jsyooptypecheck/checkExpr.js#L145)) currently handles: cast → namespace call → printf legacy → free function via `moduleSymbols`. Add **trait method resolution** between the free-function lookup and the unknown-function error:
 
@@ -842,7 +842,7 @@ if (sig) {
   // ... existing path
 }
 
-// Free function not found — try trait method dispatch.
+// Free function not found - try trait method dispatch.
 // Rule: callee is a string, args.length >= 1, args[0] is a REF_EXPRESSION
 // whose operand has type T-where-T-is-a-struct, and T's StructType.methods
 // contains `callee`.
@@ -856,23 +856,23 @@ if (typeof callee === "string" && node.args.length >= 1) {
       node.calleeMethodOf = operandType;
       node.calleeMangledName = `${operandType.moduleId}__${operandType.name}__${callee}`;
       // Reuse the existing call-resolution to check params + return.
-      // The first param is `ref self: T` — we already know the operand
+      // The first param is `ref self: T` - we already know the operand
       // matches; the rest of resolveCallType handles params 1..N.
       return resolveCallType(node, methodSig, scope, ctx);
     }
   }
 }
 
-// Unknown function — original error path.
+// Unknown function - original error path.
 pushError(ctx.errors, node, `unknown function "${callee}"`);
 return setType(node, ErrorType());
 ```
 
 A few edge cases:
 
-- **Self-referential method calls.** Inside `validateMethod` for `T.dispose`, a call to `dispose(ref self)` finds no `dispose` in `localSymbols` (none of the methods are registered as free functions — that's the point), then tries trait dispatch. `firstArg.operand` is `IDENT { name: "self" }`, `resolveExprType` returns `T` (auto-deref'd), and `T.methods.has("dispose")` is true. Resolves correctly.
-- **Method on an imported type.** Pass C.5 makes the imported `StructType` reference the same canonical object — `methods` map is preserved. The `node.calleeMangledName` correctly points at the *defining* module's mangled symbol.
-- **Method-call sugar reject.** If `node.callee` is a `FIELD_ACCESS` (object form, like `h.dispose()`), the existing namespace-call branch tries to resolve the callee. If the LHS is a struct value (not a namespace), emit "method-call form `h.dispose()` is not supported — use `dispose(ref h)` instead".
+- **Self-referential method calls.** Inside `validateMethod` for `T.dispose`, a call to `dispose(ref self)` finds no `dispose` in `localSymbols` (none of the methods are registered as free functions - that's the point), then tries trait dispatch. `firstArg.operand` is `IDENT { name: "self" }`, `resolveExprType` returns `T` (auto-deref'd), and `T.methods.has("dispose")` is true. Resolves correctly.
+- **Method on an imported type.** Pass C.5 makes the imported `StructType` reference the same canonical object - `methods` map is preserved. The `node.calleeMangledName` correctly points at the *defining* module's mangled symbol.
+- **Method-call sugar reject.** If `node.callee` is a `FIELD_ACCESS` (object form, like `h.dispose()`), the existing namespace-call branch tries to resolve the callee. If the LHS is a struct value (not a namespace), emit "method-call form `h.dispose()` is not supported - use `dispose(ref h)` instead".
 
 ### 5.h `lookupImportedTrait` helper
 
@@ -890,7 +890,7 @@ function lookupImportedTrait(name, mod, moduleEnv) {
 
 `resolveImports` when classifying an import: if the source module's `traitTable.has(exportName)`, register `kind: "trait"`. Receivers see the canonical `TraitType` after pass C.5's re-sync.
 
-### 5.i `import * as ns; ns.Trait` — not supported
+### 5.i `import * as ns; ns.Trait` - not supported
 
 A trait reference can only be a bare identifier in this phase, never `ns.Trait`. The parser's `parseTypeDecl` reads a single identifier after `implements`. `type T implements io.Disposable { ... }` is a parse error. Documented as a known restriction; revisit when generic traits land. Workaround: import the trait by name (`import { Disposable } from "./io.yoop"`).
 
@@ -898,9 +898,9 @@ A trait reference can only be a bare identifier in this phase, never `ns.Trait`.
 
 ## 6. Codegen ([codegen.js](../src/jsyoopcodegen/codegen.js))
 
-### 6.a Method emission — `emitMethod`
+### 6.a Method emission - `emitMethod`
 
-Methods emit as flat LLVM functions, mangled `${moduleId}__${TypeName}__${methodName}`. The signature exposes `self` as a `ptr` parameter — same as a `ref T` parameter from phase 4.
+Methods emit as flat LLVM functions, mangled `${moduleId}__${TypeName}__${methodName}`. The signature exposes `self` as a `ptr` parameter - same as a `ref T` parameter from phase 4.
 
 ```js
 function emitMethod(methodDecl, structType) {
@@ -932,7 +932,7 @@ function emitMethod(methodDecl, structType) {
       // Slot for the pointer itself.
       fnLines.push(`  %${p.name} = alloca ptr, align 8`);
       fnLines.push(`  store ptr %${p.name}.arg, ptr %${p.name}`);
-      // Symbol carries the *ref* type — resolveIdent's autoDeref path handles loads.
+      // Symbol carries the *ref* type - resolveIdent's autoDeref path handles loads.
       symbols.set(p.name, RefType(p === params[0] ? structType : p.resolvedBaseType));
     } else {
       const ty = p.resolvedBaseType;
@@ -957,7 +957,7 @@ function emitMethod(methodDecl, structType) {
 }
 ```
 
-Key observation: `self` is just a `ref T` binding in the symbol table, exactly like `let p: ref int32 = ref n`. The phase-4 auto-deref machinery does almost all the work — but only for primitive `inner`. Phase 5 extends it for struct `inner` (§6.b).
+Key observation: `self` is just a `ref T` binding in the symbol table, exactly like `let p: ref int32 = ref n`. The phase-4 auto-deref machinery does almost all the work - but only for primitive `inner`. Phase 5 extends it for struct `inner` (§6.b).
 
 ### 6.b Auto-deref for struct refs
 
@@ -975,9 +975,9 @@ if (node.autoDeref) {
 }
 ```
 
-For a struct `inner` (e.g. `self`), this still produces *correct* IR — `load %struct.FileHandle, ptr %ptr` is a valid LLVM instruction (LLVM happily loads aggregate types). The `valTmp` holds the struct *value* by-value. That's fine for read-only uses. It's wrong for **field access on `self`**: `self.fd` should GEP off the *pointer*, not the loaded struct value, so that `self.fd = 5` writes through the pointer.
+For a struct `inner` (e.g. `self`), this still produces *correct* IR - `load %struct.FileHandle, ptr %ptr` is a valid LLVM instruction (LLVM happily loads aggregate types). The `valTmp` holds the struct *value* by-value. That's fine for read-only uses. It's wrong for **field access on `self`**: `self.fd` should GEP off the *pointer*, not the loaded struct value, so that `self.fd = 5` writes through the pointer.
 
-The fix: extend `emitLvalue` ([codegen.js:246](../src/jsyoopcodegen/codegen.js#L246)) IDENT case to handle `ref T` bindings — load the pointer once, then return the loaded pointer as the lvalue address:
+The fix: extend `emitLvalue` ([codegen.js:246](../src/jsyoopcodegen/codegen.js#L246)) IDENT case to handle `ref T` bindings - load the pointer once, then return the loaded pointer as the lvalue address:
 
 ```js
 case ASTNodeKind.IDENT: {
@@ -994,9 +994,9 @@ case ASTNodeKind.IDENT: {
 }
 ```
 
-This change affects every `ref T` binding, not just `ref self`. For `let p: ref int32 = ref n`, an lvalue use of `p` (like `p = 99`) goes through `emitLvalue` and now correctly loads the pointer first. **But** the existing primitive auto-deref-write path in `resolveAssignmentToIdent` + `emitExpr ASSIGNMENT` doesn't go through `emitLvalue` — it has its own `autoDerefWrite` short-circuit ([codegen.js:483-499](../src/jsyoopcodegen/codegen.js#L483)). That path stays unchanged. The new lvalue branch only fires when `emitLvalue` is called explicitly (e.g. inside `FIELD_ACCESS`, `INDEX_EXPRESSION`, or `REF_EXPRESSION` lowering).
+This change affects every `ref T` binding, not just `ref self`. For `let p: ref int32 = ref n`, an lvalue use of `p` (like `p = 99`) goes through `emitLvalue` and now correctly loads the pointer first. **But** the existing primitive auto-deref-write path in `resolveAssignmentToIdent` + `emitExpr ASSIGNMENT` doesn't go through `emitLvalue` - it has its own `autoDerefWrite` short-circuit ([codegen.js:483-499](../src/jsyoopcodegen/codegen.js#L483)). That path stays unchanged. The new lvalue branch only fires when `emitLvalue` is called explicitly (e.g. inside `FIELD_ACCESS`, `INDEX_EXPRESSION`, or `REF_EXPRESSION` lowering).
 
-For `emitIdent`'s autoDeref read context, the existing code handles aggregate inner correctly — `load %struct.T, ptr %ptr` is a valid LLVM instruction. No change required, but adding a struct-aware branch as documentation is fine.
+For `emitIdent`'s autoDeref read context, the existing code handles aggregate inner correctly - `load %struct.T, ptr %ptr` is a valid LLVM instruction. No change required, but adding a struct-aware branch as documentation is fine.
 
 For `resolveAssignmentToIdent` auto-deref-write of a struct ref: `self.field = expr` doesn't go through assignment-to-IDENT (the target is FIELD_ACCESS, not IDENT). `self = something` would, but assigning a whole struct through `self` is a useful corner case; the existing auto-deref-write path already works for any `inner` type because LLVM `store` handles aggregates.
 
@@ -1011,9 +1011,9 @@ case ASTNodeKind.REF_EXPRESSION: {
 }
 ```
 
-This assumes the operand is always an IDENT and returns the alloca slot. For `let h: FileHandle = { ... }`, the alloca slot is the struct's address — exactly what we want to pass as `ref h` to `dispose`. **No change needed for this primary case.**
+This assumes the operand is always an IDENT and returns the alloca slot. For `let h: FileHandle = { ... }`, the alloca slot is the struct's address - exactly what we want to pass as `ref h` to `dispose`. **No change needed for this primary case.**
 
-But what about `ref self` inside a method body? `self` is a `ref T` binding — its alloca slot holds a pointer, not the struct. So `ref self` should yield the underlying pointer, not the pointer-to-the-pointer. The change:
+But what about `ref self` inside a method body? `self` is a `ref T` binding - its alloca slot holds a pointer, not the struct. So `ref self` should yield the underlying pointer, not the pointer-to-the-pointer. The change:
 
 ```js
 case ASTNodeKind.REF_EXPRESSION: {
@@ -1110,17 +1110,17 @@ for (const decl of node.body) {
       emitMethod(method, decl.decl.resolvedType);
     }
   }
-  // TRAIT_DECL: no codegen — traits are compile-time only.
+  // TRAIT_DECL: no codegen - traits are compile-time only.
 }
 ```
 
 `TRAIT_DECL` produces no IR at all. Trait declarations exist exclusively at the typechecker level. The first-pass signature collection skips over them naturally.
 
-The codegen file currently has **two** `emitExpr` switches and **two** module-emission paths — the single-module path (around `codegen.js:410`/`codegen.js:1107`) and the multi-module path inside `codegenWithModuleId` (around `codegen.js:1564`/`codegen.js:1107` equivalent). Phase 5 must update both, exactly the way the BOOL_LITERAL extension touched both.
+The codegen file currently has **two** `emitExpr` switches and **two** module-emission paths - the single-module path (around `codegen.js:410`/`codegen.js:1107`) and the multi-module path inside `codegenWithModuleId` (around `codegen.js:1564`/`codegen.js:1107` equivalent). Phase 5 must update both, exactly the way the BOOL_LITERAL extension touched both.
 
 ### 6.f Method-symbol tracking for `collectCalls`
 
-`collectCalls` walks the AST building a set of called names so the legacy auto-extern path can declare them. Trait method calls aren't a concern here — they're routed through `node.calleeMangledName` directly, so the `typeof n.callee === "string"` branch sees the bare method name `dispose`, which is *not* in `defined`, and would mistakenly add it to the auto-extern set.
+`collectCalls` walks the AST building a set of called names so the legacy auto-extern path can declare them. Trait method calls aren't a concern here - they're routed through `node.calleeMangledName` directly, so the `typeof n.callee === "string"` branch sees the bare method name `dispose`, which is *not* in `defined`, and would mistakenly add it to the auto-extern set.
 
 Fix: skip calls whose `calleeMethodOf` is set:
 
@@ -1137,9 +1137,9 @@ if (
 
 Without this, the legacy `externDecl` fallback would emit a stray `declare i32 @dispose(...)` line.
 
-### 6.g `functionSigs` map — methods don't go in
+### 6.g `functionSigs` map - methods don't go in
 
-The `functionSigs` map registers free functions and externs. Methods are not registered there — their `FuncType` lives on `StructType.methods`. The `emitCall` trait-method branch reads from `node.calleeMethodOf.methods.get(...)` directly, bypassing `functionSigs`. Keep `functionSigs` free of method signatures to avoid name-clash confusion.
+The `functionSigs` map registers free functions and externs. Methods are not registered there - their `FuncType` lives on `StructType.methods`. The `emitCall` trait-method branch reads from `node.calleeMethodOf.methods.get(...)` directly, bypassing `functionSigs`. Keep `functionSigs` free of method signatures to avoid name-clash confusion.
 
 ### 6.h Cross-module method calls
 
@@ -1150,7 +1150,7 @@ By the time codegen runs on `main.yoop`'s `main()`:
 - `node.calleeMangledName` was set by `resolveCall` to `io_<hash>__FileHandle__dispose`.
 - Codegen emits `call void @io_<hash>__FileHandle__dispose(ptr %h)`.
 
-Because `io.yoop` is in the same compilation unit (single LLVM IR file from `codegenProgram`), the symbol is `define`d when emitted from `io.yoop`'s third-pass and called from `main.yoop`'s third-pass — no `declare` line needed.
+Because `io.yoop` is in the same compilation unit (single LLVM IR file from `codegenProgram`), the symbol is `define`d when emitted from `io.yoop`'s third-pass and called from `main.yoop`'s third-pass - no `declare` line needed.
 
 ### 6.i Struct-name mangling reminder
 
@@ -1160,11 +1160,11 @@ Phase 3 mangled struct names per-module (`%struct.<modId>__<TypeName>`). The met
 
 ## 7. Tests
 
-### 7.1 Pass fixtures — [examples/pass/](../examples/pass/)
+### 7.1 Pass fixtures - [examples/pass/](../examples/pass/)
 
 Multi-file fixtures live in directories with a `main.yoop` entry; single-file fixtures live as `.yoop` files at the top of `examples/pass/`. However, each test in the traits phase should be added using the multi-file structure and put in their own subfolder and use the multi-file area in the e2e js tests.
 
-#### `traits_disposable.yoop` — single trait, single impl, single call
+#### `traits_disposable.yoop` - single trait, single impl, single call
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -1194,7 +1194,7 @@ disposing fd=7
 
 Exercises: trait decl, impl with one method, single call site, `self.fd` field read inside method body.
 
-#### `traits_multi_impl.yoop` — one type implementing two traits
+#### `traits_multi_impl.yoop` - one type implementing two traits
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -1239,7 +1239,7 @@ rc=7 is_open=0
 
 Exercises: parenthesized `implements (A, B)`, two methods on same type, method call returning a value, method body writing `self.field = expr`, post-call observation of mutated state.
 
-#### `traits_two_types_one_trait.yoop` — distinct types implementing the same trait
+#### `traits_two_types_one_trait.yoop` - distinct types implementing the same trait
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -1279,7 +1279,7 @@ socket sock=99
 
 Exercises: same method name on two distinct types resolved correctly (each call site's mangled symbol is different).
 
-#### `traits_self_field.yoop` — method body reads multiple fields
+#### `traits_self_field.yoop` - method body reads multiple fields
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -1307,7 +1307,7 @@ Expected stdout: `encoded=304`.
 
 Exercises: method that returns a non-void value, multiple field reads on `self`, method called from outside.
 
-#### `traits_self_call_other_method.yoop` — method body calls another method on the same type
+#### `traits_self_call_other_method.yoop` - method body calls another method on the same type
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -1347,7 +1347,7 @@ disposed via close (rc=42)
 
 Exercises: method body invoking another method on the same type via the free-function form, `ref self` passed onward.
 
-#### `traits_cross_module/` — trait declared in module A, implemented in B, called in main
+#### `traits_cross_module/` - trait declared in module A, implemented in B, called in main
 
 ```
 traits_cross_module/
@@ -1392,7 +1392,7 @@ Expected stdout: `disposing fd=13`.
 
 Exercises: trait import, struct import, cross-module method dispatch, mangled symbol uses `impl.yoop`'s module id (where the type is defined).
 
-#### `traits_recursive_method.yoop` — method calling itself
+#### `traits_recursive_method.yoop` - method calling itself
 
 ```yoop
 extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
@@ -1427,14 +1427,14 @@ n=1
 
 Exercises: tail-recursive trait method body with `ref self` re-passed, mutation of `self.n`, terminating condition. Asserts the parser doesn't loop forever and the typechecker resolves the recursive call to the same method.
 
-### 7.2 Fail fixtures — [examples/fail/](../examples/fail/)
+### 7.2 Fail fixtures - [examples/fail/](../examples/fail/)
 
 | File | Snippet | Expected error pattern |
 |---|---|---|
 | `traits_missing_method.yoop` | `type T implements Disposable { fd: int32, }` (no `dispose`) | `type "T" implements trait "Disposable" but is missing method "dispose"` |
 | `traits_wrong_signature_return.yoop` | impl method has return type `int32` while trait says `void` | `method "dispose" on type "T" has signature .*, expected .* from trait "Disposable"` |
 | `traits_wrong_signature_param.yoop` | impl method takes extra param not in trait sig | same shape as above |
-| `traits_collision_two_traits.yoop` | `type T implements (A, B)` where both traits declare `m` | `type "T" cannot implement both "A" and "B" — both require method "m"` |
+| `traits_collision_two_traits.yoop` | `type T implements (A, B)` where both traits declare `m` | `type "T" cannot implement both "A" and "B" - both require method "m"` |
 | `traits_collision_with_function.yoop` | a free `function dispose(...)` exists in same module as `type T implements Disposable { ... function dispose(ref self): ... }` | `method "dispose" on type "T" collides with module-level function "dispose"` |
 | `traits_self_outside.yoop` | `function f(): int32 { return self.x; }` (no method context) | `the keyword 'self' can only be used inside a trait method body` |
 | `traits_extra_method.yoop` | impl block has a method whose name isn't required by any trait | `type "T" declares method "extra", but no implemented trait requires it` |
@@ -1444,9 +1444,9 @@ Exercises: tail-recursive trait method body with `ref self` re-passed, mutation 
 | `traits_default_body_in_trait.yoop` | `trait Foo { function m(ref self): void { } }` (body in trait) | `expected semicolon, got lcurly` (parser error) |
 | `traits_extends_rejected.yoop` | `trait Sub extends Super { ... }` | `extends not yet supported` |
 | `traits_generic_rejected.yoop` | `trait Iter<T> { ... }` | `generic traits not yet supported` |
-| `traits_method_call_sugar.yoop` | `h.dispose()` (object form) | `method-call form .* is not supported — use 'dispose(ref h)' instead` |
+| `traits_method_call_sugar.yoop` | `h.dispose()` (object form) | `method-call form .* is not supported - use 'dispose(ref h)' instead` |
 | `traits_redeclared_method.yoop` | impl block lists `dispose` twice | `duplicate method "dispose" in type "T"` |
-| `traits_self_assignment_wrong_type.yoop` | `self.fd = "hi"` where `fd: int32` | regular assignment-type-mismatch error from phase 1 typechecker — verify it works through the auto-deref |
+| `traits_self_assignment_wrong_type.yoop` | `self.fd = "hi"` where `fd: int32` | regular assignment-type-mismatch error from phase 1 typechecker - verify it works through the auto-deref |
 
 ### 7.3 Updating `e2e.test.js`
 
@@ -1472,10 +1472,10 @@ it("traits_missing_method fails typecheck", () => {
 
 ### 7.4 Unit tests
 
-- **[lexer.test.js](../src/jsyooplexer/lexer.test.js)** — new keywords lex correctly, including in identifier-adjacent positions (`disposable` ≠ `dispose` followed by `able`).
-- **[parser.test.js](../src/jsyooparser/parser.test.js)** — every accept case in §3.f and reject case in §3.g.
-- **[typecheck.test.js](../src/jsyooptypecheck/typecheck.test.js)** — pass-by-pass: trait shells in pass A, trait method sigs in pass C.1, impl validation in pass C.3 (missing method, wrong sig, collision), self in scope inside method bodies.
-- **[checkExpr.test.js](../src/jsyooptypecheck/checkExpr.test.js)** — `resolveCall` falls through to trait dispatch when the free-function lookup misses; `self` outside method context is rejected.
+- **[lexer.test.js](../src/jsyooplexer/lexer.test.js)** - new keywords lex correctly, including in identifier-adjacent positions (`disposable` ≠ `dispose` followed by `able`).
+- **[parser.test.js](../src/jsyooparser/parser.test.js)** - every accept case in §3.f and reject case in §3.g.
+- **[typecheck.test.js](../src/jsyooptypecheck/typecheck.test.js)** - pass-by-pass: trait shells in pass A, trait method sigs in pass C.1, impl validation in pass C.3 (missing method, wrong sig, collision), self in scope inside method bodies.
+- **[checkExpr.test.js](../src/jsyooptypecheck/checkExpr.test.js)** - `resolveCall` falls through to trait dispatch when the free-function lookup misses; `self` outside method context is rejected.
 
 ### 7.5 Codegen IR-shape tests
 
@@ -1536,17 +1536,17 @@ type FileHandle implements Cloner {
 
 This works: `FileHandle` resolves at trait-decl time because pass A registers struct shells before C.1 runs. The trait method's return type is `FileHandle`, fully resolved. Pass C.3 substitutes `self` (no occurrences in the return type here) and matches against the impl's return type `FileHandle`. Equal. Done.
 
-The reason `Self` isn't needed: traits in this phase aren't generic, so there's no "what type does `Self` mean across multiple impls?" question. Each trait that names a return type names exactly one type — and that's enough.
+The reason `Self` isn't needed: traits in this phase aren't generic, so there's no "what type does `Self` mean across multiple impls?" question. Each trait that names a return type names exactly one type - and that's enough.
 
 ### 8.d `ref self` composing with phase-4 argument propagation
 
-Method `f` calls method `g` via `g(ref self)`. The `ref self` expression is `load ptr, ptr %self` (loading the original pointer that was passed to `f`). The call `@T__g(ptr %loaded)` then receives the original pointer — matching how `let p: ref int32 = ref n; increment(p)` works in phase 4. The composability is automatic once the `REF_EXPRESSION` of a ref-binding case is correct (§6.c).
+Method `f` calls method `g` via `g(ref self)`. The `ref self` expression is `load ptr, ptr %self` (loading the original pointer that was passed to `f`). The call `@T__g(ptr %loaded)` then receives the original pointer - matching how `let p: ref int32 = ref n; increment(p)` works in phase 4. The composability is automatic once the `REF_EXPRESSION` of a ref-binding case is correct (§6.c).
 
 ### 8.e Cross-module: trait in A, impl in B, call in C
 
 The mangling rule fixes the resolution: the method's symbol is built from the *defining type's* module id, not the calling site's. So `traits_cross_module/` (§7.1) emits `@impl_<hash>__FileHandle__dispose` and the call from `main.yoop` references that exact symbol regardless of where the trait was declared.
 
-The trait's module id is irrelevant at the call site — the trait is consulted only during typechecking (to validate the impl matches). Codegen doesn't read the trait at all.
+The trait's module id is irrelevant at the call site - the trait is consulted only during typechecking (to validate the impl matches). Codegen doesn't read the trait at all.
 
 ### 8.f A type with a `methods` block but no `implements`
 
@@ -1554,7 +1554,7 @@ Already handled in §3.c parser code: `parseTypeDecl` rejects with `methods are 
 
 ### 8.g Empty trait
 
-`trait Marker { }` parses fine. Pass C.1 builds an empty `methods` map. A `type T implements Marker { ... }` impl validates trivially (no required methods to satisfy, no extras allowed). The trait is a tag with no observable behavior — useful as a placeholder for kinds in phase 6 (a kind's `requires Marker` clause becomes a typecheck-only constraint that the type has the trait, even though the trait carries no methods).
+`trait Marker { }` parses fine. Pass C.1 builds an empty `methods` map. A `type T implements Marker { ... }` impl validates trivially (no required methods to satisfy, no extras allowed). The trait is a tag with no observable behavior - useful as a placeholder for kinds in phase 6 (a kind's `requires Marker` clause becomes a typecheck-only constraint that the type has the trait, even though the trait carries no methods).
 
 ### 8.h Trait name conflicting with struct or function name
 
@@ -1570,7 +1570,7 @@ trait Pairwise {
 
 The `other` param is a regular `int32`, no self-substitution needed. The `self` substitution path only touches param 0 (whose name is exactly `self` and whose type is `RefType { TraitSelfPlaceholder }`). Other params resolve normally.
 
-If a trait wanted to take a `ref T` for the same `T` that implements it (`function compare(ref self, other: ref Self): int32`) — that needs `Self`, which is deferred. For now, traits that need this can name the type explicitly (`other: ref FileHandle`), which only works for traits with a single specific impl type — i.e., traits as glorified type tags. Acceptable for v0; revisit when generics land.
+If a trait wanted to take a `ref T` for the same `T` that implements it (`function compare(ref self, other: ref Self): int32`) - that needs `Self`, which is deferred. For now, traits that need this can name the type explicitly (`other: ref FileHandle`), which only works for traits with a single specific impl type - i.e., traits as glorified type tags. Acceptable for v0; revisit when generics land.
 
 ### 8.j Orphan rule: implementing a trait on a struct from another module
 
@@ -1604,15 +1604,15 @@ type Builder implements ChainedAdd {
 }
 ```
 
-`self`'s resolved type inside the body is `Builder` (auto-deref of `ref Builder`). The return type annotation is `Builder`. The return statement produces a value of type `Builder`. This works — the auto-deref'd `self` is a struct value, copyable, returnable. The downside is that the returned value is a *copy*, not a reference to the original — phase 4 §11.b forbids `ref T` return values until lifetime tracking lands. Document this as a known limitation.
+`self`'s resolved type inside the body is `Builder` (auto-deref of `ref Builder`). The return type annotation is `Builder`. The return statement produces a value of type `Builder`. This works - the auto-deref'd `self` is a struct value, copyable, returnable. The downside is that the returned value is a *copy*, not a reference to the original - phase 4 §11.b forbids `ref T` return values until lifetime tracking lands. Document this as a known limitation.
 
 ### 8.m Method body uses `?` operator
 
-A method whose return type is fallible can use `?`. The `?` operator inspects `ctx.funcReturnType` ([checkExpr.js:579](../src/jsyooptypecheck/checkExpr.js#L579)) — `validateMethod` sets that field correctly to the method's declared return type. No new code; `?` works inside method bodies the same as inside free functions.
+A method whose return type is fallible can use `?`. The `?` operator inspects `ctx.funcReturnType` ([checkExpr.js:579](../src/jsyooptypecheck/checkExpr.js#L579)) - `validateMethod` sets that field correctly to the method's declared return type. No new code; `?` works inside method bodies the same as inside free functions.
 
 ### 8.n Method body uses arrays and for-loops
 
-The phase-4 features compose with method bodies because `validateMethod` reuses the same `validateStatement` walker. `self.xs.len` is `FIELD_ACCESS` on `FIELD_ACCESS` on `IDENT(self)` — auto-deref happens at `self`, then field lookup chains. `self.xs[i]` is an `INDEX_EXPRESSION` whose `object` is the chained field access. All existing infrastructure.
+The phase-4 features compose with method bodies because `validateMethod` reuses the same `validateStatement` walker. `self.xs.len` is `FIELD_ACCESS` on `FIELD_ACCESS` on `IDENT(self)` - auto-deref happens at `self`, then field lookup chains. `self.xs[i]` is an `INDEX_EXPRESSION` whose `object` is the chained field access. All existing infrastructure.
 
 ### 8.o A method that takes additional `ref` params
 
@@ -1622,11 +1622,11 @@ trait Fillable {
 }
 ```
 
-The extra `ref` param `source` is a phase-4 ref param. Lowers to `ptr` at LLVM level. Method's signature: `define void @T__fill(ptr %self.arg, ptr %source.arg)`. Call site: `fill(ref h, ref n)` — both args are `REF_EXPRESSION`, both lowered to ptr.
+The extra `ref` param `source` is a phase-4 ref param. Lowers to `ptr` at LLVM level. Method's signature: `define void @T__fill(ptr %self.arg, ptr %source.arg)`. Call site: `fill(ref h, ref n)` - both args are `REF_EXPRESSION`, both lowered to ptr.
 
 ### 8.p Trait or impl inside an extern block
 
-Not allowed — `parseExternBlock` accepts only `function` and `type` decls inside braces. The existing `unexpected token in extern block` error suffices.
+Not allowed - `parseExternBlock` accepts only `function` and `type` decls inside braces. The existing `unexpected token in extern block` error suffices.
 
 ### 8.q Multiple impl blocks for the same type
 
@@ -1646,7 +1646,7 @@ Both `self` and `dst` are `ref T`-where-T-is-a-struct. Both lower to `ptr`. The 
 
 ### 8.s Method names that shadow built-in `.len`
 
-`type T implements Foo { function len(ref self): int32 { ... } }` — `len` is not reserved. The struct-field-`.len` intrinsic for arrays operates on an array type, not a struct field. The free-function call `len(ref t)` resolves to the method (no free function `len` exists in `localSymbols`). No conflict.
+`type T implements Foo { function len(ref self): int32 { ... } }` - `len` is not reserved. The struct-field-`.len` intrinsic for arrays operates on an array type, not a struct field. The free-function call `len(ref t)` resolves to the method (no free function `len` exists in `localSymbols`). No conflict.
 
 ### 8.t Method names that collide with C externs
 
@@ -1654,7 +1654,7 @@ Both `self` and `dst` are `ref T`-where-T-is-a-struct. Both lower to `ptr`. The 
 
 ### 8.u An impl block whose methods are listed in a different order than the trait
 
-Trait says `dispose, close`; impl block has `close, dispose`. No problem — the resolver matches by method name, not by position.
+Trait says `dispose, close`; impl block has `close, dispose`. No problem - the resolver matches by method name, not by position.
 
 ---
 
@@ -1662,39 +1662,39 @@ Trait says `dispose, close`; impl block has `close, dispose`. No problem — the
 
 Each step keeps prior tests green and is independently bisect-able. The progression mirrors phase 4: lexer → AST → parser-decls → parser-bodies → types → typecheck → codegen → fixtures.
 
-1. **Lexer** — add `trait`, `implements`, `self`, `extends` tokens. Unit tests in [lexer.test.js](../src/jsyooplexer/lexer.test.js). After this step, source files containing these keywords lex but the parser still throws "unexpected token at top level" (or in the case of `self`, "unexpected token: self").
+1. **Lexer** - add `trait`, `implements`, `self`, `extends` tokens. Unit tests in [lexer.test.js](../src/jsyooplexer/lexer.test.js). After this step, source files containing these keywords lex but the parser still throws "unexpected token at top level" (or in the case of `self`, "unexpected token: self").
 
-2. **AST kinds** — add `TRAIT_DECL`, `METHOD_SIG`, `METHOD_DECL` to [contracts.js](../src/contracts.js). Add `implements` and `methods` fields to `TYPE_DECL`. No logic change. Run all phase-1-4 tests; they must still pass.
+2. **AST kinds** - add `TRAIT_DECL`, `METHOD_SIG`, `METHOD_DECL` to [contracts.js](../src/contracts.js). Add `implements` and `methods` fields to `TYPE_DECL`. No logic change. Run all phase-1-4 tests; they must still pass.
 
-3. **Parser — decls, no method bodies** — add `parseTraitDecl`, `parseMethodSig`. Wire `parseTopLevel` and `parseExportDecl` to dispatch on `trait`. Add `parseTypeDecl` extension for `implements` clause (without method bodies — yet). Add the early rejects for `extends` and generic traits. Add `parseAtom` branch for `self` ident. Add unit tests for accept/reject cases that don't involve method bodies. After this step, `trait Disposable { function dispose(ref self): void; }` parses; `type T implements Disposable { fd: int32 }` parses (with empty methods array); `extends` is rejected with the correct message.
+3. **Parser - decls, no method bodies** - add `parseTraitDecl`, `parseMethodSig`. Wire `parseTopLevel` and `parseExportDecl` to dispatch on `trait`. Add `parseTypeDecl` extension for `implements` clause (without method bodies - yet). Add the early rejects for `extends` and generic traits. Add `parseAtom` branch for `self` ident. Add unit tests for accept/reject cases that don't involve method bodies. After this step, `trait Disposable { function dispose(ref self): void; }` parses; `type T implements Disposable { fd: int32 }` parses (with empty methods array); `extends` is rejected with the correct message.
 
-4. **Parser — method bodies** — add `parseMethodDecl`. Extend `parseTypeDecl` body loop to accept method decls alongside fields. Add the "methods require implements" check. Tests for accept (a type with one method) and reject (method without implements). After this step, full impl blocks parse; the typechecker doesn't yet know about traits/methods.
+4. **Parser - method bodies** - add `parseMethodDecl`. Extend `parseTypeDecl` body loop to accept method decls alongside fields. Add the "methods require implements" check. Tests for accept (a type with one method) and reject (method without implements). After this step, full impl blocks parse; the typechecker doesn't yet know about traits/methods.
 
-5. **Type system — `TraitType`, struct extensions** — add `TraitType`, `TraitSelfPlaceholder`, extend `StructType` with `implementsTraits` and `methods`. Add `selfType` annotation kind to `resolveTypeAnnotation`. Update `formatType` and `typesEqual`. Unit tests for the new types.
+5. **Type system - `TraitType`, struct extensions** - add `TraitType`, `TraitSelfPlaceholder`, extend `StructType` with `implementsTraits` and `methods`. Add `selfType` annotation kind to `resolveTypeAnnotation`. Update `formatType` and `typesEqual`. Unit tests for the new types.
 
-6. **Typechecker — pass A trait shells** — register `TRAIT_DECL` shells in a new `traitTable` per module. Redeclaration checks. Unit test: `traitTable` populated correctly after pass A.
+6. **Typechecker - pass A trait shells** - register `TRAIT_DECL` shells in a new `traitTable` per module. Redeclaration checks. Unit test: `traitTable` populated correctly after pass A.
 
-7. **Typechecker — pass C.1 trait method sigs** — resolve each trait method's signature with `selfType: TraitSelfPlaceholder`. Validate no duplicate method names within a trait. Unit test: trait method sigs are correctly stored on `TraitType.methods`.
+7. **Typechecker - pass C.1 trait method sigs** - resolve each trait method's signature with `selfType: TraitSelfPlaceholder`. Validate no duplicate method names within a trait. Unit test: trait method sigs are correctly stored on `TraitType.methods`.
 
-8. **Typechecker — pass C.3 impl validation** — `validateImplBlock` covers all the rules: missing methods, extra methods, wrong signature, two-trait collision, free-function collision. After this step, impl blocks are validated but bodies aren't walked yet — codegen would crash if invoked. Skip codegen in this step's tests. Unit tests for every error case in §7.2.
+8. **Typechecker - pass C.3 impl validation** - `validateImplBlock` covers all the rules: missing methods, extra methods, wrong signature, two-trait collision, free-function collision. After this step, impl blocks are validated but bodies aren't walked yet - codegen would crash if invoked. Skip codegen in this step's tests. Unit tests for every error case in §7.2.
 
-9. **Typechecker — pass C.5 trait import re-sync** — handle `kind: "trait"` in the import overlay. Update `resolveImports` to classify trait exports correctly. Unit test: a cross-module trait import resolves to the same canonical `TraitType` object.
+9. **Typechecker - pass C.5 trait import re-sync** - handle `kind: "trait"` in the import overlay. Update `resolveImports` to classify trait exports correctly. Unit test: a cross-module trait import resolves to the same canonical `TraitType` object.
 
-10. **Typechecker — `validateMethod` (pass D extension)** — push `self` into method body scope, walk body via existing `validateStatement`. `self` outside method context is rejected. Unit test: method body type-checks (using only existing expression handlers, no new logic).
+10. **Typechecker - `validateMethod` (pass D extension)** - push `self` into method body scope, walk body via existing `validateStatement`. `self` outside method context is rejected. Unit test: method body type-checks (using only existing expression handlers, no new logic).
 
-11. **Typechecker — trait method dispatch in `resolveCall`** — fall through to trait dispatch when the free-function lookup misses. Annotate `node.calleeMethodOf` and `node.calleeMangledName`. Reject method-call sugar (`h.dispose()`). Unit tests: a call to a method resolves correctly; a call to method-call sugar errors with the right message.
+11. **Typechecker - trait method dispatch in `resolveCall`** - fall through to trait dispatch when the free-function lookup misses. Annotate `node.calleeMethodOf` and `node.calleeMangledName`. Reject method-call sugar (`h.dispose()`). Unit tests: a call to a method resolves correctly; a call to method-call sugar errors with the right message.
 
-12. **Codegen — struct ref support** — extend `emitLvalue` IDENT case to load through ref bindings. Extend `emitIdent` autoDeref case for struct inner. Extend `emitExpr REF_EXPRESSION` to handle ref-of-ref-binding. After this step, `let p: ref FileHandle = ref h; p.fd` works (this never worked before because phase 4 didn't allow struct refs). Add IR shape tests in [codegen.test.js](../src/jsyoopcodegen/codegen.test.js). **Apply the changes in both `emitExpr` switches** (single-module path ~L410 and multi-module path ~L1564) — same as the BOOL_LITERAL extension.
+12. **Codegen - struct ref support** - extend `emitLvalue` IDENT case to load through ref bindings. Extend `emitIdent` autoDeref case for struct inner. Extend `emitExpr REF_EXPRESSION` to handle ref-of-ref-binding. After this step, `let p: ref FileHandle = ref h; p.fd` works (this never worked before because phase 4 didn't allow struct refs). Add IR shape tests in [codegen.test.js](../src/jsyoopcodegen/codegen.test.js). **Apply the changes in both `emitExpr` switches** (single-module path ~L410 and multi-module path ~L1564) - same as the BOOL_LITERAL extension.
 
-13. **Codegen — `emitMethod`** — parallel to `emitFunction`, mangled `<modId>__<TypeName>__<methodName>`, params spilled into stack slots, `self` spilled as a ptr. Wire `emitProgram` (and the multi-module variant) to emit methods alongside functions. Skip TRAIT_DECL entirely.
+13. **Codegen - `emitMethod`** - parallel to `emitFunction`, mangled `<modId>__<TypeName>__<methodName>`, params spilled into stack slots, `self` spilled as a ptr. Wire `emitProgram` (and the multi-module variant) to emit methods alongside functions. Skip TRAIT_DECL entirely.
 
-14. **Codegen — trait method calls in `emitCall`** — branch on `node.calleeMethodOf`, look up the method's `FuncType` on the type's `methods` map, emit the call with `ptr` for `ref` params and llvm types for the rest. Update `collectCalls` to ignore method calls. Unit tests for the IR shape.
+14. **Codegen - trait method calls in `emitCall`** - branch on `node.calleeMethodOf`, look up the method's `FuncType` on the type's `methods` map, emit the call with `ptr` for `ref` params and llvm types for the rest. Update `collectCalls` to ignore method calls. Unit tests for the IR shape.
 
-15. **All pass fixtures** — one by one, in order of complexity from §7.1.
+15. **All pass fixtures** - one by one, in order of complexity from §7.1.
 
-16. **All fail fixtures** — match the error patterns in §7.2.
+16. **All fail fixtures** - match the error patterns in §7.2.
 
-17. **Cleanup + IR-shape regression tests** — add `traits_*` IR shape assertions to `codegen.test.js`. Verify no phase-1-4 fixture regresses by running the full e2e suite.
+17. **Cleanup + IR-shape regression tests** - add `traits_*` IR shape assertions to `codegen.test.js`. Verify no phase-1-4 fixture regresses by running the full e2e suite.
 
 Each step independently merges and ships; the codebase is never in a half-broken state for more than one step.
 
@@ -1706,12 +1706,12 @@ Each step independently merges and ships; the codebase is never in a half-broken
 - Every fail fixture in §7.2 errors at typecheck (no crash) with a message matching the pattern.
 - All existing phase-1-4 fixtures continue to compile and run identically (no regressions).
 - Cross-module trait/impl in `traits_cross_module/` compiles and runs.
-- IR-shape regression tests in [codegen.test.js](../src/jsyoopcodegen/codegen.test.js) pass — every method emits `define ... @<modId>__<TypeName>__<methodName>(...)`, every method body's `self.field` access GEPs off the loaded pointer (not the alloca slot), and trait declarations produce zero IR.
+- IR-shape regression tests in [codegen.test.js](../src/jsyoopcodegen/codegen.test.js) pass - every method emits `define ... @<modId>__<TypeName>__<methodName>(...)`, every method body's `self.field` access GEPs off the loaded pointer (not the alloca slot), and trait declarations produce zero IR.
 - `clang` accepts the generated IR for every pass fixture without errors or warnings.
 - Parser and lexer unit tests for the new tokens, accept cases, and reject cases all pass.
 - Typechecker unit tests verify the multi-pass shape: trait shells in pass A, sig resolution in C.1, impl validation in C.3, body validation in pass D.
 - The same-name collision rules are enforced (no two implemented traits sharing a method name; no method colliding with a free function).
-- `extends` and generic-trait syntax are rejected with the documented messages — neither hangs the parser nor produces a confusing typecheck error.
+- `extends` and generic-trait syntax are rejected with the documented messages - neither hangs the parser nor produces a confusing typecheck error.
 
 ---
 
@@ -1721,7 +1721,7 @@ The scope decisions are solid. A handful of design choices were made inside this
 
 ### 11.a `self` as hard keyword (departure from "contextual" framing)
 
-The original framing said `self` was "contextual." This plan promotes `self` to a hard keyword. Reasons in §2: contextual keywords require lexer-parser coupling that's expensive in this codebase, and the cost of disallowing `self` as a regular identifier elsewhere is one fewer commonly-used variable name. If the framing is preferred, the alternative is a re-tag pass on top of lex output — workable but adds ~80–100 lines of plumbing. Hard keyword wins on simplicity.
+The original framing said `self` was "contextual." This plan promotes `self` to a hard keyword. Reasons in §2: contextual keywords require lexer-parser coupling that's expensive in this codebase, and the cost of disallowing `self` as a regular identifier elsewhere is one fewer commonly-used variable name. If the framing is preferred, the alternative is a re-tag pass on top of lex output - workable but adds ~80–100 lines of plumbing. Hard keyword wins on simplicity.
 
 ### 11.b `METHOD_DECL` vs reusing `FUNCTION_DECL`
 
@@ -1729,28 +1729,28 @@ This plan adds `METHOD_DECL` and `METHOD_SIG` rather than overloading `FUNCTION_
 
 ### 11.c All trait methods are mutating (`ref self`)
 
-Spec §5 says all trait methods take `ref self` — there's no `self` (by-value) form, and no `let self: T` form. This phase honors that exactly. **Risk:** there's no way for a trait to express "I only need to read `self`, not mutate it." All trait methods get a mutable pointer. This isn't broken — it's just a v2 spec choice that's coarser than what languages with `&self` vs `&mut self` provide. Defer the question to phase 7+.
+Spec §5 says all trait methods take `ref self` - there's no `self` (by-value) form, and no `let self: T` form. This phase honors that exactly. **Risk:** there's no way for a trait to express "I only need to read `self`, not mutate it." All trait methods get a mutable pointer. This isn't broken - it's just a v2 spec choice that's coarser than what languages with `&self` vs `&mut self` provide. Defer the question to phase 7+.
 
 ### 11.d `extends` parser-rejection vs typecheck-rejection
 
-This plan picks parser-rejection (§3.b). Alternative: parse the `extends Foo` clause into the AST and reject at typecheck. Parser-rejection is simpler for v0 — no AST kind needed. The downside: when a future phase lands `extends`, there's a small refactor to switch from "parse error" to "parse-and-typecheck-validate." Comfortable with parser-rejection because the dependent work is large enough that the refactor disappears in the noise. Same logic for generic traits.
+This plan picks parser-rejection (§3.b). Alternative: parse the `extends Foo` clause into the AST and reject at typecheck. Parser-rejection is simpler for v0 - no AST kind needed. The downside: when a future phase lands `extends`, there's a small refactor to switch from "parse error" to "parse-and-typecheck-validate." Comfortable with parser-rejection because the dependent work is large enough that the refactor disappears in the noise. Same logic for generic traits.
 
 ### 11.e Cross-module trait orphan rule
 
-Phase 5 forbids implementing a trait on a struct from another module (§8.j). **Risk:** real programs may want to add a trait to a foreign struct. Workaround: wrap the struct. If user demand surfaces, a future phase could add a separate `impl Trait for T { ... }` form — but that's a substantial new grammar and not v2 territory.
+Phase 5 forbids implementing a trait on a struct from another module (§8.j). **Risk:** real programs may want to add a trait to a foreign struct. Workaround: wrap the struct. If user demand surfaces, a future phase could add a separate `impl Trait for T { ... }` form - but that's a substantial new grammar and not v2 territory.
 
 ---
 
 ## 12. Critical files reference
 
-- [SPEC.md §5 — Traits](../SPEC.md), [§7 — Functions / methods](../SPEC.md), [§17.2 — Trait method resolution](../SPEC.md) — re-read before each step.
-- [src/contracts.js](../src/contracts.js) — three new AST kinds (`TRAIT_DECL`, `METHOD_SIG`, `METHOD_DECL`), `TYPE_DECL` extension.
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) — four new tokens (`trait`, `implements`, `self`, `extends`).
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — `parseTraitDecl`, `parseMethodSig`, `parseMethodDecl`, `parseTypeDecl` extension, top-level dispatch, `parseAtom` `self` branch.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) — `TraitType`, `TraitSelfPlaceholder`, `StructType` extension, `resolveTypeAnnotation` `selfType` handling.
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) — pass A trait shells, pass C.1 trait method sigs, pass C.3 `validateImplBlock`, pass C.5 trait import re-sync, pass D method body walk.
-- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) — `resolveCall` trait-dispatch branch, `resolveIdent` `self`-outside-context error, method-call-sugar reject.
-- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) — `validateMethod` parallel to `validateFunction`, with self in scope.
-- [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) — `kind: "trait"` import classification and `lookupImportedTrait` helper.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) — `emitMethod`, `emitLvalue`/`emitIdent` struct-ref support, `emitExpr REF_EXPRESSION` ref-of-ref handling, `emitCall` trait branch, `collectCalls` skip-method-calls. **Both `emitExpr` switches** (single-module ~L410 and multi-module ~L1564) need parallel updates.
-- [src/e2e.test.js](../src/e2e.test.js) — pass and fail fixtures from §7.
+- [SPEC.md §5 - Traits](../SPEC.md), [§7 - Functions / methods](../SPEC.md), [§17.2 - Trait method resolution](../SPEC.md) - re-read before each step.
+- [src/contracts.js](../src/contracts.js) - three new AST kinds (`TRAIT_DECL`, `METHOD_SIG`, `METHOD_DECL`), `TYPE_DECL` extension.
+- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - four new tokens (`trait`, `implements`, `self`, `extends`).
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - `parseTraitDecl`, `parseMethodSig`, `parseMethodDecl`, `parseTypeDecl` extension, top-level dispatch, `parseAtom` `self` branch.
+- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js) - `TraitType`, `TraitSelfPlaceholder`, `StructType` extension, `resolveTypeAnnotation` `selfType` handling.
+- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js) - pass A trait shells, pass C.1 trait method sigs, pass C.3 `validateImplBlock`, pass C.5 trait import re-sync, pass D method body walk.
+- [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - `resolveCall` trait-dispatch branch, `resolveIdent` `self`-outside-context error, method-call-sugar reject.
+- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js) - `validateMethod` parallel to `validateFunction`, with self in scope.
+- [src/jsyooptypecheck/imports.js](../src/jsyooptypecheck/imports.js) - `kind: "trait"` import classification and `lookupImportedTrait` helper.
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - `emitMethod`, `emitLvalue`/`emitIdent` struct-ref support, `emitExpr REF_EXPRESSION` ref-of-ref handling, `emitCall` trait branch, `collectCalls` skip-method-calls. **Both `emitExpr` switches** (single-module ~L410 and multi-module ~L1564) need parallel updates.
+- [src/e2e.test.js](../src/e2e.test.js) - pass and fail fixtures from §7.

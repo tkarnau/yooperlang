@@ -6,7 +6,7 @@
 // sees the same level of locality they get from the typechecker.
 //
 // In Phase 11.B these errors are *silent fallbacks* when surfaced from
-// the opportunistic module-init folding path — the comptime pass
+// the opportunistic module-init folding path - the comptime pass
 // catches them and leaves the decl to be runtime-initialized as before.
 // In Phase 11.C (`@precompile`) they become hard build errors that
 // surface to the user, with full traceback rendering.

@@ -5,7 +5,7 @@ import { ASTNodeKind } from "../contracts.js";
 import { NamespaceType, typeKinds } from "./types.js";
 import { pushError } from "./errors.js";
 
-// resolveImports — pass B of typecheckProgram.
+// resolveImports - pass B of typecheckProgram.
 // For each IMPORT_DECL in mod, validates exports exist and populates the
 // module's local symbol/struct tables with the imported bindings.
 export function resolveImports(mod, moduleEnv, errors) {
@@ -70,12 +70,12 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcUnion = srcEnv.unionTable?.get(spec.exportName);
 
       if (srcKind) {
-        // Phase 6.4: cross-module kind import. Identity is preserved by reference —
+        // Phase 6.4: cross-module kind import. Identity is preserved by reference -
         // the same KindType instance is shared across modules so equality holds.
         kindTable.set(spec.localName, srcKind);
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "kind" });
       } else if (srcTrait) {
-        // It's a trait — record the import; pass C.5 re-syncs the resolved version
+        // It's a trait - record the import; pass C.5 re-syncs the resolved version
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "trait" });
       } else if (srcStruct) {
         // It's a struct type (possibly a shell; pass C.5 re-syncs the resolved version)
@@ -115,7 +115,7 @@ export function resolveImports(mod, moduleEnv, errors) {
         // It's a value (function, const, etc.). Imports from std/ modules
         // must use the namespace form so common function names ("info",
         // "error", "panic", ...) don't compete with user identifiers.
-        // Types/traits/kinds are exempt — they're capitalized (or, for
+        // Types/traits/kinds are exempt - they're capitalized (or, for
         // `disposable`, used in declaration-position syntax) and can keep
         // their named-import form.
         if (imp.sourcePath?.startsWith("std/")) {

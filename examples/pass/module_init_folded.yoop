@@ -35,11 +35,11 @@ const PRODUCT: int32 = 2 + 3 * 4;
 const DIFFERENCE: int32 = 7 - 10;
 const FLAG: bool = true;
 const GREETING: string = "yoop";
-// Struct literal with declared-out-of-order fields — lowering
+// Struct literal with declared-out-of-order fields - lowering
 // normalizes to the StructType.fields order so the LLVM aggregate
 // constant matches the struct layout regardless of source order.
 const ORIGIN: Point = { y: 4, x: 3 };
-// Array literal — folds into a fat-pointer `{ ptr <backing>, i64 N }`
+// Array literal - folds into a fat-pointer `{ ptr <backing>, i64 N }`
 // where `<backing>` is a private `[N x i32]` global initialized to
 // the listed elements.
 const NUMS: int32[] = [10, 20, 30];
@@ -50,7 +50,7 @@ const MASK: int32 = 0xFF & 0xCAFE;            // 254
 const SHIFTED: int32 = 1 << 10;               // 1024
 const NEGATED: int32 = ~0xF;                  // -16
 const EQ_FLAG: bool = (1 + 2) == 3;           // true
-// Cross-decl IDENT reference — `SHIFTED` was folded above, the
+// Cross-decl IDENT reference - `SHIFTED` was folded above, the
 // comptime pass threads its value into this expression's lowering.
 const HAS_HIGH_BIT: bool = (SHIFTED & 0x400) != 0; // true
 
@@ -61,14 +61,14 @@ const ORIGIN_X: int32 = ORIGIN.x;       // 3
 const NUMS_FIRST: int32 = NUMS[0];      // 10
 const NUMS_LEN: usize = NUMS.len;       // 3
 
-// Direct call into a user-defined function — the interpreter lowers
+// Direct call into a user-defined function - the interpreter lowers
 // `square`'s body once, pushes a frame at the call site, binds `x` to
 // the literal arg, runs `x * x`, then writes the result into the
 // caller's dst register. Cached per FUNCTION_DECL so a second call
 // reuses the same bytecode.
 function square(x: int32): int32 { return x * x; }
 const SQUARED: int32 = square(6);       // 36
-// Nested calls compose — the inner call frame returns before the
+// Nested calls compose - the inner call frame returns before the
 // outer one starts.
 const NESTED: int32 = square(square(2));  // 16
 
@@ -125,7 +125,7 @@ const BUMPED_SUM: int32 = sum_after_bump();  // 140
 // Ref-param mutation: the callee takes `ref p: Point` and writes
 // through `p.x = ...`, mutating the caller's binding. Comptime
 // interpreter models this via REF_LOCAL + REF_LOAD / FIELD_STORE on
-// the shared struct payload (no deep-copy on REF_LOAD — that would
+// the shared struct payload (no deep-copy on REF_LOAD - that would
 // break the mutation semantics).
 function offset_point(ref p: Point, dx: int32, dy: int32): void {
     p.x = p.x + dx;

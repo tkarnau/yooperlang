@@ -16,4 +16,4 @@ function main(): int32 {
 
 // Fails because `extra` is defined in T's impl block but no implemented trait
 // requires it. Every method in an impl block must satisfy exactly one required
-// method from the listed traits — there is no "free method" concept in Yooper.
+// method from the listed traits - there is no "free method" concept in Yooper.

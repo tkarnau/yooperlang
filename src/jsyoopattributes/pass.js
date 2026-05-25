@@ -2,7 +2,7 @@
 //
 // Walks every module's AST, finds ATTRIBUTE nodes, looks up their
 // handler in the registry, and runs the `comptimePhase` callback. For
-// Phase 11.A this is mostly a stub — `@precompile`'s handler errors out
+// Phase 11.A this is mostly a stub - `@precompile`'s handler errors out
 // with a "not yet implemented" diagnostic because the bytecode
 // interpreter doesn't land until 11.B/C. The pass itself is in place
 // so the integration point is real and the registry handlers actually
@@ -31,7 +31,7 @@ function walkNode(node, mod, out) {
     out.push({ node, moduleId: mod.id });
   }
   // Recurse into common container fields. We do this generically rather
-  // than enumerate every AST node kind — the cost of a few extra
+  // than enumerate every AST node kind - the cost of a few extra
   // traversals on non-container fields is negligible vs the maintenance
   // burden of an exhaustive switch.
   for (const key of [

@@ -12,11 +12,11 @@ function makeBuiltin(name, extra) {
   return k;
 }
 
-// `joined h = task_call();` — stack-allocated Task<T>, autoJoin (compiler
+// `joined h = task_call();` - stack-allocated Task<T>, autoJoin (compiler
 // inserts `wait` + free_sync_pair before scope exit).
 export const JOINED_KIND = makeBuiltin("joined", { autoJoin: true });
 
-// `pooled h = task_call();` — heap-allocated, refcounted Task<T>. Scope-exit
+// `pooled h = task_call();` - heap-allocated, refcounted Task<T>. Scope-exit
 // inserts release; copy/return sites get retain pairs.
 // Phase 6.4: `pooled` also applies to parameters (a function that takes
 // ownership of a refcounted Task handle).

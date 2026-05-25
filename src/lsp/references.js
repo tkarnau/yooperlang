@@ -12,11 +12,11 @@
 //        Walks every typechecked module's AST looking for occurrences
 //        that bind to `target`. Three matching strategies in increasing
 //        cost order:
-//          (a) `node.resolvedDeclNode === target.decl` — direct back-
+//          (a) `node.resolvedDeclNode === target.decl` - direct back-
 //              pointer match. Locals, params, and any IDENT the
 //              typechecker resolved.
 //          (b) CALL_EXPRESSION callee fields (calleeModuleId +
-//              callee/calleeExportName) — top-level function refs.
+//              callee/calleeExportName) - top-level function refs.
 //          (c) String-name scan over parser-internal type annotations.
 //              Type annotations aren't AST nodes, so for type / kind
 //              targets we walk every decl's annotation tree and emit a
@@ -135,7 +135,7 @@ export function identifyTarget(node, ctx) {
     }
   }
 
-  // VARIANT_CONSTRUCTOR — jump to the enum variant decl.
+  // VARIANT_CONSTRUCTOR - jump to the enum variant decl.
   if (node && node.kind === ASTNodeKind.VARIANT_CONSTRUCTOR && node.variantName) {
     const enumType = node.resolvedEnumType;
     if (enumType?.kind === typeKinds.enum) {
@@ -281,7 +281,7 @@ function findVariantParent(ast, variantDecl) {
 //   (d) METHOD_DECL call matching target's struct + method
 //   (e) VARIANT_CONSTRUCTOR matching target's enum + variant
 //   (f) For type/kind targets: any occurrence whose textual context is a
-//       type-annotation parser tree referencing the same name — we
+//       type-annotation parser tree referencing the same name - we
 //       conservatively count the occurrence if no AST node refutes it.
 export function findReferences(target, ctx) {
   if (!target) return [];
@@ -323,7 +323,7 @@ function nameOfTarget(target) {
 
 // Walk every word-boundary occurrence of `name` in `mod.src`, validate
 // each via the AST, and push matching ones. Skips occurrences inside
-// `//` line comments and `/* */` block comments — these are textual
+// `//` line comments and `/* */` block comments - these are textual
 // mentions, not references.
 function scanModuleForRefs(mod, target, name, push) {
   if (!mod.src) return;
@@ -347,7 +347,7 @@ function scanModuleForRefs(mod, target, name, push) {
 //   - `//` line comments and `/* */` block comments (nestable per lexer)
 //   - `"..."` and `'...'` string literals (whole content + delimiters)
 //   - template-literal *string portions* (text inside backticks, but
-//     NOT the code inside `${...}` interpolations — those are real
+//     NOT the code inside `${...}` interpolations - those are real
 //     expressions and references inside them must be honored)
 //
 // Mirrors the lexer's tokenizer in jsyooplexer/. Keeping this in sync
@@ -390,7 +390,7 @@ function buildCommentChecker(src) {
       let j = i + 1;
       while (j < n) {
         const cc = src.charCodeAt(j);
-        if (cc === 0x5c) { j += 2; continue; } // '\' — skip next
+        if (cc === 0x5c) { j += 2; continue; } // '\' - skip next
         if (cc === quote) { j++; break; }
         if (cc === 0x0a) break; // unterminated, bail out
         j++;
@@ -413,7 +413,7 @@ function buildCommentChecker(src) {
           break;
         }
         if (cc === 0x24 && j + 1 < n && src.charCodeAt(j + 1) === 0x7b) {
-          // `${` opens an interpolation — the preceding text portion is
+          // `${` opens an interpolation - the preceding text portion is
           // not code; mark it. Then walk to matching `}` and resume
           // text-mode after it.
           if (textStart < j) ranges.push([textStart, j]);
@@ -557,7 +557,7 @@ function fieldRecvMatches(recvType, target) {
   if (!targetStructName) return false;
   // Concrete struct match.
   if (recvType.name === targetStructName) return true;
-  // Monomorphized generic — recvType.name carries the mangled name
+  // Monomorphized generic - recvType.name carries the mangled name
   // like `DynArray__int32` while target.structDecl.name is `DynArray`.
   if (recvType.genericInstance) {
     return recvType.name === targetStructName ||
@@ -593,7 +593,7 @@ function innerDecl(decl) {
 }
 
 // Resolve a (possibly monomorphized) struct type to its declaring AST
-// node. Same logic as the helper inside nav.js — duplicated here to keep
+// node. Same logic as the helper inside nav.js - duplicated here to keep
 // these modules independent.
 function resolveStructDecl(structType, module, modById, programState) {
   if (!structType) return null;

@@ -1,8 +1,8 @@
-// std/core/traits.yoop — foundational traits used across std modules.
+// std/core/traits.yoop - foundational traits used across std modules.
 //
 // Library Phase A: the staple Readable / Writable / Display traits that
 // every downstream module either implements or takes as input. Disposable
-// is intentionally NOT defined here — it lives in std/core/kinds.yoop
+// is intentionally NOT defined here - it lives in std/core/kinds.yoop
 // alongside the disposable kind that requires it.
 
 import { Result } from "./types.yoop";
@@ -22,7 +22,7 @@ export trait Readable {
 // than buf.len for partial writes on a non-blocking sink; callers loop
 // until either `n == buf.len` or they observe an `Err`).
 //
-// Flush result is err-only — `Ok` (no payload) on success, `Err { error }`
+// Flush result is err-only - `Ok` (no payload) on success, `Err { error }`
 // on failure.
 export enum FlushOutcome {
     Ok,

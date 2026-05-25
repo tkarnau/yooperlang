@@ -14,7 +14,7 @@ type Point {
 }
 
 function main(): int32 {
-    // Primitive element type — int32[].
+    // Primitive element type - int32[].
     let xs: int32[] = [10, 20, 30, 40];
     let sum: int32 = 0;
     for x in xs {
@@ -32,7 +32,7 @@ function main(): int32 {
     }
     printf(`trues=${trues}\n`);
 
-    // Struct element type — iteration copies each element into the loop var.
+    // Struct element type - iteration copies each element into the loop var.
     let pts: Point[] = intr.heap_alloc(3);
     pts[0] = { x: 1, y: 10 };
     pts[1] = { x: 2, y: 20 };
@@ -48,7 +48,7 @@ function main(): int32 {
     // break + continue compose with for-in the same as with while / classic for.
     // (Loop variable is renamed per iteration site because each LET-style
     // alloca currently uses the user-visible name as its LLVM SSA name and
-    // sibling re-use would collide — same issue today's `let x` in sibling
+    // sibling re-use would collide - same issue today's `let x` in sibling
     // blocks hits.)
     let early: int32 = 0;
     for v in xs {
@@ -62,7 +62,7 @@ function main(): int32 {
     }
     printf(`early=${early}\n`);
 
-    // Empty array — body must not execute.
+    // Empty array - body must not execute.
     let empty: int32[] = intr.heap_alloc(0);
     let zero: int32 = 0;
     for e in empty {

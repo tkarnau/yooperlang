@@ -1,6 +1,6 @@
 // Library Phase C smoke: parse a hard-coded HTTP/1.1 request buffer
 // through std/http/parser and print the structured fields. No sockets,
-// no FFI — exercises the request-line + headers + body-offset path.
+// no FFI - exercises the request-line + headers + body-offset path.
 
 import { disposable } from "../../../std/core/kinds.yoop";
 import { HttpMethod, headers_get } from "../../../std/http/types.yoop";

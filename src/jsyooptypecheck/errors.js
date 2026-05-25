@@ -8,7 +8,7 @@ import { typeKinds } from "./types.js";
 
 // `locSource` may be either an AST node (we read its `sourceLoc`) or a raw
 // sourceLoc object `{ pos, line, column, length? }`. Use the raw form when
-// the offending token is finer-grained than the enclosing node — e.g. the
+// the offending token is finer-grained than the enclosing node - e.g. the
 // field identifier of a FIELD_ACCESS expression.
 export function pushError(errors, locSource, message) {
   let sourceLoc;
@@ -54,7 +54,7 @@ export function formatType(t) {
         const args = t.genericInstance.args.map(formatType).join(", ");
         // Recover the source decl name from the mangled `Name__a__b__...`.
         // The genericInstance.declId is `<mod>__enum__<Name>`; if available,
-        // we'd prefer that — but we only have the mangled t.name here, so
+        // we'd prefer that - but we only have the mangled t.name here, so
         // strip the trailing `__arg`s.
         const baseName = t.name.split("__")[0];
         return `enum ${baseName}<${args}>`;

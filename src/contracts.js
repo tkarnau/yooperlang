@@ -46,7 +46,7 @@ export const ASTNodeKind = Object.freeze({
 
   // phase 4: refs, arrays, control flow
   FOR_LOOP: "FOR_LOOP",
-  // phase 9.D: `for item in xs { ... }` — element-walking loop over an array
+  // phase 9.D: `for item in xs { ... }` - element-walking loop over an array
   // (default sequential iteration; trait-driven iteration is a later phase).
   FOR_IN_LOOP: "FOR_IN_LOOP",
   BREAK_STATEMENT: "BREAK_STATEMENT",
@@ -60,7 +60,7 @@ export const ASTNodeKind = Object.freeze({
   METHOD_SIG: "METHOD_SIG",
   METHOD_DECL: "METHOD_DECL",
   // Phase 9.G: `vtable Name for TraitName { field: (params) => ret, ... }`.
-  // A vtable decl is a type-erased shape backing a trait — codegen emits it
+  // A vtable decl is a type-erased shape backing a trait - codegen emits it
   // as a LLVM struct of `{ ctx, methodPtr1, methodPtr2, ... }`.
   VTABLE_DECL: "VTABLE_DECL",
 
@@ -121,7 +121,7 @@ export const ASTNodeKind = Object.freeze({
   // attribute. The `target` field carries the AST node the attribute
   // decorates (a decl, statement, block, or null for bare attribute
   // statements). Per-attribute behavior lives in
-  // src/jsyoopattributes/registry.js — the AST node itself is just the
+  // src/jsyoopattributes/registry.js - the AST node itself is just the
   // carrier. Codegen must consume every ATTRIBUTE node before emission;
   // any that survive are an internal-error.
   ATTRIBUTE: "ATTRIBUTE",

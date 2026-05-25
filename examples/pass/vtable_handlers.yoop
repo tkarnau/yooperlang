@@ -54,7 +54,7 @@ vtable Dispatcher for Handler {
 }
 
 // Sequential dispatch over a heterogeneous Dispatcher array. The function
-// takes any Dispatcher value by ref — it has zero knowledge of the underlying
+// takes any Dispatcher value by ref - it has zero knowledge of the underlying
 // impl types. Pre-9.G, this would have had to be `<H implements Handler>` and
 // monomorphize per concrete type, which makes mixed-type arrays impossible.
 function fan_out(ref handlers: Dispatcher[], req: int32): int32 {
@@ -91,7 +91,7 @@ function main(): int32 {
 
     // Single-dispatch convenience: re-wrap one handler in a fresh Dispatcher
     // value and route through it. Demonstrates that `from` is an ordinary
-    // expression — not a one-shot let-rhs constraint.
+    // expression - not a one-shot let-rhs constraint.
     let direct: Dispatcher = Dispatcher.from(ref s);
     let only: int32 = Dispatcher.handle(ref direct, 11);
     printf(`scale-only=${only}\n`);

@@ -1,8 +1,8 @@
-# Phase 10.C.3 — std/collections/ rest: Set, Deque, Map iteration ✓ landed
+# Phase 10.C.3 - std/collections/ rest: Set, Deque, Map iteration ✓ landed
 
 > The follow-up to Phase 10.C.2's generic `Map<K, V>`. Lands the
-> remaining collection shapes from the original 10.C plan — `Set<K>`,
-> `Deque<T>`, and `for entry in map_iter(ref m)` — plus the
+> remaining collection shapes from the original 10.C plan - `Set<K>`,
+> `Deque<T>`, and `for entry in map_iter(ref m)` - plus the
 > int64/uint64/bytes `KeyOps` helpers. Along the way it picks up four
 > compiler-side fixes that container code surfaced.
 
@@ -12,10 +12,10 @@
 
 In [std/collections/map.yoop](../../std/collections/map.yoop):
 
-- `int64_key_ops()` / `uint64_key_ops()` — Knuth-style multiplicative
+- `int64_key_ops()` / `uint64_key_ops()` - Knuth-style multiplicative
   hash; `==` for equality.
-- `bytes_key_ops()` — FNV-1a over the byte buffer; `bytes_eq` for
-  equality. The map's `keys` array stores the fat pointers — the
+- `bytes_key_ops()` - FNV-1a over the byte buffer; `bytes_eq` for
+  equality. The map's `keys` array stores the fat pointers - the
   caller is responsible for keeping the backing buffers alive.
 
 ### `Set<K>` in [std/collections/set.yoop](../../std/collections/set.yoop)
@@ -51,7 +51,7 @@ for e in map_iter(ref m) {
 }
 ```
 
-The iter is invalidated by any mutation that triggers a rehash — keep
+The iter is invalidated by any mutation that triggers a rehash - keep
 its lifetime scoped to the loop.
 
 ## What shipped (compiler)
@@ -65,7 +65,7 @@ inter-module dependencies: `Set<K>`'s body in
 `std/collections/set.yoop` references generic functions in
 `std/collections/map.yoop`. When `Set<string>` is monomorphized, the
 clone registers `map_contains_key<string, bool>` etc. on the *map*
-module's registry slot — which has already finished its own
+module's registry slot - which has already finished its own
 per-instance sweep. The fix:
 
 - Each module's per-instance emission is now a closure
@@ -82,12 +82,12 @@ per-instance sweep. The fix:
 `MapIter<K, V> implements Iterable<MapEntry<K, V>>` with
 `next(ref self): IterStep<MapEntry<K, V>>` exposed a long-standing
 gap: `instantiateStruct` was copying `genericDecl.methods` and
-`genericDecl.implementsTraits` straight onto the new instance —
+`genericDecl.implementsTraits` straight onto the new instance -
 unsubstituted. For `MapIter<int32, int32>`, this meant
 `methods.get("next").returnType` was still
 `IterStep<MapEntry<K, V>>` with K/V as `TypeParamType`. The for-in
 loop's elem-type extractor read the un-substituted value and the
-body's `entry.key` resolved to a `TypeParamType` — arithmetic
+body's `entry.key` resolved to a `TypeParamType` - arithmetic
 failed.
 
 Fix in [instantiate.js:instantiateStruct](../../src/jsyooptypecheck/instantiate.js):
@@ -97,7 +97,7 @@ Fix in [instantiate.js:instantiateStruct](../../src/jsyooptypecheck/instantiate.
 - Then substitute through each method sig and each trait reference.
   Self-referential walks (e.g. a method with `ref self` typed as the
   open `MapIter<K, V>`) re-instantiate the struct, hit the cache, and
-  return the in-progress instance — no infinite recursion.
+  return the in-progress instance - no infinite recursion.
 
 ### 3. Trait method re-mangle after substitution
 
@@ -114,7 +114,7 @@ substituted receiver.
 
 ### 4. Nested generic type args in `implements` clauses
 
-`MapIter<K, V> implements Iterable<MapEntry<K, V>>` — the type
+`MapIter<K, V> implements Iterable<MapEntry<K, V>>` - the type
 argument `MapEntry<K, V>` mentions the type-decl's own params (`K`,
 `V`). The impl-clause resolver in
 [typecheck.js:validateImplBlock](../../src/jsyooptypecheck/typecheck.js)
@@ -130,18 +130,18 @@ collides with the label's `%entry` reference at the LLVM level
 (SSA values and basic-block labels share a namespace). Phase 10.H's
 slot uniquifier didn't know about this. Fix: seed `usedSlots` with
 `"entry"` at function entry so the user binding falls through to
-`entry.1` for the first use — no code-level renaming needed.
+`entry.1` for the first use - no code-level renaming needed.
 
 ## Verification
 
 - [examples/pass/set_smoke.yoop](../../examples/pass/set_smoke.yoop)
-  — `Set<string>` insert/contains/remove + duplicate detection +
+  - `Set<string>` insert/contains/remove + duplicate detection +
   Disposable auto-cleanup.
 - [examples/pass/deque_smoke.yoop](../../examples/pass/deque_smoke.yoop)
-  — `Deque<int32>` push/pop on both ends, growth past the load
+  - `Deque<int32>` push/pop on both ends, growth past the load
   threshold, empty-pop returning `None`.
 - [examples/pass/map_iter.yoop](../../examples/pass/map_iter.yoop)
-  — `for e in map_iter(ref m)` over `Map<int32, int32>`, summing
+  - `for e in map_iter(ref m)` over `Map<int32, int32>`, summing
   keys and values via `Iterable<MapEntry<K, V>>`.
 - Full suite green: **551 tests**.
 
@@ -158,34 +158,34 @@ slot uniquifier didn't know about this. Fix: seed `usedSlots` with
 - **Iter invalidation under mutation**. The current `MapIter`
   borrows the map's backing arrays; a `map_insert` that triggers a
   rehash leaves the iter dangling. The compiler doesn't enforce
-  "don't mutate the source during iteration" — that's caller
+  "don't mutate the source during iteration" - that's caller
   discipline today. A real fix needs a "borrowed" kind or an iter
   version-tag check; both are larger language changes.
 - **`Vec<T>` `Iterable<T>` impl**. Not landed in this sub-phase; the
   array form `for x in vec_as_array(ref v)` covers immediate cases.
-- **`Set<K>` / `Deque<T>` iteration**. Same shape as `MapIter` —
+- **`Set<K>` / `Deque<T>` iteration**. Same shape as `MapIter` -
   bolt on when a consumer wants it.
 
 ## Critical files touched
 
-- [std/collections/map.yoop](../../std/collections/map.yoop) —
+- [std/collections/map.yoop](../../std/collections/map.yoop) -
   `MapEntry`, `MapIter`, `map_iter`, `int64_key_ops`,
   `uint64_key_ops`, `bytes_key_ops`.
-- [std/collections/set.yoop](../../std/collections/set.yoop) — new
+- [std/collections/set.yoop](../../std/collections/set.yoop) - new
   module.
-- [std/collections/deque.yoop](../../std/collections/deque.yoop) —
+- [std/collections/deque.yoop](../../std/collections/deque.yoop) -
   new module.
 - [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js)
-  — `flushInstances` closure + cross-module fixed-point; trait
+  - `flushInstances` closure + cross-module fixed-point; trait
   method re-mangle in `cloneAstWithSubstitution`; `entry`
   pre-reserved in `createLocalSymbols`.
 - [src/jsyooptypecheck/instantiate.js](../../src/jsyooptypecheck/instantiate.js)
-  — `instantiateStruct` substitutes methods + implementsTraits
+  - `instantiateStruct` substitutes methods + implementsTraits
   through a cycle-safe early-cache pattern.
 - [src/jsyooptypecheck/typecheck.js](../../src/jsyooptypecheck/typecheck.js)
-  — impl-clause args see the decl's `typeParamScope`.
+  - impl-clause args see the decl's `typeParamScope`.
 - [examples/pass/set_smoke.yoop](../../examples/pass/set_smoke.yoop),
   [examples/pass/deque_smoke.yoop](../../examples/pass/deque_smoke.yoop),
   [examples/pass/map_iter.yoop](../../examples/pass/map_iter.yoop)
-  — new fixtures.
-- [src/e2e.test.js](../../src/e2e.test.js) — three new entries.
+  - new fixtures.
+- [src/e2e.test.js](../../src/e2e.test.js) - three new entries.

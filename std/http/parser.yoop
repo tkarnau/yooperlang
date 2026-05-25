@@ -1,4 +1,4 @@
-// std/http/parser.yoop — minimal HTTP/1.1 request parser.
+// std/http/parser.yoop - minimal HTTP/1.1 request parser.
 //
 // Consumes a uint8[] buffer accumulated from a TcpStream and parses the
 // request line + headers. Body bytes (if any) are exposed as a borrowing
@@ -6,7 +6,7 @@
 // the source buffer (the strings inside are bytes_slice +
 // string_from_bytes_unchecked views into it).
 //
-// This is INTERNAL — std/http/server.yoop imports from here. User code
+// This is INTERNAL - std/http/server.yoop imports from here. User code
 // touches Request / Response from std/http/types.yoop, not this file.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
@@ -70,7 +70,7 @@ export function parse_method(buf: uint8[]): Result<HttpMethod, string> {
     return Result.Err { error: "parse_method: unknown method token" };
 }
 
-// Helper for the failure path — builds a ParsedRequest with an empty
+// Helper for the failure path - builds a ParsedRequest with an empty
 // Request shell and the error set.
 function fail_parsed(msg: string): ParsedRequest propagates<disposable> {
     let empty: uint8[] = [];
@@ -92,7 +92,7 @@ function fail_parsed(msg: string): ParsedRequest propagates<disposable> {
 // caller is expected to have already accumulated at least up through
 // \r\n\r\n; pass the full buf and we'll find the boundary internally.
 //
-// Body bytes follow the head and are NOT consumed here — caller reads
+// Body bytes follow the head and are NOT consumed here - caller reads
 // `content_length` and slices `buf[body_start..body_start+content_length]`.
 export function parse_request_head(buf: uint8[]): ParsedRequest propagates<disposable> {
     let head_end: usize = find_header_end(buf);
@@ -133,7 +133,7 @@ export function parse_request_head(buf: uint8[]): ParsedRequest propagates<dispo
     let version_str: string = intr.string_from_bytes_unchecked(version_bytes);
 
     // Build the ParsedRequest shell up front so the Headers we populate
-    // lives inside `pr` from creation — `let headers = headers_new(...)`
+    // lives inside `pr` from creation - `let headers = headers_new(...)`
     // as a separate binding doesn't transfer cleanly through a final
     // struct-literal return (the obligation tracker only follows IDENT
     // returns into struct fields). With everything inside `pr`, we

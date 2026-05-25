@@ -1,4 +1,4 @@
-// std/log.yoop — leveled logging to stderr.
+// std/log.yoop - leveled logging to stderr.
 //
 // Three free functions corresponding to the standard severity levels.
 // Each prefixes the message with `[info]` / `[warn]` / `[error]` and
@@ -8,7 +8,7 @@
 //
 // The structured-JSON sink + alternate-destination env switch
 // (`YOOP_LOG_SINK=file:/...` or `tcp:host:port`) called out in the
-// 10.D plan are follow-ups — today the sink is stderr, fixed.
+// 10.D plan are follow-ups - today the sink is stderr, fixed.
 
 extern "C" from "yoop_runtime" {
     function yoop_log_info(msg: string): void;

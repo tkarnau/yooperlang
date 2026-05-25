@@ -1,4 +1,4 @@
-// std/core/intrinsics.yoop — the compiler-recognized intrinsic surface.
+// std/core/intrinsics.yoop - the compiler-recognized intrinsic surface.
 //
 // These declarations name operations the codegen lowers directly to LLVM
 // IR or to libc calls, rather than to a yoop function body. They used to

@@ -1,4 +1,4 @@
-// std/core/format.yoop — primitive `to_string` shims.
+// std/core/format.yoop - primitive `to_string` shims.
 //
 // Used by the compiler when lowering template literals: each `${x}`
 // interpolation gets routed to the matching `<type>_to_string` here
@@ -7,7 +7,7 @@
 //
 // Integer formatting is pure yoop (a divmod loop into a fresh byte
 // buffer). Float formatting bottoms out at a tiny snprintf-based C
-// helper — pure-yoop float-to-string isn't worth the surface area.
+// helper - pure-yoop float-to-string isn't worth the surface area.
 
 import * as intr from "./intrinsics.yoop";
 
@@ -44,7 +44,7 @@ export function uint_to_string(x: uint64): string {
 }
 
 // Decimal digits of a signed 64-bit value. INT64_MIN is a known
-// edge case (its absolute value doesn't fit in int64) — callers
+// edge case (its absolute value doesn't fit in int64) - callers
 // passing it get the same overflow surface as any other arithmetic
 // hitting the wrap; not worth a branch in the hot path.
 export function int_to_string(x: int64): string {

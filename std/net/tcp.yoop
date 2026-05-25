@@ -1,4 +1,4 @@
-// std/net/tcp.yoop — TcpListener + TcpStream.
+// std/net/tcp.yoop - TcpListener + TcpStream.
 //
 // Safe wrappers over std/net/socket_ffi. `TcpListener` owns a listening
 // socket and exposes `tcp_accept`. `TcpStream` owns a connected socket
@@ -32,7 +32,7 @@ export type TcpListener implements Disposable propagates<disposable> {
     socket: Socket,
     bound_port: int32,    // remembered for diagnostics; the kernel may have
                           // assigned this if port=0 was passed in (not yet
-                          // surfaced — we use the value the caller passed)
+                          // surfaced - we use the value the caller passed)
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
     }
@@ -88,7 +88,7 @@ export type TcpStream implements (Disposable, Readable, Writable) propagates<dis
     }
 
     function flush(ref self): FlushOutcome {
-        // Unbuffered stream — flush is a no-op.
+        // Unbuffered stream - flush is a no-op.
         return FlushOutcome.Ok;
     }
 }

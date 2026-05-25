@@ -7,7 +7,7 @@ import { ASTNodeKind } from "../contracts.js";
 import { moduleIdFor } from "./moduleId.js";
 
 // Phase 9.C: the std/ import root. By default this is the std/ directory at
-// the repo root — i.e. two levels up from this file (src/jsyoopdriver/). The
+// the repo root - i.e. two levels up from this file (src/jsyoopdriver/). The
 // driver can override via the options bag (useful for tests or for an
 // alternate yoopiler distribution layout).
 const DEFAULT_STD_ROOT = path.resolve(
@@ -22,11 +22,11 @@ const DEFAULT_STD_ROOT = path.resolve(
 // leaves-first (so each module's dependencies appear before it).
 //
 // Each Module:
-//   id: string               — stable module identifier
-//   absPath: string          — canonicalized absolute path
-//   src: string              — file contents
+//   id: string               - stable module identifier
+//   absPath: string          - canonicalized absolute path
+//   src: string              - file contents
 //   ast: ProgramNode
-//   imports: [IMPORT_DECL]   — decls with resolvedAbsPath/resolvedModuleId set
+//   imports: [IMPORT_DECL]   - decls with resolvedAbsPath/resolvedModuleId set
 //
 // Options:
 //   readFile(absPath) -> string | null
@@ -43,7 +43,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   // Always pull std/core/format.yoop and std/core/strings.yoop into the
   // graph so codegen can lower interpolated template literals to
   // `string_concat_all([..., int_to_string(x), ...])` without requiring
-  // user code to import them explicitly. Loading is idempotent — if
+  // user code to import them explicitly. Loading is idempotent - if
   // the entry transitively imports either, this is a no-op.
   const autoload = [
     path.resolve(stdRoot, "core", "format.yoop"),
@@ -86,7 +86,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
       }
       // Phase 9.C: `std/...` paths resolve against the std root, not relative
       // to the importing file. Everything else must be `./...`, `../...`, or
-      // absolute — preserves the SPEC §1 relative-only contract for non-std
+      // absolute - preserves the SPEC §1 relative-only contract for non-std
       // imports.
       const isStdImport = sourcePath.startsWith("std/");
       if (

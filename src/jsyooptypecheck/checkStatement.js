@@ -191,7 +191,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   // Reject ref return types
   if (funcReturnType.kind === typeKinds.ref) {
     pushError(errors, funcNode,
-      `functions may not return 'ref T' — returning a reference to a local binding is unsafe`);
+      `functions may not return 'ref T' - returning a reference to a local binding is unsafe`);
   }
   funcNode.resolvedType = funcReturnType;
 
@@ -209,7 +209,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   // params + the synthetic outer body share `scope`. Block-statement
   // bodies open their own inner scope and pop it themselves; this catches
   // the function-level scope (params and any locals declared at function
-  // top — there usually are none, but it's the right shape).
+  // top - there usually are none, but it's the right shape).
   popScope(scope, errors);
 }
 
@@ -218,7 +218,7 @@ export function validateFunction(funcNode, typeContext, errors) {
 // no locals); identifier lookups fall through to moduleSymbols, which by
 // pass D.0 holds both this module's bindings and any imported ones.
 //
-// (Bytecode/CTE future) — this is the call site to swap for a CTE
+// (Bytecode/CTE future) - this is the call site to swap for a CTE
 // evaluator: try evaluating decl.assignment at compile time; on success
 // stash the result on the decl for codegen to use as the @global initial
 // value; on failure keep the existing runtime-init behavior.
@@ -247,7 +247,7 @@ export function validateModuleInit(decl, typeContext, errors) {
 // The block has no params and no return type (its only effects are
 // writes to module-level state); local bindings declared inside the
 // block live only during comptime evaluation. Otherwise it's a
-// normal block — IDENT resolution falls through to module symbols
+// normal block - IDENT resolution falls through to module symbols
 // the same way validateModuleInit does.
 export function validatePrecompileBlock(blockAst, typeContext, errors) {
   const scope = pushScope(null);
@@ -301,7 +301,7 @@ export function validateStatement(node, scope, ctx) {
   }
 }
 
-// `{ ... }` — opens a fresh child scope, walks each inner statement, then
+// `{ ... }` - opens a fresh child scope, walks each inner statement, then
 // enforces fallible-binding observation on every binding declared in this
 // scope before letting them go out.
 function checkBlock(node, scope, ctx) {
@@ -324,7 +324,7 @@ function checkBlock(node, scope, ctx) {
 //   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
 //     the name in the trailing block's scope rather than the enclosing one
 function checkLetOrConst(node, scope, ctx) {
-  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` —
+  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
   const builtinName = node.kindPrefix?.builtin ?? null;
   if (builtinName === "joined" || builtinName === "pooled") {
@@ -380,7 +380,7 @@ function checkLetOrConst(node, scope, ctx) {
       ((typeof node.assignment.callee === "string" &&
         lookupGenericFunc(node.assignment.callee, ctx) !== null) ||
         isNamespaceGenericCall(node.assignment, ctx));
-    // Phase 6.3: immediate task call — `const x: T = compute(...);` where
+    // Phase 6.3: immediate task call - `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
       !kindType &&
@@ -498,7 +498,7 @@ function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
 // Returns true iff `callExpr` is a CALL_EXPRESSION whose resolved return type
 // is Task<targetType>. resolveExprType is invoked as a side effect.
 function isTaskCallReturningType(callExpr, targetType, scope, ctx) {
-  // Lookahead-only check based on the callee — does the named function have
+  // Lookahead-only check based on the callee - does the named function have
   // a TaskType return? We must invoke resolveExprType for arity/type checking,
   // but we want to avoid emitting a spurious "Task<T> not assignable to T" error.
   const rhsType = resolveExprType(callExpr, scope, ctx);
@@ -571,7 +571,7 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
   // Phase 6.4 strict propagates: a struct that propagates this kind satisfies
   // the kind's requirement via propagated fields, even if it does not
   // implement the required traits directly. Skip the direct-implements check
-  // in that case — the obligation flows via the field walk in kindCheck.
+  // in that case - the obligation flows via the field walk in kindCheck.
   const structPropagatesThisKind = (declaredType.propagatedKinds ?? []).some(
     (a) => (a.kindType ?? a) === kindType,
   );
@@ -714,7 +714,7 @@ function checkForLoop(node, scope, ctx) {
   const initBinding = lookupInScope(scope, node.initIdent);
   if (!initBinding) {
     pushError(ctx.errors, node,
-      `for-loop variable "${node.initIdent}" is not declared — declare it before the loop`);
+      `for-loop variable "${node.initIdent}" is not declared - declare it before the loop`);
   } else {
     const initExprType = resolveExprType(node.initExpr, scope, ctx);
     checkAssignable(initBinding.type, initExprType, node, ctx);
@@ -758,7 +758,7 @@ function checkForInLoop(node, scope, ctx) {
     elemType = iterType.elem;
   } else if (iterType.kind === typeKinds.struct) {
     // The struct type captured from an expression site (e.g. a function-call
-    // return) may be the pass-A shell — re-fetch the canonical version from
+    // return) may be the pass-A shell - re-fetch the canonical version from
     // structTable so we see the fully-resolved implementsTraits/methods.
     if (ctx.typeContext.structTable) {
       const canonical = ctx.typeContext.structTable.get(iterType.name);
@@ -805,7 +805,7 @@ function checkForInLoop(node, scope, ctx) {
       pushError(
         ctx.errors,
         node.iterExpr,
-        `type ${formatType(iterType)} is not iterable — expected an array or a type implementing Iterable<T>`,
+        `type ${formatType(iterType)} is not iterable - expected an array or a type implementing Iterable<T>`,
       );
     }
   } else if (iterType.kind !== typeKinds.error) {
@@ -984,7 +984,7 @@ function checkSwitch(node, scope, ctx) {
             pushError(
               ctx.errors,
               pat,
-              `variant "${scrutType.name}.${pat.variantName}" has no payload — drop the '{ ... }'`,
+              `variant "${scrutType.name}.${pat.variantName}" has no payload - drop the '{ ... }'`,
             );
           }
         } else {
@@ -1073,7 +1073,7 @@ function checkSwitch(node, scope, ctx) {
         pushError(
           ctx.errors,
           node,
-          `switch over bool is not exhaustive — add 'default' or list both true and false`,
+          `switch over bool is not exhaustive - add 'default' or list both true and false`,
         );
       }
     } else if (isEnum) {
@@ -1083,7 +1083,7 @@ function checkSwitch(node, scope, ctx) {
         pushError(
           ctx.errors,
           node,
-          `switch over ${formatType(scrutType)} is not exhaustive — missing variants: ${missing.join(", ")}`,
+          `switch over ${formatType(scrutType)} is not exhaustive - missing variants: ${missing.join(", ")}`,
         );
       }
     } else if (isInt) {
@@ -1097,7 +1097,7 @@ function checkSwitch(node, scope, ctx) {
 }
 
 function checkBreak(node, ctx) {
-  // Phase 7.5: `break` is also valid inside a switch arm — it falls out of the
+  // Phase 7.5: `break` is also valid inside a switch arm - it falls out of the
   // switch. We track the switch context independently from `inLoop` because
   // `continue` inside a switch arm still targets the enclosing loop.
   if (!ctx.inLoop && !ctx.inSwitch) {

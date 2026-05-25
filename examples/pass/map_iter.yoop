@@ -1,7 +1,7 @@
 // Phase 10.C.3: `MapIter<K, V> implements Iterable<MapEntry<K, V>>`,
 // so `for entry in map.map_iter(ref m) { ... }` walks the map's
 // occupied slots and yields `MapEntry<K, V>` values. The iter holds
-// borrowing views of the map's backing arrays — keep its lifetime
+// borrowing views of the map's backing arrays - keep its lifetime
 // inside the for-loop and don't mutate the map mid-walk (a rehash
 // would relocate the buffers and the iter's view would dangle).
 

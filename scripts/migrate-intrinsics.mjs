@@ -73,7 +73,7 @@ function rewriteFile(src) {
   const before = body;
 
   // ── Step 1: rewrite std named imports to namespace imports ─────────────
-  // Parse import { a, b as c, ... } from "std/...";  — preserve the type
+  // Parse import { a, b as c, ... } from "std/...";  - preserve the type
   // exports (capitalized identifiers) as a named import; pull value names
   // out and ensure a `import * as <alias> from "std/..."` companion exists.
   const importRegex = /import\s*\{([^}]*)\}\s*from\s*"(std\/[^"]+)"\s*;/g;
@@ -87,7 +87,7 @@ function rewriteFile(src) {
     const [whole, inner, sourcePath] = match;
     const rule = STD_NAMESPACE_RULES[sourcePath];
     if (!rule) {
-      // Path under std/ but no rule — leave alone (might be all types).
+      // Path under std/ but no rule - leave alone (might be all types).
       continue;
     }
     // Split inner into specs: "a", "b as c", "...".
@@ -97,7 +97,7 @@ function rewriteFile(src) {
     for (const s of specs) {
       const m = /^([A-Za-z_][A-Za-z0-9_]*)(?:\s+as\s+([A-Za-z_][A-Za-z0-9_]*))?$/.exec(s);
       if (!m) {
-        // Unparseable — skip the whole import to be safe.
+        // Unparseable - skip the whole import to be safe.
         typeSpecs.push(s);
         continue;
       }
@@ -157,7 +157,7 @@ function rewriteFile(src) {
     if (lastImportIdx >= 0) {
       lines.splice(lastImportIdx + 1, 0, importLine);
     } else {
-      // No imports — find first non-comment, non-blank line and insert above.
+      // No imports - find first non-comment, non-blank line and insert above.
       let insertAt = 0;
       for (let i = 0; i < lines.length; i++) {
         const t = lines[i].trim();

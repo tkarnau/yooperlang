@@ -1,7 +1,7 @@
 // Phase 6.4 strict propagates: a binding of a propagating type may use a
 // plain `let`/`const` (no kind keyword) provided the user satisfies the
 // obligation manually before scope end. Here `main` calls `Disposable.dispose`
-// directly on `arr`, which discharges the `disposable` obligation — so the
+// directly on `arr`, which discharges the `disposable` obligation - so the
 // compiler accepts the binding without `disposable` and does NOT
 // auto-inject another dispose at scope end.
 

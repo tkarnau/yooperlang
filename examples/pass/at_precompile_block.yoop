@@ -9,7 +9,7 @@
 //     itself takes the folded value as its global init.
 //   - Block form: the entire block runs at comptime. Local bindings
 //     inside the block (`let cap = 256;`, `let i = 0;`) live only
-//     during the comptime evaluation — they never reach codegen.
+//     during the comptime evaluation - they never reach codegen.
 //     Module-level bindings the block writes (`PRIMES = ...`) take
 //     the post-block value as their global init.
 //
@@ -26,7 +26,7 @@ extern "C" from "stdio.h" {
 type Point { x: int32, y: int32 }
 
 // Module-level mutable lets. Their default initializers fold to
-// "empty" placeholder values via the opportunistic-fold pass —
+// "empty" placeholder values via the opportunistic-fold pass -
 // then the `@precompile` block below overwrites them with the
 // real comptime-computed values.
 let SQUARES: int32[] = [0, 0, 0, 0, 0, 0, 0, 0];

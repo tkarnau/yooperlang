@@ -1,4 +1,4 @@
-// Phase 11.B: comptime pass — opportunistic module-init folding.
+// Phase 11.B: comptime pass - opportunistic module-init folding.
 //
 // Walks each module's `moduleInitDecls`, tries to evaluate each
 // initializer expression via lower + interp, and on success stamps:
@@ -7,12 +7,12 @@
 //   decl.comptimeValue  = <wrapped value from interp>
 //
 // On failure (unsupported AST node, runtime error like divide-by-zero,
-// non-whitelisted extern call, etc.) the decl is left alone — codegen
+// non-whitelisted extern call, etc.) the decl is left alone - codegen
 // will route it through the existing runtime `<modid>__module_init`
 // function as it does today. This silent-fallback policy is
 // intentional for module-init folding: existing programs must not
 // suddenly grow build errors from the introduction of comptime.
-// Explicit `@precompile` (Phase 11.C) takes the opposite policy —
+// Explicit `@precompile` (Phase 11.C) takes the opposite policy -
 // failures there are hard errors.
 
 import { ASTNodeKind } from "../contracts.js";
@@ -39,7 +39,7 @@ import { cloneAstWithSubstitution } from "../jsyoopcodegen/codegen.js";
 //
 // Lowered function bytecode is cached on `fnCache` (keyed by FUNCTION_DECL
 // AST node identity) so repeated calls don't re-lower. Generic-instance
-// dispatch isn't supported here — the interpreter will return null for
+// dispatch isn't supported here - the interpreter will return null for
 // any callee that needs monomorphization, surfacing as a comptime
 // fallback at the call site.
 function makeResolvers(modules, currentMod, fnCache, programState) {
@@ -61,7 +61,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
       // Phase 11.D.9: include task fns in the resolver table. The
       // call-site lowering detects a task call (via the CALL_EXPRESSION's
       // resolvedType being Task<T>) and wraps the body's T return in
-      // a Task<T> at the bytecode level — see lower.js's
+      // a Task<T> at the bytecode level - see lower.js's
       // CALL_EXPRESSION case. Generic decls stay excluded since they
       // need monomorphization first.
       if (
@@ -131,7 +131,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
   }
 
   function genericInstanceResolver(inst, programState) {
-    // The instance object is the cache key — codegen caches its own
+    // The instance object is the cache key - codegen caches its own
     // `inst.emitted` flag separately, so the comptime-side cache lives
     // in `fnCache` keyed on the inst itself rather than the inst.ast
     // (which is the still-generic decl, shared across instances).
@@ -213,7 +213,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
     }
     // Fall through to the extern whitelist by name. Cross-module
     // externs share the same whitelist (the impl is keyed on the
-    // callee's source name, not its declaring module) — adding a
+    // callee's source name, not its declaring module) - adding a
     // new pure extern is a one-line PR in externWhitelist.js.
     const externEntry = lookupExtern(declName);
     if (externEntry) {
@@ -223,7 +223,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
   }
 
   // Also pass `traitMethodResolver` to user-fn lowering so a regular
-  // function body that itself contains trait calls (very common —
+  // function body that itself contains trait calls (very common -
   // e.g. `Display.to_string(ref x)`) resolves correctly. The
   // `fnResolver` closure references it via lexical scope.
   return {
@@ -233,7 +233,7 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
   };
 }
 
-// Tries to fold every module-init in every module. Returns nothing —
+// Tries to fold every module-init in every module. Returns nothing -
 // mutates decls in place. Caller is the driver (yoopiler.js).
 //
 // `options.onSkip(decl, mod, error)` is an optional callback for
@@ -251,7 +251,7 @@ export function runComptimePass(modules, options = {}) {
     // Module-local symbol table threaded into the lowerer so an init
     // can reference earlier (already-folded) module-level consts in
     // its expression. Source-order ensures forward references are
-    // never possible — declared-later names just aren't in the map
+    // never possible - declared-later names just aren't in the map
     // yet when an earlier decl is being folded. Cross-module
     // references aren't supported in this sub-phase; they fall back
     // through the same silent path as any other unsupported lookup.
@@ -260,7 +260,7 @@ export function runComptimePass(modules, options = {}) {
       makeResolvers(modules, mod, fnCache, programState);
     for (const decl of mod.moduleInitDecls ?? []) {
       if (decl.comptimeFolded) {
-        // Earlier pass already folded this one — make it visible to
+        // Earlier pass already folded this one - make it visible to
         // later decls in the same module so they can reference it.
         moduleConsts.set(decl.name, decl.comptimeValue);
         continue;

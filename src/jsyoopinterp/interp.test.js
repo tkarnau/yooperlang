@@ -79,7 +79,7 @@ describe("comptime: refuses to lower unsupported AST shapes", () => {
     // 11.E.3); the fallback path keeps a real test by reaching for
     // a kind the interpreter is unlikely to ever support directly
     // (DISCARD_STATEMENT belongs to the statement dispatcher, never
-    // appears in expression position — exactly the kind of shape
+    // appears in expression position - exactly the kind of shape
     // the catch-all guard exists to reject).
     const fakeNode = {
       kind: "DISCARD_STATEMENT",

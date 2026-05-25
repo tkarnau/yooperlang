@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Language Reference — Yooperlang</title>
+    <title>Language Reference - Yooperlang</title>
     <link rel="stylesheet" href="styles.css">
 </head>
 <body class="reference-page">
@@ -51,7 +51,7 @@
             <header class="page-head">
                 <h1>Language Reference</h1>
                 <p class="muted">
-                    Heads up &mdash; this fills in as the language stabilizes. The
+                    Heads up - this fills in as the language stabilizes. The
                     authoritative source is
                     <a href="https://github.com/">SPEC.md</a> in the repo; this page
                     is the readable distillation.
@@ -66,11 +66,11 @@
                     (what it can do), and <strong>kinds</strong> (how a binding must be used).
                 </p>
                 <p>
-                    A <em>type</em> describes data &mdash; <code>int32</code>,
+                    A <em>type</em> describes data - <code>int32</code>,
                     <code>Point</code>, <code>FileHandle</code>. A <em>trait</em> is a set
-                    of operations a type provides &mdash; <code>Disposable</code>,
+                    of operations a type provides - <code>Disposable</code>,
                     <code>Iterable&lt;T&gt;</code>. A <em>kind</em> is a usage contract
-                    attached to a binding &mdash; <code>disposable</code>,
+                    attached to a binding - <code>disposable</code>,
                     <code>scoped</code>, <code>pooled</code>.
                 </p>
                 <pre><code class="yoop">type FileHandle implements Disposable {
@@ -90,7 +90,7 @@ function main(): int32 {
                     Most languages bundle these together: an <code>AutoCloseable</code> is
                     a type that does close-on-scope-exit, baked in. Splitting them lets the
                     same <code>FileHandle</code> be passed around <code>const</code>,
-                    cleaned up via <code>disposable</code>, or pooled in a thread &mdash;
+                    cleaned up via <code>disposable</code>, or pooled in a thread -
                     without the type itself knowing about lifecycle.
                 </p>
             </section>
@@ -119,7 +119,7 @@ import { Request, Response, ok } from "std/http/types.yoop";</code></pre>
 export function add(a: int32, b: int32): int32 { return a + b; }
 export type Point { x: int32, y: int32 }
 
-function helper(): void { ... }     // not exported &mdash; private to this module</code></pre>
+function helper(): void { ... }     // not exported - private to this module</code></pre>
                 <p>
                     Re-exports use the same <code>export</code> keyword in front of a
                     re-imported binding. The module graph is walked from the entry file,
@@ -131,7 +131,7 @@ function helper(): void { ... }     // not exported &mdash; private to this modu
                 <h2>Types</h2>
                 <p>
                     Types appear on the right of a colon. The compiler does no implicit
-                    narrowing or widening between named numeric types &mdash; you reach for
+                    narrowing or widening between named numeric types - you reach for
                     an explicit cast when you mean one.
                 </p>
 
@@ -141,7 +141,7 @@ function helper(): void { ... }     // not exported &mdash; private to this modu
 let b: int16;      let v: uint16;
 let c: int32;      let w: uint32;      // int32 is also spelled `int`
 let d: int64;      let x: uint64;
-let n: usize;      let m: isize;       // pointer-width &mdash; used for sizes / indices</code></pre>
+let n: usize;      let m: isize;       // pointer-width - used for sizes / indices</code></pre>
                 <p>Floats follow IEEE-754:</p>
                 <pre><code class="yoop">let f: float32;     // also spelled `float`
 let g: float64;</code></pre>
@@ -152,7 +152,7 @@ let s:  string    = "hello";          // immutable, UTF-8, zero-terminated for C
 let b:  byte      = 0xFF;             // alias for uint8</code></pre>
                 <p>
                     Numeric literals are <strong>untyped until they reach a typed
-                    context</strong> &mdash; then they're range-checked and pinned. Out-of-range
+                    context</strong> - then they're range-checked and pinned. Out-of-range
                     literals fail at compile time. Underscores can separate digits.
                 </p>
                 <pre><code class="yoop">let hp: int32   = 100;
@@ -163,7 +163,7 @@ let bits: uint8 = 0b1111_0000;
 let mode: uint16 = 0o755;
 
 let a: int32 = 10;
-let b: int64 = a;                    // compile error &mdash; explicit cast required
+let b: int64 = a;                    // compile error - explicit cast required
 let b: int64 = int64(a);             // ok</code></pre>
                 <p>
                     Casts use the type name as a call. Narrowing truncates; float ↔ int
@@ -191,7 +191,7 @@ let r: Rect  = { origin: { x: 0, y: 0 }, width: 10, height: 20 };
 let dx: int32 = r.origin.x;          // field access chains</code></pre>
                 <p>
                     A bare struct literal <code>{ x: 1, y: 2 }</code> has no standalone
-                    type &mdash; it must be <em>pinned</em> by an assignment target, a return
+                    type - it must be <em>pinned</em> by an assignment target, a return
                     type, or a call argument. The compiler uses that target to decide
                     which struct it's building.
                 </p>
@@ -200,7 +200,7 @@ return { origin: p, width: 4, height: 4 };  // pinned by the function's return t
 draw({ x: 0, y: 0 });                    // pinned by the parameter type</code></pre>
                 <p>
                     Methods live in trait impl blocks, not in <code>type</code> bodies
-                    directly &mdash; see <a href="#traits">Traits</a>.
+                    directly - see <a href="#traits">Traits</a>.
                 </p>
 
                 <h3 id="enums">Enums &amp; unions</h3>
@@ -220,7 +220,7 @@ let s: Shape = Shape.Circle { radius: 1.5 };
 let e: Shape = Shape.Empty;</code></pre>
                 <p>
                     <code>switch</code> matches on the variant and binds payload fields by
-                    name. The compiler enforces exhaustiveness &mdash; every variant must
+                    name. The compiler enforces exhaustiveness - every variant must
                     be covered, or a <code>default</code> arm provided.
                 </p>
                 <pre><code class="yoop">switch (s) {
@@ -232,7 +232,7 @@ let e: Shape = Shape.Empty;</code></pre>
                     <code>union</code> is the untagged C-style sibling: a single byte
                     buffer the size of its largest field, with overlapping access. Useful
                     for FFI where you're modelling a real C union. The compiler does no
-                    discriminant tracking &mdash; you do.
+                    discriminant tracking - you do.
                 </p>
                 <pre><code class="yoop">union IntFloatBits {
     i: int32,
@@ -254,7 +254,7 @@ let flags: bool[] = [true, false, true];
 let first: int32 = xs[0];
 let n: usize     = xs.len;</code></pre>
                 <p>
-                    Slice syntax produces a zero-copy view over a range &mdash; the result
+                    Slice syntax produces a zero-copy view over a range - the result
                     is itself a <code>T[]</code>, sharing storage with the source.
                 </p>
                 <pre><code class="yoop">let xs: int32[] = [10, 20, 30, 40, 50, 60];
@@ -264,17 +264,17 @@ let tail: int32[] = xs[3..];         // [40, 50, 60]
 let head: int32[] = xs[..3];         // [10, 20, 30]
 let all:  int32[] = xs[..];          // view over the whole array
 
-mid[0] = 99;                         // mutates xs[1] too &mdash; shared storage</code></pre>
+mid[0] = 99;                         // mutates xs[1] too - shared storage</code></pre>
                 <p>
                     Growable arrays live in the standard library as
-                    <code>Vec&lt;T&gt;</code> &mdash; see <a href="#stdlib">Standard library</a>.
+                    <code>Vec&lt;T&gt;</code> - see <a href="#stdlib">Standard library</a>.
                 </p>
 
                 <h3 id="refs">References</h3>
                 <p>
                     <code>ref T</code> is a non-null reference to a <code>T</code>. There
                     is no pointer arithmetic and no null. Both the parameter declaration
-                    and the call site spell <code>ref</code> &mdash; aliasing is visible
+                    and the call site spell <code>ref</code> - aliasing is visible
                     wherever it happens.
                 </p>
                 <pre><code class="yoop">function increment(ref counter: int32): void {
@@ -315,7 +315,7 @@ task disposable open_remote(url: string): Handle { ... }   // multiple kinds</co
                 <p>
                     Parameters can be passed by reference with <code>ref</code> (see
                     <a href="#refs">References</a>). Function values in type position
-                    use the <code>(p: T) =&gt; R</code> arrow form &mdash; legal in field,
+                    use the <code>(p: T) =&gt; R</code> arrow form - legal in field,
                     parameter, return, and vtable slot annotations.
                 </p>
                 <pre><code class="yoop">type Handler {
@@ -323,7 +323,7 @@ task disposable open_remote(url: string): Handle { ... }   // multiple kinds</co
 }</code></pre>
                 <p>
                     The <code>=&gt;</code> form is <em>only</em> a type annotation. There
-                    are no closure literals &mdash; function values come from named
+                    are no closure literals - function values come from named
                     top-level functions or vtables (see <a href="#traits">Traits</a>).
                 </p>
             </section>
@@ -361,7 +361,7 @@ for (j = 0; j &lt; xs.len; j = j + 1) {
                 <p>
                     <code>break</code> and <code>continue</code> jump out of / past the
                     nearest enclosing loop. <code>switch</code> matches literals and enum
-                    variant patterns and is checked for exhaustiveness &mdash; see
+                    variant patterns and is checked for exhaustiveness - see
                     <a href="#enums">Enums</a>.
                 </p>
                 <pre><code class="yoop">for v in xs {
@@ -381,7 +381,7 @@ switch (code) {
                 <h2>Traits</h2>
                 <p>
                     A trait describes a set of operations. <code>self</code> is always
-                    passed as <code>ref</code> &mdash; methods never take the receiver
+                    passed as <code>ref</code> - methods never take the receiver
                     by value.
                 </p>
                 <pre><code class="yoop">trait Disposable {
@@ -443,11 +443,11 @@ function dispatch(ref v: OpVT, x: int32): int32 {
 }
 
 let d: Doubler = { factor: 5 };
-let vt: OpVT   = OpVT.from(ref d);    // builder &mdash; captures the receiver
+let vt: OpVT   = OpVT.from(ref d);    // builder - captures the receiver
 let n: int32   = dispatch(ref vt, 7); // 35</code></pre>
                 <p>
                     A <code>Reader[]</code> can mix any types whose impls were used to
-                    build the vtable values &mdash; each slot is the same nominal vtable
+                    build the vtable values - each slot is the same nominal vtable
                     type, even though the underlying struct differs.
                 </p>
             </section>
@@ -455,7 +455,7 @@ let n: int32   = dispatch(ref vt, 7); // 35</code></pre>
             <section id="kinds">
                 <h2>Kinds</h2>
                 <p>
-                    A kind attaches a usage contract to a binding &mdash; lifecycle,
+                    A kind attaches a usage contract to a binding - lifecycle,
                     scoping, sharing, or layout rules. The kind prefix sits between
                     <code>let</code> / <code>const</code> and the binding name; the
                     keyword is optional when a kind prefix is present, defaulting to
@@ -470,29 +470,29 @@ let pooled h      = fetch(url);</code></pre>
                 </p>
                 <ul>
                     <li>
-                        <code>disposable</code> &mdash; requires the binding's type to
+                        <code>disposable</code> - requires the binding's type to
                         implement <code>Disposable</code>, and emits
                         <code>Disposable.dispose(ref x)</code> at scope end. Pairs with
-                        <code>?</code> &mdash; cleanup also runs on early-return propagation.
+                        <code>?</code> - cleanup also runs on early-return propagation.
                     </li>
                     <li>
-                        <code>scoped</code> &mdash; for task handles. The compiler waits on
+                        <code>scoped</code> - for task handles. The compiler waits on
                         the task at scope end and forbids the handle from escaping the
                         declaring scope.
                     </li>
                     <li>
-                        <code>pooled</code> &mdash; for task handles you want to keep around.
-                        Heap-allocated, refcounted, returnable. No auto-wait &mdash; you call
+                        <code>pooled</code> - for task handles you want to keep around.
+                        Heap-allocated, refcounted, returnable. No auto-wait - you call
                         <code>wait h</code> yourself.
                     </li>
                     <li>
-                        <code>joined</code> &mdash; like <code>scoped</code>, but specifically
+                        <code>joined</code> - like <code>scoped</code>, but specifically
                         forces the wait at the enclosing block's <code>}</code>.
                     </li>
                 </ul>
                 <p>
                     <strong>User-defined kinds.</strong> A kind is a contract built from a
-                    closed set of clauses &mdash; <code>requires Trait</code>,
+                    closed set of clauses - <code>requires Trait</code>,
                     <code>ownsBlock</code>, <code>mustCall fn beforeScopeEnd</code>,
                     <code>mustNotEscape scope</code>, <code>layout { align N; }</code>,
                     and so on. Each clause is one statement.
@@ -525,7 +525,7 @@ kind simd_aligned {
                     </li>
                     <li>
                         Return it from a function whose return type also declares
-                        <code>propagates&lt;K&gt;</code> &mdash; the obligation flows to the
+                        <code>propagates&lt;K&gt;</code> - the obligation flows to the
                         caller.
                     </li>
                 </ol>
@@ -570,7 +570,7 @@ let n: int32    = first(xs);          // T inferred as int32 from xs</code></pre
                     <strong>Trait bounds</strong> constrain a type parameter to types
                     that implement a given trait. Inside the function body, calls of the
                     trait's methods on the bound parameter compile to direct trait
-                    dispatch &mdash; each concrete instantiation gets its own monomorphic
+                    dispatch - each concrete instantiation gets its own monomorphic
                     copy.
                 </p>
                 <pre><code class="yoop">function dispose_all&lt;T implements Disposable&gt;(ref items: T[]): void {
@@ -589,7 +589,7 @@ let n: int32    = first(xs);          // T inferred as int32 from xs</code></pre
             <section id="tasks">
                 <h2>Tasks &amp; concurrency</h2>
                 <p>
-                    Concurrency is a kind story &mdash; there are no <code>async</code> /
+                    Concurrency is a kind story - there are no <code>async</code> /
                     <code>await</code> keywords. <code>task</code> is a kind applied to a
                     function declaration; each call to that function is semantically a
                     spawn that returns a <code>Task&lt;T&gt;</code>.
@@ -597,19 +597,19 @@ let n: int32    = first(xs);          // T inferred as int32 from xs</code></pre
                 <pre><code class="yoop">task fetch(url: string): Bytes { ... }
 
 function main(): int32 {
-    let data     = fetch(url);        // synchronous-looking &mdash; wait inserted inline
-    let joined d = fetch(url);        // concurrent &mdash; wait inserted at the next `}`
+    let data     = fetch(url);        // synchronous-looking - wait inserted inline
+    let joined d = fetch(url);        // concurrent - wait inserted at the next `}`
     let pooled h = fetch(url);        // returnable handle
     let result   = wait h;            // block on h, read the result
 
-    _ = fetch(url);                   // fire-and-forget &mdash; result discarded
+    _ = fetch(url);                   // fire-and-forget - result discarded
     return 0;
 }</code></pre>
                 <p>
                     The binding's kind decides when the <code>wait</code> happens.
                     Plain <code>let x = f()</code> with no kind inserts <code>wait</code>
                     inline at that statement. <code>joined</code> defers until scope end.
-                    <code>pooled</code> never inserts a wait automatically &mdash; you call
+                    <code>pooled</code> never inserts a wait automatically - you call
                     <code>wait h</code> yourself.
                 </p>
                 <p>
@@ -620,7 +620,7 @@ function main(): int32 {
                 </p>
                 <p>
                     <strong>Bounded wait.</strong> <code>wait_until(h, deadline_ns)</code>
-                    returns a <code>WaitResult&lt;T&gt;</code> enum &mdash;
+                    returns a <code>WaitResult&lt;T&gt;</code> enum -
                     <code>Done</code>, <code>Timeout</code>, or <code>Cancelled</code>.
                     External cancellation lives behind <code>cancel(h)</code>.
                 </p>
@@ -640,7 +640,7 @@ switch (wait_until(h, deadline)) {
                 <p>
                     A type is <strong>fallible</strong> if it's an enum with exactly two
                     variants named <code>Ok</code> and <code>Err</code>, each carrying
-                    zero or one payload field. No marker trait &mdash; the shape itself
+                    zero or one payload field. No marker trait - the shape itself
                     is the contract.
                 </p>
                 <pre><code class="yoop">enum IntResult {
@@ -668,7 +668,7 @@ function parse_positive(n: int32): IntResult {
 }</code></pre>
                 <p>
                     <code>?</code> only compiles inside a function whose return type is
-                    also fallible. The default rule is <em>same-shape</em> &mdash; the
+                    also fallible. The default rule is <em>same-shape</em> - the
                     <code>Err</code> payload types must match. For different
                     <code>Err</code> payloads, the operand's type can declare
                     <code>implements Into&lt;OuterErr&gt;</code> and the compiler inserts
@@ -688,7 +688,7 @@ function load(path: string): Result&lt;Config, AppError&gt; {
 }</code></pre>
                 <p>
                     Live <code>disposable</code> bindings still get their cleanup
-                    inserted before the <code>?</code> early return &mdash; you don't
+                    inserted before the <code>?</code> early return - you don't
                     need <code>try</code>/<code>finally</code> machinery.
                 </p>
             </section>
@@ -701,7 +701,7 @@ function load(path: string): Result&lt;Config, AppError&gt; {
                     accepts.
                 </p>
                 <p>
-                    <strong><code>std/core</code></strong> &mdash; the foundation. Strings,
+                    <strong><code>std/core</code></strong> - the foundation. Strings,
                     bytes, growable <code>Vec&lt;T&gt;</code>, maps, deques, the
                     <code>Disposable</code> / <code>Into&lt;T&gt;</code> traits, kind
                     definitions, intrinsics, the concurrency primitives
@@ -716,12 +716,12 @@ vec_push(ref v, 1);
 vec_push(ref v, 2);
 printf(`len=${vec_len(ref v)}\n`);</code></pre>
                 <p>
-                    <strong><code>std/net</code></strong> &mdash; TCP sockets via the host
+                    <strong><code>std/net</code></strong> - TCP sockets via the host
                     OS. <code>tcp_listen(host, port, backlog)</code> returns a
                     <code>ListenResult</code> with a disposable listener handle.
                 </p>
                 <p>
-                    <strong><code>std/http</code></strong> &mdash; an HTTP/1.1 server and
+                    <strong><code>std/http</code></strong> - an HTTP/1.1 server and
                     request/response types. <code>serve_n(ref listener, ref handler, n)</code>
                     runs against any type that <code>implements Handler</code>. The
                     parser, types, and server are all written in Yooperlang.
@@ -740,7 +740,7 @@ type HelloHandler implements Handler {
     }
 }</code></pre>
                 <p class="placeholder">
-                    More library modules land as phases complete &mdash; this page tracks
+                    More library modules land as phases complete - this page tracks
                     what's actually in the repo, not what's planned.
                 </p>
             </section>
@@ -749,7 +749,7 @@ type HelloHandler implements Handler {
 
     <footer class="site-footer">
         <div class="container">
-            <p>Yooperlang &mdash; built slowly, one phase at a time.</p>
+            <p>Yooperlang - built slowly, one phase at a time.</p>
         </div>
     </footer>
 

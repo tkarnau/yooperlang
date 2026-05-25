@@ -75,7 +75,7 @@ export function offsetToPos(src, offset) {
 // Find the AST node at `offset` in source `src`.
 //
 // Background: the parser's `sourceLoc.pos` doesn't reliably point at the
-// start of the underlying token — it captures the parser's position state
+// start of the underlying token - it captures the parser's position state
 // at node-construction time, which often lands one or two tokens past the
 // identifier the node represents. The `line` is reliably the line where
 // the construction happened (close enough to the identifier).
@@ -90,7 +90,7 @@ export function offsetToPos(src, offset) {
 // from outermost-in. Useful when handlers need enclosing-decl context.
 export function findNodeAt(ast, offset, src, ancestry = null) {
   if (!src) return null;
-  // Reject cursors past EOF entirely — no node lives there.
+  // Reject cursors past EOF entirely - no node lives there.
   if (offset < 0 || offset > src.length) return null;
   const cursorPos = offsetToPos(src, offset);
   const cursorLine1 = cursorPos.line + 1; // sourceLoc.line is 1-indexed
@@ -139,7 +139,7 @@ export function findNodeAt(ast, offset, src, ancestry = null) {
     }
     if (node instanceof Map || node instanceof Set) return;
     if (!node.kind) {
-      // Container without a kind — descend so we still reach AST nodes
+      // Container without a kind - descend so we still reach AST nodes
       // inside (programs, blocks may not be reached via this branch but
       // we keep it general).
       for (const key of Object.keys(node)) {
@@ -149,7 +149,7 @@ export function findNodeAt(ast, offset, src, ancestry = null) {
       }
       return;
     }
-    // Match by identifier name — direct (PARAM/IDENT/LET/...) or via the
+    // Match by identifier name - direct (PARAM/IDENT/LET/...) or via the
     // string-valued callee field on CALL_EXPRESSION.
     if (node.sourceLoc) {
       if (node.name === tok.text) consider(node, path);
@@ -212,7 +212,7 @@ function isIdentStart(code) {
 
 // Human-readable hover text for a node. Returns null when there's nothing
 // useful to show (e.g. punctuation token, keyword, decl with no resolved
-// type). The result is plain text — the server wraps it in a markdown
+// type). The result is plain text - the server wraps it in a markdown
 // fence for display.
 export function getHoverInfo(node, module) {
   if (!node) return null;
@@ -292,13 +292,13 @@ export function getHoverInfo(node, module) {
 //     module's tables (or via importedNames for cross-module refs).
 //
 // `ctx`:
-//   module, modById  — required, supply the analysis context
-//   tokenText        — optional; the identifier under the cursor. Used
+//   module, modById  - required, supply the analysis context
+//   tokenText        - optional; the identifier under the cursor. Used
 //                      as a fallback when the AST node hit doesn't
 //                      yield a definition (e.g. type annotations are
 //                      parser objects, not AST nodes, so the cursor
 //                      may land on a TEMPLATE_LITERAL parent or null).
-//   moduleEnv        — optional; Map<moduleId, env> from analyze().
+//   moduleEnv        - optional; Map<moduleId, env> from analyze().
 //                      Enables type / kind table lookups.
 export function findDefinition(node, ctx) {
   const { module, modById, tokenText, moduleEnv } = ctx;
@@ -370,7 +370,7 @@ export function findDefinition(node, ctx) {
   }
 
   // Cursor on a decl's own name (LET_DECL, CONST_DECL, PARAM, FUNCTION_DECL,
-  // TYPE_DECL, etc.). The decl is its own definition site — return its
+  // TYPE_DECL, etc.). The decl is its own definition site - return its
   // location so jump-to-def is a no-op rather than dead.
   if (node.name && node.sourceLoc) {
     const declSelf = locOfDecl(node, module);
@@ -378,7 +378,7 @@ export function findDefinition(node, ctx) {
   }
 
   // Final fallback: the cursor identifier may be a type or kind name in
-  // a type annotation (annotations aren't AST nodes — they're parser
+  // a type annotation (annotations aren't AST nodes - they're parser
   // objects without sourceLoc, so the AST hit landed on the enclosing
   // decl rather than the annotation itself). Look it up by name in the
   // module's type/kind tables.
@@ -480,7 +480,7 @@ export function collectDocumentSymbols(ast, src) {
 }
 
 // LSP SymbolKind constants we actually use. The full enum is in the LSP
-// spec — we only emit the kinds Yooperlang has.
+// spec - we only emit the kinds Yooperlang has.
 const SymbolKind = {
   Function: 12,
   Method: 6,

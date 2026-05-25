@@ -1,4 +1,4 @@
-// Library Phase B — Networking primitives (`Socket`, `TcpListener`, `TcpStream`)
+// Library Phase B - Networking primitives (`Socket`, `TcpListener`, `TcpStream`)
 
 > Second slice of the library-design rollout
 > ([library-design.md §6](library-design.md#6-networking-layer)). Wraps the
@@ -13,7 +13,7 @@ top of libc + the multiplexer:
 ```
 std/net/
     addr.yoop         # SocketAddr struct + display helpers
-    socket_ffi.yoop   # unsafe — extern C bindings, htons/inet_addr
+    socket_ffi.yoop   # unsafe - extern C bindings, htons/inet_addr
     socket.yoop       # Socket (raw fd, Disposable propagates<disposable>)
     tcp.yoop          # TcpListener, TcpStream (task accept/read/write)
 ```
@@ -45,7 +45,7 @@ work. Same pattern as
 
 ### 2.1 IPv4 only, blocking sockets, multiplexer-driven readiness
 
-The MVP targets IPv4 (`AF_INET`) only — IPv6 + URI authority parsing is a
+The MVP targets IPv4 (`AF_INET`) only - IPv6 + URI authority parsing is a
 follow-up the library design names as out of scope. Sockets are left in
 **blocking mode**; concurrency comes from spawning one task per
 connection and parking each task on `yoop_io_wait_readable` /
@@ -107,7 +107,7 @@ boundaries.
 Every operation that can fail returns a struct ending in `err: string`.
 For libc failures the message is `errno.message(errno.get())` so the
 caller gets the underlying reason. The fallible-struct shape is what `?`
-understands today — same pattern Phase 8.D's `errno_fallible` example
+understands today - same pattern Phase 8.D's `errno_fallible` example
 uses.
 
 `Result` types:
@@ -126,7 +126,7 @@ binding still has its fd closed at scope end.
 
 `TcpListener.listen` always sets `SO_REUSEADDR` (most servers want it;
 saves a "Address already in use" footgun during dev). No toggle to turn
-it off — add when a user has a real reason.
+it off - add when a user has a real reason.
 
 No connection pooling for client-side use; each `Client.send` opens a
 fresh socket. A pool is one of the first follow-ups when `Map<K, V>`
@@ -134,7 +134,7 @@ lands.
 
 ## 3. Module layout in detail
 
-### 3.1 `std/net/socket_ffi.yoop` (unsafe — not user-importable)
+### 3.1 `std/net/socket_ffi.yoop` (unsafe - not user-importable)
 
 Declares the `SockAddrIn` struct and the libc / runtime externs. Exports
 helper wrappers that hide the unsafe operations so callers don't have to
@@ -168,7 +168,7 @@ extern "C" from "yoop_runtime" {
 
 Constants needed from `<sys/socket.h>` (`AF_INET = 2`, `SOCK_STREAM = 1`,
 `SOL_SOCKET = 1`, `SO_REUSEADDR = 2`) are exposed as
-yoop-side `const` declarations — yoop doesn't yet have a way to pull
+yoop-side `const` declarations - yoop doesn't yet have a way to pull
 preprocessor constants from headers, so they're hand-mirrored. **Linux**
 values; macOS is identical for the four we need.
 
@@ -178,10 +178,10 @@ Exports four thin task-aware helpers used by `socket.yoop` and
 - `function ffi_socket_open(): SocketFdResult`
 - `function ffi_bind_listen(fd, port, backlog): c_int` (port; binds to
   INADDR_ANY)
-- `task ffi_accept(fd): AcceptFdResult` — parks on multiplexer, returns
+- `task ffi_accept(fd): AcceptFdResult` - parks on multiplexer, returns
   `(client_fd, peer_addr)` or err
-- `task ffi_recv(fd, buf): RecvResult` — parks then recv into `buf`
-- `task ffi_send_all(fd, buf): c_ssize_t` — parks then send loop
+- `task ffi_recv(fd, buf): RecvResult` - parks then recv into `buf`
+- `task ffi_send_all(fd, buf): c_ssize_t` - parks then send loop
 
 Each FFI helper returns a fallible struct with the same shape as the
 public-facing wrappers; `socket.yoop` and `tcp.yoop` just re-wrap to
@@ -200,7 +200,7 @@ export function localhost(port: int32): SocketAddr { return { host: "127.0.0.1",
 export function any_addr(port: int32): SocketAddr  { return { host: "0.0.0.0", port: port }; }
 ```
 
-`Display` impl deferred to when template literals consult the trait — for
+`Display` impl deferred to when template literals consult the trait - for
 now `addr_to_string` is a free function callers reach for explicitly
 (matches the rest of std/core's pattern).
 
@@ -238,7 +238,7 @@ export function listen(addr: SocketAddr, backlog: int32): ListenResult { ... }
 multiplexer. `read` and `write` are trait methods on `TcpStream`; the
 language doesn't allow trait methods to *themselves* be `task`, so the
 task suspension happens inside the regular method body (calling
-`ffi_recv` / `ffi_send_all` which are tasks) — this works because trait
+`ffi_recv` / `ffi_send_all` which are tasks) - this works because trait
 method bodies can invoke task functions and immediately `wait` on them
 when only one in-flight is needed. **Confirmation needed at
 implementation time**: if the trait-method-can't-call-task constraint
@@ -251,7 +251,7 @@ method delegate via a single-call thunk that does `joined h = ffi_recv(...)`
 
 - **New**: `std/net/socket_ffi.yoop`, `std/net/addr.yoop`,
   `std/net/socket.yoop`, `std/net/tcp.yoop`.
-- **New test fixture**: `examples/pass/tcp_echo/main.yoop` — opens a
+- **New test fixture**: `examples/pass/tcp_echo/main.yoop` - opens a
   listener on `127.0.0.1:0` (kernel-picked port), spawns a client task
   that connects and writes "ping", server task accepts + echoes the
   bytes back, prints round-trip success.
@@ -262,7 +262,7 @@ method delegate via a single-call thunk that does `joined h = ffi_recv(...)`
 
 End-to-end test in [src/e2e.test.js](../src/e2e.test.js) runs the
 fixture above and checks exit code 0 plus a deterministic stdout. The
-test must complete in under 5 seconds wall-clock — the multiplexer is
+test must complete in under 5 seconds wall-clock - the multiplexer is
 exercised, but no external network call is made (loopback only).
 
 A negative test (`examples/fail/`) confirms the disposable obligation:
@@ -273,4 +273,4 @@ error.
 
 Library Phase A must have landed (`std/core/traits.yoop` for `Readable`,
 `Writable`). Phase 8 prerequisites must have landed (unsafe_ptr, c_int,
-errno, multiplexer) — all already in.
+errno, multiplexer) - all already in.

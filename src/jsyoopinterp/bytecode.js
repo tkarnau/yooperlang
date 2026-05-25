@@ -2,7 +2,7 @@
 //
 // Each `BytecodeFunction` carries an ordered list of `Instruction`s
 // plus a parallel `registerTypes` array mapping register index → yoop
-// Type. Registers are pure SSA — assigned once at construction time,
+// Type. Registers are pure SSA - assigned once at construction time,
 // never reassigned. Control-flow joins read whichever register the
 // branch terminator wrote (phi is implicit through reg indices).
 //
@@ -16,7 +16,7 @@
 //                and for picking the right native arithmetic path
 //   - sourceLoc: SourceLocation copied from the AST node that produced
 //                this instruction; used for diagnostics tracebacks
-//   - immediate: optional embedded payload — currently used for
+//   - immediate: optional embedded payload - currently used for
 //                literal constants and label targets; this is a JS
 //                value the interpreter consumes directly without
 //                materializing it as a register
@@ -139,11 +139,11 @@ export const OP = Object.freeze({
   CALL_EXTERN: "call_extern",
 
   // Wrap a value reg of type T as a Task<T> wrapped value. Used at
-  // the call site of a task fn — the body's CALL_DIRECT returns T,
+  // the call site of a task fn - the body's CALL_DIRECT returns T,
   // and TASK_WRAP turns it into the Task<T> the caller's
   // resolvedType expects. At comptime tasks execute synchronously
   // inline (the plan calls this out explicitly), so the Task<T>
-  // wrapper is just a tag — there's no scheduler.
+  // wrapper is just a tag - there's no scheduler.
   TASK_WRAP: "task_wrap",
 
   // Unwrap a Task<T> reg back to T. Used by WAIT_EXPRESSION and by
@@ -153,7 +153,7 @@ export const OP = Object.freeze({
 
   // Build a vtable wrapped value from a struct ref. `args[0]` is the
   // struct-ref register (the `ref x` operand from `VTable.from(ref x)`);
-  // `immediate` carries `{ methodFns: BytecodeFunction[] }` — pre-resolved
+  // `immediate` carries `{ methodFns: BytecodeFunction[] }` - pre-resolved
   // at lower time via traitMethodResolver, in vtable methodOrder. The
   // resulting value holds the ctx ref + the methodFns array so
   // VTABLE_CALL can dispatch by index without re-resolving.
@@ -171,7 +171,7 @@ export const OP = Object.freeze({
   // park the init expression's result into a stable "slot reg" the
   // binding's IDENT references resolve to, and by ASSIGNMENT to
   // overwrite that slot. The slot reg's value is mutable in the
-  // interpreter (we're not SSA-strict — see lower.js LowerCtx for
+  // interpreter (we're not SSA-strict - see lower.js LowerCtx for
   // discussion). `args[0]` is the source reg; `dst` is the slot.
   MOVE: "move",
 
@@ -188,7 +188,7 @@ export const OP = Object.freeze({
   // can build a labelName → ip map for use by BR / BRCOND.
   LABEL: "label",
 
-  // Numeric cast — `int32(x)`, `float32(y)`, etc. The destination
+  // Numeric cast - `int32(x)`, `float32(y)`, etc. The destination
   // register is typed via `inst.type`, which is also stamped as the
   // `castTargetType` from the AST. The interpreter routes the source
   // value through `coerceNumeric`, which handles every legal pairing:
@@ -199,7 +199,7 @@ export const OP = Object.freeze({
   // Write a struct field by name. `args[0]` is the struct-value
   // register; `args[1]` is the new field value; `immediate` is the
   // field name string. Mutates the struct's wrapped `v` object in
-  // place — yoop struct semantics are value-typed, so the
+  // place - yoop struct semantics are value-typed, so the
   // interpreter's MOVE handler deep-copies struct values to keep
   // aliases from sharing state.
   FIELD_STORE: "field_store",
@@ -207,7 +207,7 @@ export const OP = Object.freeze({
   // Write an array element by index. `args[0]` is the array-value
   // register; `args[1]` is the index register; `args[2]` is the new
   // element value. Arrays in yoop are fat-pointers (the buf is
-  // shared), so aliases legitimately see each other's writes — no
+  // shared), so aliases legitimately see each other's writes - no
   // deep-copy on assignment.
   INDEX_STORE: "index_store",
 
@@ -216,7 +216,7 @@ export const OP = Object.freeze({
   // interpreter stores it as the JS array key). The resulting ref
   // value is `{ ty: RefType(inner), v: { container, key } }` where
   // container is the frame's `registers` array. Lifetime is bounded
-  // by the enclosing frame — yoop's kind checks enforce that refs
+  // by the enclosing frame - yoop's kind checks enforce that refs
   // don't escape, and the interpreter doesn't need a separate check.
   REF_LOCAL: "ref_local",
 
@@ -242,7 +242,7 @@ export const OP = Object.freeze({
   // Read a named payload field from an enum value's variant. `args[0]`
   // is the enum register; `immediate` is the field name string; `type`
   // is the field's type. The interpreter assumes the variant is the
-  // expected one — lowering only emits this inside arm bodies after a
+  // expected one - lowering only emits this inside arm bodies after a
   // tag-match branch.
   VARIANT_PAYLOAD_FIELD: "variant_payload_field",
 
@@ -255,7 +255,7 @@ export const OP = Object.freeze({
 
   // Read through a reference (auto-deref). `args[0]` is the ref
   // register. Yoop is value-typed for structs, so struct reads
-  // through a ref copy out — matches the deep-copy semantics MOVE /
+  // through a ref copy out - matches the deep-copy semantics MOVE /
   // CALL_DIRECT use elsewhere.
   REF_LOAD: "ref_load",
 
@@ -266,7 +266,7 @@ export const OP = Object.freeze({
   REF_STORE: "ref_store",
 
   // Phase 11.D.18: read a module-level binding into a register.
-  // `immediate` carries `{ sym, name }` — the mangled symbol
+  // `immediate` carries `{ sym, name }` - the mangled symbol
   // (`<modid>__<name>`) is the key into the shared `moduleState`
   // map; `name` is retained for diagnostics. The interpreter
   // deep-copies struct/array values out so the local register
@@ -283,7 +283,7 @@ export const OP = Object.freeze({
   // Phase 11.E.3: assemble a string from a TEMPLATE_LITERAL's parts.
   // `args` is the ordered list of EXPR_PART value registers; the
   // `immediate` is an array of part descriptors interleaved with the
-  // args — each entry is `{ kind: "str", value }` (literal substring)
+  // args - each entry is `{ kind: "str", value }` (literal substring)
   // or `{ kind: "expr" }` (consume one register from args in order).
   // The result is a string-typed wrapped value. Used inside
   // `@precompile { ... }` blocks for debug output via comptime printf
@@ -324,7 +324,7 @@ export function bytecodeFunction({
 //     1: ...
 //
 // Used by the `--dump-bc` driver flag to inspect what the comptime
-// interpreter is actually running. Not part of the runtime path —
+// interpreter is actually running. Not part of the runtime path -
 // safe to leave out of perf-sensitive code.
 export function dumpBytecode(fn) {
   const lines = [];
@@ -379,9 +379,9 @@ function formatImmediate(imm) {
   if (Array.isArray(imm)) return `[${imm.join(", ")}]`;
   // BRCOND label pair.
   if (imm.then && imm.else) return `then=${imm.then} else=${imm.else}`;
-  // CALL_EXTERN { name, impl } — only print the name.
+  // CALL_EXTERN { name, impl } - only print the name.
   if (imm.name && typeof imm.impl === "function") return `extern ${imm.name}`;
-  // CALL_DIRECT — a BytecodeFunction; print just its name.
+  // CALL_DIRECT - a BytecodeFunction; print just its name.
   if (typeof imm === "object" && imm.name && Array.isArray(imm.instructions)) {
     return `fn ${imm.name}`;
   }

@@ -1,4 +1,4 @@
-// yoop_debug.c — runtime helpers for std/debug + std/log.
+// yoop_debug.c - runtime helpers for std/debug + std/log.
 //
 // These are deliberately tiny. Each takes a NUL-terminated message and
 // writes to stderr. `panic` and `unreachable` exit(1) after printing;
@@ -7,7 +7,7 @@
 // machinery to get reasonable diagnostics.
 //
 // Release-mode `assert` gating happens at codegen time (env var
-// `YOOP_RELEASE`); see std/debug.yoop. There's no runtime flag here —
+// `YOOP_RELEASE`); see std/debug.yoop. There's no runtime flag here -
 // the C side is the same in both modes.
 
 #include <stdio.h>

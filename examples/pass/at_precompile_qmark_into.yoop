@@ -5,7 +5,7 @@
 // at the source struct's `Into.into` impl. The comptime lowerer
 // resolves that method's bytecode via traitMethodResolver and
 // emits a CALL_DIRECT in the err-branch with `ref payload.error`
-// as `ref self` — same logical shape codegen does at runtime.
+// as `ref self` - same logical shape codegen does at runtime.
 
 import { Result } from "std/core/types.yoop";
 import { Into } from "std/core/traits.yoop";

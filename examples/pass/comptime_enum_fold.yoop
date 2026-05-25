@@ -35,7 +35,7 @@ function area_doubled(s: Shape): int32 {
     return result;
 }
 
-// Module-level enum constants — emitted as zeroinitializer + runtime
+// Module-level enum constants - emitted as zeroinitializer + runtime
 // module_init for now (the interpreter fold succeeds but the LLVM
 // constant encoding for enum payloads isn't wired yet).
 const C: Shape = Shape.Circle { radius: 4 };
@@ -49,7 +49,7 @@ const C_AREA: int32 = area_doubled(C);
 const S_AREA: int32 = area_doubled(S);
 const T_AREA: int32 = area_doubled(T);
 
-// Switch over an int literal — exercises the LITERAL_PATTERN path
+// Switch over an int literal - exercises the LITERAL_PATTERN path
 // (rather than VARIANT_PATTERN). The arm body folds the resulting
 // value into a primitive global.
 function classify(n: int32): int32 {

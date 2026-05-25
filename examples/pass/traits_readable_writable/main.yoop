@@ -12,7 +12,7 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-// A trivial in-memory cursor — appends to an internal buffer on write,
+// A trivial in-memory cursor - appends to an internal buffer on write,
 // pops from the head on read. The buffer is fixed-size for simplicity.
 type MemBuffer implements (Readable, Writable) {
     storage: uint8[],

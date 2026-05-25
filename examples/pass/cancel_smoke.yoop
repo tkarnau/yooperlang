@@ -3,7 +3,7 @@
 // A `cancel(h)` call sets the cancel byte in h's handle prefix and
 // broadcasts so any `wait_until` parked on the handle wakes immediately
 // and observes `WaitResult.Cancelled`. The task body itself is not yet
-// cooperative (in-body polling lands in 10.F.2.b) — the worker keeps
+// cooperative (in-body polling lands in 10.F.2.b) - the worker keeps
 // running it to natural completion. The cancellation semantics this
 // sub-phase provides is "abandon-the-wait": the caller stops waiting,
 // the task's result (when it eventually arrives) is unobserved.
@@ -11,7 +11,7 @@
 // Fixture shape:
 //   1. Spawn `slow()` (sleeps 200ms then returns 99).
 //   2. From a second pooled task, sleep 30ms then `cancel(slow)`.
-//   3. Main calls `conc.wait_until(slow, now+1s)` — the 1s deadline is huge,
+//   3. Main calls `conc.wait_until(slow, now+1s)` - the 1s deadline is huge,
 //      so the only path to Cancelled is through the cancel(h) at t≈30ms.
 // Final `wait slow` drains the still-running task so its handle frees
 // cleanly (same pattern as the wait_until_smoke fixture).
@@ -46,7 +46,7 @@ function main(): int32 {
         case WaitResult.Cancelled: { printf(`cancelled as expected\n`); }
     }
 
-    // Drain both pooled handles cleanly — the slow task is still
+    // Drain both pooled handles cleanly - the slow task is still
     // running until its 200ms sleep finishes.
     let _slow_final: int32 = wait target;
     let _killer_final: int32 = wait killer;

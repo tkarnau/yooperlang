@@ -1,11 +1,11 @@
-# Phase 10.C — `std/collections/` (StringMap<V>) ✓ landed (partial)
+# Phase 10.C - `std/collections/` (StringMap<V>) ✓ landed (partial)
 
 > Phase 10.A unblocked generic enums and Phase 10.B wired `Iterable<T>`.
 > 10.C is the first user of both: a real hash-based collection, plus
 > `Option<T>` and the codegen plumbing that container code reveals.
 >
-> This sub-phase shipped the marquee piece — a **string-keyed hash map**
-> with `Option<V>` returns — plus two compiler fixes that any
+> This sub-phase shipped the marquee piece - a **string-keyed hash map**
+> with `Option<V>` returns - plus two compiler fixes that any
 > generics-heavy module would have hit. Set/Deque and a fully generic
 > `Map<K, V>` are deferred to follow-up sub-phases (see below).
 
@@ -21,7 +21,7 @@ export enum Option<T> {
 ```
 
 Naming intentionally diverges from `Result`'s `Ok`/`Err` so `?` doesn't
-fire on `Option<T>` — an Option doesn't carry an error to propagate.
+fire on `Option<T>` - an Option doesn't carry an error to propagate.
 `map_get` returning `Option<V>` exercises the new shape end-to-end.
 
 ### `string_hash` in `std/core/strings.yoop`
@@ -78,7 +78,7 @@ instance. But cloning an outer instance can register additional inner
 instances (`map_insert<int32>` → `find_insert_slot<int32>` via the
 re-instantiation logic in `cloneAstWithSubstitution`), and those land
 on a different declId entry the outer loop may have already passed.
-The fix wraps the emission walk in a `while (progressed)` loop — keep
+The fix wraps the emission walk in a `while (progressed)` loop - keep
 sweeping until a full pass produces no new emissions
 ([codegen.js around emitGenericFuncInstance](../../src/jsyoopcodegen/codegen.js)).
 The header comment on `serve_n` in `std/http/server.yoop` referenced
@@ -100,7 +100,7 @@ generic-calls-generic HTTP helper is needed.
 
 - **Generic `Map<K, V>` for arbitrary key types.** Two prerequisites,
   neither in:
-  1. Either `Self` in trait signatures (Phase 5 deferred — needed for
+  1. Either `Self` in trait signatures (Phase 5 deferred - needed for
      a `trait Hashable { hash; eq(ref self, ref other: Self): bool; }`),
      **or**
   2. A `KeyOps<K>` struct holding function-pointer fields plus two
@@ -112,7 +112,7 @@ generic-calls-generic HTTP helper is needed.
      to those two cases.
 
   Either lift is small (~50–80 LOC each) but a meaningful feature
-  add — separate sub-phase work. Until then, string keys cover the
+  add - separate sub-phase work. Until then, string keys cover the
   marquee use case (HTTP `Headers`, env-like configs).
 - **`Set<K>`**. Once the generic `Map<K, V>` lands, `Set<K>` is a
   ~30-line wrapper.
@@ -120,25 +120,25 @@ generic-calls-generic HTTP helper is needed.
   needed; pure library work.
 - **`Vec<T>` `Iterable<T>` impl.** A small `VecIter<T>` struct that
   holds `{data, len, i}` and implements `Iterable<T>`. Defers until
-  the first consumer wants `for x in my_vec` — the existing
+  the first consumer wants `for x in my_vec` - the existing
   array form on `vec_as_array(ref v)` covers the immediate cases.
 - **Map iteration.** `MapIter<V>` walking occupied slots, yielding
   `MapEntry<V> { key: string, value: V }` via `Iterable<MapEntry<V>>`.
   Mechanical once a user needs it.
 - **Migrate `std/http/Headers` to `StringMap<string>`.** The current
   linear-scan vec is correct and the `headers_get`/`headers_has`
-  hot-paths are usually tiny — benchmarking the switchover is its own
+  hot-paths are usually tiny - benchmarking the switchover is its own
   story. Leaving as-is.
 
 ## Critical files touched
 
-- [std/core/types.yoop](../../std/core/types.yoop) — `Option<T>`.
-- [std/core/strings.yoop](../../std/core/strings.yoop) — `string_hash`.
-- [std/collections/map.yoop](../../std/collections/map.yoop) — new
+- [std/core/types.yoop](../../std/core/types.yoop) - `Option<T>`.
+- [std/core/strings.yoop](../../std/core/strings.yoop) - `string_hash`.
+- [std/collections/map.yoop](../../std/collections/map.yoop) - new
   module with `StringMap<V>`.
 - [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js)
-  — `cloneAstWithSubstitution` variant re-fetch, generic-instance
+  - `cloneAstWithSubstitution` variant re-fetch, generic-instance
   emission fixed-point.
 - [examples/pass/map_smoke/main.yoop](../../examples/pass/map_smoke/main.yoop)
-  — smoke fixture.
-- [src/e2e.test.js](../../src/e2e.test.js) — fixture registration.
+  - smoke fixture.
+- [src/e2e.test.js](../../src/e2e.test.js) - fixture registration.

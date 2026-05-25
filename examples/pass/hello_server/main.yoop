@@ -1,4 +1,4 @@
-// Library Phase D headline demo — a hello-world HTTP server.
+// Library Phase D headline demo - a hello-world HTTP server.
 //
 // Build:  node ./src/yoopiler.js examples/pass/hello_server/main.yoop -o /tmp/hello_server
 // Run:    /tmp/hello_server
@@ -23,7 +23,7 @@ extern "C" from "stdio.h" {
 }
 
 // User-defined handler. Lives in main.yoop because the handler is the
-// extension point — different programs supply different handlers and the
+// extension point - different programs supply different handlers and the
 // server is generic over them.
 type HelloHandler implements Handler {
     greeting: string,

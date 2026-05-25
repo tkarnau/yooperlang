@@ -1,4 +1,4 @@
-// Phase 10.A: `Result<int32>` is missing the `E` arg — should not resolve.
+// Phase 10.A: `Result<int32>` is missing the `E` arg - should not resolve.
 
 enum Result<T, E> {
     Ok { value: T },

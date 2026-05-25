@@ -1,4 +1,4 @@
-// LLVM IR code generator — walks the AST and creates IR code
+// LLVM IR code generator - walks the AST and creates IR code
 
 import { parse } from "../jsyooparser/parser.js";
 import { typecheck, typecheckProgram } from "../jsyooptypecheck/typecheck.js";
@@ -44,7 +44,7 @@ const LLVM_TYPES = {
   float64: "double",
   bool: "i1",
   void: "void",
-  string: "ptr", // i8* — null-terminated UTF-8 pointer, llvm docs thing?
+  string: "ptr", // i8* - null-terminated UTF-8 pointer, llvm docs thing?
   ptr: "ptr", // default for unknown types
 };
 
@@ -69,7 +69,7 @@ const RUNTIME_DECLARES = [
   "declare ptr @malloc(i64)",
   "declare void @free(ptr)",
   "declare ptr @memcpy(ptr, ptr, i64)",
-  // Phase 8.D: errno bridge — see runtime/yoop_runtime.c
+  // Phase 8.D: errno bridge - see runtime/yoop_runtime.c
   "declare i32 @yoop_errno_get()",
   "declare void @yoop_errno_set(i32)",
   "declare ptr @yoop_errno_message(i32)",
@@ -118,7 +118,7 @@ export function llvmType(yoopType) {
       return "ptr";
     }
     case typeKinds.vtable: {
-      // Phase 9.G: vtables are nominal struct types — `%vtable.<mod>__<Name>`.
+      // Phase 9.G: vtables are nominal struct types - `%vtable.<mod>__<Name>`.
       const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
       return `%vtable.${id}`;
     }
@@ -146,13 +146,13 @@ export function mangleTypeForTaskName(t) {
   return "unknown";
 }
 
-// Stable string key for an array element type — used in %yoop_array.<name> struct names.
+// Stable string key for an array element type - used in %yoop_array.<name> struct names.
 function arrayElemLlvmName(elemType) {
   if (elemType.kind === typeKinds.prim) return elemType.name;
   if (elemType.kind === typeKinds.struct) {
     return elemType.moduleId ? `${elemType.moduleId}__${elemType.name}` : elemType.name;
   }
-  // Phase 9.G: arrays of vtable values — `Dispatcher[]`. Each element is a
+  // Phase 9.G: arrays of vtable values - `Dispatcher[]`. Each element is a
   // small struct ({ ptr ctx, ptr m1, ... }); use the vtable's mangled name
   // as the array element key so the standard fat-pointer array shape works.
   if (elemType.kind === typeKinds.vtable) {
@@ -160,7 +160,7 @@ function arrayElemLlvmName(elemType) {
       ? `vt_${elemType.moduleId}__${elemType.name}`
       : `vt_${elemType.name}`;
   }
-  // Phase 10.A: arrays of enum values — `Result<int32, int32>[]`. The mangled
+  // Phase 10.A: arrays of enum values - `Result<int32, int32>[]`. The mangled
   // enum name is already unique per instantiation; prefix to distinguish
   // from struct-element arrays.
   if (elemType.kind === typeKinds.enum) {
@@ -184,13 +184,13 @@ function isWideInt(name) {
 }
 
 // Phase 11.B: format a wrapped comptime value as an LLVM constant
-// initializer text — the literal that follows the type in a
+// initializer text - the literal that follows the type in a
 // `@<sym> = global <type> <literal>` line. Returns null when the
 // value can't be expressed as a static LLVM constant; the caller
 // falls back to `zeroinitializer` + runtime init for those.
 //
 // Today: primitives (int, bool, float, string). Aggregates (struct,
-// array, enum) land in later 11.B sub-phases — those will return LLVM
+// array, enum) land in later 11.B sub-phases - those will return LLVM
 // `{i32 5, i32 6}` / `[3 x i32] [i32 1, i32 2, i32 3]` style
 // constants, but require materializing the comptime value tree into
 // LLVM constant syntax which is its own pass.
@@ -250,7 +250,7 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
     // but rejects bare integers in float position (`42` won't parse as
     // a float; `42.0` will). Force a fractional digit when JS's default
     // toString omits one. Special values (NaN, Inf) would need
-    // LLVM-specific spellings — refuse to fold them.
+    // LLVM-specific spellings - refuse to fold them.
     const n = Number(wrapped.v);
     if (!Number.isFinite(n)) return null;
     const s = n.toString();
@@ -275,7 +275,7 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
 }
 
 // Convert a JS-side string (from a comptime-folded value) into the
-// "inner" form that emitRawStringGlobal/encodeStringBytes expects —
+// "inner" form that emitRawStringGlobal/encodeStringBytes expects -
 // i.e. with literal escape sequences re-escaped so encodeStringBytes
 // emits them as LLVM byte-array escape codes. JS already decoded \n
 // to a newline character; we need to re-encode it as the two-char
@@ -300,7 +300,7 @@ function encodeStringForRawGlobal(s) {
 export function printfSpec(t) {
   if (t.kind === typeKinds.struct) {
     throw new Error(
-      `codegen bug: struct ${t.name} reached printf — typechecker should have rejected`,
+      `codegen bug: struct ${t.name} reached printf - typechecker should have rejected`,
     );
   }
   if (t.kind === typeKinds.prim) {
@@ -390,7 +390,7 @@ function encodeStringBytes(inner) {
 
 // LLVM gotcha: only allocas in a function's entry block are "static" and
 // released as part of the prologue/epilogue. An alloca emitted in any other
-// block becomes a *dynamic* alloca — it adjusts the stack pointer at runtime
+// block becomes a *dynamic* alloca - it adjusts the stack pointer at runtime
 // and that adjustment isn't undone until the whole function returns. So an
 // alloca inside a loop body leaks stack on every iteration. For long-running
 // main loops (e.g. an SDL render loop) this eventually overflows the stack.
@@ -403,7 +403,7 @@ function hoistAllocasToEntry(fnLines) {
   // block's terminator (the first br/ret/unreachable/switch/invoke after the
   // entry label) and lift any alloca that appears past it into a position
   // right before that terminator. Inserting before the label of the next
-  // block instead would land *between* the terminator and that label — which
+  // block instead would land *between* the terminator and that label - which
   // is invalid IR.
   const terminatorRe = /^\s+(br|ret|unreachable|switch|resume|invoke)\b/;
   let entryTerm = -1;
@@ -439,7 +439,7 @@ function hoistAllocasToEntry(fnLines) {
 //     Map-like surface for callers that only care about the binding's
 //     type (function-decl tracking, etc.).
 //   * `declare(name, type)` is the new combined "register a local binding
-//     and allocate a unique LLVM slot for it" — returns the slot string
+//     and allocate a unique LLVM slot for it" - returns the slot string
 //     (with leading `%`). Use this any time an alloca is about to be
 //     emitted for a user-visible binding.
 //   * `slotFor(name)` returns the LLVM slot string. Use it any time the
@@ -453,7 +453,7 @@ function createLocalSymbols() {
   const slotMap = new Map();      // name -> "%llvmSlot" (current binding)
   // Seed usedSlots with names that collide with LLVM basic-block labels
   // the emitter always produces. Most prominently, every function starts
-  // with an `entry:` block — if the user binds `entry`, `%entry = alloca`
+  // with an `entry:` block - if the user binds `entry`, `%entry = alloca`
   // collides with that label's `%entry` reference. By marking `entry` as
   // already-taken, `declare` falls through to `entry.1` for the first
   // user binding of that name.
@@ -616,7 +616,7 @@ export function codegen(ast) {
         const base = emitLvalue(node.object, fnLines);
         if (base.type.kind !== typeKinds.struct) {
           throw new Error(
-            `codegen: field access on non-struct type — typechecker should have caught this`,
+            `codegen: field access on non-struct type - typechecker should have caught this`,
           );
         }
         const idx = base.type.fields.findIndex((f) => f.name === node.field);
@@ -663,7 +663,7 @@ export function codegen(ast) {
   }
 
   // populate an already-allocated struct slot field-by-field. nested struct
-  // literals write directly into the corresponding GEP — no temp alloca.
+  // literals write directly into the corresponding GEP - no temp alloca.
   function emitStructLiteralInto(litNode, destPtr, structType, fnLines) {
     for (const litField of litNode.fields) {
       const idx = structType.fields.findIndex((f) => f.name === litField.name);
@@ -687,7 +687,7 @@ export function codegen(ast) {
   }
 
   // lower `expr?` up to the err check, returning the on-stack slot that
-  // holds the operand's enum value. Phase 9.H — fallible-enum shape only:
+  // holds the operand's enum value. Phase 9.H - fallible-enum shape only:
   //   <eval operand> -> %tmp
   //   alloca + store on stack
   //   load i32 tag at field 0; compare to Err ordinal
@@ -729,9 +729,9 @@ export function codegen(ast) {
   // variant carrying the operand's Err payload, then ret. operandEnumSlot
   // points to the operand's enum struct (tag has already been checked ==
   // Err ordinal); we GEP into its payload bytes and either copy the single
-  // payload field directly (Phase 9.H — typesEqual fast path) or call the
+  // payload field directly (Phase 9.H - typesEqual fast path) or call the
   // operand-err type's `Into<RetErr>.into(ref self)` impl and store its
-  // result (Phase 10.E — cross-shape path, gated on `tryNode.tryConvert`).
+  // result (Phase 10.E - cross-shape path, gated on `tryNode.tryConvert`).
   function emitFailEnumReturn(tryNode, operandEnum, operandEnumSlot, retEnumType, fnLines) {
     const retLlvm = llvmType(retEnumType);
     const retSlot = freshTemp();
@@ -771,7 +771,7 @@ export function codegen(ast) {
       fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
 
       if (tryNode.tryConvert) {
-        // Phase 10.E: cross-shape — call Into.into(ref operandErr) and
+        // Phase 10.E: cross-shape - call Into.into(ref operandErr) and
         // store the returned target value.
         const retFieldLlvm = llvmType(retFieldType);
         const converted = freshTemp();
@@ -801,7 +801,7 @@ export function codegen(ast) {
 
   // Set by codegenProgram for each module. null in single-module mode.
   let currentModuleId = null;
-  // Names of extern functions in the current module — not mangled.
+  // Names of extern functions in the current module - not mangled.
   let currentExternNames = new Set();
 
   // Phase 8.A: pointer-arithmetic / pointer-comparison emitter. Called by
@@ -834,7 +834,7 @@ export function codegen(ast) {
         const pointee = node.left.resolvedType.pointee;
         const elemLlvmTy = llvmType(pointee);
         const sizeofTmp = freshTemp();
-        // `getelementptr <T>, ptr null, i32 1` gives sizeof(T) — standard trick.
+        // `getelementptr <T>, ptr null, i32 1` gives sizeof(T) - standard trick.
         fnLines.push(
           `  ${sizeofTmp} = getelementptr ${elemLlvmTy}, ptr null, i32 1`,
         );
@@ -860,7 +860,7 @@ export function codegen(ast) {
           intVal.yoopType.name !== "int64")
       ) {
         // Widen non-int64 offsets to i64 for GEP. Sign-extend for signed
-        // ints, zero-extend for unsigned — defer that nuance, sext is fine
+        // ints, zero-extend for unsigned - defer that nuance, sext is fine
         // for the integer ranges typical of FFI offsets.
         if (offsetLlvmTy !== "i64") {
           const widened = freshTemp();
@@ -1044,7 +1044,7 @@ export function codegen(ast) {
         }
         if (node.castKind === "toArray") {
           // Phase 8.C: build a fat-pointer view {data: operand, len: lenVal}.
-          // No copy — the array borrows the underlying memory.
+          // No copy - the array borrows the underlying memory.
           const arrayType = node.resolvedType;
           ensureArrayTypeDef(arrayType.elem);
           const arrayLlvmTy = llvmType(arrayType);
@@ -1131,7 +1131,7 @@ export function codegen(ast) {
           return rhs;
         }
         if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
-          // Phase 8.A: `*p = v` — store through an unsafe_ptr<T>.
+          // Phase 8.A: `*p = v` - store through an unsafe_ptr<T>.
           const ptrExpr = emitExpr(node.target.operand, fnLines);
           const rhs = emitExpr(node.value, fnLines);
           const pointee = node.target.resolvedType;
@@ -1159,7 +1159,7 @@ export function codegen(ast) {
           fnLines.push(`  ${tmp} = call i64 @strlen(ptr ${s.val})`);
           return { val: tmp, yoopType: PrimType("usize") };
         }
-        // intrinsic: `xs.len` on an array — GEP field 1 of the fat pointer.
+        // intrinsic: `xs.len` on an array - GEP field 1 of the fat pointer.
         if (node.isArrayLen) {
           const lv = emitLvalue(node.object, fnLines);
           const arrayLlvmTy = llvmType(lv.type);
@@ -1169,7 +1169,7 @@ export function codegen(ast) {
           fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
           return { val: lenVal, yoopType: PrimType("usize") };
         }
-        // Phase 8.C: `xs.ptr` — GEP field 0 of the fat pointer, load.
+        // Phase 8.C: `xs.ptr` - GEP field 0 of the fat pointer, load.
         if (node.isArrayPtr) {
           const lv = emitLvalue(node.object, fnLines);
           const arrayLlvmTy = llvmType(lv.type);
@@ -1227,7 +1227,7 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.TRY_OP: {
-        // Phase 9.H: enum operand — extract the Ok variant payload (or void).
+        // Phase 9.H: enum operand - extract the Ok variant payload (or void).
         const slot = emitTryOpToSlot(node, fnLines);
         const okStripped = strippedEnumOkType(slot.type);
         if (okStripped.kind === typeKinds.void) {
@@ -1284,7 +1284,7 @@ export function codegen(ast) {
       fnLines.push(`  ${tmp} = ${opcode} ${llvmType(src.yoopType)} ${src.val} to ${llvmType(dstType)}`);
       return { val: tmp, yoopType: dstType };
     }
-    // Namespace call: io.greet("hello") — callee is a FIELD_ACCESS node.
+    // Namespace call: io.greet("hello") - callee is a FIELD_ACCESS node.
     // For generic calls (`vec.vec_new(...)`), node.genericInstantiation
     // holds the monomorphic mangled name; otherwise we mangle the bare
     // export name.
@@ -1350,7 +1350,7 @@ export function codegen(ast) {
     if (node.calleeModuleId) {
       calleeName = mangle(node.calleeModuleId, node.calleeExportName);
     } else if (currentModuleId && !currentExternNames.has(calleeName)) {
-      // Local function defined in this module — mangle it.
+      // Local function defined in this module - mangle it.
       calleeName = mangle(currentModuleId, node.callee);
     }
 
@@ -1401,7 +1401,7 @@ export function codegen(ast) {
 
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
-        // raw format text — strip the surrounding quotes, keep escapes intact
+        // raw format text - strip the surrounding quotes, keep escapes intact
         const inner = argNode.value.slice(1, -1);
         fmtSpec += inner;
       } else if (argNode.kind === ASTNodeKind.TEMPLATE_LITERAL) {
@@ -1476,7 +1476,7 @@ export function codegen(ast) {
   // for now (eventually this should produce a heap string via snprintf).
   // for the moment, this evaluates the parts and returns the concatenated
   // *format string* as a static global, which is wrong if there are interp
-  // values — so we error in that case.
+  // values - so we error in that case.
   function emitTemplateLiteral(node, fnLines) {
     const hasInterp = node.parts.some((p) => p.kind === ASTNodeKind.EXPR_PART);
     if (hasInterp) {
@@ -1484,7 +1484,7 @@ export function codegen(ast) {
         `codegen: template literals with \${...} interpolation are only supported inside printf(...) for now`,
       );
     }
-    // pure string template — emit as a regular string global
+    // pure string template - emit as a regular string global
     const inner = node.parts.map((p) => p.value).join("");
     const { name, byteLen } = emitRawStringGlobal(inner);
     const tmp = freshTemp();
@@ -1525,7 +1525,7 @@ export function codegen(ast) {
             node.assignment.kind === ASTNodeKind.STRUCT_LITERAL &&
             declType.kind === typeKinds.struct
           ) {
-            // populate the alloca'd slot directly — skip the temp + load + store
+            // populate the alloca'd slot directly - skip the temp + load + store
             emitStructLiteralInto(
               node.assignment,
               slot,
@@ -1549,7 +1549,7 @@ export function codegen(ast) {
         break;
 
       case ASTNodeKind.DISCARD_STATEMENT:
-        // `_ = expr;` — evaluate for side-effects only. If `expr` is a
+        // `_ = expr;` - evaluate for side-effects only. If `expr` is a
         // TRY_OP the err propagation still fires inside emitExpr; the
         // discard suppresses the resulting value.
         emitExpr(node.value, fnLines);
@@ -1588,7 +1588,7 @@ export function codegen(ast) {
     }
   }
 
-  // `const { a, b } = expr;` — destructure a struct value.
+  // `const { a, b } = expr;` - destructure a struct value.
   function emitDestructureDecl(node, fnLines) {
     const r = emitExpr(node.assignment, fnLines);
     const slotType = node.assignment.resolvedType;
@@ -1767,7 +1767,7 @@ export function codegen(ast) {
   }
 
   // Phase 9.D: `for item in xs { ... }`. Lowers to a fat-pointer walk with
-  // a hidden i64 counter — same shape as the C-style for loop a user would
+  // a hidden i64 counter - same shape as the C-style for loop a user would
   // write today, but the index is invisible and the per-iteration value is
   // copied into a fresh loopVar slot at the top of the body.
   function emitForInLoop(node, fnLines, ctx) {
@@ -2014,7 +2014,7 @@ export function codegen(ast) {
         for (const ext of decl.decls) {
           if (ext.kind !== ASTNodeKind.EXTERN_FUNCTION_DECL) continue;
           externFnNames.add(ext.name);
-          // Generic intrinsics have no resolved param/return types — pass C
+          // Generic intrinsics have no resolved param/return types - pass C
           // skips them since the canonical decl carries the signature. Don't
           // build a functionSigs entry for them; codegen dispatches by declId.
           if (isIntrinsic && ext.resolvedType === undefined) continue;
@@ -2029,7 +2029,7 @@ export function codegen(ast) {
     currentExternNames = externFnNames;
 
     // second pass: emit extern declarations from EXTERN_BLOCKs, then legacy auto-detect.
-    // `extern "intrinsic"` blocks are compiler-recognized — their lowerings
+    // `extern "intrinsic"` blocks are compiler-recognized - their lowerings
     // live in codegen / the runtime, not in LLVM `declare`s, so we skip them.
     for (const decl of node.body) {
       if (decl.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
@@ -2052,7 +2052,7 @@ export function codegen(ast) {
       const decl = externDecl(name);
       if (decl) lines.push(decl);
     }
-    // Runtime ABI declares — emitted unconditionally so codegen-injected
+    // Runtime ABI declares - emitted unconditionally so codegen-injected
     // init/shutdown (and future task scheduling) resolve at link time.
     lines.push(...RUNTIME_DECLARES);
     if (defined.size > 0 || called.size > 0) lines.push("");
@@ -2075,7 +2075,7 @@ export function codegen(ast) {
           emitMethod(method, decl.decl.resolvedType);
         }
       }
-      // TRAIT_DECL: no codegen — traits are compile-time only
+      // TRAIT_DECL: no codegen - traits are compile-time only
     }
   }
 
@@ -2106,7 +2106,7 @@ function llvmFloatConstant(jsNumber, primName = "float64") {
 }
 
 // walk the AST and collect names of called functions not in `defined`.
-// Only collects string callees — object callees (namespace calls) are handled
+// Only collects string callees - object callees (namespace calls) are handled
 // separately in emitCall.
 function collectCalls(node, defined) {
   const called = new Set();
@@ -2179,7 +2179,7 @@ function needsStrlen(node) {
   return found;
 }
 
-// True for both VoidType() and PrimType("void") — the typechecker emits the
+// True for both VoidType() and PrimType("void") - the typechecker emits the
 // latter when resolving the "void" type name via resolveTypeAnnotation.
 function isVoidReturn(rt) {
   return rt.kind === typeKinds.void || (rt.kind === typeKinds.prim && rt.name === "void");
@@ -2194,7 +2194,7 @@ export function alignOf(llvmTy) {
 }
 
 // Phase 7.5: rough byte size of a yoop type, for sizing union and enum
-// payloads. Mirrors `alignOf` — only uses natural sizes and assumes packed
+// payloads. Mirrors `alignOf` - only uses natural sizes and assumes packed
 // layout (LLVM will round up to alignment in practice; we round up explicitly
 // where it matters).
 export function sizeOfType(t) {
@@ -2300,7 +2300,7 @@ export function sizeOfAlign(t) {
     return max;
   }
   if (t.kind === typeKinds.vtable) {
-    // Phase 9.G: vtables are { ptr ctx, ptr m1, ptr m2, ... } — all pointer-
+    // Phase 9.G: vtables are { ptr ctx, ptr m1, ptr m2, ... } - all pointer-
     // wide, so the natural alignment is one pointer.
     return 8;
   }
@@ -2355,7 +2355,7 @@ const FLOAT_OP_MAP = {
 };
 
 // Phase 8.H: comparison/division ops must distinguish signed and unsigned
-// integer types — LLVM has separate opcodes (icmp slt vs icmp ult, sdiv vs
+// integer types - LLVM has separate opcodes (icmp slt vs icmp ult, sdiv vs
 // udiv, etc.). Without this, uint8 comparisons against literals > 127
 // silently produce wrong results (the byte 128 becomes -128 signed).
 const UNSIGNED_INT_OVERRIDES = {
@@ -2563,7 +2563,7 @@ function codegenModule(mod, emittedStructs, emittedArrayTypes, programState, deb
   );
 }
 
-// Phase 7.1: helper for codegenProgram — true iff a struct's fields contain
+// Phase 7.1: helper for codegenProgram - true iff a struct's fields contain
 // any TypeParamType (i.e. the struct is an "open" instantiation built during
 // type-checking of a generic decl body).
 // Phase 7.1: deep-clone an AST subtree, substituting type-params in every
@@ -2578,7 +2578,7 @@ const CLONE_SKIP_FIELDS = new Set([
 // Phase 11.D.7: exported so the comptime interpreter can reuse the
 // same per-instance substituted-AST builder codegen uses for
 // generic-fn emission. The comptime path is "lower the substituted
-// AST into bytecode" — identical input requirement, different output.
+// AST into bytecode" - identical input requirement, different output.
 export function cloneAstWithSubstitution(node, sub, registry = null) {
   if (node === null || node === undefined) return node;
   if (typeof node !== "object") return node;
@@ -2640,7 +2640,7 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
   // `Map<K, bool>`), the original mangle captured the open form
   // (`Map_set-K__bool`). After cloning the body for a concrete
   // instantiation (Set<string>), `out.calleeMethodOf` is the
-  // substituted struct (Map<string, bool>) — but `calleeMangledName`
+  // substituted struct (Map<string, bool>) - but `calleeMangledName`
   // is still the open form. Re-mangle so codegen emits the right
   // monomorphized symbol.
   if (
@@ -2666,7 +2666,7 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
     let recvType = firstArg?.resolvedType;
     if (recvType?.kind === typeKinds.ref) recvType = recvType.inner;
     if (!recvType || recvType.kind !== typeKinds.struct) {
-      // Receiver is still abstract — keep the boundMethod tag. This branch is
+      // Receiver is still abstract - keep the boundMethod tag. This branch is
       // hit when we're producing an "open" instantiation (the outer T flowed
       // in). Open instances are filtered out before IR emission.
       return out;
@@ -2690,7 +2690,7 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
   // pointer into their `resolvedEnumType.variants` map. The generic
   // substitution above replaces resolvedEnumType with a fresh instantiation
   // (via the frozen-type branch), but resolvedVariant was a plain non-frozen
-  // record that recursive-cloned — its fields may still reference the
+  // record that recursive-cloned - its fields may still reference the
   // pre-substitution variant from the *original* enum's variants map.
   // Re-fetch the variant by name from the (substituted) resolvedEnumType
   // so codegen sees the concrete field types.
@@ -2728,7 +2728,7 @@ function structContainsTypeParam(structType) {
 
 // Phase 10.A: mirror of structContainsTypeParam for enum instantiations.
 // Returns true for an "open" enum whose variant payloads still mention a
-// TypeParamType — those are intermediate substitution products that must
+// TypeParamType - those are intermediate substitution products that must
 // not be emitted as LLVM struct defs.
 function enumContainsTypeParam(enumType) {
   if (!enumType.variants) return false;
@@ -2826,7 +2826,7 @@ function codegenWithModuleId(
   }
 
   // Map a Yooperlang type to its DI type reference for use in a
-  // DILocalVariable. Returns null for shapes we don't yet describe — caller
+  // DILocalVariable. Returns null for shapes we don't yet describe - caller
   // should skip emitting llvm.dbg.declare for that binding so lldb just
   // omits it from `frame variable` rather than showing garbage.
   function diTypeFor(yoopType) {
@@ -2924,7 +2924,7 @@ function codegenWithModuleId(
   let inMainFn = false;
 
   // For now, emit struct defs using mangled names. Phase 7.1: generic type
-  // decls (with typeParams) have no resolvedType — their instantiations are
+  // decls (with typeParams) have no resolvedType - their instantiations are
   // emitted in codegenProgram from the registry.
   for (const decl of ast.body) {
     const d = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
@@ -2941,7 +2941,7 @@ function codegenWithModuleId(
     // Phase 7.5: emit enum struct + per-variant payload structs.
     //   %enum.<mod>__<E> = type { i32, [P x i8] }     (tag + payload bytes)
     //   %enumv.<mod>__<E>__<V> = type { ... fields ... }  (per-variant payload)
-    // Phase 10.A: generic enum decls have no resolvedType — they emit their
+    // Phase 10.A: generic enum decls have no resolvedType - they emit their
     // instantiations from the registry walk in codegenProgram instead.
     if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType && !d.genericDecl) {
       const enumLlvm = llvmType(d.resolvedType);
@@ -2997,7 +2997,7 @@ function codegenWithModuleId(
         structDefs.push(`${unionLlvm} = type { [${size} x i8] }`);
       }
     }
-    // Phase 9.G: emit vtable struct as { ptr ctx, ptr m1, ptr m2, ... } —
+    // Phase 9.G: emit vtable struct as { ptr ctx, ptr m1, ptr m2, ... } -
     // one pointer slot per trait method, in trait declaration order.
     if (d.kind === ASTNodeKind.VTABLE_DECL && d.resolvedType) {
       const vtLlvm = llvmType(d.resolvedType);
@@ -3010,15 +3010,15 @@ function codegenWithModuleId(
     }
   }
 
-  // Collect C-exported function names — these are defined with unmangled symbols.
+  // Collect C-exported function names - these are defined with unmangled symbols.
   const cExportNames = new Set();
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) cExportNames.add(decl.fn.name);
   }
 
   // Collect extern function names and emit declares. `extern "intrinsic"`
-  // blocks are compiler-recognized — see the note in the legacy path above
-  // — so we skip emitting LLVM declares for them.
+  // blocks are compiler-recognized - see the note in the legacy path above
+  // - so we skip emitting LLVM declares for them.
   const externFnNames = new Set();
   for (const decl of ast.body) {
     if (decl.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
@@ -3041,7 +3041,7 @@ function codegenWithModuleId(
   if (usesLegacyPrintf(ast) && !externFnNames.has("printf")) {
     lines.push("declare i32 @printf(ptr, ...)");
   }
-  // Runtime ABI declares — emitted in every module so the dedup pass folds
+  // Runtime ABI declares - emitted in every module so the dedup pass folds
   // them into a single declare per symbol in the final IR.
   lines.push(...RUNTIME_DECLARES);
   if (lines.length) lines.push("");
@@ -3078,17 +3078,17 @@ function codegenWithModuleId(
   // Phase 8.E: collect module-level let/const decls and emit one LLVM
   // `@<modid>__<name>` global per binding with `zeroinitializer`. The
   // initializer expression itself runs in the synthesized `<modid>__module_init`
-  // function emitted at the bottom of this pass. Order is source order —
+  // function emitted at the bottom of this pass. Order is source order -
   // matches the typechecker's mod.moduleInitDecls.
   //
-  // (Bytecode/CTE future) — a future evaluator could classify some inits
+  // (Bytecode/CTE future) - a future evaluator could classify some inits
   // as constant-foldable, emit them as the LLVM initial value, and drop
   // them from the runtime init function. The MVP routes everything
   // through the runtime function.
   // Phase 11.B: a module-level decl that the comptime pass managed to
   // fold carries `decl.comptimeFolded = true` + `decl.comptimeValue`.
   // We emit its `@global` with the literal value baked in and skip it
-  // when synthesizing the runtime `module_init` — the value is already
+  // when synthesizing the runtime `module_init` - the value is already
   // there at load time, no init call needed. Unfolded decls still go
   // through the existing `zeroinitializer` + runtime init path.
   const moduleLevelDecls = [];      // decls that still need runtime init
@@ -3096,7 +3096,7 @@ function codegenWithModuleId(
     // Phase 11.C: an ATTRIBUTE node (e.g. `@precompile const X = ...`)
     // wraps a let/const decl; unwrap it for the standard
     // module-level-decl path. The attribute's runtime effects (none
-    // for @precompile — its sole purpose is to demand the fold
+    // for @precompile - its sole purpose is to demand the fold
     // succeed) are handled by the attribute pass, which runs before
     // codegen.
     const outer = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl : decl;
@@ -3135,7 +3135,7 @@ function codegenWithModuleId(
   }
   // Register the symbols on programState so the entry module's `main`
   // emission can call each module's `__module_init` after yoop_runtime_init.
-  // Only register when there's actually a function to call — if every
+  // Only register when there's actually a function to call - if every
   // module-level decl folded, emitModuleInit emits nothing and a
   // registered symbol would dangle as an undefined reference.
   if (moduleLevelDecls.length > 0) {
@@ -3147,7 +3147,7 @@ function codegenWithModuleId(
     }
   }
 
-  // Collect function sigs. Phase 7.1: skip generic decls — their
+  // Collect function sigs. Phase 7.1: skip generic decls - their
   // instantiations register their own sigs in the registry.
   for (const decl of ast.body) {
     const d =
@@ -3181,7 +3181,7 @@ function codegenWithModuleId(
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.FUNCTION_DECL) {
       if (decl.genericDecl) continue;
-      // "main" is the C entry point — never mangle it.
+      // "main" is the C entry point - never mangle it.
       const sym = decl.name === "main" ? "main" : mangle(moduleId, decl.name);
       emitFn(decl, sym);
       if (decl.isTask) emitTaskThunk(decl);
@@ -3201,7 +3201,7 @@ function codegenWithModuleId(
         emitMethodFn(method, decl.decl.resolvedType);
       }
     }
-    // TRAIT_DECL: no codegen — traits are compile-time only
+    // TRAIT_DECL: no codegen - traits are compile-time only
   }
 
   // Phase 8.E: emit the synthesized module-init function for this module's
@@ -3214,7 +3214,7 @@ function codegenWithModuleId(
   // Cloning a generic body during emission can register additional concrete
   // instances belonging to OTHER modules (e.g. `Set<K>`'s body in
   // std/collections/set.yoop references generic functions defined in
-  // std/collections/map.yoop — when Set<string> is monomorphized,
+  // std/collections/map.yoop - when Set<string> is monomorphized,
   // map_contains_key<string, bool> lands in the map module's registry
   // slot, which may have already finished its own per-instance sweep).
   // The outer fixed-point in codegenProgram keeps calling each module's
@@ -3228,10 +3228,10 @@ function codegenWithModuleId(
         if (inst.emitted) continue;
         // Phase 7.2: skip "open" instances where some argType is still a
         // TypeParamType (came from a generic-calls-generic site). They only
-        // exist in the registry as caching artifacts — the concrete instances
+        // exist in the registry as caching artifacts - the concrete instances
         // produced when the outer generic is monomorphized are what get IR.
         if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
-        // Builtin generic funcs (heap_alloc / heap_free) have no AST body —
+        // Builtin generic funcs (heap_alloc / heap_free) have no AST body -
         // codegen inlines them at every call site (see emitCallExpr).
         if (inst.declId?.startsWith("$builtin")) continue;
         inst.emitted = true;
@@ -3279,7 +3279,7 @@ function codegenWithModuleId(
     programState._instanceFlushers.push(flushInstances);
   }
 
-  // Return raw lines + a deferred extractor — codegenProgram may invoke
+  // Return raw lines + a deferred extractor - codegenProgram may invoke
   // flushInstances again (cross-module fixed-point), which mutates the
   // closure-captured `lines` in place. Snapshot-on-return would miss those.
   return {
@@ -3451,7 +3451,7 @@ function codegenWithModuleId(
   // let/const initializer in source order, storing into the corresponding
   // @global. Called from main right after yoop_runtime_init() (see emitFn).
   //
-  // (Bytecode/CTE future) — this is the smallest discrete codegen entity
+  // (Bytecode/CTE future) - this is the smallest discrete codegen entity
   // for a CTE pass: parameter-free, returns void, operates only on
   // module-owned @globals. A future evaluator can replace this with
   // bytecode interpretation, or skip it entirely when every init has
@@ -3479,7 +3479,7 @@ function codegenWithModuleId(
   }
 
   function emitMethodFn(methodDecl, structType) {
-    // Phase 7.4: one impl body can satisfy multiple traits — emit one define
+    // Phase 7.4: one impl body can satisfy multiple traits - emit one define
     // per trait, all sharing the same body.
     const traits = methodDecl.implementsTraits ?? [];
     for (const traitName of traits) {
@@ -3607,7 +3607,7 @@ function codegenWithModuleId(
     );
     fnLines.push(`  store i8 0, ptr ${statePtr}`);
     // Phase 10.F.2: cancel byte at offset 9 = 0. Reuses the first byte of
-    // the `[3 x i8]` padding at field index 2 — accessed by byte offset
+    // the `[3 x i8]` padding at field index 2 - accessed by byte offset
     // so the struct's LLVM type stays unchanged. Pooled handles via
     // yoop_task_alloc come from calloc and are already zeroed; joined
     // handles via alloca are not, hence the explicit store.
@@ -3657,14 +3657,14 @@ function codegenWithModuleId(
     if (callExpr.kind !== ASTNodeKind.CALL_EXPRESSION) return null;
     if (typeof callExpr.callee !== "string") return null;
     if (callExpr.calleeModuleId) {
-      // Imported task fn — out of 6.3 scope; reject at codegen.
+      // Imported task fn - out of 6.3 scope; reject at codegen.
       throw new Error(`codegen: cross-module task calls not supported in phase 6.3`);
     }
     return taskFnTable.has(callExpr.callee) ? callExpr.callee : null;
   }
 
   function calleeSymbol(node) {
-    // Phase 7.1: generic-function call — use the instantiation's mangled name.
+    // Phase 7.1: generic-function call - use the instantiation's mangled name.
     if (node.genericInstantiation) {
       const inst = node.genericInstantiation;
       return mangle(inst.moduleId, inst.mangledName);
@@ -3767,7 +3767,7 @@ function codegenWithModuleId(
           return { val: tmp, yoopType };
         }
         // Phase 10.X.2: an IDENT in expression position whose resolved type
-        // is a FuncType denotes the function decl itself — typically used as
+        // is a FuncType denotes the function decl itself - typically used as
         // a fn-ptr value (assigning to a `(p: T) => R`-typed struct field).
         // Lower to the function's mangled symbol address.
         if (node.resolvedType?.kind === typeKinds.func && !symbols.has(node.name)) {
@@ -3967,7 +3967,7 @@ function codegenWithModuleId(
           return rhs;
         }
         if (node.target.kind === ASTNodeKind.DEREF_EXPRESSION) {
-          // Phase 8.A: `*p = v` — store through an unsafe_ptr<T>.
+          // Phase 8.A: `*p = v` - store through an unsafe_ptr<T>.
           const ptrExpr = emitExpr(node.target.operand, fnLines);
           const rhs = emitExpr(node.value, fnLines);
           const pointee = node.target.resolvedType;
@@ -3976,7 +3976,7 @@ function codegenWithModuleId(
         }
         throw new Error(`codegen: unsupported assignment target kind "${node.target.kind}"`);
       }
-      // Phase 9: compound assignment — addresses the lvalue exactly once,
+      // Phase 9: compound assignment - addresses the lvalue exactly once,
       // loads the current value, applies the binary op, stores the result.
       case ASTNodeKind.COMPOUND_ASSIGNMENT: {
         // Resolve the storage slot. Result: { ptr, type, isReg, regName? }
@@ -4001,7 +4001,7 @@ function codegenWithModuleId(
           slotType = node.target.resolvedType;
           slotPtr = ptrExpr.val;
         } else {
-          // FIELD_ACCESS or INDEX_EXPRESSION — emitLval addresses the slot
+          // FIELD_ACCESS or INDEX_EXPRESSION - emitLval addresses the slot
           // exactly once (no double-eval of e.g. xs[f()]).
           const lv = emitLval(node.target, fnLines);
           slotType = lv.type;
@@ -4033,7 +4033,7 @@ function codegenWithModuleId(
           fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
           return { val: lenVal, yoopType: PrimType("usize") };
         }
-        // Phase 8.C: `xs.ptr` — GEP field 0 of the fat pointer, load.
+        // Phase 8.C: `xs.ptr` - GEP field 0 of the fat pointer, load.
         if (node.isArrayPtr) {
           const lv = emitLval(node.object, fnLines);
           const arrayLlvmTy = llvmType(lv.type);
@@ -4083,7 +4083,7 @@ function codegenWithModuleId(
         fnLines.push(`  ${tmp} = load ${llvmType(lv.type)}, ptr ${lv.ptr}`);
         return { val: tmp, yoopType: lv.type };
       }
-      // Phase 9.E: `xs[i..j]` — zero-copy fat-pointer subview. Builds
+      // Phase 9.E: `xs[i..j]` - zero-copy fat-pointer subview. Builds
       // {xs.ptr + start * sizeof(T), end - start} from the source fat
       // pointer; open bounds default start→0, end→xs.len.
       case ASTNodeKind.SLICE_EXPRESSION: {
@@ -4140,7 +4140,7 @@ function codegenWithModuleId(
         return { val: resVal, yoopType: arrayType };
       }
       case ASTNodeKind.TRY_OP: {
-        // Phase 9.H: enum operand — extract the Ok variant payload (or void).
+        // Phase 9.H: enum operand - extract the Ok variant payload (or void).
         const slot = emitTrySlot(node, fnLines);
         const okStripped = strippedEnumOkType(slot.type);
         if (okStripped.kind === typeKinds.void) {
@@ -4259,7 +4259,7 @@ function codegenWithModuleId(
 
     // Anonymous source (e.g. `pooled h` parameter). The result type comes
     // from the operand's TaskType; the result slot lives at byte offset 32
-    // of every task struct (prefix layout is universal — see runtime-design.md).
+    // of every task struct (prefix layout is universal - see runtime-design.md).
     const operandType = symbols.get(operand.name);
     const resultType = operandType.resultType;
     const resultLlvm = llvmType(resultType);
@@ -4271,8 +4271,8 @@ function codegenWithModuleId(
   }
 
   // Phase 10.F + 10.F.2: `wait_until(h, deadline_ns): WaitResult<T>`
-  // lowering. The runtime returns an i32 outcome — 0 done, 1 timeout, 2
-  // cancelled — and we dispatch via a switch to build the matching
+  // lowering. The runtime returns an i32 outcome - 0 done, 1 timeout, 2
+  // cancelled - and we dispatch via a switch to build the matching
   // variant. The result-slot byte offset is the universal task-struct
   // prefix offset (32) so the same shape works for joined/pooled
   // bindings and pooled parameters alike.
@@ -4303,7 +4303,7 @@ function codegenWithModuleId(
     const cancelledLabel = freshLabel("wu_cancelled");
     const joinLabel = freshLabel("wu_join");
 
-    // Three-way switch on the runtime outcome — `cancelled` only appears
+    // Three-way switch on the runtime outcome - `cancelled` only appears
     // when the Cancelled variant exists in the user's WaitResult shape,
     // which it always does post-10.F.2 (Cancelled is now part of the
     // canonical std/core/concurrency.yoop enum). Default branch jumps
@@ -4373,7 +4373,7 @@ function codegenWithModuleId(
     return { val: loadTmp, yoopType: waitResultType };
   }
 
-  // Phase 10.F.2: `cancel(h): void` — thin wrapper over @yoop_task_cancel.
+  // Phase 10.F.2: `cancel(h): void` - thin wrapper over @yoop_task_cancel.
   // Stamped by the typechecker's resolveCancelCall; the arg is a Task<T>
   // value which lowers to the handle ptr directly.
   function emitCancelCall(node, fnLines) {
@@ -4455,7 +4455,7 @@ function codegenWithModuleId(
     if (inst.declId === "$builtin__string_from_bytes_unchecked") {
       // Phase 8.H: malloc(buf.len + 1), memcpy from buf.ptr, write nul.
       // Returns the malloc'd ptr as a string (zero-terminated UTF-8 by
-      // contract — caller asserts UTF-8 validity).
+      // contract - caller asserts UTF-8 validity).
       const arrayType = ArrayType(PrimType("uint8"));
       ensureArrayTypeDef(PrimType("uint8"));
       const arrayLlvmTy = llvmType(arrayType);
@@ -4486,7 +4486,7 @@ function codegenWithModuleId(
       return { val: raw, yoopType: PrimType("string") };
     }
     if (inst.declId === "$builtin__array_slice") {
-      // Phase 8.H: array_slice<T>(xs, start, end) — borrowing view, no copy.
+      // Phase 8.H: array_slice<T>(xs, start, end) - borrowing view, no copy.
       // Build {xs.ptr + start * sizeof(T), end - start} as a fresh fat pointer.
       const elemType = inst.argTypes[0];
       const arrayType = ArrayType(elemType);
@@ -4653,7 +4653,7 @@ function codegenWithModuleId(
     }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
       // Generic-namespace calls (`vec.vec_new(...)`) carry a
-      // `genericInstantiation` from the typechecker — its mangled name
+      // `genericInstantiation` from the typechecker - its mangled name
       // includes the type-arg suffix so we land on the concrete monomorphic
       // function rather than the (non-existent) base symbol.
       const mangledName = node.genericInstantiation
@@ -4710,11 +4710,11 @@ function codegenWithModuleId(
       return { val: tmp, yoopType: methodSig.returnType };
     }
 
-    // Phase 9.G: `VTableName.from(ref x)` — synthesize the vtable struct.
+    // Phase 9.G: `VTableName.from(ref x)` - synthesize the vtable struct.
     if (node.vtableBuilder) {
       return emitVTableFromBuilder(node, fnLines);
     }
-    // Phase 9.G: `Trait.method(ref vt, args)` where vt is a vtable value —
+    // Phase 9.G: `Trait.method(ref vt, args)` where vt is a vtable value -
     // lower to an indirect call through the slot, threading ctx as the
     // first argument.
     if (node.vtableCall) {
@@ -4898,7 +4898,7 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.FIELD_ACCESS: {
         const base = emitLval(node.object, fnLines);
-        // Phase 7.5: union field access — every field overlaps at offset 0;
+        // Phase 7.5: union field access - every field overlaps at offset 0;
         // the union's pointer is already the field's pointer (just retyped).
         if (base.type.kind === typeKinds.union) {
           const uf = base.type.fields.find((f) => f.name === node.field);
@@ -4938,7 +4938,7 @@ function codegenWithModuleId(
   }
 
   function emitStructLitInto(litNode, destPtr, structType, fnLines) {
-    // Phase 7.5: union literal — exactly one field gets stored, and it lives
+    // Phase 7.5: union literal - exactly one field gets stored, and it lives
     // at byte offset 0 of the union (the field's LLVM type, treated as an
     // overlay onto the byte buffer). All fields share offset 0, so we can
     // ignore the lookup `idx` here.
@@ -4974,7 +4974,7 @@ function codegenWithModuleId(
     }
   }
 
-  // Phase 9.H — enum-shaped `?` (multi-module path). Mirrors emitTryOpToSlot
+  // Phase 9.H - enum-shaped `?` (multi-module path). Mirrors emitTryOpToSlot
   // in the single-module section.
   function emitTrySlot(node, fnLines) {
     const operandEnum = node.operand.resolvedType;
@@ -5007,7 +5007,7 @@ function codegenWithModuleId(
     return { ptr: slot, type: operandEnum };
   }
 
-  // Phase 9.H + 10.E — multi-module sibling of emitFailEnumReturn.
+  // Phase 9.H + 10.E - multi-module sibling of emitFailEnumReturn.
   function emitFailEnumRet(tryNode, operandEnum, operandEnumSlot, retEnumType, fnLines) {
     const retLlvm = llvmType(retEnumType);
     const retSlot = freshTemp();
@@ -5046,7 +5046,7 @@ function codegenWithModuleId(
       fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
 
       if (tryNode.tryConvert) {
-        // Phase 10.E: cross-shape — call Into.into(ref operandErr) and
+        // Phase 10.E: cross-shape - call Into.into(ref operandErr) and
         // store the returned target value.
         const retFieldLlvm = llvmType(retFieldType);
         const converted = freshTemp();
@@ -5101,7 +5101,7 @@ function codegenWithModuleId(
       fnLines.push(`  call void @yoop_task_retain(ptr ${handlePtr})`);
       return;
     }
-    // CLEANUP_CALL — mustCall dispatch.
+    // CLEANUP_CALL - mustCall dispatch.
     if (node.fieldName) {
       // Phase 6.4: propagated dispose. GEP into binding's struct field; the
       // trait method takes `ref self` so we pass the field pointer directly.
@@ -5131,7 +5131,7 @@ function codegenWithModuleId(
     return tmp;
   }
 
-  // Phase 6.3: `joined h = task_call();` — stack-allocate the Task struct,
+  // Phase 6.3: `joined h = task_call();` - stack-allocate the Task struct,
   // submit it, and bind %h to a ptr slot holding the handle. The auto-wait
   // and free_sync_pair are inserted by kindCheck at scope exit.
   function emitJoinedBinding(node, fnLines) {
@@ -5155,7 +5155,7 @@ function codegenWithModuleId(
     fnLines.push(`  store ptr ${handleSlot}, ptr ${slot}`);
   }
 
-  // Phase 6.3: `pooled h = task_call();` — heap-allocate a refcounted handle.
+  // Phase 6.3: `pooled h = task_call();` - heap-allocate a refcounted handle.
   // yoop_task_alloc returns a zero-init buffer with refcount=2 (caller +
   // worker). kindCheck inserts a release at scope exit; the worker thunk
   // releases its own reference via yoop_handle_signal_done.
@@ -5176,7 +5176,7 @@ function codegenWithModuleId(
     fnLines.push(`  store ptr ${heapPtr}, ptr ${slot}`);
   }
 
-  // Phase 6.4: `pooled h3 = h2;` — copy the existing handle pointer and
+  // Phase 6.4: `pooled h3 = h2;` - copy the existing handle pointer and
   // retain it. The scope-exit release on h3 then balances the retain.
   function emitPooledCopyBinding(node, fnLines) {
     const rhs = emitExpr(node.assignment, fnLines);
@@ -5186,7 +5186,7 @@ function codegenWithModuleId(
     fnLines.push(`  call void @yoop_task_retain(ptr ${rhs.val})`);
   }
 
-  // Phase 6.3: immediate task call — `const x: T = compute(...);`. Allocate
+  // Phase 6.3: immediate task call - `const x: T = compute(...);`. Allocate
   // on the stack, submit, wait inline, load the result, free the sync pair.
   function emitImmediateTaskBinding(node, fnLines) {
     const fnName = taskCallFnName(node.assignment);
@@ -5336,7 +5336,7 @@ function codegenWithModuleId(
         // Phase 11.D.18: an ATTRIBUTE node inside a function body
         // (e.g. `@precompile { ... }` as a statement). The
         // attribute / comptime pass already consumed it. No runtime
-        // code is emitted — the block's side effects are baked into
+        // code is emitted - the block's side effects are baked into
         // the module-level @globals during the comptime pass.
         break;
       }
@@ -5575,7 +5575,7 @@ function codegenWithModuleId(
     symbols.leaveScope();
   }
 
-  // Phase 9.D: `for item in xs { ... }` — multi-module codegen path. Mirrors
+  // Phase 9.D: `for item in xs { ... }` - multi-module codegen path. Mirrors
   // Phase 10.B: iterable-impl twin of emitForInLoopIterable in the
   // single-module section. See that function for the lowering rationale.
   function emitForInLoopIterableStmt(node, fnLines, ctx) {

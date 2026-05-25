@@ -1,4 +1,4 @@
-// Phase 9.B: bool[] works through every standard array path — literal,
+// Phase 9.B: bool[] works through every standard array path - literal,
 // indexed read/write, conditional use, .len, and Vec<bool> / heap_alloc<bool>.
 // This regression fixture pins those guarantees so we notice if someone breaks
 // any of them in a future codegen change.

@@ -60,7 +60,7 @@ export const TokenTags = {
   implements: "implements",
   self: "self",
   extends: "extends",
-  // Phase 9.G: `vtable Name for TraitName { ... }` — declares the
+  // Phase 9.G: `vtable Name for TraitName { ... }` - declares the
   // type-erased shape of a trait. Pairs with the `=>` token (`fatArrow`)
   // for field type annotations.
   vtable: "vtable",
@@ -131,15 +131,15 @@ export const TokenTags = {
   modulus: "modulus",
   dot: "dot",
   question: "question",
-  // Phase 9.E: array slice syntax — `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
+  // Phase 9.E: array slice syntax - `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
   dotdot: "dotdot",
-  // Phase 9.B: logical NOT prefix — `!flag`. Lexer's longest-first sort keeps
+  // Phase 9.B: logical NOT prefix - `!flag`. Lexer's longest-first sort keeps
   // `!=` (`neq`) winning over `!` for the binary case.
   bang: "bang",
   // Phase 9: bitwise XOR (`^`) binary, bitwise NOT (`~`) prefix.
   caret: "caret",
   tilde: "tilde",
-  // Phase 9: compound assignments — `x += y` shorthand for `x = x + y`,
+  // Phase 9: compound assignments - `x += y` shorthand for `x = x + y`,
   // implemented as dedicated AST nodes so the lvalue is addressed once.
   plusEq: "plusEq",
   minusEq: "minusEq",
@@ -153,7 +153,7 @@ export const TokenTags = {
   fatArrow: "fatArrow",
   // Phase 11.A: `@` prefix introducing a compile-time / static-analysis
   // attribute (e.g. `@precompile`, `@test`, `@verify`). Always a
-  // compile-time directive — never queryable from runtime code.
+  // compile-time directive - never queryable from runtime code.
   at: "at",
 };
 

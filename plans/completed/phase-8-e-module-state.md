@@ -1,9 +1,9 @@
-# Phase 8.E — Module-level mutable state
+# Phase 8.E - Module-level mutable state
 
 ## Context
 
-The networking library will need at least one process-singleton — the
-event-loop registry, an `epoll`/`kqueue` handle, a connection table — and
+The networking library will need at least one process-singleton - the
+event-loop registry, an `epoll`/`kqueue` handle, a connection table - and
 yoop currently has nowhere to put it. Today every `let` / `const` lives
 inside a function body; module top is restricted to declarations
 (`type`, `function`, `extern`, `trait`, `kind`, `enum`, `union`).
@@ -23,9 +23,9 @@ function tick(): int32 {
 ```
 
 The user also mentioned interest in **a future bytecode / compile-time
-execution layer** (CTE — yoop programs running parts of themselves at
+execution layer** (CTE - yoop programs running parts of themselves at
 compile time, e.g. `comptime` blocks à la Zig). Module-level
-initializers are the natural seam for that work — see the "Future:
+initializers are the natural seam for that work - see the "Future:
 bytecode + CTE injection points" section below for the architectural
 callouts.
 
@@ -33,11 +33,11 @@ callouts.
 
 ### Surface
 
-- **`let name: T = expr;`** at module top — mutable, module-private.
-- **`const name: T = expr;`** at module top — immutable, module-private.
-- **`export let name: T = expr;`** / **`export const name: T = expr;`** —
+- **`let name: T = expr;`** at module top - mutable, module-private.
+- **`const name: T = expr;`** at module top - immutable, module-private.
+- **`export let name: T = expr;`** / **`export const name: T = expr;`** -
   visible cross-module via named imports.
-- Explicit type annotation **required**. No inference at module top — the
+- Explicit type annotation **required**. No inference at module top - the
   signature is part of the module's contract.
 - Initializer **required**. No uninitialized top-level state. The init
   expression is checked against the declared type.
@@ -67,16 +67,16 @@ Within a module: top-down, in source order.
 Across modules: same topological order as imports (already computed by
 [src/jsyoopdriver/moduleGraph.js](../src/jsyoopdriver/moduleGraph.js)).
 
-**Cycles**: the module graph already rejects import cycles at load time —
+**Cycles**: the module graph already rejects import cycles at load time -
 no further work needed. A module's init function may freely reference
 imported `let`s from already-initialized dependencies.
 
 **Within-module ordering**: each module gets one synthesized init function
 that runs every top-level let/const initializer in source order. If a
-later init references an earlier one, that's fine — the earlier global
+later init references an earlier one, that's fine - the earlier global
 has been stored by then. If a *later* let is referenced by an *earlier*
 init, the codegen will emit a load of the global's zeroinitializer
-default. We don't try to detect this — same shape as forward references
+default. We don't try to detect this - same shape as forward references
 to a struct field that hasn't been written yet. Documented foot-gun.
 
 ### Mutability
@@ -86,7 +86,7 @@ to a struct field that hasn't been written yet. Documented foot-gun.
 mirroring the function-scope behavior.
 
 The existing `binding.kind = "const" | "let"` track on scope bindings
-extends directly — module-level globals get the same field on their
+extends directly - module-level globals get the same field on their
 `moduleSymbols` entry.
 
 ### Thread safety
@@ -131,7 +131,7 @@ recognize `INT_LITERAL`, `FLOAT_LITERAL`, `BOOL_LITERAL`, `STRING_LITERAL`,
 through the runtime init function.
 
 This is intentionally less than a full constant folder. A real CTE pass
-(see below) is the right place to grow this — duplicating folding logic
+(see below) is the right place to grow this - duplicating folding logic
 in codegen-land would be wasted work.
 
 ## Future: bytecode + CTE injection points
@@ -140,7 +140,7 @@ The user mentioned wanting to potentially layer a bytecode VM / CTE
 mechanism on top of yoop later. Phase 8.E's module-init function is the
 natural injection point. Spots to call out for that future work:
 
-### 1. `mod.moduleInitDecls` — the AST list to evaluate
+### 1. `mod.moduleInitDecls` - the AST list to evaluate
 
 Phase 8.E stashes the list of top-level let/const decls onto the module
 object as `mod.moduleInitDecls: [LET_DECL | CONST_DECL]` (a stable
@@ -196,7 +196,7 @@ The same evaluator could later back a `comptime { ... }` block syntax.
 The synthesized init function calls user code (e.g. a function defined
 in the same module). Future CTE either needs to inline / interpret
 those function bodies too, or refuse to fold initializers that call
-user functions. The MVP doesn't fold them — runtime path only — so
+user functions. The MVP doesn't fold them - runtime path only - so
 this is a latent design choice for the CTE phase.
 
 ### 5. Init sequencing is data-driven
@@ -206,12 +206,12 @@ emitted by walking the topologically-ordered module list. A CTE pass
 can elide modules whose init has been fully folded.
 
 These are the architectural seams. Phase 8.E does not implement any of
-the CTE layer — only the MVP runtime path — but every codegen change
+the CTE layer - only the MVP runtime path - but every codegen change
 below is shaped so the CTE work can hook in without re-design.
 
 ## Sub-phases
 
-### 8.E.0 — SPEC
+### 8.E.0 - SPEC
 
 [SPEC.md](../SPEC.md) §4 currently describes `let` / `const` inside
 function bodies. Add a "Module-level state" subsection covering the new
@@ -221,7 +221,7 @@ rule, and the no-thread-safety contract.
 Note in the spec that initializers run after `yoop_runtime_init()` and
 before `main`'s user code.
 
-### 8.E.1 — Parser
+### 8.E.1 - Parser
 
 [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) `parseTopLevel`:
 accept `TokenTags.let` and `TokenTags.const` at top level. Reuse the
@@ -233,14 +233,14 @@ bindings without re-tracing the AST parent.
 Continue to accept `export let` / `export const` via the existing
 `parseExportDecl` path that wraps the inner decl in an `EXPORT_DECL`.
 
-### 8.E.2 — Typecheck
+### 8.E.2 - Typecheck
 
 [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js):
 
 - **Pass A**: when iterating `mod.ast.body`, recognize `LET_DECL` /
   `CONST_DECL`. Register a *shell* entry in `localSymbols` so other
   module-level decls can reference the name. The shell type is null
-  initially — filled in pass C.
+  initially - filled in pass C.
 - **Pass B (imports)**: extend the cross-module symbol import to also
   resolve `LET_DECL` / `CONST_DECL` exports. The importing module's
   `localSymbols` gets the imported type and a marker `{ kind:
@@ -260,13 +260,13 @@ Continue to accept `export let` / `export const` via the existing
 module global, allow if `let`, reject with a clear message if `const`
 or if imported from another module.
 
-### 8.E.3 — Codegen
+### 8.E.3 - Codegen
 
 [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js):
 
-- New `emitModuleGlobals(mod, ...)` — emits the `@<modid>__<name>`
+- New `emitModuleGlobals(mod, ...)` - emits the `@<modid>__<name>`
   globals.
-- New `emitModuleInit(mod, ...)` — emits `@<modid>__module_init` if any
+- New `emitModuleInit(mod, ...)` - emits `@<modid>__module_init` if any
   non-trivially-constant initializers exist.
 - In `codegenProgram`, after emitting each module's user code, also emit
   its globals + init function.
@@ -280,22 +280,22 @@ Cross-module imports: resolve the global's symbol via the importer's
 `localSymbols` entry's `(fromModuleId, exportName)` pair, mangled with
 `__`.
 
-### 8.E.4 — Demo
+### 8.E.4 - Demo
 
 Two demos:
 
-1. **`examples/pass/module_counter.yoop`** — single file. Top-level
+1. **`examples/pass/module_counter.yoop`** - single file. Top-level
    `let counter: int32 = 0;` + a `tick()` function. Main calls `tick()`
    three times and asserts the values.
 
-2. **`examples/pass/module_state_cross/`** — two-file. `counter.yoop`
+2. **`examples/pass/module_state_cross/`** - two-file. `counter.yoop`
    has `export let counter: int32 = 0;` + `export function tick()`.
    `main.yoop` imports both, calls tick + reads counter, asserts.
 
 A fail fixture exercises the "cannot assign cross-module imported let"
 rule.
 
-### 8.E.5 — Verification
+### 8.E.5 - Verification
 
 Unit tests where the change lands. e2e wired into
 [src/e2e.test.js](../src/e2e.test.js).
@@ -314,14 +314,14 @@ Unit tests where the change lands. e2e wired into
 
 ## Files touched
 
-- [SPEC.md](../SPEC.md) — module-state subsection.
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) — top-level
+- [SPEC.md](../SPEC.md) - module-state subsection.
+- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) - top-level
   let/const acceptance.
 - [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js)
-  — pass A/B/C registration of module-level bindings.
+  - pass A/B/C registration of module-level bindings.
 - [src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js)
-  — `resolveIdent` global fallback, `resolveAssignmentToIdent`
+  - `resolveIdent` global fallback, `resolveAssignmentToIdent`
   cross-module-read-only enforcement.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) —
+- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) -
   global emission, init function, sequencing.
 - Demos + e2e wiring.

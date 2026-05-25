@@ -3,7 +3,7 @@
 // Each entry pairs an attribute name with a small set of per-phase
 // handlers. The parser, typechecker, comptime pass, and codegen each
 // consult this registry rather than hardcoding per-attribute logic in
-// the pipeline — adding a new attribute is one entry here plus any
+// the pipeline - adding a new attribute is one entry here plus any
 // helpers it needs.
 //
 // Handler contract (all optional; default to no-op):
@@ -29,7 +29,7 @@
 //     Called from codegen if the attribute survived the comptime pass.
 //     For attributes that lower to runtime code (`@verify`, future
 //     `@assert`), this is where they emit. For `@precompile` and `@test`
-//     this should never be reached — those attributes consume their AST
+//     this should never be reached - those attributes consume their AST
 //     node during comptime / pre-codegen and any leakage is a bug.
 //
 // The handler shape is permissive: a missing key on the entry means
@@ -44,7 +44,7 @@ const REGISTRY = new Map();
 //   @precompile let   X: T = expr;     ← (mutable not very useful yet)
 //
 // The block form (`@precompile { ... }`) parses but isn't evaluated
-// yet — supporting it cleanly needs a notion of comptime-visible
+// yet - supporting it cleanly needs a notion of comptime-visible
 // module-level state writes that the current interpreter doesn't
 // have. Today it errors with a clear "block form not yet supported"
 // at the comptimePhase so the surface is reserved for a later
@@ -65,7 +65,7 @@ REGISTRY.set("precompile", {
     }
     if (attrNode.target == null) {
       ctx.throwError(
-        `@precompile requires a target — either a '{ ... }' block or a 'let' / 'const' declaration`,
+        `@precompile requires a target - either a '{ ... }' block or a 'let' / 'const' declaration`,
         attrNode.sourceLoc,
       );
     }
@@ -100,7 +100,7 @@ REGISTRY.set("precompile", {
       }
       ctx.error(
         attrNode,
-        `@precompile { ... } block failed to evaluate at comptime — the ` +
+        `@precompile { ... } block failed to evaluate at comptime - the ` +
           `block references something the comptime interpreter cannot ` +
           `evaluate (unsupported AST node, non-whitelisted extern, ` +
           `runtime-only task, etc.).${suffix}`,
@@ -141,7 +141,7 @@ REGISTRY.set("precompile", {
         }
         ctx.error(
           attrNode,
-          `@precompile fold failed for '${tgt.name}' — the initializer ` +
+          `@precompile fold failed for '${tgt.name}' - the initializer ` +
             `references something the comptime interpreter cannot evaluate ` +
             `(unsupported AST node, non-whitelisted extern, runtime-only ` +
             `task, etc.). Inspect the initializer expression for shapes ` +

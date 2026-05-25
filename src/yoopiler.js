@@ -30,7 +30,7 @@ function main() {
     allowPositionals: true,
   });
 
-  // Phase 11.E.4: --list-attributes — dump the registry's known
+  // Phase 11.E.4: --list-attributes - dump the registry's known
   // attribute names + each entry's handler phases. Useful for
   // tooling (editor LSP completions, doc generation) and the
   // human-typing-an-@-by-mistake workflow.
@@ -117,7 +117,7 @@ function main() {
   // stamped with `decl.comptimeFolded = true` + `decl.comptimeValue`;
   // codegen consumes those to emit an LLVM `@global` with a literal
   // initial value (skipping the runtime `module_init` call entirely
-  // for that decl). Failures are silent — the existing runtime path
+  // for that decl). Failures are silent - the existing runtime path
   // handles the unfoldable cases the same way it does today.
   //
   // Phase 11.C: this pass runs BEFORE the attribute pass so the

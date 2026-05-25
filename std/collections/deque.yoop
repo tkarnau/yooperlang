@@ -1,4 +1,4 @@
-// std/collections/deque.yoop — double-ended queue (ring buffer).
+// std/collections/deque.yoop - double-ended queue (ring buffer).
 //
 // `Deque<T>` is a ring buffer backed by a single heap allocation.
 // Both ends are O(1); growing doubles capacity and re-bases the

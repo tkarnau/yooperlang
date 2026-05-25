@@ -1,4 +1,4 @@
-# Phase 10.B — `Iterable<T>` trait + `for ... in` over user types ✓ landed
+# Phase 10.B - `Iterable<T>` trait + `for ... in` over user types ✓ landed
 
 > Phase 9.D shipped `for x in xs` for arrays only because `Iterable<T>`
 > needed generic enums (`enum IterStep<T> { ... }`) for its return shape.
@@ -26,13 +26,13 @@
 - **Typechecker** now accepts a struct whose `implementsTraits` contains
   `Iterable<U>` as the RHS of `for ... in`. The element type `U` is
   pulled from the impl's `next` method's return type
-  (`IterStep<U>` — the typechecker walks the `Yield` variant's `value`
+  (`IterStep<U>` - the typechecker walks the `Yield` variant's `value`
   field). The check lives in `checkForInLoop` at
   [src/jsyooptypecheck/checkStatement.js](../../src/jsyooptypecheck/checkStatement.js).
   Failure modes (no `Iterable` impl on the struct, malformed `next`
   signature) produce specific diagnostics.
 
-- **Codegen** lowers the iterable-impl form to a call-tag-branch loop —
+- **Codegen** lowers the iterable-impl form to a call-tag-branch loop -
   shape:
   ```
   alloca iter_slot ; store iter_value
@@ -51,13 +51,13 @@
   Lives as `emitForInLoopIterable` (single-module) and
   `emitForInLoopIterableStmt` (multi-module) in
   [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js).
-  The array path is unchanged — it's the fast path and stays.
+  The array path is unchanged - it's the fast path and stays.
 
 - **Ownership semantics**: the loop owns a mutable copy of the iterator.
   `for x in my_iter { ... }` leaves the caller's `my_iter` binding
   untouched (the loop walks a local copy); `for x in make_iter() { ... }`
   walks the freshly-returned iterator. The choice keeps user expectations
-  simple — no surprise mutation of named bindings.
+  simple - no surprise mutation of named bindings.
 
 ## Verification
 
@@ -79,7 +79,7 @@
 
 ## Deferred
 
-- **`vtable Iter<T> for Iterable<T>`** — Phase 9.G rejected vtables over
+- **`vtable Iter<T> for Iterable<T>`** - Phase 9.G rejected vtables over
   generic traits. Lifting that restriction is small but distinct work;
   until it lands, `for` over a heterogeneous iterator pipeline requires
   the concrete type at the use site. Plan doc in
@@ -99,14 +99,14 @@
 
 ## Critical files touched
 
-- [std/core/traits.yoop](../../std/core/traits.yoop) — trait + enum
+- [std/core/traits.yoop](../../std/core/traits.yoop) - trait + enum
   decls.
 - [src/jsyooptypecheck/checkStatement.js](../../src/jsyooptypecheck/checkStatement.js)
-  — `checkForInLoop` extended.
-- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) —
+  - `checkForInLoop` extended.
+- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) -
   `emitForInLoopIterable` (and `Stmt` twin).
 - [examples/pass/forin_iterable.yoop](../../examples/pass/forin_iterable.yoop)
-  — positive fixture.
+  - positive fixture.
 - [examples/fail/forin_non_iterable_struct.yoop](../../examples/fail/forin_non_iterable_struct.yoop)
-  — negative fixture.
-- [src/e2e.test.js](../../src/e2e.test.js) — fixture registrations.
+  - negative fixture.
+- [src/e2e.test.js](../../src/e2e.test.js) - fixture registrations.

@@ -16,7 +16,7 @@ vtable Dispatcher for Handler {
 
 function main(): int32 {
     let b: Bare = { n: 7 };
-    // Bare doesn't implement Handler — vtable construction must reject.
+    // Bare doesn't implement Handler - vtable construction must reject.
     let d: Dispatcher = Dispatcher.from(ref b);
     return 0;
 }

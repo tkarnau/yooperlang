@@ -3,14 +3,14 @@
 // exit for each `disposable` (or other `mustCall <method>`)
 // binding. The interpreter resolves the trait method's bytecode
 // via the trait method resolver and dispatches CALL_DIRECT with
-// `ref binding` as the `self` arg — same shape as a regular trait
+// `ref binding` as the `self` arg - same shape as a regular trait
 // method call.
 //
 // At runtime the dispose impl typically calls a libc / SDL / yoop
 // runtime extern to release OS state (free, close, etc). At
 // comptime those externs aren't whitelisted, so the fold would
 // surface a clear error. Bindings whose dispose impl is
-// comptime-safe (pure value mutation of `self`) fold cleanly —
+// comptime-safe (pure value mutation of `self`) fold cleanly -
 // that's what this fixture exercises.
 
 import { disposable, Disposable } from "std/core/kinds.yoop";

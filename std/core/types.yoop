@@ -1,4 +1,4 @@
-// std/core/types.yoop — canonical algebraic types used across std.
+// std/core/types.yoop - canonical algebraic types used across std.
 //
 // `Result<T, E>` is the standard fallible return shape. Phase 9.H's `?`
 // operator recognizes any enum with `Ok`/`Err` variants (one payload field
@@ -8,7 +8,7 @@
 // `Option<T>` is the standard "value-or-absent" shape used by lookups
 // (e.g. `map.get(k): Option<V>`). The variants intentionally mirror
 // `Result`'s naming-by-content (`Some`/`None` not `Ok`/`Err`) so `?`
-// doesn't apply — an `Option` doesn't carry an error to propagate.
+// doesn't apply - an `Option` doesn't carry an error to propagate.
 
 export enum Result<T, E> {
     Ok { value: T },

@@ -1,4 +1,4 @@
-// std/core/format — direct calls into the primitive `to_string`
+// std/core/format - direct calls into the primitive `to_string`
 // shims, prior to the template-literal lowering picking them up.
 // Verifies digit assembly across zero, single-digit, multi-digit,
 // and negative ints; the boolean labels; and the snprintf-backed

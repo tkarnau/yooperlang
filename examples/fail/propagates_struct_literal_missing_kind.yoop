@@ -19,7 +19,7 @@ type Widget implements Disposable propagates<disposable> {
 
 function main(): int32 {
     // Struct literal RHS, plain `const`, no manual dispose, no propagating
-    // return — the obligation has nowhere to go.
+    // return - the obligation has nowhere to go.
     const w: Widget = { id: 1 };
     return 0;
 }

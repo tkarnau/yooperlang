@@ -42,7 +42,7 @@ export function lookupInScope(scope, name) {
 
 // Phase 10.X: fallible-struct scope-exit enforcement retired. Fallible
 // `Result<T, E>`-shaped enums no longer require an `err` observation at
-// scope end — they're ordinary values that propagate via `?` or get
+// scope end - they're ordinary values that propagate via `?` or get
 // destructured via `switch`. popScope is kept as a no-op stub so callers
 // don't need to change.
 export function popScope(scope, errors) {

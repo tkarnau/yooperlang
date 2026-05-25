@@ -1,10 +1,23 @@
-kind k {
+// Phase 9.J: a binding carrying a kind with `mustNotShare acrossThreads`
+// cannot flow into a task spawn — the language statically rejects the cross-
+// thread share.
+
+type LocalHandle {
+    fd: int32,
+}
+
+kind thread_local {
     appliesTo binding;
     mustNotShare acrossThreads;
 }
 
-function main(): int32 {
-    return 0;
+task consume(h: LocalHandle): int32 {
+    return h.fd;
 }
 
-// Fails: mustNotShare acrossThreads not yet supported (phase 6.3)
+function main(): int32 {
+    let thread_local h: LocalHandle = { fd: 7 };
+    // Fails here: `h` has kind thread_local, which forbids cross-thread share.
+    let t: Task<int32> = consume(h);
+    return wait t;
+}

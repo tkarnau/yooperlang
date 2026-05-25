@@ -1,6 +1,6 @@
 // Phase 11.D.18: a `@precompile { ... }` block that hits a
 // non-whitelisted extern at fold time surfaces as a hard build
-// error — same policy as the init form (`@precompile const X = ...`).
+// error - same policy as the init form (`@precompile const X = ...`).
 // The user's explicit `@precompile` is a commitment that the
 // effects of the block must be fully computable at comptime; a
 // silent fallback to runtime evaluation would defeat that contract.

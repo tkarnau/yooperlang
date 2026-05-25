@@ -1,9 +1,9 @@
-// std/core/vec.yoop — Phase 8.H growable vector type.
+// std/core/vec.yoop - Phase 8.H growable vector type.
 //
 // `Vec<T>` is the blessed growable-array primitive that std modules and
 // user code build collections out of. Owns a heap-allocated backing buffer
 // and grows on demand. Carries `propagates<disposable>` so the underlying
-// memory cannot be silently dropped — the user must pick auto-cleanup
+// memory cannot be silently dropped - the user must pick auto-cleanup
 // (`disposable v: Vec<T> = vec_new(8);`), manual `Disposable.dispose`, or
 // transfer-up via return.
 //
@@ -38,7 +38,7 @@ export function vec_new<T>(initial_cap: usize): Vec<T> propagates<disposable> {
 }
 
 // Append `value`, growing the backing buffer if necessary (doubling
-// strategy). MAY REALLOCATE when len == cap — callers holding views from
+// strategy). MAY REALLOCATE when len == cap - callers holding views from
 // `vec_as_array` should re-fetch after a push.
 export function vec_push<T>(v: ref Vec<T>, value: T): void {
     if (v.len >= v.cap) {
@@ -60,7 +60,7 @@ export function vec_push<T>(v: ref Vec<T>, value: T): void {
     v.len = v.len + 1;
 }
 
-// Read `v[i]`. Traps via the underlying array indexing if i >= v.len —
+// Read `v[i]`. Traps via the underlying array indexing if i >= v.len -
 // matches the existing yoop array-indexing convention (no bounds check;
 // caller's responsibility).
 export function vec_get<T>(v: ref Vec<T>, i: usize): T {
@@ -79,7 +79,7 @@ export function vec_clear<T>(v: ref Vec<T>): void {
 }
 
 // Borrowing view of the populated prefix as a regular yoop array. The view
-// is valid until the next mutation (push/clear/dispose) — the underlying
+// is valid until the next mutation (push/clear/dispose) - the underlying
 // fat-pointer may dangle if vec_push reallocates.
 export function vec_as_array<T>(v: ref Vec<T>): T[] {
     return intr.array_slice(v.data, 0, v.len);

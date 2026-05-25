@@ -6,13 +6,13 @@
 // type without separately threading type info alongside raw JS values.
 //
 // Payload conventions:
-//   int8 / int16 / int32 / uint8 / uint16 / uint32 — JS number (safe up
+//   int8 / int16 / int32 / uint8 / uint16 / uint32 - JS number (safe up
 //     to 2^53; the typechecker already range-checks 32-bit integers).
-//   int64 / uint64 / usize / isize / uintptr                — JS BigInt
+//   int64 / uint64 / usize / isize / uintptr                - JS BigInt
 //     so the full range survives without lossy conversion.
-//   bool                                                    — JS boolean
-//   float32 / float64                                       — JS number
-//   string                                                  — JS string
+//   bool                                                    - JS boolean
+//   float32 / float64                                       - JS number
+//   string                                                  - JS string
 //
 // Wider types (struct / array / ref / enum / Task / vtable) land in
 // later sub-phases. The interpreter's value layer is intentionally
@@ -63,7 +63,7 @@ export function coerceNumeric(ty, raw) {
   }
   // Narrower integer: mask + sign-extend. Compute via BigInt so we
   // don't have to special-case JS's modulo-32 bitwise quirks at the
-  // 32-bit boundary (`1 << 32 === 1`, so `(1 << 32) - 1 === 0` —
+  // 32-bit boundary (`1 << 32 === 1`, so `(1 << 32) - 1 === 0` -
   // would silently truncate every int32 to zero).
   const bits = getBitWidthOfIntPrim(name);
   const big = BigInt.asUintN(bits, BigInt(Math.trunc(Number(raw))));
@@ -75,7 +75,7 @@ export function coerceNumeric(ty, raw) {
 
 // Deep-copy a wrapped value when yoop's value semantics demand it
 // (today: struct values, since `let a = b; a.x = 5;` must not mutate
-// `b.x`). For value-typed primitives — int, bool, float, string — the
+// `b.x`). For value-typed primitives - int, bool, float, string - the
 // payload is already immutable in JS, so we return the input unchanged
 // to avoid the allocation. For arrays we *don't* deep-copy: yoop array
 // semantics are fat-pointer + shared backing buffer, so aliases

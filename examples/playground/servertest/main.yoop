@@ -32,7 +32,7 @@ extern "C" from "stdio.h" {
 
 // user-defines handler. 
 // this lives in your code when writing an API because the handler is the
-// extension point — different programs supply different handlers and the
+// extension point - different programs supply different handlers and the
 // std/http/server is generic over them. Borrows from my comfort with
 // things like Express.JS
 type HelloHandler implements Handler {

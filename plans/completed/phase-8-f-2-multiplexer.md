@@ -1,4 +1,4 @@
-# Phase 8.F.2 — I/O multiplexer (kqueue / epoll)
+# Phase 8.F.2 - I/O multiplexer (kqueue / epoll)
 
 ## Context
 
@@ -34,7 +34,7 @@ Semantics:
   the libc convention so the existing `errno.get()` / `errno.message()`
   intrinsics from Phase 8.D compose directly.)
 - After return, the caller should attempt the actual `read` / `write`
-  syscall — and may have to call `wait_readable` again if a partial /
+  syscall - and may have to call `wait_readable` again if a partial /
   EAGAIN result happens. (Standard reactor pattern; documented in the
   runtime header.)
 - **One-shot.** Each `wait_readable` registers a one-shot interest. The
@@ -63,7 +63,7 @@ byte to the write end and joins the thread).
 ### Registration data structure
 
 A small in-memory map from `fd` → `yoop_park_token_t*`, protected by a
-mutex. The map can be flat — yoop apps in the foreseeable future will
+mutex. The map can be flat - yoop apps in the foreseeable future will
 have < 10K fds.
 
 ```c
@@ -87,7 +87,7 @@ EV_SET(&ev, fd, EVFILT_READ, EV_ADD | EV_ONESHOT, 0, 0, token);
 kevent(kq, &ev, 1, NULL, 0, NULL);
 ```
 
-The `udata` pointer carries the token directly — no map lookup needed
+The `udata` pointer carries the token directly - no map lookup needed
 on the multiplexer side. (We still keep the map for cleanup symmetry
 and so the registration mutex doesn't race with destroy.)
 
@@ -104,7 +104,7 @@ epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
 
 After firing, the multiplexer calls `epoll_ctl(EPOLL_CTL_DEL)` to fully
 remove the fd. (`EPOLLONESHOT` *disables* the fd's events until the next
-`MOD`, which isn't quite the same as "remove" — we want remove so the
+`MOD`, which isn't quite the same as "remove" - we want remove so the
 fd can be re-added on a fresh wait_readable.)
 
 #### Windows: not implemented in F2. The `runtime/yoop_io.c` is
@@ -125,7 +125,7 @@ and joins the I/O thread before tearing down the worker pool.
 
 - **fd already in the set when a second wait_readable runs.** Possible if
   two tasks (different threads) want the same fd. The MVP rejects this
-  with `errno = EAGAIN` and returns `-1` — first-come-first-served. A
+  with `errno = EAGAIN` and returns `-1` - first-come-first-served. A
   realistic networking library wouldn't share fds across tasks anyway.
 - **fd closed under our feet.** kqueue/epoll fire EV_ERROR / EPOLLERR;
   the multiplexer wakes the parked task with `errno = EBADF`.
@@ -136,20 +136,20 @@ and joins the I/O thread before tearing down the worker pool.
 
 ## Sub-phase steps
 
-### F2.0 — `runtime/yoop_io.h` + `runtime/yoop_io.c`
+### F2.0 - `runtime/yoop_io.h` + `runtime/yoop_io.c`
 
 New compilation unit. Build added to the runtime build (a follow-on
 change in [src/runtimeBuild.js](../src/runtimeBuild.js) so e2e tests
-link it in). Self-contained — depends only on `yoop_runtime.h`
+link it in). Self-contained - depends only on `yoop_runtime.h`
 (for the park token primitives).
 
-### F2.1 — Lazy multiplexer init + shutdown wiring
+### F2.1 - Lazy multiplexer init + shutdown wiring
 
 `pthread_once_t` initializer spawns the multiplexer thread on first call.
 A new `yoop_io_shutdown()` is called from `yoop_runtime_shutdown` if the
 thread was started.
 
-### F2.2 — Registration + dispatch
+### F2.2 - Registration + dispatch
 
 Implement `yoop_io_wait_readable` / `yoop_io_wait_writable` as:
 
@@ -160,15 +160,15 @@ Implement `yoop_io_wait_readable` / `yoop_io_wait_writable` as:
 5. Drop the registration (multiplexer side already did for one-shot).
 6. Return.
 
-### F2.3 — Demo
+### F2.3 - Demo
 
 Standalone demo deferred to the umbrella plan; F2 alone tests via a
 runtime-level C test that uses a libc pipe and exercises the
 wait_readable path.
 
-### F2.4 — Runtime test
+### F2.4 - Runtime test
 
-`runtime/tests/test_runtime.c` (or a new file) — a C test that:
+`runtime/tests/test_runtime.c` (or a new file) - a C test that:
 
 - Creates a pipe.
 - Spawns a pthread that writes one byte after ~10ms.
@@ -181,9 +181,9 @@ pipeline; lives next to the existing runtime smoke tests.
 ## Files touched
 
 - new: `runtime/yoop_io.h` + `runtime/yoop_io.c`.
-- [src/runtimeBuild.js](../src/runtimeBuild.js) — add `yoop_io.c` to the
+- [src/runtimeBuild.js](../src/runtimeBuild.js) - add `yoop_io.c` to the
   list of runtime sources clang compiles in.
-- [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) — call
+- [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) - call
   `yoop_io_shutdown()` from `yoop_runtime_shutdown` (guarded so programs
   that didn't use I/O skip it).
 - `runtime/tests/test_yoop_io.c` (new).

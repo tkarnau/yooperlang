@@ -1,6 +1,6 @@
 // Phase 11.D.11: `?` propagation over Result-shaped enums folds at
 // comptime. The lowerer decomposes `expr?` into a tag-equality
-// branch — on Err, build the enclosing function's Err variant from
+// branch - on Err, build the enclosing function's Err variant from
 // the operand's Err payload + RET; on Ok, extract the Ok payload as
 // the expression's result register. Same-shape only for now
 // (operand and return enum types share their Err payload layout);

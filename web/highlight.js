@@ -44,7 +44,7 @@
                 continue;
             }
 
-            // block comment (single level — good enough for highlighting)
+            // block comment (single level - good enough for highlighting)
             if (c === "/" && src[i + 1] === "*") {
                 let j = i + 2;
                 while (j < n && !(src[j] === "*" && src[j + 1] === "/")) j++;

@@ -17,7 +17,7 @@ import { coerceNumeric, usesBigInt, valueCopy } from "./values.js";
 import { typeKinds } from "../jsyooptypecheck/types.js";
 
 // Phase 11.E.5: recursion limit configurable via env var.
-// YOOP_COMPTIME_MAX_FRAMES caps the comptime call-stack depth — past
+// YOOP_COMPTIME_MAX_FRAMES caps the comptime call-stack depth - past
 // this point the interpreter aborts with a "runaway recursion"
 // ComptimeError. The default is high enough to fold the SDL demo's
 // pure logic but low enough to keep a real infinite-recursion bug
@@ -62,7 +62,7 @@ function makeFrame(fn, returnDst = null) {
 // Currently the function takes no arguments; later sub-phases will
 // accept positional args via `evaluate(fn, args)`.
 // Build a traceback array (innermost frame first) from the live
-// interpreter stack. Each entry captures `{ fnName, sourceLoc }` —
+// interpreter stack. Each entry captures `{ fnName, sourceLoc }` -
 // the function's name and the source location of the instruction
 // that was about to dispatch when the error fired. The diagnostics
 // module formats this for display.
@@ -71,7 +71,7 @@ function captureTraceback(stack, instIp) {
   for (let i = stack.length - 1; i >= 0; i--) {
     const fr = stack[i];
     // For the innermost frame, the "current instruction" is the one
-    // we just advanced past via `frame.ip++` — i.e. `ip - 1`. For
+    // we just advanced past via `frame.ip++` - i.e. `ip - 1`. For
     // frames further down, the saved `ip` is the resume point, so
     // the in-flight CALL_DIRECT is at `ip - 1` there too.
     const ip = i === stack.length - 1 ? instIp : fr.ip - 1;
@@ -240,7 +240,7 @@ export function evaluate(fn, opts = {}) {
         pendingResult = inst.args.length > 0 ? frame.registers[inst.args[0]] : null;
         const completed = stack.pop();
         if (stack.length === 0) return pendingResult;
-        // Frame returned to caller — write the result into the
+        // Frame returned to caller - write the result into the
         // caller's pending-call dst register so the calling
         // instruction's `inst.dst` reads the right value.
         const caller = stack[stack.length - 1];
@@ -303,7 +303,7 @@ export function evaluate(fn, opts = {}) {
       }
 
       case OP.TASK_WRAP: {
-        // Tasks execute synchronously inline at comptime — the body's
+        // Tasks execute synchronously inline at comptime - the body's
         // CALL_DIRECT already produced the inner T. TASK_WRAP just
         // tags it as a Task<T> wrapper so the typed register slot
         // matches the call site's resolvedType.
@@ -316,7 +316,7 @@ export function evaluate(fn, opts = {}) {
       }
 
       case OP.VTABLE_CONSTRUCT: {
-        // The struct ref came in via REF_LOCAL/REF_FIELD/REF_INDEX —
+        // The struct ref came in via REF_LOCAL/REF_FIELD/REF_INDEX -
         // its `v` already encodes (container, key). Store the ref
         // itself as the vtable's ctx so VTABLE_CALL can pass it
         // through as the method's `ref self` param.
@@ -398,13 +398,13 @@ export function evaluate(fn, opts = {}) {
         const newFrame = makeFrame(calleeFn, inst.dst);
         if (inst.args.length !== calleeFn.params.length) {
           throw new ComptimeError(
-            `comptime: arg count mismatch calling '${calleeFn.name}' — got ${inst.args.length}, expected ${calleeFn.params.length}`,
+            `comptime: arg count mismatch calling '${calleeFn.name}' - got ${inst.args.length}, expected ${calleeFn.params.length}`,
             inst.sourceLoc,
           );
         }
         for (let i = 0; i < inst.args.length; i++) {
           // valueCopy deep-copies struct args to honor yoop's
-          // value-typed struct semantics — mutating a struct param
+          // value-typed struct semantics - mutating a struct param
           // inside the callee must not flow back into the caller's
           // copy of that arg.
           newFrame.registers[i] = valueCopy(frame.registers[inst.args[i]]);
@@ -565,7 +565,7 @@ export function evaluate(fn, opts = {}) {
 
       case OP.REF_LOAD: {
         const ref = frame.registers[inst.args[0]];
-        // Share JS identity with the referent — that's the whole
+        // Share JS identity with the referent - that's the whole
         // point of a ref. The downstream consumer is responsible for
         // copying when value semantics demand it:
         //   - MOVE into a let-slot will deep-copy a struct value.
@@ -617,7 +617,7 @@ export function evaluate(fn, opts = {}) {
       case OP.ARRAY_LEN: {
         const arr = frame.registers[inst.args[0]];
         const len = arr?.v?.len ?? BigInt(0);
-        // Materialize as the dst register's type — coerce so a usize
+        // Materialize as the dst register's type - coerce so a usize
         // dst gets a BigInt and an int32 dst gets a Number.
         frame.registers[inst.dst] = {
           ty: inst.type,
@@ -690,7 +690,7 @@ export function evaluate(fn, opts = {}) {
 
     if (MAX_FRAMES > 0 && stack.length > MAX_FRAMES) {
       throw new ComptimeError(
-        `comptime: frame stack depth exceeded ${MAX_FRAMES} — likely runaway recursion (raise YOOP_COMPTIME_MAX_FRAMES to override)`,
+        `comptime: frame stack depth exceeded ${MAX_FRAMES} - likely runaway recursion (raise YOOP_COMPTIME_MAX_FRAMES to override)`,
         inst.sourceLoc,
       );
     }
@@ -698,7 +698,7 @@ export function evaluate(fn, opts = {}) {
     // Attach a traceback to ComptimeErrors so the comptime pass
     // (and `@precompile`'s hard-error path) can render call chains
     // when the failure was deep. Non-ComptimeError exceptions
-    // propagate unchanged — those are interpreter bugs.
+    // propagate unchanged - those are interpreter bugs.
     if (err instanceof ComptimeError) {
       if (err.traceback == null) {
         err.traceback = captureTraceback(stack, lastIp);
@@ -712,10 +712,10 @@ export function evaluate(fn, opts = {}) {
 
 // Phase 11.E.3: stringify a wrapped value for template-literal
 // interpolation. Mirrors what runtime printf does via the format
-// spec table — strings pass through unchanged; bools as
+// spec table - strings pass through unchanged; bools as
 // "true"/"false"; ints in base-10 (BigInt or Number); floats with
 // six-digit precision matching `%f`. Aggregates are formatted
-// permissively rather than rejected — at comptime we'd rather print
+// permissively rather than rejected - at comptime we'd rather print
 // a debug-y representation than blow up, since this is debug
 // output. (The typechecker has already enforced printable-or-Display
 // rules at the source level.)
@@ -733,7 +733,7 @@ function stringifyForTemplate(wrapped) {
     ) {
       return Number(v).toFixed(6);
     }
-    // Integer prims (int8/16/32/64, uint*, char, usize) — base-10.
+    // Integer prims (int8/16/32/64, uint*, char, usize) - base-10.
     if (typeof v === "bigint") return v.toString();
     return String(v | 0);
   }
@@ -777,7 +777,7 @@ function intBitwise(op, lhs, rhs, inst) {
       case OP.SHR:     return a >> b;
     }
   }
-  throw new ComptimeError(`comptime: internal — unexpected bitwise op ${op}`, inst.sourceLoc);
+  throw new ComptimeError(`comptime: internal - unexpected bitwise op ${op}`, inst.sourceLoc);
 }
 
 // Integer arithmetic shared between IADD/ISUB/IMUL/IDIV/IREM.
@@ -833,5 +833,5 @@ function intArith(op, lhs, rhs, inst) {
         return a % b;
     }
   }
-  throw new ComptimeError(`comptime: internal — unexpected int op ${op}`, inst.sourceLoc);
+  throw new ComptimeError(`comptime: internal - unexpected int op ${op}`, inst.sourceLoc);
 }

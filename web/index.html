@@ -24,7 +24,7 @@
             <div class="container">
                 <h1>A systems language for folks who got stuck writing web apps.</h1>
                 <p class="lede">
-                    I've spent my career in JavaScript, TypeScript, C#, and Node — shipping CRUD apps
+                    I've spent my career in JavaScript, TypeScript, C#, and Node - shipping CRUD apps
                     and APIs. Every time I tried to pick up a real systems language, I bounced off the
                     cliff face of dense syntax and missing context. So I'm building Yooperlang:
                     a systems language with a TypeScript feel, no garbage collector, and code that's
@@ -43,7 +43,7 @@
                 <p class="muted">
                     Two concurrent <code>task</code> calls, errors as
                     values with <code>?</code>, a <code>switch</code> over
-                    the result variants &mdash; and not an
+                    the result variants - and not an
                     <code>async</code> or <code>await</code> in sight.
                     Still compiles to a native binary with no garbage
                     collector. If you've written TypeScript, the shapes
@@ -52,7 +52,7 @@
                 <pre><code class="yoop">import { Result } from "std/core/types.yoop";
 
 // `task` says every call to fetch() spawns a concurrent worker.
-// The return type is a Result &mdash; any Ok/Err enum participates in `?`.
+// The return type is a Result - any Ok/Err enum participates in `?`.
 task fetch(url: string): Result&lt;int32, string&gt; {
     if (url.len == 0) {
         return Result.Err { error: "empty url" };
@@ -62,7 +62,7 @@ task fetch(url: string): Result&lt;int32, string&gt; {
 
 function total(a: string, b: string): Result&lt;int32, string&gt; {
     joined ra = fetch(a);                  // spawned now
-    joined rb = fetch(b);                  // also spawned &mdash; running in parallel
+    joined rb = fetch(b);                  // also spawned - running in parallel
     // `wait` reads each task's result; `?` bails to the caller on Err.
     return Result.Ok { value: (wait ra)? + (wait rb)? };
 }
@@ -82,14 +82,14 @@ function main(): int32 {
                 <h2>Why bother?</h2>
                 <p>
                     The gap between web devs and systems devs keeps getting wider. Every year there's
-                    another framework, another runtime, another layer of abstraction — and every year
+                    another framework, another runtime, another layer of abstraction - and every year
                     the machine underneath gets a little further away. Performance gets traded for
                     ergonomics, and ergonomics gets traded for "developer experience" that mostly
                     means more layers.
                 </p>
                 <p>
                     I miss the idea that one person could write the whole thing. Yooperlang is a
-                    small push in that direction — a language that web folks can pick up without
+                    small push in that direction - a language that web folks can pick up without
                     feeling like a simpleton, and that's still close enough to the metal to actually
                     be fast.
                 </p>
@@ -100,7 +100,7 @@ function main(): int32 {
                 <p class="disclaimer">
                     Heads up: I'm not a compiler designer. This is my first real swing at a language
                     beyond a toy project. The pitch isn't "this is the best systems language ever
-                    made" — it's "maybe folks like me deserve a path back to the fun stuff." If that
+                    made" - it's "maybe folks like me deserve a path back to the fun stuff." If that
                     resonates, stick around. It's more fun with company.
                 </p>
             </div>
@@ -112,15 +112,15 @@ function main(): int32 {
                 <div class="grid-3">
                     <div class="card">
                         <h3>Type</h3>
-                        <p>What the value <em>is</em> — the concrete shape of data. <code>int32</code>, <code>Point</code>, <code>FileHandle</code>.</p>
+                        <p>What the value <em>is</em> - the concrete shape of data. <code>int32</code>, <code>Point</code>, <code>FileHandle</code>.</p>
                     </div>
                     <div class="card">
                         <h3>Trait</h3>
-                        <p>What the value <em>can do</em> — operations it supports. <code>Disposable</code>, <code>Iterable&lt;T&gt;</code>, <code>Task&lt;T&gt;</code>.</p>
+                        <p>What the value <em>can do</em> - operations it supports. <code>Disposable</code>, <code>Iterable&lt;T&gt;</code>, <code>Task&lt;T&gt;</code>.</p>
                     </div>
                     <div class="card">
                         <h3>Kind</h3>
-                        <p>How the binding <em>must be used</em> — lifecycle and scoping rules. <code>disposable</code>, <code>scoped</code>, <code>pooled</code>.</p>
+                        <p>How the binding <em>must be used</em> - lifecycle and scoping rules. <code>disposable</code>, <code>scoped</code>, <code>pooled</code>.</p>
                     </div>
                 </div>
             </div>
@@ -138,7 +138,7 @@ function main(): int32 {
                 <div class="compare-row">
                     <h3>vs TypeScript</h3>
                     <p>
-                        The syntax feel is on purpose &mdash; types on the
+                        The syntax feel is on purpose - types on the
                         right, structs, no classes, template literals with
                         <code>${...}</code>. But TypeScript erases types at
                         runtime and rides on a garbage-collected VM. Yooper
@@ -148,7 +148,7 @@ function main(): int32 {
                     </p>
                     <p>
                         Also: types are <strong>nominal</strong>, not
-                        structural &mdash; <code>type Meters { v: int32 }</code>
+                        structural - <code>type Meters { v: int32 }</code>
                         and <code>type Seconds { v: int32 }</code> aren't
                         the same type, even though they have the same
                         shape. And there's no <code>null</code> or
@@ -161,8 +161,8 @@ function main(): int32 {
                 <div class="compare-row">
                     <h3>vs C++</h3>
                     <p>
-                        Same target &mdash; native, fast, low-level access
-                        when you need it &mdash; without the surface area
+                        Same target - native, fast, low-level access
+                        when you need it - without the surface area
                         that pushes web folks away. No header files. No
                         preprocessor. No template metaprogramming maze. No
                         rule of five.
@@ -194,7 +194,7 @@ function main(): int32 {
                         What's not here: the borrow checker, named
                         lifetimes, and the <code>Box&lt;dyn Trait&gt;</code>
                         dance. <strong>Kinds</strong> do a lot of what
-                        lifetimes do in Rust &mdash; they're a usage
+                        lifetimes do in Rust - they're a usage
                         contract on the binding
                         (<code>disposable</code>, <code>joined</code>,
                         <code>pooled</code>, <code>propagates&lt;K&gt;</code>)
@@ -228,7 +228,7 @@ function main(): int32 {
                 </p>
                 <ul class="borrow-list">
                     <li>
-                        <strong>Zig</strong> &mdash; compile-time evaluation
+                        <strong>Zig</strong> - compile-time evaluation
                         with <code>@precompile</code> (constants and small
                         tables folded into the binary), direct C ABI
                         interop with no FFI shim, and the idea that "async
@@ -240,27 +240,27 @@ function main(): int32 {
                         (<code>let joined</code>, <code>let pooled</code>).
                     </li>
                     <li>
-                        <strong>Rust</strong> &mdash; <code>Result&lt;T, E&gt;</code>,
+                        <strong>Rust</strong> - <code>Result&lt;T, E&gt;</code>,
                         the <code>?</code> operator, traits as the only
                         polymorphism mechanism, no nulls, and the general
                         attitude that errors should be visible at the call
                         site.
                     </li>
                     <li>
-                        <strong>TypeScript</strong> &mdash; types on the
+                        <strong>TypeScript</strong> - types on the
                         right, inferred when obvious, optional when not.
                         The whole expression-level feel of a modern web
                         language.
                     </li>
                     <li>
-                        <strong>Swift</strong> &mdash; value semantics by
+                        <strong>Swift</strong> - value semantics by
                         default, <code>ref</code> only where you mean it,
                         and the convention that capability-shaped things
                         (<code>Disposable</code>, <code>Iterable&lt;T&gt;</code>)
                         live in a separate layer from data.
                     </li>
                     <li>
-                        <strong>Go</strong> &mdash; small core,
+                        <strong>Go</strong> - small core,
                         unsurprising standard library, and the conviction
                         that fast compiles are worth designing the
                         language around.
@@ -268,7 +268,7 @@ function main(): int32 {
                 </ul>
                 <p class="muted aside-note">
                     The actual original-ish piece is the <strong>kind</strong>
-                    layer &mdash; treating lifecycle, scoping, concurrency
+                    layer - treating lifecycle, scoping, concurrency
                     mode, and propagation as one orthogonal mechanism
                     instead of five unrelated keywords. Whether that turns
                     out to be a good idea is something I'm figuring out as
@@ -281,7 +281,7 @@ function main(): int32 {
             <div class="container">
                 <h2>What you can build today</h2>
                 <p class="muted">
-                    These aren't promises about a future version &mdash; the snippets below are
+                    These aren't promises about a future version - the snippets below are
                     excerpts from real programs in the repo.
                 </p>
 
@@ -291,7 +291,7 @@ function main(): int32 {
                         The handler shape borrows the comfort of Express-style request/response
                         objects, but everything underneath compiles down to native code. The
                         <code>disposable</code> kind on the listener means cleanup happens at scope
-                        end, automatically &mdash; no try/finally, no defer.
+                        end, automatically - no try/finally, no defer.
                     </p>
                     <pre><code class="yoop">import { disposable } from "std/core/kinds.yoop";
 import { tcp_listen, ListenResult } from "std/net/tcp.yoop";
@@ -314,7 +314,7 @@ function main(): int32 {
     // host, port, backlog. `disposable` drops the socket at scope end.
     let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
 
-    // No try/catch in this language &mdash; inspect the error field directly.
+    // No try/catch in this language - inspect the error field directly.
     if (lr.error.len &gt; 0) {
         printf(`bind failed: ${lr.error}\n`);
         return 1;
@@ -327,15 +327,15 @@ function main(): int32 {
                 </div>
 
                 <div class="example">
-                    <h3>Use any C library &mdash; right now</h3>
+                    <h3>Use any C library - right now</h3>
                     <p>
                         You don't have to wait for the ecosystem to catch up. The
                         <code>extern "C" from library</code> block declares the C ABI you want to
                         call into, and the linker does the rest. Wrap the opaque handle in a thin
                         type that implements <code>Disposable</code> and the cleanup call disappears
-                        from your code &mdash; the <code>disposable</code> kind emits it at scope end.
+                        from your code - the <code>disposable</code> kind emits it at scope end.
                     </p>
-                    <pre><code class="yoop">// Pull SDL2 in directly &mdash; no bindings crate, no shim, no rewrite.
+                    <pre><code class="yoop">// Pull SDL2 in directly - no bindings crate, no shim, no rewrite.
 extern "C" from library "SDL2" {
     type SDL_Window;
     type SDL_Renderer;
@@ -377,7 +377,7 @@ function main(): int32 {
 }</code></pre>
                     <p class="example-note">
                         The point: you can start writing real programs today by reaching into
-                        anything C already exposes &mdash; graphics, audio, databases, crypto. The
+                        anything C already exposes - graphics, audio, databases, crypto. The
                         Yooperlang-native ecosystem grows over time; the C ABI is the bridge in the
                         meantime.
                     </p>
@@ -388,7 +388,7 @@ function main(): int32 {
 
     <footer class="site-footer">
         <div class="container">
-            <p>Yooperlang &mdash; built slowly, one phase at a time.</p>
+            <p>Yooperlang - built slowly, one phase at a time.</p>
         </div>
     </footer>
 
