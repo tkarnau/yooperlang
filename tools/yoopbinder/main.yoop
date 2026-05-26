@@ -1,0 +1,937 @@
+// yoopbinder - generate yooperlang FFI bindings from a C header.
+//
+// v0 scope:
+//   - Shells out to `clang -E -P <header>` and captures preprocessed stdout
+//   - Tokenises the result
+//   - Recognises top-level *function declarations* and emits them as a
+//     yoop `extern "C"` block
+//   - Maps a fixed set of common C primitive types to yoop types
+//   - Unknown identifiers (typedefs we haven't seen, struct tags, etc.)
+//     pass through verbatim with a // TODO comment so the user can
+//     resolve them by hand
+//
+// Out of scope for v0 (logged + skipped):
+//   - typedef / enum / struct / union declarations
+//   - function-pointer params and returns
+//   - array params with explicit size
+//   - GCC __attribute__ / __asm__ / etc. blocks (best-effort tolerated)
+//
+// Usage:
+//   yoopbinder <header.h> [-o output.yoop] [--lib LIBNAME] [--header HEADER_HINT]
+//
+//   --lib defaults to "TODO" -- swap to "SDL2" / "GL" / etc. by hand or
+//   on the command line. --header sets the string inside the
+//   `extern "C" from "..."` clause; defaults to the input filename.
+//
+// The output is intentionally over-broad: clang -E expands every
+// include, so you get every declaration in the transitive closure.
+// Trim the result by hand for now.
+
+import.unsafe;
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import * as strings from "std/core/strings.yoop";
+import * as format from "std/core/format.yoop";
+import * as vec from "std/core/vec.yoop";
+import { Vec } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// ── extern C surface ─────────────────────────────────────────────────────────
+
+extern "C" from "stdio.h" {
+    type FILE;
+    // Use unsafe_ptr<FILE> rather than ref FILE for the file handles --
+    // user functions taking `ref FILE` make codegen try to load the
+    // opaque struct (the same "unsized type" papercut as SDL_Renderer).
+    function popen(cmd: string, mode: string): unsafe_ptr<FILE>;
+    function pclose(fp: unsafe_ptr<FILE>): int32;
+    function fread(buf: unsafe_ptr<uint8>, size: c_size_t, nmemb: c_size_t, fp: unsafe_ptr<FILE>): c_size_t;
+    function fopen(path: string, mode: string): unsafe_ptr<FILE>;
+    function fclose(fp: unsafe_ptr<FILE>): int32;
+    function fwrite(buf: unsafe_ptr<uint8>, size: c_size_t, nmemb: c_size_t, fp: unsafe_ptr<FILE>): c_size_t;
+    function printf(fmt: string, ...): int32;
+}
+
+extern "C" from "yoop_runtime" {
+    function yoop_argc(): int32;
+    function yoop_argv(i: int32): string;
+    function yoop_stdout_linebuf(): void;
+}
+
+// ── argv parsing ─────────────────────────────────────────────────────────────
+
+type Args {
+    header_path:  string,    // input C header
+    output_path:  string,    // "" -> stdout
+    library_name: string,    // value for `from library "..."`
+    header_label: string,    // value for `from "..."` (when no --lib)
+    use_library:  bool,      // true if --lib supplied; otherwise emit `from "<header>"`
+    ok:           bool,
+    error:        string,
+}
+
+function default_args(): Args {
+    return {
+        header_path:  "",
+        output_path:  "",
+        library_name: "",
+        header_label: "",
+        use_library:  false,
+        ok:           false,
+        error:        "",
+    };
+}
+
+function parse_argv(): Args {
+    let a: Args = default_args();
+    let ac: int32 = yoop_argc();
+    let i: int32 = 1;
+    while (i < ac) {
+        let arg: string = yoop_argv(i);
+        if (strings.string_eq(arg, "-o")) {
+            i = i + 1;
+            if (i >= ac) {
+                a.error = "missing value for -o";
+                return a;
+            }
+            a.output_path = yoop_argv(i);
+        } else if (strings.string_eq(arg, "--lib")) {
+            i = i + 1;
+            if (i >= ac) {
+                a.error = "missing value for --lib";
+                return a;
+            }
+            a.library_name = yoop_argv(i);
+            a.use_library = true;
+        } else if (strings.string_eq(arg, "--header")) {
+            i = i + 1;
+            if (i >= ac) {
+                a.error = "missing value for --header";
+                return a;
+            }
+            a.header_label = yoop_argv(i);
+        } else if (a.header_path.len == 0) {
+            a.header_path = arg;
+        } else {
+            a.error = `unexpected argument: ${arg}`;
+            return a;
+        }
+        i = i + 1;
+    }
+    if (a.header_path.len == 0) {
+        a.error = "no input header path given";
+        return a;
+    }
+    if (a.header_label.len == 0) {
+        a.header_label = a.header_path;
+    }
+    a.ok = true;
+    return a;
+}
+
+// ── shell out to clang -E ────────────────────────────────────────────────────
+
+function read_pipe_all(fp: unsafe_ptr<FILE>): Vec<uint8> propagates<disposable> {
+    let out: Vec<uint8> = vec.vec_new(16384);
+    let chunk: uint8[] = intr.heap_alloc(8192);
+    while (true) {
+        let n: c_size_t = fread(chunk.ptr, 1, c_size_t(chunk.len), fp);
+        if (n == 0) {
+            break;
+        }
+        let count: usize = usize(n);
+        let i: usize = 0;
+        while (i < count) {
+            vec.vec_push(ref out, chunk[i]);
+            i = i + 1;
+        }
+    }
+    return out;
+}
+
+function run_clang_preprocess(header_path: string): Vec<uint8> propagates<disposable> {
+    // -E    preprocess only
+    // -P    strip line markers
+    // Quote the header path so spaces don't break us. (Not bulletproof
+    // -- a path with embedded `"` will misbehave -- a v0 papercut.)
+    //
+    // Trust popen: a failed popen returns NULL and the first fread
+    // segfaults -- a loud failure mode that we accept for v0 (the
+    // language has no ref-T null check today; the language_showcase
+    // example uses the same convention).
+    let cmd: string = strings.string_concat_all(["clang -E -P \"", header_path, "\""]);
+    let fp: unsafe_ptr<FILE> = popen(cmd, "r");
+    let buf: Vec<uint8> = read_pipe_all(fp);
+    let _rc: int32 = pclose(fp);
+    return buf;
+}
+
+// ── tokenizer ────────────────────────────────────────────────────────────────
+//
+// We don't need a fully-spec'd C tokenizer; only enough to scan declarations
+// in preprocessed output. Strings + char literals shouldn't appear in
+// declaration syntax; we skip their interiors defensively just in case.
+//
+// Token kinds live as int32 consts (rather than a yoop `enum`) so we can
+// use `==` / `!=` directly. Enums don't yet support those operators; the
+// workaround (a switch-based eq helper per pair) would balloon this file.
+
+const TK_IDENT:    int32 = 0;
+const TK_NUMBER:   int32 = 1;
+const TK_LPAREN:   int32 = 2;
+const TK_RPAREN:   int32 = 3;
+const TK_LBRACE:   int32 = 4;
+const TK_RBRACE:   int32 = 5;
+const TK_LBRACKET: int32 = 6;
+const TK_RBRACKET: int32 = 7;
+const TK_SEMI:     int32 = 8;
+const TK_COMMA:    int32 = 9;
+const TK_STAR:     int32 = 10;
+const TK_EQ:       int32 = 11;
+const TK_ELLIPSIS: int32 = 12;
+const TK_OTHER:    int32 = 13;
+
+type CTok {
+    tk: int32,
+    text: string,
+}
+
+function is_ident_start(c: uint8): bool {
+    return (c >= 65 && c <= 90) || (c >= 97 && c <= 122) || c == 95;
+}
+
+function is_ident_cont(c: uint8): bool {
+    return is_ident_start(c) || (c >= 48 && c <= 57);
+}
+
+function is_digit(c: uint8): bool {
+    return c >= 48 && c <= 57;
+}
+
+function is_ws(c: uint8): bool {
+    return c == 32 || c == 9 || c == 10 || c == 13 || c == 11 || c == 12;
+}
+
+function bytes_to_string(buf: uint8[], start: usize, end: usize): string {
+    let slice: uint8[] = bytes.bytes_slice(buf, start, end);
+    return intr.string_from_bytes_unchecked(slice);
+}
+
+function tokenize(src: uint8[]): Vec<CTok> propagates<disposable> {
+    let out: Vec<CTok> = vec.vec_new(1024);
+    let pos: usize = 0;
+    while (pos < src.len) {
+        let c: uint8 = src[pos];
+        if (is_ws(c)) {
+            pos = pos + 1;
+        } else if (c == 47 && pos + 1 < src.len && src[pos + 1] == 47) {
+            // // line comment
+            pos = pos + 2;
+            while (pos < src.len && src[pos] != 10) { pos = pos + 1; }
+        } else if (c == 47 && pos + 1 < src.len && src[pos + 1] == 42) {
+            // /* block comment */
+            pos = pos + 2;
+            while (pos + 1 < src.len && !(src[pos] == 42 && src[pos + 1] == 47)) {
+                pos = pos + 1;
+            }
+            if (pos + 1 < src.len) { pos = pos + 2; }
+        } else if (c == 35) {
+            // # directive -- with -P we shouldn't see these, but just in case
+            while (pos < src.len && src[pos] != 10) { pos = pos + 1; }
+        } else if (c == 34) {
+            // string literal -- consume to closing quote (honour \)
+            pos = pos + 1;
+            while (pos < src.len && src[pos] != 34) {
+                if (src[pos] == 92 && pos + 1 < src.len) { pos = pos + 1; }
+                pos = pos + 1;
+            }
+            if (pos < src.len) { pos = pos + 1; }
+        } else if (c == 39) {
+            // char literal
+            pos = pos + 1;
+            while (pos < src.len && src[pos] != 39) {
+                if (src[pos] == 92 && pos + 1 < src.len) { pos = pos + 1; }
+                pos = pos + 1;
+            }
+            if (pos < src.len) { pos = pos + 1; }
+        } else if (is_ident_start(c)) {
+            let s: usize = pos;
+            while (pos < src.len && is_ident_cont(src[pos])) { pos = pos + 1; }
+            let t: CTok = { tk: TK_IDENT, text: bytes_to_string(src, s, pos) };
+            vec.vec_push(ref out, t);
+        } else if (is_digit(c)) {
+            let s: usize = pos;
+            // Just consume digit/hex/float chars greedily; we don't need
+            // the value, only to know it's a numeric literal.
+            while (pos < src.len) {
+                let cc: uint8 = src[pos];
+                if (is_digit(cc) || (cc >= 65 && cc <= 90) || (cc >= 97 && cc <= 122) || cc == 46 || cc == 95 || cc == 43 || cc == 45) {
+                    pos = pos + 1;
+                } else {
+                    break;
+                }
+            }
+            let t: CTok = { tk: TK_NUMBER, text: bytes_to_string(src, s, pos) };
+            vec.vec_push(ref out, t);
+        } else if (c == 40) {
+            let t: CTok = { tk: TK_LPAREN, text: "(" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 41) {
+            let t: CTok = { tk: TK_RPAREN, text: ")" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 123) {
+            let t: CTok = { tk: TK_LBRACE, text: "{" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 125) {
+            let t: CTok = { tk: TK_RBRACE, text: "}" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 91) {
+            let t: CTok = { tk: TK_LBRACKET, text: "[" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 93) {
+            let t: CTok = { tk: TK_RBRACKET, text: "]" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 59) {
+            let t: CTok = { tk: TK_SEMI, text: ";" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 44) {
+            let t: CTok = { tk: TK_COMMA, text: "," }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 42) {
+            let t: CTok = { tk: TK_STAR, text: "*" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 61) {
+            let t: CTok = { tk: TK_EQ, text: "=" }; vec.vec_push(ref out, t); pos = pos + 1;
+        } else if (c == 46 && pos + 2 < src.len && src[pos + 1] == 46 && src[pos + 2] == 46) {
+            let t: CTok = { tk: TK_ELLIPSIS, text: "..." }; vec.vec_push(ref out, t); pos = pos + 3;
+        } else {
+            // Single unknown punctuation; record verbatim, advance one byte.
+            let s: usize = pos;
+            pos = pos + 1;
+            let t: CTok = { tk: TK_OTHER, text: bytes_to_string(src, s, pos) };
+            vec.vec_push(ref out, t);
+        }
+    }
+    return out;
+}
+
+// ── C type mapping ────────────────────────────────────────────────────────────
+//
+// `c_type_words` is the prefix of declaration-specifier tokens (text only),
+// e.g. ["unsigned", "long"] or ["const", "struct", "foo"] or ["GLuint"].
+// `n_stars` is the number of `*` that followed.
+
+function is_type_qualifier(tok: string): bool {
+    return strings.string_eq(tok, "const")
+        || strings.string_eq(tok, "volatile")
+        || strings.string_eq(tok, "restrict")
+        || strings.string_eq(tok, "__restrict")
+        || strings.string_eq(tok, "_Atomic")
+        || strings.string_eq(tok, "register");
+}
+
+function is_storage_class(tok: string): bool {
+    return strings.string_eq(tok, "extern")
+        || strings.string_eq(tok, "static")
+        || strings.string_eq(tok, "inline")
+        || strings.string_eq(tok, "__inline")
+        || strings.string_eq(tok, "__inline__")
+        || strings.string_eq(tok, "_Noreturn")
+        || strings.string_eq(tok, "auto")
+        || strings.string_eq(tok, "typedef");
+}
+
+// Join word array into a space-separated key for table lookup.
+function join_words(words: string[]): string {
+    if (words.len == 0) { return ""; }
+    if (words.len == 1) { return words[0]; }
+    let parts_n: usize = words.len * 2 - 1;
+    let parts: string[] = intr.heap_alloc(parts_n);
+    let i: usize = 0;
+    let j: usize = 0;
+    while (i < words.len) {
+        parts[j] = words[i];
+        j = j + 1;
+        if (i + 1 < words.len) {
+            parts[j] = " ";
+            j = j + 1;
+        }
+        i = i + 1;
+    }
+    return strings.string_concat_all(parts);
+}
+
+// Filter out qualifiers + redundant `signed` so the type-word key is
+// normalized. e.g. ["const", "unsigned", "int"] -> ["unsigned", "int"].
+function strip_qualifiers(words: string[]): string[] {
+    let disposable kept: Vec<string> = vec.vec_new(words.len);
+    let i: usize = 0;
+    while (i < words.len) {
+        let w: string = words[i];
+        let drop: bool = is_type_qualifier(w) || strings.string_eq(w, "signed") || strings.string_eq(w, "struct") || strings.string_eq(w, "union") || strings.string_eq(w, "enum");
+        if (!drop) {
+            vec.vec_push(ref kept, w);
+        }
+        i = i + 1;
+    }
+    // Copy into a heap-allocated array so the result survives kept's
+    // dispose at function exit (vec_as_array returns a borrowing view).
+    let out: string[] = intr.heap_alloc(kept.len);
+    let j: usize = 0;
+    while (j < kept.len) {
+        out[j] = vec.vec_get(ref kept, j);
+        j = j + 1;
+    }
+    return out;
+}
+
+// Map a normalized C base-type word-list to a yoop type name. Returns
+// "" if the type isn't a recognized primitive (caller falls back to
+// passing the C name through verbatim).
+function c_primitive_to_yoop(words: string[]): string {
+    let key: string = join_words(words);
+    if (strings.string_eq(key, "void"))                    { return "void"; }
+    if (strings.string_eq(key, "char"))                    { return "int8"; }
+    if (strings.string_eq(key, "unsigned char"))           { return "uint8"; }
+    if (strings.string_eq(key, "short"))                   { return "int16"; }
+    if (strings.string_eq(key, "short int"))               { return "int16"; }
+    if (strings.string_eq(key, "unsigned short"))          { return "uint16"; }
+    if (strings.string_eq(key, "unsigned short int"))      { return "uint16"; }
+    if (strings.string_eq(key, "int"))                     { return "int32"; }
+    if (strings.string_eq(key, "unsigned"))                { return "uint32"; }
+    if (strings.string_eq(key, "unsigned int"))            { return "uint32"; }
+    if (strings.string_eq(key, "long"))                    { return "int64"; }
+    if (strings.string_eq(key, "long int"))                { return "int64"; }
+    if (strings.string_eq(key, "unsigned long"))           { return "uint64"; }
+    if (strings.string_eq(key, "unsigned long int"))       { return "uint64"; }
+    if (strings.string_eq(key, "long long"))               { return "int64"; }
+    if (strings.string_eq(key, "long long int"))           { return "int64"; }
+    if (strings.string_eq(key, "unsigned long long"))      { return "uint64"; }
+    if (strings.string_eq(key, "unsigned long long int"))  { return "uint64"; }
+    if (strings.string_eq(key, "float"))                   { return "float32"; }
+    if (strings.string_eq(key, "double"))                  { return "float64"; }
+    if (strings.string_eq(key, "long double"))             { return "float64"; }
+    if (strings.string_eq(key, "_Bool"))                   { return "bool"; }
+    if (strings.string_eq(key, "bool"))                    { return "bool"; }
+    if (strings.string_eq(key, "size_t"))                  { return "usize"; }
+    if (strings.string_eq(key, "ssize_t"))                 { return "c_ssize_t"; }
+    if (strings.string_eq(key, "ptrdiff_t"))               { return "c_ssize_t"; }
+    if (strings.string_eq(key, "int8_t"))                  { return "int8"; }
+    if (strings.string_eq(key, "int16_t"))                 { return "int16"; }
+    if (strings.string_eq(key, "int32_t"))                 { return "int32"; }
+    if (strings.string_eq(key, "int64_t"))                 { return "int64"; }
+    if (strings.string_eq(key, "uint8_t"))                 { return "uint8"; }
+    if (strings.string_eq(key, "uint16_t"))                { return "uint16"; }
+    if (strings.string_eq(key, "uint32_t"))                { return "uint32"; }
+    if (strings.string_eq(key, "uint64_t"))                { return "uint64"; }
+    return "";
+}
+
+// Render a C type (base words + pointer depth) as a yoop type. Pointer
+// policy:
+//   char*    -> string (ergonomic; assumes nul-terminated C strings)
+//   T*       -> unsafe_ptr<T>  (T mapped recursively for primitives)
+//   T**+     -> unsafe_ptr<unsafe_ptr<T>> ... etc.
+//   void*    -> unsafe_ptr<uint8>
+function render_yoop_type(words: string[], n_stars: int32): string {
+    let stripped: string[] = strip_qualifiers(words);
+
+    // char* special case -> string
+    if (n_stars == 1) {
+        let key: string = join_words(stripped);
+        if (strings.string_eq(key, "char")) {
+            return "string";
+        }
+    }
+
+    let base: string = c_primitive_to_yoop(stripped);
+    if (base.len == 0) {
+        // Unknown identifier -- pass through verbatim (struct tag,
+        // typedef name, etc.). User trims by hand.
+        base = join_words(stripped);
+        if (base.len == 0) {
+            base = "void";   // shouldn't happen but be defensive
+        }
+    }
+
+    if (n_stars == 0) {
+        return base;
+    }
+    // void* -> unsafe_ptr<uint8>
+    if (strings.string_eq(base, "void")) {
+        base = "uint8";
+    }
+
+    let s: int32 = 0;
+    let inner: string = base;
+    while (s < n_stars) {
+        inner = strings.string_concat_all(["unsafe_ptr<", inner, ">"]);
+        s = s + 1;
+    }
+    return inner;
+}
+
+// ── declaration scanner ─────────────────────────────────────────────────────
+//
+// Walks the token stream picking out top-level chunks separated by `;` (or
+// skipped past matching `{...}` blocks when they appear at depth 0, since
+// those are function bodies / struct bodies we don't want today).
+
+type DeclSlice { start: usize, end: usize }   // [start, end) indices into toks
+
+function collect_top_level_decls(toks: CTok[]): Vec<DeclSlice> propagates<disposable> {
+    let out: Vec<DeclSlice> = vec.vec_new(64);
+    let i: usize = 0;
+    let chunk_start: usize = 0;
+    while (i < toks.len) {
+        let k: int32 = toks[i].tk;
+        if (k == TK_SEMI) {
+            if (i > chunk_start) {
+                let s: DeclSlice = { start: chunk_start, end: i };
+                vec.vec_push(ref out, s);
+            }
+            chunk_start = i + 1;
+        } else if (k == TK_LBRACE) {
+            // Skip the {...} body (function body or struct/enum/union
+            // body inside a typedef). Match braces, then absorb any
+            // trailing typedef-name + `;` -- v0 doesn't emit either.
+            let depth: int32 = 1;
+            i = i + 1;
+            while (i < toks.len && depth > 0) {
+                let kk: int32 = toks[i].tk;
+                if (kk == TK_LBRACE) { depth = depth + 1; }
+                if (kk == TK_RBRACE) { depth = depth - 1; }
+                i = i + 1;
+            }
+            while (i < toks.len && toks[i].tk != TK_SEMI) {
+                i = i + 1;
+            }
+            chunk_start = i + 1;
+            if (i < toks.len) { i = i + 1; }
+            continue;
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// ── parse one declaration as a function prototype ────────────────────────────
+
+// Parallel arrays for params (rather than `ParamOut[]`) -- the per-element
+// struct shape made heap_alloc'd buffers behave oddly when reused across
+// declarations, and parallel string[]s flatten that out.
+type ParsedFn {
+    name:        string,
+    ret_type:    string,
+    param_names: string[],
+    param_types: string[],
+    variadic:    bool,
+    ok:          bool,
+    skip_reason: string,    // populated if ok=false
+}
+
+function not_a_function(reason: string): ParsedFn {
+    let empty: string[] = [];
+    return {
+        name: "", ret_type: "",
+        param_names: empty, param_types: empty,
+        variadic: false,
+        ok: false, skip_reason: reason,
+    };
+}
+
+// Find the *outermost* paren pair in `toks[start..end)` whose content is
+// the parameter list. The qualifying pair is the LAST `(` at depth 0
+// before the trailing `;` -- this skips any `__attribute__((...))`.
+//
+// Returns the index of `(` or end if none / not a function signature.
+function find_param_paren(toks: CTok[], start: usize, end: usize): usize {
+    let depth: int32 = 0;
+    let i: usize = start;
+    let last_open: usize = end;
+    while (i < end) {
+        if (toks[i].tk == TK_LPAREN) {
+            if (depth == 0) { last_open = i; }
+            depth = depth + 1;
+        } else if (toks[i].tk == TK_RPAREN) {
+            depth = depth - 1;
+        }
+        i = i + 1;
+    }
+    return last_open;
+}
+
+// Copy a Vec<string> into a fresh heap-allocated string[] so the result
+// survives the Vec's auto-cleanup at the caller's scope exit.
+function vec_to_string_array(ref v: Vec<string>): string[] {
+    let out: string[] = intr.heap_alloc(v.len);
+    let i: usize = 0;
+    while (i < v.len) {
+        out[i] = vec.vec_get(ref v, i);
+        i = i + 1;
+    }
+    return out;
+}
+
+function parse_params(toks: CTok[], inner_start: usize, inner_end: usize): ParsedFn {
+    let disposable pnames_v: Vec<string> = vec.vec_new(8);
+    let disposable ptypes_v: Vec<string> = vec.vec_new(8);
+    let variadic: bool = false;
+
+    // Empty () means "unspecified args" in C, but in modern code is fine
+    // to emit as zero params. (void) means strictly zero -- also zero.
+    if (inner_start == inner_end) {
+        let n: string[] = vec_to_string_array(ref pnames_v);
+        let t: string[] = vec_to_string_array(ref ptypes_v);
+        let r0: ParsedFn = { name: "", ret_type: "", param_names: n, param_types: t, variadic: false, ok: true, skip_reason: "" };
+        return r0;
+    }
+    // Special case: (void)
+    if (inner_end - inner_start == 1) {
+        if (toks[inner_start].tk == TK_IDENT && strings.string_eq(toks[inner_start].text, "void")) {
+            let n: string[] = vec_to_string_array(ref pnames_v);
+            let t: string[] = vec_to_string_array(ref ptypes_v);
+            let r1: ParsedFn = { name: "", ret_type: "", param_names: n, param_types: t, variadic: false, ok: true, skip_reason: "" };
+            return r1;
+        }
+    }
+
+    // Walk and split on `,` at depth 0. Each segment is one parameter.
+    let seg_start: usize = inner_start;
+    let i: usize = inner_start;
+    let depth: int32 = 0;
+    while (i <= inner_end) {
+        let at_split: bool = false;
+        if (i == inner_end) {
+            at_split = true;
+        } else {
+            let k: int32 = toks[i].tk;
+            if (k == TK_LPAREN)  { depth = depth + 1; }
+            if (k == TK_RPAREN)  { depth = depth - 1; }
+            if (k == TK_COMMA && depth == 0) { at_split = true; }
+        }
+        if (at_split) {
+            // Process segment [seg_start, i).
+            if (seg_start < i) {
+                if (i - seg_start == 1 && toks[seg_start].tk == TK_ELLIPSIS) {
+                    variadic = true;
+                } else {
+                    // Reject function-pointer params for v0: any nested `(` in the segment
+                    // that isn't part of an outer attribute means too complex.
+                    let has_inner_paren: bool = false;
+                    let j: usize = seg_start;
+                    while (j < i) {
+                        if (toks[j].tk == TK_LPAREN) { has_inner_paren = true; break; }
+                        j = j + 1;
+                    }
+                    if (has_inner_paren) {
+                        return not_a_function("function-pointer or nested-paren param not supported in v0");
+                    }
+                    // Split into base-type words + star count + optional name + optional [..]
+                    let disposable words_v: Vec<string> = vec.vec_new(4);
+                    let n_stars: int32 = 0;
+                    let name_tok: string = "";
+                    let saw_lbracket: bool = false;
+                    let j2: usize = seg_start;
+                    while (j2 < i) {
+                        let kk: int32 = toks[j2].tk;
+                        if (kk == TK_IDENT) {
+                            vec.vec_push(ref words_v, toks[j2].text);
+                        } else if (kk == TK_STAR) {
+                            n_stars = n_stars + 1;
+                        } else if (kk == TK_LBRACKET) {
+                            saw_lbracket = true;
+                            // skip to matching ]
+                            let bd: int32 = 1;
+                            j2 = j2 + 1;
+                            while (j2 < i && bd > 0) {
+                                if (toks[j2].tk == TK_LBRACKET) { bd = bd + 1; }
+                                if (toks[j2].tk == TK_RBRACKET) { bd = bd - 1; }
+                                j2 = j2 + 1;
+                            }
+                            continue;
+                        } else {
+                            // ignore others
+                        }
+                        j2 = j2 + 1;
+                    }
+                    // Array param: treat as one extra pointer
+                    if (saw_lbracket) { n_stars = n_stars + 1; }
+
+                    // If the last word isn't a known type word, take it as
+                    // the param name. Copy out of the disposable Vec into a
+                    // fresh heap array so the slice survives words_v dispose.
+                    let words_arr: string[] = intr.heap_alloc(words_v.len);
+                    let wi: usize = 0;
+                    while (wi < words_v.len) {
+                        words_arr[wi] = vec.vec_get(ref words_v, wi);
+                        wi = wi + 1;
+                    }
+                    let final_words: string[] = words_arr;
+                    if (words_arr.len >= 2) {
+                        let last: string = words_arr[words_arr.len - 1];
+                        let last_is_typeword: bool = is_type_qualifier(last) || strings.string_eq(last, "void") || strings.string_eq(last, "int") || strings.string_eq(last, "char") || strings.string_eq(last, "short") || strings.string_eq(last, "long") || strings.string_eq(last, "float") || strings.string_eq(last, "double") || strings.string_eq(last, "signed") || strings.string_eq(last, "unsigned") || strings.string_eq(last, "_Bool") || strings.string_eq(last, "bool") || strings.string_eq(last, "struct") || strings.string_eq(last, "union") || strings.string_eq(last, "enum");
+                        if (!last_is_typeword) {
+                            name_tok = last;
+                            let nw: string[] = intr.heap_alloc(words_arr.len - 1);
+                            let ix: usize = 0;
+                            while (ix < words_arr.len - 1) {
+                                nw[ix] = words_arr[ix];
+                                ix = ix + 1;
+                            }
+                            final_words = nw;
+                        }
+                    }
+                    let yt: string = render_yoop_type(final_words, n_stars);
+                    if (name_tok.len == 0) {
+                        // Fabricate a param name so the emitted yoop extern
+                        // decl always has named params (v0 plays it safe).
+                        name_tok = strings.string_concat_all(["arg", format.uint_to_string(uint64(pnames_v.len))]);
+                    }
+                    vec.vec_push(ref pnames_v, name_tok);
+                    vec.vec_push(ref ptypes_v, yt);
+                }
+            }
+            seg_start = i + 1;
+        }
+        i = i + 1;
+    }
+
+    let names_out: string[] = vec_to_string_array(ref pnames_v);
+    let types_out: string[] = vec_to_string_array(ref ptypes_v);
+    let r: ParsedFn = {
+        name: "", ret_type: "",
+        param_names: names_out, param_types: types_out,
+        variadic: variadic,
+        ok: true, skip_reason: "",
+    };
+    return r;
+}
+
+function parse_function_decl(toks: CTok[], start: usize, end: usize): ParsedFn {
+    // Drop leading storage-class specifiers (extern, static, inline...)
+    let cur: usize = start;
+    while (cur < end) {
+        if (toks[cur].tk != TK_IDENT) { break; }
+        if (!is_storage_class(toks[cur].text)) { break; }
+        cur = cur + 1;
+    }
+
+    // The relevant `(` is the rightmost top-level `(` -- there's only one
+    // for a function decl, since we already excluded function-pointer
+    // params (those would have nested ones).
+    let lparen: usize = find_param_paren(toks, cur, end);
+    if (lparen == end) {
+        return not_a_function("no '(' found -- not a function decl");
+    }
+    // Find matching `)`
+    let rparen: usize = lparen;
+    let depth: int32 = 0;
+    let k2: usize = lparen;
+    while (k2 < end) {
+        if (toks[k2].tk == TK_LPAREN) { depth = depth + 1; }
+        if (toks[k2].tk == TK_RPAREN) {
+            depth = depth - 1;
+            if (depth == 0) { rparen = k2; break; }
+        }
+        k2 = k2 + 1;
+    }
+    if (rparen == lparen) {
+        return not_a_function("unmatched '('");
+    }
+    // After `)` we expect only attributes/qualifiers until the end of
+    // the chunk -- anything else means this isn't a simple function decl.
+    let after: usize = rparen + 1;
+    while (after < end) {
+        let t: CTok = toks[after];
+        if (t.tk == TK_IDENT && is_type_qualifier(t.text)) {
+            after = after + 1;
+            continue;
+        }
+        // Unknown trailing tokens -> skip; we may still emit, but warn.
+        break;
+    }
+
+    // Tokens before `(` are [return-type-tokens..., function-name].
+    // The last ident before lparen is the function name; everything
+    // before it (plus star count) is the return type.
+    if (lparen == cur) {
+        return not_a_function("no return type before '('");
+    }
+    let last_ident_idx: usize = lparen;
+    let m: usize = lparen;
+    while (m > cur) {
+        m = m - 1;
+        if (toks[m].tk == TK_IDENT) {
+            last_ident_idx = m;
+            break;
+        }
+    }
+    if (last_ident_idx == lparen) {
+        return not_a_function("could not locate function name");
+    }
+    let fn_name: string = toks[last_ident_idx].text;
+    // Don't emit pseudo-keywords as functions (typedef left this behind)
+    if (is_storage_class(fn_name)) {
+        return not_a_function("name is a storage-class keyword");
+    }
+
+    // Return type: words [cur..last_ident_idx), with star counts.
+    let disposable words_v: Vec<string> = vec.vec_new(4);
+    let n_stars: int32 = 0;
+    let p: usize = cur;
+    while (p < last_ident_idx) {
+        if (toks[p].tk == TK_IDENT) {
+            vec.vec_push(ref words_v, toks[p].text);
+        } else if (toks[p].tk == TK_STAR) {
+            n_stars = n_stars + 1;
+        }
+        // ignore others (commas shouldn't appear here)
+        p = p + 1;
+    }
+    // Copy out so the view passed to render_yoop_type doesn't dangle
+    // when words_v is auto-disposed.
+    let words_arr: string[] = intr.heap_alloc(words_v.len);
+    let wi: usize = 0;
+    while (wi < words_v.len) {
+        words_arr[wi] = vec.vec_get(ref words_v, wi);
+        wi = wi + 1;
+    }
+    let ret_yoop: string = render_yoop_type(words_arr, n_stars);
+
+    // Parse params from (lparen+1, rparen).
+    let pres: ParsedFn = parse_params(toks, lparen + 1, rparen);
+    if (!pres.ok) {
+        return pres;
+    }
+    let r: ParsedFn = {
+        name:        fn_name,
+        ret_type:    ret_yoop,
+        param_names: pres.param_names,
+        param_types: pres.param_types,
+        variadic:    pres.variadic,
+        ok:          true,
+        skip_reason: "",
+    };
+    return r;
+}
+
+// ── emitter ──────────────────────────────────────────────────────────────────
+
+function render_function(f: ParsedFn): string {
+    let n_params: usize = f.param_names.len;
+    // Build "name: type, name: type, ..., ..."
+    let disposable parts: Vec<string> = vec.vec_new(n_params * 4 + 8);
+    vec.vec_push(ref parts, "    function ");
+    vec.vec_push(ref parts, f.name);
+    vec.vec_push(ref parts, "(");
+    let i: usize = 0;
+    while (i < n_params) {
+        if (i > 0) {
+            vec.vec_push(ref parts, ", ");
+        }
+        vec.vec_push(ref parts, f.param_names[i]);
+        vec.vec_push(ref parts, ": ");
+        vec.vec_push(ref parts, f.param_types[i]);
+        i = i + 1;
+    }
+    if (f.variadic) {
+        if (n_params > 0) {
+            vec.vec_push(ref parts, ", ");
+        }
+        vec.vec_push(ref parts, "...");
+    }
+    vec.vec_push(ref parts, "): ");
+    vec.vec_push(ref parts, f.ret_type);
+    vec.vec_push(ref parts, ";\n");
+    return strings.string_concat_all(vec.vec_as_array(ref parts));
+}
+
+function emit_output(out_path: string, header: string, fns: ParsedFn[], skipped: int32, args: Args): void {
+    let disposable parts: Vec<string> = vec.vec_new(fns.len * 6 + 16);
+
+    vec.vec_push(ref parts, "// Generated by yoopbinder from ");
+    vec.vec_push(ref parts, header);
+    vec.vec_push(ref parts, "\n");
+    vec.vec_push(ref parts, "// ");
+    vec.vec_push(ref parts, format.int_to_string(int64(fns.len)));
+    vec.vec_push(ref parts, " function(s) emitted, ");
+    vec.vec_push(ref parts, format.int_to_string(int64(skipped)));
+    vec.vec_push(ref parts, " declaration(s) skipped.\n");
+    vec.vec_push(ref parts, "//\n");
+    vec.vec_push(ref parts, "// Unknown identifiers (struct tags, typedefs we did not\n");
+    vec.vec_push(ref parts, "// resolve, etc.) pass through verbatim -- adjust by hand.\n\n");
+
+    if (args.use_library) {
+        vec.vec_push(ref parts, "extern \"C\" from library \"");
+        vec.vec_push(ref parts, args.library_name);
+        vec.vec_push(ref parts, "\" {\n");
+    } else {
+        vec.vec_push(ref parts, "extern \"C\" from \"");
+        vec.vec_push(ref parts, args.header_label);
+        vec.vec_push(ref parts, "\" {\n");
+    }
+
+    let i: usize = 0;
+    while (i < fns.len) {
+        let line: string = render_function(fns[i]);
+        vec.vec_push(ref parts, line);
+        i = i + 1;
+    }
+
+    vec.vec_push(ref parts, "}\n");
+    let content: string = strings.string_concat_all(vec.vec_as_array(ref parts));
+    let content_bytes: uint8[] = intr.string_as_bytes(content);
+
+    if (out_path.len == 0) {
+        // stdout -- template-literal printf so the yoop fat-pointer
+        // string composes correctly (C-style %s wants a null-term char*).
+        printf(`${content}`);
+    } else {
+        // Trust the fopen -- if it returns NULL the fwrite will crash;
+        // there's no ref-T null check today (same convention as the
+        // language_showcase example).
+        let fp: unsafe_ptr<FILE> = fopen(out_path, "w");
+        let _n: c_size_t = fwrite(content_bytes.ptr, 1, c_size_t(content_bytes.len), fp);
+        let _c: int32 = fclose(fp);
+        printf(`wrote ${out_path}\n`);
+    }
+}
+
+// ── entry point ──────────────────────────────────────────────────────────────
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+    let args: Args = parse_argv();
+    if (!args.ok) {
+        printf(`yoopbinder: ${args.error}\n`);
+        printf("usage: yoopbinder <header.h> [-o OUT] [--lib LIBNAME] [--header HEADER_HINT]\n");
+        return 1;
+    }
+
+    printf(`yoopbinder: preprocessing ${args.header_path}\n`);
+    let disposable pre: Vec<uint8> = run_clang_preprocess(args.header_path);
+    let pre_arr: uint8[] = vec.vec_as_array(ref pre);
+    if (pre_arr.len == 0) {
+        printf("yoopbinder: empty preprocessor output -- header missing or clang error?\n");
+        return 1;
+    }
+
+    let disposable toks_v: Vec<CTok> = tokenize(pre_arr);
+    let toks: CTok[] = vec.vec_as_array(ref toks_v);
+    printf(`yoopbinder: ${int64(toks.len)} tokens\n`);
+
+    let disposable slices_v: Vec<DeclSlice> = collect_top_level_decls(toks);
+    let slices: DeclSlice[] = vec.vec_as_array(ref slices_v);
+    printf(`yoopbinder: ${int64(slices.len)} top-level declarations\n`);
+
+    let disposable fns_v: Vec<ParsedFn> = vec.vec_new(64);
+    let skipped: int32 = 0;
+    let i: usize = 0;
+    while (i < slices.len) {
+        let s: DeclSlice = slices[i];
+        let f: ParsedFn = parse_function_decl(toks, s.start, s.end);
+        if (f.ok && f.name.len > 0 && f.ret_type.len > 0) {
+            vec.vec_push(ref fns_v, f);
+        } else {
+            skipped = skipped + 1;
+        }
+        i = i + 1;
+    }
+
+    let fns: ParsedFn[] = vec.vec_as_array(ref fns_v);
+    emit_output(args.output_path, args.header_path, fns, skipped, args);
+    return 0;
+}

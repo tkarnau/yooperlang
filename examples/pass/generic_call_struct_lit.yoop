@@ -1,0 +1,36 @@
+// plans/yoopbinder-papercuts.md Issue 2: struct literals in generic-call
+// argument position get their target type from the inferred type param.
+// Used to require binding the literal to a typed local first.
+
+import * as vec from "std/core/vec.yoop";
+import { Vec } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Pair { a: int32, b: int32 }
+
+// Generic function whose param shape gives the typechecker a foothold
+// to infer T from a non-literal sibling arg. Here `tag` is a plain
+// untyped int so T = Pair is inferred from `v: Vec<T>` (the ref arg).
+function record<T>(ref bucket: Vec<T>, item: T, tag: int32): void {
+    vec.vec_push(ref bucket, item);
+}
+
+function main(): int32 {
+    let disposable v: Vec<Pair> = vec.vec_new(4);
+    // Used to fail with "struct literal has no target type".
+    vec.vec_push(ref v, { a: 1, b: 2 });
+    vec.vec_push(ref v, { a: 3, b: 4 });
+    record(ref v, { a: 5, b: 6 }, 100);
+
+    let view: Pair[] = vec.vec_as_array(ref v);
+    let i: usize = 0;
+    while (i < view.len) {
+        printf(`v[${int64(i)}]=(${view[i].a},${view[i].b})\n`);
+        i = i + 1;
+    }
+    return 0;
+}

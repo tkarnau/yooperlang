@@ -1,0 +1,810 @@
+// Sun + Moon sky scene with a live temperature read-out for River Falls, WI.
+//
+// What this exercises:
+//   - HTTP client (std/http/client.yoop) fetching plain text from wttr.in
+//   - DNS-resolved hostname dial (ffi_connect -> yoop_net_resolve_ipv4)
+//   - Local wall-clock time via small yoop_runtime helpers
+//   - SDL2 drawing with disposable RAII for the window + renderer
+//   - 7-segment style digits drawn from filled rectangles
+//   - A CPU-side per-pixel "shader" -- yoop computes a 200x200 RGBA buffer
+//     for the sun each frame (radial palette + animated sin-noise) and
+//     streams it into an SDL_Texture for blending onto the scene.
+//
+// The temperature is fetched once at startup. Re-running the binary
+// will pull a fresh reading. wttr.in falls back to "+" + degrees + unit;
+// we parse out the integer portion and the sign and ignore the unit.
+
+import.unsafe;
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Client, ClientSendResult } from "std/http/client.yoop";
+import * as client from "std/http/client.yoop";
+import * as vec from "std/core/vec.yoop";
+
+extern "C" from library "m" {
+    function sin(x: float64): float64;
+    function cos(x: float64): float64;
+    function sqrt(x: float64): float64;
+    function printf(fmt: string, ...): int32;
+}
+
+extern "C" from "yoop_runtime" {
+    // Local wall-clock readings. These bottom out in C's localtime() so
+    // the user's TZ environment is honoured -- no manual offset math.
+    function yoop_local_hour(): int32;
+    function yoop_local_minute(): int32;
+}
+
+// ── SDL2 ──────────────────────────────────────────────────────────────────────
+
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_Renderer;
+    type SDL_Texture;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+
+    function SDL_CreateWindow(
+        title: string,
+        x: int32, y: int32,
+        w: int32, h: int32,
+        flags: uint32
+    ): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+
+    function SDL_CreateRenderer(
+        ref win: SDL_Window,
+        index: int32,
+        flags: uint32
+    ): ref SDL_Renderer;
+    function SDL_DestroyRenderer(ref ren: SDL_Renderer): void;
+    function SDL_SetRenderDrawBlendMode(
+        ref ren: SDL_Renderer,
+        blend_mode: int32
+    ): int32;
+
+    function SDL_SetRenderDrawColor(
+        ref ren: SDL_Renderer,
+        r: uint8, g: uint8, b: uint8, a: uint8
+    ): int32;
+    function SDL_RenderClear(ref ren: SDL_Renderer): int32;
+    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
+    function SDL_RenderDrawLine(
+        ref ren: SDL_Renderer,
+        x1: int32, y1: int32,
+        x2: int32, y2: int32
+    ): int32;
+    function SDL_RenderDrawPoint(
+        ref ren: SDL_Renderer,
+        x: int32, y: int32
+    ): int32;
+
+    function SDL_CreateTexture(
+        ref ren: SDL_Renderer,
+        format: uint32,
+        access: int32,
+        w: int32, h: int32
+    ): ref SDL_Texture;
+    function SDL_DestroyTexture(ref tex: SDL_Texture): void;
+    function SDL_SetTextureBlendMode(
+        ref tex: SDL_Texture,
+        blend_mode: int32
+    ): int32;
+    function SDL_UpdateTexture(
+        ref tex: SDL_Texture,
+        rect: unsafe_ptr<SDL_Rect>,        // null => full texture
+        pixels: unsafe_ptr<uint8>,
+        pitch: int32
+    ): int32;
+    function SDL_RenderCopy(
+        ref ren: SDL_Renderer,
+        ref tex: SDL_Texture,
+        src: unsafe_ptr<SDL_Rect>,
+        dst: unsafe_ptr<SDL_Rect>
+    ): int32;
+
+    function SDL_GetTicks(): uint32;
+    function SDL_Delay(ms: uint32): void;
+    function SDL_PumpEvents(): void;
+}
+
+// ── c_layout types ───────────────────────────────────────────────────────────
+
+kind c_layout {
+    appliesTo type;
+    layout { abi "C"; };
+}
+
+// Mirrors C's SDL_Rect exactly. Used for SDL_RenderCopy src/dst rects
+// and SDL_UpdateTexture's optional rect parameter (we pass null).
+type SDL_Rect c_layout {
+    x: int32,
+    y: int32,
+    w: int32,
+    h: int32,
+}
+
+// ── SDL handle wrappers implementing the std Disposable trait ────────────────
+//
+// The std `disposable` kind doesn't declare `ownsBlock`, so a bare
+// `let disposable x = ...` cleans up at end-of-function. We wrap the
+// SDL loop in an inner function so the handle disposal happens before
+// SDL_Quit at the call site.
+
+type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void {
+        SDL_DestroyWindow(self.handle);
+    }
+}
+
+type Renderer implements Disposable {
+    handle: ref SDL_Renderer,
+    function dispose(ref self): void {
+        SDL_DestroyRenderer(self.handle);
+    }
+}
+
+type Texture implements Disposable {
+    handle: ref SDL_Texture,
+    function dispose(ref self): void {
+        SDL_DestroyTexture(self.handle);
+    }
+}
+
+// ── Window constants ──────────────────────────────────────────────────────────
+
+const WIN_W: int32 = 800;
+const WIN_H: int32 = 600;
+const FPS_TARGET: uint32 = 60;
+const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+const HORIZON_Y: int32 = 460;
+
+const SDL_SCANCODE_ESCAPE: int32 = 41;
+
+// SDL_Init flags.
+const SDL_INIT_VIDEO: uint32 = 0x00000020;
+const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+const SDL_RENDERER_ACCELERATED: uint32 = 0x00000002;
+const SDL_RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
+
+// SDL_PIXELFORMAT_ABGR8888 -- in-memory byte order is [R, G, B, A] on
+// little-endian, which matches how we pack each pixel below. Both x86
+// and Apple-Silicon macOS are little-endian, so this constant is the
+// right choice on every supported target.
+const SDL_PIXELFORMAT_ABGR8888: uint32   = 0x16762004;
+const SDL_TEXTUREACCESS_STREAMING: int32 = 2;
+const SDL_BLENDMODE_BLEND: int32         = 1;
+
+const PI: float64 = 3.14159265358979;
+
+// ── Weather fetch + parsing ──────────────────────────────────────────────────
+
+// wttr.in returns just `+83°F` when format=%t is passed; the `&u` flag
+// pins the unit to imperial (°F) so the demo always shows F regardless
+// of where the box happens to think it lives.
+const WEATHER_URL: string = "http://wttr.in/River+Falls,WI?format=%t&u";
+
+// Parse a wttr-style temperature body like `+83°F` into a signed int.
+// On any failure (empty body, no leading digits) returns 0 + ok=false.
+type TempParse { value: int32, ok: bool }
+
+function parse_wttr_temp(body: uint8[]): TempParse {
+    if (body.len == 0) {
+        return { value: 0, ok: false };
+    }
+    let i: usize = 0;
+    let sign: int32 = 1;
+    let first: uint8 = body[0];
+    if (first == 43) {       // '+'
+        i = 1;
+    } else if (first == 45) { // '-'
+        i = 1;
+        sign = -1;
+    }
+    // Read decimal digits until any non-digit (the degree symbol is the
+    // multi-byte 0xC2 0xB0 in UTF-8 and stops the loop on its first byte).
+    let val: int32 = 0;
+    let consumed: int32 = 0;
+    while (i < body.len) {
+        let c: uint8 = body[i];
+        if (c < 48 || c > 57) {
+            break;
+        }
+        val = val * 10 + int32(c) - 48;
+        consumed = consumed + 1;
+        i = i + 1;
+    }
+    if (consumed == 0) {
+        return { value: 0, ok: false };
+    }
+    return { value: sign * val, ok: true };
+}
+
+// Fetch the temperature once. On any failure returns a sentinel value so
+// the scene still has *something* to render (and the failure is printed).
+function fetch_temperature(): TempParse {
+    let c: Client = client.make_client();
+    let disposable r: ClientSendResult = client.http_get(ref c, WEATHER_URL);
+    if (r.error.len > 0) {
+        printf(`weather fetch failed: ${r.error}\n`);
+        return { value: 0, ok: false };
+    }
+    if (r.response.status.code != 200) {
+        printf(`weather fetch got status %d\n`, r.response.status.code);
+        return { value: 0, ok: false };
+    }
+    let body: uint8[] = vec.vec_as_array(ref r.response.body);
+    let parsed: TempParse = parse_wttr_temp(body);
+    if (!parsed.ok) {
+        let body_str: string = intr.string_from_bytes_unchecked(body);
+        printf(`weather parse failed for body: %s\n`, body_str);
+    }
+    return parsed;
+}
+
+// ── Color helpers ────────────────────────────────────────────────────────────
+
+type Color3 { r: uint8, g: uint8, b: uint8 }
+
+function lerp_u8(a: uint8, b: uint8, t: float64): uint8 {
+    let av: float64 = float64(a);
+    let bv: float64 = float64(b);
+    let v: float64 = av + (bv - av) * t;
+    if (v < 0.0)   { v = 0.0;   }
+    if (v > 255.0) { v = 255.0; }
+    return uint8(int32(v));
+}
+
+function lerp_color(a: Color3, b: Color3, t: float64): Color3 {
+    return {
+        r: lerp_u8(a.r, b.r, t),
+        g: lerp_u8(a.g, b.g, t),
+        b: lerp_u8(a.b, b.b, t),
+    };
+}
+
+// Map a continuous hour-of-day (0..24, with fractional minutes) to the
+// dominant sky color. Piecewise interpolation between five key colors at
+// the canonical phases: deep night -> dawn -> midday -> dusk -> deep
+// night again. Each segment is a 1D lerp between two anchor colors.
+function sky_color(hour: float64): Color3 {
+    let night: Color3 = { r: 12,  g: 18,  b: 48  };
+    let dawn:  Color3 = { r: 240, g: 130, b: 90  };
+    let day:   Color3 = { r: 110, g: 180, b: 235 };
+    let dusk:  Color3 = { r: 220, g: 100, b: 70  };
+    if (hour < 5.0) {
+        return night;
+    }
+    if (hour < 7.0) {
+        let t: float64 = (hour - 5.0) * 0.5;   // 5..7  -> 0..1
+        return lerp_color(night, dawn, t);
+    }
+    if (hour < 9.0) {
+        let t: float64 = (hour - 7.0) * 0.5;   // 7..9  -> 0..1
+        return lerp_color(dawn, day, t);
+    }
+    if (hour < 17.0) {
+        return day;
+    }
+    if (hour < 19.5) {
+        let t: float64 = (hour - 17.0) / 2.5;  // 17..19.5 -> 0..1
+        return lerp_color(day, dusk, t);
+    }
+    if (hour < 21.0) {
+        let t: float64 = (hour - 19.5) / 1.5;  // 19.5..21 -> 0..1
+        return lerp_color(dusk, night, t);
+    }
+    return night;
+}
+
+// ── Sun / moon position ──────────────────────────────────────────────────────
+
+// Returns the arc parameter in 0..1 if the body is above the horizon, or
+// -1 if it's below (i.e. invisible). Sun arcs from 6am to 8pm; moon
+// arcs from 8pm to 6am (the next morning -- the math wraps).
+function sun_arc_t(hour: float64): float64 {
+    if (hour < 6.0 || hour >= 20.0) {
+        return -1.0;
+    }
+    return (hour - 6.0) / 14.0;
+}
+
+function moon_arc_t(hour: float64): float64 {
+    if (hour >= 6.0 && hour < 20.0) {
+        return -1.0;
+    }
+    // Normalize: 20..24 -> 0..4; 0..6 -> 4..10. Span = 10 hours.
+    let elapsed: float64 = hour;
+    if (hour >= 20.0) {
+        elapsed = hour - 20.0;
+    } else {
+        elapsed = hour + 4.0;
+    }
+    return elapsed / 10.0;
+}
+
+// ── Filled-circle primitive (scanline fill) ──────────────────────────────────
+//
+// Helpers take `ref Renderer` (yoop wrapper) rather than `ref SDL_Renderer`
+// directly. Passing the opaque extern type through a user function tickles
+// the LLVM verifier "loading unsized types is not allowed" - the same
+// papercut the twinstick demo documents at load_player_texture.
+
+function fill_circle(ref ren: Renderer, cx: int32, cy: int32, radius: int32): void {
+    let row: int32 = int32(-radius);
+    while (row <= radius) {
+        let half: int32 = int32(sqrt(
+            float64(radius * radius) - float64(row * row)
+        ));
+        SDL_RenderDrawLine(ren.handle, cx - half, cy + row, cx + half, cy + row);
+        row = row + 1;
+    }
+}
+
+// Crescent moon: a full white circle with an offset disc of sky color
+// punched out. The punch is offset to the upper-right of the moon's
+// centre; the offset shrinks the visible crescent as the moon rises.
+function draw_moon(
+    ref ren: Renderer,
+    cx: int32, cy: int32, radius: int32,
+    sky: Color3
+): void {
+    SDL_SetRenderDrawColor(ren.handle, uint8(235), uint8(232), uint8(220), uint8(255));
+    fill_circle(ref ren, cx, cy, radius);
+    SDL_SetRenderDrawColor(ren.handle, sky.r, sky.g, sky.b, uint8(255));
+    fill_circle(ref ren, cx + radius / 3, cy - radius / 6, radius);
+}
+
+// ── CPU fragment shader for the sun ─────────────────────────────────────────
+//
+// Per-pixel color computation in yoop, packed into a streaming SDL
+// texture each frame. The math is what a GLSL fragment shader for a
+// fiery sun looks like, just on the CPU side:
+//
+//   r        = distance from the texture centre
+//   noise    = mix of three sin/cos waves driven by (dx, dy, t)
+//   eff_r    = r + noise   // distorted radius -> wobbly flame edge
+//   palette  = piecewise lerp(white-hot, yellow, orange, red, fade-to-0)
+//              keyed off (eff_r / CORE_RADIUS)
+//
+// The renderer is set to BLEND mode so the halo's falling alpha
+// composites smoothly over the sky gradient behind it.
+
+const SUN_TEX_DIM: int32   = 200;             // texture is SUN_TEX_DIM x SUN_TEX_DIM
+const SUN_CORE_R: float64  = 70.0;            // core disc radius in texture pixels
+const SUN_HALO_MAX: float64 = 1.40;           // halo extends to (CORE_R * this)
+
+// Write a single packed RGBA pixel into the buffer at byte-offset `off`.
+function pack_rgba(buf: uint8[], off: int32, r: uint8, g: uint8, b: uint8, a: uint8): void {
+    buf[off + 0] = r;
+    buf[off + 1] = g;
+    buf[off + 2] = b;
+    buf[off + 3] = a;
+}
+
+// Fragment colour for the sun, keyed off the noise-perturbed normalised
+// radius `nr` in [0, SUN_HALO_MAX]. Out-of-range pixels (nr > halo) are
+// the caller's responsibility -- this function only runs for visible
+// fragments. Returns a 4-tuple via a small struct so we don't repeat the
+// per-band lerp logic inline.
+type Frag { r: uint8, g: uint8, b: uint8, a: uint8 }
+
+function sun_palette(nr: float64): Frag {
+    // Anchor stops, transitioning along the radius:
+    //   0.00 ... 0.35  white-hot   #FFF0C8 -> yellow #FFD060
+    //   0.35 ... 0.70  yellow      #FFD060 -> orange #FF8830
+    //   0.70 ... 1.00  orange      #FF8830 -> red    #C82018
+    //   1.00 ... 1.40  red halo    #C82018 -> alpha-faded to 0
+    if (nr < 0.35) {
+        let s: float64 = nr / 0.35;
+        return {
+            r: uint8(255),
+            g: lerp_u8(uint8(240), uint8(208), s),
+            b: lerp_u8(uint8(200), uint8(96),  s),
+            a: uint8(255),
+        };
+    }
+    if (nr < 0.70) {
+        let s: float64 = (nr - 0.35) / 0.35;
+        return {
+            r: uint8(255),
+            g: lerp_u8(uint8(208), uint8(136), s),
+            b: lerp_u8(uint8(96),  uint8(48),  s),
+            a: uint8(255),
+        };
+    }
+    if (nr < 1.00) {
+        let s: float64 = (nr - 0.70) / 0.30;
+        return {
+            r: lerp_u8(uint8(255), uint8(200), s),
+            g: lerp_u8(uint8(136), uint8(48),  s),
+            b: lerp_u8(uint8(48),  uint8(24),  s),
+            a: uint8(255),
+        };
+    }
+    // Halo: fade red -> transparent.
+    let s: float64 = (nr - 1.0) / 0.40;
+    if (s > 1.0) { s = 1.0; }
+    return {
+        r: lerp_u8(uint8(200), uint8(110), s),
+        g: lerp_u8(uint8(48),  uint8(20),  s),
+        b: lerp_u8(uint8(24),  uint8(10),  s),
+        a: lerp_u8(uint8(220), uint8(0),   s),
+    };
+}
+
+// Render the sun shader into `pixels` and upload to `tex`. `t_ms` drives
+// the animation; small variations produce visible flame motion across
+// frames.
+function shade_sun(ref tex: Texture, pixels: uint8[], t_ms: uint32): void {
+    let t: float64 = float64(t_ms) * 0.001;     // seconds
+    let cx: int32 = SUN_TEX_DIM / 2;
+    let cy: int32 = SUN_TEX_DIM / 2;
+
+    let py: int32 = 0;
+    while (py < SUN_TEX_DIM) {
+        let dy: float64 = float64(py - cy);
+        let px: int32 = 0;
+        while (px < SUN_TEX_DIM) {
+            let dx: float64 = float64(px - cx);
+            let r: float64 = sqrt(dx * dx + dy * dy);
+
+            // Three-wave noise field. Frequencies chosen so the
+            // contributions interact at different scales -- a slow
+            // radial pulse, plus medium-frequency x and y waves whose
+            // phases drift in opposite directions.
+            let n1: float64 = sin(r * 0.14 - t * 2.4);
+            let n2: float64 = sin(dx * 0.18 + t * 1.7);
+            let n3: float64 = cos(dy * 0.22 - t * 1.3);
+            let noise: float64 = n1 * 4.5 + n2 * 3.0 + n3 * 3.0;
+
+            let nr: float64 = (r + noise) / SUN_CORE_R;
+
+            let off: int32 = (py * SUN_TEX_DIM + px) * 4;
+            if (nr < 0.0 || nr >= SUN_HALO_MAX) {
+                // Transparent pixel: RGB doesn't matter, alpha must be 0.
+                pack_rgba(pixels, off, uint8(0), uint8(0), uint8(0), uint8(0));
+            } else {
+                let f: Frag = sun_palette(nr);
+                pack_rgba(pixels, off, f.r, f.g, f.b, f.a);
+            }
+            px = px + 1;
+        }
+        py = py + 1;
+    }
+
+    SDL_UpdateTexture(
+        tex.handle,
+        null,
+        pixels.ptr,
+        SUN_TEX_DIM * 4
+    );
+}
+
+// ── 7-segment digit + temperature display ────────────────────────────────────
+
+// Segment ordering: a, b, c, d, e, f, g (canonical). Each digit's
+// bit-mask says which segments to light.
+function seg_mask_for(d: int32): int32 {
+    if (d == 0) { return 0b1111110; }   // a b c d e f
+    if (d == 1) { return 0b0110000; }   // b c
+    if (d == 2) { return 0b1101101; }   // a b d e g
+    if (d == 3) { return 0b1111001; }   // a b c d g
+    if (d == 4) { return 0b0110011; }   // b c f g
+    if (d == 5) { return 0b1011011; }   // a c d f g
+    if (d == 6) { return 0b1011111; }   // a c d e f g
+    if (d == 7) { return 0b1110000; }   // a b c
+    if (d == 8) { return 0b1111111; }   // all
+    if (d == 9) { return 0b1111011; }   // a b c d f g
+    return 0;
+}
+
+// Filled rect via scanline DrawLine -- simpler than pulling in
+// SDL_RenderFillRect and threading a c_layout SDL_Rect through.
+function fill_rect(ref ren: Renderer, x: int32, y: int32, w: int32, h: int32): void {
+    let row: int32 = 0;
+    while (row < h) {
+        SDL_RenderDrawLine(ren.handle, x, y + row, x + w - 1, y + row);
+        row = row + 1;
+    }
+}
+
+// Draw one 7-segment digit at top-left (x, y). w = digit width;
+// h = digit height; t = stroke thickness.
+function draw_digit(
+    ref ren: Renderer,
+    digit: int32, x: int32, y: int32,
+    w: int32, h: int32, t: int32
+): void {
+    let mask: int32 = seg_mask_for(digit);
+    let mid_y: int32 = y + (h - t) / 2;
+    let bottom_y: int32 = y + h - t;
+
+    // a -- top horizontal
+    if ((mask & 0b1000000) != 0) {
+        fill_rect(ref ren, x + t, y, w - 2 * t, t);
+    }
+    // b -- top-right vertical
+    if ((mask & 0b0100000) != 0) {
+        fill_rect(ref ren, x + w - t, y + t, t, mid_y - y - t);
+    }
+    // c -- bottom-right vertical
+    if ((mask & 0b0010000) != 0) {
+        fill_rect(ref ren, x + w - t, mid_y + t, t, bottom_y - mid_y - t);
+    }
+    // d -- bottom horizontal
+    if ((mask & 0b0001000) != 0) {
+        fill_rect(ref ren, x + t, bottom_y, w - 2 * t, t);
+    }
+    // e -- bottom-left vertical
+    if ((mask & 0b0000100) != 0) {
+        fill_rect(ref ren, x, mid_y + t, t, bottom_y - mid_y - t);
+    }
+    // f -- top-left vertical
+    if ((mask & 0b0000010) != 0) {
+        fill_rect(ref ren, x, y + t, t, mid_y - y - t);
+    }
+    // g -- middle horizontal
+    if ((mask & 0b0000001) != 0) {
+        fill_rect(ref ren, x + t, mid_y, w - 2 * t, t);
+    }
+}
+
+// Draw a signed integer right-anchored at (right_edge, y). Renders a
+// minus stub on the left if the value is negative, then up to three
+// decimal digits. Caller is responsible for setting the draw color.
+function draw_number(
+    ref ren: Renderer,
+    value: int32, right_edge: int32, y: int32,
+    w: int32, h: int32, t: int32, spacing: int32
+): void {
+    let abs_val: int32 = value;
+    let negative: bool = false;
+    if (value < 0) {
+        abs_val = -value;
+        negative = true;
+    }
+    // Collect up to 3 digits (low to high).
+    let d0: int32 = abs_val % 10;
+    let d1: int32 = (abs_val / 10) % 10;
+    let d2: int32 = (abs_val / 100) % 10;
+    let n_digits: int32 = 1;
+    if (abs_val >= 10)  { n_digits = 2; }
+    if (abs_val >= 100) { n_digits = 3; }
+
+    let x: int32 = right_edge - w;
+    draw_digit(ref ren, d0, x, y, w, h, t);
+    if (n_digits >= 2) {
+        x = x - (w + spacing);
+        draw_digit(ref ren, d1, x, y, w, h, t);
+    }
+    if (n_digits >= 3) {
+        x = x - (w + spacing);
+        draw_digit(ref ren, d2, x, y, w, h, t);
+    }
+    if (negative) {
+        x = x - (w + spacing);
+        let mid_y: int32 = y + (h - t) / 2;
+        fill_rect(ref ren, x + t, mid_y, w - 2 * t, t);
+    }
+}
+
+// ── Stars (drawn at night) ───────────────────────────────────────────────────
+
+// Cheap LCG (Numerical Recipes constants) so the star field is
+// deterministic per session. Range is exclusive upper bound.
+function next_rand(ref state: int32, range: int32): int32 {
+    state = state * 1103515245 + 12345;
+    let r: int32 = state % range;
+    if (r < 0) { r = r + range; }
+    return r;
+}
+
+const STAR_COUNT: int32 = 80;
+
+// Sprinkle stars across the upper portion of the sky. alpha is 0..255
+// and modulates how bright they are -- driven by how dark the sky is.
+function draw_stars(
+    ref ren: Renderer,
+    seed: int32, alpha: uint8
+): void {
+    if (alpha == 0) { return; }
+    SDL_SetRenderDrawColor(ren.handle, uint8(245), uint8(245), uint8(220), alpha);
+    let rng: int32 = seed;
+    let i: int32 = 0;
+    while (i < STAR_COUNT) {
+        let sx: int32 = next_rand(ref rng, WIN_W);
+        let sy: int32 = next_rand(ref rng, HORIZON_Y - 40);
+        SDL_RenderDrawPoint(ren.handle, sx, sy);
+        i = i + 1;
+    }
+}
+
+// Inverse of "how blue is the sky" -- night sky gets ~220 alpha for
+// stars; full daylight gets 0 (stars hidden).
+function star_alpha_for(hour: float64): uint8 {
+    if (hour < 5.0 || hour >= 21.0) { return uint8(220); }
+    if (hour < 6.5) {
+        let t: float64 = (hour - 5.0) / 1.5;
+        return uint8(int32(220.0 * (1.0 - t)));
+    }
+    if (hour >= 19.5) {
+        let t: float64 = (hour - 19.5) / 1.5;
+        return uint8(int32(220.0 * t));
+    }
+    return uint8(0);
+}
+
+// ── Ground (grass below the horizon) ─────────────────────────────────────────
+
+function draw_ground(ref ren: Renderer, hour: float64): void {
+    // Ground gets darker at night like everything else.
+    let day_g: Color3   = { r: 60,  g: 110, b: 50  };
+    let night_g: Color3 = { r: 14,  g: 28,  b: 16  };
+    let factor: float64 = 0.0;
+    if (hour >= 7.0 && hour <= 19.0) {
+        factor = 1.0;
+    } else if (hour >= 5.5 && hour < 7.0) {
+        factor = (hour - 5.5) / 1.5;
+    } else if (hour > 19.0 && hour <= 20.5) {
+        factor = 1.0 - (hour - 19.0) / 1.5;
+    }
+    let g: Color3 = lerp_color(night_g, day_g, factor);
+    SDL_SetRenderDrawColor(ren.handle, g.r, g.g, g.b, uint8(255));
+    fill_rect(ref ren, 0, HORIZON_Y, WIN_W, WIN_H - HORIZON_Y);
+}
+
+// ── Scene loop ────────────────────────────────────────────────────────────────
+//
+// Pulled into a separate function so the `let disposable` bindings for
+// Window + Renderer run their dispose() at this function's exit (LIFO:
+// ren first, then win) -- before the caller invokes SDL_Quit. Putting
+// them in main() would invert that order.
+
+function run_scene(temp: TempParse): void {
+    let disposable win: Window = {
+        handle: SDL_CreateWindow(
+            "yooperlang -- River Falls sky",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            WIN_W, WIN_H,
+            SDL_WINDOW_SHOWN
+        )
+    };
+    let disposable ren: Renderer = {
+        handle: SDL_CreateRenderer(
+            win.handle, -1,
+            SDL_RENDERER_ACCELERATED | SDL_RENDERER_PRESENTVSYNC
+        )
+    };
+    // Alpha-blend over the sky -- the sun shader emits semi-transparent
+    // halo pixels and we want them composited, not punched through.
+    SDL_SetRenderDrawBlendMode(ren.handle, SDL_BLENDMODE_BLEND);
+
+    // Streaming texture for the CPU "fragment shader" output. Allocated
+    // once and reused every frame via SDL_UpdateTexture.
+    let disposable sun_tex: Texture = {
+        handle: SDL_CreateTexture(
+            ren.handle,
+            SDL_PIXELFORMAT_ABGR8888,
+            SDL_TEXTUREACCESS_STREAMING,
+            SUN_TEX_DIM, SUN_TEX_DIM
+        )
+    };
+    SDL_SetTextureBlendMode(sun_tex.handle, SDL_BLENDMODE_BLEND);
+
+    // CPU pixel buffer the shader writes into. Heap-allocated and
+    // intentionally leaked at process exit -- short-running demo.
+    let sun_pixels: uint8[] = intr.heap_alloc(usize(SUN_TEX_DIM * SUN_TEX_DIM * 4));
+
+    // The star field's seed is fixed per run so the points don't
+    // dance frame-to-frame. (Random-then-cached would be nicer; a
+    // fixed seed is the cheapest stand-in.)
+    const STAR_SEED: int32 = 0x1A2B3C4D;
+
+    while (SDL_GetTicks() > 0) {
+        const frame_start: uint32 = SDL_GetTicks();
+
+        let kb_n: int = 0;
+        const keys: uint8[] = SDL_GetKeyboardState(ref kb_n);
+        if (keys[SDL_SCANCODE_ESCAPE] != 0) {
+            break;
+        }
+        SDL_PumpEvents();
+
+        let hr_i: int32 = yoop_local_hour();
+        let mn_i: int32 = yoop_local_minute();
+        let hour: float64 = float64(hr_i) + float64(mn_i) / 60.0;
+
+        // -- background sky --
+        let sky: Color3 = sky_color(hour);
+        SDL_SetRenderDrawColor(ren.handle, sky.r, sky.g, sky.b, uint8(255));
+        SDL_RenderClear(ren.handle);
+
+        // -- stars (only show at night, alpha-faded around twilight) --
+        draw_stars(ref ren, STAR_SEED, star_alpha_for(hour));
+
+        // -- sun (if above horizon) -- CPU per-pixel shader path --
+        let sun_t: float64 = sun_arc_t(hour);
+        if (sun_t >= 0.0) {
+            // Half-circle arc: x = lerp across, y = horizon - peak*sin.
+            let arc_peak: float64 = 320.0;
+            let sun_x: float64 = float64(WIN_W) * sun_t;
+            let sun_y: float64 = float64(HORIZON_Y) - arc_peak * sin(PI * sun_t);
+
+            // Update the CPU shader output for this frame and blit it
+            // centred on the sun's arc position.
+            shade_sun(ref sun_tex, sun_pixels, SDL_GetTicks());
+            let dst: SDL_Rect = {
+                x: int32(sun_x) - SUN_TEX_DIM / 2,
+                y: int32(sun_y) - SUN_TEX_DIM / 2,
+                w: SUN_TEX_DIM,
+                h: SUN_TEX_DIM,
+            };
+            SDL_RenderCopy(ren.handle, sun_tex.handle, null, &dst);
+        }
+
+        // -- moon (if above horizon) --
+        let moon_t: float64 = moon_arc_t(hour);
+        if (moon_t >= 0.0) {
+            let arc_peak: float64 = 300.0;
+            let moon_x: float64 = float64(WIN_W) * moon_t;
+            let moon_y: float64 = float64(HORIZON_Y) - arc_peak * sin(PI * moon_t);
+            draw_moon(ref ren, int32(moon_x), int32(moon_y), 40, sky);
+        }
+
+        // -- ground --
+        draw_ground(ref ren, hour);
+
+        // -- temperature read-out (top-right corner) --
+        if (temp.ok) {
+            SDL_SetRenderDrawColor(
+                ren.handle, uint8(255), uint8(255), uint8(255), uint8(255)
+            );
+            draw_number(
+                ref ren, temp.value,
+                /*right_edge=*/ WIN_W - 24,
+                /*y=*/ 24,
+                /*w=*/ 28, /*h=*/ 50, /*t=*/ 6, /*spacing=*/ 6
+            );
+            // Small "F" suffix glyph, hand-drawn from rects.
+            let fx: int32 = WIN_W - 18;
+            let fy: int32 = 24;
+            fill_rect(ref ren, fx, fy, 14, 6);          // top bar
+            fill_rect(ref ren, fx, fy, 6, 50);           // left vertical
+            fill_rect(ref ren, fx, fy + 22, 12, 6);     // middle bar
+        }
+
+        SDL_RenderPresent(ren.handle);
+
+        const elapsed: uint32 = SDL_GetTicks() - frame_start;
+        if (elapsed < MS_PER_FRAME) {
+            SDL_Delay(MS_PER_FRAME - elapsed);
+        }
+    }
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+function main(): int32 {
+    let temp: TempParse = fetch_temperature();
+    if (temp.ok) {
+        printf("River Falls, WI: %d F\n", temp.value);
+    } else {
+        printf("No temperature available -- showing scene without it.\n");
+    }
+
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        printf("SDL_Init failed\n");
+        return 1;
+    }
+
+    run_scene(temp);
+    SDL_Quit();
+    printf("Exiting cleanly\n");
+    return 0;
+}

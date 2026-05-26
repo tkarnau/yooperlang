@@ -1694,7 +1694,15 @@ export function parse(src) {
 
   function parseExpression(minPrecedence = 0) {
     let node;
-    // unary first
+    // Arithmetic / logical unary prefixes (`-x`, `!x`, `~x`). Each builds
+    // its unary node by recursing with high precedence (70) so the operand
+    // captures any postfix tightly, then *falls through* to the binary +
+    // assignment loop below. Returning early here was a parser bug -
+    // `!a && b` would terminate after `!a` and the trailing `&& b` would
+    // hit "expected semicolon, got andand" (see plans/yoopbinder-papercuts.md
+    // Issue 1). Chained into the same prefix if/else group as
+    // `amp`/`mult`/`null` below so the trailing `else { primary chain }`
+    // is only entered when no prefix matched.
     if (peek().tag === TokenTags.minus) {
       advance(); // consume the dash
       const operand = parseExpression(70);
@@ -1702,61 +1710,52 @@ export function parse(src) {
         operand.kind === ASTNodeKind.INT_LITERAL ||
         operand.kind === ASTNodeKind.FLOAT_LITERAL
       ) {
+        // Constant-fold `-<literal>` so the operand carries the negative
+        // value directly.
         operand.value = -operand.value;
-        return operand;
+        node = operand;
+      } else {
+        const minusNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
+        minusNode.op = "minus";
+        minusNode.operand = operand;
+        node = minusNode;
       }
-
-      // non-literal operands, build unary expression node
-      node = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
-      node.op = "minus";
-      node.operand = operand;
-
-      return node;
-    }
-
-    // Phase 9.B: prefix `!x` - logical NOT. High precedence so postfixes
-    // bind to the operand (e.g. `!flags[i]` parses as `!(flags[i])`).
-    if (peek().tag === TokenTags.bang) {
+    } else if (peek().tag === TokenTags.bang) {
+      // Phase 9.B: prefix `!x` - logical NOT.
       advance();
       const notNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
       notNode.op = "not";
       notNode.operand = parseExpression(70);
-      return notNode;
-    }
-
-    // Phase 9: prefix `~x` - bitwise NOT. Same shape as `!`, restricted to
-    // integer operands by the typechecker.
-    if (peek().tag === TokenTags.tilde) {
+      node = notNode;
+    } else if (peek().tag === TokenTags.tilde) {
+      // Phase 9: prefix `~x` - bitwise NOT. Restricted to integer
+      // operands by the typechecker.
       advance();
       const bitnotNode = buildSourcedNode(ASTNodeKind.UNARY_EXPRESSION);
       bitnotNode.op = "bitnot";
       bitnotNode.operand = parseExpression(70);
-      return bitnotNode;
-    }
-
-    // ref x - parse lvalue address operand with high precedence so postfixes bind tightly
-    if (peek().tag === TokenTags.ref) {
+      node = bitnotNode;
+    } else if (peek().tag === TokenTags.ref) {
+      // ref x - parse lvalue address operand with high precedence so
+      // postfixes bind tightly. Returns early because `ref T` isn't an
+      // operand for binary operators - the typechecker rejects it.
       advance();
       const refNode = buildSourcedNode(ASTNodeKind.REF_EXPRESSION);
       refNode.operand = parseExpression(70);
       return refNode;
-    }
-
-    // wait x - task handle await; same tight precedence as ref
-    if (peek().tag === TokenTags.wait) {
+    } else if (peek().tag === TokenTags.wait) {
+      // wait x - task handle await; same tight precedence as ref.
       advance();
       const waitNode = buildSourcedNode(ASTNodeKind.WAIT_EXPRESSION);
       waitNode.operand = parseExpression(70);
       return waitNode;
-    }
-
-    // Phase 8.A: prefix `&x` - address-of an lvalue. Same tight precedence
-    // as `ref` so postfixes bind to the operand. The `&` token also serves
-    // as bitwise-AND in binary position; that's parsed by the precedence
-    // climber and never reaches this primary path. We fall through to the
-    // postfix + assignment check so address-of expressions still flow
-    // through the usual end-of-primary path.
-    if (peek().tag === TokenTags.amp) {
+    } else if (peek().tag === TokenTags.amp) {
+      // Phase 8.A: prefix `&x` - address-of an lvalue. Same tight precedence
+      // as `ref` so postfixes bind to the operand. The `&` token also serves
+      // as bitwise-AND in binary position; that's parsed by the precedence
+      // climber and never reaches this primary path. We fall through to the
+      // postfix + assignment check so address-of expressions still flow
+      // through the usual end-of-primary path.
       advance();
       const addrNode = buildSourcedNode(ASTNodeKind.ADDRESS_OF_EXPRESSION);
       addrNode.operand = parseExpression(70);
@@ -1772,9 +1771,7 @@ export function parse(src) {
       // Phase 8.A: `null` literal. Type pinned by context.
       advance();
       node = buildSourcedNode(ASTNodeKind.NULL_LITERAL);
-    } else
-
-    if (peek().tag === TokenTags.intLiteral) {
+    } else if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
     } else if (

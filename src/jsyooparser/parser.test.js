@@ -120,6 +120,52 @@ describe("parse: expressions", () => {
     assert.equal(e.operand.kind, ASTNodeKind.BINARY_EXPRESSION);
   });
 
+  // Regression: unary prefixes used to return early instead of falling
+  // through to the binary loop, so `!a && b`, `-a + b`, `~a & b` failed
+  // to parse. See plans/yoopbinder-papercuts.md Issue 1.
+  it("`!a && b` parses as `&&((!a), b)` not as a syntax error", () => {
+    const e = exprOf("!a && b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "andand");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "not");
+    assert.equal(e.right.kind, ASTNodeKind.IDENT);
+  });
+
+  it("`-a + b` composes unary minus with binary plus", () => {
+    const e = exprOf("-a + b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "plus");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "minus");
+    assert.equal(e.right.kind, ASTNodeKind.IDENT);
+  });
+
+  it("`~a & b` composes bitwise not with bitwise and", () => {
+    const e = exprOf("~a & b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "amp");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "bitnot");
+  });
+
+  it("`!a || !b` chains unary not on both sides", () => {
+    const e = exprOf("!a || !b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "oror");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "not");
+    assert.equal(e.right.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.right.op, "not");
+  });
+
+  it("`!flags[i]` keeps the postfix binding tight to the operand", () => {
+    const e = exprOf("!flags[i]");
+    assert.equal(e.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.op, "not");
+    assert.equal(e.operand.kind, ASTNodeKind.INDEX_EXPRESSION);
+  });
+
   // Phase 9.E: array slice syntax
   it("plain index parses as INDEX_EXPRESSION", () => {
     const e = exprOf("xs[5]");

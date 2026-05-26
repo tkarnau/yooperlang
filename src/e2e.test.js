@@ -97,6 +97,29 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "a=20\nb=20\nc=20\ne=99 f=200\n");
   });
 
+  it("generic_call_struct_lit.yoop: struct literals get target type from generic arg position", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_call_struct_lit.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "v[0]=(1,2)\n" +
+        "v[1]=(3,4)\n" +
+        "v[2]=(5,6)\n",
+    );
+  });
+
+  it("enum_eq.yoop: `==` / `!=` on enums lower to tag comparison", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/enum_eq.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Red==Red\n" +
+        "Red!=Green\n" +
+        "Circle(5)==Circle(99) (tag-only)\n" +
+        "Circle!=Square\n",
+    );
+  });
+
   it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", () => {
     const { stdout, exitCode } = runFixture("examples/pass/operators_full.yoop");
     assert.equal(exitCode, 0);

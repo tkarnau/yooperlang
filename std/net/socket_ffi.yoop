@@ -79,6 +79,10 @@ extern "C" from "yoop_runtime" {
     // different numeric values on Linux vs macOS, so we resolve them in
     // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
     function yoop_net_set_reuseaddr(fd: c_int): c_int;
+    // Resolve a hostname (or numeric dotted-quad) to a dotted-quad IPv4
+    // string. Returns "" on failure. Used by ffi_connect so callers can
+    // dial out to hostnames without pre-resolving themselves.
+    function yoop_net_resolve_ipv4(name: string): string;
 }
 
 // ----- helpers exposed to safe wrappers ------------------------------------
@@ -195,7 +199,19 @@ export enum ConnectOutcome {
 }
 
 export function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
-    let built: Result<SockAddrIn, string> = build_sockaddr(host, port);
+    // inet_addr only handles dotted-quad. If that fails, fall back to a
+    // DNS lookup via the runtime helper. Numeric hosts skip the resolve
+    // and dial directly.
+    let dial_host: string = host;
+    let probe: uint32 = inet_addr(host);
+    if (probe == 4294967295) {
+        let resolved: string = yoop_net_resolve_ipv4(host);
+        if (resolved.len == 0) {
+            return ConnectOutcome.Err { error: "ffi_connect: DNS resolution failed" };
+        }
+        dial_host = resolved;
+    }
+    let built: Result<SockAddrIn, string> = build_sockaddr(dial_host, port);
     let addr: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
     switch (built) {
         case Result.Ok { value: ok_addr }: { addr = ok_addr; }

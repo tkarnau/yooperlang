@@ -2639,8 +2639,21 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
 
   // First pass: resolve each arg's type (without pinning untyped literals)
   // so we can do unification on concrete shapes.
+  //
+  // Struct-literal args are DEFERRED: a bare `{ field: 1, ... }` has no
+  // standalone type (resolveOrphanStructLiteral would emit "struct literal
+  // has no target type"), but the param's substituted type after
+  // unification IS the target. Stash these indices and check them in
+  // the second pass once we know T. See plans/yoopbinder-papercuts.md
+  // Issue 2.
   const argTypes = [];
+  const deferredStructLits = new Set();
   for (let i = 0; i < node.args.length; i++) {
+    if (node.args[i].kind === ASTNodeKind.STRUCT_LITERAL) {
+      deferredStructLits.add(i);
+      argTypes.push(ErrorType());
+      continue;
+    }
     const argType = resolveExprType(node.args[i], scope, ctx);
     argTypes.push(argType);
   }
@@ -2721,7 +2734,9 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
   }
 
   // Second pass: now that we know the substituted param types, check arg
-  // assignability and pin untyped literals.
+  // assignability and pin untyped literals. Deferred struct literals
+  // (see first-pass note) get their target type from the concrete param
+  // type and flow through checkInitializer / pinStructLiteral.
   for (let i = 0; i < inst.funcType.params.length; i++) {
     const param = inst.funcType.params[i];
     const argNode = node.args[i];
@@ -2744,6 +2759,22 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
         );
       }
       argNode.resolvedType = param.type;
+      continue;
+    }
+    if (deferredStructLits.has(i)) {
+      // Pin `{ ... }` to the now-known concrete param type. If the param
+      // didn't turn out to be a struct, the struct literal can't fit there
+      // - flag it explicitly rather than letting pinStructLiteral spew
+      // about a non-struct target.
+      if (param.type.kind !== typeKinds.struct) {
+        pushError(
+          ctx.errors,
+          argNode,
+          `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": struct literal cannot be passed where ${formatType(param.type)} is expected`,
+        );
+        continue;
+      }
+      checkInitializer(argNode, param.type, scope, ctx);
       continue;
     }
     if (argTypes[i].kind === typeKinds.error) continue;

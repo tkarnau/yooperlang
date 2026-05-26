@@ -251,6 +251,18 @@ export function unifyArith(left, right, op) {
     return null;
   }
 
+  // Enum equality: tag comparison. Both sides must be the same enum
+  // type. Payload-bearing variants compare *tags only* - structural
+  // comparison of payloads is a follow-up (use `switch` for that today;
+  // see plans/yoopbinder-papercuts.md Issue 3). Codegen lowers this to
+  // `icmp eq i32 tag_a, tag_b`.
+  if (op === "eqeq" || op === "neq") {
+    if (left.kind === typeKinds.enum && right.kind === typeKinds.enum) {
+      if (typesEqual(left, right)) return PrimType(primAnnotations.bool);
+      return null; // mismatched enum types
+    }
+  }
+
   if (isBitwise) {
     // Both operands must be integer (typed or untyped). No floats, no bools.
     const isIntish = (t) =>

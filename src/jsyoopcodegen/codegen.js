@@ -968,6 +968,28 @@ export function codegen(ast) {
         if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
           return emitPointerBinary(node, fnLines);
         }
+        // Enum equality: extract the i32 tag from each operand and icmp.
+        // Typecheck has already verified both sides are the same enum
+        // type (see plans/yoopbinder-papercuts.md Issue 3). Payloads are
+        // intentionally not compared - tag-only matches the documented
+        // semantics; structural payload comparison stays a `switch` job.
+        if (
+          (node.op === "eqeq" || node.op === "neq") &&
+          leftTy?.kind === typeKinds.enum &&
+          rightTy?.kind === typeKinds.enum
+        ) {
+          const l = emitExpr(node.left, fnLines);
+          const r = emitExpr(node.right, fnLines);
+          const enumLlvm = llvmType(leftTy);
+          const lTag = freshTemp();
+          const rTag = freshTemp();
+          fnLines.push(`  ${lTag} = extractvalue ${enumLlvm} ${l.val}, 0`);
+          fnLines.push(`  ${rTag} = extractvalue ${enumLlvm} ${r.val}, 0`);
+          const cond = node.op === "eqeq" ? "eq" : "ne";
+          const out = freshTemp();
+          fnLines.push(`  ${out} = icmp ${cond} i32 ${lTag}, ${rTag}`);
+          return { val: out, yoopType: PrimType("bool") };
+        }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const resultType = node.resolvedType;
@@ -3819,6 +3841,25 @@ function codegenWithModuleId(
           rightTy?.kind === typeKinds.untypedNull
         ) {
           return emitPointerBinaryMM(node, fnLines);
+        }
+        // Enum tag-comparison branch (mirror of the single-module path
+        // above). See plans/yoopbinder-papercuts.md Issue 3.
+        if (
+          (node.op === "eqeq" || node.op === "neq") &&
+          leftTy?.kind === typeKinds.enum &&
+          rightTy?.kind === typeKinds.enum
+        ) {
+          const l = emitExpr(node.left, fnLines);
+          const r = emitExpr(node.right, fnLines);
+          const enumLlvm = llvmType(leftTy);
+          const lTag = freshTemp();
+          const rTag = freshTemp();
+          fnLines.push(`  ${lTag} = extractvalue ${enumLlvm} ${l.val}, 0`);
+          fnLines.push(`  ${rTag} = extractvalue ${enumLlvm} ${r.val}, 0`);
+          const cond = node.op === "eqeq" ? "eq" : "ne";
+          const out = freshTemp();
+          fnLines.push(`  ${out} = icmp ${cond} i32 ${lTag}, ${rTag}`);
+          return { val: out, yoopType: PrimType("bool") };
         }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
