@@ -716,7 +716,7 @@ function run_scene(temp: TempParse): void {
         }
         SDL_PumpEvents();
 
-        let hr_i: int32 = yoop_local_hour();
+        let hr_i: int32 = 8;// yoop_local_hour();
         let mn_i: int32 = yoop_local_minute();
         let hour: float64 = float64(hr_i) + float64(mn_i) / 60.0;
 

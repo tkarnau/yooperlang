@@ -35,7 +35,7 @@ import * as strings from "std/core/strings.yoop";
 import * as format from "std/core/format.yoop";
 import * as vec from "std/core/vec.yoop";
 import { Vec } from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 
 // ── extern C surface ─────────────────────────────────────────────────────────
 
@@ -67,6 +67,8 @@ type Args {
     library_name: string,    // value for `from library "..."`
     header_label: string,    // value for `from "..."` (when no --lib)
     use_library:  bool,      // true if --lib supplied; otherwise emit `from "<header>"`
+    prefix:       string,    // optional macro / decl name prefix filter (e.g. "GL_")
+    no_macros:    bool,      // skip the `clang -E -dM` macro pass
     ok:           bool,
     error:        string,
 }
@@ -78,6 +80,8 @@ function default_args(): Args {
         library_name: "",
         header_label: "",
         use_library:  false,
+        prefix:       "",
+        no_macros:    false,
         ok:           false,
         error:        "",
     };
@@ -111,6 +115,15 @@ function parse_argv(): Args {
                 return a;
             }
             a.header_label = yoop_argv(i);
+        } else if (strings.string_eq(arg, "--prefix")) {
+            i = i + 1;
+            if (i >= ac) {
+                a.error = "missing value for --prefix";
+                return a;
+            }
+            a.prefix = yoop_argv(i);
+        } else if (strings.string_eq(arg, "--no-macros")) {
+            a.no_macros = true;
         } else if (a.header_path.len == 0) {
             a.header_path = arg;
         } else {
@@ -161,6 +174,19 @@ function run_clang_preprocess(header_path: string): Vec<uint8> propagates<dispos
     // language has no ref-T null check today; the language_showcase
     // example uses the same convention).
     let cmd: string = strings.string_concat_all(["clang -E -P \"", header_path, "\""]);
+    let fp: unsafe_ptr<FILE> = popen(cmd, "r");
+    let buf: Vec<uint8> = read_pipe_all(fp);
+    let _rc: int32 = pclose(fp);
+    return buf;
+}
+
+// `clang -E -dM` dumps every macro definition active at the end of the
+// translation unit (rather than the preprocessed source itself). Used
+// for the constant-extraction pass: `#define GL_VERTEX_SHADER 0x8B31`
+// in the input becomes `const GL_VERTEX_SHADER: uint32 = 0x8B31;` in
+// the output.
+function run_clang_macros(header_path: string): Vec<uint8> propagates<disposable> {
+    let cmd: string = strings.string_concat_all(["clang -E -dM \"", header_path, "\""]);
     let fp: unsafe_ptr<FILE> = popen(cmd, "r");
     let buf: Vec<uint8> = read_pipe_all(fp);
     let _rc: int32 = pclose(fp);
@@ -808,6 +834,203 @@ function parse_function_decl(toks: CTok[], start: usize, end: usize): ParsedFn {
     return r;
 }
 
+// ── macro scanner ────────────────────────────────────────────────────────────
+//
+// Parses `clang -E -dM` output line-by-line. A line shape we accept:
+//
+//     #define NAME       42
+//     #define NAME       0xDEAD
+//     #define NAME       -7
+//
+// Skipped (logged in skipped count):
+//   * function-like macros: `#define NAME(args) body` -- `(` immediately
+//     after NAME signals these
+//   * non-numeric values: strings, char literals, expressions, macro refs
+//   * compiler-internal names (anything starting with `__` or `_<UPPER>`),
+//     which dominate the `-dM` output but are never user API
+//
+// Numeric detection is intentionally conservative -- the gain from picking
+// up `(1<<3)` style expressions doesn't justify pulling a real C expression
+// parser into the binder for v0. The user can add those by hand.
+
+type MacroConst {
+    name:      string,
+    yoop_type: string,    // "int32" or "uint32"
+    value:     string,    // raw textual value (preserves hex form)
+}
+
+function is_hex_char(c: uint8): bool {
+    if (c >= 48 && c <= 57)  { return true; }   // 0-9
+    if (c >= 65 && c <= 70)  { return true; }   // A-F
+    if (c >= 97 && c <= 102) { return true; }   // a-f
+    return false;
+}
+
+// True if a `#define`-introduced name is one we should keep. Compiler
+// builtins and stdlib internals start with `_<UPPER>` or `__`; user APIs
+// almost never do. (`_Bool` etc. are reserved keywords, not API names.)
+function macro_name_keeps(name: string): bool {
+    if (name.len < 1) { return false; }
+    let bs: uint8[] = intr.string_as_bytes(name);
+    if (bs[0] == 95) {       // '_'
+        if (bs.len >= 2 && bs[1] == 95) { return false; }    // __FOO
+        if (bs.len >= 2 && bs[1] >= 65 && bs[1] <= 90) {
+            return false;     // _FOO (reserved-ish; mostly libc internals)
+        }
+    }
+    return true;
+}
+
+// Strip C integer suffixes (U, L, UL, LU, ULL, LLU, in any case mix).
+// Returns the cleaned numeric core.
+function strip_int_suffix(s: string): string {
+    let bs: uint8[] = intr.string_as_bytes(s);
+    let end: usize = bs.len;
+    while (end > 0) {
+        let c: uint8 = bs[end - 1];
+        let is_suf: bool = c == 85 || c == 117 || c == 76 || c == 108;
+        if (!is_suf) { break; }
+        end = end - 1;
+    }
+    let view: uint8[] = bytes.bytes_slice(bs, 0, end);
+    return intr.string_from_bytes_unchecked(view);
+}
+
+// Try to parse `value_str` as a numeric literal we can emit. Returns
+// yoop_type = "" if the value isn't a recognized form.
+type NumericClass { yoop_type: string, value_clean: string }
+
+function classify_numeric(value_str: string): NumericClass {
+    if (value_str.len == 0) {
+        return { yoop_type: "", value_clean: "" };
+    }
+    let bs: uint8[] = intr.string_as_bytes(value_str);
+    // Optional leading `-` (for decimal negatives).
+    let neg: bool = bs[0] == 45;
+    let start: usize = 0;
+    if (neg) { start = 1; }
+    if (start >= bs.len) { return { yoop_type: "", value_clean: "" }; }
+
+    // Hex literal: 0x... or 0X...
+    let is_hex: bool = false;
+    if (bs.len - start >= 3 && bs[start] == 48) {
+        if (bs[start + 1] == 120 || bs[start + 1] == 88) {     // 'x' / 'X'
+            is_hex = true;
+        }
+    }
+
+    if (is_hex) {
+        // After 0x, every char must be hex (until the suffix).
+        let view_no_suf: string = strip_int_suffix(value_str);
+        let bsv: uint8[] = intr.string_as_bytes(view_no_suf);
+        let i: usize = start + 2;
+        if (i >= bsv.len) { return { yoop_type: "", value_clean: "" }; }
+        let digit_count: usize = 0;
+        while (i < bsv.len) {
+            if (!is_hex_char(bsv[i])) {
+                return { yoop_type: "", value_clean: "" };
+            }
+            i = i + 1;
+            digit_count = digit_count + 1;
+        }
+        // Hex literals map to uint32 (matches GL / SDL convention) by
+        // default. Anything wider (>8 hex digits, i.e. >0xFFFFFFFF) goes
+        // to uint64 so OpenGL sentinels like GL_TIMEOUT_IGNORED fit.
+        // Negative-hex is unusual and rejected.
+        if (neg) { return { yoop_type: "", value_clean: "" }; }
+        let ty: string = "uint32";
+        if (digit_count > 8) { ty = "uint64"; }
+        return { yoop_type: ty, value_clean: view_no_suf };
+    }
+
+    // Decimal: every remaining char must be a digit (after suffix strip).
+    let dec_no_suf: string = strip_int_suffix(value_str);
+    let bsd: uint8[] = intr.string_as_bytes(dec_no_suf);
+    let j: usize = start;
+    if (j >= bsd.len) { return { yoop_type: "", value_clean: "" }; }
+    while (j < bsd.len) {
+        let c: uint8 = bsd[j];
+        if (c < 48 || c > 57) {
+            return { yoop_type: "", value_clean: "" };
+        }
+        j = j + 1;
+    }
+    return { yoop_type: "int32", value_clean: dec_no_suf };
+}
+
+// Scan a `#define NAME [VALUE]` line. Returns a MacroConst with
+// yoop_type == "" if the line isn't an emittable numeric macro.
+//
+// Layout assumptions (from `clang -E -dM`):
+//   * line starts with the literal `#define ` (8 bytes)
+//   * NAME is identifier chars with no embedded whitespace
+//   * a function-like macro has `(` immediately after NAME (no space)
+//   * VALUE is separated from NAME by exactly one space and runs to EOL
+//   * `clang -E -dM` does NOT preserve original spacing; the format is
+//     deterministic enough to scan without a real lexer
+function parse_macro_line(line: uint8[]): MacroConst {
+    let empty: MacroConst = { name: "", yoop_type: "", value: "" };
+    let prefix: uint8[] = intr.string_as_bytes("#define ");
+    if (!bytes.bytes_starts_with(line, prefix)) {
+        return empty;
+    }
+    let pos: usize = prefix.len;
+    // Read NAME.
+    let name_start: usize = pos;
+    while (pos < line.len) {
+        let c: uint8 = line[pos];
+        let id_char: bool = is_ident_cont(c);
+        if (!id_char) { break; }
+        pos = pos + 1;
+    }
+    if (pos == name_start) { return empty; }
+    let name_bytes: uint8[] = bytes.bytes_slice(line, name_start, pos);
+    let name: string = intr.string_from_bytes_unchecked(name_bytes);
+    // Function-like? `(` immediately after name.
+    if (pos < line.len && line[pos] == 40) {     // '('
+        return empty;
+    }
+    // Skip exactly one space.
+    if (pos < line.len && line[pos] == 32) { pos = pos + 1; }
+    // VALUE runs to EOL.
+    let val_bytes: uint8[] = bytes.bytes_slice(line, pos, line.len);
+    let value: string = intr.string_from_bytes_unchecked(val_bytes);
+    let cls: NumericClass = classify_numeric(value);
+    if (cls.yoop_type.len == 0) {
+        return empty;
+    }
+    let out: MacroConst = {
+        name: name,
+        yoop_type: cls.yoop_type,
+        value: cls.value_clean,
+    };
+    return out;
+}
+
+function scan_macros(src: uint8[], prefix: string): Vec<MacroConst> propagates<disposable> {
+    let out: Vec<MacroConst> = vec.vec_new(64);
+    let pos: usize = 0;
+    while (pos < src.len) {
+        // Find end-of-line.
+        let line_end: usize = pos;
+        while (line_end < src.len && src[line_end] != 10) {
+            line_end = line_end + 1;
+        }
+        let line: uint8[] = bytes.bytes_slice(src, pos, line_end);
+        let m: MacroConst = parse_macro_line(line);
+        if (m.yoop_type.len > 0) {
+            if (macro_name_keeps(m.name)) {
+                let keep: bool = prefix.len == 0 || strings.string_starts_with(m.name, prefix);
+                if (keep) {
+                    vec.vec_push(ref out, m);
+                }
+            }
+        }
+        pos = line_end + 1;
+    }
+    return out;
+}
+
 // ── emitter ──────────────────────────────────────────────────────────────────
 
 function render_function(f: ParsedFn): string {
@@ -839,20 +1062,41 @@ function render_function(f: ParsedFn): string {
     return strings.string_concat_all(vec.vec_as_array(ref parts));
 }
 
-function emit_output(out_path: string, header: string, fns: ParsedFn[], skipped: int32, args: Args): void {
-    let disposable parts: Vec<string> = vec.vec_new(fns.len * 6 + 16);
+function emit_output(out_path: string, header: string, fns: ParsedFn[], skipped: int32, macros: MacroConst[], args: Args): void {
+    let disposable parts: Vec<string> = vec.vec_new(fns.len * 6 + macros.len * 6 + 16);
 
     vec.vec_push(ref parts, "// Generated by yoopbinder from ");
     vec.vec_push(ref parts, header);
     vec.vec_push(ref parts, "\n");
     vec.vec_push(ref parts, "// ");
     vec.vec_push(ref parts, format.int_to_string(int64(fns.len)));
-    vec.vec_push(ref parts, " function(s) emitted, ");
+    vec.vec_push(ref parts, " function(s), ");
+    vec.vec_push(ref parts, format.int_to_string(int64(macros.len)));
+    vec.vec_push(ref parts, " constant(s) emitted, ");
     vec.vec_push(ref parts, format.int_to_string(int64(skipped)));
     vec.vec_push(ref parts, " declaration(s) skipped.\n");
     vec.vec_push(ref parts, "//\n");
     vec.vec_push(ref parts, "// Unknown identifiers (struct tags, typedefs we did not\n");
     vec.vec_push(ref parts, "// resolve, etc.) pass through verbatim -- adjust by hand.\n\n");
+
+    // Constants come first so they can be referenced from the extern
+    // block's function signatures (e.g. `function f(flags: uint32)` where
+    // a caller passes `GL_VERTEX_SHADER`).
+    let mi: usize = 0;
+    while (mi < macros.len) {
+        let m: MacroConst = macros[mi];
+        vec.vec_push(ref parts, "const ");
+        vec.vec_push(ref parts, m.name);
+        vec.vec_push(ref parts, ": ");
+        vec.vec_push(ref parts, m.yoop_type);
+        vec.vec_push(ref parts, " = ");
+        vec.vec_push(ref parts, m.value);
+        vec.vec_push(ref parts, ";\n");
+        mi = mi + 1;
+    }
+    if (macros.len > 0) {
+        vec.vec_push(ref parts, "\n");
+    }
 
     if (args.use_library) {
         vec.vec_push(ref parts, "extern \"C\" from library \"");
@@ -932,6 +1176,27 @@ function main(): int32 {
     }
 
     let fns: ParsedFn[] = vec.vec_as_array(ref fns_v);
-    emit_output(args.output_path, args.header_path, fns, skipped, args);
+
+    // Second pass: macro extraction via `clang -E -dM`. Skipped if the
+    // user passed `--no-macros` (useful when noise from system headers
+    // would drown the signal and they only want function decls).
+    let disposable macros_v: Vec<MacroConst> = vec.vec_new(64);
+    if (!args.no_macros) {
+        let disposable mac_src: Vec<uint8> = run_clang_macros(args.header_path);
+        let mac_arr: uint8[] = vec.vec_as_array(ref mac_src);
+        let scanned: Vec<MacroConst> = scan_macros(mac_arr, args.prefix);
+        // Transfer scanned -> macros_v so a single disposable owns it.
+        let scanned_view: MacroConst[] = vec.vec_as_array(ref scanned);
+        let mj: usize = 0;
+        while (mj < scanned_view.len) {
+            vec.vec_push(ref macros_v, scanned_view[mj]);
+            mj = mj + 1;
+        }
+        Disposable.dispose(ref scanned);
+        printf(`yoopbinder: ${int64(macros_v.len)} numeric macro(s) kept\n`);
+    }
+    let macros: MacroConst[] = vec.vec_as_array(ref macros_v);
+
+    emit_output(args.output_path, args.header_path, fns, skipped, macros, args);
     return 0;
 }
