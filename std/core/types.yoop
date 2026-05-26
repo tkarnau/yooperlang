@@ -10,12 +10,12 @@
 // `Result`'s naming-by-content (`Some`/`None` not `Ok`/`Err`) so `?`
 // doesn't apply - an `Option` doesn't carry an error to propagate.
 
-export enum Result<T, E> {
+export variant Result<T, E> {
     Ok { value: T },
     Err { error: E },
 }
 
-export enum Option<T> {
+export variant Option<T> {
     Some { value: T },
     None,
 }

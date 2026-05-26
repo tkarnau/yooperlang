@@ -45,9 +45,9 @@ import {
 import { pushError, formatType } from "./errors.js";
 import { lookupInScope } from "./scope.js";
 import {
-  isFallibleEnum,
-  strippedEnumOkType,
-  enumErrPayloadType,
+  isFallibleVariant,
+  strippedVariantOkType,
+  variantErrPayloadType,
 } from "./fallible.js";
 import {
   coerceUntypedLiteralToTyped,
@@ -55,7 +55,7 @@ import {
   isNumeric,
   unifyArith,
 } from "./coerce.js";
-import { instantiateEnum, instantiateFunc, mangleType } from "./instantiate.js";
+import { instantiateVariant, instantiateFunc, mangleType } from "./instantiate.js";
 import { checkBoundSatisfied, walkTraitExtends } from "./typecheck.js";
 import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
@@ -546,6 +546,8 @@ function resolveUnary(node, scope, ctx) {
   }
 
   // Phase 9: bitwise NOT - integer types only, returns the same type.
+  // Phase 12: also accepted on integer-backed value enums - returns the
+  // same enum type. String-backed enums reject.
   if (node.op === "bitnot") {
     if (
       operandType.kind === typeKinds.prim &&
@@ -554,6 +556,13 @@ function resolveUnary(node, scope, ctx) {
       return setType(node, operandType);
     }
     if (operandType.kind === typeKinds.untypedInt) {
+      return setType(node, operandType);
+    }
+    if (
+      operandType.kind === typeKinds.valueEnum &&
+      operandType.underlying?.kind === typeKinds.prim &&
+      isIntPrim(operandType.underlying.name)
+    ) {
       return setType(node, operandType);
     }
     pushError(
@@ -940,7 +949,7 @@ function resolveFieldAccess(node, scope, ctx) {
   // Phase 7.5: bare `EnumName.Variant` (no payload). Detect before
   // resolveExprType on the IDENT object would error with "undefined variable".
   if (node.object.kind === ASTNodeKind.IDENT) {
-    const maybeEnum = lookupEnumByName(node.object.name, ctx);
+    const maybeEnum = lookupVariantTypeByName(node.object.name, ctx);
     if (maybeEnum) {
       const variant = maybeEnum.variants.get(node.field);
       const fieldLoc = node.fieldSourceLoc ?? node;
@@ -948,7 +957,7 @@ function resolveFieldAccess(node, scope, ctx) {
         pushError(
           ctx.errors,
           fieldLoc,
-          `enum "${maybeEnum.name}" has no variant "${node.field}"`,
+          `variant "${maybeEnum.name}" has no case "${node.field}"`,
         );
         return setType(node, ErrorType());
       }
@@ -965,7 +974,7 @@ function resolveFieldAccess(node, scope, ctx) {
       node.enumName = node.object.name;
       node.variantName = node.field;
       node.fields = null;
-      node.resolvedEnumType = maybeEnum;
+      node.resolvedVariantType = maybeEnum;
       node.resolvedVariant = variant;
       // Clean up FIELD_ACCESS-specific properties (best-effort tidiness).
       delete node.object;
@@ -976,7 +985,7 @@ function resolveFieldAccess(node, scope, ctx) {
     // to an unpinned VARIANT_CONSTRUCTOR; checkInitializer will pin it to a
     // concrete instantiation against the target type. Without a target type
     // (statement-position use), resolveVariantConstructor reports an error.
-    const maybeGenericEnum = lookupGenericEnumDecl(node.object.name, ctx);
+    const maybeGenericEnum = lookupGenericVariantDecl(node.object.name, ctx);
     if (maybeGenericEnum) {
       const variant = maybeGenericEnum.genericVariants?.get(node.field);
       const fieldLoc = node.fieldSourceLoc ?? node;
@@ -984,7 +993,7 @@ function resolveFieldAccess(node, scope, ctx) {
         pushError(
           ctx.errors,
           fieldLoc,
-          `enum "${maybeGenericEnum.name}" has no variant "${node.field}"`,
+          `variant "${maybeGenericEnum.name}" has no case "${node.field}"`,
         );
         return setType(node, ErrorType());
       }
@@ -1000,11 +1009,36 @@ function resolveFieldAccess(node, scope, ctx) {
       node.enumName = node.object.name;
       node.variantName = node.field;
       node.fields = null;
-      // resolvedEnumType / resolvedVariant left unset - pinning happens in
+      // resolvedVariantType / resolvedVariant left unset - pinning happens in
       // checkInitializer (or resolveVariantConstructor reports an error).
       delete node.object;
       delete node.field;
       return resolveVariantConstructor(node, scope, ctx);
+    }
+    // Phase 12: bare `EnumName.Case` for a value enum. Promote to a
+    // VARIANT_CONSTRUCTOR carrying `resolvedValueEnumType` + the case record;
+    // codegen will emit the underlying constant value.
+    const maybeValueEnum = lookupValueEnumByName(node.object.name, ctx);
+    if (maybeValueEnum) {
+      const enumCase = maybeValueEnum.cases.get(node.field);
+      const fieldLoc = node.fieldSourceLoc ?? node;
+      if (!enumCase) {
+        pushError(
+          ctx.errors,
+          fieldLoc,
+          `enum "${maybeValueEnum.name}" has no case "${node.field}"`,
+        );
+        return setType(node, ErrorType());
+      }
+      node.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+      node.enumName = node.object.name;
+      node.variantName = node.field;
+      node.fields = null;
+      node.resolvedValueEnumType = maybeValueEnum;
+      node.resolvedValueEnumCase = enumCase;
+      delete node.object;
+      delete node.field;
+      return setType(node, maybeValueEnum);
     }
   }
 
@@ -1029,7 +1063,17 @@ function resolveFieldAccess(node, scope, ctx) {
       pushError(ctx.errors, node, `internal: namespace module ${objType.moduleId} not found`);
       return setType(node, ErrorType());
     }
-    const sym = srcEnv.localSymbols.get(node.field) ?? srcEnv.structTable.get(node.field);
+    // Phase 12: a namespace can export variant / value-enum / union /
+    // vtable types in addition to values + structs. Look through every
+    // table so `ns.VariantOrEnum.Case` resolves correctly through the
+    // promotion that runs at the IDENT-field branch above.
+    const sym =
+      srcEnv.localSymbols.get(node.field) ??
+      srcEnv.structTable.get(node.field) ??
+      srcEnv.variantTable?.get(node.field) ??
+      srcEnv.enumTable?.get(node.field) ??
+      srcEnv.unionTable?.get(node.field) ??
+      srcEnv.vtableTable?.get(node.field);
     if (!sym) {
       pushError(ctx.errors, fieldLoc, `internal: export "${node.field}" not found in module ${objType.moduleId}`);
       return setType(node, ErrorType());
@@ -1070,6 +1114,31 @@ function resolveFieldAccess(node, scope, ctx) {
   if (objType.kind === typeKinds.array) {
     pushError(ctx.errors, fieldLoc, `type ${formatType(objType)} has no field "${node.field}"`);
     return setType(node, ErrorType());
+  }
+
+  // Phase 12: `<expr>.Case` against a value-enum-typed receiver - happens
+  // when the receiver isn't a bare IDENT (e.g. `ns.MyEnum.Case` where
+  // `ns.MyEnum` already resolved to a ValueEnumType via the namespace
+  // branch above). Same promotion as the bare-IDENT path.
+  if (objType.kind === typeKinds.valueEnum) {
+    const enumCase = objType.cases.get(node.field);
+    if (!enumCase) {
+      pushError(
+        ctx.errors,
+        fieldLoc,
+        `enum "${objType.name}" has no case "${node.field}"`,
+      );
+      return setType(node, ErrorType());
+    }
+    node.kind = ASTNodeKind.VARIANT_CONSTRUCTOR;
+    node.enumName = objType.name;
+    node.variantName = node.field;
+    node.fields = null;
+    node.resolvedValueEnumType = objType;
+    node.resolvedValueEnumCase = enumCase;
+    delete node.object;
+    delete node.field;
+    return setType(node, objType);
   }
 
   // Phase 7.5: field access on a union type - same path as struct, just a
@@ -1374,7 +1443,13 @@ function resolveIndexExpression(node, scope, ctx) {
   }
   const isIntIdx =
     (idxType.kind === typeKinds.prim && isIntPrim(idxType.name)) ||
-    idxType.kind === typeKinds.untypedInt;
+    idxType.kind === typeKinds.untypedInt ||
+    // Phase 12: integer-backed value enums decay to their underlying
+    // primitive for indexing (matches the implicit coercion used in
+    // assignment / call positions).
+    (idxType.kind === typeKinds.valueEnum &&
+      idxType.underlying?.kind === typeKinds.prim &&
+      isIntPrim(idxType.underlying.name));
   if (!isIntIdx) {
     pushError(ctx.errors, node.index,
       `array index must be an integer type, found ${formatType(idxType)}`);
@@ -1429,7 +1504,7 @@ function resolveTryOp(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  if (!isFallibleEnum(operandType)) {
+  if (!isFallibleVariant(operandType)) {
     pushError(
       ctx.errors,
       node,
@@ -1439,7 +1514,7 @@ function resolveTryOp(node, scope, ctx) {
   }
 
   const retType = ctx.funcReturnType;
-  if (!isFallibleEnum(retType)) {
+  if (!isFallibleVariant(retType)) {
     pushError(
       ctx.errors,
       node,
@@ -1448,8 +1523,8 @@ function resolveTryOp(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  const operandErr = enumErrPayloadType(operandType);
-  const returnErr = enumErrPayloadType(retType);
+  const operandErr = variantErrPayloadType(operandType);
+  const returnErr = variantErrPayloadType(retType);
   if (!typesEqual(operandErr, returnErr)) {
     // Phase 10.E: same-type fast path failed - try the cross-shape path
     // via `Into<ReturnErr>` on the operand's Err payload type. Only
@@ -1469,7 +1544,7 @@ function resolveTryOp(node, scope, ctx) {
   }
 
   node.fallibleEnum = true;
-  return setType(node, strippedEnumOkType(operandType));
+  return setType(node, strippedVariantOkType(operandType));
 }
 
 // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` - bounded-wait
@@ -1530,7 +1605,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  const genericDecl = lookupGenericEnumDecl("WaitResult", ctx);
+  const genericDecl = lookupGenericVariantDecl("WaitResult", ctx);
   if (!genericDecl) {
     pushError(
       ctx.errors,
@@ -1539,7 +1614,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     );
     return setType(node, ErrorType());
   }
-  const waitResultType = instantiateEnum(
+  const waitResultType = instantiateVariant(
     ctx.typeContext.registry,
     genericDecl,
     [resultT],
@@ -1636,9 +1711,40 @@ function rootIdentOf(node) {
   return node.kind === ASTNodeKind.IDENT ? node : null;
 }
 
-// Phase 7.5: look up an enum type by name. Checks the local enumTable then
+// Phase 7.5: look up an enum type by name. Checks the local variantTable then
 // imported names. Returns null when the name isn't an enum.
-export function lookupEnumByName(name, ctx) {
+export function lookupVariantTypeByName(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.variantTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && imp.kind === "type") {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.variantTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 10.A: look up a generic enum decl by name. Mirrors lookupVariantTypeByName.
+// Returns the generic decl record (not a Type), or null.
+export function lookupGenericVariantDecl(name, ctx) {
+  const tc = ctx.typeContext;
+  if (!tc) return null;
+  const local = tc.genericVariantTable?.get(name);
+  if (local) return local;
+  const imp = tc.importedNames?.get(name);
+  if (imp && (imp.kind === "generic-type" || imp.kind === "type")) {
+    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
+    const resolved = srcEnv?.genericVariantTable?.get(imp.exportName);
+    if (resolved) return resolved;
+  }
+  return null;
+}
+
+// Phase 12: look up a value-enum type by name. Mirrors lookupVariantTypeByName.
+export function lookupValueEnumByName(name, ctx) {
   const tc = ctx.typeContext;
   if (!tc) return null;
   const local = tc.enumTable?.get(name);
@@ -1652,23 +1758,7 @@ export function lookupEnumByName(name, ctx) {
   return null;
 }
 
-// Phase 10.A: look up a generic enum decl by name. Mirrors lookupEnumByName.
-// Returns the generic decl record (not a Type), or null.
-export function lookupGenericEnumDecl(name, ctx) {
-  const tc = ctx.typeContext;
-  if (!tc) return null;
-  const local = tc.genericEnumTable?.get(name);
-  if (local) return local;
-  const imp = tc.importedNames?.get(name);
-  if (imp && (imp.kind === "generic-type" || imp.kind === "type")) {
-    const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
-    const resolved = srcEnv?.genericEnumTable?.get(imp.exportName);
-    if (resolved) return resolved;
-  }
-  return null;
-}
-
-// Phase 7.5: look up a union type by name. Mirrors lookupEnumByName.
+// Phase 7.5: look up a union type by name. Mirrors lookupVariantTypeByName.
 export function lookupUnionByName(name, ctx) {
   const tc = ctx.typeContext;
   if (!tc) return null;
@@ -1687,13 +1777,20 @@ export function lookupUnionByName(name, ctx) {
 // with a payload. The parser also emits this node for the bare no-payload form
 // `Shape.Empty`, but only after promotion inside resolveFieldAccess.
 // Phase 10.A: if `enumName` resolves to a generic enum decl rather than a
-// concrete EnumType, we can't pick an instantiation without a target type.
+// concrete VariantType, we can't pick an instantiation without a target type.
 // In statement position we surface "cannot determine type arguments"; the
 // pin path runs through checkInitializer instead.
+// Phase 12: if a value-enum case was already stamped during a prior visit
+// (resolveFieldAccess promotion path), short-circuit so a second resolution
+// pass doesn't re-look-up the name in the variant table and report "unknown
+// enum". A pre-stamped node carries `resolvedValueEnumType`.
 function resolveVariantConstructor(node, scope, ctx) {
-  const enumType = lookupEnumByName(node.enumName, ctx);
+  if (node.resolvedValueEnumType) {
+    return setType(node, node.resolvedValueEnumType);
+  }
+  const enumType = lookupVariantTypeByName(node.enumName, ctx);
   if (!enumType) {
-    const genericDecl = lookupGenericEnumDecl(node.enumName, ctx);
+    const genericDecl = lookupGenericVariantDecl(node.enumName, ctx);
     if (genericDecl) {
       // Visit the field expressions so any internal type errors still surface.
       for (const f of node.fields ?? []) {
@@ -1702,7 +1799,7 @@ function resolveVariantConstructor(node, scope, ctx) {
       pushError(
         ctx.errors,
         node,
-        `cannot determine type arguments for generic enum "${genericDecl.name}" - pin via a typed binding/return/call argument`,
+        `cannot determine type arguments for generic variant "${genericDecl.name}" - pin via a typed binding/return/call argument`,
       );
       return setType(node, ErrorType());
     }
@@ -1729,7 +1826,7 @@ function resolveVariantConstructor(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   // Stash the resolved variant info for codegen.
-  node.resolvedEnumType = enumType;
+  node.resolvedVariantType = enumType;
   node.resolvedVariant = variant;
 
   if (variant.fields === null) {
@@ -1798,7 +1895,7 @@ function resolveVariantConstructor(node, scope, ctx) {
 }
 
 // Phase 10.A: pin a generic-enum variant constructor to a concrete
-// instantiation supplied by the target type. Stamps `resolvedEnumType` and
+// instantiation supplied by the target type. Stamps `resolvedVariantType` and
 // `resolvedVariant` from the instantiated (already-substituted) enum so
 // codegen sees concrete field types. Diagnostics mirror the concrete path.
 function pinVariantConstructor(node, enumType, scope, ctx) {
@@ -1814,7 +1911,7 @@ function pinVariantConstructor(node, enumType, scope, ctx) {
     }
     return setType(node, ErrorType());
   }
-  node.resolvedEnumType = enumType;
+  node.resolvedVariantType = enumType;
   node.resolvedVariant = variant;
 
   if (variant.fields === null) {
@@ -1899,11 +1996,11 @@ export function checkInitializer(
   // and payload variants both flow through here.
   if (
     valueNode.kind === ASTNodeKind.VARIANT_CONSTRUCTOR &&
-    !valueNode.resolvedEnumType &&
-    expectedType?.kind === typeKinds.enum &&
+    !valueNode.resolvedVariantType &&
+    expectedType?.kind === typeKinds.variant &&
     expectedType.genericInstance
   ) {
-    const genericDecl = lookupGenericEnumDecl(valueNode.enumName, ctx);
+    const genericDecl = lookupGenericVariantDecl(valueNode.enumName, ctx);
     if (genericDecl && genericDecl.id === expectedType.genericInstance.declId) {
       return pinVariantConstructor(valueNode, expectedType, scope, ctx);
     }
@@ -1911,15 +2008,15 @@ export function checkInitializer(
   // Phase 10.A: pre-promote a FIELD_ACCESS of shape `GenericEnum.Variant`
   // (bare no-payload form) before resolveExprType has a chance to error
   // about unpinned generic enums. The promotion stamps a VARIANT_CONSTRUCTOR
-  // with `resolvedEnumType` unset; pinVariantConstructor then attaches the
+  // with `resolvedVariantType` unset; pinVariantConstructor then attaches the
   // target instantiation.
   if (
     valueNode.kind === ASTNodeKind.FIELD_ACCESS &&
     valueNode.object?.kind === ASTNodeKind.IDENT &&
-    expectedType?.kind === typeKinds.enum &&
+    expectedType?.kind === typeKinds.variant &&
     expectedType.genericInstance
   ) {
-    const genericDecl = lookupGenericEnumDecl(valueNode.object.name, ctx);
+    const genericDecl = lookupGenericVariantDecl(valueNode.object.name, ctx);
     if (genericDecl && genericDecl.id === expectedType.genericInstance.declId) {
       const variantName = valueNode.field;
       const variant = genericDecl.genericVariants?.get(variantName);
@@ -2353,7 +2450,7 @@ function substituteSelfPlaceholder(methodSig, concreteType) {
 // For generic traits (declared as `trait Foo<T>`), returns a placeholder
 // `{ isGeneric: true, name }` - `resolveTraitQualifiedCall` matches it
 // against the receiver's instantiated trait by name.
-// Phase 9.G: VTableName lookup. Mirrors lookupEnumByName / lookupUnionByName
+// Phase 9.G: VTableName lookup. Mirrors lookupVariantTypeByName / lookupUnionByName
 // - checks the local vtableTable, then imports of nominal types.
 export function lookupVTableByName(name, ctx) {
   const tc = ctx.typeContext;

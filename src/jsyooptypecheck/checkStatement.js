@@ -772,7 +772,7 @@ function checkForInLoop(node, scope, ctx) {
       const retType = nextSig?.returnType;
       if (
         retType &&
-        retType.kind === typeKinds.enum &&
+        retType.kind === typeKinds.variant &&
         retType.variants?.has("Yield") &&
         retType.variants?.has("Done")
       ) {
@@ -798,7 +798,7 @@ function checkForInLoop(node, scope, ctx) {
         pushError(
           ctx.errors,
           node.iterExpr,
-          `Iterable.next must return an IterStep<T> enum with Yield/Done variants`,
+          `Iterable.next must return an IterStep<T> variant with Yield/Done cases`,
         );
       }
     } else {
@@ -837,7 +837,7 @@ function checkForInLoop(node, scope, ctx) {
 
 // Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
 //   - integer / bool / char prim  → arms carry LITERAL_PATTERNs
-//   - EnumType                    → arms carry VARIANT_PATTERNs
+//   - VariantType                    → arms carry VARIANT_PATTERNs
 // Exhaustiveness is enforced when the scrutinee is a bool or an enum.
 function checkSwitch(node, scope, ctx) {
   const scrutType = resolveExprType(node.scrutinee, scope, ctx);
@@ -862,13 +862,17 @@ function checkSwitch(node, scope, ctx) {
       scrutType.name === "isize" ||
       scrutType.name === "char");
   const isBool = scrutType.kind === typeKinds.prim && scrutType.name === "bool";
-  const isEnum = scrutType.kind === typeKinds.enum;
+  const isVariant = scrutType.kind === typeKinds.variant;
+  // Phase 12: value-enum scrutinee. Patterns use VARIANT_PATTERN with no
+  // field bindings. Exhaustiveness checked only when the enum is "closed"
+  // (no operator-derived cases).
+  const isValueEnum = scrutType.kind === typeKinds.valueEnum;
 
-  if (!isInt && !isBool && !isEnum) {
+  if (!isInt && !isBool && !isVariant && !isValueEnum) {
     pushError(
       ctx.errors,
       node.scrutinee,
-      `switch scrutinee must be int, bool, char, or an enum type; got ${formatType(scrutType)}`,
+      `switch scrutinee must be int, bool, char, a variant, or an enum type; got ${formatType(scrutType)}`,
     );
     for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
     if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
@@ -878,6 +882,7 @@ function checkSwitch(node, scope, ctx) {
   node.scrutineeType = scrutType;
   const seenLiterals = new Map(); // value -> arm index
   const seenVariants = new Set();
+  const seenEnumCases = new Set();
   let sawAnyWildcardCase = false;
 
   for (const arm of node.arms) {
@@ -931,11 +936,51 @@ function checkSwitch(node, scope, ctx) {
         continue;
       }
       if (pat.kind === ASTNodeKind.VARIANT_PATTERN) {
-        if (!isEnum) {
+        // Phase 12: value-enum dispatch. Patterns are `Foo.Bar` with no
+        // field bindings; we match by value equality at codegen time.
+        if (isValueEnum) {
+          if (pat.enumName !== scrutType.name) {
+            pushError(
+              ctx.errors,
+              pat,
+              `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+            );
+            continue;
+          }
+          const enumCase = scrutType.cases.get(pat.variantName);
+          if (!enumCase) {
+            pushError(
+              ctx.errors,
+              pat,
+              `enum "${scrutType.name}" has no case "${pat.variantName}"`,
+            );
+            continue;
+          }
+          if (pat.fieldBindings !== null && pat.fieldBindings.length > 0) {
+            pushError(
+              ctx.errors,
+              pat,
+              `value enum case "${scrutType.name}.${pat.variantName}" has no fields - drop the '{ ... }'`,
+            );
+            continue;
+          }
+          if (seenEnumCases.has(pat.variantName)) {
+            pushError(
+              ctx.errors,
+              pat,
+              `duplicate enum case pattern "${scrutType.name}.${pat.variantName}"`,
+            );
+          }
+          seenEnumCases.add(pat.variantName);
+          pat.resolvedValueEnumType = scrutType;
+          pat.resolvedValueEnumCase = enumCase;
+          continue;
+        }
+        if (!isVariant) {
           pushError(
             ctx.errors,
             pat,
-            `variant patterns are only valid on enum scrutinees, not ${formatType(scrutType)}`,
+            `variant case patterns are only valid on variant scrutinees, not ${formatType(scrutType)}`,
           );
           continue;
         }
@@ -955,7 +1000,7 @@ function checkSwitch(node, scope, ctx) {
           pushError(
             ctx.errors,
             pat,
-            `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+            `pattern names variant "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
           );
           continue;
         }
@@ -964,7 +1009,7 @@ function checkSwitch(node, scope, ctx) {
           pushError(
             ctx.errors,
             pat,
-            `enum "${scrutType.name}" has no variant "${pat.variantName}"`,
+            `variant "${scrutType.name}" has no case "${pat.variantName}"`,
           );
           continue;
         }
@@ -976,7 +1021,7 @@ function checkSwitch(node, scope, ctx) {
           );
         }
         seenVariants.add(pat.variantName);
-        pat.resolvedEnumType = scrutType;
+        pat.resolvedVariantType = scrutType;
         pat.resolvedVariant = variant;
         // Field-binding shape: must match the variant's declared shape.
         if (variant.fields === null) {
@@ -1076,7 +1121,7 @@ function checkSwitch(node, scope, ctx) {
           `switch over bool is not exhaustive - add 'default' or list both true and false`,
         );
       }
-    } else if (isEnum) {
+    } else if (isVariant) {
       const allVariants = [...scrutType.variants.keys()];
       const missing = allVariants.filter((v) => !seenVariants.has(v));
       if (missing.length > 0) {
@@ -1085,6 +1130,28 @@ function checkSwitch(node, scope, ctx) {
           node,
           `switch over ${formatType(scrutType)} is not exhaustive - missing variants: ${missing.join(", ")}`,
         );
+      }
+    } else if (isValueEnum) {
+      // Phase 12: an "open" enum (any case derived via bitwise ops) requires
+      // a `default` since the reachable set is no longer the named cases. A
+      // closed enum (every case is a literal) gets exhaustiveness over its
+      // named cases.
+      if (scrutType.isOpen) {
+        pushError(
+          ctx.errors,
+          node,
+          `switch over open enum "${scrutType.name}" requires a 'default' case - one or more cases are derived via bitwise operators, so values may fall outside the named set`,
+        );
+      } else {
+        const allCases = [...scrutType.cases.keys()];
+        const missing = allCases.filter((c) => !seenEnumCases.has(c));
+        if (missing.length > 0) {
+          pushError(
+            ctx.errors,
+            node,
+            `switch over ${formatType(scrutType)} is not exhaustive - missing cases: ${missing.join(", ")}`,
+          );
+        }
       }
     } else if (isInt) {
       pushError(

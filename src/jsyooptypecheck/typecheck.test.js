@@ -271,11 +271,11 @@ describe("typecheckProgram: self in method body scope", () => {
   });
 });
 
-describe("Phase 7.5: enum declarations and variant constructors", () => {
-  it("declares a simple enum and constructs each variant", () => {
+describe("Phase 7.5: variant declarations and case constructors", () => {
+  it("declares a simple variant and constructs each case", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum Shape {
+        variant Shape {
           Circle { radius: int32 },
           Empty,
         }
@@ -289,10 +289,10 @@ describe("Phase 7.5: enum declarations and variant constructors", () => {
     assert.deepEqual(errors, []);
   });
 
-  it("rejects unknown variant", () => {
+  it("rejects unknown case", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum E { A, B }
+        variant E { A, B }
         function main(): int32 {
           let x: E = E.NotThere;
           return 0;
@@ -300,13 +300,13 @@ describe("Phase 7.5: enum declarations and variant constructors", () => {
       `),
     );
     assert.equal(errors.length >= 1, true);
-    assert.match(errors[0].message, /has no variant/);
+    assert.match(errors[0].message, /has no case/);
   });
 
-  it("rejects payload variant without braces", () => {
+  it("rejects payload case without braces", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum E { A { x: int32 } }
+        variant E { A { x: int32 } }
         function main(): int32 {
           let x: E = E.A;
           return 0;
@@ -317,10 +317,10 @@ describe("Phase 7.5: enum declarations and variant constructors", () => {
     assert.match(errors[0].message, /requires fields/);
   });
 
-  it("rejects payload braces on no-payload variant", () => {
+  it("rejects payload braces on no-payload case", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum E { A }
+        variant E { A }
         function main(): int32 {
           let x: E = E.A { foo: 1 };
           return 0;
@@ -331,10 +331,10 @@ describe("Phase 7.5: enum declarations and variant constructors", () => {
     assert.match(errors[0].message, /has no payload/);
   });
 
-  it("rejects extra fields in variant constructor", () => {
+  it("rejects extra fields in case constructor", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum E { A { x: int32 } }
+        variant E { A { x: int32 } }
         function main(): int32 {
           let v: E = E.A { x: 1, y: 2 };
           return 0;
@@ -378,10 +378,10 @@ describe("Phase 7.5: union declarations and literals", () => {
 });
 
 describe("Phase 7.5: switch statement", () => {
-  it("typechecks an exhaustive enum switch with no default", () => {
+  it("typechecks an exhaustive variant switch with no default", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum E { A { x: int32 }, B }
+        variant E { A { x: int32 }, B }
         function pick(e: E): int32 {
           switch (e) {
             case E.A { x }: { return x; }
@@ -395,10 +395,10 @@ describe("Phase 7.5: switch statement", () => {
     assert.deepEqual(errors, []);
   });
 
-  it("rejects non-exhaustive enum switch without default", () => {
+  it("rejects non-exhaustive variant switch without default", () => {
     const { errors } = typecheckProgram(
       singleModule(`
-        enum E { A, B, C }
+        variant E { A, B, C }
         function pick(e: E): int32 {
           switch (e) {
             case E.A: { return 1; }
@@ -426,7 +426,7 @@ describe("Phase 7.5: switch statement", () => {
       `),
     );
     assert.equal(errors.length >= 1, true);
-    assert.match(errors[0].message, /scrutinee must be int.*enum/);
+    assert.match(errors[0].message, /scrutinee must be int.*variant/);
   });
 
   it("typechecks an int switch with default", () => {

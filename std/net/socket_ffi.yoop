@@ -193,7 +193,7 @@ export function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
 
 // Connect a freshly opened fd to host:port. Caller owns the fd.
 // Err-only outcome: `Ok` on success, `Err { error }` on failure.
-export enum ConnectOutcome {
+export variant ConnectOutcome {
     Ok,
     Err { error: string },
 }

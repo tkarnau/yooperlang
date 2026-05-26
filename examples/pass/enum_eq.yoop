@@ -6,9 +6,9 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-enum Color { Red, Green, Blue }
+variant Color { Red, Green, Blue }
 
-enum Shape {
+variant Shape {
     Circle { radius: int32 },
     Square { side: int32 },
 }

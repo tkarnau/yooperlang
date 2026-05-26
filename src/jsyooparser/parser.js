@@ -395,9 +395,18 @@ export function parse(src) {
       const inner = parseTypeAnnotation();
       return { kind: "refType", inner };
     }
-    // base type name
-    const nameTok = expect(TokenTags.ident);
-    const name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    // base type name. Optional `ns.` prefix routes the lookup through
+    // an imported namespace - the typechecker walks the source module's
+    // type tables to find the qualified name.
+    let nameTok = expect(TokenTags.ident);
+    let name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    let namespace = null;
+    if (peek().tag === TokenTags.dot) {
+      advance(); // consume .
+      namespace = name;
+      nameTok = expect(TokenTags.ident);
+      name = src.substring(nameTok.start, nameTok.start + nameTok.length);
+    }
     let annot;
     // Phase 7.1: any identifier followed by `<` parses as a generic type
     // application. The closing `>` may be the first half of a `>>` token -
@@ -428,9 +437,13 @@ export function parse(src) {
         break;
       }
       consumeClosingGt();
-      annot = { kind: "typeApplication", name, typeArgs };
+      annot = namespace
+        ? { kind: "typeApplication", name, typeArgs, namespace }
+        : { kind: "typeApplication", name, typeArgs };
     } else {
-      annot = { kind: "typeName", name };
+      annot = namespace
+        ? { kind: "typeName", name, namespace }
+        : { kind: "typeName", name };
     }
     // optional [] suffix for arrays - in type position, [ always means T[]
     if (peek().tag === TokenTags.lbracket) {
@@ -597,6 +610,12 @@ export function parse(src) {
               } else {
                 node.body.push(parseFunctionDecl());
               }
+            }
+            break;
+          case TokenTags.variant:
+            {
+              seenNonImport = true;
+              node.body.push(parseVariantDecl());
             }
             break;
           case TokenTags.enum:
@@ -1459,6 +1478,9 @@ export function parse(src) {
         break;
       case TokenTags.kind:
         node.decl = parseKindDecl();
+        break;
+      case TokenTags.variant:
+        node.decl = parseVariantDecl();
         break;
       case TokenTags.enum:
         node.decl = parseEnumDecl();
@@ -2773,11 +2795,13 @@ export function parse(src) {
     return node;
   }
 
-  // Phase 7.5: enum declaration.
-  //   enum Name<TParams?> { Variant1 { f: T, ... }, Variant2, ... }
-  function parseEnumDecl() {
-    expect(TokenTags.enum);
-    const node = buildSourcedNode(ASTNodeKind.ENUM_DECL);
+  // Phase 7.5 (renamed in Phase 12): variant declaration - tagged sum type.
+  //   variant Name<TParams?> { Case1 { f: T, ... }, Case2, ... }
+  // The `enum` keyword is reserved for a separate value-enum construct in a
+  // follow-up phase.
+  function parseVariantDecl() {
+    expect(TokenTags.variant);
+    const node = buildSourcedNode(ASTNodeKind.VARIANT_DECL);
     node.name = parseIdentAsName();
     node.typeParams = parseTypeParamList();
     node.variants = [];
@@ -2785,11 +2809,11 @@ export function parse(src) {
     const seenNames = new Set();
     while (peek().tag === TokenTags.ident) {
       const varTok = peek();
-      const variant = buildSourcedNode(ASTNodeKind.ENUM_VARIANT);
+      const variant = buildSourcedNode(ASTNodeKind.VARIANT_CASE);
       variant.name = parseIdentAsName();
       if (seenNames.has(variant.name)) {
         throw parseError(
-          `duplicate variant name '${variant.name}' in enum '${node.name}'`,
+          `duplicate case name '${variant.name}' in variant '${node.name}'`,
           varTok.start,
           varTok.length,
         );
@@ -2826,7 +2850,78 @@ export function parse(src) {
     expect(TokenTags.rcurly);
     if (node.variants.length === 0) {
       throw parseError(
-        `enum '${node.name}' must declare at least one variant`,
+        `variant '${node.name}' must declare at least one case`,
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    return node;
+  }
+
+  // Phase 12: value enum declaration - C-style named primitive constants.
+  //   enum Name { Case1, Case2 (value)?, ... }            // default int32
+  //   enum Name<int64> { Case 0 }
+  //   enum Name<string> { Asc "A", Desc "D" }
+  // The `<T>` slot after the name is a single primitive selector
+  // (int*/uint*/string), not a generic type parameter list. Generic sum
+  // types stay on `variant`. Value expressions are full yoop expressions;
+  // the const-evaluator in constEvalEnum.js validates the allowed shape at
+  // typecheck time (literals, prior-case refs, bitwise ops).
+  function parseEnumDecl() {
+    expect(TokenTags.enum);
+    const node = buildSourcedNode(ASTNodeKind.ENUM_DECL);
+    node.name = parseIdentAsName();
+    // Optional `<UnderlyingType>` slot. Defaults to int32 when absent.
+    // Reused from the generics slot position: value enums aren't generic, so
+    // putting the underlying primitive selector here parallels how the slot
+    // reads for `variant Foo<T>`.
+    if (peek().tag === TokenTags.lt) {
+      advance(); // consume <
+      node.underlying = parseTypeAnnotation();
+      // Reject multi-arg form: `enum X<int32, int64>` is meaningless. Bail
+      // before consuming the closing > so the diagnostic anchors on the
+      // comma's token.
+      if (peek().tag === TokenTags.comma) {
+        throw parseError(
+          `value enum '${node.name}' takes a single underlying type, not a type-arg list - use 'variant' for generic sum types`,
+          peek().start,
+          peek().length,
+        );
+      }
+      consumeClosingGt();
+    } else {
+      node.underlying = { kind: "typeName", name: "int32" };
+    }
+    node.cases = [];
+    expect(TokenTags.lcurly);
+    const seenNames = new Set();
+    while (peek().tag === TokenTags.ident) {
+      const caseTok = peek();
+      const caseNode = buildSourcedNode(ASTNodeKind.ENUM_CASE);
+      caseNode.name = parseIdentAsName();
+      if (seenNames.has(caseNode.name)) {
+        throw parseError(
+          `duplicate case name '${caseNode.name}' in enum '${node.name}'`,
+          caseTok.start,
+          caseTok.length,
+        );
+      }
+      seenNames.add(caseNode.name);
+      // Optional value expression. Anything that's not `,` or `}` is treated
+      // as the start of an expression. The const-evaluator validates the
+      // permitted operator set.
+      if (peek().tag !== TokenTags.comma && peek().tag !== TokenTags.rcurly) {
+        caseNode.valueExpr = parseExpression(0);
+      } else {
+        caseNode.valueExpr = null;
+      }
+      node.cases.push(caseNode);
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rcurly);
+    if (node.cases.length === 0) {
+      throw parseError(
+        `enum '${node.name}' must declare at least one case`,
         node.sourceLoc.pos,
         1,
       );

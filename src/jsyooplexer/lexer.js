@@ -99,6 +99,7 @@ export const TokenTags = {
   case: "case",
   default: "default",
   enum: "enum",
+  variant: "variant",
   union: "union",
   // phase 8.A: unsafe pointers
   null: "null",
@@ -271,6 +272,7 @@ const keywordTagList = {
   case: TokenTags.case,
   default: TokenTags.default,
   enum: TokenTags.enum,
+  variant: TokenTags.variant,
   union: TokenTags.union,
   null: TokenTags.null,
   _: TokenTags.discard, // bare underscores are discarded

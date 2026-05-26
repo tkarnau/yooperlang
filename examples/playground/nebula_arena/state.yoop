@@ -1,0 +1,391 @@
+// Game state: entity pools (parallel arrays for cache locality + pool
+// recycling), player position, and the per-frame `tick` that advances
+// everything. Spawn helpers live here too.
+//
+// Each pool is its own nested struct so the original 20-field flat
+// `GameState` shrinks to a handful of well-named groups. Field access
+// goes through `g.bullets.x[i]` etc, which reads close to the original
+// `g.bullet_x[i]` but groups related arrays.
+
+import.unsafe;
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as sdl from "./sdl.yoop";
+import * as rng from "./rng.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from library "m" {
+    function sin(x: float64): float64;
+    function cos(x: float64): float64;
+}
+
+// ── Tunables ─────────────────────────────────────────────────────────
+
+export const WIN_W: int32 = 1024;
+export const WIN_H: int32 = 768;
+
+// Pre-existing codegen papercut: float32 module consts must be exactly
+// representable in IEEE-754 single. So all gameplay numbers below are
+// integers, halves, quarters, 1/64, 1/1024, etc.
+export const PLAYER_Y_FRAC: float32 = 0.875;
+export const PLAYER_SPEED:  float32 = 0.5;
+export const PLAYER_SIZE:   float32 = 36.0;
+
+export const BULLET_SPEED:  float32 = 1.0;
+export const BULLET_SIZE:   float32 = 10.0;
+export const BULLET_POOL:   int32 = 32;
+
+export const ENEMY_POOL:    int32 = 12;
+export const ENEMY_SPEED:   float32 = 0.0625;
+export const ENEMY_MIN_SIZE: float32 = 28.0;
+export const ENEMY_MAX_SIZE: float32 = 56.0;
+export const ENEMY_SPAWN_INTERVAL_MS: uint32 = 700;
+
+export const PARTICLE_POOL: int32 = 256;
+export const PARTICLES_PER_HIT: int32 = 30;
+export const PARTICLE_LIFE_MS: float32 = 1024.0;
+export const PARTICLE_SPEED_MIN: float32 = 0.125;
+export const PARTICLE_SPEED_MAX: float32 = 0.5;
+export const PARTICLE_SIZE: float32 = 8.0;
+export const PARTICLE_GRAVITY: float32 = 0.0009765625;
+
+export const POWERUP_POOL: int32 = 4;
+export const POWERUP_SIZE: float32 = 28.0;
+export const POWERUP_SPEED: float32 = 0.03125;
+export const POWERUP_SPAWN_INTERVAL_MS: uint32 = 12000;
+export const SPREAD_SHOTS_PER_PICKUP: int32 = 30;
+export const SPREAD_BULLET_COUNT: int32 = 5;
+
+export const WAVE_SIZE: int32 = 20;
+export const WAVE_ENEMY_SPEEDUP: float32 = 0.25;
+export const WAVE_SPAWN_CUT_MS: uint32 = 100;
+export const WAVE_SPAWN_FLOOR_MS: uint32 = 200;
+
+// ── Pool structs ─────────────────────────────────────────────────────
+
+export type BulletPool {
+    active: bool[],
+    x: float32[],
+    y: float32[],
+    vx: float32[],
+    vy: float32[],
+}
+
+export type PowerupPool {
+    active: bool[],
+    x: float32[],
+    y: float32[],
+    last_spawn_ms: uint32,
+    spread_shots_remaining: int32,
+}
+
+export type EnemyPool {
+    active: bool[],
+    x: float32[],
+    y: float32[],
+    size: float32[],
+    hue: float32[],
+    last_spawn_ms: uint32,
+}
+
+export type ParticlePool {
+    active: bool[],
+    x: float32[],
+    y: float32[],
+    vx: float32[],
+    vy: float32[],
+    life: float32[],
+    init_life: float32[],
+    hue: float32[],
+}
+
+export type GameState {
+    player_x: float32,
+    player_y: float32,
+    space_was_down: int32,
+    bullets: BulletPool,
+    powerups: PowerupPool,
+    enemies: EnemyPool,
+    particles: ParticlePool,
+    score: int32,
+    rng: int32,
+}
+
+// ── Pool init helpers ────────────────────────────────────────────────
+
+function zero_floats(n: int32): float32[] {
+    let arr: float32[] = intr.heap_alloc(usize(n));
+    let i: usize = 0;
+    while (i < usize(n)) { arr[i] = 0.0; i = i + 1; }
+    return arr;
+}
+
+function false_bools(n: int32): bool[] {
+    let arr: bool[] = intr.heap_alloc(usize(n));
+    let i: usize = 0;
+    while (i < usize(n)) { arr[i] = false; i = i + 1; }
+    return arr;
+}
+
+export function init_state(seed: int32): GameState {
+    return {
+        player_x: float32(WIN_W) * 0.5,
+        player_y: float32(WIN_H) * PLAYER_Y_FRAC,
+        space_was_down: 0,
+        bullets: {
+            active: false_bools(BULLET_POOL),
+            x: zero_floats(BULLET_POOL),
+            y: zero_floats(BULLET_POOL),
+            vx: zero_floats(BULLET_POOL),
+            vy: zero_floats(BULLET_POOL),
+        },
+        powerups: {
+            active: false_bools(POWERUP_POOL),
+            x: zero_floats(POWERUP_POOL),
+            y: zero_floats(POWERUP_POOL),
+            last_spawn_ms: 0,
+            spread_shots_remaining: 0,
+        },
+        enemies: {
+            active: false_bools(ENEMY_POOL),
+            x: zero_floats(ENEMY_POOL),
+            y: zero_floats(ENEMY_POOL),
+            size: zero_floats(ENEMY_POOL),
+            hue: zero_floats(ENEMY_POOL),
+            last_spawn_ms: 0,
+        },
+        particles: {
+            active: false_bools(PARTICLE_POOL),
+            x: zero_floats(PARTICLE_POOL),
+            y: zero_floats(PARTICLE_POOL),
+            vx: zero_floats(PARTICLE_POOL),
+            vy: zero_floats(PARTICLE_POOL),
+            life: zero_floats(PARTICLE_POOL),
+            init_life: zero_floats(PARTICLE_POOL),
+            hue: zero_floats(PARTICLE_POOL),
+        },
+        score: 0,
+        rng: seed | 1,
+    };
+}
+
+// ── Spawn helpers ────────────────────────────────────────────────────
+
+function spawn_bullet(ref g: GameState, vx: float32, vy: float32): void {
+    let i: int32 = 0;
+    while (i < BULLET_POOL) {
+        if (!g.bullets.active[i]) {
+            g.bullets.active[i] = true;
+            g.bullets.x[i] = g.player_x;
+            g.bullets.y[i] = g.player_y - PLAYER_SIZE * 0.5;
+            g.bullets.vx[i] = vx;
+            g.bullets.vy[i] = vy;
+            return;
+        }
+        i = i + 1;
+    }
+}
+
+function fire_bullet(ref g: GameState): void {
+    if (g.powerups.spread_shots_remaining > 0) {
+        const PI: float32 = 3.14159265;
+        let i: int32 = 0;
+        while (i < SPREAD_BULLET_COUNT) {
+            let degrees: float32 = -30.0 + float32(i) * 15.0;
+            let rad: float32 = degrees * PI / 180.0;
+            let vx: float32 = float32(sin(float64(rad))) * BULLET_SPEED;
+            let vy: float32 = -float32(cos(float64(rad))) * BULLET_SPEED;
+            spawn_bullet(ref g, vx, vy);
+            i = i + 1;
+        }
+        g.powerups.spread_shots_remaining = g.powerups.spread_shots_remaining - 1;
+        return;
+    }
+    spawn_bullet(ref g, 0.0, -BULLET_SPEED);
+}
+
+function spawn_powerup(ref g: GameState): void {
+    let i: int32 = 0;
+    while (i < POWERUP_POOL) {
+        if (!g.powerups.active[i]) {
+            let margin: int32 = 80;
+            let spread: int32 = WIN_W - 2 * margin;
+            g.powerups.active[i] = true;
+            g.powerups.x[i] = float32(margin + rng.next_rand(ref g.rng, spread));
+            g.powerups.y[i] = -POWERUP_SIZE;
+            return;
+        }
+        i = i + 1;
+    }
+}
+
+export function wave_index(score: int32): int32 { return score / WAVE_SIZE; }
+
+function current_enemy_speed(score: int32): float32 {
+    return ENEMY_SPEED * (1.0 + float32(wave_index(score)) * WAVE_ENEMY_SPEEDUP);
+}
+
+function current_spawn_interval(score: int32): uint32 {
+    let cuts: uint32 = uint32(wave_index(score)) * WAVE_SPAWN_CUT_MS;
+    if (cuts + WAVE_SPAWN_FLOOR_MS >= ENEMY_SPAWN_INTERVAL_MS) {
+        return WAVE_SPAWN_FLOOR_MS;
+    }
+    return ENEMY_SPAWN_INTERVAL_MS - cuts;
+}
+
+function spawn_enemy(ref g: GameState): void {
+    let i: int32 = 0;
+    while (i < ENEMY_POOL) {
+        if (!g.enemies.active[i]) {
+            let margin: int32 = 80;
+            let spread: int32 = WIN_W - 2 * margin;
+            g.enemies.active[i] = true;
+            g.enemies.x[i] = float32(margin + rng.next_rand(ref g.rng, spread));
+            g.enemies.y[i] = -ENEMY_MAX_SIZE;
+            g.enemies.size[i] = ENEMY_MIN_SIZE + rng.rand_float01(ref g.rng) * (ENEMY_MAX_SIZE - ENEMY_MIN_SIZE);
+            g.enemies.hue[i] = rng.rand_float01(ref g.rng);
+            return;
+        }
+        i = i + 1;
+    }
+}
+
+function alloc_particle(ref g: GameState): int32 {
+    let i: int32 = 0;
+    while (i < PARTICLE_POOL) {
+        if (!g.particles.active[i]) { return i; }
+        i = i + 1;
+    }
+    return 0;
+}
+
+function spawn_explosion(ref g: GameState, x: float32, y: float32, base_hue: float32): void {
+    const PI: float32 = 3.14159265;
+    let k: int32 = 0;
+    while (k < PARTICLES_PER_HIT) {
+        let slot: int32 = alloc_particle(ref g);
+        let angle: float32 = rng.rand_float01(ref g.rng) * 2.0 * PI;
+        let speed: float32 = PARTICLE_SPEED_MIN + rng.rand_float01(ref g.rng) * (PARTICLE_SPEED_MAX - PARTICLE_SPEED_MIN);
+        g.particles.active[slot] = true;
+        g.particles.x[slot] = x;
+        g.particles.y[slot] = y;
+        g.particles.vx[slot] = float32(cos(float64(angle))) * speed;
+        g.particles.vy[slot] = float32(sin(float64(angle))) * speed;
+        g.particles.life[slot] = PARTICLE_LIFE_MS;
+        g.particles.init_life[slot] = PARTICLE_LIFE_MS;
+        g.particles.hue[slot] = base_hue + (rng.rand_float01(ref g.rng) - 0.5) * 0.2;
+        k = k + 1;
+    }
+}
+
+// ── Per-frame update ─────────────────────────────────────────────────
+
+export function tick(ref g: GameState, dt: float32, now: uint32, keys: uint8[]): bool {
+    if (keys[sdl.Scancode.A] != 0) { g.player_x = g.player_x - PLAYER_SPEED * dt; }
+    if (keys[sdl.Scancode.D] != 0) { g.player_x = g.player_x + PLAYER_SPEED * dt; }
+    if (g.player_x < PLAYER_SIZE * 0.5) { g.player_x = PLAYER_SIZE * 0.5; }
+    if (g.player_x > float32(WIN_W) - PLAYER_SIZE * 0.5) {
+        g.player_x = float32(WIN_W) - PLAYER_SIZE * 0.5;
+    }
+
+    let space_now: int32 = int32(keys[sdl.Scancode.Space]);
+    if (space_now != 0 && g.space_was_down == 0) {
+        fire_bullet(ref g);
+    }
+    g.space_was_down = space_now;
+
+    let bi: int32 = 0;
+    while (bi < BULLET_POOL) {
+        if (g.bullets.active[bi]) {
+            g.bullets.x[bi] = g.bullets.x[bi] + g.bullets.vx[bi] * dt;
+            g.bullets.y[bi] = g.bullets.y[bi] + g.bullets.vy[bi] * dt;
+            if (g.bullets.y[bi] < -BULLET_SIZE
+                || g.bullets.y[bi] > float32(WIN_H) + BULLET_SIZE
+                || g.bullets.x[bi] < -BULLET_SIZE
+                || g.bullets.x[bi] > float32(WIN_W) + BULLET_SIZE) {
+                g.bullets.active[bi] = false;
+            }
+        }
+        bi = bi + 1;
+    }
+
+    if (g.powerups.last_spawn_ms == 0) {
+        g.powerups.last_spawn_ms = now;
+    } else if (now - g.powerups.last_spawn_ms > POWERUP_SPAWN_INTERVAL_MS) {
+        spawn_powerup(ref g);
+        g.powerups.last_spawn_ms = now;
+    }
+    let pu: int32 = 0;
+    while (pu < POWERUP_POOL) {
+        if (g.powerups.active[pu]) {
+            g.powerups.y[pu] = g.powerups.y[pu] + POWERUP_SPEED * dt;
+            if (g.powerups.y[pu] > float32(WIN_H) + POWERUP_SIZE) {
+                g.powerups.active[pu] = false;
+            } else {
+                let dx: float32 = g.powerups.x[pu] - g.player_x;
+                let dy: float32 = g.powerups.y[pu] - g.player_y;
+                let half: float32 = (POWERUP_SIZE + PLAYER_SIZE) * 0.5;
+                if (dx * dx + dy * dy < half * half) {
+                    g.powerups.active[pu] = false;
+                    g.powerups.spread_shots_remaining = g.powerups.spread_shots_remaining + SPREAD_SHOTS_PER_PICKUP;
+                    printf(`powerup: spread shot x${g.powerups.spread_shots_remaining}\n`);
+                }
+            }
+        }
+        pu = pu + 1;
+    }
+
+    let spawn_interval: uint32 = current_spawn_interval(g.score);
+    if (now - g.enemies.last_spawn_ms > spawn_interval) {
+        spawn_enemy(ref g);
+        g.enemies.last_spawn_ms = now;
+    }
+    let enemy_speed: float32 = current_enemy_speed(g.score);
+    let ei: int32 = 0;
+    while (ei < ENEMY_POOL) {
+        if (g.enemies.active[ei]) {
+            g.enemies.y[ei] = g.enemies.y[ei] + enemy_speed * dt;
+            if (g.enemies.y[ei] > float32(WIN_H) + ENEMY_MAX_SIZE) {
+                g.enemies.active[ei] = false;
+                ei = ei + 1;
+                continue;
+            }
+            let bj: int32 = 0;
+            while (bj < BULLET_POOL) {
+                if (g.bullets.active[bj]) {
+                    let dx: float32 = g.bullets.x[bj] - g.enemies.x[ei];
+                    let dy: float32 = g.bullets.y[bj] - g.enemies.y[ei];
+                    let half: float32 = g.enemies.size[ei] * 0.5;
+                    if (dx * dx + dy * dy < half * half) {
+                        spawn_explosion(ref g, g.enemies.x[ei], g.enemies.y[ei], g.enemies.hue[ei]);
+                        g.bullets.active[bj] = false;
+                        g.enemies.active[ei] = false;
+                        g.score = g.score + 1;
+                        break;
+                    }
+                }
+                bj = bj + 1;
+            }
+        }
+        ei = ei + 1;
+    }
+
+    let pi: int32 = 0;
+    while (pi < PARTICLE_POOL) {
+        if (g.particles.active[pi]) {
+            g.particles.x[pi] = g.particles.x[pi] + g.particles.vx[pi] * dt;
+            g.particles.y[pi] = g.particles.y[pi] + g.particles.vy[pi] * dt;
+            g.particles.vy[pi] = g.particles.vy[pi] + PARTICLE_GRAVITY * dt;
+            g.particles.life[pi] = g.particles.life[pi] - dt;
+            if (g.particles.life[pi] <= 0.0) {
+                g.particles.active[pi] = false;
+            }
+        }
+        pi = pi + 1;
+    }
+
+    if (keys[sdl.Scancode.Escape] != 0) { return false; }
+    return true;
+}

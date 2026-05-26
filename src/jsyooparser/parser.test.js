@@ -1028,14 +1028,14 @@ describe("parse: phase 7.2 / 9.J - trait bounds on type params", () => {
   });
 });
 
-describe("Phase 7.5: enum declarations", () => {
-  it("parses an enum with payload + no-payload variants", () => {
+describe("Phase 7.5: variant declarations", () => {
+  it("parses a variant with payload + no-payload cases", () => {
     const ast = parse(
-      "enum Shape { Circle { radius: float32 }, Rectangle { w: float32, h: float32 }, Empty, }",
+      "variant Shape { Circle { radius: float32 }, Rectangle { w: float32, h: float32 }, Empty, }",
     );
     assert.equal(ast.body.length, 1);
     const e = ast.body[0];
-    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.kind, ASTNodeKind.VARIANT_DECL);
     assert.equal(e.name, "Shape");
     assert.equal(e.variants.length, 3);
     assert.equal(e.variants[0].name, "Circle");
@@ -1047,12 +1047,12 @@ describe("Phase 7.5: enum declarations", () => {
     assert.equal(e.variants[2].fields, null);
   });
 
-  it("parses a generic enum", () => {
+  it("parses a generic variant", () => {
     const ast = parse(
-      "enum Result<T, E> { Ok { value: T }, Err { error: E } }",
+      "variant Result<T, E> { Ok { value: T }, Err { error: E } }",
     );
     const e = ast.body[0];
-    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.kind, ASTNodeKind.VARIANT_DECL);
     assert.equal(e.typeParams.length, 2);
     assert.equal(e.typeParams[0].name, "T");
     assert.equal(e.typeParams[1].name, "E");
@@ -1060,21 +1060,87 @@ describe("Phase 7.5: enum declarations", () => {
     assert.equal(e.variants[1].name, "Err");
   });
 
-  it("rejects duplicate variant names", () => {
+  it("rejects duplicate case names", () => {
     assert.throws(
-      () => parse("enum E { A, A }"),
-      /duplicate variant name 'A'/,
+      () => parse("variant E { A, A }"),
+      /duplicate case name 'A'/,
     );
   });
 
-  it("rejects empty enum", () => {
-    assert.throws(() => parse("enum E { }"), /must declare at least one variant/);
+  it("rejects empty variant decl", () => {
+    assert.throws(() => parse("variant E { }"), /must declare at least one case/);
   });
 
   it("rejects empty payload braces", () => {
     assert.throws(
-      () => parse("enum E { A { } }"),
+      () => parse("variant E { A { } }"),
       /empty payload braces/,
+    );
+  });
+
+  it("parses an exported variant", () => {
+    const ast = parse("export variant E { A, B }");
+    assert.equal(ast.body[0].kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(ast.body[0].decl.kind, ASTNodeKind.VARIANT_DECL);
+    assert.equal(ast.body[0].decl.name, "E");
+  });
+});
+
+describe("Phase 12: value enum declarations", () => {
+  it("parses a default-int32 value enum with bare cases", () => {
+    const ast = parse("enum Color { Red, Green, Blue }");
+    assert.equal(ast.body.length, 1);
+    const e = ast.body[0];
+    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.name, "Color");
+    assert.equal(e.underlying.kind, "typeName");
+    assert.equal(e.underlying.name, "int32");
+    assert.equal(e.cases.length, 3);
+    assert.equal(e.cases[0].name, "Red");
+    assert.equal(e.cases[0].valueExpr, null);
+  });
+
+  it("parses an enum with an explicit underlying type after the name", () => {
+    const ast = parse("enum X<int64> { A 0, B 42 }");
+    const e = ast.body[0];
+    assert.equal(e.underlying.kind, "typeName");
+    assert.equal(e.underlying.name, "int64");
+    assert.equal(e.cases.length, 2);
+    assert.equal(e.cases[0].valueExpr.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.cases[0].valueExpr.value, 0);
+    assert.equal(e.cases[1].valueExpr.value, 42);
+  });
+
+  it("parses an enum Name<string> with string-literal values", () => {
+    const ast = parse('enum S<string> { Asc "A", Desc "D" }');
+    const e = ast.body[0];
+    assert.equal(e.underlying.name, "string");
+    assert.equal(e.cases[0].valueExpr.kind, ASTNodeKind.STRING_LITERAL);
+  });
+
+  it("parses a flag-style enum with bitwise OR over prior cases", () => {
+    const ast = parse("enum F { A 1, B 2, AB A | B }");
+    const e = ast.body[0];
+    assert.equal(e.cases[2].name, "AB");
+    assert.equal(e.cases[2].valueExpr.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.cases[2].valueExpr.op, "pipe");
+  });
+
+  it("rejects duplicate case names", () => {
+    assert.throws(
+      () => parse("enum E { A, A }"),
+      /duplicate case name 'A'/,
+    );
+  });
+
+  it("rejects an empty enum", () => {
+    assert.throws(() => parse("enum E { }"), /must declare at least one case/);
+  });
+
+  it("rejects multi-arg type slots on value enums (the <T> slot is the underlying type)", () => {
+    assert.throws(
+      () => parse("enum Result<int32, int64> { A }"),
+      /takes a single underlying type/,
     );
   });
 

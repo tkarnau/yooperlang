@@ -183,7 +183,7 @@ kind disposable {
 // ── Direction ────────────────────────────────────────────────────────────────
 
 // Phase 7.5 enum - picks the row out of the 4×4 sprite sheet.
-enum Direction {
+variant Direction {
     South,
     North,
     West,

@@ -18,8 +18,12 @@ export const typeKinds = {
   // Phase 7.1: a reference to a generic type parameter in a generic decl.
   typeParam: "typeParam",
   // Phase 7.5: tagged sum and C-style overlapping union.
-  enum: "enum",
+  // Phase 12: tagged sum renamed from `enum` to `variant`. The new `enum`
+  // keyword introduces a value-enum: a nominal alias over a primitive
+  // underlying type (int*/uint*/string) with named-constant cases.
+  variant: "variant",
   union: "union",
+  valueEnum: "valueEnum",
   // Phase 8.A: raw FFI pointer. Distinct from `ref T` (which is non-null and
   // does not participate in arithmetic).
   unsafePtr: "unsafePtr",
@@ -201,21 +205,34 @@ export const TraitType = (
     extendsTraits,
   });
 
-// Phase 7.5: tagged sum type.
-//   variants: Map<variantName, { fields: [{name, type}] | null, ordinal: number }>
-//   fields === null means a payload-less variant (e.g. `Empty`).
+// Phase 7.5 (renamed Phase 12): tagged sum type. Source-level keyword is
+// `variant`. AST kind is VARIANT_DECL.
+//   variants: Map<caseName, { fields: [{name, type}] | null, ordinal: number }>
+//   fields === null means a payload-less case (e.g. `Empty`).
 //   ordinal: stable 0-indexed integer from declaration order; used as the
 //     LLVM discriminator value at codegen time.
 // Phase 10.A: `genericInstance: { declId, args } | null` tags instantiations
-// of a generic enum decl, mirroring StructType. Substitution re-instantiates
+// of a generic variant decl, mirroring StructType. Substitution re-instantiates
 // open instances via the registry.
-export const EnumType = (name, variants, moduleId = null, genericInstance = null) =>
-  freezerWrap(typeKinds.enum, { name, variants, moduleId, genericInstance });
+export const VariantType = (name, variants, moduleId = null, genericInstance = null) =>
+  freezerWrap(typeKinds.variant, { name, variants, moduleId, genericInstance });
 
 // Phase 7.5: untagged C-style union - every field starts at offset 0,
 // size = max(sizeof(field)), alignment = max(alignof(field)). No tag.
 export const UnionType = (name, fields, moduleId = null) =>
   freezerWrap(typeKinds.union, { name, fields, moduleId });
+
+// Phase 12: a value enum - nominal alias over a primitive underlying type
+// (any signed/unsigned int width, or string). Each case is a named compile-
+// time constant of the underlying type.
+//   underlying: PrimType (int*/uint*/string)
+//   cases: Map<name, { name, value, ordinal }> - `value` is a JS number or
+//     BigInt for integer underlyings, or a string for `enum<string>`.
+//   isOpen: true if any case's value was derived from bitwise operators on
+//     other cases. Switch over an open enum requires `default` because the
+//     reachable set is no longer the named cases alone.
+export const ValueEnumType = (name, underlying, cases, moduleId = null, isOpen = false) =>
+  freezerWrap(typeKinds.valueEnum, { name, underlying, cases, moduleId, isOpen });
 
 // Phase 9.G: a first-class function value type - what `(p: T) => R` resolves
 // to in a type annotation. Distinct from FuncType (which describes a named
@@ -450,13 +467,16 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
 // Format a type annotation object as a human-readable string (for error messages).
 export function formatAnnotation(annot) {
   if (!annot) return "unknown";
-  if (annot.kind === "typeName") return annot.name;
+  if (annot.kind === "typeName") {
+    return annot.namespace ? `${annot.namespace}.${annot.name}` : annot.name;
+  }
   if (annot.kind === "refType") return `ref ${formatAnnotation(annot.inner)}`;
   if (annot.kind === "arrayType") return `${formatAnnotation(annot.elem)}[]`;
   if (annot.kind === "taskType") return `Task<${formatAnnotation(annot.inner)}>`;
   if (annot.kind === "typeApplication") {
     const args = annot.typeArgs.map(formatAnnotation).join(", ");
-    return `${annot.name}<${args}>`;
+    const head = annot.namespace ? `${annot.namespace}.${annot.name}` : annot.name;
+    return `${head}<${args}>`;
   }
   if (annot.kind === "functionType") {
     const params = annot.params.map(formatAnnotation).join(", ");
@@ -492,9 +512,10 @@ function bitWidthOf(name) {
 }
 
 // Returns true if a numeric cast from src to dst is valid (both must be numeric prims).
+// Phase 12: an integer-backed value enum is castable to/from any numeric prim
+// via its underlying primitive. String-backed enums are not castable.
 export function isCastableTo(src, dst) {
   if (!src || !dst) return false;
-  if (src.kind !== typeKinds.prim || dst.kind !== typeKinds.prim) return false;
   const numericPrims = [
     "int8",
     "int16",
@@ -509,7 +530,14 @@ export function isCastableTo(src, dst) {
     "float32",
     "float64",
   ];
-  return numericPrims.includes(src.name) && numericPrims.includes(dst.name);
+  const effective = (t) => {
+    if (t.kind === typeKinds.valueEnum) return t.underlying;
+    return t;
+  };
+  const s = effective(src);
+  const d = effective(dst);
+  if (s.kind !== typeKinds.prim || d.kind !== typeKinds.prim) return false;
+  return numericPrims.includes(s.name) && numericPrims.includes(d.name);
 }
 
 // Returns the LLVM cast opcode string for casting srcType to dstType.
@@ -595,7 +623,10 @@ export function typesEqual(a, b) {
   if (a.kind === typeKinds.vtable) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
-  if (a.kind === typeKinds.enum || a.kind === typeKinds.union) {
+  if (a.kind === typeKinds.variant || a.kind === typeKinds.union) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
+  if (a.kind === typeKinds.valueEnum) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
   if (a.kind === typeKinds.unsafePtr) {
@@ -682,7 +713,7 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
         type.genericInstance ?? null,
       );
     }
-    case typeKinds.enum: {
+    case typeKinds.variant: {
       // Phase 10.A: mirror the struct branch. Open instances (carrying
       // genericInstance with TypeParamType args) re-route through the
       // registry once their args have concrete substitutions.
@@ -739,7 +770,7 @@ export function typeHasTypeParam(type) {
     if (!type.fields) return false;
     return type.fields.some((f) => typeHasTypeParam(f.type));
   }
-  if (type.kind === typeKinds.enum) {
+  if (type.kind === typeKinds.variant) {
     if (!type.variants) return false;
     for (const v of type.variants.values()) {
       if (v.fields === null) continue;

@@ -49,19 +49,21 @@ export function formatType(t) {
       return `kind ${t.name}`;
     case typeKinds.task:
       return `Task<${formatType(t.resultType)}>`;
-    case typeKinds.enum:
+    case typeKinds.variant:
       if (t.genericInstance) {
         const args = t.genericInstance.args.map(formatType).join(", ");
         // Recover the source decl name from the mangled `Name__a__b__...`.
-        // The genericInstance.declId is `<mod>__enum__<Name>`; if available,
+        // The genericInstance.declId is `<mod>__variant__<Name>`; if available,
         // we'd prefer that - but we only have the mangled t.name here, so
         // strip the trailing `__arg`s.
         const baseName = t.name.split("__")[0];
-        return `enum ${baseName}<${args}>`;
+        return `variant ${baseName}<${args}>`;
       }
-      return `enum ${t.name}`;
+      return `variant ${t.name}`;
     case typeKinds.union:
       return `union ${t.name}`;
+    case typeKinds.valueEnum:
+      return `enum ${t.name}`;
     case typeKinds.typeParam:
       return t.name;
     case typeKinds.unsafePtr:

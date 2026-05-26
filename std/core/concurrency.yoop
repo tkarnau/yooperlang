@@ -14,7 +14,7 @@
 // Windows), so a deadline computed locally is directly usable by
 // wait_until.
 
-export enum WaitResult<T> {
+export variant WaitResult<T> {
     Done { value: T },
     Timeout,
     Cancelled,

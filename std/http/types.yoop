@@ -18,7 +18,7 @@ import { string_eq_ignore_ascii_case } from "../core/strings.yoop";
 // rejected at parse time rather than reified as a variant - keeps the
 // switch closed.
 
-export enum HttpMethod {
+export variant HttpMethod {
     Get,
     Post,
     Put,
@@ -131,7 +131,7 @@ export function http_method_label(m: HttpMethod): string {
 
 // ----- StatusCode ---------------------------------------------------------
 
-export enum StatusClass {
+export variant StatusClass {
     Informational,
     Success,
     Redirect,

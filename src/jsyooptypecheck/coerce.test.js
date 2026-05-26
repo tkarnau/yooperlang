@@ -7,7 +7,7 @@ import {
   unifyArith,
 } from "./coerce.js";
 import {
-  EnumType,
+  VariantType,
   ErrorType,
   PrimType,
   UntypedFloatType,
@@ -105,7 +105,7 @@ describe("unifyArith", () => {
 
   // plans/yoopbinder-papercuts.md Issue 3: enums get tag-based equality.
   it("`==` on two values of the same enum type yields bool", () => {
-    const color = EnumType("Color", new Map(), "mod1");
+    const color = VariantType("Color", new Map(), "mod1");
     assert.deepEqual(
       unifyArith(color, color, "eqeq"),
       PrimType("bool"),
@@ -116,12 +116,12 @@ describe("unifyArith", () => {
     );
   });
   it("`==` on different enum types is rejected (returns null)", () => {
-    const color = EnumType("Color", new Map(), "mod1");
-    const shape = EnumType("Shape", new Map(), "mod1");
+    const color = VariantType("Color", new Map(), "mod1");
+    const shape = VariantType("Shape", new Map(), "mod1");
     assert.equal(unifyArith(color, shape, "eqeq"), null);
   });
   it("non-equality ops on enums are rejected", () => {
-    const color = EnumType("Color", new Map(), "mod1");
+    const color = VariantType("Color", new Map(), "mod1");
     assert.equal(unifyArith(color, color, "lt"), null);
     assert.equal(unifyArith(color, color, "plus"), null);
   });

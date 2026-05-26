@@ -1,15 +1,18 @@
 // Nebula Arena - GLSL + GPU-particle sibling demo to twinstick.
 //
-// Pure OpenGL pipeline (no SDL_Renderer). Showcases:
-//   - A fragment-shader animated nebula background
-//   - A single point-sprite shader that renders the player, bullets,
-//     enemies, AND particle bursts -- driven by per-vertex size + color
-//   - A pooled particle system: each enemy hit spawns ~30 short-lived
-//     particles whose alpha + position decay frame to frame
+// Pure OpenGL pipeline (no SDL_Renderer). The work is split across
+// modules:
+//   sdl.yoop       SDL2 bindings, value enums, Disposable wrappers
+//   gl.yoop        OpenGL bindings, value enums, shader/program helpers
+//   shaders.yoop   GLSL source strings
+//   state.yoop     GameState pools, tick, spawn helpers
+//   palette.yoop   palette.RGB + fire_color
+//   rng.yoop       LCG random number generator
+//   main.yoop      Scene setup, draw loop, vertex packing
 //
-// Gameplay is the same A/D + space + Esc loop twinstick uses, so the
-// muscle memory transfers. The big difference is everything is drawn
-// in one or two draw calls per frame instead of one per sprite.
+// Same A/D + Space + Esc loop as twinstick - the muscle memory
+// transfers. The big difference is everything renders in one or two
+// draw calls per frame instead of one per sprite.
 //
 // macOS-only today (uses `framework:OpenGL`). Linux would need a GL
 // function loader for the 3.2+ core entry points; the rest of the
@@ -17,101 +20,13 @@
 
 import.unsafe;
 
-import { Disposable, disposable } from "std/core/kinds.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-
-// ── extern surface (SDL2 + OpenGL.framework) ─────────────────────────────────
-
-extern "C" from library "SDL2" {
-    type SDL_Window;
-    type SDL_GLContext;
-
-    function SDL_Init(flags: uint32): int32;
-    function SDL_Quit(): void;
-    function SDL_GetError(): string;
-    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
-    function SDL_PumpEvents(): void;
-    function SDL_GetTicks(): uint32;
-    function SDL_Delay(ms: uint32): void;
-
-    function SDL_CreateWindow(
-        title: string,
-        x: int32, y: int32,
-        w: int32, h: int32,
-        flags: uint32
-    ): ref SDL_Window;
-    function SDL_DestroyWindow(ref win: SDL_Window): void;
-
-    function SDL_GL_SetAttribute(attr: int32, value: int32): int32;
-    function SDL_GL_CreateContext(ref win: SDL_Window): unsafe_ptr<SDL_GLContext>;
-    function SDL_GL_DeleteContext(ctx: unsafe_ptr<SDL_GLContext>): void;
-    function SDL_GL_SetSwapInterval(interval: int32): int32;
-    function SDL_GL_SwapWindow(ref win: SDL_Window): void;
-}
-
-extern "C" from library "framework:OpenGL" {
-    function glClearColor(r: float32, g: float32, b: float32, a: float32): void;
-    function glClear(mask: uint32): void;
-    function glViewport(x: int32, y: int32, w: int32, h: int32): void;
-    function glEnable(cap: uint32): void;
-    function glBlendFunc(sfactor: uint32, dfactor: uint32): void;
-
-    // Shader pipeline.
-    function glCreateShader(stage: uint32): uint32;
-    function glShaderSource(
-        shader: uint32,
-        count: int32,
-        string_ptrs: unsafe_ptr<string>,
-        length_ptrs: unsafe_ptr<int32>
-    ): void;
-    function glCompileShader(shader: uint32): void;
-    function glGetShaderiv(shader: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
-    function glGetShaderInfoLog(
-        shader: uint32,
-        max_len: int32,
-        length_out: unsafe_ptr<int32>,
-        log_out: unsafe_ptr<uint8>
-    ): void;
-    function glDeleteShader(shader: uint32): void;
-
-    function glCreateProgram(): uint32;
-    function glAttachShader(program: uint32, shader: uint32): void;
-    function glLinkProgram(program: uint32): void;
-    function glGetProgramiv(program: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
-    function glGetProgramInfoLog(
-        program: uint32,
-        max_len: int32,
-        length_out: unsafe_ptr<int32>,
-        log_out: unsafe_ptr<uint8>
-    ): void;
-    function glUseProgram(program: uint32): void;
-    function glDeleteProgram(program: uint32): void;
-    function glBindFragDataLocation(program: uint32, color_number: uint32, name: string): void;
-    function glBindAttribLocation(program: uint32, index: uint32, name: string): void;
-
-    function glGenVertexArrays(n: int32, arrays: unsafe_ptr<uint32>): void;
-    function glBindVertexArray(array: uint32): void;
-    function glDeleteVertexArrays(n: int32, arrays: unsafe_ptr<uint32>): void;
-    function glGenBuffers(n: int32, buffers: unsafe_ptr<uint32>): void;
-    function glBindBuffer(target: uint32, buffer: uint32): void;
-    function glBufferData(target: uint32, size: int64, data: unsafe_ptr<uint8>, usage: uint32): void;
-    function glDeleteBuffers(n: int32, buffers: unsafe_ptr<uint32>): void;
-    function glVertexAttribPointer(
-        index: uint32,
-        size: int32,
-        elem_type: uint32,
-        normalized: uint8,
-        stride: int32,
-        offset: unsafe_ptr<uint8>
-    ): void;
-    function glEnableVertexAttribArray(index: uint32): void;
-
-    function glGetUniformLocation(program: uint32, name: string): int32;
-    function glUniform1f(location: int32, v0: float32): void;
-    function glUniform2f(location: int32, v0: float32, v1: float32): void;
-
-    function glDrawArrays(mode: uint32, first: int32, count: int32): void;
-}
+import * as sdl from "./sdl.yoop";
+import * as gl from "./gl.yoop";
+import * as shaders from "./shaders.yoop";
+import * as state from "./state.yoop";
+import * as palette from "./palette.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -119,493 +34,20 @@ extern "C" from "stdio.h" {
 extern "C" from "yoop_runtime" {
     function yoop_stdout_linebuf(): void;
 }
-extern "C" from library "m" {
-    function sin(x: float64): float64;
-    function cos(x: float64): float64;
-    function sqrt(x: float64): float64;
-}
-
-// ── GL / SDL constants (the subset we need) ──────────────────────────────────
-
-const SDL_INIT_VIDEO: uint32 = 0x00000020;
-const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
-const SDL_WINDOW_OPENGL: uint32 = 0x00000002;
-const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
-const SDL_SCANCODE_ESCAPE: int32 = 41;
-const SDL_SCANCODE_A: int32 = 4;
-const SDL_SCANCODE_D: int32 = 7;
-const SDL_SCANCODE_SPACE: int32 = 44;
-
-const SDL_GL_CONTEXT_MAJOR_VERSION: int32 = 17;
-const SDL_GL_CONTEXT_MINOR_VERSION: int32 = 18;
-const SDL_GL_CONTEXT_PROFILE_MASK:  int32 = 21;
-const SDL_GL_DOUBLEBUFFER:          int32 = 5;
-const SDL_GL_CONTEXT_PROFILE_CORE:  int32 = 0x0001;
-
-const GL_VERTEX_SHADER:        uint32 = 0x8B31;
-const GL_FRAGMENT_SHADER:      uint32 = 0x8B30;
-const GL_COMPILE_STATUS:       uint32 = 0x8B81;
-const GL_LINK_STATUS:          uint32 = 0x8B82;
-const GL_INFO_LOG_LENGTH:      uint32 = 0x8B84;
-const GL_ARRAY_BUFFER:         uint32 = 0x8892;
-const GL_STATIC_DRAW:          uint32 = 0x88E4;
-const GL_DYNAMIC_DRAW:         uint32 = 0x88E8;
-const GL_FLOAT:                uint32 = 0x1406;
-const GL_FALSE:                uint8  = 0;
-const GL_TRIANGLES:            uint32 = 0x0004;
-const GL_POINTS:               uint32 = 0x0000;
-const GL_COLOR_BUFFER_BIT:     uint32 = 0x00004000;
-const GL_BLEND:                uint32 = 0x0BE2;
-const GL_SRC_ALPHA:            uint32 = 0x0302;
-const GL_ONE_MINUS_SRC_ALPHA:  uint32 = 0x0303;
-// Core profile requires programmable point-size; if we don't enable
-// this, gl_PointSize in the vertex shader is ignored.
-const GL_PROGRAM_POINT_SIZE:   uint32 = 0x8642;
-
-// ── Window + gameplay constants ──────────────────────────────────────────────
-
-const WIN_W: int32 = 1024;
-const WIN_H: int32 = 768;
-const FPS_TARGET: uint32 = 60;
-const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
-
-// Pre-existing codegen papercut: module-level `const X: float32 = 0.9`
-// emits raw `float 0.9` into LLVM IR, which the verifier rejects
-// because 0.9 isn't exactly representable in 32 bits. Same one
-// sdl_demo currently trips on. Until codegen learns to emit the hex
-// form for inexact floats, all float32 module consts here use
-// exactly-representable values (integers, halves, quarters, 1/64,
-// 1/1024, etc.) -- gameplay numbers shifted slightly to fit.
-const PLAYER_Y_FRAC: float32 = 0.875;        // ~87.5% down the screen
-const PLAYER_SPEED:  float32 = 0.5;          // pixels per ms
-const PLAYER_SIZE:   float32 = 36.0;
-
-const BULLET_SPEED:  float32 = 1.0;
-const BULLET_SIZE:   float32 = 10.0;
-const BULLET_POOL:   int32 = 32;
-
-const ENEMY_POOL:    int32 = 12;
-const ENEMY_SPEED:   float32 = 0.0625;       // 1/16
-const ENEMY_MIN_SIZE: float32 = 28.0;
-const ENEMY_MAX_SIZE: float32 = 56.0;
-const ENEMY_SPAWN_INTERVAL_MS: uint32 = 700;
-
-// Particle storage. 256 is enough for ~8 simultaneous explosions.
-const PARTICLE_POOL: int32 = 256;
-const PARTICLES_PER_HIT: int32 = 30;
-const PARTICLE_LIFE_MS: float32 = 1024.0;
-const PARTICLE_SPEED_MIN: float32 = 0.125;   // 1/8
-const PARTICLE_SPEED_MAX: float32 = 0.5;
-const PARTICLE_SIZE: float32 = 8.0;
-const PARTICLE_GRAVITY: float32 = 0.0009765625;   // 1/1024
 
 // Single vertex stride: x, y, size, r, g, b, a -- 7 floats = 28 bytes.
 const VERT_STRIDE: int32 = 28;
 const VERT_FLOATS: usize = 7;
+const FPS_TARGET: uint32 = 60;
+const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
 
-// ── Disposable wrappers ──────────────────────────────────────────────────────
-
-type Window implements Disposable {
-    handle: ref SDL_Window,
-    function dispose(ref self): void { SDL_DestroyWindow(self.handle); }
-}
-
-type GLCtx implements Disposable {
-    handle: unsafe_ptr<SDL_GLContext>,
-    function dispose(ref self): void { SDL_GL_DeleteContext(self.handle); }
-}
-
-// ── Shader sources ───────────────────────────────────────────────────────────
+// ── Vertex packing ───────────────────────────────────────────────────
 //
-// Defined as function-returning-string helpers because module-level
-// `const string` initialisation doesn't process `\n` escapes today --
-// the GLSL preprocessor REQUIRES a newline after `#version 150 core`
-// or it errors on `#`. See plans/yoopbinder-papercuts.md Issue 9.
-
-// Nebula background: domain-warped value-noise field summed at three
-// frequencies. Slow horizontal drift over time. Colors lerp between
-// deep purple and a hot pink core to evoke the Carina nebula.
-function nebula_vertex_src(): string {
-    return "#version 150 core\nin vec2 a_pos;\nout vec2 v_uv;\nvoid main() {\n    v_uv = (a_pos + vec2(1.0)) * 0.5;\n    gl_Position = vec4(a_pos, 0.0, 1.0);\n}\n";
-}
-
-function nebula_fragment_src(): string {
-    return "#version 150 core\nin vec2 v_uv;\nout vec4 frag_color;\nuniform float u_time;\nuniform vec2 u_resolution;\n// Hash-based pseudo-noise. Cheap and looks fine for slow drifts.\nfloat hash(vec2 p) {\n    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);\n}\nfloat value_noise(vec2 p) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    vec2 u = f * f * (3.0 - 2.0 * f);\n    return mix(mix(hash(i + vec2(0,0)), hash(i + vec2(1,0)), u.x),\n               mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x), u.y);\n}\nfloat fbm(vec2 p) {\n    float v = 0.0;\n    float amp = 0.5;\n    for (int k = 0; k < 4; k = k + 1) {\n        v = v + amp * value_noise(p);\n        p = p * 2.0;\n        amp = amp * 0.5;\n    }\n    return v;\n}\nvoid main() {\n    // Convert v_uv (0..1) into a wider domain so the noise has structure.\n    vec2 p = v_uv * 4.0;\n    p.x = p.x + u_time * 0.04;\n    float n = fbm(p + fbm(p + u_time * 0.02));\n    // Palette: deep navy -> magenta -> hot pink with brightness from n.\n    vec3 deep   = vec3(0.04, 0.02, 0.10);\n    vec3 mid    = vec3(0.30, 0.06, 0.40);\n    vec3 hot    = vec3(0.95, 0.35, 0.55);\n    vec3 color = mix(deep, mid, smoothstep(0.20, 0.55, n));\n    color = mix(color, hot, smoothstep(0.55, 0.85, n) * 0.8);\n    // A pinch of stars: tiny white dots where another hash is very high.\n    float star = hash(floor(v_uv * 480.0));\n    if (star > 0.997) {\n        color = color + vec3(1.0) * (star - 0.997) * 80.0;\n    }\n    frag_color = vec4(color, 1.0);\n}\n";
-}
-
-// Point-sprite shader: every drawable entity is a single GL_POINT
-// with a per-vertex size + RGBA color. Vertex turns pixel coords into
-// NDC. Fragment shapes the point into a soft-edged disc.
-function sprite_vertex_src(): string {
-    return "#version 150 core\nin vec2 a_pos;\nin float a_size;\nin vec4 a_color;\nout vec4 v_color;\nuniform vec2 u_resolution;\nvoid main() {\n    vec2 ndc;\n    ndc.x = (a_pos.x / u_resolution.x) * 2.0 - 1.0;\n    ndc.y = 1.0 - (a_pos.y / u_resolution.y) * 2.0;\n    gl_Position = vec4(ndc, 0.0, 1.0);\n    gl_PointSize = a_size;\n    v_color = a_color;\n}\n";
-}
-
-function sprite_fragment_src(): string {
-    return "#version 150 core\nin vec4 v_color;\nout vec4 frag_color;\nvoid main() {\n    // gl_PointCoord is the 0..1 UV inside the rasterised point square.\n    vec2 d = gl_PointCoord - vec2(0.5);\n    float r = length(d);\n    if (r > 0.5) discard;\n    // Soft edge + a brighter core so each sprite glows.\n    float core = smoothstep(0.50, 0.10, r);\n    float halo = smoothstep(0.50, 0.30, r);\n    vec3 col = v_color.rgb * (0.5 + 0.7 * core);\n    frag_color = vec4(col, v_color.a * halo);\n}\n";
-}
-
-// ── shader plumbing (mirrors shader_demo) ────────────────────────────────────
-
-function compile_shader(stage: uint32, src: string): uint32 {
-    let sh: uint32 = glCreateShader(stage);
-    let src_local: string = src;
-    glShaderSource(sh, 1, &src_local, null);
-    glCompileShader(sh);
-    let status: int32 = 0;
-    glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
-    if (status == 0) {
-        let log_len: int32 = 0;
-        glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &log_len);
-        if (log_len > 0) {
-            let buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
-            let written: int32 = 0;
-            glGetShaderInfoLog(sh, log_len, &written, buf.ptr);
-            buf[usize(written)] = 0;
-            let log: string = intr.string_from_bytes_unchecked(buf);
-            printf(`shader compile failed:\n${log}\n`);
-        }
-        glDeleteShader(sh);
-        return 0;
-    }
-    return sh;
-}
-
-function link_program_with_attrs(vs: uint32, fs: uint32, attrs: string[]): uint32 {
-    let prog: uint32 = glCreateProgram();
-    glAttachShader(prog, vs);
-    glAttachShader(prog, fs);
-    let i: usize = 0;
-    while (i < attrs.len) {
-        glBindAttribLocation(prog, uint32(i), attrs[i]);
-        i = i + 1;
-    }
-    glBindFragDataLocation(prog, 0, "frag_color");
-    glLinkProgram(prog);
-    let status: int32 = 0;
-    glGetProgramiv(prog, GL_LINK_STATUS, &status);
-    if (status == 0) {
-        let log_len: int32 = 0;
-        glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &log_len);
-        if (log_len > 0) {
-            let buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
-            let written: int32 = 0;
-            glGetProgramInfoLog(prog, log_len, &written, buf.ptr);
-            buf[usize(written)] = 0;
-            let log: string = intr.string_from_bytes_unchecked(buf);
-            printf(`program link failed:\n${log}\n`);
-        }
-        glDeleteProgram(prog);
-        return 0;
-    }
-    return prog;
-}
-
-// ── RNG ──────────────────────────────────────────────────────────────────────
-//
-// Linear congruential generator (Numerical Recipes constants). Used for
-// enemy spawn positions, particle velocity scatter, etc. State is a
-// single int32; the caller threads it through so the sequence is
-// deterministic per run.
-
-function next_rand(ref state: int32, range: int32): int32 {
-    state = state * 1103515245 + 12345;
-    let r: int32 = state % range;
-    if (r < 0) { r = r + range; }
-    return r;
-}
-
-function rand_float01(ref state: int32): float32 {
-    let n: int32 = next_rand(ref state, 10000);
-    return float32(n) / 10000.0;
-}
-
-// ── Game state ───────────────────────────────────────────────────────────────
-//
-// Entities live in fixed-size pools as parallel arrays. The `*_active`
-// flags drive iteration; inactive slots are recycled for new spawns.
-
-type GameState {
-    // Player.
-    player_x: float32,
-    player_y: float32,
-    space_was_down: int32,
-
-    // Bullets.
-    bullet_active: bool[],
-    bullet_x: float32[],
-    bullet_y: float32[],
-
-    // Enemies.
-    enemy_active: bool[],
-    enemy_x: float32[],
-    enemy_y: float32[],
-    enemy_size: float32[],
-    enemy_hue: float32[],
-    last_enemy_spawn_ms: uint32,
-
-    // Particles.
-    p_active: bool[],
-    p_x: float32[],
-    p_y: float32[],
-    p_vx: float32[],
-    p_vy: float32[],
-    p_life: float32[],          // remaining ms
-    p_init_life: float32[],     // for alpha fade
-    p_hue: float32[],           // 0..1 -- maps to a fire palette
-
-    score: int32,
-    rng: int32,
-}
-
-function make_zero_float_array(n: int32): float32[] {
-    let arr: float32[] = intr.heap_alloc(usize(n));
-    let i: usize = 0;
-    while (i < usize(n)) {
-        arr[i] = 0.0;
-        i = i + 1;
-    }
-    return arr;
-}
-
-function make_false_array(n: int32): bool[] {
-    let arr: bool[] = intr.heap_alloc(usize(n));
-    let i: usize = 0;
-    while (i < usize(n)) {
-        arr[i] = false;
-        i = i + 1;
-    }
-    return arr;
-}
-
-function init_state(seed: int32): GameState {
-    let g: GameState = {
-        player_x: float32(WIN_W) * 0.5,
-        player_y: float32(WIN_H) * PLAYER_Y_FRAC,
-        space_was_down: 0,
-
-        bullet_active: make_false_array(BULLET_POOL),
-        bullet_x:      make_zero_float_array(BULLET_POOL),
-        bullet_y:      make_zero_float_array(BULLET_POOL),
-
-        enemy_active: make_false_array(ENEMY_POOL),
-        enemy_x:      make_zero_float_array(ENEMY_POOL),
-        enemy_y:      make_zero_float_array(ENEMY_POOL),
-        enemy_size:   make_zero_float_array(ENEMY_POOL),
-        enemy_hue:    make_zero_float_array(ENEMY_POOL),
-        last_enemy_spawn_ms: 0,
-
-        p_active:    make_false_array(PARTICLE_POOL),
-        p_x:         make_zero_float_array(PARTICLE_POOL),
-        p_y:         make_zero_float_array(PARTICLE_POOL),
-        p_vx:        make_zero_float_array(PARTICLE_POOL),
-        p_vy:        make_zero_float_array(PARTICLE_POOL),
-        p_life:      make_zero_float_array(PARTICLE_POOL),
-        p_init_life: make_zero_float_array(PARTICLE_POOL),
-        p_hue:       make_zero_float_array(PARTICLE_POOL),
-
-        score: 0,
-        rng:   seed | 1,
-    };
-    return g;
-}
-
-// ── Game logic ───────────────────────────────────────────────────────────────
-
-function fire_bullet(ref g: GameState): void {
-    let i: int32 = 0;
-    while (i < BULLET_POOL) {
-        if (!g.bullet_active[i]) {
-            g.bullet_active[i] = true;
-            g.bullet_x[i] = g.player_x;
-            g.bullet_y[i] = g.player_y - PLAYER_SIZE * 0.5;
-            return;
-        }
-        i = i + 1;
-    }
-}
-
-function spawn_enemy(ref g: GameState): void {
-    let i: int32 = 0;
-    while (i < ENEMY_POOL) {
-        if (!g.enemy_active[i]) {
-            let margin: int32 = 80;
-            let spread: int32 = WIN_W - 2 * margin;
-            g.enemy_active[i] = true;
-            g.enemy_x[i] = float32(margin + next_rand(ref g.rng, spread));
-            g.enemy_y[i] = -ENEMY_MAX_SIZE;
-            g.enemy_size[i] = ENEMY_MIN_SIZE + rand_float01(ref g.rng) * (ENEMY_MAX_SIZE - ENEMY_MIN_SIZE);
-            g.enemy_hue[i] = rand_float01(ref g.rng);
-            return;
-        }
-        i = i + 1;
-    }
-}
-
-// Pick the next free particle slot. If the pool is saturated, recycle
-// the oldest by overwriting slot 0 (simple ring-buffer fallback). For
-// PARTICLE_POOL=256 with PARTICLES_PER_HIT=30 this stays headroomy
-// unless the player obliterates the entire enemy pool at once.
-function alloc_particle(ref g: GameState): int32 {
-    let i: int32 = 0;
-    while (i < PARTICLE_POOL) {
-        if (!g.p_active[i]) {
-            return i;
-        }
-        i = i + 1;
-    }
-    return 0;
-}
-
-function spawn_explosion(ref g: GameState, x: float32, y: float32, base_hue: float32): void {
-    const PI: float32 = 3.14159265;
-    let k: int32 = 0;
-    while (k < PARTICLES_PER_HIT) {
-        let slot: int32 = alloc_particle(ref g);
-        // Random direction in a full circle; speed within [min, max].
-        let angle: float32 = rand_float01(ref g.rng) * 2.0 * PI;
-        let speed: float32 = PARTICLE_SPEED_MIN + rand_float01(ref g.rng) * (PARTICLE_SPEED_MAX - PARTICLE_SPEED_MIN);
-        g.p_active[slot] = true;
-        g.p_x[slot] = x;
-        g.p_y[slot] = y;
-        g.p_vx[slot] = float32(cos(float64(angle))) * speed;
-        g.p_vy[slot] = float32(sin(float64(angle))) * speed;
-        g.p_life[slot] = PARTICLE_LIFE_MS;
-        g.p_init_life[slot] = PARTICLE_LIFE_MS;
-        // Cluster hues around the source enemy's hue with a bit of jitter
-        // so each explosion has a consistent palette but isn't monotone.
-        g.p_hue[slot] = base_hue + (rand_float01(ref g.rng) - 0.5) * 0.2;
-        k = k + 1;
-    }
-}
-
-function tick(ref g: GameState, dt: float32, now: uint32, keys: uint8[]): bool {
-    // Player movement.
-    if (keys[SDL_SCANCODE_A] != 0) { g.player_x = g.player_x - PLAYER_SPEED * dt; }
-    if (keys[SDL_SCANCODE_D] != 0) { g.player_x = g.player_x + PLAYER_SPEED * dt; }
-    if (g.player_x < PLAYER_SIZE * 0.5) { g.player_x = PLAYER_SIZE * 0.5; }
-    if (g.player_x > float32(WIN_W) - PLAYER_SIZE * 0.5) {
-        g.player_x = float32(WIN_W) - PLAYER_SIZE * 0.5;
-    }
-
-    // Rising-edge fire on Space.
-    let space_now: int32 = int32(keys[SDL_SCANCODE_SPACE]);
-    if (space_now != 0 && g.space_was_down == 0) {
-        fire_bullet(ref g);
-    }
-    g.space_was_down = space_now;
-
-    // Bullets.
-    let bi: int32 = 0;
-    while (bi < BULLET_POOL) {
-        if (g.bullet_active[bi]) {
-            g.bullet_y[bi] = g.bullet_y[bi] - BULLET_SPEED * dt;
-            if (g.bullet_y[bi] < -BULLET_SIZE) {
-                g.bullet_active[bi] = false;
-            }
-        }
-        bi = bi + 1;
-    }
-
-    // Enemies: spawn on interval, march downward, check collision.
-    if (now - g.last_enemy_spawn_ms > ENEMY_SPAWN_INTERVAL_MS) {
-        spawn_enemy(ref g);
-        g.last_enemy_spawn_ms = now;
-    }
-    let ei: int32 = 0;
-    while (ei < ENEMY_POOL) {
-        if (g.enemy_active[ei]) {
-            g.enemy_y[ei] = g.enemy_y[ei] + ENEMY_SPEED * dt;
-            // Despawn off the bottom (counts as a miss, no penalty).
-            if (g.enemy_y[ei] > float32(WIN_H) + ENEMY_MAX_SIZE) {
-                g.enemy_active[ei] = false;
-                ei = ei + 1;
-                continue;
-            }
-            // Collide against any active bullet.
-            let bj: int32 = 0;
-            while (bj < BULLET_POOL) {
-                if (g.bullet_active[bj]) {
-                    let dx: float32 = g.bullet_x[bj] - g.enemy_x[ei];
-                    let dy: float32 = g.bullet_y[bj] - g.enemy_y[ei];
-                    let half: float32 = g.enemy_size[ei] * 0.5;
-                    if (dx * dx + dy * dy < half * half) {
-                        // Hit! Spawn particles, retire both, count score.
-                        spawn_explosion(ref g, g.enemy_x[ei], g.enemy_y[ei], g.enemy_hue[ei]);
-                        g.bullet_active[bj] = false;
-                        g.enemy_active[ei] = false;
-                        g.score = g.score + 1;
-                        break;
-                    }
-                }
-                bj = bj + 1;
-            }
-        }
-        ei = ei + 1;
-    }
-
-    // Particles: velocity * dt, gravity, lifetime decay.
-    let pi: int32 = 0;
-    while (pi < PARTICLE_POOL) {
-        if (g.p_active[pi]) {
-            g.p_x[pi] = g.p_x[pi] + g.p_vx[pi] * dt;
-            g.p_y[pi] = g.p_y[pi] + g.p_vy[pi] * dt;
-            g.p_vy[pi] = g.p_vy[pi] + PARTICLE_GRAVITY * dt;
-            g.p_life[pi] = g.p_life[pi] - dt;
-            if (g.p_life[pi] <= 0.0) {
-                g.p_active[pi] = false;
-            }
-        }
-        pi = pi + 1;
-    }
-
-    // Esc => quit (returns false to break the loop).
-    if (keys[SDL_SCANCODE_ESCAPE] != 0) {
-        return false;
-    }
-    return true;
-}
-
-// ── Color helpers ────────────────────────────────────────────────────────────
-//
-// Map a hue in [0, 1] to a fire-like RGB palette. Simple piecewise lerp,
-// no full HSV->RGB rigamarole.
-
-type RGB { r: float32, g: float32, b: float32 }
-
-function fire_color(hue: float32): RGB {
-    // Hue cycles: yellow -> orange -> red -> magenta -> back to yellow.
-    let h: float32 = hue;
-    if (h < 0.0) { h = h + 1.0; }
-    if (h >= 1.0) { h = h - 1.0; }
-    if (h < 0.25) {
-        let s: float32 = h / 0.25;
-        let r: RGB = { r: 1.0, g: 1.0 - s * 0.4, b: 0.2 + s * 0.0 };
-        return r;
-    }
-    if (h < 0.5) {
-        let s: float32 = (h - 0.25) / 0.25;
-        let r: RGB = { r: 1.0, g: 0.6 - s * 0.5, b: 0.2 - s * 0.1 };
-        return r;
-    }
-    if (h < 0.75) {
-        let s: float32 = (h - 0.5) / 0.25;
-        let r: RGB = { r: 1.0 - s * 0.2, g: 0.1, b: 0.1 + s * 0.5 };
-        return r;
-    }
-    let s: float32 = (h - 0.75) / 0.25;
-    let r: RGB = { r: 0.8 + s * 0.2, g: 0.1 + s * 0.9, b: 0.6 - s * 0.4 };
-    return r;
-}
-
-// ── Per-frame vertex buffer build ────────────────────────────────────────────
-//
-// Walks the game state, packs every visible entity into a single
-// interleaved buffer with the layout the sprite shader expects:
+// Walks the game state, packs every visible entity into one interleaved
+// buffer with the layout the sprite shader expects:
 //   x, y, size, r, g, b, a   (7 floats per vertex)
-//
-// Returns the number of vertices written. The caller uploads + draws.
 
-function pack_vertex(ref out: float32[], offset: usize, x: float32, y: float32, size: float32, r: float32, g: float32, b: float32, a: float32): void {
+function pack(ref out: float32[], offset: usize, x: float32, y: float32, size: float32, r: float32, g: float32, b: float32, a: float32): void {
     out[offset + 0] = x;
     out[offset + 1] = y;
     out[offset + 2] = size;
@@ -615,47 +57,51 @@ function pack_vertex(ref out: float32[], offset: usize, x: float32, y: float32, 
     out[offset + 6] = a;
 }
 
-function build_sprite_vbo(ref g: GameState, ref buf: float32[]): int32 {
+function build_sprite_vbo(ref g: state.GameState, ref buf: float32[]): int32 {
     let off: usize = 0;
     let count: int32 = 0;
 
-    // Particles first so they render behind the gameplay objects.
+    // Particles first so they render behind gameplay objects.
     let pi: int32 = 0;
-    while (pi < PARTICLE_POOL) {
-        if (g.p_active[pi]) {
-            let alpha: float32 = g.p_life[pi] / g.p_init_life[pi];
+    while (pi < state.PARTICLE_POOL) {
+        if (g.particles.active[pi]) {
+            let alpha: float32 = g.particles.life[pi] / g.particles.init_life[pi];
             if (alpha < 0.0) { alpha = 0.0; }
-            let c: RGB = fire_color(g.p_hue[pi]);
-            pack_vertex(ref buf, off,
-                g.p_x[pi], g.p_y[pi], PARTICLE_SIZE,
-                c.r, c.g, c.b, alpha);
+            let c: palette.RGB = palette.fire_color(g.particles.hue[pi]);
+            pack(ref buf, off, g.particles.x[pi], g.particles.y[pi], state.PARTICLE_SIZE, c.r, c.g, c.b, alpha);
             off = off + VERT_FLOATS;
             count = count + 1;
         }
         pi = pi + 1;
     }
 
-    // Enemies.
     let ei: int32 = 0;
-    while (ei < ENEMY_POOL) {
-        if (g.enemy_active[ei]) {
-            let c: RGB = fire_color(g.enemy_hue[ei]);
-            pack_vertex(ref buf, off,
-                g.enemy_x[ei], g.enemy_y[ei], g.enemy_size[ei],
-                c.r, c.g, c.b, 1.0);
+    while (ei < state.ENEMY_POOL) {
+        if (g.enemies.active[ei]) {
+            let c: palette.RGB = palette.fire_color(g.enemies.hue[ei]);
+            pack(ref buf, off, g.enemies.x[ei], g.enemies.y[ei], g.enemies.size[ei], c.r, c.g, c.b, 1.0);
             off = off + VERT_FLOATS;
             count = count + 1;
         }
         ei = ei + 1;
     }
 
-    // Bullets - bright cyan-white tracers.
+    // Power-ups: bright gold disc.
+    let pu: int32 = 0;
+    while (pu < state.POWERUP_POOL) {
+        if (g.powerups.active[pu]) {
+            pack(ref buf, off, g.powerups.x[pu], g.powerups.y[pu], state.POWERUP_SIZE, 1.0, 0.85, 0.25, 1.0);
+            off = off + VERT_FLOATS;
+            count = count + 1;
+        }
+        pu = pu + 1;
+    }
+
+    // Bullets - bright cyan-white.
     let bi: int32 = 0;
-    while (bi < BULLET_POOL) {
-        if (g.bullet_active[bi]) {
-            pack_vertex(ref buf, off,
-                g.bullet_x[bi], g.bullet_y[bi], BULLET_SIZE,
-                0.7, 1.0, 1.0, 1.0);
+    while (bi < state.BULLET_POOL) {
+        if (g.bullets.active[bi]) {
+            pack(ref buf, off, g.bullets.x[bi], g.bullets.y[bi], state.BULLET_SIZE, 0.7, 1.0, 1.0, 1.0);
             off = off + VERT_FLOATS;
             count = count + 1;
         }
@@ -663,125 +109,105 @@ function build_sprite_vbo(ref g: GameState, ref buf: float32[]): int32 {
     }
 
     // Player - large white-blue disc.
-    pack_vertex(ref buf, off,
-        g.player_x, g.player_y, PLAYER_SIZE,
-        0.85, 0.95, 1.0, 1.0);
-    off = off + VERT_FLOATS;
+    pack(ref buf, off, g.player_x, g.player_y, state.PLAYER_SIZE, 0.85, 0.95, 1.0, 1.0);
     count = count + 1;
-
     return count;
 }
 
-// ── Scene loop ───────────────────────────────────────────────────────────────
+// ── Scene loop ───────────────────────────────────────────────────────
 
 function run_scene(): void {
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
-    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
-    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+    sdl.gl_set_attribute(sdl.GLAttr.ContextMajorVersion, 3);
+    sdl.gl_set_attribute(sdl.GLAttr.ContextMinorVersion, 2);
+    sdl.gl_set_attribute(sdl.GLAttr.ContextProfileMask, int32(sdl.GLProfile.Core));
+    sdl.gl_set_attribute(sdl.GLAttr.DoubleBuffer, 1);
 
-    let disposable win: Window = {
-        handle: SDL_CreateWindow(
-            "yooperlang -- Nebula Arena (GLSL + particles)",
-            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
-            WIN_W, WIN_H,
-            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN
-        )
-    };
-    let disposable ctx: GLCtx = {
-        handle: SDL_GL_CreateContext(win.handle)
-    };
-    let _vsync: int32 = SDL_GL_SetSwapInterval(1);
-    glViewport(0, 0, WIN_W, WIN_H);
-    glEnable(GL_BLEND);
-    glBlendFunc(GL_SRC_ALPHA, GL_ONE_MINUS_SRC_ALPHA);
-    glEnable(GL_PROGRAM_POINT_SIZE);
+    let disposable win: sdl.Window = sdl.create_window(
+        "yooperlang -- Nebula Arena (GLSL + particles)",
+        state.WIN_W, state.WIN_H,
+        sdl.WindowFlags.OpenGL | sdl.WindowFlags.Shown
+    );
+    let disposable ctx: sdl.GLCtx = sdl.gl_create_context(ref win);
+    let _vsync: int32 = sdl.gl_set_swap_interval(1);
 
-    // -- compile both programs --
-    let neb_vs: uint32 = compile_shader(GL_VERTEX_SHADER, nebula_vertex_src());
-    let neb_fs: uint32 = compile_shader(GL_FRAGMENT_SHADER, nebula_fragment_src());
-    let attrs1: string[] = ["a_pos"];
-    let neb_prog: uint32 = link_program_with_attrs(neb_vs, neb_fs, attrs1);
-    glDeleteShader(neb_vs);
-    glDeleteShader(neb_fs);
-    if (neb_prog == 0) {
-        printf("nebula program failed\n");
-        return;
-    }
+    gl.viewport(0, 0, state.WIN_W, state.WIN_H);
+    gl.enable(gl.Cap.Blend);
+    gl.blend_func(gl.BlendFactor.SrcAlpha, gl.BlendFactor.OneMinusSrcAlpha);
+    gl.enable(gl.Cap.ProgramPointSize);
 
-    let sp_vs: uint32 = compile_shader(GL_VERTEX_SHADER, sprite_vertex_src());
-    let sp_fs: uint32 = compile_shader(GL_FRAGMENT_SHADER, sprite_fragment_src());
-    let attrs2: string[] = ["a_pos", "a_size", "a_color"];
-    let sp_prog: uint32 = link_program_with_attrs(sp_vs, sp_fs, attrs2);
-    glDeleteShader(sp_vs);
-    glDeleteShader(sp_fs);
-    if (sp_prog == 0) {
-        printf("sprite program failed\n");
-        return;
-    }
+    // ── compile both programs ──
+    let neb_vs: uint32 = gl.compile_shader(gl.ShaderStage.Vertex, shaders.nebula_vertex_src());
+    let neb_fs: uint32 = gl.compile_shader(gl.ShaderStage.Fragment, shaders.nebula_fragment_src());
+    let neb_attrs: string[] = ["a_pos"];
+    let neb_prog: uint32 = gl.link_program(neb_vs, neb_fs, neb_attrs);
+    gl.delete_shader(neb_vs);
+    gl.delete_shader(neb_fs);
+    if (neb_prog == 0) { printf(`nebula program failed\n`); return; }
 
-    // -- nebula VAO/VBO: a static fullscreen quad --
+    let sp_vs: uint32 = gl.compile_shader(gl.ShaderStage.Vertex, shaders.sprite_vertex_src());
+    let sp_fs: uint32 = gl.compile_shader(gl.ShaderStage.Fragment, shaders.sprite_fragment_src());
+    let sp_attrs: string[] = ["a_pos", "a_size", "a_color"];
+    let sp_prog: uint32 = gl.link_program(sp_vs, sp_fs, sp_attrs);
+    gl.delete_shader(sp_vs);
+    gl.delete_shader(sp_fs);
+    if (sp_prog == 0) { printf(`sprite program failed\n`); return; }
+
+    // ── nebula VAO/VBO: static fullscreen quad ──
     let neb_quad: float32[] = [
         -1.0, -1.0,    1.0, -1.0,    1.0,  1.0,
         -1.0, -1.0,    1.0,  1.0,   -1.0,  1.0
     ];
     let neb_vao: uint32 = 0;
-    glGenVertexArrays(1, &neb_vao);
-    glBindVertexArray(neb_vao);
+    gl.gen_vertex_arrays(1, &neb_vao);
+    gl.bind_vertex_array(neb_vao);
     let neb_vbo: uint32 = 0;
-    glGenBuffers(1, &neb_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, neb_vbo);
+    gl.gen_buffers(1, &neb_vbo);
+    gl.bind_buffer(gl.BufferTarget.Array, neb_vbo);
     let neb_bytes: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(neb_quad.ptr);
-    glBufferData(GL_ARRAY_BUFFER, 48, neb_bytes, GL_STATIC_DRAW);
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, null);
-    glEnableVertexAttribArray(0);
+    gl.buffer_data(gl.BufferTarget.Array, 48, neb_bytes, gl.BufferUsage.StaticDraw);
+    gl.vertex_attrib_pointer(0, 2, gl.DataType.Float, gl.FALSE, 8, null);
+    gl.enable_vertex_attrib_array(0);
+    let u_neb_time: int32 = gl.get_uniform_location(neb_prog, "u_time");
+    let u_neb_res:  int32 = gl.get_uniform_location(neb_prog, "u_resolution");
 
-    let u_neb_time: int32 = glGetUniformLocation(neb_prog, "u_time");
-    let u_neb_res:  int32 = glGetUniformLocation(neb_prog, "u_resolution");
-
-    // -- sprite VAO/VBO: re-uploaded each frame --
+    // ── sprite VAO/VBO: re-uploaded each frame ──
     let sp_vao: uint32 = 0;
-    glGenVertexArrays(1, &sp_vao);
-    glBindVertexArray(sp_vao);
+    gl.gen_vertex_arrays(1, &sp_vao);
+    gl.bind_vertex_array(sp_vao);
     let sp_vbo: uint32 = 0;
-    glGenBuffers(1, &sp_vbo);
-    glBindBuffer(GL_ARRAY_BUFFER, sp_vbo);
+    gl.gen_buffers(1, &sp_vbo);
+    gl.bind_buffer(gl.BufferTarget.Array, sp_vbo);
     // attribs: 0=a_pos (2f @ 0), 1=a_size (1f @ 8), 2=a_color (4f @ 12)
-    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, VERT_STRIDE, null);
-    glEnableVertexAttribArray(0);
-    // Need a non-null pointer for the offset arg; cast small ints via
-    // unsafe_ptr.fromInt for the byte offset within the vertex.
+    gl.vertex_attrib_pointer(0, 2, gl.DataType.Float, gl.FALSE, VERT_STRIDE, null);
+    gl.enable_vertex_attrib_array(0);
     let off8:  unsafe_ptr<uint8> = unsafe_ptr.fromInt<uint8>(8);
     let off12: unsafe_ptr<uint8> = unsafe_ptr.fromInt<uint8>(12);
-    glVertexAttribPointer(1, 1, GL_FLOAT, GL_FALSE, VERT_STRIDE, off8);
-    glEnableVertexAttribArray(1);
-    glVertexAttribPointer(2, 4, GL_FLOAT, GL_FALSE, VERT_STRIDE, off12);
-    glEnableVertexAttribArray(2);
+    gl.vertex_attrib_pointer(1, 1, gl.DataType.Float, gl.FALSE, VERT_STRIDE, off8);
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer(2, 4, gl.DataType.Float, gl.FALSE, VERT_STRIDE, off12);
+    gl.enable_vertex_attrib_array(2);
+    let u_sp_res: int32 = gl.get_uniform_location(sp_prog, "u_resolution");
 
-    let u_sp_res: int32 = glGetUniformLocation(sp_prog, "u_resolution");
-
-    // CPU-side staging buffer for sprite verts. Sized for the worst
-    // case: PARTICLE_POOL + ENEMY_POOL + BULLET_POOL + 1 (player).
-    let max_verts: usize = usize(PARTICLE_POOL + ENEMY_POOL + BULLET_POOL + 1);
+    // CPU staging buffer for sprite verts (sized for worst case).
+    let max_verts: usize = usize(state.PARTICLE_POOL + state.ENEMY_POOL + state.BULLET_POOL + state.POWERUP_POOL + 1);
     let cpu_buf: float32[] = intr.heap_alloc(max_verts * VERT_FLOATS);
 
-    // -- game --
-    let mut_state: GameState = init_state(int32(SDL_GetTicks()));
-    let start_ticks: uint32 = SDL_GetTicks();
+    let mut_state: state.GameState = state.init_state(int32(sdl.ticks()));
+    let start_ticks: uint32 = sdl.ticks();
     let last_ticks: uint32 = start_ticks;
     let last_score_print: int32 = 0;
 
-    while (SDL_GetTicks() > 0) {
-        let frame_start: uint32 = SDL_GetTicks();
-        SDL_PumpEvents();
+    while (sdl.ticks() > 0) {
+        let frame_start: uint32 = sdl.ticks();
+        sdl.pump_events();
         let kb_n: int = 0;
-        let keys: uint8[] = SDL_GetKeyboardState(ref kb_n);
+        let keys: uint8[] = sdl.keyboard_state(ref kb_n);
 
         let dt: float32 = float32(frame_start - last_ticks);
-        if (dt > 100.0) { dt = 100.0; }   // clamp huge dt (e.g. after a stall)
+        if (dt > 100.0) { dt = 100.0; }
         last_ticks = frame_start;
 
-        let alive: bool = tick(ref mut_state, dt, frame_start, keys);
+        let alive: bool = state.tick(ref mut_state, dt, frame_start, keys);
         if (!alive) { break; }
 
         if (mut_state.score != last_score_print) {
@@ -791,58 +217,56 @@ function run_scene(): void {
 
         let t_seconds: float32 = float32(frame_start - start_ticks) * 0.001;
 
-        // -- draw --
-        glClearColor(0.0, 0.0, 0.0, 1.0);
-        glClear(GL_COLOR_BUFFER_BIT);
+        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.ClearBits.Color);
 
-        // Background nebula (covers whole screen, depth-write disabled
-        // by default in core profile; we never set up depth testing).
-        glUseProgram(neb_prog);
-        glUniform1f(u_neb_time, t_seconds);
-        glUniform2f(u_neb_res, float32(WIN_W), float32(WIN_H));
-        glBindVertexArray(neb_vao);
-        glDrawArrays(GL_TRIANGLES, 0, 6);
+        // Background nebula (covers whole screen).
+        gl.use_program(neb_prog);
+        gl.uniform1f(u_neb_time, t_seconds);
+        gl.uniform2f(u_neb_res, float32(state.WIN_W), float32(state.WIN_H));
+        gl.bind_vertex_array(neb_vao);
+        gl.draw_arrays(gl.DrawMode.Triangles, 0, 6);
 
         // Sprites + particles in one draw.
         let n_verts: int32 = build_sprite_vbo(ref mut_state, ref cpu_buf);
         if (n_verts > 0) {
             let upload_bytes: int64 = int64(n_verts) * int64(VERT_STRIDE);
             let cpu_bytes: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(cpu_buf.ptr);
-            glUseProgram(sp_prog);
-            glUniform2f(u_sp_res, float32(WIN_W), float32(WIN_H));
-            glBindVertexArray(sp_vao);
-            glBindBuffer(GL_ARRAY_BUFFER, sp_vbo);
-            glBufferData(GL_ARRAY_BUFFER, upload_bytes, cpu_bytes, GL_DYNAMIC_DRAW);
-            glDrawArrays(GL_POINTS, 0, n_verts);
+            gl.use_program(sp_prog);
+            gl.uniform2f(u_sp_res, float32(state.WIN_W), float32(state.WIN_H));
+            gl.bind_vertex_array(sp_vao);
+            gl.bind_buffer(gl.BufferTarget.Array, sp_vbo);
+            gl.buffer_data(gl.BufferTarget.Array, upload_bytes, cpu_bytes, gl.BufferUsage.DynamicDraw);
+            gl.draw_arrays(gl.DrawMode.Points, 0, n_verts);
         }
 
-        SDL_GL_SwapWindow(win.handle);
+        sdl.gl_swap_window(ref win);
 
-        let elapsed: uint32 = SDL_GetTicks() - frame_start;
+        let elapsed: uint32 = sdl.ticks() - frame_start;
         if (elapsed < MS_PER_FRAME) {
-            SDL_Delay(MS_PER_FRAME - elapsed);
+            sdl.delay(MS_PER_FRAME - elapsed);
         }
     }
 
-    glDeleteProgram(neb_prog);
-    glDeleteProgram(sp_prog);
-    glDeleteVertexArrays(1, &neb_vao);
-    glDeleteVertexArrays(1, &sp_vao);
-    glDeleteBuffers(1, &neb_vbo);
-    glDeleteBuffers(1, &sp_vbo);
+    gl.delete_program(neb_prog);
+    gl.delete_program(sp_prog);
+    gl.delete_vertex_arrays(1, &neb_vao);
+    gl.delete_vertex_arrays(1, &sp_vao);
+    gl.delete_buffers(1, &neb_vbo);
+    gl.delete_buffers(1, &sp_vbo);
 }
 
-// ── Entry point ──────────────────────────────────────────────────────────────
+// ── Entry point ──────────────────────────────────────────────────────
 
 function main(): int32 {
     yoop_stdout_linebuf();
-    printf("nebula_arena: starting (A/D move, Space shoot, Esc quit)\n");
-    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
-        printf(`SDL_Init failed: ${SDL_GetError()}\n`);
+    printf(`nebula_arena: starting (A/D move, Space shoot, grab gold orbs for spread, Esc quit)\n`);
+    if (sdl.init(sdl.InitFlags.Video) != 0) {
+        printf(`SDL_Init failed: ${sdl.error()}\n`);
         return 1;
     }
     run_scene();
-    SDL_Quit();
-    printf("Exiting cleanly\n");
+    sdl.quit();
+    printf(`Exiting cleanly\n`);
     return 0;
 }

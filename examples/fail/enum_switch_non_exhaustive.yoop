@@ -1,4 +1,4 @@
-enum E { A, B, C }
+variant E { A, B, C }
 
 function pick(e: E): int32 {
     switch (e) {

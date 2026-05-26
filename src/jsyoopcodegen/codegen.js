@@ -15,8 +15,8 @@ import {
   typeKinds,
 } from "../jsyooptypecheck/types.js";
 import {
-  isFallibleEnum,
-  strippedEnumOkType,
+  isFallibleVariant,
+  strippedVariantOkType,
 } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
@@ -98,13 +98,19 @@ export function llvmType(yoopType) {
       // lives in codegen state, not in the type-system.
       return "ptr";
     }
-    case typeKinds.enum: {
+    case typeKinds.variant: {
       const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
-      return `%enum.${id}`;
+      return `%variant.${id}`;
     }
     case typeKinds.union: {
       const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
       return `%union.${id}`;
+    }
+    // Phase 12: value enums collapse to their underlying primitive at the
+    // LLVM level. No nominal LLVM struct; we just route through the
+    // underlying type's llvmType.
+    case typeKinds.valueEnum: {
+      return llvmType(yoopType.underlying);
     }
     case typeKinds.unsafePtr: {
       // Phase 8.A: LLVM opaque pointers. The pointee type is tracked in the
@@ -163,7 +169,7 @@ function arrayElemLlvmName(elemType) {
   // Phase 10.A: arrays of enum values - `Result<int32, int32>[]`. The mangled
   // enum name is already unique per instantiation; prefix to distinguish
   // from struct-element arrays.
-  if (elemType.kind === typeKinds.enum) {
+  if (elemType.kind === typeKinds.variant) {
     return elemType.moduleId
       ? `enum_${elemType.moduleId}__${elemType.name}`
       : `enum_${elemType.name}`;
@@ -755,8 +761,8 @@ export function codegen(ast) {
       const retEnumId = retEnumType.moduleId
         ? `${retEnumType.moduleId}__${retEnumType.name}`
         : retEnumType.name;
-      const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
-      const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
+      const operandPayloadLlvm = `%variantc.${operandEnumId}__Err`;
+      const retPayloadLlvm = `%variantc.${retEnumId}__Err`;
       const operandFieldType = operandErr.fields[0].type;
       const retFieldType = retErr.fields[0].type;
 
@@ -975,8 +981,8 @@ export function codegen(ast) {
         // semantics; structural payload comparison stays a `switch` job.
         if (
           (node.op === "eqeq" || node.op === "neq") &&
-          leftTy?.kind === typeKinds.enum &&
-          rightTy?.kind === typeKinds.enum
+          leftTy?.kind === typeKinds.variant &&
+          rightTy?.kind === typeKinds.variant
         ) {
           const l = emitExpr(node.left, fnLines);
           const r = emitExpr(node.right, fnLines);
@@ -1251,14 +1257,14 @@ export function codegen(ast) {
       case ASTNodeKind.TRY_OP: {
         // Phase 9.H: enum operand - extract the Ok variant payload (or void).
         const slot = emitTryOpToSlot(node, fnLines);
-        const okStripped = strippedEnumOkType(slot.type);
+        const okStripped = strippedVariantOkType(slot.type);
         if (okStripped.kind === typeKinds.void) {
           return { val: "void", yoopType: VoidType() };
         }
         const enumId = slot.type.moduleId
           ? `${slot.type.moduleId}__${slot.type.name}`
           : slot.type.name;
-        const payloadLlvm = `%enumv.${enumId}__Ok`;
+        const payloadLlvm = `%variantc.${enumId}__Ok`;
         const fieldLlvm = llvmType(okStripped);
         const payloadPtr = freshTemp();
         fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
@@ -1768,7 +1774,7 @@ export function codegen(ast) {
     const stepEnumId = iterStepType.moduleId
       ? `${iterStepType.moduleId}__${iterStepType.name}`
       : iterStepType.name;
-    const yieldVariantLlvm = `%enumv.${stepEnumId}__Yield`;
+    const yieldVariantLlvm = `%variantc.${stepEnumId}__Yield`;
     const payloadPtr = freshTemp();
     fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 1`);
     const valuePtr = freshTemp();
@@ -2270,7 +2276,7 @@ export function sizeOfType(t) {
     }
     return max;
   }
-  if (t.kind === typeKinds.enum) {
+  if (t.kind === typeKinds.variant) {
     let maxPayload = 0;
     for (const v of t.variants.values()) {
       if (v.fields === null) continue;
@@ -2310,7 +2316,7 @@ export function sizeOfAlign(t) {
     }
     return max;
   }
-  if (t.kind === typeKinds.enum) {
+  if (t.kind === typeKinds.variant) {
     let max = 4; // i32 tag
     for (const v of t.variants.values()) {
       if (v.fields === null) continue;
@@ -2479,12 +2485,12 @@ export function codegenProgram(modules, _moduleEnv, programState) {
         .join(", ");
       allStructDefs.push(`${mangled} = type { ${fieldLlvm} }`);
     }
-    // Phase 10.A: emit each generic-enum instantiation as
-    // %enum.<mod>__<Mangled> = type { i32, [P x i8] } + per-variant payload
-    // structs. Mirrors the per-module ENUM_DECL emission shape so codegen
-    // GEPs against either an instantiated or a concrete enum the same way.
-    for (const [_key, enumType] of programState.registry.enums) {
-      if (enumContainsTypeParam(enumType)) continue;
+    // Phase 10.A: emit each generic-variant instantiation as
+    // %variant.<mod>__<Mangled> = type { i32, [P x i8] } + per-case payload
+    // structs. Mirrors the per-module VARIANT_DECL emission shape so codegen
+    // GEPs against either an instantiated or a concrete variant the same way.
+    for (const [_key, enumType] of programState.registry.variants) {
+      if (variantContainsTypeParam(enumType)) continue;
       const mangled = llvmType(enumType);
       if (emittedStructs.has(mangled)) continue;
       emittedStructs.add(mangled);
@@ -2506,7 +2512,7 @@ export function codegenProgram(modules, _moduleEnv, programState) {
       const enumId = `${enumType.moduleId}__${enumType.name}`;
       for (const v of enumType.variants.values()) {
         if (v.fields === null) continue;
-        const variantLlvm = `%enumv.${enumId}__${v.name}`;
+        const variantLlvm = `%variantc.${enumId}__${v.name}`;
         if (emittedStructs.has(variantLlvm)) continue;
         emittedStructs.add(variantLlvm);
         const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
@@ -2709,21 +2715,21 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
     out.boundMethod = null;
   }
   // Phase 10.C: VARIANT_CONSTRUCTOR / VARIANT_PATTERN carry a `resolvedVariant`
-  // pointer into their `resolvedEnumType.variants` map. The generic
-  // substitution above replaces resolvedEnumType with a fresh instantiation
+  // pointer into their `resolvedVariantType.variants` map. The generic
+  // substitution above replaces resolvedVariantType with a fresh instantiation
   // (via the frozen-type branch), but resolvedVariant was a plain non-frozen
   // record that recursive-cloned - its fields may still reference the
   // pre-substitution variant from the *original* enum's variants map.
-  // Re-fetch the variant by name from the (substituted) resolvedEnumType
+  // Re-fetch the variant by name from the (substituted) resolvedVariantType
   // so codegen sees the concrete field types.
   if (
     (out.kind === ASTNodeKind.VARIANT_CONSTRUCTOR ||
       out.kind === ASTNodeKind.VARIANT_PATTERN) &&
-    out.resolvedEnumType &&
+    out.resolvedVariantType &&
     out.variantName &&
-    out.resolvedEnumType.variants?.has?.(out.variantName)
+    out.resolvedVariantType.variants?.has?.(out.variantName)
   ) {
-    out.resolvedVariant = out.resolvedEnumType.variants.get(out.variantName);
+    out.resolvedVariant = out.resolvedVariantType.variants.get(out.variantName);
   }
   return out;
 }
@@ -2752,7 +2758,7 @@ function structContainsTypeParam(structType) {
 // Returns true for an "open" enum whose variant payloads still mention a
 // TypeParamType - those are intermediate substitution products that must
 // not be emitted as LLVM struct defs.
-function enumContainsTypeParam(enumType) {
+function variantContainsTypeParam(enumType) {
   if (!enumType.variants) return false;
   const seenStruct = new Set();
   function hasParam(t) {
@@ -2767,7 +2773,7 @@ function enumContainsTypeParam(enumType) {
       if (!t.fields) return false;
       return t.fields.some((f) => hasParam(f.type));
     }
-    if (t.kind === typeKinds.enum) {
+    if (t.kind === typeKinds.variant) {
       // An open enum's own variants may carry typeParam.
       if (!t.variants) return false;
       for (const v of t.variants.values()) {
@@ -2960,12 +2966,12 @@ function codegenWithModuleId(
         structDefs.push(`${mangled} = type { ${fieldLlvm} }`);
       }
     }
-    // Phase 7.5: emit enum struct + per-variant payload structs.
-    //   %enum.<mod>__<E> = type { i32, [P x i8] }     (tag + payload bytes)
-    //   %enumv.<mod>__<E>__<V> = type { ... fields ... }  (per-variant payload)
-    // Phase 10.A: generic enum decls have no resolvedType - they emit their
+    // Phase 7.5: emit variant struct + per-case payload structs.
+    //   %variant.<mod>__<V> = type { i32, [P x i8] }     (tag + payload bytes)
+    //   %variantc.<mod>__<V>__<C> = type { ... fields ... }  (per-case payload)
+    // Phase 10.A: generic variant decls have no resolvedType - they emit their
     // instantiations from the registry walk in codegenProgram instead.
-    if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType && !d.genericDecl) {
+    if (d.kind === ASTNodeKind.VARIANT_DECL && d.resolvedType && !d.genericDecl) {
       const enumLlvm = llvmType(d.resolvedType);
       if (!emittedStructs.has(enumLlvm)) {
         emittedStructs.add(enumLlvm);
@@ -2994,7 +3000,7 @@ function codegenWithModuleId(
           : d.resolvedType.name;
         for (const v of d.resolvedType.variants.values()) {
           if (v.fields === null) continue;
-          const variantLlvm = `%enumv.${enumId}__${v.name}`;
+          const variantLlvm = `%variantc.${enumId}__${v.name}`;
           if (!emittedStructs.has(variantLlvm)) {
             emittedStructs.add(variantLlvm);
             const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
@@ -3846,8 +3852,8 @@ function codegenWithModuleId(
         // above). See plans/yoopbinder-papercuts.md Issue 3.
         if (
           (node.op === "eqeq" || node.op === "neq") &&
-          leftTy?.kind === typeKinds.enum &&
-          rightTy?.kind === typeKinds.enum
+          leftTy?.kind === typeKinds.variant &&
+          rightTy?.kind === typeKinds.variant
         ) {
           const l = emitExpr(node.left, fnLines);
           const r = emitExpr(node.right, fnLines);
@@ -4058,6 +4064,19 @@ function codegenWithModuleId(
         return { val: newVal, yoopType: slotType };
       }
       case ASTNodeKind.FIELD_ACCESS: {
+        // Phase 12: `ns.constName` (non-call) - the typechecker stamped
+        // `namespaceLookup` and resolvedType when it walked the namespace
+        // dispatch. Load directly from the mangled module-level global.
+        // Call-position `ns.fn(...)` is handled in emitCallExpr via the
+        // callee.namespaceLookup branch and never reaches here.
+        if (node.namespaceLookup) {
+          const sym = mangle(node.namespaceLookup.moduleId, node.namespaceLookup.exportName);
+          const yoopType = node.resolvedType;
+          const llvmTy = llvmType(yoopType);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = load ${llvmTy}, ptr @${sym}`);
+          return { val: tmp, yoopType };
+        }
         const objType = node.object.resolvedType;
         if (objType?.kind === typeKinds.prim && objType.name === "string" && node.field === "len") {
           const s = emitExpr(node.object, fnLines);
@@ -4183,14 +4202,14 @@ function codegenWithModuleId(
       case ASTNodeKind.TRY_OP: {
         // Phase 9.H: enum operand - extract the Ok variant payload (or void).
         const slot = emitTrySlot(node, fnLines);
-        const okStripped = strippedEnumOkType(slot.type);
+        const okStripped = strippedVariantOkType(slot.type);
         if (okStripped.kind === typeKinds.void) {
           return { val: "void", yoopType: VoidType() };
         }
         const enumId = slot.type.moduleId
           ? `${slot.type.moduleId}__${slot.type.name}`
           : slot.type.name;
-        const payloadLlvm = `%enumv.${enumId}__Ok`;
+        const payloadLlvm = `%variantc.${enumId}__Ok`;
         const fieldLlvm = llvmType(okStripped);
         const payloadPtr = freshTemp();
         fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
@@ -4230,12 +4249,17 @@ function codegenWithModuleId(
     }
   }
 
-  // Phase 7.5: emit `Enum.Variant { f1: v1, ... }` (or no-payload `Enum.V`).
-  // Layout: alloca enum struct → store tag at field 0 → bitcast payload
-  // bytes to the per-variant payload struct and GEP/store each field → load
-  // the whole enum as the rvalue.
+  // Phase 7.5: emit `Variant.Case { f1: v1, ... }` (or no-payload `Variant.C`).
+  // Layout: alloca variant struct -> store tag at field 0 -> bitcast payload
+  // bytes to the per-case payload struct and GEP/store each field -> load
+  // the whole struct as the rvalue.
+  // Phase 12: when the constructor targets a value enum, emit the case's
+  // primitive constant value directly (no alloca/load).
   function emitVariantConstructor(node, fnLines) {
-    const enumType = node.resolvedEnumType;
+    if (node.resolvedValueEnumType) {
+      return emitValueEnumConstant(node, fnLines);
+    }
+    const enumType = node.resolvedVariantType;
     const variant = node.resolvedVariant;
     if (!enumType || !variant) {
       throw new Error(`codegen: variant constructor missing resolved enum/variant`);
@@ -4254,7 +4278,7 @@ function codegenWithModuleId(
       const enumId = enumType.moduleId
         ? `${enumType.moduleId}__${enumType.name}`
         : enumType.name;
-      const variantLlvm = `%enumv.${enumId}__${variant.name}`;
+      const variantLlvm = `%variantc.${enumId}__${variant.name}`;
       for (const litField of node.fields) {
         const idx = variant.fields.findIndex((f) => f.name === litField.name);
         if (idx < 0) continue;
@@ -4268,6 +4292,32 @@ function codegenWithModuleId(
     const loadTmp = freshTemp();
     fnLines.push(`  ${loadTmp} = load ${enumLlvm}, ptr ${slot}`);
     return { val: loadTmp, yoopType: enumType };
+  }
+
+  // Phase 12: emit a value-enum case as its underlying primitive constant.
+  // Integer underlyings produce the integer literal directly (immediate).
+  // String underlyings produce a getelementptr against a deduplicated global.
+  function emitValueEnumConstant(node, fnLines) {
+    const enumType = node.resolvedValueEnumType;
+    const enumCase = node.resolvedValueEnumCase;
+    if (!enumType || !enumCase) {
+      throw new Error(`codegen: value-enum constructor missing resolved type/case`);
+    }
+    const underlying = enumType.underlying;
+    if (underlying.name === "string") {
+      const { name: gname, byteLen } = emitRawStringGlobal(enumCase.value);
+      const tmp = freshTemp();
+      fnLines.push(
+        `  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${gname}, i32 0, i32 0`,
+      );
+      return { val: tmp, yoopType: enumType };
+    }
+    // Integer underlying: emit the bigint as a decimal literal (LLVM accepts
+    // negative decimals for signed ints).
+    const v = typeof enumCase.value === "bigint"
+      ? enumCase.value.toString()
+      : String(enumCase.value);
+    return { val: v, yoopType: enumType };
   }
 
   // Phase 6.3: `wait <ident>`. The operand must be a Task<T>-typed binding
@@ -4382,7 +4432,7 @@ function codegenWithModuleId(
       );
       const valuePtr = freshTemp();
       fnLines.push(
-        `  ${valuePtr} = getelementptr inbounds %enumv.${enumId}__Done, ptr ${payloadPtr}, i32 0, i32 0`,
+        `  ${valuePtr} = getelementptr inbounds %variantc.${enumId}__Done, ptr ${payloadPtr}, i32 0, i32 0`,
       );
       fnLines.push(`  store ${resultLlvm} ${resVal}, ptr ${valuePtr}`);
       fnLines.push(`  br label %${joinLabel}`);
@@ -4686,10 +4736,17 @@ function codegenWithModuleId(
     if (node.isCast) {
       const src = emitExpr(node.args[0], fnLines);
       const dstType = node.castTargetType;
-      const opcode = castInstruction(src.yoopType, dstType);
+      // Phase 12: value enums collapse to their underlying primitive for
+      // cast purposes. The LLVM-level type and SSA value are already the
+      // underlying width; just unwrap so castInstruction can read .name.
+      const unwrap = (t) =>
+        t && t.kind === typeKinds.valueEnum ? t.underlying : t;
+      const srcEff = unwrap(src.yoopType);
+      const dstEff = unwrap(dstType);
+      const opcode = castInstruction(srcEff, dstEff);
       if (!opcode) return { val: src.val, yoopType: dstType };
       const tmp = freshTemp();
-      fnLines.push(`  ${tmp} = ${opcode} ${llvmType(src.yoopType)} ${src.val} to ${llvmType(dstType)}`);
+      fnLines.push(`  ${tmp} = ${opcode} ${llvmType(srcEff)} ${src.val} to ${llvmType(dstEff)}`);
       return { val: tmp, yoopType: dstType };
     }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
@@ -4938,6 +4995,13 @@ function codegenWithModuleId(
         return { ptr: `${symbols.slotFor(node.name)}`, type: t };
       }
       case ASTNodeKind.FIELD_ACCESS: {
+        // Phase 12: `ns.name` lvalue - the global itself is the slot. Used
+        // when an enclosing assignment / `&` / indexing wants the address
+        // of a module-level binding accessed through a namespace.
+        if (node.namespaceLookup) {
+          const sym = mangle(node.namespaceLookup.moduleId, node.namespaceLookup.exportName);
+          return { ptr: `@${sym}`, type: node.resolvedType };
+        }
         const base = emitLval(node.object, fnLines);
         // Phase 7.5: union field access - every field overlaps at offset 0;
         // the union's pointer is already the field's pointer (just retyped).
@@ -5071,8 +5135,8 @@ function codegenWithModuleId(
       const retEnumId = retEnumType.moduleId
         ? `${retEnumType.moduleId}__${retEnumType.name}`
         : retEnumType.name;
-      const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
-      const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
+      const operandPayloadLlvm = `%variantc.${operandEnumId}__Err`;
+      const retPayloadLlvm = `%variantc.${retEnumId}__Err`;
       const operandFieldType = operandErr.fields[0].type;
       const retFieldType = retErr.fields[0].type;
 
@@ -5406,7 +5470,7 @@ function codegenWithModuleId(
     // expressions emitLval will materialize a temp slot for us.
     let scrutSlot = null;
     let scrutVal = null;
-    if (scrutType.kind === typeKinds.enum) {
+    if (scrutType.kind === typeKinds.variant) {
       scrutSlot = emitLval(node.scrutinee, fnLines);
       const enumLlvm = llvmType(scrutType);
       const tagPtr = freshTemp();
@@ -5431,7 +5495,17 @@ function codegenWithModuleId(
           const ty = llvmType(scrutType);
           caseLines.push(`${ty} ${litVal}, label %${armLabel}`);
         } else if (pat.kind === ASTNodeKind.VARIANT_PATTERN && !pat.isWildcard) {
-          caseLines.push(`i32 ${pat.resolvedVariant.ordinal}, label %${armLabel}`);
+          if (pat.resolvedValueEnumCase) {
+            // Phase 12: value-enum pattern. Match the underlying primitive
+            // constant of the case.
+            const ty = llvmType(scrutType);
+            const v = typeof pat.resolvedValueEnumCase.value === "bigint"
+              ? pat.resolvedValueEnumCase.value.toString()
+              : String(pat.resolvedValueEnumCase.value);
+            caseLines.push(`${ty} ${v}, label %${armLabel}`);
+          } else {
+            caseLines.push(`i32 ${pat.resolvedVariant.ordinal}, label %${armLabel}`);
+          }
         }
         // VARIANT_PATTERN { isWildcard: true } only appears as `case _:` which
         // the parser routed through the default-arm slot already (we don't
@@ -5440,7 +5514,7 @@ function codegenWithModuleId(
     }
 
     const scrutTyForSwitch =
-      scrutType.kind === typeKinds.enum ? "i32" : llvmType(scrutType);
+      scrutType.kind === typeKinds.variant ? "i32" : llvmType(scrutType);
     fnLines.push(
       `  switch ${scrutTyForSwitch} ${scrutVal.val}, label %${defaultLabel} [ ${caseLines.join(" ")} ]`,
     );
@@ -5457,13 +5531,17 @@ function codegenWithModuleId(
       const vp = arm.patterns.find(
         (p) => p.kind === ASTNodeKind.VARIANT_PATTERN && !p.isWildcard,
       );
-      if (vp && vp.resolvedVariant.fields !== null && vp.fieldBindings) {
-        const enumType = vp.resolvedEnumType;
+      // Phase 12: value-enum patterns have no payload - skip the field-binding
+      // path entirely.
+      if (vp && vp.resolvedValueEnumCase) {
+        // nothing to bind; value-enum cases are scalar constants.
+      } else if (vp && vp.resolvedVariant.fields !== null && vp.fieldBindings) {
+        const enumType = vp.resolvedVariantType;
         const enumLlvm = llvmType(enumType);
         const enumId = enumType.moduleId
           ? `${enumType.moduleId}__${enumType.name}`
           : enumType.name;
-        const variantLlvm = `%enumv.${enumId}__${vp.variantName}`;
+        const variantLlvm = `%variantc.${enumId}__${vp.variantName}`;
         const payloadPtr = freshTemp();
         fnLines.push(
           `  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${scrutSlot.ptr}, i32 0, i32 1`,
@@ -5669,7 +5747,7 @@ function codegenWithModuleId(
     const stepEnumId = iterStepType.moduleId
       ? `${iterStepType.moduleId}__${iterStepType.name}`
       : iterStepType.name;
-    const yieldVariantLlvm = `%enumv.${stepEnumId}__Yield`;
+    const yieldVariantLlvm = `%variantc.${stepEnumId}__Yield`;
     const payloadPtr = freshTemp();
     fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 1`);
     const valuePtr = freshTemp();

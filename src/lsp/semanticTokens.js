@@ -172,13 +172,13 @@ function emitTokensForNode(node, src, tokens) {
       break;
     }
     case ASTNodeKind.TYPE_DECL:
-    case ASTNodeKind.ENUM_DECL:
+    case ASTNodeKind.VARIANT_DECL:
     case ASTNodeKind.UNION_DECL:
     case ASTNodeKind.TRAIT_DECL: {
       emitNamed(tokens, src, node, node.name, TT_TYPE, TM_DECLARATION);
       break;
     }
-    case ASTNodeKind.ENUM_VARIANT: {
+    case ASTNodeKind.VARIANT_CASE: {
       emitNamed(tokens, src, node, node.name, TT_ENUM_MEMBER, TM_DECLARATION | TM_READONLY);
       break;
     }
@@ -212,7 +212,7 @@ function emitTokensForNode(node, src, tokens) {
         emitNamed(tokens, src, node, node.name, TT_NAMESPACE, 0);
       } else if (
         t?.kind === typeKinds.struct ||
-        t?.kind === typeKinds.enum ||
+        t?.kind === typeKinds.variant ||
         t?.kind === typeKinds.union ||
         t?.kind === typeKinds.trait
       ) {

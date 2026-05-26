@@ -532,6 +532,34 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "a is A\nb.x=42\n");
   });
 
+  // Phase 12: value enums - the new `enum` keyword as a nominal primitive alias.
+  it("value_enum_basic.yoop: int32-backed enum with switch + equality", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "red\ngreen\nblue\neq works\nneq works\n");
+  });
+
+  it("value_enum_flags.yoop: bitwise operators on int-backed enum (SDL-style flags)", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_flags.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "has sweet\nhas bitter\nmask matches sweet+sour combo\ncleared sweet bit\n",
+    );
+  });
+
+  it("value_enum_explicit_int.yoop: enum<int64> with explicit + auto-incremented cases", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_explicit_int.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "z=Zero\nbig > zero\nauto increments to 19\n");
+  });
+
+  it("value_enum_string.yoop: enum<string> with named string constants and equality", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_string.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "asc\nnot desc\n");
+  });
+
   it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {
     const { stdout, exitCode } = runFixture("examples/pass/enum_showcase.yoop");
     assert.equal(exitCode, 0);
@@ -1768,7 +1796,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_unpinned.yoop");
     assert.ok(
       errors.some((e) =>
-        /cannot determine type arguments for generic enum "Result"/.test(e.message),
+        /cannot determine type arguments for generic variant "Result"/.test(e.message),
       ),
       `expected unpinned-generic-enum error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
@@ -2362,8 +2390,51 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("enum_unknown_variant.yoop rejects E.NotThere", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/enum_unknown_variant.yoop");
     assert.ok(
-      errors.some((e) => /has no variant "NotThere"/.test(e.message)),
-      `expected unknown-variant error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /has no case "NotThere"/.test(e.message)),
+      `expected unknown-case error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 12: value-enum failure cases.
+  it("value_enum_forward_ref.yoop rejects forward reference to a later case", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_forward_ref.yoop");
+    assert.ok(
+      errors.some((e) => /does not name a prior case/.test(e.message)),
+      `expected forward-ref error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_string_no_value.yoop rejects a string-backed case without a literal", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_string_no_value.yoop");
+    assert.ok(
+      errors.some((e) => /requires an explicit string value/.test(e.message)),
+      `expected missing-string-value error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_open_switch_no_default.yoop rejects an open enum switch without default", () => {
+    const { errors } = typecheckFixtureProgram(
+      "examples/fail/value_enum_open_switch_no_default.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /switch over open enum .* requires a 'default'/.test(e.message)),
+      `expected open-enum default error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_unrelated_compare.yoop rejects comparing two different value enums", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_unrelated_compare.yoop");
+    assert.ok(
+      errors.length >= 1,
+      `expected at least one error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_shift_oob.yoop rejects an out-of-range shift amount", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_shift_oob.yoop");
+    assert.ok(
+      errors.some((e) => /shift amount .* out of range/.test(e.message)),
+      `expected shift-OOB error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

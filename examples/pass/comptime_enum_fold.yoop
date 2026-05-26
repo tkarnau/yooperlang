@@ -16,7 +16,7 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-enum Shape {
+variant Shape {
     Circle { radius: int32 },
     Square { side: int32 },
     Triangle,

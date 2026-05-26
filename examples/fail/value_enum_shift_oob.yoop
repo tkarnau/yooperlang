@@ -1,0 +1,8 @@
+// Shift amount must be 0..bit_width-1 for the underlying type.
+enum X<int32> {
+    A 1 << 33,
+}
+
+function main(): int32 {
+    return 0;
+}

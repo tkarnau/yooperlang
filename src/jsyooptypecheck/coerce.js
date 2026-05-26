@@ -138,6 +138,19 @@ export function isAssignable(dest, src) {
     return true;
   }
 
+  // Phase 12: one-way value-enum -> underlying-primitive coercion. A value
+  // enum case is always a valid instance of its underlying primitive, so
+  // passing `Flags.A` where `uint32` is expected (FFI calls being the
+  // overwhelming case) is safe. The reverse (primitive -> value enum) is
+  // *not* allowed - that would let any random integer become a named case.
+  if (
+    src.kind === typeKinds.valueEnum &&
+    dest.kind === typeKinds.prim &&
+    typesEqual(src.underlying, dest)
+  ) {
+    return true;
+  }
+
   // Phase 8.A: pointer-to-T is assignable to pointer-to-T (matching pointee).
   // `typesEqual` would catch this if pointees share identity; the `frozen`
   // type cache makes that usually true, but check structurally for safety.
@@ -251,16 +264,54 @@ export function unifyArith(left, right, op) {
     return null;
   }
 
-  // Enum equality: tag comparison. Both sides must be the same enum
-  // type. Payload-bearing variants compare *tags only* - structural
+  // Variant equality: tag comparison. Both sides must be the same variant
+  // type. Payload-bearing cases compare *tags only* - structural
   // comparison of payloads is a follow-up (use `switch` for that today;
   // see plans/yoopbinder-papercuts.md Issue 3). Codegen lowers this to
   // `icmp eq i32 tag_a, tag_b`.
   if (op === "eqeq" || op === "neq") {
-    if (left.kind === typeKinds.enum && right.kind === typeKinds.enum) {
+    if (left.kind === typeKinds.variant && right.kind === typeKinds.variant) {
       if (typesEqual(left, right)) return PrimType(primAnnotations.bool);
-      return null; // mismatched enum types
+      return null; // mismatched variant types
     }
+  }
+
+  // Phase 12: value enum operators. Mixed enum/primitive operands are
+  // rejected on purpose; the programmer must cast first. Across two
+  // matching value enums:
+  //   `==` / `!=`             -> bool (both int and string underlyings)
+  //   `<` / `>` / `<=` / `>=` -> bool (int underlyings only)
+  //   `|` / `&` / `^` / `<<` / `>>` -> same enum (int underlyings only)
+  if (
+    left.kind === typeKinds.valueEnum ||
+    right.kind === typeKinds.valueEnum
+  ) {
+    if (
+      left.kind !== typeKinds.valueEnum ||
+      right.kind !== typeKinds.valueEnum
+    ) {
+      return null; // mixing enum with non-enum - cast first
+    }
+    if (!typesEqual(left, right)) return null; // mismatched enums
+    const isStringUnderlying = left.underlying?.name === "string";
+    if (op === "eqeq" || op === "neq") {
+      return PrimType(primAnnotations.bool);
+    }
+    if (op === "lt" || op === "gt" || op === "lte" || op === "gte") {
+      if (isStringUnderlying) return null;
+      return PrimType(primAnnotations.bool);
+    }
+    if (
+      op === "pipe" ||
+      op === "amp" ||
+      op === "caret" ||
+      op === "lshift" ||
+      op === "rshift"
+    ) {
+      if (isStringUnderlying) return null;
+      return left;
+    }
+    return null;
   }
 
   if (isBitwise) {

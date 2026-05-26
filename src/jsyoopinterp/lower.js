@@ -621,7 +621,7 @@ function lowerStatement(node, ctx, scope) {
       // targeting the same arm body.
       const scrutReg = lowerExpr(node.scrutinee, ctx, scope);
       const scrutTy = ctx.registerTypes[scrutReg];
-      const isEnum = scrutTy.kind === typeKinds.enum;
+      const isEnum = scrutTy.kind === typeKinds.variant;
       const exitLabel = ctx.freshLabel("switch_exit");
 
       // Pre-allocate per-arm labels so we can branch into them from
@@ -1474,7 +1474,7 @@ function lowerExpr(node, ctx, scope) {
       // Cross-shape `?` is handled below by calling Into.into on
       // the operand's Err payload in the err branch.
       const operandEnum = node.operand.resolvedType;
-      if (operandEnum?.kind !== typeKinds.enum) {
+      if (operandEnum?.kind !== typeKinds.variant) {
         throw new ComptimeError(
           `comptime: '?' operand must be enum-shaped at the bytecode lowerer (got ${operandEnum?.kind})`,
           node.sourceLoc,
@@ -1535,7 +1535,7 @@ function lowerExpr(node, ctx, scope) {
       // a new Err of the enclosing return type, and RET.
       ctx.emit(instruction(OP.LABEL, { immediate: errLabel }));
       const returnEnum = ctx.currentReturnType;
-      if (returnEnum?.kind !== typeKinds.enum) {
+      if (returnEnum?.kind !== typeKinds.variant) {
         throw new ComptimeError(
           `comptime: '?' used in a function whose return type isn't an enum (current is ${returnEnum?.kind})`,
           node.sourceLoc,
@@ -1718,7 +1718,7 @@ function lowerExpr(node, ctx, scope) {
     }
 
     case ASTNodeKind.VARIANT_CONSTRUCTOR: {
-      const enumType = node.resolvedEnumType;
+      const enumType = node.resolvedVariantType;
       const variant = node.resolvedVariant;
       if (!enumType || !variant) {
         throw new ComptimeError(

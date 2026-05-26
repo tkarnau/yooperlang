@@ -260,7 +260,7 @@ export function getHoverInfo(node, module) {
     case ASTNodeKind.TYPE_DECL: {
       return `type ${node.name}`;
     }
-    case ASTNodeKind.ENUM_DECL: {
+    case ASTNodeKind.VARIANT_DECL: {
       return `enum ${node.name}`;
     }
     case ASTNodeKind.UNION_DECL: {
@@ -420,7 +420,7 @@ function summarizeDecl(decl) {
         : "";
       return head + traits;
     }
-    case ASTNodeKind.ENUM_DECL:
+    case ASTNodeKind.VARIANT_DECL:
       return `enum ${decl.name}`;
     case ASTNodeKind.UNION_DECL:
       return `union ${decl.name}`;
@@ -533,7 +533,7 @@ function symbolFor(decl, src) {
         children,
       };
     }
-    case ASTNodeKind.ENUM_DECL: {
+    case ASTNodeKind.VARIANT_DECL: {
       const children = [];
       for (const v of inner.variants ?? []) {
         if (!v.sourceLoc) continue;
@@ -600,7 +600,7 @@ function declKindLabel(decl) {
     case ASTNodeKind.PARAM: return "parameter";
     case ASTNodeKind.FUNCTION_DECL: return "function";
     case ASTNodeKind.TYPE_DECL: return "type";
-    case ASTNodeKind.ENUM_DECL: return "enum";
+    case ASTNodeKind.VARIANT_DECL: return "variant";
     case ASTNodeKind.UNION_DECL: return "union";
     case ASTNodeKind.TRAIT_DECL: return "trait";
     case ASTNodeKind.FIELD_DECL: return "field";

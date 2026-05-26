@@ -34,7 +34,7 @@ import {
 // `HandleOutcome` distinguishes "handler ran cleanly" from "it errored".
 // A non-empty `error` is observed by the server; the connection is closed
 // in either case (no keep-alive in the MVP).
-export enum HandleOutcome {
+export variant HandleOutcome {
     Ok,
     Err { error: string },
 }

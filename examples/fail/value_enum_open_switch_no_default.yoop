@@ -1,0 +1,20 @@
+// An "open" enum (a case derived via bitwise operators) requires a
+// `default` arm in switches because the value can fall outside named cases.
+enum Flags {
+    A 1,
+    B 2,
+    AB A | B,
+}
+
+function pick(f: Flags): int32 {
+    switch (f) {
+        case Flags.A: { return 1; }
+        case Flags.B: { return 2; }
+        case Flags.AB: { return 3; }
+    }
+    return 0;
+}
+
+function main(): int32 {
+    return pick(Flags.A);
+}

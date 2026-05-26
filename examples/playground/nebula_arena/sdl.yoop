@@ -1,0 +1,134 @@
+// SDL2 bindings: extern decls, named-constant enums, Disposable
+// wrappers, and a thin layer of helpers. Main only ever talks to the
+// helpers here, never to the raw `SDL_*` functions - that keeps the
+// FFI surface contained and lets the public API use value enums.
+
+import.unsafe;
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_GLContext;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+    function SDL_GetError(): string;
+    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+    function SDL_PumpEvents(): void;
+    function SDL_GetTicks(): uint32;
+    function SDL_Delay(ms: uint32): void;
+
+    function SDL_CreateWindow(
+        title: string,
+        x: int32, y: int32,
+        w: int32, h: int32,
+        flags: uint32
+    ): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+
+    function SDL_GL_SetAttribute(attr: int32, value: int32): int32;
+    function SDL_GL_CreateContext(ref win: SDL_Window): unsafe_ptr<SDL_GLContext>;
+    function SDL_GL_DeleteContext(ctx: unsafe_ptr<SDL_GLContext>): void;
+    function SDL_GL_SetSwapInterval(interval: int32): int32;
+    function SDL_GL_SwapWindow(ref win: SDL_Window): void;
+}
+
+// SDL_Init flag bits. uint32 so they OR cleanly into the raw flag arg.
+export enum InitFlags<uint32> {
+    Video 0x00000020,
+}
+
+// SDL_CreateWindow flag bits.
+export enum WindowFlags<uint32> {
+    OpenGL 0x00000002,
+    Shown 0x00000004,
+}
+
+// SDL_WINDOWPOS_CENTERED - magic single value used as the x/y arg to
+// SDL_CreateWindow when you want OS-default centering. Not a flag set,
+// so a plain const is the right shape.
+export const WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+
+// Hardware-key scancodes (USB HID page 7 - the SDL2 convention). We
+// only carry the keys the demo cares about; full SDL has ~280.
+export enum Scancode {
+    A 4,
+    D 7,
+    Space 44,
+    Escape 41,
+}
+
+// SDL_GL_SetAttribute attr selectors (the *kind* of attribute being set).
+export enum GLAttr {
+    DoubleBuffer 5,
+    ContextMajorVersion 17,
+    ContextMinorVersion 18,
+    ContextProfileMask 21,
+}
+
+// Profile-mask values fed into SDL_GL_SetAttribute(ContextProfileMask, ...).
+// Single useful value today; the field is a bitmask in SDL but core/compat
+// are the only options we care about.
+export enum GLProfile {
+    Core 0x0001,
+}
+
+// Disposable wrappers - tying SDL handles to scope-exit cleanup via the
+// `disposable` kind. `let disposable win: Window = ...` injects the
+// SDL_DestroyWindow call automatically when the binding leaves scope.
+
+export type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void { SDL_DestroyWindow(self.handle); }
+}
+
+export type GLCtx implements Disposable {
+    handle: unsafe_ptr<SDL_GLContext>,
+    function dispose(ref self): void { SDL_GL_DeleteContext(self.handle); }
+}
+
+// Helper wrappers. Pass-throughs to the externs that simply rename and
+// re-type the user-facing arguments so callers can stay in value-enum
+// terms without manually casting at every site.
+
+export function init(flags: InitFlags): int32 { return SDL_Init(flags); }
+export function quit(): void { SDL_Quit(); }
+export function error(): string { return SDL_GetError(); }
+export function pump_events(): void { SDL_PumpEvents(); }
+export function ticks(): uint32 { return SDL_GetTicks(); }
+export function delay(ms: uint32): void { SDL_Delay(ms); }
+
+export function keyboard_state(ref n: int): uint8[] {
+    return SDL_GetKeyboardState(ref n);
+}
+
+// Wraps SDL_CreateWindow in a Disposable. `flags` accepts a combined
+// WindowFlags bitmask. The window is owned by the binding the caller
+// names with `disposable`.
+export function create_window(title: string, w: int32, h: int32, flags: WindowFlags): Window {
+    return {
+        handle: SDL_CreateWindow(
+            title,
+            WINDOWPOS_CENTERED, WINDOWPOS_CENTERED,
+            w, h,
+            flags
+        )
+    };
+}
+
+export function gl_set_attribute(attr: GLAttr, value: int32): int32 {
+    return SDL_GL_SetAttribute(attr, value);
+}
+
+export function gl_create_context(ref win: Window): GLCtx {
+    return { handle: SDL_GL_CreateContext(win.handle) };
+}
+
+export function gl_set_swap_interval(interval: int32): int32 {
+    return SDL_GL_SetSwapInterval(interval);
+}
+
+export function gl_swap_window(ref win: Window): void {
+    SDL_GL_SwapWindow(win.handle);
+}

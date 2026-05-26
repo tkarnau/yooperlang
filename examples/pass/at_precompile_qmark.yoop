@@ -10,7 +10,7 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-enum IntResult {
+variant IntResult {
     Ok { value: int32 },
     Err { error: int32 },
 }

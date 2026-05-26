@@ -20,7 +20,7 @@ kind disposable {
     mustCall dispose beforeScopeEnd;
 }
 
-enum ReadResult {
+variant ReadResult {
     Ok { value: int32 },
     Err { error: string },
 }
