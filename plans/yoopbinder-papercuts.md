@@ -10,22 +10,39 @@ a std-lib module). It surfaced a cluster of small friction points that
 each individually feel like a footnote but together kept extending what
 should have been an afternoon's work.
 
+A second wave of papercuts (Issues 9-11 below) came out of extending
+the binder with `clang -E -dM` macro extraction and then writing
+[examples/playground/shader_demo/main.yoop](../examples/playground/shader_demo/main.yoop) -
+a GLSL fragment-shader demo that consumed the hand-edited GL bindings.
+
 These all look like things the language wants to handle better,
 especially because the self-hosting work in [phase-10.md](phase-10.md)
 and the package-system tooling in
 [package-system.md](package-system.md) will hit every one of them
 again - probably more than once.
 
-Filed here as a single rollup rather than five separate plans because
+Filed here as a single rollup rather than separate plans because
 they're related in flavour (parser / typecheck / codegen interactions
 with idiomatic library code) and would naturally be picked up by the
 same person in a single session.
 
+### Status snapshot
+
+Issues 1, 2, and 3 LANDED. Tests in
+[src/jsyooparser/parser.test.js](../src/jsyooparser/parser.test.js),
+[src/jsyooptypecheck/coerce.test.js](../src/jsyooptypecheck/coerce.test.js),
+and [examples/pass/](../examples/pass/) (`enum_eq.yoop`,
+`generic_call_struct_lit.yoop`). The fixed-issue sections are kept
+as a historical record of the symptom + diagnosis; skip past their
+"Severity" lines when triaging what's left.
+
 ## Issues, by impact
 
-### Issue 1 - Unary `!` binds wrong with `&&` / `||`
+### Issue 1 - Unary `!` binds wrong with `&&` / `||` (LANDED)
 
-**Severity: HIGH (parser bug, real, easy fix).**
+**Severity: HIGH (parser bug, real, easy fix). FIXED in
+[src/jsyooparser/parser.js:1695-1779](../src/jsyooparser/parser.js#L1695-L1779);
+regression tests in [parser.test.js:122-160](../src/jsyooparser/parser.test.js#L122-L160).**
 
 #### Symptom
 
@@ -75,9 +92,11 @@ lines around the `!` handler.
 
 ---
 
-### Issue 2 - Struct literals don't get target type inferred through generic-call args
+### Issue 2 - Struct literals don't get target type inferred through generic-call args (LANDED)
 
-**Severity: HIGH (most pervasive ergonomic friction in tooling code).**
+**Severity: HIGH (most pervasive ergonomic friction in tooling code). FIXED in
+[src/jsyooptypecheck/checkExpr.js:2640-2790](../src/jsyooptypecheck/checkExpr.js#L2640-L2790);
+e2e fixture [generic_call_struct_lit.yoop](../examples/pass/generic_call_struct_lit.yoop).**
 
 #### Symptom
 
@@ -148,9 +167,13 @@ the other args, not silently default.
 
 ---
 
-### Issue 3 - Enum value equality (`==` / `!=`) not supported
+### Issue 3 - Enum value equality (`==` / `!=`) not supported (LANDED)
 
-**Severity: MEDIUM (workaround is verbose; recognised in std).**
+**Severity: MEDIUM (workaround is verbose; recognised in std). FIXED:
+typecheck in [coerce.js:249-262](../src/jsyooptypecheck/coerce.js#L249-L262),
+codegen tag-extract+icmp in single + multi-module BINARY_EXPRESSION paths,
+e2e fixture [enum_eq.yoop](../examples/pass/enum_eq.yoop). Tag-only;
+payload-bearing equality stays a `switch` job per the inline note.**
 
 #### Symptom
 
@@ -506,34 +529,250 @@ small change to kindCheck's "unsatisfied obligation" emit path.
 - yoopbinder, the std modules, and the playground demos can drop
   most `disposable` keywords.
 
+> Note: per maintainer guidance, the *requirement* to mark every
+> propagating binding stays - that's part of the language's resource
+> story. What this issue proposes is inference for the most common
+> answer when it's unambiguous, not removing the discipline. If the
+> tax stays explicit-only, close this issue.
+
+---
+
+### Issue 9 - Module-level `const string` literals don't process `\n` escapes
+
+**Severity: HIGH (silent codegen inconsistency, real bug).**
+
+#### Symptom
+
+```yoop
+const S: string = "ab\n";          // S.len == 4 (literal '\' + 'n')
+function f(): void {
+    let local: string = "ab\n";    // local.len == 3 (actual newline)
+}
+```
+
+Same source `"ab\n"`, different runtime byte length depending on
+whether it's the RHS of a module-level `const` or a function-local
+`let`. Other backslash escapes (`\t`, `\\`, `\"`) are presumably
+affected too, though only `\n` has been verified.
+
+Found while writing
+[examples/playground/shader_demo/main.yoop](../examples/playground/shader_demo/main.yoop) -
+the GLSL preprocessor requires a newline after `#version 150 core`,
+and the shader source defined as a module-level `const` produced
+shaders that compiled to "syntax error on `#`" until the source was
+moved into a function-returning-string helper. Real productivity hit,
+took a while to spot because both forms type-check as `string`.
+
+Tight repro saved at `/tmp/str_test4.yoop` during the session;
+one-liner:
+
+```text
+$ echo 'extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+const S: string = "ab\n";
+function main(): int32 { let l: string = "ab\n"; printf(`module=${int64(S.len)} local=${int64(l.len)}\n`); return 0; }' \
+  | node src/yoopiler.js /dev/stdin && /tmp/<binary>
+module=4 local=3
+```
+
+#### Cause (hypothesis)
+
+Two emit paths for `STRING_LITERAL`:
+
+1. In function bodies, lowered as inline LLVM constants via the
+   `emitRawStringGlobal` path (lines around
+   [codegen.js:265](../src/jsyoopcodegen/codegen.js#L265)). That path
+   calls `encodeStringForRawGlobal` which interprets `\n` as `\0A` in
+   the LLVM literal. Result: real newlines.
+2. At module-level const-initializer time (Phase 11 comptime or the
+   module-init path that backs `const X: T = ...;` decls), strings are
+   probably stored / serialised via a different route that takes the
+   raw lexer text without the escape pass. The two paths *should* go
+   through the same encoder.
+
+#### Fix
+
+Audit every place a `STRING_LITERAL`'s `value` field flows into LLVM
+IR and confirm they all go through the same escape-aware encoder
+(`encodeStringForRawGlobal` or whatever its canonical name is). The
+likely fix is one or two lines - the comptime / module-init path
+needs to call the same encoder the in-function path does.
+
+#### Acceptance
+
+- `const S: string = "ab\n"; ... S.len == 3` at runtime.
+- All standard C escapes work in const-init position: `\n`, `\t`,
+  `\r`, `\\`, `\"`, `\0`, hex (`\x41`), and any others the
+  in-function path supports today.
+- New e2e test in `examples/pass/` covering module-level const string
+  with a `\n` and asserting the length is 1 (or printing the byte and
+  comparing to 10).
+- Once landed, the
+  [shader_demo](../examples/playground/shader_demo/main.yoop)'s
+  `vertex_shader_src()` / `fragment_shader_src()` helpers can be
+  reverted to module-level `const VERTEX_SRC` / `const FRAGMENT_SRC`.
+
+---
+
+### Issue 10 - Extern parameter names that collide with yoop reserved keywords
+
+**Severity: MEDIUM (blocks yoopbinder output for many C headers).**
+
+#### Symptom
+
+```yoop
+extern "C" from library "framework:OpenGL" {
+    function glVertexAttribPointer(
+        index: uint32,
+        size: int32,
+        type: uint32,                // parse error: expected ident, got type
+        normalized: uint8,
+        ...
+    ): void;
+}
+```
+
+Yoop reserves `type` (used for `type Name { ... }`), `kind`, `trait`,
+`enum`, `union`, `let`, `const`, `function`, `if`, `else`, `while`,
+`for`, `return`, `import`, `extern`, etc. C headers regularly use
+these as parameter names (`glVertexAttribPointer(... GLenum type ...)`
+is the most-cited example, but `pthread.h`, `socket.h`, and many
+others all do similar things).
+
+Hand-fixing at the call site is fine (rename `type` to `elem_type`).
+But for **yoopbinder**, generated output for any such header will
+fail to parse. The blocker isn't the language definition - parameter
+names in `extern` declarations are documentation only, the C ABI
+passes positionally - it's the parser's strict ident-name check at
+the call site.
+
+#### Two fix paths
+
+**Fix path A (parser-side):** Relax the parameter-name parser inside
+`extern "C"` blocks to accept any identifier-shaped token including
+reserved keywords. The names never become bindings; they're metadata.
+Smallest delta, but a special case in the grammar.
+
+**Fix path B (binder-side):** Yoopbinder emits a rename when it sees
+a reserved keyword as a parameter name. Pick a deterministic suffix
+(`type` -> `type_`) and document it. Doesn't fix hand-written
+externs, but unblocks generated bindings without touching the parser.
+
+Recommended: **B first** (small, targeted, unblocks the GL/SDL
+binding pipeline today), then **A later** when there's appetite for
+the small grammar tweak.
+
+#### Acceptance for path B
+
+- yoopbinder maintains a known reserved-keyword set and, when
+  emitting an extern decl, rewrites any colliding parameter name to
+  `<name>_` (with a // TODO comment annotating the rename).
+- Generated bindings for the full `OpenGL/gl.h` typecheck without
+  hand edits (today they fail at the first `type` param).
+- Round-trip test: generate `gl_bindings.yoop`, then have a separate
+  yoop file `import * as gl from ...` and compile it; tests that no
+  emitted decl trips the parser.
+
+#### Acceptance for path A (future)
+
+- A `function foo(type: int32): void;` *inside* an `extern` block
+  parses without error. Outside an extern (in a user-defined function
+  decl) it still errors - keeping the reservation everywhere else
+  preserves the existing grammar.
+
+---
+
+### Issue 11 - No `Vec<T>` extend / merge in std
+
+**Severity: LOW (std-library gap, not language). Surfaced repeatedly
+in tooling code.**
+
+#### Symptom
+
+Function A builds a `Vec<T>`. Function B holds a longer-lived
+`Vec<T>` and wants to fold A's into it. Today's only path:
+
+```yoop
+let scanned: Vec<MacroConst> = scan_macros(mac_arr, args.prefix);
+let scanned_view: MacroConst[] = vec.vec_as_array(ref scanned);
+let mj: usize = 0;
+while (mj < scanned_view.len) {
+    vec.vec_push(ref macros_v, scanned_view[mj]);
+    mj = mj + 1;
+}
+Disposable.dispose(ref scanned);
+```
+
+Five lines for a "merge two collections" operation. Showed up in
+yoopbinder's macro pass when piping `scan_macros` output into the
+main `macros_v` collector.
+
+#### Fix
+
+Add to [std/core/vec.yoop](../std/core/vec.yoop):
+
+```yoop
+// Move every element from `src` into `dst`, then dispose `src`.
+// O(n) plus one reallocation of dst if cap is exceeded.
+export function vec_extend<T>(ref dst: Vec<T>, src: Vec<T>): void {
+    let i: usize = 0;
+    while (i < src.len) {
+        vec_push(ref dst, vec_get(ref src, i));
+        i = i + 1;
+    }
+    Disposable.dispose(ref src);
+}
+```
+
+Signature note: `src` is taken by value (transferring ownership of
+the propagating obligation), and the function explicitly disposes it
+before returning. Callers go from the five-line loop to:
+
+```yoop
+vec.vec_extend(ref macros_v, scan_macros(mac_arr, args.prefix));
+```
+
+#### Acceptance
+
+- `vec_extend(ref dst, src)` available in std.
+- yoopbinder's macro merge collapses to one call.
+- New `vec_extend` unit test in `std/core/vec.test.js` (or similar)
+  covering: empty src, empty dst, both empty, dst needs to reallocate.
+
 ---
 
 ## Suggested order
 
 Priorities are about ROI per implementation hour, not pure severity.
+Issues 1, 2, 3 already landed - skipped here.
 
-1. **Issue 1 (`!` + `&&`)** - tiny parser fix, unblocks a class of
-   conditions that today need parens or temp bindings.
-2. **Issue 3 (enum `==`)** - one extra arm in the equality-op
-   typechecker + codegen; removes the 80-line `http_method_eq` and
-   any future variants. Big readability win per line of compiler
-   change.
-3. **Issue 2 (struct-literal generic inference)** - bigger lift but
-   the most pervasive friction in real code. Should land before
-   self-hosting work where this would compound across the whole
-   compiler rewrite.
+1. **Issue 9 (module-level const string escapes)** - a real codegen
+   bug producing silently-wrong byte content. Confirmed minimal repro.
+   Fix is likely small (route module-level const string init through
+   the same encoder as in-function `STRING_LITERAL`). Highest impact
+   per hour - silent miscompilation deserves to be at the top.
+2. **Issue 10 path B (binder-side keyword rename)** - unblocks
+   yoopbinder for any header with a `type` / `kind` / `enum` parameter
+   name, which is most of them. Maybe 30 lines in
+   [tools/yoopbinder/main.yoop](../tools/yoopbinder/main.yoop).
+3. **Issue 11 (vec_extend)** - 10-line std/core/vec.yoop addition.
+   Removes ceremony from any code that builds + merges Vecs.
 4. **Issue 6 (argv in main)** - small codegen change, makes CLI
    tools feel native instead of leaning on a runtime helper.
-5. **Issue 8 (disposable inference)** - kindCheck change, mostly
-   ergonomics; saves a lot of noise across std and tools.
+5. **Issue 10 path A (parser-side keyword relaxation in extern)** -
+   small grammar tweak, fixes hand-written externs too. Pick up
+   after B; B alone unblocks the binder pipeline.
 6. **Issue 4 (opaque-extern `ref T` in user fns)** - real codegen
    investigation, but the workaround is already widely used and
    documented. Less urgent.
 7. **Issue 5 (printf format strings)** - mostly a documentation +
    `print`/`println` helper rollout. Low engineering cost, low impact.
-8. **Issue 7 (Vec corruption)** - needs an investigation pass first.
+8. **Issue 8 (disposable inference)** - per maintainer guidance, the
+   explicit-keyword discipline stays. Close unless inference for the
+   unambiguous case is genuinely wanted.
+9. **Issue 7 (Vec corruption)** - needs an investigation pass first.
    Could turn out to be a non-issue or a real codegen bug; we don't
-   know yet.
+   know yet. Three minimal repros tried at the time, none triggered;
+   may be retire-able after one more look.
 
 ## What this *doesn't* cover
 

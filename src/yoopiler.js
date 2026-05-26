@@ -160,6 +160,21 @@ function main() {
   fs.writeFileSync(tmpIR, ir, "utf8");
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
 
+  // Turn each `extern "C" from library "X"` name into the right linker
+  // arg(s). Default: `-lX`. macOS Apple-framework escape hatch: a name
+  // of shape `framework:NAME` lowers to `-framework NAME` (two argv
+  // entries) so OpenGL / Cocoa / etc. can be linked without a tweak to
+  // every yoop call site. Ignored / passes through as `-lframework:NAME`
+  // on Windows + Linux, which won't link -- the convention is meant for
+  // macOS-targeted demos.
+  function lowerLinkFlag(name) {
+    if (name.startsWith("framework:")) {
+      return ["-framework", name.slice("framework:".length)];
+    }
+    return [`-l${name}`];
+  }
+  const linkArgs = allLinkFlags.flatMap(lowerLinkFlag);
+
   // `-g` keeps the DWARF metadata that codegen emits; `-O0` keeps every
   // statement's DILocation distinct so `lldb` stepping doesn't fold lines.
   // Once an opt-level flag lands these should respect it.
@@ -172,7 +187,7 @@ function main() {
       "-o",
       `${outputFileName}.exe`,
       ...debugFlags,
-      ...allLinkFlags.map((f) => `-l${f}`),
+      ...linkArgs,
       "-fuse-ld=link",
     ];
     execFileSync(clang, clangArgs, { stdio: "inherit" });
@@ -196,7 +211,7 @@ function main() {
       outputFileName,
       ...debugFlags,
       ...extraSearchPaths,
-      ...allLinkFlags.map((f) => `-l${f}`),
+      ...linkArgs,
     ];
     execFileSync("clang", clangArgs, { stdio: "inherit" });
     console.log(`compiled: ${outputFileName}`);
