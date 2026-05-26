@@ -39,6 +39,13 @@
     "breakpoints": [
       { "language": "yoop" }
     ],
+    "configurationDefaults": {
+      "[yoop]": {
+        "editor.tabSize": 2,
+        "editor.insertSpaces": true,
+        "editor.detectIndentation": false
+      }
+    },
     "commands": [
       {
         "command": "yoopiler.debugCurrentFile",

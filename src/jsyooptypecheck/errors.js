@@ -27,12 +27,21 @@ export function formatType(t) {
   switch (t.kind) {
     case typeKinds.prim:
       return t.name;
-    case typeKinds.struct:
+    case typeKinds.struct: {
+      // Phase 7.1: a generic instantiation has a mangled name like
+      // `Box__int32`; the original decl name + concrete args are stashed on
+      // `genericInstance`. Render the source-level form for diagnostics.
+      if (t.genericInstance) {
+        const args = t.genericInstance.args.map(formatType).join(", ");
+        const baseName = t.name.split("__")[0];
+        return `struct ${baseName}<${args}>`;
+      }
       return `struct ${t.name}`;
+    }
     case typeKinds.ref:
       return `ref ${formatType(t.inner)}`;
     case typeKinds.array:
-      return `array ${formatType(t.elem)}`;
+      return `${formatType(t.elem)}[]`;
     case typeKinds.func:
       return `(${t.params.map((p) => `${p.isRef ? "ref " : ""}${formatType(p.type)}`).join(", ")}) -> ${formatType(t.returnType)}`;
     case typeKinds.void:
@@ -74,6 +83,8 @@ export function formatType(t) {
       return `(${t.params.map(formatType).join(", ")}) => ${formatType(t.returnType)}`;
     case typeKinds.vtable:
       return `vtable ${t.name}`;
+    case typeKinds.namespace:
+      return "namespace";
     default:
       return `unknown kind ${t.kind}`;
   }

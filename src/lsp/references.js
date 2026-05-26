@@ -490,6 +490,20 @@ function occurrenceMatches(mod, target, name, offset) {
     return true;
   }
 
+  // (b2) FIELD_ACCESS with `namespaceLookup` - cross-module call or
+  // value access through a namespace import, e.g. `state.init_state(...)`
+  // or `state.WIN_W`. Matches any top-level decl (function or
+  // const/let) reached through its source-module exportName.
+  if (
+    node?.kind === ASTNodeKind.FIELD_ACCESS &&
+    node.namespaceLookup &&
+    node.field === name &&
+    node.namespaceLookup.moduleId === target.module.id &&
+    node.namespaceLookup.exportName === (target.decl?.name ?? name)
+  ) {
+    return true;
+  }
+
   // (c) FIELD_ACCESS on the right struct.
   if (
     target.kind === TargetKind.field &&
