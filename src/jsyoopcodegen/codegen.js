@@ -2102,6 +2102,17 @@ export function codegen(ast) {
         for (const method of decl.decl.methods) {
           emitMethod(method, decl.decl.resolvedType);
         }
+      } else if (decl.kind === ASTNodeKind.VARIANT_DECL && decl.methods?.length > 0) {
+        // Phase 13.B: variant impl methods - same emission pipeline as
+        // struct methods. mangleTraitMethod just reads moduleId + name
+        // off the receiver type; VariantType has both.
+        for (const method of decl.methods) {
+          emitMethod(method, decl.resolvedType);
+        }
+      } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.VARIANT_DECL && decl.decl.methods?.length > 0) {
+        for (const method of decl.decl.methods) {
+          emitMethod(method, decl.decl.resolvedType);
+        }
       }
       // TRAIT_DECL: no codegen - traits are compile-time only
     }
@@ -3225,6 +3236,15 @@ function codegenWithModuleId(
         emitMethodFn(method, decl.resolvedType);
       }
     } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0 && !decl.decl.genericDecl) {
+      for (const method of decl.decl.methods) {
+        emitMethodFn(method, decl.decl.resolvedType);
+      }
+    } else if (decl.kind === ASTNodeKind.VARIANT_DECL && decl.methods?.length > 0 && !decl.genericDecl) {
+      // Phase 13.B: variant impl methods in the multi-module path.
+      for (const method of decl.methods) {
+        emitMethodFn(method, decl.resolvedType);
+      }
+    } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.VARIANT_DECL && decl.decl.methods?.length > 0 && !decl.decl.genericDecl) {
       for (const method of decl.decl.methods) {
         emitMethodFn(method, decl.decl.resolvedType);
       }

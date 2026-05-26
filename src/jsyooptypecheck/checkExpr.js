@@ -2271,6 +2271,9 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     const canonical = ctx.typeContext.structTable.get(recvType.name);
     if (canonical) recvType = canonical;
   }
+  // Phase 13.B: variants are nominal types that can implement traits.
+  // The variant shell is the canonical mutable object (since 13.A), so
+  // no re-fetch is needed - it's the same object every reader sees.
 
   // Phase 7.4 + 7.1: if the trait reference is generic (e.g. `Container.get`
   // where Container is `trait Container<T>`), resolve it against the
@@ -2280,13 +2283,16 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
   // Phase 9.J: TypeParamType bounds is a list; multi-bound dispatch picks the
   // bound matching `trait.name`. Empty bounds = unbounded type-param can't
   // dispatch a trait method.
+  // Phase 13.B: variants share the same implementsTraits surface as
+  // structs; pull from the same slot.
   let resolvedTrait = trait;
   if (trait.isGenericTraitRef) {
-    const implTraits = recvType.kind === typeKinds.struct
-      ? (recvType.implementsTraits ?? [])
-      : recvType.kind === typeKinds.typeParam
-      ? recvType.bounds ?? []
-      : [];
+    const implTraits =
+      recvType.kind === typeKinds.struct || recvType.kind === typeKinds.variant
+        ? (recvType.implementsTraits ?? [])
+        : recvType.kind === typeKinds.typeParam
+        ? recvType.bounds ?? []
+        : [];
     resolvedTrait = implTraits.find((t) => t.name === trait.name) ?? null;
     if (!resolvedTrait) {
       pushError(
@@ -2322,12 +2328,14 @@ function resolveTraitQualifiedCall(node, trait, methodName, scope, ctx) {
     return setType(node, ErrorType());
   }
 
-  // Case 1: receiver is a struct implementing the trait.
+  // Case 1: receiver is a struct or variant implementing the trait.
   // Phase 9.J: extends chain - a type that implements a sub-trait `Child`
   // implicitly implements every ancestor; `validateImplBlock` flattens
-  // ancestors into `implementsTraits`, so this check still trips when a struct
+  // ancestors into `implementsTraits`, so this check still trips when a type
   // implements `Child` and the user qualifies via `Parent.method(...)`.
-  if (recvType.kind === typeKinds.struct) {
+  // Phase 13.B: variants share the dispatch surface; same lookup, same
+  // mangling scheme (the variant's moduleId + name + trait + method).
+  if (recvType.kind === typeKinds.struct || recvType.kind === typeKinds.variant) {
     const implementsIt = (recvType.implementsTraits ?? []).some(
       (t) => t === resolvedTrait || (trait.isGenericTraitRef && t.name === resolvedTrait.name),
     );

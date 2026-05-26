@@ -214,8 +214,30 @@ export const TraitType = (
 // Phase 10.A: `genericInstance: { declId, args } | null` tags instantiations
 // of a generic variant decl, mirroring StructType. Substitution re-instantiates
 // open instances via the registry.
-export const VariantType = (name, variants, moduleId = null, genericInstance = null) =>
-  freezerWrap(typeKinds.variant, { name, variants, moduleId, genericInstance });
+// Phase 13.A: `variants` is populated in-place by pass C (mutates the shell
+// the table registered in pass A) so back-references captured during struct
+// field resolution see the populated cases at codegen time.
+// Phase 13.B: variants can `implements Trait propagates<K>` like structs.
+// `implementsTraits`, `methods`, and `propagatedKinds` are mutable slots
+// populated by pass C / pass C.1; the outer object stays frozen.
+export const VariantType = (
+  name,
+  variants,
+  moduleId = null,
+  genericInstance = null,
+  implementsTraits = [],
+  methods = new Map(),
+  propagatedKinds = [],
+) =>
+  freezerWrap(typeKinds.variant, {
+    name,
+    variants,
+    moduleId,
+    genericInstance,
+    implementsTraits,
+    methods,
+    propagatedKinds,
+  });
 
 // Phase 7.5: untagged C-style union - every field starts at offset 0,
 // size = max(sizeof(field)), alignment = max(alignof(field)). No tag.

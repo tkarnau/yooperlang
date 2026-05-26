@@ -2796,18 +2796,55 @@ export function parse(src) {
   }
 
   // Phase 7.5 (renamed in Phase 12): variant declaration - tagged sum type.
-  //   variant Name<TParams?> { Case1 { f: T, ... }, Case2, ... }
-  // The `enum` keyword is reserved for a separate value-enum construct in a
-  // follow-up phase.
+  //   variant Name<TParams?> implements (T, U)? propagates<K>? contains<K>? {
+  //       Case1 { f: T, ... },
+  //       Case2,
+  //       function method(ref self, ...): R { ... },
+  //       ...
+  //   }
+  // Phase 13.B: variants can now implement traits and declare propagates /
+  // contains clauses, mirroring `type` decls. The body interleaves variant
+  // cases and method bodies; methods are only legal when the variant
+  // declares an `implements` clause.
   function parseVariantDecl() {
     expect(TokenTags.variant);
     const node = buildSourcedNode(ASTNodeKind.VARIANT_DECL);
     node.name = parseIdentAsName();
     node.typeParams = parseTypeParamList();
+
+    // Phase 13.B: implements clause - same shape as `parseTypeDecl`.
+    node.implements = [];
+    if (peek().tag === TokenTags.implements) {
+      advance();
+      if (peek().tag === TokenTags.lparen) {
+        advance();
+        while (peek().tag === TokenTags.ident) {
+          node.implements.push(parseImplementsClauseRef());
+          if (peek().tag === TokenTags.comma) {
+            advance();
+          }
+        }
+        expect(TokenTags.rparen);
+      } else {
+        node.implements.push(parseImplementsClauseRef());
+      }
+    }
+
+    // Phase 13.B: optional `propagates<...>` / `contains<...>` clauses.
+    parsePropagationClauses(node);
+
     node.variants = [];
+    node.methods = [];
     expect(TokenTags.lcurly);
     const seenNames = new Set();
-    while (peek().tag === TokenTags.ident) {
+    while (
+      peek().tag === TokenTags.ident ||
+      peek().tag === TokenTags.function
+    ) {
+      if (peek().tag === TokenTags.function) {
+        node.methods.push(parseMethodDecl());
+        continue;
+      }
       const varTok = peek();
       const variant = buildSourcedNode(ASTNodeKind.VARIANT_CASE);
       variant.name = parseIdentAsName();
@@ -2853,6 +2890,13 @@ export function parse(src) {
         `variant '${node.name}' must declare at least one case`,
         node.sourceLoc.pos,
         1,
+      );
+    }
+    if (node.methods.length > 0 && node.implements.length === 0) {
+      throw parseError(
+        `methods are only allowed inside an 'implements' block - variant "${node.name}" has methods but no 'implements' clause`,
+        peek().start,
+        peek().length,
       );
     }
     return node;

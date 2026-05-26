@@ -120,11 +120,15 @@ export function validateFunction(funcNode, typeContext, errors) {
           // validated by the binding-resolution path.
           paramKindType = kt;
         } else {
-          // Unwrap ref to get the underlying struct type.
+          // Unwrap ref to get the underlying nominal type. Phase 13.B:
+          // variants are valid receivers for kind-tracked params too.
           const structType = baseType.kind === typeKinds.ref ? baseType.inner : baseType;
-          if (structType.kind !== typeKinds.struct) {
+          if (
+            structType.kind !== typeKinds.struct &&
+            structType.kind !== typeKinds.variant
+          ) {
             pushError(errors, param,
-              `kind "${kt.name}" can only apply to struct values, got ${formatType(baseType)}`);
+              `kind "${kt.name}" can only apply to struct or variant values, got ${formatType(baseType)}`);
           } else {
             // Phase 6.4 strict propagates: a struct that propagates this kind
             // satisfies the kind's requirement via its propagated fields, even
@@ -559,12 +563,17 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     }
   }
 
-  // The struct under a kind binding must be a plain struct value (not a ref,
-  // not an array, not a primitive).
+  // The value under a kind binding must be a plain nominal value (not a
+  // ref, not an array, not a primitive). Phase 13.B: variants count too -
+  // a variant that implements the kind's required traits binds the same
+  // way a struct would.
   if (declaredType.kind === typeKinds.error) return;
-  if (declaredType.kind !== typeKinds.struct) {
+  if (
+    declaredType.kind !== typeKinds.struct &&
+    declaredType.kind !== typeKinds.variant
+  ) {
     pushError(ctx.errors, node,
-      `kind "${kindType.name}" can only apply to struct values, got ${formatType(declaredType)}`);
+      `kind "${kindType.name}" can only apply to struct or variant values, got ${formatType(declaredType)}`);
     return;
   }
 

@@ -1,0 +1,52 @@
+// Phase 13.B: variants can now `implements Trait propagates<K>` and carry
+// trait methods inside the variant body. Before, the disposal walk had
+// to live in a free function called from a wrapper struct's `dispose` -
+// the variant couldn't directly own the Disposable contract.
+//
+// This fixture exercises every wired surface:
+//   * Parser - `implements`, `propagates`, and a `function dispose(...)`
+//     interleaved with variant cases.
+//   * Typechecker - validateImplBlock matches the impl signature against
+//     the trait, registers the method on the variant shell, and runKindCheck
+//     turns `disposable o: Owned` into an auto-cleanup obligation.
+//   * Codegen - emits the impl method under the trait-mangled symbol,
+//     dispatches `Disposable.dispose(ref ...)` through it.
+//
+// The Buffer case carries a heap allocation; auto-cleanup at scope end
+// fires the variant's own dispose, which switches on the cases and frees
+// the buffer. Empty is a no-op cleanup path.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+variant Owned implements Disposable propagates<disposable> {
+    Empty,
+    Buffer { data: uint8[] },
+    function dispose(ref self): void {
+        switch (self) {
+            case Owned.Empty: { printf(`dispose Empty\n`); }
+            case Owned.Buffer { data: d }: {
+                printf(`dispose Buffer len=${d.len}\n`);
+                intr.heap_free(d);
+            }
+        }
+    }
+}
+
+function main(): int32 {
+    let buf: uint8[] = intr.heap_alloc(3);
+    buf[0] = 65;
+    buf[1] = 66;
+    buf[2] = 67;
+    disposable filled: Owned = Owned.Buffer { data: buf } {
+        printf(`built filled\n`);
+        disposable empty: Owned = Owned.Empty;
+        printf(`built empty\n`);
+    }
+    printf(`after outer scope\n`);
+    return 0;
+}

@@ -746,6 +746,13 @@ function validateVTableDecl(d, mod, moduleEnv, errors, programState) {
 
 function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   const env = moduleEnv.get(mod.id);
+  // Phase 13.B: variants share the same impl-block validation pipeline
+  // as structs. The variant shell lives in `variantTable` and (since
+  // 13.A) is the canonical mutable object; we populate its
+  // implementsTraits + methods in place. Generic variants are deferred -
+  // there's no `genericDecl` path for them today and the open-self
+  // dance below is struct-shaped.
+  const isVariant = typeDecl.kind === ASTNodeKind.VARIANT_DECL;
   // Phase 7.x: for generic structs, build an "open" struct shell by
   // instantiating the generic decl with its own TypeParamTypes as args.
   // This yields a StructType whose field slots carry TypeParamType, suitable
@@ -753,7 +760,10 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   const isGeneric = !!typeDecl.genericDecl;
   const typeParamScope = isGeneric ? typeDecl.genericDecl.paramScope : null;
   let structShell;
-  if (isGeneric) {
+  if (isVariant) {
+    structShell = env.variantTable.get(typeDecl.name);
+    if (!structShell) return;
+  } else if (isGeneric) {
     const gd = typeDecl.genericDecl;
     // Build a throwaway open StructType to serve as `self` during impl
     // resolution. We deliberately don't go through the instantiation registry
@@ -960,6 +970,23 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   // Phase 9.J: store the flattened impls list (user-declared traits +
   // every extends ancestor, deduped) so downstream trait-method dispatch
   // doesn't need to re-walk the extends chain on every lookup.
+  if (isVariant) {
+    // Phase 13.B: variants mutate the shell in place (same shape as the
+    // 13.A variants-Map fix). No fresh VariantType, no table replacement -
+    // so struct fields that captured the shell during their own
+    // resolution see the populated implementsTraits + methods on their
+    // next read.
+    for (const t of flattenedImpls) {
+      structShell.implementsTraits.push(t);
+    }
+    for (const [name, sig] of resolvedMethods) {
+      structShell.methods.set(name, sig);
+    }
+    for (const m of typeDecl.methods ?? []) {
+      m.implementingType = structShell;
+    }
+    return;
+  }
   if (isGeneric) {
     // For generic decls, stash impls + methods on the genericDecl so
     // subsequent instantiateStruct calls produce concrete instances carrying
@@ -2299,7 +2326,34 @@ export function typecheckProgram(modules) {
         }
         gd.genericVariants = genericVariants;
       } else if (d.kind === ASTNodeKind.VARIANT_DECL) {
-        const variants = new Map();
+        // Phase 13.A: mutate the shell registered by pass A in place
+        // instead of constructing a fresh VariantType and replacing it.
+        // Any struct field whose type was resolved earlier in pass C
+        // captured the shell reference; if we swapped a new object into
+        // variantTable here, those references would point at the empty
+        // shell and `sizeOfType` on the field would compute as 4 (tag
+        // only), undersizing every enclosing struct. Mirrors the
+        // TraitType pattern (frozen outer, mutable `methods` Map).
+        const shell = variantTable.get(d.name);
+
+        // Phase 13.B: resolve `propagates<...>` on the variant decl and
+        // store on the shell. Same shape as the struct branch above.
+        if (d.propagatesClause) {
+          const env2 = moduleEnv.get(mod.id);
+          for (const ref of d.propagatesClause.kindNames) {
+            const app = resolveKindAppFromPropagatesEntry(ref, env2, errors);
+            if (!app) continue;
+            if (shell.propagatedKinds.some((a) => a.kindType === app.kindType)) {
+              errors.push({
+                message: `duplicate kind '${ref.name}' in propagates clause of variant "${d.name}"`,
+                sourceLoc: ref.sourceLoc,
+              });
+              continue;
+            }
+            shell.propagatedKinds.push(app);
+          }
+        }
+
         let ordinal = 0;
         for (const variantNode of d.variants ?? []) {
           let resolvedFields = null;
@@ -2331,7 +2385,7 @@ export function typecheckProgram(modules) {
               resolvedFields.push({ name: f.name, type: ft });
             }
           }
-          variants.set(variantNode.name, {
+          shell.variants.set(variantNode.name, {
             name: variantNode.name,
             fields: resolvedFields,
             ordinal,
@@ -2339,9 +2393,7 @@ export function typecheckProgram(modules) {
           variantNode.ordinal = ordinal;
           ordinal++;
         }
-        const fullEnum = VariantType(d.name, variants, mod.id);
-        d.resolvedType = fullEnum;
-        variantTable.set(d.name, fullEnum);
+        d.resolvedType = shell;
       }
 
       // Phase 7.5: resolve union field types.
@@ -2807,13 +2859,23 @@ export function typecheckProgram(modules) {
     // pass C.3 - impl block validation
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
-      if (d.kind !== ASTNodeKind.TYPE_DECL || !d.implements?.length) continue;
+      if (
+        (d.kind !== ASTNodeKind.TYPE_DECL &&
+          d.kind !== ASTNodeKind.VARIANT_DECL) ||
+        !d.implements?.length
+      ) {
+        continue;
+      }
       // Phase 7.x: generic structs now support `implements Trait`. validateImplBlock
       // routes to the open-self code path when d.genericDecl is set. Note: this
       // runs *after* struct field resolution in pass C, so a struct field that
       // references DynArray<int32> in the same module would have already been
       // cached with empty implementsTraits. The current playground demo doesn't
       // hit this case; broader use will need a pre-pass before field resolution.
+      // Phase 13.B: variants flow through the same validator. The shell
+      // mutation pattern (13.A) means struct fields that captured the
+      // variant before its impls landed will see the populated
+      // implementsTraits + methods on their next read.
       validateImplBlock(d, mod, moduleEnv, errors, programState);
     }
 
@@ -2994,6 +3056,16 @@ export function typecheckProgram(modules) {
             validateMethod(method, selfShell, tcForMethod, errors);
           }
         }
+      } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
+        // Phase 13.B: variant methods are typechecked the same way as
+        // struct methods, with `self` bound to the variant's shell.
+        // Generic variants are not yet supported on the impl side.
+        const selfShell = d.resolvedType;
+        if (selfShell) {
+          for (const method of d.methods) {
+            validateMethod(method, selfShell, typeContext, errors);
+          }
+        }
       }
     }
 
@@ -3016,6 +3088,12 @@ export function typecheckProgram(modules) {
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         runKindCheck(d, errors, funcDeclTable, programState.registry);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
+        for (const method of d.methods) {
+          runKindCheck(method, errors, funcDeclTable, programState.registry);
+        }
+      } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
+        // Phase 13.B: variant methods participate in kind-check like
+        // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
         }

@@ -1,0 +1,64 @@
+// yooparse/main.yoop - a demo program that uses the json package.
+//
+// Run with `yoopiler examples/playground/yooparse/main.yoop`.
+//
+// This file is NOT part of the json package - it's a consumer. The
+// package itself is just `./json.yoop`; this file demonstrates how a
+// downstream program imports it and uses the exported types.
+//
+// The key thing to note: there is no `main` in json.yoop, and there
+// doesn't need to be. A yooperlang package is just a `.yoop` file (or a
+// directory of them) that exports types, functions, constants. The
+// entry program - the file you pass to `yoopiler` - is the only file
+// that needs a `main`.
+
+import * as json from "./json.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as fmt from "std/core/format.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let input: string =
+        "{\"name\":\"yoop\",\"version\":3,\"tags\":[\"systems\",\"fun\",\"new\"],\"ready\":true,\"notes\":null}";
+
+    disposable doc: json.JsonDoc = json.parse(input) {
+        if (doc.error.len > 0) {
+            printf(`parse error: ${doc.error}\n`);
+            return 1;
+        }
+
+        // Pull individual fields out by key.
+        let name_node:    json.JsonValue = json.obj_get(ref doc.root, "name");
+        let version_node: json.JsonValue = json.obj_get(ref doc.root, "version");
+        let ready_node:   json.JsonValue = json.obj_get(ref doc.root, "ready");
+        let notes_node:   json.JsonValue = json.obj_get(ref doc.root, "notes");
+
+        let name:    string = json.as_string(ref name_node, "<missing>");
+        let version: int64  = json.as_int(ref version_node, -1);
+        let ready:   bool   = json.as_bool(ref ready_node, false);
+        let notes_is_null:  bool = json.is_null(ref notes_node);
+
+        printf(`name=${name} version=${version} ready=${ready} notes_null=${notes_is_null}\n`);
+
+        // Walk the "tags" array element by element.
+        let tags_node: json.JsonValue = json.obj_get(ref doc.root, "tags");
+        let tags: json.JsonValue[] = json.as_array(ref tags_node);
+        printf(`tags (${tags.len}):\n`);
+        let i: usize = 0;
+        while (i < tags.len) {
+            let t: json.JsonValue = tags[i];
+            let tag_str: string = json.as_string(ref t, "<not a string>");
+            printf(`  [${i}] ${tag_str}\n`);
+            i = i + 1;
+        }
+
+        // Round-trip: serialize the doc back to a string.
+        let out: string = json.stringify(ref doc.root);
+        printf(`stringified: ${out}\n`);
+    }
+
+    return 0;
+}

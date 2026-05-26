@@ -532,6 +532,32 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "a is A\nb.x=42\n");
   });
 
+  // Phase 13.A: a struct declared before a variant that mentions it back
+  // through `Variant.Inner { kids: Struct[] }` used to capture the
+  // empty-variants shell when the typechecker resolved its field types.
+  // `sizeOfType(Struct)` then ran on the stale shell and undersized the
+  // struct; `heap_alloc<Struct>(n)` allocated half the bytes LLVM expects
+  // and writes corrupted the heap. The fix makes pass C mutate the shell
+  // in place. Would fail to run cleanly under the old typechecker.
+  it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/variant_struct_forward_ref.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "total=110 kids=5\n");
+  });
+
+  // Phase 13.B: variant decls accept `implements Trait propagates<K>` and
+  // interleave method bodies with variant cases, exactly like struct
+  // decls. Auto-cleanup at scope end dispatches through the variant's
+  // own dispose; cleanup order is LIFO (Empty fires before Buffer).
+  it("variant_implements_trait.yoop: variant implements Disposable + propagates<disposable> with auto-cleanup", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/variant_implements_trait.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "built filled\nbuilt empty\ndispose Empty\ndispose Buffer len=3\nafter outer scope\n",
+    );
+  });
+
   // Phase 12: value enums - the new `enum` keyword as a nominal primitive alias.
   it("value_enum_basic.yoop: int32-backed enum with switch + equality", () => {
     const { stdout, exitCode } = runFixture("examples/pass/value_enum_basic.yoop");
@@ -2022,7 +2048,8 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("binding_non_struct.yoop rejects a kind-prefixed binding with a non-struct type", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/binding_non_struct.yoop");
     assert.ok(
-      errors.some((e) => /can only apply to struct values/.test(e.message)),
+      // Phase 13.B: error wording now includes "or variant".
+      errors.some((e) => /can only apply to struct or variant values/.test(e.message)),
       `expected non-struct-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });

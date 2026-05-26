@@ -163,7 +163,13 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       return out;
     }
 
-    if (rt?.kind !== "struct") return out;
+    // Phase 13.B: variants can declare `propagates<K>` and carry the
+    // same obligations as structs. The shape of `propagatedKinds`,
+    // `implementsTraits`, and `methods` is identical, so the rest of
+    // this function just works on either receiver. Variants don't
+    // contribute field-carried obligations (no `fields` slot) but the
+    // mustCall path covers the disposable-tree use case directly.
+    if (rt?.kind !== "struct" && rt?.kind !== "variant") return out;
 
     // Build the set of kinds that produce obligations on this binding, with
     // each kind's `autoCleanup` flag:
@@ -496,7 +502,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           // pathway has nothing to transfer, so we emit the function-side
           // error directly when the function fails to declare propagates<K>.
           const rt = stmt.value.resolvedType;
-          if (rt?.kind === "struct" && (rt.propagatedKinds?.length ?? 0) > 0) {
+          if (
+            (rt?.kind === "struct" || rt?.kind === "variant") &&
+            (rt.propagatedKinds?.length ?? 0) > 0
+          ) {
             const declaredPropagates = new Set(
               (fnOrMethodDecl.returnPropagatedKinds ?? []).map(
                 (a) => a.kindType ?? a,
