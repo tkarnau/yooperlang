@@ -306,10 +306,8 @@ export function respond_bytes(ref resp: Response, take: Bytes): void {
 // Borrowing view of the body as raw bytes, for serialization. Valid until
 // the Response (or its body) is disposed or reassigned.
 export function response_body_bytes(ref resp: Response): uint8[] {
-    let out: uint8[] = [];
     switch (resp.body) {
-        case ResponseBody.Static { text: t }:  { out = intr.string_as_bytes(t); }
-        case ResponseBody.Owned  { bytes: b }: { out = bytes_to_array(ref b); }
+        case ResponseBody.Static { text: t }:  { return intr.string_as_bytes(t); }
+        case ResponseBody.Owned  { bytes: b }: { return bytes_to_array(ref b); }
     }
-    return out;
 }

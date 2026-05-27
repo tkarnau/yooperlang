@@ -43,15 +43,16 @@ function main(): int32 {
         }
         printf(`yoopstore listening on ${HOST}:${PORT}, data root: ${DATA_ROOT}\n`);
 
-        disposable h: StorageHandler = handler.storage_handler_new(DATA_ROOT) {
-            // n=0 -> serve forever.
-            let outcome: ServeOutcome = http_server.serve_n(ref lr.listener, ref h, 0);
-            if (outcome.error.len > 0) {
-                printf(`server stopped: served=${outcome.served} err=${outcome.error}\n`);
-                return 1;
-            }
-            printf(`served ${outcome.served} requests\n`);
+        // The handler owns nothing to dispose now that Response bodies are
+        // owned (papercut #6) - a plain `let` is enough.
+        let h: StorageHandler = handler.storage_handler_new(DATA_ROOT);
+        // n=0 -> serve forever.
+        let outcome: ServeOutcome = http_server.serve_n(ref lr.listener, ref h, 0);
+        if (outcome.error.len > 0) {
+            printf(`server stopped: served=${outcome.served} err=${outcome.error}\n`);
+            return 1;
         }
+        printf(`served ${outcome.served} requests\n`);
     }
 
     return 0;

@@ -2,7 +2,7 @@
 
 ## Context
 
-[examples/playground/yoopstore](../examples/playground/yoopstore) is a
+[examples/playground/yoopstore](../../examples/playground/yoopstore) is a
 small S3-style file-storage HTTP server split into four modules:
 
 - `safepath.yoop` - validates the request-target before it touches disk
@@ -27,7 +27,7 @@ hit every one of them again.
 
 ### 1. Codegen miscounts template-literal length when the literal contains an embedded `"` [FIXED]
 
-Was: `encodeStringBytes` in [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js)
+Was: `encodeStringBytes` in [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js)
 only hex-escaped `"` and `\` when they arrived as `\"` / `\\` escape pairs.
 Template-literal STRING_PARTs preserve raw bytes between the backticks
 (see `parseTemplateLiteralBody`), so a literal `"` reached `encodeStringBytes`
@@ -37,34 +37,41 @@ which terminated the literal early and produced a length-mismatched
 
 Fixed by adding two `else if` arms to `encodeStringBytes` that hex-escape
 raw `"` to `\22` and raw `\` to `\5C`. Regression test in
-[src/jsyoopcodegen/codegen.test.js](../src/jsyoopcodegen/codegen.test.js)
+[src/jsyoopcodegen/codegen.test.js](../../src/jsyoopcodegen/codegen.test.js)
 covers a `printf(\`... "${x}" ...\`)` shape and asserts every emitted
 string-global header agrees with its body's decoded length.
 
 ### 2. No standard-library file I/O [LANDED, MVP]
 
 Was: yoopstore had to hand-roll a libc stdio + POSIX mkdir block in
-[storage.yoop](../examples/playground/yoopstore/storage.yoop), about
+[storage.yoop](../../examples/playground/yoopstore/storage.yoop), about
 130 lines of FFI boilerplate.
 
-Landed: [std/fs.yoop](../std/fs.yoop) - top-level module exporting
+Landed: [std/fs.yoop](../../std/fs.yoop) - top-level module exporting
 `read_file`, `read_file_into`, `write_file`, `delete_file`, `mkdir_p`,
 and `path_join`. yoopstore's `storage.yoop` collapsed to ~25 lines of
 one-line forwards (kept as a thin wrapper so the handler stays free of
 the `import.unsafe` requirement and so `join_path` can encode the
 project-local `<root>/<rel>` convention).
 
-Still open as follow-ups:
+Follow-ups since landed:
 
-- No `exists(path)` / metadata. Needs `stat` + a yoop-side mirror of
-  `struct stat`, or a runtime helper. Punted until there's a use site.
-- No streaming reads. `read_file` slurps. Once `std/io` factors a
-  `Readable` trait out of `std/net`, an fd-backed implementation
-  reading in chunks slots in alongside.
-- Errno is dropped on the floor (mkdir_p eats "already exists" along
-  with "permission denied"). A `last_errno_message()` helper in std
-  would let `std/fs` surface the real reason.
-- Windows / non-POSIX path conventions are not handled.
+- `exists(path) -> bool` and `file_size(path) -> int64` now exist,
+  backed by stat helpers `yoop_io_exists` / `yoop_io_file_size` in
+  [runtime/yoop_io.c](../../runtime/yoop_io.c) (no yoop-side `struct stat`
+  mirror needed - the helpers return plain scalars). [DONE]
+- Errno is now surfaced: `write_file` / `read_file_into` (fopen) and
+  `delete_file` (remove) append `errno.message(errno.get())`, so
+  "No such file or directory" vs "Permission denied" is distinguishable.
+  `mkdir_p` still intentionally ignores per-segment errors (the next op
+  decides usability). [DONE]
+
+Deferred (no consumer / blocked on bigger work):
+
+- No streaming reads. `read_file` slurps. Blocked on a `std/io`
+  refactor that factors a `Readable` trait out of `std/net`; an
+  fd-backed chunked reader slots in once that exists.
+- Windows / non-POSIX path conventions are not handled (no CI target).
 
 ### 3. No type for opaque C pointers [LANDED]
 
@@ -95,7 +102,7 @@ Was: the Vec API exposed `vec_push` / `vec_clear` but no bulk fill, so
 `read_file_into` pushed byte-by-byte (O(log n) capacity-doubling
 reallocs).
 
-Fixed: [std/core/vec.yoop](../std/core/vec.yoop) now exports
+Fixed: [std/core/vec.yoop](../../std/core/vec.yoop) now exports
 `vec_extend_from<T>(v: ref Vec<T>, src: T[])` (grows the backing buffer
 at most once - to exactly `v.len + src.len`, or not at all when the
 existing capacity is big enough - then copies) and
@@ -103,7 +110,7 @@ existing capacity is big enough - then copies) and
 Vec copy, cap == len). `std/fs.read_file_into` now slurps into a scratch
 buffer and bulk-copies via `vec_extend_from`, allocating once instead
 of `log2(n)` times. Fixture:
-[examples/pass/vec_extend_from.yoop](../examples/pass/vec_extend_from.yoop)
+[examples/pass/vec_extend_from.yoop](../../examples/pass/vec_extend_from.yoop)
 (asserts net-0 heap under --track-heap).
 
 ### 5. Owned uint8[] without a wrapping struct doesn't exist [FIXED]
@@ -111,7 +118,7 @@ of `log2(n)` times. Fixture:
 Was: `uint8[]` is a borrowing view with no ownership, so "return owned
 bytes" APIs had to commit to a wrapper type (Vec, or hand-rolled).
 
-Fixed: [std/core/bytes.yoop](../std/core/bytes.yoop) now exports an owned
+Fixed: [std/core/bytes.yoop](../../std/core/bytes.yoop) now exports an owned
 `Bytes` type - `{ data: uint8[], len: usize }` implementing
 `Disposable propagates<disposable>`. `data` keeps the full allocation's
 fat-pointer length (so heap_free / --track-heap stay paired with the
@@ -129,7 +136,7 @@ capacity. Surface:
 papercut's `to_array(ref self)` - `self` is a method-only keyword, and
 std collections use the free-function `<type>_<op>(ref x, ...)` shape
 (vec_get, bytes_eq). Fixture:
-[examples/pass/bytes_owned.yoop](../examples/pass/bytes_owned.yoop)
+[examples/pass/bytes_owned.yoop](../../examples/pass/bytes_owned.yoop)
 (asserts net-0 heap, i.e. the from_vec seal neither double-frees nor
 leaks the transferred buffer).
 
@@ -143,7 +150,7 @@ just as easily heap_alloc inside the handler, free at scope end, and
 hand back a view into freed memory.
 
 Fixed: `Response.body` is now an owning `ResponseBody` variant in
-[std/http/types.yoop](../std/http/types.yoop):
+[std/http/types.yoop](../../std/http/types.yoop):
 
 - `Static { text: string }` - a borrowed static string (literals,
   handler fields, template-literal results). String storage is never
@@ -183,10 +190,10 @@ from `response_new`, so the leak only bites on manual re-assignment.
 ### 7. (retracted) `switch default:` does exist
 
 I claimed `switch` had no `default:` arm. It does -
-[examples/playground/yooparse/json.yoop](../examples/playground/yooparse/json.yoop)
+[examples/playground/yooparse/json.yoop](../../examples/playground/yooparse/json.yoop)
 uses it in `JsonValue.dispose` and yoopstore's handler should too.
 The three redundant `Head` / `Patch` / `Options` arms in
-[handler.yoop](../examples/playground/yoopstore/handler.yoop) can
+[handler.yoop](../../examples/playground/yoopstore/handler.yoop) can
 collapse to a single `default:` once the playground gets refactored.
 Filed here so future me doesn't trip over the same gap.
 
@@ -195,10 +202,12 @@ Filed here so future me doesn't trip over the same gap.
 `std/fs.path_join(parts)` landed alongside the rest of std/fs. The
 "build a path from N components" use case is covered.
 
-Still missing: `dirname`, `basename`, `is_absolute`, `normalize`.
-These belong in a `std/path` module once there are enough call sites
-to justify the split. Today nothing uses them, so they'd be code
-without a consumer.
+Deferred: `dirname`, `basename`, `is_absolute`, `normalize` in a
+`std/path` module. Still no consumer - yoopstore's
+[safepath.yoop](../../examples/playground/yoopstore/safepath.yoop)
+*rejects* `.`/`..` components outright rather than normalizing, so it
+needs none of these. Building the module now would be code without a
+caller; revisit when a playground actually needs path arithmetic.
 
 ### 9. Namespace import doubles the import line for a one-type-plus-functions module [FIXED]
 
@@ -214,26 +223,26 @@ import * as vec, { Vec } from "std/core/vec.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop"; // equivalent
 ```
 
-The parser ([parseImportDecl](../src/jsyooparser/parser.js)) accepts a
+The parser ([parseImportDecl](../../src/jsyooparser/parser.js)) accepts a
 trailing `, { ... }` after a namespace clause (or a trailing `, * as ns`
 after a named clause) and stamps both `namespaceName` and `specifiers`
 onto one IMPORT_DECL with `importKind: "combined"`. The resolver
-([imports.js](../src/jsyooptypecheck/imports.js)) wires the namespace
+([imports.js](../../src/jsyooptypecheck/imports.js)) wires the namespace
 when `namespaceName` is present and always runs the specifier loop, so
 both clauses take effect. The std-value-import rule still applies to the
 named clause (a value in `{ ... }` from a `std/` path is still
 rejected), so the combined form is only ergonomic for the legal
 type-named + value-namespaced split. Dogfooded in
-[examples/playground/yoopstore/handler.yoop](../examples/playground/yoopstore/handler.yoop)
-and [std/fs.yoop](../std/fs.yoop); fixture
-[examples/pass/imports_combined](../examples/pass/imports_combined).
+[examples/playground/yoopstore/handler.yoop](../../examples/playground/yoopstore/handler.yoop)
+and [std/fs.yoop](../../std/fs.yoop); fixture
+[examples/pass/imports_combined](../../examples/pass/imports_combined).
 
 ### 10. POSIX `mkdir` mode constant is hardcoded [FIXED]
 
 Was: std/fs hand-mirrored `const DIR_MODE: c_int = 493;` (0755 decimal)
 and passed it to the libc `mkdir` extern.
 
-Fixed: `yoop_io_mkdir(path)` in [runtime/yoop_io.c](../runtime/yoop_io.c)
+Fixed: `yoop_io_mkdir(path)` in [runtime/yoop_io.c](../../runtime/yoop_io.c)
 computes the standard directory mode from the POSIX `S_*` symbols
 (`S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH`) at C compile time -
 the same pattern std/net uses for `SO_REUSEADDR` via yoop_net.c - so the
@@ -256,7 +265,7 @@ export function read_file(path: string): ReadFileResult propagates<disposable> {
 
 The typechecker rejected this even though the function declared
 `propagates<disposable>`: the transfer-via-return path in
-[src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js)
+[src/jsyooptypecheck/kindCheck.js](../../src/jsyooptypecheck/kindCheck.js)
 only fired when the return value was a bare `IDENT`. A struct literal
 whose fields moved in propagating bindings didn't propagate the
 transfer mark down to those bindings, so they showed up as unsatisfied
@@ -271,20 +280,28 @@ uses. Nested literals recurse; non-IDENT field values (calls, inline
 keyword-wins rule still holds - a field binding that declared the kind
 keyword is committed to local cleanup and is not transferred.
 `std/fs.read_file` is back to the natural two-step shape above. Fixtures:
-[examples/pass/propagates_return_struct_literal.yoop](../examples/pass/propagates_return_struct_literal.yoop),
-[examples/pass/propagates_return_variant_literal.yoop](../examples/pass/propagates_return_variant_literal.yoop),
+[examples/pass/propagates_return_struct_literal.yoop](../../examples/pass/propagates_return_struct_literal.yoop),
+[examples/pass/propagates_return_variant_literal.yoop](../../examples/pass/propagates_return_variant_literal.yoop),
 and the negative
-[examples/fail/propagates_return_struct_literal_not_declared.yoop](../examples/fail/propagates_return_struct_literal_not_declared.yoop).
+[examples/fail/propagates_return_struct_literal_not_declared.yoop](../../examples/fail/propagates_return_struct_literal_not_declared.yoop).
 
-## Priority
+## Status - all complete
 
-All items are now landed. The arc, in the order they were fixed: #1
-codegen quote bug; #2 file I/O via std/fs; #8 path_join; #3 opaque
-unsafe_ptr; #11 return-struct transfer; #4 Vec bulk fill; #5 owned
-Bytes; #6 owning Response body; #10 yoop_io_mkdir; #9 combined import.
-(#7 was retracted - `switch default:` exists.)
+Every numbered item is landed (or retracted, for #7). The arc, in fix
+order: #1 codegen quote bug; #2 file I/O via std/fs; #8 path_join; #3
+opaque unsafe_ptr; #11 return-struct transfer; #4 Vec bulk fill; #5
+owned Bytes; #6 owning Response body; #10 yoop_io_mkdir; #9 combined
+import. Then the #2 follow-ups: `exists` / `file_size` (stat helpers)
+and errno-surfaced failure messages.
 
-Remaining follow-ups noted inline, none blocking: std/fs metadata /
-streaming reads / errno surfacing (#2), `dirname`/`basename`/etc. in a
-future `std/path` (#8), and per-connection task-per-request serving now
-that the Response owns its body (#6).
+Consciously deferred, with rationale recorded inline - each is either
+blocked on bigger work or has no consumer, so building now would be
+speculative:
+
+- **Streaming reads (#2)** - blocked on a `std/io` `Readable` refactor.
+- **`std/path` helpers (#8)** - no caller; safepath rejects rather than
+  normalizes.
+- **Per-connection task-per-request serving (#6)** - blocked on `task`
+  accepting `ref` params (a language feature); the owning Response body
+  unblocks it on the std/http side, but the task plumbing is the gate.
+- **Windows path conventions (#2)** - no CI target.

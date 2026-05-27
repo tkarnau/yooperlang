@@ -1253,6 +1253,23 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.match(stderr, /net 0 bytes/);
   });
 
+  // Yoopstore-papercut #2 follow-ups: std/fs exists() / file_size() via a
+  // stat runtime helper, plus real errno reasons in failure messages.
+  it("fs_metadata: exists/file_size report state and errno surfaces the real reason", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fs_metadata.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout.split("\n")[0], "before=0 after=1 size=5 missing=-1 werr.len=0");
+    assert.match(stdout, /delete_missing="std\/fs: remove\(.*\) failed: No such file or directory"/);
+  });
+
+  // Regression: a non-void function ending in an exhaustive variant switch
+  // whose arms all return must not emit an unterminated switch_end block.
+  it("switch_exhaustive_diverge: all-returning exhaustive switch tail terminates cleanly", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/switch_exhaustive_diverge.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "r=1 g=2 b=3\nred=red blue=other\n");
+  });
+
   it("parse_request_line: pure-yoop HTTP/1.1 request-line parser using only std/core/bytes + std/core/strings", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/parse_request_line/main.yoop");
     assert.equal(exitCode, 0);

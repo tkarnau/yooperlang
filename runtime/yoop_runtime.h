@@ -138,6 +138,12 @@ void yoop_io_shutdown(void);
 // POSIX S_* symbols per platform). Returns mkdir()'s rc.
 int yoop_io_mkdir(const char* path);
 
+// 1 if `path` exists (any type), 0 otherwise.
+int yoop_io_exists(const char* path);
+
+// Size in bytes of the regular file at `path`, or -1 on error.
+int64_t yoop_io_file_size(const char* path);
+
 #ifdef __cplusplus
 }
 #endif

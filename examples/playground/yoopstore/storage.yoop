@@ -29,3 +29,10 @@ export function read_file_into(ref out: Vec<uint8>, full_path: string): string {
 export function delete_file(full_path: string): string {
     return fs.delete_file(full_path);
 }
+
+// Size in bytes of the file at `full_path`, or -1 if it doesn't exist or
+// isn't a regular file. Used by the HEAD handler to fill Content-Length
+// without reading the body.
+export function file_size(full_path: string): int64 {
+    return fs.file_size(full_path);
+}

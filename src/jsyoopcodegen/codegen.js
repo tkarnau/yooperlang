@@ -1972,6 +1972,10 @@ export function codegen(ast) {
     if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
+    } else if (!blockIsTerminated(fnLines)) {
+      // See emitFunction: an exhaustive all-diverging switch leaves an
+      // unreachable tail block; terminate it.
+      fnLines.push("  unreachable");
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
@@ -2026,6 +2030,12 @@ export function codegen(ast) {
         if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
         fnLines.push("  ret void");
       }
+    } else if (!blockIsTerminated(fnLines)) {
+      // Non-void body left an open tail block - the typechecker proved every
+      // path returns, so this block is unreachable (e.g. the body ends in an
+      // exhaustive `switch` whose arms all diverge, leaving an empty
+      // `switch_end:`). Terminate it so the LLVM verifier accepts the IR.
+      fnLines.push("  unreachable");
     }
 
     fnLines.push("}");
@@ -3518,6 +3528,11 @@ function codegenWithModuleId(
         if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
         fnLines.push("  ret void");
       }
+    } else if (!blockIsTerminated(fnLines)) {
+      // Non-void body left an open tail block (e.g. an exhaustive `switch`
+      // whose arms all diverge). The typechecker proved every path returns,
+      // so the block is unreachable - terminate it for the verifier.
+      fnLines.push("  unreachable");
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
@@ -3613,6 +3628,10 @@ function codegenWithModuleId(
     if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
+    } else if (!blockIsTerminated(fnLines)) {
+      // See emitFn: an exhaustive all-diverging switch leaves an unreachable
+      // tail block; terminate it.
+      fnLines.push("  unreachable");
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);

@@ -13,13 +13,16 @@
 //   delete_file(path)                -> string
 //   mkdir_p(path)                    -> string
 //   path_join(parts)                 -> string
+//   exists(path)                     -> bool
+//   file_size(path)                  -> int64 (-1 if absent / not a file)
 //
 // All "string" returns are empty on success and an error message on
 // failure - matching the std/net convention so callers stay uniform.
+// Failure messages from the libc calls carry the real errno reason
+// (via the Phase 8.D errno bridge) so "not found" and "permission
+// denied" are distinguishable.
 //
 // What's deliberately absent from this MVP:
-//   * No `exists(path)` / metadata. stat would mean exposing struct stat
-//     or a yoop-side mirror; punted until there's a real use site.
 //   * No streaming reads. read_file slurps. A `read_chunks` over the
 //     existing Readable trait is the right follow-up once `std/io` is
 //     factored out from std/net.
@@ -50,9 +53,11 @@ extern "C" from "stdio.h" {
 // 0755 mask is a magic number when hand-mirrored in yoop. yoop_io_mkdir
 // (runtime/yoop_io.c) computes the standard directory mode from the POSIX
 // S_* symbols at C compile time and applies it - the same pattern std/net
-// uses for SO_REUSEADDR. See plans/yoopstore-papercuts.md #10.
+// uses for SO_REUSEADDR. See plans/completed/yoopstore-papercuts.md #10.
 extern "C" from "yoop_runtime" {
     function yoop_io_mkdir(path: string): c_int;
+    function yoop_io_exists(path: string): c_int;
+    function yoop_io_file_size(path: string): int64;
 }
 
 const SEEK_SET: c_int = 0;
@@ -109,7 +114,8 @@ export function mkdir_p(full_path: string): string {
 export function write_file(path: string, body: uint8[]): string {
     let f: unsafe_ptr = fopen(path, "wb");
     if (f == null) {
-        return `std/fs: fopen("${path}", "wb") failed`;
+        let why: string = errno.message(errno.get());
+        return `std/fs: fopen("${path}", "wb") failed: ${why}`;
     }
     if (body.len > 0) {
         let n: c_size_t = fwrite(body.ptr, 1, body.len, f);
@@ -132,7 +138,8 @@ export function read_file_into(ref out: Vec<uint8>, path: string): string {
     vec.vec_clear(ref out);
     let f: unsafe_ptr = fopen(path, "rb");
     if (f == null) {
-        return `std/fs: fopen("${path}", "rb") failed`;
+        let why: string = errno.message(errno.get());
+        return `std/fs: fopen("${path}", "rb") failed: ${why}`;
     }
     let s1: c_int = fseek(f, 0, SEEK_END);
     if (s1 != 0) {
@@ -191,7 +198,23 @@ export function read_file(path: string): ReadFileResult propagates<disposable> {
 export function delete_file(path: string): string {
     let rc: c_int = remove(path);
     if (rc != 0) {
-        return `std/fs: remove("${path}") failed`;
+        let why: string = errno.message(errno.get());
+        return `std/fs: remove("${path}") failed: ${why}`;
     }
     return "";
+}
+
+// ----- metadata ----------------------------------------------------------
+
+// True if `path` names an existing filesystem entry (file, directory, or
+// otherwise). A missing parent component also reads as "does not exist".
+export function exists(path: string): bool {
+    return yoop_io_exists(path) != 0;
+}
+
+// Size in bytes of the regular file at `path`, or -1 if it doesn't exist
+// or isn't a regular file. (-1 rather than a fallible struct keeps the
+// common "stat the file I just wrote" path a single read.)
+export function file_size(path: string): int64 {
+    return yoop_io_file_size(path);
 }
