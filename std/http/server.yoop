@@ -22,7 +22,8 @@ import {
 import {
   StatusCode, reason_phrase,
   Headers, headers_new, headers_add, headers_get, headers_has,
-  HeaderEntry, Request, Response, response_new, server_err,
+  HeaderEntry, Request, Response, response_new,
+  response_body_bytes, server_err,
 } from "./types.yoop";
 import {
   ParsedRequest, parse_request_head, find_header_end,
@@ -118,6 +119,10 @@ function push_bytes(ref out: Vec<uint8>, bs: uint8[]): void {
 // ----- Response serialization ------------------------------------------
 
 function write_response(ref resp: Response, ref out: Vec<uint8>): void {
+  // Borrowing view of the body bytes (Static string or Owned buffer). Valid
+  // for the duration of this call - we only read from `resp` below.
+  let body_view: uint8[] = response_body_bytes(ref resp);
+
   push_str(ref out, "HTTP/1.1 ");
   push_decimal_i32(ref out, resp.status.code);
   vec_push(ref out, 32);
@@ -129,7 +134,7 @@ function write_response(ref resp: Response, ref out: Vec<uint8>): void {
     // Handler already set Content-Length explicitly; trust it.
   } else {
     push_str(ref out, "Content-Length: ");
-    push_decimal(ref out, resp.body.len);
+    push_decimal(ref out, body_view.len);
     vec_push(ref out, 13);
     vec_push(ref out, 10);
   }
@@ -153,7 +158,7 @@ function write_response(ref resp: Response, ref out: Vec<uint8>): void {
 
   vec_push(ref out, 13);
   vec_push(ref out, 10);
-  push_bytes(ref out, resp.body);
+  push_bytes(ref out, body_view);
 }
 
 // ----- Serve loop --------------------------------------------------------

@@ -1,0 +1,7 @@
+// Yoopstore-papercut #3: bare `unsafe_ptr` is gated by `import.unsafe;`
+// just like the parametric form.
+
+function main(): int32 {
+    let p: unsafe_ptr = null;
+    return 0;
+}

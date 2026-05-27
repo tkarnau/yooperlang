@@ -415,6 +415,10 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       const tp = tps.get(annot.name);
       if (tp) return tp;
     }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (opaque pointee).
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
+    }
     // Phase 12: namespace-qualified type name. Routes through the imported
     // namespace's source module instead of the local tables.
     if (annot.namespace) {
@@ -578,6 +582,10 @@ function resolveAnnotSingle(annot, typeContext, extraScope) {
     if (tps) {
       const tp = tps.get(annot.name);
       if (tp) return tp;
+    }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (opaque pointee).
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
     }
     return (
       primTypeFromName(annot.name) ??

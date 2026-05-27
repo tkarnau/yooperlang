@@ -392,6 +392,22 @@ function encodeStringBytes(inner) {
       const hex = ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0");
       bytes += `\\${hex}`;
       byteLen++;
+    } else if (ch === '"') {
+      // Template literal STRING_PARTs preserve raw characters between the
+      // backticks (see parser's parseTemplateLiteralBody), so a literal
+      // `"` reaches us unescaped. LLVM c-string literals use `"` as the
+      // closing delimiter, so we must hex-escape it; without this the
+      // emitted constant has the wrong [N x i8] length and clang rejects
+      // the IR with a type mismatch.
+      bytes += "\\22";
+      byteLen++;
+    } else if (ch === "\\") {
+      // Mirror of the `"` case: a stray `\` would also corrupt the
+      // LLVM string literal. In practice the escape-pair branch above
+      // consumes every well-formed `\X`; this handles the trailing-`\`
+      // edge case defensively.
+      bytes += "\\5C";
+      byteLen++;
     } else {
       bytes += ch;
       byteLen++;

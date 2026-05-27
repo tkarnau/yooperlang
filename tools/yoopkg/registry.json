@@ -1,0 +1,10 @@
+{
+  "comment": "Stand-in for a real package registry. Each package name maps to a set of versions, and each version points at a directory containing the package's source files and a yoop.json manifest. Paths are resolved relative to this file.",
+  "packages": {
+    "yooparse": {
+      "0.1.0": {
+        "source": "../../examples/playground/yooparse"
+      }
+    }
+  }
+}

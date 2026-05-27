@@ -1,0 +1,13 @@
+// Yoopstore-papercut #3: deref of bare `unsafe_ptr` is rejected -
+// there's no pointee type to read. User must `unsafe_ptr.cast<T>(p)`
+// first to spell out the pointee.
+
+import.unsafe;
+
+function main(): int32 {
+    let x: int32 = 7;
+    let typed: unsafe_ptr<int32> = &x;
+    let opaque: unsafe_ptr = typed;
+    let v: int32 = *opaque;
+    return v;
+}

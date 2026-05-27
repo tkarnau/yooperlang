@@ -1382,42 +1382,50 @@ export function parse(src) {
       return node;
     }
 
-    // namespace: import * as ns from "./mod.yoop";
+    // namespace clause: `* as ns`. Yoopstore-papercut #9: a two-axis module
+    // (a type plus value-level functions) can combine the namespace and a
+    // named clause on one line - `import * as ns, { Type } from "..."` (or
+    // the reverse order). Both clauses target the same source path; the node
+    // carries both `namespaceName` and `specifiers` and importKind is
+    // "combined".
     if (peek().tag === TokenTags.mult) {
       node.importKind = "namespace";
-      advance(); // consume *
-      expect(TokenTags.as);
-      node.namespaceName = parseIdentAsName();
+      parseNamespaceClause(node);
+      if (peek().tag === TokenTags.comma) {
+        advance(); // consume ,
+        if (peek().tag !== TokenTags.lcurly) {
+          throw parseError(
+            `expected a named-import clause '{ ... }' after '* as ${node.namespaceName},'`,
+            peek().start,
+            peek().length,
+          );
+        }
+        parseNamedClause(node);
+        node.importKind = "combined";
+      }
       expect(TokenTags.from);
       node.sourcePath = unquoteStringLiteral(expect(TokenTags.strLiteral));
       expect(TokenTags.semicolon);
       return node;
     }
 
-    // named: import { a, b as c } from "./mod.yoop";
+    // named: import { a, b as c } from "./mod.yoop";  (optionally combined
+    // with a trailing `, * as ns`.)
     if (peek().tag === TokenTags.lcurly) {
       node.importKind = "named";
-      node.specifiers = [];
-      advance(); // consume {
-      while (peek().tag === TokenTags.ident) {
-        const exportTok = expect(TokenTags.ident);
-        const exportName = src.substring(
-          exportTok.start,
-          exportTok.start + exportTok.length,
-        );
-        let localName = exportName;
-        if (peek().tag === TokenTags.as) {
-          advance();
-          localName = parseIdentAsName();
+      parseNamedClause(node);
+      if (peek().tag === TokenTags.comma) {
+        advance(); // consume ,
+        if (peek().tag !== TokenTags.mult) {
+          throw parseError(
+            `expected a namespace clause '* as <name>' after the named import`,
+            peek().start,
+            peek().length,
+          );
         }
-        node.specifiers.push({
-          exportName,
-          localName,
-          sourceLoc: posToSourceLocation(src, exportTok.start),
-        });
-        if (peek().tag === TokenTags.comma) advance();
+        parseNamespaceClause(node);
+        node.importKind = "combined";
       }
-      expect(TokenTags.rcurly);
       expect(TokenTags.from);
       node.sourcePath = unquoteStringLiteral(expect(TokenTags.strLiteral));
       expect(TokenTags.semicolon);
@@ -1429,6 +1437,40 @@ export function parse(src) {
       peek().start,
       peek().length,
     );
+  }
+
+  // Parse `* as ns`, stamping `namespaceName` onto the import node. The `*`
+  // has already been peeked (not consumed) by the caller.
+  function parseNamespaceClause(node) {
+    expect(TokenTags.mult); // consume *
+    expect(TokenTags.as);
+    node.namespaceName = parseIdentAsName();
+  }
+
+  // Parse `{ a, b as c }`, stamping `specifiers` onto the import node. The
+  // `{` has already been peeked (not consumed) by the caller.
+  function parseNamedClause(node) {
+    node.specifiers = [];
+    expect(TokenTags.lcurly); // consume {
+    while (peek().tag === TokenTags.ident) {
+      const exportTok = expect(TokenTags.ident);
+      const exportName = src.substring(
+        exportTok.start,
+        exportTok.start + exportTok.length,
+      );
+      let localName = exportName;
+      if (peek().tag === TokenTags.as) {
+        advance();
+        localName = parseIdentAsName();
+      }
+      node.specifiers.push({
+        exportName,
+        localName,
+        sourceLoc: posToSourceLocation(src, exportTok.start),
+      });
+      if (peek().tag === TokenTags.comma) advance();
+    }
+    expect(TokenTags.rcurly);
   }
 
   function parseExportDecl() {

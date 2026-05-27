@@ -48,6 +48,11 @@ import "./init.yoop";                    // side-effect only
 
 import { Vec } from "std/core/vec.yoop";  // type imports stay named
 import * as vec from "std/core/vec.yoop"; // value imports require namespace
+
+// Combined form: a two-axis module (a type plus value-level functions) can
+// bind both on one line. Either ordering is accepted.
+import * as vec, { Vec } from "std/core/vec.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop"; // equivalent
 ```
 
 The `.yoop` extension is required. Any top-level declaration can be exported:

@@ -192,7 +192,7 @@ function run_scene(): void {
     let max_verts: usize = usize(state.PARTICLE_POOL + state.ENEMY_POOL + state.BULLET_POOL + state.POWERUP_POOL + 1);
     let cpu_buf: float32[] = intr.heap_alloc(max_verts * VERT_FLOATS);
 
-    let mut_state: state.GameState = state.init_state(int32(sdl.ticks()));
+    let disposable mut_state: state.GameState = state.init_state(int32(sdl.ticks()));
     let start_ticks: uint32 = sdl.ticks();
     let last_ticks: uint32 = start_ticks;
     let last_score_print: int32 = 0;

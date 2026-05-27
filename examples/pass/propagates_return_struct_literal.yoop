@@ -1,0 +1,53 @@
+// Yoopstore-papercut #11: returning a struct literal whose fields move in
+// propagating bindings transfers the obligation to the caller - the same as
+// a bare `return ident;`. Before the fix, the inner binding ('inner' here)
+// showed up as unsatisfied at scope exit even though the enclosing function
+// declared propagates<disposable>.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Inner implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`disposed-inner(${self.id})\n`);
+    }
+}
+
+type Outer implements Disposable propagates<disposable> {
+    inner: Inner,
+    note:  int32,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.inner);
+    }
+}
+
+// Two-step shape: bind the propagating value, then move it into a field of
+// the returned literal. The transfer mark has to reach 'inner'.
+function make_outer(): Outer propagates<disposable> {
+    let inner: Inner = { id: 42 };
+    let note: int32 = 7;
+    return { inner: inner, note: note };
+}
+
+function main(): int32 {
+    let o: Outer = make_outer();
+    printf(`using(${o.note})\n`);
+    Disposable.dispose(ref o);
+    return 0;
+}
+
+// expected output:
+// using(7)
+// disposed-inner(42)

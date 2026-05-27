@@ -9,6 +9,7 @@
 
 import.unsafe;
 
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import * as sdl from "./sdl.yoop";
 import * as rng from "./rng.yoop";
@@ -65,32 +66,51 @@ export const WAVE_SPAWN_FLOOR_MS: uint32 = 200;
 
 // ── Pool structs ─────────────────────────────────────────────────────
 
-export type BulletPool {
+export type BulletPool implements Disposable {
     active: bool[],
     x: float32[],
     y: float32[],
     vx: float32[],
     vy: float32[],
+    function dispose(ref self): void {
+      intr.heap_free(self.active);
+      intr.heap_free(self.x);
+      intr.heap_free(self.y);
+      intr.heap_free(self.vx);
+      intr.heap_free(self.vy);
+    }
 }
 
-export type PowerupPool {
+export type PowerupPool implements Disposable {
     active: bool[],
     x: float32[],
     y: float32[],
     last_spawn_ms: uint32,
     spread_shots_remaining: int32,
+    function dispose(ref self): void {
+      intr.heap_free(self.active);
+      intr.heap_free(self.x);
+      intr.heap_free(self.y);
+    }
 }
 
-export type EnemyPool {
+export type EnemyPool implements Disposable {
     active: bool[],
     x: float32[],
     y: float32[],
     size: float32[],
     hue: float32[],
     last_spawn_ms: uint32,
+    function dispose(ref self): void {
+      intr.heap_free(self.active);
+      intr.heap_free(self.x);
+      intr.heap_free(self.y);
+      intr.heap_free(self.size);
+      intr.heap_free(self.hue);
+    }
 }
 
-export type ParticlePool {
+export type ParticlePool implements Disposable {
     active: bool[],
     x: float32[],
     y: float32[],
@@ -99,9 +119,19 @@ export type ParticlePool {
     life: float32[],
     init_life: float32[],
     hue: float32[],
+    function dispose(ref self): void {
+      intr.heap_free(self.active);
+      intr.heap_free(self.x);
+      intr.heap_free(self.y);
+      intr.heap_free(self.vx);
+      intr.heap_free(self.vy);
+      intr.heap_free(self.life);
+      intr.heap_free(self.init_life);
+      intr.heap_free(self.hue);
+    }
 }
 
-export type GameState {
+export type GameState implements Disposable {
     player_x: float32,
     player_y: float32,
     space_was_down: int32,
@@ -111,6 +141,12 @@ export type GameState {
     particles: ParticlePool,
     score: int32,
     rng: int32,
+    function dispose(ref self): void {
+      Disposable.dispose(ref self.bullets);
+      Disposable.dispose(ref self.particles);
+      Disposable.dispose(ref self.powerups);
+      Disposable.dispose(ref self.enemies);
+    }
 }
 
 // ── Pool init helpers ────────────────────────────────────────────────

@@ -71,6 +71,8 @@ export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 // `unsafe_ptr` reference. Returns true if any subtree names the type.
 function annotMentionsUnsafePtr(annot) {
   if (!annot) return false;
+  // Both the bare `unsafe_ptr` (typeName) and the parametric `unsafe_ptr<T>`
+  // (typeApplication) flow through here; both require `import.unsafe;`.
   if (annot.kind === "typeName") return annot.name === "unsafe_ptr";
   if (annot.kind === "refType") return annotMentionsUnsafePtr(annot.inner);
   if (annot.kind === "arrayType") return annotMentionsUnsafePtr(annot.elem);
@@ -237,6 +239,11 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     // namespace's source module.
     if (annot.namespace) {
       return resolveNamespacedTypeName(annot.namespace, annot.name, modId, moduleEnv);
+    }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+    // C-pointer handle. import.unsafe gating is handled by walkAstForUnsafe.
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
     }
     return resolveTypeInModule(annot.name, modId, moduleEnv);
   }

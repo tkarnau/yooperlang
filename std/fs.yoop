@@ -1,0 +1,197 @@
+// std/fs.yoop - filesystem operations for regular files.
+//
+// This is a small wrapper over libc stdio (fopen / fread / fwrite /
+// fclose / fseek / ftell / remove) and POSIX mkdir, modeled after the
+// std/net layer: an internal `import.unsafe` C interop block, and a set
+// of safe exports that hand back yoop-shaped types.
+//
+// The public API:
+//
+//   read_file(path)                  -> ReadFileResult propagates<disposable>
+//   read_file_into(ref out, path)    -> string (empty on success)
+//   write_file(path, bytes)          -> string
+//   delete_file(path)                -> string
+//   mkdir_p(path)                    -> string
+//   path_join(parts)                 -> string
+//
+// All "string" returns are empty on success and an error message on
+// failure - matching the std/net convention so callers stay uniform.
+//
+// What's deliberately absent from this MVP:
+//   * No `exists(path)` / metadata. stat would mean exposing struct stat
+//     or a yoop-side mirror; punted until there's a real use site.
+//   * No streaming reads. read_file slurps. A `read_chunks` over the
+//     existing Readable trait is the right follow-up once `std/io` is
+//     factored out from std/net.
+//   * No Windows-specific path handling. Forward slashes only.
+
+import.unsafe;
+
+import { Disposable, disposable } from "./core/kinds.yoop";
+import { Result } from "./core/types.yoop";
+import * as vec, { Vec } from "./core/vec.yoop";
+import * as intr from "./core/intrinsics.yoop";
+import * as str from "./core/strings.yoop";
+
+// FILE* is opaque - we use bare `unsafe_ptr` (no `<T>`) so we don't have
+// to invent a fake pointee. `unsafe_ptr<uint8>` (e.g. `body.ptr`) decays
+// implicitly when passed where bare `unsafe_ptr` is expected.
+extern "C" from "stdio.h" {
+    function fopen(path: string, mode: string): unsafe_ptr;
+    function fclose(stream: unsafe_ptr): c_int;
+    function fwrite(buf: unsafe_ptr<uint8>, size: c_size_t, count: c_size_t, stream: unsafe_ptr): c_size_t;
+    function fread(buf: unsafe_ptr<uint8>, size: c_size_t, count: c_size_t, stream: unsafe_ptr): c_size_t;
+    function fseek(stream: unsafe_ptr, offset: c_long, whence: c_int): c_int;
+    function ftell(stream: unsafe_ptr): c_long;
+    function remove(path: string): c_int;
+}
+
+// mkdir's `mode_t` permission bits differ in width per platform and the
+// 0755 mask is a magic number when hand-mirrored in yoop. yoop_io_mkdir
+// (runtime/yoop_io.c) computes the standard directory mode from the POSIX
+// S_* symbols at C compile time and applies it - the same pattern std/net
+// uses for SO_REUSEADDR. See plans/yoopstore-papercuts.md #10.
+extern "C" from "yoop_runtime" {
+    function yoop_io_mkdir(path: string): c_int;
+}
+
+const SEEK_SET: c_int = 0;
+const SEEK_END: c_int = 2;
+
+// ----- path joining ------------------------------------------------------
+
+// Join an array of components with `/`. Empty components are kept (so the
+// caller can prepend an absolute root by passing `[""].concat(...)`).
+// We do NOT normalize - successive `/`s are not collapsed, `.` and `..`
+// pass through. Validation belongs at the API boundary, not here.
+export function path_join(parts: string[]): string {
+    if (parts.len == 0) { return ""; }
+    if (parts.len == 1) { return parts[0]; }
+    let pieces: Vec<string> = vec.vec_new(parts.len * 2);
+    let i: usize = 0;
+    while (i < parts.len) {
+        if (i > 0) { vec.vec_push(ref pieces, "/"); }
+        vec.vec_push(ref pieces, parts[i]);
+        i = i + 1;
+    }
+    let arr: string[] = vec.vec_as_array(ref pieces);
+    let out: string = str.string_concat_all(arr);
+    Disposable.dispose(ref pieces);
+    return out;
+}
+
+// ----- mkdir_p -----------------------------------------------------------
+
+// Walk `full_path` left to right and mkdir each `/`-bounded prefix.
+// "Already exists" failures are NOT treated as errors: the next
+// operation (fopen, mkdir of the next segment) is what decides whether
+// the path is usable. If `full_path` is itself the file you want to
+// create, this creates its parent directories but not the file.
+export function mkdir_p(full_path: string): string {
+    let bytes: uint8[] = intr.string_as_bytes(full_path);
+    let i: usize = 1;
+    while (i < bytes.len) {
+        if (bytes[i] == 47) {  // '/'
+            let prefix_view: uint8[] = intr.array_slice(bytes, 0, i);
+            let prefix: string = intr.string_from_bytes_unchecked(prefix_view);
+            let _r: c_int = yoop_io_mkdir(prefix);
+        }
+        i = i + 1;
+    }
+    return "";
+}
+
+// ----- write -------------------------------------------------------------
+
+// Create-or-truncate `path` and write all of `body`. Parent directories
+// are NOT created automatically - call mkdir_p first if the destination
+// is nested. Returns "" on success, an error string on failure.
+export function write_file(path: string, body: uint8[]): string {
+    let f: unsafe_ptr = fopen(path, "wb");
+    if (f == null) {
+        return `std/fs: fopen("${path}", "wb") failed`;
+    }
+    if (body.len > 0) {
+        let n: c_size_t = fwrite(body.ptr, 1, body.len, f);
+        if (n != body.len) {
+            let _c: c_int = fclose(f);
+            return `std/fs: short write to "${path}"`;
+        }
+    }
+    let _c: c_int = fclose(f);
+    return "";
+}
+
+// ----- read --------------------------------------------------------------
+
+// `read_file_into` is the lower-level form: fills the caller's Vec with
+// the file contents (clearing it first). On error the Vec is left empty.
+// Preferred when the caller already owns a reusable buffer (e.g. an HTTP
+// handler reusing its body buffer across requests).
+export function read_file_into(ref out: Vec<uint8>, path: string): string {
+    vec.vec_clear(ref out);
+    let f: unsafe_ptr = fopen(path, "rb");
+    if (f == null) {
+        return `std/fs: fopen("${path}", "rb") failed`;
+    }
+    let s1: c_int = fseek(f, 0, SEEK_END);
+    if (s1 != 0) {
+        let _c: c_int = fclose(f);
+        return `std/fs: fseek(end) failed for "${path}"`;
+    }
+    let size: c_long = ftell(f);
+    if (size < 0) {
+        let _c: c_int = fclose(f);
+        return `std/fs: ftell failed for "${path}"`;
+    }
+    let s2: c_int = fseek(f, 0, SEEK_SET);
+    if (s2 != 0) {
+        let _c: c_int = fclose(f);
+        return `std/fs: fseek(set) failed for "${path}"`;
+    }
+    let want: usize = usize(size);
+
+    // Slurp into a scratch buffer, then bulk-copy into `out` in one shot via
+    // vec_extend_from - which grows `out` at most once (to exactly `want`,
+    // or not at all when the caller's buffer is already big enough) rather
+    // than the O(log n) reallocs a vec_push loop would incur.
+    let scratch: uint8[] = intr.heap_alloc(want);
+    let n: c_size_t = 0;
+    if (want > 0) {
+        n = fread(scratch.ptr, 1, want, f);
+    }
+    let _c: c_int = fclose(f);
+    if (n != want) {
+        intr.heap_free(scratch);
+        return `std/fs: short read from "${path}"`;
+    }
+    vec.vec_extend_from(ref out, scratch);
+    intr.heap_free(scratch);
+    return "";
+}
+
+// Owned-result form: allocates a fresh Vec<uint8> and reads the whole
+// file into it. Caller wraps in `disposable` and observes `error`.
+export type ReadFileResult implements Disposable propagates<disposable> {
+    data:  Vec<uint8>,
+    error: string,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.data);
+    }
+}
+
+export function read_file(path: string): ReadFileResult propagates<disposable> {
+    let buf: Vec<uint8> = vec.vec_new(4096);
+    let err: string = read_file_into(ref buf, path);
+    return { data: buf, error: err };
+}
+
+// ----- delete ------------------------------------------------------------
+
+export function delete_file(path: string): string {
+    let rc: c_int = remove(path);
+    if (rc != 0) {
+        return `std/fs: remove("${path}") failed`;
+    }
+    return "";
+}

@@ -285,6 +285,14 @@ export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, 
 // `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the
 // typechecker still tracks pointee identity so arithmetic / deref are
 // strongly typed in source.
+//
+// Yoopstore-papercut #3: a `null` pointee represents the bare `unsafe_ptr`
+// (no `<T>`) - an opaque C-pointer handle (think `void *` / `FILE *`).
+// Opaque pointers compare to null and other unsafe_ptrs, can be cast to a
+// typed pointer with `unsafe_ptr.cast<T>(p)`, and can round-trip through
+// integers, but deref / pointer arithmetic / `toArray` are rejected.
+// `unsafe_ptr<T>` decays implicitly to opaque (matches C's `T*` -> `void*`);
+// the reverse requires the explicit cast.
 export const UnsafePtrType = (pointee) =>
   freezerWrap(typeKinds.unsafePtr, { pointee });
 
@@ -418,6 +426,12 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     if (ctx?.typeParamScope) {
       const tp = ctx.typeParamScope.get(annot.name);
       if (tp) return tp;
+    }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+    // C-pointer handle. Gated by `import.unsafe;` via the same path that
+    // catches the generic form.
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
     }
     return resolveTypeFromName(annot.name, structTable);
   }
@@ -652,6 +666,10 @@ export function typesEqual(a, b) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
   if (a.kind === typeKinds.unsafePtr) {
+    // Yoopstore-papercut #3: a null pointee is the opaque `unsafe_ptr`.
+    // Two opaques are equal; typed and opaque are not.
+    if (a.pointee === null && b.pointee === null) return true;
+    if (a.pointee === null || b.pointee === null) return false;
     return typesEqual(a.pointee, b.pointee);
   }
   if (a.kind === typeKinds.untypedNull) {
@@ -765,6 +783,9 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
       return FunctionPointerType(newParams, newRet);
     }
     case typeKinds.unsafePtr: {
+      // Yoopstore-papercut #3: opaque (null pointee) is invariant under
+      // substitution.
+      if (type.pointee === null) return type;
       const newPointee = substituteTypeParams(type.pointee, substitution, inst);
       if (newPointee === type.pointee) return type;
       return UnsafePtrType(newPointee);
@@ -807,6 +828,7 @@ export function typeHasTypeParam(type) {
     );
   }
   if (type.kind === typeKinds.unsafePtr) {
+    if (type.pointee === null) return false;
     return typeHasTypeParam(type.pointee);
   }
   return false;

@@ -157,7 +157,21 @@ export function isAssignable(dest, src) {
   if (
     dest.kind === typeKinds.unsafePtr &&
     src.kind === typeKinds.unsafePtr &&
+    dest.pointee !== null &&
+    src.pointee !== null &&
     typesEqual(dest.pointee, src.pointee)
+  ) {
+    return true;
+  }
+
+  // Yoopstore-papercut #3: any `unsafe_ptr<T>` decays implicitly to the
+  // opaque `unsafe_ptr` (matches `T*` -> `void*` in C). The reverse
+  // requires `unsafe_ptr.cast<T>(p)` so the user has to spell out the
+  // pointee they're claiming.
+  if (
+    dest.kind === typeKinds.unsafePtr &&
+    dest.pointee === null &&
+    src.kind === typeKinds.unsafePtr
   ) {
     return true;
   }
@@ -203,9 +217,17 @@ export function unifyArith(left, right, op) {
   const leftIsNull = left.kind === typeKinds.untypedNull;
   const rightIsNull = right.kind === typeKinds.untypedNull;
   if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
-    // Equality against null / matching-pointee ptr.
+    // Yoopstore-papercut #3: an opaque-pointee side (pointee === null) on
+    // either operand makes the comparison legal (the pointee identity is
+    // explicitly absent). Otherwise we require pointee match.
+    const leftOpaque = leftIsPtr && left.pointee === null;
+    const rightOpaque = rightIsPtr && right.pointee === null;
+    // Equality against null / matching-pointee ptr / any opaque pair.
     if (op === "eqeq" || op === "neq") {
       if (leftIsPtr && rightIsPtr) {
+        if (leftOpaque || rightOpaque) {
+          return PrimType(primAnnotations.bool);
+        }
         if (typesEqual(left.pointee, right.pointee)) {
           return PrimType(primAnnotations.bool);
         }
@@ -222,7 +244,10 @@ export function unifyArith(left, right, op) {
       return null;
     }
     // Subtraction: ptr - ptr (matching pointee) -> int64; ptr - int -> ptr.
+    // Opaque pointees have no element size, so arithmetic is rejected -
+    // the user must `unsafe_ptr.cast<T>(p)` first to spell out the pointee.
     if (op === "minus") {
+      if (leftOpaque || rightOpaque) return null;
       if (leftIsPtr && rightIsPtr) {
         if (typesEqual(left.pointee, right.pointee)) {
           return PrimType(primAnnotations.int64);
@@ -239,6 +264,7 @@ export function unifyArith(left, right, op) {
       return null;
     }
     if (op === "plus") {
+      if (leftOpaque || rightOpaque) return null;
       if (
         leftIsPtr &&
         ((right.kind === typeKinds.prim && isIntPrim(right.name)) ||

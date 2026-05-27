@@ -448,6 +448,21 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "disposed(7)\n");
   });
 
+  // Yoopstore-papercut #11: a returned struct/variant literal that moves a
+  // propagating binding into a field transfers the obligation - dispose fires
+  // exactly once, at the caller.
+  it("propagates_return_struct_literal.yoop: returning a struct literal transfers the inner obligation", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/propagates_return_struct_literal.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "using(7)\ndisposed-inner(42)\n");
+  });
+
+  it("propagates_return_variant_literal.yoop: returning a variant constructor transfers the inner obligation", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/propagates_return_variant_literal.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "made-box\ndisposed-inner(99)\n");
+  });
+
   it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
     const { stdout, exitCode } = runFixture("examples/pass/for_break_continue.yoop");
     assert.equal(exitCode, 0);
@@ -678,6 +693,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "diff=3\nsame=1\n");
   });
 
+  // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+  // C-pointer handle. fopen/fclose round-trip + implicit decay + cast.
+  it("unsafe_ptr_opaque.yoop: bare unsafe_ptr round-trips through fopen/fclose and casts", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_opaque.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "opened=0 nz=1 v=7\n");
+  });
+
   it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", () => {
     const { stdout, exitCode } = runFixture("examples/pass/clock_gettime.yoop");
     assert.equal(exitCode, 0);
@@ -802,6 +825,14 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_renamed/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "16 = 16\n");
+  });
+
+  // Yoopstore-papercut #9: `import * as ns, { Type } from "..."` binds the
+  // namespace and a named type from a two-axis module in one line.
+  it("imports_combined: combined namespace + named import on one line", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_combined/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "area=20\n");
   });
 
   it("imports_struct: exported struct + cross-module fallible flow", () => {
@@ -1196,6 +1227,30 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
       stdout,
       "len=4 cap=4\nv[2]=30\nv[0]=99\nafter_clear len=0 cap=4\n",
     );
+  });
+
+  // Yoopstore-papercut #4: bulk Vec fill (vec_from_array + vec_extend_from).
+  it("vec_extend_from: vec_from_array copies and vec_extend_from grows once", () => {
+    const { stdout, stderr, exitCode } = runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "from_array len=3 cap=3 sum=60\nextend len=5 cap=5 last=50\nempty len=3 cap=3 first=10\n",
+    );
+    assert.match(stderr, /net 0 bytes/);
+  });
+
+  // Yoopstore-papercut #5: owned Bytes buffer with copy / seal constructors.
+  // trackHeap asserts the from_vec seal doesn't double-free or leak the
+  // transferred buffer.
+  it("bytes_owned: bytes_from_array + bytes_from_vec seal + transfer-up dispose", () => {
+    const { stdout, stderr, exitCode } = runFixture("examples/pass/bytes_owned.yoop", { trackHeap: true });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "from_array len=3 [9 8 7]\nfrom_vec len=3 [1 2 3]\n",
+    );
+    assert.match(stderr, /net 0 bytes/);
   });
 
   it("parse_request_line: pure-yoop HTTP/1.1 request-line parser using only std/core/bytes + std/core/strings", () => {
@@ -2186,6 +2241,16 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
+  // Yoopstore-papercut #11 (negative): moving a propagating binding into a
+  // returned struct literal still needs propagates<K> on the function.
+  it("propagates_return_struct_literal_not_declared.yoop rejects a moved-binding literal return without propagates<K>", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_struct_literal_not_declared.yoop");
+    assert.ok(
+      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
+      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
   it("propagates_binding_missing_kind.yoop rejects a binding whose propagates<K> obligation is never satisfied", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_binding_missing_kind.yoop");
     assert.ok(
@@ -2514,6 +2579,52 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /cannot deref non-pointer type/.test(e.message)),
       `expected non-pointer deref error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Yoopstore-papercut #3: opaque `unsafe_ptr` (no `<T>`) ergonomics.
+  it("unsafe_ptr_opaque_deref.yoop rejects '*' on opaque unsafe_ptr", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_deref.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /cannot deref opaque unsafe_ptr/.test(e.message)),
+      `expected opaque-deref error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("unsafe_ptr_opaque_to_typed.yoop rejects implicit opaque -> typed assignment", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_to_typed.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /cannot assign unsafe_ptr to unsafe_ptr<int32>/.test(e.message)),
+      `expected opaque->typed assignment error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("unsafe_ptr_opaque_arith.yoop rejects pointer arithmetic on opaque unsafe_ptr", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_arith.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(errors.length > 0, "expected at least one error");
+  });
+
+  it("unsafe_ptr_opaque_no_import.yoop gates bare unsafe_ptr behind import.unsafe", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_no_import.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /'unsafe_ptr<T>' requires 'import\.unsafe;'/.test(e.message)),
+      `expected import.unsafe gating error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

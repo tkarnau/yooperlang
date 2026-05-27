@@ -1,0 +1,122 @@
+// yoopstore/handler.yoop - StorageHandler implements the Handler trait
+// from std/http/server.yoop. Dispatches GET / PUT / POST / DELETE against
+// the on-disk storage rooted at `root_dir`.
+//
+// `body_buf` is a reusable read buffer: read_file_into fills it without
+// reallocating across requests. For the response we copy the bytes into an
+// owned `Bytes` via respond_bytes - Response.body now owns its storage
+// (yoopstore-papercut #6), so the old "the buffer must outlive the handler
+// return" footgun is gone and the Response disposes the body itself.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import * as str from "std/core/strings.yoop";
+
+import { Handler, HandleOutcome } from "std/http/server.yoop";
+import { Request, Response, HttpMethod } from "std/http/types.yoop";
+import * as http_types from "std/http/types.yoop";
+
+import * as safepath from "./safepath.yoop";
+import * as storage from "./storage.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+export type StorageHandler implements (Disposable, Handler) propagates<disposable> {
+    root_dir: string,
+    body_buf: Vec<uint8>,
+
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.body_buf);
+    }
+
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let san: Result<string, string> = safepath.sanitize(req.path);
+        let rel: string = "";
+        switch (san) {
+            case Result.Ok  { value: ok }:  { rel = ok; }
+            case Result.Err { error: err }: {
+                respond_text(ref resp, http_types.bad_request(), err);
+                return HandleOutcome.Ok;
+            }
+        }
+
+        let full: string = storage.join_path(self.root_dir, rel);
+
+        switch (req.method) {
+            case HttpMethod.Get: {
+                let err: string = storage.read_file_into(ref self.body_buf, full);
+                if (err.len > 0) {
+                    respond_text(ref resp, http_types.not_found(), `not found: ${rel}\n`);
+                    return HandleOutcome.Ok;
+                }
+                let view: uint8[] = vec.vec_as_array(ref self.body_buf);
+                let n: usize = view.len;
+                resp.status = http_types.ok();
+                http_types.headers_add(ref resp.headers, "Content-Type", "application/octet-stream");
+                http_types.respond_bytes(ref resp, bytes.bytes_from_array(view));
+                printf(`GET   /${rel} -> ${n} bytes\n`);
+                return HandleOutcome.Ok;
+            }
+            case HttpMethod.Put: {
+                return store_body(self.root_dir, rel, full, ref req, ref resp);
+            }
+            case HttpMethod.Post: {
+                return store_body(self.root_dir, rel, full, ref req, ref resp);
+            }
+            case HttpMethod.Delete: {
+                let err: string = storage.delete_file(full);
+                if (err.len > 0) {
+                    respond_text(ref resp, http_types.not_found(), `not found: ${rel}\n`);
+                    return HandleOutcome.Ok;
+                }
+                respond_text(ref resp, http_types.ok(), `deleted /${rel}\n`);
+                printf(`DEL   /${rel}\n`);
+                return HandleOutcome.Ok;
+            }
+            case HttpMethod.Head: {
+                respond_text(ref resp, http_types.method_not_allowed(), "method not allowed\n");
+                return HandleOutcome.Ok;
+            }
+            case HttpMethod.Patch: {
+                respond_text(ref resp, http_types.method_not_allowed(), "method not allowed\n");
+                return HandleOutcome.Ok;
+            }
+            case HttpMethod.Options: {
+                respond_text(ref resp, http_types.method_not_allowed(), "method not allowed\n");
+                return HandleOutcome.Ok;
+            }
+        }
+        return HandleOutcome.Ok;
+    }
+}
+
+function store_body(root_dir: string, rel: string, full: string, ref req: Request, ref resp: Response): HandleOutcome {
+    let err: string = storage.write_file(full, req.body);
+    if (err.len > 0) {
+        respond_text(ref resp, http_types.server_err(), err);
+        return HandleOutcome.Ok;
+    }
+    respond_text(ref resp, http_types.ok(), `stored /${rel} (${req.body.len} bytes)\n`);
+    printf(`STORE /${rel} <- ${req.body.len} bytes\n`);
+    return HandleOutcome.Ok;
+}
+
+// Helper: set status + plain-text body in one shot. `msg` must outlive
+// the response write; we use it with string literals and with template
+// literals that stamp out fresh strings.
+function respond_text(ref resp: Response, code: http_types.StatusCode, msg: string): void {
+    resp.status = code;
+    http_types.headers_add(ref resp.headers, "Content-Type", "text/plain");
+    http_types.respond_static(ref resp, msg);
+}
+
+export function storage_handler_new(root_dir: string): StorageHandler propagates<disposable> {
+    return {
+        root_dir: root_dir,
+        body_buf: vec.vec_new(4096),
+    };
+}

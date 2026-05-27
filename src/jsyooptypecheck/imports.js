@@ -23,16 +23,19 @@ export function resolveImports(mod, moduleEnv, errors) {
       continue;
     }
 
-    if (imp.importKind === "namespace") {
-      // import * as ns from "./mod.yoop"
+    // Namespace clause: `import * as ns ...`. Yoopstore-papercut #9: a
+    // "combined" import (`import * as ns, { Type } from "..."`) carries both
+    // a namespaceName and specifiers, so this is gated on the field, not on
+    // importKind, and we fall through to the named-specifier loop rather than
+    // `continue`-ing.
+    if (imp.namespaceName) {
       if (localSymbols.has(imp.namespaceName)) {
         pushError(errors, imp, `local name "${imp.namespaceName}" collides with an existing declaration`);
-        continue;
+      } else {
+        const nsType = NamespaceType(srcEnv === modEnv ? mod.id : imp.resolvedModuleId, srcEnv.exports);
+        localSymbols.set(imp.namespaceName, nsType);
+        importedNames.set(imp.namespaceName, { fromModuleId: imp.resolvedModuleId, exportName: imp.namespaceName, kind: "namespace" });
       }
-      const nsType = NamespaceType(srcEnv === modEnv ? mod.id : imp.resolvedModuleId, srcEnv.exports);
-      localSymbols.set(imp.namespaceName, nsType);
-      importedNames.set(imp.namespaceName, { fromModuleId: imp.resolvedModuleId, exportName: imp.namespaceName, kind: "namespace" });
-      continue;
     }
 
     // named: import { a, b as c }

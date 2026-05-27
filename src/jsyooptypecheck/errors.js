@@ -76,7 +76,10 @@ export function formatType(t) {
     case typeKinds.typeParam:
       return t.name;
     case typeKinds.unsafePtr:
-      return `unsafe_ptr<${formatType(t.pointee)}>`;
+      // Yoopstore-papercut #3: null pointee is the opaque form.
+      return t.pointee === null
+        ? `unsafe_ptr`
+        : `unsafe_ptr<${formatType(t.pointee)}>`;
     case typeKinds.untypedNull:
       return "null";
     case typeKinds.functionPointer:

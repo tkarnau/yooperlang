@@ -1,0 +1,13 @@
+// Yoopstore-papercut #3: pointer arithmetic on bare `unsafe_ptr` is
+// rejected - the opaque form has no element size, so `p + 1` is
+// undefined. User must cast to a typed pointer first.
+
+import.unsafe;
+
+function main(): int32 {
+    let x: int32 = 7;
+    let typed: unsafe_ptr<int32> = &x;
+    let opaque: unsafe_ptr = typed;
+    let next: unsafe_ptr = opaque + 1;
+    return 0;
+}

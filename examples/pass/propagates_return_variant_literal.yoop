@@ -1,0 +1,53 @@
+// Yoopstore-papercut #11 (variant arm): a returned variant constructor that
+// moves a propagating binding into its payload transfers the obligation just
+// like a struct literal does.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Inner implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`disposed-inner(${self.id})\n`);
+    }
+}
+
+variant Box implements Disposable propagates<disposable> {
+    Empty,
+    Full { item: Inner },
+    function dispose(ref self): void {
+        switch (self) {
+            case Box.Full { item }: {
+                Disposable.dispose(ref item);
+            }
+            default: {}
+        }
+    }
+}
+
+function make_box(): Box propagates<disposable> {
+    let inner: Inner = { id: 99 };
+    return Box.Full { item: inner };
+}
+
+function main(): int32 {
+    let b: Box = make_box();
+    printf(`made-box\n`);
+    Disposable.dispose(ref b);
+    return 0;
+}
+
+// expected output:
+// made-box
+// disposed-inner(99)

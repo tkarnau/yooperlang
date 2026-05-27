@@ -134,6 +134,10 @@ int yoop_io_wait_readable(int fd);
 int yoop_io_wait_writable(int fd);
 void yoop_io_shutdown(void);
 
+// Create a directory with standard 0755 permissions (mode computed from
+// POSIX S_* symbols per platform). Returns mkdir()'s rc.
+int yoop_io_mkdir(const char* path);
+
 #ifdef __cplusplus
 }
 #endif

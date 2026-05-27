@@ -16,7 +16,24 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
+
+// Create a single directory with standard 0755 permissions. The mode bits
+// are computed from the POSIX S_* symbols (the headers resolve them to the
+// right per-platform mode_t value), so yoop callers never hand-mirror a
+// numeric mode - the same philosophy as the yoop_net.c constant helpers.
+// Returns mkdir()'s rc: 0 on success, -1 with errno set. EEXIST is left for
+// the caller to interpret (std/fs.mkdir_p treats it as benign).
+int yoop_io_mkdir(const char* path) {
+#ifdef _WIN32
+    // Windows mkdir takes no mode argument.
+    return _mkdir(path);
+#else
+    return mkdir(path, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+#endif
+}
 
 #ifdef _WIN32
   // Stub for now - no IOCP backend. Public API returns ENOSYS.

@@ -763,6 +763,16 @@ function resolveAssignmentToDeref(node, scope, ctx) {
     );
     return setType(node, ErrorType());
   }
+  // Yoopstore-papercut #3: bare `unsafe_ptr` has no pointee type, so we
+  // can't validate the RHS - require a cast first.
+  if (ptrType.pointee === null) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot store through opaque unsafe_ptr - use 'unsafe_ptr.cast<T>(p)' first to spell out the pointee`,
+    );
+    return setType(node, ErrorType());
+  }
   const pointee = ptrType.pointee;
   node.target.resolvedType = pointee;
   checkInitializer(
@@ -1227,6 +1237,16 @@ function resolveDeref(node, scope, ctx) {
       ctx.errors,
       node,
       `cannot deref non-pointer type ${formatType(operandType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  // Yoopstore-papercut #3: opaque `unsafe_ptr` has no pointee, so a deref
+  // has no result type. Force the user to spell out the pointee via cast.
+  if (operandType.pointee === null) {
+    pushError(
+      ctx.errors,
+      node,
+      `cannot deref opaque unsafe_ptr - use 'unsafe_ptr.cast<T>(p)' first to spell out the pointee`,
     );
     return setType(node, ErrorType());
   }

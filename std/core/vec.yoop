@@ -84,3 +84,46 @@ export function vec_clear<T>(v: ref Vec<T>): void {
 export function vec_as_array<T>(v: ref Vec<T>): T[] {
     return intr.array_slice(v.data, 0, v.len);
 }
+
+// Append every element of `src` to `v`, growing the backing buffer at most
+// once (to exactly `v.len + src.len` when a grow is needed). This is the
+// bulk-append the byte-shuffling paths want: O(n) copies but a single
+// allocation, versus `vec_push` in a loop which reallocates O(log n) times.
+// MAY REALLOCATE - callers holding views from `vec_as_array` should re-fetch.
+export function vec_extend_from<T>(v: ref Vec<T>, src: T[]): void {
+    let needed: usize = v.len + src.len;
+    if (needed > v.cap) {
+        let new_data: T[] = intr.heap_alloc(needed);
+        let i: usize = 0;
+        while (i < v.len) {
+            new_data[i] = v.data[i];
+            i = i + 1;
+        }
+        if (v.cap > 0) {
+            intr.heap_free(v.data);
+        }
+        v.data = new_data;
+        v.cap = needed;
+    }
+    let j: usize = 0;
+    while (j < src.len) {
+        v.data[v.len + j] = src[j];
+        j = j + 1;
+    }
+    v.len = needed;
+}
+
+// Build a fresh Vec holding a copy of `src` (capacity == src.len, so no
+// spare). Like `vec_new` it allocates once and carries the disposable
+// obligation to the caller. `src` is unmodified - the bytes are copied, not
+// aliased - so passing a borrowing view (string_as_bytes, array_slice) is
+// safe.
+export function vec_from_array<T>(src: T[]): Vec<T> propagates<disposable> {
+    let data: T[] = intr.heap_alloc(src.len);
+    let i: usize = 0;
+    while (i < src.len) {
+        data[i] = src[i];
+        i = i + 1;
+    }
+    return { data: data, len: src.len, cap: src.len };
+}

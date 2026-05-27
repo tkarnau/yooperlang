@@ -500,8 +500,8 @@ export function stringify(ref v: JsonValue): string {
     }
     Disposable.dispose(ref parts);
     let result: string = str.string_concat_all(arr);
-
     intr.heap_free(arr);
+
     return result;
 }
 
