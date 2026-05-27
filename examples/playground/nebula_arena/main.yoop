@@ -254,6 +254,8 @@ function run_scene(): void {
     gl.delete_vertex_arrays(1, &sp_vao);
     gl.delete_buffers(1, &neb_vbo);
     gl.delete_buffers(1, &sp_vbo);
+
+    intr.heap_free(cpu_buf);
 }
 
 // ── Entry point ──────────────────────────────────────────────────────

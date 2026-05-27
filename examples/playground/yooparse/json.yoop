@@ -79,10 +79,6 @@ export variant JsonValue implements Disposable {
 
     function dispose(ref self): void {
         switch (self) {
-            case JsonValue.Null: { }
-            case JsonValue.Bool { value: _b }: { }
-            case JsonValue.Number { value: _n }: { }
-            case JsonValue.String { value: _s }: { }
             case JsonValue.Array { items: arr }: {
                 let i: usize = 0;
                 while (i < arr.len) {
@@ -105,6 +101,7 @@ export variant JsonValue implements Disposable {
                     intr.heap_free(ms);
                 }
             }
+            default: {} // all other cases are no-op
         }
     }
 }

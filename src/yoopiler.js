@@ -26,6 +26,7 @@ function main() {
       "dump-ast": { type: "boolean" },
       "dump-bc": { type: "boolean" },
       "list-attributes": { type: "boolean" },
+      "track-heap": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -92,6 +93,12 @@ function main() {
 
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
+  // --track-heap: instruct codegen to emit yoop_diag_record_alloc /
+  // yoop_diag_record_free calls around the heap_alloc / heap_free
+  // intrinsics, and to install an atexit dump in main. See
+  // runtime/yoop_runtime.c and the emitBuiltinGenericCall branches in
+  // jsyoopcodegen/codegen.js.
+  programState.trackHeap = !!values["track-heap"];
 
   if (errors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));

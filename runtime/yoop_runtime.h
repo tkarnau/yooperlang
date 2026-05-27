@@ -115,6 +115,17 @@ void yoop_unpark(yoop_park_token_t* t);
 int yoop_sleep_ns(uint64_t ns);
 int yoop_sleep_ms(uint64_t ms);
 
+// ----- --track-heap diagnostics --------------------------------------------
+//
+// Counter ABI used by `--track-heap` builds. yoop_diag_record_alloc and
+// yoop_diag_record_free are emitted by codegen alongside each heap_alloc /
+// heap_free intrinsic; yoop_diag_dump is called from main immediately
+// before yoop_runtime_shutdown. The bytes argument is the malloc/free
+// byte size (count * sizeof(elem)), not the element count.
+void yoop_diag_record_alloc(uint64_t bytes);
+void yoop_diag_record_free(uint64_t bytes);
+void yoop_diag_dump(void);
+
 // ----- Phase 8.F.2 - I/O multiplexer (forward declarations) ----------------
 // Implemented in runtime/yoop_io.c. Declared here so callers don't need
 // a second header. Lazy init on first call; shutdown is hooked into

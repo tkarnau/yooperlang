@@ -14,6 +14,7 @@
 #include <errno.h>
 #include <stdatomic.h>
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
@@ -254,6 +255,41 @@ void yoop_runtime_shutdown(void) {
 
     g_rt.initialized = 0;
     init_unlock();
+}
+
+// ---- --track-heap diagnostics --------------------------------------------
+//
+// Compiler-injected counters for the heap_alloc / heap_free intrinsics. The
+// symbols are always exported, but main only references them when the
+// program was compiled with --track-heap. Atomics keep the counters honest
+// when allocations happen from concurrent task bodies.
+
+static _Atomic uint64_t g_diag_bytes_allocated = 0;
+static _Atomic uint64_t g_diag_bytes_freed     = 0;
+static _Atomic uint64_t g_diag_alloc_count     = 0;
+static _Atomic uint64_t g_diag_free_count      = 0;
+
+void yoop_diag_record_alloc(uint64_t bytes) {
+    atomic_fetch_add_explicit(&g_diag_bytes_allocated, bytes, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_diag_alloc_count, 1, memory_order_relaxed);
+}
+
+void yoop_diag_record_free(uint64_t bytes) {
+    atomic_fetch_add_explicit(&g_diag_bytes_freed, bytes, memory_order_relaxed);
+    atomic_fetch_add_explicit(&g_diag_free_count, 1, memory_order_relaxed);
+}
+
+void yoop_diag_dump(void) {
+    uint64_t a  = atomic_load_explicit(&g_diag_bytes_allocated, memory_order_relaxed);
+    uint64_t f  = atomic_load_explicit(&g_diag_bytes_freed, memory_order_relaxed);
+    uint64_t ac = atomic_load_explicit(&g_diag_alloc_count, memory_order_relaxed);
+    uint64_t fc = atomic_load_explicit(&g_diag_free_count, memory_order_relaxed);
+    int64_t leaked = (int64_t)a - (int64_t)f;
+    fprintf(stderr,
+        "[yoop-diag] heap: %llu bytes allocated in %llu calls; %llu bytes freed in %llu calls; net %lld bytes\n",
+        (unsigned long long)a, (unsigned long long)ac,
+        (unsigned long long)f, (unsigned long long)fc,
+        (long long)leaked);
 }
 
 // ---- submit / wait --------------------------------------------------------

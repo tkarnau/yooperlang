@@ -73,6 +73,14 @@ const RUNTIME_DECLARES = [
   "declare i32 @yoop_errno_get()",
   "declare void @yoop_errno_set(i32)",
   "declare ptr @yoop_errno_message(i32)",
+  // --track-heap diagnostics. Always declared, only referenced when
+  // programState.trackHeap is set (see emitBuiltinGenericCall + main fn).
+  // atexit registers yoop_diag_dump so every exit path - normal return,
+  // exit(), uncaught abort - prints the totals.
+  "declare void @yoop_diag_record_alloc(i64)",
+  "declare void @yoop_diag_record_free(i64)",
+  "declare void @yoop_diag_dump()",
+  "declare i32 @atexit(ptr)",
 ];
 
 export function llvmType(yoopType) {
@@ -3449,6 +3457,13 @@ function codegenWithModuleId(
     const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
     if (inMainFn) {
       fnLines.push("  call void @yoop_runtime_init()");
+      // --track-heap: register the dump as an atexit handler so every
+      // exit path prints heap totals once. Registered before module_init
+      // so allocations made during static initializers are counted.
+      if (programState?.trackHeap) {
+        const atexitRet = freshTemp();
+        fnLines.push(`  ${atexitRet} = call i32 @atexit(ptr @yoop_diag_dump)`);
+      }
       // Phase 8.E: run every module's __module_init in topological order.
       // The list is populated as each module is codegen'd (see the
       // moduleLevelDecls block earlier in this file). Order matches the
@@ -4509,6 +4524,11 @@ function codegenWithModuleId(
       // Multiply count by element size to get byte size.
       const byteSize = freshTemp();
       fnLines.push(`  ${byteSize} = mul i64 ${nArg.val}, ${elemSize}`);
+      // --track-heap: record the alloc before malloc so the counter
+      // reflects intent even if malloc returns null.
+      if (programState?.trackHeap) {
+        fnLines.push(`  call void @yoop_diag_record_alloc(i64 ${byteSize})`);
+      }
       // Allocate on the heap.
       const raw = freshTemp();
       fnLines.push(`  ${raw} = call ptr @malloc(i64 ${byteSize})`);
@@ -4540,6 +4560,19 @@ function codegenWithModuleId(
       fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
       const dataPtr = freshTemp();
       fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      // --track-heap: load len and record `len * elemSize` bytes freed
+      // before the call to @free so the counters stay paired with the
+      // matching alloc record.
+      if (programState?.trackHeap) {
+        const elemSize = sizeOfType(elemType);
+        const lenField = freshTemp();
+        fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+        const lenVal = freshTemp();
+        fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
+        const byteSize = freshTemp();
+        fnLines.push(`  ${byteSize} = mul i64 ${lenVal}, ${elemSize}`);
+        fnLines.push(`  call void @yoop_diag_record_free(i64 ${byteSize})`);
+      }
       fnLines.push(`  call void @free(ptr ${dataPtr})`);
       return { val: "void", yoopType: VoidType() };
     }
@@ -5874,13 +5907,16 @@ function usesLegacyPrintf(ast) {
   return found;
 }
 
-export function compileEntry(entryAbsPath) {
+export function compileEntry(entryAbsPath, opts = {}) {
   const { modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbsPath);
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   // Thread the well-known std module ids through programState so codegen
   // can mint mangled symbols (`<fmtModId>__int_to_string`, etc.) when
   // lowering interpolated template literals.
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
+  // --track-heap parity with the yoopiler.js driver. Tests pass this
+  // through opts; production code paths go through the driver flag.
+  programState.trackHeap = !!opts.trackHeap;
   if (errors.length > 0) {
     throw new Error(
       `compileEntry: typecheck failed with ${errors.length} error(s):\n` +

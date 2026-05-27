@@ -27,7 +27,7 @@ function runFixture(relPath, opts = {}) {
   const usesImport = /^\s*import(\s|\.)/m.test(src);
   let ir, extraLinkFlags = [];
   if (usesImport) {
-    const result = compileEntry(path.join(repoRoot, relPath));
+    const result = compileEntry(path.join(repoRoot, relPath), { trackHeap: !!opts.trackHeap });
     ir = result.ir;
     extraLinkFlags = result.linkFlags ?? [];
   } else {
@@ -52,7 +52,7 @@ function runFixture(relPath, opts = {}) {
     env,
     timeout: opts.timeoutMs ?? 30000,
   });
-  return { stdout: result.stdout, exitCode: result.status };
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
 }
 
 // Variant of runFixture that stages an asset file alongside the binary and
@@ -404,6 +404,26 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "p[0]=(1, 2.500000) p[2]=(5, 6.500000)\n");
   });
 
+  it("track_heap_basic.yoop: --track-heap counts alloc/free bytes and dumps net via atexit", () => {
+    const { stdout, stderr, exitCode } = runFixture(
+      "examples/pass/track_heap_basic.yoop",
+      { trackHeap: true },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "done\n");
+    // 5 * 4 = 20 bytes int32[] (freed); 3 * 8 = 24 bytes Pair[] (leaked).
+    // Pair is two int32s with no padding so sizeof = 8.
+    assert.match(
+      stderr,
+      /\[yoop-diag\] heap: 44 bytes allocated in 2 calls; 20 bytes freed in 1 calls; net 24 bytes/,
+    );
+  });
+
+  it("heap_alloc_int.yoop without --track-heap emits no diag line", () => {
+    const { stderr } = runFixture("examples/pass/heap_alloc_int.yoop");
+    assert.equal(stderr ?? "", "");
+  });
+
   it("dynarray_push.yoop pushes through a grow boundary in user-defined DynArray<int32>", () => {
     const { stdout, exitCode } = runFixture("examples/pass/dynarray_push.yoop");
     assert.equal(exitCode, 0);
@@ -710,9 +730,9 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
-function runFixtureEntry(relPath) {
+function runFixtureEntry(relPath, opts = {}) {
   const entryAbs = path.join(repoRoot, relPath);
-  const { ir, linkFlags } = compileEntry(entryAbs);
+  const { ir, linkFlags } = compileEntry(entryAbs, { trackHeap: !!opts.trackHeap });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
   const binPath = path.join(tmpDir, "out");
