@@ -61,6 +61,7 @@ import {
 } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
 import { runKindCheck } from "./kindCheck.js";
+import { runKindFlow } from "./kindFlow.js";
 import { TASK_KIND } from "./builtinKinds.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
@@ -1037,16 +1038,45 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
   let mustNotEscapeSeen = false;
   let mustNotShareSeen = false;
   let layoutSeen = false;
+  let markerSeen = false;
   let mustCallClause = null;
   for (const c of clauses) {
     switch (c.kind) {
+      case ASTNodeKind.KIND_MARKER_CLAUSE:
+        if (markerSeen) {
+          pushError(errors, c, `duplicate marker (conferred/restrictive) clause in kind '${displayName}'`);
+          break;
+        }
+        markerSeen = true;
+        kt.marker = c.polarity; // "conferred" | "restrictive"
+        break;
+      case ASTNodeKind.KIND_TRANSITION_CLAUSE: {
+        if (c.direction === "clearedBy") {
+          if (kt.clearedBy !== null) {
+            pushError(errors, c, `duplicate clearedBy clause in kind '${displayName}'`);
+          } else {
+            kt.clearedBy = c.functionName;
+          }
+        } else {
+          if (kt.appliedBy !== null) {
+            pushError(errors, c, `duplicate appliedBy clause in kind '${displayName}'`);
+          } else {
+            kt.appliedBy = c.functionName;
+          }
+        }
+        break;
+      }
       case ASTNodeKind.KIND_APPLIES_TO_CLAUSE:
         // Store all sites from the multi-site list (parser validated at least one).
         for (const s of c.sites) kt.appliesTo.add(s);
         break;
       case ASTNodeKind.KIND_REQUIRES_CLAUSE: {
+        // Look up the trait in both the concrete table and the generic-trait
+        // table - a `requires` clause may reference either. The downstream
+        // check (methods.has / genericMethods.has) handles both shapes.
         const trait =
           env.traitTable.get(c.traitName) ??
+          env.genericTraitTable?.get(c.traitName) ??
           lookupImportedTrait(c.traitName, mod, moduleEnv);
         if (!trait) {
           pushError(errors, c, `unknown trait '${c.traitName}' in requires clause of kind '${displayName}'`);
@@ -1112,14 +1142,57 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
       }
     }
   }
+  // clearance kinds: a marker kind (conferred/restrictive) carries no
+  // obligation, so it cannot also declare mustCall - the two discharge
+  // models are mutually exclusive.
+  if (markerSeen && mustCallClause) {
+    pushError(errors, mustCallClause,
+      `kind '${displayName}' declares a marker polarity (conferred/restrictive) and 'mustCall'; a marker kind carries no obligation, so the two are mutually exclusive`);
+  }
+  // clearance kinds: transition clauses must match the kind's polarity.
+  // `clearedBy` only makes sense on a restrictive kind (stripping a hazard);
+  // `appliedBy` only on a conferred kind (minting a capability).
+  if (kt.clearedBy !== null && kt.marker !== "restrictive") {
+    pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+      `kind '${displayName}' declares 'clearedBy ${kt.clearedBy}' but is not restrictive; clearedBy only applies to restrictive marker kinds`);
+  }
+  if (kt.appliedBy !== null && kt.marker !== "conferred") {
+    pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+      `kind '${displayName}' declares 'appliedBy ${kt.appliedBy}' but is not conferred; appliedBy only applies to conferred marker kinds`);
+  }
+  // clearance kinds: the named transition method must be declared by one of
+  // the required traits. The trait is the structural authority; the method
+  // name is what the kind decl picks out of that trait. Mirrors how
+  // `mustCall` resolves against a `requires Disposable;` clause.
+  for (const [direction, methodName] of [
+    ["clearedBy", kt.clearedBy],
+    ["appliedBy", kt.appliedBy],
+  ]) {
+    if (methodName === null) continue;
+    if (kt.requires.length === 0) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares '${direction} ${methodName}' but no 'requires <Trait>;' clause; the trait is the authority that names the method`);
+      continue;
+    }
+    const traitWithMethod = kt.requires.find((t) =>
+      (t.methods ?? t.genericMethods)?.has(methodName),
+    );
+    if (!traitWithMethod) {
+      const traitNames = kt.requires.map((t) => t.name).join(", ");
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares '${direction} ${methodName}' but no required trait (${traitNames}) declares a method by that name`);
+    }
+  }
   // mustCall resolution runs after requires have been collected so we can
   // search the full trait set.
-  if (mustCallClause) {
+  if (mustCallClause && !markerSeen) {
     if (kt.requires.length === 0) {
       pushError(errors, mustCallClause,
         `mustCall requires at least one 'requires' clause to resolve method '${mustCallClause.methodName}' in kind '${displayName}'`);
     } else {
-      const traitWithMethod = kt.requires.find((t) => t.methods.has(mustCallClause.methodName));
+      const traitWithMethod = kt.requires.find((t) =>
+        (t.methods ?? t.genericMethods)?.has(mustCallClause.methodName),
+      );
       if (!traitWithMethod) {
         pushError(errors, mustCallClause,
           `mustCall ${mustCallClause.methodName}: no required trait declares this method in kind '${displayName}'`);
@@ -3090,19 +3163,23 @@ export function typecheckProgram(modules) {
     // (TypeParamType-bearing) body since the obligations it stamps onto AST
     // nodes (pendingCleanups, implicitCleanups) are preserved by the
     // per-instance `cloneAstWithSubstitution` walk in codegen.
+    const flowKindTable = moduleEnv.get(mod.id)?.kindTable;
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         runKindCheck(d, errors, funcDeclTable, programState.registry);
+        runKindFlow(d, errors, funcDeclTable, flowKindTable, null);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
         // Phase 13.B: variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
         }
       }
     }

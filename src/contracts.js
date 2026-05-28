@@ -77,6 +77,11 @@ export const ASTNodeKind = Object.freeze({
   KIND_FORBIDS_CLAUSE: "KIND_FORBIDS_CLAUSE",
   // phase 6.5: layout / composition / parameterized kinds
   KIND_LAYOUT_CLAUSE: "KIND_LAYOUT_CLAUSE",
+  // clearance kinds: marker polarity (conferred | restrictive)
+  KIND_MARKER_CLAUSE: "KIND_MARKER_CLAUSE",
+  // clearance kinds: kind-decl-named transition authority
+  // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
+  KIND_TRANSITION_CLAUSE: "KIND_TRANSITION_CLAUSE",
 
   // phase 6.3: task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",

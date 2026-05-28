@@ -108,6 +108,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("keyword_field_names.yoop: reserved keywords accepted in name-only positions", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/keyword_field_names.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "p.type=7 p.kind=3\n" +
+        "t==Tag.kind\n" +
+        "type variant, kind=42\n",
+    );
+  });
+
   it("enum_eq.yoop: `==` / `!=` on enums lower to tag comparison", () => {
     const { stdout, exitCode } = runFixture("examples/pass/enum_eq.yoop");
     assert.equal(exitCode, 0);
@@ -748,6 +761,23 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
       stdout,
       "bytes: 44\nlines: 2\nwords: 9\nmost common letter: 'o' (4 times)\n",
     );
+  });
+
+  // Clearance kinds (marker polarity + static two-bound check): a conferred
+  // `cleared` capability earned via `launder`, and a restrictive `tainted`
+  // hazard that must pass through a transition before reaching a plain slot.
+  it("clearance_marker.yoop launders tainted bytes and feeds a cleared sink", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/clearance_marker.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a: safe\nb: safe\n");
+  });
+
+  // chat-agent-papercut #3: `contains` was a global keyword (kind-clause
+  // word) blocking it as an ordinary function name. Now contextual.
+  it("contains_as_function_name.yoop accepts `contains` as an ordinary fn name", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/contains_as_function_name.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "yes\n");
   });
 
 });
@@ -2678,6 +2708,63 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /assignment from outside its module is not permitted/.test(e.message)),
       `expected cross-module-write error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // ---- Clearance kinds (marker polarity + static two-bound check) ----
+  it("clearance_unlaundered_sink.yoop rejects a plain value into a `cleared` (conferred) sink", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_unlaundered_sink.yoop");
+    assert.ok(
+      errors.some((e) => /parameter 'value' of 'sink' requires kind 'cleared'/.test(e.message)),
+      `expected conferred-required error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_restrictive_leak.yoop rejects a `tainted` value flowing into a plain slot", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_restrictive_leak.yoop");
+    assert.ok(
+      errors.some((e) => /forbids kind 'tainted' but the value carries it/.test(e.message)),
+      `expected restrictive-forbidden error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_marker_and_mustcall.yoop rejects a kind declaring both a marker polarity and mustCall", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_marker_and_mustcall.yoop");
+    assert.ok(
+      errors.some((e) => /declares a marker polarity .* and 'mustCall'/.test(e.message)),
+      `expected marker+mustCall error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_forge.yoop rejects forging a conferred kind via a binding annotation", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_forge.yoop");
+    assert.ok(
+      errors.some((e) => /binding 'c' requires kind 'cleared'/.test(e.message)),
+      `expected forge-binding error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_fake_launder.yoop rejects a free-function stripper (must be a trait impl method)", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_fake_launder.yoop");
+    assert.ok(
+      errors.some((e) => /would strip kind 'tainted'.*only an impl method of trait 'Cleansable'.*a free function is not authorized/.test(e.message)),
+      `expected fake-launder error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_fake_confer.yoop rejects a free-function conferrer (must be a trait impl method)", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_fake_confer.yoop");
+    assert.ok(
+      errors.some((e) => /would confer kind 'cleared'.*only an impl method of trait 'Cleansable'.*a free function is not authorized/.test(e.message)),
+      `expected fake-confer error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_clearedby_on_conferred.yoop rejects clearedBy on a non-restrictive kind", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_clearedby_on_conferred.yoop");
+    assert.ok(
+      errors.some((e) => /clearedBy only applies to restrictive marker kinds/.test(e.message)),
+      `expected clearedBy-polarity error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

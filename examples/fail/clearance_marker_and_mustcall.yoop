@@ -1,0 +1,13 @@
+// Clearance kinds: a marker polarity (conferred / restrictive) is mutually
+// exclusive with `mustCall` - a marker kind carries no obligation.
+
+trait Disposable { function dispose(ref self): void; }
+
+kind bad {
+    appliesTo binding;
+    requires Disposable;
+    conferred;
+    mustCall dispose beforeScopeEnd;
+}
+
+function main(): int32 { return 0; }

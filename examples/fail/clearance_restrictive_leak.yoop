@@ -1,0 +1,17 @@
+// Clearance kinds: a restrictive value cannot flow into a plain slot. A
+// restrictive kind cannot be silently dropped; only a function that accepts
+// the kind and returns without it may shed it.
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+}
+
+function source(): tainted string { return "danger"; }
+function plain_sink(value: string): void {}
+
+function main(): int32 {
+    let t: tainted string = source();
+    plain_sink(t);
+    return 0;
+}

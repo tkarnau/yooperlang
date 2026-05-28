@@ -1,0 +1,19 @@
+// chat-agent-papercut #3: `contains` was a global keyword (kind-clause word)
+// that blocked it as an ordinary function name - a very natural collision.
+// It is now contextual: the lexer emits IDENT, and the parser recognizes it
+// only inside kind decls and propagation clauses.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function contains(haystack: string, needle: string): bool {
+    if (needle.len > haystack.len) { return false; }
+    return true;
+}
+
+function main(): int32 {
+    let ok: bool = contains("hello world", "world");
+    if (ok) { printf(`yes\n`); } else { printf(`no\n`); }
+    return 0;
+}

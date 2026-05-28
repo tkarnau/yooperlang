@@ -1,0 +1,20 @@
+/*
+  Author: Tom Karnau
+
+  Main entry point for the self-hosted yooperlang compiler
+*/
+
+// for starters lets define a main function, and start getting a lexer stream of
+// tokens from an input file.
+
+import * as log from "std/log.yoop";
+
+@precompile {
+  log.info("hello, yooper from a precompile!");
+}
+
+function main(): int {
+  log.info("hello, yooper!");
+
+  return 0;
+}

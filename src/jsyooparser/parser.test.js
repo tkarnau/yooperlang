@@ -1339,3 +1339,128 @@ describe("Phase 7.5: variant constructor expression", () => {
     assert.equal(e.object.name, "Shape");
   });
 });
+
+// Issue 10 path A: reserved keywords accepted in name-only positions so the
+// growing keyword set doesn't block common C-style names like `type`, `kind`,
+// `enum` in extern bindings, struct fields, etc.
+describe("parse: reserved keywords in name-only positions", () => {
+  it("struct field name can be a reserved keyword", () => {
+    const ast = parse("type Foo { type: int32, kind: int32, enum: bool }");
+    const td = ast.body[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(td.fields.length, 3);
+    assert.deepEqual(
+      td.fields.map((f) => f.name),
+      ["type", "kind", "enum"],
+    );
+  });
+
+  it("struct can mix keyword fields and methods", () => {
+    const ast = parse(`
+      trait T { function go(ref self): void; }
+      type Foo implements T {
+        type: int32,
+        function go(ref self): void { return; }
+      }
+    `);
+    const td = ast.body[1];
+    assert.equal(td.fields.length, 1);
+    assert.equal(td.fields[0].name, "type");
+    assert.equal(td.methods.length, 1);
+    assert.equal(td.methods[0].name, "go");
+  });
+
+  it("union field name can be a reserved keyword", () => {
+    const ast = parse("union U { type: int32, kind: float32 }");
+    const ud = ast.body[0];
+    assert.equal(ud.kind, ASTNodeKind.UNION_DECL);
+    assert.deepEqual(
+      ud.fields.map((f) => f.name),
+      ["type", "kind"],
+    );
+  });
+
+  it("enum case name can be a reserved keyword", () => {
+    const ast = parse("enum E { type, kind, enum }");
+    const ed = ast.body[0];
+    assert.equal(ed.kind, ASTNodeKind.ENUM_DECL);
+    assert.deepEqual(
+      ed.cases.map((c) => c.name),
+      ["type", "kind", "enum"],
+    );
+  });
+
+  it("variant case name and payload field name can be reserved keywords", () => {
+    const ast = parse(
+      "variant V { type { kind: int32 }, function }",
+    );
+    const vd = ast.body[0];
+    assert.equal(vd.kind, ASTNodeKind.VARIANT_DECL);
+    assert.equal(vd.variants.length, 2);
+    assert.equal(vd.variants[0].name, "type");
+    assert.equal(vd.variants[0].fields[0].name, "kind");
+    assert.equal(vd.variants[1].name, "function");
+    assert.equal(vd.variants[1].fields, null);
+  });
+
+  it("extern function parameter name can be a reserved keyword", () => {
+    const ast = parse(`
+      extern "C" from "stdio.h" {
+        function f(type: int32, kind: int32, enum: int32): void;
+      }
+    `);
+    const block = ast.body[0];
+    assert.equal(block.kind, ASTNodeKind.EXTERN_BLOCK);
+    const fn = block.decls[0];
+    assert.deepEqual(
+      fn.params.map((p) => p.name),
+      ["type", "kind", "enum"],
+    );
+  });
+
+  it("extern ref param keeps the keyword name", () => {
+    const ast = parse(`
+      extern "C" from "x.h" { function f(ref type: int32): void; }
+    `);
+    const fn = ast.body[0].decls[0];
+    assert.equal(fn.params[0].name, "type");
+    assert.equal(fn.params[0].isRef, true);
+  });
+
+  it("field access RHS can be a reserved keyword", () => {
+    const ast = parse("function f(): int32 { return obj.type; }");
+    const ret = ast.body[0].body.body[0];
+    assert.equal(ret.value.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(ret.value.field, "type");
+  });
+
+  it("struct literal field name can be a reserved keyword", () => {
+    const ast = parse(
+      "function f(): Foo { let x: Foo = { type: 1, kind: 2 }; return x; }",
+    );
+    const decl = ast.body[0].body.body[0];
+    const lit = decl.assignment;
+    assert.equal(lit.kind, ASTNodeKind.STRUCT_LITERAL);
+    assert.deepEqual(
+      lit.fields.map((f) => f.name),
+      ["type", "kind"],
+    );
+  });
+
+  it("variant constructor field name can be a reserved keyword", () => {
+    const ast = parse(
+      "function f(): int32 { let x: E = E.A { type: 1 }; return 0; }",
+    );
+    const decl = ast.body[0].body.body[0];
+    const vc = decl.assignment;
+    assert.equal(vc.kind, ASTNodeKind.VARIANT_CONSTRUCTOR);
+    assert.equal(vc.fields[0].name, "type");
+  });
+
+  it("user-defined function param still rejects keyword names", () => {
+    assert.throws(
+      () => parse("function f(type: int32): void { return; }"),
+      /expected rparen, got type/,
+    );
+  });
+});

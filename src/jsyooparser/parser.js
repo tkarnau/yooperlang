@@ -3,6 +3,7 @@ import {
   TokenTags,
   inverseTokenTags,
   tokenScanList,
+  keywordTagList,
 } from "../jsyooplexer/lexer.js";
 
 import { ASTNode, ASTNodeKind } from "../contracts.js";
@@ -12,6 +13,16 @@ import {
   knownAttributeNames,
   suggestAttributeName,
 } from "../jsyoopattributes/registry.js";
+
+// Set of tags the lexer assigns to reserved-word identifiers. Used to accept
+// keyword-shaped tokens in name-only positions (field decls, extern param
+// names, RHS of field access) where the keyword's grammar role doesn't apply
+// and the source is being used as a bare identifier.
+const keywordTagSet = new Set(Object.values(keywordTagList));
+
+function isIdentLikeTag(tag) {
+  return tag === TokenTags.ident || keywordTagSet.has(tag);
+}
 
 function isBinaryOp(tag) {
   return (
@@ -295,6 +306,15 @@ export function parse(src) {
   // Phase 6.4: shared parser for `propagates<K1, K2, ...>` and `contains<K1, ...>`
   // clauses. Lives on struct decls and function return types. The current token
   // must be `propagates` or `contains` when this is called.
+  // chat-agent-papercut #3: `contains` is contextual - it lexes as IDENT and
+  // is recognized only inside kind decls and propagation clauses.
+  function isContainsKeywordIdent(tok) {
+    return (
+      tok.tag === TokenTags.ident &&
+      src.substring(tok.start, tok.start + tok.length) === "contains"
+    );
+  }
+
   function parseKindListClause() {
     const tok = advance(); // consume propagates|contains
     const variant = tok.tag === TokenTags.propagates ? "propagates" : "contains";
@@ -346,7 +366,8 @@ export function parse(src) {
     node.containsClause = null;
     while (
       peek().tag === TokenTags.propagates ||
-      peek().tag === TokenTags.contains
+      peek().tag === TokenTags.contains ||
+      isContainsKeywordIdent(peek())
     ) {
       const startTok = peek();
       const clause = parseKindListClause();
@@ -379,6 +400,29 @@ export function parse(src) {
   //   { kind: "typeApplication", name: "Box", typeArgs: [<annot>...] }
   //   { kind: "functionType", params: [<annot>...], returnType: <annot> }
   function parseTypeAnnotation() {
+    // clearance kinds: optional leading marker-kind prefix(es) on a type, e.g.
+    // `cleared string`, `tainted uint8[]`, `cleared validated Foo`. A prefix is
+    // an IDENT immediately followed by another IDENT (the rest of the type) -
+    // the only shape in which two idents are adjacent in type position. The
+    // names are resolved + validated in the typechecker. `ref cleared T` works
+    // via the recursion below (the prefix lands on the inner type).
+    let kindPrefixes = null;
+    while (
+      peek().tag === TokenTags.ident &&
+      peekAhead(1).tag === TokenTags.ident
+    ) {
+      const tok = advance();
+      (kindPrefixes ??= []).push(
+        src.substring(tok.start, tok.start + tok.length),
+      );
+    }
+    if (kindPrefixes !== null) {
+      // After consuming prefixes the remaining type is always IDENT-led
+      // (typeName / typeApplication, optional []). Parse it and attach.
+      const base = parseTypeAnnotation();
+      base.kindPrefixes = kindPrefixes;
+      return base;
+    }
     // Phase 9.G: function value type `(p1: T1, p2: T2, ...) => RetT`. The
     // disambiguator from a non-existent "parenthesized type" is that
     // function-type annotations always start with `(` and contain either
@@ -982,6 +1026,20 @@ export function parse(src) {
         node.clauses.push(parseKindClause());
         continue;
       }
+      // clearance kinds: `conferred;` / `restrictive;` are recognized
+      // contextually inside a kind body (they lex as plain idents, so they
+      // stay usable as ordinary identifiers everywhere else).
+      if (markerPolarityFromIdent() !== null) {
+        node.clauses.push(parseMarkerClause());
+        continue;
+      }
+      // clearance kinds: `clearedBy <fn>;` / `appliedBy <fn>;` name the
+      // function authorized to strip / confer this kind. Also contextual
+      // idents so the words stay usable elsewhere.
+      if (transitionDirectionFromIdent() !== null) {
+        node.clauses.push(parseTransitionClause());
+        continue;
+      }
       // Surface a precise message for deferred-feature clause keywords
       // (they currently lex as plain idents).
       if (peek().tag === TokenTags.ident) {
@@ -1052,6 +1110,53 @@ export function parse(src) {
     }
   }
 
+  // clearance kinds: returns the marker polarity if the current token is the
+  // contextual ident `conferred` or `restrictive`, else null. These are not
+  // reserved words - they are recognized only in kind-clause position.
+  function markerPolarityFromIdent() {
+    if (peek().tag !== TokenTags.ident) return null;
+    const text = src.substring(peek().start, peek().start + peek().length);
+    if (text === "conferred" || text === "restrictive") return text;
+    return null;
+  }
+
+  // clearance kinds: returns "clearedBy" / "appliedBy" if the current token
+  // is the contextual ident naming a transition direction, else null.
+  function transitionDirectionFromIdent() {
+    if (peek().tag !== TokenTags.ident) return null;
+    const text = src.substring(peek().start, peek().start + peek().length);
+    if (text === "clearedBy" || text === "appliedBy") return text;
+    return null;
+  }
+
+  // clearance kinds: `clearedBy <fn>;` on a restrictive kind names the
+  // function authorized to strip the kind from a value; `appliedBy <fn>;`
+  // on a conferred kind names the function authorized to confer the kind.
+  // The function name is a user-chosen identifier ("expressed sentiment") -
+  // the compiler bakes in no "launder" verb.
+  function parseTransitionClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_TRANSITION_CLAUSE);
+    const direction = transitionDirectionFromIdent();
+    advance(); // consume direction ident
+    node.direction = direction; // "clearedBy" | "appliedBy"
+    const fnTok = expect(TokenTags.ident);
+    node.functionName = src.substring(fnTok.start, fnTok.start + fnTok.length);
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // clearance kinds: `conferred;` (a capability the slot must have - lower
+  // bound) or `restrictive;` (a hazard the slot must not have - upper bound).
+  // A marker kind carries no obligation; its only rules are at use sites.
+  function parseMarkerClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_MARKER_CLAUSE);
+    const polarity = markerPolarityFromIdent();
+    advance(); // consume the polarity ident
+    node.polarity = polarity; // "conferred" | "restrictive"
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
   function parseAppliesToClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
     expect(TokenTags.appliesTo);
@@ -1077,6 +1182,10 @@ export function parse(src) {
           );
         case TokenTags.type:
           site = "type";
+          break;
+        case TokenTags.return:
+          // clearance kinds: a marker kind may prefix a function return type.
+          site = "return";
           break;
         default: {
           const name =
@@ -1736,13 +1845,37 @@ export function parse(src) {
         node.variadic = true;
         break; // ... must be last before )
       }
-      node.params.push(parseFunctionParam());
+      node.params.push(parseExternFunctionParam());
       if (peek().tag === TokenTags.comma) advance();
     }
     expect(TokenTags.rparen);
     expect(TokenTags.colon);
     node.returnTypeAnnotation = parseTypeAnnotation();
     expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // Extern function parameters: simpler than yoop-side params - no kind
+  // prefixes (the C ABI has no yoop kind notion) and the name is metadata
+  // (the C ABI passes positionally). Reserved keyword names are accepted so
+  // a generated binding for `glVertexAttribPointer(GLenum type, ...)` doesn't
+  // need a hand-edit on the `type` parameter.
+  function parseExternFunctionParam() {
+    const node = buildSourcedNode(ASTNodeKind.PARAM);
+    node.kindPrefix = null;
+    if (peek().tag === TokenTags.ref) {
+      advance();
+      node.isRef = true;
+    } else {
+      node.isRef = false;
+    }
+    node.name = parseIdentOrKeywordAsName();
+    expect(TokenTags.colon);
+    node.typeAnnotation = parseTypeAnnotation();
+    if (!node.isRef && node.typeAnnotation?.kind === "refType") {
+      node.isRef = true;
+      node.typeAnnotation = node.typeAnnotation.inner;
+    }
     return node;
   }
 
@@ -1965,7 +2098,7 @@ export function parse(src) {
       node.fields = [];
       while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
         const fieldNode = buildSourcedNode(ASTNodeKind.STRUCT_LITERAL_FIELD);
-        fieldNode.name = parseIdentAsName();
+        fieldNode.name = parseIdentOrKeywordAsName();
         expect(TokenTags.colon);
         fieldNode.value = parseExpression();
         node.fields.push(fieldNode);
@@ -1999,18 +2132,11 @@ export function parse(src) {
         // Capture the field name token before consuming it so we can pin
         // diagnostics (e.g. "no such variant") at the field identifier
         // rather than at the FIELD_ACCESS node's overall anchor.
-        // Phase 9.G: allow `from` here in addition to an IDENT, so
-        // `VTableName.from(ref x)` parses without making `from` non-reserved
-        // at the lexer level (it's still a keyword in `import ... from ...`
-        // and `extern "C" from ..."` contexts).
+        // Any identifier-shaped token is accepted here (including reserved
+        // keywords like `type`, `kind`, `from`) - the position is purely a
+        // name lookup so the keyword's grammar role doesn't apply.
         const fieldTok = peek();
-        let fieldName;
-        if (fieldTok.tag === TokenTags.from) {
-          advance();
-          fieldName = "from";
-        } else {
-          fieldName = parseIdentAsName();
-        }
+        const fieldName = parseIdentOrKeywordAsName();
         const fieldAccessNode = new ASTNode(
           ASTNodeKind.FIELD_ACCESS,
           posToSourceLocation(src, node.sourceLoc?.pos ?? fieldTok.start),
@@ -2043,7 +2169,7 @@ export function parse(src) {
           peek().tag !== TokenTags.eof
         ) {
           const fieldNode = buildSourcedNode(ASTNodeKind.STRUCT_LITERAL_FIELD);
-          fieldNode.name = parseIdentAsName();
+          fieldNode.name = parseIdentOrKeywordAsName();
           expect(TokenTags.colon);
           fieldNode.value = parseExpression();
           vc.fields.push(fieldNode);
@@ -2757,6 +2883,7 @@ export function parse(src) {
           after.tag === TokenTags.implements ||
           after.tag === TokenTags.propagates ||
           after.tag === TokenTags.contains ||
+          isContainsKeywordIdent(after) ||
           after.tag === TokenTags.lcurly
         ) {
           node.kindPrefix = consumeKindPrefixWithArgs();
@@ -2792,32 +2919,36 @@ export function parse(src) {
       node.fields = [];
       node.methods = [];
       expect(TokenTags.lcurly);
-      while (
-        peek().tag === TokenTags.ident ||
-        peek().tag === TokenTags.function
-      ) {
-        if (peek().tag === TokenTags.function) {
+      while (isIdentLikeTag(peek().tag)) {
+        // `function NAME(...)` is a method decl. `function: T` is a field
+        // whose name happens to be `function` - disambiguate via the trailing
+        // colon. Reserved keywords are accepted as field names so C-style
+        // names like `type`, `kind`, `enum` don't collide with the grammar.
+        if (
+          peek().tag === TokenTags.function &&
+          peekAhead(1).tag !== TokenTags.colon
+        ) {
           node.methods.push(parseMethodDecl());
-        } else {
-          const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
-          fieldNode.name = parseIdentAsName();
-          expect(TokenTags.colon);
-          // Detect kind-prefix on field type: `IDENT IDENT` after colon.
-          // Parse it fully so the typechecker can emit a clear error message.
-          fieldNode.kindPrefix = null;
-          if (peek().tag === TokenTags.ident && peekAhead(1).tag === TokenTags.ident) {
-            const kindTok = advance();
-            fieldNode.kindPrefix = {
-              name: src.substring(kindTok.start, kindTok.start + kindTok.length),
-              sourceLoc: posToSourceLocation(src, kindTok.start),
-            };
-          }
-          fieldNode.typeAnnotation = parseTypeAnnotation();
-          node.fields.push(fieldNode);
-          if (peek().tag === TokenTags.comma) {
-            advance();
-          } // allow trailing comma
+          continue;
         }
+        const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
+        fieldNode.name = parseIdentOrKeywordAsName();
+        expect(TokenTags.colon);
+        // Detect kind-prefix on field type: `IDENT IDENT` after colon.
+        // Parse it fully so the typechecker can emit a clear error message.
+        fieldNode.kindPrefix = null;
+        if (peek().tag === TokenTags.ident && peekAhead(1).tag === TokenTags.ident) {
+          const kindTok = advance();
+          fieldNode.kindPrefix = {
+            name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+            sourceLoc: posToSourceLocation(src, kindTok.start),
+          };
+        }
+        fieldNode.typeAnnotation = parseTypeAnnotation();
+        node.fields.push(fieldNode);
+        if (peek().tag === TokenTags.comma) {
+          advance();
+        } // allow trailing comma
       }
       expect(TokenTags.rcurly);
     } else {
@@ -2879,17 +3010,23 @@ export function parse(src) {
     node.methods = [];
     expect(TokenTags.lcurly);
     const seenNames = new Set();
-    while (
-      peek().tag === TokenTags.ident ||
-      peek().tag === TokenTags.function
-    ) {
-      if (peek().tag === TokenTags.function) {
+    while (isIdentLikeTag(peek().tag)) {
+      // `function NAME(...)` is a method decl. A keyword-as-case-name like
+      // `function` is followed by `{` (payload), `,`, or `}` - never `(`. We
+      // use the trailing `(` to disambiguate, mirroring how struct bodies
+      // distinguish `function name(...)` (method) from `function: T` (field).
+      if (
+        peek().tag === TokenTags.function &&
+        peekAhead(1).tag !== TokenTags.lcurly &&
+        peekAhead(1).tag !== TokenTags.comma &&
+        peekAhead(1).tag !== TokenTags.rcurly
+      ) {
         node.methods.push(parseMethodDecl());
         continue;
       }
       const varTok = peek();
       const variant = buildSourcedNode(ASTNodeKind.VARIANT_CASE);
-      variant.name = parseIdentAsName();
+      variant.name = parseIdentOrKeywordAsName();
       if (seenNames.has(variant.name)) {
         throw parseError(
           `duplicate case name '${variant.name}' in variant '${node.name}'`,
@@ -2902,9 +3039,9 @@ export function parse(src) {
         // payload variant - { field: Type, ... }
         advance(); // consume {
         variant.fields = [];
-        while (peek().tag === TokenTags.ident) {
+        while (isIdentLikeTag(peek().tag)) {
           const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
-          fieldNode.name = parseIdentAsName();
+          fieldNode.name = parseIdentOrKeywordAsName();
           expect(TokenTags.colon);
           fieldNode.typeAnnotation = parseTypeAnnotation();
           fieldNode.kindPrefix = null;
@@ -2981,10 +3118,10 @@ export function parse(src) {
     node.cases = [];
     expect(TokenTags.lcurly);
     const seenNames = new Set();
-    while (peek().tag === TokenTags.ident) {
+    while (isIdentLikeTag(peek().tag)) {
       const caseTok = peek();
       const caseNode = buildSourcedNode(ASTNodeKind.ENUM_CASE);
-      caseNode.name = parseIdentAsName();
+      caseNode.name = parseIdentOrKeywordAsName();
       if (seenNames.has(caseNode.name)) {
         throw parseError(
           `duplicate case name '${caseNode.name}' in enum '${node.name}'`,
@@ -3039,9 +3176,9 @@ export function parse(src) {
     }
     node.fields = [];
     expect(TokenTags.lcurly);
-    while (peek().tag === TokenTags.ident) {
+    while (isIdentLikeTag(peek().tag)) {
       const fieldNode = buildSourcedNode(ASTNodeKind.FIELD_DECL);
-      fieldNode.name = parseIdentAsName();
+      fieldNode.name = parseIdentOrKeywordAsName();
       expect(TokenTags.colon);
       fieldNode.typeAnnotation = parseTypeAnnotation();
       fieldNode.kindPrefix = null;
@@ -3199,7 +3336,7 @@ export function parse(src) {
         );
       }
       advance(); // consume dot
-      const variantName = parseIdentAsName();
+      const variantName = parseIdentOrKeywordAsName();
       const p = buildSourcedNode(ASTNodeKind.VARIANT_PATTERN);
       p.isWildcard = false;
       p.enumName = enumName;
@@ -3221,11 +3358,15 @@ export function parse(src) {
             fb.isWildcard = true;
             fb.sourceLoc = posToSourceLocation(src, dtok.start);
           } else {
-            const fnameTok = expect(TokenTags.ident);
-            fb.fieldName = src.substring(
-              fnameTok.start,
-              fnameTok.start + fnameTok.length,
-            );
+            const fnameTok = peek();
+            if (!isIdentLikeTag(fnameTok.tag)) {
+              throw parseError(
+                `expected ident, got ${inverseTokenTags[fnameTok.tag]}`,
+                fnameTok.start,
+                fnameTok.length,
+              );
+            }
+            fb.fieldName = parseIdentOrKeywordAsName();
             fb.sourceLoc = posToSourceLocation(src, fnameTok.start);
             fb.isWildcard = false;
             fb.bindingName = fb.fieldName; // shorthand: bind to same name
@@ -3236,6 +3377,9 @@ export function parse(src) {
                 fb.isWildcard = true;
                 fb.bindingName = null;
               } else {
+                // The rename target is a new local binding, so it must be a
+                // plain ident - reserved words would shadow grammar roles in
+                // the case body.
                 const renameTok = expect(TokenTags.ident);
                 fb.bindingName = src.substring(
                   renameTok.start,
@@ -3365,6 +3509,26 @@ export function parse(src) {
     );
 
     return name;
+  }
+
+  // Like parseIdentAsName, but also accepts any reserved keyword token and
+  // returns its source text. Used in positions where the name is metadata
+  // (struct / variant / union / enum case + field decls, extern function
+  // parameter names, the RHS of `.`, and struct-literal field names) so the
+  // growing keyword set doesn't block common C-style names like `type`,
+  // `kind`, `enum`. The keyword's grammar role does not apply in these
+  // positions - they are syntactically unambiguous.
+  function parseIdentOrKeywordAsName() {
+    const tok = peek();
+    if (!isIdentLikeTag(tok.tag)) {
+      throw parseError(
+        `expected ident, got ${inverseTokenTags[tok.tag]}`,
+        tok.start,
+        tok.length,
+      );
+    }
+    advance();
+    return src.substring(tok.start, tok.start + tok.length);
   }
 
   function parseBlock() {

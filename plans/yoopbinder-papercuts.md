@@ -615,7 +615,31 @@ needs to call the same encoder the in-function path does.
 
 ### Issue 10 - Extern parameter names that collide with yoop reserved keywords
 
-**Severity: MEDIUM (blocks yoopbinder output for many C headers).**
+**Severity: MEDIUM (blocks yoopbinder output for many C headers). Path A
+LANDED for the scope below; path B no longer needed.**
+
+Landed via [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) -
+a new `parseIdentOrKeywordAsName` helper accepts any identifier-shaped
+token (plain IDENT or any reserved keyword) and is used in name-only
+positions where the keyword's grammar role doesn't apply:
+
+- Struct field decl names (`type Foo { type: int32, kind: int32 }`)
+- Union field decl names
+- Enum case names (`enum Tag { type, kind }`)
+- Variant case names + variant payload field decl names
+- Extern function parameter names (`function gl(type: uint32, ...): void`)
+- RHS of `.` (so `foo.type` reads the field)
+- Struct-literal field names (`{ type: 1, kind: 2 }`)
+- Variant constructor field names + variant-pattern field bindings
+
+User-defined function parameter names still require a plain IDENT - those
+become bindings inside the body and would shadow the keyword's grammar
+role.
+
+Regression tests in [parser.test.js - "parse: reserved keywords in
+name-only positions"](../src/jsyooparser/parser.test.js); end-to-end
+fixture [keyword_field_names.yoop](../examples/pass/keyword_field_names.yoop)
+exercises the full pipeline.
 
 #### Symptom
 
@@ -750,26 +774,24 @@ Issues 1, 2, 3 already landed - skipped here.
    Fix is likely small (route module-level const string init through
    the same encoder as in-function `STRING_LITERAL`). Highest impact
    per hour - silent miscompilation deserves to be at the top.
-2. **Issue 10 path B (binder-side keyword rename)** - unblocks
-   yoopbinder for any header with a `type` / `kind` / `enum` parameter
-   name, which is most of them. Maybe 30 lines in
-   [tools/yoopbinder/main.yoop](../tools/yoopbinder/main.yoop).
+2. **Issue 10 path A (parser-side keyword relaxation)** - LANDED.
+   Reserved keywords now accepted in name-only positions (struct /
+   union / enum / variant field + case names, extern param names,
+   field access RHS, struct-literal field names). Path B (binder-side
+   rename) is no longer needed.
 3. **Issue 11 (vec_extend)** - 10-line std/core/vec.yoop addition.
    Removes ceremony from any code that builds + merges Vecs.
 4. **Issue 6 (argv in main)** - small codegen change, makes CLI
    tools feel native instead of leaning on a runtime helper.
-5. **Issue 10 path A (parser-side keyword relaxation in extern)** -
-   small grammar tweak, fixes hand-written externs too. Pick up
-   after B; B alone unblocks the binder pipeline.
-6. **Issue 4 (opaque-extern `ref T` in user fns)** - real codegen
+5. **Issue 4 (opaque-extern `ref T` in user fns)** - real codegen
    investigation, but the workaround is already widely used and
    documented. Less urgent.
-7. **Issue 5 (printf format strings)** - mostly a documentation +
+6. **Issue 5 (printf format strings)** - mostly a documentation +
    `print`/`println` helper rollout. Low engineering cost, low impact.
-8. **Issue 8 (disposable inference)** - per maintainer guidance, the
+7. **Issue 8 (disposable inference)** - per maintainer guidance, the
    explicit-keyword discipline stays. Close unless inference for the
    unambiguous case is genuinely wanted.
-9. **Issue 7 (Vec corruption)** - needs an investigation pass first.
+8. **Issue 7 (Vec corruption)** - needs an investigation pass first.
    Could turn out to be a non-issue or a real codegen bug; we don't
    know yet. Three minimal repros tried at the time, none triggered;
    may be retire-able after one more look.

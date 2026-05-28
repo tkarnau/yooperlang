@@ -217,7 +217,7 @@ export const tokenScanList = [
   { str: "@", tag: TokenTags.at },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
-const keywordTagList = {
+export const keywordTagList = {
   let: TokenTags.let,
   function: TokenTags.function,
   const: TokenTags.const,
@@ -265,7 +265,11 @@ const keywordTagList = {
   joined: TokenTags.joined,
   pooled: TokenTags.pooled,
   propagates: TokenTags.propagates,
-  contains: TokenTags.contains,
+  // `contains` is recognized CONTEXTUALLY by the parser inside kind decls and
+  // propagation clauses (`isContainsKeywordIdent`). It lexes as an ordinary
+  // IDENT so it stays usable as a normal identifier in user code
+  // (chat-agent-papercut #3).
+  // contains: TokenTags.contains,  // intentionally absent
   layout: TokenTags.layout,
   align: TokenTags.align,
   switch: TokenTags.switch,

@@ -1,0 +1,15 @@
+// Clearance kinds: passing a plain string to a `cleared` (conferred) sink
+// is rejected. A conferred kind cannot be forged; you must obtain it from a
+// function whose return type declares `cleared`.
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+}
+
+function sink(value: cleared string): void {}
+
+function main(): int32 {
+    sink("raw and uncleared");
+    return 0;
+}

@@ -334,6 +334,18 @@ export function KindType(name, moduleId) {
   this.requires = [];                       // array of TraitType
   this.mustCall = [];                       // array of { methodName, timing, traitType }
   this.ownsBlock = false;
+  // clearance kinds: marker polarity. null = obligation kind (disposable etc.);
+  // "conferred" = capability a slot must have (lower bound); "restrictive" =
+  // hazard a slot must not have (upper bound). A marker kind carries no
+  // mustCall obligation - the two are mutually exclusive.
+  this.marker = null;                      // null | "conferred" | "restrictive"
+  // clearance kinds: name of the user function authorized to transition this
+  // kind. `clearedBy` is the only function permitted to strip a restrictive
+  // kind from a value; `appliedBy` is the only function permitted to confer
+  // a conferred kind. The kind decl is the source of truth - random functions
+  // with a matching signature shape are NOT authorized.
+  this.clearedBy = null;                   // string | null (only on restrictive)
+  this.appliedBy = null;                 // string | null (only on conferred)
   this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
   this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
   this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
