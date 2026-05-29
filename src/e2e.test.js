@@ -1682,6 +1682,32 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
+  it("at_precompile_log.yoop: a @precompile block can call std/log; namespace calls resolve and the sinks print at comptime", () => {
+    // The comptime log output is written to the parent process's stderr
+    // during compileEntry (inside runFixtureEntry), so capture it around
+    // that call. The compiled binary's own stdout/stderr come back
+    // through spawnSync and are unaffected by the capture.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    process.stderr.write = (chunk) => { captured += String(chunk); return true; };
+    let result;
+    try {
+      result = runFixtureEntry("examples/pass/at_precompile_log.yoop");
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    // Comptime: all three levels printed with the `[comptime] [<level>]`
+    // banner, and the folded module-level binding was interpolated.
+    assert.match(captured, /\[comptime\] \[info\] precompile: starting setup\n/);
+    assert.match(captured, /\[comptime\] \[warn\] precompile: configured 6 slots\n/);
+    assert.match(captured, /\[comptime\] \[error\] precompile: nothing actually wrong, just exercising the sink\n/);
+    // Runtime: the program runs normally - log.info goes to stderr,
+    // printf goes to stdout, and the comptime-folded READY shows 6.
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "READY=6\n");
+    assert.equal(result.stderr, "[info] runtime: program started\n");
+  });
+
   it("at_precompile_block_unfoldable.yoop: block form hitting a non-whitelisted extern surfaces as a hard build error", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/at_precompile_block_unfoldable.yoop"),

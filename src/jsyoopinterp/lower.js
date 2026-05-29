@@ -1384,14 +1384,34 @@ function lowerExpr(node, ctx, scope) {
             node.sourceLoc,
           );
         }
+        // Namespace-qualified call (`log.info(...)`): the typechecker
+        // stamps `namespaceLookup = { moduleId, exportName }` on the
+        // callee FIELD_ACCESS node rather than `calleeModuleId` /
+        // `calleeExportName` on the CALL_EXPRESSION itself. Normalize
+        // both shapes to (name, moduleId, exportName) before resolving
+        // so a plain `f(...)` and a namespaced `ns.f(...)` reach the
+        // same resolver path.
+        const nsLookup =
+          node.callee && typeof node.callee === "object"
+            ? node.callee.namespaceLookup
+            : null;
+        const calleeName = nsLookup ? nsLookup.exportName : node.callee;
+        const calleeModuleId = nsLookup
+          ? nsLookup.moduleId
+          : node.calleeModuleId ?? null;
+        const calleeExportName = nsLookup
+          ? nsLookup.exportName
+          : node.calleeExportName ?? null;
         resolved = ctx.fnResolver(
-          node.callee,
-          node.calleeModuleId ?? null,
-          node.calleeExportName ?? null,
+          calleeName,
+          calleeModuleId,
+          calleeExportName,
         );
         if (!resolved) {
+          const displayName =
+            typeof calleeName === "string" ? calleeName : "<call>";
           throw new ComptimeError(
-            `comptime: function '${node.callee}' is not comptime-evaluable (non-whitelisted extern, generic-unresolved, or in a not-yet-lowered module)`,
+            `comptime: function '${displayName}' is not comptime-evaluable (non-whitelisted extern, generic-unresolved, or in a not-yet-lowered module)`,
             node.sourceLoc,
           );
         }
