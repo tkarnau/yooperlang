@@ -1451,6 +1451,16 @@ export function codegen(ast) {
     let fmtSpec = "";
     const valueArgs = []; // { val, yoopType } that follow the format string
 
+    // A call that includes an explicit format-string literal is C printf: the
+    // literal's `%` directives are authoritative and trailing value args fill
+    // them, so we must NOT auto-append a specifier per value arg (doing so
+    // produced a doubled directive, e.g. `printf("x=%d\n", x)` -> "x=%d\n%d").
+    // Auto-append only when there is no format literal (`printf(someString)` ->
+    // "%s") and for template-literal interpolations (no explicit directive).
+    const hasFormatLiteral = node.args.some(
+      (a) => a.kind === ASTNodeKind.STRING_LITERAL,
+    );
+
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         // raw format text - strip the surrounding quotes, keep escapes intact
@@ -1468,7 +1478,7 @@ export function codegen(ast) {
         }
       } else {
         const r = emitExpr(argNode, fnLines);
-        fmtSpec += printfSpec(r.yoopType);
+        if (!hasFormatLiteral) fmtSpec += printfSpec(r.yoopType);
         valueArgs.push(r);
       }
     }
@@ -5028,6 +5038,13 @@ function codegenWithModuleId(
     if (node.args.length === 0) throw new Error("codegen: printf called with no arguments");
     let fmtSpec = "";
     const valueArgs = [];
+    // See emitPrintfCall: an explicit format-string literal is C printf, so a
+    // bare value arg fills a `%` directive already in the string and must not
+    // get an auto-appended specifier. Only auto-append with no format literal
+    // (`printf(someString)`) or for template-literal interpolations.
+    const hasFormatLiteral = node.args.some(
+      (a) => a.kind === ASTNodeKind.STRING_LITERAL,
+    );
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         fmtSpec += argNode.value.slice(1, -1);
@@ -5038,7 +5055,7 @@ function codegenWithModuleId(
         }
       } else {
         const r = emitExpr(argNode, fnLines);
-        fmtSpec += printfSpec(r.yoopType);
+        if (!hasFormatLiteral) fmtSpec += printfSpec(r.yoopType);
         valueArgs.push(r);
       }
     }

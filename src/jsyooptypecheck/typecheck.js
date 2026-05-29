@@ -2985,6 +2985,16 @@ export function typecheckProgram(modules) {
         (d.kind === ASTNodeKind.LET_DECL || d.kind === ASTNodeKind.CONST_DECL) &&
         d.isModuleLevel
       ) {
+        if (d.typeAnnotation === null) {
+          // No annotation: the type is inferred from the initializer in pass
+          // D.0 (validateModuleInit), where the full per-module typeContext
+          // and all same-module function signatures are available. Leave the
+          // ErrorType shell in place until then; resolvedType stays null as a
+          // "needs inference" sentinel (distinct from an ErrorType failure).
+          d.resolvedType = null;
+          mod.moduleInitDecls.push(d);
+          continue;
+        }
         const declaredType =
           resolveTypeAnnotationInModule(
             d.typeAnnotation,

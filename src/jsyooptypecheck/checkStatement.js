@@ -13,6 +13,7 @@ import {
   ArrayType,
   ErrorType,
   KindApplication,
+  PrimType,
   RefType,
   StructType,
   primAnnotations,
@@ -236,6 +237,30 @@ export function validateModuleInit(decl, typeContext, errors) {
     inLoop: false,
     inTaskBody: false,
   };
+  // No annotation (resolvedType left null by pass C.4): infer the binding's
+  // type from its initializer and publish it so function bodies in this module
+  // - and any importer, which typechecks later in topological order - resolve
+  // the name to the inferred type rather than the ErrorType shell.
+  if (decl.typeAnnotation === null) {
+    const rhsType = resolveExprType(decl.assignment, scope, ctx);
+    decl.resolvedType = concretizeInferred(rhsType) ?? ErrorType();
+    if (decl.resolvedType.kind === typeKinds.error) {
+      pushError(errors, decl,
+        `cannot infer a type for "${decl.name}"; add an explicit type annotation`);
+    } else {
+      if (
+        decl.resolvedType.kind === typeKinds.array &&
+        decl.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+      ) {
+        // Re-pin an untyped array literal to its concrete element type so
+        // codegen emits a concrete element type (see checkLetOrConst).
+        checkArrayLiteralWithElemType(decl.assignment, decl.resolvedType.elem, scope, ctx);
+      }
+      typeContext.moduleSymbols.set(decl.name, decl.resolvedType);
+    }
+    popScope(scope, errors);
+    return;
+  }
   checkInitializer(
     decl.assignment,
     decl.resolvedType,
@@ -327,6 +352,24 @@ function checkBlock(node, scope, ctx) {
 //   - validate the RHS struct type implements every trait in kind.requires
 //   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
 //     the name in the trailing block's scope rather than the enclosing one
+// When a binding omits its type annotation, its type is inferred from the
+// initializer. Bare integer/float literals resolve to the `untypedInt` /
+// `untypedFloat` placeholders, which exist only to be pinned by a surrounding
+// context; with no annotation there is no such context, so default them to the
+// same concrete types an explicit annotation would have produced (int32 /
+// float64). Recurse into array element types so `const xs = [1, 2];` infers
+// `int32[]` rather than the un-emittable `untypedInt[]`.
+function concretizeInferred(t) {
+  if (!t) return t;
+  if (t.kind === typeKinds.untypedInt) return PrimType("int32");
+  if (t.kind === typeKinds.untypedFloat) return PrimType("float64");
+  if (t.kind === typeKinds.array) {
+    const elem = concretizeInferred(t.elem);
+    return elem === t.elem ? t : ArrayType(elem);
+  }
+  return t;
+}
+
 function checkLetOrConst(node, scope, ctx) {
   // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
@@ -335,10 +378,42 @@ function checkLetOrConst(node, scope, ctx) {
     return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
   }
 
-  const declaredType =
-    resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
-  if (declaredType.kind === typeKinds.error) {
-    pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
+  // No annotation: infer the binding's type from its initializer. The parser
+  // guarantees a module-level binding without an annotation has an initializer;
+  // a local one might not, which is an error (nothing to infer from).
+  const inferred = node.typeAnnotation === null;
+  let declaredType;
+  if (inferred) {
+    if (!node.assignment) {
+      pushError(ctx.errors, node,
+        `binding "${node.name}" needs either a type annotation or an initializer to infer from`);
+      declaredType = ErrorType();
+    } else {
+      const rhsType = resolveExprType(node.assignment, scope, ctx);
+      declaredType = concretizeInferred(rhsType) ?? ErrorType();
+      // resolveExprType already reports a specific error for expressions that
+      // cannot be typed without a target (bare struct literals, empty array
+      // literals); add an inference-focused hint pointing at the fix.
+      if (declaredType.kind === typeKinds.error) {
+        pushError(ctx.errors, node,
+          `cannot infer a type for "${node.name}"; add an explicit type annotation`);
+      } else if (
+        declaredType.kind === typeKinds.array &&
+        node.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+      ) {
+        // resolveArrayLiteral leaves the literal (and its elements) typed as
+        // `untypedInt[]`/`untypedFloat[]`; re-pin them to the concretized
+        // element type so codegen sees a concrete element type, matching the
+        // annotated `const xs: int32[] = [...]` path.
+        checkArrayLiteralWithElemType(node.assignment, declaredType.elem, scope, ctx);
+      }
+    }
+  } else {
+    declaredType =
+      resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
+    if (declaredType.kind === typeKinds.error) {
+      pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
+    }
   }
   node.resolvedType = declaredType;
 
@@ -374,7 +449,7 @@ function checkLetOrConst(node, scope, ctx) {
   node.resolvedKindType = kindType;
   node.resolvedKindApplication = kindApp;
 
-  if (node.assignment) {
+  if (node.assignment && !inferred) {
     // Generic function calls need to flow through checkInitializer so the
     // declared LHS type can drive return-type inference (e.g. heap_alloc).
     // The eager resolveExprType inside isTaskCallReturningType would otherwise

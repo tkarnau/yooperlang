@@ -91,6 +91,24 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("type_inference.yoop: let/const bindings infer their type from the initializer", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/type_inference.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "str is world\ncount is 54, flag is 1\npoint is 3,4\n",
+    );
+  });
+
+  it("printf_format.yoop: explicit %-directives in a format string are not doubled", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/printf_format.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "x=10\nx=10 y=20\nname=Tom x=10\ntemplate x is 10\nTom\n",
+    );
+  });
+
   it("parens_basic.yoop groups subexpressions and composes with postfix ops", () => {
     const { stdout, exitCode } = runFixture("examples/pass/parens_basic.yoop");
     assert.equal(exitCode, 0);

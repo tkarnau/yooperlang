@@ -41,6 +41,21 @@ describe("typecheckSource: well-typed programs produce zero errors", () => {
     );
     assert.deepEqual(errors, []);
   });
+
+  it("binding with no annotation infers its type from the initializer", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 { const s = 7; let t = s + 1; return t; }",
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("inferred int binding defaults to int32 (usable where int32 is wanted)", () => {
+    const { errors } = typecheckSource(
+      "function takes_i32(n: int32): int32 { return n; }\n" +
+        "function main(): int32 { const x = 5; return takes_i32(x); }",
+    );
+    assert.deepEqual(errors, []);
+  });
 });
 
 describe("typecheckSource: ill-typed programs report positioned errors", () => {
@@ -82,6 +97,21 @@ describe("typecheckSource: ill-typed programs report positioned errors", () => {
       "function main(): int32 { let x: int8 = 200; return 0; }",
     );
     assert.ok(errors.some((e) => /out of range|range/i.test(e.message)));
+  });
+
+  it("binding with neither annotation nor initializer cannot infer", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 { let x; return 0; }",
+    );
+    assert.ok(errors.some((e) => /type annotation or an initializer/.test(e.message)));
+  });
+
+  it("inferring from an orphan struct literal is rejected with a hint", () => {
+    const { errors } = typecheckSource(
+      "type Point { x: int32, y: int32 }\n" +
+        "function main(): int32 { const p = { x: 1, y: 2 }; return p.x; }",
+    );
+    assert.ok(errors.some((e) => /cannot infer a type/.test(e.message)));
   });
 });
 

@@ -229,6 +229,20 @@ describe("parse: statements", () => {
     assert.equal(stmts[0].kind, ASTNodeKind.CONST_DECL);
   });
 
+  it("let decl with no annotation leaves typeAnnotation null (inferred)", () => {
+    const stmts = bodyOf("let x = 1;");
+    assert.equal(stmts[0].kind, ASTNodeKind.LET_DECL);
+    assert.equal(stmts[0].name, "x");
+    assert.equal(stmts[0].typeAnnotation, null);
+    assert.ok(stmts[0].assignment);
+  });
+
+  it("const decl with no annotation leaves typeAnnotation null (inferred)", () => {
+    const stmts = bodyOf('const s = "hello";');
+    assert.equal(stmts[0].kind, ASTNodeKind.CONST_DECL);
+    assert.equal(stmts[0].typeAnnotation, null);
+  });
+
   it("if statement with else", () => {
     const stmts = bodyOf("if (1) { } else { }");
     assert.equal(stmts[0].kind, ASTNodeKind.IF_STATEMENT);

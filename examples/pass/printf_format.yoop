@@ -1,0 +1,18 @@
+// printf with explicit C-style format directives in a string literal: the
+// directives in the format string are authoritative and trailing args fill
+// them (no auto-appended specifier). Template literals and bare-value printf
+// still auto-format.
+
+function main(): int32 {
+  let x: int32 = 10;
+  let y: int32 = 20;
+  const name: string = "Tom";
+
+  printf("x=%d\n", x);              // single directive
+  printf("x=%d y=%d\n", x, y);      // two directives, two args
+  printf("name=%s x=%d\n", name, x); // mixed %s + %d
+  printf(`template x is ${x}\n`);   // template literal still works
+  printf(name);                     // bare string value -> %s
+  printf("\n");
+  return 0;
+}

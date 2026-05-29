@@ -2555,8 +2555,14 @@ export function parse(src) {
     node.trailingBlock = null;
 
     node.name = parseIdentAsName();
-    expect(TokenTags.colon);
-    node.typeAnnotation = parseTypeAnnotation();
+    // The type annotation is optional: when omitted, the typechecker infers
+    // the binding's type from its initializer (`const testStr = "hello";`).
+    if (peek().tag === TokenTags.colon) {
+      advance(); // consume :
+      node.typeAnnotation = parseTypeAnnotation();
+    } else {
+      node.typeAnnotation = null;
+    }
 
     // Kind-prefixed bindings always require an initializer; the `mustCall`
     // obligation has nothing to bind against without one.
@@ -2607,16 +2613,14 @@ export function parse(src) {
         1,
       );
     }
-    if (!decl.typeAnnotation) {
-      throw parseError(
-        "module-level binding requires an explicit type annotation",
-        decl.sourceLoc?.pos ?? 0,
-        1,
-      );
-    }
+    // A module-level binding may omit its type annotation; the typechecker
+    // infers the type from the initializer. The initializer is therefore
+    // mandatory - without an annotation OR a value there is nothing to bind.
     if (!decl.assignment) {
       throw parseError(
-        "module-level binding requires an initializer (= expr)",
+        decl.typeAnnotation
+          ? "module-level binding requires an initializer (= expr)"
+          : "module-level binding without a type annotation requires an initializer to infer from",
         decl.sourceLoc?.pos ?? 0,
         1,
       );
