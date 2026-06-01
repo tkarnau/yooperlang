@@ -7,6 +7,7 @@
 import { Display } from "std/core/traits.yoop";
 import { SocketAddr } from "std/net/addr.yoop";
 import * as addr from "std/net/addr.yoop";
+import * as net from "std/net/addr.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -30,9 +31,20 @@ function main(): int32 {
     // Mix Display + primitive interpolations in the same template.
     printf(`p=${p} x=${p.x}\n`);
     printf(`addr=${addr} port=${addr.port}\n`);
+
+    // A cross-module Display type used straight from a function call
+    // result (no annotation) must still resolve Display - the returned
+    // struct instance can be a pass-A shell with an empty
+    // implementsTraits, so the interpolation re-fetches the canonical
+    // type from its module's structTable.
+    let inferred = net.localhost(9090);
+    printf(`inferred=${inferred}\n`);
+    printf(`direct=${net.localhost(7070)}\n`);
     return 0;
 }
 
 // expected output:
 // p=Point x=3
 // addr=127.0.0.1 port=8080
+// inferred=127.0.0.1
+// direct=127.0.0.1

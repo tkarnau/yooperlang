@@ -291,7 +291,10 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   it("display_templates: Display trait wires into template literal interpolations", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/display_templates.yoop");
     assert.equal(exitCode, 0);
-    assert.equal(stdout, "p=Point x=3\naddr=127.0.0.1 port=8080\n");
+    assert.equal(
+      stdout,
+      "p=Point x=3\naddr=127.0.0.1 port=8080\ninferred=127.0.0.1\ndirect=127.0.0.1\n",
+    );
   });
 
   it("debug_smoke: assert(true, ...) is a no-op; normal-path codegen unaffected", () => {
@@ -650,6 +653,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/value_enum_string.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "asc\nnot desc\n");
+  });
+
+  it("value_enum_template.yoop: value enums interpolate as their underlying primitive", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_template.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "level=warn color=2\nfirst=info count=1\n");
   });
 
   it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {

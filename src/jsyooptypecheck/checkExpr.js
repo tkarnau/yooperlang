@@ -593,6 +593,26 @@ function resolveUnary(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
+// Re-fetch the canonical, fully-resolved struct from its module's
+// structTable. The struct flowing out of an imported function's return
+// type (or an enum payload, etc.) may be a pass-A shell with an empty
+// `implementsTraits`, so a direct `.implementsTraits` read misses the
+// trait. Mirrors the technique in `lookupIntoImpl` and
+// `resolveTraitQualifiedCall`.
+function canonicalStructType(structType, ctx) {
+  if (!structType || structType.kind !== typeKinds.struct) return structType;
+  const moduleEnv = ctx.typeContext?.moduleEnv;
+  if (structType.moduleId && moduleEnv) {
+    const env = moduleEnv.get(structType.moduleId);
+    const fromTable = env?.structTable?.get(structType.name);
+    if (fromTable) return fromTable;
+  } else if (ctx.typeContext?.structTable) {
+    const fromTable = ctx.typeContext.structTable.get(structType.name);
+    if (fromTable) return fromTable;
+  }
+  return structType;
+}
+
 // `` `hi ${name}` `` - every interpolation must be a printable scalar
 // (string, bool, or any numeric type) or a type that implements
 // `Display`. For Display types we rewrite the interpolation at
@@ -606,7 +626,10 @@ function resolveTemplateLiteral(node, scope, ctx) {
       if (isPrintableInTemplate(exprType)) continue;
       // Phase 9.F: try Display. Look for a `Display` trait on the
       // (deref'd) struct's implementsTraits; synthesize a trait call.
-      const innerType = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
+      // Re-fetch the canonical struct first - an imported type's shell
+      // can have an empty implementsTraits (see canonicalStructType).
+      const derefed = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
+      const innerType = canonicalStructType(derefed, ctx);
       if (
         innerType.kind === typeKinds.struct &&
         (innerType.implementsTraits ?? []).some((t) => t.name === "Display")
@@ -669,6 +692,12 @@ function synthesizeDisplayCall(originalExpr, structType, exprType) {
 
 function isPrintableInTemplate(t) {
   if (!t) return false;
+  // Phase 12: a value enum is a nominal alias over a primitive underlying
+  // type, so it prints exactly like that primitive (the string value for
+  // `enum<string>`, the int for an int-backed enum). Codegen sees through
+  // the alias to the underlying. Tagged variants (payload-carrying sum
+  // types) are NOT covered here - those need a Display impl.
+  if (t.kind === typeKinds.valueEnum) return isPrintableInTemplate(t.underlying);
   if (t.kind === typeKinds.prim && t.name === primAnnotations.string)
     return true;
   if (t.kind === typeKinds.prim && t.name === primAnnotations.bool) return true;

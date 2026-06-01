@@ -310,8 +310,16 @@ function encodeStringForRawGlobal(s) {
   return out;
 }
 
+// Phase 12: a value enum collapses to its underlying primitive at the LLVM
+// level, so for any printf/varargs purpose it behaves exactly as that
+// primitive. Unwrap once here so format-spec and promotion logic stay simple.
+function valueEnumUnderlying(t) {
+  return t && t.kind === typeKinds.valueEnum ? t.underlying : t;
+}
+
 // pick a printf format specifier for a yooper type
 export function printfSpec(t) {
+  t = valueEnumUnderlying(t);
   if (t.kind === typeKinds.struct) {
     throw new Error(
       `codegen bug: struct ${t.name} reached printf - typechecker should have rejected`,
@@ -331,6 +339,7 @@ export function printfSpec(t) {
 // when a value is passed through C variadic printf, small ints/floats get
 // promoted. report the LLVM type that the call site should use.
 function promotedLlvmType(t) {
+  t = valueEnumUnderlying(t);
   if (t.kind === typeKinds.prim) {
     if (t.name === "string") return "ptr";
     if (t.name === "bool") return "i32";
@@ -1496,24 +1505,27 @@ export function codegen(ast) {
     const argList = ["ptr " + fmtTmp]
       .concat(
         valueArgs.map((r) => {
-          const promoted = promotedLlvmType(r.yoopType);
-          const actual = llvmType(r.yoopType);
+          // value enums share their underlying primitive's LLVM repr and
+          // promotion rules (see valueEnumUnderlying).
+          const vt = valueEnumUnderlying(r.yoopType);
+          const promoted = promotedLlvmType(vt);
+          const actual = llvmType(vt);
           if (promoted !== actual) {
             // varargs promotion: widen the value to the promoted type
             const tmp = freshTemp();
-            if (isIntType(r.yoopType)) {
-              const op = isUnsignedIntPrim(r.yoopType.name) ? "zext" : "sext";
+            if (isIntType(vt)) {
+              const op = isUnsignedIntPrim(vt.name) ? "zext" : "sext";
               fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
             } else if (
-              r.yoopType.kind === typeKinds.prim &&
-              r.yoopType.name === "bool"
+              vt.kind === typeKinds.prim &&
+              vt.name === "bool"
             ) {
               fnLines.push(`  ${tmp} = zext ${actual} ${r.val} to ${promoted}`);
-            } else if (isFloatType(r.yoopType)) {
+            } else if (isFloatType(vt)) {
               fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
             } else {
               throw new Error(
-                `codegen: don't know how to promote ${r.yoopType.kind}/${r.yoopType.name ?? ""} for varargs`,
+                `codegen: don't know how to promote ${vt.kind}/${vt.name ?? ""} for varargs`,
               );
             }
             return `${promoted} ${tmp}`;
@@ -5063,19 +5075,22 @@ function codegenWithModuleId(
     const fmtTmp = freshTemp();
     fnLines.push(`  ${fmtTmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`);
     const argList = ["ptr " + fmtTmp].concat(valueArgs.map((r) => {
-      const promoted = promotedLlvmType(r.yoopType);
-      const actual = llvmType(r.yoopType);
+      // value enums share their underlying primitive's LLVM repr and
+      // promotion rules (see valueEnumUnderlying).
+      const vt = valueEnumUnderlying(r.yoopType);
+      const promoted = promotedLlvmType(vt);
+      const actual = llvmType(vt);
       if (promoted !== actual) {
         const tmp = freshTemp();
-        if (isIntType(r.yoopType)) {
-          const op = isUnsignedIntPrim(r.yoopType.name) ? "zext" : "sext";
+        if (isIntType(vt)) {
+          const op = isUnsignedIntPrim(vt.name) ? "zext" : "sext";
           fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
-        } else if (r.yoopType.kind === typeKinds.prim && r.yoopType.name === "bool") {
+        } else if (vt.kind === typeKinds.prim && vt.name === "bool") {
           fnLines.push(`  ${tmp} = zext ${actual} ${r.val} to ${promoted}`);
-        } else if (isFloatType(r.yoopType)) {
+        } else if (isFloatType(vt)) {
           fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
         } else {
-          throw new Error(`codegen: don't know how to promote ${r.yoopType.kind}/${r.yoopType.name ?? ""} for varargs`);
+          throw new Error(`codegen: don't know how to promote ${vt.kind}/${vt.name ?? ""} for varargs`);
         }
         return `${promoted} ${tmp}`;
       }

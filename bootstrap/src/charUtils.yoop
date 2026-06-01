@@ -5,7 +5,7 @@
 */
 
 export function isHexDigit(ch: uint8): bool {
-  const result: bool = (
+  const result = (
     (ch >= 48 && ch <= 57) ||
     (ch >= 97 && ch <= 102) ||
     (ch >= 65 && ch <= 70)

@@ -4,3 +4,215 @@
   
   Main lexer logic
 */
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+import { Result } from "std/core/types.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Display } from "std/core/traits.yoop";
+import * as log from "std/log.yoop";
+
+enum TokenTags<string> {
+  // atoms
+  EOF "EOF",
+  IDENT "IDENT", // NOT A KEYWORD
+  INTLITERAL "INTLITERAL",
+  STRLITERAL "STRLITERAL", // INCLUDED WRAPPING QUOTE CHARACTERS
+  TEMPLATELITERAL "TEMPLATELITERAL", // BACKTICK-QUOTED, MAY CONTAIN ${...} INTERPOLATIONS
+  FLOATLITERAL "FLOATLITERAL",
+
+  // KEYWORDS
+  LET "LET",
+  FUNCTION "FUNCTION",
+  CONST "CONST",
+  RETURN "RETURN",
+  IF "IF",
+  ELSE "ELSE",
+  WHILE "WHILE",
+  FOR "FOR",
+  // PHASE 9.D: `FOR ITEM IN XS { ... }` ITERATION FORM.
+  IN "IN",
+  TYPE "TYPE",
+  IMPORT "IMPORT",
+  EXPORT "EXPORT",
+  EXTERN "EXTERN",
+  FROM "FROM",
+  AS "AS",
+  LIBRARY "LIBRARY",
+  DOTDOTDOT "DOTDOTDOT", // FOR VARIADIC PARAMS AND REST PATTERNS
+  REF "REF",
+  BREAK "BREAK",
+  CONTINUE "CONTINUE",
+  LBRACKET "LBRACKET", // [
+  RBRACKET "RBRACKET", // ]
+  TRUE "TRUE",
+  FALSE "FALSE",
+  TRAIT "TRAIT",
+  IMPLEMENTS "IMPLEMENTS",
+  SELF "SELF",
+  EXTENDS "EXTENDS",
+  // PHASE 9.G: `VTABLE NAME FOR TRAITNAME { ... }` - DECLARES THE
+  // TYPE-ERASED SHAPE OF A TRAIT. PAIRS WITH THE `=>` TOKEN (`FATARROW`)
+  // FOR FIELD TYPE ANNOTATIONS.
+  VTABLE "VTABLE",
+  KIND "KIND",
+  // KIND STUFF
+  APPLIESTO "APPLIESTO",
+  REQUIRES "REQUIRES",
+  MUSTCALL "MUSTCALL",
+  OWNSBLOCK "OWNSBLOCK",
+  BEFORESCOPEEND "BEFORESCOPEEND",
+  BINDING "BINDING",
+  // PHASE 6.2: ESCAPE AND SHARING
+  MUSTNOTESCAPE "MUSTNOTESCAPE",
+  MUSTNOTSHARE "MUSTNOTSHARE",
+  FORBIDS "FORBIDS",
+  SCOPE "SCOPE",
+  ACROSSSCOPES "ACROSSSCOPES",
+  PARAMETER "PARAMETER",
+  FIELD "FIELD",
+  IO "IO",
+  GLOBALSTATE "GLOBALSTATE",
+  // PHASE 6.3: TASK/CONCURRENCY
+  TASK "TASK",
+  WAIT "WAIT",
+  JOINED "JOINED",
+  POOLED "POOLED",
+  // PHASE 6.4: CONTAINMENT / PROPAGATION
+  PROPAGATES "PROPAGATES",
+  CONTAINS "CONTAINS",
+  // PHASE 6.5: LAYOUT / COMPOSITION
+  LAYOUT "LAYOUT",
+  ALIGN "ALIGN",
+  AMP "AMP", // STANDALONE & (COMPOSITION OPERATOR), DISTINCT FROM &&
+  // PHASE 7.5: SWITCH / PATTERNS / SUM TYPES / UNIONS
+  SWITCH "SWITCH",
+  CASE "CASE",
+  DEFAULT "DEFAULT",
+  ENUM "ENUM",
+  VARIANT "VARIANT",
+  UNION "UNION",
+  // PHASE 8.A: UNSAFE POINTERS
+  NULL "NULL",
+
+  // PUNCTUATION / OPERATORS
+  EQ "EQ",
+  SEMICOLON "SEMICOLON",
+  LPAREN "LPAREN",
+  RPAREN "RPAREN",
+  DISCARD "DISCARD",
+  LCURLY "LCURLY",
+  RCURLY "RCURLY",
+  COLON "COLON",
+  COMMA "COMMA",
+  EQEQ "EQEQ",
+  NEQ "NEQ",
+  LTE "LTE",
+  GTE "GTE",
+  LT "LT",
+  GT "GT",
+  ANDAND "ANDAND",
+  OROR "OROR",
+  PIPE "PIPE",
+  LSHIFT "LSHIFT",
+  RSHIFT "RSHIFT",
+  PLUS "PLUS",
+  MINUS "MINUS",
+  MULT "MULT",
+  DIVIDE "DIVIDE",
+  MODULUS "MODULUS",
+  DOT "DOT",
+  QUESTION "QUESTION",
+  // PHASE 9.E: ARRAY SLICE SYNTAX - `XS[I..J]`, `XS[..J]`, `XS[I..]`, `XS[..]`.
+  DOTDOT "DOTDOT",
+  // PHASE 9.B: LOGICAL NOT PREFIX - `!FLAG`. LEXER'S LONGEST-FIRST SORT KEEPS
+  // `!=` (`NEQ`) WINNING OVER `!` FOR THE BINARY CASE.
+  BANG "BANG",
+  // PHASE 9: BITWISE XOR (`^`) BINARY, BITWISE NOT (`~`) PREFIX.
+  CARET "CARET",
+  TILDE "TILDE",
+  // PHASE 9: COMPOUND ASSIGNMENTS - `X += Y` SHORTHAND FOR `X = X + Y`,
+  // IMPLEMENTED AS DEDICATED AST NODES SO THE LVALUE IS ADDRESSED ONCE.
+  PLUSEQ "PLUSEQ",
+  MINUSEQ "MINUSEQ",
+  MULTEQ "MULTEQ",
+  DIVIDEEQ "DIVIDEEQ",
+  MODULUSEQ "MODULUSEQ",
+  // PHASE 9.G: `=>` SEPARATOR FOR FUNCTION VALUE TYPES IN TYPE POSITION.
+  // ONLY LEGAL IN TYPE ANNOTATIONS (STRUCT FIELDS, PARAMETER / RETURN TYPES,
+  // VTABLE FIELDS). EXPRESSION-POSITION `=>` IS RESERVED FOR A FUTURE
+  // CLOSURE-LITERAL SYNTAX AND IS CURRENTLY A PARSE ERROR THERE.
+  FATARROW "FATARROW",
+  // PHASE 11.A: `@` PREFIX INTRODUCING A COMPILE-TIME / STATIC-ANALYSIS
+  // ATTRIBUTE (E.G. `@PRECOMPILE`, `@TEST`, `@VERIFY`). ALWAYS A
+  // COMPILE-TIME DIRECTIVE - NEVER QUERYABLE FROM RUNTIME CODE.
+  AT "AT",
+}
+
+
+export type Token implements Display {
+  tag: TokenTags,
+  start: int,
+  length: int,
+  intVal: int,
+  floatVal: float,
+  function to_string(ref self): string {
+    return `tag: ${self.tag}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
+  }
+}
+
+type LexedVal {
+  token: Token,
+  nextPos: int,
+}
+
+type LexedError {
+  pos: int,
+  error: string,
+}
+
+export function lexNext(src: string, pos: int32): Result<LexedVal, LexedError> {
+  let res: LexedVal = {
+    token: {
+      tag: TokenTags.EOF, // start as EOF
+      start: pos,
+      length: 0,
+      intVal: 0,
+      floatVal: 0.0,
+    },
+    nextPos: pos,
+  };
+
+  // skip whitespace
+  
+
+
+  return Result.Err { error: { error: "lexNext not yet implemented", pos: pos  } };
+}
+
+
+export function tokenize(src: string): Result<Token[], string> {
+  // should just allocate enough space for all possible / 2 for now... this might be a mistake :)
+  disposable tokens: Vec<Token> = vec.vec_new((src.len / 2) + 1); // minimum of 1
+  let pos = 0;
+  let iters = 0;
+  const maxIters = int32(src.len * 2 + 100);
+
+  while (iters < maxIters) {
+    iters += 1;
+    const lexResult = lexNext(src, pos);
+    switch (lexResult) {
+      case Result.Err { error: e } : {
+        log.error(`lexer error at ${e.pos}: ${e.error}`);
+      }
+      case Result.Ok { value: v } : {
+        if (v.token.tag == TokenTags.EOF) {
+          return Result.Ok { value: vec.vec_as_array(ref tokens) };
+        }
+        vec.vec_push(ref tokens, v.token);
+        pos = v.nextPos;
+      }
+    }
+  }
+
+  return Result.Err { error: "tokenize: exceeded iteration failsafe" };
+}

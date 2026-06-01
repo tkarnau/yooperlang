@@ -1,0 +1,26 @@
+// Phase 12: a value enum is a nominal alias over a primitive, so it is
+// interpolatable in a template literal exactly as that primitive - the
+// string value for `enum<string>`, the int for an int-backed enum.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Level<string> { Info "info", Warn "warn", Error "error" }
+
+enum Color { Red, Green, Blue }
+
+function main(): int32 {
+    let lvl: Level = Level.Warn;
+    let col: Color = Color.Blue;
+
+    // direct binding interpolation
+    printf(`level=${lvl} color=${col}\n`);
+    // a case constant interpolated inline
+    printf(`first=${Level.Info} count=${Color.Green}\n`);
+    return 0;
+}
+
+// expected output:
+// level=warn color=2
+// first=info count=1
