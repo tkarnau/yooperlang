@@ -1,0 +1,52 @@
+// Phase 11: comptime `std/log`. A `@precompile { ... }` block may call
+// the leveled logging functions from `std/log` (`log.info` / `log.warn`
+// / `log.error`). Two things make this work:
+//
+//   1. The comptime lowerer resolves namespace-qualified calls
+//      (`log.info(...)`) the same way it resolves a bare `f(...)` - it
+//      reads the `namespaceLookup = { moduleId, exportName }` the
+//      typechecker stamps on the callee FIELD_ACCESS node.
+//   2. The runtime sinks `log` forwards to (`yoop_log_info` / `_warn` /
+//      `_error`) are on the comptime extern whitelist, so they print at
+//      compile time instead of surfacing as a non-whitelisted-extern
+//      failure.
+//
+// Comptime log output goes to stderr with a `[comptime] [<level>]`
+// prefix so it's visibly distinct from both the compiler's own
+// diagnostics and the compiled program's runtime log lines (which the
+// e2e test asserts on separately). The block also folds a module-level
+// binding to prove ordinary @precompile state-write still works
+// alongside the logging.
+
+import * as log from "std/log.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+let READY: int32 = 0;
+
+@precompile {
+    log.info("precompile: starting setup");
+    let steps: int32 = 3;
+    READY = steps * 2;
+    log.warn(`precompile: configured ${READY} slots`);
+    log.error("precompile: nothing actually wrong, just exercising the sink");
+}
+
+function main(): int32 {
+    log.info("runtime: program started");
+    printf(`READY=${READY}\n`);
+    return 0;
+}
+
+// The comptime log lines (captured from stderr during compilation) are:
+//   [comptime] [info] precompile: starting setup
+//   [comptime] [warn] precompile: configured 6 slots
+//   [comptime] [error] precompile: nothing actually wrong, just exercising the sink
+//
+// expected stderr:
+// [info] runtime: program started
+//
+// expected stdout:
+// READY=6

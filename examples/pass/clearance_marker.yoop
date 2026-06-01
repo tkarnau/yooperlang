@@ -1,0 +1,65 @@
+// Clearance kinds: marker kinds whose transition authority is a TRAIT.
+//
+// Pairs cleanly with the disposable+Disposable pattern: the kind decl names
+// the required trait and the trait method that mediates the transition. Only
+// types that opt in (by implementing the trait with the named method) can
+// participate in laundering. Random free functions cannot launder - the
+// trait is the structural gate. The trait method has a plain signature; the
+// kind decl describes its semantic role.
+//
+//   cleared (conferred):  capability a sink REQUIRES; conferred only by
+//                         Cleansable.cleanse on a Cleansable impl.
+//   tainted (restrictive): hazard a plain slot FORBIDS; stripped only by
+//                         Cleansable.cleanse on a Cleansable impl.
+
+trait Cleansable<T> {
+    function cleanse(ref self): T;
+}
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Cleansable;
+    clearedBy cleanse;
+}
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Cleansable;
+    appliedBy cleanse;
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// A type opts in to being launderable by implementing Cleansable. The trait
+// method is the authorized site of transition; the kind decls describe what
+// it does. The impl returns a fresh, cleansed value.
+type LaunderableText implements Cleansable<LaunderableText> {
+    body: string,
+    function cleanse(ref self): LaunderableText {
+        return { body: "safe" };
+    }
+}
+
+// A source: produces a tainted value (restrictive widens freely).
+function untrusted(): tainted LaunderableText {
+    return { body: "danger" };
+}
+
+// A sink that only accepts a cleared value.
+function sink(label: string, value: cleared LaunderableText): void {
+    printf(`${label}: ${value.body}\n`);
+}
+
+function main(): int32 {
+    let dirty: tainted LaunderableText = untrusted();
+    let clean: cleared LaunderableText = Cleansable.cleanse(ref dirty);
+    sink("a", clean);
+    let dirty2: tainted LaunderableText = untrusted();
+    let clean2: cleared LaunderableText = Cleansable.cleanse(ref dirty2);
+    sink("b", clean2);
+    return 0;
+}

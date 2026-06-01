@@ -77,6 +77,11 @@ export const ASTNodeKind = Object.freeze({
   KIND_FORBIDS_CLAUSE: "KIND_FORBIDS_CLAUSE",
   // phase 6.5: layout / composition / parameterized kinds
   KIND_LAYOUT_CLAUSE: "KIND_LAYOUT_CLAUSE",
+  // clearance kinds: marker polarity (conferred | restrictive)
+  KIND_MARKER_CLAUSE: "KIND_MARKER_CLAUSE",
+  // clearance kinds: kind-decl-named transition authority
+  // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
+  KIND_TRANSITION_CLAUSE: "KIND_TRANSITION_CLAUSE",
 
   // phase 6.3: task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",
@@ -88,14 +93,26 @@ export const ASTNodeKind = Object.freeze({
   TYPE_PARAM: "TYPE_PARAM",
 
   // phase 7.5: switch / patterns / sum types / unions
+  // Phase 12: ENUM_DECL renamed to VARIANT_DECL (sum types); ENUM_VARIANT
+  // renamed to VARIANT_CASE (one case inside a variant decl). The `enum`
+  // keyword is reserved for the value-enum construct below.
   SWITCH_STATEMENT: "SWITCH_STATEMENT",
   SWITCH_ARM: "SWITCH_ARM",
   LITERAL_PATTERN: "LITERAL_PATTERN",
   VARIANT_PATTERN: "VARIANT_PATTERN",
-  ENUM_DECL: "ENUM_DECL",
-  ENUM_VARIANT: "ENUM_VARIANT",
+  VARIANT_DECL: "VARIANT_DECL",
+  VARIANT_CASE: "VARIANT_CASE",
   UNION_DECL: "UNION_DECL",
   VARIANT_CONSTRUCTOR: "VARIANT_CONSTRUCTOR",
+
+  // Phase 12: value enums - C-style named constants of a primitive
+  // underlying type (default int32). `enum<T> Name { Case (value)? , ... }`.
+  // ENUM_CASE is one case inside an ENUM_DECL; its valueExpr is parsed as a
+  // normal expression and const-evaluated at typecheck. The constructor and
+  // pattern AST kinds reuse VARIANT_CONSTRUCTOR / VARIANT_PATTERN - the
+  // typechecker stamps the right resolved type onto them.
+  ENUM_DECL: "ENUM_DECL",
+  ENUM_CASE: "ENUM_CASE",
 
   // phase 8.A: unsafe pointers
   ADDRESS_OF_EXPRESSION: "ADDRESS_OF_EXPRESSION",

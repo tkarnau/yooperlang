@@ -75,4 +75,52 @@ describe("compileSource: smoke", () => {
       /typecheck failed/,
     );
   });
+
+  it("template literal STRING_PARTs hex-escape embedded raw double-quotes", () => {
+    // Regression: a literal `"` in a template literal STRING_PART used to
+    // be emitted unescaped into the LLVM c-string constant, which both
+    // terminated the constant early and produced a [N x i8] header
+    // whose length didn't match the rendered body. clang rejected the
+    // IR with "constant expression type mismatch".
+    //
+    // We exercise two lowering paths:
+    //  - printf(`...`)   - fuses all parts into one format-string global
+    //  - return `...`    - calls string_concat_all over per-part globals
+    // The compileSource harness is single-module and doesn't autoload
+    // std/core/format.yoop, so we can't exercise the `return \`...\``
+    // path here (it lowers to string_concat_all). The printf lowering
+    // shares the same `encodeStringBytes` -> `emitRawStringGlobal`
+    // path for STRING_PARTs, so this is a sufficient regression for
+    // the underlying bug. End-to-end coverage of the return path
+    // lives in the yoopstore playground program.
+    const src = `
+      extern "C" from "stdio.h" { function printf(fmt: string, ...): int32; }
+      function main(): int32 {
+        let name: string = "yoop";
+        printf(\`fopen("\${name}", "wb") failed - check "\${name}.tmp"\\n\`);
+        return 0;
+      }
+    `;
+    const ir = compileSource(src);
+    const stringGlobals = ir
+      .split("\n")
+      .filter((l) => /private unnamed_addr constant \[\d+ x i8\]/.test(l));
+    const withQuote = stringGlobals.filter((l) => l.includes("\\22"));
+    assert.ok(withQuote.length >= 1, `expected at least one string global with a hex-escaped quote (\\\\22), got:\n${stringGlobals.join("\n")}`);
+    // Every emitted [N x i8] header must agree with its body's decoded
+    // length. One `\xx` escape counts as one byte; a raw char counts as
+    // one byte. This is the exact invariant the old bug violated.
+    for (const line of stringGlobals) {
+      const m = line.match(/\[(\d+) x i8\] c"((?:\\.|[^"\\])*)"/);
+      assert.ok(m, `could not parse string global: ${line}`);
+      const declared = Number(m[1]);
+      const body = m[2];
+      let actual = 0;
+      for (let i = 0; i < body.length; i++) {
+        if (body[i] === "\\") { actual++; i += 2; }
+        else actual++;
+      }
+      assert.equal(actual, declared, `length mismatch in ${line}: declared ${declared}, body decodes to ${actual} bytes`);
+    }
+  });
 });

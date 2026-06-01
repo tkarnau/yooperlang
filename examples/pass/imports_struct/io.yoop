@@ -1,4 +1,4 @@
-export enum Bytes {
+export variant Bytes {
     Ok { value: int32 },
     Err { error: string },
 }

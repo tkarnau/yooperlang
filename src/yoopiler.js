@@ -26,6 +26,7 @@ function main() {
       "dump-ast": { type: "boolean" },
       "dump-bc": { type: "boolean" },
       "list-attributes": { type: "boolean" },
+      "track-heap": { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -92,6 +93,12 @@ function main() {
 
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
+  // --track-heap: instruct codegen to emit yoop_diag_record_alloc /
+  // yoop_diag_record_free calls around the heap_alloc / heap_free
+  // intrinsics, and to install an atexit dump in main. See
+  // runtime/yoop_runtime.c and the emitBuiltinGenericCall branches in
+  // jsyoopcodegen/codegen.js.
+  programState.trackHeap = !!values["track-heap"];
 
   if (errors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));
@@ -160,6 +167,21 @@ function main() {
   fs.writeFileSync(tmpIR, ir, "utf8");
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
 
+  // Turn each `extern "C" from library "X"` name into the right linker
+  // arg(s). Default: `-lX`. macOS Apple-framework escape hatch: a name
+  // of shape `framework:NAME` lowers to `-framework NAME` (two argv
+  // entries) so OpenGL / Cocoa / etc. can be linked without a tweak to
+  // every yoop call site. Ignored / passes through as `-lframework:NAME`
+  // on Windows + Linux, which won't link -- the convention is meant for
+  // macOS-targeted demos.
+  function lowerLinkFlag(name) {
+    if (name.startsWith("framework:")) {
+      return ["-framework", name.slice("framework:".length)];
+    }
+    return [`-l${name}`];
+  }
+  const linkArgs = allLinkFlags.flatMap(lowerLinkFlag);
+
   // `-g` keeps the DWARF metadata that codegen emits; `-O0` keeps every
   // statement's DILocation distinct so `lldb` stepping doesn't fold lines.
   // Once an opt-level flag lands these should respect it.
@@ -172,7 +194,7 @@ function main() {
       "-o",
       `${outputFileName}.exe`,
       ...debugFlags,
-      ...allLinkFlags.map((f) => `-l${f}`),
+      ...linkArgs,
       "-fuse-ld=link",
     ];
     execFileSync(clang, clangArgs, { stdio: "inherit" });
@@ -196,7 +218,7 @@ function main() {
       outputFileName,
       ...debugFlags,
       ...extraSearchPaths,
-      ...allLinkFlags.map((f) => `-l${f}`),
+      ...linkArgs,
     ];
     execFileSync("clang", clangArgs, { stdio: "inherit" });
     console.log(`compiled: ${outputFileName}`);

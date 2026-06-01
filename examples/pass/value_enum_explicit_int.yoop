@@ -1,0 +1,21 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Big<int64> {
+    Zero 0,
+    Big 1000000000000,
+    Eighteen 18,
+    Auto,
+}
+
+function main(): int32 {
+    let z: Big = Big.Zero;
+    let b: Big = Big.Big;
+    let eighteen: Big = Big.Eighteen;
+    let nineteen: Big = Big.Auto;
+    if (z == Big.Zero) { printf(`z=Zero\n`); }
+    if (b > z) { printf(`big > zero\n`); }
+    if (nineteen > eighteen) { printf(`auto increments to 19\n`); }
+    return 0;
+}

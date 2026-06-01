@@ -15,7 +15,7 @@ import {
     serve_n, ServeOutcome, Handler, HandleOutcome,
 } from "../../../std/http/server.yoop";
 import {
-    Request, Response, HttpMethod, ok, headers_add,
+    Request, Response, HttpMethod, ok, headers_add, respond_static,
 } from "../../../std/http/types.yoop";
 import {
     Client, ClientRequest, ClientSendResult, ClientResponse,
@@ -35,7 +35,7 @@ type EchoHandler implements Handler {
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         resp.status = ok();
         headers_add(ref resp.headers, "Content-Type", "text/plain");
-        resp.body = intr.string_as_bytes(self.body);
+        respond_static(ref resp, self.body);
         return HandleOutcome.Ok;
     }
 }

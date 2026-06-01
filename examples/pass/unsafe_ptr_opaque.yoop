@@ -1,0 +1,42 @@
+// Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+// C-pointer handle. The fopen path below is the canonical FFI use case:
+// we hand a `FILE *` back and forth without ever dereferencing it. We
+// also exercise the implicit decay from `unsafe_ptr<uint8>` to the
+// opaque form, and an explicit `unsafe_ptr.cast<int32>(p)` to recover
+// a typed pointee.
+
+import.unsafe;
+
+extern "C" from "stdio.h" {
+    function fopen(path: string, mode: string): unsafe_ptr;
+    function fclose(stream: unsafe_ptr): int32;
+}
+
+function takes_opaque(p: unsafe_ptr): int32 {
+    if (p == null) { return 0; }
+    return 1;
+}
+
+function main(): int32 {
+    // 1. fopen returns opaque; comparing to null and passing along works.
+    let f: unsafe_ptr = fopen("/nonexistent/yoop/opaque/path", "rb");
+    let opened: int32 = 0;
+    if (f != null) {
+        opened = 1;
+        let _rc: int32 = fclose(f);
+    }
+
+    // 2. `unsafe_ptr<int32>` decays implicitly to bare `unsafe_ptr` when
+    //    passed where opaque is expected.
+    let x: int32 = 7;
+    let tp: unsafe_ptr<int32> = &x;
+    let nz: int32 = takes_opaque(tp);
+
+    // 3. opaque -> typed via explicit cast, then deref reads the int.
+    let op: unsafe_ptr = tp;
+    let recovered: unsafe_ptr<int32> = unsafe_ptr.cast<int32>(op);
+    let v: int32 = *recovered;
+
+    printf(`opened=${opened} nz=${nz} v=${v}\n`);
+    return 0;
+}

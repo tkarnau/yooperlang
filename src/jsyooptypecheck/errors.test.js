@@ -38,8 +38,8 @@ describe("formatType", () => {
   it("ref -> 'ref <inner>'", () => {
     assert.equal(formatType(RefType(PrimType("int32"))), "ref int32");
   });
-  it("array -> 'array <elem>'", () => {
-    assert.equal(formatType(ArrayType(PrimType("uint8"))), "array uint8");
+  it("array -> '<elem>[]'", () => {
+    assert.equal(formatType(ArrayType(PrimType("uint8"))), "uint8[]");
   });
   it("func -> '(params) -> return'", () => {
     const ft = FuncType(

@@ -152,6 +152,34 @@ WHITELIST.set("yoop_runtime_shutdown", {
   },
 });
 
+// ── std/log sinks ──────────────────────────────────────────────────
+// `std/log`'s `info` / `warn` / `error` forward to these runtime
+// helpers, which at runtime write a `[info]` / `[warn]` / `[error]`
+// prefixed, newline-terminated line to stderr. At comptime there's no
+// runtime, so we mirror that behavior directly in JS - writing to
+// `process.stderr` with the same severity prefix plus the `[comptime]`
+// banner so a `@precompile { log.info(...) }` block's output is
+// visibly distinct from the compiled program's own log lines. The
+// single string argument has already been lowered to a register (the
+// template-literal case is folded to one string before the call), so
+// each impl just unwraps `args[0]`. Return type is `void` - the impls
+// return null and the interpreter discards it.
+function makeLogSink(level) {
+  return {
+    impl(args, _loc, _returnType) {
+      const msg = String(args[0]?.v ?? "");
+      if (typeof process !== "undefined" && process.stderr) {
+        process.stderr.write(`[comptime] [${level}] ${msg}\n`);
+      }
+      return null;
+    },
+  };
+}
+
+WHITELIST.set("yoop_log_info", makeLogSink("info"));
+WHITELIST.set("yoop_log_warn", makeLogSink("warn"));
+WHITELIST.set("yoop_log_error", makeLogSink("error"));
+
 // Phase 11.E.3: comptime printf. Writes to stderr with a
 // `[comptime] ` prefix so debug output from a `@precompile { ... }`
 // block doesn't intermingle with the compiler's own diagnostics or

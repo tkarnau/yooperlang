@@ -1,0 +1,9 @@
+// Yoopstore-papercut #9: one import line binds both the namespace (for the
+// value-level functions) and a named type, instead of two separate lines.
+import * as shape, { Shape } from "./shape.yoop";
+
+function main(): int32 {
+    let s: Shape = shape.shape_make(4, 5);
+    printf(`area=${shape.shape_area(s)}\n`);
+    return 0;
+}

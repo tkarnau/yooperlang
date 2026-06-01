@@ -1,0 +1,29 @@
+// Clearance kinds: only an impl method of the kind's `requires` trait may
+// strip a restrictive kind. A free function with a matching signature shape
+// is NOT authorized - the trait is the structural gate.
+
+trait Cleansable<T> {
+    function cleanse(ref self): T;
+}
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Cleansable;
+    clearedBy cleanse;
+}
+
+type SafeText implements Cleansable<SafeText> {
+    body: string,
+    function cleanse(ref self): SafeText {
+        return { body: "safe" };
+    }
+}
+
+// A free function whose signature would strip `tainted`. Rejected at the
+// function decl: free functions cannot launder, only trait impl methods can.
+function fake_launder(t: tainted SafeText): SafeText {
+    return { body: "fake" };
+}
+
+function main(): int32 { return 0; }

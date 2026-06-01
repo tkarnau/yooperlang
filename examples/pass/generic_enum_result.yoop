@@ -6,7 +6,7 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-enum Result<T, E> {
+variant Result<T, E> {
     Ok { value: T },
     Err { error: E },
 }

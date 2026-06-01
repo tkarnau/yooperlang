@@ -163,7 +163,13 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       return out;
     }
 
-    if (rt?.kind !== "struct") return out;
+    // Phase 13.B: variants can declare `propagates<K>` and carry the
+    // same obligations as structs. The shape of `propagatedKinds`,
+    // `implementsTraits`, and `methods` is identical, so the rest of
+    // this function just works on either receiver. Variants don't
+    // contribute field-carried obligations (no `fields` slot) but the
+    // mustCall path covers the disposable-tree use case directly.
+    if (rt?.kind !== "struct" && rt?.kind !== "variant") return out;
 
     // Build the set of kinds that produce obligations on this binding, with
     // each kind's `autoCleanup` flag:
@@ -341,6 +347,28 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     return any;
   }
 
+  // Yoopstore-papercut #11: a returned struct / variant literal moves its
+  // field bindings into the result. Recurse the literal's field values and
+  // transfer any IDENT obligation for `kindType` - nested literals are
+  // handled the same way (a field whose value is itself a literal). Field
+  // values that aren't IDENTs or literals (calls, arithmetic, inline
+  // `vec_new(...)`) have no leaked binding, so they're skipped.
+  function markLiteralFieldObligationsTransferred(expr, kindType) {
+    if (!expr) return;
+    if (expr.kind === ASTNodeKind.IDENT) {
+      markIdentObligationsTransferred(expr.name, kindType);
+      return;
+    }
+    if (
+      expr.kind === ASTNodeKind.STRUCT_LITERAL ||
+      expr.kind === ASTNodeKind.VARIANT_CONSTRUCTOR
+    ) {
+      for (const f of expr.fields ?? []) {
+        markLiteralFieldObligationsTransferred(f.value, kindType);
+      }
+    }
+  }
+
   // Phase 6.4 strict propagates: emit the unsatisfied-obligation error for any
   // tracked obligation that has reached scope exit without being satisfied,
   // transferred, or cleaned up automatically. Uses `o.reported` to dedupe.
@@ -496,7 +524,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           // pathway has nothing to transfer, so we emit the function-side
           // error directly when the function fails to declare propagates<K>.
           const rt = stmt.value.resolvedType;
-          if (rt?.kind === "struct" && (rt.propagatedKinds?.length ?? 0) > 0) {
+          if (
+            (rt?.kind === "struct" || rt?.kind === "variant") &&
+            (rt.propagatedKinds?.length ?? 0) > 0
+          ) {
             const declaredPropagates = new Set(
               (fnOrMethodDecl.returnPropagatedKinds ?? []).map(
                 (a) => a.kindType ?? a,
@@ -504,6 +535,14 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
             );
             const identName =
               stmt.value.kind === ASTNodeKind.IDENT ? stmt.value.name : null;
+            // Yoopstore-papercut #11: a returned struct / variant literal
+            // moves its field bindings into the result value. When those
+            // fields are bare IDENTs they carry the same obligation the
+            // result struct propagates, so the literal is a transfer site
+            // too - not just a bare `return ident;`.
+            const isLiteral =
+              stmt.value.kind === ASTNodeKind.STRUCT_LITERAL ||
+              stmt.value.kind === ASTNodeKind.VARIANT_CONSTRUCTOR;
             for (const propA of rt.propagatedKinds) {
               const propK = propA.kindType ?? propA;
               const carriesObligation =
@@ -516,7 +555,16 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
                 // If not declared: the IDENT's binding-side obligation will
                 // be reported by `reportUnsatisfied` below - no need for a
                 // separate function-side error.
-              } else if (!declaredPropagates.has(propK)) {
+              } else if (declaredPropagates.has(propK)) {
+                // Declared propagates<K>. For a struct / variant literal,
+                // recurse into the field values and transfer any IDENT
+                // obligation for K (same effect as the bare-IDENT branch).
+                // A non-literal (e.g. a call result) has no binding to
+                // transfer, so this is a no-op there.
+                if (isLiteral) {
+                  markLiteralFieldObligationsTransferred(stmt.value, propK);
+                }
+              } else {
                 pushError(errors, stmt,
                   `function returns a value of type ${rt.name} carrying propagates<${propK.name}>; either declare 'propagates<${propK.name}>' on the function or satisfy the obligation before return`);
               }

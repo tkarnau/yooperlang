@@ -1,0 +1,19 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum SortDir<string> {
+    Asc "ASCENDING",
+    Desc "DESCENDING",
+}
+
+function main(): int32 {
+    let dir: SortDir = SortDir.Asc;
+    if (dir == SortDir.Asc) {
+        printf(`asc\n`);
+    }
+    if (dir != SortDir.Desc) {
+        printf(`not desc\n`);
+    }
+    return 0;
+}

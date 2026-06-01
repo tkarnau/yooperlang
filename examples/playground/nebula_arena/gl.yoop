@@ -1,0 +1,259 @@
+// OpenGL bindings: extern decls, named-constant enums, and the
+// compile/link helpers used by the demo. All GL entry points live here
+// so main never sees raw `gl*` names - the public API stays in value-
+// enum terms.
+
+import.unsafe;
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+extern "C" from library "framework:OpenGL" {
+    function glClearColor(r: float32, g: float32, b: float32, a: float32): void;
+    function glClear(mask: uint32): void;
+    function glViewport(x: int32, y: int32, w: int32, h: int32): void;
+    function glEnable(cap: uint32): void;
+    function glBlendFunc(sfactor: uint32, dfactor: uint32): void;
+
+    function glCreateShader(stage: uint32): uint32;
+    function glShaderSource(
+        shader: uint32,
+        count: int32,
+        string_ptrs: unsafe_ptr<string>,
+        length_ptrs: unsafe_ptr<int32>
+    ): void;
+    function glCompileShader(shader: uint32): void;
+    function glGetShaderiv(shader: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
+    function glGetShaderInfoLog(
+        shader: uint32,
+        max_len: int32,
+        length_out: unsafe_ptr<int32>,
+        log_out: unsafe_ptr<uint8>
+    ): void;
+    function glDeleteShader(shader: uint32): void;
+
+    function glCreateProgram(): uint32;
+    function glAttachShader(program: uint32, shader: uint32): void;
+    function glLinkProgram(program: uint32): void;
+    function glGetProgramiv(program: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
+    function glGetProgramInfoLog(
+        program: uint32,
+        max_len: int32,
+        length_out: unsafe_ptr<int32>,
+        log_out: unsafe_ptr<uint8>
+    ): void;
+    function glUseProgram(program: uint32): void;
+    function glDeleteProgram(program: uint32): void;
+    function glBindFragDataLocation(program: uint32, color_number: uint32, name: string): void;
+    function glBindAttribLocation(program: uint32, index: uint32, name: string): void;
+
+    function glGenVertexArrays(n: int32, arrays: unsafe_ptr<uint32>): void;
+    function glBindVertexArray(array: uint32): void;
+    function glDeleteVertexArrays(n: int32, arrays: unsafe_ptr<uint32>): void;
+    function glGenBuffers(n: int32, buffers: unsafe_ptr<uint32>): void;
+    function glBindBuffer(target: uint32, buffer: uint32): void;
+    function glBufferData(target: uint32, size: int64, data: unsafe_ptr<uint8>, usage: uint32): void;
+    function glDeleteBuffers(n: int32, buffers: unsafe_ptr<uint32>): void;
+    function glVertexAttribPointer(
+        index: uint32,
+        size: int32,
+        elem_type: uint32,
+        normalized: uint8,
+        stride: int32,
+        offset: unsafe_ptr<uint8>
+    ): void;
+    function glEnableVertexAttribArray(index: uint32): void;
+
+    function glGetUniformLocation(program: uint32, name: string): int32;
+    function glUniform1f(location: int32, v0: float32): void;
+    function glUniform2f(location: int32, v0: float32, v1: float32): void;
+
+    function glDrawArrays(mode: uint32, first: int32, count: int32): void;
+}
+
+// ── Constant groups (value enums) ────────────────────────────────────
+
+export enum ShaderStage<uint32> {
+    Vertex 0x8B31,
+    Fragment 0x8B30,
+}
+
+export enum ShaderParam<uint32> {
+    CompileStatus 0x8B81,
+    InfoLogLength 0x8B84,
+}
+
+export enum ProgramParam<uint32> {
+    LinkStatus 0x8B82,
+    InfoLogLength 0x8B84,
+}
+
+export enum BufferTarget<uint32> {
+    Array 0x8892,
+}
+
+export enum BufferUsage<uint32> {
+    StaticDraw 0x88E4,
+    DynamicDraw 0x88E8,
+}
+
+export enum DataType<uint32> {
+    Float 0x1406,
+}
+
+export enum DrawMode<uint32> {
+    Points 0x0000,
+    Triangles 0x0004,
+}
+
+// glClear mask bits. Bitwise-OR'd; an SDL-style flag enum.
+export enum ClearBits<uint32> {
+    Color 0x00004000,
+}
+
+// glEnable / glDisable capability ids.
+export enum Cap<uint32> {
+    Blend 0x0BE2,
+    // Core profile requires programmable point-size; without enabling
+    // this, gl_PointSize in the vertex shader is ignored.
+    ProgramPointSize 0x8642,
+}
+
+export enum BlendFactor<uint32> {
+    SrcAlpha 0x0302,
+    OneMinusSrcAlpha 0x0303,
+}
+
+// glVertexAttribPointer's `normalized` arg is GL_FALSE/GL_TRUE; we only
+// ever pass GL_FALSE, so a plain const is fine.
+export const FALSE: uint8 = 0;
+
+// ── Wrapper helpers ──────────────────────────────────────────────────
+
+export function clear_color(r: float32, g: float32, b: float32, a: float32): void {
+    glClearColor(r, g, b, a);
+}
+
+export function clear(mask: ClearBits): void { glClear(mask); }
+export function viewport(x: int32, y: int32, w: int32, h: int32): void { glViewport(x, y, w, h); }
+export function enable(cap: Cap): void { glEnable(cap); }
+
+export function blend_func(src: BlendFactor, dst: BlendFactor): void {
+    glBlendFunc(src, dst);
+}
+
+export function use_program(prog: uint32): void { glUseProgram(prog); }
+export function delete_program(prog: uint32): void { glDeleteProgram(prog); }
+export function bind_vertex_array(vao: uint32): void { glBindVertexArray(vao); }
+export function bind_buffer(target: BufferTarget, buffer: uint32): void {
+    glBindBuffer(target, buffer);
+}
+
+export function buffer_data(target: BufferTarget, size: int64, data: unsafe_ptr<uint8>, usage: BufferUsage): void {
+    glBufferData(target, size, data, usage);
+}
+
+export function gen_vertex_arrays(n: int32, arrays: unsafe_ptr<uint32>): void {
+    glGenVertexArrays(n, arrays);
+}
+
+export function delete_vertex_arrays(n: int32, arrays: unsafe_ptr<uint32>): void {
+    glDeleteVertexArrays(n, arrays);
+}
+
+export function gen_buffers(n: int32, buffers: unsafe_ptr<uint32>): void {
+    glGenBuffers(n, buffers);
+}
+
+export function delete_buffers(n: int32, buffers: unsafe_ptr<uint32>): void {
+    glDeleteBuffers(n, buffers);
+}
+
+export function vertex_attrib_pointer(index: uint32, size: int32, elem_type: DataType, normalized: uint8, stride: int32, offset: unsafe_ptr<uint8>): void {
+    glVertexAttribPointer(index, size, elem_type, normalized, stride, offset);
+}
+
+export function enable_vertex_attrib_array(index: uint32): void {
+    glEnableVertexAttribArray(index);
+}
+
+export function get_uniform_location(prog: uint32, name: string): int32 {
+    return glGetUniformLocation(prog, name);
+}
+
+export function uniform1f(location: int32, v0: float32): void {
+    glUniform1f(location, v0);
+}
+
+export function uniform2f(location: int32, v0: float32, v1: float32): void {
+    glUniform2f(location, v0, v1);
+}
+
+export function draw_arrays(mode: DrawMode, first: int32, count: int32): void {
+    glDrawArrays(mode, first, count);
+}
+
+// ── Shader compile/link ──────────────────────────────────────────────
+
+// Compile one shader stage from source. Returns 0 on failure and prints
+// the GL info log to stderr-via-printf.
+export function compile_shader(stage: ShaderStage, src: string): uint32 {
+    let sh: uint32 = glCreateShader(stage);
+    let src_local: string = src;
+    glShaderSource(sh, 1, &src_local, null);
+    glCompileShader(sh);
+    let status: int32 = 0;
+    glGetShaderiv(sh, ShaderParam.CompileStatus, &status);
+    if (status == 0) {
+        let log_len: int32 = 0;
+        glGetShaderiv(sh, ShaderParam.InfoLogLength, &log_len);
+        if (log_len > 0) {
+            let buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
+            let written: int32 = 0;
+            glGetShaderInfoLog(sh, log_len, &written, buf.ptr);
+            buf[usize(written)] = 0;
+            let log: string = intr.string_from_bytes_unchecked(buf);
+            printf(`shader compile failed:\n${log}\n`);
+        }
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+// Link an already-compiled vertex+fragment pair into a program, binding
+// attribute names to slots 0..N-1 in the order they appear in `attrs`.
+// `frag_color` is hard-coded as the fragment data location.
+export function link_program(vs: uint32, fs: uint32, attrs: string[]): uint32 {
+    let prog: uint32 = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    let i: usize = 0;
+    while (i < attrs.len) {
+        glBindAttribLocation(prog, uint32(i), attrs[i]);
+        i = i + 1;
+    }
+    glBindFragDataLocation(prog, 0, "frag_color");
+    glLinkProgram(prog);
+    let status: int32 = 0;
+    glGetProgramiv(prog, ProgramParam.LinkStatus, &status);
+    if (status == 0) {
+        let log_len: int32 = 0;
+        glGetProgramiv(prog, ProgramParam.InfoLogLength, &log_len);
+        if (log_len > 0) {
+            let buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
+            let written: int32 = 0;
+            glGetProgramInfoLog(prog, log_len, &written, buf.ptr);
+            buf[usize(written)] = 0;
+            let log: string = intr.string_from_bytes_unchecked(buf);
+            printf(`program link failed:\n${log}\n`);
+        }
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
+}
+
+export function delete_shader(sh: uint32): void { glDeleteShader(sh); }

@@ -360,7 +360,7 @@ function formatType(t) {
   if (t.kind === "ref") return `ref ${formatType(t.inner)}`;
   if (t.kind === "array") return `${formatType(t.elem)}[]`;
   if (t.kind === "struct") return `struct ${t.name ?? "?"}`;
-  if (t.kind === "enum") return `enum ${t.name ?? "?"}`;
+  if (t.kind === "variant") return `variant ${t.name ?? "?"}`;
   if (t.kind === "task") return `Task<${formatType(t.resultType)}>`;
   if (t.kind === "void") return "void";
   return `<${t.kind}>`;

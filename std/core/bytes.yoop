@@ -11,7 +11,81 @@
 //   * everything else here is read-only over its inputs.
 
 import { Result } from "./types.yoop";
+import { Disposable, disposable } from "./kinds.yoop";
+import { Vec } from "./vec.yoop";
 import * as intr from "./intrinsics.yoop";
+
+// ----- owned byte buffer -------------------------------------------------
+
+// `Bytes` is the canonical owned, heap-backed byte buffer. A bare `uint8[]`
+// is a *borrowing* fat-pointer view with no ownership, so an API that wants
+// to hand back bytes the caller can keep has to wrap them in something that
+// implements Disposable. `Bytes` is that wrapper - lighter than a full
+// `Vec<uint8>` (no push / capacity-doubling machinery), for the common
+// "here are N owned bytes" return shape (file reads, response bodies).
+//
+//   * `data` is the owned allocation. Its fat-pointer length is the
+//     allocation size (kept intact so heap_free / --track-heap stay paired
+//     with the original heap_alloc).
+//   * `len`  is the number of valid bytes, which may be < data.len when the
+//     buffer was handed over from a Vec that still had spare capacity.
+//
+// Carries propagates<disposable>: the caller picks auto-cleanup
+// (`disposable b: Bytes = ...`), manual `Disposable.dispose`, or transfer-up
+// via return - same contract as Vec.
+export type Bytes implements Disposable propagates<disposable> {
+    data: uint8[],
+    len:  usize,
+    function dispose(ref self): void {
+        if (self.data.len > 0) {
+            intr.heap_free(self.data);
+            // Reslice to an empty view so a second dispose is a no-op (the
+            // pointer dangles but is never dereferenced).
+            self.data = intr.array_slice(self.data, 0, 0);
+            self.len = 0;
+        }
+    }
+}
+
+// Borrowing view of the valid prefix as a regular uint8[]. Valid until the
+// Bytes is disposed; the caller must keep the Bytes alive while using it.
+export function bytes_to_array(b: ref Bytes): uint8[] {
+    return intr.array_slice(b.data, 0, b.len);
+}
+
+// Copy `src` into a fresh owned allocation (capacity == src.len, no spare).
+// `src` is unmodified, so passing a borrowing view (string_as_bytes,
+// array_slice, vec_as_array) is safe.
+export function bytes_from_array(src: uint8[]): Bytes propagates<disposable> {
+    let data: uint8[] = intr.heap_alloc(src.len);
+    let i: usize = 0;
+    while (i < src.len) {
+        data[i] = src[i];
+        i = i + 1;
+    }
+    return { data: data, len: src.len };
+}
+
+// Take ownership of an already-heap-allocated buffer (zero-copy). The caller
+// is asserting that `buf` came from heap_alloc (directly or via a Vec /
+// another Bytes) and is transferring ownership - do NOT pass a borrowing
+// view here, or dispose will free memory the Bytes doesn't own. `len` is the
+// count of valid bytes and must be <= buf.len.
+export function bytes_from_raw(buf: uint8[], len: usize): Bytes propagates<disposable> {
+    return { data: buf, len: len };
+}
+
+// Seal a Vec<uint8> into Bytes, taking ownership of its backing buffer with
+// no copy. The Vec is left empty (cap reset to 0) so its own dispose becomes
+// a harmless no-op - the buffer now belongs to the returned Bytes. Pass the
+// Vec by ref; after the call the (emptied) Vec still needs its obligation
+// discharged, but disposing it does nothing.
+export function bytes_from_vec(v: ref Vec<uint8>): Bytes propagates<disposable> {
+    let b: Bytes = { data: v.data, len: v.len };
+    v.cap = 0;
+    v.len = 0;
+    return b;
+}
 
 // Byte-wise equality. Returns true iff lengths match and every byte matches.
 export function bytes_eq(a: uint8[], b: uint8[]): bool {

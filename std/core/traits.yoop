@@ -24,7 +24,7 @@ export trait Readable {
 //
 // Flush result is err-only - `Ok` (no payload) on success, `Err { error }`
 // on failure.
-export enum FlushOutcome {
+export variant FlushOutcome {
     Ok,
     Err { error: string },
 }
@@ -70,7 +70,7 @@ export trait Display {
 // A step from an iterator: either `Yield { value: T }` with the next
 // element, or `Done` once the sequence is exhausted. The for-in loop
 // pattern-matches on this enum to drive iteration.
-export enum IterStep<T> {
+export variant IterStep<T> {
     Yield { value: T },
     Done,
 }

@@ -1,0 +1,34 @@
+// std/fs follow-ups (yoopstore-papercuts #2): exists() / file_size() via a
+// stat-backed runtime helper, plus real errno reasons in failure messages.
+
+import * as fs from "std/fs.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+function main(): int32 {
+    let path: string = "/tmp/yoop_fs_meta_test.bin";
+
+    // Clean slate: the file should not exist yet.
+    let _d: string = fs.delete_file(path);
+    let before: bool = fs.exists(path);
+
+    // Write 5 bytes.
+    let body: uint8[] = intr.heap_alloc(5);
+    body[0] = 72; body[1] = 105; body[2] = 33; body[3] = 33; body[4] = 33;
+    let werr: string = fs.write_file(path, body);
+    intr.heap_free(body);
+
+    let after: bool = fs.exists(path);
+    let sz: int64 = fs.file_size(path);
+    let missing_sz: int64 = fs.file_size("/tmp/yoop_fs_meta_does_not_exist.bin");
+
+    let before_i: int32 = 0; if (before) { before_i = 1; }
+    let after_i: int32 = 0; if (after) { after_i = 1; }
+    printf(`before=${before_i} after=${after_i} size=${sz} missing=${missing_sz} werr.len=${werr.len}\n`);
+
+    // errno surfacing: deleting a missing file reports the real reason.
+    let derr: string = fs.delete_file("/tmp/yoop_fs_meta_does_not_exist.bin");
+    printf(`delete_missing="${derr}"\n`);
+
+    let _d2: string = fs.delete_file(path);
+    return 0;
+}

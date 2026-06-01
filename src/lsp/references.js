@@ -48,10 +48,10 @@ const SKIP_FIELDS = new Set([
 // easy to log / debug.
 export const TargetKind = Object.freeze({
   local: "local",        // LET / CONST / PARAM / DESTRUCTURE_DECL binding
-  topLevel: "topLevel",  // FUNCTION_DECL / TYPE_DECL / ENUM_DECL / UNION_DECL / TRAIT_DECL / KIND_DECL
+  topLevel: "topLevel",  // FUNCTION_DECL / TYPE_DECL / VARIANT_DECL / UNION_DECL / TRAIT_DECL / KIND_DECL
   field: "field",        // FIELD_DECL on a struct
   method: "method",      // METHOD_DECL on a trait impl
-  variant: "variant",    // ENUM_VARIANT
+  variant: "variant",    // VARIANT_CASE
 });
 
 // Identify the target symbol under the cursor based on the AST node hit
@@ -137,8 +137,8 @@ export function identifyTarget(node, ctx) {
 
   // VARIANT_CONSTRUCTOR - jump to the enum variant decl.
   if (node && node.kind === ASTNodeKind.VARIANT_CONSTRUCTOR && node.variantName) {
-    const enumType = node.resolvedEnumType;
-    if (enumType?.kind === typeKinds.enum) {
+    const enumType = node.resolvedVariantType;
+    if (enumType?.kind === typeKinds.variant) {
       const targetMod = modById.get(enumType.moduleId) ?? module;
       const enumDecl = findTopLevelByName(targetMod.ast, enumType.name);
       const variant = (enumDecl?.variants ?? []).find((v) => v.name === node.variantName);
@@ -208,7 +208,7 @@ function targetFromDecl(decl, module, _modById) {
         structDecl: parent,
       };
     }
-    case ASTNodeKind.ENUM_VARIANT: {
+    case ASTNodeKind.VARIANT_CASE: {
       const enumDecl = findVariantParent(module.ast, decl);
       return {
         kind: TargetKind.variant,
@@ -220,7 +220,7 @@ function targetFromDecl(decl, module, _modById) {
     }
     case ASTNodeKind.FUNCTION_DECL:
     case ASTNodeKind.TYPE_DECL:
-    case ASTNodeKind.ENUM_DECL:
+    case ASTNodeKind.VARIANT_DECL:
     case ASTNodeKind.UNION_DECL:
     case ASTNodeKind.TRAIT_DECL:
     case ASTNodeKind.KIND_DECL:
@@ -256,7 +256,7 @@ function findMethodParent(ast, methodDecl) {
 function findVariantParent(ast, variantDecl) {
   for (const decl of ast.body) {
     const inner = innerDecl(decl);
-    if (inner?.kind === ASTNodeKind.ENUM_DECL && (inner.variants ?? []).includes(variantDecl)) {
+    if (inner?.kind === ASTNodeKind.VARIANT_DECL && (inner.variants ?? []).includes(variantDecl)) {
       return inner;
     }
   }
@@ -490,6 +490,20 @@ function occurrenceMatches(mod, target, name, offset) {
     return true;
   }
 
+  // (b2) FIELD_ACCESS with `namespaceLookup` - cross-module call or
+  // value access through a namespace import, e.g. `state.init_state(...)`
+  // or `state.WIN_W`. Matches any top-level decl (function or
+  // const/let) reached through its source-module exportName.
+  if (
+    node?.kind === ASTNodeKind.FIELD_ACCESS &&
+    node.namespaceLookup &&
+    node.field === name &&
+    node.namespaceLookup.moduleId === target.module.id &&
+    node.namespaceLookup.exportName === (target.decl?.name ?? name)
+  ) {
+    return true;
+  }
+
   // (c) FIELD_ACCESS on the right struct.
   if (
     target.kind === TargetKind.field &&
@@ -518,7 +532,7 @@ function occurrenceMatches(mod, target, name, offset) {
     target.kind === TargetKind.variant &&
     node?.kind === ASTNodeKind.VARIANT_CONSTRUCTOR &&
     node.variantName === name &&
-    node.resolvedEnumType?.name === target.enumDecl?.name
+    node.resolvedVariantType?.name === target.enumDecl?.name
   ) {
     return true;
   }
@@ -626,20 +640,20 @@ function isDecl(kind) {
     kind === ASTNodeKind.PARAM ||
     kind === ASTNodeKind.FUNCTION_DECL ||
     kind === ASTNodeKind.TYPE_DECL ||
-    kind === ASTNodeKind.ENUM_DECL ||
+    kind === ASTNodeKind.VARIANT_DECL ||
     kind === ASTNodeKind.UNION_DECL ||
     kind === ASTNodeKind.TRAIT_DECL ||
     kind === ASTNodeKind.KIND_DECL ||
     kind === ASTNodeKind.FIELD_DECL ||
     kind === ASTNodeKind.METHOD_DECL ||
-    kind === ASTNodeKind.ENUM_VARIANT
+    kind === ASTNodeKind.VARIANT_CASE
   );
 }
 
 function isTypeOrKindDecl(kind) {
   return (
     kind === ASTNodeKind.TYPE_DECL ||
-    kind === ASTNodeKind.ENUM_DECL ||
+    kind === ASTNodeKind.VARIANT_DECL ||
     kind === ASTNodeKind.UNION_DECL ||
     kind === ASTNodeKind.TRAIT_DECL ||
     kind === ASTNodeKind.KIND_DECL

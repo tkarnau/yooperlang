@@ -16,7 +16,42 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
+
+// Create a single directory with standard 0755 permissions. The mode bits
+// are computed from the POSIX S_* symbols (the headers resolve them to the
+// right per-platform mode_t value), so yoop callers never hand-mirror a
+// numeric mode - the same philosophy as the yoop_net.c constant helpers.
+// Returns mkdir()'s rc: 0 on success, -1 with errno set. EEXIST is left for
+// the caller to interpret (std/fs.mkdir_p treats it as benign).
+int yoop_io_mkdir(const char* path) {
+#ifdef _WIN32
+    // Windows mkdir takes no mode argument.
+    return _mkdir(path);
+#else
+    return mkdir(path, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+#endif
+}
+
+// 1 if `path` names an existing filesystem entry (of any type), 0 otherwise.
+// A 0 result also covers "stat failed" (e.g. a missing parent component).
+int yoop_io_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? 1 : 0;
+}
+
+// Size in bytes of the regular file at `path`, or -1 if it doesn't exist,
+// isn't a regular file, or stat() otherwise fails. Returning -1 (rather than
+// a fallible struct) keeps the yoop side a single int64 read; callers test
+// `< 0`.
+int64_t yoop_io_file_size(const char* path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (!S_ISREG(st.st_mode)) return -1;
+    return (int64_t)st.st_size;
+}
 
 #ifdef _WIN32
   // Stub for now - no IOCP backend. Public API returns ENOSYS.

@@ -13,6 +13,7 @@ import {
   ArrayType,
   ErrorType,
   KindApplication,
+  PrimType,
   RefType,
   StructType,
   primAnnotations,
@@ -120,11 +121,15 @@ export function validateFunction(funcNode, typeContext, errors) {
           // validated by the binding-resolution path.
           paramKindType = kt;
         } else {
-          // Unwrap ref to get the underlying struct type.
+          // Unwrap ref to get the underlying nominal type. Phase 13.B:
+          // variants are valid receivers for kind-tracked params too.
           const structType = baseType.kind === typeKinds.ref ? baseType.inner : baseType;
-          if (structType.kind !== typeKinds.struct) {
+          if (
+            structType.kind !== typeKinds.struct &&
+            structType.kind !== typeKinds.variant
+          ) {
             pushError(errors, param,
-              `kind "${kt.name}" can only apply to struct values, got ${formatType(baseType)}`);
+              `kind "${kt.name}" can only apply to struct or variant values, got ${formatType(baseType)}`);
           } else {
             // Phase 6.4 strict propagates: a struct that propagates this kind
             // satisfies the kind's requirement via its propagated fields, even
@@ -232,6 +237,30 @@ export function validateModuleInit(decl, typeContext, errors) {
     inLoop: false,
     inTaskBody: false,
   };
+  // No annotation (resolvedType left null by pass C.4): infer the binding's
+  // type from its initializer and publish it so function bodies in this module
+  // - and any importer, which typechecks later in topological order - resolve
+  // the name to the inferred type rather than the ErrorType shell.
+  if (decl.typeAnnotation === null) {
+    const rhsType = resolveExprType(decl.assignment, scope, ctx);
+    decl.resolvedType = concretizeInferred(rhsType) ?? ErrorType();
+    if (decl.resolvedType.kind === typeKinds.error) {
+      pushError(errors, decl,
+        `cannot infer a type for "${decl.name}"; add an explicit type annotation`);
+    } else {
+      if (
+        decl.resolvedType.kind === typeKinds.array &&
+        decl.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+      ) {
+        // Re-pin an untyped array literal to its concrete element type so
+        // codegen emits a concrete element type (see checkLetOrConst).
+        checkArrayLiteralWithElemType(decl.assignment, decl.resolvedType.elem, scope, ctx);
+      }
+      typeContext.moduleSymbols.set(decl.name, decl.resolvedType);
+    }
+    popScope(scope, errors);
+    return;
+  }
   checkInitializer(
     decl.assignment,
     decl.resolvedType,
@@ -323,6 +352,24 @@ function checkBlock(node, scope, ctx) {
 //   - validate the RHS struct type implements every trait in kind.requires
 //   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
 //     the name in the trailing block's scope rather than the enclosing one
+// When a binding omits its type annotation, its type is inferred from the
+// initializer. Bare integer/float literals resolve to the `untypedInt` /
+// `untypedFloat` placeholders, which exist only to be pinned by a surrounding
+// context; with no annotation there is no such context, so default them to the
+// same concrete types an explicit annotation would have produced (int32 /
+// float64). Recurse into array element types so `const xs = [1, 2];` infers
+// `int32[]` rather than the un-emittable `untypedInt[]`.
+function concretizeInferred(t) {
+  if (!t) return t;
+  if (t.kind === typeKinds.untypedInt) return PrimType("int32");
+  if (t.kind === typeKinds.untypedFloat) return PrimType("float64");
+  if (t.kind === typeKinds.array) {
+    const elem = concretizeInferred(t.elem);
+    return elem === t.elem ? t : ArrayType(elem);
+  }
+  return t;
+}
+
 function checkLetOrConst(node, scope, ctx) {
   // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
@@ -331,10 +378,42 @@ function checkLetOrConst(node, scope, ctx) {
     return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
   }
 
-  const declaredType =
-    resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
-  if (declaredType.kind === typeKinds.error) {
-    pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
+  // No annotation: infer the binding's type from its initializer. The parser
+  // guarantees a module-level binding without an annotation has an initializer;
+  // a local one might not, which is an error (nothing to infer from).
+  const inferred = node.typeAnnotation === null;
+  let declaredType;
+  if (inferred) {
+    if (!node.assignment) {
+      pushError(ctx.errors, node,
+        `binding "${node.name}" needs either a type annotation or an initializer to infer from`);
+      declaredType = ErrorType();
+    } else {
+      const rhsType = resolveExprType(node.assignment, scope, ctx);
+      declaredType = concretizeInferred(rhsType) ?? ErrorType();
+      // resolveExprType already reports a specific error for expressions that
+      // cannot be typed without a target (bare struct literals, empty array
+      // literals); add an inference-focused hint pointing at the fix.
+      if (declaredType.kind === typeKinds.error) {
+        pushError(ctx.errors, node,
+          `cannot infer a type for "${node.name}"; add an explicit type annotation`);
+      } else if (
+        declaredType.kind === typeKinds.array &&
+        node.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+      ) {
+        // resolveArrayLiteral leaves the literal (and its elements) typed as
+        // `untypedInt[]`/`untypedFloat[]`; re-pin them to the concretized
+        // element type so codegen sees a concrete element type, matching the
+        // annotated `const xs: int32[] = [...]` path.
+        checkArrayLiteralWithElemType(node.assignment, declaredType.elem, scope, ctx);
+      }
+    }
+  } else {
+    declaredType =
+      resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
+    if (declaredType.kind === typeKinds.error) {
+      pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
+    }
   }
   node.resolvedType = declaredType;
 
@@ -370,7 +449,7 @@ function checkLetOrConst(node, scope, ctx) {
   node.resolvedKindType = kindType;
   node.resolvedKindApplication = kindApp;
 
-  if (node.assignment) {
+  if (node.assignment && !inferred) {
     // Generic function calls need to flow through checkInitializer so the
     // declared LHS type can drive return-type inference (e.g. heap_alloc).
     // The eager resolveExprType inside isTaskCallReturningType would otherwise
@@ -559,12 +638,17 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     }
   }
 
-  // The struct under a kind binding must be a plain struct value (not a ref,
-  // not an array, not a primitive).
+  // The value under a kind binding must be a plain nominal value (not a
+  // ref, not an array, not a primitive). Phase 13.B: variants count too -
+  // a variant that implements the kind's required traits binds the same
+  // way a struct would.
   if (declaredType.kind === typeKinds.error) return;
-  if (declaredType.kind !== typeKinds.struct) {
+  if (
+    declaredType.kind !== typeKinds.struct &&
+    declaredType.kind !== typeKinds.variant
+  ) {
     pushError(ctx.errors, node,
-      `kind "${kindType.name}" can only apply to struct values, got ${formatType(declaredType)}`);
+      `kind "${kindType.name}" can only apply to struct or variant values, got ${formatType(declaredType)}`);
     return;
   }
 
@@ -772,7 +856,7 @@ function checkForInLoop(node, scope, ctx) {
       const retType = nextSig?.returnType;
       if (
         retType &&
-        retType.kind === typeKinds.enum &&
+        retType.kind === typeKinds.variant &&
         retType.variants?.has("Yield") &&
         retType.variants?.has("Done")
       ) {
@@ -798,7 +882,7 @@ function checkForInLoop(node, scope, ctx) {
         pushError(
           ctx.errors,
           node.iterExpr,
-          `Iterable.next must return an IterStep<T> enum with Yield/Done variants`,
+          `Iterable.next must return an IterStep<T> variant with Yield/Done cases`,
         );
       }
     } else {
@@ -837,7 +921,7 @@ function checkForInLoop(node, scope, ctx) {
 
 // Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
 //   - integer / bool / char prim  → arms carry LITERAL_PATTERNs
-//   - EnumType                    → arms carry VARIANT_PATTERNs
+//   - VariantType                    → arms carry VARIANT_PATTERNs
 // Exhaustiveness is enforced when the scrutinee is a bool or an enum.
 function checkSwitch(node, scope, ctx) {
   const scrutType = resolveExprType(node.scrutinee, scope, ctx);
@@ -862,13 +946,17 @@ function checkSwitch(node, scope, ctx) {
       scrutType.name === "isize" ||
       scrutType.name === "char");
   const isBool = scrutType.kind === typeKinds.prim && scrutType.name === "bool";
-  const isEnum = scrutType.kind === typeKinds.enum;
+  const isVariant = scrutType.kind === typeKinds.variant;
+  // Phase 12: value-enum scrutinee. Patterns use VARIANT_PATTERN with no
+  // field bindings. Exhaustiveness checked only when the enum is "closed"
+  // (no operator-derived cases).
+  const isValueEnum = scrutType.kind === typeKinds.valueEnum;
 
-  if (!isInt && !isBool && !isEnum) {
+  if (!isInt && !isBool && !isVariant && !isValueEnum) {
     pushError(
       ctx.errors,
       node.scrutinee,
-      `switch scrutinee must be int, bool, char, or an enum type; got ${formatType(scrutType)}`,
+      `switch scrutinee must be int, bool, char, a variant, or an enum type; got ${formatType(scrutType)}`,
     );
     for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
     if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
@@ -878,6 +966,7 @@ function checkSwitch(node, scope, ctx) {
   node.scrutineeType = scrutType;
   const seenLiterals = new Map(); // value -> arm index
   const seenVariants = new Set();
+  const seenEnumCases = new Set();
   let sawAnyWildcardCase = false;
 
   for (const arm of node.arms) {
@@ -931,11 +1020,51 @@ function checkSwitch(node, scope, ctx) {
         continue;
       }
       if (pat.kind === ASTNodeKind.VARIANT_PATTERN) {
-        if (!isEnum) {
+        // Phase 12: value-enum dispatch. Patterns are `Foo.Bar` with no
+        // field bindings; we match by value equality at codegen time.
+        if (isValueEnum) {
+          if (pat.enumName !== scrutType.name) {
+            pushError(
+              ctx.errors,
+              pat,
+              `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+            );
+            continue;
+          }
+          const enumCase = scrutType.cases.get(pat.variantName);
+          if (!enumCase) {
+            pushError(
+              ctx.errors,
+              pat,
+              `enum "${scrutType.name}" has no case "${pat.variantName}"`,
+            );
+            continue;
+          }
+          if (pat.fieldBindings !== null && pat.fieldBindings.length > 0) {
+            pushError(
+              ctx.errors,
+              pat,
+              `value enum case "${scrutType.name}.${pat.variantName}" has no fields - drop the '{ ... }'`,
+            );
+            continue;
+          }
+          if (seenEnumCases.has(pat.variantName)) {
+            pushError(
+              ctx.errors,
+              pat,
+              `duplicate enum case pattern "${scrutType.name}.${pat.variantName}"`,
+            );
+          }
+          seenEnumCases.add(pat.variantName);
+          pat.resolvedValueEnumType = scrutType;
+          pat.resolvedValueEnumCase = enumCase;
+          continue;
+        }
+        if (!isVariant) {
           pushError(
             ctx.errors,
             pat,
-            `variant patterns are only valid on enum scrutinees, not ${formatType(scrutType)}`,
+            `variant case patterns are only valid on variant scrutinees, not ${formatType(scrutType)}`,
           );
           continue;
         }
@@ -955,7 +1084,7 @@ function checkSwitch(node, scope, ctx) {
           pushError(
             ctx.errors,
             pat,
-            `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+            `pattern names variant "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
           );
           continue;
         }
@@ -964,7 +1093,7 @@ function checkSwitch(node, scope, ctx) {
           pushError(
             ctx.errors,
             pat,
-            `enum "${scrutType.name}" has no variant "${pat.variantName}"`,
+            `variant "${scrutType.name}" has no case "${pat.variantName}"`,
           );
           continue;
         }
@@ -976,7 +1105,7 @@ function checkSwitch(node, scope, ctx) {
           );
         }
         seenVariants.add(pat.variantName);
-        pat.resolvedEnumType = scrutType;
+        pat.resolvedVariantType = scrutType;
         pat.resolvedVariant = variant;
         // Field-binding shape: must match the variant's declared shape.
         if (variant.fields === null) {
@@ -1076,7 +1205,7 @@ function checkSwitch(node, scope, ctx) {
           `switch over bool is not exhaustive - add 'default' or list both true and false`,
         );
       }
-    } else if (isEnum) {
+    } else if (isVariant) {
       const allVariants = [...scrutType.variants.keys()];
       const missing = allVariants.filter((v) => !seenVariants.has(v));
       if (missing.length > 0) {
@@ -1085,6 +1214,28 @@ function checkSwitch(node, scope, ctx) {
           node,
           `switch over ${formatType(scrutType)} is not exhaustive - missing variants: ${missing.join(", ")}`,
         );
+      }
+    } else if (isValueEnum) {
+      // Phase 12: an "open" enum (any case derived via bitwise ops) requires
+      // a `default` since the reachable set is no longer the named cases. A
+      // closed enum (every case is a literal) gets exhaustiveness over its
+      // named cases.
+      if (scrutType.isOpen) {
+        pushError(
+          ctx.errors,
+          node,
+          `switch over open enum "${scrutType.name}" requires a 'default' case - one or more cases are derived via bitwise operators, so values may fall outside the named set`,
+        );
+      } else {
+        const allCases = [...scrutType.cases.keys()];
+        const missing = allCases.filter((c) => !seenEnumCases.has(c));
+        if (missing.length > 0) {
+          pushError(
+            ctx.errors,
+            node,
+            `switch over ${formatType(scrutType)} is not exhaustive - missing cases: ${missing.join(", ")}`,
+          );
+        }
       }
     } else if (isInt) {
       pushError(

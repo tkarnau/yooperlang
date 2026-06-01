@@ -195,6 +195,7 @@ function posToRange(text, pos, length) {
   return offsetToRange(text, pos, length);
 }
 
+
 function publishFor(uri) {
   const doc = documents.get(uri);
   if (!doc || !doc.absPath) return;
@@ -326,7 +327,12 @@ function handleMessage(msg) {
     // enclosing decl wouldn't show anything useful about the type name.
     if (!text) {
       const tok = identTokenAt(at.src, at.offset);
-      if (tok) text = hoverFromName(tok.text, at.module, at.analysis);
+      if (tok) {
+        text = hoverFromName(tok.text, at.module, at.analysis, {
+          src: at.src,
+          tokenStart: tok.start,
+        });
+      }
     }
     if (!text) { sendResponse(msg.id, null); return; }
     sendResponse(msg.id, {
@@ -349,6 +355,8 @@ function handleMessage(msg) {
       moduleEnv: at.analysis.moduleEnv,
       programState: at.analysis.programState,
       tokenText: tok?.text,
+      tokenStart: tok?.start,
+      cursorOffset: at.offset,
     });
     if (!def) { sendResponse(msg.id, null); return; }
     // Read the target file's text to build a valid range. Prefer the open

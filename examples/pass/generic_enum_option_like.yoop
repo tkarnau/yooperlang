@@ -5,7 +5,7 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-enum Maybe<T> {
+variant Maybe<T> {
     Some { value: T },
     None,
 }

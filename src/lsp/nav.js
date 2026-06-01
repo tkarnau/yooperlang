@@ -150,11 +150,37 @@ export function findNodeAt(ast, offset, src, ancestry = null) {
       return;
     }
     // Match by identifier name - direct (PARAM/IDENT/LET/...) or via the
-    // string-valued callee field on CALL_EXPRESSION.
+    // string-valued callee field on CALL_EXPRESSION / variant promotions.
     if (node.sourceLoc) {
       if (node.name === tok.text) consider(node, path);
       else if (node.kind === "CALL_EXPRESSION" && node.callee === tok.text) consider(node, path);
       else if (node.kind === "FIELD_ACCESS" && node.field === tok.text) consider(node, path);
+      // Phase 7.5 / 12: VARIANT_CONSTRUCTOR / VARIANT_PATTERN carry the
+      // qualifying type name on `enumName` and the case name on
+      // `variantName`. The promotion path drops `node.object` / `node.field`
+      // so the cursor only finds the node when we look at these slots.
+      else if (
+        (node.kind === "VARIANT_CONSTRUCTOR" || node.kind === "VARIANT_PATTERN") &&
+        (node.enumName === tok.text || node.variantName === tok.text)
+      ) {
+        consider(node, path);
+      }
+      // `import * as ns from "..."` - the namespace name is on the import
+      // decl as `namespaceName`. Cursor on `ns` lands here so goto-def can
+      // jump to the imported file.
+      else if (node.kind === "IMPORT_DECL" && node.namespaceName === tok.text) {
+        consider(node, path);
+      }
+      // `import { foo } from "..."` - each specifier in `specifiers` has a
+      // localName. Cursor on `foo` should jump to the export's decl.
+      else if (node.kind === "IMPORT_DECL" && Array.isArray(node.specifiers)) {
+        for (const spec of node.specifiers) {
+          if (spec.localName === tok.text || spec.exportName === tok.text) {
+            consider(node, path);
+            break;
+          }
+        }
+      }
     }
     const childPath = path.concat([node]);
     for (const key of Object.keys(node)) {
@@ -217,8 +243,7 @@ function isIdentStart(code) {
 export function getHoverInfo(node, module) {
   if (!node) return null;
   switch (node.kind) {
-    case ASTNodeKind.IDENT:
-    case ASTNodeKind.NAMESPACE_IDENT: {
+    case ASTNodeKind.IDENT: {
       const t = node.resolvedType;
       if (!t) return null;
       const decl = node.resolvedDeclNode;
@@ -228,9 +253,21 @@ export function getHoverInfo(node, module) {
         ? `(${declKind}) ${name}: ${formatType(t)}`
         : `${name}: ${formatType(t)}`;
     }
+    case ASTNodeKind.NAMESPACE_IDENT: {
+      // A namespace import. The resolved type is the NamespaceType - render
+      // as `(namespace) name` so the hover doesn't fall back to the
+      // "unknown kind namespace" fallback in formatType.
+      return `(namespace) ${node.name}`;
+    }
     case ASTNodeKind.FIELD_ACCESS: {
       const t = node.resolvedType;
       if (!t) return null;
+      // Phase 12: `ns.exportName` (non-call) - render in dotted form rather
+      // than as a leading `.` field-access (there's no struct receiver to
+      // hide the dot, so `palette.fire_color` reads more naturally).
+      if (node.namespaceLookup) {
+        return `${node.object?.name ?? "?"}.${node.field}: ${formatType(t)}`;
+      }
       return `.${node.field}: ${formatType(t)}`;
     }
     case ASTNodeKind.CALL_EXPRESSION: {
@@ -239,9 +276,27 @@ export function getHoverInfo(node, module) {
       if (t) return `${callee}(...): ${formatType(t)}`;
       return null;
     }
+    // Phase 7.5 / 12: a tagged-variant or value-enum constructor expression.
+    // The constructor is hover-helpful: the case name + the resolved
+    // (post-promotion) carrier type tells the reader which variant / value
+    // they're looking at.
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      const t = node.resolvedType ?? node.resolvedValueEnumType ?? node.resolvedVariantType;
+      if (!t) return null;
+      return `${node.enumName}.${node.variantName}: ${formatType(t)}`;
+    }
+    case ASTNodeKind.VARIANT_PATTERN: {
+      const t = node.resolvedValueEnumType ?? node.resolvedVariantType;
+      if (!t) return null;
+      return `case ${node.enumName}.${node.variantName} of ${formatType(t)}`;
+    }
     case ASTNodeKind.LET_DECL:
     case ASTNodeKind.CONST_DECL: {
-      const kw = node.kind === ASTNodeKind.LET_DECL ? "let" : "const";
+      // Phase 6: kind-prefixed bindings (`disposable arr: T = ...`) replace
+      // the `let`/`const` keyword with the kind name in the source. Hover
+      // mirrors that so the kind is visible at a glance.
+      const kw = node.resolvedKindType?.name
+        ?? (node.kind === ASTNodeKind.LET_DECL ? "let" : "const");
       if (!node.resolvedType) return null;
       return `${kw} ${node.name}: ${formatType(node.resolvedType)}`;
     }
@@ -258,20 +313,40 @@ export function getHoverInfo(node, module) {
       return `function ${node.name}(${params}): ${formatType(node.resolvedType)}`;
     }
     case ASTNodeKind.TYPE_DECL: {
-      return `type ${node.name}`;
+      const tps = (node.typeParams ?? []).map((p) => p.name).join(", ");
+      return tps ? `type ${node.name}<${tps}>` : `type ${node.name}`;
+    }
+    case ASTNodeKind.VARIANT_DECL: {
+      // Phase 12: source-level keyword is `variant`, not `enum`.
+      const tps = (node.typeParams ?? []).map((p) => p.name).join(", ");
+      return tps ? `variant ${node.name}<${tps}>` : `variant ${node.name}`;
     }
     case ASTNodeKind.ENUM_DECL: {
-      return `enum ${node.name}`;
+      // Phase 12: value enum.
+      const ut = node.underlying?.name ?? "int32";
+      return ut === "int32" ? `enum ${node.name}` : `enum ${node.name}<${ut}>`;
     }
     case ASTNodeKind.UNION_DECL: {
       return `union ${node.name}`;
     }
     case ASTNodeKind.TRAIT_DECL: {
-      return `trait ${node.name}`;
+      const tps = (node.typeParams ?? []).map((p) => p.name).join(", ");
+      return tps ? `trait ${node.name}<${tps}>` : `trait ${node.name}`;
+    }
+    case ASTNodeKind.KIND_DECL: {
+      return `kind ${node.name}`;
     }
     case ASTNodeKind.FIELD_DECL: {
       if (!node.resolvedType) return null;
       return `${node.name}: ${formatType(node.resolvedType)}`;
+    }
+    // Phase 7.5: one case inside a variant decl.
+    case ASTNodeKind.VARIANT_CASE: {
+      return `case ${node.name}`;
+    }
+    // Phase 12: one case inside a value enum decl.
+    case ASTNodeKind.ENUM_CASE: {
+      return `case ${node.name}`;
     }
     default:
       return null;
@@ -298,12 +373,89 @@ export function getHoverInfo(node, module) {
 //                      yield a definition (e.g. type annotations are
 //                      parser objects, not AST nodes, so the cursor
 //                      may land on a TEMPLATE_LITERAL parent or null).
+//   tokenStart       - optional; the source offset of `tokenText`. Used
+//                      to detect a leading `ns.` prefix at the cursor
+//                      and route the lookup through that namespace.
+//   cursorOffset     - optional; the raw cursor offset. Used as a final
+//                      fallback to detect cursors that land inside a
+//                      string literal (e.g. import path strings) where
+//                      identTokenAt returned nothing.
 //   moduleEnv        - optional; Map<moduleId, env> from analyze().
 //                      Enables type / kind table lookups.
 export function findDefinition(node, ctx) {
-  const { module, modById, tokenText, moduleEnv } = ctx;
+  const { module, modById, tokenText, tokenStart, cursorOffset, moduleEnv } = ctx;
+  // Phase 12: cursor on (or inside) an import decl - prefer file/file-
+  // export navigation over the more general dotted-name sniff below.
+  // This handles the path-string case (`"./lib.yoop"`) and also keeps
+  // the dotted sniff from misinterpreting an identifier-shaped substring
+  // inside the import line.
+  if (typeof cursorOffset === "number" && module?.src) {
+    const importDecl = findImportDeclCovering(module.ast, module.src, cursorOffset);
+    if (importDecl) {
+      const ns = importDecl.namespaceName;
+      // If the cursor is exactly the namespace name, that's the AST-node
+      // case which is handled below; but it's safe to early-return here
+      // too. Same for matching specifiers.
+      const targetMod = importDecl.resolvedModuleId
+        ? modById.get(importDecl.resolvedModuleId)
+        : null;
+      if (targetMod) {
+        if (tokenText && Array.isArray(importDecl.specifiers)) {
+          const spec = importDecl.specifiers.find(
+            (s) => s.localName === tokenText || s.exportName === tokenText,
+          );
+          if (spec) {
+            const decl = findTopLevelByName(targetMod.ast, spec.exportName);
+            if (decl) return locOfDecl(decl, targetMod);
+          }
+        }
+        // Namespace ident or path-string cursor - jump into the file.
+        if (!tokenText || tokenText === ns) {
+          return { absPath: targetMod.absPath, pos: 0, length: 1 };
+        }
+        // Fall through to other resolution paths for tokens that aren't
+        // recognized parts of the import (which shouldn't normally appear
+        // on an import line, but be defensive).
+      }
+    }
+  }
+  // Phase 12: dotted form sniff. When the cursor is on either side of a
+  // `<ns>.<name>` in a type annotation (which isn't an AST node) we still
+  // want goto-def to jump to the right place.
+  if (tokenText && module?.src && typeof tokenStart === "number") {
+    const dotted = readDottedAtCursor(module.src, tokenStart, tokenText);
+    if (dotted) {
+      const target = resolveDottedName(dotted, module, modById, moduleEnv);
+      if (target) return target;
+    }
+  }
   if (!node) {
     return tokenText ? findByName(tokenText, module, modById, moduleEnv) : null;
+  }
+
+  // Phase 12: cursor on `import * as ns from "./m.yoop"` - jump into the
+  // imported file. For `import { foo } from "./m.yoop"` cursor on `foo`,
+  // jump to the export's decl in the source module.
+  if (node.kind === ASTNodeKind.IMPORT_DECL) {
+    const targetMod = node.resolvedModuleId
+      ? modById.get(node.resolvedModuleId)
+      : null;
+    if (targetMod) {
+      // Bare-import (path-only): if cursor token matches a specifier's
+      // localName, jump to that export's decl.
+      if (tokenText && Array.isArray(node.specifiers)) {
+        const spec = node.specifiers.find(
+          (s) => s.localName === tokenText || s.exportName === tokenText,
+        );
+        if (spec) {
+          const decl = findTopLevelByName(targetMod.ast, spec.exportName);
+          if (decl) return locOfDecl(decl, targetMod);
+        }
+      }
+      // Namespace import or unmatched-specifier cursor: jump to the file's
+      // first source location (the top of the module).
+      return { absPath: targetMod.absPath, pos: 0, length: 1 };
+    }
   }
 
   // IDENT: typechecker stamped a direct back-pointer for local bindings.
@@ -355,6 +507,45 @@ export function findDefinition(node, ctx) {
     }
   }
 
+  // Phase 12: `ns.exportedName` (non-call) - the typechecker stamped a
+  // `namespaceLookup` slot pointing at the source module + the original
+  // export. Jump straight to the decl by name in that module.
+  if (node.kind === ASTNodeKind.FIELD_ACCESS && node.namespaceLookup) {
+    const targetMod = modById.get(node.namespaceLookup.moduleId);
+    if (targetMod) {
+      const decl = findTopLevelByName(targetMod.ast, node.namespaceLookup.exportName);
+      if (decl) return locOfDecl(decl, targetMod);
+    }
+  }
+
+  // Phase 7.5 / 12: a promoted variant / value-enum constructor / pattern.
+  // Cursor on the case name jumps to the case's decl inside the enum body;
+  // cursor on the qualifying type name jumps to the decl itself.
+  if (
+    (node.kind === ASTNodeKind.VARIANT_CONSTRUCTOR ||
+      node.kind === ASTNodeKind.VARIANT_PATTERN) &&
+    node.enumName
+  ) {
+    const carrier =
+      node.resolvedValueEnumType ?? node.resolvedVariantType ?? null;
+    const targetMod = carrier?.moduleId
+      ? modById.get(carrier.moduleId) ?? module
+      : module;
+    const decl = findTopLevelByName(targetMod.ast, node.enumName);
+    if (decl) {
+      // Cursor on case name -> the case AST node; cursor on type name (or
+      // anywhere else inside the constructor) -> the decl itself.
+      const wantCase = tokenText && tokenText === node.variantName;
+      if (wantCase) {
+        const cases =
+          decl.kind === ASTNodeKind.ENUM_DECL ? decl.cases : decl.variants;
+        const found = (cases ?? []).find((c) => c.name === node.variantName);
+        if (found) return locOfDecl(found, targetMod);
+      }
+      return locOfDecl(decl, targetMod);
+    }
+  }
+
   // FIELD_ACCESS on a struct receiver: jump to the field declaration.
   if (node.kind === ASTNodeKind.FIELD_ACCESS) {
     const recvType = node.object?.resolvedType;
@@ -393,8 +584,27 @@ export function findDefinition(node, ctx) {
 // Hover fallback: render a one-line description for a name that has no
 // AST node hit (type annotations, kind refs). Looks the name up in the
 // current module's AST first, then follows imports via moduleEnv.
-export function hoverFromName(name, module, analysis) {
+// `cursor` (optional): { src, tokenStart } - lets the fallback also
+// resolve `<ns>.<name>` forms by sniffing the source around the cursor.
+export function hoverFromName(name, module, analysis, cursor) {
   if (!name || !module) return null;
+  // Phase 12: cursor on either half of `<ns>.<name>` - jump to the right
+  // module before doing the by-name lookup.
+  if (cursor?.src && typeof cursor.tokenStart === "number") {
+    const dotted = readDottedAtCursor(cursor.src, cursor.tokenStart, name);
+    if (dotted && analysis?.moduleEnv) {
+      const env = analysis.moduleEnv.get(module.id);
+      const imp = env?.importedNames?.get(dotted.ns);
+      if (imp?.kind === "namespace") {
+        if (dotted.onNs) return `(namespace) ${dotted.ns}`;
+        const target = analysis.modById.get(imp.fromModuleId);
+        if (target) {
+          const decl = findTopLevelByName(target.ast, dotted.name);
+          if (decl) return summarizeDecl(decl);
+        }
+      }
+    }
+  }
   const localDecl = findTopLevelByName(module.ast, name);
   if (localDecl) return summarizeDecl(localDecl);
   const env = analysis?.moduleEnv?.get(module.id);
@@ -420,8 +630,14 @@ function summarizeDecl(decl) {
         : "";
       return head + traits;
     }
-    case ASTNodeKind.ENUM_DECL:
-      return `enum ${decl.name}`;
+    case ASTNodeKind.VARIANT_DECL: {
+      const tps = (decl.typeParams ?? []).map((p) => p.name).join(", ");
+      return tps ? `variant ${decl.name}<${tps}>` : `variant ${decl.name}`;
+    }
+    case ASTNodeKind.ENUM_DECL: {
+      const ut = decl.underlying?.name ?? "int32";
+      return ut === "int32" ? `enum ${decl.name}` : `enum ${decl.name}<${ut}>`;
+    }
     case ASTNodeKind.UNION_DECL:
       return `union ${decl.name}`;
     case ASTNodeKind.TRAIT_DECL:
@@ -439,6 +655,85 @@ function summarizeDecl(decl) {
     default:
       return decl.name ? `${declKindLabel(decl) ?? decl.kind} ${decl.name}` : null;
   }
+}
+
+// Phase 12: read a possible `<ns>.<name>` form around the cursor. Given the
+// cursor's token + its source offset, walk backwards over ident chars to
+// catch the case where the user is hovering on the second half of a dotted
+// name; walk forwards to catch the first-half case. Returns `{ ns, name,
+// onNs }` where `onNs` is true iff the cursor token IS the namespace half.
+// Returns null when there's no leading `<ident>.` or trailing `.<ident>`.
+function readDottedAtCursor(src, tokStart, tokText) {
+  const tokEnd = tokStart + tokText.length;
+  // Case 1: cursor is the second half. `ns.tokText` -> look back from tokStart.
+  if (tokStart >= 2 && src[tokStart - 1] === ".") {
+    let i = tokStart - 2;
+    while (i >= 0 && isIdentCharStr(src[i])) i--;
+    const ns = src.slice(i + 1, tokStart - 1);
+    if (ns && isIdentStart(ns.charCodeAt(0))) {
+      return { ns, name: tokText, onNs: false };
+    }
+  }
+  // Case 2: cursor is the first half. `tokText.<name>` -> look forward.
+  if (tokEnd < src.length && src[tokEnd] === ".") {
+    let j = tokEnd + 1;
+    while (j < src.length && isIdentCharStr(src[j])) j++;
+    const name = src.slice(tokEnd + 1, j);
+    if (name && isIdentStart(name.charCodeAt(0))) {
+      return { ns: tokText, name, onNs: true };
+    }
+  }
+  return null;
+}
+
+// Resolve a `ns.name` pair through the imported namespaces of `module`.
+// If the cursor is on the namespace half, jump to the import decl; if on
+// the export name, jump to the export decl in the source module.
+function resolveDottedName(dotted, module, modById, moduleEnv) {
+  if (!moduleEnv) return null;
+  const env = moduleEnv.get(module.id);
+  const imp = env?.importedNames?.get(dotted.ns);
+  if (!imp || imp.kind !== "namespace") return null;
+  if (dotted.onNs) {
+    // Cursor on the namespace itself - find the import decl that introduced
+    // this name and jump to it.
+    const decl = findImportDecl(module.ast, dotted.ns);
+    if (decl) return locOfDecl(decl, module);
+    return null;
+  }
+  const targetMod = modById.get(imp.fromModuleId);
+  if (!targetMod) return null;
+  const decl = findTopLevelByName(targetMod.ast, dotted.name);
+  if (decl) return locOfDecl(decl, targetMod);
+  return null;
+}
+
+// Find the `import * as <name> from "..."` decl that introduced `nsName`.
+function findImportDecl(ast, nsName) {
+  for (const decl of ast.body) {
+    if (decl.kind === ASTNodeKind.IMPORT_DECL && decl.namespaceName === nsName) {
+      return decl;
+    }
+  }
+  return null;
+}
+
+// Find an IMPORT_DECL whose source line(s) cover `offset`. Used when the
+// cursor lands inside the path string literal (identTokenAt returns null
+// there). The decl's `sourceLoc.pos` is the start; the line containing
+// the trailing `;` is the natural end. Imports always sit at the top of
+// the module so the loop is bounded.
+function findImportDeclCovering(ast, src, offset) {
+  for (const decl of ast.body) {
+    if (decl.kind !== ASTNodeKind.IMPORT_DECL) break;
+    if (!decl.sourceLoc) continue;
+    const start = decl.sourceLoc.pos ?? 0;
+    const lineStart = src.lastIndexOf("\n", Math.max(0, start - 1)) + 1;
+    const semi = src.indexOf(";", start);
+    const end = semi >= 0 ? semi + 1 : start + (decl.sourceLoc.length ?? 1);
+    if (offset >= lineStart && offset <= end) return decl;
+  }
+  return null;
 }
 
 // Look up a type or kind name in the module's tables and follow imports
@@ -533,12 +828,29 @@ function symbolFor(decl, src) {
         children,
       };
     }
-    case ASTNodeKind.ENUM_DECL: {
+    case ASTNodeKind.VARIANT_DECL: {
       const children = [];
       for (const v of inner.variants ?? []) {
         if (!v.sourceLoc) continue;
         const r = offsetToRange(src, v.sourceLoc.pos, v.sourceLoc.length);
         children.push({ name: v.name, kind: SymbolKind.EnumMember, range: r, selectionRange: r });
+      }
+      return {
+        name: inner.name,
+        kind: SymbolKind.Enum,
+        range,
+        selectionRange: selRange,
+        children,
+      };
+    }
+    // Phase 12: value enum decl. Each case becomes an EnumMember child so
+    // the outline view collapses cases under the parent enum.
+    case ASTNodeKind.ENUM_DECL: {
+      const children = [];
+      for (const c of inner.cases ?? []) {
+        if (!c.sourceLoc) continue;
+        const r = offsetToRange(src, c.sourceLoc.pos, c.sourceLoc.length);
+        children.push({ name: c.name, kind: SymbolKind.EnumMember, range: r, selectionRange: r });
       }
       return {
         name: inner.name,
@@ -600,9 +912,11 @@ function declKindLabel(decl) {
     case ASTNodeKind.PARAM: return "parameter";
     case ASTNodeKind.FUNCTION_DECL: return "function";
     case ASTNodeKind.TYPE_DECL: return "type";
+    case ASTNodeKind.VARIANT_DECL: return "variant";
     case ASTNodeKind.ENUM_DECL: return "enum";
     case ASTNodeKind.UNION_DECL: return "union";
     case ASTNodeKind.TRAIT_DECL: return "trait";
+    case ASTNodeKind.KIND_DECL: return "kind";
     case ASTNodeKind.FIELD_DECL: return "field";
     default: return null;
   }

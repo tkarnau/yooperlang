@@ -1,0 +1,33 @@
+// plans/yoopbinder-papercuts.md Issue 3: enum `==` / `!=` direct
+// operators. Compared values are tag-only - payload bytes are
+// intentionally not consulted (use `switch` for structural comparison).
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+variant Color { Red, Green, Blue }
+
+variant Shape {
+    Circle { radius: int32 },
+    Square { side: int32 },
+}
+
+function main(): int32 {
+    // Payload-free enum: straight tag comparison.
+    let r1: Color = Color.Red;
+    let r2: Color = Color.Red;
+    let g: Color = Color.Green;
+    if (r1 == r2) { printf("Red==Red\n"); }
+    if (r1 != g) { printf("Red!=Green\n"); }
+    if (r1 == g) { printf("UNREACHABLE\n"); }
+
+    // Payload-bearing enum: tag-only -- different payloads but same
+    // variant tag compare equal.
+    let c5: Shape = Shape.Circle { radius: 5 };
+    let c99: Shape = Shape.Circle { radius: 99 };
+    let sq: Shape = Shape.Square { side: 5 };
+    if (c5 == c99) { printf("Circle(5)==Circle(99) (tag-only)\n"); }
+    if (c5 != sq) { printf("Circle!=Square\n"); }
+    return 0;
+}

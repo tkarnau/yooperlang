@@ -1,0 +1,48 @@
+// plans/yoopbinder-papercuts.md Issue 10 path A: reserved keywords are
+// accepted in name-only positions (struct/union/variant/enum field+case
+// names, extern function param names, field access RHS, struct literal
+// field names). C headers use `type`, `kind`, `enum`, etc. as parameter
+// names; generated bindings would otherwise fail to parse on the first
+// collision.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+    // Mirrors a typical C signature like `void f(int type, int kind, int enum)`.
+    // The names are metadata; the C ABI passes positionally.
+    function fputs(type: string, kind: ref FILE): int32;
+    type FILE;
+}
+
+type Packet {
+    type: int32,
+    kind: int32,
+}
+
+union Value {
+    type: int32,
+    enum: float32,
+}
+
+enum Tag { type, kind, enum }
+
+variant Shape {
+    function,
+    type { kind: int32 },
+}
+
+function main(): int32 {
+    let p: Packet = { type: 7, kind: 3 };
+    printf(`p.type=${int64(p.type)} p.kind=${int64(p.kind)}\n`);
+
+    let t: Tag = Tag.kind;
+    if (t == Tag.kind) { printf("t==Tag.kind\n"); }
+
+    let s: Shape = Shape.type { kind: 42 };
+    switch (s) {
+        case Shape.function: { printf("function variant\n"); }
+        case Shape.type { kind: k }: {
+            printf(`type variant, kind=${int64(k)}\n`);
+        }
+    }
+    return 0;
+}

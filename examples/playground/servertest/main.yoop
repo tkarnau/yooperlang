@@ -1,17 +1,17 @@
 /*
-    Author: Tom Karnau
+  Author: Tom Karnau
 
-    Http server proof of concept demonstration in yooperlang
+  Http server proof of concept demonstration in yooperlang
 
-    The ergonomics in here are deliberately chosen to make higher level
-    feeling in the http code that we normally get from popular TS/JS libraries
-    but this is running in a systems language.
+  The ergonomics in here are deliberately chosen to make higher level
+  feeling in the http code that we normally get from popular TS/JS libraries
+  but this is running in a systems language.
 
-    The actual network layer OS calls and such are the C system headers 
-    and we have a std/core set of yoop code that interfaces with that and
-    surfaces yooperlang modules for interacting with it.
+  The actual network layer OS calls and such are the C system headers 
+  and we have a std/core set of yoop code that interfaces with that and
+  surfaces yooperlang modules for interacting with it.
 
-    Any of these core features could be written by hand.
+  Any of these core features could be written by hand.
 */
 
 // The server handles N requests and then exits (serve_n's `n` arg).
@@ -24,10 +24,9 @@ import { Handler, HandleOutcome, ServeOutcome } from "std/http/server.yoop";
 import * as http_server from "std/http/server.yoop";
 import { Request, Response } from "std/http/types.yoop";
 import * as http_types from "std/http/types.yoop";
-import * as intr from "std/core/intrinsics.yoop";
 
 extern "C" from "stdio.h" {
-    function printf(fmt: string, ...): int32;
+  function printf(fmt: string, ...): int32;
 }
 
 // user-defines handler. 
@@ -36,31 +35,30 @@ extern "C" from "stdio.h" {
 // std/http/server is generic over them. Borrows from my comfort with
 // things like Express.JS
 type HelloHandler implements Handler {
-    greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = http_types.ok();
-        http_types.headers_add(ref resp.headers, "Content-Type", "text/plain");
-        resp.body = intr.string_as_bytes(self.greeting);
-        return HandleOutcome.Ok;
-    }
+  greeting: string,
+  function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    resp.status = http_types.ok();
+    http_types.headers_add(ref resp.headers, "Content-Type", "text/plain");
+    http_types.respond_static(ref resp, self.greeting);
+    return HandleOutcome.Ok;
+  }
 }
 
 function main(): int32 {
 
-    // host, port, backlog
-    // backlog is the maximum pending-connection queue length
-    // backlog is passed directly to C function -> "listen" call in sys/socket.h
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128);
-
+  // host, port, backlog
+  // backlog is the maximum pending-connection queue length
+  // backlog is passed directly to C function -> "listen" call in sys/socket.h
+  let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128) {
     // there is no try/catch in this language.
     // explicitly inspect the `error` field on the disposable result.
     if (lr.error.len > 0) {
-        printf(`bind failed: ${lr.error}\n`);
-        return 1;
+      printf(`bind failed: ${lr.error}\n`);
+      return 1;
     }
     printf(`listening on 127.0.0.1:18080\n`);
     let handler: HelloHandler = { greeting: "Hello, World!\n" };
-
+  
     // serve_n with n=1: exit after one request (test-friendly).
     // Switch to a large N or <=0 for a long-running server.
     // serve_n is not an async function, this runs in a while loop and has its
@@ -71,9 +69,11 @@ function main(): int32 {
     // to tap into like in other GC'd or event-looped langauges.
     // THIS is the "long-running" process
     let outcome: ServeOutcome = http_server.serve_n(ref lr.listener, ref handler, 0);
-
+  
     // if there is an error or we maxed out our test number of calls the outcome
     // will resolve and we print and exit...
     printf(`served=${outcome.served} err=${outcome.error}\n`);
-    return 0;
+  }
+
+  return 0;
 }

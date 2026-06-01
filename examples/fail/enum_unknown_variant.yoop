@@ -1,4 +1,4 @@
-enum E { A, B }
+variant E { A, B }
 
 function main(): int32 {
     let x: E = E.NotThere;

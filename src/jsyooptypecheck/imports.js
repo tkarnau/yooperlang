@@ -23,16 +23,19 @@ export function resolveImports(mod, moduleEnv, errors) {
       continue;
     }
 
-    if (imp.importKind === "namespace") {
-      // import * as ns from "./mod.yoop"
+    // Namespace clause: `import * as ns ...`. Yoopstore-papercut #9: a
+    // "combined" import (`import * as ns, { Type } from "..."`) carries both
+    // a namespaceName and specifiers, so this is gated on the field, not on
+    // importKind, and we fall through to the named-specifier loop rather than
+    // `continue`-ing.
+    if (imp.namespaceName) {
       if (localSymbols.has(imp.namespaceName)) {
         pushError(errors, imp, `local name "${imp.namespaceName}" collides with an existing declaration`);
-        continue;
+      } else {
+        const nsType = NamespaceType(srcEnv === modEnv ? mod.id : imp.resolvedModuleId, srcEnv.exports);
+        localSymbols.set(imp.namespaceName, nsType);
+        importedNames.set(imp.namespaceName, { fromModuleId: imp.resolvedModuleId, exportName: imp.namespaceName, kind: "namespace" });
       }
-      const nsType = NamespaceType(srcEnv === modEnv ? mod.id : imp.resolvedModuleId, srcEnv.exports);
-      localSymbols.set(imp.namespaceName, nsType);
-      importedNames.set(imp.namespaceName, { fromModuleId: imp.resolvedModuleId, exportName: imp.namespaceName, kind: "namespace" });
-      continue;
     }
 
     // named: import { a, b as c }
@@ -60,14 +63,16 @@ export function resolveImports(mod, moduleEnv, errors) {
       const srcGenericFunc = srcEnv.genericFuncTable?.get(spec.exportName);
       const srcGenericTrait = srcEnv.genericTraitTable?.get(spec.exportName);
       // Phase 10.A: generic enums import-side; lookups for an instantiated
-      // generic enum go through genericEnumTable in the source module.
-      const srcGenericEnum = srcEnv.genericEnumTable?.get(spec.exportName);
+      // generic enum go through genericVariantTable in the source module.
+      const srcGenericVariant = srcEnv.genericVariantTable?.get(spec.exportName);
       // Phase 7.5: enum / union are sibling nominal types alongside struct.
       // lookupEnumByName / lookupUnionByName walk importedNames with kind ===
       // "type", so we register them the same way (and surface the resolved
       // type so resolveTypeAnnotation can find it via the type table).
-      const srcEnum = srcEnv.enumTable?.get(spec.exportName);
+      const srcVariant = srcEnv.variantTable?.get(spec.exportName);
       const srcUnion = srcEnv.unionTable?.get(spec.exportName);
+      // Phase 12: value-enum export lookup.
+      const srcValueEnum = srcEnv.enumTable?.get(spec.exportName);
       // Phase 9.G / 10.I: vtable nominal lookup. Treated as a "type" kind
       // import - resolveTypeAnnotation walks importedNames and consults
       // the source module's vtableTable when the kind is "type".
@@ -106,14 +111,16 @@ export function resolveImports(mod, moduleEnv, errors) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-func" });
       } else if (srcGenericTrait) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-trait" });
-      } else if (srcGenericEnum) {
+      } else if (srcGenericVariant) {
         // Phase 10.A: imported generic enum. resolveGenericApplication walks
-        // importedNames → genericEnumTable to find it; variant-constructor
+        // importedNames → genericVariantTable to find it; variant-constructor
         // pinning uses the same path.
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "generic-type" });
-      } else if (srcEnum) {
+      } else if (srcVariant) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcUnion) {
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
+      } else if (srcValueEnum) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcVtable) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });

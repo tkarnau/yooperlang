@@ -120,6 +120,52 @@ describe("parse: expressions", () => {
     assert.equal(e.operand.kind, ASTNodeKind.BINARY_EXPRESSION);
   });
 
+  // Regression: unary prefixes used to return early instead of falling
+  // through to the binary loop, so `!a && b`, `-a + b`, `~a & b` failed
+  // to parse. See plans/yoopbinder-papercuts.md Issue 1.
+  it("`!a && b` parses as `&&((!a), b)` not as a syntax error", () => {
+    const e = exprOf("!a && b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "andand");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "not");
+    assert.equal(e.right.kind, ASTNodeKind.IDENT);
+  });
+
+  it("`-a + b` composes unary minus with binary plus", () => {
+    const e = exprOf("-a + b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "plus");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "minus");
+    assert.equal(e.right.kind, ASTNodeKind.IDENT);
+  });
+
+  it("`~a & b` composes bitwise not with bitwise and", () => {
+    const e = exprOf("~a & b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "amp");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "bitnot");
+  });
+
+  it("`!a || !b` chains unary not on both sides", () => {
+    const e = exprOf("!a || !b");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "oror");
+    assert.equal(e.left.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.left.op, "not");
+    assert.equal(e.right.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.right.op, "not");
+  });
+
+  it("`!flags[i]` keeps the postfix binding tight to the operand", () => {
+    const e = exprOf("!flags[i]");
+    assert.equal(e.kind, ASTNodeKind.UNARY_EXPRESSION);
+    assert.equal(e.op, "not");
+    assert.equal(e.operand.kind, ASTNodeKind.INDEX_EXPRESSION);
+  });
+
   // Phase 9.E: array slice syntax
   it("plain index parses as INDEX_EXPRESSION", () => {
     const e = exprOf("xs[5]");
@@ -181,6 +227,20 @@ describe("parse: statements", () => {
   it("const decl", () => {
     const stmts = bodyOf("const y: int32 = 2;");
     assert.equal(stmts[0].kind, ASTNodeKind.CONST_DECL);
+  });
+
+  it("let decl with no annotation leaves typeAnnotation null (inferred)", () => {
+    const stmts = bodyOf("let x = 1;");
+    assert.equal(stmts[0].kind, ASTNodeKind.LET_DECL);
+    assert.equal(stmts[0].name, "x");
+    assert.equal(stmts[0].typeAnnotation, null);
+    assert.ok(stmts[0].assignment);
+  });
+
+  it("const decl with no annotation leaves typeAnnotation null (inferred)", () => {
+    const stmts = bodyOf('const s = "hello";');
+    assert.equal(stmts[0].kind, ASTNodeKind.CONST_DECL);
+    assert.equal(stmts[0].typeAnnotation, null);
   });
 
   it("if statement with else", () => {
@@ -982,14 +1042,14 @@ describe("parse: phase 7.2 / 9.J - trait bounds on type params", () => {
   });
 });
 
-describe("Phase 7.5: enum declarations", () => {
-  it("parses an enum with payload + no-payload variants", () => {
+describe("Phase 7.5: variant declarations", () => {
+  it("parses a variant with payload + no-payload cases", () => {
     const ast = parse(
-      "enum Shape { Circle { radius: float32 }, Rectangle { w: float32, h: float32 }, Empty, }",
+      "variant Shape { Circle { radius: float32 }, Rectangle { w: float32, h: float32 }, Empty, }",
     );
     assert.equal(ast.body.length, 1);
     const e = ast.body[0];
-    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.kind, ASTNodeKind.VARIANT_DECL);
     assert.equal(e.name, "Shape");
     assert.equal(e.variants.length, 3);
     assert.equal(e.variants[0].name, "Circle");
@@ -1001,12 +1061,12 @@ describe("Phase 7.5: enum declarations", () => {
     assert.equal(e.variants[2].fields, null);
   });
 
-  it("parses a generic enum", () => {
+  it("parses a generic variant", () => {
     const ast = parse(
-      "enum Result<T, E> { Ok { value: T }, Err { error: E } }",
+      "variant Result<T, E> { Ok { value: T }, Err { error: E } }",
     );
     const e = ast.body[0];
-    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.kind, ASTNodeKind.VARIANT_DECL);
     assert.equal(e.typeParams.length, 2);
     assert.equal(e.typeParams[0].name, "T");
     assert.equal(e.typeParams[1].name, "E");
@@ -1014,21 +1074,87 @@ describe("Phase 7.5: enum declarations", () => {
     assert.equal(e.variants[1].name, "Err");
   });
 
-  it("rejects duplicate variant names", () => {
+  it("rejects duplicate case names", () => {
     assert.throws(
-      () => parse("enum E { A, A }"),
-      /duplicate variant name 'A'/,
+      () => parse("variant E { A, A }"),
+      /duplicate case name 'A'/,
     );
   });
 
-  it("rejects empty enum", () => {
-    assert.throws(() => parse("enum E { }"), /must declare at least one variant/);
+  it("rejects empty variant decl", () => {
+    assert.throws(() => parse("variant E { }"), /must declare at least one case/);
   });
 
   it("rejects empty payload braces", () => {
     assert.throws(
-      () => parse("enum E { A { } }"),
+      () => parse("variant E { A { } }"),
       /empty payload braces/,
+    );
+  });
+
+  it("parses an exported variant", () => {
+    const ast = parse("export variant E { A, B }");
+    assert.equal(ast.body[0].kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(ast.body[0].decl.kind, ASTNodeKind.VARIANT_DECL);
+    assert.equal(ast.body[0].decl.name, "E");
+  });
+});
+
+describe("Phase 12: value enum declarations", () => {
+  it("parses a default-int32 value enum with bare cases", () => {
+    const ast = parse("enum Color { Red, Green, Blue }");
+    assert.equal(ast.body.length, 1);
+    const e = ast.body[0];
+    assert.equal(e.kind, ASTNodeKind.ENUM_DECL);
+    assert.equal(e.name, "Color");
+    assert.equal(e.underlying.kind, "typeName");
+    assert.equal(e.underlying.name, "int32");
+    assert.equal(e.cases.length, 3);
+    assert.equal(e.cases[0].name, "Red");
+    assert.equal(e.cases[0].valueExpr, null);
+  });
+
+  it("parses an enum with an explicit underlying type after the name", () => {
+    const ast = parse("enum X<int64> { A 0, B 42 }");
+    const e = ast.body[0];
+    assert.equal(e.underlying.kind, "typeName");
+    assert.equal(e.underlying.name, "int64");
+    assert.equal(e.cases.length, 2);
+    assert.equal(e.cases[0].valueExpr.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.cases[0].valueExpr.value, 0);
+    assert.equal(e.cases[1].valueExpr.value, 42);
+  });
+
+  it("parses an enum Name<string> with string-literal values", () => {
+    const ast = parse('enum S<string> { Asc "A", Desc "D" }');
+    const e = ast.body[0];
+    assert.equal(e.underlying.name, "string");
+    assert.equal(e.cases[0].valueExpr.kind, ASTNodeKind.STRING_LITERAL);
+  });
+
+  it("parses a flag-style enum with bitwise OR over prior cases", () => {
+    const ast = parse("enum F { A 1, B 2, AB A | B }");
+    const e = ast.body[0];
+    assert.equal(e.cases[2].name, "AB");
+    assert.equal(e.cases[2].valueExpr.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.cases[2].valueExpr.op, "pipe");
+  });
+
+  it("rejects duplicate case names", () => {
+    assert.throws(
+      () => parse("enum E { A, A }"),
+      /duplicate case name 'A'/,
+    );
+  });
+
+  it("rejects an empty enum", () => {
+    assert.throws(() => parse("enum E { }"), /must declare at least one case/);
+  });
+
+  it("rejects multi-arg type slots on value enums (the <T> slot is the underlying type)", () => {
+    assert.throws(
+      () => parse("enum Result<int32, int64> { A }"),
+      /takes a single underlying type/,
     );
   });
 
@@ -1225,5 +1351,130 @@ describe("Phase 7.5: variant constructor expression", () => {
     assert.equal(e.field, "Empty");
     assert.equal(e.object.kind, ASTNodeKind.IDENT);
     assert.equal(e.object.name, "Shape");
+  });
+});
+
+// Issue 10 path A: reserved keywords accepted in name-only positions so the
+// growing keyword set doesn't block common C-style names like `type`, `kind`,
+// `enum` in extern bindings, struct fields, etc.
+describe("parse: reserved keywords in name-only positions", () => {
+  it("struct field name can be a reserved keyword", () => {
+    const ast = parse("type Foo { type: int32, kind: int32, enum: bool }");
+    const td = ast.body[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(td.fields.length, 3);
+    assert.deepEqual(
+      td.fields.map((f) => f.name),
+      ["type", "kind", "enum"],
+    );
+  });
+
+  it("struct can mix keyword fields and methods", () => {
+    const ast = parse(`
+      trait T { function go(ref self): void; }
+      type Foo implements T {
+        type: int32,
+        function go(ref self): void { return; }
+      }
+    `);
+    const td = ast.body[1];
+    assert.equal(td.fields.length, 1);
+    assert.equal(td.fields[0].name, "type");
+    assert.equal(td.methods.length, 1);
+    assert.equal(td.methods[0].name, "go");
+  });
+
+  it("union field name can be a reserved keyword", () => {
+    const ast = parse("union U { type: int32, kind: float32 }");
+    const ud = ast.body[0];
+    assert.equal(ud.kind, ASTNodeKind.UNION_DECL);
+    assert.deepEqual(
+      ud.fields.map((f) => f.name),
+      ["type", "kind"],
+    );
+  });
+
+  it("enum case name can be a reserved keyword", () => {
+    const ast = parse("enum E { type, kind, enum }");
+    const ed = ast.body[0];
+    assert.equal(ed.kind, ASTNodeKind.ENUM_DECL);
+    assert.deepEqual(
+      ed.cases.map((c) => c.name),
+      ["type", "kind", "enum"],
+    );
+  });
+
+  it("variant case name and payload field name can be reserved keywords", () => {
+    const ast = parse(
+      "variant V { type { kind: int32 }, function }",
+    );
+    const vd = ast.body[0];
+    assert.equal(vd.kind, ASTNodeKind.VARIANT_DECL);
+    assert.equal(vd.variants.length, 2);
+    assert.equal(vd.variants[0].name, "type");
+    assert.equal(vd.variants[0].fields[0].name, "kind");
+    assert.equal(vd.variants[1].name, "function");
+    assert.equal(vd.variants[1].fields, null);
+  });
+
+  it("extern function parameter name can be a reserved keyword", () => {
+    const ast = parse(`
+      extern "C" from "stdio.h" {
+        function f(type: int32, kind: int32, enum: int32): void;
+      }
+    `);
+    const block = ast.body[0];
+    assert.equal(block.kind, ASTNodeKind.EXTERN_BLOCK);
+    const fn = block.decls[0];
+    assert.deepEqual(
+      fn.params.map((p) => p.name),
+      ["type", "kind", "enum"],
+    );
+  });
+
+  it("extern ref param keeps the keyword name", () => {
+    const ast = parse(`
+      extern "C" from "x.h" { function f(ref type: int32): void; }
+    `);
+    const fn = ast.body[0].decls[0];
+    assert.equal(fn.params[0].name, "type");
+    assert.equal(fn.params[0].isRef, true);
+  });
+
+  it("field access RHS can be a reserved keyword", () => {
+    const ast = parse("function f(): int32 { return obj.type; }");
+    const ret = ast.body[0].body.body[0];
+    assert.equal(ret.value.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(ret.value.field, "type");
+  });
+
+  it("struct literal field name can be a reserved keyword", () => {
+    const ast = parse(
+      "function f(): Foo { let x: Foo = { type: 1, kind: 2 }; return x; }",
+    );
+    const decl = ast.body[0].body.body[0];
+    const lit = decl.assignment;
+    assert.equal(lit.kind, ASTNodeKind.STRUCT_LITERAL);
+    assert.deepEqual(
+      lit.fields.map((f) => f.name),
+      ["type", "kind"],
+    );
+  });
+
+  it("variant constructor field name can be a reserved keyword", () => {
+    const ast = parse(
+      "function f(): int32 { let x: E = E.A { type: 1 }; return 0; }",
+    );
+    const decl = ast.body[0].body.body[0];
+    const vc = decl.assignment;
+    assert.equal(vc.kind, ASTNodeKind.VARIANT_CONSTRUCTOR);
+    assert.equal(vc.fields[0].name, "type");
+  });
+
+  it("user-defined function param still rejects keyword names", () => {
+    assert.throws(
+      () => parse("function f(type: int32): void { return; }"),
+      /expected rparen, got type/,
+    );
   });
 });

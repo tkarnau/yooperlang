@@ -1,0 +1,24 @@
+import * as intr from "std/core/intrinsics.yoop";
+
+// Compiled with --track-heap, this should record:
+//   5 int32 * 4 bytes = 20  bytes allocated, freed
+//   3 Pair  * 16 bytes = 48 bytes allocated (never freed - intentional leak)
+// Net leak: 48 bytes.
+
+type Pair {
+    x: int32,
+    y: int32,
+}
+
+function main(): int32 {
+    let buf: int32[] = intr.heap_alloc(5);
+    buf[0] = 1;
+    buf[4] = 5;
+    intr.heap_free(buf);
+
+    let pairs: Pair[] = intr.heap_alloc(3);
+    pairs[0] = { x: 1, y: 2 };
+
+    printf(`done\n`);
+    return 0;
+}

@@ -15,6 +15,8 @@ import {
   findDefinition,
   findNodeAt,
   getHoverInfo,
+  hoverFromName,
+  identTokenAt,
   posToOffset,
 } from "./nav.js";
 
@@ -141,6 +143,284 @@ function main(): int32 {
     // Jump lands on the function *name* token, not the `function` keyword.
     const nameOff = src.indexOf("add");
     assert.equal(def.pos, nameOff);
+  });
+});
+
+describe("nav: variant + value-enum hover and goto-def", () => {
+  it("hover on a variant decl says 'variant', not 'enum'", () => {
+    const src = `variant Shape { Circle, Square }
+function main(): int32 { return 0; }
+`;
+    const { mod } = analyzeFixture(src);
+    const off = src.indexOf("Shape");
+    const node = findNodeAt(mod.ast, off, src);
+    assert.equal(node.kind, "VARIANT_DECL");
+    const hover = getHoverInfo(node, mod);
+    assert.equal(hover, "variant Shape");
+  });
+
+  it("hover on a value-enum decl renders 'enum Name' (or with underlying)", () => {
+    const src = `enum Color { Red, Green, Blue }
+enum Big<int64> { Zero 0 }
+function main(): int32 { return 0; }
+`;
+    const { mod } = analyzeFixture(src);
+    const colorOff = src.indexOf("Color");
+    const colorNode = findNodeAt(mod.ast, colorOff, src);
+    assert.equal(colorNode.kind, "ENUM_DECL");
+    assert.equal(getHoverInfo(colorNode, mod), "enum Color");
+    const bigOff = src.indexOf("Big");
+    const bigNode = findNodeAt(mod.ast, bigOff, src);
+    assert.equal(getHoverInfo(bigNode, mod), "enum Big<int64>");
+  });
+
+  it("hover on a variant-constructor expression renders Type.Case + carrier", () => {
+    const src = `enum Color { Red, Green, Blue }
+function main(): int32 {
+    let c: Color = Color.Red;
+    return 0;
+}
+`;
+    const { mod } = analyzeFixture(src);
+    const off = src.indexOf("Color.Red");
+    const node = findNodeAt(mod.ast, off, src);
+    // After typecheck promotion the node is a VARIANT_CONSTRUCTOR.
+    assert.equal(node.kind, "VARIANT_CONSTRUCTOR");
+    const hover = getHoverInfo(node, mod);
+    assert.match(hover, /^Color\.Red:/);
+  });
+
+  it("goto-def on a value-enum case lands on the case row, not the enum decl", () => {
+    const src = `enum Color { Red, Green, Blue }
+function main(): int32 {
+    let c: Color = Color.Red;
+    return 0;
+}
+`;
+    const { mod, result } = analyzeFixture(src);
+    const caseOff = src.lastIndexOf("Red");
+    const tok = identTokenAt(src, caseOff);
+    const node = findNodeAt(mod.ast, caseOff, src);
+    const def = findDefinition(node, {
+      module: mod,
+      modById: result.modById,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      moduleEnv: result.moduleEnv,
+    });
+    assert.ok(def);
+    // The case row "Red" lives in the enum body, not at the enum name.
+    const enumDeclOff = src.indexOf("Color"); // first "Color" is the decl
+    assert.notEqual(def.pos, enumDeclOff, "case def should not point at the enum name");
+    // It should point at the "Red" inside the enum body.
+    const caseDeclOff = src.indexOf("Red");
+    assert.equal(def.pos, caseDeclOff);
+  });
+});
+
+describe("nav: namespace-prefixed access", () => {
+  it("dotted type annotation cursor jumps across modules", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_nav_ns_"));
+    const m = path.join(dir, "m.yoop");
+    const main = path.join(dir, "main.yoop");
+    fs.writeFileSync(m, `export type Point { x: int32, y: int32 }
+`);
+    const mainSrc = `import * as m from "./m.yoop";
+function f(): int32 {
+    let p: m.Point = { x: 1, y: 2 };
+    return p.x;
+}
+function main(): int32 { return f(); }
+`;
+    fs.writeFileSync(main, mainSrc);
+    const result = analyze(fs.realpathSync(main), new Map());
+    assert.deepEqual(result.diagnostics, []);
+    const mainMod = result.modules.find((mm) => mm.absPath === fs.realpathSync(main));
+    // Cursor on `Point` in `m.Point` annotation - that's not an AST node,
+    // so findNodeAt returns null and findDefinition must fall back via
+    // the dotted-sniff path.
+    const pointOff = mainSrc.indexOf("m.Point") + 2;
+    const tok = identTokenAt(mainSrc, pointOff);
+    assert.equal(tok?.text, "Point");
+    const node = findNodeAt(mainMod.ast, pointOff, mainSrc);
+    const def = findDefinition(node, {
+      module: mainMod,
+      modById: result.modById,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      moduleEnv: result.moduleEnv,
+    });
+    assert.ok(def, "expected a def for ns.Type annotation cursor");
+    assert.equal(def.absPath, fs.realpathSync(m));
+  });
+
+  it("goto-def on a namespace-prefixed const lands in the source module", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_nav_ns2_"));
+    const m = path.join(dir, "m.yoop");
+    const main = path.join(dir, "main.yoop");
+    fs.writeFileSync(m, `export const MAX: int32 = 100;
+`);
+    const mainSrc = `import * as m from "./m.yoop";
+function main(): int32 {
+    let n: int32 = m.MAX;
+    return n;
+}
+`;
+    fs.writeFileSync(main, mainSrc);
+    const result = analyze(fs.realpathSync(main), new Map());
+    assert.deepEqual(result.diagnostics, []);
+    const mainMod = result.modules.find((mm) => mm.absPath === fs.realpathSync(main));
+    const maxOff = mainSrc.indexOf("m.MAX") + 2;
+    const tok = identTokenAt(mainSrc, maxOff);
+    const node = findNodeAt(mainMod.ast, maxOff, mainSrc);
+    const def = findDefinition(node, {
+      module: mainMod,
+      modById: result.modById,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      moduleEnv: result.moduleEnv,
+    });
+    assert.ok(def, "expected a def for ns.MAX const access");
+    assert.equal(def.absPath, fs.realpathSync(m));
+  });
+
+  it("hover on a namespace identifier reads as '(namespace) name'", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_nav_ns3_"));
+    const m = path.join(dir, "m.yoop");
+    const main = path.join(dir, "main.yoop");
+    fs.writeFileSync(m, `export function ping(): int32 { return 1; }
+`);
+    const mainSrc = `import * as m from "./m.yoop";
+function main(): int32 { return m.ping(); }
+`;
+    fs.writeFileSync(main, mainSrc);
+    const result = analyze(fs.realpathSync(main), new Map());
+    const mainMod = result.modules.find((mm) => mm.absPath === fs.realpathSync(main));
+    const off = mainSrc.indexOf("m.ping");
+    const node = findNodeAt(mainMod.ast, off, mainSrc);
+    const hover = getHoverInfo(node, mainMod);
+    assert.equal(hover, "(namespace) m");
+  });
+});
+
+describe("nav: import goto-def", () => {
+  it("cursor on `import * as ns` jumps into the imported file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_nav_imp_"));
+    const m = path.join(dir, "lib.yoop");
+    const main = path.join(dir, "main.yoop");
+    fs.writeFileSync(m, `export function ping(): int32 { return 1; }\n`);
+    const mainSrc = `import * as lib from "./lib.yoop";
+function main(): int32 { return lib.ping(); }
+`;
+    fs.writeFileSync(main, mainSrc);
+    const result = analyze(fs.realpathSync(main));
+    const mainMod = result.modules.find((mm) => mm.absPath === fs.realpathSync(main));
+    const off = mainSrc.indexOf("lib from");
+    const tok = identTokenAt(mainSrc, off);
+    const node = findNodeAt(mainMod.ast, off, mainSrc);
+    const def = findDefinition(node, {
+      module: mainMod,
+      modById: result.modById,
+      moduleEnv: result.moduleEnv,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      cursorOffset: off,
+    });
+    assert.ok(def);
+    assert.equal(def.absPath, fs.realpathSync(m));
+  });
+
+  it("cursor inside the import path string jumps into the imported file", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_nav_imp2_"));
+    const m = path.join(dir, "lib.yoop");
+    const main = path.join(dir, "main.yoop");
+    fs.writeFileSync(m, `export function ping(): int32 { return 1; }\n`);
+    const mainSrc = `import * as lib from "./lib.yoop";
+function main(): int32 { return lib.ping(); }
+`;
+    fs.writeFileSync(main, mainSrc);
+    const result = analyze(fs.realpathSync(main));
+    const mainMod = result.modules.find((mm) => mm.absPath === fs.realpathSync(main));
+    // Cursor inside `"./lib.yoop"` - identTokenAt returns null but the
+    // file-fallback should still navigate.
+    const off = mainSrc.indexOf("./lib") + 2;
+    const tok = identTokenAt(mainSrc, off);
+    const node = findNodeAt(mainMod.ast, off, mainSrc);
+    const def = findDefinition(node, {
+      module: mainMod,
+      modById: result.modById,
+      moduleEnv: result.moduleEnv,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      cursorOffset: off,
+    });
+    assert.ok(def, "expected def for cursor inside import path string");
+    assert.equal(def.absPath, fs.realpathSync(m));
+  });
+
+  it("cursor on a named-import specifier jumps to the export's decl", () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_nav_imp3_"));
+    const m = path.join(dir, "lib.yoop");
+    const main = path.join(dir, "main.yoop");
+    fs.writeFileSync(m, `export type Point { x: int32, y: int32 }\n`);
+    const mainSrc = `import { Point } from "./lib.yoop";
+function f(): int32 {
+    let p: Point = { x: 1, y: 2 };
+    return p.x;
+}
+function main(): int32 { return f(); }
+`;
+    fs.writeFileSync(main, mainSrc);
+    const result = analyze(fs.realpathSync(main));
+    const mainMod = result.modules.find((mm) => mm.absPath === fs.realpathSync(main));
+    // Cursor on `Point` inside the `import { Point }` specifier list.
+    const off = mainSrc.indexOf("Point") + 1;
+    const tok = identTokenAt(mainSrc, off);
+    const node = findNodeAt(mainMod.ast, off, mainSrc);
+    const def = findDefinition(node, {
+      module: mainMod,
+      modById: result.modById,
+      moduleEnv: result.moduleEnv,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      cursorOffset: off,
+    });
+    assert.ok(def);
+    assert.equal(def.absPath, fs.realpathSync(m));
+    // The jump should land on the `Point` token in the source module's
+    // type decl, not at byte 0.
+    assert.ok(def.pos > 0, "expected def.pos to point at the decl, not file start");
+  });
+});
+
+describe("nav: formatType rendering", () => {
+  it("renders a generic struct instantiation in source form", () => {
+    const src = `type Box<T> { value: T }
+function main(): int32 {
+    let b: Box<int32> = { value: 42 };
+    return b.value;
+}
+`;
+    const { mod } = analyzeFixture(src);
+    const off = src.lastIndexOf("b.value");
+    const node = findNodeAt(mod.ast, off, src);
+    assert.equal(node.kind, "IDENT");
+    const hover = getHoverInfo(node, mod);
+    assert.match(hover, /Box<int32>/, `hover was: ${hover}`);
+  });
+
+  it("renders arrays as 'Elem[]'", () => {
+    const src = `function main(): int32 {
+    let xs: int32[] = [1, 2, 3];
+    if (xs.len > 0) { return 1; }
+    return 0;
+}
+`;
+    const { mod } = analyzeFixture(src);
+    const off = src.indexOf("let xs") + "let ".length;
+    const node = findNodeAt(mod.ast, off, src);
+    const hover = getHoverInfo(node, mod);
+    assert.match(hover, /int32\[\]/);
   });
 });
 

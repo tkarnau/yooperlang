@@ -1,0 +1,29 @@
+// GLSL source strings for the two pipelines used by nebula_arena:
+//   - nebula:  domain-warped value-noise background, drifts over time.
+//   - sprite:  point-sprite shader that draws the player, bullets,
+//              enemies, particles, and powerups in one draw call.
+//
+// These are exported as functions returning string because module-level
+// `const string` initialisation doesn't process `\n` escapes today, and
+// the GLSL preprocessor requires a newline after `#version 150 core`.
+// See plans/yoopbinder-papercuts.md Issue 9.
+
+export function nebula_vertex_src(): string {
+    return "#version 150 core\nin vec2 a_pos;\nout vec2 v_uv;\nvoid main() {\n    v_uv = (a_pos + vec2(1.0)) * 0.5;\n    gl_Position = vec4(a_pos, 0.0, 1.0);\n}\n";
+}
+
+export function nebula_fragment_src(): string {
+    return "#version 150 core\nin vec2 v_uv;\nout vec4 frag_color;\nuniform float u_time;\nuniform vec2 u_resolution;\n// Hash-based pseudo-noise. Cheap and looks fine for slow drifts.\nfloat hash(vec2 p) {\n    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453);\n}\nfloat value_noise(vec2 p) {\n    vec2 i = floor(p);\n    vec2 f = fract(p);\n    vec2 u = f * f * (3.0 - 2.0 * f);\n    return mix(mix(hash(i + vec2(0,0)), hash(i + vec2(1,0)), u.x),\n               mix(hash(i + vec2(0,1)), hash(i + vec2(1,1)), u.x), u.y);\n}\nfloat fbm(vec2 p) {\n    float v = 0.0;\n    float amp = 0.5;\n    for (int k = 0; k < 4; k = k + 1) {\n        v = v + amp * value_noise(p);\n        p = p * 2.0;\n        amp = amp * 0.5;\n    }\n    return v;\n}\nvoid main() {\n    vec2 p = v_uv * 4.0;\n    p.x = p.x + u_time * 0.04;\n    float n = fbm(p + fbm(p + u_time * 0.02));\n    vec3 deep   = vec3(0.04, 0.02, 0.10);\n    vec3 mid    = vec3(0.30, 0.06, 0.40);\n    vec3 hot    = vec3(0.95, 0.35, 0.55);\n    vec3 color = mix(deep, mid, smoothstep(0.20, 0.55, n));\n    color = mix(color, hot, smoothstep(0.55, 0.85, n) * 0.8);\n    float star = hash(floor(v_uv * 480.0));\n    if (star > 0.997) {\n        color = color + vec3(1.0) * (star - 0.997) * 80.0;\n    }\n    frag_color = vec4(color, 1.0);\n}\n";
+}
+
+// Sprite pipeline: every drawable entity is a single GL_POINT with a
+// per-vertex size + RGBA color. Vertex turns pixel coords into NDC.
+// Fragment shapes the point into a soft-edged disc with a brighter core
+// so each sprite glows.
+export function sprite_vertex_src(): string {
+    return "#version 150 core\nin vec2 a_pos;\nin float a_size;\nin vec4 a_color;\nout vec4 v_color;\nuniform vec2 u_resolution;\nvoid main() {\n    vec2 ndc;\n    ndc.x = (a_pos.x / u_resolution.x) * 2.0 - 1.0;\n    ndc.y = 1.0 - (a_pos.y / u_resolution.y) * 2.0;\n    gl_Position = vec4(ndc, 0.0, 1.0);\n    gl_PointSize = a_size;\n    v_color = a_color;\n}\n";
+}
+
+export function sprite_fragment_src(): string {
+    return "#version 150 core\nin vec4 v_color;\nout vec4 frag_color;\nvoid main() {\n    vec2 d = gl_PointCoord - vec2(0.5);\n    float r = length(d);\n    if (r > 0.5) discard;\n    float core = smoothstep(0.50, 0.10, r);\n    float halo = smoothstep(0.50, 0.30, r);\n    vec3 col = v_color.rgb * (0.5 + 0.7 * core);\n    frag_color = vec4(col, v_color.a * halo);\n}\n";
+}

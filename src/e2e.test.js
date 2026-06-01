@@ -27,7 +27,7 @@ function runFixture(relPath, opts = {}) {
   const usesImport = /^\s*import(\s|\.)/m.test(src);
   let ir, extraLinkFlags = [];
   if (usesImport) {
-    const result = compileEntry(path.join(repoRoot, relPath));
+    const result = compileEntry(path.join(repoRoot, relPath), { trackHeap: !!opts.trackHeap });
     ir = result.ir;
     extraLinkFlags = result.linkFlags ?? [];
   } else {
@@ -52,7 +52,7 @@ function runFixture(relPath, opts = {}) {
     env,
     timeout: opts.timeoutMs ?? 30000,
   });
-  return { stdout: result.stdout, exitCode: result.status };
+  return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
 }
 
 // Variant of runFixture that stages an asset file alongside the binary and
@@ -91,10 +91,64 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("type_inference.yoop: let/const bindings infer their type from the initializer", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/type_inference.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "str is world\ncount is 54, flag is 1\npoint is 3,4\n",
+    );
+  });
+
+  it("printf_format.yoop: explicit %-directives in a format string are not doubled", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/printf_format.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "x=10\nx=10 y=20\nname=Tom x=10\ntemplate x is 10\nTom\n",
+    );
+  });
+
   it("parens_basic.yoop groups subexpressions and composes with postfix ops", () => {
     const { stdout, exitCode } = runFixture("examples/pass/parens_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=20\nb=20\nc=20\ne=99 f=200\n");
+  });
+
+  it("generic_call_struct_lit.yoop: struct literals get target type from generic arg position", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_call_struct_lit.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "v[0]=(1,2)\n" +
+        "v[1]=(3,4)\n" +
+        "v[2]=(5,6)\n",
+    );
+  });
+
+  it("keyword_field_names.yoop: reserved keywords accepted in name-only positions", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/keyword_field_names.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "p.type=7 p.kind=3\n" +
+        "t==Tag.kind\n" +
+        "type variant, kind=42\n",
+    );
+  });
+
+  it("enum_eq.yoop: `==` / `!=` on enums lower to tag comparison", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/enum_eq.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Red==Red\n" +
+        "Red!=Green\n" +
+        "Circle(5)==Circle(99) (tag-only)\n" +
+        "Circle!=Square\n",
+    );
   });
 
   it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", () => {
@@ -237,7 +291,10 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   it("display_templates: Display trait wires into template literal interpolations", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/display_templates.yoop");
     assert.equal(exitCode, 0);
-    assert.equal(stdout, "p=Point x=3\naddr=127.0.0.1 port=8080\n");
+    assert.equal(
+      stdout,
+      "p=Point x=3\naddr=127.0.0.1 port=8080\ninferred=127.0.0.1\ndirect=127.0.0.1\n",
+    );
   });
 
   it("debug_smoke: assert(true, ...) is a no-op; normal-path codegen unaffected", () => {
@@ -381,6 +438,26 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "p[0]=(1, 2.500000) p[2]=(5, 6.500000)\n");
   });
 
+  it("track_heap_basic.yoop: --track-heap counts alloc/free bytes and dumps net via atexit", () => {
+    const { stdout, stderr, exitCode } = runFixture(
+      "examples/pass/track_heap_basic.yoop",
+      { trackHeap: true },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "done\n");
+    // 5 * 4 = 20 bytes int32[] (freed); 3 * 8 = 24 bytes Pair[] (leaked).
+    // Pair is two int32s with no padding so sizeof = 8.
+    assert.match(
+      stderr,
+      /\[yoop-diag\] heap: 44 bytes allocated in 2 calls; 20 bytes freed in 1 calls; net 24 bytes/,
+    );
+  });
+
+  it("heap_alloc_int.yoop without --track-heap emits no diag line", () => {
+    const { stderr } = runFixture("examples/pass/heap_alloc_int.yoop");
+    assert.equal(stderr ?? "", "");
+  });
+
   it("dynarray_push.yoop pushes through a grow boundary in user-defined DynArray<int32>", () => {
     const { stdout, exitCode } = runFixture("examples/pass/dynarray_push.yoop");
     assert.equal(exitCode, 0);
@@ -403,6 +480,21 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/propagates_dispose_both_branches.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposed(7)\n");
+  });
+
+  // Yoopstore-papercut #11: a returned struct/variant literal that moves a
+  // propagating binding into a field transfers the obligation - dispose fires
+  // exactly once, at the caller.
+  it("propagates_return_struct_literal.yoop: returning a struct literal transfers the inner obligation", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/propagates_return_struct_literal.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "using(7)\ndisposed-inner(42)\n");
+  });
+
+  it("propagates_return_variant_literal.yoop: returning a variant constructor transfers the inner obligation", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/propagates_return_variant_literal.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "made-box\ndisposed-inner(99)\n");
   });
 
   it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
@@ -509,6 +601,66 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "a is A\nb.x=42\n");
   });
 
+  // Phase 13.A: a struct declared before a variant that mentions it back
+  // through `Variant.Inner { kids: Struct[] }` used to capture the
+  // empty-variants shell when the typechecker resolved its field types.
+  // `sizeOfType(Struct)` then ran on the stale shell and undersized the
+  // struct; `heap_alloc<Struct>(n)` allocated half the bytes LLVM expects
+  // and writes corrupted the heap. The fix makes pass C mutate the shell
+  // in place. Would fail to run cleanly under the old typechecker.
+  it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/variant_struct_forward_ref.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "total=110 kids=5\n");
+  });
+
+  // Phase 13.B: variant decls accept `implements Trait propagates<K>` and
+  // interleave method bodies with variant cases, exactly like struct
+  // decls. Auto-cleanup at scope end dispatches through the variant's
+  // own dispose; cleanup order is LIFO (Empty fires before Buffer).
+  it("variant_implements_trait.yoop: variant implements Disposable + propagates<disposable> with auto-cleanup", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/variant_implements_trait.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "built filled\nbuilt empty\ndispose Empty\ndispose Buffer len=3\nafter outer scope\n",
+    );
+  });
+
+  // Phase 12: value enums - the new `enum` keyword as a nominal primitive alias.
+  it("value_enum_basic.yoop: int32-backed enum with switch + equality", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "red\ngreen\nblue\neq works\nneq works\n");
+  });
+
+  it("value_enum_flags.yoop: bitwise operators on int-backed enum (SDL-style flags)", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_flags.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "has sweet\nhas bitter\nmask matches sweet+sour combo\ncleared sweet bit\n",
+    );
+  });
+
+  it("value_enum_explicit_int.yoop: enum<int64> with explicit + auto-incremented cases", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_explicit_int.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "z=Zero\nbig > zero\nauto increments to 19\n");
+  });
+
+  it("value_enum_string.yoop: enum<string> with named string constants and equality", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_string.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "asc\nnot desc\n");
+  });
+
+  it("value_enum_template.yoop: value enums interpolate as their underlying primitive", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/value_enum_template.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "level=warn color=2\nfirst=info count=1\n");
+  });
+
   it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {
     const { stdout, exitCode } = runFixture("examples/pass/enum_showcase.yoop");
     assert.equal(exitCode, 0);
@@ -581,6 +733,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "diff=3\nsame=1\n");
   });
 
+  // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+  // C-pointer handle. fopen/fclose round-trip + implicit decay + cast.
+  it("unsafe_ptr_opaque.yoop: bare unsafe_ptr round-trips through fopen/fclose and casts", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_opaque.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "opened=0 nz=1 v=7\n");
+  });
+
   it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", () => {
     const { stdout, exitCode } = runFixture("examples/pass/clock_gettime.yoop");
     assert.equal(exitCode, 0);
@@ -630,12 +790,29 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  // Clearance kinds (marker polarity + static two-bound check): a conferred
+  // `cleared` capability earned via `launder`, and a restrictive `tainted`
+  // hazard that must pass through a transition before reaching a plain slot.
+  it("clearance_marker.yoop launders tainted bytes and feeds a cleared sink", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/clearance_marker.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a: safe\nb: safe\n");
+  });
+
+  // chat-agent-papercut #3: `contains` was a global keyword (kind-clause
+  // word) blocking it as an ordinary function name. Now contextual.
+  it("contains_as_function_name.yoop accepts `contains` as an ordinary fn name", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/contains_as_function_name.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "yes\n");
+  });
+
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
-function runFixtureEntry(relPath) {
+function runFixtureEntry(relPath, opts = {}) {
   const entryAbs = path.join(repoRoot, relPath);
-  const { ir, linkFlags } = compileEntry(entryAbs);
+  const { ir, linkFlags } = compileEntry(entryAbs, { trackHeap: !!opts.trackHeap });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
   const binPath = path.join(tmpDir, "out");
@@ -705,6 +882,14 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_renamed/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "16 = 16\n");
+  });
+
+  // Yoopstore-papercut #9: `import * as ns, { Type } from "..."` binds the
+  // namespace and a named type from a two-axis module in one line.
+  it("imports_combined: combined namespace + named import on one line", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_combined/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "area=20\n");
   });
 
   it("imports_struct: exported struct + cross-module fallible flow", () => {
@@ -1101,6 +1286,47 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     );
   });
 
+  // Yoopstore-papercut #4: bulk Vec fill (vec_from_array + vec_extend_from).
+  it("vec_extend_from: vec_from_array copies and vec_extend_from grows once", () => {
+    const { stdout, stderr, exitCode } = runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "from_array len=3 cap=3 sum=60\nextend len=5 cap=5 last=50\nempty len=3 cap=3 first=10\n",
+    );
+    assert.match(stderr, /net 0 bytes/);
+  });
+
+  // Yoopstore-papercut #5: owned Bytes buffer with copy / seal constructors.
+  // trackHeap asserts the from_vec seal doesn't double-free or leak the
+  // transferred buffer.
+  it("bytes_owned: bytes_from_array + bytes_from_vec seal + transfer-up dispose", () => {
+    const { stdout, stderr, exitCode } = runFixture("examples/pass/bytes_owned.yoop", { trackHeap: true });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "from_array len=3 [9 8 7]\nfrom_vec len=3 [1 2 3]\n",
+    );
+    assert.match(stderr, /net 0 bytes/);
+  });
+
+  // Yoopstore-papercut #2 follow-ups: std/fs exists() / file_size() via a
+  // stat runtime helper, plus real errno reasons in failure messages.
+  it("fs_metadata: exists/file_size report state and errno surfaces the real reason", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fs_metadata.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout.split("\n")[0], "before=0 after=1 size=5 missing=-1 werr.len=0");
+    assert.match(stdout, /delete_missing="std\/fs: remove\(.*\) failed: No such file or directory"/);
+  });
+
+  // Regression: a non-void function ending in an exhaustive variant switch
+  // whose arms all return must not emit an unterminated switch_end block.
+  it("switch_exhaustive_diverge: all-returning exhaustive switch tail terminates cleanly", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/switch_exhaustive_diverge.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "r=1 g=2 b=3\nred=red blue=other\n");
+  });
+
   it("parse_request_line: pure-yoop HTTP/1.1 request-line parser using only std/core/bytes + std/core/strings", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/parse_request_line/main.yoop");
     assert.equal(exitCode, 0);
@@ -1483,6 +1709,32 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
+  it("at_precompile_log.yoop: a @precompile block can call std/log; namespace calls resolve and the sinks print at comptime", () => {
+    // The comptime log output is written to the parent process's stderr
+    // during compileEntry (inside runFixtureEntry), so capture it around
+    // that call. The compiled binary's own stdout/stderr come back
+    // through spawnSync and are unaffected by the capture.
+    const origWrite = process.stderr.write.bind(process.stderr);
+    let captured = "";
+    process.stderr.write = (chunk) => { captured += String(chunk); return true; };
+    let result;
+    try {
+      result = runFixtureEntry("examples/pass/at_precompile_log.yoop");
+    } finally {
+      process.stderr.write = origWrite;
+    }
+    // Comptime: all three levels printed with the `[comptime] [<level>]`
+    // banner, and the folded module-level binding was interpolated.
+    assert.match(captured, /\[comptime\] \[info\] precompile: starting setup\n/);
+    assert.match(captured, /\[comptime\] \[warn\] precompile: configured 6 slots\n/);
+    assert.match(captured, /\[comptime\] \[error\] precompile: nothing actually wrong, just exercising the sink\n/);
+    // Runtime: the program runs normally - log.info goes to stderr,
+    // printf goes to stdout, and the comptime-folded READY shows 6.
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.stdout, "READY=6\n");
+    assert.equal(result.stderr, "[info] runtime: program started\n");
+  });
+
   it("at_precompile_block_unfoldable.yoop: block form hitting a non-whitelisted extern surfaces as a hard build error", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/at_precompile_block_unfoldable.yoop"),
@@ -1745,7 +1997,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     const { errors } = typecheckFixtureProgram("examples/fail/generic_enum_unpinned.yoop");
     assert.ok(
       errors.some((e) =>
-        /cannot determine type arguments for generic enum "Result"/.test(e.message),
+        /cannot determine type arguments for generic variant "Result"/.test(e.message),
       ),
       `expected unpinned-generic-enum error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
@@ -1971,7 +2223,8 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("binding_non_struct.yoop rejects a kind-prefixed binding with a non-struct type", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/binding_non_struct.yoop");
     assert.ok(
-      errors.some((e) => /can only apply to struct values/.test(e.message)),
+      // Phase 13.B: error wording now includes "or variant".
+      errors.some((e) => /can only apply to struct or variant values/.test(e.message)),
       `expected non-struct-kind error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -2082,6 +2335,16 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   // Phase 6.4 strict propagates enforcement.
   it("propagates_return_not_declared.yoop rejects a function that returns a propagating type without declaring propagates<K>", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_not_declared.yoop");
+    assert.ok(
+      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
+      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Yoopstore-papercut #11 (negative): moving a propagating binding into a
+  // returned struct literal still needs propagates<K> on the function.
+  it("propagates_return_struct_literal_not_declared.yoop rejects a moved-binding literal return without propagates<K>", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_struct_literal_not_declared.yoop");
     assert.ok(
       errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
       `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
@@ -2339,8 +2602,51 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
   it("enum_unknown_variant.yoop rejects E.NotThere", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/enum_unknown_variant.yoop");
     assert.ok(
-      errors.some((e) => /has no variant "NotThere"/.test(e.message)),
-      `expected unknown-variant error, got: ${errors.map((e) => e.message).join(" | ")}`,
+      errors.some((e) => /has no case "NotThere"/.test(e.message)),
+      `expected unknown-case error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 12: value-enum failure cases.
+  it("value_enum_forward_ref.yoop rejects forward reference to a later case", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_forward_ref.yoop");
+    assert.ok(
+      errors.some((e) => /does not name a prior case/.test(e.message)),
+      `expected forward-ref error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_string_no_value.yoop rejects a string-backed case without a literal", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_string_no_value.yoop");
+    assert.ok(
+      errors.some((e) => /requires an explicit string value/.test(e.message)),
+      `expected missing-string-value error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_open_switch_no_default.yoop rejects an open enum switch without default", () => {
+    const { errors } = typecheckFixtureProgram(
+      "examples/fail/value_enum_open_switch_no_default.yoop",
+    );
+    assert.ok(
+      errors.some((e) => /switch over open enum .* requires a 'default'/.test(e.message)),
+      `expected open-enum default error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_unrelated_compare.yoop rejects comparing two different value enums", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_unrelated_compare.yoop");
+    assert.ok(
+      errors.length >= 1,
+      `expected at least one error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_shift_oob.yoop rejects an out-of-range shift amount", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_shift_oob.yoop");
+    assert.ok(
+      errors.some((e) => /shift amount .* out of range/.test(e.message)),
+      `expected shift-OOB error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -2373,6 +2679,52 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /cannot deref non-pointer type/.test(e.message)),
       `expected non-pointer deref error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Yoopstore-papercut #3: opaque `unsafe_ptr` (no `<T>`) ergonomics.
+  it("unsafe_ptr_opaque_deref.yoop rejects '*' on opaque unsafe_ptr", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_deref.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /cannot deref opaque unsafe_ptr/.test(e.message)),
+      `expected opaque-deref error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("unsafe_ptr_opaque_to_typed.yoop rejects implicit opaque -> typed assignment", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_to_typed.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /cannot assign unsafe_ptr to unsafe_ptr<int32>/.test(e.message)),
+      `expected opaque->typed assignment error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("unsafe_ptr_opaque_arith.yoop rejects pointer arithmetic on opaque unsafe_ptr", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_arith.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(errors.length > 0, "expected at least one error");
+  });
+
+  it("unsafe_ptr_opaque_no_import.yoop gates bare unsafe_ptr behind import.unsafe", () => {
+    const src = fs.readFileSync(
+      path.join(repoRoot, "examples/fail/unsafe_ptr_opaque_no_import.yoop"),
+      "utf8",
+    );
+    const { errors } = typecheckSource(src);
+    assert.ok(
+      errors.some((e) => /'unsafe_ptr<T>' requires 'import\.unsafe;'/.test(e.message)),
+      `expected import.unsafe gating error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -2409,6 +2761,63 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /assignment from outside its module is not permitted/.test(e.message)),
       `expected cross-module-write error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // ---- Clearance kinds (marker polarity + static two-bound check) ----
+  it("clearance_unlaundered_sink.yoop rejects a plain value into a `cleared` (conferred) sink", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_unlaundered_sink.yoop");
+    assert.ok(
+      errors.some((e) => /parameter 'value' of 'sink' requires kind 'cleared'/.test(e.message)),
+      `expected conferred-required error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_restrictive_leak.yoop rejects a `tainted` value flowing into a plain slot", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_restrictive_leak.yoop");
+    assert.ok(
+      errors.some((e) => /forbids kind 'tainted' but the value carries it/.test(e.message)),
+      `expected restrictive-forbidden error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_marker_and_mustcall.yoop rejects a kind declaring both a marker polarity and mustCall", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_marker_and_mustcall.yoop");
+    assert.ok(
+      errors.some((e) => /declares a marker polarity .* and 'mustCall'/.test(e.message)),
+      `expected marker+mustCall error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_forge.yoop rejects forging a conferred kind via a binding annotation", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_forge.yoop");
+    assert.ok(
+      errors.some((e) => /binding 'c' requires kind 'cleared'/.test(e.message)),
+      `expected forge-binding error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_fake_launder.yoop rejects a free-function stripper (must be a trait impl method)", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_fake_launder.yoop");
+    assert.ok(
+      errors.some((e) => /would strip kind 'tainted'.*only an impl method of trait 'Cleansable'.*a free function is not authorized/.test(e.message)),
+      `expected fake-launder error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_fake_confer.yoop rejects a free-function conferrer (must be a trait impl method)", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_fake_confer.yoop");
+    assert.ok(
+      errors.some((e) => /would confer kind 'cleared'.*only an impl method of trait 'Cleansable'.*a free function is not authorized/.test(e.message)),
+      `expected fake-confer error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_clearedby_on_conferred.yoop rejects clearedBy on a non-restrictive kind", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/clearance_clearedby_on_conferred.yoop");
+    assert.ok(
+      errors.some((e) => /clearedBy only applies to restrictive marker kinds/.test(e.message)),
+      `expected clearedBy-polarity error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

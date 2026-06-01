@@ -1,0 +1,10 @@
+// Two value enums of unrelated types can't be compared.
+enum Color { Red, Green, Blue }
+enum Flavor { Sweet, Sour }
+
+function main(): int32 {
+    if (Color.Red == Flavor.Sweet) {
+        return 1;
+    }
+    return 0;
+}

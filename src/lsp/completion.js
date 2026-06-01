@@ -139,8 +139,8 @@ function completionForDecl(decl) {
       const head = tps ? `${decl.name}<${tps}>` : decl.name;
       return { kind: CompletionItemKind.Struct, detail: `type ${head}` };
     }
-    case ASTNodeKind.ENUM_DECL:
-      return { kind: CompletionItemKind.Enum, detail: `enum ${decl.name}` };
+    case ASTNodeKind.VARIANT_DECL:
+      return { kind: CompletionItemKind.Enum, detail: `variant ${decl.name}` };
     case ASTNodeKind.UNION_DECL:
       return { kind: CompletionItemKind.Struct, detail: `union ${decl.name}` };
     case ASTNodeKind.TRAIT_DECL:

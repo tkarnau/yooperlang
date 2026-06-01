@@ -15,8 +15,8 @@ import {
   typeKinds,
 } from "../jsyooptypecheck/types.js";
 import {
-  isFallibleEnum,
-  strippedEnumOkType,
+  isFallibleVariant,
+  strippedVariantOkType,
 } from "../jsyooptypecheck/fallible.js";
 import { loadModuleGraph } from "../jsyoopdriver/moduleGraph.js";
 import { instantiateFunc } from "../jsyooptypecheck/instantiate.js";
@@ -73,6 +73,14 @@ const RUNTIME_DECLARES = [
   "declare i32 @yoop_errno_get()",
   "declare void @yoop_errno_set(i32)",
   "declare ptr @yoop_errno_message(i32)",
+  // --track-heap diagnostics. Always declared, only referenced when
+  // programState.trackHeap is set (see emitBuiltinGenericCall + main fn).
+  // atexit registers yoop_diag_dump so every exit path - normal return,
+  // exit(), uncaught abort - prints the totals.
+  "declare void @yoop_diag_record_alloc(i64)",
+  "declare void @yoop_diag_record_free(i64)",
+  "declare void @yoop_diag_dump()",
+  "declare i32 @atexit(ptr)",
 ];
 
 export function llvmType(yoopType) {
@@ -98,13 +106,19 @@ export function llvmType(yoopType) {
       // lives in codegen state, not in the type-system.
       return "ptr";
     }
-    case typeKinds.enum: {
+    case typeKinds.variant: {
       const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
-      return `%enum.${id}`;
+      return `%variant.${id}`;
     }
     case typeKinds.union: {
       const id = yoopType.moduleId ? `${yoopType.moduleId}__${yoopType.name}` : yoopType.name;
       return `%union.${id}`;
+    }
+    // Phase 12: value enums collapse to their underlying primitive at the
+    // LLVM level. No nominal LLVM struct; we just route through the
+    // underlying type's llvmType.
+    case typeKinds.valueEnum: {
+      return llvmType(yoopType.underlying);
     }
     case typeKinds.unsafePtr: {
       // Phase 8.A: LLVM opaque pointers. The pointee type is tracked in the
@@ -163,7 +177,7 @@ function arrayElemLlvmName(elemType) {
   // Phase 10.A: arrays of enum values - `Result<int32, int32>[]`. The mangled
   // enum name is already unique per instantiation; prefix to distinguish
   // from struct-element arrays.
-  if (elemType.kind === typeKinds.enum) {
+  if (elemType.kind === typeKinds.variant) {
     return elemType.moduleId
       ? `enum_${elemType.moduleId}__${elemType.name}`
       : `enum_${elemType.name}`;
@@ -296,8 +310,16 @@ function encodeStringForRawGlobal(s) {
   return out;
 }
 
+// Phase 12: a value enum collapses to its underlying primitive at the LLVM
+// level, so for any printf/varargs purpose it behaves exactly as that
+// primitive. Unwrap once here so format-spec and promotion logic stay simple.
+function valueEnumUnderlying(t) {
+  return t && t.kind === typeKinds.valueEnum ? t.underlying : t;
+}
+
 // pick a printf format specifier for a yooper type
 export function printfSpec(t) {
+  t = valueEnumUnderlying(t);
   if (t.kind === typeKinds.struct) {
     throw new Error(
       `codegen bug: struct ${t.name} reached printf - typechecker should have rejected`,
@@ -317,6 +339,7 @@ export function printfSpec(t) {
 // when a value is passed through C variadic printf, small ints/floats get
 // promoted. report the LLVM type that the call site should use.
 function promotedLlvmType(t) {
+  t = valueEnumUnderlying(t);
   if (t.kind === typeKinds.prim) {
     if (t.name === "string") return "ptr";
     if (t.name === "bool") return "i32";
@@ -377,6 +400,22 @@ function encodeStringBytes(inner) {
     } else if (ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) > 0x7e) {
       const hex = ch.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0");
       bytes += `\\${hex}`;
+      byteLen++;
+    } else if (ch === '"') {
+      // Template literal STRING_PARTs preserve raw characters between the
+      // backticks (see parser's parseTemplateLiteralBody), so a literal
+      // `"` reaches us unescaped. LLVM c-string literals use `"` as the
+      // closing delimiter, so we must hex-escape it; without this the
+      // emitted constant has the wrong [N x i8] length and clang rejects
+      // the IR with a type mismatch.
+      bytes += "\\22";
+      byteLen++;
+    } else if (ch === "\\") {
+      // Mirror of the `"` case: a stray `\` would also corrupt the
+      // LLVM string literal. In practice the escape-pair branch above
+      // consumes every well-formed `\X`; this handles the trailing-`\`
+      // edge case defensively.
+      bytes += "\\5C";
       byteLen++;
     } else {
       bytes += ch;
@@ -755,8 +794,8 @@ export function codegen(ast) {
       const retEnumId = retEnumType.moduleId
         ? `${retEnumType.moduleId}__${retEnumType.name}`
         : retEnumType.name;
-      const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
-      const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
+      const operandPayloadLlvm = `%variantc.${operandEnumId}__Err`;
+      const retPayloadLlvm = `%variantc.${retEnumId}__Err`;
       const operandFieldType = operandErr.fields[0].type;
       const retFieldType = retErr.fields[0].type;
 
@@ -967,6 +1006,28 @@ export function codegen(ast) {
         const rightIsNull = rightTy?.kind === typeKinds.untypedNull;
         if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
           return emitPointerBinary(node, fnLines);
+        }
+        // Enum equality: extract the i32 tag from each operand and icmp.
+        // Typecheck has already verified both sides are the same enum
+        // type (see plans/yoopbinder-papercuts.md Issue 3). Payloads are
+        // intentionally not compared - tag-only matches the documented
+        // semantics; structural payload comparison stays a `switch` job.
+        if (
+          (node.op === "eqeq" || node.op === "neq") &&
+          leftTy?.kind === typeKinds.variant &&
+          rightTy?.kind === typeKinds.variant
+        ) {
+          const l = emitExpr(node.left, fnLines);
+          const r = emitExpr(node.right, fnLines);
+          const enumLlvm = llvmType(leftTy);
+          const lTag = freshTemp();
+          const rTag = freshTemp();
+          fnLines.push(`  ${lTag} = extractvalue ${enumLlvm} ${l.val}, 0`);
+          fnLines.push(`  ${rTag} = extractvalue ${enumLlvm} ${r.val}, 0`);
+          const cond = node.op === "eqeq" ? "eq" : "ne";
+          const out = freshTemp();
+          fnLines.push(`  ${out} = icmp ${cond} i32 ${lTag}, ${rTag}`);
+          return { val: out, yoopType: PrimType("bool") };
         }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
@@ -1229,14 +1290,14 @@ export function codegen(ast) {
       case ASTNodeKind.TRY_OP: {
         // Phase 9.H: enum operand - extract the Ok variant payload (or void).
         const slot = emitTryOpToSlot(node, fnLines);
-        const okStripped = strippedEnumOkType(slot.type);
+        const okStripped = strippedVariantOkType(slot.type);
         if (okStripped.kind === typeKinds.void) {
           return { val: "void", yoopType: VoidType() };
         }
         const enumId = slot.type.moduleId
           ? `${slot.type.moduleId}__${slot.type.name}`
           : slot.type.name;
-        const payloadLlvm = `%enumv.${enumId}__Ok`;
+        const payloadLlvm = `%variantc.${enumId}__Ok`;
         const fieldLlvm = llvmType(okStripped);
         const payloadPtr = freshTemp();
         fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
@@ -1399,6 +1460,16 @@ export function codegen(ast) {
     let fmtSpec = "";
     const valueArgs = []; // { val, yoopType } that follow the format string
 
+    // A call that includes an explicit format-string literal is C printf: the
+    // literal's `%` directives are authoritative and trailing value args fill
+    // them, so we must NOT auto-append a specifier per value arg (doing so
+    // produced a doubled directive, e.g. `printf("x=%d\n", x)` -> "x=%d\n%d").
+    // Auto-append only when there is no format literal (`printf(someString)` ->
+    // "%s") and for template-literal interpolations (no explicit directive).
+    const hasFormatLiteral = node.args.some(
+      (a) => a.kind === ASTNodeKind.STRING_LITERAL,
+    );
+
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         // raw format text - strip the surrounding quotes, keep escapes intact
@@ -1416,7 +1487,7 @@ export function codegen(ast) {
         }
       } else {
         const r = emitExpr(argNode, fnLines);
-        fmtSpec += printfSpec(r.yoopType);
+        if (!hasFormatLiteral) fmtSpec += printfSpec(r.yoopType);
         valueArgs.push(r);
       }
     }
@@ -1434,24 +1505,27 @@ export function codegen(ast) {
     const argList = ["ptr " + fmtTmp]
       .concat(
         valueArgs.map((r) => {
-          const promoted = promotedLlvmType(r.yoopType);
-          const actual = llvmType(r.yoopType);
+          // value enums share their underlying primitive's LLVM repr and
+          // promotion rules (see valueEnumUnderlying).
+          const vt = valueEnumUnderlying(r.yoopType);
+          const promoted = promotedLlvmType(vt);
+          const actual = llvmType(vt);
           if (promoted !== actual) {
             // varargs promotion: widen the value to the promoted type
             const tmp = freshTemp();
-            if (isIntType(r.yoopType)) {
-              const op = isUnsignedIntPrim(r.yoopType.name) ? "zext" : "sext";
+            if (isIntType(vt)) {
+              const op = isUnsignedIntPrim(vt.name) ? "zext" : "sext";
               fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
             } else if (
-              r.yoopType.kind === typeKinds.prim &&
-              r.yoopType.name === "bool"
+              vt.kind === typeKinds.prim &&
+              vt.name === "bool"
             ) {
               fnLines.push(`  ${tmp} = zext ${actual} ${r.val} to ${promoted}`);
-            } else if (isFloatType(r.yoopType)) {
+            } else if (isFloatType(vt)) {
               fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
             } else {
               throw new Error(
-                `codegen: don't know how to promote ${r.yoopType.kind}/${r.yoopType.name ?? ""} for varargs`,
+                `codegen: don't know how to promote ${vt.kind}/${vt.name ?? ""} for varargs`,
               );
             }
             return `${promoted} ${tmp}`;
@@ -1746,7 +1820,7 @@ export function codegen(ast) {
     const stepEnumId = iterStepType.moduleId
       ? `${iterStepType.moduleId}__${iterStepType.name}`
       : iterStepType.name;
-    const yieldVariantLlvm = `%enumv.${stepEnumId}__Yield`;
+    const yieldVariantLlvm = `%variantc.${stepEnumId}__Yield`;
     const payloadPtr = freshTemp();
     fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 1`);
     const valuePtr = freshTemp();
@@ -1920,6 +1994,10 @@ export function codegen(ast) {
     if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
+    } else if (!blockIsTerminated(fnLines)) {
+      // See emitFunction: an exhaustive all-diverging switch leaves an
+      // unreachable tail block; terminate it.
+      fnLines.push("  unreachable");
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
@@ -1974,6 +2052,12 @@ export function codegen(ast) {
         if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
         fnLines.push("  ret void");
       }
+    } else if (!blockIsTerminated(fnLines)) {
+      // Non-void body left an open tail block - the typechecker proved every
+      // path returns, so this block is unreachable (e.g. the body ends in an
+      // exhaustive `switch` whose arms all diverge, leaving an empty
+      // `switch_end:`). Terminate it so the LLVM verifier accepts the IR.
+      fnLines.push("  unreachable");
     }
 
     fnLines.push("}");
@@ -2071,6 +2155,17 @@ export function codegen(ast) {
           emitMethod(method, decl.resolvedType);
         }
       } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.TYPE_DECL && decl.decl.methods?.length > 0) {
+        for (const method of decl.decl.methods) {
+          emitMethod(method, decl.decl.resolvedType);
+        }
+      } else if (decl.kind === ASTNodeKind.VARIANT_DECL && decl.methods?.length > 0) {
+        // Phase 13.B: variant impl methods - same emission pipeline as
+        // struct methods. mangleTraitMethod just reads moduleId + name
+        // off the receiver type; VariantType has both.
+        for (const method of decl.methods) {
+          emitMethod(method, decl.resolvedType);
+        }
+      } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.VARIANT_DECL && decl.decl.methods?.length > 0) {
         for (const method of decl.decl.methods) {
           emitMethod(method, decl.decl.resolvedType);
         }
@@ -2248,7 +2343,7 @@ export function sizeOfType(t) {
     }
     return max;
   }
-  if (t.kind === typeKinds.enum) {
+  if (t.kind === typeKinds.variant) {
     let maxPayload = 0;
     for (const v of t.variants.values()) {
       if (v.fields === null) continue;
@@ -2288,7 +2383,7 @@ export function sizeOfAlign(t) {
     }
     return max;
   }
-  if (t.kind === typeKinds.enum) {
+  if (t.kind === typeKinds.variant) {
     let max = 4; // i32 tag
     for (const v of t.variants.values()) {
       if (v.fields === null) continue;
@@ -2457,12 +2552,12 @@ export function codegenProgram(modules, _moduleEnv, programState) {
         .join(", ");
       allStructDefs.push(`${mangled} = type { ${fieldLlvm} }`);
     }
-    // Phase 10.A: emit each generic-enum instantiation as
-    // %enum.<mod>__<Mangled> = type { i32, [P x i8] } + per-variant payload
-    // structs. Mirrors the per-module ENUM_DECL emission shape so codegen
-    // GEPs against either an instantiated or a concrete enum the same way.
-    for (const [_key, enumType] of programState.registry.enums) {
-      if (enumContainsTypeParam(enumType)) continue;
+    // Phase 10.A: emit each generic-variant instantiation as
+    // %variant.<mod>__<Mangled> = type { i32, [P x i8] } + per-case payload
+    // structs. Mirrors the per-module VARIANT_DECL emission shape so codegen
+    // GEPs against either an instantiated or a concrete variant the same way.
+    for (const [_key, enumType] of programState.registry.variants) {
+      if (variantContainsTypeParam(enumType)) continue;
       const mangled = llvmType(enumType);
       if (emittedStructs.has(mangled)) continue;
       emittedStructs.add(mangled);
@@ -2484,7 +2579,7 @@ export function codegenProgram(modules, _moduleEnv, programState) {
       const enumId = `${enumType.moduleId}__${enumType.name}`;
       for (const v of enumType.variants.values()) {
         if (v.fields === null) continue;
-        const variantLlvm = `%enumv.${enumId}__${v.name}`;
+        const variantLlvm = `%variantc.${enumId}__${v.name}`;
         if (emittedStructs.has(variantLlvm)) continue;
         emittedStructs.add(variantLlvm);
         const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
@@ -2687,21 +2782,21 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
     out.boundMethod = null;
   }
   // Phase 10.C: VARIANT_CONSTRUCTOR / VARIANT_PATTERN carry a `resolvedVariant`
-  // pointer into their `resolvedEnumType.variants` map. The generic
-  // substitution above replaces resolvedEnumType with a fresh instantiation
+  // pointer into their `resolvedVariantType.variants` map. The generic
+  // substitution above replaces resolvedVariantType with a fresh instantiation
   // (via the frozen-type branch), but resolvedVariant was a plain non-frozen
   // record that recursive-cloned - its fields may still reference the
   // pre-substitution variant from the *original* enum's variants map.
-  // Re-fetch the variant by name from the (substituted) resolvedEnumType
+  // Re-fetch the variant by name from the (substituted) resolvedVariantType
   // so codegen sees the concrete field types.
   if (
     (out.kind === ASTNodeKind.VARIANT_CONSTRUCTOR ||
       out.kind === ASTNodeKind.VARIANT_PATTERN) &&
-    out.resolvedEnumType &&
+    out.resolvedVariantType &&
     out.variantName &&
-    out.resolvedEnumType.variants?.has?.(out.variantName)
+    out.resolvedVariantType.variants?.has?.(out.variantName)
   ) {
-    out.resolvedVariant = out.resolvedEnumType.variants.get(out.variantName);
+    out.resolvedVariant = out.resolvedVariantType.variants.get(out.variantName);
   }
   return out;
 }
@@ -2730,7 +2825,7 @@ function structContainsTypeParam(structType) {
 // Returns true for an "open" enum whose variant payloads still mention a
 // TypeParamType - those are intermediate substitution products that must
 // not be emitted as LLVM struct defs.
-function enumContainsTypeParam(enumType) {
+function variantContainsTypeParam(enumType) {
   if (!enumType.variants) return false;
   const seenStruct = new Set();
   function hasParam(t) {
@@ -2745,7 +2840,7 @@ function enumContainsTypeParam(enumType) {
       if (!t.fields) return false;
       return t.fields.some((f) => hasParam(f.type));
     }
-    if (t.kind === typeKinds.enum) {
+    if (t.kind === typeKinds.variant) {
       // An open enum's own variants may carry typeParam.
       if (!t.variants) return false;
       for (const v of t.variants.values()) {
@@ -2938,12 +3033,12 @@ function codegenWithModuleId(
         structDefs.push(`${mangled} = type { ${fieldLlvm} }`);
       }
     }
-    // Phase 7.5: emit enum struct + per-variant payload structs.
-    //   %enum.<mod>__<E> = type { i32, [P x i8] }     (tag + payload bytes)
-    //   %enumv.<mod>__<E>__<V> = type { ... fields ... }  (per-variant payload)
-    // Phase 10.A: generic enum decls have no resolvedType - they emit their
+    // Phase 7.5: emit variant struct + per-case payload structs.
+    //   %variant.<mod>__<V> = type { i32, [P x i8] }     (tag + payload bytes)
+    //   %variantc.<mod>__<V>__<C> = type { ... fields ... }  (per-case payload)
+    // Phase 10.A: generic variant decls have no resolvedType - they emit their
     // instantiations from the registry walk in codegenProgram instead.
-    if (d.kind === ASTNodeKind.ENUM_DECL && d.resolvedType && !d.genericDecl) {
+    if (d.kind === ASTNodeKind.VARIANT_DECL && d.resolvedType && !d.genericDecl) {
       const enumLlvm = llvmType(d.resolvedType);
       if (!emittedStructs.has(enumLlvm)) {
         emittedStructs.add(enumLlvm);
@@ -2972,7 +3067,7 @@ function codegenWithModuleId(
           : d.resolvedType.name;
         for (const v of d.resolvedType.variants.values()) {
           if (v.fields === null) continue;
-          const variantLlvm = `%enumv.${enumId}__${v.name}`;
+          const variantLlvm = `%variantc.${enumId}__${v.name}`;
           if (!emittedStructs.has(variantLlvm)) {
             emittedStructs.add(variantLlvm);
             const fieldLlvm = v.fields.map((f) => llvmType(f.type)).join(", ");
@@ -3200,6 +3295,15 @@ function codegenWithModuleId(
       for (const method of decl.decl.methods) {
         emitMethodFn(method, decl.decl.resolvedType);
       }
+    } else if (decl.kind === ASTNodeKind.VARIANT_DECL && decl.methods?.length > 0 && !decl.genericDecl) {
+      // Phase 13.B: variant impl methods in the multi-module path.
+      for (const method of decl.methods) {
+        emitMethodFn(method, decl.resolvedType);
+      }
+    } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.VARIANT_DECL && decl.decl.methods?.length > 0 && !decl.decl.genericDecl) {
+      for (const method of decl.decl.methods) {
+        emitMethodFn(method, decl.decl.resolvedType);
+      }
     }
     // TRAIT_DECL: no codegen - traits are compile-time only
   }
@@ -3401,6 +3505,13 @@ function codegenWithModuleId(
     const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
     if (inMainFn) {
       fnLines.push("  call void @yoop_runtime_init()");
+      // --track-heap: register the dump as an atexit handler so every
+      // exit path prints heap totals once. Registered before module_init
+      // so allocations made during static initializers are counted.
+      if (programState?.trackHeap) {
+        const atexitRet = freshTemp();
+        fnLines.push(`  ${atexitRet} = call i32 @atexit(ptr @yoop_diag_dump)`);
+      }
       // Phase 8.E: run every module's __module_init in topological order.
       // The list is populated as each module is codegen'd (see the
       // moduleLevelDecls block earlier in this file). Order matches the
@@ -3439,6 +3550,11 @@ function codegenWithModuleId(
         if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
         fnLines.push("  ret void");
       }
+    } else if (!blockIsTerminated(fnLines)) {
+      // Non-void body left an open tail block (e.g. an exhaustive `switch`
+      // whose arms all diverge). The typechecker proved every path returns,
+      // so the block is unreachable - terminate it for the verifier.
+      fnLines.push("  unreachable");
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
@@ -3534,6 +3650,10 @@ function codegenWithModuleId(
     if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
+    } else if (!blockIsTerminated(fnLines)) {
+      // See emitFn: an exhaustive all-diverging switch leaves an unreachable
+      // tail block; terminate it.
+      fnLines.push("  unreachable");
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
@@ -3820,6 +3940,25 @@ function codegenWithModuleId(
         ) {
           return emitPointerBinaryMM(node, fnLines);
         }
+        // Enum tag-comparison branch (mirror of the single-module path
+        // above). See plans/yoopbinder-papercuts.md Issue 3.
+        if (
+          (node.op === "eqeq" || node.op === "neq") &&
+          leftTy?.kind === typeKinds.variant &&
+          rightTy?.kind === typeKinds.variant
+        ) {
+          const l = emitExpr(node.left, fnLines);
+          const r = emitExpr(node.right, fnLines);
+          const enumLlvm = llvmType(leftTy);
+          const lTag = freshTemp();
+          const rTag = freshTemp();
+          fnLines.push(`  ${lTag} = extractvalue ${enumLlvm} ${l.val}, 0`);
+          fnLines.push(`  ${rTag} = extractvalue ${enumLlvm} ${r.val}, 0`);
+          const cond = node.op === "eqeq" ? "eq" : "ne";
+          const out = freshTemp();
+          fnLines.push(`  ${out} = icmp ${cond} i32 ${lTag}, ${rTag}`);
+          return { val: out, yoopType: PrimType("bool") };
+        }
         const l = emitExpr(node.left, fnLines);
         const r = emitExpr(node.right, fnLines);
         const resultType = node.resolvedType;
@@ -4017,6 +4156,19 @@ function codegenWithModuleId(
         return { val: newVal, yoopType: slotType };
       }
       case ASTNodeKind.FIELD_ACCESS: {
+        // Phase 12: `ns.constName` (non-call) - the typechecker stamped
+        // `namespaceLookup` and resolvedType when it walked the namespace
+        // dispatch. Load directly from the mangled module-level global.
+        // Call-position `ns.fn(...)` is handled in emitCallExpr via the
+        // callee.namespaceLookup branch and never reaches here.
+        if (node.namespaceLookup) {
+          const sym = mangle(node.namespaceLookup.moduleId, node.namespaceLookup.exportName);
+          const yoopType = node.resolvedType;
+          const llvmTy = llvmType(yoopType);
+          const tmp = freshTemp();
+          fnLines.push(`  ${tmp} = load ${llvmTy}, ptr @${sym}`);
+          return { val: tmp, yoopType };
+        }
         const objType = node.object.resolvedType;
         if (objType?.kind === typeKinds.prim && objType.name === "string" && node.field === "len") {
           const s = emitExpr(node.object, fnLines);
@@ -4142,14 +4294,14 @@ function codegenWithModuleId(
       case ASTNodeKind.TRY_OP: {
         // Phase 9.H: enum operand - extract the Ok variant payload (or void).
         const slot = emitTrySlot(node, fnLines);
-        const okStripped = strippedEnumOkType(slot.type);
+        const okStripped = strippedVariantOkType(slot.type);
         if (okStripped.kind === typeKinds.void) {
           return { val: "void", yoopType: VoidType() };
         }
         const enumId = slot.type.moduleId
           ? `${slot.type.moduleId}__${slot.type.name}`
           : slot.type.name;
-        const payloadLlvm = `%enumv.${enumId}__Ok`;
+        const payloadLlvm = `%variantc.${enumId}__Ok`;
         const fieldLlvm = llvmType(okStripped);
         const payloadPtr = freshTemp();
         fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${llvmType(slot.type)}, ptr ${slot.ptr}, i32 0, i32 1`);
@@ -4189,12 +4341,17 @@ function codegenWithModuleId(
     }
   }
 
-  // Phase 7.5: emit `Enum.Variant { f1: v1, ... }` (or no-payload `Enum.V`).
-  // Layout: alloca enum struct → store tag at field 0 → bitcast payload
-  // bytes to the per-variant payload struct and GEP/store each field → load
-  // the whole enum as the rvalue.
+  // Phase 7.5: emit `Variant.Case { f1: v1, ... }` (or no-payload `Variant.C`).
+  // Layout: alloca variant struct -> store tag at field 0 -> bitcast payload
+  // bytes to the per-case payload struct and GEP/store each field -> load
+  // the whole struct as the rvalue.
+  // Phase 12: when the constructor targets a value enum, emit the case's
+  // primitive constant value directly (no alloca/load).
   function emitVariantConstructor(node, fnLines) {
-    const enumType = node.resolvedEnumType;
+    if (node.resolvedValueEnumType) {
+      return emitValueEnumConstant(node, fnLines);
+    }
+    const enumType = node.resolvedVariantType;
     const variant = node.resolvedVariant;
     if (!enumType || !variant) {
       throw new Error(`codegen: variant constructor missing resolved enum/variant`);
@@ -4213,7 +4370,7 @@ function codegenWithModuleId(
       const enumId = enumType.moduleId
         ? `${enumType.moduleId}__${enumType.name}`
         : enumType.name;
-      const variantLlvm = `%enumv.${enumId}__${variant.name}`;
+      const variantLlvm = `%variantc.${enumId}__${variant.name}`;
       for (const litField of node.fields) {
         const idx = variant.fields.findIndex((f) => f.name === litField.name);
         if (idx < 0) continue;
@@ -4227,6 +4384,32 @@ function codegenWithModuleId(
     const loadTmp = freshTemp();
     fnLines.push(`  ${loadTmp} = load ${enumLlvm}, ptr ${slot}`);
     return { val: loadTmp, yoopType: enumType };
+  }
+
+  // Phase 12: emit a value-enum case as its underlying primitive constant.
+  // Integer underlyings produce the integer literal directly (immediate).
+  // String underlyings produce a getelementptr against a deduplicated global.
+  function emitValueEnumConstant(node, fnLines) {
+    const enumType = node.resolvedValueEnumType;
+    const enumCase = node.resolvedValueEnumCase;
+    if (!enumType || !enumCase) {
+      throw new Error(`codegen: value-enum constructor missing resolved type/case`);
+    }
+    const underlying = enumType.underlying;
+    if (underlying.name === "string") {
+      const { name: gname, byteLen } = emitRawStringGlobal(enumCase.value);
+      const tmp = freshTemp();
+      fnLines.push(
+        `  ${tmp} = getelementptr inbounds [${byteLen} x i8], ptr ${gname}, i32 0, i32 0`,
+      );
+      return { val: tmp, yoopType: enumType };
+    }
+    // Integer underlying: emit the bigint as a decimal literal (LLVM accepts
+    // negative decimals for signed ints).
+    const v = typeof enumCase.value === "bigint"
+      ? enumCase.value.toString()
+      : String(enumCase.value);
+    return { val: v, yoopType: enumType };
   }
 
   // Phase 6.3: `wait <ident>`. The operand must be a Task<T>-typed binding
@@ -4341,7 +4524,7 @@ function codegenWithModuleId(
       );
       const valuePtr = freshTemp();
       fnLines.push(
-        `  ${valuePtr} = getelementptr inbounds %enumv.${enumId}__Done, ptr ${payloadPtr}, i32 0, i32 0`,
+        `  ${valuePtr} = getelementptr inbounds %variantc.${enumId}__Done, ptr ${payloadPtr}, i32 0, i32 0`,
       );
       fnLines.push(`  store ${resultLlvm} ${resVal}, ptr ${valuePtr}`);
       fnLines.push(`  br label %${joinLabel}`);
@@ -4398,6 +4581,11 @@ function codegenWithModuleId(
       // Multiply count by element size to get byte size.
       const byteSize = freshTemp();
       fnLines.push(`  ${byteSize} = mul i64 ${nArg.val}, ${elemSize}`);
+      // --track-heap: record the alloc before malloc so the counter
+      // reflects intent even if malloc returns null.
+      if (programState?.trackHeap) {
+        fnLines.push(`  call void @yoop_diag_record_alloc(i64 ${byteSize})`);
+      }
       // Allocate on the heap.
       const raw = freshTemp();
       fnLines.push(`  ${raw} = call ptr @malloc(i64 ${byteSize})`);
@@ -4429,6 +4617,19 @@ function codegenWithModuleId(
       fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
       const dataPtr = freshTemp();
       fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      // --track-heap: load len and record `len * elemSize` bytes freed
+      // before the call to @free so the counters stay paired with the
+      // matching alloc record.
+      if (programState?.trackHeap) {
+        const elemSize = sizeOfType(elemType);
+        const lenField = freshTemp();
+        fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+        const lenVal = freshTemp();
+        fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
+        const byteSize = freshTemp();
+        fnLines.push(`  ${byteSize} = mul i64 ${lenVal}, ${elemSize}`);
+        fnLines.push(`  call void @yoop_diag_record_free(i64 ${byteSize})`);
+      }
       fnLines.push(`  call void @free(ptr ${dataPtr})`);
       return { val: "void", yoopType: VoidType() };
     }
@@ -4645,10 +4846,17 @@ function codegenWithModuleId(
     if (node.isCast) {
       const src = emitExpr(node.args[0], fnLines);
       const dstType = node.castTargetType;
-      const opcode = castInstruction(src.yoopType, dstType);
+      // Phase 12: value enums collapse to their underlying primitive for
+      // cast purposes. The LLVM-level type and SSA value are already the
+      // underlying width; just unwrap so castInstruction can read .name.
+      const unwrap = (t) =>
+        t && t.kind === typeKinds.valueEnum ? t.underlying : t;
+      const srcEff = unwrap(src.yoopType);
+      const dstEff = unwrap(dstType);
+      const opcode = castInstruction(srcEff, dstEff);
       if (!opcode) return { val: src.val, yoopType: dstType };
       const tmp = freshTemp();
-      fnLines.push(`  ${tmp} = ${opcode} ${llvmType(src.yoopType)} ${src.val} to ${llvmType(dstType)}`);
+      fnLines.push(`  ${tmp} = ${opcode} ${llvmType(srcEff)} ${src.val} to ${llvmType(dstEff)}`);
       return { val: tmp, yoopType: dstType };
     }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
@@ -4842,6 +5050,13 @@ function codegenWithModuleId(
     if (node.args.length === 0) throw new Error("codegen: printf called with no arguments");
     let fmtSpec = "";
     const valueArgs = [];
+    // See emitPrintfCall: an explicit format-string literal is C printf, so a
+    // bare value arg fills a `%` directive already in the string and must not
+    // get an auto-appended specifier. Only auto-append with no format literal
+    // (`printf(someString)`) or for template-literal interpolations.
+    const hasFormatLiteral = node.args.some(
+      (a) => a.kind === ASTNodeKind.STRING_LITERAL,
+    );
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         fmtSpec += argNode.value.slice(1, -1);
@@ -4852,7 +5067,7 @@ function codegenWithModuleId(
         }
       } else {
         const r = emitExpr(argNode, fnLines);
-        fmtSpec += printfSpec(r.yoopType);
+        if (!hasFormatLiteral) fmtSpec += printfSpec(r.yoopType);
         valueArgs.push(r);
       }
     }
@@ -4860,19 +5075,22 @@ function codegenWithModuleId(
     const fmtTmp = freshTemp();
     fnLines.push(`  ${fmtTmp} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`);
     const argList = ["ptr " + fmtTmp].concat(valueArgs.map((r) => {
-      const promoted = promotedLlvmType(r.yoopType);
-      const actual = llvmType(r.yoopType);
+      // value enums share their underlying primitive's LLVM repr and
+      // promotion rules (see valueEnumUnderlying).
+      const vt = valueEnumUnderlying(r.yoopType);
+      const promoted = promotedLlvmType(vt);
+      const actual = llvmType(vt);
       if (promoted !== actual) {
         const tmp = freshTemp();
-        if (isIntType(r.yoopType)) {
-          const op = isUnsignedIntPrim(r.yoopType.name) ? "zext" : "sext";
+        if (isIntType(vt)) {
+          const op = isUnsignedIntPrim(vt.name) ? "zext" : "sext";
           fnLines.push(`  ${tmp} = ${op} ${actual} ${r.val} to ${promoted}`);
-        } else if (r.yoopType.kind === typeKinds.prim && r.yoopType.name === "bool") {
+        } else if (vt.kind === typeKinds.prim && vt.name === "bool") {
           fnLines.push(`  ${tmp} = zext ${actual} ${r.val} to ${promoted}`);
-        } else if (isFloatType(r.yoopType)) {
+        } else if (isFloatType(vt)) {
           fnLines.push(`  ${tmp} = fpext ${actual} ${r.val} to ${promoted}`);
         } else {
-          throw new Error(`codegen: don't know how to promote ${r.yoopType.kind}/${r.yoopType.name ?? ""} for varargs`);
+          throw new Error(`codegen: don't know how to promote ${vt.kind}/${vt.name ?? ""} for varargs`);
         }
         return `${promoted} ${tmp}`;
       }
@@ -4897,6 +5115,13 @@ function codegenWithModuleId(
         return { ptr: `${symbols.slotFor(node.name)}`, type: t };
       }
       case ASTNodeKind.FIELD_ACCESS: {
+        // Phase 12: `ns.name` lvalue - the global itself is the slot. Used
+        // when an enclosing assignment / `&` / indexing wants the address
+        // of a module-level binding accessed through a namespace.
+        if (node.namespaceLookup) {
+          const sym = mangle(node.namespaceLookup.moduleId, node.namespaceLookup.exportName);
+          return { ptr: `@${sym}`, type: node.resolvedType };
+        }
         const base = emitLval(node.object, fnLines);
         // Phase 7.5: union field access - every field overlaps at offset 0;
         // the union's pointer is already the field's pointer (just retyped).
@@ -5030,8 +5255,8 @@ function codegenWithModuleId(
       const retEnumId = retEnumType.moduleId
         ? `${retEnumType.moduleId}__${retEnumType.name}`
         : retEnumType.name;
-      const operandPayloadLlvm = `%enumv.${operandEnumId}__Err`;
-      const retPayloadLlvm = `%enumv.${retEnumId}__Err`;
+      const operandPayloadLlvm = `%variantc.${operandEnumId}__Err`;
+      const retPayloadLlvm = `%variantc.${retEnumId}__Err`;
       const operandFieldType = operandErr.fields[0].type;
       const retFieldType = retErr.fields[0].type;
 
@@ -5365,7 +5590,7 @@ function codegenWithModuleId(
     // expressions emitLval will materialize a temp slot for us.
     let scrutSlot = null;
     let scrutVal = null;
-    if (scrutType.kind === typeKinds.enum) {
+    if (scrutType.kind === typeKinds.variant) {
       scrutSlot = emitLval(node.scrutinee, fnLines);
       const enumLlvm = llvmType(scrutType);
       const tagPtr = freshTemp();
@@ -5390,7 +5615,17 @@ function codegenWithModuleId(
           const ty = llvmType(scrutType);
           caseLines.push(`${ty} ${litVal}, label %${armLabel}`);
         } else if (pat.kind === ASTNodeKind.VARIANT_PATTERN && !pat.isWildcard) {
-          caseLines.push(`i32 ${pat.resolvedVariant.ordinal}, label %${armLabel}`);
+          if (pat.resolvedValueEnumCase) {
+            // Phase 12: value-enum pattern. Match the underlying primitive
+            // constant of the case.
+            const ty = llvmType(scrutType);
+            const v = typeof pat.resolvedValueEnumCase.value === "bigint"
+              ? pat.resolvedValueEnumCase.value.toString()
+              : String(pat.resolvedValueEnumCase.value);
+            caseLines.push(`${ty} ${v}, label %${armLabel}`);
+          } else {
+            caseLines.push(`i32 ${pat.resolvedVariant.ordinal}, label %${armLabel}`);
+          }
         }
         // VARIANT_PATTERN { isWildcard: true } only appears as `case _:` which
         // the parser routed through the default-arm slot already (we don't
@@ -5399,7 +5634,7 @@ function codegenWithModuleId(
     }
 
     const scrutTyForSwitch =
-      scrutType.kind === typeKinds.enum ? "i32" : llvmType(scrutType);
+      scrutType.kind === typeKinds.variant ? "i32" : llvmType(scrutType);
     fnLines.push(
       `  switch ${scrutTyForSwitch} ${scrutVal.val}, label %${defaultLabel} [ ${caseLines.join(" ")} ]`,
     );
@@ -5416,13 +5651,17 @@ function codegenWithModuleId(
       const vp = arm.patterns.find(
         (p) => p.kind === ASTNodeKind.VARIANT_PATTERN && !p.isWildcard,
       );
-      if (vp && vp.resolvedVariant.fields !== null && vp.fieldBindings) {
-        const enumType = vp.resolvedEnumType;
+      // Phase 12: value-enum patterns have no payload - skip the field-binding
+      // path entirely.
+      if (vp && vp.resolvedValueEnumCase) {
+        // nothing to bind; value-enum cases are scalar constants.
+      } else if (vp && vp.resolvedVariant.fields !== null && vp.fieldBindings) {
+        const enumType = vp.resolvedVariantType;
         const enumLlvm = llvmType(enumType);
         const enumId = enumType.moduleId
           ? `${enumType.moduleId}__${enumType.name}`
           : enumType.name;
-        const variantLlvm = `%enumv.${enumId}__${vp.variantName}`;
+        const variantLlvm = `%variantc.${enumId}__${vp.variantName}`;
         const payloadPtr = freshTemp();
         fnLines.push(
           `  ${payloadPtr} = getelementptr inbounds ${enumLlvm}, ptr ${scrutSlot.ptr}, i32 0, i32 1`,
@@ -5628,7 +5867,7 @@ function codegenWithModuleId(
     const stepEnumId = iterStepType.moduleId
       ? `${iterStepType.moduleId}__${iterStepType.name}`
       : iterStepType.name;
-    const yieldVariantLlvm = `%enumv.${stepEnumId}__Yield`;
+    const yieldVariantLlvm = `%variantc.${stepEnumId}__Yield`;
     const payloadPtr = freshTemp();
     fnLines.push(`  ${payloadPtr} = getelementptr inbounds ${stepLlvm}, ptr ${stepSlot}, i32 0, i32 1`);
     const valuePtr = freshTemp();
@@ -5735,13 +5974,16 @@ function usesLegacyPrintf(ast) {
   return found;
 }
 
-export function compileEntry(entryAbsPath) {
+export function compileEntry(entryAbsPath, opts = {}) {
   const { modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbsPath);
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   // Thread the well-known std module ids through programState so codegen
   // can mint mangled symbols (`<fmtModId>__int_to_string`, etc.) when
   // lowering interpolated template literals.
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
+  // --track-heap parity with the yoopiler.js driver. Tests pass this
+  // through opts; production code paths go through the driver flag.
+  programState.trackHeap = !!opts.trackHeap;
   if (errors.length > 0) {
     throw new Error(
       `compileEntry: typecheck failed with ${errors.length} error(s):\n` +

@@ -1,0 +1,10 @@
+// Clearance kinds: `clearedBy` only applies to restrictive marker kinds
+// (stripping a hazard). Declaring it on a conferred kind is rejected.
+
+kind cleared {
+    appliesTo binding;
+    conferred;
+    clearedBy somefn;
+}
+
+function main(): int32 { return 0; }

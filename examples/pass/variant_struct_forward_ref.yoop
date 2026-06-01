@@ -1,0 +1,62 @@
+// Phase 13.A: variant decls now mutate their pass-A shell in place
+// (instead of swapping a fresh VariantType into the table at pass C
+// end). Without that fix, a struct declared BEFORE the variant - and
+// referencing the variant from one of its fields - captures the empty
+// shell. `sizeOfType(Struct)` then computes a too-small layout (the
+// captured variant looks payload-less), and `heap_alloc<Struct>(n)`
+// undersizes the buffer by the missing-payload bytes per element.
+// Subsequent writes scribble past the end of the allocation and
+// `intr.heap_free` traps with SIGABRT when malloc detects the corruption.
+//
+// This fixture reproduces the smallest shape that triggers the bug:
+// a struct `Member` declared first, holding a `value: V` field, where
+// `V` is a variant whose payload references `Member[]` back. We push
+// five members into a heap-allocated `Member[]`, then iterate and
+// verify the variant tag + payload survive intact.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Member {
+    key:   int32,
+    value: V,
+}
+
+variant V {
+    Leaf  { n: int32 },
+    Inner { kids: Member[] },
+}
+
+function main(): int32 {
+    let kids: Member[] = intr.heap_alloc(5);
+    let i: usize = 0;
+    while (i < 5) {
+        kids[i] = { key: int32(i), value: V.Leaf { n: int32(i) * 10 } };
+        i = i + 1;
+    }
+
+    let root: V = V.Inner { kids: kids };
+
+    let total: int32 = 0;
+    switch (root) {
+        case V.Leaf { n: _x }: { }
+        case V.Inner { kids: ks }: {
+            let j: usize = 0;
+            while (j < ks.len) {
+                let m: Member = ks[j];
+                switch (m.value) {
+                    case V.Leaf { n: v }: { total = total + m.key + v; }
+                    case V.Inner { kids: _k }: { }
+                }
+                j = j + 1;
+            }
+        }
+    }
+
+    printf(`total=${total} kids=${kids.len}\n`);
+    intr.heap_free(kids);
+    return 0;
+}

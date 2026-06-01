@@ -16,7 +16,7 @@
 
 import {
   ArrayType,
-  EnumType,
+  VariantType,
   ErrorType,
   FuncType,
   FunctionPointerType,
@@ -39,7 +39,7 @@ export function mangleType(t) {
       return t.name;
     case typeKinds.struct:
       return t.moduleId ? `${t.moduleId}__${t.name}` : t.name;
-    case typeKinds.enum:
+    case typeKinds.variant:
       return t.moduleId ? `${t.moduleId}__${t.name}` : t.name;
     case typeKinds.ref:
       return `ref_${mangleType(t.inner)}`;
@@ -146,15 +146,15 @@ export function instantiateStruct(registry, genericDecl, argTypes) {
 
 // Phase 10.A: instantiate a generic enum decl at concrete `argTypes`.
 // Mirrors instantiateStruct - substitutes type params in variant payload
-// fields, returns a frozen monomorphic EnumType, caches by (declId, argKey).
+// fields, returns a frozen monomorphic VariantType, caches by (declId, argKey).
 //   genericDecl: {
 //     id, name, moduleId, paramNames: [string], paramScope,
 //     genericVariants: Map<vname, { name, fields: [{name,type}] | null, ordinal }>,
 //     ast
 //   }
-export function instantiateEnum(registry, genericDecl, argTypes) {
+export function instantiateVariant(registry, genericDecl, argTypes) {
   const key = `E:${genericDecl.id}:${cacheKeyForArgs(argTypes)}`;
-  const cached = registry.enums.get(key);
+  const cached = registry.variants.get(key);
   if (cached) return cached;
 
   if (argTypes.length !== genericDecl.paramNames.length) {
@@ -179,17 +179,17 @@ export function instantiateEnum(registry, genericDecl, argTypes) {
     }
     variants.set(vname, { name: vname, fields, ordinal: v.ordinal });
   }
-  const inst = EnumType(mangledName, variants, genericDecl.moduleId, {
+  const inst = VariantType(mangledName, variants, genericDecl.moduleId, {
     declId: genericDecl.id,
     args: argTypes,
   });
-  registry.enums.set(key, inst);
+  registry.variants.set(key, inst);
   registry.byMangledName.set(`${genericDecl.moduleId}__${mangledName}`, inst);
   if (!registry.genericDeclById) registry.genericDeclById = new Map();
   registry.genericDeclById.set(genericDecl.id, genericDecl);
-  registry.enumInstancesByDecl.set(
+  registry.variantInstancesByDecl.set(
     genericDecl.id,
-    [...(registry.enumInstancesByDecl.get(genericDecl.id) ?? []), inst],
+    [...(registry.variantInstancesByDecl.get(genericDecl.id) ?? []), inst],
   );
   return inst;
 }
@@ -197,15 +197,15 @@ export function instantiateEnum(registry, genericDecl, argTypes) {
 // Phase 7.1: a registry-aware instantiator closure suitable for the
 // `instantiator` argument of substituteTypeParams.
 // Phase 10.A: dispatches on the recorded `genericKind` slot of the genericDecl
-// so enums route to instantiateEnum and structs to instantiateStruct. The
+// so enums route to instantiateVariant and structs to instantiateStruct. The
 // field is named `genericKind` (not `kind`) to avoid colliding with the
 // generic AST-walking heuristic in codegen.
 export function makeInstantiator(registry) {
   return (declId, argTypes) => {
     const decl = registry.genericDeclById?.get(declId);
     if (!decl) return null;
-    if (decl.genericKind === "enum")
-      return instantiateEnum(registry, decl, argTypes);
+    if (decl.genericKind === "variant")
+      return instantiateVariant(registry, decl, argTypes);
     return instantiateStruct(registry, decl, argTypes);
   };
 }
@@ -345,15 +345,16 @@ export function createInstantiationRegistry() {
     structs: new Map(),
     funcs: new Map(),
     traits: new Map(),
-    // Phase 10.A: per-instantiation enum cache, parallel to `structs`.
-    enums: new Map(),
+    // Phase 10.A: per-instantiation variant (tagged sum) cache, parallel to
+    // `structs`. Renamed in Phase 12 from `enums` to match the `variant` keyword.
+    variants: new Map(),
     byMangledName: new Map(),
     funcInstancesByDecl: new Map(),
     structInstancesByDecl: new Map(),
     // Phase 10.A: per-decl enum instance list - used by codegen to walk
     // concrete instances and emit one LLVM enum struct + per-variant payload
     // struct per instantiation.
-    enumInstancesByDecl: new Map(),
+    variantInstancesByDecl: new Map(),
     traitArgsByInstance: new Map(),
     // Phase 7.2: callback installed by the typechecker. Receives
     // ({ genericDecl, argTypes, paramIndex, paramName, requiredTrait }) and
@@ -414,16 +415,40 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       const tp = tps.get(annot.name);
       if (tp) return tp;
     }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (opaque pointee).
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
+    }
+    // Phase 12: namespace-qualified type name. Routes through the imported
+    // namespace's source module instead of the local tables.
+    if (annot.namespace) {
+      const env = typeContext.moduleEnv.get(typeContext.currentModId);
+      const imp = env.importedNames?.get(annot.namespace);
+      if (!imp || imp.kind !== "namespace") return null;
+      const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
+      if (!srcEnv) return null;
+      return (
+        srcEnv.structTable?.get(annot.name) ??
+        srcEnv.variantTable?.get(annot.name) ??
+        srcEnv.enumTable?.get(annot.name) ??
+        srcEnv.unionTable?.get(annot.name) ??
+        srcEnv.vtableTable?.get(annot.name) ??
+        null
+      );
+    }
     const env = typeContext.moduleEnv.get(typeContext.currentModId);
     const local = env.structTable?.get(annot.name);
     if (local && local.fields !== null) return local;
     const prim = primTypeFromName(annot.name);
     if (prim) return prim;
-    // Phase 7.5: enum / union tables.
-    const localEnum = env.enumTable?.get(annot.name);
-    if (localEnum) return localEnum;
+    // Phase 7.5: variant / union tables.
+    const localVariant = env.variantTable?.get(annot.name);
+    if (localVariant) return localVariant;
     const localUnion = env.unionTable?.get(annot.name);
     if (localUnion) return localUnion;
+    // Phase 12: value-enum nominal lookup.
+    const localValueEnum = env.enumTable?.get(annot.name);
+    if (localValueEnum) return localValueEnum;
     // Phase 9.G: vtable nominal lookup.
     const localVtable = env.vtableTable?.get(annot.name);
     if (localVtable) return localVtable;
@@ -432,8 +457,9 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
       const resolved =
         srcEnv?.structTable.get(imp.exportName) ??
-        srcEnv?.enumTable?.get(imp.exportName) ??
+        srcEnv?.variantTable?.get(imp.exportName) ??
         srcEnv?.unionTable?.get(imp.exportName) ??
+        srcEnv?.enumTable?.get(imp.exportName) ??
         srcEnv?.vtableTable?.get(imp.exportName);
       if (resolved) return resolved;
     }
@@ -481,6 +507,30 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       return UnsafePtrType(argTypes[0]);
     }
     if (!typeContext.registry) return null;
+    // Phase 12: namespace-qualified generic application.
+    if (annot.namespace) {
+      const env = typeContext.moduleEnv.get(typeContext.currentModId);
+      const imp = env.importedNames?.get(annot.namespace);
+      if (!imp || imp.kind !== "namespace") return null;
+      const srcEnv = typeContext.moduleEnv.get(imp.fromModuleId);
+      if (!srcEnv) return null;
+      const gs = srcEnv.genericStructTable?.get(annot.name);
+      if (gs) {
+        if (argTypes.length !== gs.paramNames.length) return null;
+        return instantiateStruct(typeContext.registry, gs, argTypes);
+      }
+      const gt = srcEnv.genericTraitTable?.get(annot.name);
+      if (gt) {
+        if (argTypes.length !== gt.paramNames.length) return null;
+        return instantiateTrait(typeContext.registry, gt, argTypes);
+      }
+      const gv = srcEnv.genericVariantTable?.get(annot.name);
+      if (gv) {
+        if (argTypes.length !== gv.paramNames.length) return null;
+        return instantiateVariant(typeContext.registry, gv, argTypes);
+      }
+      return null;
+    }
     const env = typeContext.moduleEnv.get(typeContext.currentModId);
     const localStruct = env.genericStructTable?.get(annot.name);
     if (localStruct) {
@@ -492,10 +542,10 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       if (argTypes.length !== localTrait.paramNames.length) return null;
       return instantiateTrait(typeContext.registry, localTrait, argTypes);
     }
-    const localEnum = env.genericEnumTable?.get(annot.name);
+    const localEnum = env.genericVariantTable?.get(annot.name);
     if (localEnum) {
       if (argTypes.length !== localEnum.paramNames.length) return null;
-      return instantiateEnum(typeContext.registry, localEnum, argTypes);
+      return instantiateVariant(typeContext.registry, localEnum, argTypes);
     }
     const imp = env.importedNames?.get(annot.name);
     if (imp) {
@@ -511,10 +561,10 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
           if (argTypes.length !== rt.paramNames.length) return null;
           return instantiateTrait(typeContext.registry, rt, argTypes);
         }
-        const re = srcEnv.genericEnumTable?.get(imp.exportName);
+        const re = srcEnv.genericVariantTable?.get(imp.exportName);
         if (re) {
           if (argTypes.length !== re.paramNames.length) return null;
-          return instantiateEnum(typeContext.registry, re, argTypes);
+          return instantiateVariant(typeContext.registry, re, argTypes);
         }
       }
     }
@@ -532,6 +582,10 @@ function resolveAnnotSingle(annot, typeContext, extraScope) {
     if (tps) {
       const tp = tps.get(annot.name);
       if (tp) return tp;
+    }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (opaque pointee).
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
     }
     return (
       primTypeFromName(annot.name) ??

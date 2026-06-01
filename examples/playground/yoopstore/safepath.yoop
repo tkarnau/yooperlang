@@ -1,0 +1,104 @@
+// yoopstore/safepath.yoop - validate and normalize the path portion of an
+// incoming HTTP request before it's used to address a file on disk.
+//
+// The shape we accept:
+//   - leading "/" required (the server passes us the raw request-target)
+//   - each component (between two "/"s) must be non-empty, no longer than
+//     64 bytes, and contain only ASCII alphanumerics plus . _ -
+//   - "." and ".." are rejected as components outright; this rules out
+//     `..` traversal without doing path arithmetic
+//   - trailing "/" is rejected (we only address files, not directories)
+//   - the whole path can be at most 512 bytes
+//
+// We do NOT decode percent-escapes. Anything fancier than the ASCII set
+// above gets rejected here.
+
+import { Result } from "std/core/types.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+
+const MAX_PATH_LEN:      usize = 512;
+const MAX_COMPONENT_LEN: usize = 64;
+
+// `sanitize` returns the path with the leading "/" stripped if everything
+// validates, otherwise an error describing why the path was rejected.
+// The returned string is heap-allocated (via string_from_bytes_unchecked)
+// and safe to keep beyond this function's scope.
+export function sanitize(path: string): Result<string, string> {
+    if (path.len == 0) {
+        return Result.Err { error: "safepath: empty path" };
+    }
+    if (path.len > MAX_PATH_LEN) {
+        return Result.Err { error: "safepath: path too long" };
+    }
+    let bytes: uint8[] = intr.string_as_bytes(path);
+    if (bytes[0] != 47) {  // '/'
+        return Result.Err { error: "safepath: path must start with /" };
+    }
+    if (bytes[bytes.len - 1] == 47) {
+        return Result.Err { error: "safepath: trailing / not allowed" };
+    }
+
+    let comp_start: usize = 1;
+    let i: usize = 1;
+    while (i <= bytes.len) {
+        let at_end: bool = i == bytes.len;
+        let at_sep: bool = false;
+        if (!at_end) {
+            if (bytes[i] == 47) { at_sep = true; }
+        }
+        if (at_end || at_sep) {
+            let clen: usize = i - comp_start;
+            if (clen == 0) {
+                return Result.Err { error: "safepath: empty path component" };
+            }
+            if (clen > MAX_COMPONENT_LEN) {
+                return Result.Err { error: "safepath: component too long" };
+            }
+            if (is_dot_component(bytes, comp_start, i)) {
+                return Result.Err { error: "safepath: . component not allowed" };
+            }
+            if (is_dotdot_component(bytes, comp_start, i)) {
+                return Result.Err { error: "safepath: .. component not allowed" };
+            }
+            let j: usize = comp_start;
+            while (j < i) {
+                if (!is_allowed_byte(bytes[j])) {
+                    return Result.Err { error: "safepath: disallowed character in path" };
+                }
+                j = j + 1;
+            }
+            comp_start = i + 1;
+        }
+        i = i + 1;
+    }
+
+    // Strip the leading "/" so storage sees `tom/test/file1` rather than
+    // `/tom/test/file1`. The trailing-slash + empty-component checks above
+    // guarantee bytes.len >= 2 here.
+    let view: uint8[] = intr.array_slice(bytes, 1, bytes.len);
+    return Result.Ok { value: intr.string_from_bytes_unchecked(view) };
+}
+
+function is_dot_component(b: uint8[], start: usize, end: usize): bool {
+    if (end - start != 1) { return false; }
+    return b[start] == 46;  // '.'
+}
+
+function is_dotdot_component(b: uint8[], start: usize, end: usize): bool {
+    if (end - start != 2) { return false; }
+    return b[start] == 46 && b[start + 1] == 46;
+}
+
+// ASCII alphanumerics plus `.`, `_`, `-`. No spaces, no symbols, no
+// percent-decoded bytes - the storage layer should never see anything
+// that requires re-encoding.
+function is_allowed_byte(c: uint8): bool {
+    if (c >= 48 && c <= 57)  { return true; }  // 0-9
+    if (c >= 65 && c <= 90)  { return true; }  // A-Z
+    if (c >= 97 && c <= 122) { return true; }  // a-z
+    if (c == 46)             { return true; }  // .
+    if (c == 95)             { return true; }  // _
+    if (c == 45)             { return true; }  // -
+    return false;
+}

@@ -1,0 +1,274 @@
+// Nebula Arena - GLSL + GPU-particle sibling demo to twinstick.
+//
+// Pure OpenGL pipeline (no SDL_Renderer). The work is split across
+// modules:
+//   sdl.yoop       SDL2 bindings, value enums, Disposable wrappers
+//   gl.yoop        OpenGL bindings, value enums, shader/program helpers
+//   shaders.yoop   GLSL source strings
+//   state.yoop     GameState pools, tick, spawn helpers
+//   palette.yoop   palette.RGB + fire_color
+//   rng.yoop       LCG random number generator
+//   main.yoop      Scene setup, draw loop, vertex packing
+//
+// Same A/D + Space + Esc loop as twinstick - the muscle memory
+// transfers. The big difference is everything renders in one or two
+// draw calls per frame instead of one per sprite.
+//
+// macOS-only today (uses `framework:OpenGL`). Linux would need a GL
+// function loader for the 3.2+ core entry points; the rest of the
+// program is portable.
+
+import.unsafe;
+
+import { disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as sdl from "./sdl.yoop";
+import * as gl from "./gl.yoop";
+import * as shaders from "./shaders.yoop";
+import * as state from "./state.yoop";
+import * as palette from "./palette.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "yoop_runtime" {
+    function yoop_stdout_linebuf(): void;
+}
+
+// Single vertex stride: x, y, size, r, g, b, a -- 7 floats = 28 bytes.
+const VERT_STRIDE: int32 = 28;
+const VERT_FLOATS: usize = 7;
+const FPS_TARGET: uint32 = 60;
+const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+
+// ── Vertex packing ───────────────────────────────────────────────────
+//
+// Walks the game state, packs every visible entity into one interleaved
+// buffer with the layout the sprite shader expects:
+//   x, y, size, r, g, b, a   (7 floats per vertex)
+
+function pack(ref out: float32[], offset: usize, x: float32, y: float32, size: float32, r: float32, g: float32, b: float32, a: float32): void {
+    out[offset + 0] = x;
+    out[offset + 1] = y;
+    out[offset + 2] = size;
+    out[offset + 3] = r;
+    out[offset + 4] = g;
+    out[offset + 5] = b;
+    out[offset + 6] = a;
+}
+
+function build_sprite_vbo(ref g: state.GameState, ref buf: float32[]): int32 {
+    let off: usize = 0;
+    let count: int32 = 0;
+
+    // Particles first so they render behind gameplay objects.
+    let pi: int32 = 0;
+    while (pi < state.PARTICLE_POOL) {
+        if (g.particles.active[pi]) {
+            let alpha: float32 = g.particles.life[pi] / g.particles.init_life[pi];
+            if (alpha < 0.0) { alpha = 0.0; }
+            let c: palette.RGB = palette.fire_color(g.particles.hue[pi]);
+            pack(ref buf, off, g.particles.x[pi], g.particles.y[pi], state.PARTICLE_SIZE, c.r, c.g, c.b, alpha);
+            off = off + VERT_FLOATS;
+            count = count + 1;
+        }
+        pi = pi + 1;
+    }
+
+    let ei: int32 = 0;
+    while (ei < state.ENEMY_POOL) {
+        if (g.enemies.active[ei]) {
+            let c: palette.RGB = palette.fire_color(g.enemies.hue[ei]);
+            pack(ref buf, off, g.enemies.x[ei], g.enemies.y[ei], g.enemies.size[ei], c.r, c.g, c.b, 1.0);
+            off = off + VERT_FLOATS;
+            count = count + 1;
+        }
+        ei = ei + 1;
+    }
+
+    // Power-ups: bright gold disc.
+    let pu: int32 = 0;
+    while (pu < state.POWERUP_POOL) {
+        if (g.powerups.active[pu]) {
+            pack(ref buf, off, g.powerups.x[pu], g.powerups.y[pu], state.POWERUP_SIZE, 1.0, 0.85, 0.25, 1.0);
+            off = off + VERT_FLOATS;
+            count = count + 1;
+        }
+        pu = pu + 1;
+    }
+
+    // Bullets - bright cyan-white.
+    let bi: int32 = 0;
+    while (bi < state.BULLET_POOL) {
+        if (g.bullets.active[bi]) {
+            pack(ref buf, off, g.bullets.x[bi], g.bullets.y[bi], state.BULLET_SIZE, 0.7, 1.0, 1.0, 1.0);
+            off = off + VERT_FLOATS;
+            count = count + 1;
+        }
+        bi = bi + 1;
+    }
+
+    // Player - large white-blue disc.
+    pack(ref buf, off, g.player_x, g.player_y, state.PLAYER_SIZE, 0.85, 0.95, 1.0, 1.0);
+    count = count + 1;
+    return count;
+}
+
+// ── Scene loop ───────────────────────────────────────────────────────
+
+function run_scene(): void {
+    sdl.gl_set_attribute(sdl.GLAttr.ContextMajorVersion, 3);
+    sdl.gl_set_attribute(sdl.GLAttr.ContextMinorVersion, 2);
+    sdl.gl_set_attribute(sdl.GLAttr.ContextProfileMask, int32(sdl.GLProfile.Core));
+    sdl.gl_set_attribute(sdl.GLAttr.DoubleBuffer, 1);
+
+    let disposable win: sdl.Window = sdl.create_window(
+        "yooperlang -- Nebula Arena (GLSL + particles)",
+        state.WIN_W, state.WIN_H,
+        sdl.WindowFlags.OpenGL | sdl.WindowFlags.Shown
+    );
+    let disposable ctx: sdl.GLCtx = sdl.gl_create_context(ref win);
+    let _vsync: int32 = sdl.gl_set_swap_interval(1);
+
+    gl.viewport(0, 0, state.WIN_W, state.WIN_H);
+    gl.enable(gl.Cap.Blend);
+    gl.blend_func(gl.BlendFactor.SrcAlpha, gl.BlendFactor.OneMinusSrcAlpha);
+    gl.enable(gl.Cap.ProgramPointSize);
+
+    // ── compile both programs ──
+    let neb_vs: uint32 = gl.compile_shader(gl.ShaderStage.Vertex, shaders.nebula_vertex_src());
+    let neb_fs: uint32 = gl.compile_shader(gl.ShaderStage.Fragment, shaders.nebula_fragment_src());
+    let neb_attrs: string[] = ["a_pos"];
+    let neb_prog: uint32 = gl.link_program(neb_vs, neb_fs, neb_attrs);
+    gl.delete_shader(neb_vs);
+    gl.delete_shader(neb_fs);
+    if (neb_prog == 0) { printf(`nebula program failed\n`); return; }
+
+    let sp_vs: uint32 = gl.compile_shader(gl.ShaderStage.Vertex, shaders.sprite_vertex_src());
+    let sp_fs: uint32 = gl.compile_shader(gl.ShaderStage.Fragment, shaders.sprite_fragment_src());
+    let sp_attrs: string[] = ["a_pos", "a_size", "a_color"];
+    let sp_prog: uint32 = gl.link_program(sp_vs, sp_fs, sp_attrs);
+    gl.delete_shader(sp_vs);
+    gl.delete_shader(sp_fs);
+    if (sp_prog == 0) { printf(`sprite program failed\n`); return; }
+
+    // ── nebula VAO/VBO: static fullscreen quad ──
+    let neb_quad: float32[] = [
+        -1.0, -1.0,    1.0, -1.0,    1.0,  1.0,
+        -1.0, -1.0,    1.0,  1.0,   -1.0,  1.0
+    ];
+    let neb_vao: uint32 = 0;
+    gl.gen_vertex_arrays(1, &neb_vao);
+    gl.bind_vertex_array(neb_vao);
+    let neb_vbo: uint32 = 0;
+    gl.gen_buffers(1, &neb_vbo);
+    gl.bind_buffer(gl.BufferTarget.Array, neb_vbo);
+    let neb_bytes: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(neb_quad.ptr);
+    gl.buffer_data(gl.BufferTarget.Array, 48, neb_bytes, gl.BufferUsage.StaticDraw);
+    gl.vertex_attrib_pointer(0, 2, gl.DataType.Float, gl.FALSE, 8, null);
+    gl.enable_vertex_attrib_array(0);
+    let u_neb_time: int32 = gl.get_uniform_location(neb_prog, "u_time");
+    let u_neb_res:  int32 = gl.get_uniform_location(neb_prog, "u_resolution");
+
+    // ── sprite VAO/VBO: re-uploaded each frame ──
+    let sp_vao: uint32 = 0;
+    gl.gen_vertex_arrays(1, &sp_vao);
+    gl.bind_vertex_array(sp_vao);
+    let sp_vbo: uint32 = 0;
+    gl.gen_buffers(1, &sp_vbo);
+    gl.bind_buffer(gl.BufferTarget.Array, sp_vbo);
+    // attribs: 0=a_pos (2f @ 0), 1=a_size (1f @ 8), 2=a_color (4f @ 12)
+    gl.vertex_attrib_pointer(0, 2, gl.DataType.Float, gl.FALSE, VERT_STRIDE, null);
+    gl.enable_vertex_attrib_array(0);
+    let off8:  unsafe_ptr<uint8> = unsafe_ptr.fromInt<uint8>(8);
+    let off12: unsafe_ptr<uint8> = unsafe_ptr.fromInt<uint8>(12);
+    gl.vertex_attrib_pointer(1, 1, gl.DataType.Float, gl.FALSE, VERT_STRIDE, off8);
+    gl.enable_vertex_attrib_array(1);
+    gl.vertex_attrib_pointer(2, 4, gl.DataType.Float, gl.FALSE, VERT_STRIDE, off12);
+    gl.enable_vertex_attrib_array(2);
+    let u_sp_res: int32 = gl.get_uniform_location(sp_prog, "u_resolution");
+
+    // CPU staging buffer for sprite verts (sized for worst case).
+    let max_verts: usize = usize(state.PARTICLE_POOL + state.ENEMY_POOL + state.BULLET_POOL + state.POWERUP_POOL + 1);
+    let cpu_buf: float32[] = intr.heap_alloc(max_verts * VERT_FLOATS);
+
+    let disposable mut_state: state.GameState = state.init_state(int32(sdl.ticks()));
+    let start_ticks: uint32 = sdl.ticks();
+    let last_ticks: uint32 = start_ticks;
+    let last_score_print: int32 = 0;
+
+    while (sdl.ticks() > 0) {
+        let frame_start: uint32 = sdl.ticks();
+        sdl.pump_events();
+        let kb_n: int = 0;
+        let keys: uint8[] = sdl.keyboard_state(ref kb_n);
+
+        let dt: float32 = float32(frame_start - last_ticks);
+        if (dt > 100.0) { dt = 100.0; }
+        last_ticks = frame_start;
+
+        let alive: bool = state.tick(ref mut_state, dt, frame_start, keys);
+        if (!alive) { break; }
+
+        if (mut_state.score != last_score_print) {
+            printf(`score: ${mut_state.score}\n`);
+            last_score_print = mut_state.score;
+        }
+
+        let t_seconds: float32 = float32(frame_start - start_ticks) * 0.001;
+
+        gl.clear_color(0.0, 0.0, 0.0, 1.0);
+        gl.clear(gl.ClearBits.Color);
+
+        // Background nebula (covers whole screen).
+        gl.use_program(neb_prog);
+        gl.uniform1f(u_neb_time, t_seconds);
+        gl.uniform2f(u_neb_res, float32(state.WIN_W), float32(state.WIN_H));
+        gl.bind_vertex_array(neb_vao);
+        gl.draw_arrays(gl.DrawMode.Triangles, 0, 6);
+
+        // Sprites + particles in one draw.
+        let n_verts: int32 = build_sprite_vbo(ref mut_state, ref cpu_buf);
+        if (n_verts > 0) {
+            let upload_bytes: int64 = int64(n_verts) * int64(VERT_STRIDE);
+            let cpu_bytes: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(cpu_buf.ptr);
+            gl.use_program(sp_prog);
+            gl.uniform2f(u_sp_res, float32(state.WIN_W), float32(state.WIN_H));
+            gl.bind_vertex_array(sp_vao);
+            gl.bind_buffer(gl.BufferTarget.Array, sp_vbo);
+            gl.buffer_data(gl.BufferTarget.Array, upload_bytes, cpu_bytes, gl.BufferUsage.DynamicDraw);
+            gl.draw_arrays(gl.DrawMode.Points, 0, n_verts);
+        }
+
+        sdl.gl_swap_window(ref win);
+
+        let elapsed: uint32 = sdl.ticks() - frame_start;
+        if (elapsed < MS_PER_FRAME) {
+            sdl.delay(MS_PER_FRAME - elapsed);
+        }
+    }
+
+    gl.delete_program(neb_prog);
+    gl.delete_program(sp_prog);
+    gl.delete_vertex_arrays(1, &neb_vao);
+    gl.delete_vertex_arrays(1, &sp_vao);
+    gl.delete_buffers(1, &neb_vbo);
+    gl.delete_buffers(1, &sp_vbo);
+
+    intr.heap_free(cpu_buf);
+}
+
+// ── Entry point ──────────────────────────────────────────────────────
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+    printf(`nebula_arena: starting (A/D move, Space shoot, grab gold orbs for spread, Esc quit)\n`);
+    if (sdl.init(sdl.InitFlags.Video) != 0) {
+        printf(`SDL_Init failed: ${sdl.error()}\n`);
+        return 1;
+    }
+    run_scene();
+    sdl.quit();
+    printf(`Exiting cleanly\n`);
+    return 0;
+}

@@ -20,13 +20,12 @@
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Vec, vec_new, vec_push, vec_as_array } from "../core/vec.yoop";
 import { string_eq } from "../core/strings.yoop";
-import * as intr from "../core/intrinsics.yoop";
 
 import {
     Request, Response, HttpMethod,
     StatusCode, status, not_found, ok, server_err, method_not_allowed,
     Headers, headers_new, headers_add,
-    http_method_eq,
+    http_method_eq, respond_static,
 } from "./types.yoop";
 import { Handler, HandleOutcome, Dispatcher } from "./server.yoop";
 
@@ -82,14 +81,14 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
         if (any_method_match) {
             // The path was registered but not for this method.
             resp.status = method_not_allowed();
-            resp.body   = intr.string_as_bytes("405 Method Not Allowed\n");
+            respond_static(ref resp, "405 Method Not Allowed\n");
             return HandleOutcome.Ok;
         }
         if (self.has_fallback) {
             return Dispatcher.handle(ref self.fallback, ref req, ref resp);
         }
         resp.status = not_found();
-        resp.body   = intr.string_as_bytes("404 Not Found\n");
+        respond_static(ref resp, "404 Not Found\n");
         return HandleOutcome.Ok;
     }
 }

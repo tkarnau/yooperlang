@@ -1,0 +1,43 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Flavors {
+    Sweet 1,
+    Sour 2,
+    Bitter 4,
+    Umami 8,
+    SweetAndSour Sweet | Sour,
+    Everything Sweet | Sour | Bitter | Umami,
+}
+
+function hasFlag(set: Flavors, bit: Flavors): bool {
+    return (set & bit) == bit;
+}
+
+function main(): int32 {
+    let combo: Flavors = Flavors.Sweet | Flavors.Bitter;
+    if (hasFlag(combo, Flavors.Sweet)) {
+        printf(`has sweet\n`);
+    }
+    if (hasFlag(combo, Flavors.Sour)) {
+        printf(`should not see this\n`);
+        return 1;
+    }
+    if (hasFlag(combo, Flavors.Bitter)) {
+        printf(`has bitter\n`);
+    }
+    let all: Flavors = Flavors.Everything;
+    let mask: Flavors = all & Flavors.SweetAndSour;
+    if (mask == Flavors.SweetAndSour) {
+        printf(`mask matches sweet+sour combo\n`);
+    }
+    let inverted: Flavors = ~Flavors.Sweet;
+    let cleared: Flavors = all & inverted;
+    if (hasFlag(cleared, Flavors.Sweet)) {
+        printf(`should not see this either\n`);
+        return 1;
+    }
+    printf(`cleared sweet bit\n`);
+    return 0;
+}

@@ -2,7 +2,7 @@
 // context. The compiler can't pick `T`/`E`, so the diagnostic asks the user
 // to add a typed binding/return/call argument.
 
-enum Result<T, E> {
+variant Result<T, E> {
     Ok { value: T },
     Err { error: E },
 }

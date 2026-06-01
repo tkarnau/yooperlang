@@ -1,0 +1,59 @@
+// yoopstore - a tiny S3-like file storage server.
+//
+//   PUT  http://127.0.0.1:18080/<path>   -> store request body at data/<path>
+//   POST http://127.0.0.1:18080/<path>   -> same as PUT
+//   GET  http://127.0.0.1:18080/<path>   -> read data/<path>
+//   DELETE http://127.0.0.1:18080/<path> -> delete data/<path>
+//
+// `<path>` is one or more slash-separated components. Each component is
+// restricted to alphanumerics + `.`, `_`, `-` (see safepath.yoop). The
+// data root is a directory named `data/` next to the running binary.
+//
+// Run:
+//   yoopiler examples/playground/yoopstore/main.yoop -o yoopstore
+//   ./yoopstore
+//
+// Then from another terminal:
+//   echo "hello" | curl --data-binary @- -X PUT http://127.0.0.1:18080/tom/test/file1
+//   curl http://127.0.0.1:18080/tom/test/file1
+//   curl -X DELETE http://127.0.0.1:18080/tom/test/file1
+
+import { disposable } from "std/core/kinds.yoop";
+import { ListenResult } from "std/net/tcp.yoop";
+import * as tcp from "std/net/tcp.yoop";
+import { ServeOutcome } from "std/http/server.yoop";
+import * as http_server from "std/http/server.yoop";
+
+import { StorageHandler } from "./handler.yoop";
+import * as handler from "./handler.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const HOST: string = "127.0.0.1";
+const PORT: int32  = 18080;
+const DATA_ROOT: string = "./data";
+
+function main(): int32 {
+    disposable lr: ListenResult = tcp.tcp_listen(HOST, PORT, 128) {
+        if (lr.error.len > 0) {
+            printf(`bind failed: ${lr.error}\n`);
+            return 1;
+        }
+        printf(`yoopstore listening on ${HOST}:${PORT}, data root: ${DATA_ROOT}\n`);
+
+        // The handler owns nothing to dispose now that Response bodies are
+        // owned (papercut #6) - a plain `let` is enough.
+        let h: StorageHandler = handler.storage_handler_new(DATA_ROOT);
+        // n=0 -> serve forever.
+        let outcome: ServeOutcome = http_server.serve_n(ref lr.listener, ref h, 0);
+        if (outcome.error.len > 0) {
+            printf(`server stopped: served=${outcome.served} err=${outcome.error}\n`);
+            return 1;
+        }
+        printf(`served ${outcome.served} requests\n`);
+    }
+
+    return 0;
+}

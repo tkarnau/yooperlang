@@ -1,7 +1,7 @@
 // Phase 9.H: `?` on a fallible enum is only legal inside a function whose
 // return type is also a fallible enum with the same Err payload.
 
-enum IntResult {
+variant IntResult {
     Ok { value: int32 },
     Err { error: int32 },
 }
