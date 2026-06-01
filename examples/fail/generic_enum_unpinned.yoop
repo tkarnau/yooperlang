@@ -1,0 +1,13 @@
+// Phase 10.A: bare generic-enum variant constructor outside any pinning
+// context. The compiler can't pick `T`/`E`, so the diagnostic asks the user
+// to add a typed binding/return/call argument.
+
+variant Result<T, E> {
+    Ok { value: T },
+    Err { error: E },
+}
+
+function main(): int32 {
+    Result.Ok { value: 5 }; // expected: cannot determine type arguments for generic enum "Result"
+    return 0;
+}

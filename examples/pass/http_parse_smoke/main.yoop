@@ -1,10 +1,12 @@
 // Library Phase C smoke: parse a hard-coded HTTP/1.1 request buffer
 // through std/http/parser and print the structured fields. No sockets,
-// no FFI — exercises the request-line + headers + body-offset path.
+// no FFI - exercises the request-line + headers + body-offset path.
 
 import { disposable } from "../../../std/core/kinds.yoop";
 import { HttpMethod, headers_get } from "../../../std/http/types.yoop";
-import { ParsedRequest, parse_request_head } from "../../../std/http/parser.yoop";
+import {
+    ParsedRequest, parse_request_head, parsed_content_length,
+} from "../../../std/http/parser.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -34,12 +36,13 @@ function main(): int32 {
         13, 10,
     ];
     let disposable p: ParsedRequest = parse_request_head(raw);
-    if (p.err.len > 0) {
-        printf(`parse err: ${p.err}\n`);
+    if (p.error.len > 0) {
+        printf(`parse err: ${p.error}\n`);
         return 1;
     }
     let m: string = method_label(p.request.method);
     let host: string = headers_get(ref p.request.headers, "host");
-    printf(`method=${m} path=${p.request.path} version=${p.request.version} cl=${p.content_length} host=${host}\n`);
+    let cl: usize = parsed_content_length(ref p);
+    printf(`method=${m} path=${p.request.path} version=${p.request.version} cl=${cl} host=${host}\n`);
     return 0;
 }

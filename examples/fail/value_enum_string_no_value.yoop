@@ -1,0 +1,9 @@
+// String-backed enum cases must have an explicit literal value.
+enum Bad<string> {
+    A,
+    B "x",
+}
+
+function main(): int32 {
+    return 0;
+}

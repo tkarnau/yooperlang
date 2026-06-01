@@ -18,14 +18,23 @@ export const typeKinds = {
   // Phase 7.1: a reference to a generic type parameter in a generic decl.
   typeParam: "typeParam",
   // Phase 7.5: tagged sum and C-style overlapping union.
-  enum: "enum",
+  // Phase 12: tagged sum renamed from `enum` to `variant`. The new `enum`
+  // keyword introduces a value-enum: a nominal alias over a primitive
+  // underlying type (int*/uint*/string) with named-constant cases.
+  variant: "variant",
   union: "union",
+  valueEnum: "valueEnum",
   // Phase 8.A: raw FFI pointer. Distinct from `ref T` (which is non-null and
   // does not participate in arithmetic).
   unsafePtr: "unsafePtr",
   // Phase 8.A: literal-placeholder for `null`, similar to untypedInt/Float.
   // Pinned by context (assignment target, return, call arg, equality side).
   untypedNull: "untypedNull",
+  // Phase 9.G: a value-shaped function pointer. The `=>` form in a type
+  // annotation. Distinct from `func` (which describes named function decls).
+  functionPointer: "functionPointer",
+  // Phase 9.G: a type-erased trait shape. See VTableType.
+  vtable: "vtable",
 };
 
 const freezerWrap = (kind, obj) => {
@@ -55,7 +64,7 @@ export const primAnnotations = {
   isize: "isize",
   // Phase 8.A: platform pointer-width unsigned integer. Lowered to i64 on
   // 64-bit targets (the only ones we currently support). Distinct from usize
-  // in source for documentation purposes — mirrors C uintptr_t vs size_t.
+  // in source for documentation purposes - mirrors C uintptr_t vs size_t.
   uintptr: "uintptr",
   void: "void",
 };
@@ -175,26 +184,115 @@ export const UntypedFloatType = () => freezerWrap(typeKinds.untypedFloat, {});
 export const ErrorType = () => freezerWrap(typeKinds.error, {});
 // Phase 7.1: trait types carry an optional type-param list for generic traits.
 // `typeParams` is a list of TypeParamType. For non-generic traits, it's [].
-export const TraitType = (name, methods, moduleId = null, typeParams = []) =>
-  freezerWrap(typeKinds.trait, { name, methods, moduleId, typeParams });
+// Phase 9.J: `extendsTraits` is the list of parent traits a `trait Child extends A, B`
+// declaration names. The list itself is mutable (constructed empty in pass A,
+// populated in pass C.1 once parent-trait shells are resolvable), so the
+// outer freezerWrap is unchanged. Method resolution walks this chain
+// transitively - a type implementing `Child` is required to provide methods
+// for `Child` and every ancestor.
+export const TraitType = (
+  name,
+  methods,
+  moduleId = null,
+  typeParams = [],
+  extendsTraits = [],
+) =>
+  freezerWrap(typeKinds.trait, {
+    name,
+    methods,
+    moduleId,
+    typeParams,
+    extendsTraits,
+  });
 
-// Phase 7.5: tagged sum type.
-//   variants: Map<variantName, { fields: [{name, type}] | null, ordinal: number }>
-//   fields === null means a payload-less variant (e.g. `Empty`).
+// Phase 7.5 (renamed Phase 12): tagged sum type. Source-level keyword is
+// `variant`. AST kind is VARIANT_DECL.
+//   variants: Map<caseName, { fields: [{name, type}] | null, ordinal: number }>
+//   fields === null means a payload-less case (e.g. `Empty`).
 //   ordinal: stable 0-indexed integer from declaration order; used as the
 //     LLVM discriminator value at codegen time.
-export const EnumType = (name, variants, moduleId = null) =>
-  freezerWrap(typeKinds.enum, { name, variants, moduleId });
+// Phase 10.A: `genericInstance: { declId, args } | null` tags instantiations
+// of a generic variant decl, mirroring StructType. Substitution re-instantiates
+// open instances via the registry.
+// Phase 13.A: `variants` is populated in-place by pass C (mutates the shell
+// the table registered in pass A) so back-references captured during struct
+// field resolution see the populated cases at codegen time.
+// Phase 13.B: variants can `implements Trait propagates<K>` like structs.
+// `implementsTraits`, `methods`, and `propagatedKinds` are mutable slots
+// populated by pass C / pass C.1; the outer object stays frozen.
+export const VariantType = (
+  name,
+  variants,
+  moduleId = null,
+  genericInstance = null,
+  implementsTraits = [],
+  methods = new Map(),
+  propagatedKinds = [],
+) =>
+  freezerWrap(typeKinds.variant, {
+    name,
+    variants,
+    moduleId,
+    genericInstance,
+    implementsTraits,
+    methods,
+    propagatedKinds,
+  });
 
-// Phase 7.5: untagged C-style union — every field starts at offset 0,
+// Phase 7.5: untagged C-style union - every field starts at offset 0,
 // size = max(sizeof(field)), alignment = max(alignof(field)). No tag.
 export const UnionType = (name, fields, moduleId = null) =>
   freezerWrap(typeKinds.union, { name, fields, moduleId });
+
+// Phase 12: a value enum - nominal alias over a primitive underlying type
+// (any signed/unsigned int width, or string). Each case is a named compile-
+// time constant of the underlying type.
+//   underlying: PrimType (int*/uint*/string)
+//   cases: Map<name, { name, value, ordinal }> - `value` is a JS number or
+//     BigInt for integer underlyings, or a string for `enum<string>`.
+//   isOpen: true if any case's value was derived from bitwise operators on
+//     other cases. Switch over an open enum requires `default` because the
+//     reachable set is no longer the named cases alone.
+export const ValueEnumType = (name, underlying, cases, moduleId = null, isOpen = false) =>
+  freezerWrap(typeKinds.valueEnum, { name, underlying, cases, moduleId, isOpen });
+
+// Phase 9.G: a first-class function value type - what `(p: T) => R` resolves
+// to in a type annotation. Distinct from FuncType (which describes a named
+// function decl) so call resolution can tell the two apart: FuncType callees
+// resolve to a global mangled symbol, FunctionPointerType callees lower to
+// an indirect call through a value slot.
+export const FunctionPointerType = (params, returnType) =>
+  freezerWrap(typeKinds.functionPointer, { params, returnType });
+
+// Phase 9.G: a type-erased shape for a trait. Conceptually a struct with one
+// `ctx` pointer + one function-pointer field per trait method. The compiler
+// owns the field layout; the user only writes the method-pointer fields in
+// the `vtable T for Trait { ... }` body. Two vtables are typesEqual if their
+// `(name, moduleId)` match - they are nominal types, like structs.
+//   methodOrder: list of method names in trait declaration order. Codegen
+//                uses this to pick a stable LLVM field index for each.
+export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) =>
+  freezerWrap(typeKinds.vtable, {
+    name,
+    traitName,
+    traitModuleId,
+    fields,
+    methodOrder,
+    moduleId,
+  });
 
 // Phase 8.A: raw, nullable, arithmetic-capable pointer for FFI. Gated by
 // `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the
 // typechecker still tracks pointee identity so arithmetic / deref are
 // strongly typed in source.
+//
+// Yoopstore-papercut #3: a `null` pointee represents the bare `unsafe_ptr`
+// (no `<T>`) - an opaque C-pointer handle (think `void *` / `FILE *`).
+// Opaque pointers compare to null and other unsafe_ptrs, can be cast to a
+// typed pointer with `unsafe_ptr.cast<T>(p)`, and can round-trip through
+// integers, but deref / pointer arithmetic / `toArray` are rejected.
+// `unsafe_ptr<T>` decays implicitly to opaque (matches C's `T*` -> `void*`);
+// the reverse requires the explicit cast.
 export const UnsafePtrType = (pointee) =>
   freezerWrap(typeKinds.unsafePtr, { pointee });
 
@@ -207,14 +305,16 @@ export const UntypedNullType = () => freezerWrap(typeKinds.untypedNull, {});
 // method signatures). It is replaced via substituteTypeParams at every
 // instantiation site. `originDecl` is a stable per-decl id so two unrelated
 // `T`s never compare equal.
-// Phase 7.2: `bound` is set later in pass C if the param has an `implements`
-// clause. Unlike other types in this file, TypeParamType is mutable for that
-// one slot — see CLAUDE.md cross-cutting invariants.
+// Phase 7.2 / 9.J: `bounds` is populated later in pass C if the param has an
+// `implements` clause. Empty list means unbounded; single-bound is a list of
+// length 1; multi-bound `<T implements (A, B)>` (9.J) is a list of length N.
+// Unlike other types in this file, TypeParamType is mutable for that one slot
+// - see CLAUDE.md cross-cutting invariants.
 export function TypeParamType(name, originDecl) {
   this.kind = typeKinds.typeParam;
   this.name = name;
   this.originDecl = originDecl;
-  this.bound = null; // TraitType | null
+  this.bounds = []; // TraitType[]
 }
 
 // Phase 6.3: compiler-builtin Task<T>. Not user-declarable; produced as the
@@ -223,7 +323,7 @@ export const TaskType = (resultType) =>
   freezerWrap(typeKinds.task, { resultType });
 
 // KindType is a language-level "kind" decl (phase 6.1: `disposable`). Unlike
-// other types in this file, KindType is mutable during pass C.2 — clauses
+// other types in this file, KindType is mutable during pass C.2 - clauses
 // resolve trait references and method names after the shell is registered in
 // pass A. The shape mirrors the plan in plans/phase-6-1-disposable.md §4.a.
 export function KindType(name, moduleId) {
@@ -234,6 +334,18 @@ export function KindType(name, moduleId) {
   this.requires = [];                       // array of TraitType
   this.mustCall = [];                       // array of { methodName, timing, traitType }
   this.ownsBlock = false;
+  // clearance kinds: marker polarity. null = obligation kind (disposable etc.);
+  // "conferred" = capability a slot must have (lower bound); "restrictive" =
+  // hazard a slot must not have (upper bound). A marker kind carries no
+  // mustCall obligation - the two are mutually exclusive.
+  this.marker = null;                      // null | "conferred" | "restrictive"
+  // clearance kinds: name of the user function authorized to transition this
+  // kind. `clearedBy` is the only function permitted to strip a restrictive
+  // kind from a value; `appliedBy` is the only function permitted to confer
+  // a conferred kind. The kind decl is the source of truth - random functions
+  // with a matching signature shape are NOT authorized.
+  this.clearedBy = null;                   // string | null (only on restrictive)
+  this.appliedBy = null;                 // string | null (only on conferred)
   this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
   this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
   this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
@@ -268,7 +380,7 @@ export const TraitSelfPlaceholder = Object.freeze({
   kind: "trait_self_placeholder",
 });
 
-// Phase 8.B: C-portable integer aliases. Resolution-time synonyms — the
+// Phase 8.B: C-portable integer aliases. Resolution-time synonyms - the
 // alias *is* the target type for every downstream purpose (typesEqual,
 // assignability, codegen). Hardcoded to LP64 (Linux + macOS); Windows
 // LLP64 mapping waits on real target-triple awareness in the compiler.
@@ -327,6 +439,12 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
       const tp = ctx.typeParamScope.get(annot.name);
       if (tp) return tp;
     }
+    // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
+    // C-pointer handle. Gated by `import.unsafe;` via the same path that
+    // catches the generic form.
+    if (annot.name === "unsafe_ptr") {
+      return UnsafePtrType(null);
+    }
     return resolveTypeFromName(annot.name, structTable);
   }
   if (annot.kind === "refType") {
@@ -377,6 +495,18 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
     }
     return ctx.selfType;
   }
+  // Phase 9.G: `(p: T) => R` function value type.
+  if (annot.kind === "functionType") {
+    const params = [];
+    for (const p of annot.params) {
+      const pt = resolveTypeAnnotation(p, structTable, ctx);
+      if (!pt) return null;
+      params.push(pt);
+    }
+    const rt = resolveTypeAnnotation(annot.returnType, structTable, ctx);
+    if (!rt) return null;
+    return FunctionPointerType(params, rt);
+  }
   throw new Error(
     `resolveTypeAnnotation: unknown annotation kind "${annot.kind}"`,
   );
@@ -385,13 +515,20 @@ export function resolveTypeAnnotation(annot, structTable, ctx) {
 // Format a type annotation object as a human-readable string (for error messages).
 export function formatAnnotation(annot) {
   if (!annot) return "unknown";
-  if (annot.kind === "typeName") return annot.name;
+  if (annot.kind === "typeName") {
+    return annot.namespace ? `${annot.namespace}.${annot.name}` : annot.name;
+  }
   if (annot.kind === "refType") return `ref ${formatAnnotation(annot.inner)}`;
   if (annot.kind === "arrayType") return `${formatAnnotation(annot.elem)}[]`;
   if (annot.kind === "taskType") return `Task<${formatAnnotation(annot.inner)}>`;
   if (annot.kind === "typeApplication") {
     const args = annot.typeArgs.map(formatAnnotation).join(", ");
-    return `${annot.name}<${args}>`;
+    const head = annot.namespace ? `${annot.namespace}.${annot.name}` : annot.name;
+    return `${head}<${args}>`;
+  }
+  if (annot.kind === "functionType") {
+    const params = annot.params.map(formatAnnotation).join(", ");
+    return `(${params}) => ${formatAnnotation(annot.returnType)}`;
   }
   return "unknown";
 }
@@ -423,9 +560,10 @@ function bitWidthOf(name) {
 }
 
 // Returns true if a numeric cast from src to dst is valid (both must be numeric prims).
+// Phase 12: an integer-backed value enum is castable to/from any numeric prim
+// via its underlying primitive. String-backed enums are not castable.
 export function isCastableTo(src, dst) {
   if (!src || !dst) return false;
-  if (src.kind !== typeKinds.prim || dst.kind !== typeKinds.prim) return false;
   const numericPrims = [
     "int8",
     "int16",
@@ -440,7 +578,14 @@ export function isCastableTo(src, dst) {
     "float32",
     "float64",
   ];
-  return numericPrims.includes(src.name) && numericPrims.includes(dst.name);
+  const effective = (t) => {
+    if (t.kind === typeKinds.valueEnum) return t.underlying;
+    return t;
+  };
+  const s = effective(src);
+  const d = effective(dst);
+  if (s.kind !== typeKinds.prim || d.kind !== typeKinds.prim) return false;
+  return numericPrims.includes(s.name) && numericPrims.includes(d.name);
 }
 
 // Returns the LLVM cast opcode string for casting srcType to dstType.
@@ -516,10 +661,27 @@ export function typesEqual(a, b) {
   if (a.kind === typeKinds.typeParam) {
     return a.name === b.name && a.originDecl === b.originDecl;
   }
-  if (a.kind === typeKinds.enum || a.kind === typeKinds.union) {
+  if (a.kind === typeKinds.functionPointer) {
+    if (a.params.length !== b.params.length) return false;
+    for (let i = 0; i < a.params.length; i++) {
+      if (!typesEqual(a.params[i], b.params[i])) return false;
+    }
+    return typesEqual(a.returnType, b.returnType);
+  }
+  if (a.kind === typeKinds.vtable) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
+  if (a.kind === typeKinds.variant || a.kind === typeKinds.union) {
+    return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
+  }
+  if (a.kind === typeKinds.valueEnum) {
     return a.name === b.name && (a.moduleId ?? null) === (b.moduleId ?? null);
   }
   if (a.kind === typeKinds.unsafePtr) {
+    // Yoopstore-papercut #3: a null pointee is the opaque `unsafe_ptr`.
+    // Two opaques are equal; typed and opaque are not.
+    if (a.pointee === null && b.pointee === null) return true;
+    if (a.pointee === null || b.pointee === null) return false;
     return typesEqual(a.pointee, b.pointee);
   }
   if (a.kind === typeKinds.untypedNull) {
@@ -534,7 +696,7 @@ export function typesEqual(a, b) {
 // composite types are constructed and frozen.
 //
 // `instantiator` is an optional callback (declId, args) -> StructType used
-// when a struct carries a `genericInstance` tag — substitution re-instantiates
+// when a struct carries a `genericInstance` tag - substitution re-instantiates
 // against the registry so an open `Box<T>` becomes the canonical `Box<int32>`.
 let _globalInstantiator = null;
 export function setGlobalInstantiator(fn) {
@@ -603,7 +765,44 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
         type.genericInstance ?? null,
       );
     }
-    // prim/void/untyped/error/namespace/trait/kind — no nested type
+    case typeKinds.variant: {
+      // Phase 10.A: mirror the struct branch. Open instances (carrying
+      // genericInstance with TypeParamType args) re-route through the
+      // registry once their args have concrete substitutions.
+      if (type.genericInstance && inst) {
+        const newArgs = type.genericInstance.args.map((a) =>
+          substituteTypeParams(a, substitution, inst),
+        );
+        const allSame = newArgs.every(
+          (a, i) => a === type.genericInstance.args[i],
+        );
+        if (allSame) return type;
+        const fresh = inst(type.genericInstance.declId, newArgs);
+        if (fresh) return fresh;
+      }
+      return type;
+    }
+    case typeKinds.functionPointer: {
+      // Phase 10.X.2: FPT carries plain-type params + return. Walk both.
+      const newParams = type.params.map((p) =>
+        substituteTypeParams(p, substitution, inst),
+      );
+      const newRet = substituteTypeParams(type.returnType, substitution, inst);
+      const allSame =
+        newParams.every((p, i) => p === type.params[i]) &&
+        newRet === type.returnType;
+      if (allSame) return type;
+      return FunctionPointerType(newParams, newRet);
+    }
+    case typeKinds.unsafePtr: {
+      // Yoopstore-papercut #3: opaque (null pointee) is invariant under
+      // substitution.
+      if (type.pointee === null) return type;
+      const newPointee = substituteTypeParams(type.pointee, substitution, inst);
+      if (newPointee === type.pointee) return type;
+      return UnsafePtrType(newPointee);
+    }
+    // prim/void/untyped/error/namespace/trait/kind - no nested type
     default:
       return type;
   }
@@ -625,6 +824,24 @@ export function typeHasTypeParam(type) {
   if (type.kind === typeKinds.struct) {
     if (!type.fields) return false;
     return type.fields.some((f) => typeHasTypeParam(f.type));
+  }
+  if (type.kind === typeKinds.variant) {
+    if (!type.variants) return false;
+    for (const v of type.variants.values()) {
+      if (v.fields === null) continue;
+      if (v.fields.some((f) => typeHasTypeParam(f.type))) return true;
+    }
+    return false;
+  }
+  if (type.kind === typeKinds.functionPointer) {
+    return (
+      type.params.some((p) => typeHasTypeParam(p)) ||
+      typeHasTypeParam(type.returnType)
+    );
+  }
+  if (type.kind === typeKinds.unsafePtr) {
+    if (type.pointee === null) return false;
+    return typeHasTypeParam(type.pointee);
   }
   return false;
 }

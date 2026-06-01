@@ -1,0 +1,24 @@
+// Fire palette used by particles + enemies. Hue cycles
+// yellow -> orange -> red -> magenta and wraps back.
+
+export type RGB { r: float32, g: float32, b: float32 }
+
+export function fire_color(hue: float32): RGB {
+    let h: float32 = hue;
+    if (h < 0.0) { h = h + 1.0; }
+    if (h >= 1.0) { h = h - 1.0; }
+    if (h < 0.25) {
+        let s: float32 = h / 0.25;
+        return { r: 1.0, g: 1.0 - s * 0.4, b: 0.2 + s * 0.0 };
+    }
+    if (h < 0.5) {
+        let s: float32 = (h - 0.25) / 0.25;
+        return { r: 1.0, g: 0.6 - s * 0.5, b: 0.2 - s * 0.1 };
+    }
+    if (h < 0.75) {
+        let s: float32 = (h - 0.5) / 0.25;
+        return { r: 1.0 - s * 0.2, g: 0.1, b: 0.1 + s * 0.5 };
+    }
+    let s: float32 = (h - 0.75) / 0.25;
+    return { r: 0.8 + s * 0.2, g: 0.1 + s * 0.9, b: 0.6 - s * 0.4 };
+}

@@ -1,0 +1,547 @@
+// yooparse/json.yoop - a small, dependency-free JSON parser + serializer.
+//
+// Public API:
+//
+//     import * as json from "./json.yoop";
+//
+//     disposable doc: json.JsonDoc = json.parse(input) {
+//         if (doc.error.len > 0) {
+//             // doc.error holds the first error encountered. doc.root is
+//             // JsonValue.Null on hard failures; on soft failures (e.g.
+//             // unterminated array) it may hold a partial tree. Either
+//             // way, dispose on the JsonDoc walks whatever was built and
+//             // frees it - leaks are not possible if you always wrap the
+//             // result in `disposable`.
+//             printf(`parse error: ${doc.error}\n`);
+//             return 1;
+//         }
+//         // Use doc.root here. It is a JsonValue - switch on the variant
+//         // tag, or use the get_*, obj_get, arr_get helpers below.
+//     }
+//
+// Why a wrapper struct (JsonDoc) instead of returning a JsonValue directly:
+// yoop variants cannot carry `implements Disposable propagates<disposable>`,
+// so the variant itself cannot own its heap-backed children. A small
+// disposable struct wraps the root value, walks the tree on dispose, and
+// frees every nested array allocation in one shot.
+//
+// Why JsonValue uses raw heap arrays instead of Vec or struct pairs:
+// same reason - the variant payload cannot carry the propagates<disposable>
+// obligation that Vec<T> needs. The parser uses Vec internally for growth,
+// then copies into a freshly-sized heap array before constructing the
+// variant and disposes the temporary Vec.
+//
+// Not yet implemented (intentional first-cut limits):
+//   * Numbers are parsed as int64. JSON `1.5` and `1e10` parse as `15` or
+//     skip the exponent digits and yield the integer mantissa. A real
+//     float64 lane is a follow-up.
+//   * String escapes are not decoded. `\"` is recognized as "do not end
+//     the string here" but the raw bytes are kept as-is. Add a real
+//     unescape pass (and \uXXXX) before treating this as wire-safe.
+//   * No streaming / incremental parsing - the whole document is in memory.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Vec } from "std/core/vec.yoop";
+import * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// ---- Public types --------------------------------------------------------
+
+// One key/value pair inside a JSON object. Plain struct so it can sit by
+// value inside the JsonMember[] array on JsonValue.Object.
+export type JsonMember {
+    key:   string,
+    value: JsonValue,
+}
+
+// Any JSON value. Container payloads use raw heap-allocated arrays so the
+// variant itself stays a small POD; `dispose` walks the tree and frees
+// every nested array.
+//
+// Phase 13.B lets the variant carry the trait directly - before, the
+// walk lived in a free `dispose_value` helper that the JsonDoc wrapper's
+// `dispose` had to call. We deliberately do NOT add `propagates<disposable>`
+// here, even though the tree is heap-backed: accessor functions like
+// `obj_get` and `as_array` return child JsonValues that borrow into the
+// parent, and a propagating return type would force every borrow site
+// to either dispose or re-transfer. Ownership lives at the JsonDoc level
+// (which IS propagates<disposable>); `Disposable.dispose(ref doc.root)`
+// is what kicks off the recursive walk.
+export variant JsonValue implements Disposable {
+    Null,
+    Bool   { value: bool },
+    Number { value: int64 },
+    String { value: string },
+    Array  { items:   JsonValue[] },
+    Object { members: JsonMember[] },
+
+    function dispose(ref self): void {
+        switch (self) {
+            case JsonValue.Array { items: arr }: {
+                let i: usize = 0;
+                while (i < arr.len) {
+                    let child: JsonValue = arr[i];
+                    Disposable.dispose(ref child);
+                    i = i + 1;
+                }
+                if (arr.len > 0) {
+                    intr.heap_free(arr);
+                }
+            }
+            case JsonValue.Object { members: ms }: {
+                let i: usize = 0;
+                while (i < ms.len) {
+                    let m: JsonMember = ms[i];
+                    Disposable.dispose(ref m.value);
+                    i = i + 1;
+                }
+                if (ms.len > 0) {
+                    intr.heap_free(ms);
+                }
+            }
+            default: {} // all other cases are no-op
+        }
+    }
+}
+
+// Disposable wrapper around a parsed JSON document. The variant itself
+// is now Disposable, so JsonDoc just forwards the dispose; this struct
+// stays only to carry the `error` field alongside the parsed root.
+export type JsonDoc implements Disposable propagates<disposable> {
+    root:  JsonValue,
+    error: string,    // empty on parse success
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.root);
+    }
+}
+
+// ---- Parsing -------------------------------------------------------------
+
+// Internal parser state. Threaded by `ref` through every parse_* helper.
+type Parser {
+    bytes: uint8[],
+    pos:   usize,
+    error: string,    // first error encountered; subsequent failures are silent
+}
+
+// Top-level entry. Always returns a JsonDoc; on failure, doc.error is set
+// and doc.root may hold a partial tree (which dispose still cleans up).
+export function parse(input: string): JsonDoc propagates<disposable> {
+    let p: Parser = {
+        bytes: intr.string_as_bytes(input),
+        pos:   0,
+        error: "",
+    };
+    skip_ws(ref p);
+    let root: JsonValue = parse_value(ref p);
+    if (p.error.len == 0) {
+        skip_ws(ref p);
+        if (p.pos < p.bytes.len) {
+            p.error = "json: trailing characters after value";
+        }
+    }
+    return { root: root, error: p.error };
+}
+
+// Skip ASCII whitespace per the JSON spec (space, tab, LF, CR).
+function skip_ws(ref p: Parser): void {
+    while (p.pos < p.bytes.len) {
+        let c: uint8 = p.bytes[p.pos];
+        if (c == 32 || c == 9 || c == 10 || c == 13) {
+            p.pos = p.pos + 1;
+        } else {
+            break;
+        }
+    }
+}
+
+// Dispatch on the first non-whitespace character.
+function parse_value(ref p: Parser): JsonValue {
+    skip_ws(ref p);
+    if (p.pos >= p.bytes.len) {
+        if (p.error.len == 0) { p.error = "json: unexpected end of input"; }
+        return JsonValue.Null;
+    }
+    let c: uint8 = p.bytes[p.pos];
+    if (c == 34)  { return parse_string(ref p); }       // "
+    if (c == 123) { return parse_object(ref p); }       // {
+    if (c == 91)  { return parse_array(ref p); }        // [
+    if (c == 116) { return parse_literal(ref p, "true",  JsonValue.Bool { value: true  }); }
+    if (c == 102) { return parse_literal(ref p, "false", JsonValue.Bool { value: false }); }
+    if (c == 110) { return parse_literal(ref p, "null",  JsonValue.Null); }
+    if (c == 45 || (c >= 48 && c <= 57)) { return parse_number(ref p); }   // - or 0..9
+    if (p.error.len == 0) { p.error = "json: unexpected character"; }
+    return JsonValue.Null;
+}
+
+// Match an exact ASCII keyword (true / false / null) starting at p.pos.
+function parse_literal(ref p: Parser, kw: string, on_match: JsonValue): JsonValue {
+    let kw_bytes: uint8[] = intr.string_as_bytes(kw);
+    if (p.pos + kw_bytes.len > p.bytes.len) {
+        if (p.error.len == 0) { p.error = "json: unexpected end of input in literal"; }
+        return JsonValue.Null;
+    }
+    let i: usize = 0;
+    while (i < kw_bytes.len) {
+        if (p.bytes[p.pos + i] != kw_bytes[i]) {
+            if (p.error.len == 0) { p.error = "json: unknown literal"; }
+            return JsonValue.Null;
+        }
+        i = i + 1;
+    }
+    p.pos = p.pos + kw_bytes.len;
+    return on_match;
+}
+
+// Integer-only number parse. Fraction/exponent characters are accepted
+// and skipped past so the parser doesn't choke on `1.5` or `2e3`, but the
+// returned value is the truncated integer mantissa.
+function parse_number(ref p: Parser): JsonValue {
+    let negative: bool = false;
+    if (p.bytes[p.pos] == 45) {
+        negative = true;
+        p.pos = p.pos + 1;
+    }
+    let value: int64 = 0;
+    let any: bool = false;
+    while (p.pos < p.bytes.len) {
+        let c: uint8 = p.bytes[p.pos];
+        if (c < 48 || c > 57) { break; }
+        value = value * 10 + int64(c) - 48;
+        any = true;
+        p.pos = p.pos + 1;
+    }
+    if (!any) {
+        if (p.error.len == 0) { p.error = "json: number missing digits"; }
+        return JsonValue.Null;
+    }
+    // Eat fraction/exponent characters without using them. A future float
+    // lane will actually consume them.
+    while (p.pos < p.bytes.len) {
+        let c: uint8 = p.bytes[p.pos];
+        if (c == 46 || c == 101 || c == 69 || c == 43 || c == 45 || (c >= 48 && c <= 57)) {
+            p.pos = p.pos + 1;
+        } else {
+            break;
+        }
+    }
+    if (negative) { value = -value; }
+    return JsonValue.Number { value: value };
+}
+
+// Quoted string parse. Does NOT decode escape sequences - it just refuses
+// to treat the byte after a backslash as a string terminator. The string
+// payload is a borrowing view into the source buffer.
+function parse_string(ref p: Parser): JsonValue {
+    p.pos = p.pos + 1;          // consume opening "
+    let start: usize = p.pos;
+    while (p.pos < p.bytes.len && p.bytes[p.pos] != 34) {
+        if (p.bytes[p.pos] == 92) {     // backslash - skip the next byte
+            p.pos = p.pos + 1;
+            if (p.pos >= p.bytes.len) {
+                if (p.error.len == 0) { p.error = "json: dangling backslash"; }
+                return JsonValue.Null;
+            }
+        }
+        p.pos = p.pos + 1;
+    }
+    if (p.pos >= p.bytes.len) {
+        if (p.error.len == 0) { p.error = "json: unterminated string"; }
+        return JsonValue.Null;
+    }
+    let slice: uint8[] = intr.array_slice(p.bytes, start, p.pos);
+    p.pos = p.pos + 1;          // consume closing "
+    return JsonValue.String { value: intr.string_from_bytes_unchecked(slice) };
+}
+
+// Parse `[ value, value, ... ]`. Single-exit pattern so the temporary Vec
+// is always disposed exactly once at the bottom.
+function parse_array(ref p: Parser): JsonValue {
+    p.pos = p.pos + 1;          // consume [
+    let items: Vec<JsonValue> = vec.vec_new(4);
+    skip_ws(ref p);
+    let done: bool = false;
+    if (p.pos < p.bytes.len && p.bytes[p.pos] == 93) {
+        p.pos = p.pos + 1;      // empty array
+        done = true;
+    }
+    while (!done) {
+        if (p.error.len > 0) { break; }
+        skip_ws(ref p);
+        let v: JsonValue = parse_value(ref p);
+        vec.vec_push(ref items, v);
+        if (p.error.len > 0) { break; }
+        skip_ws(ref p);
+        if (p.pos >= p.bytes.len) {
+            p.error = "json: unterminated array";
+            break;
+        }
+        let c: uint8 = p.bytes[p.pos];
+        if (c == 44) {              // ,
+            p.pos = p.pos + 1;
+        } else if (c == 93) {       // ]
+            p.pos = p.pos + 1;
+            done = true;
+        } else {
+            p.error = "json: expected , or ] in array";
+            break;
+        }
+    }
+    let arr: JsonValue[] = freeze_values(ref items);
+    Disposable.dispose(ref items);
+    return JsonValue.Array { items: arr };
+}
+
+// Parse `{ "key": value, ... }`. Same single-exit shape as parse_array.
+function parse_object(ref p: Parser): JsonValue {
+    p.pos = p.pos + 1;          // consume {
+    let members: Vec<JsonMember> = vec.vec_new(4);
+    skip_ws(ref p);
+    let done: bool = false;
+    if (p.pos < p.bytes.len && p.bytes[p.pos] == 125) {
+        p.pos = p.pos + 1;      // empty object
+        done = true;
+    }
+    while (!done) {
+        if (p.error.len > 0) { break; }
+        skip_ws(ref p);
+        if (p.pos >= p.bytes.len || p.bytes[p.pos] != 34) {
+            p.error = "json: expected string key in object";
+            break;
+        }
+        let key_val: JsonValue = parse_string(ref p);
+        let key_str: string = "";
+        switch (key_val) {
+            case JsonValue.String { value: s }: { key_str = s; }
+            case JsonValue.Null: { }
+            case JsonValue.Bool { value: _b }: { }
+            case JsonValue.Number { value: _n }: { }
+            case JsonValue.Array { items: _a }: { }
+            case JsonValue.Object { members: _m }: { }
+        }
+        if (p.error.len > 0) { break; }
+        skip_ws(ref p);
+        if (p.pos >= p.bytes.len || p.bytes[p.pos] != 58) {     // :
+            p.error = "json: expected : after object key";
+            break;
+        }
+        p.pos = p.pos + 1;
+        skip_ws(ref p);
+        let v: JsonValue = parse_value(ref p);
+        let pair: JsonMember = { key: key_str, value: v };
+        vec.vec_push(ref members, pair);
+        if (p.error.len > 0) { break; }
+        skip_ws(ref p);
+        if (p.pos >= p.bytes.len) {
+            p.error = "json: unterminated object";
+            break;
+        }
+        let c: uint8 = p.bytes[p.pos];
+        if (c == 44) {                  // ,
+            p.pos = p.pos + 1;
+        } else if (c == 125) {          // }
+            p.pos = p.pos + 1;
+            done = true;
+        } else {
+            p.error = "json: expected , or } in object";
+            break;
+        }
+    }
+    let arr: JsonMember[] = freeze_members(ref members);
+    Disposable.dispose(ref members);
+    return JsonValue.Object { members: arr };
+}
+
+// Copy a Vec<JsonValue> into a freshly-sized JsonValue[]. The caller
+// disposes the Vec; this function only does the allocate-and-copy.
+function freeze_values(ref v: Vec<JsonValue>): JsonValue[] {
+    if (v.len == 0) {
+        let empty: JsonValue[] = [];
+        return empty;
+    }
+    let out: JsonValue[] = intr.heap_alloc(v.len);
+    let i: usize = 0;
+    while (i < v.len) {
+        out[i] = vec.vec_get(ref v, i);
+        i = i + 1;
+    }
+    return out;
+}
+
+function freeze_members(ref v: Vec<JsonMember>): JsonMember[] {
+    if (v.len == 0) {
+        let empty: JsonMember[] = [];
+        return empty;
+    }
+    let out: JsonMember[] = intr.heap_alloc(v.len);
+    let i: usize = 0;
+    while (i < v.len) {
+        out[i] = vec.vec_get(ref v, i);
+        i = i + 1;
+    }
+    return out;
+}
+
+// ---- Accessors -----------------------------------------------------------
+//
+// JsonValue is a variant, so the canonical pattern is `switch (v) { case
+// JsonValue.X { ... }: ... }`. These helpers are convenience for the
+// common "I know what shape I want; give me a default otherwise" case.
+
+// True iff v is JsonValue.Null.
+export function is_null(ref v: JsonValue): bool {
+    switch (v) {
+        case JsonValue.Null: { return true; }
+        case JsonValue.Bool   { value: _b }: { return false; }
+        case JsonValue.Number { value: _n }: { return false; }
+        case JsonValue.String { value: _s }: { return false; }
+        case JsonValue.Array  { items: _a }: { return false; }
+        case JsonValue.Object { members: _m }: { return false; }
+    }
+    return false;
+}
+
+// Read a Bool, or fall back to `default` for any other shape.
+export function as_bool(ref v: JsonValue, default_val: bool): bool {
+    switch (v) {
+        case JsonValue.Bool { value: b }: { return b; }
+        case JsonValue.Null: { return default_val; }
+        case JsonValue.Number { value: _n }: { return default_val; }
+        case JsonValue.String { value: _s }: { return default_val; }
+        case JsonValue.Array  { items: _a }: { return default_val; }
+        case JsonValue.Object { members: _m }: { return default_val; }
+    }
+    return default_val;
+}
+
+// Read a Number as int64, or fall back to `default`.
+export function as_int(ref v: JsonValue, default_val: int64): int64 {
+    switch (v) {
+        case JsonValue.Number { value: n }: { return n; }
+        case JsonValue.Null: { return default_val; }
+        case JsonValue.Bool   { value: _b }: { return default_val; }
+        case JsonValue.String { value: _s }: { return default_val; }
+        case JsonValue.Array  { items: _a }: { return default_val; }
+        case JsonValue.Object { members: _m }: { return default_val; }
+    }
+    return default_val;
+}
+
+// Read a String, or fall back to `default`.
+export function as_string(ref v: JsonValue, default_val: string): string {
+    switch (v) {
+        case JsonValue.String { value: s }: { return s; }
+        case JsonValue.Null: { return default_val; }
+        case JsonValue.Bool   { value: _b }: { return default_val; }
+        case JsonValue.Number { value: _n }: { return default_val; }
+        case JsonValue.Array  { items: _a }: { return default_val; }
+        case JsonValue.Object { members: _m }: { return default_val; }
+    }
+    return default_val;
+}
+
+// Borrow the items array out of a JsonValue.Array. Returns an empty array
+// for any other shape. The returned slice aliases the JsonDoc - don't use
+// it after disposing the doc.
+export function as_array(ref v: JsonValue): JsonValue[] {
+    switch (v) {
+        case JsonValue.Array { items: arr }: { return arr; }
+        case JsonValue.Null: { let empty: JsonValue[] = []; return empty; }
+        case JsonValue.Bool   { value: _b }: { let empty: JsonValue[] = []; return empty; }
+        case JsonValue.Number { value: _n }: { let empty: JsonValue[] = []; return empty; }
+        case JsonValue.String { value: _s }: { let empty: JsonValue[] = []; return empty; }
+        case JsonValue.Object { members: _m }: { let empty: JsonValue[] = []; return empty; }
+    }
+    let empty: JsonValue[] = [];
+    return empty;
+}
+
+// Look up `key` in a JsonValue.Object. Returns JsonValue.Null if not
+// found or if v isn't an object. Linear scan - JSON objects are typically
+// small enough that this is faster than a hashmap.
+export function obj_get(ref v: JsonValue, key: string): JsonValue {
+    switch (v) {
+        case JsonValue.Object { members: ms }: {
+            let i: usize = 0;
+            while (i < ms.len) {
+                if (str.string_eq(ms[i].key, key)) {
+                    return ms[i].value;
+                }
+                i = i + 1;
+            }
+            return JsonValue.Null;
+        }
+        case JsonValue.Null: { return JsonValue.Null; }
+        case JsonValue.Bool   { value: _b }: { return JsonValue.Null; }
+        case JsonValue.Number { value: _n }: { return JsonValue.Null; }
+        case JsonValue.String { value: _s }: { return JsonValue.Null; }
+        case JsonValue.Array  { items: _a }: { return JsonValue.Null; }
+    }
+    return JsonValue.Null;
+}
+
+// ---- Serialization -------------------------------------------------------
+//
+// stringify produces a compact (no whitespace) JSON encoding. The result
+// is a single freshly-allocated string - safe to keep beyond the lifetime
+// of the JsonDoc.
+
+export function stringify(ref v: JsonValue): string {
+    let parts: Vec<string> = vec.vec_new(16);
+    append_value(ref parts, ref v);
+    let count: usize = parts.len;
+    let arr: string[] = intr.heap_alloc(count);
+    let i: usize = 0;
+    while (i < count) {
+        arr[i] = vec.vec_get(ref parts, i);
+        i = i + 1;
+    }
+    Disposable.dispose(ref parts);
+    let result: string = str.string_concat_all(arr);
+    intr.heap_free(arr);
+
+    return result;
+}
+
+function append_value(ref parts: Vec<string>, ref v: JsonValue): void {
+    switch (v) {
+        case JsonValue.Null: { vec.vec_push(ref parts, "null"); }
+        case JsonValue.Bool { value: b }: { vec.vec_push(ref parts, fmt.bool_to_string(b)); }
+        case JsonValue.Number { value: n }: { vec.vec_push(ref parts, fmt.int_to_string(n)); }
+        case JsonValue.String { value: s }: {
+            // Note: this does not escape control chars / quotes. Round-tripping
+            // a string with embedded `"` will produce invalid JSON. Pairs
+            // with the parser's lack of unescape - both fixed together.
+            vec.vec_push(ref parts, "\"");
+            vec.vec_push(ref parts, s);
+            vec.vec_push(ref parts, "\"");
+        }
+        case JsonValue.Array { items: arr }: {
+            vec.vec_push(ref parts, "[");
+            let i: usize = 0;
+            while (i < arr.len) {
+                if (i > 0) { vec.vec_push(ref parts, ","); }
+                let child: JsonValue = arr[i];
+                append_value(ref parts, ref child);
+                i = i + 1;
+            }
+            vec.vec_push(ref parts, "]");
+        }
+        case JsonValue.Object { members: ms }: {
+            vec.vec_push(ref parts, "{");
+            let i: usize = 0;
+            while (i < ms.len) {
+                if (i > 0) { vec.vec_push(ref parts, ","); }
+                vec.vec_push(ref parts, "\"");
+                vec.vec_push(ref parts, ms[i].key);
+                vec.vec_push(ref parts, "\":");
+                let val: JsonValue = ms[i].value;
+                append_value(ref parts, ref val);
+                i = i + 1;
+            }
+            vec.vec_push(ref parts, "}");
+        }
+    }
+}

@@ -1,5 +1,5 @@
-// Phase 6.1 — flow-analysis pass for `mustCall fn beforeScopeEnd` obligations.
-// Phase 6.2 — escape-analysis extension: tracks `mustNotEscape scope` sentinels
+// Phase 6.1 - flow-analysis pass for `mustCall fn beforeScopeEnd` obligations.
+// Phase 6.2 - escape-analysis extension: tracks `mustNotEscape scope` sentinels
 //             and rejects escape via return, field store, or ref-pass to non-scoped param.
 //
 // Runs after Pass D has populated `resolvedType` and `resolvedKindType` on
@@ -17,7 +17,7 @@
 // share their enclosing scope's frame.
 //
 // Phase 6.2 sentinel tracking:
-// Each frame also carries `escapeSentinels` — the names of scoped bindings/
+// Each frame also carries `escapeSentinels` - the names of scoped bindings/
 // parameters whose escape must be detected. The walker checks three escape paths:
 //   1. RETURN: expression names a sentinel whose resolved type is non-primitive
 //   2. ASSIGNMENT to outer.field: outer's scopeDepth < sentinel's declScope
@@ -59,7 +59,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // snapshot/restore around if/else branches to compute "satisfied on every
   // reaching path". After both arms of an if/else, the post-merge sat state
   // is the intersection of each arm's sat state. Branches that diverged
-  // (returned, etc.) are excluded from the intersection — they don't reach
+  // (returned, etc.) are excluded from the intersection - they don't reach
   // the merge point. Loops (while/for) discard inner sat changes since the
   // body may execute zero times. `walkDiverged` is set when control flow
   // exits the current branch via `return`; subsequent statements in the
@@ -121,17 +121,17 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // it to the caller via the enclosing function's `propagates<K>` clause.
   //
   // Every obligation carries:
-  //   - `kindType`        — the K it represents.
-  //   - `autoCleanup`     — true if the binding's kind keyword authorises
+  //   - `kindType`        - the K it represents.
+  //   - `autoCleanup`     - true if the binding's kind keyword authorises
   //                         the compiler to inject the cleanup call at
   //                         scope exit; false if the user is on the hook.
-  //   - `transferred`     — flipped by RETURN_STATEMENT when the enclosing
+  //   - `transferred`     - flipped by RETURN_STATEMENT when the enclosing
   //                         function declares `propagates<K>` and the
   //                         returned value carries the obligation.
-  //   - `satisfied`       — flipped by `walkExpr` when it sees a direct call
+  //   - `satisfied`       - flipped by `walkExpr` when it sees a direct call
   //                         to the obligation's cleanup method on the
   //                         tracked binding (linear flow-insensitive).
-  //   - `reported`        — dedupes the unsatisfied-at-scope-exit error so
+  //   - `reported`        - dedupes the unsatisfied-at-scope-exit error so
   //                         the same obligation doesn't fire twice across a
   //                         return + block-end pair.
   function obligationsFor(stmt) {
@@ -139,7 +139,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const kt = stmt.resolvedKindType;
     const rt = stmt.resolvedType;
 
-    // Phase 6.3: builtin kinds bound directly to Task<T> — joined / pooled.
+    // Phase 6.3: builtin kinds bound directly to Task<T> - joined / pooled.
     // These are always opt-in via keyword, so `autoCleanup` is true.
     if (kt?.builtin && rt?.kind === "task") {
       if (kt.autoJoin) {
@@ -163,7 +163,13 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       return out;
     }
 
-    if (rt?.kind !== "struct") return out;
+    // Phase 13.B: variants can declare `propagates<K>` and carry the
+    // same obligations as structs. The shape of `propagatedKinds`,
+    // `implementsTraits`, and `methods` is identical, so the rest of
+    // this function just works on either receiver. Variants don't
+    // contribute field-carried obligations (no `fields` slot) but the
+    // mustCall path covers the disposable-tree use case directly.
+    if (rt?.kind !== "struct" && rt?.kind !== "variant") return out;
 
     // Build the set of kinds that produce obligations on this binding, with
     // each kind's `autoCleanup` flag:
@@ -319,7 +325,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // obligation was marked.
   //
   // Bindings that declared the kind keyword (`autoCleanup === true`) are
-  // committed to local cleanup — declaring the keyword IS the user's
+  // committed to local cleanup - declaring the keyword IS the user's
   // statement that the lifetime ends in this scope. Even if the enclosing
   // function declares `propagates<K>`, the keyword wins: cleanup fires
   // before return, and the obligation is NOT transferred.
@@ -339,6 +345,28 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       }
     }
     return any;
+  }
+
+  // Yoopstore-papercut #11: a returned struct / variant literal moves its
+  // field bindings into the result. Recurse the literal's field values and
+  // transfer any IDENT obligation for `kindType` - nested literals are
+  // handled the same way (a field whose value is itself a literal). Field
+  // values that aren't IDENTs or literals (calls, arithmetic, inline
+  // `vec_new(...)`) have no leaked binding, so they're skipped.
+  function markLiteralFieldObligationsTransferred(expr, kindType) {
+    if (!expr) return;
+    if (expr.kind === ASTNodeKind.IDENT) {
+      markIdentObligationsTransferred(expr.name, kindType);
+      return;
+    }
+    if (
+      expr.kind === ASTNodeKind.STRUCT_LITERAL ||
+      expr.kind === ASTNodeKind.VARIANT_CONSTRUCTOR
+    ) {
+      for (const f of expr.fields ?? []) {
+        markLiteralFieldObligationsTransferred(f.value, kindType);
+      }
+    }
   }
 
   // Phase 6.4 strict propagates: emit the unsatisfied-obligation error for any
@@ -411,7 +439,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       const operand = expr.operand;
       if (operand?.kind === ASTNodeKind.IDENT) {
         const s = sentinels.find((s) => s.bindingName === operand.name);
-        if (s) return s; // ref always escapes — the pointer itself carries the reference
+        if (s) return s; // ref always escapes - the pointer itself carries the reference
       }
       return null;
     }
@@ -496,7 +524,10 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           // pathway has nothing to transfer, so we emit the function-side
           // error directly when the function fails to declare propagates<K>.
           const rt = stmt.value.resolvedType;
-          if (rt?.kind === "struct" && (rt.propagatedKinds?.length ?? 0) > 0) {
+          if (
+            (rt?.kind === "struct" || rt?.kind === "variant") &&
+            (rt.propagatedKinds?.length ?? 0) > 0
+          ) {
             const declaredPropagates = new Set(
               (fnOrMethodDecl.returnPropagatedKinds ?? []).map(
                 (a) => a.kindType ?? a,
@@ -504,6 +535,14 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
             );
             const identName =
               stmt.value.kind === ASTNodeKind.IDENT ? stmt.value.name : null;
+            // Yoopstore-papercut #11: a returned struct / variant literal
+            // moves its field bindings into the result value. When those
+            // fields are bare IDENTs they carry the same obligation the
+            // result struct propagates, so the literal is a transfer site
+            // too - not just a bare `return ident;`.
+            const isLiteral =
+              stmt.value.kind === ASTNodeKind.STRUCT_LITERAL ||
+              stmt.value.kind === ASTNodeKind.VARIANT_CONSTRUCTOR;
             for (const propA of rt.propagatedKinds) {
               const propK = propA.kindType ?? propA;
               const carriesObligation =
@@ -514,9 +553,18 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
                   markIdentObligationsTransferred(identName, propK);
                 }
                 // If not declared: the IDENT's binding-side obligation will
-                // be reported by `reportUnsatisfied` below — no need for a
+                // be reported by `reportUnsatisfied` below - no need for a
                 // separate function-side error.
-              } else if (!declaredPropagates.has(propK)) {
+              } else if (declaredPropagates.has(propK)) {
+                // Declared propagates<K>. For a struct / variant literal,
+                // recurse into the field values and transfer any IDENT
+                // obligation for K (same effect as the bare-IDENT branch).
+                // A non-literal (e.g. a call result) has no binding to
+                // transfer, so this is a no-op there.
+                if (isLiteral) {
+                  markLiteralFieldObligationsTransferred(stmt.value, propK);
+                }
+              } else {
                 pushError(errors, stmt,
                   `function returns a value of type ${rt.name} carrying propagates<${propK.name}>; either declare 'propagates<${propK.name}>' on the function or satisfy the obligation before return`);
               }
@@ -554,7 +602,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           const elseDiverged = walkBranchAndTrack(stmt.elseBody);
           const elseSnap = snapshotSat();
           if (thenDiverged && elseDiverged) {
-            // Both arms exit via return — code after the if is unreachable.
+            // Both arms exit via return - code after the if is unreachable.
             walkDiverged = true;
             restoreSat(base);
           } else if (thenDiverged) {
@@ -591,6 +639,15 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         if (stmt.initExpr) walkExpr(stmt.initExpr);
         if (stmt.cond) walkExpr(stmt.cond);
         if (stmt.stepExpr) walkExpr(stmt.stepExpr);
+        const base = snapshotSat();
+        walkBranchAndTrack(stmt.body);
+        restoreSat(base);
+        return;
+      }
+      case ASTNodeKind.FOR_IN_LOOP: {
+        if (stmt.iterExpr) walkExpr(stmt.iterExpr);
+        // Body may execute zero times; like WHILE_STATEMENT / FOR_LOOP,
+        // anything satisfied inside cannot discharge an outer obligation.
         const base = snapshotSat();
         walkBranchAndTrack(stmt.body);
         restoreSat(base);
@@ -712,7 +769,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // `satisfied` flag. The walker uses path coverage (snapshot/restore around
   // branches in walkStatement) to ensure a dispose inside one arm of an
   // if/else doesn't satisfy an obligation unless the other arm also
-  // disposes — that logic lives in the IF_STATEMENT handler, not here.
+  // disposes - that logic lives in the IF_STATEMENT handler, not here.
   function markManualCleanupSatisfies(callNode) {
     const method = callNode.calleeMethodName;
     if (!method) return;

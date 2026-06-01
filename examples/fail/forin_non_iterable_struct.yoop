@@ -1,0 +1,13 @@
+// Phase 10.B: a struct that doesn't implement Iterable<T> is not iterable -
+// `for x in s` is rejected at typecheck time with a diagnostic pointing at
+// the trait the RHS would have to implement.
+
+type Point { x: int32, y: int32 }
+
+function main(): int32 {
+    let p: Point = { x: 1, y: 2 };
+    for v in p {
+        _ = v;
+    }
+    return 0;
+}

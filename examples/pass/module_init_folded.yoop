@@ -1,0 +1,201 @@
+// Phase 11.B: opportunistic module-init folding. The interpreter
+// evaluates the initializer at compile time and codegen emits the
+// LLVM @global with the literal value baked in, skipping the
+// runtime `<modid>__module_init` path entirely for that decl.
+//
+// Folded today (11.B.0 through 11.B.12):
+//   - integer literal arithmetic                            (i32)
+//   - bool literals                                         (i1)
+//   - string literals                                       (ptr → [N x i8])
+//   - struct literals with primitive fields                 (named-struct aggregate)
+//   - array literals with primitive elements                (fat-pointer to private backing buffer)
+//   - bitwise / shift / comparison / logical / unary ops    (all primitive-typed)
+//   - same-module IDENT references to earlier folded consts (e.g. `const M = N + 1;`)
+//   - struct field reads, array index reads, array `.len`   (over folded structs / arrays)
+//   - direct calls to user functions, single + nested       (params bound; cached per-decl)
+//   - local `let` / `const` + `if` / `while` inside fns     (full straight-line + branching algos)
+//   - numeric casts (`int32(x)`, `float32(y)`, ...)         (single CAST opcode + coerceNumeric)
+//   - struct field assignment + array index assignment      (`obj.x = ...`, `arr[i] = ...`)
+//   - `ref T` params with mutation through auto-deref       (callee mutates caller's binding)
+//   - `for x in arr` over folded arrays                      (desugars to idx-counter while loop)
+//
+// Verification: the compiled binary prints the expected values.
+// The IR-level verification (literal value baked into @global,
+// zero `module_init` function emitted) is covered by the e2e
+// fold-shape assertion in src/e2e.test.js.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Point { x: int32, y: int32 }
+
+const SUM: int32 = 2 + 3;
+const PRODUCT: int32 = 2 + 3 * 4;
+const DIFFERENCE: int32 = 7 - 10;
+const FLAG: bool = true;
+const GREETING: string = "yoop";
+// Struct literal with declared-out-of-order fields - lowering
+// normalizes to the StructType.fields order so the LLVM aggregate
+// constant matches the struct layout regardless of source order.
+const ORIGIN: Point = { y: 4, x: 3 };
+// Array literal - folds into a fat-pointer `{ ptr <backing>, i64 N }`
+// where `<backing>` is a private `[N x i32]` global initialized to
+// the listed elements.
+const NUMS: int32[] = [10, 20, 30];
+
+// Bitwise + shift + comparison + logical folds. Each lands as a
+// literal-initialized global with no module_init footprint.
+const MASK: int32 = 0xFF & 0xCAFE;            // 254
+const SHIFTED: int32 = 1 << 10;               // 1024
+const NEGATED: int32 = ~0xF;                  // -16
+const EQ_FLAG: bool = (1 + 2) == 3;           // true
+// Cross-decl IDENT reference - `SHIFTED` was folded above, the
+// comptime pass threads its value into this expression's lowering.
+const HAS_HIGH_BIT: bool = (SHIFTED & 0x400) != 0; // true
+
+// Field access + array index + array `.len` read folded-aggregate
+// values directly at comptime. Each lands as a literal-initialized
+// primitive global.
+const ORIGIN_X: int32 = ORIGIN.x;       // 3
+const NUMS_FIRST: int32 = NUMS[0];      // 10
+const NUMS_LEN: usize = NUMS.len;       // 3
+
+// Direct call into a user-defined function - the interpreter lowers
+// `square`'s body once, pushes a frame at the call site, binds `x` to
+// the literal arg, runs `x * x`, then writes the result into the
+// caller's dst register. Cached per FUNCTION_DECL so a second call
+// reuses the same bytecode.
+function square(x: int32): int32 { return x * x; }
+const SQUARED: int32 = square(6);       // 36
+// Nested calls compose - the inner call frame returns before the
+// outer one starts.
+const NESTED: int32 = square(square(2));  // 16
+
+// `factorial` exercises everything 11.B.8 added: `let` allocs a slot
+// reg, the `while` lowering emits LABEL/BRCOND/BR with back-patched
+// targets, the assignment overwrites the slot. The whole thing runs
+// to completion at comptime and the result lands as a literal global.
+function factorial(n: int32): int32 {
+    let result: int32 = 1;
+    let i: int32 = 1;
+    while (i <= n) {
+        result = result * i;
+        i = i + 1;
+    }
+    return result;
+}
+const FACT_5: int32 = factorial(5);     // 120
+const FACT_8: int32 = factorial(8);     // 40320
+
+// `if` / `else` lowers to a brcond pair around two basic blocks
+// joining at a merge label. Both arms write the same slot so the
+// post-merge code sees the correct value.
+function abs_diff(a: int32, b: int32): int32 {
+    let r: int32 = 0;
+    if (a >= b) { r = a - b; } else { r = b - a; }
+    return r;
+}
+const ABS_DIFF: int32 = abs_diff(3, 10);  // 7
+
+// Cast fold: int32 → float32 (decimal literal added by the LLVM
+// formatter so `42` becomes `42.0` in IR).
+const CAST_F: float32 = float32(42);      // 42.0
+// Cast fold: int32 → uint8 (truncates).
+const CAST_U8: uint8 = uint8(255);        // 255
+
+// Struct field assignment + array index assignment fold. The body
+// mutates a local through FIELD_STORE / INDEX_STORE and returns the
+// resulting struct/value, which then lands as the global's literal init.
+function build_point(): Point {
+    let p: Point = { x: 0, y: 0 };
+    p.x = 17;
+    p.y = 42;
+    return p;
+}
+const BUILT: Point = build_point();      // {x: 17, y: 42}
+
+function sum_after_bump(): int32 {
+    let arr: int32[] = [10, 20, 30];
+    arr[1] = arr[1] * 5;                  // arr = [10, 100, 30]
+    return arr[0] + arr[1] + arr[2];
+}
+const BUMPED_SUM: int32 = sum_after_bump();  // 140
+
+// Ref-param mutation: the callee takes `ref p: Point` and writes
+// through `p.x = ...`, mutating the caller's binding. Comptime
+// interpreter models this via REF_LOCAL + REF_LOAD / FIELD_STORE on
+// the shared struct payload (no deep-copy on REF_LOAD - that would
+// break the mutation semantics).
+function offset_point(ref p: Point, dx: int32, dy: int32): void {
+    p.x = p.x + dx;
+    p.y = p.y + dy;
+}
+function bumped_origin(): Point {
+    let p: Point = { x: 1, y: 2 };
+    offset_point(ref p, 3, 4);
+    return p;
+}
+const BUMPED_PT: Point = bumped_origin();  // {x: 4, y: 6}
+
+// for-in over a folded array. Desugars (in the lowerer) to a
+// while-loop with idx counter + INDEX_LOAD per iteration; same
+// bytecode primitives as everything else.
+function sum_for_in(): int32 {
+    let arr: int32[] = [1, 2, 3, 4, 5];
+    let total: int32 = 0;
+    for x in arr {
+        total = total + x;
+    }
+    return total;
+}
+const FORIN_SUM: int32 = sum_for_in();  // 15
+
+function main(): int32 {
+    printf(`SUM=${SUM}\n`);
+    printf(`PRODUCT=${PRODUCT}\n`);
+    printf(`DIFFERENCE=${DIFFERENCE}\n`);
+    if (FLAG) { printf(`FLAG\n`); }
+    printf(`GREETING=${GREETING}\n`);
+    // Module-level struct globals can't be field-accessed directly
+    // (pre-existing limitation around module-level identifier
+    // resolution in field access); copy through a local first.
+    let p: Point = ORIGIN;
+    printf(`ORIGIN=(${p.x},${p.y})\n`);
+    // Same module-level-identifier-in-expression limitation for
+    // arrays: copy first, then index.
+    let n: int32[] = NUMS;
+    printf(`NUMS=${n[0]},${n[1]},${n[2]} len=${n.len}\n`);
+    printf(`MASK=${MASK} SHIFTED=${SHIFTED} NEGATED=${NEGATED}\n`);
+    if (EQ_FLAG) { printf(`EQ\n`); }
+    if (HAS_HIGH_BIT) { printf(`HIGH_BIT\n`); }
+    printf(`ORIGIN_X=${ORIGIN_X} NUMS_FIRST=${NUMS_FIRST} NUMS_LEN=${NUMS_LEN}\n`);
+    printf(`SQUARED=${SQUARED} NESTED=${NESTED}\n`);
+    printf(`FACT_5=${FACT_5} FACT_8=${FACT_8} ABS_DIFF=${ABS_DIFF}\n`);
+    printf(`CAST_F=${CAST_F} CAST_U8=${CAST_U8}\n`);
+    let bu: Point = BUILT;
+    printf(`BUILT=(${bu.x},${bu.y}) BUMPED_SUM=${BUMPED_SUM}\n`);
+    let bp: Point = BUMPED_PT;
+    printf(`BUMPED_PT=(${bp.x},${bp.y})\n`);
+    printf(`FORIN_SUM=${FORIN_SUM}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   SUM=5
+//   PRODUCT=14
+//   DIFFERENCE=-3
+//   FLAG
+//   GREETING=yoop
+//   ORIGIN=(3,4)
+//   NUMS=10,20,30 len=3
+//   MASK=254 SHIFTED=1024 NEGATED=-16
+//   EQ
+//   HIGH_BIT
+//   ORIGIN_X=3 NUMS_FIRST=10 NUMS_LEN=3
+//   SQUARED=36 NESTED=16
+//   FACT_5=120 FACT_8=40320 ABS_DIFF=7
+//   CAST_F=42.000000 CAST_U8=255
+//   BUILT=(17,42) BUMPED_SUM=140
+//   BUMPED_PT=(4,6)
+//   FORIN_SUM=15

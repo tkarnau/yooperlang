@@ -1,6 +1,9 @@
-export type Bytes { len: int32, err: string, }
+export variant Bytes {
+    Ok { value: int32 },
+    Err { error: string },
+}
 
 export function read_all(p: string): Bytes {
-    if (p.len == 0) { return { len: 0, err: "empty path" }; }
-    return { len: 42, err: "" };
+    if (p.len == 0) { return Bytes.Err { error: "empty path" }; }
+    return Bytes.Ok { value: 42 };
 }

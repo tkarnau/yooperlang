@@ -1,8 +1,8 @@
-// Library Phase C — HTTP types, wire parser
+// Library Phase C - HTTP types, wire parser
 
 > Third slice of the library-design rollout
 > ([library-design.md §7](library-design.md#7-http-layer)). Pure yoop on
-> top of `std/core/bytes` + `std/net/tcp` — no FFI. Lands the wire-level
+> top of `std/core/bytes` + `std/net/tcp` - no FFI. Lands the wire-level
 > request/response shape and a single-pass HTTP/1.1 parser sufficient
 > for a hello-world server. Library Phase D layers the server on top.
 
@@ -20,7 +20,7 @@ std/http/
     parser.yoop     # internal HTTP/1.1 wire parser
 ```
 
-`parser.yoop` is **internal** — used by Library Phase D, not exported as
+`parser.yoop` is **internal** - used by Library Phase D, not exported as
 a user-facing API. Listed here so it lives next to its consumers in
 `std/http`.
 
@@ -40,7 +40,7 @@ export enum HttpMethod {
     Head,
     Patch,
     Options,
-    // Unknown is intentionally absent — `parse_method` returns a
+    // Unknown is intentionally absent - `parse_method` returns a
     // fallible struct instead of a Unknown variant so callers
     // distinguish parse-failure from "we got a method but it's odd."
 }
@@ -124,7 +124,7 @@ export type Response implements Disposable propagates<disposable> {
 }
 ```
 
-`body` is not auto-disposed — it's a borrowing view in the request case
+`body` is not auto-disposed - it's a borrowing view in the request case
 (slice into the read buffer) and a caller-owned `uint8[]` in the response
 case. Documenting this is more honest than papering over with another
 kind.
@@ -143,7 +143,7 @@ inside `response_to_bytes` other than what `vec_push` does internally.
 
 `std/http/parser.yoop` is a state-machine parser consuming a `uint8[]`
 buffer that contains a full request (or response) head + the start of
-the body. It does **not** do any I/O — the caller (Phase D's server)
+the body. It does **not** do any I/O - the caller (Phase D's server)
 reads bytes off a `TcpStream` and hands the accumulated buffer to the
 parser when it sees `\r\n\r\n`.
 
@@ -171,10 +171,10 @@ Chunked transfer-encoding is rejected with a clear error. HTTP/1.0 is
 accepted (we just don't enforce keep-alive).
 
 The parser does **not** materialize header values into fresh strings
-unless necessary — every `headers_add` call passes
+unless necessary - every `headers_add` call passes
 `string_from_bytes_unchecked` on a borrowing slice into `buf`, so the
 parsed request's headers live as long as `buf` does. This means
-`Request` is *not* safe to outlive the read buffer it was parsed from —
+`Request` is *not* safe to outlive the read buffer it was parsed from -
 callers either consume + respond synchronously or `bytes_copy` the
 needed strings. **Documented at the function signature.**
 
@@ -185,7 +185,7 @@ status line or request line" enum.
 ## 4. Files touched
 
 - **New**: six `std/http/*.yoop` files listed in §1.
-- **New unit fixture**: `examples/pass/http_parse_smoke/main.yoop` —
+- **New unit fixture**: `examples/pass/http_parse_smoke/main.yoop` -
   feeds a hard-coded HTTP/1.1 request buffer to `parse_request_head`,
   prints method, path, content_length, two header values. Confirms the
   parser end-to-end without any sockets.
@@ -196,11 +196,11 @@ status line or request line" enum.
 The smoke fixture above is the headline test. Bad-path tests in
 `examples/fail/`:
 
-- `http_no_crlf_crlf` — buffer without `\r\n\r\n` ends in a clean error,
+- `http_no_crlf_crlf` - buffer without `\r\n\r\n` ends in a clean error,
   not a panic.
-- `http_chunked_rejected` — request with `Transfer-Encoding: chunked`
+- `http_chunked_rejected` - request with `Transfer-Encoding: chunked`
   rejected with a specific error message.
-- `http_bad_method` — request line "FOO / HTTP/1.1\r\n" parses with
+- `http_bad_method` - request line "FOO / HTTP/1.1\r\n" parses with
   `method.err` set.
 
 ## 6. Dependencies

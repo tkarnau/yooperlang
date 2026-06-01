@@ -1,0 +1,15 @@
+// Phase 9.J: a cycle in the extends graph is rejected. Two traits that
+// extend each other have no consistent topological order and would let
+// method resolution recurse forever.
+
+trait A extends B {
+    function a(ref self): int32;
+}
+
+trait B extends A {
+    function b(ref self): int32;
+}
+
+function main(): int32 {
+    return 0;
+}

@@ -40,12 +40,12 @@ function main(): int32 {
     let bi: Box<int32> = { value: 42 };
     printf(`bi=${bi.value}\n`);
 
-    // Same generic, monomorphization #2 at float64 — via a generic function.
+    // Same generic, monomorphization #2 at float64 - via a generic function.
     let f: float64 = float64(35) / float64(10);
     let bf: Box<float64> = wrap(f);
     printf(`bf=${bf.value}\n`);
 
-    // identity called with two distinct concrete arg types — two
+    // identity called with two distinct concrete arg types - two
     // monomorphizations, both inferred from the arg (no turbofish needed).
     let n: int32 = 100;
     let id_i: int32 = identity(n);

@@ -38,7 +38,7 @@ function main(): int32 {
     joined r = reader(rfd);
 
     // Give the reader time to actually park inside the multiplexer
-    // before we write — exercises the suspend+resume path.
+    // before we write - exercises the suspend+resume path.
     let s_rc: c_int = yoop_sleep_ms(20);
 
     let msg: uint8[] = [88];  // ASCII 'X'

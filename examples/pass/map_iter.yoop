@@ -1,0 +1,34 @@
+// Phase 10.C.3: `MapIter<K, V> implements Iterable<MapEntry<K, V>>`,
+// so `for entry in map.map_iter(ref m) { ... }` walks the map's
+// occupied slots and yields `MapEntry<K, V>` values. The iter holds
+// borrowing views of the map's backing arrays - keep its lifetime
+// inside the for-loop and don't mutate the map mid-walk (a rehash
+// would relocate the buffers and the iter's view would dangle).
+
+import { disposable } from "std/core/kinds.yoop";
+import { Map, MapEntry } from "std/collections/map.yoop";
+import * as map from "std/collections/map.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable m: Map<int32, int32> = map.map_new(8, map.int32_key_ops());
+    let _f1: bool = map.map_insert(ref m, 1, 100);
+    let _f2: bool = map.map_insert(ref m, 2, 200);
+    let _f3: bool = map.map_insert(ref m, 3, 300);
+    let _f4: bool = map.map_insert(ref m, 4, 400);
+
+    let sum_keys: int32 = 0;
+    let sum_vals: int32 = 0;
+    for e in map.map_iter(ref m) {
+        sum_keys = sum_keys + e.key;
+        sum_vals = sum_vals + e.value;
+    }
+    printf(`keys_sum=${sum_keys} vals_sum=${sum_vals}\n`);
+    return 0;
+}
+
+// expected output:
+// keys_sum=10 vals_sum=1000

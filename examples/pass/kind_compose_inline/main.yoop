@@ -1,0 +1,32 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable_base {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+// Inline kind body in composition: anonymous bag of clauses, no appliesTo.
+// Equivalent to declaring `kind noescape { appliesTo binding; mustNotEscape scope; }`
+// and writing `kind scoped_alt = disposable_base & noescape;`.
+kind scoped_alt = disposable_base & { mustNotEscape scope; };
+
+type Vec3 implements Disposable {
+    x: float32, y: float32, z: float32,
+    function dispose(ref self): void {
+        printf(`bye vec3\n`);
+    }
+}
+
+function main(): int32 {
+    scoped_alt h: Vec3 = { x: 1.0, y: 2.0, z: 3.0 };
+    printf(`h.x=${h.x}\n`);
+    return 0;
+}

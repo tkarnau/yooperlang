@@ -22,7 +22,7 @@ function describe<T implements Display>(ref x: T): void {
     printf(`${s}\n`);
 }
 
-// Bounded type param flowing through a generic — exercises the
+// Bounded type param flowing through a generic - exercises the
 // TypeParamType-as-arg case in checkBoundSatisfied.
 function describe_twice<T implements Display>(ref x: T): void {
     describe(ref x);

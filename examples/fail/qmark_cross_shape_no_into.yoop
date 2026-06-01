@@ -1,0 +1,32 @@
+// Phase 10.E: cross-shape `?` propagation only works when the operand's
+// Err payload type implements `Into<RetErr>`. Without that impl, the
+// typechecker rejects with a fix-it message pointing at the missing trait.
+
+import { Result } from "std/core/types.yoop";
+
+type AppError {
+    msg: string,
+}
+
+type IoError {
+    code: int32,
+}
+
+function leaf(): Result<int32, IoError> {
+    return Result.Err { error: { code: 1 } };
+}
+
+function wrap(): Result<int32, AppError> {
+    let x: int32 = leaf()?;
+    return Result.Ok { value: x };
+}
+
+function main(): int32 {
+    let r: Result<int32, AppError> = wrap();
+    switch (r) {
+        case Result.Ok { value: v }: { return v; }
+        case Result.Err { error: e }: { return 1; }
+    }
+}
+
+// expected error: no `Into<struct AppError>` impl on struct IoError

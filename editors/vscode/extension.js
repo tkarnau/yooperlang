@@ -1,9 +1,9 @@
 // Yooperlang VS Code extension entry point.
 //
 // Two things wired up here:
-// 1. LSP client — launches src/lsp/server.js as a Node child process over
+// 1. LSP client - launches src/lsp/server.js as a Node child process over
 //    stdio for diagnostics, hover, etc.
-// 2. Debug adapter — registers the `yoop` debug type and delegates to the
+// 2. Debug adapter - registers the `yoop` debug type and delegates to the
 //    system `lldb-dap` binary. The configuration provider compiles the .yoop
 //    entry file with yoopiler before launch, then rewrites `program` from
 //    the source path to the compiled binary path that lldb-dap expects.
@@ -183,7 +183,7 @@ class YoopConfigurationProvider {
         log(`compiling ${yoopFile} via ${yoopilerPath}`);
         const ok = await runYoopiler(yoopilerPath, yoopFile);
         if (!ok) {
-          vscode.window.showErrorMessage("Yoopiler compile failed — see the Yoopiler output channel.");
+          vscode.window.showErrorMessage("Yoopiler compile failed - see the Yoopiler output channel.");
           return undefined;
         }
       }

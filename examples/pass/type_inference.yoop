@@ -1,0 +1,31 @@
+// Type inference for let/const bindings: when the type annotation is omitted,
+// the binding's type is inferred from its initializer. Works at module level
+// and inside functions. Formatting uses template literals (the idiomatic
+// alternative to printf format args).
+
+type Point { x: int32, y: int32 }
+
+function make_point(): Point {
+  return { x: 3, y: 4 };
+}
+
+function add(a: int32, b: int32): int32 {
+  return a + b;
+}
+
+function main(): int32 {
+  // Local inference across several initializer shapes.
+  const local_str = "world";       // string literal
+  let count = 10;                  // int literal -> int32
+  const flag = true;               // bool
+  const sum = add(20, 22);         // call result -> int32
+  const nums = [1, 2, 3];          // array literal -> int32[]
+  const p = make_point();          // struct via call
+
+  count = count + nums[1] + sum;
+
+  printf(`str is ${local_str}\n`);
+  printf(`count is ${count}, flag is ${flag}\n`);
+  printf(`point is ${p.x},${p.y}\n`);
+  return 0;
+}

@@ -1,0 +1,273 @@
+/*
+  A tiny chat agent that talks over real HTTP sockets.
+
+  One process, two roles:
+    * a background `task` runs an HTTP server. Its Handler reads the POST
+      body, launders it through a clearance kind, and routes the cleansed
+      input through a pluggable "brain" (the ChatBrain trait) to compose
+      a reply.
+    * the main thread is the HTTP *client*: it sends a scripted series of
+      user turns to the server and prints the transcript it gets back.
+
+  Where the kinds earn their keep:
+
+    The request body is bytes off the socket - untrusted. The handler must
+    pass it through `Cleansable.cleanse(...)` before any other code is
+    allowed to look at it. That isn't enforced by convention or a comment;
+    it is the only way to satisfy the brain's `cleared UserInput` parameter
+    type. There is no magic injection - the cleanse call is something the
+    programmer has to type out, and the compiler refuses any code path
+    that skips it.
+
+  Build: node ./src/yoopiler.js examples/playground/chat_agent/main.yoop -o /tmp/chat_agent
+  Run:   /tmp/chat_agent
+*/
+
+import { disposable } from "../../../std/core/kinds.yoop";
+import * as intr from "../../../std/core/intrinsics.yoop";
+import { string_index_of } from "../../../std/core/strings.yoop";
+import { Vec, vec_new, vec_push, vec_as_array } from "../../../std/core/vec.yoop";
+import { Bytes, bytes_from_vec } from "../../../std/core/bytes.yoop";
+
+import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
+import {
+    serve_n, ServeOutcome, Handler, HandleOutcome,
+} from "../../../std/http/server.yoop";
+import {
+    Request, Response, HttpMethod, ok, headers_add, respond_bytes,
+} from "../../../std/http/types.yoop";
+import {
+    Client, ClientRequest, ClientSendResult,
+    make_client, client_request, client_send,
+} from "../../../std/http/client.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "unistd.h" {
+    function usleep(microseconds: uint32): int32;
+}
+
+// ----- clearance kinds: tainted -> cleared via Cleansable -----------------
+//
+// The kind decl pairs a required trait with a method name. Any function or
+// method whose signature would strip `tainted` or confer `cleared` must be
+// an impl of `Cleansable.cleanse` on a type that implements `Cleansable`.
+// Free functions are categorically rejected - laundering only happens via
+// trait dispatch.
+
+trait Cleansable<T> {
+    function cleanse(ref self): T;
+}
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Cleansable;
+    clearedBy cleanse;
+}
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Cleansable;
+    appliedBy cleanse;
+}
+
+// A wrapper that opts the user-input payload into being launderable. Its
+// `cleanse` impl strips ASCII control bytes (CR, LF, escapes) so a hostile
+// peer cannot inject newlines into the transcript or, future-proofed, into
+// a header value if the echo ever lands in one.
+type UserInput implements Cleansable<UserInput> {
+    text: string,
+    function cleanse(ref self): UserInput {
+        let disposable buf: Vec<uint8> = vec_new(64);
+        let bs: uint8[] = intr.string_as_bytes(self.text);
+        let i: usize = 0;
+        while (i < bs.len) {
+            let c: uint8 = bs[i];
+            if (c >= 32) { vec_push(ref buf, c); }
+            i = i + 1;
+        }
+        let view: uint8[] = vec_as_array(ref buf);
+        let safe: string = intr.string_from_bytes_unchecked(view);
+        return { text: safe };
+    }
+}
+
+// Source: lift the raw request bytes into a `tainted UserInput`. Returning
+// a tainted value is legal (restrictive widens freely); the consumer is
+// the side that has to handle it.
+function read_user_input(ref req: Request): tainted UserInput {
+    let raw: string = intr.string_from_bytes_unchecked(req.body);
+    return { text: raw };
+}
+
+// ----- byte-buffer helpers ----------------------------------------------
+
+function push_str(ref out: Vec<uint8>, s: string): void {
+    let bs: uint8[] = intr.string_as_bytes(s);
+    let i: usize = 0;
+    while (i < bs.len) {
+        vec_push(ref out, bs[i]);
+        i = i + 1;
+    }
+}
+
+function push_decimal(ref out: Vec<uint8>, n: int32): void {
+    if (n <= 0) {
+        vec_push(ref out, 48);   // '0'
+        return;
+    }
+    let digits: int32[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    let count: int32 = 0;
+    let v: int32 = n;
+    while (v > 0) {
+        digits[count] = v % 10;
+        v = v / 10;
+        count = count + 1;
+    }
+    let j: int32 = count - 1;
+    while (j >= 0) {
+        vec_push(ref out, uint8(48 + digits[j]));
+        j = j - 1;
+    }
+}
+
+// True iff `needle` occurs anywhere in `haystack`.
+function contains(haystack: string, needle: string): bool {
+    return string_index_of(haystack, needle) < haystack.len;
+}
+
+// ----- the brain ---------------------------------------------------------
+
+// The chat policy, decoupled from the HTTP plumbing. The `heard` parameter
+// is `cleared UserInput`: the brain cannot be called with anything other
+// than a value that has passed through `Cleansable.cleanse`. Swapping in a
+// smarter brain is a one-line field change on `ChatHandler`.
+trait ChatBrain {
+    function reply(ref self, heard: cleared UserInput, turn: int32, ref out: Vec<uint8>): void;
+}
+
+// A deterministic rule-based bot. No model, just a pile of if-statements -
+// enough to show request/response state (the turn counter) surviving across
+// separate TCP connections.
+type RuleBot implements ChatBrain {
+    name: string,
+    function reply(ref self, heard: cleared UserInput, turn: int32, ref out: Vec<uint8>): void {
+        let msg: string = heard.text;
+        if (contains(msg, "bye")) {
+            push_str(ref out, "Goodbye! It was nice chatting.");
+            return;
+        }
+        if (contains(msg, "?")) {
+            push_str(ref out, "Good question. I'm just a pile of if-statements, but I'm listening.");
+            return;
+        }
+        if (contains(msg, "hello") || contains(msg, "hi")) {
+            push_str(ref out, "Hi! I'm ");
+            push_str(ref out, self.name);
+            push_str(ref out, ". What's on your mind?");
+            return;
+        }
+        push_str(ref out, "(turn ");
+        push_decimal(ref out, turn);
+        push_str(ref out, ") You said: ");
+        push_str(ref out, msg);
+    }
+}
+
+// ----- the HTTP handler --------------------------------------------------
+
+type ChatHandler implements Handler {
+    brain: RuleBot,
+    turns: int32,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        self.turns = self.turns + 1;
+
+        // 1. Lift the request body into the tainted form. From here the
+        //    compiler refuses to let the value reach the brain until it
+        //    passes through the launder step.
+        let dirty: tainted UserInput = read_user_input(ref req);
+
+        // 2. Launder. `Cleansable.cleanse` is the kind's named authority -
+        //    no other call would produce a `cleared UserInput`, so the
+        //    `let clean: cleared UserInput = ...` binding only succeeds
+        //    when the RHS is this exact trait call.
+        let clean: cleared UserInput = Cleansable.cleanse(ref dirty);
+
+        // 3. The brain is statically guaranteed to see a cleansed message.
+        let disposable reply: Vec<uint8> = vec_new(128);
+        ChatBrain.reply(ref self.brain, clean, self.turns, ref reply);
+
+        resp.status = ok();
+        headers_add(ref resp.headers, "Content-Type", "text/plain; charset=utf-8");
+        // Owned bytes (zero-copy hand-off): the buffer outlives `handle`,
+        // is disposed with the Response, and is still valid when the server
+        // serializes the response after handle returns.
+        respond_bytes(ref resp, bytes_from_vec(ref reply));
+        return HandleOutcome.Ok;
+    }
+}
+
+// ----- server task -------------------------------------------------------
+//
+// Tasks accept by-value parameters; the server's port and request cap are
+// threaded in by the caller rather than reading module-level constants.
+
+task chat_server(port: int32, turns: int32): int32 {
+    let disposable lr: ListenResult = tcp_listen("127.0.0.1", port, 16);
+    if (lr.error.len > 0) {
+        printf(`server bind err: ${lr.error}\n`);
+        return 1;
+    }
+    let bot: RuleBot = { name: "Yoopbot" };
+    let handler: ChatHandler = { brain: bot, turns: 0 };
+    let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, turns);
+    if (outcome.error.len > 0) {
+        printf(`server err: ${outcome.error}\n`);
+    }
+    return 0;
+}
+
+// ----- client side -------------------------------------------------------
+
+// Send one chat turn: POST the user's message and print the reply.
+function send_turn(ref c: Client, user_msg: string): void {
+    let disposable req: ClientRequest = client_request(HttpMethod.Post, "http://127.0.0.1:18085/chat");
+    // The body is a borrowing view of the literal; string literals live in
+    // immutable rodata, so it is safe to hand off without a copy.
+    req.body = intr.string_as_bytes(user_msg);
+
+    let disposable r: ClientSendResult = client_send(ref c, ref req);
+    if (r.error.len > 0) {
+        printf(`client err: ${r.error}\n`);
+        return;
+    }
+    let body_view: uint8[] = vec_as_array(ref r.response.body);
+    let bot_says: string = intr.string_from_bytes_unchecked(body_view);
+    printf(`You: ${user_msg}\n`);
+    printf(`Bot: ${bot_says}\n\n`);
+}
+
+function main(): int32 {
+    let port: int32 = 18085;
+    let turns: int32 = 5;
+    joined sh = chat_server(port, turns);
+    // Give the server a moment to bind. tcp_connect races accept() fine,
+    // but it cannot connect before listen() has run.
+    let _slept: int32 = usleep(150000);   // 150ms
+
+    let c: Client = make_client();
+    send_turn(ref c, "hello there");
+    send_turn(ref c, "what is the capital of Michigan?");
+    send_turn(ref c, "tell me a joke");
+    // An injection attempt: embedded CRLF that Cleansable.cleanse strips
+    // before the echo. The raw line prints on two lines under "You:"; the
+    // laundered echo under "Bot:" comes back on a single line.
+    send_turn(ref c, "repeat after me\r\nX-Evil: 1");
+    send_turn(ref c, "ok bye");
+
+    let rc: int32 = wait sh;
+    return 0;
+}

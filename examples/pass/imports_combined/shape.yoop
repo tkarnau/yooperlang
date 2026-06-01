@@ -1,0 +1,13 @@
+// A two-axis module: exports a type (Shape) plus value-level functions
+// (shape_make, shape_area). The combined-import form in main.yoop binds
+// both axes in one line.
+
+export type Shape { w: int32, h: int32 }
+
+export function shape_make(w: int32, h: int32): Shape {
+    return { w: w, h: h };
+}
+
+export function shape_area(s: Shape): int32 {
+    return s.w * s.h;
+}

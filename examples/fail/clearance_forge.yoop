@@ -1,0 +1,15 @@
+// Clearance kinds: you cannot forge a conferred kind by annotating a binding.
+// The initializer must already carry the conferred kind (obtained from a
+// function whose return declares it).
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+}
+
+function plain(): string { return "p"; }
+
+function main(): int32 {
+    let c: cleared string = plain();
+    return 0;
+}

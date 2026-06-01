@@ -1,0 +1,26 @@
+// Phase 10.D: `std/log` writes leveled lines to stderr - no special
+// handler registration, no JSON sink yet (those are 10.D follow-ups).
+// The fixture exercises the three free functions and confirms the
+// labels render alongside primitive interpolation.
+
+import * as log from "std/log.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    log.info("booting");
+    log.warn("config missing - using defaults");
+    log.error("one item dropped");
+    printf(`done\n`);  // stdout - separates from the stderr log lines
+    return 0;
+}
+
+// expected stderr:
+// [log.info] booting
+// [log.warn] config missing - using defaults
+// [log.error] one item dropped
+//
+// expected stdout:
+// done

@@ -116,7 +116,7 @@
         },
         {
           "name": "keyword.declaration.yoop",
-          "match": "\\b(let|const|function|type|trait|kind|library|enum|union)\\b"
+          "match": "\\b(let|const|function|type|trait|kind|library|enum|variant|union|vtable)\\b"
         },
         {
           "name": "keyword.modifier.yoop",

@@ -39,6 +39,8 @@ export const TokenTags = {
   else: "else",
   while: "while",
   for: "for",
+  // Phase 9.D: `for item in xs { ... }` iteration form.
+  in: "in",
   type: "type",
   import: "import",
   export: "export",
@@ -58,6 +60,10 @@ export const TokenTags = {
   implements: "implements",
   self: "self",
   extends: "extends",
+  // Phase 9.G: `vtable Name for TraitName { ... }` - declares the
+  // type-erased shape of a trait. Pairs with the `=>` token (`fatArrow`)
+  // for field type annotations.
+  vtable: "vtable",
   kind: "kind",
   // kind stuff
   appliesTo: "appliesTo",
@@ -93,6 +99,7 @@ export const TokenTags = {
   case: "case",
   default: "default",
   enum: "enum",
+  variant: "variant",
   union: "union",
   // phase 8.A: unsafe pointers
   null: "null",
@@ -125,21 +132,30 @@ export const TokenTags = {
   modulus: "modulus",
   dot: "dot",
   question: "question",
-  // Phase 9.E: array slice syntax — `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
+  // Phase 9.E: array slice syntax - `xs[i..j]`, `xs[..j]`, `xs[i..]`, `xs[..]`.
   dotdot: "dotdot",
-  // Phase 9.B: logical NOT prefix — `!flag`. Lexer's longest-first sort keeps
+  // Phase 9.B: logical NOT prefix - `!flag`. Lexer's longest-first sort keeps
   // `!=` (`neq`) winning over `!` for the binary case.
   bang: "bang",
   // Phase 9: bitwise XOR (`^`) binary, bitwise NOT (`~`) prefix.
   caret: "caret",
   tilde: "tilde",
-  // Phase 9: compound assignments — `x += y` shorthand for `x = x + y`,
+  // Phase 9: compound assignments - `x += y` shorthand for `x = x + y`,
   // implemented as dedicated AST nodes so the lvalue is addressed once.
   plusEq: "plusEq",
   minusEq: "minusEq",
   multEq: "multEq",
   divideEq: "divideEq",
   modulusEq: "modulusEq",
+  // Phase 9.G: `=>` separator for function value types in type position.
+  // Only legal in type annotations (struct fields, parameter / return types,
+  // vtable fields). Expression-position `=>` is reserved for a future
+  // closure-literal syntax and is currently a parse error there.
+  fatArrow: "fatArrow",
+  // Phase 11.A: `@` prefix introducing a compile-time / static-analysis
+  // attribute (e.g. `@precompile`, `@test`, `@verify`). Always a
+  // compile-time directive - never queryable from runtime code.
+  at: "at",
 };
 
 export const inverseTokenTags = Object.entries(TokenTags).reduce(
@@ -188,14 +204,20 @@ export const tokenScanList = [
   { str: "*=", tag: TokenTags.multEq },
   { str: "/=", tag: TokenTags.divideEq },
   { str: "%=", tag: TokenTags.modulusEq },
+  // Phase 9.G: function value type separator. Longest-first sort puts this
+  // before `=` and before `>=` / `>`; the lexer's existing logic handles
+  // the disambiguation against `==`.
+  { str: "=>", tag: TokenTags.fatArrow },
   { str: ".", tag: TokenTags.dot },
   { str: "..", tag: TokenTags.dotdot },
   { str: "...", tag: TokenTags.dotdotdot },
   { str: "[", tag: TokenTags.lbracket },
   { str: "]", tag: TokenTags.rbracket },
+  // Phase 11.A: attribute prefix `@`.
+  { str: "@", tag: TokenTags.at },
 ].toSorted((a, b) => b.str.length - a.str.length);
 
-const keywordTagList = {
+export const keywordTagList = {
   let: TokenTags.let,
   function: TokenTags.function,
   const: TokenTags.const,
@@ -204,6 +226,7 @@ const keywordTagList = {
   else: TokenTags.else,
   while: TokenTags.while,
   for: TokenTags.for,
+  in: TokenTags.in,
   type: TokenTags.type,
   import: TokenTags.import,
   export: TokenTags.export,
@@ -220,6 +243,7 @@ const keywordTagList = {
   implements: TokenTags.implements,
   self: TokenTags.self,
   extends: TokenTags.extends,
+  vtable: TokenTags.vtable,
   kind: TokenTags.kind,
   appliesTo: TokenTags.appliesTo,
   requires: TokenTags.requires,
@@ -241,13 +265,18 @@ const keywordTagList = {
   joined: TokenTags.joined,
   pooled: TokenTags.pooled,
   propagates: TokenTags.propagates,
-  contains: TokenTags.contains,
+  // `contains` is recognized CONTEXTUALLY by the parser inside kind decls and
+  // propagation clauses (`isContainsKeywordIdent`). It lexes as an ordinary
+  // IDENT so it stays usable as a normal identifier in user code
+  // (chat-agent-papercut #3).
+  // contains: TokenTags.contains,  // intentionally absent
   layout: TokenTags.layout,
   align: TokenTags.align,
   switch: TokenTags.switch,
   case: TokenTags.case,
   default: TokenTags.default,
   enum: TokenTags.enum,
+  variant: TokenTags.variant,
   union: TokenTags.union,
   null: TokenTags.null,
   _: TokenTags.discard, // bare underscores are discarded

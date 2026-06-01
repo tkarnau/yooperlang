@@ -22,7 +22,7 @@ export function isBool(t) {
   return t.kind === typeKinds.prim && t.name === primAnnotations.bool;
 }
 
-// True if t is any int-like or float-like type — typed int prims, typed float
+// True if t is any int-like or float-like type - typed int prims, typed float
 // prims, or the "untyped" literal kinds. Used wherever the language accepts
 // "any number" (unary minus, template-literal interpolation, etc).
 export function isNumeric(t) {
@@ -74,7 +74,7 @@ export function coerceUntypedLiteralToTyped(
   }
   // Phase 9.A fix: a nested arithmetic expression whose own resolvedType is
   // still untyped (e.g. `3 * 4` inside `let x: int32 = 2 + 3 * 4;`) needs the
-  // target type pushed all the way down — otherwise codegen reads an
+  // target type pushed all the way down - otherwise codegen reads an
   // untypedInt at the intermediate node and crashes. Bare literals at the
   // leaves still go through coerceLiteralToType (range-checked).
   if (
@@ -107,7 +107,7 @@ export function isAssignable(dest, src) {
   if (typesEqual(dest, src)) {
     return true;
   }
-  // if either is an error type, suppress cascading errors — the real error
+  // if either is an error type, suppress cascading errors - the real error
   // was reported at the source of the error type, and propagating beyond
   // that obscures which spot the user needs to fix.
   if (dest.kind === typeKinds.error || src.kind === typeKinds.error) {
@@ -138,15 +138,64 @@ export function isAssignable(dest, src) {
     return true;
   }
 
+  // Phase 12: one-way value-enum -> underlying-primitive coercion. A value
+  // enum case is always a valid instance of its underlying primitive, so
+  // passing `Flags.A` where `uint32` is expected (FFI calls being the
+  // overwhelming case) is safe. The reverse (primitive -> value enum) is
+  // *not* allowed - that would let any random integer become a named case.
+  if (
+    src.kind === typeKinds.valueEnum &&
+    dest.kind === typeKinds.prim &&
+    typesEqual(src.underlying, dest)
+  ) {
+    return true;
+  }
+
   // Phase 8.A: pointer-to-T is assignable to pointer-to-T (matching pointee).
   // `typesEqual` would catch this if pointees share identity; the `frozen`
   // type cache makes that usually true, but check structurally for safety.
   if (
     dest.kind === typeKinds.unsafePtr &&
     src.kind === typeKinds.unsafePtr &&
+    dest.pointee !== null &&
+    src.pointee !== null &&
     typesEqual(dest.pointee, src.pointee)
   ) {
     return true;
+  }
+
+  // Yoopstore-papercut #3: any `unsafe_ptr<T>` decays implicitly to the
+  // opaque `unsafe_ptr` (matches `T*` -> `void*` in C). The reverse
+  // requires `unsafe_ptr.cast<T>(p)` so the user has to spell out the
+  // pointee they're claiming.
+  if (
+    dest.kind === typeKinds.unsafePtr &&
+    dest.pointee === null &&
+    src.kind === typeKinds.unsafePtr
+  ) {
+    return true;
+  }
+
+  // Phase 10.X.2: a top-level function decl's FuncType is assignable to a
+  // matching FunctionPointerType. The two types track the same shape but
+  // store it differently - FuncType has `{ name, type, isRef }` params and
+  // a variadic flag; FunctionPointerType has plain-type params and no
+  // variadic. Used to seed vtable-like dispatch tables (e.g. `KeyOps<K>`)
+  // by naming functions directly in struct literals: `{ hash: int_hash }`.
+  if (
+    dest.kind === typeKinds.functionPointer &&
+    src.kind === typeKinds.func
+  ) {
+    if (src.variadic) return false;
+    const dParams = dest.params ?? [];
+    const sParams = src.params ?? [];
+    if (dParams.length !== sParams.length) return false;
+    for (let i = 0; i < dParams.length; i++) {
+      // FPT doesn't carry `ref`-marked params today; require non-ref on src.
+      if (sParams[i].isRef) return false;
+      if (!typesEqual(dParams[i], sParams[i].type)) return false;
+    }
+    return typesEqual(dest.returnType, src.returnType);
   }
 
   return false;
@@ -168,9 +217,17 @@ export function unifyArith(left, right, op) {
   const leftIsNull = left.kind === typeKinds.untypedNull;
   const rightIsNull = right.kind === typeKinds.untypedNull;
   if (leftIsPtr || rightIsPtr || leftIsNull || rightIsNull) {
-    // Equality against null / matching-pointee ptr.
+    // Yoopstore-papercut #3: an opaque-pointee side (pointee === null) on
+    // either operand makes the comparison legal (the pointee identity is
+    // explicitly absent). Otherwise we require pointee match.
+    const leftOpaque = leftIsPtr && left.pointee === null;
+    const rightOpaque = rightIsPtr && right.pointee === null;
+    // Equality against null / matching-pointee ptr / any opaque pair.
     if (op === "eqeq" || op === "neq") {
       if (leftIsPtr && rightIsPtr) {
+        if (leftOpaque || rightOpaque) {
+          return PrimType(primAnnotations.bool);
+        }
         if (typesEqual(left.pointee, right.pointee)) {
           return PrimType(primAnnotations.bool);
         }
@@ -187,7 +244,10 @@ export function unifyArith(left, right, op) {
       return null;
     }
     // Subtraction: ptr - ptr (matching pointee) -> int64; ptr - int -> ptr.
+    // Opaque pointees have no element size, so arithmetic is rejected -
+    // the user must `unsafe_ptr.cast<T>(p)` first to spell out the pointee.
     if (op === "minus") {
+      if (leftOpaque || rightOpaque) return null;
       if (leftIsPtr && rightIsPtr) {
         if (typesEqual(left.pointee, right.pointee)) {
           return PrimType(primAnnotations.int64);
@@ -204,6 +264,7 @@ export function unifyArith(left, right, op) {
       return null;
     }
     if (op === "plus") {
+      if (leftOpaque || rightOpaque) return null;
       if (
         leftIsPtr &&
         ((right.kind === typeKinds.prim && isIntPrim(right.name)) ||
@@ -226,6 +287,56 @@ export function unifyArith(left, right, op) {
 
   if (isLogical) {
     if (isBool(left) && isBool(right)) return PrimType("bool");
+    return null;
+  }
+
+  // Variant equality: tag comparison. Both sides must be the same variant
+  // type. Payload-bearing cases compare *tags only* - structural
+  // comparison of payloads is a follow-up (use `switch` for that today;
+  // see plans/yoopbinder-papercuts.md Issue 3). Codegen lowers this to
+  // `icmp eq i32 tag_a, tag_b`.
+  if (op === "eqeq" || op === "neq") {
+    if (left.kind === typeKinds.variant && right.kind === typeKinds.variant) {
+      if (typesEqual(left, right)) return PrimType(primAnnotations.bool);
+      return null; // mismatched variant types
+    }
+  }
+
+  // Phase 12: value enum operators. Mixed enum/primitive operands are
+  // rejected on purpose; the programmer must cast first. Across two
+  // matching value enums:
+  //   `==` / `!=`             -> bool (both int and string underlyings)
+  //   `<` / `>` / `<=` / `>=` -> bool (int underlyings only)
+  //   `|` / `&` / `^` / `<<` / `>>` -> same enum (int underlyings only)
+  if (
+    left.kind === typeKinds.valueEnum ||
+    right.kind === typeKinds.valueEnum
+  ) {
+    if (
+      left.kind !== typeKinds.valueEnum ||
+      right.kind !== typeKinds.valueEnum
+    ) {
+      return null; // mixing enum with non-enum - cast first
+    }
+    if (!typesEqual(left, right)) return null; // mismatched enums
+    const isStringUnderlying = left.underlying?.name === "string";
+    if (op === "eqeq" || op === "neq") {
+      return PrimType(primAnnotations.bool);
+    }
+    if (op === "lt" || op === "gt" || op === "lte" || op === "gte") {
+      if (isStringUnderlying) return null;
+      return PrimType(primAnnotations.bool);
+    }
+    if (
+      op === "pipe" ||
+      op === "amp" ||
+      op === "caret" ||
+      op === "lshift" ||
+      op === "rshift"
+    ) {
+      if (isStringUnderlying) return null;
+      return left;
+    }
     return null;
   }
 

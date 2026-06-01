@@ -1,0 +1,38 @@
+// Phase 9.I: a wait inside a task body must yield the worker rather than
+// block it, so deeper-than-N-deep nested-wait chains complete even when the
+// pool size is N=1.
+//
+// Chain shape: leaf -> mid_a -> mid_b -> main. Each interior task waits on
+// the next one inline (`let r = next();` inserts wait at the next statement).
+// Pre-9.I behavior with YOOP_NUM_WORKERS=1: main submits mid_b, blocks
+// pthread_cond_wait. The lone worker picks up mid_b, which submits mid_a and
+// blocks waiting for it. With no remaining workers, mid_a sits in the queue
+// forever -> deadlock. After 9.I: the blocked worker re-enters the dispatch
+// loop instead of pthread_cond_wait, drains the queue, and the chain finishes.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+task leaf(): int32 {
+    return 7;
+}
+
+task mid_a(): int32 {
+    let v: int32 = leaf();
+    return v + 1;
+}
+
+task mid_b(): int32 {
+    let v: int32 = mid_a();
+    return v + 10;
+}
+
+function main(): int32 {
+    let result: int32 = mid_b();
+    printf(`chain=${result}\n`);
+    return 0;
+}
+
+// expected output:
+// chain=18

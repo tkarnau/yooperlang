@@ -9,7 +9,7 @@ function isPrime(num: int32): bool {
 
 function main(): int32 {
     let n: int32 = 100;
-    // Arrays are stack-allocated fixed-size fat pointers in v0 — no `new`,
+    // Arrays are stack-allocated fixed-size fat pointers in v0 - no `new`,
     // no realloc. The language can't grow `primes` until heap allocation
     // arrives via the `unsafe_ptr` kind (phase 6) or a stdlib Vec built on
     // a future `Iterable` trait (phase 5+). Until then, pre-size to the

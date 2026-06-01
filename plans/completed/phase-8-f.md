@@ -1,13 +1,13 @@
-# Phase 8.F — Real Task suspension, I/O multiplexer, and timers
+# Phase 8.F - Real Task suspension, I/O multiplexer, and timers
 
 ## Context
 
 The parent plan calls this the biggest of the prerequisite phases. It splits
 into three sub-phases that each get their own document:
 
-- **F1 — Task suspension** ([phase-8-f-1-suspension.md](phase-8-f-1-suspension.md))
-- **F2 — I/O multiplexer** ([phase-8-f-2-multiplexer.md](phase-8-f-2-multiplexer.md))
-- **F3 — Timers** ([phase-8-f-3-timers.md](phase-8-f-3-timers.md))
+- **F1 - Task suspension** ([phase-8-f-1-suspension.md](phase-8-f-1-suspension.md))
+- **F2 - I/O multiplexer** ([phase-8-f-2-multiplexer.md](phase-8-f-2-multiplexer.md))
+- **F3 - Timers** ([phase-8-f-3-timers.md](phase-8-f-3-timers.md))
 
 Phase 8.A–E gave yoop the FFI surface and module-state primitives needed to
 talk to libc. Phase 8.F gives the *runtime* the concurrency primitives so a
@@ -31,7 +31,7 @@ The parent plan describes two possible end-states:
 
 **Phase 8.F MVP picks (2).** The pthread-per-task model is correct, simple,
 and uses primitives we already have (pthreads, condvars). The M:N story is
-real future work — see "Out of scope" below.
+real future work - see "Out of scope" below.
 
 The yoop language surface does **not** change in this phase. Everything new
 is reachable via `extern "C"` declarations against the runtime's exported
@@ -39,14 +39,14 @@ symbols. Phase 8.F is a pure runtime + library phase.
 
 ## Sub-phase summaries
 
-### F1 — park/unpark primitives ([phase-8-f-1-suspension.md](phase-8-f-1-suspension.md))
+### F1 - park/unpark primitives ([phase-8-f-1-suspension.md](phase-8-f-1-suspension.md))
 
 Adds two runtime functions: `yoop_park()` and `yoop_unpark(token)`. These
 are the lower-level primitives that the multiplexer and timer build on. F1
-does not surface anything to user code — it's the infrastructure F2 and
+does not surface anything to user code - it's the infrastructure F2 and
 F3 use. A small unit test exercises park/unpark from C.
 
-### F2 — I/O multiplexer ([phase-8-f-2-multiplexer.md](phase-8-f-2-multiplexer.md))
+### F2 - I/O multiplexer ([phase-8-f-2-multiplexer.md](phase-8-f-2-multiplexer.md))
 
 New runtime subsystem: `runtime/yoop_io.c`. Wraps `kqueue` (macOS / BSD)
 and `epoll` (Linux) behind a stable platform-agnostic API:
@@ -60,7 +60,7 @@ One dedicated multiplexer thread runs the poll loop and `yoop_unpark`s
 threads whose fds have become ready. Yoop user code reaches these by
 `extern "C"`-declaring them.
 
-### F3 — Timers ([phase-8-f-3-timers.md](phase-8-f-3-timers.md))
+### F3 - Timers ([phase-8-f-3-timers.md](phase-8-f-3-timers.md))
 
 ```c
 int yoop_sleep_ns(uint64_t ns);   // park current thread for ns nanoseconds
@@ -68,7 +68,7 @@ int yoop_sleep_ms(uint64_t ms);   // convenience wrapper
 ```
 
 Implementation: `clock_gettime(CLOCK_MONOTONIC) + pthread_cond_timedwait`
-on a fresh park token. Self-contained — doesn't depend on the multiplexer.
+on a fresh park token. Self-contained - doesn't depend on the multiplexer.
 
 ## Whole-phase demo
 
@@ -94,7 +94,7 @@ deliberately delays via the timer (F3).
   closed the listening socket, cancel all the accept-waiting tasks." The
   primitive needs a `yoop_unpark_with_reason(token, REASON_CANCEL)` so the
   woken task can distinguish ready-from-IO from cancellation. Designed in
-  F1 but the language-level cancellation hook is deferred — see F1
+  F1 but the language-level cancellation hook is deferred - see F1
   "Out of scope."
 - **IOCP (Windows).** F2 implements kqueue + epoll only. The
   `runtime/yoop_io.c` is structured so a Windows backend can be added

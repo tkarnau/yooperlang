@@ -1,0 +1,400 @@
+// Standalone OpenGL fragment-shader demo.
+//
+// Opens an SDL window with an OpenGL 3.2 Core context, compiles a
+// vertex + fragment shader pair into a program, sets up a single
+// fullscreen-quad VAO/VBO, and renders one frame per loop tick. The
+// fragment shader generates the same fiery-sun look the sun_moon
+// CPU shader did, but now on the GPU.
+//
+// macOS-only today. Linux would need a GL function loader
+// (SDL_GL_GetProcAddress) for the modern GL entry points; on macOS
+// OpenGL.framework exposes the GL 4.1 core surface as direct symbols
+// so we can link them with `framework:OpenGL`.
+
+import.unsafe;
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// ── extern "C" surface ───────────────────────────────────────────────────────
+
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_GLContext;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+    function SDL_GetError(): string;
+    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+    function SDL_PumpEvents(): void;
+    function SDL_GetTicks(): uint32;
+    function SDL_Delay(ms: uint32): void;
+
+    function SDL_CreateWindow(
+        title: string,
+        x: int32, y: int32,
+        w: int32, h: int32,
+        flags: uint32
+    ): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+
+    function SDL_GL_SetAttribute(attr: int32, value: int32): int32;
+    function SDL_GL_CreateContext(ref win: SDL_Window): unsafe_ptr<SDL_GLContext>;
+    function SDL_GL_DeleteContext(ctx: unsafe_ptr<SDL_GLContext>): void;
+    function SDL_GL_SetSwapInterval(interval: int32): int32;
+    function SDL_GL_SwapWindow(ref win: SDL_Window): void;
+}
+
+// OpenGL on macOS lives in OpenGL.framework. The `framework:` prefix
+// tells the yoopiler driver to lower this to `-framework OpenGL`
+// instead of `-lOpenGL` (which doesn't exist).
+extern "C" from library "framework:OpenGL" {
+    function glClearColor(r: float32, g: float32, b: float32, a: float32): void;
+    function glClear(mask: uint32): void;
+    function glViewport(x: int32, y: int32, w: int32, h: int32): void;
+
+    // Shader pipeline.
+    function glCreateShader(stage: uint32): uint32;
+    function glShaderSource(
+        shader: uint32,
+        count: int32,
+        string_ptrs: unsafe_ptr<string>,   // pointer to an array of source pointers
+        length_ptrs: unsafe_ptr<int32>     // null => assume nul-terminated
+    ): void;
+    function glCompileShader(shader: uint32): void;
+    function glGetShaderiv(shader: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
+    function glGetShaderInfoLog(
+        shader: uint32,
+        max_len: int32,
+        length_out: unsafe_ptr<int32>,
+        log_out: unsafe_ptr<uint8>
+    ): void;
+    function glDeleteShader(shader: uint32): void;
+
+    function glCreateProgram(): uint32;
+    function glAttachShader(program: uint32, shader: uint32): void;
+    function glLinkProgram(program: uint32): void;
+    function glGetProgramiv(program: uint32, pname: uint32, params: unsafe_ptr<int32>): void;
+    function glGetProgramInfoLog(
+        program: uint32,
+        max_len: int32,
+        length_out: unsafe_ptr<int32>,
+        log_out: unsafe_ptr<uint8>
+    ): void;
+    function glUseProgram(program: uint32): void;
+    function glDeleteProgram(program: uint32): void;
+    function glBindFragDataLocation(program: uint32, color_number: uint32, name: string): void;
+    function glBindAttribLocation(program: uint32, index: uint32, name: string): void;
+
+    // VAO / VBO / vertex attribs.
+    function glGenVertexArrays(n: int32, arrays: unsafe_ptr<uint32>): void;
+    function glBindVertexArray(array: uint32): void;
+    function glDeleteVertexArrays(n: int32, arrays: unsafe_ptr<uint32>): void;
+    function glGenBuffers(n: int32, buffers: unsafe_ptr<uint32>): void;
+    function glBindBuffer(target: uint32, buffer: uint32): void;
+    function glBufferData(target: uint32, size: int64, data: unsafe_ptr<uint8>, usage: uint32): void;
+    function glDeleteBuffers(n: int32, buffers: unsafe_ptr<uint32>): void;
+    function glVertexAttribPointer(
+        index: uint32,
+        size: int32,
+        elem_type: uint32,                 // `type` is a yoop keyword - renamed
+        normalized: uint8,
+        stride: int32,
+        offset: unsafe_ptr<uint8>          // actually an offset, not a pointer (legacy ABI)
+    ): void;
+    function glEnableVertexAttribArray(index: uint32): void;
+
+    // Uniforms.
+    function glGetUniformLocation(program: uint32, name: string): int32;
+    function glUniform1f(location: int32, v0: float32): void;
+    function glUniform2f(location: int32, v0: float32, v1: float32): void;
+
+    function glDrawArrays(mode: uint32, first: int32, count: int32): void;
+}
+
+// ── Constants ────────────────────────────────────────────────────────────────
+
+// Window.
+const WIN_W: int32 = 800;
+const WIN_H: int32 = 600;
+const FPS_TARGET: uint32 = 60;
+const MS_PER_FRAME: uint32 = 1000 / FPS_TARGET;
+
+const SDL_INIT_VIDEO: uint32 = 0x00000020;
+const SDL_WINDOWPOS_CENTERED: int32 = 0x2FFF0000;
+const SDL_WINDOW_OPENGL: uint32 = 0x00000002;
+const SDL_WINDOW_SHOWN: uint32 = 0x00000004;
+const SDL_SCANCODE_ESCAPE: int32 = 41;
+
+// SDL_GLattr (enum values from SDL_video.h).
+const SDL_GL_CONTEXT_MAJOR_VERSION: int32 = 17;
+const SDL_GL_CONTEXT_MINOR_VERSION: int32 = 18;
+const SDL_GL_CONTEXT_PROFILE_MASK:  int32 = 21;
+const SDL_GL_DOUBLEBUFFER:          int32 = 5;
+const SDL_GL_CONTEXT_PROFILE_CORE:  int32 = 0x0001;
+
+// GL enum values (from OpenGL/gl.h / generated by yoopbinder).
+const GL_VERTEX_SHADER:     uint32 = 0x8B31;
+const GL_FRAGMENT_SHADER:   uint32 = 0x8B30;
+const GL_COMPILE_STATUS:    uint32 = 0x8B81;
+const GL_LINK_STATUS:       uint32 = 0x8B82;
+const GL_INFO_LOG_LENGTH:   uint32 = 0x8B84;
+const GL_ARRAY_BUFFER:      uint32 = 0x8892;
+const GL_STATIC_DRAW:       uint32 = 0x88E4;
+const GL_FLOAT:             uint32 = 0x1406;
+const GL_FALSE:             uint8  = 0;
+const GL_TRIANGLES:         uint32 = 0x0004;
+const GL_COLOR_BUFFER_BIT:  uint32 = 0x00004000;
+
+// ── extern stdio for diagnostics ─────────────────────────────────────────────
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+extern "C" from "yoop_runtime" {
+    // Line-buffer stdout so progress prints reach the file/pipe before
+    // the next event loop iteration -- useful when running redirected
+    // (block-buffered by default in libc when stdout is not a TTY).
+    function yoop_stdout_linebuf(): void;
+}
+
+// ── SDL handle wrapper (Disposable) ──────────────────────────────────────────
+//
+// Same pattern the other SDL demos use: wrap the raw handle in a yoop
+// struct so the std `disposable` kind can drive cleanup at scope exit.
+// SDL_GL_DeleteContext takes the unsafe_ptr by value, so the GLCtx
+// wrapper holds it the same way and forwards in dispose.
+
+type Window implements Disposable {
+    handle: ref SDL_Window,
+    function dispose(ref self): void { SDL_DestroyWindow(self.handle); }
+}
+
+type GLCtx implements Disposable {
+    handle: unsafe_ptr<SDL_GLContext>,
+    function dispose(ref self): void { SDL_GL_DeleteContext(self.handle); }
+}
+
+// ── GLSL ─────────────────────────────────────────────────────────────────────
+//
+// `#version 150 core` matches the GL 3.2 core profile we request below.
+// The fragment shader is the GPU port of the CPU shader in sun_moon:
+// radial palette + animated three-wave sin/cos noise, alpha-faded halo.
+//
+// Built inside `run_scene` rather than as module-level `const` because
+// module-level string-literal init currently doesn't process `\n`
+// escapes (lengths come out wrong - "ab\n" has len 4 there but len 3
+// in a function-local let). Same string-literal source works fine as
+// a local. Captured as a separate function so each call site stays
+// readable.
+
+function vertex_shader_src(): string {
+    return "#version 150 core\nin vec2 a_pos;\nout vec2 v_uv;\nvoid main() {\n    v_uv = (a_pos + vec2(1.0)) * 0.5;\n    gl_Position = vec4(a_pos, 0.0, 1.0);\n}\n";
+}
+
+function fragment_shader_src(): string {
+    return "#version 150 core\nin vec2 v_uv;\nout vec4 frag_color;\nuniform float u_time;\nuniform vec2 u_resolution;\nvoid main() {\n    vec2 p = v_uv - vec2(0.5);\n    p.x *= u_resolution.x / u_resolution.y;\n    float r = length(p);\n    float t = u_time;\n    float n1 = sin(r * 28.0 - t * 2.4);\n    float n2 = sin(p.x * 36.0 + t * 1.7);\n    float n3 = cos(p.y * 44.0 - t * 1.3);\n    float noise = n1 * 0.012 + n2 * 0.008 + n3 * 0.008;\n    float eff_r = r + noise;\n    float CORE = 0.25;\n    float nr = eff_r / CORE;\n    vec3 color;\n    float alpha = 1.0;\n    if (nr < 0.35) {\n        float s = nr / 0.35;\n        color = mix(vec3(1.0, 0.94, 0.78), vec3(1.0, 0.82, 0.38), s);\n    } else if (nr < 0.70) {\n        float s = (nr - 0.35) / 0.35;\n        color = mix(vec3(1.0, 0.82, 0.38), vec3(1.0, 0.53, 0.19), s);\n    } else if (nr < 1.0) {\n        float s = (nr - 0.70) / 0.30;\n        color = mix(vec3(1.0, 0.53, 0.19), vec3(0.78, 0.20, 0.10), s);\n    } else if (nr < 1.4) {\n        float s = (nr - 1.0) / 0.40;\n        color = mix(vec3(0.78, 0.20, 0.10), vec3(0.0, 0.0, 0.0), s);\n        alpha = 1.0 - s;\n    } else {\n        discard;\n    }\n    vec3 bg = mix(vec3(0.0, 0.04, 0.13), vec3(0.0, 0.0, 0.0), v_uv.y);\n    color = mix(bg, color, alpha);\n    frag_color = vec4(color, 1.0);\n}\n";
+}
+
+// ── shader compile / program link helpers ────────────────────────────────────
+
+// Compile a single shader stage. Returns the GL shader handle. On
+// failure prints the info log and panics by returning 0 (caller checks).
+function compile_shader(stage: uint32, src: string): uint32 {
+    let sh: uint32 = glCreateShader(stage);
+    // glShaderSource wants `const GLchar* const*` for the source array
+    // plus an optional length array. We pass `&src` so the address-of
+    // an `lvalue: string` is a `char**`, and null for length to mean
+    // "nul-terminated".
+    let src_local: string = src;
+    glShaderSource(sh, 1, &src_local, null);
+    glCompileShader(sh);
+
+    let status: int32 = 0;
+    glGetShaderiv(sh, GL_COMPILE_STATUS, &status);
+    if (status == 0) {
+        let log_len: int32 = 0;
+        glGetShaderiv(sh, GL_INFO_LOG_LENGTH, &log_len);
+        if (log_len > 0) {
+            let log_buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
+            let written: int32 = 0;
+            glGetShaderInfoLog(sh, log_len, &written, log_buf.ptr);
+            log_buf[usize(written)] = 0;
+            let log_str: string = intr.string_from_bytes_unchecked(log_buf);
+            printf(`shader compile failed:\n${log_str}\n`);
+        } else {
+            printf("shader compile failed (no log)\n");
+        }
+        glDeleteShader(sh);
+        return 0;
+    }
+    return sh;
+}
+
+// Build a program from already-compiled shader handles. Returns 0 on
+// link failure with diagnostics printed.
+function link_program(vs: uint32, fs: uint32): uint32 {
+    let prog: uint32 = glCreateProgram();
+    glAttachShader(prog, vs);
+    glAttachShader(prog, fs);
+    // Bind vertex attribute 0 to the in-shader name; matches the
+    // `in vec2 a_pos` slot in the vertex shader and the layout we use
+    // in glVertexAttribPointer below.
+    glBindAttribLocation(prog, 0, "a_pos");
+    // Bind the single fragment output explicitly. Optional under
+    // GL 3.3+ where there's only one out var, but stating it makes
+    // the binding deterministic across drivers.
+    glBindFragDataLocation(prog, 0, "frag_color");
+    glLinkProgram(prog);
+
+    let status: int32 = 0;
+    glGetProgramiv(prog, GL_LINK_STATUS, &status);
+    if (status == 0) {
+        let log_len: int32 = 0;
+        glGetProgramiv(prog, GL_INFO_LOG_LENGTH, &log_len);
+        if (log_len > 0) {
+            let log_buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
+            let written: int32 = 0;
+            glGetProgramInfoLog(prog, log_len, &written, log_buf.ptr);
+            log_buf[usize(written)] = 0;
+            let log_str: string = intr.string_from_bytes_unchecked(log_buf);
+            printf(`program link failed:\n${log_str}\n`);
+        }
+        glDeleteProgram(prog);
+        return 0;
+    }
+    return prog;
+}
+
+// ── Scene loop ───────────────────────────────────────────────────────────────
+//
+// Lifted into a separate function so the Window + GLCtx disposable
+// bindings clean up at this function's exit (LIFO: ctx then win),
+// strictly before SDL_Quit at the caller.
+
+function run_scene(): void {
+    // Request a GL 3.2 core context. Must be done BEFORE creating the
+    // window's GL context.
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_MINOR_VERSION, 2);
+    SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_CORE);
+    SDL_GL_SetAttribute(SDL_GL_DOUBLEBUFFER, 1);
+
+    let disposable win: Window = {
+        handle: SDL_CreateWindow(
+            "yooperlang -- GLSL fiery sun",
+            SDL_WINDOWPOS_CENTERED, SDL_WINDOWPOS_CENTERED,
+            WIN_W, WIN_H,
+            SDL_WINDOW_OPENGL | SDL_WINDOW_SHOWN
+        )
+    };
+    let disposable ctx: GLCtx = {
+        handle: SDL_GL_CreateContext(win.handle)
+    };
+    let _vsync: int32 = SDL_GL_SetSwapInterval(1);
+    glViewport(0, 0, WIN_W, WIN_H);
+
+    // -- compile + link the shader program --
+    let vs: uint32 = compile_shader(GL_VERTEX_SHADER, vertex_shader_src());
+    if (vs == 0) {
+        printf("vertex shader compile failed -- aborting scene\n");
+        return;
+    }
+    let fs: uint32 = compile_shader(GL_FRAGMENT_SHADER, fragment_shader_src());
+    if (fs == 0) {
+        printf("fragment shader compile failed -- aborting scene\n");
+        glDeleteShader(vs);
+        return;
+    }
+    let program: uint32 = link_program(vs, fs);
+    // Shaders can be detached + deleted once the program owns them.
+    glDeleteShader(vs);
+    glDeleteShader(fs);
+    if (program == 0) {
+        printf("program link failed -- aborting scene\n");
+        return;
+    }
+
+    // -- fullscreen quad: two triangles in NDC space --
+    // 6 vertices x 2 floats = 12 floats. Storage order is (x, y) per
+    // vertex, with the quad covering the entire viewport.
+    let quad: float32[] = [
+        -1.0, -1.0,
+         1.0, -1.0,
+         1.0,  1.0,
+        -1.0, -1.0,
+         1.0,  1.0,
+        -1.0,  1.0
+    ];
+
+    let vao: uint32 = 0;
+    glGenVertexArrays(1, &vao);
+    glBindVertexArray(vao);
+
+    let vbo: uint32 = 0;
+    glGenBuffers(1, &vbo);
+    glBindBuffer(GL_ARRAY_BUFFER, vbo);
+    // Upload the quad. Size in bytes = 6 verts * 2 floats * 4 bytes.
+    // glBufferData takes a `void*`; we have `unsafe_ptr<float32>` and
+    // need to cast through the byte pointer the extern declares.
+    let quad_bytes: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(quad.ptr);
+    glBufferData(GL_ARRAY_BUFFER, 48, quad_bytes, GL_STATIC_DRAW);
+
+    // Vertex attrib 0 = a_pos, 2 floats per vertex, tightly packed,
+    // starting at offset 0 inside the VBO.
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 8, null);
+    glEnableVertexAttribArray(0);
+
+    // -- uniform locations (one lookup per program is fine) --
+    let u_time_loc: int32 = glGetUniformLocation(program, "u_time");
+    let u_res_loc:  int32 = glGetUniformLocation(program, "u_resolution");
+
+    let start_ticks: uint32 = SDL_GetTicks();
+    while (SDL_GetTicks() > 0) {
+        let frame_start: uint32 = SDL_GetTicks();
+        SDL_PumpEvents();
+        let kb_n: int = 0;
+        let keys: uint8[] = SDL_GetKeyboardState(ref kb_n);
+        if (keys[SDL_SCANCODE_ESCAPE] != 0) {
+            break;
+        }
+
+        let t_seconds: float32 = float32(SDL_GetTicks() - start_ticks) * 0.001;
+
+        glClearColor(0.0, 0.0, 0.05, 1.0);
+        glClear(GL_COLOR_BUFFER_BIT);
+
+        glUseProgram(program);
+        glUniform1f(u_time_loc, t_seconds);
+        glUniform2f(u_res_loc, float32(WIN_W), float32(WIN_H));
+
+        glBindVertexArray(vao);
+        glDrawArrays(GL_TRIANGLES, 0, 6);
+
+        SDL_GL_SwapWindow(win.handle);
+
+        let elapsed: uint32 = SDL_GetTicks() - frame_start;
+        if (elapsed < MS_PER_FRAME) {
+            SDL_Delay(MS_PER_FRAME - elapsed);
+        }
+    }
+
+    glDeleteProgram(program);
+    glDeleteVertexArrays(1, &vao);
+    glDeleteBuffers(1, &vbo);
+}
+
+// ── Entry point ──────────────────────────────────────────────────────────────
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+    if (SDL_Init(SDL_INIT_VIDEO) != 0) {
+        printf(`SDL_Init failed: ${SDL_GetError()}\n`);
+        return 1;
+    }
+    run_scene();
+    SDL_Quit();
+    printf("Exiting cleanly\n");
+    return 0;
+}

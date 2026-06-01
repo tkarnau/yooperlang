@@ -1,4 +1,4 @@
-// std/core/strings.yoop — Phase 8.H string primitives and bridges.
+// std/core/strings.yoop - Phase 8.H string primitives and bridges.
 //
 // Built on the `string_as_bytes` / `string_from_bytes_unchecked` builtins
 // and on top of std/core/bytes.yoop. `string_from_bytes` validates UTF-8
@@ -17,14 +17,13 @@ import {
     bytes_slice,
 } from "./bytes.yoop";
 
-import { Maybe } from "./types.yoop";
+import { Result } from "./types.yoop";
+import * as intr from "./intrinsics.yoop";
 
 // Fresh-string construction from a UTF-8 byte buffer. Validates the bytes
 // are well-formed UTF-8 (per RFC 3629, with the 4-byte-max cap). On invalid
-// input, returns "" with `err` set.
-// export type StringFromBytes { value: string, err: string }
-
-export function string_from_bytes(buf: uint8[]): Maybe<string> {
+// input, returns `Err` with a diagnostic.
+export function string_from_bytes(buf: uint8[]): Result<string, string> {
     let i: usize = 0;
     while (i < buf.len) {
         let first: uint8 = buf[i];
@@ -32,7 +31,7 @@ export function string_from_bytes(buf: uint8[]): Maybe<string> {
         if (first < 128) {
             seq_len = 1;
         } else if (first < 194) {
-            return { value: "", err: "string_from_bytes: invalid UTF-8 start byte" };
+            return Result.Err { error: "string_from_bytes: invalid UTF-8 start byte" };
         } else if (first < 224) {
             seq_len = 2;
         } else if (first < 240) {
@@ -40,80 +39,94 @@ export function string_from_bytes(buf: uint8[]): Maybe<string> {
         } else if (first < 245) {
             seq_len = 4;
         } else {
-            return { value: "", err: "string_from_bytes: invalid UTF-8 start byte" };
+            return Result.Err { error: "string_from_bytes: invalid UTF-8 start byte" };
         }
         if (i + seq_len > buf.len) {
-            return { value: "", err: "string_from_bytes: truncated UTF-8 sequence" };
+            return Result.Err { error: "string_from_bytes: truncated UTF-8 sequence" };
         }
         let j: usize = 1;
         while (j < seq_len) {
             let c: uint8 = buf[i + j];
             if (c < 128 || c >= 192) {
-                return { value: "", err: "string_from_bytes: malformed continuation byte" };
+                return Result.Err { error: "string_from_bytes: malformed continuation byte" };
             }
             j = j + 1;
         }
         i = i + seq_len;
     }
-    return { value: string_from_bytes_unchecked(buf), err: "" };
+    return Result.Ok { value: intr.string_from_bytes_unchecked(buf) };
 }
 
 // String equality. Byte-wise comparison of the underlying UTF-8.
 export function string_eq(a: string, b: string): bool {
-    return bytes_eq(string_as_bytes(a), string_as_bytes(b));
+    return bytes_eq(intr.string_as_bytes(a), intr.string_as_bytes(b));
 }
 
 // ASCII-only case-insensitive equality. Non-ASCII bytes compare exactly.
 export function string_eq_ignore_ascii_case(a: string, b: string): bool {
-    return bytes_eq_ignore_ascii_case(string_as_bytes(a), string_as_bytes(b));
+    return bytes_eq_ignore_ascii_case(intr.string_as_bytes(a), intr.string_as_bytes(b));
 }
 
 // True iff `s` starts with `prefix`.
 export function string_starts_with(s: string, prefix: string): bool {
-    return bytes_starts_with(string_as_bytes(s), string_as_bytes(prefix));
+    return bytes_starts_with(intr.string_as_bytes(s), intr.string_as_bytes(prefix));
 }
 
 // First byte-offset of `needle` in `s`, or `s.len` if not found.
 export function string_index_of(s: string, needle: string): usize {
-    return bytes_index_of_seq(string_as_bytes(s), string_as_bytes(needle));
+    return bytes_index_of_seq(intr.string_as_bytes(s), intr.string_as_bytes(needle));
 }
 
 // Sub-string in BYTE offsets. Allocates a fresh string. Errors if `start`
 // or `end` would split a multi-byte UTF-8 codepoint (verified by checking
 // that neither lands on a continuation byte 0x80-0xBF, except at the
 // boundaries where there's nothing to split).
-export type StringSlice { value: string, err: string }
-
-export function string_slice(s: string, start: usize, end: usize): StringSlice {
-    let bytes: uint8[] = string_as_bytes(s);
+export function string_slice(s: string, start: usize, end: usize): Result<string, string> {
+    let bytes: uint8[] = intr.string_as_bytes(s);
     if (end > bytes.len) {
-        return { value: "", err: "string_slice: end > s.len" };
+        return Result.Err { error: "string_slice: end > s.len" };
     }
     if (start > end) {
-        return { value: "", err: "string_slice: start > end" };
+        return Result.Err { error: "string_slice: start > end" };
     }
     if (start > 0 && start < bytes.len) {
         let c_start: uint8 = bytes[start];
         if (c_start >= 128 && c_start < 192) {
-            return { value: "", err: "string_slice: start is mid-codepoint" };
+            return Result.Err { error: "string_slice: start is mid-codepoint" };
         }
     }
     if (end > 0 && end < bytes.len) {
         let c_end: uint8 = bytes[end];
         if (c_end >= 128 && c_end < 192) {
-            return { value: "", err: "string_slice: end is mid-codepoint" };
+            return Result.Err { error: "string_slice: end is mid-codepoint" };
         }
     }
     let view: uint8[] = bytes_slice(bytes, start, end);
-    return { value: string_from_bytes_unchecked(view), err: "" };
+    return Result.Ok { value: intr.string_from_bytes_unchecked(view) };
+}
+
+// FNV-1a hash of the underlying UTF-8 bytes. Stable across runs but not
+// cryptographically secure - meant for hash-table keying, not crypto.
+// Empty string hashes to the FNV offset basis (14695981039346656037).
+export function string_hash(s: string): uint64 {
+    let bytes: uint8[] = intr.string_as_bytes(s);
+    let h: uint64 = 14695981039346656037;
+    let prime: uint64 = 1099511628211;
+    let i: usize = 0;
+    while (i < bytes.len) {
+        h = h ^ uint64(bytes[i]);
+        h = h * prime;
+        i = i + 1;
+    }
+    return h;
 }
 
 // Concat two strings into one fresh heap-allocated string.
 export function string_concat(a: string, b: string): string {
-    let a_bytes: uint8[] = string_as_bytes(a);
-    let b_bytes: uint8[] = string_as_bytes(b);
+    let a_bytes: uint8[] = intr.string_as_bytes(a);
+    let b_bytes: uint8[] = intr.string_as_bytes(b);
     let total: usize = a_bytes.len + b_bytes.len;
-    let buf: uint8[] = heap_alloc(total);
+    let buf: uint8[] = intr.heap_alloc(total);
     let i: usize = 0;
     while (i < a_bytes.len) {
         buf[i] = a_bytes[i];
@@ -124,8 +137,8 @@ export function string_concat(a: string, b: string): string {
         buf[a_bytes.len + j] = b_bytes[j];
         j = j + 1;
     }
-    let result: string = string_from_bytes_unchecked(buf);
-    heap_free(buf);
+    let result: string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
     return result;
 }
 
@@ -136,14 +149,14 @@ export function string_concat_all(parts: string[]): string {
     let total: usize = 0;
     let i: usize = 0;
     while (i < parts.len) {
-        total = total + string_as_bytes(parts[i]).len;
+        total = total + intr.string_as_bytes(parts[i]).len;
         i = i + 1;
     }
-    let buf: uint8[] = heap_alloc(total);
+    let buf: uint8[] = intr.heap_alloc(total);
     let pos: usize = 0;
     let k: usize = 0;
     while (k < parts.len) {
-        let part_bytes: uint8[] = string_as_bytes(parts[k]);
+        let part_bytes: uint8[] = intr.string_as_bytes(parts[k]);
         let m: usize = 0;
         while (m < part_bytes.len) {
             buf[pos + m] = part_bytes[m];
@@ -152,7 +165,7 @@ export function string_concat_all(parts: string[]): string {
         pos = pos + part_bytes.len;
         k = k + 1;
     }
-    let result: string = string_from_bytes_unchecked(buf);
-    heap_free(buf);
+    let result: string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
     return result;
 }

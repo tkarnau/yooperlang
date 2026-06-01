@@ -1,0 +1,76 @@
+// Phase 11.B.13: enum variant construct + switch lowering for the
+// comptime interpreter. The interpreter builds a wrapped enum value
+// for `Shape.Circle { radius: 4 }` and dispatches `switch` arms via a
+// tag-equality chain, binding payload fields as locals in each arm.
+//
+// Note on coverage today: the *consumer* folds (functions that read
+// previously-folded enum constants via the moduleConsts table) fold
+// to literal LLVM globals. The *producer* enum constants themselves
+// stay as `zeroinitializer` because encoding an enum's variant
+// payload as LLVM constant bytes is non-trivial (payload-as-bytes
+// layout). The runtime module_init still constructs the enum values
+// for any code that loads them at runtime; comptime-known consumers
+// short-circuit the load via the interpreter's symbol table.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+variant Shape {
+    Circle { radius: int32 },
+    Square { side: int32 },
+    Triangle,
+}
+
+// Switch with variant patterns + payload field bindings. The
+// interpreter VARIANT_PAYLOAD_FIELD opcode pulls each bound field
+// out of the matched variant; bindings land in per-arm scopes.
+function area_doubled(s: Shape): int32 {
+    let result: int32 = 0;
+    switch (s) {
+        case Shape.Circle { radius: r }: { result = 3 * r * r * 2; }
+        case Shape.Square { side: x }: { result = x * x * 2; }
+        case Shape.Triangle: { result = 0; }
+    }
+    return result;
+}
+
+// Module-level enum constants - emitted as zeroinitializer + runtime
+// module_init for now (the interpreter fold succeeds but the LLVM
+// constant encoding for enum payloads isn't wired yet).
+const C: Shape = Shape.Circle { radius: 4 };
+const S: Shape = Shape.Square { side: 5 };
+const T: Shape = Shape.Triangle;
+
+// Consumer folds: these *do* land as literal i32 globals because the
+// comptime pass sees C/S/T already-folded in moduleConsts and
+// evaluates area_doubled at compile time, returning a primitive.
+const C_AREA: int32 = area_doubled(C);
+const S_AREA: int32 = area_doubled(S);
+const T_AREA: int32 = area_doubled(T);
+
+// Switch over an int literal - exercises the LITERAL_PATTERN path
+// (rather than VARIANT_PATTERN). The arm body folds the resulting
+// value into a primitive global.
+function classify(n: int32): int32 {
+    let r: int32 = 0;
+    switch (n) {
+        case 0: { r = 100; }
+        case 1, 2, 3: { r = n * 10; }
+        default: { r = -1; }
+    }
+    return r;
+}
+const CLASS_0: int32 = classify(0);   // 100
+const CLASS_2: int32 = classify(2);   // 20
+const CLASS_99: int32 = classify(99); // -1
+
+function main(): int32 {
+    printf(`AREAS C=${C_AREA} S=${S_AREA} T=${T_AREA}\n`);
+    printf(`CLASS 0=${CLASS_0} 2=${CLASS_2} 99=${CLASS_99}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   AREAS C=96 S=50 T=0
+//   CLASS 0=100 2=20 99=-1

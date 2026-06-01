@@ -1,37 +1,59 @@
-// std/core/traits.yoop — foundational traits used across std modules.
+// std/core/traits.yoop - foundational traits used across std modules.
 //
 // Library Phase A: the staple Readable / Writable / Display traits that
 // every downstream module either implements or takes as input. Disposable
-// is intentionally NOT defined here — it lives in std/core/kinds.yoop
+// is intentionally NOT defined here - it lives in std/core/kinds.yoop
 // alongside the disposable kind that requires it.
-//
-// All three traits use the fallible-struct convention for their result
-// types so the `?` operator composes cleanly at call sites.
+
+import { Result } from "./types.yoop";
 
 // ----- Readable ----------------------------------------------------------
 
-// Result of a single read attempt. `n` is the count of bytes written into
-// the caller's buffer (0 = EOF on a stream). `err` is non-empty if the
-// underlying source failed.
-export type ReadOutcome { n: c_ssize_t, err: string }
-
+// Result of a single read attempt. `Ok { value }` carries the count of
+// bytes written into the caller's buffer (0 = EOF on a stream); `Err`
+// carries a non-empty diagnostic when the underlying source failed.
 export trait Readable {
-    function read(ref self, ref buf: uint8[]): ReadOutcome;
+    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
 }
 
 // ----- Writable ----------------------------------------------------------
 
-// Result of a single write attempt. `n` is bytes actually written (may be
-// less than buf.len for partial writes on a non-blocking sink; callers
-// loop until either `n == buf.len` or `err != ""`).
-export type WriteOutcome { n: c_ssize_t, err: string }
-
-// Result of a flush attempt. No byte-count; just a success/error signal.
-export type FlushOutcome { err: string }
+// Write result: `Ok { value: n }` is bytes actually written (may be less
+// than buf.len for partial writes on a non-blocking sink; callers loop
+// until either `n == buf.len` or they observe an `Err`).
+//
+// Flush result is err-only - `Ok` (no payload) on success, `Err { error }`
+// on failure.
+export variant FlushOutcome {
+    Ok,
+    Err { error: string },
+}
 
 export trait Writable {
-    function write(ref self, ref buf: uint8[]): WriteOutcome;
+    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
     function flush(ref self): FlushOutcome;
+}
+
+// ----- Reader / Writer vtables ------------------------------------------
+//
+// Phase 10.I: type-erased views over Readable / Writable. Callers that
+// want to mix concrete impl types behind one parameter (e.g. an HTTP
+// parser that doesn't care whether it's reading from a TcpStream, a
+// TlsStream, or an in-memory buffer) take a `Reader` / `Writer` rather
+// than a generic `<R implements Readable>`. The trait stays the source
+// of truth; `Reader.from(ref s)` builds the erased view from any impl.
+//
+// The vtables intentionally don't carry Disposable - the caller still
+// owns the underlying stream and is responsible for disposing it. Use
+// the concrete-type / generic-bound form when ownership transfers.
+
+export vtable Reader for Readable {
+    read: (ref buf: uint8[]) => Result<c_ssize_t, string>,
+}
+
+export vtable Writer for Writable {
+    write: (ref buf: uint8[]) => Result<c_ssize_t, string>,
+    flush: () => FlushOutcome,
 }
 
 // ----- Display ----------------------------------------------------------
@@ -41,4 +63,42 @@ export trait Writable {
 // template path is a separate typechecker change.
 export trait Display {
     function to_string(ref self): string;
+}
+
+// ----- Iterable ----------------------------------------------------------
+
+// A step from an iterator: either `Yield { value: T }` with the next
+// element, or `Done` once the sequence is exhausted. The for-in loop
+// pattern-matches on this enum to drive iteration.
+export variant IterStep<T> {
+    Yield { value: T },
+    Done,
+}
+
+// Any type implementing `Iterable<T>` can be walked with `for x in ...`.
+// The `next` method advances internal state and returns the next step.
+// Phase 10.B: lowering for `for x in EXPR` desugars to:
+//   while (true) {
+//       switch (Iterable.next(ref iter)) {
+//           case IterStep.Yield { value: x }: { <body> }
+//           case IterStep.Done: break;
+//       }
+//   }
+export trait Iterable<T> {
+    function next(ref self): IterStep<T>;
+}
+
+// ----- Into ------------------------------------------------------------
+
+// Cross-shape `?` conversion (Phase 10.E). When a `?`-propagated error's
+// payload type differs from the enclosing function's Err payload type, the
+// typechecker looks for an `Into<TargetErr>` impl on the operand's error
+// type and rewrites the propagation to call `Into.into(ref operandErr)`
+// before constructing the outer `Err` variant.
+//
+// Semantically the source type is `self` and the target is the type
+// parameter, so the natural read is "IoError implements Into<AppError>"
+// ("an IoError can be converted into an AppError").
+export trait Into<T> {
+    function into(ref self): T;
 }

@@ -1,0 +1,73 @@
+// Phase 10.I: end-to-end demo for std/http/client.yoop. Spawns a
+// background task that serves one request, then has the main thread
+// connect via the client and print the response body.
+//
+// The server side is the same `serve_n` loop used by hello_server;
+// the client side uses `client_send` to issue a GET, parse the
+// response head + body, and pull the body out.
+
+import { disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import * as intr from "../../../std/core/intrinsics.yoop";
+
+import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
+import {
+    serve_n, ServeOutcome, Handler, HandleOutcome,
+} from "../../../std/http/server.yoop";
+import {
+    Request, Response, HttpMethod, ok, headers_add, respond_static,
+} from "../../../std/http/types.yoop";
+import {
+    Client, ClientRequest, ClientSendResult, ClientResponse,
+    make_client, http_get, client_request, client_send,
+} from "../../../std/http/client.yoop";
+import { Vec, vec_as_array } from "../../../std/core/vec.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "unistd.h" {
+    function usleep(microseconds: uint32): int32;
+}
+
+type EchoHandler implements Handler {
+    body: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        resp.status = ok();
+        headers_add(ref resp.headers, "Content-Type", "text/plain");
+        respond_static(ref resp, self.body);
+        return HandleOutcome.Ok;
+    }
+}
+
+task server_task(): int32 {
+    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18082, 32);
+    if (lr.error.len > 0) {
+        printf(`server bind err: ${lr.error}\n`);
+        return 1;
+    }
+    let h: EchoHandler = { body: "ping-pong\n" };
+    let outcome: ServeOutcome = serve_n(ref lr.listener, ref h, 1);
+    printf(`server done served=${outcome.served} err=${outcome.error}\n`);
+    return 0;
+}
+
+function main(): int32 {
+    joined sh = server_task();
+    // Give the server time to bind. The accept loop is fine to race
+    // against - tcp_connect retries until accept(2) accepts the fd.
+    let _slept: int32 = usleep(100000);    // 100ms
+
+    let c: Client = make_client();
+    let disposable r: ClientSendResult = http_get(ref c, "http://127.0.0.1:18082/");
+    if (r.error.len > 0) {
+        printf(`client err: ${r.error}\n`);
+        let rc: int32 = wait sh;
+        return 1;
+    }
+    let body_view: uint8[] = vec_as_array(ref r.response.body);
+    let body_str: string = intr.string_from_bytes_unchecked(body_view);
+    printf(`status=${r.response.status.code} body=${body_str}`);
+    let rc: int32 = wait sh;
+    return 0;
+}

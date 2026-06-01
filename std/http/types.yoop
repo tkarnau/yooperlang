@@ -1,4 +1,4 @@
-// std/http/types.yoop — HTTP wire-level types.
+// std/http/types.yoop - HTTP wire-level types.
 //
 // Per library-design.md §7.1, but consolidated into one module for the
 // MVP. HttpMethod / StatusCode / Headers are first-class types; Request
@@ -10,15 +10,17 @@
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Vec, vec_new, vec_push, vec_get, vec_as_array } from "../core/vec.yoop";
 import { string_eq_ignore_ascii_case } from "../core/strings.yoop";
+import { Bytes, bytes_to_array } from "../core/bytes.yoop";
+import * as intr from "../core/intrinsics.yoop";
 
 // ----- HttpMethod ---------------------------------------------------------
 //
 // Enum lookups are cheap (i32 tag compare); the parser converts the
 // request-line method bytes via `parse_method`. Unknown methods are
-// rejected at parse time rather than reified as a variant — keeps the
+// rejected at parse time rather than reified as a variant - keeps the
 // switch closed.
 
-export enum HttpMethod {
+export variant HttpMethod {
     Get,
     Post,
     Put,
@@ -28,9 +30,110 @@ export enum HttpMethod {
     Options,
 }
 
+// Yoop enums don't yet support `==` directly. `http_method_eq` is the
+// helper consumers use when they need to compare two HttpMethod values
+// (e.g. router dispatch, client request-line construction).
+export function http_method_eq(a: HttpMethod, b: HttpMethod): bool {
+    switch (a) {
+        case HttpMethod.Get: {
+            switch (b) {
+                case HttpMethod.Get:     { return true;  }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Post: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return true;  }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Put: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return true;  }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Delete: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return true;  }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Head: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return true;  }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Patch: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return true;  }
+                case HttpMethod.Options: { return false; }
+            }
+        }
+        case HttpMethod.Options: {
+            switch (b) {
+                case HttpMethod.Get:     { return false; }
+                case HttpMethod.Post:    { return false; }
+                case HttpMethod.Put:     { return false; }
+                case HttpMethod.Delete:  { return false; }
+                case HttpMethod.Head:    { return false; }
+                case HttpMethod.Patch:   { return false; }
+                case HttpMethod.Options: { return true;  }
+            }
+        }
+    }
+    return false;
+}
+
+// Canonical uppercase ASCII byte form of a method, used by the client
+// to construct request lines.
+export function http_method_label(m: HttpMethod): string {
+    switch (m) {
+        case HttpMethod.Get:     { return "GET";     }
+        case HttpMethod.Post:    { return "POST";    }
+        case HttpMethod.Put:     { return "PUT";     }
+        case HttpMethod.Delete:  { return "DELETE";  }
+        case HttpMethod.Head:    { return "HEAD";    }
+        case HttpMethod.Patch:   { return "PATCH";   }
+        case HttpMethod.Options: { return "OPTIONS"; }
+    }
+    return "GET";
+}
+
 // ----- StatusCode ---------------------------------------------------------
 
-export enum StatusClass {
+export variant StatusClass {
     Informational,
     Success,
     Redirect,
@@ -146,20 +249,65 @@ export type Request implements Disposable propagates<disposable> {
 
 // ----- Response -----------------------------------------------------------
 
+// yoopstore-papercut #6: a Response body is either a borrowed static string
+// (string literals and handler-owned strings never dangle, so no copy is
+// needed) or an owned heap buffer (`Bytes`, disposed with the Response).
+// Making the body own its storage removes the old footgun where `body` was a
+// bare `uint8[]` view and a handler could hand back a pointer into a freed
+// local. The lifetime contract is now enforced by the `disposable` kind
+// rather than living in a comment.
+export variant ResponseBody implements Disposable propagates<disposable> {
+    Static { text: string },
+    Owned  { bytes: Bytes },
+    function dispose(ref self): void {
+        switch (self) {
+            case ResponseBody.Owned { bytes: b }: { Disposable.dispose(ref b); }
+            default: {}
+        }
+    }
+}
+
 export type Response implements Disposable propagates<disposable> {
     status:  StatusCode,
     headers: Headers,
-    body:    uint8[],       // caller-owned bytes (typically string_as_bytes)
+    body:    ResponseBody,
     function dispose(ref self): void {
         Disposable.dispose(ref self.headers);
+        Disposable.dispose(ref self.body);
     }
 }
 
 export function response_new(): Response propagates<disposable> {
-    let empty: uint8[] = [];
     return {
         status:  server_err(),
         headers: headers_new(8),
-        body:    empty,
+        body:    ResponseBody.Static { text: "" },
     };
+}
+
+// Set the body to a borrowed static string - a literal, a handler field, or
+// a template-literal result. No copy; the caller guarantees the string
+// outlives the response (string storage is never freed by yoop, so literals
+// and stamped strings are always safe). Disposes any previous owned body.
+export function respond_static(ref resp: Response, text: string): void {
+    Disposable.dispose(ref resp.body);
+    resp.body = ResponseBody.Static { text: text };
+}
+
+// Set the body to owned bytes, taking ownership of `take` - the Response
+// disposes it. Disposes any previous owned body first. Build the argument
+// inline (e.g. `respond_bytes(ref resp, bytes_from_array(view))`) so no
+// leftover binding is left holding the obligation at the call site.
+export function respond_bytes(ref resp: Response, take: Bytes): void {
+    Disposable.dispose(ref resp.body);
+    resp.body = ResponseBody.Owned { bytes: take };
+}
+
+// Borrowing view of the body as raw bytes, for serialization. Valid until
+// the Response (or its body) is disposed or reassigned.
+export function response_body_bytes(ref resp: Response): uint8[] {
+    switch (resp.body) {
+        case ResponseBody.Static { text: t }:  { return intr.string_as_bytes(t); }
+        case ResponseBody.Owned  { bytes: b }: { return bytes_to_array(ref b); }
+    }
 }

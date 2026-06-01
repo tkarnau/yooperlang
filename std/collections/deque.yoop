@@ -1,0 +1,115 @@
+// std/collections/deque.yoop - double-ended queue (ring buffer).
+//
+// `Deque<T>` is a ring buffer backed by a single heap allocation.
+// Both ends are O(1); growing doubles capacity and re-bases the
+// buffer at index 0 so the head/tail pointers don't have to wrap on
+// the new buffer. Capacity is always a power of two so modulo is a
+// bit-and.
+//
+// Layout invariants:
+//   * `head` is the index of the front element (when len > 0).
+//   * Elements at indices `head, (head+1) & mask, ..., (head+len-1) & mask`
+//     are live.
+//   * `head` and `len` are stored as `usize`. `mask = cap - 1`.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Option } from "../core/types.yoop";
+import * as intr from "../core/intrinsics.yoop";
+
+export type Deque<T> implements Disposable propagates<disposable> {
+    data: T[],
+    head: usize,
+    len:  usize,
+    cap:  usize,
+    function dispose(ref self): void {
+        if (self.cap > 0) {
+            intr.heap_free(self.data);
+            self.cap = 0;
+        }
+    }
+}
+
+function next_pow2_floor8(n: usize): usize {
+    let cap: usize = 8;
+    while (cap < n) {
+        cap = cap * 2;
+    }
+    return cap;
+}
+
+export function deque_new<T>(initial_cap: usize): Deque<T> propagates<disposable> {
+    let cap: usize = next_pow2_floor8(initial_cap);
+    return { data: intr.heap_alloc(cap), head: 0, len: 0, cap: cap };
+}
+
+// Linearize into a fresh buffer at twice the capacity. The new head is
+// 0; existing elements move to their natural offsets.
+function grow<T>(ref d: Deque<T>): void {
+    let new_cap: usize = d.cap * 2;
+    let new_data: T[] = intr.heap_alloc(new_cap);
+    let i: usize = 0;
+    let mask: usize = d.cap - 1;
+    while (i < d.len) {
+        new_data[i] = d.data[(d.head + i) & mask];
+        i = i + 1;
+    }
+    intr.heap_free(d.data);
+    d.data = new_data;
+    d.head = 0;
+    d.cap  = new_cap;
+}
+
+// Append at the back. O(1) amortized.
+export function deque_push_back<T>(ref d: Deque<T>, value: T): void {
+    if (d.len >= d.cap) { grow(ref d); }
+    let mask: usize = d.cap - 1;
+    let idx: usize = (d.head + d.len) & mask;
+    d.data[idx] = value;
+    d.len = d.len + 1;
+}
+
+// Prepend at the front. O(1) amortized.
+export function deque_push_front<T>(ref d: Deque<T>, value: T): void {
+    if (d.len >= d.cap) { grow(ref d); }
+    let mask: usize = d.cap - 1;
+    // head moves backwards (modulo cap).
+    d.head = (d.head + d.cap - 1) & mask;
+    d.data[d.head] = value;
+    d.len = d.len + 1;
+}
+
+// Remove + return the front element. `None` when empty.
+export function deque_pop_front<T>(ref d: Deque<T>): Option<T> {
+    if (d.len == 0) { return Option.None; }
+    let v: T = d.data[d.head];
+    let mask: usize = d.cap - 1;
+    d.head = (d.head + 1) & mask;
+    d.len = d.len - 1;
+    return Option.Some { value: v };
+}
+
+// Remove + return the back element. `None` when empty.
+export function deque_pop_back<T>(ref d: Deque<T>): Option<T> {
+    if (d.len == 0) { return Option.None; }
+    let mask: usize = d.cap - 1;
+    let idx: usize = (d.head + d.len - 1) & mask;
+    let v: T = d.data[idx];
+    d.len = d.len - 1;
+    return Option.Some { value: v };
+}
+
+// Read by logical index (`0` is the front). Out-of-bounds yields `None`.
+export function deque_get<T>(ref d: Deque<T>, i: usize): Option<T> {
+    if (i >= d.len) { return Option.None; }
+    let mask: usize = d.cap - 1;
+    return Option.Some { value: d.data[(d.head + i) & mask] };
+}
+
+export function deque_len<T>(ref d: Deque<T>): usize {
+    return d.len;
+}
+
+export function deque_clear<T>(ref d: Deque<T>): void {
+    d.head = 0;
+    d.len  = 0;
+}

@@ -1,0 +1,24 @@
+// Phase 9.G: `VTableName.from(ref x)` requires x's type to implement the
+// trait the vtable is for. Without an impl, there's no way for the compiler
+// to populate the method-pointer slots.
+
+trait Handler {
+    function handle(ref self, req: int32): int32;
+}
+
+type Bare {
+    n: int32,
+}
+
+vtable Dispatcher for Handler {
+    handle: (req: int32) => int32,
+}
+
+function main(): int32 {
+    let b: Bare = { n: 7 };
+    // Bare doesn't implement Handler - vtable construction must reject.
+    let d: Dispatcher = Dispatcher.from(ref b);
+    return 0;
+}
+
+// expected error: struct "Bare" does not implement trait "Handler" required by vtable "Dispatcher"

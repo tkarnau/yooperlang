@@ -1,7 +1,7 @@
 // Completion: when the user is typing in a `.yoop` file, suggest
 // identifiers that are visible at the cursor position. VSCode's LSP
 // client filters the returned items against the typed prefix
-// client-side, so we don't do prefix matching here — we just return
+// client-side, so we don't do prefix matching here - we just return
 // everything in scope.
 //
 // What we include:
@@ -42,7 +42,7 @@ const CompletionItemKind = {
   TypeParameter: 25,
 };
 
-// Yoop primitive type names — exposed for completion in type-annotation
+// Yoop primitive type names - exposed for completion in type-annotation
 // position. Kept in sync with the lexer/typechecker's primitive set.
 const PRIM_TYPES = [
   "int8", "int16", "int32", "int64",
@@ -79,7 +79,7 @@ export function collectCompletions(module, src, position, ctx = {}) {
     items.push(item);
   };
 
-  // 1. Local bindings reachable at this offset — walk the AST and
+  // 1. Local bindings reachable at this offset - walk the AST and
   //    collect every LET/CONST/PARAM whose enclosing function/method
   //    contains `offset`. We treat any binding declared *before* offset
   //    inside an ancestor function as visible.
@@ -102,7 +102,7 @@ export function collectCompletions(module, src, position, ctx = {}) {
     if (kind) push(inner.name, kind, detail);
   }
 
-  // 3. Imported names — look up the module env to find imported symbols.
+  // 3. Imported names - look up the module env to find imported symbols.
   if (ctx.moduleEnv) {
     const env = ctx.moduleEnv.get(module.id);
     for (const [name, imp] of env?.importedNames ?? []) {
@@ -117,7 +117,7 @@ export function collectCompletions(module, src, position, ctx = {}) {
     }
   }
 
-  // 4. Primitive types — always available in type-annotation position.
+  // 4. Primitive types - always available in type-annotation position.
   for (const prim of PRIM_TYPES) {
     push(prim, CompletionItemKind.TypeParameter, "primitive");
   }
@@ -139,8 +139,8 @@ function completionForDecl(decl) {
       const head = tps ? `${decl.name}<${tps}>` : decl.name;
       return { kind: CompletionItemKind.Struct, detail: `type ${head}` };
     }
-    case ASTNodeKind.ENUM_DECL:
-      return { kind: CompletionItemKind.Enum, detail: `enum ${decl.name}` };
+    case ASTNodeKind.VARIANT_DECL:
+      return { kind: CompletionItemKind.Enum, detail: `variant ${decl.name}` };
     case ASTNodeKind.UNION_DECL:
       return { kind: CompletionItemKind.Struct, detail: `union ${decl.name}` };
     case ASTNodeKind.TRAIT_DECL:
@@ -178,7 +178,7 @@ function findTopLevelByName(ast, name) {
 // bindings are in scope iff they precede `offset` in source order.
 //
 // The visibility rule used here is conservative (binding's sourceLoc.pos
-// must be < offset) and doesn't model block-level scoping perfectly — it
+// must be < offset) and doesn't model block-level scoping perfectly - it
 // works well enough for completion which favors recall over precision.
 function collectLocalsInScope(ast, offset) {
   const out = [];
@@ -210,7 +210,7 @@ function collectLocalsInScope(ast, offset) {
       const bodyStart = bodyLoc?.pos ?? -1;
       // The end-of-body offset isn't on the AST, so approximate as the
       // next top-level decl's start, or end of source. Caller scans
-      // every fn anyway — we just guard against collecting from fns the
+      // every fn anyway - we just guard against collecting from fns the
       // cursor isn't inside.
       const insideThisFn = offset >= bodyStart;
       if (insideThisFn) {

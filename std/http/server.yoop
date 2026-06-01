@@ -1,143 +1,164 @@
-// std/http/server.yoop — HTTP server loop + Handler trait.
+// std/http/server.yoop - HTTP server loop + Handler trait.
 //
 // Glues std/net (TCP) and std/http/parser (request parse) +
 // std/http/types (Request, Response). Per-connection processing is
-// sequential — one request at a time. Spawning a task per connection
+// sequential - one request at a time. Spawning a task per connection
 // for true concurrency is the obvious next step (library-design.md
 // §7.3 follow-ups) and becomes straightforward once `task` accepts
 // `ref` parameters more broadly.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
 import { Readable, Writable } from "../core/traits.yoop";
+import * as intr from "../core/intrinsics.yoop";
 import {
-    Vec, vec_new, vec_push, vec_get, vec_as_array, vec_set,
+  Vec, vec_new, vec_push, vec_get, vec_as_array, vec_set,
 } from "../core/vec.yoop";
-import { ReadOutcome, WriteOutcome } from "../core/traits.yoop";
 import { SocketAddr } from "../net/addr.yoop";
 import {
-    TcpListener, TcpStream, AcceptResult, ListenResult,
-    tcp_listen, tcp_accept,
+  TcpListener, TcpStream, AcceptResult, ListenResult,
+  tcp_listen, tcp_accept,
 } from "../net/tcp.yoop";
 import {
-    StatusCode, reason_phrase,
-    Headers, headers_new, headers_add, headers_get, headers_has,
-    HeaderEntry, Request, Response, response_new, server_err,
+  StatusCode, reason_phrase,
+  Headers, headers_new, headers_add, headers_get, headers_has,
+  HeaderEntry, Request, Response, response_new,
+  response_body_bytes, server_err,
 } from "./types.yoop";
 import {
-    ParsedRequest, parse_request_head, find_header_end,
+  ParsedRequest, parse_request_head, find_header_end,
+  parsed_content_length,
 } from "./parser.yoop";
 
 // ----- Handler trait -----------------------------------------------------
 
-// `HandleOutcome.err` distinguishes "handler ran cleanly" from "it
-// errored." A non-empty err is observed by the server; the connection
-// is closed in either case (no keep-alive in the MVP).
-export type HandleOutcome { err: string }
+// `HandleOutcome` distinguishes "handler ran cleanly" from "it errored".
+// A non-empty `error` is observed by the server; the connection is closed
+// in either case (no keep-alive in the MVP).
+export variant HandleOutcome {
+  Ok,
+  Err { error: string },
+}
 
 export trait Handler {
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
+  function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
+}
+
+// Phase 10.I: the Phase 9.G vtable for `Handler`. Built once at the
+// trait's home so `Dispatcher.from(ref h)` works from anywhere a Handler
+// impl is in scope. Routers and middleware compose handlers by holding
+// `Dispatcher` values rather than monomorphizing per impl type.
+export vtable Dispatcher for Handler {
+  handle: (ref req: Request, ref resp: Response) => HandleOutcome,
 }
 
 // ----- ServeOutcome -----------------------------------------------------
-
-export type ServeOutcome { served: int32, err: string }
+//
+// Ordinary struct, not a fallible struct: the server reports how many
+// requests it served plus an optional `error`. Caller checks both fields
+// explicitly (no `?` propagation).
+export type ServeOutcome { served: int32, error: string }
 
 // ----- int-to-decimal helper -------------------------------------------
 
 // Push the ASCII decimal representation of `n` onto the back of `out`.
 function push_decimal(ref out: Vec<uint8>, n: usize): void {
-    if (n == 0) {
-        vec_push(ref out, 48);
-        return;
-    }
-    let digits: usize = 0;
-    let count: usize = n;
-    while (count > 0) {
-        count = count / 10;
-        digits = digits + 1;
-    }
-    let start: usize = out.len;
-    let i: usize = 0;
-    while (i < digits) {
-        vec_push(ref out, 0);
-        i = i + 1;
-    }
-    let val: usize = n;
-    let j: usize = digits;
-    while (val > 0) {
-        j = j - 1;
-        let q: usize = val / 10;
-        let rem: usize = val - q * 10;
-        vec_set(ref out, start + j, uint8(48 + rem));
-        val = q;
-    }
+  if (n == 0) {
+    vec_push(ref out, 48);
+    return;
+  }
+  let digits: usize = 0;
+  let count: usize = n;
+  while (count > 0) {
+    count = count / 10;
+    digits = digits + 1;
+  }
+  let start: usize = out.len;
+  let i: usize = 0;
+  while (i < digits) {
+    vec_push(ref out, 0);
+    i = i + 1;
+  }
+  let val: usize = n;
+  let j: usize = digits;
+  while (val > 0) {
+    j = j - 1;
+    let q: usize = val / 10;
+    let rem: usize = val - q * 10;
+    vec_set(ref out, start + j, uint8(48 + rem));
+    val = q;
+  }
 }
 
 function push_decimal_i32(ref out: Vec<uint8>, n: int32): void {
-    if (n < 0) {
-        vec_push(ref out, 45);   // '-'
-        push_decimal(ref out, usize(0 - int64(n)));
-        return;
-    }
-    push_decimal(ref out, usize(n));
+  if (n < 0) {
+    vec_push(ref out, 45);   // '-'
+    push_decimal(ref out, usize(0 - int64(n)));
+    return;
+  }
+  push_decimal(ref out, usize(n));
 }
 
 function push_str(ref out: Vec<uint8>, s: string): void {
-    let bs: uint8[] = string_as_bytes(s);
-    let i: usize = 0;
-    while (i < bs.len) {
-        vec_push(ref out, bs[i]);
-        i = i + 1;
-    }
+  let bs: uint8[] = intr.string_as_bytes(s);
+  let i: usize = 0;
+  while (i < bs.len) {
+    vec_push(ref out, bs[i]);
+    i = i + 1;
+  }
 }
 
 function push_bytes(ref out: Vec<uint8>, bs: uint8[]): void {
-    let i: usize = 0;
-    while (i < bs.len) {
-        vec_push(ref out, bs[i]);
-        i = i + 1;
-    }
+  let i: usize = 0;
+  while (i < bs.len) {
+    vec_push(ref out, bs[i]);
+    i = i + 1;
+  }
 }
 
 // ----- Response serialization ------------------------------------------
 
 function write_response(ref resp: Response, ref out: Vec<uint8>): void {
-    push_str(ref out, "HTTP/1.1 ");
-    push_decimal_i32(ref out, resp.status.code);
-    vec_push(ref out, 32);
-    push_str(ref out, reason_phrase(resp.status.code));
+  // Borrowing view of the body bytes (Static string or Owned buffer). Valid
+  // for the duration of this call - we only read from `resp` below.
+  let body_view: uint8[] = response_body_bytes(ref resp);
+
+  push_str(ref out, "HTTP/1.1 ");
+  push_decimal_i32(ref out, resp.status.code);
+  vec_push(ref out, 32);
+  push_str(ref out, reason_phrase(resp.status.code));
+  vec_push(ref out, 13);
+  vec_push(ref out, 10);
+
+  if (headers_has(ref resp.headers, "Content-Length")) {
+    // Handler already set Content-Length explicitly; trust it.
+  } else {
+    push_str(ref out, "Content-Length: ");
+    push_decimal(ref out, body_view.len);
     vec_push(ref out, 13);
     vec_push(ref out, 10);
+  }
 
-    if (headers_has(ref resp.headers, "Content-Length")) {
-        // Handler already set Content-Length explicitly; trust it.
-    } else {
-        push_str(ref out, "Content-Length: ");
-        push_decimal(ref out, resp.body.len);
-        vec_push(ref out, 13);
-        vec_push(ref out, 10);
-    }
+  if (headers_has(ref resp.headers, "Connection")) {
+    // Handler already set Connection; respect it.
+  } else {
+    push_str(ref out, "Connection: close\r\n");
+  }
 
-    if (headers_has(ref resp.headers, "Connection")) {
-        // Handler already set Connection; respect it.
-    } else {
-        push_str(ref out, "Connection: close\r\n");
-    }
-
-    let entries: HeaderEntry[] = vec_as_array(ref resp.headers.entries);
-    let i: usize = 0;
-    while (i < entries.len) {
-        push_str(ref out, entries[i].name);
-        push_str(ref out, ": ");
-        push_str(ref out, entries[i].value);
-        vec_push(ref out, 13);
-        vec_push(ref out, 10);
-        i = i + 1;
-    }
-
+  let entries: HeaderEntry[] = vec_as_array(ref resp.headers.entries);
+  let i: usize = 0;
+  while (i < entries.len) {
+    push_str(ref out, entries[i].name);
+    push_str(ref out, ": ");
+    push_str(ref out, entries[i].value);
     vec_push(ref out, 13);
     vec_push(ref out, 10);
-    push_bytes(ref out, resp.body);
+    i = i + 1;
+  }
+
+  vec_push(ref out, 13);
+  vec_push(ref out, 10);
+  push_bytes(ref out, body_view);
 }
 
 // ----- Serve loop --------------------------------------------------------
@@ -145,114 +166,133 @@ function write_response(ref resp: Response, ref out: Vec<uint8>): void {
 // All per-connection processing is inlined here. We previously had a
 // `handle_one_connection<H>` helper that serve_n called recursively,
 // but generic-calls-generic across module-instantiation boundaries
-// doesn't yet emit the second instantiation cleanly — until that's
+// doesn't yet emit the second instantiation cleanly - until that's
 // fixed in the registry walk, keeping the per-connection body in serve_n
 // is the simplest path.
 //
 // serve_n takes the listener by ref so the listener's lifetime stays
 // with the caller (typical pattern is `disposable lr: ListenResult =
-// tcp_listen(...);` — see examples/pass/hello_server). `n <= 0` loops
+// tcp_listen(...);` - see examples/pass/hello_server). `n <= 0` loops
 // forever; n > 0 handles exactly N requests then returns.
 
 export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H, n: int32): ServeOutcome {
-    let served: int32 = 0;
-    let unbounded: bool = n <= 0;
-    while (true) {
-        if (unbounded) {
-            // loop forever; no count check
-        } else {
-            if (served >= n) {
-                return { served: served, err: "" };
-            }
-        }
-        let disposable ar: AcceptResult = tcp_accept(ref l);
-        if (ar.err.len > 0) {
-            return { served: served, err: ar.err };
-        }
-
-        // ----- per-connection read + parse + dispatch + write -----
-        let disposable buf: Vec<uint8> = vec_new(2048);
-        let scratch: uint8[] = heap_alloc(2048);
-        let found: bool = false;
-        let dos_limit: usize = 65536;
-        while (buf.len < dos_limit) {
-            let r: ReadOutcome = Readable.read(ref ar.stream, ref scratch);
-            if (r.err.len > 0) {
-                heap_free(scratch);
-                return { served: served, err: r.err };
-            }
-            if (r.n == 0) {
-                heap_free(scratch);
-                return { served: served, err: "client closed before request head completed" };
-            }
-            let i: usize = 0;
-            let avail: usize = usize(r.n);
-            while (i < avail) {
-                vec_push(ref buf, scratch[i]);
-                i = i + 1;
-            }
-            let view_in: uint8[] = vec_as_array(ref buf);
-            let he: usize = find_header_end(view_in);
-            if (he != view_in.len) {
-                found = true;
-                break;
-            }
-        }
-        heap_free(scratch);
-        if (found) {
-            // fall through to parsing
-        } else {
-            return { served: served, err: "request head exceeded DoS limit" };
-        }
-
-        let parse_view: uint8[] = vec_as_array(ref buf);
-        let disposable pr: ParsedRequest = parse_request_head(parse_view);
-        if (pr.err.len > 0) {
-            return { served: served, err: pr.err };
-        }
-
-        let body_start: usize = pr.body_start;
-        let need: usize = pr.content_length;
-        let have: usize = 0;
-        if (parse_view.len > body_start) {
-            have = parse_view.len - body_start;
-        }
-        if (have < need) {
-            let extra: uint8[] = heap_alloc(2048);
-            while (have < need) {
-                let rr: ReadOutcome = Readable.read(ref ar.stream, ref extra);
-                if (rr.err.len > 0) {
-                    heap_free(extra);
-                    return { served: served, err: rr.err };
-                }
-                if (rr.n == 0) {
-                    heap_free(extra);
-                    return { served: served, err: "client closed before body complete" };
-                }
-                let k: usize = 0;
-                let avail2: usize = usize(rr.n);
-                while (k < avail2) {
-                    vec_push(ref buf, extra[k]);
-                    k = k + 1;
-                }
-                have = have + avail2;
-            }
-            heap_free(extra);
-        }
-        let final_view: uint8[] = vec_as_array(ref buf);
-        pr.request.body = array_slice(final_view, body_start, body_start + need);
-
-        let disposable resp: Response = response_new();
-        let outcome: HandleOutcome = Handler.handle(ref handler, ref pr.request, ref resp);
-        let handler_err: string = outcome.err;    // observe
-
-        let disposable out: Vec<uint8> = vec_new(512);
-        write_response(ref resp, ref out);
-        let out_view: uint8[] = vec_as_array(ref out);
-        let wo: WriteOutcome = Writable.write(ref ar.stream, ref out_view);
-        let wo_err: string = wo.err;             // observe
-
-        served = served + 1;
+  let served: int32 = 0;
+  let unbounded: bool = n <= 0;
+  while (true) {
+    if (unbounded) {
+      // loop forever; no count check
+    } else {
+      if (served >= n) {
+        return { served: served, error: "" };
+      }
     }
-    return { served: served, err: "" };
+    let disposable ar: AcceptResult = tcp_accept(ref l);
+    if (ar.error.len > 0) {
+      return { served: served, error: ar.error };
+    }
+
+    // ----- per-connection read + parse + dispatch + write -----
+    let disposable buf: Vec<uint8> = vec_new(2048);
+    let scratch: uint8[] = intr.heap_alloc(2048);
+    let found: bool = false;
+    let dos_limit: usize = 65536;
+    while (buf.len < dos_limit) {
+      let r: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref scratch);
+      let r_n: c_ssize_t = 0;
+      let r_err: string = "";
+      switch (r) {
+        case Result.Ok { value: read_n_ok }: { r_n = read_n_ok; }
+        case Result.Err { error: read_e_ok }: { r_err = read_e_ok; }
+      }
+      if (r_err.len > 0) {
+        intr.heap_free(scratch);
+        return { served: served, error: r_err };
+      }
+      if (r_n == 0) {
+        intr.heap_free(scratch);
+        return { served: served, error: "client closed before request head completed" };
+      }
+      let i: usize = 0;
+      let avail: usize = usize(r_n);
+      while (i < avail) {
+        vec_push(ref buf, scratch[i]);
+        i = i + 1;
+      }
+      let view_in: uint8[] = vec_as_array(ref buf);
+      let he: usize = find_header_end(view_in);
+      if (he != view_in.len) {
+        found = true;
+        break;
+      }
+    }
+    intr.heap_free(scratch);
+    if (found) {
+      // fall through to parsing
+    } else {
+      return { served: served, error: "request head exceeded DoS limit" };
+    }
+
+    let parse_view: uint8[] = vec_as_array(ref buf);
+    let disposable pr: ParsedRequest = parse_request_head(parse_view);
+    if (pr.error.len > 0) {
+      return { served: served, error: pr.error };
+    }
+
+    let body_start: usize = pr.body_start;
+    let need: usize = parsed_content_length(ref pr);
+    let have: usize = 0;
+    if (parse_view.len > body_start) {
+      have = parse_view.len - body_start;
+    }
+    if (have < need) {
+      let extra: uint8[] = intr.heap_alloc(2048);
+      while (have < need) {
+        let rr: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref extra);
+        let rr_n: c_ssize_t = 0;
+        let rr_err: string = "";
+        switch (rr) {
+          case Result.Ok { value: rr_n_ok }: { rr_n = rr_n_ok; }
+          case Result.Err { error: rr_e_ok }: { rr_err = rr_e_ok; }
+        }
+        if (rr_err.len > 0) {
+          intr.heap_free(extra);
+          return { served: served, error: rr_err };
+        }
+        if (rr_n == 0) {
+          intr.heap_free(extra);
+          return { served: served, error: "client closed before body complete" };
+        }
+        let k: usize = 0;
+        let avail2: usize = usize(rr_n);
+        while (k < avail2) {
+          vec_push(ref buf, extra[k]);
+          k = k + 1;
+        }
+        have = have + avail2;
+      }
+      intr.heap_free(extra);
+    }
+    let final_view: uint8[] = vec_as_array(ref buf);
+    pr.request.body = intr.array_slice(final_view, body_start, body_start + need);
+
+    let disposable resp: Response = response_new();
+    let outcome: HandleOutcome = Handler.handle(ref handler, ref pr.request, ref resp);
+    // observe outcome; the server logs and continues on either branch
+    switch (outcome) {
+      case HandleOutcome.Ok: { }
+      case HandleOutcome.Err { error: _he }: { }
+    }
+
+    let disposable out: Vec<uint8> = vec_new(512);
+    write_response(ref resp, ref out);
+    let out_view: uint8[] = vec_as_array(ref out);
+    let wo: Result<c_ssize_t, string> = Writable.write(ref ar.stream, ref out_view);
+    switch (wo) {
+      case Result.Ok { value: write_n }: { }
+      case Result.Err { error: write_e }: { }
+    }
+
+    served = served + 1;
+  }
+  return { served: served, error: "" };
 }

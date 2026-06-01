@@ -1,0 +1,11 @@
+// Phase 9.F: a struct that doesn't implement `Display` still can't be
+// interpolated in a template literal. The diagnostic mentions Display
+// so the fix-it is one trait impl away.
+
+type Untemplated { value: int32 }
+
+function main(): int32 {
+    let u: Untemplated = { value: 42 };
+    printf(`u=${u}\n`);
+    return 0;
+}

@@ -1,0 +1,52 @@
+/*
+  Author: Tom Karnau
+
+  Main entry point for the self-hosted yooperlang compiler
+*/
+
+// for starters lets define a main function, and start getting a lexer stream of
+// tokens from an input file.
+
+import * as log from "std/log.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Display } from "std/core/traits.yoop";
+
+import { isHexDigit } from "./charUtils.yoop";
+import { tokenize, Token } from "./lexer.yoop";
+
+// @precompile {
+//   log.info("hello, yooper from a precompile!");
+// }
+
+function main(): int {
+  log.info("hello, yooper!");
+
+  // const testStr = "ello";
+  // const testStrBytes = intr.string_as_bytes(testStr);
+  // const isIt = isHexDigit(testStrBytes[0]);
+
+  // log.info(`is hex digit?: ${isIt}, value: ${testStrBytes[0]}`);
+
+  const testStr = `
+    // test program
+    function main(): int {
+      return 0;
+    }
+  `;
+
+  const tokenizeResult = tokenize(testStr);
+  switch (tokenizeResult){
+    case Result.Err { error: e } : {
+      log.info(`tokenize error: ${e}`);
+    }
+    case Result.Ok { value: tokens } : {
+      for tok in tokens {
+        log.info(`token: ${tok}`);
+      }
+    }
+  }
+
+  // log.info(`tokenize result ${tokenizeResult}`);
+
+  return 0;
+}

@@ -1,4 +1,4 @@
-// Phase 9: full operator coverage — bitwise & ^ ~ << >> binary, ~ prefix,
+// Phase 9: full operator coverage - bitwise & ^ ~ << >> binary, ~ prefix,
 // and compound assignment += -= *= /= %= on IDENT / FIELD / INDEX lvalues.
 
 extern "C" from "stdio.h" {
@@ -32,7 +32,7 @@ function main(): int32 {
     let mix: int32 = 1 + 2 << 1;  // (1 + 2) << 1 = 6
     printf(`mix=${mix}\n`);
 
-    // Compound assignments — IDENT.
+    // Compound assignments - IDENT.
     let x: int32 = 100;
     x += 5;
     x -= 3;
@@ -41,13 +41,13 @@ function main(): int32 {
     x %= 9;
     printf(`x=${x}\n`);
 
-    // Compound assignment — FIELD.
+    // Compound assignment - FIELD.
     let pt: Point = { x: 10, y: 20 };
     pt.x += 5;
     pt.y *= 3;
     printf(`pt=(${pt.x},${pt.y})\n`);
 
-    // Compound assignment — INDEX.
+    // Compound assignment - INDEX.
     let xs: int32[] = [1, 2, 3, 4];
     xs[1] += 100;
     xs[2] -= 1;

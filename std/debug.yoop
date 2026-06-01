@@ -1,0 +1,40 @@
+// std/debug.yoop - assert / panic / unreachable.
+//
+// Each terminates the process after writing to stderr (via the
+// `runtime/yoop_debug.c` helpers, linked into every yoop program).
+// The messages are deliberately bare strings to keep the surface
+// composable with `${}` template literals once `Display` is in the
+// caller's hand - `panic(`bad state: ${ctx}`)` reads the same as
+// `printf` does.
+//
+// Release-mode `assert` gating (a `YOOP_RELEASE=1` env-time switch
+// that erases the `assert` call entirely at codegen time) is on the
+// 10.D follow-up list; today `assert` always evaluates.
+
+extern "C" from "yoop_runtime" {
+    function yoop_panic(msg: string): void;
+    function yoop_unreachable(msg: string): void;
+}
+
+// Print `panic: <msg>\n` to stderr and exit the process with status 1.
+// Use for unrecoverable invariants violated at runtime - anywhere a
+// programmer would write `unreachable!()` in Rust or `assert(false)` in
+// C. Returns `void`; the function does not return in practice.
+export function panic(msg: string): void {
+    yoop_panic(msg);
+}
+
+// Print `unreachable: <msg>\n` to stderr and exit. Distinct from
+// `panic` only in the label - useful in switch-statement default arms
+// or fall-throughs the typechecker can't prove dead.
+export function unreachable(msg: string): void {
+    yoop_unreachable(msg);
+}
+
+// If `cond` is false, panic with `msg`. Otherwise no-op. Always
+// evaluates today; `YOOP_RELEASE=1` gating is a follow-up.
+export function assert(cond: bool, msg: string): void {
+    if (!cond) {
+        yoop_panic(msg);
+    }
+}

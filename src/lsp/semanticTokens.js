@@ -11,7 +11,7 @@
 import { ASTNodeKind } from "../contracts.js";
 import { typeKinds } from "../jsyooptypecheck/types.js";
 
-// Token type names emitted by this server. Order matters — the index here
+// Token type names emitted by this server. Order matters - the index here
 // is what we put in the flat token data array.
 const TOKEN_TYPES = [
   "function",   // 0  function decl, function name in call
@@ -28,8 +28,8 @@ const TOKEN_TYPES = [
 // Token modifier names. Bit positions in the modifier bitmask correspond
 // to the index here.
 const TOKEN_MODIFIERS = [
-  "declaration", // bit 0 — applies to the *defining* position
-  "readonly",    // bit 1 — `const` bindings, enum variants
+  "declaration", // bit 0 - applies to the *defining* position
+  "readonly",    // bit 1 - `const` bindings, enum variants
 ];
 
 export const SEMANTIC_TOKEN_LEGEND = {
@@ -65,7 +65,7 @@ export function buildSemanticTokens(ast, src) {
 
 // Fields that point *backwards* in the AST (or into the typechecker's
 // records, which in turn point back at AST nodes). Skipping these breaks
-// the cycles those back-pointers create — see also CLONE_SKIP_FIELDS in
+// the cycles those back-pointers create - see also CLONE_SKIP_FIELDS in
 // codegen.js for the same shape. The `resolvedDeclNode` field stamped by
 // the LSP layer is also already non-enumerable, but listing it here
 // keeps things explicit.
@@ -93,7 +93,7 @@ function encode(tokens, src) {
   let prevChar = 0;
   let prevKey = ""; // (line:char:length:type) of the last emitted token
   for (const t of tokens) {
-    // Drop exact duplicates — emit helpers fire from multiple paths
+    // Drop exact duplicates - emit helpers fire from multiple paths
     // (e.g. a PARAM is touched once via its enclosing FUNCTION_DECL and
     // once as a standalone walker hit). After sort, duplicates land
     // adjacent.
@@ -111,7 +111,7 @@ function encode(tokens, src) {
 }
 
 // Walk the AST, calling `cb(node)` for every object that carries a `kind`
-// field. `visited` (a WeakSet) breaks every cycle defensively — the
+// field. `visited` (a WeakSet) breaks every cycle defensively - the
 // typechecker stamps several back-pointers (genericDecl,
 // genericInstantiation, implementingType, …) that turn an otherwise-tree
 // AST into a graph. SKIP_FIELDS handles the named cases; the WeakSet
@@ -136,7 +136,7 @@ function walk(node, cb, visited = new WeakSet()) {
 // Stamp tokens for a single AST node based on its kind.
 //
 // The parser's `sourceLoc.pos` doesn't reliably point at the start of the
-// identifier a node represents — it captures parser state at node-
+// identifier a node represents - it captures parser state at node-
 // construction time, which usually lands one or two tokens past the name.
 // And `sourceLoc.length` is almost never set. So every emit helper here
 // uses `findNameSpan(src, anchor, name)` which scans both directions
@@ -172,13 +172,13 @@ function emitTokensForNode(node, src, tokens) {
       break;
     }
     case ASTNodeKind.TYPE_DECL:
-    case ASTNodeKind.ENUM_DECL:
+    case ASTNodeKind.VARIANT_DECL:
     case ASTNodeKind.UNION_DECL:
     case ASTNodeKind.TRAIT_DECL: {
       emitNamed(tokens, src, node, node.name, TT_TYPE, TM_DECLARATION);
       break;
     }
-    case ASTNodeKind.ENUM_VARIANT: {
+    case ASTNodeKind.VARIANT_CASE: {
       emitNamed(tokens, src, node, node.name, TT_ENUM_MEMBER, TM_DECLARATION | TM_READONLY);
       break;
     }
@@ -212,7 +212,7 @@ function emitTokensForNode(node, src, tokens) {
         emitNamed(tokens, src, node, node.name, TT_NAMESPACE, 0);
       } else if (
         t?.kind === typeKinds.struct ||
-        t?.kind === typeKinds.enum ||
+        t?.kind === typeKinds.variant ||
         t?.kind === typeKinds.union ||
         t?.kind === typeKinds.trait
       ) {
@@ -280,7 +280,7 @@ function emitNamed(tokens, src, node, name, type, mods) {
 }
 
 // Walk a parsed type annotation tree and emit TT_TYPE tokens for every
-// referenced type name. Type annotations are NOT AST nodes — they're
+// referenced type name. Type annotations are NOT AST nodes - they're
 // parser objects shaped `{ kind: "typeName" | "typeApplication" | "refType"
 // | "arrayType" | "selfType", name?, inner?, elem?, typeArgs? }` with no
 // sourceLoc of their own. We anchor the name search at the enclosing
@@ -325,7 +325,7 @@ function emitTypeAnnotationTokens(tokens, src, anchorNode, annot) {
         return;
       }
       case "selfType":
-        // No source span — `self` is implicit in the syntax.
+        // No source span - `self` is implicit in the syntax.
         return;
       default:
         return;

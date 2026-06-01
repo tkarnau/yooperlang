@@ -1,4 +1,4 @@
-// Library Phase D headline demo — a hello-world HTTP server.
+// Library Phase D headline demo - a hello-world HTTP server.
 //
 // Build:  node ./src/yoopiler.js examples/pass/hello_server/main.yoop -o /tmp/hello_server
 // Run:    /tmp/hello_server
@@ -14,7 +14,7 @@ import {
     serve_n, ServeOutcome,
 } from "../../../std/http/server.yoop";
 import {
-    Request, Response, ok, headers_add,
+    Request, Response, ok, headers_add, respond_static,
 } from "../../../std/http/types.yoop";
 
 extern "C" from "stdio.h" {
@@ -22,22 +22,22 @@ extern "C" from "stdio.h" {
 }
 
 // User-defined handler. Lives in main.yoop because the handler is the
-// extension point — different programs supply different handlers and the
+// extension point - different programs supply different handlers and the
 // server is generic over them.
 type HelloHandler implements Handler {
     greeting: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         resp.status = ok();
         headers_add(ref resp.headers, "Content-Type", "text/plain");
-        resp.body = string_as_bytes(self.greeting);
-        return { err: "" };
+        respond_static(ref resp, self.greeting);
+        return HandleOutcome.Ok;
     }
 }
 
 function main(): int32 {
     let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
-    if (lr.err.len > 0) {
-        printf(`bind failed: ${lr.err}\n`);
+    if (lr.error.len > 0) {
+        printf(`bind failed: ${lr.error}\n`);
         return 1;
     }
     printf(`listening on 127.0.0.1:18080\n`);
@@ -45,6 +45,6 @@ function main(): int32 {
     // serve_n with n=1 → exit after one request (test-friendly).
     // Switch to a large N or <=0 for a long-running server.
     let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, 1);
-    printf(`served=${outcome.served} err=${outcome.err}\n`);
+    printf(`served=${outcome.served} err=${outcome.error}\n`);
     return 0;
 }

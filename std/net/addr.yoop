@@ -1,29 +1,29 @@
-// std/net/addr.yoop — IPv4 SocketAddr.
+// std/net/addr.yoop - IPv4 SocketAddr.
 //
 // IPv4-only in the MVP per library-design.md §6.1. host is a dotted-quad
 // string ("127.0.0.1") or a hostname; resolution is not yet implemented
 // so non-numeric hosts will fail at bind/connect time via inet_addr().
 
-export type SocketAddr {
+import { Display } from "../core/traits.yoop";
+
+// Phase 9.F: Display impl renders the host. A `host:port` form waits
+// for an int-to-string helper in std/core; for now the trait lets
+// `${addr}` in a template render the dotted-quad without the caller
+// pre-stringifying.
+export type SocketAddr implements Display {
     host: string,
     port: int32,
+    function to_string(ref self): string {
+        return self.host;
+    }
 }
 
-// Display-shaped helper. Templates don't consult the Display trait yet,
-// AND codegen doesn't yet allow template interpolation outside `printf`,
-// so this is intentionally minimal — returns the host only. A full
-// `host:port` formatter waits for either string_concat-based formatting
-// of integers or template-literal lowering for arbitrary contexts.
-export function addr_to_string(ref a: SocketAddr): string {
-    return a.host;
-}
-
-// 127.0.0.1 — the loopback address. Use for tests and local-only servers.
+// 127.0.0.1 - the loopback address. Use for tests and local-only servers.
 export function localhost(port: int32): SocketAddr {
     return { host: "127.0.0.1", port: port };
 }
 
-// 0.0.0.0 — bind to every interface. Use for servers exposed to the network.
+// 0.0.0.0 - bind to every interface. Use for servers exposed to the network.
 export function any_addr(port: int32): SocketAddr {
     return { host: "0.0.0.0", port: port };
 }

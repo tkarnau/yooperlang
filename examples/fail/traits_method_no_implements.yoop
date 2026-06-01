@@ -9,5 +9,5 @@ function main(): int32 {
 }
 
 // Fails at parse time because T declares methods without an `implements` clause.
-// Methods are only allowed inside a type that implements at least one trait —
+// Methods are only allowed inside a type that implements at least one trait -
 // there is no bare impl block or free-method concept in Yooper.

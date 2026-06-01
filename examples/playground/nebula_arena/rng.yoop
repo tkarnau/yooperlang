@@ -1,0 +1,15 @@
+// Linear congruential generator (Numerical Recipes constants).
+// State is a single int32 that the caller threads through, so the
+// sequence is deterministic per seed.
+
+export function next_rand(ref state: int32, range: int32): int32 {
+    state = state * 1103515245 + 12345;
+    let r: int32 = state % range;
+    if (r < 0) { r = r + range; }
+    return r;
+}
+
+export function rand_float01(ref state: int32): float32 {
+    let n: int32 = next_rand(ref state, 10000);
+    return float32(n) / 10000.0;
+}

@@ -13,6 +13,7 @@ import {
   ArrayType,
   ErrorType,
   KindApplication,
+  PrimType,
   RefType,
   StructType,
   primAnnotations,
@@ -32,9 +33,26 @@ import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
   lookupGenericFunc,
-  markErrObservedThroughRoot,
   resolveExprType,
 } from "./checkExpr.js";
+
+// True if `callExpr` is `ns.method(...)` where `ns` resolves to a namespace
+// import and the source module has a generic function by that name. Lets
+// checkLetOrConst route the call through checkInitializer so the LHS type
+// drives return-position type-param inference (e.g. `intr.heap_alloc(8)`).
+function isNamespaceGenericCall(callExpr, ctx) {
+  const callee = callExpr.callee;
+  if (!callee || typeof callee !== "object") return false;
+  if (callee.kind !== ASTNodeKind.FIELD_ACCESS) return false;
+  if (
+    callee.object?.kind !== ASTNodeKind.IDENT &&
+    callee.object?.kind !== ASTNodeKind.NAMESPACE_IDENT
+  ) return false;
+  const ns = ctx.typeContext.moduleSymbols?.get(callee.object.name);
+  if (!ns || ns.kind !== typeKinds.namespace) return false;
+  const srcEnv = ctx.typeContext.moduleEnv?.get(ns.moduleId);
+  return !!srcEnv?.genericFuncTable?.has(callee.field);
+}
 import { lookupBuiltinKind } from "./builtinKinds.js";
 
 // Phase 6.4: kind-prefix resolution walks both the local kindTable (user
@@ -46,8 +64,8 @@ function resolveKindByName(name, typeContext) {
   );
 }
 import { TaskType } from "./types.js";
-import { isFallible, } from "./fallible.js";
 import { isAssignable } from "./coerce.js";
+import { mangleTraitMethod } from "./mangleTraitMethod.js";
 
 export function validateMethod(methodDecl, structType, typeContext, errors) {
   const scope = pushScope(null);
@@ -103,11 +121,15 @@ export function validateFunction(funcNode, typeContext, errors) {
           // validated by the binding-resolution path.
           paramKindType = kt;
         } else {
-          // Unwrap ref to get the underlying struct type.
+          // Unwrap ref to get the underlying nominal type. Phase 13.B:
+          // variants are valid receivers for kind-tracked params too.
           const structType = baseType.kind === typeKinds.ref ? baseType.inner : baseType;
-          if (structType.kind !== typeKinds.struct) {
+          if (
+            structType.kind !== typeKinds.struct &&
+            structType.kind !== typeKinds.variant
+          ) {
             pushError(errors, param,
-              `kind "${kt.name}" can only apply to struct values, got ${formatType(baseType)}`);
+              `kind "${kt.name}" can only apply to struct or variant values, got ${formatType(baseType)}`);
           } else {
             // Phase 6.4 strict propagates: a struct that propagates this kind
             // satisfies the kind's requirement via its propagated fields, even
@@ -174,7 +196,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   // Reject ref return types
   if (funcReturnType.kind === typeKinds.ref) {
     pushError(errors, funcNode,
-      `functions may not return 'ref T' — returning a reference to a local binding is unsafe`);
+      `functions may not return 'ref T' - returning a reference to a local binding is unsafe`);
   }
   funcNode.resolvedType = funcReturnType;
 
@@ -192,7 +214,7 @@ export function validateFunction(funcNode, typeContext, errors) {
   // params + the synthetic outer body share `scope`. Block-statement
   // bodies open their own inner scope and pop it themselves; this catches
   // the function-level scope (params and any locals declared at function
-  // top — there usually are none, but it's the right shape).
+  // top - there usually are none, but it's the right shape).
   popScope(scope, errors);
 }
 
@@ -201,7 +223,7 @@ export function validateFunction(funcNode, typeContext, errors) {
 // no locals); identifier lookups fall through to moduleSymbols, which by
 // pass D.0 holds both this module's bindings and any imported ones.
 //
-// (Bytecode/CTE future) — this is the call site to swap for a CTE
+// (Bytecode/CTE future) - this is the call site to swap for a CTE
 // evaluator: try evaluating decl.assignment at compile time; on success
 // stash the result on the decl for codegen to use as the @global initial
 // value; on failure keep the existing runtime-init behavior.
@@ -215,6 +237,30 @@ export function validateModuleInit(decl, typeContext, errors) {
     inLoop: false,
     inTaskBody: false,
   };
+  // No annotation (resolvedType left null by pass C.4): infer the binding's
+  // type from its initializer and publish it so function bodies in this module
+  // - and any importer, which typechecks later in topological order - resolve
+  // the name to the inferred type rather than the ErrorType shell.
+  if (decl.typeAnnotation === null) {
+    const rhsType = resolveExprType(decl.assignment, scope, ctx);
+    decl.resolvedType = concretizeInferred(rhsType) ?? ErrorType();
+    if (decl.resolvedType.kind === typeKinds.error) {
+      pushError(errors, decl,
+        `cannot infer a type for "${decl.name}"; add an explicit type annotation`);
+    } else {
+      if (
+        decl.resolvedType.kind === typeKinds.array &&
+        decl.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+      ) {
+        // Re-pin an untyped array literal to its concrete element type so
+        // codegen emits a concrete element type (see checkLetOrConst).
+        checkArrayLiteralWithElemType(decl.assignment, decl.resolvedType.elem, scope, ctx);
+      }
+      typeContext.moduleSymbols.set(decl.name, decl.resolvedType);
+    }
+    popScope(scope, errors);
+    return;
+  }
   checkInitializer(
     decl.assignment,
     decl.resolvedType,
@@ -223,6 +269,26 @@ export function validateModuleInit(decl, typeContext, errors) {
     (valueType) =>
       `cannot assign ${formatType(valueType)} to ${formatType(decl.resolvedType)} in initializer of module-level "${decl.name}"`,
   );
+  popScope(scope, errors);
+}
+
+// Phase 11.D.18: typecheck a top-level `@precompile { ... }` block.
+// The block has no params and no return type (its only effects are
+// writes to module-level state); local bindings declared inside the
+// block live only during comptime evaluation. Otherwise it's a
+// normal block - IDENT resolution falls through to module symbols
+// the same way validateModuleInit does.
+export function validatePrecompileBlock(blockAst, typeContext, errors) {
+  const scope = pushScope(null);
+  const ctx = {
+    funcReturnType: null,
+    funcName: "<precompile block>",
+    typeContext,
+    errors,
+    inLoop: false,
+    inTaskBody: false,
+  };
+  validateStatement(blockAst, scope, ctx);
   popScope(scope, errors);
 }
 
@@ -247,6 +313,8 @@ export function validateStatement(node, scope, ctx) {
       return checkWhile(node, scope, ctx);
     case ASTNodeKind.FOR_LOOP:
       return checkForLoop(node, scope, ctx);
+    case ASTNodeKind.FOR_IN_LOOP:
+      return checkForInLoop(node, scope, ctx);
     case ASTNodeKind.BREAK_STATEMENT:
       return checkBreak(node, ctx);
     case ASTNodeKind.CONTINUE_STATEMENT:
@@ -262,7 +330,7 @@ export function validateStatement(node, scope, ctx) {
   }
 }
 
-// `{ ... }` — opens a fresh child scope, walks each inner statement, then
+// `{ ... }` - opens a fresh child scope, walks each inner statement, then
 // enforces fallible-binding observation on every binding declared in this
 // scope before letting them go out.
 function checkBlock(node, scope, ctx) {
@@ -284,18 +352,68 @@ function checkBlock(node, scope, ctx) {
 //   - validate the RHS struct type implements every trait in kind.requires
 //   - if `node.trailingBlock` is present, require kind.ownsBlock and bind
 //     the name in the trailing block's scope rather than the enclosing one
+// When a binding omits its type annotation, its type is inferred from the
+// initializer. Bare integer/float literals resolve to the `untypedInt` /
+// `untypedFloat` placeholders, which exist only to be pinned by a surrounding
+// context; with no annotation there is no such context, so default them to the
+// same concrete types an explicit annotation would have produced (int32 /
+// float64). Recurse into array element types so `const xs = [1, 2];` infers
+// `int32[]` rather than the un-emittable `untypedInt[]`.
+function concretizeInferred(t) {
+  if (!t) return t;
+  if (t.kind === typeKinds.untypedInt) return PrimType("int32");
+  if (t.kind === typeKinds.untypedFloat) return PrimType("float64");
+  if (t.kind === typeKinds.array) {
+    const elem = concretizeInferred(t.elem);
+    return elem === t.elem ? t : ArrayType(elem);
+  }
+  return t;
+}
+
 function checkLetOrConst(node, scope, ctx) {
-  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` —
+  // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
   const builtinName = node.kindPrefix?.builtin ?? null;
   if (builtinName === "joined" || builtinName === "pooled") {
     return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
   }
 
-  const declaredType =
-    resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
-  if (declaredType.kind === typeKinds.error) {
-    pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
+  // No annotation: infer the binding's type from its initializer. The parser
+  // guarantees a module-level binding without an annotation has an initializer;
+  // a local one might not, which is an error (nothing to infer from).
+  const inferred = node.typeAnnotation === null;
+  let declaredType;
+  if (inferred) {
+    if (!node.assignment) {
+      pushError(ctx.errors, node,
+        `binding "${node.name}" needs either a type annotation or an initializer to infer from`);
+      declaredType = ErrorType();
+    } else {
+      const rhsType = resolveExprType(node.assignment, scope, ctx);
+      declaredType = concretizeInferred(rhsType) ?? ErrorType();
+      // resolveExprType already reports a specific error for expressions that
+      // cannot be typed without a target (bare struct literals, empty array
+      // literals); add an inference-focused hint pointing at the fix.
+      if (declaredType.kind === typeKinds.error) {
+        pushError(ctx.errors, node,
+          `cannot infer a type for "${node.name}"; add an explicit type annotation`);
+      } else if (
+        declaredType.kind === typeKinds.array &&
+        node.assignment.kind === ASTNodeKind.ARRAY_LITERAL
+      ) {
+        // resolveArrayLiteral leaves the literal (and its elements) typed as
+        // `untypedInt[]`/`untypedFloat[]`; re-pin them to the concretized
+        // element type so codegen sees a concrete element type, matching the
+        // annotated `const xs: int32[] = [...]` path.
+        checkArrayLiteralWithElemType(node.assignment, declaredType.elem, scope, ctx);
+      }
+    }
+  } else {
+    declaredType =
+      resolveTypeInCtx(node.typeAnnotation, ctx.typeContext) ?? ErrorType();
+    if (declaredType.kind === typeKinds.error) {
+      pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
+    }
   }
   node.resolvedType = declaredType;
 
@@ -331,16 +449,17 @@ function checkLetOrConst(node, scope, ctx) {
   node.resolvedKindType = kindType;
   node.resolvedKindApplication = kindApp;
 
-  if (node.assignment) {
+  if (node.assignment && !inferred) {
     // Generic function calls need to flow through checkInitializer so the
     // declared LHS type can drive return-type inference (e.g. heap_alloc).
     // The eager resolveExprType inside isTaskCallReturningType would otherwise
     // error out before bidirectional inference gets a chance.
     const isGenericCall =
       node.assignment.kind === ASTNodeKind.CALL_EXPRESSION &&
-      typeof node.assignment.callee === "string" &&
-      lookupGenericFunc(node.assignment.callee, ctx) !== null;
-    // Phase 6.3: immediate task call — `const x: T = compute(...);` where
+      ((typeof node.assignment.callee === "string" &&
+        lookupGenericFunc(node.assignment.callee, ctx) !== null) ||
+        isNamespaceGenericCall(node.assignment, ctx));
+    // Phase 6.3: immediate task call - `const x: T = compute(...);` where
     // compute returns Task<T>. Auto-spawn+wait inline; binding sees T.
     if (
       !kindType &&
@@ -458,7 +577,7 @@ function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
 // Returns true iff `callExpr` is a CALL_EXPRESSION whose resolved return type
 // is Task<targetType>. resolveExprType is invoked as a side effect.
 function isTaskCallReturningType(callExpr, targetType, scope, ctx) {
-  // Lookahead-only check based on the callee — does the named function have
+  // Lookahead-only check based on the callee - does the named function have
   // a TaskType return? We must invoke resolveExprType for arity/type checking,
   // but we want to avoid emitting a spurious "Task<T> not assignable to T" error.
   const rhsType = resolveExprType(callExpr, scope, ctx);
@@ -519,19 +638,24 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
     }
   }
 
-  // The struct under a kind binding must be a plain struct value (not a ref,
-  // not an array, not a primitive).
+  // The value under a kind binding must be a plain nominal value (not a
+  // ref, not an array, not a primitive). Phase 13.B: variants count too -
+  // a variant that implements the kind's required traits binds the same
+  // way a struct would.
   if (declaredType.kind === typeKinds.error) return;
-  if (declaredType.kind !== typeKinds.struct) {
+  if (
+    declaredType.kind !== typeKinds.struct &&
+    declaredType.kind !== typeKinds.variant
+  ) {
     pushError(ctx.errors, node,
-      `kind "${kindType.name}" can only apply to struct values, got ${formatType(declaredType)}`);
+      `kind "${kindType.name}" can only apply to struct or variant values, got ${formatType(declaredType)}`);
     return;
   }
 
   // Phase 6.4 strict propagates: a struct that propagates this kind satisfies
   // the kind's requirement via propagated fields, even if it does not
   // implement the required traits directly. Skip the direct-implements check
-  // in that case — the obligation flows via the field walk in kindCheck.
+  // in that case - the obligation flows via the field walk in kindCheck.
   const structPropagatesThisKind = (declaredType.propagatedKinds ?? []).some(
     (a) => (a.kindType ?? a) === kindType,
   );
@@ -578,14 +702,10 @@ function checkArrayLiteralWithElemType(litNode, elemType, scope, ctx) {
   litNode.knownElemType = elemType;
 }
 
-// `const { a, err } = expr;` / `let { a, err } = expr;`
+// `const { a, b } = expr;` / `let { a, b } = expr;`
 function checkDestructureDecl(node, scope, ctx) {
   const declKind = node.declKind === ASTNodeKind.CONST_DECL ? "const" : "let";
-  let rhsType = resolveExprType(node.assignment, scope, ctx);
-  const isTryRhs = node.assignment.kind === ASTNodeKind.TRY_OP;
-  if (isTryRhs && node.assignment.strippedMulti) {
-    rhsType = StructType("__stripped", node.assignment.strippedMulti.fields);
-  }
+  const rhsType = resolveExprType(node.assignment, scope, ctx);
 
   if (rhsType.kind === typeKinds.error) {
     for (const n of node.names) {
@@ -628,31 +748,14 @@ function checkDestructureDecl(node, scope, ctx) {
     }
     declareInScope(scope, name, fieldType, declKind, node, ctx.errors);
   }
-
-  if (!isTryRhs && isFallible(rhsType) && !seenNames.has("err")) {
-    pushError(
-      ctx.errors,
-      node,
-      `destructuring a fallible type ${formatType(rhsType)} must include "err" or use '?' to propagate`,
-    );
-  }
 }
 
 function checkDiscardStatement(node, scope, ctx) {
   resolveExprType(node.value, scope, ctx);
-  markErrObservedThroughRoot(node.value, scope);
 }
 
 function checkExpressionStatement(node, scope, ctx) {
-  const t = resolveExprType(node.value, scope, ctx);
-  if (isFallible(t)) {
-    pushError(
-      ctx.errors,
-      node,
-      `fallible result of type ${formatType(t)} dropped — bind it, destructure, propagate with '?', or discard with '_ = ...'`,
-    );
-  }
-  return t;
+  return resolveExprType(node.value, scope, ctx);
 }
 
 function checkReturn(node, scope, ctx) {
@@ -695,7 +798,7 @@ function checkForLoop(node, scope, ctx) {
   const initBinding = lookupInScope(scope, node.initIdent);
   if (!initBinding) {
     pushError(ctx.errors, node,
-      `for-loop variable "${node.initIdent}" is not declared — declare it before the loop`);
+      `for-loop variable "${node.initIdent}" is not declared - declare it before the loop`);
   } else {
     const initExprType = resolveExprType(node.initExpr, scope, ctx);
     checkAssignable(initBinding.type, initExprType, node, ctx);
@@ -725,9 +828,100 @@ function checkForLoop(node, scope, ctx) {
   validateStatement(node.body, scope, loopCtx);
 }
 
+// Phase 9.D + 10.B: `for item in xs { ... }`. The RHS may be either:
+//   - An array expression (`T[]`): the fast path. The element type T drives
+//     the body binding; codegen walks the fat-pointer.
+//   - A struct implementing `Iterable<U>` (Phase 10.B): the loop desugars
+//     to a `while (true) { switch (Iterable.next(ref iter)) { ... } }` over
+//     `IterStep<U>`. The U from the impl's trait args drives the body binding.
+function checkForInLoop(node, scope, ctx) {
+  let iterType = resolveExprType(node.iterExpr, scope, ctx);
+  let elemType = ErrorType();
+  let iterableImpl = null;
+  if (iterType.kind === typeKinds.array) {
+    elemType = iterType.elem;
+  } else if (iterType.kind === typeKinds.struct) {
+    // The struct type captured from an expression site (e.g. a function-call
+    // return) may be the pass-A shell - re-fetch the canonical version from
+    // structTable so we see the fully-resolved implementsTraits/methods.
+    if (ctx.typeContext.structTable) {
+      const canonical = ctx.typeContext.structTable.get(iterType.name);
+      if (canonical) iterType = canonical;
+    }
+    const iterableTrait = (iterType.implementsTraits ?? []).find(
+      (t) => t.name === "Iterable",
+    );
+    if (iterableTrait) {
+      const nextSig = iterType.methods?.get("next");
+      const retType = nextSig?.returnType;
+      if (
+        retType &&
+        retType.kind === typeKinds.variant &&
+        retType.variants?.has("Yield") &&
+        retType.variants?.has("Done")
+      ) {
+        const yieldVariant = retType.variants.get("Yield");
+        if (
+          yieldVariant.fields &&
+          yieldVariant.fields.length === 1 &&
+          yieldVariant.fields[0].name === "value"
+        ) {
+          elemType = yieldVariant.fields[0].type;
+          iterableImpl = {
+            mangledNextName: mangleTraitMethod(iterType, "Iterable", "next"),
+            iterStepType: retType,
+          };
+        } else {
+          pushError(
+            ctx.errors,
+            node.iterExpr,
+            `Iterable.next must return IterStep<T> with a single-field 'Yield { value: T }' variant`,
+          );
+        }
+      } else {
+        pushError(
+          ctx.errors,
+          node.iterExpr,
+          `Iterable.next must return an IterStep<T> variant with Yield/Done cases`,
+        );
+      }
+    } else {
+      pushError(
+        ctx.errors,
+        node.iterExpr,
+        `type ${formatType(iterType)} is not iterable - expected an array or a type implementing Iterable<T>`,
+      );
+    }
+  } else if (iterType.kind !== typeKinds.error) {
+    pushError(
+      ctx.errors,
+      node.iterExpr,
+      `'for ... in' requires an array or a type implementing Iterable<T>; got ${formatType(iterType)}`,
+    );
+  }
+  node.resolvedElemType = elemType;
+  node.resolvedIterType = iterType;
+  node.iterableImpl = iterableImpl;
+
+  // The loop variable is scoped to the body only. Open a scope, declare it,
+  // walk the body's statements, then pop. This mirrors the trailing-block
+  // pattern in checkLetOrConst.
+  const inner = pushScope(scope);
+  declareInScope(inner, node.loopVar, elemType, "const", node, ctx.errors);
+  const loopCtx = { ...ctx, inLoop: true };
+  if (node.body.kind === ASTNodeKind.BLOCK) {
+    for (const s of node.body.body) {
+      validateStatement(s, inner, loopCtx);
+    }
+  } else {
+    validateStatement(node.body, inner, loopCtx);
+  }
+  popScope(inner, ctx.errors);
+}
+
 // Phase 7.5: typecheck a `switch` statement. Scrutinee is one of:
 //   - integer / bool / char prim  → arms carry LITERAL_PATTERNs
-//   - EnumType                    → arms carry VARIANT_PATTERNs
+//   - VariantType                    → arms carry VARIANT_PATTERNs
 // Exhaustiveness is enforced when the scrutinee is a bool or an enum.
 function checkSwitch(node, scope, ctx) {
   const scrutType = resolveExprType(node.scrutinee, scope, ctx);
@@ -752,13 +946,17 @@ function checkSwitch(node, scope, ctx) {
       scrutType.name === "isize" ||
       scrutType.name === "char");
   const isBool = scrutType.kind === typeKinds.prim && scrutType.name === "bool";
-  const isEnum = scrutType.kind === typeKinds.enum;
+  const isVariant = scrutType.kind === typeKinds.variant;
+  // Phase 12: value-enum scrutinee. Patterns use VARIANT_PATTERN with no
+  // field bindings. Exhaustiveness checked only when the enum is "closed"
+  // (no operator-derived cases).
+  const isValueEnum = scrutType.kind === typeKinds.valueEnum;
 
-  if (!isInt && !isBool && !isEnum) {
+  if (!isInt && !isBool && !isVariant && !isValueEnum) {
     pushError(
       ctx.errors,
       node.scrutinee,
-      `switch scrutinee must be int, bool, char, or an enum type; got ${formatType(scrutType)}`,
+      `switch scrutinee must be int, bool, char, a variant, or an enum type; got ${formatType(scrutType)}`,
     );
     for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
     if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
@@ -768,6 +966,7 @@ function checkSwitch(node, scope, ctx) {
   node.scrutineeType = scrutType;
   const seenLiterals = new Map(); // value -> arm index
   const seenVariants = new Set();
+  const seenEnumCases = new Set();
   let sawAnyWildcardCase = false;
 
   for (const arm of node.arms) {
@@ -821,19 +1020,71 @@ function checkSwitch(node, scope, ctx) {
         continue;
       }
       if (pat.kind === ASTNodeKind.VARIANT_PATTERN) {
-        if (!isEnum) {
+        // Phase 12: value-enum dispatch. Patterns are `Foo.Bar` with no
+        // field bindings; we match by value equality at codegen time.
+        if (isValueEnum) {
+          if (pat.enumName !== scrutType.name) {
+            pushError(
+              ctx.errors,
+              pat,
+              `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+            );
+            continue;
+          }
+          const enumCase = scrutType.cases.get(pat.variantName);
+          if (!enumCase) {
+            pushError(
+              ctx.errors,
+              pat,
+              `enum "${scrutType.name}" has no case "${pat.variantName}"`,
+            );
+            continue;
+          }
+          if (pat.fieldBindings !== null && pat.fieldBindings.length > 0) {
+            pushError(
+              ctx.errors,
+              pat,
+              `value enum case "${scrutType.name}.${pat.variantName}" has no fields - drop the '{ ... }'`,
+            );
+            continue;
+          }
+          if (seenEnumCases.has(pat.variantName)) {
+            pushError(
+              ctx.errors,
+              pat,
+              `duplicate enum case pattern "${scrutType.name}.${pat.variantName}"`,
+            );
+          }
+          seenEnumCases.add(pat.variantName);
+          pat.resolvedValueEnumType = scrutType;
+          pat.resolvedValueEnumCase = enumCase;
+          continue;
+        }
+        if (!isVariant) {
           pushError(
             ctx.errors,
             pat,
-            `variant patterns are only valid on enum scrutinees, not ${formatType(scrutType)}`,
+            `variant case patterns are only valid on variant scrutinees, not ${formatType(scrutType)}`,
           );
           continue;
         }
-        if (pat.enumName !== scrutType.name) {
+        // Phase 10.A: scrutinee may be a generic-enum instantiation whose
+        // mangled name differs from the user-written decl name. Match either
+        // the concrete name or the generic decl's source name via the
+        // registry-stamped genericInstance tag.
+        const genericInstance = scrutType.genericInstance;
+        let scrutDeclName = scrutType.name;
+        if (genericInstance) {
+          const decl = ctx.typeContext?.registry?.genericDeclById?.get(
+            genericInstance.declId,
+          );
+          if (decl) scrutDeclName = decl.name;
+        }
+        if (pat.enumName !== scrutType.name && pat.enumName !== scrutDeclName) {
           pushError(
             ctx.errors,
             pat,
-            `pattern names enum "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
+            `pattern names variant "${pat.enumName}" but scrutinee has type ${formatType(scrutType)}`,
           );
           continue;
         }
@@ -842,7 +1093,7 @@ function checkSwitch(node, scope, ctx) {
           pushError(
             ctx.errors,
             pat,
-            `enum "${scrutType.name}" has no variant "${pat.variantName}"`,
+            `variant "${scrutType.name}" has no case "${pat.variantName}"`,
           );
           continue;
         }
@@ -854,7 +1105,7 @@ function checkSwitch(node, scope, ctx) {
           );
         }
         seenVariants.add(pat.variantName);
-        pat.resolvedEnumType = scrutType;
+        pat.resolvedVariantType = scrutType;
         pat.resolvedVariant = variant;
         // Field-binding shape: must match the variant's declared shape.
         if (variant.fields === null) {
@@ -862,7 +1113,7 @@ function checkSwitch(node, scope, ctx) {
             pushError(
               ctx.errors,
               pat,
-              `variant "${scrutType.name}.${pat.variantName}" has no payload — drop the '{ ... }'`,
+              `variant "${scrutType.name}.${pat.variantName}" has no payload - drop the '{ ... }'`,
             );
           }
         } else {
@@ -951,18 +1202,40 @@ function checkSwitch(node, scope, ctx) {
         pushError(
           ctx.errors,
           node,
-          `switch over bool is not exhaustive — add 'default' or list both true and false`,
+          `switch over bool is not exhaustive - add 'default' or list both true and false`,
         );
       }
-    } else if (isEnum) {
+    } else if (isVariant) {
       const allVariants = [...scrutType.variants.keys()];
       const missing = allVariants.filter((v) => !seenVariants.has(v));
       if (missing.length > 0) {
         pushError(
           ctx.errors,
           node,
-          `switch over ${formatType(scrutType)} is not exhaustive — missing variants: ${missing.join(", ")}`,
+          `switch over ${formatType(scrutType)} is not exhaustive - missing variants: ${missing.join(", ")}`,
         );
+      }
+    } else if (isValueEnum) {
+      // Phase 12: an "open" enum (any case derived via bitwise ops) requires
+      // a `default` since the reachable set is no longer the named cases. A
+      // closed enum (every case is a literal) gets exhaustiveness over its
+      // named cases.
+      if (scrutType.isOpen) {
+        pushError(
+          ctx.errors,
+          node,
+          `switch over open enum "${scrutType.name}" requires a 'default' case - one or more cases are derived via bitwise operators, so values may fall outside the named set`,
+        );
+      } else {
+        const allCases = [...scrutType.cases.keys()];
+        const missing = allCases.filter((c) => !seenEnumCases.has(c));
+        if (missing.length > 0) {
+          pushError(
+            ctx.errors,
+            node,
+            `switch over ${formatType(scrutType)} is not exhaustive - missing cases: ${missing.join(", ")}`,
+          );
+        }
       }
     } else if (isInt) {
       pushError(
@@ -975,7 +1248,7 @@ function checkSwitch(node, scope, ctx) {
 }
 
 function checkBreak(node, ctx) {
-  // Phase 7.5: `break` is also valid inside a switch arm — it falls out of the
+  // Phase 7.5: `break` is also valid inside a switch arm - it falls out of the
   // switch. We track the switch context independently from `inLoop` because
   // `continue` inside a switch arm still targets the enclosing loop.
   if (!ctx.inLoop && !ctx.inSwitch) {

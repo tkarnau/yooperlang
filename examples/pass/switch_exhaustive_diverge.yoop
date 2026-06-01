@@ -1,0 +1,30 @@
+// Regression: a non-void function whose body ends in an exhaustive variant
+// `switch` where every arm returns used to emit malformed IR - the synthesized
+// `switch_end` block was left without a terminator. Codegen now caps such an
+// unreachable tail block with `unreachable`. Covers both the explicit-arms
+// form and the `default:` form.
+
+variant Color { Red, Green, Blue }
+
+// Exhaustive, every arm returns, NO trailing statement.
+function code(c: Color): int32 {
+    switch (c) {
+        case Color.Red:   { return 1; }
+        case Color.Green: { return 2; }
+        case Color.Blue:  { return 3; }
+    }
+}
+
+// Same shape but via `default:`.
+function name(c: Color): string {
+    switch (c) {
+        case Color.Red: { return "red"; }
+        default:        { return "other"; }
+    }
+}
+
+function main(): int32 {
+    printf(`r=${code(Color.Red)} g=${code(Color.Green)} b=${code(Color.Blue)}\n`);
+    printf(`red=${name(Color.Red)} blue=${name(Color.Blue)}\n`);
+    return 0;
+}

@@ -1,0 +1,79 @@
+// Phase 10.H: codegen-side alloca-name uniquification.
+//
+// Before this fix, two `case ... { value: v }` arms in the same function
+// would both emit `%v = alloca`, and clang would reject the module with
+// "multiple definition of local value 'v'". Same shape for any reused
+// binding name across disjoint scopes (if/else arms, sibling blocks,
+// switch arms over Option<V>/Result<T,E>, etc.).
+//
+// The fix: every alloca for a user binding goes through
+// `symbols.declare(name, type)`, which uniquifies by appending `.1`,
+// `.2`, ... when the candidate slot name is taken. References inside
+// the binding's lexical scope look up the LLVM slot via
+// `symbols.slotFor(name)`, so source code keeps reading the original
+// name. Scope push/pop restores outer bindings when an inner one shadows
+// them. This fixture would fail to compile under the old codegen.
+
+import { Option } from "std/core/types.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function maybe(n: int32): Option<int32> {
+    if (n >= 0) { return Option.Some { value: n }; }
+    return Option.None;
+}
+
+function main(): int32 {
+    let total: int32 = 0;
+
+    // Four switch arms in the same function, all binding `value: v` -
+    // would have collided pre-10.H.
+    let a: Option<int32> = maybe(1);
+    switch (a) {
+        case Option.Some { value: v }: { total = total + v; }
+        case Option.None: { }
+    }
+    let b: Option<int32> = maybe(2);
+    switch (b) {
+        case Option.Some { value: v }: { total = total + v; }
+        case Option.None: { }
+    }
+    let c: Option<int32> = maybe(3);
+    switch (c) {
+        case Option.Some { value: v }: { total = total + v; }
+        case Option.None: { }
+    }
+    let d: Option<int32> = maybe(-1);
+    switch (d) {
+        case Option.Some { value: v }: { total = total + v; }
+        case Option.None: { }
+    }
+
+    // Two disjoint if-blocks each declaring `let x` - also a former
+    // collision shape.
+    let mode: int32 = 0;
+    if (total > 0) { let x: int32 = total * 2; mode = x; }
+    if (total < 100) { let x: int32 = total + 1; mode = mode + x; }
+
+    // Nested shadowing: inner `let v` shadows arm-scope `let v`. After
+    // the inner block exits, the outer `v` should snap back.
+    let v: int32 = 7;
+    if (true) {
+        let v: int32 = 99;
+        total = total + v;
+    }
+    total = total + v;
+
+    printf(`total=${total} mode=${mode}\n`);
+    return 0;
+}
+
+// expected output:
+// total=112 mode=19
+//
+// Walk: maybe(1)/(2)/(3) -> Some(1)+Some(2)+Some(3) = 6 in total.
+// maybe(-1) -> None (skipped). mode = 6*2 + (6+1) = 19. Then v=7,
+// inner-shadow v=99 adds to total (105), outer v=7 snaps back and adds
+// (112). The outer v's reappearance is the scope-restore behavior.

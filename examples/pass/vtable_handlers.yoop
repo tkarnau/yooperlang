@@ -1,0 +1,106 @@
+// Phase 9.G: vtables + `=>` function value types give yoop runtime
+// polymorphism without monomorphization. This fixture exercises the
+// canonical motivating case: a *heterogeneous* list of handlers, all
+// answering the same trait but each backed by a different struct type
+// with its own state.
+//
+// Pre-9.G, this shape required either generics (one monomorphization
+// per handler type, so the array couldn't be heterogeneous) or
+// hand-rolled function-pointer-plus-void-context fields with no
+// compiler help. The vtable form is the compiler-supported one.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// The interface every handler answers.
+trait Handler {
+    function handle(ref self, req: int32): int32;
+}
+
+// Three concrete handlers, each with its own state, each implementing the
+// trait with a different lowering strategy:
+
+// Constant-response handler: ignores the request and returns a fixed value.
+type Const implements Handler {
+    value: int32,
+    function handle(ref self, req: int32): int32 {
+        return self.value;
+    }
+}
+
+// Adder handler: returns the request plus a stored offset.
+type AddOffset implements Handler {
+    offset: int32,
+    function handle(ref self, req: int32): int32 {
+        return req + self.offset;
+    }
+}
+
+// Scaler handler: multiplies the request by a stored factor.
+type Scale implements Handler {
+    factor: int32,
+    function handle(ref self, req: int32): int32 {
+        return req * self.factor;
+    }
+}
+
+// The type-erased view. Every Handler impl plugs into the same Dispatcher
+// slot; arrays of Dispatcher hold a mix of impls.
+vtable Dispatcher for Handler {
+    handle: (req: int32) => int32,
+}
+
+// Sequential dispatch over a heterogeneous Dispatcher array. The function
+// takes any Dispatcher value by ref - it has zero knowledge of the underlying
+// impl types. Pre-9.G, this would have had to be `<H implements Handler>` and
+// monomorphize per concrete type, which makes mixed-type arrays impossible.
+function fan_out(ref handlers: Dispatcher[], req: int32): int32 {
+    let i: int32 = 0;
+    let n: int32 = int32(handlers.len);
+    let total: int32 = 0;
+    while (i < n) {
+        let r: int32 = Dispatcher.handle(ref handlers[i], req);
+        total = total + r;
+        i = i + 1;
+    }
+    return total;
+}
+
+function main(): int32 {
+    // Build three impl values on the stack.
+    let c: Const = { value: 5 };
+    let a: AddOffset = { offset: 100 };
+    let s: Scale = { factor: 3 };
+
+    // Build the heterogeneous handler list. Each slot wraps a different impl.
+    let handlers: Dispatcher[] = intr.heap_alloc(3);
+    handlers[0] = Dispatcher.from(ref c);
+    handlers[1] = Dispatcher.from(ref a);
+    handlers[2] = Dispatcher.from(ref s);
+
+    // Two distinct requests against the same handler list.
+    //   req=10: 5 (const) + 110 (10+100) + 30 (10*3)        = 145
+    //   req=7:  5 (const) +   107        + 21               = 133
+    let r1: int32 = fan_out(ref handlers, 10);
+    let r2: int32 = fan_out(ref handlers, 7);
+    printf(`req=10 sum=${r1}\n`);
+    printf(`req=7  sum=${r2}\n`);
+
+    // Single-dispatch convenience: re-wrap one handler in a fresh Dispatcher
+    // value and route through it. Demonstrates that `from` is an ordinary
+    // expression - not a one-shot let-rhs constraint.
+    let direct: Dispatcher = Dispatcher.from(ref s);
+    let only: int32 = Dispatcher.handle(ref direct, 11);
+    printf(`scale-only=${only}\n`);
+
+    intr.heap_free(handlers);
+    return 0;
+}
+
+// expected output:
+// req=10 sum=145
+// req=7  sum=133
+// scale-only=33

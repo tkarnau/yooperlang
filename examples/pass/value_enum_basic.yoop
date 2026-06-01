@@ -1,0 +1,27 @@
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Color { Red, Green, Blue }
+
+function describe(c: Color): int32 {
+    switch (c) {
+        case Color.Red: { printf(`red\n`); return 1; }
+        case Color.Green: { printf(`green\n`); return 2; }
+        case Color.Blue: { printf(`blue\n`); return 3; }
+    }
+    return 0;
+}
+
+function main(): int32 {
+    let _a: int32 = describe(Color.Red);
+    let _b: int32 = describe(Color.Green);
+    let _c: int32 = describe(Color.Blue);
+    if (Color.Red == Color.Red) {
+        printf(`eq works\n`);
+    }
+    if (Color.Red != Color.Blue) {
+        printf(`neq works\n`);
+    }
+    return 0;
+}

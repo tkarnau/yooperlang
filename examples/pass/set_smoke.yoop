@@ -1,0 +1,44 @@
+// Phase 10.C.3: Set<K> is a thin wrapper over Map<K, bool>. Same
+// open-addressing storage; methods forward to the underlying map.
+// Smoke-tests the string-keyed shape including duplicate-insert,
+// contains, remove, and Disposable auto-cleanup.
+
+import { disposable } from "std/core/kinds.yoop";
+import { Set } from "std/collections/set.yoop";
+import * as set from "std/collections/set.yoop";
+import * as map from "std/collections/map.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable s: Set<string> = set.set_new(4, map.string_key_ops());
+
+    // set_insert returns true iff the key was already present.
+    let was_a:  bool = set.set_insert(ref s, "alpha");
+    let was_b:  bool = set.set_insert(ref s, "beta");
+    let was_a2: bool = set.set_insert(ref s, "alpha");  // dup
+    let wa:  int32 = 0; if (was_a)  { wa  = 1; }
+    let wb:  int32 = 0; if (was_b)  { wb  = 1; }
+    let wa2: int32 = 0; if (was_a2) { wa2 = 1; }
+    printf(`insert: a=${wa} b=${wb} a2=${wa2} len=${set.set_len(ref s)}\n`);
+
+    let has_a: bool = set.set_contains(ref s, "alpha");
+    let has_z: bool = set.set_contains(ref s, "zeta");
+    let ha: int32 = 0; if (has_a) { ha = 1; }
+    let hz: int32 = 0; if (has_z) { hz = 1; }
+    printf(`contains: alpha=${ha} zeta=${hz}\n`);
+
+    let rm_b: bool = set.set_remove(ref s, "beta");
+    let rm_z: bool = set.set_remove(ref s, "zeta");
+    let rb: int32 = 0; if (rm_b) { rb = 1; }
+    let rz: int32 = 0; if (rm_z) { rz = 1; }
+    printf(`remove: beta=${rb} zeta=${rz} len=${set.set_len(ref s)}\n`);
+    return 0;
+}
+
+// expected output:
+// insert: a=0 b=0 a2=1 len=2
+// contains: alpha=1 zeta=0
+// remove: beta=1 zeta=0 len=1

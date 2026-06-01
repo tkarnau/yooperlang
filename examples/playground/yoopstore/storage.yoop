@@ -1,0 +1,38 @@
+// yoopstore/storage.yoop - thin file-storage wrapper over std/fs.
+//
+// Originally this module hand-rolled fopen / fclose / fwrite / fread /
+// mkdir against libc; the std/fs module landed during this same change
+// (alongside the fix for the template-literal `"` codegen bug) so the
+// wrapper now collapses to a few one-line forwards plus the path
+// joining that std/fs deliberately keeps separate from validation.
+
+import { Vec } from "std/core/vec.yoop";
+import * as fs from "std/fs.yoop";
+
+// Build "<root>/<rel>" for an already-sanitized relative path. Calling
+// this with an unvalidated `rel` is unsafe; see safepath.sanitize.
+export function join_path(root: string, rel: string): string {
+    let parts: string[] = [root, rel];
+    return fs.path_join(parts);
+}
+
+export function write_file(full_path: string, body: uint8[]): string {
+    let err: string = fs.mkdir_p(full_path);
+    if (err.len > 0) { return err; }
+    return fs.write_file(full_path, body);
+}
+
+export function read_file_into(ref out: Vec<uint8>, full_path: string): string {
+    return fs.read_file_into(ref out, full_path);
+}
+
+export function delete_file(full_path: string): string {
+    return fs.delete_file(full_path);
+}
+
+// Size in bytes of the file at `full_path`, or -1 if it doesn't exist or
+// isn't a regular file. Used by the HEAD handler to fill Content-Length
+// without reading the body.
+export function file_size(full_path: string): int64 {
+    return fs.file_size(full_path);
+}

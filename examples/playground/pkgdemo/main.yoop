@@ -1,0 +1,39 @@
+// pkgdemo/main.yoop - mirrors examples/playground/yooparse/main.yoop, but
+// imports the json parser through `./yoop_packages/yooparse/json.yoop`
+// instead of a sibling file. Run `yoopkg install` first to populate
+// yoop_packages/ from the registry.
+
+import * as json from "./yoop_packages/yooparse/json.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as fmt from "std/core/format.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let input: string =
+        "{\"name\":\"yoop\",\"version\":3,\"tags\":[\"systems\",\"fun\",\"new\"],\"ready\":true,\"notes\":null}";
+
+    disposable doc: json.JsonDoc = json.parse(input) {
+        if (doc.error.len > 0) {
+            printf(`parse error: ${doc.error}\n`);
+            return 1;
+        }
+
+        let name_node:    json.JsonValue = json.obj_get(ref doc.root, "name");
+        let version_node: json.JsonValue = json.obj_get(ref doc.root, "version");
+        let ready_node:   json.JsonValue = json.obj_get(ref doc.root, "ready");
+
+        let name:    string = json.as_string(ref name_node, "<missing>");
+        let version: int64  = json.as_int(ref version_node, -1);
+        let ready:   bool   = json.as_bool(ref ready_node, false);
+
+        printf(`pkgdemo: name=${name} version=${version} ready=${ready}\n`);
+
+        let out: string = json.stringify(ref doc.root);
+        printf(`stringified: ${out}\n`);
+    }
+
+    return 0;
+}

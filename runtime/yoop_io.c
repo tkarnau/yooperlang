@@ -1,4 +1,4 @@
-// Phase 8.F.2 — I/O multiplexer for the Yooperlang runtime.
+// Phase 8.F.2 - I/O multiplexer for the Yooperlang runtime.
 //
 // One dedicated pthread (the "I/O thread") runs a kqueue (macOS) or
 // epoll (Linux) loop. yoop_io_wait_readable / wait_writable register a
@@ -16,10 +16,45 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#include <sys/types.h>
 #include <unistd.h>
 
+// Create a single directory with standard 0755 permissions. The mode bits
+// are computed from the POSIX S_* symbols (the headers resolve them to the
+// right per-platform mode_t value), so yoop callers never hand-mirror a
+// numeric mode - the same philosophy as the yoop_net.c constant helpers.
+// Returns mkdir()'s rc: 0 on success, -1 with errno set. EEXIST is left for
+// the caller to interpret (std/fs.mkdir_p treats it as benign).
+int yoop_io_mkdir(const char* path) {
 #ifdef _WIN32
-  // Stub for now — no IOCP backend. Public API returns ENOSYS.
+    // Windows mkdir takes no mode argument.
+    return _mkdir(path);
+#else
+    return mkdir(path, S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH);
+#endif
+}
+
+// 1 if `path` names an existing filesystem entry (of any type), 0 otherwise.
+// A 0 result also covers "stat failed" (e.g. a missing parent component).
+int yoop_io_exists(const char* path) {
+    struct stat st;
+    return stat(path, &st) == 0 ? 1 : 0;
+}
+
+// Size in bytes of the regular file at `path`, or -1 if it doesn't exist,
+// isn't a regular file, or stat() otherwise fails. Returning -1 (rather than
+// a fallible struct) keeps the yoop side a single int64 read; callers test
+// `< 0`.
+int64_t yoop_io_file_size(const char* path) {
+    struct stat st;
+    if (stat(path, &st) != 0) return -1;
+    if (!S_ISREG(st.st_mode)) return -1;
+    return (int64_t)st.st_size;
+}
+
+#ifdef _WIN32
+  // Stub for now - no IOCP backend. Public API returns ENOSYS.
   int yoop_io_wait_readable(int fd) { (void)fd; errno = ENOSYS; return -1; }
   int yoop_io_wait_writable(int fd) { (void)fd; errno = ENOSYS; return -1; }
   void yoop_io_shutdown(void) {}
@@ -35,7 +70,7 @@
   #define YOOP_IO_EPOLL 1
   #include <sys/epoll.h>
 #else
-  #error "Unsupported platform — add a yoop_io.c backend"
+  #error "Unsupported platform - add a yoop_io.c backend"
 #endif
 
 // Per-wait state. Lives on the caller's stack; the multiplexer
@@ -77,7 +112,7 @@ static void* io_thread_main(void* arg) {
         int n = kevent(io_kq, NULL, 0, events, 64, NULL);
         if (n < 0) {
             if (errno == EINTR) continue;
-            // Fatal — log and exit the loop. The runtime is shutting down.
+            // Fatal - log and exit the loop. The runtime is shutting down.
             break;
         }
         int should_exit = 0;
@@ -120,7 +155,7 @@ static void* io_thread_main(void* arg) {
             }
             yoop_io_wait_t* w = (yoop_io_wait_t*)ev->data.ptr;
             // Remove the fd from the set (one-shot semantics). We don't
-            // know the fd off the bat — but epoll's data.ptr is the
+            // know the fd off the bat - but epoll's data.ptr is the
             // token, not the fd. The fd is recoverable only if we stash
             // it; for one-shot we just rely on EPOLLONESHOT having
             // disarmed the fd. The caller re-arms on next wait_*.
@@ -258,7 +293,7 @@ static int io_wait_common(int fd, int want_write) {
 
 #ifdef YOOP_IO_EPOLL
     // One-shot: explicitly remove so a future wait can ADD freshly.
-    // Ignore failures — the fd may already have been closed by the
+    // Ignore failures - the fd may already have been closed by the
     // caller.
     epoll_ctl(io_ep, EPOLL_CTL_DEL, fd, NULL);
 #endif

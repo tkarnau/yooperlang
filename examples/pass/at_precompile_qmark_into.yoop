@@ -1,0 +1,68 @@
+// Phase 11.D.15: cross-shape `?` propagation through `Into<T>` folds
+// at comptime. When the operand's Err type differs from the
+// enclosing function's Err type, the typechecker stamps the
+// TRY_OP with `tryConvert = { mangledName, targetType }` pointing
+// at the source struct's `Into.into` impl. The comptime lowerer
+// resolves that method's bytecode via traitMethodResolver and
+// emits a CALL_DIRECT in the err-branch with `ref payload.error`
+// as `ref self` - same logical shape codegen does at runtime.
+
+import { Result } from "std/core/types.yoop";
+import { Into } from "std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type AppError {
+    code: int32,
+    tag: int32,
+}
+
+type IoError implements Into<AppError> {
+    code: int32,
+    function into(ref self): AppError {
+        // Tag = 7 lets the test prove the conversion ran (versus a
+        // structural reinterpret that would leave tag at 0).
+        return { code: self.code, tag: 7 };
+    }
+}
+
+function parse_positive(n: int32): Result<int32, IoError> {
+    if (n < 0) {
+        return Result.Err { error: { code: n } };
+    }
+    return Result.Ok { value: n };
+}
+
+// Cross-shape `?`: parse_positive returns Result<int32, IoError>
+// but add_two_positives returns Result<int32, AppError>. Each `?`
+// converts IoError → AppError via Into.into in the err branch.
+function add_two_positives(a: int32, b: int32): Result<int32, AppError> {
+    let x: int32 = parse_positive(a)?;
+    let y: int32 = parse_positive(b)?;
+    return Result.Ok { value: x + y };
+}
+
+function unwrap_or_code(r: Result<int32, AppError>): int32 {
+    switch (r) {
+        case Result.Ok { value: v }: { return v; }
+        case Result.Err { error: e }: { return (0 - e.code) * 10 - e.tag; }
+    }
+    return 0;
+}
+
+// Happy path: both `?` succeed, returns Ok{7}.
+@precompile const HAPPY: int32 = unwrap_or_code(add_two_positives(3, 4));
+
+// Sad path: second `?` sees Err{IoError{-7}}, converts to AppError{-7,7},
+// caller sees Err. unwrap_or_code returns `-1 * -7 * 10 - 7 = 63`.
+@precompile const SAD: int32 = unwrap_or_code(add_two_positives(3, -7));
+
+function main(): int32 {
+    printf(`HAPPY=${HAPPY} SAD=${SAD}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   HAPPY=7 SAD=63

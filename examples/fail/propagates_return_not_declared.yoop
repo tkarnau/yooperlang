@@ -17,7 +17,7 @@ type Widget implements Disposable propagates<disposable> {
     function dispose(ref self): void {}
 }
 
-// Missing propagates<disposable> on the return type — should be an error.
+// Missing propagates<disposable> on the return type - should be an error.
 function make_widget(): Widget {
     return { id: 1 };
 }
