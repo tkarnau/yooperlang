@@ -1,0 +1,91 @@
+/*
+  Author: Tom Karnau
+
+  Character Utilities - primarily used by lexer and parser functionality
+*/
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as log from "std/log.yoop";
+
+
+function isWhitespace(ch: uint8): bool {
+  const whitespaceCharCodes: uint8[] = [32, 9, 13, 10];
+  for i in whitespaceCharCodes {
+    if (ch == i) {
+      return true;
+    }
+  }
+
+  return false;
+}
+
+function skipLineComment(src: uint8[], pos: usize): usize {
+  let p = pos;
+  while (p < src.len) {
+    let ch = src[p];
+    if (ch == 10) {// new line
+      return p;
+    }
+    p = p + 1;
+  }
+
+  return p;
+}
+
+// returns position after all discard space, comments, etc
+export function skipWhitespace(src: uint8[], pos: usize): usize {
+  let p = pos;
+  // let strBytes = intr.string_as_bytes(src);
+
+  while (p < src.len) {
+    let ch = src[p];
+    log.info(`ch: ${ch}`);
+    if (isWhitespace(ch)) {
+      p = p + 1;
+    } else { // check for comments
+      if (p + 1 < src.len) {
+        let nextCh = src[p + 1];
+        if (ch == 47 && nextCh == 47) { // forward slashes
+          p = skipLineComment(src, p);
+
+          // continue
+          return skipWhitespace(src, p);
+        }
+        if (ch == 47 && nextCh == 42) { // block comments
+          p = p + 2;
+          let blockCommentStack = 1;
+          while (p + 1 < src.len) {
+            if (src[p] == 42 && src[p + 1] == 47) {
+              p = p + 2;
+              blockCommentStack = blockCommentStack - 1;
+              if (blockCommentStack == 0) {
+                break;
+              }
+            } else if (src[p] == 47 && src[p + 1] == 42) {
+              p += 2;
+              blockCommentStack = blockCommentStack + 1;
+            }
+            p = p + 1;
+          }
+
+          // continue
+          return skipWhitespace(src, p);
+        }
+      }
+
+      return p;
+    }
+  }
+  // eof fallback
+  return p;
+}
+
+export function isHexDigit(ch: uint8): bool {
+  const result = (
+    (ch >= 48 && ch <= 57) ||
+    (ch >= 97 && ch <= 102) ||
+    (ch >= 65 && ch <= 70)
+  );
+
+  return result;
+}

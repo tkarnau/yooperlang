@@ -4759,7 +4759,10 @@ function codegenWithModuleId(
         continue;
       }
       const r = emitExpr(part.expr, fnLines);
-      const t = r.yoopType;
+      // Phase 12: a value enum shares its underlying primitive's LLVM repr,
+      // so route it through the same per-prim to_string shim (string passes
+      // through, ints go to int_to_string, etc).
+      const t = valueEnumUnderlying(r.yoopType);
       if (t.kind === typeKinds.prim && t.name === "string") {
         partVals.push(r.val);
         continue;
@@ -5104,6 +5107,13 @@ function codegenWithModuleId(
   function emitLval(node, fnLines) {
     switch (node.kind) {
       case ASTNodeKind.IDENT: {
+        // Phase 8.E: a module-level global used as an lvalue (indexing,
+        // field access, address-of) lives in its owning module's @global
+        // table, not this function's local `symbols`. Resolve straight to
+        // @<modid>__<name>, mirroring the emitExpr IDENT path.
+        if (node.isModuleGlobal) {
+          return { ptr: `@${node.moduleGlobalSym}`, type: node.resolvedType };
+        }
         const t = symbols.get(node.name);
         if (!t) throw new Error(`codegen: unknown identifier "${node.name}"`);
         if (t.kind === typeKinds.ref) {

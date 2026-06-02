@@ -1,0 +1,92 @@
+/* 
+  Author: Tom Karnau
+
+  
+  Main lexer logic
+*/
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+import { Result } from "std/core/types.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Display } from "std/core/traits.yoop";
+import * as log from "std/log.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { skipWhitespace } from "./charUtils.yoop";
+import { TokenTags } from "../contracts.yoop";
+
+export type Token implements Display {
+  tag: TokenTags,
+  start: usize,
+  length: int,
+  intVal: int,
+  floatVal: float,
+  function to_string(ref self): string {
+    return `tag: ${self.tag}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
+  }
+}
+
+type LexedVal {
+  token: Token,
+  nextPos: usize,
+}
+
+type LexedError {
+  pos: usize,
+  error: string,
+}
+
+export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+  let res: LexedVal = {
+    token: {
+      tag: TokenTags.EOF, // start as EOF
+      start: pos,
+      length: 0,
+      intVal: 0,
+      floatVal: 0.0,
+    },
+    nextPos: pos,
+  };
+
+  // skip whitespace
+  let p = skipWhitespace(src, pos);
+  if (p >= src.len) {
+    res.token.tag = TokenTags.EOF;
+    res.token.start = p;
+    res.nextPos = p;
+
+    return Result.Ok { value: res };
+  }
+
+  let ch = src[p];
+
+  return Result.Err { error: { error: "lexNext not yet implemented", pos: pos  } };
+}
+
+// we need to do so much single-character peeking and processing
+// that we will just use a uint8[] instead of a string for lexing.
+export function tokenize(src: uint8[]): Result<Token[], string> {
+  // should just allocate enough space for all possible / 2 for now... this might be a mistake :)
+  disposable tokens: Vec<Token> = vec.vec_new((src.len / 2) + 1); // minimum of 1
+  let pos: usize = 0;
+  let iters = 0;
+  const maxIters = int32(src.len * 2 + 100);
+
+  while (iters < maxIters) {
+    iters = iters + 1;
+    const lexResult = lexNext(src, pos);
+    switch (lexResult) {
+      case Result.Err { error: e } : {
+        return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };
+      }
+      case Result.Ok { value: v } : {
+        vec.vec_push(ref tokens, v.token); // push either way for now...
+        if (v.token.tag == TokenTags.EOF) {
+          return Result.Ok { value: vec.vec_as_array(ref tokens) };
+        }
+        pos = v.nextPos;
+      }
+    }
+  }
+
+  return Result.Err { error: "tokenize: exceeded iteration failsafe" };
+}

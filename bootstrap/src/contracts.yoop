@@ -1,17 +1,8 @@
-/* 
-  Author: Tom Karnau
+import * as debug from "std/debug.yoop";
+import { Comparable, quickSort } from "./utils/arrayUtils.yoop";
 
-  
-  Main lexer logic
-*/
 
-import * as vec, { Vec } from "std/core/vec.yoop";
-import { Result } from "std/core/types.yoop";
-import { Disposable, disposable } from "std/core/kinds.yoop";
-import { Display } from "std/core/traits.yoop";
-import * as log from "std/log.yoop";
-
-enum TokenTags<string> {
+export enum TokenTags<string> {
   // atoms
   EOF "EOF",
   IDENT "IDENT", // NOT A KEYWORD
@@ -148,71 +139,78 @@ enum TokenTags<string> {
   AT "AT",
 }
 
+// should move these into std or something perhaps
 
-export type Token implements Display {
+export type SortedTokenDefinition implements Comparable<SortedTokenDefinition> {
+  str: string, // the value in source code that points to a tag
   tag: TokenTags,
-  start: int,
-  length: int,
-  intVal: int,
-  floatVal: float,
-  function to_string(ref self): string {
-    return `tag: ${self.tag}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
-  }
-}
-
-type LexedVal {
-  token: Token,
-  nextPos: int,
-}
-
-type LexedError {
-  pos: int,
-  error: string,
-}
-
-export function lexNext(src: string, pos: int32): Result<LexedVal, LexedError> {
-  let res: LexedVal = {
-    token: {
-      tag: TokenTags.EOF, // start as EOF
-      start: pos,
-      length: 0,
-      intVal: 0,
-      floatVal: 0.0,
-    },
-    nextPos: pos,
-  };
-
-  // skip whitespace
-  
-
-
-  return Result.Err { error: { error: "lexNext not yet implemented", pos: pos  } };
-}
-
-
-export function tokenize(src: string): Result<Token[], string> {
-  // should just allocate enough space for all possible / 2 for now... this might be a mistake :)
-  disposable tokens: Vec<Token> = vec.vec_new((src.len / 2) + 1); // minimum of 1
-  let pos = 0;
-  let iters = 0;
-  const maxIters = int32(src.len * 2 + 100);
-
-  while (iters < maxIters) {
-    iters += 1;
-    const lexResult = lexNext(src, pos);
-    switch (lexResult) {
-      case Result.Err { error: e } : {
-        log.error(`lexer error at ${e.pos}: ${e.error}`);
-      }
-      case Result.Ok { value: v } : {
-        if (v.token.tag == TokenTags.EOF) {
-          return Result.Ok { value: vec.vec_as_array(ref tokens) };
-        }
-        vec.vec_push(ref tokens, v.token);
-        pos = v.nextPos;
-      }
+  function compare(ref self, b: SortedTokenDefinition): int8 {
+    if (self.str.len < b.str.len) {
+      return 1;
+    } else if (self.str.len > b.str.len) {
+      return -1;
+    } else {
+      return 0;
     }
   }
-
-  return Result.Err { error: "tokenize: exceeded iteration failsafe" };
 }
+
+// vtable Comparator<T> for Comparable<T> {
+//   compare: (b: T) => int8,
+// }
+
+function sortedDefs(arr: SortedTokenDefinition[]): SortedTokenDefinition[] {
+  quickSort(arr, 0, arr.len - 1);
+  return arr;
+}
+ 
+// needs to be sorted...
+export const tokenDelimAndOpList: SortedTokenDefinition[] = sortedDefs([
+  { str: "{", tag: TokenTags.LPAREN },
+  { str: ")", tag: TokenTags.RPAREN },
+  { str: ";", tag: TokenTags.SEMICOLON },
+  { str: "=", tag: TokenTags.EQ },
+  { str: "{", tag: TokenTags.LCURLY },
+  { str: "}", tag: TokenTags.RCURLY },
+  { str: ":", tag: TokenTags.COLON },
+  { str: ",", tag: TokenTags.COMMA },
+  { str: "?", tag: TokenTags.QUESTION },
+  { str: "==", tag: TokenTags.EQEQ },
+  { str: "!=", tag: TokenTags.NEQ },
+  { str: "!", tag: TokenTags.BANG },
+  { str: "^", tag: TokenTags.CARET },
+  { str: "~", tag: TokenTags.TILDE },
+  { str: "<=", tag: TokenTags.LTE },
+  { str: ">=", tag: TokenTags.GTE },
+  { str: "<", tag: TokenTags.LT },
+  { str: ">", tag: TokenTags.GT },
+  { str: "&&", tag: TokenTags.ANDAND },
+  { str: "&", tag: TokenTags.AMP },
+  { str: "||", tag: TokenTags.OROR },
+  { str: "|", tag: TokenTags.PIPE },
+  { str: "<<", tag: TokenTags.LSHIFT },
+  { str: ">>", tag: TokenTags.RSHIFT },
+  { str: "+", tag: TokenTags.PLUS },
+  { str: "-", tag: TokenTags.MINUS },
+  { str: "*", tag: TokenTags.MULT },
+  { str: "/", tag: TokenTags.DIVIDE },
+  { str: "%", tag: TokenTags.MODULUS },
+  // Phase 9: compound-assignment two-char operators. Longest-first sort puts
+  // these before the single-char arithmetic ops above.
+  { str: "+=", tag: TokenTags.PLUSEQ },
+  { str: "-=", tag: TokenTags.MINUSEQ },
+  { str: "*=", tag: TokenTags.MULTEQ },
+  { str: "/=", tag: TokenTags.DIVIDEEQ },
+  { str: "%=", tag: TokenTags.MODULUSEQ },
+  // Phase 9.G: function value type separator. Longest-first sort puts this
+  // before `=` and before `>=` / `>`; the lexer's existing logic handles
+  // the disambiguation against `==`.
+  { str: "=>", tag: TokenTags.FATARROW },
+  { str: ".", tag: TokenTags.DOT },
+  { str: "..", tag: TokenTags.DOTDOT },
+  { str: "...", tag: TokenTags.DOTDOTDOT },
+  { str: "[", tag: TokenTags.LBRACKET },
+  { str: "]", tag: TokenTags.RBRACKET },
+  // Phase 11.A: attribute prefix `@`.
+  { str: "@", tag: TokenTags.AT },
+]);

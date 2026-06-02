@@ -225,14 +225,42 @@ function resolveIdent(node, scope, ctx) {
 
 // `a + b`, `a == b`, `a && b` - recurses into both sides, then asks
 // unifyArith for the resulting type given the operator.
+// Render a binary-op token tag (`node.op`, e.g. "lt") back to its source
+// symbol for diagnostics. Falls back to the tag itself for anything unmapped.
+const BIN_OP_SYMBOLS = {
+  plus: "+", minus: "-", mult: "*", divide: "/", modulus: "%",
+  eqeq: "==", neq: "!=", lt: "<", gt: ">", lte: "<=", gte: ">=",
+  andand: "&&", oror: "||", pipe: "|", amp: "&", caret: "^",
+  lshift: "<<", rshift: ">>",
+};
+function binOpSymbol(op) {
+  return BIN_OP_SYMBOLS[op] ?? op;
+}
+
 function resolveBinary(node, scope, ctx) {
   const leftType = resolveExprType(node.left, scope, ctx);
   const rightType = resolveExprType(node.right, scope, ctx);
   const resultType = unifyArith(leftType, rightType, node.op);
+  // unifyArith is a pure function with no error channel: it returns null for
+  // every operand-type mismatch (e.g. `int32 < usize` - both typed, not
+  // equal, no implicit widening). resolveExprType must never return null (the
+  // statement checkers dereference `.kind` on every result), so convert a null
+  // into a clear diagnostic + ErrorType here. Suppress the secondary error if
+  // an operand already failed - the root cause was reported there.
+  if (!resultType) {
+    if (leftType.kind !== typeKinds.error && rightType.kind !== typeKinds.error) {
+      pushError(
+        ctx.errors,
+        node,
+        `operator "${binOpSymbol(node.op)}" cannot be applied to ${formatType(leftType)} and ${formatType(rightType)}`,
+      );
+    }
+    return setType(node, ErrorType());
+  }
   // Pin untyped literal operands to the unified type so downstream (codegen)
   // doesn't have to second-guess their precision. E.g. `b.hue + 0.015` where
   // b.hue is float32 should coerce 0.015 from untypedFloat to float32.
-  if (resultType && resultType.kind === typeKinds.prim) {
+  if (resultType.kind === typeKinds.prim) {
     coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
     coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
   }

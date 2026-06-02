@@ -126,6 +126,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("generic_quicksort.yoop: trait-bounded generic fn dispatches a generic trait method through a type param", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_quicksort.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "1 2 3 5 5 7 9 \n");
+  });
+
   it("keyword_field_names.yoop: reserved keywords accepted in name-only positions", () => {
     const { stdout, exitCode } = runFixture(
       "examples/pass/keyword_field_names.yoop",
@@ -659,6 +665,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/value_enum_template.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "level=warn color=2\nfirst=info count=1\n");
+  });
+
+  it("value_enum_to_string.yoop: value enum in a string-producing template literal", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/value_enum_to_string.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "level=error color=1\n");
   });
 
   it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {

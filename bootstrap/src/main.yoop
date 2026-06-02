@@ -9,10 +9,13 @@
 
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
+import * as strings from "std/core/strings.yoop";
 
-import { isHexDigit } from "./charUtils.yoop";
-import { tokenize, Token } from "./lexer.yoop";
+import { isHexDigit } from "./sourceCodeProcessing/charUtils.yoop";
+import { tokenize, Token } from "./sourceCodeProcessing/lexer.yoop";
+import { tokenDelimAndOpList } from "./contracts.yoop";
 
 // @precompile {
 //   log.info("hello, yooper from a precompile!");
@@ -20,6 +23,8 @@ import { tokenize, Token } from "./lexer.yoop";
 
 function main(): int {
   log.info("hello, yooper!");
+
+  runCompilerAssertions();
 
   // const testStr = "ello";
   // const testStrBytes = intr.string_as_bytes(testStr);
@@ -29,12 +34,14 @@ function main(): int {
 
   const testStr = `
     // test program
-    function main(): int {
-      return 0;
-    }
+    /* 
+      this is a test
+    */
   `;
 
-  const tokenizeResult = tokenize(testStr);
+  const bytes = intr.string_as_bytes(testStr);
+
+  const tokenizeResult = tokenize(bytes);
   switch (tokenizeResult){
     case Result.Err { error: e } : {
       log.info(`tokenize error: ${e}`);
@@ -49,4 +56,8 @@ function main(): int {
   // log.info(`tokenize result ${tokenizeResult}`);
 
   return 0;
+}
+
+function runCompilerAssertions(): void {
+  debug.assert(strings.string_eq(tokenDelimAndOpList[0].str, "..."), "TokenDelimAndOpList is not sorted");
 }
