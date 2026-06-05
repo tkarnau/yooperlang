@@ -38,7 +38,15 @@ function main(): int {
       this is a test
     */
     ;{}...,'\\xFF'
-    "teststr"`;
+    "teststr"
+    0xFF
+    13.54
+    return return function main(): int {
+      printf("hello, world!");
+
+      return 0;
+    }
+    `;
 
   const bytes = intr.string_as_bytes(testStr);
 

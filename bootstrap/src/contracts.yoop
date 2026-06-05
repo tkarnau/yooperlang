@@ -168,7 +168,7 @@ function sortedDefs(arr: SortedTokenDefinition[]): SortedTokenDefinition[] {
 // needs to be sorted by largest scannable to smallest by char count
 // so that `...` is found instead of `.`, `.`, `.`
 export const tokenScanList: SortedTokenDefinition[] = sortedDefs([
-  { str: "{", tag: TokenTags.LPAREN },
+  { str: "(", tag: TokenTags.LPAREN },
   { str: ")", tag: TokenTags.RPAREN },
   { str: ";", tag: TokenTags.SEMICOLON },
   { str: "=", tag: TokenTags.EQ },
@@ -216,3 +216,76 @@ export const tokenScanList: SortedTokenDefinition[] = sortedDefs([
   // Phase 11.A: attribute prefix `@`.
   { str: "@", tag: TokenTags.AT },
 ]);
+
+// A reserved word that `lexIdentifierOrKeyword` promotes from IDENT to its
+// dedicated tag on an exact match. Unlike `tokenScanList`, order does not
+// matter here: `scanIdentity` already gave us a whole-word boundary, so we
+// only ever compare complete tokens (no prefix ambiguity to length-sort away).
+export type KeywordDefinition {
+  str: string, // the exact lowercase source spelling
+  tag: TokenTags,
+}
+
+// Mirrors the JS lexer's `keywordTagList`. Two intentional notes carried over:
+//   * `contains` is absent - it's recognized CONTEXTUALLY by the parser inside
+//     kind decls / propagation clauses, so it stays usable as a plain ident.
+//   * `_` lexes to DISCARD - bare underscores are discarded.
+export const keywordList: KeywordDefinition[] = [
+  { str: "let",            tag: TokenTags.LET },
+  { str: "function",       tag: TokenTags.FUNCTION },
+  { str: "const",          tag: TokenTags.CONST },
+  { str: "return",         tag: TokenTags.RETURN },
+  { str: "if",             tag: TokenTags.IF },
+  { str: "else",           tag: TokenTags.ELSE },
+  { str: "while",          tag: TokenTags.WHILE },
+  { str: "for",            tag: TokenTags.FOR },
+  { str: "in",             tag: TokenTags.IN },
+  { str: "type",           tag: TokenTags.TYPE },
+  { str: "import",         tag: TokenTags.IMPORT },
+  { str: "export",         tag: TokenTags.EXPORT },
+  { str: "extern",         tag: TokenTags.EXTERN },
+  { str: "from",           tag: TokenTags.FROM },
+  { str: "as",             tag: TokenTags.AS },
+  { str: "library",        tag: TokenTags.LIBRARY },
+  { str: "ref",            tag: TokenTags.REF },
+  { str: "break",          tag: TokenTags.BREAK },
+  { str: "continue",       tag: TokenTags.CONTINUE },
+  { str: "true",           tag: TokenTags.TRUE },
+  { str: "false",          tag: TokenTags.FALSE },
+  { str: "trait",          tag: TokenTags.TRAIT },
+  { str: "implements",     tag: TokenTags.IMPLEMENTS },
+  { str: "self",           tag: TokenTags.SELF },
+  { str: "extends",        tag: TokenTags.EXTENDS },
+  { str: "vtable",         tag: TokenTags.VTABLE },
+  { str: "kind",           tag: TokenTags.KIND },
+  { str: "appliesTo",      tag: TokenTags.APPLIESTO },
+  { str: "requires",       tag: TokenTags.REQUIRES },
+  { str: "mustCall",       tag: TokenTags.MUSTCALL },
+  { str: "ownsBlock",      tag: TokenTags.OWNSBLOCK },
+  { str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND },
+  { str: "binding",        tag: TokenTags.BINDING },
+  { str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE },
+  { str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE },
+  { str: "forbids",        tag: TokenTags.FORBIDS },
+  { str: "scope",          tag: TokenTags.SCOPE },
+  { str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES },
+  { str: "parameter",      tag: TokenTags.PARAMETER },
+  { str: "field",          tag: TokenTags.FIELD },
+  { str: "io",             tag: TokenTags.IO },
+  { str: "globalState",    tag: TokenTags.GLOBALSTATE },
+  { str: "task",           tag: TokenTags.TASK },
+  { str: "wait",           tag: TokenTags.WAIT },
+  { str: "joined",         tag: TokenTags.JOINED },
+  { str: "pooled",         tag: TokenTags.POOLED },
+  { str: "propagates",     tag: TokenTags.PROPAGATES },
+  { str: "layout",         tag: TokenTags.LAYOUT },
+  { str: "align",          tag: TokenTags.ALIGN },
+  { str: "switch",         tag: TokenTags.SWITCH },
+  { str: "case",           tag: TokenTags.CASE },
+  { str: "default",        tag: TokenTags.DEFAULT },
+  { str: "enum",           tag: TokenTags.ENUM },
+  { str: "variant",        tag: TokenTags.VARIANT },
+  { str: "union",          tag: TokenTags.UNION },
+  { str: "null",           tag: TokenTags.NULL },
+  { str: "_",              tag: TokenTags.DISCARD },
+];

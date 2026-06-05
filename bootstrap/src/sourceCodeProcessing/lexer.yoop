@@ -10,6 +10,7 @@ import * as bytes from "std/core/bytes.yoop";
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import * as numbers from "std/core/numbers.yoop";
+import * as strings from "std/core/strings.yoop";
 import { Result } from "std/core/types.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Display } from "std/core/traits.yoop";
@@ -19,15 +20,21 @@ import {
   scanStringLiteral,
   isDigit,
   scanHexDigitsAndUnderscores,
+  scanBinDigitsAndUnderscores,
+  scanOctDigitsAndUnderscores,
+  scanDecDigitsAndUnderscores,
+  scanIdentity,
+  isIdentStart,
+  digitValue,
 } from "./charUtils.yoop";
-import { TokenTags, tokenScanList } from "../contracts.yoop";
+import { TokenTags, tokenScanList, keywordList } from "../contracts.yoop";
 
 export type Token implements Display {
   tag: TokenTags,
   start: usize,
   length: int,
   intVal: int,
-  floatVal: float,
+  floatVal: float64,
   function to_string(ref self): string {
     return `tag: ${self.tag}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
   }
@@ -233,8 +240,179 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
           end = v;
         }
       }
+    } else if (next == 'b') {
+      base = 2;
+      pos += 2;
+      digitsStart = pos;
+      const scanBinResult = scanBinDigitsAndUnderscores(src, pos);
+      switch (scanBinResult) {
+        case Result.Err { error: e }: {
+          return Result.Err { error: { error: e, pos: pos } };
+        }
+        case Result.Ok { value: v }: {
+          end = v;
+        }
+      }
+    } else if (next == 'o') {
+      base = 2;
+      pos += 2;
+      digitsStart = pos;
+      const scanOctResult = scanOctDigitsAndUnderscores(src, pos);
+      switch (scanOctResult) {
+        case Result.Err { error: e }: {
+          return Result.Err { error: { error: e, pos: pos } };
+        }
+        case Result.Ok { value: v }: {
+          end = v;
+        }
+      }
+    } else {
+      const scanDecResult = scanDecDigitsAndUnderscores(src, pos);
+      switch (scanDecResult) {
+        case Result.Err { error: e }: {
+          return Result.Err { error: { error: e, pos: pos } };
+        }
+        case Result.Ok { value: v }: {
+          end = v;
+        }
+      }
+    }
+  } else {
+    const scanDecResult = scanDecDigitsAndUnderscores(src, pos);
+    switch (scanDecResult) {
+      case Result.Err { error: e }: {
+        return Result.Err { error: { error: e, pos: pos } };
+      }
+      case Result.Ok { value: v }: {
+        end = v;
+      }
     }
   }
+
+  // float fractional part - only legal in base10
+  if (base == 10 && end < src.len && src[end] == '.' && isDigit(src[end + 1])) {
+    isFloat = true;
+    end += 1;
+    const scanDecResult = scanDecDigitsAndUnderscores(src, end);
+    switch (scanDecResult) {
+      case Result.Err { error: e }: {
+        return Result.Err { error: { error: e, pos: pos } };
+      }
+      case Result.Ok { value: v }: {
+        end = v;
+      }
+    }
+  }
+
+  // float exponent - only legal in base10
+  if (base == 10 && end < src.len && src[end] == 'e') {
+    isFloat = true;
+    end += 1;
+    if (src[end] == '+' || src[end] == '-') {
+      end += 1;
+    }
+    const scanDecResult = scanDecDigitsAndUnderscores(src, end);
+    switch (scanDecResult) {
+      case Result.Err { error: e }: {
+        return Result.Err { error: { error: e, pos: pos } };
+      }
+      case Result.Ok { value: v }: {
+        end = v;
+      }
+    }
+  }
+
+  // parse the numeric value
+  let res = createLexedVal();
+  if (isFloat) {
+    // base is always 10 here (isFloat only set in the base-10 paths)
+    let mantissa = 0.0;
+    let fracDigits = 0;
+    let seenDot = false;
+    let expSign = 1;
+    let expVal = 0;
+    let i = digitsStart;
+    while (i < end) {
+      const ch = src[i];
+      if (ch == '_') {
+        // skip separator
+      } else if (ch == '.') {
+        seenDot = true;
+      } else if (ch == 'e' || ch == 'E') {
+        i += 1;
+        if (i < end && (src[i] == '+' || src[i] == '-')) {
+          if (src[i] == '-') { expSign = -1; }
+          i += 1;
+        }
+        while (i < end) {
+          if (src[i] != '_') { expVal = expVal * 10 + digitValue(src[i]); }
+          i += 1;
+        }
+        // exponent consumed the rest
+      } else {
+        mantissa = mantissa * 10.0 + float64(digitValue(ch));
+        if (seenDot) { fracDigits += 1; }
+      }
+      i += 1;
+    }
+
+    let p = expSign * expVal - fracDigits;
+    let value = mantissa;
+    while (p > 0) { value = value * 10.0; p -= 1; }
+    while (p < 0) { value = value / 10.0; p += 1; }
+
+    res.token.tag = TokenTags.FLOATLITERAL;
+    res.token.floatVal = value;
+  } else {
+    let value = 0;
+    let i = digitsStart;
+    while (i < end) {
+      const ch = src[i];
+      if (ch != '_') { value = value * base + digitValue(ch); }
+      i += 1;
+    }
+    res.token.tag = TokenTags.INTLITERAL;
+    res.token.intVal = value;
+  }
+
+  res.token.start = start;
+  res.token.length = int32(end - start);
+  res.nextPos = end;
+  return Result.Ok { value: res };
+}
+
+function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+  let res = createLexedVal();
+  let end = scanIdentity(src, pos);
+  let len = end - pos;
+  res.token.start = pos;
+  res.nextPos = end;
+  res.token.length = int32(len);
+
+  const byteSubstr = bytes.bytes_slice(src, pos, end);
+  let str: string = "";
+  switch (strings.string_from_bytes(byteSubstr)) {
+    case Result.Err { error: e }: {
+      return Result.Err { error: { error: `invalid identifier bytes: ${e}`, pos: pos } };
+    }
+    case Result.Ok { value: v }: {
+      str = v;
+    }
+  }
+
+  // Default to a plain identifier; promote to a keyword tag on an exact match.
+  // This is the array-scan analogue of the JS `keywordTagList[value]` lookup -
+  // Yoop has no map indexing operator, so we mirror `tokenScanList` and walk
+  // the small reserved-word table with `string_eq`.
+  res.token.tag = TokenTags.IDENT;
+  for kw in keywordList {
+    if (strings.string_eq(str, kw.str)) {
+      res.token.tag = kw.tag;
+      break;
+    }
+  }
+
+  return Result.Ok { value: res };
 }
 
 export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
@@ -302,10 +480,15 @@ export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
 
   // numeric literal?
   if (isDigit(ch)) {
-
+    return lexNumericLiteral(src, p);
   }
 
-  return Result.Err { error: { error: "lexNext not yet implemented", pos: pos  } };
+  // identifier or keyword?
+  if (isIdentStart(ch)) {
+    return lexIdentifierOrKeyword(src, p);
+  }
+
+  return Result.Err { error: { error: "unrecognized character at position", pos: pos  } };
 }
 
 // we need to do so much single-character peeking and processing

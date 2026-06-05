@@ -96,8 +96,27 @@ export function isDigit(ch: uint8): bool {
   return ch >= '0' && ch <= '9';
 }
 
+export function isBinDigit(ch: uint8): bool {
+  return ch == '0' || ch == '1';
+}
+
+export function isOctDigit(ch:uint8): bool {
+  return ch >= '0' && ch <= '7';
+}
+
 function isAlpha(ch: uint8): bool {
   return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+}
+
+function isAlphaNumOr_(ch: uint8): bool {
+  return isAlpha(ch) || isDigit(ch) || ch == '_';
+}
+
+// An identifier (or keyword) may start with a letter or an underscore, but not
+// a digit - that is `lexNumericLiteral`'s job. The rest of the run is scanned
+// by `scanIdentity`.
+export function isIdentStart(ch: uint8): bool {
+  return isAlpha(ch) || ch == '_';
 }
 
 // scan functions
@@ -111,6 +130,18 @@ function isAlpha(ch: uint8): bool {
 
 function hexDigitPred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
   return Result.Ok { value: isHexDigit(src[pos]) };
+}
+
+function binDigitPred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+  return Result.Ok { value: isBinDigit(src[pos]) };
+}
+
+function octDigitPred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+  return Result.Ok { value: isOctDigit(src[pos]) };
+}
+
+function decDigitPred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+  return Result.Ok { value: isDigit(src[pos]) };
 }
 
 function validUnderscorePred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
@@ -164,8 +195,12 @@ function scanCharPredicates(
   return Result.Ok { value: p };
 }
 
+function allocDigitPredicateArr(size: usize): ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] {
+  return intr.heap_alloc(size);
+}
+
 export function scanHexDigitsAndUnderscores(src: uint8[], start: usize): Result<usize, string> {
-  let predicates: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] = intr.heap_alloc(2);
+  let predicates = allocDigitPredicateArr(2);
   predicates[0] = hexDigitPred;
   predicates[1] = validUnderscorePred;
   const result = scanCharPredicates(src, start, ref predicates);
@@ -173,6 +208,38 @@ export function scanHexDigitsAndUnderscores(src: uint8[], start: usize): Result<
   intr.heap_free(predicates);
   return result;
 }
+
+export function scanBinDigitsAndUnderscores(src: uint8[], start: usize): Result<usize, string> {
+  let predicates = allocDigitPredicateArr(2);
+  predicates[0] = binDigitPred;
+  predicates[1] = validUnderscorePred;
+  const result = scanCharPredicates(src, start, ref predicates);
+
+  intr.heap_free(predicates);
+  return result;
+}
+
+export function scanOctDigitsAndUnderscores(src: uint8[], start: usize): Result<usize, string> {
+  let predicates = allocDigitPredicateArr(2);
+  predicates[0] = octDigitPred;
+  predicates[1] = validUnderscorePred;
+  const result = scanCharPredicates(src, start, ref predicates);
+
+  intr.heap_free(predicates);
+  return result;
+}
+
+export function scanDecDigitsAndUnderscores(src: uint8[], start: usize): Result<usize, string> {
+  let predicates = allocDigitPredicateArr(2);
+  predicates[0] = decDigitPred;
+  predicates[1] = validUnderscorePred;
+  const result = scanCharPredicates(src, start, ref predicates);
+
+  intr.heap_free(predicates);
+  return result;
+}
+
+
 
 export function scanStringLiteral(src: uint8[], start: usize): Option<usize> {
   const quote = src[start];
@@ -188,4 +255,25 @@ export function scanStringLiteral(src: uint8[], start: usize): Option<usize> {
     }
   }
   return Option.None;
+}
+
+export function scanIdentity(src: uint8[], start: usize): usize {
+  let p = start;
+  while (p < src.len) {
+    const ch = src[p];
+    if (isAlphaNumOr_(ch)) {
+      p += 1;
+    } else {
+      break;
+    }
+  }
+
+  return p;
+}
+
+export function digitValue(ch: uint8): int {
+  if (ch >= '0' && ch <= '9') { return int(ch - '0'); }
+  if (ch >= 'a' && ch <= 'f') { return int(ch - 'a') + 10; }
+  if (ch >= 'A' && ch <= 'F') { return int(ch - 'A') + 10; }
+  return 0;
 }
