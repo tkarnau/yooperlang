@@ -8,6 +8,7 @@ export enum TokenTags<string> {
   IDENT "IDENT", // NOT A KEYWORD
   INTLITERAL "INTLITERAL",
   STRLITERAL "STRLITERAL", // INCLUDED WRAPPING QUOTE CHARACTERS
+  CHARLITERAL "CHARLITERAL",
   TEMPLATELITERAL "TEMPLATELITERAL", // BACKTICK-QUOTED, MAY CONTAIN ${...} INTERPOLATIONS
   FLOATLITERAL "FLOATLITERAL",
 
@@ -163,9 +164,10 @@ function sortedDefs(arr: SortedTokenDefinition[]): SortedTokenDefinition[] {
   quickSort(arr, 0, arr.len - 1);
   return arr;
 }
- 
-// needs to be sorted...
-export const tokenDelimAndOpList: SortedTokenDefinition[] = sortedDefs([
+
+// needs to be sorted by largest scannable to smallest by char count
+// so that `...` is found instead of `.`, `.`, `.`
+export const tokenScanList: SortedTokenDefinition[] = sortedDefs([
   { str: "{", tag: TokenTags.LPAREN },
   { str: ")", tag: TokenTags.RPAREN },
   { str: ";", tag: TokenTags.SEMICOLON },

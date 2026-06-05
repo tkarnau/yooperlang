@@ -456,6 +456,20 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
+  // Phase 10.K: a bare identifier callee that resolves to an in-scope binding
+  // of FunctionPointerType is an indirect call through that binding - a
+  // function-pointer parameter or local (`pred(ch)` where `pred:
+  // (ch: uint8) => bool`). This is the bare-identifier sibling of the
+  // FIELD_ACCESS fn-ptr-field call above. Module-level functions live in
+  // moduleSymbols (checked below), not the lexical scope, so a real function
+  // call never reaches here.
+  if (typeof callee === "string") {
+    const binding = lookupInScope(scope, callee);
+    if (binding && binding.type?.kind === typeKinds.functionPointer) {
+      return resolveFunctionPointerCall(node, binding.type, scope, ctx);
+    }
+  }
+
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
     // Phase 7.4: bare-form `m(ref x)` is no longer a trait dispatch path.
@@ -529,6 +543,10 @@ function resolveFunctionPointerCall(node, fptType, scope, ctx) {
     );
   }
   node.fnPointerCall = true;
+  // Phase 10.K: stash the FPT so codegen has it for the bare-identifier
+  // callee case (where node.callee is a string with no .resolvedType, unlike
+  // the FIELD_ACCESS field case which carries its own resolved type).
+  node.fnPointerType = fptType;
   return setType(node, fptType.returnType);
 }
 
@@ -2558,6 +2576,14 @@ export function lookupVTableByName(name, ctx) {
 //     vtable value, but lets callers use the vtable type as the dispatch
 //     namespace (matches the library-design surface in §8 q1).
 function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
+  // Phase 10.K: `VTableName.fromFn(f1, f2, ...)` - build a vtable value
+  // directly from named functions (one per trait method, in declaration
+  // order), skipping the struct + impl boilerplate. The ctx slot is null
+  // (the functions are stateless); codegen wraps each in a ctx-dropping
+  // shim so the uniform ctx-first dispatch convention still calls them.
+  if (methodName === "fromFn") {
+    return resolveVTableFromFn(node, vtableType, scope, ctx);
+  }
   if (methodName !== "from") {
     // Forwarding to trait dispatch: synthesize a trait reference and route
     // through resolveTraitQualifiedCall, which already knows how to handle
@@ -2627,6 +2653,49 @@ function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
     implType: recvType,
   };
   arg.resolvedType = operandType;
+  return setType(node, vtableType);
+}
+
+// Phase 10.K: `VTableName.fromFn(f1, f2, ...)`. One named function per trait
+// method, in declaration order. Each function's FuncType must be assignable
+// to the matching method's function-pointer slot (params + return). Args must
+// be *named functions* (FuncType) - not runtime function-pointer values - so
+// codegen can take their address statically and synthesize the ctx-dropping
+// shim. The result is a vtable value with a null ctx.
+function resolveVTableFromFn(node, vtableType, scope, ctx) {
+  const expected = vtableType.methodOrder.length;
+  if (node.args.length !== expected) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.fromFn(...)\` expects ${expected} function argument(s) (one per method of trait "${vtableType.traitName}"), got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  for (let i = 0; i < node.args.length; i++) {
+    const arg = node.args[i];
+    const argType = resolveExprType(arg, scope, ctx);
+    if (!argType || argType.kind === typeKinds.error) continue;
+    if (argType.kind !== typeKinds.func) {
+      pushError(
+        ctx.errors,
+        node,
+        `\`${vtableType.name}.fromFn(...)\` argument ${i + 1} must be a named function, got ${formatType(argType)}`,
+      );
+      continue;
+    }
+    const fieldFpt = vtableType.fields[i].type;
+    if (fieldFpt.kind !== typeKinds.functionPointer) continue; // vtable decl already errored
+    if (!isAssignable(fieldFpt, argType)) {
+      pushError(
+        ctx.errors,
+        node,
+        `\`${vtableType.name}.fromFn(...)\` argument ${i + 1} has type ${formatType(argType)}, which does not match method "${vtableType.methodOrder[i]}" of trait "${vtableType.traitName}" (expected ${formatType(fieldFpt)})`,
+      );
+    }
+  }
+  node.vtableFromFnBuilder = { vtableType };
   return setType(node, vtableType);
 }
 

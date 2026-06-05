@@ -190,6 +190,60 @@ describe("lexer: string and template literals", () => {
   });
 });
 
+describe("lexer: char literals", () => {
+  it("a plain ASCII char lexes to its codepoint", () => {
+    const tokens = tokenize("'A'");
+    assert.equal(tokens[0].tag, tag("charLiteral"));
+    assert.equal(tokens[0].intVal, 65);
+    assert.equal(tokens[0].length, 3);
+  });
+
+  it("a punctuation char lexes to its codepoint", () => {
+    const tokens = tokenize("'/'");
+    assert.equal(tokens[0].tag, tag("charLiteral"));
+    assert.equal(tokens[0].intVal, 47);
+  });
+
+  it("escape sequences decode to control codepoints", () => {
+    assert.equal(tokenize("'\\n'")[0].intVal, 10);
+    assert.equal(tokenize("'\\r'")[0].intVal, 13);
+    assert.equal(tokenize("'\\t'")[0].intVal, 9);
+    assert.equal(tokenize("'\\0'")[0].intVal, 0);
+    assert.equal(tokenize("'\\\\'")[0].intVal, 92);
+    assert.equal(tokenize("'\\''")[0].intVal, 39);
+  });
+
+  it("\\xNN hex escape decodes to the byte value", () => {
+    assert.equal(tokenize("'\\x41'")[0].intVal, 65);
+    assert.equal(tokenize("'\\xff'")[0].intVal, 255);
+  });
+
+  it("an astral scalar decodes to its full codepoint", () => {
+    // U+1F600 GRINNING FACE
+    assert.equal(tokenize("'\u{1F600}'")[0].intVal, 0x1f600);
+  });
+
+  it("rejects an empty char literal", () => {
+    assert.throws(() => tokenize("''"), /empty char literal/);
+  });
+
+  it("rejects a multi-character char literal", () => {
+    assert.throws(() => tokenize("'ab'"), /single character/);
+  });
+
+  it("rejects an unterminated char literal", () => {
+    assert.throws(() => tokenize("'a"), /unterminated char literal/);
+  });
+
+  it("rejects an unknown escape", () => {
+    assert.throws(() => tokenize("'\\q'"), /unknown escape/);
+  });
+
+  it("rejects a malformed \\x escape", () => {
+    assert.throws(() => tokenize("'\\xZZ'"), /invalid \\x escape/);
+  });
+});
+
 describe("lexer: whitespace handling", () => {
   it("skips spaces, tabs, newlines between tokens", () => {
     const tokens = tokenize("  let \n\tx  =  1 ");

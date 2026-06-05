@@ -1,0 +1,21 @@
+// Phase 10.K: `VTableName.fromFn(...)` requires each named function's
+// signature to match the corresponding method slot (trait method minus
+// `ref self`). Here `wrongReturn` returns int32 where the slot wants bool,
+// so the typechecker rejects the fromFn argument.
+
+trait CharPred {
+    function test(ref self, ch: uint8): bool;
+}
+
+vtable PredDispatcher for CharPred {
+    test: (ch: uint8) => bool,
+}
+
+function wrongReturn(ch: uint8): int32 {
+    return 1;
+}
+
+function main(): int32 {
+    let p: PredDispatcher = PredDispatcher.fromFn(wrongReturn);
+    return 0;
+}

@@ -48,6 +48,18 @@ describe("parse: expressions", () => {
     assert.equal(e.value, 42);
   });
 
+  it("char literal lowers to an INT_LITERAL carrying its codepoint", () => {
+    const e = exprOf("'A'");
+    assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.value, 65);
+  });
+
+  it("char literal escape lowers to its control codepoint", () => {
+    const e = exprOf("'\\n'");
+    assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.value, 10);
+  });
+
   it("binary + has correct shape", () => {
     const e = exprOf("1 + 2");
     assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
@@ -1476,5 +1488,53 @@ describe("parse: reserved keywords in name-only positions", () => {
       () => parse("function f(type: int32): void { return; }"),
       /expected rparen, got type/,
     );
+  });
+});
+
+// Phase 10.K: a parenthesized type group lets `[]` attach to a function type,
+// which is the only way to spell an array of function pointers.
+describe("parse: parenthesized type groups (array of function pointers)", () => {
+  function paramType(srcLine) {
+    const ast = parse(`function f(p: ${srcLine}): void { return; }`);
+    return ast.body[0].params[0].typeAnnotation;
+  }
+
+  it("`(a: int32) => bool` still parses as a bare function type", () => {
+    const t = paramType("(a: int32) => bool");
+    assert.equal(t.kind, "functionType");
+    assert.deepEqual(t.params, [{ kind: "typeName", name: "int32" }]);
+    assert.deepEqual(t.returnType, { kind: "typeName", name: "bool" });
+  });
+
+  it("`((a: int32) => bool)[]` is an array whose element is a function type", () => {
+    const t = paramType("((a: int32) => bool)[]");
+    assert.equal(t.kind, "arrayType");
+    assert.equal(t.elem.kind, "functionType");
+    assert.deepEqual(t.elem.params, [{ kind: "typeName", name: "int32" }]);
+    assert.deepEqual(t.elem.returnType, { kind: "typeName", name: "bool" });
+  });
+
+  it("`(a: int32) => bool[]` binds the `[]` to the return type (no grouping)", () => {
+    const t = paramType("(a: int32) => bool[]");
+    assert.equal(t.kind, "functionType");
+    assert.deepEqual(t.returnType, {
+      kind: "arrayType",
+      elem: { kind: "typeName", name: "bool" },
+    });
+  });
+
+  it("a parenthesized simple type with `[]` is an array of that type", () => {
+    const t = paramType("(int32)[]");
+    assert.deepEqual(t, {
+      kind: "arrayType",
+      elem: { kind: "typeName", name: "int32" },
+    });
+  });
+
+  it("nested `[]` suffixes on a group stack into nested array types", () => {
+    const t = paramType("((a: int32) => bool)[][]");
+    assert.equal(t.kind, "arrayType");
+    assert.equal(t.elem.kind, "arrayType");
+    assert.equal(t.elem.elem.kind, "functionType");
   });
 });

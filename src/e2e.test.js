@@ -109,6 +109,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("char_literals.yoop: single-quoted chars pin like untyped ints and match in switch patterns", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/char_literals.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "slashes: 2\nnewline=10 cp=65\n1230\n");
+  });
+
   it("parens_basic.yoop groups subexpressions and composes with postfix ops", () => {
     const { stdout, exitCode } = runFixture("examples/pass/parens_basic.yoop");
     assert.equal(exitCode, 0);
@@ -712,6 +718,34 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/vtable_handlers.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "req=10 sum=145\nreq=7  sum=133\nscale-only=33\n");
+  });
+
+  // Phase 10.K: `VTableName.fromFn(f1, ...)` builds a vtable from named
+  // functions (ctx-null + ctx-dropping shim), with no per-predicate struct.
+  // Exercises a heterogeneous array mixing fromFn and from(ref struct) values
+  // through one vtable type, plus a two-method vtable to pin slot ordering.
+  it("vtable_fromfn.yoop: fromFn builds vtables from named functions", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/vtable_fromfn.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "matches=6\nseven-is-digit\nlo=20 hi=11\n");
+  });
+
+  // Phase 10.K: a function-pointer parameter is callable directly by name
+  // (`pred(ch)`), and a bare top-level function name materializes as the
+  // argument - the lightest higher-order form, no vtable/struct/ctx.
+  it("fn_pointer_param.yoop: a function passed as an argument is called indirectly", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fn_pointer_param.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "digits=3\nuppers=2\nagain=2\n");
+  });
+
+  // Phase 10.K: an array of function pointers - element type spelled with a
+  // parenthesized function-value type `((p: T) => R)[]`. Names materialize
+  // into the slots, the loop variable is called directly. No vtable/struct.
+  it("fn_pointer_array.yoop: an array of function pointers scans via indirect calls", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fn_pointer_array.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "aF3: ok end=3\na_3: ok end=3\n_a3: err leading underscore\naFxy: ok end=2\n");
   });
 
   // Phase 9.I: a nested-wait chain deeper than the worker count must complete.
@@ -1523,6 +1557,17 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     assert.ok(
       errors.some((e) => /no `Into<struct AppError>` impl on struct IoError/.test(e.message)),
       `expected missing-Into error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 10.K: `VTableName.fromFn(...)` arguments must match the method slot
+  // signature. A return-type mismatch (int32 where the slot wants bool) is
+  // rejected at typecheck.
+  it("vtable_fromfn_sig_mismatch: a fromFn arg whose signature differs from the method slot is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/vtable_fromfn_sig_mismatch.yoop");
+    assert.ok(
+      errors.some((e) => /fromFn.*argument 1.*does not match method "test"/.test(e.message)),
+      `expected fromFn signature-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });

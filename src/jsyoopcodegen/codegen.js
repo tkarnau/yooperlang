@@ -182,6 +182,13 @@ function arrayElemLlvmName(elemType) {
       ? `enum_${elemType.moduleId}__${elemType.name}`
       : `enum_${elemType.name}`;
   }
+  // Phase 10.K: arrays of function pointers - `((p: T) => R)[]`. Every
+  // function pointer is a bare `ptr` at the storage layer (the typed
+  // signature lives in the yoop type and is recovered at each call site), so
+  // a single shared key is correct regardless of the pointed-to signature.
+  if (elemType.kind === typeKinds.functionPointer) {
+    return "fnptr";
+  }
   throw new Error(`arrayElemLlvmName: unsupported elem type "${elemType.kind}"`);
 }
 
@@ -1371,9 +1378,18 @@ export function codegen(ast) {
     }
 
     // Phase 10.X.2: indirect call through a fn-ptr struct field.
+    // Phase 10.K: or a bare identifier naming a fn-ptr parameter/local
+    // (string callee - load its slot instead of emitExpr'ing a node).
     if (node.fnPointerCall) {
-      const fptType = node.callee.resolvedType;
-      const fnPtr = emitExpr(node.callee, fnLines);
+      const fptType = node.fnPointerType ?? node.callee.resolvedType;
+      let fnPtr;
+      if (typeof node.callee === "string") {
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ptr, ptr ${symbols.slotFor(node.callee)}`);
+        fnPtr = { val: tmp };
+      } else {
+        fnPtr = emitExpr(node.callee, fnLines);
+      }
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
       const argList = argResults.map((r, i) =>
         `${llvmType(fptType.params[i])} ${r.val}`,
@@ -2870,6 +2886,9 @@ function codegenWithModuleId(
   const lines = [];
   const globals = [];
   const structDefs = [];
+  // Phase 10.K: ctx-dropping shims emitted for `VTableName.fromFn(...)`, keyed
+  // by shim symbol so each (module, target function) pair is emitted once.
+  const emittedFromFnShims = new Set();
   let strConstCounter = 0;
   let tempCounter = 0;
   let labelCounter = 0;
@@ -4204,10 +4223,21 @@ function codegenWithModuleId(
         const arrayType = node.resolvedType;
         ensureArrayTypeDef(arrayType.elem);
         const elemLlvmTy = llvmType(arrayType.elem);
-        const elemAlign = alignOf(elemLlvmTy);
         const n = node.elements.length;
+        // Heap-allocate the backing buffer rather than stack-alloca. An array
+        // literal's fat pointer escapes the current function whenever it is
+        // stored into a module-level global (its initializer runs inside
+        // __module_init, which returns), returned, or stashed in a struct
+        // field - a stack buffer would dangle the moment that frame unwinds
+        // (the dangling-tokenScanList bug). malloc keeps the data alive for
+        // the array's full reach. Trade-off: a non-escaping local literal now
+        // leaks until an escape analysis can reclaim it; correctness first.
+        // Deliberately NOT recorded under --track-heap: with no matching free
+        // yet, counting these would report false leaks for the common local
+        // case and skew the balanced-accounting fixtures.
+        const byteSize = n * sizeOfType(arrayType.elem);
         const dataBuf = freshTemp();
-        fnLines.push(`  ${dataBuf} = alloca [${n} x ${elemLlvmTy}], align ${elemAlign}`);
+        fnLines.push(`  ${dataBuf} = call ptr @malloc(i64 ${byteSize})`);
         for (let i = 0; i < n; i++) {
           const elemVal = emitExpr(node.elements[i], fnLines);
           const gepTmp = freshTemp();
@@ -4886,9 +4916,20 @@ function codegenWithModuleId(
     // Phase 10.X.2: indirect call through a fn-ptr struct field. The
     // typechecker tagged the CALL_EXPRESSION with `fnPointerCall`; the
     // callee is a FIELD_ACCESS whose rvalue evaluation loads the slot.
+    // Phase 10.K: the callee may instead be a bare identifier naming a
+    // function-pointer parameter or local - then it's a string, so load the
+    // pointer from its slot rather than emitExpr'ing a node.
     if (node.fnPointerCall) {
-      const fptType = node.callee.resolvedType;
-      const fnPtr = emitExpr(node.callee, fnLines);
+      const fptType = node.fnPointerType ?? node.callee.resolvedType;
+      let fnPtr;
+      if (typeof node.callee === "string") {
+        const slot = symbols.slotFor(node.callee);
+        const tmp = freshTemp();
+        fnLines.push(`  ${tmp} = load ptr, ptr ${slot}`);
+        fnPtr = { val: tmp };
+      } else {
+        fnPtr = emitExpr(node.callee, fnLines);
+      }
       const argResults = node.args.map((a) => emitExpr(a, fnLines));
       const argList = argResults.map((r, i) =>
         `${llvmType(fptType.params[i])} ${r.val}`,
@@ -4924,6 +4965,10 @@ function codegenWithModuleId(
     // Phase 9.G: `VTableName.from(ref x)` - synthesize the vtable struct.
     if (node.vtableBuilder) {
       return emitVTableFromBuilder(node, fnLines);
+    }
+    // Phase 10.K: `VTableName.fromFn(f1, ...)` - vtable from named functions.
+    if (node.vtableFromFnBuilder) {
+      return emitVTableFromFnBuilder(node, fnLines);
     }
     // Phase 9.G: `Trait.method(ref vt, args)` where vt is a vtable value -
     // lower to an indirect call through the slot, threading ctx as the
@@ -4996,6 +5041,66 @@ function codegenWithModuleId(
       const slotGep = freshTemp();
       fnLines.push(`  ${slotGep} = getelementptr inbounds ${vtLlvm}, ptr ${slot}, i32 0, i32 ${i + 1}`);
       fnLines.push(`  store ptr @${mangled}, ptr ${slotGep}`);
+    }
+
+    const loaded = freshTemp();
+    fnLines.push(`  ${loaded} = load ${vtLlvm}, ptr ${slot}`);
+    return { val: loaded, yoopType: vtableType };
+  }
+
+  // Phase 10.K: emit (once per module + target symbol) a ctx-dropping shim so
+  // a plain named function can fill a vtable method slot. Vtable dispatch
+  // always passes the ctx pointer as the first call argument; a stateless
+  // function has no ctx/self param, so the shim takes a leading `ptr` it
+  // ignores and forwards the remaining args. `fpt` is the slot's
+  // FunctionPointerType (trait method signature minus `ref self`). Pushed
+  // directly into `lines` (top-level defines), which is safe because emitFn
+  // only flushes its in-progress fnLines into `lines` at the very end.
+  function registerFromFnShim(targetSym, fpt) {
+    const shimSym = `yoop_fromfn_shim__${moduleId}__${targetSym}`;
+    if (emittedFromFnShims.has(shimSym)) return shimSym;
+    emittedFromFnShims.add(shimSym);
+    const llvmRet = llvmType(fpt.returnType);
+    const paramSig = ["ptr %ctx", ...fpt.params.map((p, i) => `${llvmType(p)} %a${i}`)].join(", ");
+    const callArgs = fpt.params.map((p, i) => `${llvmType(p)} %a${i}`).join(", ");
+    const def = [`define ${llvmRet} @${shimSym}(${paramSig}) {`, "entry:"];
+    if (llvmRet === "void") {
+      def.push(`  call void @${targetSym}(${callArgs})`);
+      def.push("  ret void");
+    } else {
+      def.push(`  %r = call ${llvmRet} @${targetSym}(${callArgs})`);
+      def.push(`  ret ${llvmRet} %r`);
+    }
+    def.push("}");
+    lines.push(...def);
+    return shimSym;
+  }
+
+  // Phase 10.K: lower `VTableName.fromFn(f1, f2, ...)` to a stack-allocated
+  // vtable whose ctx is null and whose method slots hold ctx-dropping shims
+  // (see registerFromFnShim) wrapping the named functions, in trait method
+  // declaration order. Each arg IDENT lowers to its `@symbol` address via the
+  // Phase 10.X.2 function-reference materialization.
+  function emitVTableFromFnBuilder(node, fnLines) {
+    const { vtableType } = node.vtableFromFnBuilder;
+    const vtLlvm = llvmType(vtableType);
+
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${vtLlvm}, align 8`);
+
+    // ctx = null (the functions are stateless).
+    const ctxGep = freshTemp();
+    fnLines.push(`  ${ctxGep} = getelementptr inbounds ${vtLlvm}, ptr ${slot}, i32 0, i32 0`);
+    fnLines.push(`  store ptr null, ptr ${ctxGep}`);
+
+    for (let i = 0; i < vtableType.methodOrder.length; i++) {
+      const fpt = vtableType.fields[i].type; // FunctionPointerType
+      const argRes = emitExpr(node.args[i], fnLines); // -> { val: "@sym" }
+      const targetSym = argRes.val.startsWith("@") ? argRes.val.slice(1) : argRes.val;
+      const shimSym = registerFromFnShim(targetSym, fpt);
+      const slotGep = freshTemp();
+      fnLines.push(`  ${slotGep} = getelementptr inbounds ${vtLlvm}, ptr ${slot}, i32 0, i32 ${i + 1}`);
+      fnLines.push(`  store ptr @${shimSym}, ptr ${slotGep}`);
     }
 
     const loaded = freshTemp();

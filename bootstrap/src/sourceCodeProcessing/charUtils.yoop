@@ -6,10 +6,10 @@
 
 import * as intr from "std/core/intrinsics.yoop";
 import * as log from "std/log.yoop";
+import { Option, Result } from "std/core/types.yoop";
 
-
+const whitespaceCharCodes: uint8[] = [32, 9, 13, 10];
 function isWhitespace(ch: uint8): bool {
-  const whitespaceCharCodes: uint8[] = [32, 9, 13, 10];
   for i in whitespaceCharCodes {
     if (ch == i) {
       return true;
@@ -39,7 +39,7 @@ export function skipWhitespace(src: uint8[], pos: usize): usize {
 
   while (p < src.len) {
     let ch = src[p];
-    log.info(`ch: ${ch}`);
+    // log.info(`ch: ${ch}`);
     if (isWhitespace(ch)) {
       p = p + 1;
     } else { // check for comments
@@ -80,12 +80,112 @@ export function skipWhitespace(src: uint8[], pos: usize): usize {
   return p;
 }
 
+// bool checks
+
 export function isHexDigit(ch: uint8): bool {
   const result = (
-    (ch >= 48 && ch <= 57) ||
-    (ch >= 97 && ch <= 102) ||
-    (ch >= 65 && ch <= 70)
+    isDigit(ch) ||
+    (ch >= 'a' && ch <= 'f') ||
+    (ch >= 'A' && ch <= 'F')
   );
 
   return result;
+}
+
+export function isDigit(ch: uint8): bool {
+  return ch >= '0' && ch <= '9';
+}
+
+function isAlpha(ch: uint8): bool {
+  return (ch >= 'a' && ch <= 'z') || (ch >= 'A' && ch <= 'Z');
+}
+
+// scan functions
+//
+// A scan predicate answers "does the byte at `pos` keep the run going?" and
+// may reject the whole token (the underscore rules below). Every predicate
+// gets the scanner's full context - the source, the current position, and the
+// run's start - so none of them need to capture state: they're all plain
+// top-level functions. `scanCharPredicates` takes them as a plain array of
+// function pointers - no trait, no vtable, no per-predicate struct.
+
+function hexDigitPred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+  return Result.Ok { value: isHexDigit(src[pos]) };
+}
+
+function validUnderscorePred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+  const isUnderscore = src[pos] == '_';
+  if (isUnderscore) {
+    if (pos == start) {
+      // cannot start with an underscore
+      return Result.Err { error: `numeric token at pos ${pos} starting with underscore is not allowed`};
+    }
+    if (pos + 1 >= src.len ||
+      !isHexDigit(src[pos - 1]) ||
+      !isHexDigit(src[pos + 1])) {
+      return Result.Err { error: `numeric token at pos ${pos} underscore must be surrounded by digits` };
+    }
+  }
+
+  return Result.Ok { value: isUnderscore };
+}
+
+function scanCharPredicates(
+  src: uint8[],
+  start: usize,
+  ref predicates: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[]):
+    Result<usize, string> {
+  let p = start;
+  while (p < src.len) {
+    let passed = false;
+    for predicate in predicates {
+      switch (predicate(src, p, start)) {
+        case Result.Err { error: e }: {
+          return Result.Err { error: e };
+        }
+        case Result.Ok { value: pass }: {
+          if (pass) {
+            p += 1;
+            passed = true;
+            break;
+          }
+        }
+      }
+    }
+    if (!passed) {
+      break;
+    }
+  }
+
+  if (p == start) {
+    return Result.Err { error: `expected one or more characters to satisfy a scanner predicate at pos ${p}` };
+  }
+
+  return Result.Ok { value: p };
+}
+
+export function scanHexDigitsAndUnderscores(src: uint8[], start: usize): Result<usize, string> {
+  let predicates: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] = intr.heap_alloc(2);
+  predicates[0] = hexDigitPred;
+  predicates[1] = validUnderscorePred;
+  const result = scanCharPredicates(src, start, ref predicates);
+
+  intr.heap_free(predicates);
+  return result;
+}
+
+export function scanStringLiteral(src: uint8[], start: usize): Option<usize> {
+  const quote = src[start];
+  let p = start + 1;
+  while (p < src.len) {
+    const ch = src[p];
+    if (ch == '\\') { // check for escape char
+      p += 2;
+    } else if (ch == quote) {
+      return Option.Some { value: p + 1 };
+    } else {
+      p += 1;
+    }
+  }
+  return Option.None;
 }

@@ -6,13 +6,21 @@
 */
 
 import * as vec, { Vec } from "std/core/vec.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import * as log from "std/log.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as numbers from "std/core/numbers.yoop";
 import { Result } from "std/core/types.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Display } from "std/core/traits.yoop";
-import * as log from "std/log.yoop";
-import * as intr from "std/core/intrinsics.yoop";
-import { skipWhitespace } from "./charUtils.yoop";
-import { TokenTags } from "../contracts.yoop";
+import {
+  skipWhitespace,
+  isHexDigit,
+  scanStringLiteral,
+  isDigit,
+  scanHexDigitsAndUnderscores,
+} from "./charUtils.yoop";
+import { TokenTags, tokenScanList } from "../contracts.yoop";
 
 export type Token implements Display {
   tag: TokenTags,
@@ -35,17 +43,204 @@ type LexedError {
   error: string,
 }
 
-export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
-  let res: LexedVal = {
+function createLexedVal(): LexedVal {
+  return {
     token: {
-      tag: TokenTags.EOF, // start as EOF
-      start: pos,
+      tag: TokenTags.EOF,
+      start: 0,
       length: 0,
       intVal: 0,
       floatVal: 0.0,
     },
-    nextPos: pos,
+    nextPos: 0
   };
+}
+
+function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+  let res = createLexedVal();
+  res.token.start = pos;
+
+  let p = pos + 1; // past opening quote
+  if (p >= src.len) {
+    return Result.Err { error: { error: "unterminated char literal", pos: p } };
+  }
+
+  if (src[p] == '\'') {
+    return Result.Err { error: { error: "empty char literal", pos: p } };
+  }
+
+
+  let codepoint: int = 0;
+  if (src[p] == '\\') {
+    if (p + 1 >= src.len) {
+      return Result.Err { error: { error: "unterminated char literal", pos: p } };
+    }
+    const escChar = src[p + 1];
+    switch (escChar) {
+      case 'n': {
+        codepoint = 10;
+        p += 2;
+        break;
+      }
+      case 'r': {
+        codepoint = 13;
+        p += 2;
+        break;
+      }
+      case 't': {
+        codepoint = 9;
+        p += 2;
+        break;
+      }
+      case '0': {
+        codepoint = 0;
+        p += 2;
+        break;
+      }
+      case '\\': {
+        codepoint = 92;
+        p += 2;
+        break;
+      }
+      case '\'': {
+        codepoint = 39;
+        p += 2;
+        break;
+      }
+      case '"': {
+        codepoint = 34;
+        p += 2;
+        break;
+      }
+      case 'x': {
+        const h1 = src[p + 2];
+        const h2 = src[p + 3];
+        if (!isHexDigit(h1) || !isHexDigit(h2)) {
+          return Result.Err {
+            error: {
+              error: "invalid \\x escape in char literal (expected two hex digits)",
+              pos: p 
+            }
+          };
+        }
+        switch (numbers.parseBytesToInt32([h1, h2], 16)) {
+          case Result.Err { error: e }: {
+            return Result.Err { error: { error: `unable to parse hex char literal: ${e}`, pos: p } };
+          }
+          case Result.Ok { value: v }: {
+            codepoint = v;
+            p += 4;
+          }
+        }
+        break;
+      }
+      default: {
+        return Result.Err { error: { error: `unknown escape '\\${escChar}' in char literal`, pos: p } };
+      }
+    }
+  } else {
+    // a single possibly astral Unicode scalar
+    // decode a UTF-8 scalar (add link to reference about these, confusing a bit)
+    // the first byte tells us how many more there might be to parse the full character
+    const lead = src[p];
+    let extraBytes = 0;
+    // if first bit is a 0, then it is just a single byte char
+    if (lead < 0x80) { // less than or equal to 01xxxxxx (ASCII)
+      codepoint = int(lead);
+      extraBytes = 0; // no extra bytes
+    } else if ((lead & 0xE0) == 0xC0) {
+      // 2-byte form: 110x xxxx
+      // keep the top 3 bits, lead and-ing using E (1110) and 0 (0000)
+      // and compare to C (1100)
+
+      // keep the bottom 5 value bits by and-ing with 1F (0001 1111)
+      codepoint = int(lead & 0x1F);
+      extraBytes = 1;
+    } else if ((lead & 0xF0) == 0xE0) {
+      // 3-byte form: 1110 xxxx
+      // keep top 4 bits using F0 (1111 0000) and comparing to E0 like before
+
+      // keep bottom 4 value bits
+      codepoint = int(lead & 0x0F);
+      extraBytes = 2;
+    } else if ((lead & 0xF8) == 0xF0) {
+      // 4-byte form: 1111 0xxx
+      // keep top 5 bites using F8 (1111 1000), etc.
+
+      // keep bottom 3 value bits
+      codepoint = int(0x07);
+      extraBytes = 3;
+    } else {
+      return Result.Err { error: { error: "invalid UTF-8 lead byte in char literal", pos: p } };
+    }
+
+    p += 1;
+    let k = 0;
+    while (k < extraBytes) {
+      if (p >= src.len) {
+        return Result.Err { error: { error: "unterminated char literal", pos: p } };
+      }
+      const cont = src[p];
+
+      // continuation byte: 10xx xxxx
+      // make sure leftmost 2 bits are 1, 0
+      if ((cont & 0b1100_0000) != 0b1000_0000) {
+        return Result.Err { error: { error: "invalid UTF-8 continuation byte", pos: p } };
+      }
+
+      // append this byte's 6 value bits:
+      codepoint = (codepoint << 6 | int(cont & 0b0011_1111));
+      p += 1;
+      k += 1;
+    }
+  }
+
+  if (p >= src.len) {
+    return Result.Err { error: { error: "unterminated char literal", pos: p } };
+  }
+
+  if (src[p] != '\'') {
+    return Result.Err { error: { error: "char literal must contain a single character", pos: p } };
+  }
+
+  res.token.tag = TokenTags.CHARLITERAL;
+  res.token.intVal = codepoint;
+  res.token.length = int32(p + 1 - pos);
+  res.nextPos = p + 1;
+
+  return Result.Ok { value: res };
+}
+
+function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+  let start = pos;
+  let isFloat = false;
+  let base = 10;
+  let digitsStart = pos;
+  let end = digitsStart;
+
+  if (src[pos] == '0' && pos + 1 < src.len) {
+    let next = src[pos + 1];
+    if (next == 'x') {
+      base = 16;
+      pos += 2;
+      digitsStart = pos;
+      const scanHexResult = scanHexDigitsAndUnderscores(src, pos);
+      switch (scanHexResult) {
+        case Result.Err { error: e }: {
+          return Result.Err { error: { error: e, pos: pos } };
+        }
+        case Result.Ok { value: v }: {
+          end = v;
+        }
+      }
+    }
+  }
+}
+
+export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+  let res = createLexedVal();
+  res.token.start = pos;
+  res.nextPos = pos;
 
   // skip whitespace
   let p = skipWhitespace(src, pos);
@@ -58,6 +253,57 @@ export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
   }
 
   let ch = src[p];
+
+  // common language token?
+  for tokenScanObj in tokenScanList {
+    if (p + (tokenScanObj.str.len - 1) >= src.len) {
+      continue; // not enough string left
+    }
+
+    // need to figure out how to do substring from bytes array in this language
+    const scanAheadSlice = bytes.bytes_slice(src, p, p + tokenScanObj.str.len);
+    const tokenBytes = intr.string_as_bytes(tokenScanObj.str);
+    if (bytes.bytes_eq(scanAheadSlice, tokenBytes)) {
+      res.token.tag = tokenScanObj.tag;
+      res.token.start = p;
+      res.token.length = int32(tokenScanObj.str.len);
+      res.nextPos = p + tokenScanObj.str.len;
+
+      return Result.Ok { value: res };
+    }
+  }
+
+  // char literal?
+  if (ch == '\'') {
+    return lexCharLiteral(src, p);
+  }
+
+  // string literal?
+  if (ch == '"' || ch == '`') {
+    let end = scanStringLiteral(src, p);
+    switch (end) {
+      case Option.None {}: {
+        return Result.Err { error: { error: "unterminated string litera", pos: p } };
+      }
+      case Option.Some { value: newPos }: {
+        if (ch == '`') {
+          res.token.tag = TokenTags.TEMPLATELITERAL;
+        } else {
+          res.token.tag = TokenTags.STRLITERAL;
+        }
+        res.token.start = p;
+        res.token.length = int32(newPos - p);
+        res.nextPos = newPos;
+
+        return Result.Ok { value: res };
+      }
+    }
+  }
+
+  // numeric literal?
+  if (isDigit(ch)) {
+
+  }
 
   return Result.Err { error: { error: "lexNext not yet implemented", pos: pos  } };
 }
