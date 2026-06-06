@@ -1,0 +1,17 @@
+// The smallest Yooperlang program.
+//
+// Every executable starts at `main`, which returns an int32 exit code
+// (0 means success, like in C). `printf` is always in scope - it lowers
+// to C's printf under the hood.
+//
+// Compile and run:
+//   node ./src/yoopiler.js examples/intro/hello.yoop
+//   ./examples/intro/hello
+
+function main(): int32 {
+    printf("Hello from Yooperlang!\n");
+    return 0;
+}
+
+// expected output:
+// Hello from Yooperlang!

@@ -8,3 +8,9 @@ examples/**/*.exe
 !examples/**/*.js
 **/*dSYM/
 
+# phasePrograms holds .yoop sources plus their compiled binaries; track
+# only the sources.
+phasePrograms/**
+!phasePrograms/**/
+!phasePrograms/**/*.yoop
+
