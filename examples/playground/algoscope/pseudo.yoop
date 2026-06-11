@@ -1,0 +1,410 @@
+// algoscope/pseudo.yoop - turn an AST FUNCTION_DECL into abstracted,
+// math-flavored pseudocode lines ("scientific notation").
+//
+// The renderer walks statements from the selected function (the "start point",
+// depth 0). Each nested block adds a depth level; once depth exceeds the
+// caller's budget the block is glossed to a single collapsed line instead of
+// being expanded, so you see the SHAPE of an algorithm without drowning in the
+// leaves. Recursion is surfaced (a call back to the enclosing function gets a
+// recurse glyph) rather than inlined.
+//
+// Notation: `<-` assignment, `=/!=/<=/>=` comparisons, `and/or` logical,
+// quantifier `for i = A, ..., B` ranges and `forall x in xs`, `=>` return,
+// `recurse f(...)` for self-calls, and `<... K statements>` for glossed blocks.
+// Kept ASCII on purpose (the repo avoids non-keyboard glyphs in source); the
+// abstraction style - not Unicode symbols - is what makes it read scientific.
+
+import.unsafe;
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+import { Vec } from "std/core/vec.yoop";
+import * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as json from "./json.yoop";
+import * as ast from "./ast.yoop";
+
+// One rendered line: `indent` levels deep, `collapsed` marks a glossed-over
+// subtree (drawn dimmed), `node_id` ties the line back to its AST node.
+export type Line {
+    indent: int32,
+    text: string,
+    collapsed: bool,
+    node_id: int32,
+}
+
+// ---- glyphs ----
+
+const G_ASSIGN: string = " <- ";
+const G_RETURN: string = "=> ";
+const G_FORALL: string = "forall ";
+const G_IN: string = " in ";
+const G_RECURSE: string = "recurse ";
+const G_ELLIPSIS: string = "...";
+const G_LANGLE: string = "<";
+const G_RANGLE: string = ">";
+
+function op_glyph(op: string): string {
+    if (str.string_eq(op, "plus")) { return "+"; }
+    if (str.string_eq(op, "minus")) { return "-"; }
+    if (str.string_eq(op, "mult")) { return "*"; }
+    if (str.string_eq(op, "divide")) { return "/"; }
+    if (str.string_eq(op, "modulus")) { return "mod"; }
+    if (str.string_eq(op, "eq")) { return "="; }
+    if (str.string_eq(op, "neq")) { return "!="; }
+    if (str.string_eq(op, "lt")) { return "<"; }
+    if (str.string_eq(op, "lte")) { return "<="; }
+    if (str.string_eq(op, "gt")) { return ">"; }
+    if (str.string_eq(op, "gte")) { return ">="; }
+    if (str.string_eq(op, "andand")) { return "and"; }
+    if (str.string_eq(op, "oror")) { return "or"; }
+    if (str.string_eq(op, "bitand")) { return "&"; }
+    if (str.string_eq(op, "bitor")) { return "|"; }
+    if (str.string_eq(op, "bitxor")) { return "^"; }
+    if (str.string_eq(op, "shl")) { return "<<"; }
+    if (str.string_eq(op, "shr")) { return ">>"; }
+    return op;
+}
+
+function unary_glyph(op: string): string {
+    if (str.string_eq(op, "not")) { return "!"; }
+    if (str.string_eq(op, "minus")) { return "-"; }
+    if (str.string_eq(op, "bitnot")) { return "~"; }
+    return op;
+}
+
+// ---- expression rendering (no depth budget; expressions are shallow) ----
+
+// Wrap a binary sub-expression in parens so precedence reads unambiguously.
+function paren(n: json.JsonValue, self_name: string): string {
+    if (ast.kind_is(n, "BINARY_EXPRESSION")) {
+        return `(${expr(n)})`;
+    }
+    return expr_self(n, self_name);
+}
+
+// Render an expression, marking self-recursive calls.
+export function expr_self(n: json.JsonValue, self_name: string): string {
+    let k: string = ast.node_kind(n);
+
+    if (str.string_eq(k, "INT_LITERAL")) {
+        return fmt.int_to_string(int64(ast.field_int(n, "value")));
+    }
+    if (str.string_eq(k, "FLOAT_LITERAL")) {
+        return fmt.float_to_string(ast.field_num(n, "value"));
+    }
+    if (str.string_eq(k, "STRING_LITERAL")) {
+        return ast.field_str(n, "value");
+    }
+    if (str.string_eq(k, "BOOL_LITERAL")) {
+        return fmt.bool_to_string(ast.field_bool(n, "value"));
+    }
+    if (str.string_eq(k, "IDENT")) {
+        return ast.field_str(n, "name");
+    }
+    if (str.string_eq(k, "NULL_LITERAL")) {
+        return "null";
+    }
+    if (str.string_eq(k, "BINARY_EXPRESSION")) {
+        let l: json.JsonValue = ast.child_by_label(n, "left");
+        let r: json.JsonValue = ast.child_by_label(n, "right");
+        let g: string = op_glyph(ast.field_str(n, "op"));
+        return `${paren(l, self_name)} ${g} ${paren(r, self_name)}`;
+    }
+    if (str.string_eq(k, "UNARY_EXPRESSION")) {
+        let o: json.JsonValue = ast.child_by_label(n, "operand");
+        return `${unary_glyph(ast.field_str(n, "op"))}${paren(o, self_name)}`;
+    }
+    if (str.string_eq(k, "CALL_EXPRESSION")) {
+        return call_text(n, self_name);
+    }
+    if (str.string_eq(k, "FIELD_ACCESS")) {
+        let o: json.JsonValue = ast.child_by_label(n, "object");
+        return `${expr_self(o, self_name)}.${ast.field_str(n, "field")}`;
+    }
+    if (str.string_eq(k, "INDEX_EXPRESSION")) {
+        let o: json.JsonValue = ast.child_by_label(n, "object");
+        let ix: json.JsonValue = ast.child_by_label(n, "index");
+        return `${expr_self(o, self_name)}[${expr_self(ix, self_name)}]`;
+    }
+    if (str.string_eq(k, "REF_EXPRESSION")) {
+        let o: json.JsonValue = ast.child_by_label(n, "operand");
+        return `ref ${expr_self(o, self_name)}`;
+    }
+    if (str.string_eq(k, "ADDRESS_OF_EXPRESSION")) {
+        let o: json.JsonValue = ast.child_by_label(n, "operand");
+        return `&${expr_self(o, self_name)}`;
+    }
+    if (str.string_eq(k, "DEREF_EXPRESSION")) {
+        let o: json.JsonValue = ast.child_by_label(n, "operand");
+        return `*${expr_self(o, self_name)}`;
+    }
+    if (str.string_eq(k, "ASSIGNMENT")) {
+        let t: json.JsonValue = ast.child_by_label(n, "target");
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        return `${expr_self(t, self_name)}${G_ASSIGN}${expr_self(v, self_name)}`;
+    }
+    if (str.string_eq(k, "COMPOUND_ASSIGNMENT")) {
+        let t: json.JsonValue = ast.child_by_label(n, "target");
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        let ts: string = expr_self(t, self_name);
+        return `${ts}${G_ASSIGN}${ts} ${op_glyph(ast.field_str(n, "op"))} ${expr_self(v, self_name)}`;
+    }
+    if (str.string_eq(k, "TEMPLATE_LITERAL")) {
+        return "`...`";
+    }
+    if (str.string_eq(k, "VARIANT_CONSTRUCTOR")) {
+        return ast.field_str(n, "variant");
+    }
+    if (str.string_eq(k, "STRUCT_LITERAL")) {
+        let flds: json.JsonValue[] = ast.group_items(n, "fields");
+        let s: string = "{ ";
+        let i: usize = usize(0);
+        while (i < flds.len) {
+            if (i > usize(0)) { s = `${s}, `; }
+            let f: json.JsonValue = flds[i];
+            s = `${s}${ast.field_str(f, "name")}: ${expr_self(ast.child_by_label(f, "value"), self_name)}`;
+            i = i + usize(1);
+        }
+        return `${s} }`;
+    }
+    // Unknown / not-yet-handled expression: show the kind so nothing crashes.
+    return `${G_LANGLE}${k}${G_RANGLE}`;
+}
+
+// Convenience wrapper when there is no enclosing-function context.
+export function expr(n: json.JsonValue): string {
+    return expr_self(n, "");
+}
+
+// Render a call, joining its argument expressions and flagging recursion.
+function call_text(n: json.JsonValue, self_name: string): string {
+    let callee: string = ast.field_str(n, "callee");
+    if (str.string_eq(callee, "")) {
+        // Namespaced / computed callee lives as a child node instead of a field.
+        let cc: json.JsonValue = ast.child_by_label(n, "callee");
+        callee = expr_self(cc, self_name);
+    }
+    let args: json.JsonValue[] = ast.group_items(n, "args");
+    let argstr: string = "";
+    let i: usize = usize(0);
+    while (i < args.len) {
+        if (i > usize(0)) { argstr = `${argstr}, `; }
+        argstr = `${argstr}${expr_self(args[i], self_name)}`;
+        i = i + usize(1);
+    }
+    if (!str.string_eq(self_name, "") && str.string_eq(callee, self_name)) {
+        return `${G_RECURSE}${callee}(${argstr})`;
+    }
+    return `${callee}(${argstr})`;
+}
+
+// ---- statement / block rendering (depth-budgeted) ----
+
+function push_line(ref out: Vec<Line>, indent: int32, text: string, collapsed: bool, id: int32): void {
+    vec.vec_push(ref out, { indent: indent, text: text, collapsed: collapsed, node_id: id });
+}
+
+// Render a BLOCK's statements at `indent`/`depth`, or gloss the whole block to
+// one collapsed line when it sits below the depth budget.
+function emit_block(block: json.JsonValue, indent: int32, depth: int32, max_depth: int32, ref out: Vec<Line>, self_name: string): void {
+    let stmts: json.JsonValue[] = ast.block_stmts(block);
+    if (depth > max_depth) {
+        let count: int64 = int64(stmts.len);
+        push_line(ref out, indent, `${G_LANGLE}${G_ELLIPSIS} ${fmt.int_to_string(count)} statements${G_RANGLE}`, true, ast.node_id(block));
+        return;
+    }
+    let i: usize = usize(0);
+    while (i < stmts.len) {
+        emit_stmt(stmts[i], indent, depth, max_depth, ref out, self_name);
+        i = i + usize(1);
+    }
+}
+
+// Try to render a C-style FOR_LOOP as a quantifier range `for i = A, ..., B`.
+// Returns "" when the loop is not a simple `i = A; i </<= B; i = i + 1`.
+function for_range_text(n: json.JsonValue, self_name: string): string {
+    let iv: string = ast.field_str(n, "initIdent");
+    let sv: string = ast.field_str(n, "stepIdent");
+    if (!str.string_eq(iv, sv)) { return ""; }
+
+    let cond: json.JsonValue = ast.child_by_label(n, "cond");
+    if (!ast.kind_is(cond, "BINARY_EXPRESSION")) { return ""; }
+    let cop: string = ast.field_str(cond, "op");
+    if (!str.string_eq(cop, "lt") && !str.string_eq(cop, "lte")) { return ""; }
+    let cleft: json.JsonValue = ast.child_by_label(cond, "left");
+    if (!ast.kind_is(cleft, "IDENT") || !str.string_eq(ast.field_str(cleft, "name"), iv)) { return ""; }
+    let bound: json.JsonValue = ast.child_by_label(cond, "right");
+
+    // step must be `i + 1`
+    let step: json.JsonValue = ast.child_by_label(n, "stepExpr");
+    if (!ast.kind_is(step, "BINARY_EXPRESSION") || !str.string_eq(ast.field_str(step, "op"), "plus")) { return ""; }
+    let sleft: json.JsonValue = ast.child_by_label(step, "left");
+    let sright: json.JsonValue = ast.child_by_label(step, "right");
+    if (!ast.kind_is(sleft, "IDENT") || !str.string_eq(ast.field_str(sleft, "name"), iv)) { return ""; }
+    if (!ast.kind_is(sright, "INT_LITERAL") || ast.field_int(sright, "value") != 1) { return ""; }
+
+    let lo: json.JsonValue = ast.child_by_label(n, "initExpr");
+    let upper: string = expr_self(bound, self_name);
+    if (str.string_eq(cop, "lt")) {
+        upper = `${upper} - 1`;
+    }
+    return `for ${iv} = ${expr_self(lo, self_name)}, ${G_ELLIPSIS}, ${upper}:`;
+}
+
+function emit_stmt(n: json.JsonValue, indent: int32, depth: int32, max_depth: int32, ref out: Vec<Line>, self_name: string): void {
+    let k: string = ast.node_kind(n);
+    let id: int32 = ast.node_id(n);
+
+    if (str.string_eq(k, "LET_DECL") || str.string_eq(k, "CONST_DECL")) {
+        let name: string = ast.field_str(n, "name");
+        let initv: json.JsonValue = ast.child_by_label(n, "assignment");
+        if (json.is_null(initv)) {
+            push_line(ref out, indent, `${name} : ${ast.field_type_name(n, "typeAnnotation")}`, false, id);
+        } else {
+            push_line(ref out, indent, `${name}${G_ASSIGN}${expr_self(initv, self_name)}`, false, id);
+        }
+        return;
+    }
+    if (str.string_eq(k, "ASSIGNMENT")) {
+        let t: json.JsonValue = ast.child_by_label(n, "target");
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        push_line(ref out, indent, `${expr_self(t, self_name)}${G_ASSIGN}${expr_self(v, self_name)}`, false, id);
+        return;
+    }
+    if (str.string_eq(k, "COMPOUND_ASSIGNMENT")) {
+        let t: json.JsonValue = ast.child_by_label(n, "target");
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        let g: string = op_glyph(ast.field_str(n, "op"));
+        let ts: string = expr_self(t, self_name);
+        push_line(ref out, indent, `${ts}${G_ASSIGN}${ts} ${g} ${expr_self(v, self_name)}`, false, id);
+        return;
+    }
+    if (str.string_eq(k, "RETURN_STATEMENT")) {
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        if (json.is_null(v)) {
+            push_line(ref out, indent, `${G_RETURN}`, false, id);
+        } else {
+            push_line(ref out, indent, `${G_RETURN}${expr_self(v, self_name)}`, false, id);
+        }
+        return;
+    }
+    if (str.string_eq(k, "EXPRESSION_STATEMENT")) {
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        push_line(ref out, indent, expr_self(v, self_name), false, id);
+        return;
+    }
+    if (str.string_eq(k, "IF_STATEMENT")) {
+        emit_if_chain(n, indent, depth, max_depth, ref out, self_name, false);
+        return;
+    }
+    if (str.string_eq(k, "WHILE_STATEMENT")) {
+        let c: json.JsonValue = ast.child_by_label(n, "expression");
+        push_line(ref out, indent, `while ${expr_self(c, self_name)}:`, false, id);
+        emit_block(ast.child_by_label(n, "body"), indent + 1, depth + 1, max_depth, ref out, self_name);
+        return;
+    }
+    if (str.string_eq(k, "FOR_LOOP")) {
+        let header: string = for_range_text(n, self_name);
+        if (str.string_eq(header, "")) {
+            let iv: string = ast.field_str(n, "initIdent");
+            let sv: string = ast.field_str(n, "stepIdent");
+            let lo: json.JsonValue = ast.child_by_label(n, "initExpr");
+            let cond: json.JsonValue = ast.child_by_label(n, "cond");
+            let step: json.JsonValue = ast.child_by_label(n, "stepExpr");
+            header = `for (${iv}${G_ASSIGN}${expr_self(lo, self_name)}; ${expr_self(cond, self_name)}; ${sv}${G_ASSIGN}${expr_self(step, self_name)}):`;
+        }
+        push_line(ref out, indent, header, false, id);
+        emit_block(ast.child_by_label(n, "body"), indent + 1, depth + 1, max_depth, ref out, self_name);
+        return;
+    }
+    if (str.string_eq(k, "FOR_IN_LOOP")) {
+        let it: json.JsonValue = ast.child_by_label(n, "iterExpr");
+        push_line(ref out, indent, `${G_FORALL}${ast.field_str(n, "loopVar")}${G_IN}${expr_self(it, self_name)}:`, false, id);
+        emit_block(ast.child_by_label(n, "body"), indent + 1, depth + 1, max_depth, ref out, self_name);
+        return;
+    }
+    if (str.string_eq(k, "BREAK_STATEMENT")) {
+        push_line(ref out, indent, "break", false, id);
+        return;
+    }
+    if (str.string_eq(k, "CONTINUE_STATEMENT")) {
+        push_line(ref out, indent, "continue", false, id);
+        return;
+    }
+    if (str.string_eq(k, "SWITCH_STATEMENT")) {
+        let scrut: json.JsonValue = ast.child_by_label(n, "scrutinee");
+        push_line(ref out, indent, `switch ${expr_self(scrut, self_name)}:`, false, id);
+        let arms: json.JsonValue[] = ast.group_items(n, "arms");
+        push_line(ref out, indent + 1, `${G_LANGLE}${G_ELLIPSIS} ${fmt.int_to_string(int64(arms.len))} arms${G_RANGLE}`, true, id);
+        return;
+    }
+    if (str.string_eq(k, "DISCARD_STATEMENT")) {
+        let v: json.JsonValue = ast.child_by_label(n, "value");
+        push_line(ref out, indent, `discard ${expr_self(v, self_name)}`, false, id);
+        return;
+    }
+    // Unknown statement kind: emit a labeled placeholder rather than crash.
+    push_line(ref out, indent, `${G_LANGLE}${k}${G_RANGLE}`, false, id);
+}
+
+// Render an `if` and any chained `else if` / `else`, flattening the chain so
+// each condition sits at the same indent.
+function emit_if_chain(n: json.JsonValue, indent: int32, depth: int32, max_depth: int32, ref out: Vec<Line>, self_name: string, is_else: bool): void {
+    let c: json.JsonValue = ast.child_by_label(n, "expression");
+    let header: string = "";
+    if (is_else) {
+        header = `else if ${expr_self(c, self_name)}:`;
+    } else {
+        header = `if ${expr_self(c, self_name)}:`;
+    }
+    push_line(ref out, indent, header, false, ast.node_id(n));
+    emit_block(ast.child_by_label(n, "body"), indent + 1, depth + 1, max_depth, ref out, self_name);
+
+    let el: json.JsonValue = ast.child_by_label(n, "elseBody");
+    if (json.is_null(el)) { return; }
+    if (ast.kind_is(el, "IF_STATEMENT")) {
+        emit_if_chain(el, indent, depth, max_depth, ref out, self_name, true);
+    } else {
+        push_line(ref out, indent, "else:", false, ast.node_id(el));
+        emit_block(el, indent + 1, depth + 1, max_depth, ref out, self_name);
+    }
+}
+
+// ---- public entry ----
+
+// Build the function signature header line: `name(p: T, ...) -> R:`.
+function signature(fn: json.JsonValue): string {
+    let name: string = ast.field_str(fn, "name");
+    let params: json.JsonValue[] = ast.group_items(fn, "params");
+    let plist: string = "";
+    let i: usize = usize(0);
+    while (i < params.len) {
+        if (i > usize(0)) { plist = `${plist}, `; }
+        let p: json.JsonValue = params[i];
+        let pref: string = "";
+        if (ast.field_bool(p, "isRef")) { pref = "ref "; }
+        plist = `${plist}${pref}${ast.field_str(p, "name")}: ${ast.type_of(p, "typeAnnotation")}`;
+        i = i + usize(1);
+    }
+    let ret: string = ast.type_of(fn, "returnTypeAnnotation");
+    return `${name}(${plist}) -> ${ret}:`;
+}
+
+// Render a whole function to pseudocode lines at the given detail depth. The
+// signature is depth 0; the body opens at depth 1, and blocks below `max_depth`
+// are glossed to a single collapsed line.
+export function render_function(fn: json.JsonValue, max_depth: int32): Line[] {
+    disposable out: Vec<Line> = vec.vec_new(usize(64));
+    let self_name: string = ast.field_str(fn, "name");
+    push_line(ref out, 0, signature(fn), false, ast.node_id(fn));
+    emit_block(ast.child_by_label(fn, "body"), 1, 1, max_depth, ref out, self_name);
+
+    let result: Line[] = intr.heap_alloc(out.len);
+    let i: usize = usize(0);
+    while (i < out.len) {
+        result[i] = out.data[i];
+        i = i + usize(1);
+    }
+    return result;
+}

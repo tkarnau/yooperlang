@@ -1,0 +1,392 @@
+// algoscope/json.yoop - a minimal JSON reader, written in Yooperlang.
+//
+// Parses the `--dump-ast-json` payload (a tree of objects / arrays / strings /
+// numbers / bools) into a generic `JsonValue` tree. This is the self-hosting
+// stress piece of the playground: a recursive-descent parser over the source
+// bytes, accumulating children into `disposable Vec`s and freezing each into an
+// independently-owned array before the Vec's backing buffer is reclaimed.
+//
+// Ownership rule that makes this correct: `vec_as_array` is a *borrowing view*
+// valid only until the next mutation/dispose (see std/core/vec.yoop). So every
+// list we keep in the tree is copied out via `own_items` / `own_keys` into a
+// fresh `heap_alloc` array that outlives the temporary Vec. The AST tree then
+// lives for the whole program (a viewer loads one file and never frees it).
+
+import.unsafe;
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec } from "std/core/vec.yoop";
+import * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// JsonValue.kind tags. Plain int32 consts (not an enum) so equality checks stay
+// trivial and the struct field is a bare scalar.
+export const J_NULL: int32 = 0;
+export const J_BOOL: int32 = 1;
+export const J_NUM: int32 = 2;
+export const J_STR: int32 = 3;
+export const J_ARR: int32 = 4;
+export const J_OBJ: int32 = 5;
+
+// A parsed JSON value. Objects use the parallel `keys` / `items` arrays
+// (keys[i] -> items[i]); arrays use `items`; scalars use the matching field.
+// `items: JsonValue[]` is heap-backed (a fat pointer), so the struct is a fixed
+// size despite being self-referential.
+export type JsonValue {
+    kind: int32,
+    str: string,
+    num: float64,
+    boolv: bool,
+    keys: string[],
+    items: JsonValue[],
+}
+
+// Cursor over the source bytes. Threaded by `ref` so position advances across
+// the recursive parse calls.
+export type Parser {
+    bytes: uint8[],
+    pos: usize,
+}
+
+// ---- empty-array helpers (leaf values carry zero-length keys/items) ----
+
+function empty_items(): JsonValue[] {
+    return intr.heap_alloc(usize(0));
+}
+
+function empty_keys(): string[] {
+    return intr.heap_alloc(usize(0));
+}
+
+// ---- JsonValue constructors ----
+
+export function mk_null(): JsonValue {
+    return { kind: J_NULL, str: "", num: 0.0, boolv: false, keys: empty_keys(), items: empty_items() };
+}
+
+function mk_bool(b: bool): JsonValue {
+    return { kind: J_BOOL, str: "", num: 0.0, boolv: b, keys: empty_keys(), items: empty_items() };
+}
+
+function mk_num(n: float64): JsonValue {
+    return { kind: J_NUM, str: "", num: n, boolv: false, keys: empty_keys(), items: empty_items() };
+}
+
+function mk_str(s: string): JsonValue {
+    return { kind: J_STR, str: s, num: 0.0, boolv: false, keys: empty_keys(), items: empty_items() };
+}
+
+// ---- cursor primitives ----
+
+function at_end(ref p: Parser): bool {
+    return p.pos >= p.bytes.len;
+}
+
+function cur(ref p: Parser): uint8 {
+    if (p.pos >= p.bytes.len) {
+        return uint8(0);
+    }
+    return p.bytes[p.pos];
+}
+
+function advance(ref p: Parser): void {
+    p.pos = p.pos + usize(1);
+}
+
+function skip_ws(ref p: Parser): void {
+    while (p.pos < p.bytes.len) {
+        let c: uint8 = p.bytes[p.pos];
+        // space, tab, newline, carriage return
+        if (c == uint8(32) || c == uint8(9) || c == uint8(10) || c == uint8(13)) {
+            p.pos = p.pos + usize(1);
+        } else {
+            return;
+        }
+    }
+}
+
+// ---- freeze helpers: copy a Vec's populated prefix into an owned array ----
+
+function own_items(ref v: Vec<JsonValue>): JsonValue[] {
+    let out: JsonValue[] = intr.heap_alloc(v.len);
+    let i: usize = usize(0);
+    while (i < v.len) {
+        out[i] = v.data[i];
+        i = i + usize(1);
+    }
+    return out;
+}
+
+function own_keys(ref v: Vec<string>): string[] {
+    let out: string[] = intr.heap_alloc(v.len);
+    let i: usize = usize(0);
+    while (i < v.len) {
+        out[i] = v.data[i];
+        i = i + usize(1);
+    }
+    return out;
+}
+
+// ---- string parsing (with escapes) ----
+
+function hex_val(c: uint8): int32 {
+    if (c >= uint8(48) && c <= uint8(57)) { return int32(c) - 48; }   // 0-9
+    if (c >= uint8(97) && c <= uint8(102)) { return int32(c) - 87; }  // a-f
+    if (c >= uint8(65) && c <= uint8(70)) { return int32(c) - 55; }   // A-F
+    return 0;
+}
+
+// Encode a Unicode scalar value as UTF-8 into the byte accumulator. Handles the
+// BMP (1-3 byte forms); astral planes via surrogate pairs are not decoded in v1
+// (source identifiers never need them).
+function push_utf8(ref sb: Vec<uint8>, cp: int32): void {
+    if (cp < 0x80) {
+        vec.vec_push(ref sb, uint8(cp));
+    } else if (cp < 0x800) {
+        vec.vec_push(ref sb, uint8(0xC0 | (cp >> 6)));
+        vec.vec_push(ref sb, uint8(0x80 | (cp & 0x3F)));
+    } else {
+        vec.vec_push(ref sb, uint8(0xE0 | (cp >> 12)));
+        vec.vec_push(ref sb, uint8(0x80 | ((cp >> 6) & 0x3F)));
+        vec.vec_push(ref sb, uint8(0x80 | (cp & 0x3F)));
+    }
+}
+
+// Parse a JSON string. Assumes `cur` is the opening quote. Returns the decoded,
+// NUL-terminated string (string_from_bytes_unchecked malloc+memcpy+nul copies
+// the view, so the temporary Vec is safe to dispose afterward).
+function parse_string(ref p: Parser): string {
+    advance(ref p); // skip opening quote
+    disposable sb: Vec<uint8> = vec.vec_new(usize(16));
+    while (p.pos < p.bytes.len) {
+        let c: uint8 = p.bytes[p.pos];
+        if (c == uint8(34)) {            // closing "
+            advance(ref p);
+            return intr.string_from_bytes_unchecked(vec.vec_as_array(ref sb));
+        }
+        if (c == uint8(92)) {            // backslash escape
+            advance(ref p);
+            let e: uint8 = cur(ref p);
+            if (e == uint8(110)) { vec.vec_push(ref sb, uint8(10)); advance(ref p); }       // \n
+            else if (e == uint8(116)) { vec.vec_push(ref sb, uint8(9)); advance(ref p); }   // \t
+            else if (e == uint8(114)) { vec.vec_push(ref sb, uint8(13)); advance(ref p); }  // \r
+            else if (e == uint8(98)) { vec.vec_push(ref sb, uint8(8)); advance(ref p); }    // \b
+            else if (e == uint8(102)) { vec.vec_push(ref sb, uint8(12)); advance(ref p); }  // \f
+            else if (e == uint8(117)) {                                                     // \uXXXX
+                advance(ref p);
+                let cp: int32 = 0;
+                let k: int32 = 0;
+                while (k < 4 && p.pos < p.bytes.len) {
+                    cp = (cp << 4) | hex_val(p.bytes[p.pos]);
+                    advance(ref p);
+                    k = k + 1;
+                }
+                push_utf8(ref sb, cp);
+            } else {
+                // \" \\ \/ and any other: emit the escaped byte verbatim.
+                vec.vec_push(ref sb, e);
+                advance(ref p);
+            }
+        } else {
+            vec.vec_push(ref sb, c);
+            advance(ref p);
+        }
+    }
+    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref sb));
+}
+
+// ---- number parsing ----
+
+// Parse a JSON number into float64. Handles sign, integer part, fraction, and
+// exponent. AST ids / source positions are integers well within float64's exact
+// range, so `as_int` (a cast) recovers them losslessly.
+function parse_number(ref p: Parser): JsonValue {
+    let sign: float64 = 1.0;
+    if (cur(ref p) == uint8(45)) { sign = -1.0; advance(ref p); }   // -
+
+    let intpart: float64 = 0.0;
+    while (p.pos < p.bytes.len) {
+        let c: uint8 = p.bytes[p.pos];
+        if (c >= uint8(48) && c <= uint8(57)) {
+            intpart = intpart * 10.0 + float64(int32(c) - 48);
+            advance(ref p);
+        } else {
+            break;
+        }
+    }
+
+    let value: float64 = intpart;
+
+    if (cur(ref p) == uint8(46)) {   // .
+        advance(ref p);
+        let frac: float64 = 0.0;
+        let scale: float64 = 1.0;
+        while (p.pos < p.bytes.len) {
+            let c: uint8 = p.bytes[p.pos];
+            if (c >= uint8(48) && c <= uint8(57)) {
+                frac = frac * 10.0 + float64(int32(c) - 48);
+                scale = scale * 10.0;
+                advance(ref p);
+            } else {
+                break;
+            }
+        }
+        value = value + frac / scale;
+    }
+
+    if (cur(ref p) == uint8(101) || cur(ref p) == uint8(69)) {   // e / E
+        advance(ref p);
+        let esign: float64 = 1.0;
+        if (cur(ref p) == uint8(43)) { advance(ref p); }
+        else if (cur(ref p) == uint8(45)) { esign = -1.0; advance(ref p); }
+        let exp: int32 = 0;
+        while (p.pos < p.bytes.len) {
+            let c: uint8 = p.bytes[p.pos];
+            if (c >= uint8(48) && c <= uint8(57)) {
+                exp = exp * 10 + (int32(c) - 48);
+                advance(ref p);
+            } else {
+                break;
+            }
+        }
+        let mult: float64 = 1.0;
+        let i: int32 = 0;
+        while (i < exp) { mult = mult * 10.0; i = i + 1; }
+        if (esign < 0.0) { value = value / mult; } else { value = value * mult; }
+    }
+
+    return mk_num(sign * value);
+}
+
+// ---- keyword parsing (true / false / null) ----
+
+function parse_keyword(ref p: Parser): JsonValue {
+    let c: uint8 = cur(ref p);
+    if (c == uint8(116)) {          // true
+        p.pos = p.pos + usize(4);
+        return mk_bool(true);
+    }
+    if (c == uint8(102)) {          // false
+        p.pos = p.pos + usize(5);
+        return mk_bool(false);
+    }
+    // null
+    p.pos = p.pos + usize(4);
+    return mk_null();
+}
+
+// ---- composite parsing ----
+
+function parse_array(ref p: Parser): JsonValue {
+    advance(ref p); // [
+    disposable items: Vec<JsonValue> = vec.vec_new(usize(4));
+    skip_ws(ref p);
+    if (cur(ref p) == uint8(93)) {  // ]
+        advance(ref p);
+        return { kind: J_ARR, str: "", num: 0.0, boolv: false, keys: empty_keys(), items: own_items(ref items) };
+    }
+    while (p.pos < p.bytes.len) {
+        let v: JsonValue = parse_value(ref p);
+        vec.vec_push(ref items, v);
+        skip_ws(ref p);
+        let c: uint8 = cur(ref p);
+        if (c == uint8(44)) { advance(ref p); skip_ws(ref p); }   // ,
+        else if (c == uint8(93)) { advance(ref p); break; }       // ]
+        else { break; }
+    }
+    return { kind: J_ARR, str: "", num: 0.0, boolv: false, keys: empty_keys(), items: own_items(ref items) };
+}
+
+function parse_object(ref p: Parser): JsonValue {
+    advance(ref p); // {
+    disposable keys: Vec<string> = vec.vec_new(usize(8));
+    disposable items: Vec<JsonValue> = vec.vec_new(usize(8));
+    skip_ws(ref p);
+    if (cur(ref p) == uint8(125)) { // }
+        advance(ref p);
+        return { kind: J_OBJ, str: "", num: 0.0, boolv: false, keys: own_keys(ref keys), items: own_items(ref items) };
+    }
+    while (p.pos < p.bytes.len) {
+        skip_ws(ref p);
+        let key: string = parse_string(ref p);
+        skip_ws(ref p);
+        if (cur(ref p) == uint8(58)) { advance(ref p); }   // :
+        let v: JsonValue = parse_value(ref p);
+        vec.vec_push(ref keys, key);
+        vec.vec_push(ref items, v);
+        skip_ws(ref p);
+        let c: uint8 = cur(ref p);
+        if (c == uint8(44)) { advance(ref p); }            // ,
+        else if (c == uint8(125)) { advance(ref p); break; } // }
+        else { break; }
+    }
+    return { kind: J_OBJ, str: "", num: 0.0, boolv: false, keys: own_keys(ref keys), items: own_items(ref items) };
+}
+
+export function parse_value(ref p: Parser): JsonValue {
+    skip_ws(ref p);
+    let c: uint8 = cur(ref p);
+    if (c == uint8(123)) { return parse_object(ref p); }   // {
+    if (c == uint8(91)) { return parse_array(ref p); }     // [
+    if (c == uint8(34)) { return mk_str(parse_string(ref p)); } // "
+    if (c == uint8(116) || c == uint8(102) || c == uint8(110)) { return parse_keyword(ref p); } // t/f/n
+    return parse_number(ref p);
+}
+
+// Public entry: parse a whole JSON document held in `src`.
+export function parse(src: string): JsonValue {
+    let bytes: uint8[] = intr.string_as_bytes(src);
+    let p: Parser = { bytes: bytes, pos: usize(0) };
+    return parse_value(ref p);
+}
+
+// Parse a document directly from a byte buffer (e.g. a file's contents). The
+// buffer is only read during parsing - all string values the parser keeps are
+// independently malloc'd copies - so the caller may free `bytes` afterward.
+export function parse_bytes(bytes: uint8[]): JsonValue {
+    let p: Parser = { bytes: bytes, pos: usize(0) };
+    return parse_value(ref p);
+}
+
+// ---- accessors used by ast.yoop / pseudo.yoop ----
+
+// First `items[i]` whose `keys[i]` equals `key`, or a null JsonValue if absent.
+export function obj_get(v: JsonValue, key: string): JsonValue {
+    let i: usize = usize(0);
+    while (i < v.keys.len) {
+        if (str.string_eq(v.keys[i], key)) {
+            return v.items[i];
+        }
+        i = i + usize(1);
+    }
+    return mk_null();
+}
+
+export function has(v: JsonValue, key: string): bool {
+    let i: usize = usize(0);
+    while (i < v.keys.len) {
+        if (str.string_eq(v.keys[i], key)) { return true; }
+        i = i + usize(1);
+    }
+    return false;
+}
+
+export function as_str(v: JsonValue): string {
+    return v.str;
+}
+
+export function as_num(v: JsonValue): float64 {
+    return v.num;
+}
+
+export function as_int(v: JsonValue): int32 {
+    return int32(v.num);
+}
+
+export function as_bool(v: JsonValue): bool {
+    return v.boolv;
+}
+
+export function is_null(v: JsonValue): bool {
+    return v.kind == J_NULL;
+}

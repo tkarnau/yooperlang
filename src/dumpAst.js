@@ -62,7 +62,10 @@ function sanitizeForJson(v) {
   }
 }
 
-export function dumpAst(inputFile, outFile) {
+// Parse `inputFile` and return the same serialized payload the HTML viewer
+// embeds: { filename, source, ast }. Shared by dumpAst (HTML) and
+// dumpAstJson (raw JSON). Exits with a formatted diagnostic on parse error.
+function buildAstPayload(inputFile) {
   const absPath = fs.realpathSync(path.resolve(inputFile));
   const src = fs.readFileSync(absPath, "utf8");
 
@@ -85,12 +88,16 @@ export function dumpAst(inputFile, outFile) {
   }
 
   nextId = 1;
-  const serialized = serialize(ast);
+  return { filename: inputFile, source: src, ast: serialize(ast) };
+}
+
+export function dumpAst(inputFile, outFile) {
+  const { filename, source, ast: serialized } = buildAstPayload(inputFile);
 
   const template = fs.readFileSync(TEMPLATE_PATH, "utf8");
   const payload = JSON.stringify({
-    filename: inputFile,
-    source: src,
+    filename,
+    source,
     ast: serialized,
   })
     .replace(/<\/script/gi, "<\\/script")
@@ -99,4 +106,13 @@ export function dumpAst(inputFile, outFile) {
   const html = template.replace("__DATA__", payload);
   fs.writeFileSync(outFile, html, "utf8");
   console.log(`AST dumped: ${outFile}`);
+}
+
+// Raw-JSON sibling of dumpAst: writes the { filename, source, ast } payload
+// (same serialize() shape the HTML viewer embeds) so external tools can load
+// an AST without scraping HTML. Consumed by the algoscope playground.
+export function dumpAstJson(inputFile, outFile) {
+  const payload = buildAstPayload(inputFile);
+  fs.writeFileSync(outFile, JSON.stringify(payload), "utf8");
+  console.log(`AST JSON dumped: ${outFile}`);
 }

@@ -12,7 +12,7 @@ import { knownAttributeNames } from "./jsyoopattributes/registry.js";
 import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
-import { dumpAst } from "./dumpAst.js";
+import { dumpAst, dumpAstJson } from "./dumpAst.js";
 
 const phaseMode = process.env.phaseMode === "true";
 
@@ -24,6 +24,7 @@ function main() {
       outputFile: { type: "string", short: "o" },
       outputModules: { type: "boolean", short: "a" },
       "dump-ast": { type: "boolean" },
+      "dump-ast-json": { type: "string" },
       "dump-bc": { type: "boolean" },
       "list-attributes": { type: "boolean" },
       "track-heap": { type: "boolean" },
@@ -65,6 +66,13 @@ function main() {
   if (values["dump-ast"]) {
     const astOut = values.outputFile ?? `${outputFileName}.ast.html`;
     dumpAst(inputFile, astOut);
+    return;
+  }
+
+  if (values["dump-ast-json"] !== undefined) {
+    // Value is the explicit output path; empty string falls back to a default.
+    const astOut = values["dump-ast-json"] || `${outputFileName}.ast.json`;
+    dumpAstJson(inputFile, astOut);
     return;
   }
 
