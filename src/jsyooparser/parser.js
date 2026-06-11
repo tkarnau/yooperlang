@@ -424,14 +424,37 @@ export function parse(src) {
       return base;
     }
     // Phase 9.G: function value type `(p1: T1, p2: T2, ...) => RetT`. The
-    // disambiguator from a non-existent "parenthesized type" is that
-    // function-type annotations always start with `(` and contain either
-    // `)` (no params) or `IDENT :` (named param) right after it. The
-    // unnamed-param form `(T) => R` would be ambiguous with `(IDENT)` -
-    // we require named params for clarity and to match the function-decl
-    // surface.
+    // disambiguator from a parenthesized type group is that function-type
+    // param lists always start with `(` followed by `)` (no params), `ref`
+    // (a ref param), or `IDENT :` (a named param). The unnamed-param form
+    // `(T) => R` would be ambiguous with a `(T)` group - we require named
+    // params for clarity and to match the function-decl surface.
+    //
+    // Phase 10.K: anything else after `(` is a parenthesized type *group*,
+    // whose only purpose is to attach an array suffix: `((p: T) => R)[]` is
+    // the way to spell an array of function pointers. (A bare
+    // `(p: T) => R[]` binds the `[]` to the return type, since the return
+    // type is parsed greedily - so grouping is required to lift the array
+    // out to the whole function type.)
     if (peek().tag === TokenTags.lparen) {
-      return parseFunctionTypeAnnotation();
+      const after = peekAhead(1);
+      const isFnParamList =
+        after.tag === TokenTags.rparen ||
+        after.tag === TokenTags.ref ||
+        (after.tag === TokenTags.ident && peekAhead(2).tag === TokenTags.colon);
+      if (isFnParamList) {
+        return parseFunctionTypeAnnotation();
+      }
+      // Parenthesized type group: `( type )` with optional `[]` suffix(es).
+      advance(); // consume (
+      let grouped = parseTypeAnnotation();
+      expect(TokenTags.rparen);
+      while (peek().tag === TokenTags.lbracket) {
+        advance(); // consume [
+        expect(TokenTags.rbracket); // must be ]
+        grouped = { kind: "arrayType", elem: grouped };
+      }
+      return grouped;
     }
     // ref T
     if (peek().tag === TokenTags.ref) {
@@ -1971,6 +1994,12 @@ export function parse(src) {
     } else if (peek().tag === TokenTags.intLiteral) {
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
+    } else if (peek().tag === TokenTags.charLiteral) {
+      // char literal: a single-quoted Unicode scalar. The lexer already
+      // decoded it to a codepoint; lower it to an INT_LITERAL so it flows
+      // through the untyped-int pinning path (`ch == '/'` against a uint8).
+      node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
+      node.value = advance().intVal;
     } else if (
       peek().tag === TokenTags.true ||
       peek().tag === TokenTags.false
@@ -3268,12 +3297,13 @@ export function parse(src) {
   }
 
   // Phase 7.5: parse a single arm pattern. Accepts:
-  //   - INT_LITERAL / BOOL_LITERAL                       → LITERAL_PATTERN
+  //   - INT_LITERAL / CHAR_LITERAL / BOOL_LITERAL        → LITERAL_PATTERN
   //   - `_`                                              → VARIANT_PATTERN { isWildcard: true }
   //   - IDENT.IDENT { fieldBindings? }                   → VARIANT_PATTERN
   //   - IDENT.IDENT                                      → VARIANT_PATTERN (no-payload form)
-  // (Char literals tokenize as strLiterals today; reject string and float
-  // literals at pattern position with explicit diagnostics.)
+  // (Char literals lower to int-valued LITERAL_PATTERNs - their codepoint;
+  // reject string and float literals at pattern position with explicit
+  // diagnostics.)
   function parseSwitchPattern() {
     const tok = peek();
     if (tok.tag === TokenTags.discard) {
@@ -3302,7 +3332,7 @@ export function parse(src) {
       p.value = -num.intVal;
       return p;
     }
-    if (tok.tag === TokenTags.intLiteral) {
+    if (tok.tag === TokenTags.intLiteral || tok.tag === TokenTags.charLiteral) {
       advance();
       const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
       p.literalKind = "int";

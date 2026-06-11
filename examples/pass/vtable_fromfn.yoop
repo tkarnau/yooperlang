@@ -1,0 +1,111 @@
+// Phase 10.K: `VTableName.fromFn(f1, f2, ...)` builds a vtable value directly
+// from named functions - one per trait method, in declaration order - with no
+// struct + impl boilerplate. Stateless predicates that used to each need their
+// own empty `type X implements Trait { ... }` collapse to a plain function
+// plus a `fromFn` at the use site.
+//
+// The functions are stateless: the vtable's ctx slot is null and the compiler
+// emits a ctx-dropping shim so the uniform ctx-first dispatch still calls them.
+// fromFn-built and from(ref struct)-built values share one nominal vtable type,
+// so a single array holds a mix of both.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Single-method "is this byte interesting?" predicate.
+trait CharPred {
+    function test(ref self, ch: uint8): bool;
+}
+
+vtable PredDispatcher for CharPred {
+    test: (ch: uint8) => bool,
+}
+
+// Stateless predicates - plain functions, no wrapper type needed.
+function isDigit(ch: uint8): bool {
+    return ch >= '0' && ch <= '9';
+}
+
+function isUpper(ch: uint8): bool {
+    return ch >= 'A' && ch <= 'Z';
+}
+
+// A stateful predicate still uses an explicit struct + impl: it closes over
+// `target`, so it needs a ctx. It plugs into the same PredDispatcher slot.
+type IsChar implements CharPred {
+    target: uint8,
+    function test(ref self, ch: uint8): bool {
+        return ch == self.target;
+    }
+}
+
+// Count how many bytes of `src` satisfy any predicate in the list.
+function count_matches(src: uint8[], ref preds: PredDispatcher[]): int32 {
+    let total: int32 = 0;
+    for ch in src {
+        for pred in preds {
+            if (PredDispatcher.test(ref pred, ch)) {
+                total = total + 1;
+                break;
+            }
+        }
+    }
+    return total;
+}
+
+// A two-method trait, to prove fromFn maps args to method slots in
+// declaration order (lo <- first arg, hi <- second arg).
+trait TwoOp {
+    function lo(ref self, x: int32): int32;
+    function hi(ref self, x: int32): int32;
+}
+
+vtable TwoOpVT for TwoOp {
+    lo: (x: int32) => int32,
+    hi: (x: int32) => int32,
+}
+
+function dbl(x: int32): int32 {
+    return x * 2;
+}
+
+function inc(x: int32): int32 {
+    return x + 1;
+}
+
+function main(): int32 {
+    let src: uint8[] = [ 'a', '1', 'B', '2', 'z', 'C', '#', '9' ];
+
+    // Heterogeneous list: two stateless fromFn predicates plus one stateful
+    // struct-backed predicate, all the same PredDispatcher type.
+    let star: IsChar = { target: '#' };
+    let preds: PredDispatcher[] = intr.heap_alloc(3);
+    preds[0] = PredDispatcher.fromFn(isDigit);   // ctx-null shim around isDigit
+    preds[1] = PredDispatcher.fromFn(isUpper);   // ctx-null shim around isUpper
+    preds[2] = PredDispatcher.from(ref star);    // stateful, real ctx
+
+    // digits: '1' '2' '9' = 3; uppers: 'B' 'C' = 2; '#' = 1  -> 6
+    let n: int32 = count_matches(src, ref preds);
+    printf(`matches=${n}\n`);
+
+    // Single-dispatch convenience: fromFn produces an ordinary expression.
+    let onlyDigit: PredDispatcher = PredDispatcher.fromFn(isDigit);
+    if (PredDispatcher.test(ref onlyDigit, '7')) {
+        printf(`seven-is-digit\n`);
+    }
+
+    // Two-method vtable: lo gets dbl, hi gets inc (declaration order).
+    let ops: TwoOpVT = TwoOpVT.fromFn(dbl, inc);
+    printf(`lo=${TwoOpVT.lo(ref ops, 10)} hi=${TwoOpVT.hi(ref ops, 10)}\n`);
+
+    intr.heap_free(preds);
+    return 0;
+}
+
+// expected output:
+// matches=6
+// seven-is-digit
+// lo=20 hi=11

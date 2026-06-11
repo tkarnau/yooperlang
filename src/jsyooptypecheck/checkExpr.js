@@ -225,14 +225,42 @@ function resolveIdent(node, scope, ctx) {
 
 // `a + b`, `a == b`, `a && b` - recurses into both sides, then asks
 // unifyArith for the resulting type given the operator.
+// Render a binary-op token tag (`node.op`, e.g. "lt") back to its source
+// symbol for diagnostics. Falls back to the tag itself for anything unmapped.
+const BIN_OP_SYMBOLS = {
+  plus: "+", minus: "-", mult: "*", divide: "/", modulus: "%",
+  eqeq: "==", neq: "!=", lt: "<", gt: ">", lte: "<=", gte: ">=",
+  andand: "&&", oror: "||", pipe: "|", amp: "&", caret: "^",
+  lshift: "<<", rshift: ">>",
+};
+function binOpSymbol(op) {
+  return BIN_OP_SYMBOLS[op] ?? op;
+}
+
 function resolveBinary(node, scope, ctx) {
   const leftType = resolveExprType(node.left, scope, ctx);
   const rightType = resolveExprType(node.right, scope, ctx);
   const resultType = unifyArith(leftType, rightType, node.op);
+  // unifyArith is a pure function with no error channel: it returns null for
+  // every operand-type mismatch (e.g. `int32 < usize` - both typed, not
+  // equal, no implicit widening). resolveExprType must never return null (the
+  // statement checkers dereference `.kind` on every result), so convert a null
+  // into a clear diagnostic + ErrorType here. Suppress the secondary error if
+  // an operand already failed - the root cause was reported there.
+  if (!resultType) {
+    if (leftType.kind !== typeKinds.error && rightType.kind !== typeKinds.error) {
+      pushError(
+        ctx.errors,
+        node,
+        `operator "${binOpSymbol(node.op)}" cannot be applied to ${formatType(leftType)} and ${formatType(rightType)}`,
+      );
+    }
+    return setType(node, ErrorType());
+  }
   // Pin untyped literal operands to the unified type so downstream (codegen)
   // doesn't have to second-guess their precision. E.g. `b.hue + 0.015` where
   // b.hue is float32 should coerce 0.015 from untypedFloat to float32.
-  if (resultType && resultType.kind === typeKinds.prim) {
+  if (resultType.kind === typeKinds.prim) {
     coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
     coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
   }
@@ -428,6 +456,20 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
+  // Phase 10.K: a bare identifier callee that resolves to an in-scope binding
+  // of FunctionPointerType is an indirect call through that binding - a
+  // function-pointer parameter or local (`pred(ch)` where `pred:
+  // (ch: uint8) => bool`). This is the bare-identifier sibling of the
+  // FIELD_ACCESS fn-ptr-field call above. Module-level functions live in
+  // moduleSymbols (checked below), not the lexical scope, so a real function
+  // call never reaches here.
+  if (typeof callee === "string") {
+    const binding = lookupInScope(scope, callee);
+    if (binding && binding.type?.kind === typeKinds.functionPointer) {
+      return resolveFunctionPointerCall(node, binding.type, scope, ctx);
+    }
+  }
+
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
     // Phase 7.4: bare-form `m(ref x)` is no longer a trait dispatch path.
@@ -501,6 +543,10 @@ function resolveFunctionPointerCall(node, fptType, scope, ctx) {
     );
   }
   node.fnPointerCall = true;
+  // Phase 10.K: stash the FPT so codegen has it for the bare-identifier
+  // callee case (where node.callee is a string with no .resolvedType, unlike
+  // the FIELD_ACCESS field case which carries its own resolved type).
+  node.fnPointerType = fptType;
   return setType(node, fptType.returnType);
 }
 
@@ -2530,6 +2576,14 @@ export function lookupVTableByName(name, ctx) {
 //     vtable value, but lets callers use the vtable type as the dispatch
 //     namespace (matches the library-design surface in §8 q1).
 function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
+  // Phase 10.K: `VTableName.fromFn(f1, f2, ...)` - build a vtable value
+  // directly from named functions (one per trait method, in declaration
+  // order), skipping the struct + impl boilerplate. The ctx slot is null
+  // (the functions are stateless); codegen wraps each in a ctx-dropping
+  // shim so the uniform ctx-first dispatch convention still calls them.
+  if (methodName === "fromFn") {
+    return resolveVTableFromFn(node, vtableType, scope, ctx);
+  }
   if (methodName !== "from") {
     // Forwarding to trait dispatch: synthesize a trait reference and route
     // through resolveTraitQualifiedCall, which already knows how to handle
@@ -2599,6 +2653,49 @@ function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
     implType: recvType,
   };
   arg.resolvedType = operandType;
+  return setType(node, vtableType);
+}
+
+// Phase 10.K: `VTableName.fromFn(f1, f2, ...)`. One named function per trait
+// method, in declaration order. Each function's FuncType must be assignable
+// to the matching method's function-pointer slot (params + return). Args must
+// be *named functions* (FuncType) - not runtime function-pointer values - so
+// codegen can take their address statically and synthesize the ctx-dropping
+// shim. The result is a vtable value with a null ctx.
+function resolveVTableFromFn(node, vtableType, scope, ctx) {
+  const expected = vtableType.methodOrder.length;
+  if (node.args.length !== expected) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.fromFn(...)\` expects ${expected} function argument(s) (one per method of trait "${vtableType.traitName}"), got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  for (let i = 0; i < node.args.length; i++) {
+    const arg = node.args[i];
+    const argType = resolveExprType(arg, scope, ctx);
+    if (!argType || argType.kind === typeKinds.error) continue;
+    if (argType.kind !== typeKinds.func) {
+      pushError(
+        ctx.errors,
+        node,
+        `\`${vtableType.name}.fromFn(...)\` argument ${i + 1} must be a named function, got ${formatType(argType)}`,
+      );
+      continue;
+    }
+    const fieldFpt = vtableType.fields[i].type;
+    if (fieldFpt.kind !== typeKinds.functionPointer) continue; // vtable decl already errored
+    if (!isAssignable(fieldFpt, argType)) {
+      pushError(
+        ctx.errors,
+        node,
+        `\`${vtableType.name}.fromFn(...)\` argument ${i + 1} has type ${formatType(argType)}, which does not match method "${vtableType.methodOrder[i]}" of trait "${vtableType.traitName}" (expected ${formatType(fieldFpt)})`,
+      );
+    }
+  }
+  node.vtableFromFnBuilder = { vtableType };
   return setType(node, vtableType);
 }
 

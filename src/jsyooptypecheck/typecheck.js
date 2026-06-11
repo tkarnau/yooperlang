@@ -475,12 +475,26 @@ function traitExtendsHasCycle(root) {
   return false;
 }
 
+// Two TraitTypes name the same trait when they share (name, moduleId). This
+// is the same nominal identity `typesEqual` uses for traits (see
+// instantiate.js). For generic traits, distinct instantiations
+// (`Comparable<Num>` vs the open bound `Comparable<T>`) are different object
+// instances but the SAME trait nominally - bound satisfaction must treat them
+// as matching, since a struct implementing `Comparable<Num>` does satisfy a
+// `<T implements Comparable<T>>` bound at T = Num. Generic type-arg agreement
+// is not verified here (v0 limitation, consistent with name-based dispatch).
+function traitNominalEq(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.name === b.name && a.moduleId === b.moduleId;
+}
+
 // Phase 9.J: true if `subject` is `target` or transitively extends it.
 function traitIsOrExtends(subject, target) {
   if (!subject || !target) return false;
-  if (subject === target) return true;
+  if (traitNominalEq(subject, target)) return true;
   for (const t of walkTraitExtends(subject)) {
-    if (t === target) return true;
+    if (traitNominalEq(t, target)) return true;
   }
   return false;
 }
@@ -2164,6 +2178,72 @@ export function typecheckProgram(modules) {
       typeParamScope: paramScope,
     });
 
+    // Phase 7.2 fix: generic-trait method sigs must be resolved BEFORE the
+    // main pass-C loop, because that loop resolves generic function/struct
+    // `implements` bounds (resolveAndAttachBounds), which instantiate the
+    // bound generic trait via the registry. instantiateTrait snapshots
+    // `gd.genericMethods` into a fresh (cached) TraitType; if genericMethods
+    // is still empty at snapshot time the instance is permanently method-less,
+    // and trait-qualified dispatch through a bounded type param
+    // (`Comparable.compare(ref x, ...)` for `<T implements Comparable<T>>`)
+    // later fails with "trait has no method". Non-generic bounds don't hit
+    // this because they attach the live mutable trait object whose `.methods`
+    // map is filled in-place by C.1. Hoisting generic-trait population to a
+    // pre-pass keeps the snapshot well-formed; the C.1 generic branch then
+    // just `continue`s.
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind !== ASTNodeKind.TRAIT_DECL || !d.genericDecl) continue;
+      const gd = d.genericDecl;
+      resolveAndAttachBounds(
+        gd,
+        d.typeParams,
+        mod,
+        moduleEnv,
+        programState,
+        errors,
+      );
+      const ctxForSig = {
+        ...genericCtx(gd.paramScope),
+        selfType: TraitSelfPlaceholder,
+      };
+      const seen = new Set();
+      for (const sig of d.methods) {
+        if (seen.has(sig.name)) {
+          errors.push({
+            message: `duplicate method name "${sig.name}" in trait "${d.name}"`,
+            sourceLoc: sig.sourceLoc,
+          });
+          continue;
+        }
+        seen.add(sig.name);
+        const params = sig.params.map((p) => {
+          const baseType =
+            resolveTypeAnnotationInModule(
+              p.typeAnnotation,
+              mod.id,
+              moduleEnv,
+              ctxForSig,
+            ) ?? ErrorType();
+          return {
+            name: p.name,
+            type: p.isRef ? RefType(baseType) : baseType,
+            isRef: p.isRef ?? false,
+          };
+        });
+        const returnType =
+          resolveTypeAnnotationInModule(
+            sig.returnTypeAnnotation,
+            mod.id,
+            moduleEnv,
+            ctxForSig,
+          ) ?? ErrorType();
+        const sigFunc = FuncType(params, returnType, false);
+        gd.genericMethods.set(sig.name, sigFunc);
+        sig.resolvedFuncType = sigFunc;
+      }
+    }
+
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
 
@@ -2824,59 +2904,10 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TRAIT_DECL) continue;
-      // Phase 7.1: generic trait - resolve method sigs with type-param scope.
-      if (d.genericDecl) {
-        const gd = d.genericDecl;
-        // Phase 7.2: attach bounds before resolving method signatures.
-        resolveAndAttachBounds(
-          gd,
-          d.typeParams,
-          mod,
-          moduleEnv,
-          programState,
-          errors,
-        );
-        const ctxForSig = {
-          ...genericCtx(gd.paramScope),
-          selfType: TraitSelfPlaceholder,
-        };
-        const seen = new Set();
-        for (const sig of d.methods) {
-          if (seen.has(sig.name)) {
-            errors.push({
-              message: `duplicate method name "${sig.name}" in trait "${d.name}"`,
-              sourceLoc: sig.sourceLoc,
-            });
-            continue;
-          }
-          seen.add(sig.name);
-          const params = sig.params.map((p) => {
-            const baseType =
-              resolveTypeAnnotationInModule(
-                p.typeAnnotation,
-                mod.id,
-                moduleEnv,
-                ctxForSig,
-              ) ?? ErrorType();
-            return {
-              name: p.name,
-              type: p.isRef ? RefType(baseType) : baseType,
-              isRef: p.isRef ?? false,
-            };
-          });
-          const returnType =
-            resolveTypeAnnotationInModule(
-              sig.returnTypeAnnotation,
-              mod.id,
-              moduleEnv,
-              ctxForSig,
-            ) ?? ErrorType();
-          const sigFunc = FuncType(params, returnType, false);
-          gd.genericMethods.set(sig.name, sigFunc);
-          sig.resolvedFuncType = sigFunc;
-        }
-        continue;
-      }
+      // Phase 7.1: generic trait method sigs are resolved in the pre-pass
+      // above (so generic bounds instantiate against a populated method map);
+      // nothing left to do here.
+      if (d.genericDecl) continue;
       const trait = traitTable.get(d.name);
       if (!trait) continue; // was rejected in pass A due to redeclaration
       // validate no duplicate method names within the trait

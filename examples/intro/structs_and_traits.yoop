@@ -1,0 +1,33 @@
+// Structs and traits - the heart of Yooperlang's data model.
+//
+// There are no classes. You define data with a `type` (a struct) and
+// behavior with a `trait`. A struct opts in to a trait with
+// `implements`, and supplies the trait's methods inline.
+//
+// Methods take `ref self` as their first parameter (a reference to the
+// receiver). You call a trait method through the trait name:
+//   Greeter.greet(ref m)
+// not `m.greet()`. The trait-qualified form means two traits can declare
+// a method with the same name without ambiguity.
+
+trait Greeter {
+    function greet(ref self): int32;
+}
+
+type Megaphone implements Greeter {
+    volume: int32,
+    function greet(ref self): int32 {
+        // Returns the "loudness" of the greeting.
+        return self.volume * 10;
+    }
+}
+
+function main(): int32 {
+    let m: Megaphone = { volume: 5 };
+    let loud: int32 = Greeter.greet(ref m);
+    printf(`greeting loudness = ${loud}\n`);
+    return 0;
+}
+
+// expected output:
+// greeting loudness = 50

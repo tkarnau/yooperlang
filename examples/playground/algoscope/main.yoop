@@ -1,0 +1,238 @@
+// algoscope/main.yoop - an SDL playground that visualizes Yooperlang algorithms.
+//
+// Loads a dumped AST (the `yoopiler --dump-ast-json` payload), lists the
+// top-level functions in a left panel, and renders the selected function as
+// abstracted "scientific" pseudocode in a right panel - range-form loops,
+// recursion markers, and depth-glossed nested blocks.
+//
+//   build:  node src/yoopiler.js examples/playground/algoscope/main.yoop
+//   run:    examples/playground/algoscope/main path/to/file.ast.json
+//
+// Keys: up/down (or j/k) select a function, mouse-click a row to select,
+//       -/= lower/raise detail depth, mouse-wheel scrolls, esc/q quits.
+
+import.unsafe;
+import * as intr from "std/core/intrinsics.yoop";
+import { Vec } from "std/core/vec.yoop";
+import * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+
+import * as json from "./json.yoop";
+import * as ast from "./ast.yoop";
+import * as pseudo from "./pseudo.yoop";
+import * as sdl from "./sdl.yoop";
+
+extern "C" from library "m" {
+    function printf(fmt: string, ...): int32;
+}
+
+// ---- layout + theme ----
+
+const WIN_W: int32 = 1180;
+const WIN_H: int32 = 760;
+const HEADER_H: int32 = 44;
+const LEFT_W: int32 = 320;
+const PAD: int32 = 14;
+const INDENT_PX: int32 = 26;
+const FONT_SIZE: int32 = 18;
+// A single-face .ttf that harfbuzz shapes reliably (the .ttc collections and the
+// SF system fonts crash libharfbuzz here). Proportional, but legible.
+const FONT_PATH: string = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
+
+// All packed once in main() (rgba is not a compile-time const expression).
+export type Theme {
+    bg: uint32,
+    header_bg: uint32,
+    panel_bg: uint32,
+    text: uint32,
+    dim: uint32,
+    accent: uint32,
+    sigtext: uint32,
+}
+
+// Mutable view state.
+export type State {
+    fns: json.JsonValue[],
+    nfns: int32,
+    selected: int32,
+    max_depth: int32,
+    scroll: int32,        // right-panel pixel scroll
+    list_scroll: int32,   // left-panel pixel scroll
+    filename: string,
+    lh: int32,            // line height in pixels
+}
+
+// ---- drawing ----
+
+function draw(ref st: State, ref ren: sdl.Ren, ref font: sdl.Font, ref th: Theme): void {
+    sdl.clear(ref ren, th.bg);
+
+    // Header bar.
+    sdl.fill_rect(ref ren, 0, 0, WIN_W, HEADER_H, th.header_bg);
+    let title: string = `algoscope  -  ${st.filename}`;
+    sdl.draw_text(ref ren, ref font,title, PAD, 10, th.text);
+    let hint: string = `depth ${fmt.int_to_string(int64(st.max_depth))}    [up/down] fn   [-/=] depth   [wheel] scroll   [esc] quit`;
+    sdl.draw_text(ref ren, ref font,hint, LEFT_W + PAD, 10, th.dim);
+
+    // Left panel background + divider.
+    sdl.fill_rect(ref ren, 0, HEADER_H, LEFT_W, WIN_H - HEADER_H, th.panel_bg);
+
+    let list_top: int32 = HEADER_H + PAD;
+    let i: int32 = 0;
+    while (i < st.nfns) {
+        let y: int32 = list_top + i * st.lh - st.list_scroll;
+        if (y + st.lh > HEADER_H && y < WIN_H) {
+            if (i == st.selected) {
+                sdl.fill_rect(ref ren, 0, y - 2, LEFT_W, st.lh, th.accent);
+            }
+            let name: string = ast.field_str(st.fns[usize(i)], "name");
+            sdl.draw_text(ref ren, ref font,name, PAD, y, th.text);
+        }
+        i = i + 1;
+    }
+
+    // Right panel: pseudocode for the selected function.
+    if (st.nfns > 0) {
+        let lines: pseudo.Line[] = pseudo.render_function(st.fns[usize(st.selected)], st.max_depth);
+        let right_x: int32 = LEFT_W + PAD;
+        let right_top: int32 = HEADER_H + PAD;
+        let li: usize = usize(0);
+        while (li < lines.len) {
+            let ln: pseudo.Line = lines[li];
+            let y: int32 = right_top + int32(li) * st.lh - st.scroll;
+            if (y + st.lh > HEADER_H && y < WIN_H) {
+                let x: int32 = right_x + ln.indent * INDENT_PX;
+                let color: uint32 = th.text;
+                if (ln.collapsed) { color = th.dim; }
+                if (int32(li) == 0) { color = th.sigtext; }
+                sdl.draw_text(ref ren, ref font,ln.text, x, y, color);
+            }
+            li = li + usize(1);
+        }
+    }
+
+    sdl.present(ref ren);
+}
+
+// ---- selection / scroll helpers ----
+
+function clamp_selection(ref st: State): void {
+    if (st.selected < 0) { st.selected = 0; }
+    if (st.selected >= st.nfns) { st.selected = st.nfns - 1; }
+    if (st.selected < 0) { st.selected = 0; }
+    // Keep the selected row visible in the left panel.
+    let list_view_h: int32 = WIN_H - HEADER_H - PAD;
+    let top: int32 = st.selected * st.lh;
+    if (top < st.list_scroll) { st.list_scroll = top; }
+    if (top + st.lh > st.list_scroll + list_view_h) {
+        st.list_scroll = top + st.lh - list_view_h;
+    }
+    if (st.list_scroll < 0) { st.list_scroll = 0; }
+}
+
+// ---- main ----
+
+function main(): int32 {
+    // Resolve the AST-JSON path from argv (or a default for quick runs).
+    let path: string = "/tmp/x.ast.json";
+    if (sdl.argc() > 1) { path = sdl.argv(1); }
+
+    disposable buf: Vec<uint8> = vec.vec_new(usize(16384));
+    let err: string = fs.read_file_into(ref buf, path);
+    if (!str.string_eq(err, "")) {
+        printf("algoscope: cannot read %s: %s\n", path, err);
+        return 1;
+    }
+
+    let root: json.JsonValue = json.parse_bytes(vec.vec_as_array(ref buf));
+    let filename: string = json.as_str(json.obj_get(root, "filename"));
+    let program: json.JsonValue = json.obj_get(root, "ast");
+    let fns: json.JsonValue[] = ast.top_functions(program);
+
+    if (!sdl.init_video()) { return 1; }
+    let win: sdl.Win = sdl.make_window("algoscope", WIN_W, WIN_H);
+    let ren: sdl.Ren = sdl.make_renderer(ref win);
+    let font: sdl.Font = sdl.open_font(FONT_PATH, FONT_SIZE);
+
+    let th: Theme = {
+        bg: sdl.rgba(28, 28, 38, 255),
+        header_bg: sdl.rgba(18, 18, 26, 255),
+        panel_bg: sdl.rgba(36, 36, 50, 255),
+        text: sdl.rgba(222, 222, 232, 255),
+        dim: sdl.rgba(120, 122, 145, 255),
+        accent: sdl.rgba(54, 78, 140, 255),
+        sigtext: sdl.rgba(150, 200, 255, 255),
+    };
+
+    let st: State = {
+        fns: fns,
+        nfns: int32(fns.len),
+        selected: 0,
+        max_depth: 3,
+        scroll: 0,
+        list_scroll: 0,
+        filename: filename,
+        lh: sdl.font_height(ref font) + 6,
+    };
+
+    // Event-driven render loop: redraw only after input changes the view.
+    let ebuf: uint8[] = intr.heap_alloc(usize(256));
+    let running: bool = true;
+    let dirty: bool = true;
+    while (running) {
+        if (dirty) {
+            draw(ref st, ref ren, ref font, ref th);
+            dirty = false;
+        }
+        while (sdl.poll_event(ebuf) != 0) {
+            let et: int32 = sdl.event_type(ebuf);
+            if (et == sdl.EVT_QUIT) {
+                running = false;
+            } else if (et == sdl.EVT_KEYDOWN) {
+                let sc: int32 = sdl.event_scancode(ebuf);
+                if (sc == sdl.SC_ESCAPE || sc == sdl.SC_Q) {
+                    running = false;
+                } else if (sc == sdl.SC_UP || sc == sdl.SC_K) {
+                    st.selected = st.selected - 1;
+                    st.scroll = 0;
+                    clamp_selection(ref st);
+                    dirty = true;
+                } else if (sc == sdl.SC_DOWN || sc == sdl.SC_J) {
+                    st.selected = st.selected + 1;
+                    st.scroll = 0;
+                    clamp_selection(ref st);
+                    dirty = true;
+                } else if (sc == sdl.SC_MINUS || sc == sdl.SC_KP_MINUS) {
+                    if (st.max_depth > 0) { st.max_depth = st.max_depth - 1; }
+                    dirty = true;
+                } else if (sc == sdl.SC_EQUALS || sc == sdl.SC_KP_PLUS) {
+                    if (st.max_depth < 40) { st.max_depth = st.max_depth + 1; }
+                    dirty = true;
+                }
+            } else if (et == sdl.EVT_MOUSEWHEEL) {
+                st.scroll = st.scroll - sdl.event_wheel_y(ebuf) * st.lh * 3;
+                if (st.scroll < 0) { st.scroll = 0; }
+                dirty = true;
+            } else if (et == sdl.EVT_MOUSEBUTTONDOWN) {
+                let mx: int32 = sdl.event_mouse_x(ebuf);
+                let my: int32 = sdl.event_mouse_y(ebuf);
+                if (mx < LEFT_W && my > HEADER_H) {
+                    let row: int32 = (my - (HEADER_H + PAD) + st.list_scroll) / st.lh;
+                    if (row >= 0 && row < st.nfns) {
+                        st.selected = row;
+                        st.scroll = 0;
+                        clamp_selection(ref st);
+                        dirty = true;
+                    }
+                }
+            }
+        }
+        if (!dirty) { sdl.delay(uint32(8)); }
+    }
+
+    sdl.quit(ref win, ref ren, ref font);
+    return 0;
+}

@@ -168,6 +168,70 @@ describe("typecheckProgram: trait method sigs - pass C.1", () => {
   });
 });
 
+describe("typecheckProgram: generic trait dispatch through a bounded type param", () => {
+  // Regression: a generic function's `implements` bound on a GENERIC trait used
+  // to instantiate that trait before pass C.1 had populated its method sigs, so
+  // the cached instance was permanently method-less and `Trait.method(ref x)`
+  // through the type param failed with "trait has no method". Generic-trait
+  // method population is now hoisted to a pre-pass.
+  it("resolves Comparable.compare(ref x, ...) for <T implements Comparable<T>>", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+        "trait Comparable<T> { function compare(ref self, b: T): int8; }\n" +
+          "function cmp<T implements Comparable<T>>(a: T, b: T): int8 {\n" +
+          "  return Comparable.compare(ref a, b);\n" +
+          "}\n",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  // Regression: bound satisfaction compared TraitTypes by identity, so a struct
+  // implementing `Comparable<Num>` was rejected against an open `Comparable<T>`
+  // bound. Matching is now nominal (name + moduleId).
+  it("accepts a concrete struct implementing the generic trait as a type arg", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+        "trait Comparable<T> { function compare(ref self, b: T): int8; }\n" +
+          "type Num implements Comparable<Num> {\n" +
+          "  v: int32,\n" +
+          "  function compare(ref self, b: Num): int8 { return 0; }\n" +
+          "}\n" +
+          "function cmp<T implements Comparable<T>>(a: T, b: T): int8 {\n" +
+          "  return Comparable.compare(ref a, b);\n" +
+          "}\n" +
+          "function main(): int32 {\n" +
+          "  let x: Num = { v: 1 };\n" +
+          "  let y: Num = { v: 2 };\n" +
+          "  return int32(cmp(x, y));\n" +
+          "}\n",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+});
+
+describe("typecheckProgram: binary operator on mismatched types", () => {
+  // Regression: unifyArith returns null for mismatched operands (e.g. a signed
+  // int compared against usize); resolveBinary used to propagate that null,
+  // which crashed the for-loop checker (null.kind). It now reports a clean
+  // diagnostic and returns an error type.
+  it("reports a clean error (no crash) for int32 < usize", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        "  let xs: int32[] = [1, 2, 3];\n" +
+        "  let i: int32 = 0;\n" +
+        "  for (i = 0; i < xs.len; i = i + 1) {}\n" +
+        "  return 0;\n" +
+        "}\n",
+    );
+    assert.ok(
+      errors.some((e) => /operator "<" cannot be applied to int32 and usize/.test(e.message)),
+      `expected operator-mismatch error, got: ${JSON.stringify(errors.map((e) => e.message))}`,
+    );
+  });
+});
+
 describe("typecheckProgram: impl block validation - pass C.3", () => {
   it("well-formed impl produces no errors", () => {
     const { errors } = typecheckProgram(

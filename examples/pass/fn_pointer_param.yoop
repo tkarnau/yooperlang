@@ -1,0 +1,46 @@
+// Phase 10.K: a function-pointer parameter can be called directly by name,
+// and a bare top-level function name materializes as the argument. This is
+// the lightest-weight higher-order form - no vtable, no struct, no ctx: a
+// plain non-capturing code pointer passed and called. The same `count_where`
+// drives different behavior purely by which function is handed in.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function isDigit(ch: uint8): bool {
+    return ch >= '0' && ch <= '9';
+}
+
+function isUpper(ch: uint8): bool {
+    return ch >= 'A' && ch <= 'Z';
+}
+
+// `pred` is a function-pointer parameter; `pred(ch)` is an indirect call.
+function count_where(src: uint8[], pred: (ch: uint8) => bool): int32 {
+    let total: int32 = 0;
+    for ch in src {
+        if (pred(ch)) {
+            total = total + 1;
+        }
+    }
+    return total;
+}
+
+function main(): int32 {
+    let src: uint8[] = [ 'a', '1', 'B', '2', 'z', 'C', '#', '9' ];
+
+    // Pass each predicate by name; the parameter selects the behavior.
+    printf(`digits=${count_where(src, isDigit)}\n`);
+    printf(`uppers=${count_where(src, isUpper)}\n`);
+
+    // A function value can also be bound to a local and then passed along.
+    let p: (ch: uint8) => bool = isUpper;
+    printf(`again=${count_where(src, p)}\n`);
+    return 0;
+}
+
+// expected output:
+// digits=3
+// uppers=2
+// again=2

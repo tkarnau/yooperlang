@@ -142,9 +142,24 @@ and ~every example file would otherwise need an extra line.
 | Type | Literal examples | Notes |
 |---|---|---|
 | `bool` | `true`, `false` | |
-| `char` | `'A'`, `'\n'`, `'\x41'` | evaluates to a `uint32` Unicode codepoint |
+| `char` | `'A'`, `'\n'`, `'\x41'` | a Unicode scalar; see below |
 | `string` | `"hello"`, `"line\n"` | immutable, UTF-8, zero-terminated for C interop |
 | `void` | - | function return only |
+
+**Char literals are single-quoted, and the single quote is reserved exclusively
+for them** - strings use double quotes, templates use backticks. A char literal
+is one Unicode scalar between single quotes (`'a'`, `'\n'`, `'\x41'`, or an
+astral scalar like an emoji). Supported escapes: `\n \r \t \0 \\ \' \"` and the
+`\xNN` two-hex-digit byte form. An empty `''` or multi-character `'ab'` literal
+is a lex error.
+
+A char literal evaluates to its codepoint and is **untyped, exactly like an
+integer literal**: it pins to whatever integer type the context requires and is
+range-checked there. So `ch == '/'` against a `uint8` works (`'/'` is `47`,
+fits a byte), while pinning an astral scalar to a `uint8` is the same overflow
+error as `let x: uint8 = 256`. With no pinning context it defaults to `int32`
+like any untyped integer. This is what makes byte-oriented code (a lexer
+scanning `uint8[]`) read as `ch == '\n'` instead of `ch == 10`.
 
 ### Numeric literals
 
@@ -436,6 +451,16 @@ Two builtins on every vtable type:
 - **`VTableName.from(ref x)`** - constructs a vtable value from any
   `ref T` where `T implements TraitName`. The compiler stores `&x` as
   the ctx and pulls the method addresses from `T`'s impl.
+- **`VTableName.fromFn(f1, f2, ...)`** (Phase 10.K) - constructs a vtable
+  value directly from named functions, one per trait method in declaration
+  order, with no struct + impl boilerplate. Each function's signature must
+  match the corresponding method slot (the trait method minus `ref self`).
+  The functions are stateless, so the ctx slot is null; the compiler emits a
+  ctx-dropping shim around each function so the uniform ctx-first dispatch
+  convention still calls them. fromFn-built and from(ref struct)-built values
+  share the same nominal vtable type, so one array can hold a mix of both.
+  Arguments must be named functions (so their address is known statically),
+  not runtime function-pointer values.
 - **`VTableName.method(ref v, ...)`** - dispatches through the vtable's
   method slot. Equivalent to `TraitName.method(ref v, ...)` where v is
   the vtable value; both forms produce the same IR.
@@ -463,10 +488,31 @@ type Handler {
 }
 ```
 
+A function-value type may be wrapped in parentheses to form a type group, so
+an array suffix attaches to the whole function type rather than its return
+type (Phase 10.K). This is the way to spell an **array of function pointers**:
+
+```js
+// array of predicates - each element is a (uint8) => bool function pointer
+preds: ((ch: uint8) => bool)[]
+```
+
+Without the grouping parens, `(ch: uint8) => bool[]` parses as a function
+returning `bool[]` (the return type is parsed greedily). The grouping form
+`( T )` works for any type, but its only load-bearing use is lifting an array
+suffix out past a `=>`.
+
 The form is **only** valid in type position - `=>` is not a closure-literal
-syntax (closures aren't planned). Function values flow into vtables today;
-broader function-value materialization (taking the address of a top-level
-function by name) is a future incremental extension.
+syntax (closures aren't planned). Function-value materialization (Phase
+10.X.2) lets a bare top-level function name be used as a value wherever a
+matching `(p: T) => R` is expected - a struct field initializer
+(`{ handle: my_func }`), a function-pointer parameter
+(`count_where(src, isDigit)`), or a `VTableName.fromFn(...)` argument. A
+function-pointer parameter or local is itself callable by name -
+`pred(ch)` is an indirect call through the stored pointer. A named
+function captures nothing, so it materializes to a plain code-pointer address
+with no environment or allocation - the non-capturing case that needs no
+closure machinery.
 
 ---
 
