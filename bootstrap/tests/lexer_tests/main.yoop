@@ -14,11 +14,17 @@
 import { Result } from "std/core/types.yoop";
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-import { tokenize } from "../../src/sourceCodeProcessing/lexer.yoop";
+import { tokenize, Token } from "../../src/sourceCodeProcessing/lexer.yoop";
 import { keywordList, tokenScanList, TokenTags } from "../../src/contracts.yoop";
+
+
+// store this at compile time so that we can declare a fixed array of assertion
+// values
+// @precompile const KEYWORD_COUNT = keywordList.len;
 
 function main(): int {
   // first test all defined keywords
+  // const expectedKeywordTokens: Token[KEYWORD_COUNT]; 
   let keywordTestString = "";
   for kd in keywordList {
     keywordTestString = `${keywordTestString}${kd.str} `;

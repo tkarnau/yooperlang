@@ -1,5 +1,5 @@
 import * as debug from "std/debug.yoop";
-import { Comparable, quickSort } from "./utils/arrayUtils.yoop";
+import { Comparable, quickSort } from "./utils/array_utils.yoop";
 
 
 export enum TokenTags<string> {
