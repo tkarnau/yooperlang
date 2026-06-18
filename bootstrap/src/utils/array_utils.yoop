@@ -36,4 +36,3 @@ export function quickSort<T implements Comparable<T>>(arr: T[], low: usize, high
   }
   quickSort(arr, p + 1, high);
 }
-

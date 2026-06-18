@@ -1,6 +1,8 @@
-// Yoopstore-papercut #11 (negative): returning a struct literal that moves a
-// propagating binding into a field still requires the enclosing function to
-// declare propagates<K>. Without it, the obligation has nowhere to go.
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// returning a struct literal that moves a propagating binding into a field
+// needs no propagates<K> on the function. Obligations are advisory; this
+// typechecks cleanly. (Formerly
+// examples/fail/propagates_return_struct_literal_not_declared.)
 
 trait Disposable {
     function dispose(ref self): void;
@@ -24,7 +26,7 @@ type Outer implements Disposable propagates<disposable> {
     }
 }
 
-// Missing propagates<disposable> on the return - should be an error.
+// No propagates<disposable> on the return. Advisory model: not an error.
 function make_outer(): Outer {
     let inner: Inner = { id: 1 };
     return { inner: inner };
@@ -33,5 +35,3 @@ function make_outer(): Outer {
 function main(): int32 {
     return 0;
 }
-
-// Fails: function returns a value of type Outer carrying propagates<disposable>

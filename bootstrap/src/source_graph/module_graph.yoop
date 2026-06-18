@@ -1,0 +1,73 @@
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Set }, * as set from "std/collections/set.yoop";
+import * as fs from "std/fs.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind } from "../contracts.yoop";
+
+export type Module propagates<disposable> {
+  id: string,
+  absPath: string,
+  src: Vec<uint8>,
+  ast: ASTNode,
+  imports: ASTNode[],
+}
+
+export type ModuleGraph propagates<disposable> {
+  modules: Module[],
+  entry: Module,
+  autoLoadModuleIds: Map<string, string>,
+}
+
+export function getModuleId(path: string): string {
+  // todo create hash...
+  // for now just return the absPath
+  return path;
+}
+
+variant LoadResult propagates<disposable> {
+  Ok { value: Module },
+  Err { error: string },
+}
+
+// take the current module graph and a cycle detection stack pointer
+// and a path (either the entry point or an import referenced via another module)
+function loadModule(
+  ref graph: Map<string, Module>,
+  ref cycleStack: Set<string>,
+  absPath: string): LoadResult propagates<disposable> {
+  if (set.set_contains(ref cycleStack, absPath)) {
+    return LoadResult.Err { error: `import cycle detected involving ${absPath}` };
+  }
+  // if it has already been loaded, just return it
+  switch (map.map_get(ref graph, absPath)) {
+    case Option.None: { }
+    case Option.Some { value: v } : { return LoadResult.Ok { value: v }; }
+  }
+
+  const srcBuf: Vec<uint8> = vec.vec_new(4096); // 4kb seems fine to start...
+  const readErr = fs.read_file_into(ref srcBuf, absPath);
+  if (readErr.len > 0) {
+    return LoadResult.Err { error: readErr };
+  }
+  const ast: ASTNode = {
+    kind: ASTNodeKind.PROGRAM,
+    sourceLoc: {
+      pos: 0,
+      line: 0,
+      column: 0,
+      length: 0
+    },
+  };
+  const id = getModuleId(absPath);
+  const mod: Module = {
+    id: id,
+    absPath: absPath,
+    src: srcBuf,
+    ast: ast,
+    imports: []
+  };
+
+  return LoadResult.Ok { value: mod };
+}

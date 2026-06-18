@@ -1,7 +1,8 @@
-// Phase 6.4 path coverage: a dispose call in only ONE arm of an if/else does
-// not satisfy the obligation - the other path still leaks. The mirror-image
-// pass test (`examples/pass/propagates_dispose_both_branches.yoop`) has
-// dispose in both arms and compiles cleanly.
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// obligations are advisory, so a manual dispose in only ONE arm of an if/else
+// is no longer an error (there is no obligation to leave unsatisfied on the
+// other path). This typechecks cleanly. (Formerly
+// examples/fail/propagates_dispose_only_then.)
 
 trait Disposable {
     function dispose(ref self): void;
@@ -31,5 +32,3 @@ function main(): int32 {
     }
     return 0;
 }
-
-// Fails: binding 'r' has unsatisfied obligation from propagates<disposable>

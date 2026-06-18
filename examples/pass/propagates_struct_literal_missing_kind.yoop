@@ -1,0 +1,26 @@
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// obligations are ADVISORY. A struct-literal binding of a propagating type
+// that is never disposed typechecks cleanly. (Formerly
+// examples/fail/propagates_struct_literal_missing_kind.)
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Widget implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {}
+}
+
+function main(): int32 {
+    // Struct literal RHS, plain `const`, no manual dispose. Advisory model:
+    // not an error. Opt into auto-cleanup with `const disposable w: ...`.
+    const w: Widget = { id: 1 };
+    return 0;
+}

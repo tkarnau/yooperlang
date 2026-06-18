@@ -1,25 +1,24 @@
 // Safe, generic dynamic array.
 //
-//   - `DynArray<T> implements Disposable propagates<disposable>`:
-//     the type itself is the disposable thing, and its `propagates<disposable>`
-//     clause says: every binding of `DynArray<T>` carries the dispose obligation
-//     and must either fulfil it or pass it on. There is no way to use a value
-//     of this type that silently leaks the obligation.
-//   - `new_dynarray<T>(...): DynArray<T> propagates<disposable>`:
-//     factory that pushes the obligation through its return type to the caller.
-//     The function must declare `propagates<disposable>`, otherwise the
-//     return is rejected - a helper that creates a DynArray either disposes
-//     it locally or hands the dispose obligation up to its caller.
-//   - At a call site (main) the binding's `disposable` keyword opts into
-//     auto-cleanup: the compiler injects `Disposable.dispose(ref arr)` at
-//     scope end. A plain `let arr: DynArray<int32> = ...` is also legal but
-//     then the user must either call `Disposable.dispose(ref arr)` manually
-//     or return `arr` from a function that propagates `disposable`.
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// `propagates<disposable>` is ADVISORY guidance, not an enforced contract. The
+// compiler does not error on an undisposed binding or an undeclared return.
 //
-// Try dropping `propagates<disposable>` from `new_dynarray` and the compiler
-// will reject the return: the kind's obligation has nowhere to go. Try dropping
-// the `disposable` keyword on `arr` in main without adding a manual dispose
-// call, and the compiler will reject the binding for an unsatisfied obligation.
+//   - `DynArray<T> implements Disposable propagates<disposable>`:
+//     the type is the disposable thing; the `propagates<disposable>` clause
+//     documents (for readers and tooling) that every binding of `DynArray<T>`
+//     carries a dispose obligation. It is a hint, not a gate.
+//   - `new_dynarray<T>(...): DynArray<T> propagates<disposable>`:
+//     factory whose return clause advertises that the result owns a resource.
+//     The clause is optional - omitting it no longer rejects the return.
+//   - At a call site (main) the binding's `disposable` keyword is the one
+//     piece with teeth: it opts into auto-cleanup, so the compiler injects
+//     `Disposable.dispose(ref arr)` at scope end. A plain `let arr: ... = ...`
+//     is equally legal and silent - then it is on you to dispose it (or not).
+//
+// Avoiding double-free is the dispose implementer's job, not the compiler's:
+// note how `dispose` below guards on `isDisposed` and is safe to call twice.
+// That idempotency convention is what the advisory model relies on.
 
 import * as intr from "std/core/intrinsics.yoop";
 
@@ -68,11 +67,10 @@ type DynArray<T> implements Disposable propagates<disposable> {
     }
 }
 
-// Factory. `propagates<disposable>` on the return type transfers the
-// dispose obligation to the caller. The local `newArr` does NOT declare the
-// kind keyword - the function's propagates clause is what allows it to escape
-// via return without local discharge. Adding `disposable` here would mean
-// "I'll dispose this locally", which contradicts returning it.
+// Factory. The `propagates<disposable>` return clause advertises that the
+// result owns a resource (advisory only). The local `newArr` is a plain `let`
+// and is simply moved out via return. Adding `disposable` here would opt into
+// local auto-cleanup, which would contradict returning it.
 function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
     let newArr: DynArray<T> = { data: intr.heap_alloc(initial_cap), len: 0, cap: initial_cap, isDisposed: false };
 

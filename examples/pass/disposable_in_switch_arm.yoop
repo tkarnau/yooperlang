@@ -1,0 +1,51 @@
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// a `disposable`-keyword binding declared inside a `switch` arm gets its
+// auto-cleanup injected at the end of that arm's block. Before the redesign,
+// kindCheck did not walk SWITCH_STATEMENT, so the cleanup for `r` here was
+// silently never emitted. The expected output proves dispose fires at arm end
+// (before "after"), not at function exit.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Resource implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`disposed(${self.id})\n`);
+    }
+}
+
+function make_resource(id: int32): Resource propagates<disposable> {
+    return { id: id };
+}
+
+function main(): int32 {
+    let sel: int32 = 1;
+    switch (sel) {
+        case 1: {
+            disposable r: Resource = make_resource(1);
+            printf(`using(${r.id})\n`);
+        }
+        default: {
+            printf(`default\n`);
+        }
+    }
+    printf(`after\n`);
+    return 0;
+}
+
+// expected output:
+// using(1)
+// disposed(1)
+// after

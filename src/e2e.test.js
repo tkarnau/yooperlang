@@ -494,6 +494,16 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "disposed(7)\n");
   });
 
+  // Ownership redesign (2026-06-17): kindCheck now walks SWITCH_STATEMENT, so a
+  // `disposable`-keyword binding inside a `case` arm gets its auto-cleanup
+  // injected at the arm-block end. dispose fires before "after", proving the
+  // arm body's implicitCleanups were populated and emitted.
+  it("disposable_in_switch_arm.yoop: a `disposable` binding inside a switch arm fires cleanup at arm end", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/disposable_in_switch_arm.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "using(1)\ndisposed(1)\nafter\n");
+  });
+
   // Yoopstore-papercut #11: a returned struct/variant literal that moves a
   // propagating binding into a field transfers the obligation - dispose fires
   // exactly once, at the caller.
@@ -1541,11 +1551,12 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     );
   });
 
-  it("vec_no_disposable: binding Vec<T> without `disposable` leaves the propagates<disposable> obligation unsatisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/vec_no_disposable/main.yoop");
-    assert.ok(
-      errors.some((e) => /unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
+  it("vec_no_disposable: binding Vec<T> without `disposable` is advisory, not an error (ownership redesign)", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/vec_no_disposable/main.yoop");
+    assert.equal(
+      errors.length,
+      0,
+      `expected clean typecheck under the advisory model, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -2389,47 +2400,39 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  // Phase 6.4 strict propagates enforcement.
-  it("propagates_return_not_declared.yoop rejects a function that returns a propagating type without declaring propagates<K>", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_not_declared.yoop");
-    assert.ok(
-      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
-      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  // Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+  // `propagates<K>` obligations are ADVISORY, not enforced. The five fixtures
+  // below were formerly examples/fail cases asserting hard errors; they now
+  // typecheck cleanly and live in examples/pass. These tests guard that the
+  // relaxation holds (no obligation error is produced).
+  it("propagates_return_not_declared.yoop: returning a propagating type without propagates<K> is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_not_declared.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  // Yoopstore-papercut #11 (negative): moving a propagating binding into a
-  // returned struct literal still needs propagates<K> on the function.
-  it("propagates_return_struct_literal_not_declared.yoop rejects a moved-binding literal return without propagates<K>", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_struct_literal_not_declared.yoop");
-    assert.ok(
-      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
-      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_return_struct_literal_not_declared.yoop: moved-binding literal return without propagates<K> is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_struct_literal_not_declared.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_binding_missing_kind.yoop rejects a binding whose propagates<K> obligation is never satisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_binding_missing_kind.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_binding_missing_kind.yoop: an un-disposed binding of a propagating type is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_binding_missing_kind.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_struct_literal_missing_kind.yoop rejects a struct-literal binding whose propagates<K> obligation is never satisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_struct_literal_missing_kind.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_struct_literal_missing_kind.yoop: an un-disposed struct-literal binding is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_struct_literal_missing_kind.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_dispose_only_then.yoop rejects a binding whose dispose appears in only one arm of an if/else", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_dispose_only_then.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'r' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected one-arm-only error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_dispose_only_then.yoop: a manual dispose in only one if/else arm is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_dispose_only_then.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
   it("scoped_escape_return.yoop rejects returning a scoped binding", () => {

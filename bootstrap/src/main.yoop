@@ -13,13 +13,13 @@ import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
 import * as strings from "std/core/strings.yoop";
 
-import { isHexDigit } from "./sourceCodeProcessing/charUtils.yoop";
-import { tokenize, Token } from "./sourceCodeProcessing/lexer.yoop";
+import { isHexDigit } from "./source_processing/charUtils.yoop";
+import { tokenize, Token } from "./source_processing/lexer.yoop";
 import { tokenScanList } from "./contracts.yoop";
 
-// @precompile {
-//   log.info("hello, yooper from a precompile!");
-// }
+@precompile {
+  log.info("hello, yooper from a precompile!");
+}
 
 function main(): int {
   log.info("hello, yooper!");
@@ -63,6 +63,9 @@ function main(): int {
   }
 
   // log.info(`tokenize result ${tokenizeResult}`);
+
+  // the real compilation will drive from compiling "modules" which are like files
+  // for now, we can start that pattern first: module graph compilation driver
 
   return 0;
 }

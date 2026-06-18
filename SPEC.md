@@ -1407,8 +1407,13 @@ int             float
 int is 32 bit signed int
 float is 32 bit float
 
-Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Kind and trait names are conventionally
-`snake_case` and `PascalCase` respectively.
+Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Naming convention: types, traits,
+variants / enums / unions, vtables, type parameters, and `variant` case names
+are `PascalCase`; functions, methods, local bindings, parameters, fields, and
+kind names are `camelCase`; value-`enum` case names and module-level `const`
+declarations are `SCREAMING_SNAKE`. `snake_case` is reserved for file and folder
+names - it is not used in identifiers (the underscore remains legal in the
+grammar above). See CLAUDE.md "Naming and file conventions".
 
 Contextual keywords (reserved only in their syntactic positions): `in`, `layout`,
 `restricts`, `provides`, `requires`, `appliesTo`, `ownsBlock`, `mustCall`,

@@ -1,6 +1,7 @@
 import * as debug from "std/debug.yoop";
 import { Comparable, quickSort } from "./utils/array_utils.yoop";
 
+// ************ LEXING CONTRACTS **************
 
 export enum TokenTags<string> {
   // atoms
@@ -289,3 +290,162 @@ export const keywordList: KeywordDefinition[] = [
   { str: "null",           tag: TokenTags.NULL },
   { str: "_",              tag: TokenTags.DISCARD },
 ];
+
+// *************** DRIVER CONTRACTS *************
+
+export enum ASTNodeKind<string> {
+  FUNCTION_DECL "FUNCTION_DECL",
+  LET_DECL "LET_DECL",
+  CONST_DECL "CONST_DECL",
+  TYPE_DECL "TYPE_DECL",
+  FIELD_DECL "FIELD_DECL",
+  DESTRUCTURE_DECL "DESTRUCTURE_DECL",
+  IMPORT_DECL "IMPORT_DECL",
+  EXPORT_DECL "EXPORT_DECL",
+  EXTERN_FUNCTION_DECL "EXTERN_FUNCTION_DECL",
+  EXTERN_TYPE_DECL "EXTERN_TYPE_DECL",
+  EXPORT_C_FUNCTION_DECL "EXPORT_C_FUNCTION_DECL",
+
+  // literals
+  TEMPLATE_LITERAL "TEMPLATE_LITERAL",
+  STRING_PART "STRING_PART",
+  INT_LITERAL "INT_LITERAL",
+  FLOAT_LITERAL "FLOAT_LITERAL",
+  STRING_LITERAL "STRING_LITERAL",
+  BOOL_LITERAL "BOOL_LITERAL",
+
+  // expressions
+  CALL_EXPRESSION "CALL_EXPRESSION",
+  EXPRESSION_STATEMENT "EXPRESSION_STATEMENT",
+  EXPR_PART "EXPR_PART",
+  UNARY_EXPRESSION "UNARY_EXPRESSION",
+  BINARY_EXPRESSION "BINARY_EXPRESSION",
+  FIELD_ACCESS "FIELD_ACCESS",
+  STRUCT_LITERAL "STRUCT_LITERAL",
+  STRUCT_LITERAL_FIELD "STRUCT_LITERAL_FIELD",
+
+  // other
+  EXTERN_BLOCK "EXTERN_BLOCK",
+  BLOCK "BLOCK",
+  PARAM "PARAM",
+  IDENT "IDENT",
+  NAMESPACE_IDENT "NAMESPACE_IDENT",
+  ASSIGNMENT "ASSIGNMENT",
+  PROGRAM "PROGRAM",
+  RETURN_STATEMENT "RETURN_STATEMENT",
+  IF_STATEMENT "IF_STATEMENT",
+  WHILE_STATEMENT "WHILE_STATEMENT",
+  DISCARD_STATEMENT "DISCARD_STATEMENT",
+  TRY_OP "TRY_OP",
+
+  // phase 4 refs, arrays, control flow
+  FOR_LOOP "FOR_LOOP",
+  // phase 9.D `for item in xs { ... }` - element-walking loop over an array
+  // (default sequential iteration; trait-driven iteration is a later phase).
+  FOR_IN_LOOP "FOR_IN_LOOP",
+  BREAK_STATEMENT "BREAK_STATEMENT",
+  CONTINUE_STATEMENT "CONTINUE_STATEMENT",
+  ARRAY_LITERAL "ARRAY_LITERAL",
+  INDEX_EXPRESSION "INDEX_EXPRESSION",
+  REF_EXPRESSION "REF_EXPRESSION",
+
+  // phase 5 traits
+  TRAIT_DECL "TRAIT_DECL",
+  METHOD_SIG "METHOD_SIG",
+  METHOD_DECL "METHOD_DECL",
+  // Phase 9.G `vtable Name for TraitName { field (params) => ret, ... }`.
+  // A vtable decl is a type-erased shape backing a trait - codegen emits it
+  // as a LLVM struct of `{ ctx, methodPtr1, methodPtr2, ... }`.
+  VTABLE_DECL "VTABLE_DECL",
+
+  // phase 6 kinds
+  KIND_DECL "KIND_DECL",
+  KIND_APPLIES_TO_CLAUSE "KIND_APPLIES_TO_CLAUSE",
+  KIND_REQUIRES_CLAUSE "KIND_REQUIRES_CLAUSE",
+  KIND_MUSTCALL_CLAUSE "KIND_MUSTCALL_CLAUSE",
+  KIND_OWNSBLOCK_CLAUSE "KIND_OWNSBLOCK_CLAUSE",
+  CLEANUP_CALL "CLEANUP_CALL",
+  // phase 6.2 escape and sharing
+  KIND_MUST_NOT_ESCAPE_CLAUSE "KIND_MUST_NOT_ESCAPE_CLAUSE",
+  KIND_MUST_NOT_SHARE_CLAUSE "KIND_MUST_NOT_SHARE_CLAUSE",
+  KIND_FORBIDS_CLAUSE "KIND_FORBIDS_CLAUSE",
+  // phase 6.5 layout / composition / parameterized kinds
+  KIND_LAYOUT_CLAUSE "KIND_LAYOUT_CLAUSE",
+  // clearance kinds marker polarity (conferred | restrictive)
+  KIND_MARKER_CLAUSE "KIND_MARKER_CLAUSE",
+  // clearance kinds kind-decl-named transition authority
+  // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
+  KIND_TRANSITION_CLAUSE "KIND_TRANSITION_CLAUSE",
+
+  // phase 6.3 task / concurrency sugar
+  WAIT_EXPRESSION "WAIT_EXPRESSION",
+  TASK_AUTO_WAIT "TASK_AUTO_WAIT",
+  TASK_RELEASE "TASK_RELEASE",
+  TASK_RETAIN "TASK_RETAIN",
+
+  // phase 7.1 generics
+  TYPE_PARAM "TYPE_PARAM",
+
+  // phase 7.5 switch / patterns / sum types / unions
+  // Phase 12 ENUM_DECL renamed to VARIANT_DECL (sum types); ENUM_VARIANT
+  // renamed to VARIANT_CASE (one case inside a variant decl). The `enum`
+  // keyword is reserved for the value-enum construct below.
+  SWITCH_STATEMENT "SWITCH_STATEMENT",
+  SWITCH_ARM "SWITCH_ARM",
+  LITERAL_PATTERN "LITERAL_PATTERN",
+  VARIANT_PATTERN "VARIANT_PATTERN",
+  VARIANT_DECL "VARIANT_DECL",
+  VARIANT_CASE "VARIANT_CASE",
+  UNION_DECL "UNION_DECL",
+  VARIANT_CONSTRUCTOR "VARIANT_CONSTRUCTOR",
+
+  // Phase 12 value enums - C-style named constants of a primitive
+  // underlying type (default int32). `enum<T> Name { Case (value)? , ... }`.
+  // ENUM_CASE is one case inside an ENUM_DECL; its valueExpr is parsed as a
+  // normal expression and const-evaluated at typecheck. The constructor and
+  // pattern AST kinds reuse VARIANT_CONSTRUCTOR / VARIANT_PATTERN - the
+  // typechecker stamps the right resolved type onto them.
+  ENUM_DECL "ENUM_DECL",
+  ENUM_CASE "ENUM_CASE",
+
+  // phase 8.A unsafe pointers
+  ADDRESS_OF_EXPRESSION "ADDRESS_OF_EXPRESSION",
+  DEREF_EXPRESSION "DEREF_EXPRESSION",
+  NULL_LITERAL "NULL_LITERAL",
+  UNSAFE_PTR_CAST "UNSAFE_PTR_CAST",
+
+  // phase 8.D errno intrinsics
+  ERRNO_INTRINSIC "ERRNO_INTRINSIC",
+
+  // phase 9.E array slice syntax `xs[i..j]`
+  SLICE_EXPRESSION "SLICE_EXPRESSION",
+
+  // phase 9 compound assignments `x += y`, `x -= y`, etc. Stored as a
+  // dedicated node so codegen can address the lvalue once (no double-eval
+  // of expressions inside `xs[f()] += 1`).
+  COMPOUND_ASSIGNMENT "COMPOUND_ASSIGNMENT",
+
+  // test undefined kind handling for iteration tests
+  FAIL_TEST_KIND "FAIL_TEST_KIND",
+
+  // phase 11.A `@<name>(args?) target` compile-time / static-analysis
+  // attribute. The `target` field carries the AST node the attribute
+  // decorates (a decl, statement, block, or null for bare attribute
+  // statements). Per-attribute behavior lives in
+  // src/jsyoopattributes/registry.js - the AST node itself is just the
+  // carrier. Codegen must consume every ATTRIBUTE node before emission;
+  // any that survive are an internal-error.
+  ATTRIBUTE "ATTRIBUTE",
+}
+
+export type SourceLocation {
+  pos: usize,
+  line: usize,
+  column: usize,
+  length: usize,
+}
+
+export type ASTNode {
+  kind: ASTNodeKind,
+  sourceLoc: SourceLocation,
+}
