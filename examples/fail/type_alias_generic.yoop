@@ -1,0 +1,7 @@
+// Generic type aliases are not yet supported - the deferred-feature diagnostic
+// fires and no spurious follow-on error is emitted.
+type Pair<T> = T;
+
+function main(): int32 {
+  return 0;
+}

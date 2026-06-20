@@ -26,6 +26,7 @@ import {
   TraitType,
   UnsafePtrType,
   primTypeFromName,
+  lookupAlias,
   substituteTypeParams,
   typeKinds,
 } from "./types.js";
@@ -415,6 +416,28 @@ function resolveAnnotMulti(annot, typeContext, extraScope) {
       const tp = tps.get(annot.name);
       if (tp) return tp;
     }
+    // Transparent type alias: resolve the RHS in its home module so the result
+    // IS the underlying type. Cycle guard threaded through extraScope.aliasStack.
+    // No-op in the single-module path (typeContext.moduleEnv is undefined).
+    const aliasHit = lookupAlias(
+      annot.namespace,
+      annot.name,
+      typeContext.currentModId,
+      typeContext.moduleEnv,
+    );
+    if (aliasHit) {
+      const stack = extraScope?.aliasStack;
+      if (stack?.has(aliasHit.key)) return null;
+      const nextStack = new Set(stack ?? []);
+      nextStack.add(aliasHit.key);
+      const homeCtx =
+        aliasHit.homeModId === typeContext.currentModId
+          ? typeContext
+          : { ...typeContext, currentModId: aliasHit.homeModId };
+      return resolveAnnotMulti(aliasHit.annot, homeCtx, {
+        aliasStack: nextStack,
+      });
+    }
     // Yoopstore-papercut #3: bare `unsafe_ptr` (opaque pointee).
     if (annot.name === "unsafe_ptr") {
       return UnsafePtrType(null);
@@ -582,6 +605,28 @@ function resolveAnnotSingle(annot, typeContext, extraScope) {
     if (tps) {
       const tp = tps.get(annot.name);
       if (tp) return tp;
+    }
+    // Transparent type alias: resolve the RHS in its home module so the result
+    // IS the underlying type. Cycle guard threaded through extraScope.aliasStack.
+    // No-op in the single-module path (typeContext.moduleEnv is undefined).
+    const aliasHit = lookupAlias(
+      annot.namespace,
+      annot.name,
+      typeContext.currentModId,
+      typeContext.moduleEnv,
+    );
+    if (aliasHit) {
+      const stack = extraScope?.aliasStack;
+      if (stack?.has(aliasHit.key)) return null;
+      const nextStack = new Set(stack ?? []);
+      nextStack.add(aliasHit.key);
+      const homeCtx =
+        aliasHit.homeModId === typeContext.currentModId
+          ? typeContext
+          : { ...typeContext, currentModId: aliasHit.homeModId };
+      return resolveAnnotMulti(aliasHit.annot, homeCtx, {
+        aliasStack: nextStack,
+      });
     }
     // Yoopstore-papercut #3: bare `unsafe_ptr` (opaque pointee).
     if (annot.name === "unsafe_ptr") {

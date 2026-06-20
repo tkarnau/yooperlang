@@ -424,6 +424,47 @@ export function resolveTypeFromName(name, structTable) {
   return primTypeFromName(name) ?? structTable.get(name) ?? null;
 }
 
+// Find a transparent type alias (`type NodeId = usize;`) visible from `modId`
+// under `name`, optionally namespace-qualified. Returns
+// { annot, homeModId, key } - `annot` is the alias RHS to resolve, `homeModId`
+// is the module whose scope that RHS must be resolved in, and `key` is a stable
+// identity for cycle detection. Returns null when `name` is not an alias.
+//
+// Shared by both type resolvers (resolveTypeAnnotationInModule in typecheck.js
+// and resolveAnnotMulti in instantiate.js) so alias visibility stays identical
+// across the declaration-resolution and body-checking paths.
+export function lookupAlias(namespace, name, modId, moduleEnv) {
+  const env = moduleEnv?.get(modId);
+  if (!env) return null;
+  if (namespace) {
+    const imp = env.importedNames?.get(namespace);
+    if (!imp || imp.kind !== "namespace") return null;
+    const srcEnv = moduleEnv.get(imp.fromModuleId);
+    const a = srcEnv?.aliasTable?.get(name);
+    if (a) {
+      return { annot: a.annot, homeModId: imp.fromModuleId, key: `${imp.fromModuleId}::${name}` };
+    }
+    return null;
+  }
+  const local = env.aliasTable?.get(name);
+  if (local) {
+    return { annot: local.annot, homeModId: modId, key: `${modId}::${name}` };
+  }
+  const imp = env.importedNames?.get(name);
+  if (imp && imp.kind === "alias") {
+    const srcEnv = moduleEnv.get(imp.fromModuleId);
+    const a = srcEnv?.aliasTable?.get(imp.exportName);
+    if (a) {
+      return {
+        annot: a.annot,
+        homeModId: imp.fromModuleId,
+        key: `${imp.fromModuleId}::${imp.exportName}`,
+      };
+    }
+  }
+  return null;
+}
+
 // Resolve a structured type annotation object (from parseTypeAnnotation) to a Type.
 //
 // Phase 7.1: ctx may carry:

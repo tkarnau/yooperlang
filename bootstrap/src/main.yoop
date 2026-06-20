@@ -13,7 +13,7 @@ import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
 import * as strings from "std/core/strings.yoop";
 
-import { isHexDigit } from "./source_processing/charUtils.yoop";
+import { isHexDigit } from "./source_processing/char_utils.yoop";
 import { tokenize, Token } from "./source_processing/lexer.yoop";
 import { tokenScanList } from "./contracts.yoop";
 

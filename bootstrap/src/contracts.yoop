@@ -1,4 +1,6 @@
 import * as debug from "std/debug.yoop";
+import { Vec } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import { Comparable, quickSort } from "./utils/array_utils.yoop";
 
 // ************ LEXING CONTRACTS **************
@@ -438,6 +440,8 @@ export enum ASTNodeKind<string> {
   ATTRIBUTE "ATTRIBUTE",
 }
 
+export type NodeId = usize;
+
 export type SourceLocation {
   pos: usize,
   line: usize,
@@ -448,4 +452,9 @@ export type SourceLocation {
 export type ASTNode {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
+}
+
+export type AST propagates<disposable> {
+  nodes: Vec<ASTNode>,
+  root: NodeId,
 }

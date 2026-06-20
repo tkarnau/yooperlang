@@ -91,6 +91,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("type_alias.yoop: transparent `type X = Y` aliases resolve through to the underlying type", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/type_alias.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=7 b=7 first=7 len=3\nx=3 y=4 n=9\n");
+  });
+
   it("type_inference.yoop: let/const bindings infer their type from the initializer", () => {
     const { stdout, exitCode } = runFixture("examples/pass/type_inference.yoop");
     assert.equal(exitCode, 0);
@@ -2009,6 +2015,34 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       "utf8",
     );
     assert.throws(() => parse(src), /expected semicolon/);
+  });
+
+  it("type_alias_unknown_target.yoop rejects a type alias whose RHS names an unknown type", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_unknown_target.yoop");
+    assert.ok(
+      errors.some((e) => /type alias "Foo" references an unknown type or is cyclic/.test(e.message)),
+      `expected unknown-alias-target error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("type_alias_cyclic.yoop rejects a cyclic alias chain instead of looping", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_cyclic.yoop");
+    assert.ok(
+      errors.some((e) => /type alias "A" references an unknown type or is cyclic/.test(e.message)),
+      `expected cyclic-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("type_alias_generic.yoop rejects a generic type alias with no spurious follow-on error", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_generic.yoop");
+    assert.ok(
+      errors.some((e) => /generic type aliases are not yet supported/.test(e.message)),
+      `expected generic-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+    assert.ok(
+      !errors.some((e) => /references an unknown type or is cyclic/.test(e.message)),
+      `did not expect a follow-on resolve error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
   });
 
   it("ref_return.yoop rejects a function whose return type is ref T", () => {

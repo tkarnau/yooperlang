@@ -77,6 +77,10 @@ export function resolveImports(mod, moduleEnv, errors) {
       // import - resolveTypeAnnotation walks importedNames and consults
       // the source module's vtableTable when the kind is "type".
       const srcVtable = srcEnv.vtableTable?.get(spec.exportName);
+      // Transparent type alias export. Resolution walks importedNames with
+      // kind === "alias" back into the source module's aliasTable (see
+      // lookupAlias in typecheck.js), so the RHS resolves in its home context.
+      const srcAlias = srcEnv.aliasTable?.get(spec.exportName);
 
       if (srcKind) {
         // Phase 6.4: cross-module kind import. Identity is preserved by reference -
@@ -124,6 +128,8 @@ export function resolveImports(mod, moduleEnv, errors) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
       } else if (srcVtable) {
         importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "type" });
+      } else if (srcAlias) {
+        importedNames.set(spec.localName, { fromModuleId: imp.resolvedModuleId, exportName: spec.exportName, kind: "alias" });
       } else if (srcSym) {
         // It's a value (function, const, etc.). Imports from std/ modules
         // must use the namespace form so common function names ("info",

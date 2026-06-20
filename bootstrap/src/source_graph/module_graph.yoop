@@ -4,7 +4,7 @@ import { Set }, * as set from "std/collections/set.yoop";
 import * as fs from "std/fs.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
-import { ASTNode, ASTNodeKind } from "../contracts.yoop";
+import { ASTNode, ASTNodeKind, NodeId } from "../contracts.yoop";
 
 export type Module propagates<disposable> {
   id: string,
@@ -26,7 +26,7 @@ export function getModuleId(path: string): string {
   return path;
 }
 
-variant LoadResult propagates<disposable> {
+variant LoadResult {
   Ok { value: Module },
   Err { error: string },
 }
