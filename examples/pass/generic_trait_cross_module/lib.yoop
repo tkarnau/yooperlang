@@ -1,0 +1,15 @@
+// A generic trait declared and implemented in one module, called via the
+// trait-qualified form from another. Regression for the imported-generic-trait
+// resolution gap: `ImportedGenericTrait.method(...)` used to fail with
+// "undefined variable" because lookupTraitByName checked the wrong import kind.
+
+export trait Box<T> {
+    function unwrap(ref self): T;
+}
+
+export type IntBox implements Box<IntBox> {
+    n: int32,
+    function unwrap(ref self): IntBox {
+        return { n: self.n };
+    }
+}

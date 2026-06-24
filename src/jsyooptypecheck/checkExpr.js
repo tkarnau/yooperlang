@@ -2716,7 +2716,11 @@ function lookupTraitByName(name, ctx) {
   if (tc.genericTraitTable?.has(name)) {
     return { isGenericTraitRef: true, name };
   }
-  if (imp && imp.kind === "trait") {
+  // Imported generic trait. imports.js registers these with kind
+  // "generic-trait" (not "trait"), so match that; the receiver carries the
+  // instantiated TraitType, so the name-only marker is enough for
+  // resolveTraitQualifiedCall to resolve the concrete method.
+  if (imp && imp.kind === "generic-trait") {
     const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
     if (srcEnv?.genericTraitTable?.has(imp.exportName)) {
       return { isGenericTraitRef: true, name: imp.exportName };

@@ -249,6 +249,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "total=112 mode=19\n");
   });
 
+  it("generic_trait_cross_module: an imported generic trait's method is callable via the qualified form", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_trait_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "unwrapped 7\n");
+  });
+
   it("clearance_namespaced_sink: a laundered value flows into a sink called through its namespace", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/clearance_namespaced_sink/main.yoop");
     assert.equal(exitCode, 0);
