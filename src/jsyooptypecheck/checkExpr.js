@@ -2895,7 +2895,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
   // standalone type (resolveOrphanStructLiteral would emit "struct literal
   // has no target type"), but the param's substituted type after
   // unification IS the target. Stash these indices and check them in
-  // the second pass once we know T. See plans/yoopbinder-papercuts.md
+  // the second pass once we know T. See plans/archive/yoopbinder-papercuts.md
   // Issue 2.
   const argTypes = [];
   const deferredStructLits = new Set();

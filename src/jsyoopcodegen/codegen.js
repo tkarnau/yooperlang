@@ -1016,7 +1016,7 @@ export function codegen(ast) {
         }
         // Enum equality: extract the i32 tag from each operand and icmp.
         // Typecheck has already verified both sides are the same enum
-        // type (see plans/yoopbinder-papercuts.md Issue 3). Payloads are
+        // type (see plans/archive/yoopbinder-papercuts.md Issue 3). Payloads are
         // intentionally not compared - tag-only matches the documented
         // semantics; structural payload comparison stays a `switch` job.
         if (
@@ -3960,7 +3960,7 @@ function codegenWithModuleId(
           return emitPointerBinaryMM(node, fnLines);
         }
         // Enum tag-comparison branch (mirror of the single-module path
-        // above). See plans/yoopbinder-papercuts.md Issue 3.
+        // above). See plans/archive/yoopbinder-papercuts.md Issue 3.
         if (
           (node.op === "eqeq" || node.op === "neq") &&
           leftTy?.kind === typeKinds.variant &&

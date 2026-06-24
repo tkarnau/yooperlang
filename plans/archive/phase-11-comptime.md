@@ -14,11 +14,11 @@ The existing pipeline is `src → lex → parse → typecheck → codegen
 table, every const-foldable initializer routes through a runtime
 `<modid>__module_init` function that runs once at startup. Five
 `(Bytecode/CTE future)` TODO comments scattered through the codebase
-([typecheck.js:2430](../src/jsyooptypecheck/typecheck.js#L2430),
-[typecheck.js:2538](../src/jsyooptypecheck/typecheck.js#L2538),
-[checkStatement.js:203](../src/jsyooptypecheck/checkStatement.js#L203),
-[codegen.js:2923](../src/jsyoopcodegen/codegen.js#L2923),
-[codegen.js:3256](../src/jsyoopcodegen/codegen.js#L3256))
+([typecheck.js:2430](../../src/jsyooptypecheck/typecheck.js#L2430),
+[typecheck.js:2538](../../src/jsyooptypecheck/typecheck.js#L2538),
+[checkStatement.js:203](../../src/jsyooptypecheck/checkStatement.js#L203),
+[codegen.js:2923](../../src/jsyoopcodegen/codegen.js#L2923),
+[codegen.js:3256](../../src/jsyoopcodegen/codegen.js#L3256))
 signpost where a compile-time evaluator would plug in.
 
 This phase lands that evaluator, framed as a **typed register-based
@@ -124,7 +124,7 @@ sure the attribute registry can absorb them without redesign.
 
 **Register-based, typed, SSA-adjacent.** Every register has a static
 yoop `Type` (the existing `Type` objects from
-[src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js)). Typed
+[src/jsyooptypecheck/types.js](../../src/jsyooptypecheck/types.js)). Typed
 instructions let the interpreter dispatch correctly (e.g. `add.i32`
 vs `add.f64`) and let a future verification pass run independently.
 
@@ -220,7 +220,7 @@ diagnostic (trivially detectable since there are no other workers).
 ### Integration points
 
 The comptime pass is a new pipeline stage invoked from
-[src/yoopiler.js](../src/yoopiler.js) **after** typecheck returns clean
+[src/yoopiler.js](../../src/yoopiler.js) **after** typecheck returns clean
 and **before** `codegenProgram`. It:
 
 1. Walks every module's AST collecting `@precompile` attributes
@@ -237,11 +237,11 @@ and **before** `codegenProgram`. It:
    failure, leaves the decl alone - runtime module-init handles it
    the way it does today.
 
-Codegen ([codegen.js](../src/jsyoopcodegen/codegen.js)) changes:
+Codegen ([codegen.js](../../src/jsyoopcodegen/codegen.js)) changes:
 
 - Honor `decl.comptimeValue` when emitting module globals
   (replaces the `zeroinitializer` at
-  [codegen.js:2938](../src/jsyoopcodegen/codegen.js#L2938)).
+  [codegen.js:2938](../../src/jsyoopcodegen/codegen.js#L2938)).
 - The synthesized `<modid>__module_init` skips folded decls.
 - Reject any `@`-attribute AST node that survives to codegen with
   an internal-error diagnostic - every attribute consumer must
@@ -260,11 +260,11 @@ focused work - comparable to Phase 6 (kinds) in scope.
 ### 11.A - `@`-attribute lexer/parser + registry skeleton (~600 LOC, 4-5 days)
 
 - Lex `@` as a new single-char punctuation token (`at`).
-- Add `ATTRIBUTE` to `ASTNodeKind` in [src/contracts.js](../src/contracts.js).
+- Add `ATTRIBUTE` to `ASTNodeKind` in [src/contracts.js](../../src/contracts.js).
 - Parser: `parseAttribute()` at statement position (inside
-  [parseStatement](../src/jsyooparser/parser.js)) and declaration
+  [parseStatement](../../src/jsyooparser/parser.js)) and declaration
   position (inside
-  [parseTopLevel near line 539](../src/jsyooparser/parser.js#L539)).
+  [parseTopLevel near line 539](../../src/jsyooparser/parser.js#L539)).
 - `attributeRegistry` table in JS mapping `@name` → `{ parsePhase,
   typecheckPhase, comptimePhase, codegenPhase }` handlers.
 - Land `@precompile` *parsing only* in this sub-phase - the handler
@@ -285,7 +285,7 @@ focused work - comparable to Phase 6 (kinds) in scope.
   calls, struct / array / ref ops, enum variant
   construct/match. **Does not yet cover** tasks, generics, vtables,
   kind-flow cleanup calls - those land in 11.E.
-- New comptime pass in [src/yoopiler.js](../src/yoopiler.js) between
+- New comptime pass in [src/yoopiler.js](../../src/yoopiler.js) between
   typecheck and codegen. **Opportunistic module-init folding only**
   in this sub-phase; no user-facing `@precompile` yet. Failures are
   silent fallbacks.
@@ -311,7 +311,7 @@ focused work - comparable to Phase 6 (kinds) in scope.
 ### 11.D - Interpreter feature completeness (~1500 LOC, 2 weeks)
 
 - Generic-function instantiation at comptime via the existing
-  [instantiate.js](../src/jsyooptypecheck/instantiate.js) registry.
+  [instantiate.js](../../src/jsyooptypecheck/instantiate.js) registry.
   The interpreter reuses the same monomorphization path as codegen.
 - Vtable indirect dispatch.
 - `Task<T>` synchronous-inline semantics + refcount discipline.
@@ -331,31 +331,31 @@ focused work - comparable to Phase 6 (kinds) in scope.
 
 ## Critical files
 
-- [src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js) - add `at`
+- [src/jsyooplexer/lexer.js](../../src/jsyooplexer/lexer.js) - add `at`
   token + scanner entry.
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) -
+- [src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) -
   attribute parsing in `parseTopLevel` (~line 539) and
   `parseStatement`.
-- [src/contracts.js](../src/contracts.js) - `ATTRIBUTE` AST node kind.
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js)
+- [src/contracts.js](../../src/contracts.js) - `ATTRIBUTE` AST node kind.
+- [src/jsyooptypecheck/typecheck.js](../../src/jsyooptypecheck/typecheck.js)
   - attribute typecheck phase dispatch; `mod.moduleInitDecls`
   already exists at line 2433 as the natural input for module-init
   folding.
-- [src/jsyooptypecheck/checkStatement.js](../src/jsyooptypecheck/checkStatement.js)
+- [src/jsyooptypecheck/checkStatement.js](../../src/jsyooptypecheck/checkStatement.js)
   - `validateModuleInit` at line 207 stays as the typecheck call
   site; the comptime fold attempt moves into the new pass.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) -
+- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) -
   honor `decl.comptimeValue` when emitting `@global`s at line
   2938; the `(Bytecode/CTE future)` comments at lines 2923 and
   3256 are the exact integration sites.
-- [src/yoopiler.js](../src/yoopiler.js) - add comptime pass
+- [src/yoopiler.js](../../src/yoopiler.js) - add comptime pass
   invocation between typecheck and codegen.
 - **New**: `src/jsyoopinterp/` - entire directory.
 - Reuse the existing
-  [instantiate.js](../src/jsyooptypecheck/instantiate.js) registry
+  [instantiate.js](../../src/jsyooptypecheck/instantiate.js) registry
   from Phase 7.1 for generic monomorphization (11.D).
 - Reuse the `CLEANUP_CALL` AST node already emitted by
-  [kindCheck.js](../src/jsyooptypecheck/kindCheck.js) so the
+  [kindCheck.js](../../src/jsyooptypecheck/kindCheck.js) so the
   interpreter doesn't re-derive lifetime logic.
 
 ## Verification

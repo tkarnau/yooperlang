@@ -1,5 +1,6 @@
 import * as debug from "std/debug.yoop";
 import { Vec } from "std/core/vec.yoop";
+import { Map } from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Comparable, quickSort } from "./utils/array_utils.yoop";
 
@@ -452,9 +453,43 @@ export type SourceLocation {
 export type ASTNode {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
+
+  // variable-arity children: a slice into AST.childIds
+  // (PROGRAM.body, CALL.args, STRUCT_LITERAL.fields, SWITCH.arms, ... all use this)
+  childStart: usize,
+  childCount: usize,
+
+  // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
+  spanStart: usize,
+  spanLen: usize,
+
+  strId: usize,
+  // ...the result of the fat-node scalar/NodeId slots
 }
 
 export type AST propagates<disposable> {
   nodes: Vec<ASTNode>,
+  childIds: Vec<NodeId>,
+  strings: Vec<string>, // string pool: decoded string-literal text
   root: NodeId,
+}
+
+export type ImportEdge {
+  nodeId: NodeId,
+  resolvedModuleIndex: usize,
+  resolvedModuleId: string,
+}
+
+export type Module propagates<disposable> {
+  id: string,
+  absPath: string,
+  src: Vec<uint8>,
+  ast: AST,
+  imports: Vec<ImportEdge>,
+}
+
+export type ModuleGraph propagates<disposable> {
+  modules: Vec<Module>,
+  entry: Module,
+  autoLoadModuleIds: Map<string, string>,
 }

@@ -1,0 +1,46 @@
+// STAGE 4 (forgot): identical to stage4, but main passes the un-sanitized
+// field straight to the sink. Prediction: REJECTED, because req.body is a
+// field access that does not carry `cleared`, and only Sanitizer.sanitize mints
+// it. If this rejects, the conferred direction gives the stdlib guarantee
+// through a plain struct field with no field annotation at all.
+
+trait Sanitizer<T> {
+    function sanitize(ref self): T;
+}
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Sanitizer;
+    appliedBy sanitize;
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Body implements Sanitizer<Body> {
+    text: string,
+    function sanitize(ref self): Body {
+        return { text: "safe" };
+    }
+}
+
+type Request {
+    path: string,
+    body: Body,
+}
+
+function receive(): Request {
+    return { path: "/", body: { text: "'; DROP TABLE users; --" } };
+}
+
+function runQuery(sql: cleared Body): void {
+    printf(`query: %s\n`, sql.text);
+}
+
+function main(): int32 {
+    let req: Request = receive();
+    runQuery(req.body); // forgot to sanitize: field access lacks `cleared`
+    return 0;
+}

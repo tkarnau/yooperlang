@@ -3161,6 +3161,29 @@ export function typecheckProgram(modules) {
     }
   }
 
+  // Cross-module function-decl index for kindFlow (clearance markers). Resolves
+  // an imported or namespaced callee (`db.runQuery(...)`, or a by-name imported
+  // `readBody()`) to its source decl plus that module's kind table, so a marker
+  // on a std-style signature is enforced across the boundary instead of being
+  // silently dropped at the call site. Built once; keyed by module id then
+  // export name.
+  const funcDeclsByModule = new Map();
+  for (const m of modules) {
+    const t = new Map();
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) t.set(d.name, d);
+    }
+    funcDeclsByModule.set(m.id, t);
+  }
+  const resolveCrossModuleCallee = (moduleId, exportName) => {
+    const decl = funcDeclsByModule.get(moduleId)?.get(exportName);
+    if (!decl) return null;
+    const kindTable = moduleEnv.get(moduleId)?.kindTable;
+    if (!kindTable) return null;
+    return { decl, kindTable };
+  };
+
   // pass D: function body typechecking.
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
@@ -3291,18 +3314,18 @@ export function typecheckProgram(modules) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         runKindCheck(d, errors, funcDeclTable, programState.registry);
-        runKindFlow(d, errors, funcDeclTable, flowKindTable, null);
+        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
         // Phase 13.B: variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
         }
       }
     }

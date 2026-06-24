@@ -1,0 +1,15 @@
+// Cross-module clearance: launder the value through the Sanitizer trait, then
+// hand it to the library sink CALLED THROUGH ITS NAMESPACE (`db.runQuery`).
+// The `cleared` capability minted by the launder is the same kind object the
+// sink's parameter requires (imported kinds share identity), so the namespaced
+// call typechecks. Compiles and runs, printing "ran query".
+
+import { Body, Sanitizer, cleared } from "./lib.yoop";
+import * as db from "./lib.yoop";
+
+function main(): int32 {
+    let raw: Body = db.receive();
+    let safe: cleared Body = Sanitizer.sanitize(ref raw);
+    db.runQuery(safe);
+    return 0;
+}

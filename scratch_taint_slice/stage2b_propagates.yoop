@@ -1,0 +1,44 @@
+// STAGE 2b: does adding `propagates<tainted>` to the struct make a tainted
+// FIELD work? This probes whether field-position markers are reachable at all
+// today, or only the ownership `propagates` machinery is wired to field kinds.
+
+trait Sanitizer<T> {
+    function sanitize(ref self): T;
+}
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Sanitizer;
+    clearedBy sanitize;
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Body implements Sanitizer<Body> {
+    text: string,
+    function sanitize(ref self): Body {
+        return { text: "safe" };
+    }
+}
+
+type Request propagates<tainted> {
+    path: string,
+    body: tainted Body,
+}
+
+function receive(): Request {
+    return { path: "/", body: { text: "evil" } };
+}
+
+function logLine(b: Body): void {
+    printf(`log: %s\n`, b.text);
+}
+
+function main(): int32 {
+    let req: Request = receive();
+    logLine(req.body); // is req.body seen as tainted?
+    return 0;
+}

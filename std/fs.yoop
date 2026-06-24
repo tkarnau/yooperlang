@@ -218,3 +218,15 @@ export function exists(path: string): bool {
 export function file_size(path: string): int64 {
     return yoop_io_file_size(path);
 }
+
+// odd helpers for now...
+export function hasYoopFileNameSuffix(s: string): bool {
+  const n = s.len;
+  if (n < 5) {
+    return false;
+  }
+  switch (str.string_slice(s, n - 5, n)) {
+    case Result.Ok { value: tail }: { return str.string_eq(tail, ".yoop"); }
+    case Result.Err { error: _ }: { return false; }
+  }
+}

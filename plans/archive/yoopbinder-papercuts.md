@@ -2,7 +2,7 @@
 
 ## Context
 
-Writing [tools/yoopbinder/main.yoop](../tools/yoopbinder/main.yoop) - a
+Writing [tools/yoopbinder/main.yoop](../../tools/yoopbinder/main.yoop) - a
 ~700-line yoop program that shells out to `clang -E`, tokenises the
 output, parses C function declarations, and emits a yoop `extern "C"`
 block - was the first non-trivial yoop *tool* (as opposed to a demo or
@@ -12,7 +12,7 @@ should have been an afternoon's work.
 
 A second wave of papercuts (Issues 9-11 below) came out of extending
 the binder with `clang -E -dM` macro extraction and then writing
-[examples/playground/shader_demo/main.yoop](../examples/playground/shader_demo/main.yoop) -
+[examples/playground/shader_demo/main.yoop](../../examples/playground/shader_demo/main.yoop) -
 a GLSL fragment-shader demo that consumed the hand-edited GL bindings.
 
 These all look like things the language wants to handle better,
@@ -29,9 +29,9 @@ same person in a single session.
 ### Status snapshot
 
 Issues 1, 2, and 3 LANDED. Tests in
-[src/jsyooparser/parser.test.js](../src/jsyooparser/parser.test.js),
-[src/jsyooptypecheck/coerce.test.js](../src/jsyooptypecheck/coerce.test.js),
-and [examples/pass/](../examples/pass/) (`enum_eq.yoop`,
+[src/jsyooparser/parser.test.js](../../src/jsyooparser/parser.test.js),
+[src/jsyooptypecheck/coerce.test.js](../../src/jsyooptypecheck/coerce.test.js),
+and [examples/pass/](../../examples/pass/) (`enum_eq.yoop`,
 `generic_call_struct_lit.yoop`). The fixed-issue sections are kept
 as a historical record of the symptom + diagnosis; skip past their
 "Severity" lines when triaging what's left.
@@ -41,8 +41,8 @@ as a historical record of the symptom + diagnosis; skip past their
 ### Issue 1 - Unary `!` binds wrong with `&&` / `||` (LANDED)
 
 **Severity: HIGH (parser bug, real, easy fix). FIXED in
-[src/jsyooparser/parser.js:1695-1779](../src/jsyooparser/parser.js#L1695-L1779);
-regression tests in [parser.test.js:122-160](../src/jsyooparser/parser.test.js#L122-L160).**
+[src/jsyooparser/parser.js:1695-1779](../../src/jsyooparser/parser.js#L1695-L1779);
+regression tests in [parser.test.js:122-160](../../src/jsyooparser/parser.test.js#L122-L160).**
 
 #### Symptom
 
@@ -66,8 +66,8 @@ expected semicolon, got andand
 #### Cause
 
 The Pratt-style precedence loop in
-[src/jsyooparser/parser.js](../src/jsyooparser/parser.js) (precedence
-table near [parser.js:52](../src/jsyooparser/parser.js#L52)) treats `!`
+[src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) (precedence
+table near [parser.js:52](../../src/jsyooparser/parser.js#L52)) treats `!`
 as a *prefix* operator that fully consumes its operand and returns - it
 doesn't re-enter the binary-operator loop after producing the unary
 result. So `!a` is the whole expression and the next `&&` is "after"
@@ -95,8 +95,8 @@ lines around the `!` handler.
 ### Issue 2 - Struct literals don't get target type inferred through generic-call args (LANDED)
 
 **Severity: HIGH (most pervasive ergonomic friction in tooling code). FIXED in
-[src/jsyooptypecheck/checkExpr.js:2640-2790](../src/jsyooptypecheck/checkExpr.js#L2640-L2790);
-e2e fixture [generic_call_struct_lit.yoop](../examples/pass/generic_call_struct_lit.yoop).**
+[src/jsyooptypecheck/checkExpr.js:2640-2790](../../src/jsyooptypecheck/checkExpr.js#L2640-L2790);
+e2e fixture [generic_call_struct_lit.yoop](../../examples/pass/generic_call_struct_lit.yoop).**
 
 #### Symptom
 
@@ -118,7 +118,7 @@ each one a separate edit. Same shape in any collection-building loop.
 
 #### Cause
 
-[CLAUDE.md](../CLAUDE.md) already documents this under "Cross-cutting
+[CLAUDE.md](../../CLAUDE.md) already documents this under "Cross-cutting
 invariants": *"Struct literals can't be typed standalone. A bare
 `Foo { x: 1 }` returns an error from `resolveExprType`. Struct literals
 must be pinned to a target type via `checkInitializer` (assignment RHS,
@@ -127,7 +127,7 @@ return value, call argument, etc.)."*
 The call-arg case *should* work - `vec_push<T>(v: ref Vec<T>, item: T)`
 unifies `T = MyStruct` from `v`, and the second argument's target type
 is `T`. But the existing call-site generic inference pipeline in
-[src/jsyooptypecheck/checkExpr.js](../src/jsyooptypecheck/checkExpr.js)
+[src/jsyooptypecheck/checkExpr.js](../../src/jsyooptypecheck/checkExpr.js)
 walks args to *infer* `T`, then doesn't use the inferred `T` as the
 *target type* for those same arg expressions in a second pass.
 
@@ -143,7 +143,7 @@ Two-pass call resolution for generic functions:
    target.
 
 The instantiation registry in
-[src/jsyooptypecheck/instantiate.js](../src/jsyooptypecheck/instantiate.js)
+[src/jsyooptypecheck/instantiate.js](../../src/jsyooptypecheck/instantiate.js)
 already has the machinery to substitute `TypeParamType` into a
 concrete `StructType`; what's missing is a `checkInitializer`-style
 second pass on the struct-literal args.
@@ -170,9 +170,9 @@ the other args, not silently default.
 ### Issue 3 - Enum value equality (`==` / `!=`) not supported (LANDED)
 
 **Severity: MEDIUM (workaround is verbose; recognised in std). FIXED:
-typecheck in [coerce.js:249-262](../src/jsyooptypecheck/coerce.js#L249-L262),
+typecheck in [coerce.js:249-262](../../src/jsyooptypecheck/coerce.js#L249-L262),
 codegen tag-extract+icmp in single + multi-module BINARY_EXPRESSION paths,
-e2e fixture [enum_eq.yoop](../examples/pass/enum_eq.yoop). Tag-only;
+e2e fixture [enum_eq.yoop](../../examples/pass/enum_eq.yoop). Tag-only;
 payload-bearing equality stays a `switch` job per the inline note.**
 
 #### Symptom
@@ -185,7 +185,7 @@ function eq(a: Color, b: Color): bool {
 ```
 
 The std workaround is in
-[std/http/types.yoop:34-114](../std/http/types.yoop#L34-L114) -
+[std/http/types.yoop:34-114](../../std/http/types.yoop#L34-L114) -
 `http_method_eq` is an 80-line nested switch that compares two enum
 values by walking both. Real yooperlang code that wants enum equality
 either writes a switch-of-switches per enum or sidesteps with int
@@ -200,7 +200,7 @@ state-machine code will keep wanting `==` on enums.
 
 Lower `a == b` on enum types to a tag comparison in codegen. Enum
 ordinals are already stable `i32` tag values per Phase 7.5 (see
-[CLAUDE.md](../CLAUDE.md) - "Enum and union are nominal types
+[CLAUDE.md](../../CLAUDE.md) - "Enum and union are nominal types
 alongside struct"); the typecheck can recognise `eq_op` over
 `(EnumType, EnumType)` of the same type and emit
 `%t = icmp eq i32 %tag_a, %tag_b`. `!=` symmetric.
@@ -244,7 +244,7 @@ Same shape with `FILE`, `SDL_Texture`, anything declared as
 
 Two existing workarounds in the codebase:
 
-1. [twinstick/main.yoop:315-321](../examples/playground/twinstick/main.yoop#L315-L321)
+1. [twinstick/main.yoop:315-321](../../examples/playground/twinstick/main.yoop#L315-L321)
    wraps the opaque handle in a yoop struct (`type Renderer { handle: ref SDL_Renderer }`)
    and passes `ref Renderer` to user helpers. The comment there
    explicitly documents the workaround.
@@ -262,7 +262,7 @@ boundary. The bug is in the codegen path for user functions that
 *receive* a `ref OpaqueExtern` and forward it to another extern.
 
 Probably one of: `emitCall` constructing an alloca + store + load for
-the param ([codegen.js:emitCall](../src/jsyoopcodegen/codegen.js#L216)
+the param ([codegen.js:emitCall](../../src/jsyoopcodegen/codegen.js#L216)
 area), or the function-entry alloca emission for `ref T` params
 materialising a copy of the opaque struct.
 
@@ -284,10 +284,10 @@ be a faster first step.
 - `function helper(ref ren: SDL_Renderer): void { SDL_RenderClear(ren); }`
   compiles and runs.
 - The Renderer/Texture/FILE wrapper structs in
-  [examples/playground/sdl_demo](../examples/playground/sdl_demo/),
-  [examples/playground/twinstick](../examples/playground/twinstick/),
-  [examples/playground/sun_moon](../examples/playground/sun_moon/),
-  and [tools/yoopbinder](../tools/yoopbinder/) can be removed (or kept
+  [examples/playground/sdl_demo](../../examples/playground/sdl_demo/),
+  [examples/playground/twinstick](../../examples/playground/twinstick/),
+  [examples/playground/sun_moon](../../examples/playground/sun_moon/),
+  and [tools/yoopbinder](../../tools/yoopbinder/) can be removed (or kept
   for ergonomic disposable RAII but no longer required for
   correctness).
 - Reproducer test in `examples/pass/` that takes a `ref FILE` through a
@@ -306,7 +306,7 @@ printf("got %d items: %s\n", n, name);   // garbled / wrong output
 ```
 
 Yoop strings lower to a nul-terminated `ptr` (per
-[src/jsyoopcodegen/codegen.js:321](../src/jsyoopcodegen/codegen.js#L321) -
+[src/jsyoopcodegen/codegen.js:321](../../src/jsyoopcodegen/codegen.js#L321) -
 `if (t.name === "string") return "ptr";`), which is what C's
 `printf %s` wants. But the *format string itself* doesn't get
 recognised by yoop as a format string - it's just a regular string -
@@ -371,10 +371,10 @@ args have nowhere to read them from.
 
 #### Current state
 
-[runtime/yoop_args.c](../runtime/yoop_args.c) exposes `yoop_argc()`
+[runtime/yoop_args.c](../../runtime/yoop_args.c) exposes `yoop_argc()`
 and `yoop_argv(i)` (macOS via `_NSGetArgv`, Linux via
 `/proc/self/cmdline`), wired into every binary via
-[src/runtimeBuild.js](../src/runtimeBuild.js). yoopbinder uses them.
+[src/runtimeBuild.js](../../src/runtimeBuild.js). yoopbinder uses them.
 
 This is a workaround. The language-level story should be: user can
 declare `function main(args: string[]): int32` and the entry-point
@@ -383,7 +383,7 @@ argc/argv before calling user main.
 
 #### Fix
 
-In codegen's `main` emission ([codegen.js:3184-3190](../src/jsyoopcodegen/codegen.js#L3184-L3190)
+In codegen's `main` emission ([codegen.js:3184-3190](../../src/jsyoopcodegen/codegen.js#L3184-L3190)
 area), recognise a `main(args: string[]): int32` signature and:
 
 1. Always emit the C entry as `int main(int argc, char** argv)`.
@@ -401,7 +401,7 @@ becomes `function main(args: string[]): int32`.
 - `function main(args: string[]): int32 { ... args[0] ... }` works.
 - args[0] is the program name (matches C convention).
 - Zero-arg `function main(): int32` still works.
-- Update [examples/](../examples/) to use the new shape in any
+- Update [examples/](../../examples/) to use the new shape in any
   CLI-shaped programs (yoopbinder is the obvious one).
 - The runtime `yoop_argc`/`yoop_argv` helpers stay available for
   non-main callers.
@@ -435,7 +435,7 @@ Three minimal repros tried while writing this plan, all in
   (matching the yoopbinder tokenizer) - **passes correctly**.
 
 So the bug is real (yoopbinder reproducibly hit it, fixed by switching
-to parallel `string[]` arrays in [tools/yoopbinder/main.yoop](../tools/yoopbinder/main.yoop)),
+to parallel `string[]` arrays in [tools/yoopbinder/main.yoop](../../tools/yoopbinder/main.yoop)),
 but minimal repros don't trigger it. Something about the interaction
 between disposable Vec lifetimes, nested function calls, and the
 specific shape of ParsedFn (which had 6 fields including bool, string,
@@ -450,12 +450,12 @@ and a fat-pointer field) is load-bearing.
    malloc is returning overlapping ranges or whether something else is
    stomping the data.
 2. Look at `sizeOfType` for the ParamOut struct case
-   ([codegen.js:2232-2241](../src/jsyoopcodegen/codegen.js#L2232-L2241)).
+   ([codegen.js:2232-2241](../../src/jsyoopcodegen/codegen.js#L2232-L2241)).
    For a struct of two `string` fields (each lowered to `ptr` of size
    8), the result should be 16. Verify with an emit of
    `getelementptr` indices.
 3. Check `vec_push`'s grow-and-realloc path
-   ([std/core/vec.yoop:43-61](../std/core/vec.yoop#L43-L61)) - the
+   ([std/core/vec.yoop:43-61](../../std/core/vec.yoop#L43-L61)) - the
    `new_data[i] = v.data[i]` element copy for struct T may have a
    subtle codegen issue.
 4. Check whether `vec_get<T>(ref v, i): T` for struct T returns a
@@ -492,7 +492,7 @@ which the typechecker can see).
 #### Cause
 
 The kind-check in
-[src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js)
+[src/jsyooptypecheck/kindCheck.js](../../src/jsyooptypecheck/kindCheck.js)
 requires explicit user choice between auto-cleanup, manual dispose,
 and transfer-up. This is the right *semantic* model but the syntax
 makes the most common case (auto-cleanup) the most verbose.
@@ -556,7 +556,7 @@ whether it's the RHS of a module-level `const` or a function-local
 affected too, though only `\n` has been verified.
 
 Found while writing
-[examples/playground/shader_demo/main.yoop](../examples/playground/shader_demo/main.yoop) -
+[examples/playground/shader_demo/main.yoop](../../examples/playground/shader_demo/main.yoop) -
 the GLSL preprocessor requires a newline after `#version 150 core`,
 and the shader source defined as a module-level `const` produced
 shaders that compiled to "syntax error on `#`" until the source was
@@ -580,7 +580,7 @@ Two emit paths for `STRING_LITERAL`:
 
 1. In function bodies, lowered as inline LLVM constants via the
    `emitRawStringGlobal` path (lines around
-   [codegen.js:265](../src/jsyoopcodegen/codegen.js#L265)). That path
+   [codegen.js:265](../../src/jsyoopcodegen/codegen.js#L265)). That path
    calls `encodeStringForRawGlobal` which interprets `\n` as `\0A` in
    the LLVM literal. Result: real newlines.
 2. At module-level const-initializer time (Phase 11 comptime or the
@@ -607,7 +607,7 @@ needs to call the same encoder the in-function path does.
   with a `\n` and asserting the length is 1 (or printing the byte and
   comparing to 10).
 - Once landed, the
-  [shader_demo](../examples/playground/shader_demo/main.yoop)'s
+  [shader_demo](../../examples/playground/shader_demo/main.yoop)'s
   `vertex_shader_src()` / `fragment_shader_src()` helpers can be
   reverted to module-level `const VERTEX_SRC` / `const FRAGMENT_SRC`.
 
@@ -618,7 +618,7 @@ needs to call the same encoder the in-function path does.
 **Severity: MEDIUM (blocks yoopbinder output for many C headers). Path A
 LANDED for the scope below; path B no longer needed.**
 
-Landed via [src/jsyooparser/parser.js](../src/jsyooparser/parser.js) -
+Landed via [src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) -
 a new `parseIdentOrKeywordAsName` helper accepts any identifier-shaped
 token (plain IDENT or any reserved keyword) and is used in name-only
 positions where the keyword's grammar role doesn't apply:
@@ -637,8 +637,8 @@ become bindings inside the body and would shadow the keyword's grammar
 role.
 
 Regression tests in [parser.test.js - "parse: reserved keywords in
-name-only positions"](../src/jsyooparser/parser.test.js); end-to-end
-fixture [keyword_field_names.yoop](../examples/pass/keyword_field_names.yoop)
+name-only positions"](../../src/jsyooparser/parser.test.js); end-to-end
+fixture [keyword_field_names.yoop](../../examples/pass/keyword_field_names.yoop)
 exercises the full pipeline.
 
 #### Symptom
@@ -732,7 +732,7 @@ main `macros_v` collector.
 
 #### Fix
 
-Add to [std/core/vec.yoop](../std/core/vec.yoop):
+Add to [std/core/vec.yoop](../../std/core/vec.yoop):
 
 ```yoop
 // Move every element from `src` into `dst`, then dispose `src`.
@@ -806,8 +806,8 @@ together:
   Real fix probably waits for whatever borrow story Phase 12+ has.
 - C string vs yoop string conventions at FFI boundaries beyond
   printf - the codebase has consistent rules but they're spread
-  across [CLAUDE.md](../CLAUDE.md) and
-  [std/core/strings.yoop](../std/core/strings.yoop) comments.
+  across [CLAUDE.md](../../CLAUDE.md) and
+  [std/core/strings.yoop](../../std/core/strings.yoop) comments.
 - Template-literal parsing edge cases (none hit during yoopbinder,
   but escape-handling under `${expr}` interpolation is a known
   area).

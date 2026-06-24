@@ -1,0 +1,12 @@
+// STAGE 5 (correct, cross-module): import the Sanitizer trait + cleared kind,
+// launder the body, then call the namespaced sink. Must NOT false-positive.
+
+import { Body, Sanitizer, cleared } from "./stage5_lib.yoop";
+import * as db from "./stage5_lib.yoop";
+
+function main(): int32 {
+    let req: db.Request = db.receive();
+    let safe: cleared Body = Sanitizer.sanitize(ref req.body);
+    db.runQuery(safe); // laundered: should compile clean across the boundary
+    return 0;
+}

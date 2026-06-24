@@ -1,0 +1,55 @@
+// STAGE 2 (the thesis test - field position): the realistic library shape.
+// The library hands you a Request STRUCT whose `body` field is `tainted`.
+// For "the stdlib breathes it" to work, reading `req.body` must carry the taint
+// into a sink. CLAUDE.md flags field-position sources as a not-yet-enforced
+// follow-up, so the prediction is: this COMPILES, i.e. the leak is undetected.
+
+trait Sanitizer<T> {
+    function sanitize(ref self): T;
+}
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Sanitizer;
+    clearedBy sanitize;
+}
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Sanitizer;
+    appliedBy sanitize;
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Body implements Sanitizer<Body> {
+    text: string,
+    function sanitize(ref self): Body {
+        return { text: "safe" };
+    }
+}
+
+// The library's Request: the body field is marked tainted at the source.
+type Request {
+    path: string,
+    body: tainted Body,
+}
+
+function receive(): Request {
+    return { path: "/", body: { text: "'; DROP TABLE users; --" } };
+}
+
+// A plain log sink: a plain slot should FORBID a restrictive (tainted) value.
+function logLine(b: Body): void {
+    printf(`log: %s\n`, b.text);
+}
+
+function main(): int32 {
+    let req: Request = receive();
+    logLine(req.body); // does field access carry the taint? prediction: no -> compiles (leak)
+    return 0;
+}

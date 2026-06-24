@@ -293,7 +293,7 @@ export function unifyArith(left, right, op) {
   // Variant equality: tag comparison. Both sides must be the same variant
   // type. Payload-bearing cases compare *tags only* - structural
   // comparison of payloads is a follow-up (use `switch` for that today;
-  // see plans/yoopbinder-papercuts.md Issue 3). Codegen lowers this to
+  // see plans/archive/yoopbinder-papercuts.md Issue 3). Codegen lowers this to
   // `icmp eq i32 tag_a, tag_b`.
   if (op === "eqeq" || op === "neq") {
     if (left.kind === typeKinds.variant && right.kind === typeKinds.variant) {

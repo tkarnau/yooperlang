@@ -13,7 +13,7 @@ A systems language with a TypeScript feel - for folks who spent their career shi
 
 This is a re-imagining of a version I first wrote in C and have since abandoned. The current compiler is written in JavaScript (plain Node, no build tools, no dependencies) for readability, with the long-term plan of bootstrapping the compiler in Yooperlang itself once enough of the language is in place.
 
-What works today: the full pipeline (lex, parse, typecheck, codegen, link) is implemented through phase 9, plus standard-library phases A through D. That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Phase 10 (more library, runtime polish, and self-hosting prep) is in progress. See [plans/roadmap.md](plans/roadmap.md) for the full phase map.
+What works today: the full pipeline (lex, parse, typecheck, codegen, link) is implemented through phase 9, plus standard-library phases A through D. That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Self-hosting (rewriting the compiler in Yooperlang itself) is the current focus. See [plans/](plans/) for what is being worked on now, and [plans/archive/roadmap.md](plans/archive/roadmap.md) for the full historical phase map.
 
 It's a moving target and a learning project. I'm relatively new to compilers outside of small DSLs and school projects, so expect rough edges.
 

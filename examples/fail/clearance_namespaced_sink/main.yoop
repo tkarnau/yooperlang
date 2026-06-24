@@ -1,0 +1,15 @@
+// Cross-module clearance failure: the consumer forgets to launder the value
+// and passes raw, un-cleared data straight into the library sink called
+// through its namespace (`db.runQuery`). Before namespaced-callee resolution
+// in kindFlow this compiled clean (the guarantee evaporated at the module
+// boundary); now the conferred-capability check follows across it and rejects
+// the call.
+
+import { Body, cleared } from "./lib.yoop";
+import * as db from "./lib.yoop";
+
+function main(): int32 {
+    let raw: Body = db.receive();
+    db.runQuery(raw); // un-cleared value into a `cleared` sink, across modules
+    return 0;
+}

@@ -249,6 +249,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "total=112 mode=19\n");
   });
 
+  it("clearance_namespaced_sink: a laundered value flows into a sink called through its namespace", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/clearance_namespaced_sink/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "ran query\n");
+  });
+
   it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/map_smoke/main.yoop");
     assert.equal(exitCode, 0);
@@ -2872,6 +2878,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /forbids kind 'tainted' but the value carries it/.test(e.message)),
       `expected restrictive-forbidden error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_namespaced_sink rejects an un-cleared value into a sink called through its namespace", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/clearance_namespaced_sink/main.yoop");
+    assert.ok(
+      errors.some((e) => /parameter 'sql' of 'db\.runQuery' requires kind 'cleared'/.test(e.message)),
+      `expected cross-module namespaced-sink conferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

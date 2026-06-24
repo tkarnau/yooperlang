@@ -1,7 +1,7 @@
 ## Phase 13 - Variant ergonomics: forward-ref sizing + variant trait impls
 
 Two related sharp edges surfaced while writing the first real downstream
-package against yoop (a JSON parser, [examples/playground/yooparse/json.yoop](../examples/playground/yooparse/json.yoop)).
+package against yoop (a JSON parser, [examples/playground/yooparse/json.yoop](../../examples/playground/yooparse/json.yoop)).
 Both block the natural shape a tree-of-tagged-values library wants to take,
 and the workarounds for each are visible in the package's header comment.
 
@@ -58,7 +58,7 @@ sizing one, you still need a wrapper struct to own the disposal.
 
 **The bug**, narrowed to a single line:
 
-[src/jsyooptypecheck/typecheck.js:2342-2344](../src/jsyooptypecheck/typecheck.js#L2342-L2344)
+[src/jsyooptypecheck/typecheck.js:2342-2344](../../src/jsyooptypecheck/typecheck.js#L2342-L2344)
 
 ```js
 const fullEnum = VariantType(d.name, variants, mod.id);
@@ -66,7 +66,7 @@ d.resolvedType = fullEnum;
 variantTable.set(d.name, fullEnum);
 ```
 
-Pass A registered a shell at [typecheck.js:1667](../src/jsyooptypecheck/typecheck.js#L1667):
+Pass A registered a shell at [typecheck.js:1667](../../src/jsyooptypecheck/typecheck.js#L1667):
 `variantTable.set(d.name, VariantType(d.name, new Map(), mod.id));`. Pass
 C builds a *new* VariantType with the populated variants Map and replaces
 the table entry. Any struct field whose type was resolved between those
@@ -80,7 +80,7 @@ undersizes by exactly the missing payload bytes times n, and writes past
 the buffer corrupt the heap.
 
 **The fix**, matching the trait pattern documented in
-[CLAUDE.md](../CLAUDE.md) ("TraitType is itself frozen, but its methods:
+[CLAUDE.md](../../CLAUDE.md) ("TraitType is itself frozen, but its methods:
 Map ... slots are mutable containers that pass C.1 populates"):
 
 - Pass C mutates the shell's `variants` Map in place instead of
@@ -105,7 +105,7 @@ The `VariantType` constructor needs to keep the Map mutable (don't
 freeze it) - mirror what `TraitType` already does.
 
 **Generic variants** (the `gd.genericVariants = genericVariants` path at
-[typecheck.js:2300](../src/jsyooptypecheck/typecheck.js#L2300)) need the
+[typecheck.js:2300](../../src/jsyooptypecheck/typecheck.js#L2300)) need the
 same in-place treatment if they hit the same hazard. Worth checking
 whether generic-variant pass C can race ahead of struct-field resolution
 the same way the concrete path can; if so, store directly into the
@@ -120,7 +120,7 @@ generic-decl's shell instead of building a fresh Map.
   alloca a `[2 x %struct]` and compare the offset of element 1 against
   `sizeOfType`-multiplied-by-1).
 - Re-test the parallel-array workaround in
-  [examples/playground/yooparse/json.yoop](../examples/playground/yooparse/json.yoop)
+  [examples/playground/yooparse/json.yoop](../../examples/playground/yooparse/json.yoop)
   reverted to the natural `members: JsonMember[]` shape - it should run
   the existing demo cleanly.
 - Add a small E2E fixture under `examples/pass/` that exercises
@@ -131,7 +131,7 @@ generic-decl's shell instead of building a fresh Map.
 ### Phase 13.B - `variant T implements Trait propagates<K>`
 
 **The gap**: the variant parser at
-[src/jsyooparser/parser.js:2802-2851](../src/jsyooparser/parser.js#L2802)
+[src/jsyooparser/parser.js:2802-2851](../../src/jsyooparser/parser.js#L2802)
 goes straight from `variant Name<Tparams>` to `{` without considering
 `implements` or `propagates` clauses. The struct parser
 (`parseTypeDecl`) accepts both - the variant parser was never extended.
@@ -163,7 +163,7 @@ Typechecker:
   and register each method on the variant's `methods` Map. Identical
   control flow to the struct path; the only difference is the receiver
   type.
-- `runKindCheck` ([src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js))
+- `runKindCheck` ([src/jsyooptypecheck/kindCheck.js](../../src/jsyooptypecheck/kindCheck.js))
   participates the same way: a binding of a variant type that declares
   `propagates<K>` carries the obligation, and a return that transfers
   the variant value satisfies / transfers the obligation. The existing
@@ -193,7 +193,7 @@ Codegen:
   variant is propagates<disposable>; binding it as `disposable` and
   letting scope exit fire `dispose` should work.
 - E2E pass: revert
-  [examples/playground/yooparse/json.yoop](../examples/playground/yooparse/json.yoop)
+  [examples/playground/yooparse/json.yoop](../../examples/playground/yooparse/json.yoop)
   to wear its own Disposable - the `JsonDoc` wrapper goes away, the
   variant gets the `dispose_value` switch as its own method, and
   `disposable doc: JsonValue = parse(input)` binds the same way.
@@ -230,21 +230,21 @@ Codegen:
 
 ### Critical files
 
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js)
+- [src/jsyooptypecheck/typecheck.js](../../src/jsyooptypecheck/typecheck.js)
   - pass A shell registration at line 1667, pass C variant resolution
   at lines 2301-2344.
-- [src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js)
+- [src/jsyooptypecheck/types.js](../../src/jsyooptypecheck/types.js)
   - `VariantType` constructor: confirm `variants` Map stays mutable
   after construction (mirror `TraitType.methods`).
-- [src/jsyooparser/parser.js](../src/jsyooparser/parser.js)
+- [src/jsyooparser/parser.js](../../src/jsyooparser/parser.js)
   - `parseVariantDecl` at line 2802; teach it `implements` /
   `propagates` clauses and interleaved method bodies.
-- [src/jsyooptypecheck/kindCheck.js](../src/jsyooptypecheck/kindCheck.js)
+- [src/jsyooptypecheck/kindCheck.js](../../src/jsyooptypecheck/kindCheck.js)
   - obligation flow for variant bindings that propagate.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js)
+- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js)
   - trait-method mangling lookup widening to cover variant receivers;
   dispatch through the same `<mod>__<Name>__<Trait>__<method>` shape.
-- [src/e2e.test.js](../src/e2e.test.js) - new fixture registrations.
-- [examples/playground/yooparse/json.yoop](../examples/playground/yooparse/json.yoop)
+- [src/e2e.test.js](../../src/e2e.test.js) - new fixture registrations.
+- [examples/playground/yooparse/json.yoop](../../examples/playground/yooparse/json.yoop)
   - reverts the parallel-array workaround and the JsonDoc wrapper once
   both fixes land.

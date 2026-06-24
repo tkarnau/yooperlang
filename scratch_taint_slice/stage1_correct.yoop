@@ -1,0 +1,50 @@
+// STAGE 1 (correct): the mechanism in HTTP/SQL clothing.
+// A request body arrives `tainted`; the SQL sink demands `cleared`; the only
+// bridge is the Sanitizer trait method. This is the happy path v0 supports.
+
+trait Sanitizer<T> {
+    function sanitize(ref self): T;
+}
+
+kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Sanitizer;
+    clearedBy sanitize;
+}
+
+kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Sanitizer;
+    appliedBy sanitize;
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Body implements Sanitizer<Body> {
+    text: string,
+    function sanitize(ref self): Body {
+        // pretend this strips SQL metacharacters
+        return { text: "safe" };
+    }
+}
+
+// Source: the library hands you a tainted body.
+function readRequestBody(): tainted Body {
+    return { text: "'; DROP TABLE users; --" };
+}
+
+// Sink: refuses anything not cleared.
+function runQuery(sql: cleared Body): void {
+    printf(`query: %s\n`, sql.text);
+}
+
+function main(): int32 {
+    let raw: tainted Body = readRequestBody();
+    let safe: cleared Body = Sanitizer.sanitize(ref raw);
+    runQuery(safe);
+    return 0;
+}

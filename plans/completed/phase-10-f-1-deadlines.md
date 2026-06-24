@@ -1,6 +1,6 @@
 # Phase 10.F.1 - Deadlines (`wait_until`) + dropping the wait poll ✓ landed
 
-> Phase 10.F as scoped in [phase-10.md](../phase-10.md#phase-10f----cancellation-tokens-deadlines-multiplexer-timers)
+> Phase 10.F as scoped in [phase-10.md](../archive/phase-10.md#phase-10f----cancellation-tokens-deadlines-multiplexer-timers)
 > bundles three independent runtime-shaped features: cancellation tokens,
 > deadlines, and a multiplexer-integrated timer subsystem. This sub-phase
 > ships the **deadline** half plus the **poll removal** that the timer

@@ -1,0 +1,35 @@
+// STAGE 3 (the thesis test - cross-module): the source lives in the "library"
+// module; the sink + main live in the app module. For "the stdlib breathes it"
+// to work, the `tainted` on the library function's return must survive the
+// module boundary. CLAUDE.md flags cross-module callees as a not-yet-enforced
+// follow-up, so the prediction is the taint evaporates across the import.
+
+export trait Sanitizer<T> {
+    function sanitize(ref self): T;
+}
+
+export kind tainted {
+    appliesTo binding parameter field return;
+    restrictive;
+    requires Sanitizer;
+    clearedBy sanitize;
+}
+
+export kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Sanitizer;
+    appliedBy sanitize;
+}
+
+export type Body implements Sanitizer<Body> {
+    text: string,
+    function sanitize(ref self): Body {
+        return { text: "safe" };
+    }
+}
+
+// The library source: hands back a tainted body.
+export function readRequestBody(): tainted Body {
+    return { text: "'; DROP TABLE users; --" };
+}

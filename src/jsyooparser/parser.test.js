@@ -134,7 +134,7 @@ describe("parse: expressions", () => {
 
   // Regression: unary prefixes used to return early instead of falling
   // through to the binary loop, so `!a && b`, `-a + b`, `~a & b` failed
-  // to parse. See plans/yoopbinder-papercuts.md Issue 1.
+  // to parse. See plans/archive/yoopbinder-papercuts.md Issue 1.
   it("`!a && b` parses as `&&((!a), b)` not as a syntax error", () => {
     const e = exprOf("!a && b");
     assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);

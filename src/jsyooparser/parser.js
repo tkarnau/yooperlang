@@ -1919,7 +1919,7 @@ export function parse(src) {
     // captures any postfix tightly, then *falls through* to the binary +
     // assignment loop below. Returning early here was a parser bug -
     // `!a && b` would terminate after `!a` and the trailing `&& b` would
-    // hit "expected semicolon, got andand" (see plans/yoopbinder-papercuts.md
+    // hit "expected semicolon, got andand" (see plans/archive/yoopbinder-papercuts.md
     // Issue 1). Chained into the same prefix if/else group as
     // `amp`/`mult`/`null` below so the trailing `else { primary chain }`
     // is only entered when no prefix matched.

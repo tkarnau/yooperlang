@@ -1,0 +1,19 @@
+// STAGE 3 app module: imports the tainted source from the library and forgets
+// to sanitize before the SQL sink. If cross-module markers were enforced this
+// would be rejected exactly like stage1_forgot. Prediction: it compiles.
+
+import { tainted, cleared, Sanitizer, Body, readRequestBody } from "./stage3_lib.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function runQuery(sql: cleared Body): void {
+    printf(`query: %s\n`, sql.text);
+}
+
+function main(): int32 {
+    let raw: tainted Body = readRequestBody();
+    runQuery(raw); // forgot to sanitize, across a module boundary
+    return 0;
+}
