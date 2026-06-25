@@ -1,0 +1,38 @@
+// Stage 4: std containers route through the ambient allocator. A `Vec<T>`
+// created inside an arena scope draws its backing storage (and every grow)
+// from the arena - with NO change to the Vec code at the call site. The Vec is
+// container-owned: it remembers the arena and frees back into it (a no-op; the
+// region reclaims in bulk when the scope ends).
+
+import.unsafe;
+import { disposable } from "std/core/kinds.yoop";
+import * as mem from "std/core/alloc.yoop";
+import * as vec from "std/core/vec.yoop";
+import { Vec } from "std/core/vec.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let usedInArena: usize = 0;
+    disposable reg: mem.ArenaScope = mem.arenaScope(8192) {
+        disposable v: Vec<int32> = vec.vec_new(4);
+        vec.vec_push(ref v, 10);
+        vec.vec_push(ref v, 20);
+        vec.vec_push(ref v, 30);
+        vec.vec_push(ref v, 40);
+        vec.vec_push(ref v, 50); // forces a grow - still from the arena
+        usedInArena = mem.arenaUsed(reg.arena);
+        let sum: int32 = vec.vec_get(ref v, 0) + vec.vec_get(ref v, 4);
+        printf(`sum=${sum} len=${v.len}\n`);
+    }
+    let arenaGotData: int32 = 0;
+    if (usedInArena > 0) { arenaGotData = 1; }
+    printf(`arenaGotData=${arenaGotData}\n`);
+    return 0;
+}
+
+// expected output:
+// sum=60 len=5
+// arenaGotData=1

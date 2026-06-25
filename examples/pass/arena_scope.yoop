@@ -1,0 +1,48 @@
+// Scoped arena + temporary storage (std/core/alloc.yoop), Stages 3 + 5.
+//
+// `arenaScope(cap)` makes a fresh arena and installs it as the current
+// allocator (a side effect of construction); binding it with the `disposable`
+// keyword and a trailing block injects the teardown (pop + destroy) at block
+// end. So everything allocated inside the block comes from the arena, and the
+// whole region reclaims at the brace. No manual push/pop, no per-object free.
+//
+// `tempAllocator()` / `resetTemp()` is the per-thread scratch arena: allocate
+// freely, reset once at a boundary.
+
+import.unsafe;
+import { disposable } from "std/core/kinds.yoop";
+import * as mem from "std/core/alloc.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Inside the scoped arena, allocations route to it; report how much it used.
+function useScope(): usize {
+    let usedInside: usize = 0;
+    disposable reg: mem.ArenaScope = mem.arenaScope(4096) {
+        let a: unsafe_ptr<void> = mem.allocBytes(64, 8);
+        let b: unsafe_ptr<void> = mem.allocBytes(64, 8);
+        usedInside = mem.arenaUsed(reg.arena);
+    }
+    // teardown (pop + destroy) fired at the brace above; the region is gone.
+    return usedInside;
+}
+
+function main(): int32 {
+    let scopeUsed: usize = useScope();
+
+    // Temp storage: allocate, reset, allocate -> the reset reuses the region.
+    let ta: mem.Allocator = mem.tempAllocator();
+    let p1: unsafe_ptr<void> = ta.alloc(ta.data, 64, 8);
+    mem.resetTemp();
+    let p2: unsafe_ptr<void> = ta.alloc(ta.data, 64, 8);
+    let tempReused: int32 = 0;
+    if (p1 == p2) { tempReused = 1; }
+
+    printf(`scopeUsed=${scopeUsed} tempReused=${tempReused}\n`);
+    return 0;
+}
+
+// expected output:
+// scopeUsed=128 tempReused=1

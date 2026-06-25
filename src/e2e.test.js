@@ -249,6 +249,31 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "total=112 mode=19\n");
   });
 
+  it("arena_context: malloc default + bump arena installed as the current allocator", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_context.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "mallocOk=1 distinct=1 reused=1 used=128 afterReset=0\n");
+  });
+
+  it("arena_scope: disposable arenaScope installs+tears down a region; temp allocator resets", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_scope.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "scopeUsed=128 tempReused=1\n");
+  });
+
+  it("arena_vec: a Vec created inside an arena scope draws its storage from the arena", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_vec.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum=60 len=5\narenaGotData=1\n");
+  });
+
+  it("arena_request_loop: per-request arena reset keeps peak memory bounded across requests", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_request_loop.yoop");
+    assert.equal(exitCode, 0);
+    // 5 requests summed (5*45=225); peak is ONE request's footprint, not 5x.
+    assert.equal(stdout, "totalSum=225 peakUsed=96\n");
+  });
+
   it("generic_trait_cross_module: an imported generic trait's method is callable via the qualified form", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_trait_cross_module/main.yoop");
     assert.equal(exitCode, 0);

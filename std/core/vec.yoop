@@ -18,23 +18,35 @@
 
 import { Disposable, disposable } from "./kinds.yoop";
 import * as intr from "./intrinsics.yoop";
+import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./alloc.yoop";
 
+// `Vec<T>` is container-owned: it remembers the allocator it was built with
+// (whatever was current at `vec_new`) and routes every later grow and the
+// final free back through that same allocator, regardless of what is current
+// when those happen. So a Vec built inside an arena scope frees into the arena
+// (a no-op; the region reclaims in bulk), and a malloc Vec stays malloc-backed
+// even if it grows while an arena is installed.
 export type Vec<T> implements Disposable propagates<disposable> {
     data: T[],
     len: usize,
     cap: usize,
+    alloc: Allocator,
     function dispose(ref self): void {
         if (self.cap > 0) {
-            intr.heap_free(self.data);
+            let prev: Allocator = pushAllocator(self.alloc);
+            intr.ctx_free(self.data);
+            popAllocator(prev);
             self.cap = 0;
         }
     }
 }
 
-// Construct a fresh Vec with `initial_cap` capacity. Caller must discharge
-// the disposable obligation (auto-cleanup, manual dispose, or transfer up).
+// Construct a fresh Vec with `initial_cap` capacity. Captures the current
+// allocator. Caller must discharge the disposable obligation (auto-cleanup,
+// manual dispose, or transfer up).
 export function vec_new<T>(initial_cap: usize): Vec<T> propagates<disposable> {
-    return { data: intr.heap_alloc(initial_cap), len: 0, cap: initial_cap };
+    let a: Allocator = currentAllocator();
+    return { data: intr.ctx_alloc(initial_cap), len: 0, cap: initial_cap, alloc: a };
 }
 
 // Append `value`, growing the backing buffer if necessary (doubling
@@ -44,15 +56,18 @@ export function vec_push<T>(v: ref Vec<T>, value: T): void {
     if (v.len >= v.cap) {
         let new_cap: usize = v.cap * 2;
         if (new_cap == 0) { new_cap = 4; }
-        let new_data: T[] = intr.heap_alloc(new_cap);
+        // Grow through the Vec's own allocator, not whatever is ambient now.
+        let prev: Allocator = pushAllocator(v.alloc);
+        let new_data: T[] = intr.ctx_alloc(new_cap);
         let i: usize = 0;
         while (i < v.len) {
             new_data[i] = v.data[i];
             i = i + 1;
         }
         if (v.cap > 0) {
-            intr.heap_free(v.data);
+            intr.ctx_free(v.data);
         }
+        popAllocator(prev);
         v.data = new_data;
         v.cap = new_cap;
     }
@@ -93,15 +108,17 @@ export function vec_as_array<T>(v: ref Vec<T>): T[] {
 export function vec_extend_from<T>(v: ref Vec<T>, src: T[]): void {
     let needed: usize = v.len + src.len;
     if (needed > v.cap) {
-        let new_data: T[] = intr.heap_alloc(needed);
+        let prev: Allocator = pushAllocator(v.alloc);
+        let new_data: T[] = intr.ctx_alloc(needed);
         let i: usize = 0;
         while (i < v.len) {
             new_data[i] = v.data[i];
             i = i + 1;
         }
         if (v.cap > 0) {
-            intr.heap_free(v.data);
+            intr.ctx_free(v.data);
         }
+        popAllocator(prev);
         v.data = new_data;
         v.cap = needed;
     }
@@ -119,11 +136,12 @@ export function vec_extend_from<T>(v: ref Vec<T>, src: T[]): void {
 // aliased - so passing a borrowing view (string_as_bytes, array_slice) is
 // safe.
 export function vec_from_array<T>(src: T[]): Vec<T> propagates<disposable> {
-    let data: T[] = intr.heap_alloc(src.len);
+    let a: Allocator = currentAllocator();
+    let data: T[] = intr.ctx_alloc(src.len);
     let i: usize = 0;
     while (i < src.len) {
         data[i] = src[i];
         i = i + 1;
     }
-    return { data: data, len: src.len, cap: src.len };
+    return { data: data, len: src.len, cap: src.len, alloc: a };
 }

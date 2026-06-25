@@ -15,15 +15,22 @@
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Option } from "../core/types.yoop";
 import * as intr from "../core/intrinsics.yoop";
+import { Allocator, currentAllocator, pushAllocator, popAllocator } from "../core/alloc.yoop";
 
+// Container-owned, like Vec: the Deque remembers the allocator it was built
+// with and routes grows and the final free back through it, so a Deque built
+// inside an arena scope draws from (and frees into) the arena.
 export type Deque<T> implements Disposable propagates<disposable> {
     data: T[],
     head: usize,
     len:  usize,
     cap:  usize,
+    alloc: Allocator,
     function dispose(ref self): void {
         if (self.cap > 0) {
-            intr.heap_free(self.data);
+            let prev: Allocator = pushAllocator(self.alloc);
+            intr.ctx_free(self.data);
+            popAllocator(prev);
             self.cap = 0;
         }
     }
@@ -39,21 +46,24 @@ function next_pow2_floor8(n: usize): usize {
 
 export function deque_new<T>(initial_cap: usize): Deque<T> propagates<disposable> {
     let cap: usize = next_pow2_floor8(initial_cap);
-    return { data: intr.heap_alloc(cap), head: 0, len: 0, cap: cap };
+    let a: Allocator = currentAllocator();
+    return { data: intr.ctx_alloc(cap), head: 0, len: 0, cap: cap, alloc: a };
 }
 
 // Linearize into a fresh buffer at twice the capacity. The new head is
 // 0; existing elements move to their natural offsets.
 function grow<T>(ref d: Deque<T>): void {
     let new_cap: usize = d.cap * 2;
-    let new_data: T[] = intr.heap_alloc(new_cap);
+    let prev: Allocator = pushAllocator(d.alloc);
+    let new_data: T[] = intr.ctx_alloc(new_cap);
     let i: usize = 0;
     let mask: usize = d.cap - 1;
     while (i < d.len) {
         new_data[i] = d.data[(d.head + i) & mask];
         i = i + 1;
     }
-    intr.heap_free(d.data);
+    intr.ctx_free(d.data);
+    popAllocator(prev);
     d.data = new_data;
     d.head = 0;
     d.cap  = new_cap;

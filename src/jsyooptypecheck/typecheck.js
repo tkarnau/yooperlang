@@ -1552,6 +1552,10 @@ export function effectiveLayoutAlign(app) {
 export const INTRINSIC_DECL_IDS = new Map([
   ["heap_alloc", "$builtin__heap_alloc"],
   ["heap_free", "$builtin__heap_free"],
+  // Context-routed siblings of heap_alloc/heap_free: allocate/free through the
+  // current allocator (std/core/alloc.yoop) instead of raw malloc/free.
+  ["ctx_alloc", "$builtin__ctx_alloc"],
+  ["ctx_free", "$builtin__ctx_free"],
   ["string_as_bytes", "$builtin__string_as_bytes"],
   ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
   ["array_slice", "$builtin__array_slice"],
@@ -1666,7 +1670,41 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked];
+  // Context-routed allocation: same shapes as heap_alloc/heap_free, but codegen
+  // lowers the malloc/free to yoop_ctx_alloc/yoop_ctx_free (current allocator).
+  const ctxAllocDeclId = "$builtin__ctx_alloc";
+  const ctxAllocT = new TypeParamType("T", ctxAllocDeclId);
+  const ctxAlloc = {
+    id: ctxAllocDeclId,
+    name: "ctx_alloc",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", ctxAllocT]]),
+    genericSig: FuncType(
+      [{ name: "n", type: PrimType("usize"), isRef: false }],
+      ArrayType(ctxAllocT),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  const ctxFreeDeclId = "$builtin__ctx_free";
+  const ctxFreeT = new TypeParamType("T", ctxFreeDeclId);
+  const ctxFree = {
+    id: ctxFreeDeclId,
+    name: "ctx_free",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", ctxFreeT]]),
+    genericSig: FuncType(
+      [{ name: "a", type: ArrayType(ctxFreeT), isRef: false }],
+      VoidType(),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked, ctxAlloc, ctxFree];
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
