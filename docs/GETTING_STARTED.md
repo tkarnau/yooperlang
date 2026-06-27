@@ -94,6 +94,7 @@ Then open <http://localhost:8080/>.
 
 ## Where to go next
 
+- if using vscode: try installing the debugger, LSP, and syntax highlighting in the [editors/vscode](../editors/vscode/README.md) folder
 - [../SPEC.md](../SPEC.md) - the language spec, syntax first
 - [../plans/](../plans/) - the current focus and small consolidated plan ([../plans/archive/roadmap.md](../plans/archive/roadmap.md) for the full historical phase map)
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) - running the tests, hacking on the

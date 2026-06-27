@@ -11,11 +11,19 @@ A systems language with a TypeScript feel - for folks who spent their career shi
 
 ## Status
 
-This is a re-imagining of a version I first wrote in C and have since abandoned. The current compiler is written in JavaScript (plain Node, no build tools, no dependencies) for readability, with the long-term plan of bootstrapping the compiler in Yooperlang itself once enough of the language is in place.
+This is a re-imagining of a version I first wrote in C and have since abandoned. The current compiler is written in JavaScript (plain Node, no build tools, no dependencies) for readability by me (having lived in web languages and node backend worlds for a bit too long,) with the long-term plan of bootstrapping the compiler in Yooperlang itself once enough of the language is in place.
 
-What works today: the full pipeline (lex, parse, typecheck, codegen, link) is implemented through phase 9, plus standard-library phases A through D. That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Self-hosting (rewriting the compiler in Yooperlang itself) is the current focus. See [plans/](plans/) for what is being worked on now, and [plans/archive/roadmap.md](plans/archive/roadmap.md) for the full historical phase map.
+What works today: a "working" chunk of the pipeline (lex, parse, typecheck, codegen, link). That covers structs, traits, kinds, generics, enums and unions, error handling, tasks and concurrency, and a starting standard library (`std/core`, `std/net`, `std/http`, `std/collections`). Self-hosting (rewriting the compiler in Yooperlang itself) is the current focus, to unlock some iteration on a bytecode layer and feel the language out. See [plans/](plans/) for what is being worked on now, and [plans/archive/roadmap.md](plans/archive/roadmap.md) for the full historical phase map.
+
+Typically I will begin writing a small document about the next portion of the language to work on and have a few iterations with LLMs to build out a plan and some pseudocode and begin implementation from there. Ideally very little of the compiler is AI generated, but there are some parts of LLVM and the C-runtime edges that I will lean on some AI implementation to get a better understanding to see it working in the context of this language.
+
+It is likely that parts of the language get ripped out or rewritten by hand once an understanding of how a particular feature works in the full pipeline after I've written most of the front-end. Like memory allocators, and such. I didn't really understand how they might be implemented beyond the syntax and so most of the lowering was AI-assisted and is slowly being replaced.
 
 It's a moving target and a learning project. I'm relatively new to compilers outside of small DSLs and school projects, so expect rough edges.
+
+### dev platform and build target NOTE
+
+Currently it is working mostly for macos, and we need to go through and get a build server or something for all of the other test/build scenarios to ensure this continues working and being testable cross platform. I started writing this on windows and did a couple passes working on it in linux, but a huge amount has been on the macbook in coffee shops and kids' softball tournament downtimes...
 
 ## A taste
 
@@ -62,6 +70,7 @@ A few small, self-contained programs to start with:
 - [examples/intro/](examples/intro/) - tiny, heavily commented starter programs
 - [examples/playground/calculate_primes/](examples/playground/calculate_primes/) - a longer worked example
 - [examples/playground/dynamic_array/](examples/playground/dynamic_array/) - generics and heap allocation
+- installing SDL2 and trying some of the graphical programs
 
 There are also hundreds of feature fixtures under [examples/pass/](examples/pass/) (programs that should compile) and [examples/fail/](examples/fail/) (programs that should be rejected, used as compiler tests).
 

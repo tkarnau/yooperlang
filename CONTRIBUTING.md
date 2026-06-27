@@ -10,12 +10,25 @@ that way for the JavaScript compiler itself - plain Node, no build tools, no npm
 packages. (Auxiliary tooling under `tools/` may have its own isolated
 dependencies.)
 
-A note on AI: the compiler code is written by hand, on purpose, so the author
+A note on AI: the compiler code is intended to be written by hand, on purpose, so the author
 actually understands each piece. AI is used for planning and organizing, not for
-generating compiler code. If you send a patch, please understand what it does.
+generating long-term compiler code. If you send a patch, please understand what it does.
+It is okay to use LLMs to assist in adding comments and clarifying code, but
+avoid walls of text with complex explanations. If it is a complex topic, prefer
+links to extra information beyond what the code is doing.
 
 In docs and comments, keep to plain ASCII: no emdashes, no curly quotes, no
 fancy markdown tables.
+
+Branches and idea builds are encouraged and using AI to get an idea moving to
+see the ergonomics of trying to write "working" code with that new feature is
+valuable. You can write tools as well, but please make sure there are some pass
+and/or fail example programs written to validate the compiler features being
+added. I don't care really how those are written in the JS side of the compiler,
+but eventually we need to write a yoop test harness for the bootstrap compiler.
+Keeping that in mind, we should stick to only testing with features that will
+eventually exist in the regular language. The default node testing library
+should be good enough.
 
 ## Running the tests
 
@@ -55,8 +68,8 @@ Features land phase by phase. The current focus and the small consolidated plan
 live in [plans/](plans/); per-phase write-ups for shipped work are in
 [plans/completed/](plans/completed/), and the full historical roadmap is at
 [plans/archive/roadmap.md](plans/archive/roadmap.md). Code is annotated with phase comments
-(`// Phase 7.1:`, `// 6.5:`) marking the version a piece of logic became correct
-- treat those as load-bearing breadcrumbs.
+(`// Phase 7.1:`, `// 6.5:`) marking the version a piece of logic became
+correct - treat those as load-bearing breadcrumbs.
 
 ## Reporting issues
 
