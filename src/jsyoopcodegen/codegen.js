@@ -68,6 +68,10 @@ const RUNTIME_DECLARES = [
   "declare void @yoop_task_free_sync_pair(ptr)",
   "declare ptr @malloc(i64)",
   "declare void @free(ptr)",
+  // Context-routed allocation (runtime/yoop_alloc.c): dispatch through the
+  // current allocator. Back the ctx_alloc/ctx_free intrinsics.
+  "declare ptr @yoop_ctx_alloc(i64, i64)",
+  "declare void @yoop_ctx_free(ptr)",
   "declare ptr @memcpy(ptr, ptr, i64)",
   // Phase 8.D: errno bridge - see runtime/yoop_runtime.c
   "declare i32 @yoop_errno_get()",
@@ -1016,7 +1020,7 @@ export function codegen(ast) {
         }
         // Enum equality: extract the i32 tag from each operand and icmp.
         // Typecheck has already verified both sides are the same enum
-        // type (see plans/yoopbinder-papercuts.md Issue 3). Payloads are
+        // type (see plans/archive/yoopbinder-papercuts.md Issue 3). Payloads are
         // intentionally not compared - tag-only matches the documented
         // semantics; structural payload comparison stays a `switch` job.
         if (
@@ -3960,7 +3964,7 @@ function codegenWithModuleId(
           return emitPointerBinaryMM(node, fnLines);
         }
         // Enum tag-comparison branch (mirror of the single-module path
-        // above). See plans/yoopbinder-papercuts.md Issue 3.
+        // above). See plans/archive/yoopbinder-papercuts.md Issue 3.
         if (
           (node.op === "eqeq" || node.op === "neq") &&
           leftTy?.kind === typeKinds.variant &&
@@ -4632,6 +4636,62 @@ function codegenWithModuleId(
       const fatVal = freshTemp();
       fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
       return { val: fatVal, yoopType: arrayType };
+    }
+    if (inst.declId === "$builtin__ctx_alloc") {
+      // Same as heap_alloc, but the byte allocation routes through the current
+      // allocator (yoop_ctx_alloc) instead of malloc. Alignment is 8, which
+      // satisfies every current Yoop scalar/struct type.
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      const elemSize = sizeOfType(elemType);
+      const nArg = emitExpr(node.args[0], fnLines);
+      const byteSize = freshTemp();
+      fnLines.push(`  ${byteSize} = mul i64 ${nArg.val}, ${elemSize}`);
+      if (programState?.trackHeap) {
+        fnLines.push(`  call void @yoop_diag_record_alloc(i64 ${byteSize})`);
+      }
+      const raw = freshTemp();
+      fnLines.push(`  ${raw} = call ptr @yoop_ctx_alloc(i64 ${byteSize}, i64 8)`);
+      const arrayLlvmTy = llvmType(arrayType);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      fnLines.push(`  store ptr ${raw}, ptr ${dataField}`);
+      const lenField = freshTemp();
+      fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+      fnLines.push(`  store i64 ${nArg.val}, ptr ${lenField}`);
+      const fatVal = freshTemp();
+      fnLines.push(`  ${fatVal} = load ${arrayLlvmTy}, ptr ${fatSlot}`);
+      return { val: fatVal, yoopType: arrayType };
+    }
+    if (inst.declId === "$builtin__ctx_free") {
+      // Same as heap_free, but frees through the current allocator.
+      const elemType = inst.argTypes[0];
+      const arrayType = ArrayType(elemType);
+      ensureArrayTypeDef(elemType);
+      const fatArg = emitExpr(node.args[0], fnLines);
+      const arrayLlvmTy = llvmType(arrayType);
+      const fatSlot = freshTemp();
+      fnLines.push(`  ${fatSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${fatArg.val}, ptr ${fatSlot}`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 0`);
+      const dataPtr = freshTemp();
+      fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      if (programState?.trackHeap) {
+        const elemSize = sizeOfType(elemType);
+        const lenField = freshTemp();
+        fnLines.push(`  ${lenField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${fatSlot}, i32 0, i32 1`);
+        const lenVal = freshTemp();
+        fnLines.push(`  ${lenVal} = load i64, ptr ${lenField}`);
+        const byteSize = freshTemp();
+        fnLines.push(`  ${byteSize} = mul i64 ${lenVal}, ${elemSize}`);
+        fnLines.push(`  call void @yoop_diag_record_free(i64 ${byteSize})`);
+      }
+      fnLines.push(`  call void @yoop_ctx_free(ptr ${dataPtr})`);
+      return { val: "void", yoopType: VoidType() };
     }
     if (inst.declId === "$builtin__heap_free") {
       const elemType = inst.argTypes[0];

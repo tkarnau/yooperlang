@@ -124,16 +124,18 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   //   - `kindType`        - the K it represents.
   //   - `autoCleanup`     - true if the binding's kind keyword authorises
   //                         the compiler to inject the cleanup call at
-  //                         scope exit; false if the user is on the hook.
-  //   - `transferred`     - flipped by RETURN_STATEMENT when the enclosing
-  //                         function declares `propagates<K>` and the
-  //                         returned value carries the obligation.
+  //                         scope exit; false if the obligation is advisory
+  //                         and the user handles it (or not) themselves.
   //   - `satisfied`       - flipped by `walkExpr` when it sees a direct call
   //                         to the obligation's cleanup method on the
-  //                         tracked binding (linear flow-insensitive).
-  //   - `reported`        - dedupes the unsatisfied-at-scope-exit error so
-  //                         the same obligation doesn't fire twice across a
-  //                         return + block-end pair.
+  //                         tracked binding; lets the compiler skip the
+  //                         injected cleanup for an autoCleanup binding that
+  //                         was already disposed by hand on every path.
+  //   - `transferred`     - vestigial (ownership redesign 2026-06-17): never
+  //                         set now that `propagates<K>` is advisory only;
+  //                         projectCleanups still tolerates it.
+  //   - `reported`        - vestigial; the unsatisfied-obligation error it
+  //                         deduped no longer exists.
   function obligationsFor(stmt) {
     const out = [];
     const kt = stmt.resolvedKindType;
@@ -320,82 +322,31 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     return branchDiverged;
   }
 
-  // Phase 6.4 strict propagates: mark obligations associated with the given
-  // identifier name and kind as `transferred`. Returns true if at least one
-  // obligation was marked.
-  //
-  // Bindings that declared the kind keyword (`autoCleanup === true`) are
-  // committed to local cleanup - declaring the keyword IS the user's
-  // statement that the lifetime ends in this scope. Even if the enclosing
-  // function declares `propagates<K>`, the keyword wins: cleanup fires
-  // before return, and the obligation is NOT transferred.
-  function markIdentObligationsTransferred(identName, kindType) {
-    let any = false;
-    for (const frame of stack) {
-      for (const o of frame.obligations) {
-        if (
-          o.bindingName === identName &&
-          o.kindType === kindType &&
-          !o.transferred &&
-          !o.autoCleanup
-        ) {
-          o.transferred = true;
-          any = true;
-        }
-      }
-    }
-    return any;
-  }
-
-  // Yoopstore-papercut #11: a returned struct / variant literal moves its
-  // field bindings into the result. Recurse the literal's field values and
-  // transfer any IDENT obligation for `kindType` - nested literals are
-  // handled the same way (a field whose value is itself a literal). Field
-  // values that aren't IDENTs or literals (calls, arithmetic, inline
-  // `vec_new(...)`) have no leaked binding, so they're skipped.
-  function markLiteralFieldObligationsTransferred(expr, kindType) {
-    if (!expr) return;
-    if (expr.kind === ASTNodeKind.IDENT) {
-      markIdentObligationsTransferred(expr.name, kindType);
-      return;
-    }
-    if (
-      expr.kind === ASTNodeKind.STRUCT_LITERAL ||
-      expr.kind === ASTNodeKind.VARIANT_CONSTRUCTOR
-    ) {
-      for (const f of expr.fields ?? []) {
-        markLiteralFieldObligationsTransferred(f.value, kindType);
-      }
-    }
-  }
-
-  // Phase 6.4 strict propagates: emit the unsatisfied-obligation error for any
-  // tracked obligation that has reached scope exit without being satisfied,
-  // transferred, or cleaned up automatically. Uses `o.reported` to dedupe.
-  function reportUnsatisfied(o) {
-    if (o.reported || o.satisfied || o.transferred || o.autoCleanup) return;
-    o.reported = true;
-    const kName = o.kindType?.name ?? "<kind>";
-    const methodHint = o.methodName
-      ? ` call '${o.kindType?.requires?.[0]?.name ?? "Trait"}.${o.methodName}(ref ${o.bindingName})' to satisfy it,`
-      : "";
-    pushError(errors, { sourceLoc: o.sourceLoc },
-      `binding '${o.bindingName}' has unsatisfied obligation from propagates<${kName}>; declare the '${kName}' kind keyword for auto-cleanup,${methodHint} or transfer it to the caller via 'propagates<${kName}>' on the enclosing function`);
-  }
+  // Ownership redesign (2026-06-17): the return-site obligation-transfer
+  // machinery (`markIdentObligationsTransferred` /
+  // `markLiteralFieldObligationsTransferred`) was removed. `propagates<K>` no
+  // longer transfers an enforced obligation across a return, so there is
+  // nothing to mark. The `transferred` flag on obligations is now vestigial
+  // (never set); projectCleanups still tolerates it.
 
   // Convert a list of obligations into auto-cleanup nodes for codegen,
-  // skipping any that are satisfied, transferred, or not autoCleanup. Errors
-  // are emitted (via reportUnsatisfied) as a side effect for non-autoCleanup
-  // obligations that reached this exit point unsatisfied.
+  // skipping any that are satisfied, transferred, or not autoCleanup.
+  //
+  // Ownership redesign (2026-06-17, see plans/ownership-and-typestate-redesign.md):
+  // obligations are ADVISORY, not enforced. A non-autoCleanup obligation that
+  // reaches scope exit unhandled is NOT an error - the default is silent. Only a
+  // binding that opted in via its kind keyword (`disposable`/`pooled`/`joined`/
+  // Task -> autoCleanup) gets a cleanup call injected here. What to do with an
+  // un-keyworded disposable is left entirely to the caller; avoiding double-free
+  // is the `dispose` implementer's responsibility (idempotent dispose).
   function projectCleanups(obligations) {
     const out = [];
     for (const o of obligations) {
       if (o.satisfied || o.transferred) continue;
       if (o.autoCleanup) {
         out.push(makeCleanupCall(o));
-      } else {
-        reportUnsatisfied(o);
       }
+      // else: silent. Handling an un-keyworded obligation is the user's choice.
     }
     return out;
   }
@@ -514,67 +465,16 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
             }
           }
           walkExpr(stmt.value);
-          // Phase 6.4 strict propagates: if the returned value carries a
-          // propagating kind, the enclosing function must declare
-          // `propagates<K>` so the obligation transfers to the caller.
-          // IDENT returns: when the function declares propagates<K>, mark
-          // matching active obligations as transferred (suppresses cleanup
-          // + the unsatisfied-at-scope-exit error for that obligation).
-          // Non-IDENT returns (struct literal, call): the binding-side
-          // pathway has nothing to transfer, so we emit the function-side
-          // error directly when the function fails to declare propagates<K>.
-          const rt = stmt.value.resolvedType;
-          if (
-            (rt?.kind === "struct" || rt?.kind === "variant") &&
-            (rt.propagatedKinds?.length ?? 0) > 0
-          ) {
-            const declaredPropagates = new Set(
-              (fnOrMethodDecl.returnPropagatedKinds ?? []).map(
-                (a) => a.kindType ?? a,
-              ),
-            );
-            const identName =
-              stmt.value.kind === ASTNodeKind.IDENT ? stmt.value.name : null;
-            // Yoopstore-papercut #11: a returned struct / variant literal
-            // moves its field bindings into the result value. When those
-            // fields are bare IDENTs they carry the same obligation the
-            // result struct propagates, so the literal is a transfer site
-            // too - not just a bare `return ident;`.
-            const isLiteral =
-              stmt.value.kind === ASTNodeKind.STRUCT_LITERAL ||
-              stmt.value.kind === ASTNodeKind.VARIANT_CONSTRUCTOR;
-            for (const propA of rt.propagatedKinds) {
-              const propK = propA.kindType ?? propA;
-              const carriesObligation =
-                (propK.mustCall?.length ?? 0) > 0 || propK.refcounted;
-              if (!carriesObligation) continue;
-              if (identName) {
-                if (declaredPropagates.has(propK)) {
-                  markIdentObligationsTransferred(identName, propK);
-                }
-                // If not declared: the IDENT's binding-side obligation will
-                // be reported by `reportUnsatisfied` below - no need for a
-                // separate function-side error.
-              } else if (declaredPropagates.has(propK)) {
-                // Declared propagates<K>. For a struct / variant literal,
-                // recurse into the field values and transfer any IDENT
-                // obligation for K (same effect as the bare-IDENT branch).
-                // A non-literal (e.g. a call result) has no binding to
-                // transfer, so this is a no-op there.
-                if (isLiteral) {
-                  markLiteralFieldObligationsTransferred(stmt.value, propK);
-                }
-              } else {
-                pushError(errors, stmt,
-                  `function returns a value of type ${rt.name} carrying propagates<${propK.name}>; either declare 'propagates<${propK.name}>' on the function or satisfy the obligation before return`);
-              }
-            }
-          }
+          // Ownership redesign (2026-06-17): returning a value that carries a
+          // propagating kind is fine and needs no annotation. `propagates<K>`
+          // is now an advisory producer-side signal (surfaced by tooling/IDE),
+          // not a transfer contract - there is nothing to enforce or mark here.
+          // The `mustNotEscape` escape check above still applies (that is the
+          // separate `scoped` kind, which stays enforced).
         }
-        // Project cleanups for every active obligation. Auto-cleanup obligations
-        // (kind-keyword bindings) get a CLEANUP_CALL injected here; manually-
-        // tracked obligations that reached return without satisfaction or
-        // transfer surface the unsatisfied error via reportUnsatisfied.
+        // Project cleanups for every active obligation. Only kind-keyword
+        // (autoCleanup) bindings get a CLEANUP_CALL injected here; un-keyworded
+        // obligations are advisory and silently left to the user.
         stmt.pendingCleanups = projectCleanups(flattenStackReverse());
         walkDiverged = true;
         return;
@@ -651,6 +551,41 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         const base = snapshotSat();
         walkBranchAndTrack(stmt.body);
         restoreSat(base);
+        return;
+      }
+      case ASTNodeKind.SWITCH_STATEMENT: {
+        // Ownership redesign (2026-06-17): walk each arm body as its own block
+        // so a `disposable`-keyword binding declared inside an arm gets its
+        // auto-cleanup injected (walkBlock populates arm.body.implicitCleanups,
+        // which codegen's emitBlockStmt emits). Before this, SWITCH fell through
+        // to `default` and arm bodies were never walked, so keyword cleanups in
+        // a `case` silently failed to fire. We also do an IF-style path-coverage
+        // merge across the arms so a manual dispose that appears on every
+        // reaching arm can satisfy an outer obligation.
+        walkExpr(stmt.scrutinee);
+        const base = snapshotSat();
+        const bodies = (stmt.arms ?? []).map((a) => a.body);
+        if (stmt.defaultArm) bodies.push(stmt.defaultArm);
+        const reachingSnaps = [];
+        for (const body of bodies) {
+          restoreSat(base);
+          const diverged = walkBranchAndTrack(body);
+          if (!diverged) reachingSnaps.push(snapshotSat());
+        }
+        // Without a `default`, a non-matching scrutinee falls through with the
+        // pre-switch sat state, so that is a reaching path too.
+        if (!stmt.defaultArm) reachingSnaps.push(base);
+        if (reachingSnaps.length === 0) {
+          // Every arm diverged (returned) and a default covered all cases.
+          walkDiverged = true;
+          restoreSat(base);
+        } else {
+          let merged = reachingSnaps[0];
+          for (let i = 1; i < reachingSnaps.length; i++) {
+            merged = mergeSatIntersect(merged, reachingSnaps[i]);
+          }
+          restoreSat(merged);
+        }
         return;
       }
       case ASTNodeKind.BLOCK:

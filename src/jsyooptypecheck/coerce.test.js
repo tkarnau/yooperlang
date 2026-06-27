@@ -103,7 +103,7 @@ describe("unifyArith", () => {
     assert.equal(unifyArith(null, PrimType("int32"), "plus"), null);
   });
 
-  // plans/yoopbinder-papercuts.md Issue 3: enums get tag-based equality.
+  // plans/archive/yoopbinder-papercuts.md Issue 3: enums get tag-based equality.
   it("`==` on two values of the same enum type yields bool", () => {
     const color = VariantType("Color", new Map(), "mod1");
     assert.deepEqual(

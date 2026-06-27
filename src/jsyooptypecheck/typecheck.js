@@ -34,6 +34,7 @@ import {
   VTableType,
   primTypeFromName,
   resolveTypeAnnotation,
+  lookupAlias,
   formatAnnotation,
   TraitType,
   TraitSelfPlaceholder,
@@ -235,6 +236,24 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     if (ctx?.typeParamScope) {
       const tp = ctx.typeParamScope.get(annot.name);
       if (tp) return tp;
+    }
+    // Transparent type alias: resolve the alias RHS in the module that declared
+    // it, so the result IS the underlying type (no distinct identity). Threads a
+    // cycle-guard set so `type A = B; type B = A;` terminates (returns null,
+    // surfaced as a clear error by the decl-site validation in pass C). The RHS
+    // is resolved with no type-param/self scope - an alias is a top-level decl.
+    const aliasHit = lookupAlias(annot.namespace, annot.name, modId, moduleEnv);
+    if (aliasHit) {
+      const stack = ctx?.aliasStack;
+      if (stack?.has(aliasHit.key)) return null;
+      const nextStack = new Set(stack ?? []);
+      nextStack.add(aliasHit.key);
+      return resolveTypeAnnotationInModule(aliasHit.annot, aliasHit.homeModId, moduleEnv, {
+        ...ctx,
+        typeParamScope: null,
+        selfType: undefined,
+        aliasStack: nextStack,
+      });
     }
     // Phase 12: `ns.TypeName` qualifies the lookup through an imported
     // namespace's source module.
@@ -1533,6 +1552,10 @@ export function effectiveLayoutAlign(app) {
 export const INTRINSIC_DECL_IDS = new Map([
   ["heap_alloc", "$builtin__heap_alloc"],
   ["heap_free", "$builtin__heap_free"],
+  // Context-routed siblings of heap_alloc/heap_free: allocate/free through the
+  // current allocator (std/core/alloc.yoop) instead of raw malloc/free.
+  ["ctx_alloc", "$builtin__ctx_alloc"],
+  ["ctx_free", "$builtin__ctx_free"],
   ["string_as_bytes", "$builtin__string_as_bytes"],
   ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
   ["array_slice", "$builtin__array_slice"],
@@ -1647,7 +1670,41 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked];
+  // Context-routed allocation: same shapes as heap_alloc/heap_free, but codegen
+  // lowers the malloc/free to yoop_ctx_alloc/yoop_ctx_free (current allocator).
+  const ctxAllocDeclId = "$builtin__ctx_alloc";
+  const ctxAllocT = new TypeParamType("T", ctxAllocDeclId);
+  const ctxAlloc = {
+    id: ctxAllocDeclId,
+    name: "ctx_alloc",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", ctxAllocT]]),
+    genericSig: FuncType(
+      [{ name: "n", type: PrimType("usize"), isRef: false }],
+      ArrayType(ctxAllocT),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  const ctxFreeDeclId = "$builtin__ctx_free";
+  const ctxFreeT = new TypeParamType("T", ctxFreeDeclId);
+  const ctxFree = {
+    id: ctxFreeDeclId,
+    name: "ctx_free",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", ctxFreeT]]),
+    genericSig: FuncType(
+      [{ name: "a", type: ArrayType(ctxFreeT), isRef: false }],
+      VoidType(),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked, ctxAlloc, ctxFree];
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
@@ -1721,6 +1778,13 @@ export function typecheckProgram(modules) {
     // Phase 9.G: vtable type table. Like structTable, the shell only carries
     // a name in pass A; pass C resolves field types and trait references.
     const vtableTable = new Map();
+    // Transparent type aliases (`type NodeId = usize;`). Maps the alias name to
+    // the parsed RHS type annotation; resolution happens lazily at every use
+    // site (see resolveTypeAnnotationInModule) so an alias to a struct picks up
+    // the same shell-then-filled type object a direct reference would. The alias
+    // is NOT a distinct type - it resolves straight through to the underlying
+    // type, so nothing downstream (coercion, indexing, codegen) sees the name.
+    const aliasTable = new Map();
     // Names this module brought into scope via an `extern "intrinsic"`
     // block. checkExpr.js's special-case paths for `wait_until` / `cancel`
     // gate on membership here so that user code that hasn't imported the
@@ -1744,7 +1808,8 @@ export function typecheckProgram(modules) {
             structTable.has(d.name) ||
             genericStructTable.has(d.name) ||
             unionTable.has(d.name) ||
-            enumTable.has(d.name)
+            enumTable.has(d.name) ||
+            aliasTable.has(d.name)
           ) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
@@ -1777,7 +1842,8 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           structTable.has(d.name) ||
           unionTable.has(d.name) ||
-          enumTable.has(d.name)
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of type "${d.name}"`,
@@ -1795,7 +1861,8 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           structTable.has(d.name) ||
           unionTable.has(d.name) ||
-          enumTable.has(d.name)
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of type "${d.name}"`,
@@ -1815,7 +1882,8 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           structTable.has(d.name) ||
           unionTable.has(d.name) ||
-          enumTable.has(d.name)
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of type "${d.name}"`,
@@ -1828,11 +1896,36 @@ export function typecheckProgram(modules) {
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
       }
-      if (d.kind === ASTNodeKind.TYPE_DECL) {
+      if (d.kind === ASTNodeKind.TYPE_DECL && d.targetType) {
+        // Transparent type alias: `type Name = <annotation>;`. Registered in a
+        // dedicated table - never in structTable (which holds monomorphic struct
+        // types only). The RHS annotation is resolved lazily at each use site.
+        if (d.typeParams && d.typeParams.length > 0) {
+          errors.push({
+            message: `generic type aliases are not yet supported - declare "${d.name}" without type parameters`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else if (
+          structTable.has(d.name) ||
+          genericStructTable.has(d.name) ||
+          variantTable.has(d.name) ||
+          unionTable.has(d.name) ||
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of type "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          aliasTable.set(d.name, { annot: d.targetType, sourceLoc: d.sourceLoc });
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+      } else if (d.kind === ASTNodeKind.TYPE_DECL) {
         const hasTypeParams = d.typeParams && d.typeParams.length > 0;
         if (hasTypeParams) {
           // Phase 7.1: generic struct decl. Register in genericStructTable.
-          if (genericStructTable.has(d.name) || structTable.has(d.name)) {
+          if (genericStructTable.has(d.name) || structTable.has(d.name) || aliasTable.has(d.name)) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
               sourceLoc: d.sourceLoc,
@@ -1865,7 +1958,7 @@ export function typecheckProgram(modules) {
           }
           if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         } else {
-          if (structTable.has(d.name) || genericStructTable.has(d.name)) {
+          if (structTable.has(d.name) || genericStructTable.has(d.name) || aliasTable.has(d.name)) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
               sourceLoc: d.sourceLoc,
@@ -2042,6 +2135,7 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           unionTable.has(d.name) ||
           traitTable.has(d.name) ||
+          aliasTable.has(d.name) ||
           localSymbols.has(d.name)
         ) {
           errors.push({
@@ -2140,6 +2234,7 @@ export function typecheckProgram(modules) {
       unionTable,
       enumTable,
       vtableTable,
+      aliasTable,
       builtinIntrinsicNames,
       // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
       allowsUnsafe: !!mod.ast.allowsUnsafe,
@@ -2316,7 +2411,28 @@ export function typecheckProgram(modules) {
       }
 
       // struct fields
-      if (d.kind === ASTNodeKind.TYPE_DECL && !d.genericDecl) {
+      // Transparent type alias: resolve its RHS once here so an unknown target
+      // type or a cyclic alias is reported at the declaration, not at every use.
+      // The alias has no struct/resolvedType - codegen never emits anything for
+      // it (every use already resolved through to the underlying type).
+      if (d.kind === ASTNodeKind.TYPE_DECL && d.targetType && !(d.typeParams?.length)) {
+        const resolved = resolveTypeAnnotationInModule(
+          d.targetType,
+          mod.id,
+          moduleEnv,
+          baseCtx(),
+        );
+        if (!resolved) {
+          errors.push({
+            message: `type alias "${d.name}" references an unknown type or is cyclic: ${formatAnnotation(d.targetType)}`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          d.resolvedAliasType = resolved;
+        }
+      }
+
+      if (d.kind === ASTNodeKind.TYPE_DECL && !d.genericDecl && !d.targetType) {
         // Phase 6.4: reject `contains<K>` at a single point.
         if (d.containsClause) {
           errors.push({
@@ -2495,6 +2611,10 @@ export function typecheckProgram(modules) {
         // only), undersizing every enclosing struct. Mirrors the
         // TraitType pattern (frozen outer, mutable `methods` Map).
         const shell = variantTable.get(d.name);
+        // A name collision (this variant redeclares a struct/alias/etc.) means
+        // pass A pushed a redeclaration error and skipped registering the shell.
+        // Skip body resolution rather than dereferencing the missing shell.
+        if (!shell) continue;
 
         // Phase 13.B: resolve `propagates<...>` on the variant decl and
         // store on the shell. Same shape as the struct branch above.
@@ -3079,6 +3199,29 @@ export function typecheckProgram(modules) {
     }
   }
 
+  // Cross-module function-decl index for kindFlow (clearance markers). Resolves
+  // an imported or namespaced callee (`db.runQuery(...)`, or a by-name imported
+  // `readBody()`) to its source decl plus that module's kind table, so a marker
+  // on a std-style signature is enforced across the boundary instead of being
+  // silently dropped at the call site. Built once; keyed by module id then
+  // export name.
+  const funcDeclsByModule = new Map();
+  for (const m of modules) {
+    const t = new Map();
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) t.set(d.name, d);
+    }
+    funcDeclsByModule.set(m.id, t);
+  }
+  const resolveCrossModuleCallee = (moduleId, exportName) => {
+    const decl = funcDeclsByModule.get(moduleId)?.get(exportName);
+    if (!decl) return null;
+    const kindTable = moduleEnv.get(moduleId)?.kindTable;
+    if (!kindTable) return null;
+    return { decl, kindTable };
+  };
+
   // pass D: function body typechecking.
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
@@ -3209,18 +3352,18 @@ export function typecheckProgram(modules) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         runKindCheck(d, errors, funcDeclTable, programState.registry);
-        runKindFlow(d, errors, funcDeclTable, flowKindTable, null);
+        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
         // Phase 13.B: variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
         }
       }
     }
@@ -3268,7 +3411,10 @@ export function typecheck(ast) {
   // pass 1: struct shells
   for (const decl of ast.body) {
     const d = innerDecl(decl);
-    if (d.kind === ASTNodeKind.TYPE_DECL) {
+    // Type aliases aren't supported in the legacy single-module path (only the
+    // multi-module pipeline used by compileEntry/e2e); skip so they aren't
+    // mis-registered as empty structs.
+    if (d.kind === ASTNodeKind.TYPE_DECL && !d.targetType) {
       if (structTable.has(d.name)) {
         errors.push({
           message: `redeclaration of type "${d.name}"`,
@@ -3293,7 +3439,7 @@ export function typecheck(ast) {
   // pass 2: struct fields
   for (const decl of ast.body) {
     const d = innerDecl(decl);
-    if (d.kind === ASTNodeKind.TYPE_DECL) {
+    if (d.kind === ASTNodeKind.TYPE_DECL && !d.targetType) {
       const fields = [];
       for (const field of d.fields ?? []) {
         let fieldType = resolveTypeAnnotation(

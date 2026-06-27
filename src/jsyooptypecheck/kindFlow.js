@@ -22,10 +22,13 @@
 //                         signature-driven; there is no baked-in "launder")
 //   - anything else    -> plain (empty)
 //
-// v0 scope: same-module direct function calls (string callee) and the
-// binding / return / call-argument slots. Cross-module + namespaced calls,
-// method calls, and field-position sources are follow-ups (see
-// plans/clearance-kinds.md).
+// Scope: same-module direct function calls (string callee), imported by-name
+// calls, and namespaced member calls (`ns.fn(...)`) at the binding / return /
+// call-argument slots. A cross-module callee's annotations are resolved against
+// ITS OWN module's kind table via `crossModuleCallee` (imported kinds share
+// object identity, so the markers line up with the consuming module's). Field-
+// position sources (a `tainted` struct field surfacing through `x.field`) are
+// still a follow-up (see plans/clearance-kinds.md).
 
 import { ASTNodeKind } from "../contracts.js";
 import { pushError } from "./errors.js";
@@ -34,16 +37,18 @@ function emptyMarkers() {
   return { conferred: new Set(), restrictive: new Set() };
 }
 
-export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, containingType) {
+export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, containingType, crossModuleCallee) {
   if (!fnOrMethodDecl?.body || !kindTable) return;
 
   // Resolve kind-prefix names to a marker set, dropping non-marker kinds. No
   // validation (callees validate their own annotations); use validateAnnot
-  // for the owning function's own sites.
-  function markersFromNames(names) {
+  // for the owning function's own sites. `table` defaults to this module's kind
+  // table; a cross-module callee passes its own so the names resolve in their
+  // home module (imported kinds are the same object, so identity is preserved).
+  function markersFromNames(names, table = kindTable) {
     const out = emptyMarkers();
     for (const name of names ?? []) {
-      const kt = kindTable.get(name);
+      const kt = table.get(name);
       if (!kt || !kt.marker) continue;
       if (kt.marker === "conferred") out.conferred.add(kt);
       else if (kt.marker === "restrictive") out.restrictive.add(kt);
@@ -111,29 +116,53 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
   // change their kind set (it is part of their type), so a flat map suffices.
   const bindingMarkers = new Map();
 
+  // Resolve a call node to the callee's decl plus the kind table its
+  // annotations are written against. Three shapes:
+  //   - same-module bare name      -> local funcDeclTable, this kind table
+  //   - imported bare name         -> calleeModuleId/calleeExportName stamped by
+  //                                   the typechecker; source module's table
+  //   - namespaced member `ns.fn`  -> callee.namespaceLookup stamped during
+  //                                   field-access resolution; source table
+  // The cross-module shapes resolve through `crossModuleCallee` so a marker on
+  // a std-style signature is enforced at the call site instead of dropped.
+  // Returns null for externs / printf / fn-pointer / trait-method calls.
+  function calleeInfo(callNode) {
+    const callee = callNode.callee;
+    if (typeof callee === "string") {
+      if (callNode.calleeModuleId && callNode.calleeExportName && crossModuleCallee) {
+        const x = crossModuleCallee(callNode.calleeModuleId, callNode.calleeExportName);
+        if (x) return { decl: x.decl, table: x.kindTable, name: callee };
+      }
+      const decl = funcDeclTable?.get(callee);
+      if (decl) return { decl, table: kindTable, name: callee };
+      return null;
+    }
+    const nl = callee?.namespaceLookup;
+    if (nl && crossModuleCallee) {
+      const x = crossModuleCallee(nl.moduleId, nl.exportName);
+      if (x) {
+        const ns = callee.object?.name;
+        const name = ns ? `${ns}.${nl.exportName}` : nl.exportName;
+        return { decl: x.decl, table: x.kindTable, name };
+      }
+    }
+    return null;
+  }
+
   function exprMarkers(e) {
     if (!e || typeof e !== "object") return emptyMarkers();
     if (e.kind === ASTNodeKind.IDENT) {
       return bindingMarkers.get(e.name) ?? emptyMarkers();
     }
     if (e.kind === ASTNodeKind.CALL_EXPRESSION) {
-      // Direct free function call: result kinds come from the callee's return
-      // annotation. This still works only for kinds whose `appliedBy` named
-      // the free function - but free-function laundering is rejected at the
-      // function's own decl-authority check (only trait impl methods may
-      // strip/confer), so in practice the return annotation here will be plain.
-      const callee = e.callee;
-      if (typeof callee === "string" && funcDeclTable) {
-        const decl = funcDeclTable.get(callee);
-        if (decl) return markersFromNames(decl.returnTypeAnnotation?.kindPrefixes);
-      }
       // Trait method call (`Trait.method(...)`): the receiver type's impl of
       // the trait's method is the authorized transition for any kind whose
       // `appliedBy` names this method on this trait. The kind decl is the
       // source of truth, so the call confers every conferred kind that names
       // this (trait, method) pair. Match by trait NAME since the call's
       // calleeTrait may be a per-instance TraitType while kt.requires holds a
-      // generic-trait decl record (different objects, same name).
+      // generic-trait decl record (different objects, same name). This is the
+      // launder boundary, checked before the plain-return path below.
       if (e.calleeMethodName && e.calleeTrait) {
         const traitName = e.calleeTrait.name;
         const out = emptyMarkers();
@@ -145,27 +174,35 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
         }
         return out;
       }
+      // Direct / imported / namespaced call: result kinds come from the callee's
+      // return annotation, resolved in the callee's home module. Free-function
+      // laundering is rejected at the callee's own decl-authority check (only
+      // trait impl methods may strip/confer), so the markers that ride here are
+      // passthroughs the signature declares.
+      const info = calleeInfo(e);
+      if (info) {
+        return markersFromNames(info.decl.returnTypeAnnotation?.kindPrefixes, info.table);
+      }
     }
     return emptyMarkers();
   }
 
-  // Sink check: every argument vs the callee's parameter markers.
+  // Sink check: every argument vs the callee's parameter markers (resolved in
+  // the callee's home module so namespaced/imported sinks are enforced too).
   function checkCallArgs(callNode) {
-    const callee = callNode.callee;
-    if (typeof callee !== "string" || !funcDeclTable) return;
-    const decl = funcDeclTable.get(callee);
-    if (!decl) return;
+    const info = calleeInfo(callNode);
+    if (!info) return;
     const args = callNode.args ?? [];
-    const params = decl.params ?? [];
+    const params = info.decl.params ?? [];
     for (let i = 0; i < args.length; i++) {
       const param = params[i];
       if (!param) continue;
       // A plain slot is an upper bound of the empty set, so it still rejects a
       // restrictive argument - run the check even when the slot is unmarked.
-      const slot = markersFromNames(param.typeAnnotation?.kindPrefixes);
+      const slot = markersFromNames(param.typeAnnotation?.kindPrefixes, info.table);
       const value = exprMarkers(args[i]);
       checkBound(value, slot, args[i] ?? callNode,
-        `parameter '${param.name ?? `#${i}`}' of '${callee}'`);
+        `parameter '${param.name ?? `#${i}`}' of '${info.name}'`);
     }
   }
 

@@ -4,7 +4,7 @@
 
 ## 1. Purpose and scope
 
-Phase 6.3 of the [roadmap](./roadmap.md) introduces tasks - values whose work may be performed on another thread. This is the first language feature with execution-time semantics that aren't trivially lowered to a single C call. To keep the design tractable and the language stable, the runtime contract is captured here as a separate document from the language spec.
+Phase 6.3 of the [roadmap](./archive/roadmap.md) introduces tasks - values whose work may be performed on another thread. This is the first language feature with execution-time semantics that aren't trivially lowered to a single C call. To keep the design tractable and the language stable, the runtime contract is captured here as a separate document from the language spec.
 
 In scope:
 

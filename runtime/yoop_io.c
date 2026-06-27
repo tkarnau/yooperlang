@@ -42,6 +42,19 @@ int yoop_io_exists(const char* path) {
     return stat(path, &st) == 0 ? 1 : 0;
 }
 
+// Canonicalize `path` to an absolute, symlink-resolved path. On success
+// writes a freshly malloc'd nul-terminated string into *out (caller owns it)
+// and returns 0; on failure returns -1 with errno set and leaves *out alone.
+// Passing NULL as realpath's resolved_path makes libc allocate a PATH_MAX-safe
+// buffer for us - NEVER hand realpath a fixed/foreign buffer, it overruns it.
+// Note: realpath requires `path` to exist and always yields an ABSOLUTE path.
+int yoop_io_normalize_real_path(const char* path, char** out) {
+    char* resolved = realpath(path, NULL);
+    if (!resolved) return -1;
+    *out = resolved;
+    return 0;
+}
+
 // Size in bytes of the regular file at `path`, or -1 if it doesn't exist,
 // isn't a regular file, or stat() otherwise fails. Returning -1 (rather than
 // a fallible struct) keeps the yoop side a single int64 read; callers test

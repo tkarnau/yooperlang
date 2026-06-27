@@ -1,39 +1,39 @@
 # Phase 10 - Library completion, runtime polish, self-hosting
 
 > Most of Phase 10 has landed. This doc tracks what's *left* — the
-> per-sub-phase landings are in [plans/completed/](completed/).
+> per-sub-phase landings are in [plans/completed/](../completed/).
 
 ## Already landed
 
 - **10.A** - Generic enums (`Option<T>`, `Result<T, E>`, `IterStep<T>`).
-  See [phase-10-a-generic-enums.md](completed/phase-10-a-generic-enums.md).
+  See [phase-10-a-generic-enums.md](../completed/phase-10-a-generic-enums.md).
 - **10.B** - `Iterable<T>` trait + `for x in EXPR` over user types.
-  See [phase-10-b-iterable.md](completed/phase-10-b-iterable.md).
+  See [phase-10-b-iterable.md](../completed/phase-10-b-iterable.md).
 - **10.C** - `std/collections/`: `Option`, `StringMap`.
-  See [phase-10-c-collections.md](completed/phase-10-c-collections.md).
+  See [phase-10-c-collections.md](../completed/phase-10-c-collections.md).
 - **10.C.2** - Generic `Map<K, V>` with `KeyOps<K>`.
-  See [phase-10-c-2-generic-map.md](completed/phase-10-c-2-generic-map.md).
+  See [phase-10-c-2-generic-map.md](../completed/phase-10-c-2-generic-map.md).
 - **10.C.3** - `Set<K>`, `Deque<T>`, `map_iter`, more KeyOps.
-  See [phase-10-c-3-collections-rest.md](completed/phase-10-c-3-collections-rest.md).
+  See [phase-10-c-3-collections-rest.md](../completed/phase-10-c-3-collections-rest.md).
 - **10.D** - `std/debug` (`panic`/`unreachable`/`assert`) + `std/log`.
-  See [phase-10-d-debug-log.md](completed/phase-10-d-debug-log.md).
+  See [phase-10-d-debug-log.md](../completed/phase-10-d-debug-log.md).
 - **10.E** - Cross-shape `?` via `Into<T>`.
-  See [phase-10-e-cross-shape-qmark.md](completed/phase-10-e-cross-shape-qmark.md).
+  See [phase-10-e-cross-shape-qmark.md](../completed/phase-10-e-cross-shape-qmark.md).
 - **10.F.1** - Deadlines (`wait_until(h, deadline_ns)`).
-  See [phase-10-f-1-deadlines.md](completed/phase-10-f-1-deadlines.md).
+  See [phase-10-f-1-deadlines.md](../completed/phase-10-f-1-deadlines.md).
 - **10.F.2.A** - External cancellation (`cancel(h)` + `WaitResult.Cancelled`).
-  See [phase-10-f-2-a-external-cancel.md](completed/phase-10-f-2-a-external-cancel.md).
+  See [phase-10-f-2-a-external-cancel.md](../completed/phase-10-f-2-a-external-cancel.md).
 - **10.H** - Per-binding alloca uniqueness in codegen.
-  See [phase-10-h-alloca-uniqueness.md](completed/phase-10-h-alloca-uniqueness.md).
+  See [phase-10-h-alloca-uniqueness.md](../completed/phase-10-h-alloca-uniqueness.md).
 - **10.I** - Networking polish (`Reader`/`Writer` vtables, `Router`,
   `Client`, `std/net/uri`).
-  See [phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md).
+  See [phase-10-i-networking-polish.md](../completed/phase-10-i-networking-polish.md).
 - **10.X** - Fallible-struct retirement (Phase 2 convention removed;
   `std/` on `Result<T, E>`).
-  See [phase-10-x-cleansing.md](completed/phase-10-x-cleansing.md).
+  See [phase-10-x-cleansing.md](../completed/phase-10-x-cleansing.md).
 - **10.X.2** - Function-pointer-field lifts (func-decl to FPT +
   indirect call).
-  See [phase-10-x2-fn-ptr-fields.md](completed/phase-10-x2-fn-ptr-fields.md).
+  See [phase-10-x2-fn-ptr-fields.md](../completed/phase-10-x2-fn-ptr-fields.md).
 
 ## Still open
 
@@ -61,19 +61,19 @@ The alloca-uniqueness slice landed. Open items:
   at colliding binding sites instead of relying on the LLVM message.
 - **Better parse-error messages.** Several `// todo better error
   messages` markers in
-  [src/jsyooparser/parser.test.js](../src/jsyooparser/parser.test.js).
+  [src/jsyooparser/parser.test.js](../../src/jsyooparser/parser.test.js).
   Most are one-line fix-it strings.
 - **`SWITCH_STATEMENT` + `break`/`continue` in propagates-path-coverage
-  merge.** Named in [CLAUDE.md](../CLAUDE.md) cross-cutting invariants
+  merge.** Named in [CLAUDE.md](../../CLAUDE.md) cross-cutting invariants
   as the known gap in the Phase 6.4 sat-state intersection.
 - **Array bounds checking** as a `YOOP_BOUNDS_CHECK=1` codegen opt-in
-  ([phase-4-refs-arrays-control-flow.md](completed/phase-4-refs-arrays-control-flow.md)
+  ([phase-4-refs-arrays-control-flow.md](../completed/phase-4-refs-arrays-control-flow.md)
   defers it). Useful once the self-hosted compiler exists and can use
   it to catch its own bugs.
 
 ### 10.I follow-ups (networking)
 
-Per [phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md):
+Per [phase-10-i-networking-polish.md](../completed/phase-10-i-networking-polish.md):
 
 - **Streaming bodies inside `Request.body`.** Switch from `body:
   uint8[]` to `body: Reader` so handlers stream large bodies. The
@@ -89,7 +89,7 @@ Per [phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md)
 - **IPv6 connect path.** The URI parser handles bracketed authority;
   `tcp_connect` still goes through `inet_addr` (IPv4-only). Needs a
   `sockaddr_in6` mirror + AF_INET6 branch in
-  [std/net/socket_ffi.yoop](../std/net/socket_ffi.yoop).
+  [std/net/socket_ffi.yoop](../../std/net/socket_ffi.yoop).
 - **Trie-style path matching** in `Router`. Exact match was enough
   for the demo; parametric routes (`/user/:id`) need a path-parameter
   story.
@@ -105,7 +105,7 @@ once 10.K is in flight.
 
 - **Const folding.** A single mid-typecheck pass that replaces
   literal-arithmetic subtrees with their values. Note: per
-  [phase-11-a-precompile-attribute.md](completed/phase-11-a-precompile-attribute.md)
+  [phase-11-a-precompile-attribute.md](../completed/phase-11-a-precompile-attribute.md)
   (and related work) some of this already lives in the
   `@precompile` attribute path; the unconditional general-purpose
   pass is still open.
@@ -133,7 +133,7 @@ bootstrap fixed-point check).
 Pre-requirements (all landed): 10.A, 10.B, 10.C, 10.D, 10.H.
 Optional-but-desirable: 10.J for compile speed.
 
-First acid test: compile [examples/pass/](../examples/pass/) bit-for-bit
+First acid test: compile [examples/pass/](../../examples/pass/) bit-for-bit
 identically to the JS bootstrap. Discrepancies are bugs in the yoop
 version.
 

@@ -15,8 +15,10 @@ import {
     bytes_starts_with,
     bytes_index_of_seq,
     bytes_slice,
+    lastIndexOfSeq,
 } from "./bytes.yoop";
 
+import * as vec, { Vec } from "./vec.yoop";
 import { Result } from "./types.yoop";
 import * as intr from "./intrinsics.yoop";
 
@@ -76,6 +78,11 @@ export function string_starts_with(s: string, prefix: string): bool {
 export function string_index_of(s: string, needle: string): usize {
     return bytes_index_of_seq(intr.string_as_bytes(s), intr.string_as_bytes(needle));
 }
+
+export function lastIndexOf(s: string, needle: string): usize {
+  return lastIndexOfSeq(intr.string_as_bytes(s), intr.string_as_bytes(needle));
+}
+
 
 // Sub-string in BYTE offsets. Allocates a fresh string. Errors if `start`
 // or `end` would split a multi-byte UTF-8 codepoint (verified by checking
@@ -168,4 +175,77 @@ export function string_concat_all(parts: string[]): string {
     let result: string = intr.string_from_bytes_unchecked(buf);
     intr.heap_free(buf);
     return result;
+}
+
+export function sliceFrom(s: string, start: usize): string {
+  switch(string_slice(s, start, s.len)) {
+    case Result.Ok { value: v }: { return v; }
+    case Result.Err { error: _ }: { return ""; }
+  }
+}
+
+export function split(
+  ref out: Vec<string>,
+  input: string,
+  separator: string,
+  keepEmpty: bool
+): string {
+  const inputBytes = intr.string_as_bytes(input);
+  const separatorBytes = intr.string_as_bytes(separator);
+  if (separatorBytes.len > inputBytes.len || separatorBytes.len == 0) {
+    // nothing splittable, just use the string
+    vec.vec_push(ref out, input);
+    return "";
+  }
+
+  // iterate over the string looking for instances of the separator
+  // and shoving the bytes into the output vec since the last instance
+  let i: usize = 0;
+  let indexOfEndOfLastMatch: usize = 0;
+  while (i < inputBytes.len - separatorBytes.len + 1) {
+    let j: usize = 0;
+    let matching = true;
+    while (j < separatorBytes.len) {
+      if (inputBytes[i + j] != separatorBytes[j]) {
+        matching = false;
+        break;
+      }
+      j += 1;
+    }
+    if (matching) {
+      // push an entry
+      const entry = inputBytes[indexOfEndOfLastMatch..i];
+      if (entry.len > 0 || keepEmpty) {
+        const entryStringResult = string_from_bytes(entry);
+        switch (entryStringResult) {
+          case Result.Ok { value: entryString }: {
+            vec.vec_push(ref out, entryString);
+          }
+          case Result.Err { error: e }: {
+            return `unable to parse string when recomposing split entry strings: ${e}`;
+          }
+        }
+      }
+      indexOfEndOfLastMatch = i + separatorBytes.len;
+    }
+    i += 1;
+  }
+
+  // add last entry
+  if (i > indexOfEndOfLastMatch) {
+    const entry = inputBytes[indexOfEndOfLastMatch..i];
+    if (entry.len > 0 || keepEmpty) {
+      const entryStringResult = string_from_bytes(entry);
+      switch (entryStringResult) {
+        case Result.Ok { value: entryString }: {
+          vec.vec_push(ref out, entryString);
+        }
+        case Result.Err { error: e }: {
+          return `unable to parse string when recomposing split entry strings: ${e}`;
+        }
+      }
+    }
+  }
+
+  return "";
 }

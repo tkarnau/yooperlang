@@ -1,0 +1,33 @@
+// Library module for the cross-module clearance failure fixture. Identical
+// shape to the passing one: a `cleared` conferred kind, a Sanitizer launder
+// trait, and a sink that only accepts a `cleared` value.
+
+export trait Sanitizer {
+    function sanitize(ref self): Body;
+}
+
+export kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Sanitizer;
+    appliedBy sanitize;
+}
+
+export type Body implements Sanitizer {
+    text: string,
+    function sanitize(ref self): Body {
+        return { text: "safe" };
+    }
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+export function runQuery(sql: cleared Body): void {
+    printf(`ran query\n`);
+}
+
+export function receive(): Body {
+    return { text: "'; DROP TABLE users; --" };
+}

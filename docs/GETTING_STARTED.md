@@ -95,6 +95,6 @@ Then open <http://localhost:8080/>.
 ## Where to go next
 
 - [../SPEC.md](../SPEC.md) - the language spec, syntax first
-- [../plans/roadmap.md](../plans/roadmap.md) - what is built and what is planned
+- [../plans/](../plans/) - the current focus and small consolidated plan ([../plans/archive/roadmap.md](../plans/archive/roadmap.md) for the full historical phase map)
 - [../CONTRIBUTING.md](../CONTRIBUTING.md) - running the tests, hacking on the
   compiler

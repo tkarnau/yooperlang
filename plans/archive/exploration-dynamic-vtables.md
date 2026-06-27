@@ -11,12 +11,12 @@
 ## What's the actual problem
 
 Today the compiler is whole-program. The instantiation registry in
-[src/jsyooptypecheck/instantiate.js](../src/jsyooptypecheck/instantiate.js)
+[src/jsyooptypecheck/instantiate.js](../../src/jsyooptypecheck/instantiate.js)
 sees every call site and emits one LLVM define per concrete
 `(generic_decl, [type_args])` tuple via `codegenProgram` in
-[src/jsyoopcodegen/codegen.js:1533](../src/jsyoopcodegen/codegen.js#L1533).
+[src/jsyoopcodegen/codegen.js:1533](../../src/jsyoopcodegen/codegen.js#L1533).
 Codegen never sees a `TypeParamType` - everything is concrete by the
-time it gets there ([codegen.js:1605 `cloneAstWithSubstitution`](../src/jsyoopcodegen/codegen.js#L1605)).
+time it gets there ([codegen.js:1605 `cloneAstWithSubstitution`](../../src/jsyoopcodegen/codegen.js#L1605)).
 
 This works because the call sites and the generic definitions are in
 the same compilation. If we ship a precompiled `mylib.yoop.so` that

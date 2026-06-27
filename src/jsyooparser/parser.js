@@ -1919,7 +1919,7 @@ export function parse(src) {
     // captures any postfix tightly, then *falls through* to the binary +
     // assignment loop below. Returning early here was a parser bug -
     // `!a && b` would terminate after `!a` and the trailing `&& b` would
-    // hit "expected semicolon, got andand" (see plans/yoopbinder-papercuts.md
+    // hit "expected semicolon, got andand" (see plans/archive/yoopbinder-papercuts.md
     // Issue 1). Chained into the same prefix if/else group as
     // `amp`/`mult`/`null` below so the trailing `else { primary chain }`
     // is only entered when no prefix matched.
@@ -2917,7 +2917,8 @@ export function parse(src) {
           after.tag === TokenTags.propagates ||
           after.tag === TokenTags.contains ||
           isContainsKeywordIdent(after) ||
-          after.tag === TokenTags.lcurly
+          after.tag === TokenTags.lcurly ||
+          after.tag === TokenTags.eq
         ) {
           node.kindPrefix = consumeKindPrefixWithArgs();
         }
@@ -2985,8 +2986,17 @@ export function parse(src) {
       }
       expect(TokenTags.rcurly);
     } else {
-      // type alias, just a reference to another type for now
-      node.targetType = parseIdentAsName();
+      // Transparent type alias: `type Name = <type annotation>;`. The RHS is a
+      // full type annotation, parsed identically to any other type position, so
+      // `type Bytes = uint8[];` and `type IdList = NodeId[];` work out of the
+      // box. The alias has no distinct identity in the typechecker - it resolves
+      // to the underlying type at every use site (indexing, coercion, etc. need
+      // no special casing). Storing the parsed annotation (not a bare name) also
+      // leaves room for a future `A & B` / `A | B` type-expression RHS without
+      // reshaping the AST node.
+      expect(TokenTags.eq);
+      node.targetType = parseTypeAnnotation();
+      expect(TokenTags.semicolon);
     }
 
     // constraint: methods only allowed when implements is non-empty

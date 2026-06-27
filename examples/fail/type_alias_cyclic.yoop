@@ -1,0 +1,8 @@
+// A cyclic alias chain (A -> B -> A) terminates and is reported, rather than
+// looping the resolver forever.
+type A = B;
+type B = A;
+
+function main(): int32 {
+  return 0;
+}

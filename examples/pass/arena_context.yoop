@@ -1,0 +1,51 @@
+// Arena + context allocators (std/core/alloc.yoop), Stages 1-2.
+//
+// Exercises:
+//   - the default (malloc) allocator, installed lazily on first use;
+//   - installing a bump arena as the current allocator with push/pop;
+//   - bump semantics (two allocations get distinct addresses) and reset
+//     (after reset the next allocation reuses the first address; used -> 0).
+
+import.unsafe;
+import * as mem from "std/core/alloc.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    // Default path: no arena installed yet, so allocBytes routes through the
+    // lazily-installed malloc allocator. It must hand back a real pointer.
+    let m: unsafe_ptr<void> = mem.allocBytes(32, 8);
+    let mallocOk: int32 = 0;
+    if (m == null) { mallocOk = 0; } else { mallocOk = 1; }
+    mem.freeBytes(m);
+
+    // Install a bump arena as the current allocator.
+    let ar: mem.Arena = mem.arenaNew(4096);
+    let prev: mem.Allocator = mem.pushAllocator(mem.arenaAllocator(ar));
+
+    let p1: unsafe_ptr<void> = mem.allocBytes(64, 8);
+    let p2: unsafe_ptr<void> = mem.allocBytes(64, 8);
+    let used: usize = mem.arenaUsed(ar);
+
+    let distinct: int32 = 0;
+    if (p1 == p2) { distinct = 0; } else { distinct = 1; }
+
+    // Reset rewinds the bump cursor; the region's memory is reused.
+    mem.arenaReset(ar);
+    let afterReset: usize = mem.arenaUsed(ar);
+    let p3: unsafe_ptr<void> = mem.allocBytes(64, 8);
+    let reused: int32 = 0;
+    if (p1 == p3) { reused = 1; }
+
+    // Restore the previous allocator and reclaim the whole region at once.
+    mem.popAllocator(prev);
+    mem.arenaDestroy(ar);
+
+    printf(`mallocOk=${mallocOk} distinct=${distinct} reused=${reused} used=${used} afterReset=${afterReset}\n`);
+    return 0;
+}
+
+// expected output:
+// mallocOk=1 distinct=1 reused=1 used=128 afterReset=0

@@ -83,7 +83,7 @@
   generic traits. Lifting that restriction is small but distinct work;
   until it lands, `for` over a heterogeneous iterator pipeline requires
   the concrete type at the use site. Plan doc in
-  [plans/phase-10.md §10.B](../phase-10.md).
+  [plans/phase-10.md §10.B](../archive/phase-10.md).
 - **Built-in `Iter_array<T>`** that exposes an Iterable view of an
   array. The current array form is hard-wired in codegen and doesn't
   need it; if a future generic API wants "anything iterable, including

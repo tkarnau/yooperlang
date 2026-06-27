@@ -29,6 +29,9 @@ export const RUNTIME_SOURCES = [
   // yoop_argc / yoop_argv - argv access for programs whose user main
   // wants CLI args. Platform-specific under the hood.
   path.resolve(runtimeDir, "yoop_args.c"),
+  // Arena/context allocators backing std/core/alloc.yoop: the per-thread
+  // current-allocator slot and the bump arena.
+  path.resolve(runtimeDir, "yoop_alloc.c"),
 ];
 
 export function runtimeLinkFlags() {

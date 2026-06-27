@@ -230,6 +230,27 @@ type Result {
 
 Plain data. No methods defined inside `type`. No inheritance. All fields public.
 
+### Type aliases
+
+```js
+type NodeId = usize;        // alias a primitive
+type IdList = NodeId[];      // RHS is a full type annotation, so arrays work
+type Coord = Point;          // alias a struct (and aliases may chain)
+```
+
+`type Name = <type>;` (note the `=` and the trailing `;`, vs the brace-bodied
+struct form) introduces a *transparent* alias: it has no identity of its own and
+resolves straight through to the underlying type at every use. A `NodeId` IS a
+`usize` everywhere - the two are freely interchangeable, indexing an aliased
+array (`IdList`) yields the underlying element type, and no conversions are
+needed. Aliases are documentation and intent, not a distinct nominal type (so
+they will not stop you passing a raw `usize` where a `NodeId` is expected).
+
+The right-hand side is any type annotation, resolved in the module that declares
+the alias; an unknown target or a cyclic chain (`type A = B; type B = A;`) is a
+compile error at the declaration. Generic aliases (`type Pair<T> = ...`) and
+composed forms (`A & B`, `A | B`) are reserved for a later phase.
+
 ### Arrays
 
 ```js
@@ -1407,8 +1428,13 @@ int             float
 int is 32 bit signed int
 float is 32 bit float
 
-Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Kind and trait names are conventionally
-`snake_case` and `PascalCase` respectively.
+Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Naming convention: types, traits,
+variants / enums / unions, vtables, type parameters, and `variant` case names
+are `PascalCase`; functions, methods, local bindings, parameters, fields, and
+kind names are `camelCase`; value-`enum` case names and module-level `const`
+declarations are `SCREAMING_SNAKE`. `snake_case` is reserved for file and folder
+names - it is not used in identifiers (the underscore remains legal in the
+grammar above). See CLAUDE.md "Naming and file conventions".
 
 Contextual keywords (reserved only in their syntactic positions): `in`, `layout`,
 `restricts`, `provides`, `requires`, `appliesTo`, `ownsBlock`, `mustCall`,

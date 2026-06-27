@@ -1,0 +1,39 @@
+// Library module: defines the clearance kind, the laundering trait, the
+// launderable type, and a "sink" that only accepts a `cleared` value. A
+// consumer in another module imports these and calls the sink through a
+// namespace - the clearance check now follows across that boundary.
+
+export trait Sanitizer {
+    function sanitize(ref self): Body;
+}
+
+// `cleared` is a conferred capability: a value cannot forge it, and the only
+// authorized way to obtain it is the Sanitizer trait's `sanitize` method.
+export kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Sanitizer;
+    appliedBy sanitize;
+}
+
+export type Body implements Sanitizer {
+    text: string,
+    function sanitize(ref self): Body {
+        // pretend this strips dangerous metacharacters
+        return { text: "safe" };
+    }
+}
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// The sink: refuses anything not `cleared`.
+export function runQuery(sql: cleared Body): void {
+    printf(`ran query\n`);
+}
+
+// A source of un-cleared data.
+export function receive(): Body {
+    return { text: "'; DROP TABLE users; --" };
+}

@@ -134,7 +134,7 @@ describe("parse: expressions", () => {
 
   // Regression: unary prefixes used to return early instead of falling
   // through to the binary loop, so `!a && b`, `-a + b`, `~a & b` failed
-  // to parse. See plans/yoopbinder-papercuts.md Issue 1.
+  // to parse. See plans/archive/yoopbinder-papercuts.md Issue 1.
   it("`!a && b` parses as `&&((!a), b)` not as a syntax error", () => {
     const e = exprOf("!a && b");
     assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
@@ -530,6 +530,30 @@ describe("parse: phase 5 - traits", () => {
       name: "int32",
     });
   });
+  it("type alias `type X = Y;` parses targetType as a type annotation", () => {
+    const stmts = parse("type NodeId = usize;").body;
+    assert.equal(stmts.length, 1);
+    const td = stmts[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(td.name, "NodeId");
+    assert.equal(td.fields, undefined); // not a struct
+    assert.deepEqual(td.targetType, { kind: "typeName", name: "usize" });
+  });
+
+  it("type alias accepts a full type annotation RHS (array of an alias)", () => {
+    const td = parse("type IdList = NodeId[];").body[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.deepEqual(td.targetType, {
+      kind: "arrayType",
+      elem: { kind: "typeName", name: "NodeId" },
+    });
+  });
+
+  it("type alias requires the `=` and a trailing `;`", () => {
+    assert.throws(() => parse("type NodeId usize;"), /expected/);
+    assert.throws(() => parse("type NodeId = usize"), /expected semicolon/);
+  });
+
   it("type implements parses properly", () => {
     const stmts = parse(
       "type FileHandle implements Disposable { fd: int32, function dispose(ref self): void { } }",

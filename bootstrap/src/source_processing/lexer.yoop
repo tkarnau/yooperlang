@@ -26,7 +26,7 @@ import {
   scanIdentity,
   isIdentStart,
   digitValue,
-} from "./charUtils.yoop";
+} from "./char_utils.yoop";
 import { TokenTags, tokenScanList, keywordList } from "../contracts.yoop";
 
 export type Token implements Display {

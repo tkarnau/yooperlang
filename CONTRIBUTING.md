@@ -51,9 +51,10 @@ de facto architecture document for this repo.
 
 ## The phase model
 
-Features land phase by phase. The plan lives in
-[plans/roadmap.md](plans/roadmap.md); per-phase write-ups are in
-[plans/completed/](plans/completed/). Code is annotated with phase comments
+Features land phase by phase. The current focus and the small consolidated plan
+live in [plans/](plans/); per-phase write-ups for shipped work are in
+[plans/completed/](plans/completed/), and the full historical roadmap is at
+[plans/archive/roadmap.md](plans/archive/roadmap.md). Code is annotated with phase comments
 (`// Phase 7.1:`, `// 6.5:`) marking the version a piece of logic became correct
 - treat those as load-bearing breadcrumbs.
 

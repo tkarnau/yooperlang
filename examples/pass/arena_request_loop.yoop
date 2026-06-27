@@ -1,0 +1,55 @@
+// Stage 7 showcase: the per-request / per-frame arena pattern.
+//
+// One arena is installed as the current allocator. Each "request" (or frame)
+// does its work - allocating Vecs and scratch from the arena - and then the
+// arena is RESET, reclaiming everything that request allocated in one cheap
+// pointer rewind. No per-object dispose anywhere in the handler: the region
+// boundary is the reclamation point. Because every request reuses the same
+// region, peak memory stays bounded no matter how many requests run.
+
+import { disposable } from "std/core/kinds.yoop";
+import * as mem from "std/core/alloc.yoop";
+import * as vec from "std/core/vec.yoop";
+import { Vec } from "std/core/vec.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Handle one request: build a result vector from the arena and sum it. Note
+// there is NO dispose - the arena reset after the call reclaims it.
+function handle(n: int32): int32 {
+    let v: Vec<int32> = vec.vec_new(8);
+    let i: int32 = 0;
+    let sum: int32 = 0;
+    while (i < n) {
+        vec.vec_push(ref v, i);
+        sum = sum + i;
+        i = i + 1;
+    }
+    return sum;
+}
+
+function main(): int32 {
+    let ar: mem.Arena = mem.arenaNew(65536);
+    let prev: mem.Allocator = mem.pushAllocator(mem.arenaAllocator(ar));
+
+    let totalSum: int32 = 0;
+    let peakUsed: usize = 0;
+    let req: int32 = 0;
+    while (req < 5) {
+        let s: int32 = handle(10);
+        totalSum = totalSum + s;
+        let used: usize = mem.arenaUsed(ar);
+        if (used > peakUsed) { peakUsed = used; }
+        mem.arenaReset(ar);   // reclaim this request's allocations in bulk
+        req = req + 1;
+    }
+
+    mem.popAllocator(prev);
+    mem.arenaDestroy(ar);
+
+    // peakUsed is the footprint of ONE request, not 5 - the region is reused.
+    printf(`totalSum=${totalSum} peakUsed=${peakUsed}\n`);
+    return 0;
+}

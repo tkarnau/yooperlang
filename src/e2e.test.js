@@ -91,6 +91,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("type_alias.yoop: transparent `type X = Y` aliases resolve through to the underlying type", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/type_alias.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=7 b=7 first=7 len=3\nx=3 y=4 n=9\n");
+  });
+
   it("type_inference.yoop: let/const bindings infer their type from the initializer", () => {
     const { stdout, exitCode } = runFixture("examples/pass/type_inference.yoop");
     assert.equal(exitCode, 0);
@@ -241,6 +247,43 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "total=112 mode=19\n");
+  });
+
+  it("arena_context: malloc default + bump arena installed as the current allocator", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_context.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "mallocOk=1 distinct=1 reused=1 used=128 afterReset=0\n");
+  });
+
+  it("arena_scope: disposable arenaScope installs+tears down a region; temp allocator resets", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_scope.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "scopeUsed=128 tempReused=1\n");
+  });
+
+  it("arena_vec: a Vec created inside an arena scope draws its storage from the arena", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_vec.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum=60 len=5\narenaGotData=1\n");
+  });
+
+  it("arena_request_loop: per-request arena reset keeps peak memory bounded across requests", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_request_loop.yoop");
+    assert.equal(exitCode, 0);
+    // 5 requests summed (5*45=225); peak is ONE request's footprint, not 5x.
+    assert.equal(stdout, "totalSum=225 peakUsed=96\n");
+  });
+
+  it("generic_trait_cross_module: an imported generic trait's method is callable via the qualified form", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_trait_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "unwrapped 7\n");
+  });
+
+  it("clearance_namespaced_sink: a laundered value flows into a sink called through its namespace", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/clearance_namespaced_sink/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "ran query\n");
   });
 
   it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", () => {
@@ -492,6 +535,16 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/propagates_dispose_both_branches.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposed(7)\n");
+  });
+
+  // Ownership redesign (2026-06-17): kindCheck now walks SWITCH_STATEMENT, so a
+  // `disposable`-keyword binding inside a `case` arm gets its auto-cleanup
+  // injected at the arm-block end. dispose fires before "after", proving the
+  // arm body's implicitCleanups were populated and emitted.
+  it("disposable_in_switch_arm.yoop: a `disposable` binding inside a switch arm fires cleanup at arm end", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/disposable_in_switch_arm.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "using(1)\ndisposed(1)\nafter\n");
   });
 
   // Yoopstore-papercut #11: a returned struct/variant literal that moves a
@@ -1541,11 +1594,12 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     );
   });
 
-  it("vec_no_disposable: binding Vec<T> without `disposable` leaves the propagates<disposable> obligation unsatisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/vec_no_disposable/main.yoop");
-    assert.ok(
-      errors.some((e) => /unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
+  it("vec_no_disposable: binding Vec<T> without `disposable` is advisory, not an error (ownership redesign)", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/vec_no_disposable/main.yoop");
+    assert.equal(
+      errors.length,
+      0,
+      `expected clean typecheck under the advisory model, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -2000,6 +2054,34 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.throws(() => parse(src), /expected semicolon/);
   });
 
+  it("type_alias_unknown_target.yoop rejects a type alias whose RHS names an unknown type", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_unknown_target.yoop");
+    assert.ok(
+      errors.some((e) => /type alias "Foo" references an unknown type or is cyclic/.test(e.message)),
+      `expected unknown-alias-target error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("type_alias_cyclic.yoop rejects a cyclic alias chain instead of looping", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_cyclic.yoop");
+    assert.ok(
+      errors.some((e) => /type alias "A" references an unknown type or is cyclic/.test(e.message)),
+      `expected cyclic-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("type_alias_generic.yoop rejects a generic type alias with no spurious follow-on error", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_generic.yoop");
+    assert.ok(
+      errors.some((e) => /generic type aliases are not yet supported/.test(e.message)),
+      `expected generic-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+    assert.ok(
+      !errors.some((e) => /references an unknown type or is cyclic/.test(e.message)),
+      `did not expect a follow-on resolve error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
   it("ref_return.yoop rejects a function whose return type is ref T", () => {
     const { errors } = typecheckFixture("examples/fail/ref_return.yoop");
     assert.ok(
@@ -2389,47 +2471,39 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  // Phase 6.4 strict propagates enforcement.
-  it("propagates_return_not_declared.yoop rejects a function that returns a propagating type without declaring propagates<K>", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_not_declared.yoop");
-    assert.ok(
-      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
-      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  // Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+  // `propagates<K>` obligations are ADVISORY, not enforced. The five fixtures
+  // below were formerly examples/fail cases asserting hard errors; they now
+  // typecheck cleanly and live in examples/pass. These tests guard that the
+  // relaxation holds (no obligation error is produced).
+  it("propagates_return_not_declared.yoop: returning a propagating type without propagates<K> is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_not_declared.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  // Yoopstore-papercut #11 (negative): moving a propagating binding into a
-  // returned struct literal still needs propagates<K> on the function.
-  it("propagates_return_struct_literal_not_declared.yoop rejects a moved-binding literal return without propagates<K>", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_struct_literal_not_declared.yoop");
-    assert.ok(
-      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
-      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_return_struct_literal_not_declared.yoop: moved-binding literal return without propagates<K> is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_struct_literal_not_declared.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_binding_missing_kind.yoop rejects a binding whose propagates<K> obligation is never satisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_binding_missing_kind.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_binding_missing_kind.yoop: an un-disposed binding of a propagating type is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_binding_missing_kind.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_struct_literal_missing_kind.yoop rejects a struct-literal binding whose propagates<K> obligation is never satisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_struct_literal_missing_kind.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_struct_literal_missing_kind.yoop: an un-disposed struct-literal binding is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_struct_literal_missing_kind.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_dispose_only_then.yoop rejects a binding whose dispose appears in only one arm of an if/else", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_dispose_only_then.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'r' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected one-arm-only error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_dispose_only_then.yoop: a manual dispose in only one if/else arm is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_dispose_only_then.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
   it("scoped_escape_return.yoop rejects returning a scoped binding", () => {
@@ -2835,6 +2909,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /forbids kind 'tainted' but the value carries it/.test(e.message)),
       `expected restrictive-forbidden error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_namespaced_sink rejects an un-cleared value into a sink called through its namespace", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/clearance_namespaced_sink/main.yoop");
+    assert.ok(
+      errors.some((e) => /parameter 'sql' of 'db\.runQuery' requires kind 'cleared'/.test(e.message)),
+      `expected cross-module namespaced-sink conferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
