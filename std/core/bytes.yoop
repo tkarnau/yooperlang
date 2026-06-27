@@ -108,6 +108,31 @@ export function bytes_index_of(buf: uint8[], needle: uint8): usize {
     return buf.len;
 }
 
+export function lastIndexOfSeq(buf: uint8[], needle: uint8[]): usize {
+  if (needle.len == 0) { return 0; }
+  if (needle.len > buf.len ) { return buf.len; }
+  let max: usize = buf.len - needle.len + 1;
+
+  // start at the last character that has at least the needle length remaining
+  // in the buffer
+  let i: usize = buf.len - needle.len;
+  while (i > max) {
+    let matched = true;
+    let j: usize = 0;
+    while (j < needle.len) {
+      if (buf[i + j] != needle[j]) {
+        matched = false;
+        break;
+      }
+      j += 1;
+    }
+    if (matched) { return i; }
+    i -= 1; // decrement i - searching backwards from end
+  }
+
+  return buf.len; // fail case
+}
+
 // First index `i` such that buf[i..i+needle.len] == needle, or buf.len if
 // not found. Naive O(n*m) scan; HTTP needles are short.
 export function bytes_index_of_seq(buf: uint8[], needle: uint8[]): usize {

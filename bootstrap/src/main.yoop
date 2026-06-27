@@ -4,14 +4,14 @@
   Main entry point for the self-hosted yooperlang compiler
 */
 
-// for starters lets define a main function, and start getting a lexer stream of
-// tokens from an input file.
-
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
 import * as strings from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as fs from "std/fs.yoop";
 
 import { isHexDigit } from "./source_processing/char_utils.yoop";
 import { tokenize, Token } from "./source_processing/lexer.yoop";
@@ -72,4 +72,16 @@ function main(): int {
 
 function runCompilerAssertions(): void {
   debug.assert(strings.string_eq(tokenScanList[0].str, "..."), "tokenScanList is not sorted");
+  const testSplittingStr = "this_is_a_test";
+  disposable pieces: Vec<string> = vec.vec_new(0);
+  const splitResult = strings.split(ref pieces, testSplittingStr, "_", false);
+  debug.assert(pieces.len == 4, `split expected 4 elements, found ${pieces.len}: result ${splitResult}, ${pieces.data[0]}`);
+  debug.assert(strings.string_eq(pieces.data[0], "this"), `split failed, expected "this" in slot 1, found ${pieces.data[0]}`);
+  debug.assert(strings.string_eq(pieces.data[1], "is"), `split failed, expected "is" in slot 2, found ${pieces.data[1]}`);
+  debug.assert(strings.string_eq(pieces.data[2], "a"), `split failed, expected "a" in slot 3, found ${pieces.data[2]}`);
+  debug.assert(strings.string_eq(pieces.data[3], "test"), `split failed, expected "test" in slot 4, found ${pieces.data[3]}`);
+
+  // file stuff
+  // const normalizeResult = fs.normalizePath("./bootstrap/../bootstrap/src/main.yoop");
+  // debug.assert(strings.string_eq(normalizeResult, "main.yoop"), `normalizePath failed, exepected "main.yoop", found ${normalizeResult}`);
 }

@@ -66,8 +66,28 @@ function resultImportPath(
   let joinedPath: string;
   if (isStd) {
     // drop the leadings "std/" then root it at stdRoot
-    const rest = sliceFrom
+    const rest = str.sliceFrom(sourcePath, 4);
+    joinedPath = fs.path_join([stdRoot, rest]);
+  } else {
+    const isRel = str.string_starts_with(sourcePath, "./")
+      || str.string_starts_with(sourcePath, "../");
+    const isAbs = str.string_starts_with(sourcePath, "/");
+    if (!isRel && !isAbs) {
+      return Result.Err {
+        error: `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`
+      };
+    }
+    if (isAbs) {
+      joinedPath = sourcePath;
+    } else {
+      const baseDir = fs.dirName(importerAbsPath);
+      joinedPath = fs.path_join([baseDir, sourcePath]);
+    }
   }
+
+  return Result.Ok { value: "test" };
+  // 3. canonicalize + existence check.
+  // const canonical = normalizePath(joinedPath);
 }
 
 function importSourcePath(ref ast: AST, importNode: NodeId): string {
