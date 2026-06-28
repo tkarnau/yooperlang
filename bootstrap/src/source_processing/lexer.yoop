@@ -27,7 +27,7 @@ import {
   isIdentStart,
   digitValue,
 } from "./char_utils.yoop";
-import { TokenTags, tokenScanList, keywordList } from "../contracts.yoop";
+import { TokenTags, tagName, tokenScanList, keywordList } from "../contracts.yoop";
 
 export type Token implements Display {
   tag: TokenTags,
@@ -36,7 +36,7 @@ export type Token implements Display {
   intVal: int,
   floatVal: float64,
   function to_string(ref self): string {
-    return `tag: ${self.tag}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
+    return `tag: ${tagName(self.tag)}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
   }
 }
 

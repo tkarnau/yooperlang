@@ -2765,6 +2765,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
+  it("value_enum_string_switch.yoop rejects a switch over a string-backed enum", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_string_switch.yoop");
+    assert.ok(
+      errors.some((e) => /switch requires an integer-backed enum/.test(e.message)),
+      `expected string-backed-switch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
   it("value_enum_unrelated_compare.yoop rejects comparing two different value enums", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/value_enum_unrelated_compare.yoop");
     assert.ok(

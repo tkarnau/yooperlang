@@ -20,6 +20,7 @@ import {
   resolveTypeFromName,
   resolveTypeAnnotation,
   formatAnnotation,
+  isIntPrim,
   typeKinds,
   typesEqual,
 } from "./types.js";
@@ -957,6 +958,29 @@ function checkSwitch(node, scope, ctx) {
       ctx.errors,
       node.scrutinee,
       `switch scrutinee must be int, bool, char, a variant, or an enum type; got ${formatType(scrutType)}`,
+    );
+    for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
+    if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
+    return;
+  }
+
+  // A value-enum scrutinee must be integer-backed: `switch` lowers to the
+  // LLVM `switch` instruction, whose condition must have integer type. A
+  // string-backed enum (`enum Foo<string>`) would otherwise slip through
+  // typecheck and emit `switch ptr ...` IR that clang rejects with a cryptic
+  // "switch condition must have integer type". Reject it here with a real
+  // diagnostic; use `==`/`!=` chains for string-backed enums instead.
+  if (
+    isValueEnum &&
+    !(scrutType.underlying?.kind === typeKinds.prim &&
+      isIntPrim(scrutType.underlying.name))
+  ) {
+    pushError(
+      ctx.errors,
+      node.scrutinee,
+      `cannot switch over ${formatType(scrutType)}: its underlying type is ` +
+        `${formatType(scrutType.underlying)}, but switch requires an ` +
+        `integer-backed enum. Use if/else with == for string-backed enums.`,
     );
     for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
     if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);

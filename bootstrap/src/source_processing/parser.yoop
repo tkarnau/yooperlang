@@ -1,7 +1,7 @@
 import * as debug from "std/debug.yoop";
 import { Result, Option } from "std/core/types.yoop";
 import * as bytes from "std/core/bytes.yoop";
-import { ASTNode, ASTNodeKind, TokenTags, SourceLocation, ParsingError } from "../contracts.yoop";
+import { ASTNode, ASTNodeKind, TokenTags, tagName, SourceLocation, ParsingError } from "../contracts.yoop";
 import { Token, LexedVal, createLexedVal } from "./lexer.yoop";
 
 trait SelfLexing {
@@ -93,7 +93,7 @@ function parseTopLevel(ref pState: ParserState): Result<ASTNode, ParsingError> {
       default: {
         return Result.Err { error: SelfLexing.createParsingError(
           ref pState,
-          `unexpected token at top level: ${peekTag}`
+          `unexpected token at top level: ${tagName(peekTag)}`,
           Option.Some { value: usize(SelfLexing.peek(ref pState).length) }
         )};
       }
