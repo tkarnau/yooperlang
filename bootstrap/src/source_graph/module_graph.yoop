@@ -85,9 +85,19 @@ function resultImportPath(
     }
   }
 
-  return Result.Ok { value: "test" };
   // 3. canonicalize + existence check.
-  // const canonical = normalizePath(joinedPath);
+  // need to normalize a canonical path so that modules and mangling
+  // for the same actual file referenced from two different paths do
+  // not get duplicated.
+  const canonicalPath = fs.normalizePath(joinedPath);
+  if (canonicalPath.len == 0) {
+    return Result.Err { error: `unable to identify a canonical path from ${joinedPath}` };
+  }
+  if (!fs.exists(canonicalPath)) {
+    return Result.Err { error: `cannot resolve import ${sourcePath} from ${importerAbsPath}: file not found` };
+  }
+
+  return Result.Ok { value: canonicalPath };
 }
 
 function importSourcePath(ref ast: AST, importNode: NodeId): string {
@@ -139,7 +149,7 @@ function loadModule(
     return LoadResult.Err { error: `error loading source file ${absPath}: ${readErr}` };
   }
   // temp - build an empty arena AST with only the program node for now
-  // const ast = emptyArena();
+  const ast = emptyArena();
 
   // walk the leading IMPORT_DECLs (imports-first rule) out of the arena
   const edges: Vec<ImportEdge> = vec.vec_new(0);

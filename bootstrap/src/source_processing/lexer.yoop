@@ -40,7 +40,7 @@ export type Token implements Display {
   }
 }
 
-type LexedVal {
+export type LexedVal {
   token: Token,
   nextPos: usize,
 }
@@ -50,7 +50,7 @@ type LexedError {
   error: string,
 }
 
-function createLexedVal(): LexedVal {
+export function createLexedVal(): LexedVal {
   return {
     token: {
       tag: TokenTags.EOF,

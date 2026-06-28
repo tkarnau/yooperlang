@@ -2,11 +2,13 @@ import * as debug from "std/debug.yoop";
 import { Vec } from "std/core/vec.yoop";
 import { Map } from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
+import { Display } from "std/core/traits.yoop";
 import { Comparable, quickSort } from "./utils/array_utils.yoop";
 
 // ************ LEXING CONTRACTS **************
 
 export enum TokenTags<string> {
+  NOTOKEN "NOTOKEN", // for initializers, etc
   // atoms
   EOF "EOF",
   IDENT "IDENT", // NOT A KEYWORD
@@ -443,14 +445,17 @@ export enum ASTNodeKind<string> {
 
 export type NodeId = usize;
 
-export type SourceLocation {
+export type SourceLocation implements Display {
   pos: usize,
   line: usize,
   column: usize,
   length: usize,
+  function to_string(ref self): string {
+    return `pos: ${self.pos}, line: ${self.line}, column: ${self.column}, length: ${self.length}`;
+  }
 }
 
-export type ASTNode {
+export type ASTNode implements Display {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
 
@@ -465,6 +470,16 @@ export type ASTNode {
 
   strId: usize,
   // ...the result of the fat-node scalar/NodeId slots
+  function to_string(ref self): string {
+    return `
+      kind: ${self.kind},
+      sourceLoc: (${self.sourceLoc}),
+      childStart: ${self.childStart},
+      childCount: ${self.childCount},
+      spanStart: ${self.spanStart},
+      spanLen: ${self.spanLen},
+      strId: ${self.strId}`;
+  }
 }
 
 export type AST propagates<disposable> {
@@ -492,4 +507,18 @@ export type ModuleGraph propagates<disposable> {
   modules: Vec<Module>,
   entry: Module,
   autoLoadModuleIds: Map<string, string>,
+}
+
+export type ParsingError implements Display {
+  sourceLoc: SourceLocation,
+  isParseError: bool,
+  rawMessage: string,
+  err: string,
+  function to_string(ref self): string {
+    return `
+      err: ${self.err},
+      sourceLoc: ${self.sourceLoc},
+      rawMessage: ${self.rawMessage},
+      isParseError: ${self.isParseError}`;
+  }
 }

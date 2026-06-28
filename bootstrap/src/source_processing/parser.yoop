@@ -1,0 +1,117 @@
+import * as debug from "std/debug.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import { ASTNode, ASTNodeKind, TokenTags, SourceLocation, ParsingError } from "../contracts.yoop";
+import { Token, LexedVal, createLexedVal } from "./lexer.yoop";
+
+trait SelfLexing {
+  // function advance(ref self): Token;
+  function peek(ref self): Token;
+  // function peekAhead(ref self, n: usize): Token;
+  // function expect(ref self, tag: TokenTags): Result<Token, ParsingError>;
+  function createParsingError(ref self, message: string, length: Option<usize>): ParsingError;
+  function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode;
+  // function 
+}
+
+function posToSourceLocation(ref src: uint8[], pos: usize, length: usize): SourceLocation {
+  debug.assert(pos < src.len, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
+
+  let i: usize = 0;
+  let line: usize = 0;
+  let lastNewLinePos: usize = 0;
+  while (i < pos) {
+    if (src[i] == '\n') {
+      line += 1;
+      lastNewLinePos = i;
+    }
+    i += 1;
+  }
+  const column = pos - lastNewLinePos;
+  return {
+    line: line,
+    column: column,
+    pos: pos,
+    length: length
+  };
+}
+
+function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocation): ASTNode {
+  return {
+    kind: astNodeKind,
+    sourceLoc: sourceLoc,
+    childStart: 0,
+    childCount: 0,
+    spanStart: 0,
+    spanLen: 0,
+    strId: 0,
+  };
+}
+
+type ParserState implements SelfLexing {
+  currentLex: LexedVal,
+  pos: usize,
+  src: ref uint8[],
+  function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode {
+    return createASTNode(
+      astNodeKind,
+      posToSourceLocation(
+        self.src,
+        self.pos,
+        usize(self.currentLex.token.length)
+      )
+    );
+  }
+  function peek(ref self): Token  {
+    return self.currentLex.token;
+  }
+  function createParsingError(ref self, message: string, length: Option<usize>): ParsingError {
+    const sourceLoc = posToSourceLocation(self.src, self.pos, 1);
+    return {
+      sourceLoc: sourceLoc,
+      isParseError: true,
+      rawMessage: message,
+      err: message, // for now...
+    };
+  }
+  // function advance(ref self): Token {
+  //   const tok = self.currentLex.token;
+    
+  // }
+}
+
+// main parsing logic, starts with top level and handles all child levels
+function parseTopLevel(ref pState: ParserState): Result<ASTNode, ParsingError> {
+  const node = SelfLexing.buildSourcedNode(ref pState, ASTNodeKind.PROGRAM);
+
+  let peekTag = SelfLexing.peek(ref pState).tag;
+  while (peekTag != TokenTags.EOF) {
+    switch (peekTag) {
+      case TokenTags.FUNCTION: {
+        
+      }
+      default: {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref pState,
+          `unexpected token at top level: ${peekTag}`
+          Option.Some { value: usize(SelfLexing.peek(ref pState).length) }
+        )};
+      }
+    }
+  }
+
+  return Result.Ok { value: node };
+}
+
+
+export function parse(src: uint8[]): Result<ASTNode, ParsingError> {
+  const pState: ParserState = {
+    currentLex: createLexedVal(), // init is just an EOF for now...
+    pos: 0,
+    src: ref src,
+  };
+
+  const topLevelNodeResult = parseTopLevel(ref pState);
+
+  return topLevelNodeResult;
+}

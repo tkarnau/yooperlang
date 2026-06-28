@@ -15,6 +15,7 @@ import * as fs from "std/fs.yoop";
 
 import { isHexDigit } from "./source_processing/char_utils.yoop";
 import { tokenize, Token } from "./source_processing/lexer.yoop";
+import { parse } from "./source_processing/parser.yoop";
 import { tokenScanList } from "./contracts.yoop";
 
 @precompile {
@@ -59,6 +60,16 @@ function main(): int {
       for tok in tokens {
         log.info(`token: ${tok}`);
       }
+    }
+  }
+
+  const parseResult = parse(bytes);
+  switch (parseResult) {
+    case Result.Err { error: e } : {
+      log.info(`parsing error: ${e}`);
+    }
+    case Result.Ok { value: astNode } : {
+      log.info(`parsed successfully: ${astNode}`);
     }
   }
 
