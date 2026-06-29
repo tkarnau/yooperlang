@@ -1,0 +1,8 @@
+{
+  "name": "yooparse",
+  "version": "0.1.0",
+  "description": "tiny JSON parser and serializer for yooperlang",
+  "files": [
+    "json.yoop"
+  ]
+}

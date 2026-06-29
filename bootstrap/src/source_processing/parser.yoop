@@ -87,7 +87,7 @@ function parseTopLevel(ref pState: ParserState): Result<ASTNode, ParsingError> {
   let peekTag = SelfLexing.peek(ref pState).tag;
   while (peekTag != TokenTags.EOF) {
     switch (peekTag) {
-      case TokenTags.FUNCTION: {
+      case TokenTags.TASK, TokenTags.FUNCTION: {
         
       }
       default: {

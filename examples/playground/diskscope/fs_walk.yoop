@@ -1,0 +1,165 @@
+// diskscope/fs_walk.yoop - recursive directory scan into a flat node array.
+//
+// The whole tree is a single `Vec<FsNode>` and every node refers to its
+// children by integer id (an index into that array), the same arena+NodeId
+// shape the self-hosting bootstrap uses for its AST. Building post-order
+// (children pushed before their parent) means a node's id is the largest id in
+// its subtree and the root is always the last node pushed - so a parent can sum
+// its children's already-known sizes the moment it is created, with no second
+// pass.
+//
+// The directory primitives are a thin POSIX wrapper in the C runtime
+// (runtime/yoop_io.c: yoop_io_opendir / readdir / closedir / stat2). stat2 uses
+// lstat, so symlinks are NOT followed: a symlinked directory reads as a 0-size
+// leaf and is never descended into, which sidesteps symlink-cycle infinite
+// recursion and double-counting linked trees.
+
+import.unsafe;
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+
+extern "C" from "yoop_runtime" {
+    function yoop_io_opendir(path: string): unsafe_ptr;
+    function yoop_io_readdir(d: unsafe_ptr): string;
+    function yoop_io_closedir(d: unsafe_ptr): void;
+    function yoop_io_stat2(path: string, is_dir: unsafe_ptr<int32>): int64;
+}
+
+export enum EntryKind { DIR, FILE }
+
+// One filesystem entry. `size` is the aggregate byte size of the whole subtree
+// (a file's own size; a directory's children summed). `children` holds child
+// node ids, sorted largest-first once the directory is fully scanned.
+export type FsNode propagates<disposable> {
+    name: string,
+    kind: EntryKind,
+    size: int64,
+    depth: int32,
+    children: Vec<int32>,
+}
+
+// Copy a borrowed C string (e.g. a readdir result, valid only until the next
+// readdir) into a fresh owned heap string.
+function dup_str(s: string): string {
+    return str.string_concat(s, "");
+}
+
+function join_path(dir: string, name: string): string {
+    return str.string_concat_all([dir, "/", name]);
+}
+
+// Append an FsNode and return its id.
+function push_node(ref nodes: Vec<FsNode>, n: FsNode): int32 {
+    vec.vec_push(ref nodes, n);
+    return int32(nodes.len) - 1;
+}
+
+// Recursively scan `path` (shown as `name`) into `nodes`, returning the new
+// node's id, or -1 if it could not be stat'd (vanished / permission denied) or
+// the node budget is exhausted. `budget` caps the total node count so pointing
+// the tool at a pathologically large tree degrades gracefully instead of
+// running the machine out of memory.
+export function scan(ref nodes: Vec<FsNode>, path: string, name: string, depth: int32, ref budget: int32): int32 {
+    if (budget <= 0) { return -1; }
+    let is_dir: int32 = 0;
+    let sz: int64 = yoop_io_stat2(path, &is_dir);
+    if (sz < 0) { return -1; }
+    budget = budget - 1;
+
+    if (is_dir == 0) {
+        let leaf: FsNode = {
+            name: name,
+            kind: EntryKind.FILE,
+            size: sz,
+            depth: depth,
+            children: vec.vec_new(usize(0)),
+        };
+        return push_node(ref nodes, leaf);
+    }
+
+    // A directory: walk its entries, recurse, and sum.
+    let kids: Vec<int32> = vec.vec_new(usize(8));
+    let total: int64 = 0;
+    let d: unsafe_ptr = yoop_io_opendir(path);
+    if (d != null) {
+        let entry: string = yoop_io_readdir(d);
+        while (entry.len > usize(0)) {
+            let child_name: string = dup_str(entry);
+            let child_path: string = join_path(path, child_name);
+            let cid: int32 = scan(ref nodes, child_path, child_name, depth + 1, ref budget);
+            if (cid >= 0) {
+                vec.vec_push(ref kids, cid);
+                total = total + nodes.data[usize(cid)].size;
+            }
+            entry = yoop_io_readdir(d);
+        }
+        yoop_io_closedir(d);
+    }
+    sort_children_by_size(ref nodes, ref kids);
+    let dir: FsNode = {
+        name: name,
+        kind: EntryKind.DIR,
+        size: total,
+        depth: depth,
+        children: kids,
+    };
+    return push_node(ref nodes, dir);
+}
+
+// ----- sorting children largest-first --------------------------------------
+// Hoare-partition quicksort over an id array, keyed by each node's aggregate
+// size (descending). Done once per directory at scan time so the treemap layout
+// never has to sort or allocate scratch for ordering.
+
+function node_size(ref nodes: Vec<FsNode>, id: int32): int64 {
+    return nodes.data[usize(id)].size;
+}
+
+function qsort_ids(ref nodes: Vec<FsNode>, a: int32[], lo: int32, hi: int32): void {
+    if (lo >= hi) { return; }
+    let pivot: int64 = node_size(ref nodes, a[usize((lo + hi) / 2)]);
+    let i: int32 = lo;
+    let j: int32 = hi;
+    while (i <= j) {
+        while (node_size(ref nodes, a[usize(i)]) > pivot) { i = i + 1; }
+        while (node_size(ref nodes, a[usize(j)]) < pivot) { j = j - 1; }
+        if (i <= j) {
+            let tmp: int32 = a[usize(i)];
+            a[usize(i)] = a[usize(j)];
+            a[usize(j)] = tmp;
+            i = i + 1;
+            j = j - 1;
+        }
+    }
+    if (lo < j) { qsort_ids(ref nodes, a, lo, j); }
+    if (i < hi) { qsort_ids(ref nodes, a, i, hi); }
+}
+
+export function sort_children_by_size(ref nodes: Vec<FsNode>, ref kids: Vec<int32>): void {
+    if (kids.len < usize(2)) { return; }
+    qsort_ids(ref nodes, kids.data, 0, int32(kids.len) - 1);
+}
+
+// ----- human-readable byte sizes -------------------------------------------
+
+export function human_size(bytes: int64): string {
+    if (bytes < int64(1024)) {
+        return str.string_concat_all([fmt.int_to_string(bytes), " B"]);
+    }
+    let units: string[] = ["KB", "MB", "GB", "TB", "PB"];
+    let div: int64 = int64(1024);
+    let k: int32 = 0;
+    while (k < 4 && bytes / div >= int64(1024)) {
+        div = div * int64(1024);
+        k = k + 1;
+    }
+    let tenths: int64 = (bytes * int64(10)) / div;
+    let whole: int64 = tenths / int64(10);
+    let frac: int64 = tenths - whole * int64(10);
+    return str.string_concat_all([
+        fmt.int_to_string(whole), ".", fmt.int_to_string(frac), " ", units[usize(k)],
+    ]);
+}
