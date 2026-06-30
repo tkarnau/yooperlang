@@ -15,6 +15,7 @@ import {
   ModuleGraph,
 } from "../contracts.yoop";
 import { IterableVec, vecIter } from "../utils/array_utils.yoop";
+import { emptyArena } from "../utils/ast_utils.yoop";
 
 
 export function getModuleId(path: string): string {

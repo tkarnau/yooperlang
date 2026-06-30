@@ -112,6 +112,11 @@ export function parse(src) {
   // advancing. The flag is only consulted by `consumeClosingGt`; other parser
   // sites see the underlying token as usual.
   let pendingGtFromRshift = false;
+  // Monotonic counter for synthesized names of anonymous region-kind bindings
+  // (`ephemeral EXPR { ... }`). The `$` prefix can't appear in user source, so
+  // these names are collision-free and unreferenceable - the value exists only
+  // so the cleanup machinery has a slot to dispose at scope/block end.
+  let anonRegionCounter = 0;
 
   // helper functions for token stream management
 
@@ -174,27 +179,51 @@ export function parse(src) {
     return i - 1;
   }
 
-  // Phase 6.5: true if the current tokens look like a kind-prefixed binding
-  // start: `IDENT IDENT :` or `IDENT ( ... ) IDENT :`. Used for both
+  // Phase 6.5: true if the current tokens look like a *named* kind-prefixed
+  // binding start: `IDENT IDENT :` / `IDENT IDENT =` or the kind-with-args
+  // forms `IDENT ( ... ) IDENT :` / `IDENT ( ... ) IDENT =`. Used for both
   // statement-start dispatch (implicit-const form) and the `let|const`
   // kind-prefix recognizer.
+  //
+  // The `=` alternative (no `:` type annotation) is the inferred-type form:
+  // `disposable allocScope = mem.allocatorScope(arena) { ... }` infers the
+  // binding's type from its initializer, exactly like a plain `const x = ...`.
+  // No expression statement begins with two bare identifiers, so `IDENT IDENT`
+  // is an unambiguous kind-prefix lead.
+  function bindingNameFollowedByColonOrEq(idx) {
+    return (
+      peekAhead(idx).tag === TokenTags.ident &&
+      (peekAhead(idx + 1).tag === TokenTags.colon ||
+        peekAhead(idx + 1).tag === TokenTags.eq)
+    );
+  }
   function looksLikeKindPrefixedBindingStart() {
     if (peek().tag !== TokenTags.ident) return false;
-    if (
-      peekAhead(1).tag === TokenTags.ident &&
-      peekAhead(2).tag === TokenTags.colon
-    ) {
+    if (bindingNameFollowedByColonOrEq(1)) {
       return true;
     }
     if (peekAhead(1).tag === TokenTags.lparen) {
       const j = findMatchingRparen(1);
       if (j < 0) return false;
-      return (
-        peekAhead(j + 1).tag === TokenTags.ident &&
-        peekAhead(j + 2).tag === TokenTags.colon
-      );
+      return bindingNameFollowedByColonOrEq(j + 1);
     }
     return false;
+  }
+
+  // True if the current tokens look like an *anonymous* region-kind block:
+  // `IDENT EXPR { ... }` or `IDENT EXPR;` with no binding name (e.g.
+  // `ephemeral mem.allocatorScope(arena) { ... }`). The defining lead is two
+  // adjacent identifiers where the second is NOT a binding name (no following
+  // `:`/`=`); the first identifier is the kind, the second begins the
+  // initializer expression. Must be checked AFTER the named recognizer so the
+  // `IDENT IDENT :`/`IDENT IDENT =` named forms win.
+  function looksLikeAnonymousRegionStart() {
+    return (
+      peek().tag === TokenTags.ident &&
+      peekAhead(1).tag === TokenTags.ident &&
+      peekAhead(2).tag !== TokenTags.colon &&
+      peekAhead(2).tag !== TokenTags.eq
+    );
   }
 
   // Phase 6.5: consume `IDENT ( argList )?` and return a kindPrefix record.
@@ -1215,6 +1244,14 @@ export function parse(src) {
             tok.tag === TokenTags.ident
               ? src.substring(tok.start, tok.start + tok.length)
               : inverseTokenTags[tok.tag];
+          // `region` is a contextual ident (kept usable as an ordinary
+          // identifier everywhere else). A region kind governs a lexical
+          // scope rather than a named value - it is used in the anonymous
+          // `<kind> EXPR { ... }` / `<kind> EXPR;` block form, with no binding.
+          if (name === "region") {
+            site = "region";
+            break;
+          }
           throw parseError(
             `unrecognized appliesTo site '${name}'`,
             tok.start,
@@ -2500,10 +2537,15 @@ export function parse(src) {
         return parseAttribute();
       }
       case TokenTags.ident: {
-        // kind-prefixed binding form: `IDENT IDENT : ...` or
-        // `IDENT(args) IDENT : ...` (phase 6.5).
+        // kind-prefixed binding form: `IDENT IDENT : ...` / `IDENT IDENT = ...`
+        // or `IDENT(args) IDENT : ...` (phase 6.5; inferred `=` form added later).
         if (looksLikeKindPrefixedBindingStart()) {
           return parseVarDecl();
+        }
+        // Anonymous region-kind block: `IDENT EXPR { ... }` / `IDENT EXPR;`
+        // (no binding name). Checked after the named recognizer.
+        if (looksLikeAnonymousRegionStart()) {
+          return parseAnonymousRegionBinding();
         }
         return parseExpressionStatement();
       }
@@ -2621,6 +2663,33 @@ export function parse(src) {
     expect(TokenTags.eq);
     node.assignment = parseExpression();
     expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // Anonymous region-kind binding: `KIND EXPR { ... }` (explicit block, cleanup
+  // at the trailing `}`) or `KIND EXPR;` (implicit block, cleanup at enclosing
+  // scope end in LIFO order - same as a name-less `disposable`). The kind must
+  // resolve to a region kind (`appliesTo region`) in the typechecker; the
+  // synthesized `$region$N` name is never visible to user code. We reuse the
+  // CONST_DECL shape so the entire downstream pipeline (type inference, kind-
+  // obligation tracking, cleanup codegen) treats it exactly like a name-less
+  // kind-prefixed binding.
+  function parseAnonymousRegionBinding() {
+    const kindPrefix = consumeKindPrefixWithArgs();
+    const node = buildSourcedNode(ASTNodeKind.CONST_DECL);
+    node.kindPrefix = kindPrefix;
+    node.trailingBlock = null;
+    node.anonymousRegion = true;
+    node.name = `$region$${anonRegionCounter++}`;
+    // The type is always inferred from the initializer - there is no name to
+    // annotate, and the value is unobservable anyway.
+    node.typeAnnotation = null;
+    node.assignment = parseExpression();
+    if (peek().tag === TokenTags.lcurly) {
+      node.trailingBlock = parseBlock();
+    } else {
+      expect(TokenTags.semicolon);
+    }
     return node;
   }
 

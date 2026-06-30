@@ -1,117 +1,63 @@
 import * as debug from "std/debug.yoop";
 import { Result, Option } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import * as bytes from "std/core/bytes.yoop";
-import { ASTNode, ASTNodeKind, TokenTags, tagName, SourceLocation, ParsingError } from "../contracts.yoop";
-import { Token, LexedVal, createLexedVal } from "./lexer.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, TokenTags, tagName, SourceLocation, ParsingError } from "../contracts.yoop";
+import { Token, LexedVal, createLexedVal, lexNext } from "./lexer.yoop";
+import { skipWhitespace, posToSourceLocation } from "./char_utils.yoop";
+import { SelfLexing, ParserState, peekLengthUsize } from "./parsing/parser_state.yoop";
+import { emptyArena } from "../utils/ast_utils.yoop";
+import { parseTypeDecl } from "./parsing/type_decl.yoop";
 
-trait SelfLexing {
-  // function advance(ref self): Token;
-  function peek(ref self): Token;
-  // function peekAhead(ref self, n: usize): Token;
-  // function expect(ref self, tag: TokenTags): Result<Token, ParsingError>;
-  function createParsingError(ref self, message: string, length: Option<usize>): ParsingError;
-  function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode;
-  // function 
-}
-
-function posToSourceLocation(ref src: uint8[], pos: usize, length: usize): SourceLocation {
-  debug.assert(pos < src.len, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
-
-  let i: usize = 0;
-  let line: usize = 0;
-  let lastNewLinePos: usize = 0;
-  while (i < pos) {
-    if (src[i] == '\n') {
-      line += 1;
-      lastNewLinePos = i;
-    }
-    i += 1;
-  }
-  const column = pos - lastNewLinePos;
-  return {
-    line: line,
-    column: column,
-    pos: pos,
-    length: length
-  };
-}
-
-function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocation): ASTNode {
-  return {
-    kind: astNodeKind,
-    sourceLoc: sourceLoc,
-    childStart: 0,
-    childCount: 0,
-    spanStart: 0,
-    spanLen: 0,
-    strId: 0,
-  };
-}
-
-type ParserState implements SelfLexing {
-  currentLex: LexedVal,
-  pos: usize,
-  src: ref uint8[],
-  function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode {
-    return createASTNode(
-      astNodeKind,
-      posToSourceLocation(
-        self.src,
-        self.pos,
-        usize(self.currentLex.token.length)
-      )
-    );
-  }
-  function peek(ref self): Token  {
-    return self.currentLex.token;
-  }
-  function createParsingError(ref self, message: string, length: Option<usize>): ParsingError {
-    const sourceLoc = posToSourceLocation(self.src, self.pos, 1);
-    return {
-      sourceLoc: sourceLoc,
-      isParseError: true,
-      rawMessage: message,
-      err: message, // for now...
-    };
-  }
-  // function advance(ref self): Token {
-  //   const tok = self.currentLex.token;
-    
-  // }
-}
 
 // main parsing logic, starts with top level and handles all child levels
-function parseTopLevel(ref pState: ParserState): Result<ASTNode, ParsingError> {
-  const node = SelfLexing.buildSourcedNode(ref pState, ASTNodeKind.PROGRAM);
+function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
+  let program = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PROGRAM);
 
-  let peekTag = SelfLexing.peek(ref pState).tag;
+  // Collect each top-level decl's NodeId in a scratch buffer, then splice the
+  // whole run into the arena's shared childIds pool as the PROGRAM body.
+  disposable body: Vec<NodeId> = vec.vec_new(8);
+  let peekTag = SelfLexing.peek(ref ps).tag;
   while (peekTag != TokenTags.EOF) {
     switch (peekTag) {
-      case TokenTags.TASK, TokenTags.FUNCTION: {
-        
+      case TokenTags.TYPE: {
+        const declId = parseTypeDecl(ref ps)?;
+        vec.vec_push(ref body, declId);
       }
+      // TODO: rest of tags...
       default: {
         return Result.Err { error: SelfLexing.createParsingError(
-          ref pState,
+          ref ps,
           `unexpected token at top level: ${tagName(peekTag)}`,
-          Option.Some { value: usize(SelfLexing.peek(ref pState).length) }
+          peekLengthUsize(ref ps),
         )};
       }
     }
+    peekTag = SelfLexing.peek(ref ps).tag;
   }
 
-  return Result.Ok { value: node };
+  const start: usize = ps.ast.childIds.len;
+  // copy the dynamic body into the childIds so we can destroy
+  // the scratch buffer (body: Vec<NodeId>)
+  vec.vec_extend_from(ref ps.ast.childIds, vec.vec_as_array(ref body));
+  program.childStart = start;
+  program.childCount = body.len;
+  ps.ast.root = SelfLexing.pushNode(ref ps, program);
+
+  return Result.Ok { value: ps.ast };
 }
 
 
-export function parse(src: uint8[]): Result<ASTNode, ParsingError> {
-  const pState: ParserState = {
-    currentLex: createLexedVal(), // init is just an EOF for now...
+export function parse(src: uint8[]): Result<AST, ParsingError> {
+  let pState: ParserState = {
+    currentLex: createLexedVal(), // EOF placeholder; primed by the advance below
     pos: 0,
+    ast: emptyArena(),
     src: ref src,
   };
 
-  const topLevelNodeResult = parseTopLevel(ref pState);
+  SelfLexing.advance(ref pState)?; // prime: load the first real token into currentLex
 
-  return topLevelNodeResult;
+  return parseAST(ref pState);
 }

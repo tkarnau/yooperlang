@@ -772,6 +772,19 @@ describe("parse: phase 6.1 - kind decls", () => {
     assert.equal(k.clauses.length, 2);
   });
 
+  it("`appliesTo region` parses (contextual site ident)", () => {
+    const k = parse(
+      "kind ephemeral { appliesTo region; requires Disposable; mustCall dispose beforeScopeEnd; ownsBlock; }",
+    ).body[0];
+    assert.equal(k.clauses[0].kind, ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
+    assert.deepEqual(k.clauses[0].sites, ["region"]);
+  });
+
+  it("`region` stays usable as an ordinary identifier outside kind clauses", () => {
+    const s = parse("function f(): int32 { let region: int32 = 1; return region; }");
+    assert.equal(s.body[0].body.body[0].name, "region");
+  });
+
   it("multiple requires clauses parse independently", () => {
     const k = parse(
       `kind handle {
@@ -997,6 +1010,74 @@ describe("parse: phase 6.1 - kind-prefixed bindings", () => {
         /kind-prefixed binding requires initializer/,
       );
     });
+  });
+
+  // Inferred-type named binding: `disposable a = expr` (no `: T`). The
+  // recognizer now accepts the `=` shape alongside `:`.
+  it("named binding infers its type when the annotation is omitted (implicit block)", () => {
+    const s = stmtOf("disposable a = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.CONST_DECL);
+    assert.equal(s.name, "a");
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.typeAnnotation, null);
+    assert.equal(s.trailingBlock, null);
+    assert.equal(s.assignment.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+
+  it("named binding infers its type with a trailing block", () => {
+    const s = stmtOf("disposable a = make_handle() { return 0; }");
+    assert.equal(s.name, "a");
+    assert.equal(s.typeAnnotation, null);
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.trailingBlock.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("explicit `let disposable a = expr` infers type too", () => {
+    const s = stmtOf("let disposable a = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.LET_DECL);
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.typeAnnotation, null);
+  });
+});
+
+// Anonymous region-kind blocks: `KIND EXPR { ... }` / `KIND EXPR;` with no
+// binding name. The kind is the first ident, the second ident begins the
+// initializer expression, and there is no `:`/`=`.
+describe("parse: region kinds - anonymous block bindings", () => {
+  function stmtOf(src) {
+    const ast = parse(`function f(): int32 { ${src} return 0; }`);
+    return ast.body[0].body.body[0];
+  }
+
+  it("anonymous explicit block: `ephemeral mem.scope(arena) { ... }`", () => {
+    const s = stmtOf("ephemeral mem.scope(arena) { doThing(); }");
+    assert.equal(s.kind, ASTNodeKind.CONST_DECL);
+    assert.equal(s.anonymousRegion, true);
+    assert.equal(s.kindPrefix.name, "ephemeral");
+    assert.equal(s.typeAnnotation, null);
+    assert.match(s.name, /^\$region\$\d+$/);
+    assert.equal(s.assignment.kind, ASTNodeKind.CALL_EXPRESSION);
+    assert.equal(s.trailingBlock.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("anonymous implicit block (no braces): `ephemeral mem.scope(arena);`", () => {
+    const s = stmtOf("ephemeral mem.scope(arena); doThing();");
+    assert.equal(s.anonymousRegion, true);
+    assert.equal(s.kindPrefix.name, "ephemeral");
+    assert.equal(s.trailingBlock, null);
+  });
+
+  it("synthesized names are unique across multiple anonymous blocks", () => {
+    const ast = parse(
+      "function f(): int32 { ephemeral a(); ephemeral b(); return 0; }",
+    );
+    const [s0, s1] = ast.body[0].body.body;
+    assert.notEqual(s0.name, s1.name);
+  });
+
+  it("does not steal a plain call or member-call statement", () => {
+    assert.equal(stmtOf("doThing(x);").kind, ASTNodeKind.EXPRESSION_STATEMENT);
+    assert.equal(stmtOf("mem.reset(arena);").kind, ASTNodeKind.EXPRESSION_STATEMENT);
   });
 });
 

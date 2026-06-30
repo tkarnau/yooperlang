@@ -21,7 +21,7 @@ Yooperlang separates three ideas that other languages tend to conflate:
 | Layer | Role | Attached to | Example |
 |---|---|---|---|
 | **Trait** | Capability - operations a value supports | Types | `Disposable`, `Task<T>`, `Iterable<T>` |
-| **Kind** | Usage contract - scoping, lifecycle, iteration, sharing rules | Bindings, parameters, fields, functions | `disposable`, `scoped`, `pooled`, `batchable(n)` |
+| **Kind** | Usage contract - scoping, lifecycle, iteration, sharing rules | Bindings, parameters, fields, functions, regions | `disposable`, `ephemeral`, `scoped`, `pooled`, `batchable(n)` |
 | **Type** | Concrete data shape | Variables, fields | `int`, `FileHandle`, `Point` |
 
 A **type** says *what the value is*. A **trait** says *what the value can do*. A
@@ -362,6 +362,43 @@ block explicitly, nested in reverse order; the compiler just doesn't make you ty
 A kind-prefixed binding may only have a trailing block when **at least one** of its
 kinds declares `ownsBlock`. For kinds without that clause, no block is allowed.
 
+The `: type` annotation is **optional** on a kind-prefixed binding, exactly as on a
+plain `let` / `const` - the type is inferred from the initializer:
+
+```js
+disposable input = open_input(path) { ... }   // type inferred from open_input
+```
+
+### Region kinds - anonymous block owners
+
+A kind whose definition says `appliesTo region` (rather than `appliesTo binding`)
+governs a **lexical region, not a named value**. It is the right shape when the value
+exists only for the ambient state it installs on entry and undoes on exit - an
+allocator scope, a pushed context, a transaction - and there is nothing to refer to
+inside the block. A region kind is used with **no binding name**:
+
+```js
+// Explicit block - the guard's effect is active inside, undone at `}`
+ephemeral allocator_scope(arena) {
+    const rects = ctx_alloc(n);   // draws from `arena`
+    // ...
+}                                 // dispose() fires here
+
+// Implicit block - effect active for the rest of the enclosing scope (LIFO)
+ephemeral allocator_scope(arena);
+const rects = ctx_alloc(n);
+// dispose() fires at the enclosing scope end
+```
+
+A region kind must declare `ownsBlock` (the region *is* the block) and may not also
+apply to a value site. The two shapes are mutually exclusive at the use site and the
+compiler enforces the distinction: an `appliesTo binding` kind used without a name is
+an error (give it a name), and an `appliesTo region` kind given a name is an error
+(drop it). The cleanup machinery is identical to a name-less `disposable` - the value
+is still constructed and disposed; you simply cannot name it. `ephemeral`
+(`std/core/kinds.yoop`) is the standard-library region kind; define your own for other
+ambient guards.
+
 ### Destructuring (sugar)
 
 Destructuring is **surface sugar**, not a codegen primitive. The callee always returns
@@ -601,7 +638,8 @@ Multiple `requires` are written as separate clauses
 
 | Clause | Meaning |
 |---|---|
-| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`. Default: any value-site. |
+| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`, or the standalone `region`. Default: any value-site. |
+| `appliesTo region` | The kind governs a lexical region, not a named value: used only in the anonymous block form (`KIND EXPR { ... }` / `KIND EXPR;`), with no binding. Requires `ownsBlock`; mutually exclusive with the value sites above. See §4 "Region kinds". |
 | `requires Trait` | Values of this kind must implement the named trait. Repeat to require multiple. |
 | `provides Trait` | The kind supplies the trait's implementation (can transform its initializer). |
 | `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |

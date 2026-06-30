@@ -23,7 +23,7 @@ import.unsafe;
 import * as intr from "std/core/intrinsics.yoop";
 import * as vec, { Vec } from "std/core/vec.yoop";
 import * as mem from "std/core/alloc.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { disposable, ephemeral } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";
 import * as fmt from "std/core/format.yoop";
 
@@ -76,7 +76,11 @@ type State {
 // into the arena and is valid until the next relayout (the next reset).
 function relayout(arena: mem.Arena, ref nodes: Vec<FsNode>, root: int32, node_count: int32, x: int32, y: int32, w: int32, h: int32): Rect[] {
   mem.arenaReset(arena);
-  disposable allocScope: mem.AllocatorScope = mem.allocatorScope(arena) {
+  // Install `arena` as the current allocator for this block only - there is no
+  // value to name, just an ambient state change, so `ephemeral` (a region kind)
+  // fits: `intr.ctx_alloc` below draws from the arena, and the allocator is
+  // popped at the closing `}` (even on the early return).
+  ephemeral mem.allocatorScope(arena) {
     let rects: Rect[] = intr.ctx_alloc(usize(node_count));
     let i: int32 = 0;
     while (i < node_count) {

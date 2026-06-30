@@ -33,43 +33,44 @@ function main(): int {
 
   // log.info(`is hex digit?: ${isIt}, value: ${testStrBytes[0]}`);
 
-  const testStr = `
-    // test program
-    /* 
-      this is a test
-    */
-    ;{}...,'\\xFF'
-    "teststr"
-    0xFF
-    13.54
-    return return function main(): int {
-      printf("hello, world!");
+  // const testStr = `
+  //   // test program
+  //   /* 
+  //     this is a test
+  //   */
+  //   ;{}...,'\\xFF'
+  //   "teststr"
+  //   0xFF
+  //   13.54
+  //   return return function main(): int {
+  //     printf("hello, world!");
 
-      return 0;
-    }
-    `;
+  //     return 0;
+  //   }
+  //   `;
 
+  const testStr = "type Test<Foo,Bar>";
   const bytes = intr.string_as_bytes(testStr);
 
-  const tokenizeResult = tokenize(bytes);
-  switch (tokenizeResult){
-    case Result.Err { error: e } : {
-      log.info(`tokenize error: ${e}`);
-    }
-    case Result.Ok { value: tokens } : {
-      for tok in tokens {
-        log.info(`token: ${tok}`);
-      }
-    }
-  }
+  // const tokenizeResult = tokenize(bytes);
+  // switch (tokenizeResult){
+  //   case Result.Err { error: e } : {
+  //     log.info(`tokenize error: ${e}`);
+  //   }
+  //   case Result.Ok { value: tokens } : {
+  //     for tok in tokens {
+  //       log.info(`token: ${tok}`);
+  //     }
+  //   }
+  // }
 
   const parseResult = parse(bytes);
   switch (parseResult) {
     case Result.Err { error: e } : {
       log.info(`parsing error: ${e}`);
     }
-    case Result.Ok { value: astNode } : {
-      log.info(`parsed successfully: ${astNode}`);
+    case Result.Ok { value: ast } : {
+      log.info(`parsed successfully: ${ast}`);
     }
   }
 

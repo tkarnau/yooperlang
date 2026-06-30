@@ -1,5 +1,6 @@
 import * as debug from "std/debug.yoop";
-import { Vec } from "std/core/vec.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
 import { Map } from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Display } from "std/core/traits.yoop";
@@ -558,6 +559,7 @@ export enum ASTNodeKind {
   // carrier. Codegen must consume every ATTRIBUTE node before emission;
   // any that survive are an internal-error.
   ATTRIBUTE,
+  NODE_LIST, // with a fat node, the list of nodes allows a level of indirection
 }
 
 const AST_NODE_KIND_NAMES: string[] = [
@@ -645,6 +647,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "COMPOUND_ASSIGNMENT",
   "FAIL_TEST_KIND",
   "ATTRIBUTE",
+  "NODE_LIST", // node for handling a list of nodes
 ];
 
 // Maps an ASTNodeKind case to its source spelling. Used by Display sites
@@ -669,11 +672,24 @@ export type SourceLocation implements Display {
 export type ASTNode implements Display {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
+  name: string,
 
-  // variable-arity children: a slice into AST.childIds
-  // (PROGRAM.body, CALL.args, STRUCT_LITERAL.fields, SWITCH.arms, ... all use this)
+  // variable-arity children: a slice into AST.childIds. This is the node's
+  // PRIMARY list (PROGRAM.body, CALL.args, STRUCT_LITERAL.fields, SWITCH.arms,
+  // TYPE_DECL.fields, ...). Any ADDITIONAL list a kind needs is reached through
+  // a named single-child slot below pointing at a NODE_LIST whose own
+  // childStart/childCount holds that list.
   childStart: usize,
   childCount: usize,
+
+  // Named single-child slots for the fat node (0 = none, since NodeId 0 is the
+  // reserved "none" sentinel - no real node lives at arena index 0). Each kind
+  // documents its own meaning, e.g.
+  //   TYPE_DECL:     childA = typeParams list-node
+  //   FUNCTION_DECL: childA = typeParams, childB = params, childC = returnType
+  childA: NodeId,
+  childB: NodeId,
+  childC: NodeId,
 
   // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
   spanStart: usize,
@@ -687,17 +703,58 @@ export type ASTNode implements Display {
       sourceLoc: (${self.sourceLoc}),
       childStart: ${self.childStart},
       childCount: ${self.childCount},
+      childA: ${self.childA},
+      childB: ${self.childB},
+      childC: ${self.childC},
       spanStart: ${self.spanStart},
       spanLen: ${self.spanLen},
       strId: ${self.strId}`;
   }
 }
 
-export type AST propagates<disposable> {
+export type AST implements Display propagates<disposable> {
   nodes: Vec<ASTNode>,
   childIds: Vec<NodeId>,
   strings: Vec<string>, // string pool: decoded string-literal text
   root: NodeId,
+  function to_string(ref self): string {
+    // Debug dump of the whole arena. We collect each line as its own string
+    // piece and concat once at the end (the path_join pattern in std/fs) -
+    // far cheaper than re-allocating a growing accumulator per node.
+    disposable pieces: Vec<string> = vec.vec_new(self.nodes.len + self.strings.len + self.childIds.len + 4);
+
+    vec.vec_push(ref pieces,
+      `AST { root: ${self.root}, nodes: ${self.nodes.len}, childIds: ${self.childIds.len}, strings: ${self.strings.len} }\n`);
+
+    // Node arena. Index 0 is the reserved "none" sentinel, so real nodes
+    // begin at 1. ASTNode implements Display, so `${n}` dispatches to its
+    // own to_string (Phase 9.F template interpolation).
+    let i: usize = 1;
+    while (i < self.nodes.len) {
+      let n: ASTNode = vec.vec_get(ref self.nodes, i);
+      vec.vec_push(ref pieces, `  node[${i}]: {${n}\n  }\n`);
+      i = i + 1;
+    }
+
+    // Flat child-id pool (nodes index into this via childStart/childCount).
+    vec.vec_push(ref pieces, "  childIds: [ ");
+    let c: usize = 0;
+    while (c < self.childIds.len) {
+      vec.vec_push(ref pieces, `${vec.vec_get(ref self.childIds, c)} `);
+      c = c + 1;
+    }
+    vec.vec_push(ref pieces, "]\n");
+
+    // String pool.
+    let s: usize = 0;
+    while (s < self.strings.len) {
+      vec.vec_push(ref pieces, `  str[${s}]: "${vec.vec_get(ref self.strings, s)}"\n`);
+      s = s + 1;
+    }
+
+    let arr: string[] = vec.vec_as_array(ref pieces);
+    return str.string_concat_all(arr);
+  }
 }
 
 export type ImportEdge {

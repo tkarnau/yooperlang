@@ -1238,6 +1238,24 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
       }
     }
   }
+  // region kinds: a kind that `appliesTo region` governs a lexical scope, not a
+  // named value. It is used only in the anonymous block form
+  // (`<kind> EXPR { ... }` / `<kind> EXPR;`), so it must own a block and cannot
+  // also apply to a value site (binding/parameter/field/type/return) - the two
+  // are conceptually distinct (a resource you hold vs. an ambient state change
+  // over a scope), and the use-site syntax for each is disjoint.
+  if (kt.appliesTo.has("region")) {
+    if (!ownsBlockSeen) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' applies to a region but does not declare 'ownsBlock'; a region kind governs a block, so ownsBlock is required`);
+    }
+    for (const valueSite of ["binding", "parameter", "field", "type", "return"]) {
+      if (kt.appliesTo.has(valueSite)) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a region and to '${valueSite}'; a region kind has no named value, so it cannot also apply to a value site`);
+      }
+    }
+  }
 }
 
 // Pass C.2: walk each kind decl and resolve its clauses against the module's
@@ -2165,6 +2183,7 @@ export function typecheckProgram(modules) {
           });
         } else {
           const kt = new KindType(d.name, mod.id);
+          kt.sourceLoc = d.sourceLoc ?? null;
           // Phase 6.5: record kind parameters on the shell so use-site
           // resolution can validate arg counts during pass C.
           for (const p of d.params ?? []) {
