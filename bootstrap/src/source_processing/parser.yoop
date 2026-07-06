@@ -25,6 +25,9 @@ function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
         const declId = parseTypeDecl(ref ps)?;
         vec.vec_push(ref body, declId);
       }
+      // case TokenTags.FUNCTION, TokenTags.TASK: {
+
+      // }
       // TODO: rest of tags...
       default: {
         return Result.Err { error: SelfLexing.createParsingError(

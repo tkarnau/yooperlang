@@ -49,7 +49,7 @@ function main(): int {
   //   }
   //   `;
 
-  const testStr = "type Test<Foo,Bar>";
+  const testStr = "type Test<Foo,Bar> 32";
   const bytes = intr.string_as_bytes(testStr);
 
   // const tokenizeResult = tokenize(bytes);

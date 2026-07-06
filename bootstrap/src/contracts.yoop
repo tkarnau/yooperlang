@@ -499,6 +499,7 @@ export enum ASTNodeKind {
   // clearance kinds kind-decl-named transition authority
   // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
   KIND_TRANSITION_CLAUSE,
+  KIND_PREFIX,
 
   // phase 6.3 task / concurrency sugar
   WAIT_EXPRESSION,
@@ -623,6 +624,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "KIND_LAYOUT_CLAUSE",
   "KIND_MARKER_CLAUSE",
   "KIND_TRANSITION_CLAUSE",
+  "KIND_PREFIX",
   "WAIT_EXPRESSION",
   "TASK_AUTO_WAIT",
   "TASK_RELEASE",
@@ -657,6 +659,28 @@ export function kindName(v: ASTNodeKind): string {
   return AST_NODE_KIND_NAMES[v];
 }
 
+export function astNodeFlagAName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.INT_LITERAL: {
+      return "negated";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildAName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.TYPE_DECL: {
+      return "typeParams";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
 export type NodeId = usize;
 
 export type SourceLocation implements Display {
@@ -669,6 +693,8 @@ export type SourceLocation implements Display {
   }
 }
 
+// Flat & Fat nodes for now, node reference and flag reuse.
+// conventions defined in loggable helpers for now.
 export type ASTNode implements Display {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
@@ -696,6 +722,8 @@ export type ASTNode implements Display {
   spanLen: usize,
 
   strId: usize,
+  intVal: uint64,
+  flagA: bool, // per-kind flags
   // ...the result of the fat-node scalar/NodeId slots
   function to_string(ref self): string {
     return `
@@ -703,12 +731,14 @@ export type ASTNode implements Display {
       sourceLoc: (${self.sourceLoc}),
       childStart: ${self.childStart},
       childCount: ${self.childCount},
-      childA: ${self.childA},
+      childA: (slot: ${astNodeChildAName(self.kind)}): ${self.childA},
       childB: ${self.childB},
       childC: ${self.childC},
       spanStart: ${self.spanStart},
       spanLen: ${self.spanLen},
-      strId: ${self.strId}`;
+      strId: ${self.strId},
+      intVal: ${self.intVal},
+      flagA (slot: ${astNodeFlagAName(self.kind)}): ${self.flagA}`;
   }
 }
 

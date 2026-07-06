@@ -34,7 +34,7 @@ export type Token implements Display {
   tag: TokenTags,
   start: usize,
   length: int,
-  intVal: int,
+  intVal: uint64,
   floatVal: float64,
   function to_string(ref self): string {
     return `tag: ${tagName(self.tag)}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
@@ -223,7 +223,7 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
   }
 
   res.token.tag = TokenTags.CHARLITERAL;
-  res.token.intVal = codepoint;
+  res.token.intVal = uint64(codepoint); 
   res.token.length = int32(p + 1 - pos);
   res.nextPos = p + 1;
 
@@ -233,7 +233,7 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
 function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
   let start = pos;
   let isFloat = false;
-  let base = 10;
+  let base: uint64 = 10; // for multiplying without casting
   let digitsStart = pos;
   let end = digitsStart;
 
@@ -376,11 +376,11 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     res.token.tag = TokenTags.FLOATLITERAL;
     res.token.floatVal = value;
   } else {
-    let value = 0;
+    let value: uint64 = 0;
     let i = digitsStart;
     while (i < end) {
       const ch = src[i];
-      if (ch != '_') { value = value * base + digitValue(ch); }
+      if (ch != '_') { value = value * base + uint64(digitValue(ch)); }
       i += 1;
     }
     res.token.tag = TokenTags.INTLITERAL;

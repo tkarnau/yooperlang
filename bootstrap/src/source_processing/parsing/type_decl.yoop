@@ -5,6 +5,7 @@ import { ASTNodeKind, TokenTags, NodeId, ParsingError } from "../../contracts.yo
 import { SelfLexing as sl, ParserState, peekLengthUsize } from "./parser_state.yoop";
 import { parseIdentAsName } from "./names.yoop";
 import { posToSourceLocation } from "../char_utils.yoop";
+import { findMatchingRParen } from "./utils.yoop";
 
 // `<T, U>` after a type name (generics, etc). Returns the NodeId of a NODE_LIST holding the
 // TYPE_PARAM nodes, or 0 (the none sentinel) when there is no list.
@@ -48,7 +49,33 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?; // typeParams list-node (0 = none)
 
-  
+  // node.kindPrefix
+  if (sl.peek(ref ps).tag == TokenTags.IDENT) {
+    let afterIdx: usize = 1;
+    if (sl.peekAhead(ref ps, 1)?.tag == TokenTags.LPAREN) { // NOTE(tom): may be an incorrect to fail here
+      const jRes = findMatchingRParen(ref ps, 1);
+      switch (jRes) {
+        case Option.None {}: {
+          afterIdx = 0; // rparen not found, will fail next steps, that's not our problem here.
+        }
+        case Option.Some { value: j }: {
+          afterIdx = j + 1;
+        }
+      }
+    }
+    if (afterIdx > 0) {
+      const after = sl.peekAhead(ref ps, afterIdx)?;
+      if (
+        after.tag == TokenTags.IMPLEMENTS ||
+        after.tag == TokenTags.PROPAGATES ||
+        after.tag == TokenTags.CONTAINS ||
+        after.tag == TokenTags.LCURLY ||
+        after.tag == TokenTags.EQ
+      ) {
+        
+      }
+    }
+  }
   // TODO: the rest of the type decl - optional kind prefix, `implements`
   // clause, propagates/contains clauses, and then either the struct body
   // (`{ field: Type, ... }` -> this node's own childStart/childCount run) or a

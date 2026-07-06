@@ -11,7 +11,7 @@ import { createASTNode } from "../../utils/ast_utils.yoop";
 export trait SelfLexing {
   function advance(ref self): Result<Token, ParsingError>;
   function peek(ref self): Token;
-  // function peekAhead(ref self, n: usize): Token;
+  function peekAhead(ref self, n: usize): Result<Token, ParsingError>;
   function expect(ref self, tag: TokenTags): Result<Token, ParsingError>;
   function createParsingError(ref self, message: string, length: Option<usize>): ParsingError;
   function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode;
@@ -63,6 +63,26 @@ export type ParserState implements SelfLexing propagates<disposable> {
   }
   function peek(ref self): Token {
     return self.currentLex.token;
+  }
+  // peeks ahead 'n' tokens without disturbing parser state. peekAhead(0) is
+  // equivalent to peek(); peekAhead(1) is the token following 'currentLex'
+  // used for certain statement disambiguation, like kind prefixes with multi
+  // ident tokens
+  function peekAhead(ref self, n: usize): Result<Token, ParsingError> {
+    if (n == 0) {
+      return Result.Ok { value: self.currentLex.token };
+    }
+    let p = self.pos;
+    let i: usize = 0;
+    let token: Token;
+    while (i < n) {
+      const lexRes = lexNext(self.src, p)?;
+      token = lexRes.token;
+      p = lexRes.nextPos;
+      i += 1;
+    }
+
+    return Result.Ok { value: token };
   }
   function createParsingError(ref self, message: string, length: Option<usize>): ParsingError {
     const sourceLoc = posToSourceLocation(self.src, self.pos, 1);

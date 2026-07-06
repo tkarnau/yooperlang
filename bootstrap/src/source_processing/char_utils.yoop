@@ -281,7 +281,7 @@ export function digitValue(ch: uint8): int {
 }
 
 export function posToSourceLocation(ref src: uint8[], pos: usize, length: usize): SourceLocation {
-  debug.assert(pos < src.len, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
+  debug.assert(pos <= src.len, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
 
   let i: usize = 0;
   let line: usize = 0;

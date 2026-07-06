@@ -1,0 +1,35 @@
+import { Result } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind, TokenTags, ParsingError, tagName } from "../../contracts.yoop";
+import { ParserState, SelfLexing as sl, peekLengthUsize } from "./parser_state.yoop";
+
+export function parseExpression(ref ps: ParserState, minPrecedence: int): Result<ASTNode, ParsingError> {
+  let node: ASTNode;
+  const peekTag = sl.peek(ref ps).tag;
+  // prefix first
+  switch (peekTag) {
+    case TokenTags.MINUS: {
+      sl.advance(ref ps); // consume the dash
+      const operand = parseExpression(ref ps, 70);
+      // todo finish minus - moved on to intLiteral to test the flow
+    }
+    case TokenTags.INTLITERAL: {
+      node = sl.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
+      node.intVal = sl.advance(ref ps)?.intVal;
+    }
+    default: {
+      return Result.Err { error: sl.createParsingError(
+        ref ps,
+        `unexpected token in expression: ${tagName(peekTag)}`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+  }
+
+  // postfix
+
+  // assignment
+  // compound assignment
+  // binary ops
+  // return
+  return Result.Ok { value: node };
+}
