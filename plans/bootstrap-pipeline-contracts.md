@@ -154,8 +154,9 @@ reference, current bootstrap status.
   imports: Vec<NodeId>, // IMPORT_DECL nodes, with resolved targets
   }
   type ModuleGraph {
-  entry: Module,
-  modules: Vec<Module>, // topo-ordered, leaves first
+  modules: Vec<Module>, // topo-ordered, leaves first; entry is IN this list
+  entryIndex: usize, // index of the entry module in `modules` (NOT a copy - a
+                     // duplicated `entry: Module` value would double-own its AST)
   autoLoadModuleIds: Map<string, string>, // std autoloads -> module id
   }
 - Invariants: cycle-free; topological order (a module appears after its
@@ -219,26 +220,40 @@ reference, current bootstrap status.
 - Output: TypedAst per module (D2) + the program-level type state:
   type TypedProgram {
   modules: Vec<TypedAst>,
-  moduleEnvs: Map<string, ModuleEnv>, // by module id
+  moduleScopes: Vec<ModuleScope>, // one per module, indexed by ModuleId
+  types: Vec<Type>, // interned; referenced everywhere by TypeId
+  symbols: Vec<Symbol>, // interned; referenced by SymbolId
   registry: InstantiationRegistry, // monomorphized generics
   diagnostics: Vec<Diagnostic>,
   }
-  Types are their own nominal model mirroring src/jsyooptypecheck/types.js.
-  Recommended: intern types in a table and reference by `TypeId` (same arena
-  trick - keeps Type values shared and comparable by id):
-  type TypeId = usize;
-  variant Type { // one case per JS Type variant
-  Prim { name: string },
-  Struct { ... }, Ref { inner: TypeId }, Array { elem: TypeId },
-  Func { ... }, Trait { ... }, Variant { ... }, ValueEnum { ... },
-  Union { ... }, Kind { ... }, TypeParam { ... }, ... ,
-  ErrorT, Void, UntypedInt, UntypedFloat,
-  }
-  ModuleEnv mirrors the JS ModuleEnvironment: localSymbols, structTable,
-  traitTable, kindTable, variantTable, unionTable, enumTable, vtableTable,
-  the generic\* tables, exports, importedNames, builtinIntrinsicNames,
-  allowsUnsafe. The InstantiationRegistry is keyed by (declId, argTypeIds)
-  and caches monomorphic Struct/Func/Trait/Variant instances.
+  The `Type` and `Symbol` variants are DEFINED CONCRETELY in
+  bootstrap/src/contracts.yoop - read those, not a sketch here. Two design
+  moves diverge from the JS impl internally (sanctioned - only this BOUNDARY
+  shape is a contract, per the deviation policy below):
+
+  1. Types are INTERNED in one arena (`types: Vec<Type>`); every inner type
+     reference is a `TypeId` (index), never a nested Type value. This
+     sidesteps recursive value ownership AND replaces the JS "mutate a shared
+     shell in place across passes" pattern (StructType.fields, TraitType.methods,
+     TypeParamType.bounds) with "pass A inserts a shell, pass C re-sets the arena
+     slot." NominalDecl.populated is the shell/filled bit that stands in for JS's
+     `fields: null`. Type equality is `id == id`; reserve low TypeIds for the
+     Void / Untyped* / Error singletons.
+
+  2. One symbol table per module, NOT thirteen. A ModuleScope is a
+     `Map<string, SymbolId>` whose value is a `Symbol` variant; the JS split
+     across structTable / traitTable / variantTable / enum/union/vtable / the
+     generic\* tables / importedNames collapses into one namespace. Lookup is one
+     get + one match; redeclaration is one `has`. Imports are name bindings into
+     the shared `symbols` arena (Symbol.Imported / Symbol.Namespace), so
+     cross-module resolution is one hop with no per-module table branching.
+     KindType is a Symbol (Symbol.Kind -> a KindId), NOT a Type case: a kind is a
+     decl, not a value's type.
+
+  ModuleScope carries the module id (the mangling basis), its name map, its
+  export set, and allowsUnsafe. The InstantiationRegistry is unchanged from the
+  JS design: keyed by (declId, argTypeIds), caching monomorphic
+  Struct/Func/Trait/Variant instances.
 - Invariants (the load-bearing ones for codegen):
   - every node that reaches codegen has a concrete resolvedType (a real
     TypeId, not the infer-later sentinel and not an error type);

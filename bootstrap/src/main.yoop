@@ -17,6 +17,7 @@ import { isHexDigit } from "./source_processing/char_utils.yoop";
 import { tokenize, Token } from "./source_processing/lexer.yoop";
 import { parse } from "./source_processing/parser.yoop";
 import { tokenScanList } from "./contracts.yoop";
+import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
 
 @precompile {
   log.info("hello, yooper from a precompile!");
@@ -49,45 +50,17 @@ function main(): int {
   //   }
   //   `;
 
-  const testStr = `
-function main(): int {
-  const num = 32 + 10;
-
-  return num;
-}
-
-function foo(bar: int): void {
-
-}
-`;
-  const bytes = intr.string_as_bytes(testStr);
-
-  // const tokenizeResult = tokenize(bytes);
-  // switch (tokenizeResult){
-  //   case Result.Err { error: e } : {
-  //     log.info(`tokenize error: ${e}`);
-  //   }
-  //   case Result.Ok { value: tokens } : {
-  //     for tok in tokens {
-  //       log.info(`token: ${tok}`);
-  //     }
-  //   }
-  // }
-
-  const parseResult = parse(bytes);
-  switch (parseResult) {
-    case Result.Err { error: e } : {
-      log.info(`parsing error: ${e}`);
+  // Layer 0 smoke test: load a real source file into a one-module graph.
+  const entryPath = "bootstrap/examples/single_module.yoop";
+  switch (loadModuleGraph(entryPath)) {
+    case LoadGraphResult.Err { error: e }: {
+      log.info(`module graph load failed: ${e}`);
     }
-    case Result.Ok { value: ast } : {
-      log.info(`parsed successfully: ${ast}`);
+    case LoadGraphResult.Ok { value: mg }: {
+      const entryMod = vec.vec_get(ref mg.modules, mg.entryIndex);
+      log.info(`loaded ${mg.modules.len} module(s); entry ${entryMod.absPath} parsed to ${entryMod.ast.nodes.len} AST nodes`);
     }
   }
-
-  // log.info(`tokenize result ${tokenizeResult}`);
-
-  // the real compilation will drive from compiling "modules" which are like files
-  // for now, we can start that pattern first: module graph compilation driver
 
   return 0;
 }

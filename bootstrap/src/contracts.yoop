@@ -915,8 +915,8 @@ export type Module propagates<disposable> {
 }
 
 export type ModuleGraph propagates<disposable> {
-  modules: Vec<Module>,
-  entry: Module,
+  modules: Vec<Module>,            // topo-ordered, leaves first; the entry is IN this list
+  entryIndex: usize,               // index of the entry module in `modules` (not a copy)
   autoLoadModuleIds: Map<string, string>,
 }
 
@@ -975,3 +975,208 @@ code:
 }
 
 export type ParsingResult = Result<NodeId, ParsingError>;
+
+// ===========================================================================
+// Typecheck-layer contracts (Layer 3): the interned Type + Symbol model.
+//
+// This deliberately DIVERGES from the JS reference internals (see the deviation
+// policy in plans/bootstrap-pipeline-contracts.md - only the TypedProgram
+// BOUNDARY is a contract; the tables inside a pass are free to differ). Two JS
+// patterns do not port to a value-semantic language, and each has a clean
+// collapse here:
+//
+//   1. src/jsyooptypecheck/types.js reference-shares "shell" type objects and
+//      MUTATES them in place across passes (StructType.fields filled in pass C,
+//      TraitType.methods, TypeParamType.bounds). yoop cannot mutate a
+//      copied-around value, so instead every type is INTERNED in one arena
+//      (Program.types: Vec<Type>) and referred to by an integer `TypeId`. Pass A
+//      inserts a shell; pass C REPLACES the whole arena slot
+//      (types.set(id, filled)). `NominalDecl.populated` is the shell/filled bit
+//      that replaces JS's `fields: null` sentinel (which a Vec can't express).
+//
+//   2. The JS ModuleEnvironment splits one logical namespace across 13
+//      string-keyed tables (structTable, traitTable, variantTable, the generic*
+//      tables, ...). Here a module scope is ONE Map<string, SymbolId> whose
+//      value is a `Symbol`. Name lookup is one get + one switch, not an
+//      N-table `??` fallthrough, and the redeclaration check is one `has`.
+//
+// KindType is intentionally NOT a Type case: a kind is a decl, not a value's
+// type. It lives in the symbol table as `Symbol.Kind` (a KindId into a separate
+// kinds table). That drops the single heaviest, most-mutable JS type case out
+// of the type arena entirely.
+// ===========================================================================
+
+export type TypeId   = usize;   // index into Program.types  (0 = none/error sentinel)
+export type SymbolId = usize;   // index into Program.symbols
+export type ModuleId = usize;   // index into Program.modules
+export type DeclId   = usize;   // stable per-decl id for a generic origin (0 = none)
+export type KindId   = usize;   // index into the kinds table (0 = none)
+// NodeId is already declared above (the AST arena uses it).
+
+// Canonical primitive kinds. Resolution canonicalizes source spellings up front
+// (`int` -> INT32, `float` -> FLOAT32, the c_* aliases -> their LP64 widths), so
+// the arena only ever holds a canonical PrimKind, never a raw name string.
+export enum PrimKind {
+  INT8, INT16, INT32, INT64, ISIZE,
+  UINT8, UINT16, UINT32, UINT64, USIZE,
+  FLOAT32, FLOAT64,
+  BOOL, STRING,
+}
+
+// Which generic-decl family a `Symbol.GenericDecl` points at. Replaces the JS
+// genericStructTable / genericFuncTable / genericTraitTable / genericVariantTable
+// four-table split with one tag; the decl itself lives in a side table keyed by
+// DeclId. Concrete instantiations never live here - they go in the registry.
+export enum GenericSort { STRUCT, FUNC, TRAIT, VARIANT }
+
+// Identity shared by every nominal type (struct / variant / union / enum /
+// trait / vtable). `populated` is the shell/filled bit: pass A registers a shell
+// (populated = false, empty member lists) so cross-module and forward refs
+// resolve; pass C re-sets the arena slot with populated = true once fields /
+// methods are known. This is the value-semantic replacement for the JS
+// `fields: null` shell sentinel.
+export type NominalDecl {
+  name: string,
+  module: ModuleId,
+  populated: bool,
+}
+
+// When a nominal type is an instantiation of a generic decl, `origin` names the
+// generic decl and `args` are the type-args used. `origin == 0` means "not an
+// instance". Substitution re-instantiates open instances (args that are
+// themselves TypeParams) through the registry.
+export type GenericInst propagates<disposable> {
+  origin: DeclId,
+  args: Vec<TypeId>,
+}
+
+export type Field {
+  name: string,
+  typeId: TypeId,
+}
+
+// One case of a tagged `variant`. `ordinal` is the stable 0-indexed
+// declaration-order tag and is ABI: reordering cases changes the emitted i32
+// discriminator. Empty `fields` = a payload-less case.
+export type VariantCase propagates<disposable> {
+  name: string,
+  ordinal: int,
+  fields: Vec<Field>,
+}
+
+// One case of a value `enum`. `value` is the case's compile-time constant of the
+// enum's underlying primitive. For `enum<string>` the constant is a string;
+// store its string-pool index here (or add a valueStr slot) when Phase-12 string
+// enums land in the bootstrap.
+export type EnumCase {
+  name: string,
+  ordinal: int,
+  value: int64,
+}
+
+// The interned type. Every inner type reference is a `TypeId` (an arena index),
+// never a nested `Type` value - that indirection is what sidesteps recursive
+// value ownership and lets a pass "fill a shell" by re-setting one slot. Mirrors
+// the ~22 constructors in src/jsyooptypecheck/types.js, minus KindType (now a
+// Symbol) and with the JS mutable exceptions (Struct.fields, Trait.methods,
+// TypeParam.bounds) folded into the uniform shell-then-reset pattern.
+export variant Type propagates<disposable> {
+  // Leaves: no inner TypeId. The singletons below should get RESERVED low
+  // TypeIds allocated once at Program init, so equality on them is `id == id`.
+  Prim            { prim: PrimKind },
+  Void,
+  UntypedInt,
+  UntypedFloat,
+  UntypedNull,
+  ErrorT,
+  SelfPlaceholder,                        // trait-method `ref self` placeholder
+
+  // Structural: compose other TypeIds.
+  Ref       { inner: TypeId },
+  Array     { elem: TypeId },
+  Task      { result: TypeId },
+  UnsafePtr { pointee: TypeId },          // pointee 0 = opaque `unsafe_ptr` (no <T>)
+  Func      { params: Vec<TypeId>, ret: TypeId, variadic: bool },
+  FuncPtr   { params: Vec<TypeId>, ret: TypeId },   // `(p: T) => R` value type
+  Namespace { module: ModuleId },         // `import * as ns`; exports on the scope
+
+  // Nominal: named, per-module, shell-then-filled (see NominalDecl.populated).
+  Struct    { decl: NominalDecl, fields: Vec<Field>, methods: Map<string, TypeId>,
+              implementsTraits: Vec<TypeId>, generic: GenericInst },
+  Variant   { decl: NominalDecl, cases: Vec<VariantCase>, methods: Map<string, TypeId>,
+              implementsTraits: Vec<TypeId>, generic: GenericInst },
+  Union     { decl: NominalDecl, fields: Vec<Field> },
+  ValueEnum { decl: NominalDecl, underlying: TypeId, cases: Vec<EnumCase>, isOpen: bool },
+  Trait     { decl: NominalDecl, methods: Map<string, TypeId>,
+              typeParams: Vec<TypeId>, extendsTraits: Vec<TypeId> },
+  VTable    { decl: NominalDecl, forTrait: TypeId, fields: Vec<Field>,
+              methodOrder: Vec<string> },
+
+  // Generics: a TypeParam placeholder inside a generic body. `bounds` is empty
+  // in pass A and re-set in pass C once `implements` clauses resolve.
+  TypeParam { name: string, originDecl: DeclId, bounds: Vec<TypeId> },
+}
+
+// A module-level name binding. One symbol namespace per module (a module scope
+// is Map<string, SymbolId>) replaces the JS 13-table split; the value here says
+// what the name means, so lookup is one get + one switch.
+//
+// The eight type-carrying cases (Struct..Vtable) could collapse into a single
+// `Type { typeId }`, since Program.types[typeId] already discriminates which
+// nominal kind it is - kept explicit here for 1:1 readability against the JS
+// tables. Collapse if the redundancy bites. Symbol is all-scalar (no Vec/Map),
+// so unlike Type it needs no `propagates` clause.
+export variant Symbol {
+  Struct      { typeId: TypeId },
+  Func        { typeId: TypeId },         // a named function's FuncType
+  Value       { typeId: TypeId },         // a module-level const binding
+  Trait       { typeId: TypeId },
+  VariantT    { typeId: TypeId },         // tagged `variant` (enum-with-payload)
+  Union       { typeId: TypeId },
+  ValueEnum   { typeId: TypeId },
+  Vtable      { typeId: TypeId },
+  Alias       { annot: NodeId, home: ModuleId },   // transparent `type X = ...` RHS
+  Kind        { kindId: KindId },         // a kind decl (disposable, tainted, ...)
+  GenericDecl { decl: DeclId, sort: GenericSort }, // stays out of the concrete tables
+  Namespace   { module: ModuleId },       // `import * as ns`
+  Imported    { target: SymbolId },       // by-name import: a redirect to another module's symbol
+}
+
+// A typecheck diagnostic. Unlike lex/parse (which fail fast via Result), the
+// typechecker ACCUMULATES these and never throws (decision D3) - the whole
+// program is checked so the user sees every error at once. `sourceLoc` points
+// into the original module source.
+export enum Severity { ERROR, WARNING }
+
+export type Diagnostic {
+  message: string,
+  sourceLoc: SourceLocation,
+  severity: Severity,
+}
+
+// Per-module typecheck state, indexed positionally by ModuleId (parallel to the
+// driver's module list). This does NOT own the module's AST - the ModuleGraph
+// does; decoration references nodes by NodeId (decision D2), so codegen reads
+// the AST from the graph and the resolved types from here, correlated by index.
+export type TypedModule propagates<disposable> {
+  moduleId: string,               // stable id copied from Module.id; mangling basis
+  names: Map<string, SymbolId>,   // the one symbol namespace (replaces the 13 JS tables)
+  exports: Map<string, SymbolId>, // the exported subset of `names`
+  resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
+  allowsUnsafe: bool,
+  // Sparse decorations (calleeMangled, genericInstances, castTargets, ...) are
+  // added as Map<NodeId, T> slots here when the checker needs them.
+}
+
+// The whole-program output of typecheckProgram. Types and symbols are interned
+// ONCE across the program (TypeId / SymbolId are global indices); per-module
+// name maps point into the shared `symbols` arena, which is what makes an import
+// just a name binding. Holds the accumulated diagnostics rather than returning a
+// Result - see Diagnostic above.
+export type Program propagates<disposable> {
+  types: Vec<Type>,             // interned; indexed by TypeId (low ids reserved for singletons)
+  symbols: Vec<Symbol>,         // interned; indexed by SymbolId
+  modules: Vec<TypedModule>,    // by ModuleId; parallel to the driver's modules
+  diagnostics: Vec<Diagnostic>,
+  // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
+}

@@ -1,0 +1,39 @@
+/*
+  Author: Tom Karnau
+
+  The typecheckProgram function takes a parsed yooperlang AST
+  and produces a typechecked yooperlang AST with coercions and
+  other modifications to the original AST prior to bytecode and
+  codegen phases.
+
+  Typechecking is different than the lexing and parsing, in that
+  we want to collect all of the errors rather than bailing out
+  so we will use something different than the Result<T,E> strategy:
+  errors accumulate in Program.diagnostics and we never throw.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ModuleGraph, Program } from "../contracts.yoop";
+
+// Layer 3 producer. Borrows the parsed, import-ordered module graph (the driver
+// retains ownership so codegen can read the ASTs afterward) and produces the
+// whole-program Program: interned types + symbols, per-module decoration, and
+// accumulated diagnostics. Never throws - errors land in Program.diagnostics.
+//
+// Passes (mirroring the JS reference, but over the interned model):
+//   A - register decl shells (names -> SymbolId, shell Types) so cross-module
+//       and forward references resolve.
+//   B - wire imports (bind imported names into each module's `names` map).
+//   C - fill shells: struct fields, function signatures, trait methods, kinds.
+//   D - check bodies + module-init inference; decorate resolvedTypes.
+export function typecheckProgram(ref graph: ModuleGraph): Program propagates<disposable> {
+  // TODO(10.K): passes A-D. For now, return an empty program shell so the
+  // signature and Program shape are exercised end to end.
+  return {
+    types: vec.vec_new(0),
+    symbols: vec.vec_new(0),
+    modules: vec.vec_new(0),
+    diagnostics: vec.vec_new(0),
+  };
+}

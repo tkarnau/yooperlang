@@ -1,73 +1,155 @@
+/*
+  Layer 0 - module graph / driver.
+
+  Today the bootstrap does NOT resolve imports, so "the graph" is a single
+  entry module: read the file, parse it into an AST arena, wrap it in a Module,
+  and return a one-module ModuleGraph. If the entry uses imports we refuse with
+  a clear message rather than half-building a graph.
+
+  Note on `disposable` ceremony: this file leans on the arena/index pattern to
+  keep ownership simple. Every value that survives is MOVED forward into the
+  returned graph (src -> Module.src, ast -> Module.ast, module -> modules,
+  modules -> ModuleGraph), so there is exactly one owner at the end and nothing
+  to auto-clean. That is why no binding here needs the `disposable` keyword and
+  no function needs `propagates<disposable>` on its return: only the container
+  TYPE decls in contracts.yoop (Module, ModuleGraph, AST) carry that annotation,
+  because for a `type` a disposable field requires it - a rule that does NOT
+  apply to `variant` decls or to function return types.
+*/
+
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
-import { Set }, * as set from "std/collections/set.yoop";
 import * as fs from "std/fs.yoop";
 import * as str from "std/core/strings.yoop";
-import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
-import {
-  AST,
-  ASTNode,
-  ASTNodeKind,
-  ImportEdge,
-  NodeId,
-  Module,
-  ModuleGraph,
-} from "../contracts.yoop";
-import { IterableVec, vecIter } from "../utils/array_utils.yoop";
-import { emptyArena } from "../utils/ast_utils.yoop";
-
+import { AST, ASTNodeKind, Module, ModuleGraph } from "../contracts.yoop";
+import { parse } from "../source_processing/parser.yoop";
 
 export function getModuleId(path: string): string {
-  // todo create hash...
-  // for now just return the absPath
+  // TODO: hash to a short, stable id for cross-module symbol mangling. Until
+  // imports (and therefore multi-module mangling) exist, the path is a unique
+  // enough id for the single entry module.
   return path;
 }
 
-variant LoadResult {
-  Ok { value: usize },
-  Err { error: string },
-}
-
-variant LoadGraphResult {
+export variant LoadGraphResult {
   Ok { value: ModuleGraph },
   Err { error: string },
 }
 
-// function emptyArena(): AST propagates<disposable> {
-//   const rootNode: ASTNode = {
-//     kind: ASTNodeKind.PROGRAM,
-//     sourceLoc: {
-//       pos: 0,
-//       line: 0,
-//       column: 0,
-//       length: 0
-//     },
-//   };
-//   const astNodes: Vec<ASTNode> = vec.vec_new(0);
-//   vec.vec_push(ref astNodes, rootNode);
-//   return {
-//     root: 0,
-//     nodes: astNodes
-//   };
-// }
+variant LoadModuleResult {
+  Ok { value: Module },
+  Err { error: string },
+}
 
-function resultImportPath(
+// Count the leading IMPORT_DECLs in a parsed program (the imports-first rule).
+// The parser does not emit IMPORT_DECL nodes yet - it rejects `import` at the
+// top level - so this returns 0 today. It is the forward-compatible guard: the
+// moment imports parse, they get a clear refusal here instead of silently
+// vanishing from a graph the driver cannot yet build.
+function countLeadingImports(ref ast: AST): usize {
+  const program = vec.vec_get(ref ast.nodes, ast.root);
+  let count: usize = 0;
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const childId = vec.vec_get(ref ast.childIds, program.childStart + i);
+    const child = vec.vec_get(ref ast.nodes, childId);
+    if (child.kind != ASTNodeKind.IMPORT_DECL) {
+      break; // imports-first: the first non-import ends the run
+    }
+    count += 1;
+    i += 1;
+  }
+  return count;
+}
+
+// Read + parse one source file into a Module. This is the whole graph today.
+function loadModule(absPath: string): LoadModuleResult {
+  if (!fs.exists(absPath)) {
+    return LoadModuleResult.Err { error: `entry file not found: ${absPath}` };
+  }
+
+  // Read the source bytes. read_file_into returns "" on success, else an error.
+  const srcBuf: Vec<uint8> = vec.vec_new(4096);
+  const readErr = fs.read_file_into(ref srcBuf, absPath);
+  if (readErr.len > 0) {
+    return LoadModuleResult.Err { error: `error reading ${absPath}: ${readErr}` };
+  }
+
+  // Parse into an AST arena. parse borrows the byte array for the duration of
+  // the call; srcBuf outlives it and is moved into Module.src below (the AST's
+  // spans are byte offsets into it, so the module keeps the source around).
+  const parseResult = parse(vec.vec_as_array(ref srcBuf));
+  let ast: AST;
+  switch (parseResult) {
+    case Result.Err { error: e }: {
+      return LoadModuleResult.Err { error: `parse error in ${absPath}: ${e}` };
+    }
+    case Result.Ok { value: parsedAst }: {
+      ast = parsedAst;
+    }
+  }
+
+  if (countLeadingImports(ref ast) > 0) {
+    return LoadModuleResult.Err {
+      error: `module ${absPath} uses imports, which the bootstrap compiler does not support yet`
+    };
+  }
+
+  const mod: Module = {
+    id: getModuleId(absPath),
+    absPath: absPath,
+    src: srcBuf,
+    ast: ast,
+    imports: vec.vec_new(0),
+  };
+  return LoadModuleResult.Ok { value: mod };
+}
+
+// Layer 0 producer. Loads the entry file into a one-module graph.
+export function loadModuleGraph(entryPath: string): LoadGraphResult {
+  let entryModule: Module;
+  switch (loadModule(entryPath)) {
+    case LoadModuleResult.Err { error: e }: {
+      return LoadGraphResult.Err { error: e };
+    }
+    case LoadModuleResult.Ok { value: m }: {
+      entryModule = m;
+    }
+  }
+
+  const modules: Vec<Module> = vec.vec_new(1);
+  vec.vec_push(ref modules, entryModule);
+
+  // No std autoloads wired yet; an empty map keeps the ModuleGraph shape whole.
+  const autoLoads: Map<string, string> = map.map_new(0, map.string_key_ops());
+
+  const graph: ModuleGraph = {
+    modules: modules,
+    entryIndex: 0,
+    autoLoadModuleIds: autoLoads,
+  };
+  return LoadGraphResult.Ok { value: graph };
+}
+
+// --- Import-path resolution (dormant until imports land) -------------------
+// Kept because it is standalone path logic, not a layer-interfacing assumption:
+// it maps an import source path (std/..., ./..., ../..., or absolute) to a
+// canonical, existing file path. loadModule will call this per import edge once
+// the parser emits IMPORT_DECLs and the graph goes multi-module.
+export function resolveImportPath(
   importerAbsPath: string,
   sourcePath: string,
   stdRoot: string
 ): Result<string, string> {
-  // 1. Must be a .yoop path
   if (!fs.hasYoopFileNameSuffix(sourcePath)) {
     return Result.Err { error: `import path "${sourcePath}" must end in .yoop` };
   }
 
-  // 2. std/... resolves against stdRoot; everything else must be ./ ../ or abs
   const isStd = str.string_starts_with(sourcePath, "std/");
   let joinedPath: string;
   if (isStd) {
-    // drop the leadings "std/" then root it at stdRoot
-    const rest = str.sliceFrom(sourcePath, 4);
+    const rest = str.sliceFrom(sourcePath, 4); // drop "std/", root at stdRoot
     joinedPath = fs.path_join([stdRoot, rest]);
   } else {
     const isRel = str.string_starts_with(sourcePath, "./")
@@ -86,10 +168,6 @@ function resultImportPath(
     }
   }
 
-  // 3. canonicalize + existence check.
-  // need to normalize a canonical path so that modules and mangling
-  // for the same actual file referenced from two different paths do
-  // not get duplicated.
   const canonicalPath = fs.normalizePath(joinedPath);
   if (canonicalPath.len == 0) {
     return Result.Err { error: `unable to identify a canonical path from ${joinedPath}` };
@@ -99,102 +177,4 @@ function resultImportPath(
   }
 
   return Result.Ok { value: canonicalPath };
-}
-
-function importSourcePath(ref ast: AST, importNode: NodeId): string {
-  const node = vec.vec_get(ref ast.nodes, importNode);
-  return vec.vec_get(ref ast.strings, node.strId);
-}
-
-function fillProgramImportNodeIds(ref ast: AST, ref out: Vec<NodeId>): void {
-  const program = vec.vec_get(ref ast.nodes, ast.root); // pod copy
-
-  let i: usize = 0;
-  while (i < program.childCount) {
-    const childId = vec.vec_get(ref ast.childIds, program.childStart + i);
-    const child = vec.vec_get(ref ast.nodes, childId); // pod copy
-
-    if (child.kind != ASTNodeKind.IMPORT_DECL) {
-      break; // imports-first: first non-import ends the run
-    }
-    vec.vec_push(ref out, childId);
-    i += 1;
-  }
-}
-
-// take the current module graph and a cycle detection stack pointer
-// and a path (either the entry point or an import referenced via another module)
-function loadModule(
-  ref modules: Vec<Module>,
-  ref pathIndexMap: Map<string, usize>,
-  ref cycleStack: Set<string>,
-  absPath: string,
-  stdRoot: string,
-): LoadResult propagates<disposable> {
-  if (set.set_contains(ref cycleStack, absPath)) {
-    return LoadResult.Err { error: `import cycle detected involving ${absPath}` };
-  }
-  // if it has already been loaded, just return it
-  switch (map.map_get(ref pathIndexMap, absPath)) {
-    case Option.None: { }
-    case Option.Some { value: v } : { return LoadResult.Ok { value: v }; }
-  }
-
-  
-  set.set_insert(ref cycleStack, absPath);
-
-  // declare a file buffer and read in the source code...
-  const srcBuf: Vec<uint8> = vec.vec_new(4096); // 4kb seems fine to start...
-  const readErr = fs.read_file_into(ref srcBuf, absPath);
-  if (readErr.len > 0) {
-    return LoadResult.Err { error: `error loading source file ${absPath}: ${readErr}` };
-  }
-  // temp - build an empty arena AST with only the program node for now
-  const ast = emptyArena();
-
-  // walk the leading IMPORT_DECLs (imports-first rule) out of the arena
-  const edges: Vec<ImportEdge> = vec.vec_new(0);
-  
-  const importNodes: Vec<NodeId> = vec.vec_new(0);
-  // fill this vec
-  fillProgramImportNodeIds(ref ast, ref importNodes);
-  for importNode in vecIter(ref importNodes) {
-
-  }
-
-  const id = getModuleId(absPath);
-  const mod: Module = {
-    id: id,
-    absPath: absPath,
-    src: srcBuf,
-    ast: ast,
-    imports: []
-  };
-
-  return LoadResult.Ok { value: mod };
-}
-
-// layer producer for the module graph
-export function loadModuleGraph(entryPath: string): LoadGraphResult propagates<disposable> {
-  // const graph: Map<string, Module> = map.map_new(0, map.string_key_ops());
-  const cycleStack: Set<string> = set.set_new(0, map.string_key_ops());
-  const moduleVec: Vec<Module> = vec.vec_new(0);
-  const loadResult = loadModule(ref moduleVec, ref cycleStack, entryPath);
-
-  // deal with autoload - std stuff
-  const mainEntryResult = map.map_get(ref graph, entryPath);
-  let mainEntry: Module;
-  switch (mainEntryResult) {
-    case Option.None: { 
-      return LoadGraphResult.Err { error: "unable to find entry module" };
-    }
-    case Option.Some { value: mainEntryValue } : {
-      mainEntry = mainEntryValue;
-    }
-  }
-
-  // const result: ModuleGraph = {
-  //   entry: mainEntry,
-  // };
-  // return LoadGraphResult.Ok { value: result };
 }
