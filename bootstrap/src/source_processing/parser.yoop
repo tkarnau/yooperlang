@@ -8,7 +8,8 @@ import { Token, LexedVal, createLexedVal, lexNext } from "./lexer.yoop";
 import { skipWhitespace, posToSourceLocation } from "./char_utils.yoop";
 import { SelfLexing, ParserState, peekLengthUsize } from "./parsing/parser_state.yoop";
 import { emptyArena } from "../utils/ast_utils.yoop";
-import { parseTypeDecl } from "./parsing/type_decl.yoop";
+import { parseTypeDecl } from "./parsing/types.yoop";
+import { parseFunctionDecl } from "./parsing/functions.yoop";
 
 
 // main parsing logic, starts with top level and handles all child levels
@@ -22,12 +23,11 @@ function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
   while (peekTag != TokenTags.EOF) {
     switch (peekTag) {
       case TokenTags.TYPE: {
-        const declId = parseTypeDecl(ref ps)?;
-        vec.vec_push(ref body, declId);
+        vec.vec_push(ref body, parseTypeDecl(ref ps)?);
       }
-      // case TokenTags.FUNCTION, TokenTags.TASK: {
-
-      // }
+      case TokenTags.FUNCTION /*, TokenTags.TASK */: {
+        vec.vec_push(ref body, parseFunctionDecl(ref ps)?);
+      }
       // TODO: rest of tags...
       default: {
         return Result.Err { error: SelfLexing.createParsingError(
@@ -51,8 +51,7 @@ function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
   return Result.Ok { value: ps.ast };
 }
 
-
-export function parse(src: uint8[]): Result<AST, ParsingError> {
+export function parse(src: uint8[]): Result<AST, ParsingError> propagates<disposable> {
   let pState: ParserState = {
     currentLex: createLexedVal(), // EOF placeholder; primed by the advance below
     pos: 0,

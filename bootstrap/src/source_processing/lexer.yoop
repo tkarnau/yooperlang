@@ -58,6 +58,7 @@ type LexedError implements (Display, Into<ParsingError>) {
       sourceLoc: posToSourceLocation(self.src, self.pos, usize(1)),
       isParseError: true,
       rawMessage: self.error,
+      src: self.src,
       err: `parsing error from lexing: ${self.error}`
     };
   }

@@ -6,10 +6,11 @@ import { SelfLexing as sl, ParserState, peekLengthUsize } from "./parser_state.y
 import { parseIdentAsName } from "./names.yoop";
 import { posToSourceLocation } from "../char_utils.yoop";
 import { findMatchingRParen } from "./utils.yoop";
+import { consumeKindPrefixWithArgs } from "./kinds.yoop";
 
 // `<T, U>` after a type name (generics, etc). Returns the NodeId of a NODE_LIST holding the
 // TYPE_PARAM nodes, or 0 (the none sentinel) when there is no list.
-function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingError> {
+export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingError> {
   if (sl.peek(ref ps).tag != TokenTags.LT) {
     return Result.Ok { value: 0 };
   }
@@ -72,7 +73,7 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
         after.tag == TokenTags.LCURLY ||
         after.tag == TokenTags.EQ
       ) {
-        
+        node.childB = consumeKindPrefixWithArgs(ref ps)?;
       }
     }
   }
@@ -85,4 +86,25 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   // its name + type params.
 
   return Result.Ok { value: sl.pushNode(ref ps, node) };
+}
+
+// original js compiler had a custom shape for this, but we're going to fit it
+// as a regular AST node
+export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, ParsingError> {
+  // TODO - clearance kind support like tainted uint8[], or cleared validated Foo
+  // TODO - Function param types or wrapped type for attaching as an array
+  // ref T
+  let peekTag = sl.peek(ref ps).tag;
+  if (peekTag == TokenTags.REF) {
+    sl.advance(ref ps)?;
+    let refNode = sl.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_REF_TYPE);
+    refNode.childA = parseTypeAnnotation(ref ps)?;
+    return Result.Ok { value: sl.pushNode(ref ps, refNode) };
+  }
+  // other conditions.. for now just do a basic type without namespace...
+  let typeNameNode = sl.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+  let name = parseIdentAsName(ref ps)?;
+  typeNameNode.name = name;
+
+  return Result.Ok { value: sl.pushNode(ref ps, typeNameNode) };
 }

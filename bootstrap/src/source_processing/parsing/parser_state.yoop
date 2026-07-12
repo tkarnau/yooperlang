@@ -2,6 +2,7 @@ import { Result, Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as bytes from "std/core/bytes.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
+import * as Log from "std/log.yoop";
 
 import { AST, ASTNode, ASTNodeKind, NodeId, TokenTags, tagName, SourceLocation, ParsingError } from "../../contracts.yoop";
 import { Token, LexedVal, createLexedVal, lexNext } from "../lexer.yoop";
@@ -86,10 +87,13 @@ export type ParserState implements SelfLexing propagates<disposable> {
   }
   function createParsingError(ref self, message: string, length: Option<usize>): ParsingError {
     const sourceLoc = posToSourceLocation(self.src, self.pos, 1);
+    // log the current ast...
+    Log.info(`creating parser error - current AST\n${self.ast}`);
     return {
       sourceLoc: sourceLoc,
       isParseError: true,
       rawMessage: message,
+      src: self.src,
       err: message, // for now...
     };
   }

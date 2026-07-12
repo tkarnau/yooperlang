@@ -1,10 +1,12 @@
 import * as debug from "std/debug.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import * as str from "std/core/strings.yoop";
+import * as bytes from "std/core/bytes.yoop";
 import { Map } from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Display } from "std/core/traits.yoop";
 import { Comparable, quickSort } from "./utils/array_utils.yoop";
+import { Result } from  "std/core/types.yoop";
 
 // ************ LEXING CONTRACTS **************
 
@@ -145,6 +147,31 @@ export enum TokenTags {
   // ATTRIBUTE (E.G. `@PRECOMPILE`, `@TEST`, `@VERIFY`). ALWAYS A
   // COMPILE-TIME DIRECTIVE - NEVER QUERYABLE FROM RUNTIME CODE.
   AT,
+}
+
+export function getTokenPrecedence(tag: TokenTags): int {
+  switch(tag) {
+    case TokenTags.EQ: { return 10; }
+    case TokenTags.OROR: { return 20; }
+    case TokenTags.ANDAND: { return 30; }
+    case TokenTags.PIPE: { return 35; }
+    case TokenTags.CARET: { return 36; }
+    case TokenTags.AMP: { return 37; }
+    case TokenTags.EQEQ,
+         TokenTags.NEQ,
+         TokenTags.LT,
+         TokenTags.GT,
+         TokenTags.LTE,
+         TokenTags.GTE: { return 40; }
+    case TokenTags.LSHIFT,
+         TokenTags.RSHIFT: { return 45; }
+    case TokenTags.PLUS,
+         TokenTags.MINUS: { return 50; }
+    case TokenTags.MULT,
+         TokenTags.DIVIDE,
+         TokenTags.MODULUS: { return 60; }
+    default: { return 0; }
+  }
 }
 
 const TOKEN_TAG_NAMES: string[] = [
@@ -561,6 +588,9 @@ export enum ASTNodeKind {
   // any that survive are an internal-error.
   ATTRIBUTE,
   NODE_LIST, // with a fat node, the list of nodes allows a level of indirection
+  // type annotation kinds
+  TYPE_ANNOTATION_REF_TYPE,
+  TYPE_ANNOTATION_TYPE_NAME,
 }
 
 const AST_NODE_KIND_NAMES: string[] = [
@@ -650,6 +680,8 @@ const AST_NODE_KIND_NAMES: string[] = [
   "FAIL_TEST_KIND",
   "ATTRIBUTE",
   "NODE_LIST", // node for handling a list of nodes
+  "TYPE_ANNOTATION_REF_TYPE",
+  "TYPE_ANNOTATION_TYPE_NAME",
 ];
 
 // Maps an ASTNodeKind case to its source spelling. Used by Display sites
@@ -664,6 +696,9 @@ export function astNodeFlagAName(v: ASTNodeKind): string {
     case ASTNodeKind.INT_LITERAL: {
       return "negated";
     }
+    case ASTNodeKind.PARAM: {
+      return "isRef";
+    }
     default: {
       return "undefined";
     }
@@ -672,8 +707,72 @@ export function astNodeFlagAName(v: ASTNodeKind): string {
 
 export function astNodeChildAName(v: ASTNodeKind): string {
   switch (v) {
-    case ASTNodeKind.TYPE_DECL: {
+    case ASTNodeKind.TYPE_DECL,
+         ASTNodeKind.FUNCTION_DECL: {
       return "typeParams";
+    }
+    case ASTNodeKind.KIND_PREFIX: {
+      return "argsList";
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
+      return "inner";
+    }
+    case ASTNodeKind.PARAM,
+         ASTNodeKind.CONST_DECL,
+         ASTNodeKind.LET_DECL: {
+      return "typeAnnotation";
+    }
+    case ASTNodeKind.BLOCK: {
+      return "statementsList";
+    }
+    case ASTNodeKind.RETURN_STATEMENT: {
+      return "returnExpression";
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return "leftNode";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildBName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.TYPE_DECL: {
+      return "kindPrefix";
+    }
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "functionParamList";
+    }
+    case ASTNodeKind.CONST_DECL,
+         ASTNodeKind.LET_DECL: {
+      return "assignmentExpression";
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return "rightNode";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildCName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "returnTypeAnnotation";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildDName(v: ASTNodeKind): string {
+  switch(v) {
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "functionBody";
     }
     default: {
       return "undefined";
@@ -706,7 +805,10 @@ export type ASTNode implements Display {
   // a named single-child slot below pointing at a NODE_LIST whose own
   // childStart/childCount holds that list.
   childStart: usize,
-  childCount: usize,
+  // Can I actually use this? Since nodes are arbitrarily added to the list?
+  // Wouldn't we only want direct descendents in this count? You can't just
+  // take it from the childStart and count...
+  childCount: usize, 
 
   // Named single-child slots for the fat node (0 = none, since NodeId 0 is the
   // reserved "none" sentinel - no real node lives at arena index 0). Each kind
@@ -716,31 +818,42 @@ export type ASTNode implements Display {
   childA: NodeId,
   childB: NodeId,
   childC: NodeId,
+  childD: NodeId,
 
   // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
   spanStart: usize,
   spanLen: usize,
+  operator: TokenTags,
 
   strId: usize,
   intVal: uint64,
   flagA: bool, // per-kind flags
   // ...the result of the fat-node scalar/NodeId slots
   function to_string(ref self): string {
+    let nameStr = self.name;
+    if (self.name.len == 0) {
+      nameStr = "none";
+    }
     return `
+      name: ${nameStr},
       kind: ${kindName(self.kind)},
       sourceLoc: (${self.sourceLoc}),
       childStart: ${self.childStart},
       childCount: ${self.childCount},
-      childA: (slot: ${astNodeChildAName(self.kind)}): ${self.childA},
-      childB: ${self.childB},
-      childC: ${self.childC},
+      childA (slot: ${astNodeChildAName(self.kind)}): ${self.childA},
+      childB (slot: ${astNodeChildBName(self.kind)}): ${self.childB},
+      childC (slot: ${astNodeChildCName(self.kind)}): ${self.childC},
+      childD (slot: ${astNodeChildDName(self.kind)}): ${self.childD},
       spanStart: ${self.spanStart},
       spanLen: ${self.spanLen},
+      operator: ${tagName(self.operator)},
       strId: ${self.strId},
       intVal: ${self.intVal},
       flagA (slot: ${astNodeFlagAName(self.kind)}): ${self.flagA}`;
   }
 }
+
+
 
 export type AST implements Display propagates<disposable> {
   nodes: Vec<ASTNode>,
@@ -811,12 +924,54 @@ export type ParsingError implements Display {
   sourceLoc: SourceLocation,
   isParseError: bool,
   rawMessage: string,
+  src: ref uint8[],
   err: string,
   function to_string(ref self): string {
-    return `
-      err: ${self.err},
-      sourceLoc: ${self.sourceLoc},
-      rawMessage: ${self.rawMessage},
-      isParseError: ${self.isParseError}`;
+    let lowerBound: usize;
+    let upperBound: usize;
+    let relativePos: usize = 4;
+    if (self.sourceLoc.column >= 5) {
+      lowerBound = self.sourceLoc.pos - 5;
+    } else {
+      lowerBound = self.sourceLoc.pos - self.sourceLoc.column;
+      relativePos = self.sourceLoc.column;
+    }
+    
+    const srcRef = self.src;
+    let maxOffSet: usize = 5;
+    if (srcRef.len <= 5) {
+      maxOffSet = srcRef.len;
+    }
+    if (self.sourceLoc.column < (srcRef.len - maxOffSet)) {
+      upperBound = self.sourceLoc.pos + maxOffSet;
+    } else {
+      upperBound = self.sourceLoc.pos;
+    }
+
+    let codestr: string = "";
+    const codestrRes = str.string_from_bytes(bytes.bytes_slice(srcRef, lowerBound, upperBound));
+    switch (codestrRes) {
+      case Result.Err { error: e }: {
+        codestr = e;
+      }
+      case Result.Ok { value: v}: {
+        codestr = v;
+      }
+    }
+    let caretStr = "^";
+    let caretStrCtr: usize = 0;
+    while (caretStrCtr < relativePos) {
+      caretStr = ` ${caretStr}`;
+      caretStrCtr += 1;
+    }
+    return `err: ${self.err},
+sourceLoc: ${self.sourceLoc},
+rawMessage: ${self.rawMessage},
+isParseError: ${self.isParseError}
+code:
+\t${codestr}
+\t${caretStr}`;
   }
 }
+
+export type ParsingResult = Result<NodeId, ParsingError>;

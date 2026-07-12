@@ -1,6 +1,6 @@
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, SourceLocation } from "../contracts.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, SourceLocation, TokenTags } from "../contracts.yoop";
 
 export function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocation): ASTNode {
   return {
@@ -12,8 +12,10 @@ export function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocatio
     childA: 0,
     childB: 0,
     childC: 0,
+    childD: 0,
     spanStart: 0,
     spanLen: 0,
+    operator: TokenTags.NOTOKEN,
     strId: 0,
     intVal: 0,
     flagA: false,

@@ -10,7 +10,7 @@ import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
 import * as strings from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as fs from "std/fs.yoop";
 
 import { isHexDigit } from "./source_processing/char_utils.yoop";
@@ -49,7 +49,17 @@ function main(): int {
   //   }
   //   `;
 
-  const testStr = "type Test<Foo,Bar> 32";
+  const testStr = `
+function main(): int {
+  const num = 32 + 10;
+
+  return num;
+}
+
+function foo(bar: int): void {
+
+}
+`;
   const bytes = intr.string_as_bytes(testStr);
 
   // const tokenizeResult = tokenize(bytes);
