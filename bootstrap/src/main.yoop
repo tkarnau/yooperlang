@@ -18,6 +18,7 @@ import { tokenize, Token } from "./source_processing/lexer.yoop";
 import { parse } from "./source_processing/parser.yoop";
 import { tokenScanList } from "./contracts.yoop";
 import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
+import { typecheckProgram } from "./typecheck/typecheck.yoop";
 
 @precompile {
   log.info("hello, yooper from a precompile!");
@@ -58,7 +59,14 @@ function main(): int {
     }
     case LoadGraphResult.Ok { value: mg }: {
       const entryMod = vec.vec_get(ref mg.modules, mg.entryIndex);
+      log.info(`ast: ${entryMod.ast}`);
       log.info(`loaded ${mg.modules.len} module(s); entry ${entryMod.absPath} parsed to ${entryMod.ast.nodes.len} AST nodes`);
+
+      // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
+      // for now (returns a Program with no types/symbols/diagnostics) - this
+      // wires the call so the layer can be built out incrementally.
+      const prog = typecheckProgram(ref mg);
+      log.info(`typecheck done: ${prog.diagnostics.len} diagnostic(s), ${prog.types.len} type(s), ${prog.symbols.len} symbol(s), ${prog.modules.len} typed module(s)`);
     }
   }
 
