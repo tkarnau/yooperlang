@@ -1,147 +1,294 @@
 import * as debug from "std/debug.yoop";
-import { Vec } from "std/core/vec.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import * as bytes from "std/core/bytes.yoop";
 import { Map } from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Display } from "std/core/traits.yoop";
 import { Comparable, quickSort } from "./utils/array_utils.yoop";
+import { Result } from  "std/core/types.yoop";
 
 // ************ LEXING CONTRACTS **************
 
-export enum TokenTags<string> {
+export enum TokenTags {
+  NOTOKEN, // for initializers, etc
   // atoms
-  EOF "EOF",
-  IDENT "IDENT", // NOT A KEYWORD
-  INTLITERAL "INTLITERAL",
-  STRLITERAL "STRLITERAL", // INCLUDED WRAPPING QUOTE CHARACTERS
-  CHARLITERAL "CHARLITERAL",
-  TEMPLATELITERAL "TEMPLATELITERAL", // BACKTICK-QUOTED, MAY CONTAIN ${...} INTERPOLATIONS
-  FLOATLITERAL "FLOATLITERAL",
+  EOF,
+  IDENT, // NOT A KEYWORD
+  INTLITERAL,
+  STRLITERAL, // INCLUDED WRAPPING QUOTE CHARACTERS
+  CHARLITERAL,
+  TEMPLATELITERAL, // BACKTICK-QUOTED, MAY CONTAIN ${...} INTERPOLATIONS
+  FLOATLITERAL,
 
   // KEYWORDS
-  LET "LET",
-  FUNCTION "FUNCTION",
-  CONST "CONST",
-  RETURN "RETURN",
-  IF "IF",
-  ELSE "ELSE",
-  WHILE "WHILE",
-  FOR "FOR",
+  LET,
+  FUNCTION,
+  CONST,
+  RETURN,
+  IF,
+  ELSE,
+  WHILE,
+  FOR,
   // PHASE 9.D: `FOR ITEM IN XS { ... }` ITERATION FORM.
-  IN "IN",
-  TYPE "TYPE",
-  IMPORT "IMPORT",
-  EXPORT "EXPORT",
-  EXTERN "EXTERN",
-  FROM "FROM",
-  AS "AS",
-  LIBRARY "LIBRARY",
-  DOTDOTDOT "DOTDOTDOT", // FOR VARIADIC PARAMS AND REST PATTERNS
-  REF "REF",
-  BREAK "BREAK",
-  CONTINUE "CONTINUE",
-  LBRACKET "LBRACKET", // [
-  RBRACKET "RBRACKET", // ]
-  TRUE "TRUE",
-  FALSE "FALSE",
-  TRAIT "TRAIT",
-  IMPLEMENTS "IMPLEMENTS",
-  SELF "SELF",
-  EXTENDS "EXTENDS",
+  IN,
+  TYPE,
+  IMPORT,
+  EXPORT,
+  EXTERN,
+  FROM,
+  AS,
+  LIBRARY,
+  DOTDOTDOT, // FOR VARIADIC PARAMS AND REST PATTERNS
+  REF,
+  BREAK,
+  CONTINUE,
+  LBRACKET, // [
+  RBRACKET, // ]
+  TRUE,
+  FALSE,
+  TRAIT,
+  IMPLEMENTS,
+  SELF,
+  EXTENDS,
   // PHASE 9.G: `VTABLE NAME FOR TRAITNAME { ... }` - DECLARES THE
   // TYPE-ERASED SHAPE OF A TRAIT. PAIRS WITH THE `=>` TOKEN (`FATARROW`)
   // FOR FIELD TYPE ANNOTATIONS.
-  VTABLE "VTABLE",
-  KIND "KIND",
+  VTABLE,
+  KIND,
   // KIND STUFF
-  APPLIESTO "APPLIESTO",
-  REQUIRES "REQUIRES",
-  MUSTCALL "MUSTCALL",
-  OWNSBLOCK "OWNSBLOCK",
-  BEFORESCOPEEND "BEFORESCOPEEND",
-  BINDING "BINDING",
+  APPLIESTO,
+  REQUIRES,
+  MUSTCALL,
+  OWNSBLOCK,
+  BEFORESCOPEEND,
+  BINDING,
   // PHASE 6.2: ESCAPE AND SHARING
-  MUSTNOTESCAPE "MUSTNOTESCAPE",
-  MUSTNOTSHARE "MUSTNOTSHARE",
-  FORBIDS "FORBIDS",
-  SCOPE "SCOPE",
-  ACROSSSCOPES "ACROSSSCOPES",
-  PARAMETER "PARAMETER",
-  FIELD "FIELD",
-  IO "IO",
-  GLOBALSTATE "GLOBALSTATE",
+  MUSTNOTESCAPE,
+  MUSTNOTSHARE,
+  FORBIDS,
+  SCOPE,
+  ACROSSSCOPES,
+  PARAMETER,
+  FIELD,
+  IO,
+  GLOBALSTATE,
   // PHASE 6.3: TASK/CONCURRENCY
-  TASK "TASK",
-  WAIT "WAIT",
-  JOINED "JOINED",
-  POOLED "POOLED",
+  TASK,
+  WAIT,
+  JOINED,
+  POOLED,
   // PHASE 6.4: CONTAINMENT / PROPAGATION
-  PROPAGATES "PROPAGATES",
-  CONTAINS "CONTAINS",
+  PROPAGATES,
+  CONTAINS,
   // PHASE 6.5: LAYOUT / COMPOSITION
-  LAYOUT "LAYOUT",
-  ALIGN "ALIGN",
-  AMP "AMP", // STANDALONE & (COMPOSITION OPERATOR), DISTINCT FROM &&
+  LAYOUT,
+  ALIGN,
+  AMP, // STANDALONE & (COMPOSITION OPERATOR), DISTINCT FROM &&
   // PHASE 7.5: SWITCH / PATTERNS / SUM TYPES / UNIONS
-  SWITCH "SWITCH",
-  CASE "CASE",
-  DEFAULT "DEFAULT",
-  ENUM "ENUM",
-  VARIANT "VARIANT",
-  UNION "UNION",
+  SWITCH,
+  CASE,
+  DEFAULT,
+  ENUM,
+  VARIANT,
+  UNION,
   // PHASE 8.A: UNSAFE POINTERS
-  NULL "NULL",
+  NULL,
 
   // PUNCTUATION / OPERATORS
-  EQ "EQ",
-  SEMICOLON "SEMICOLON",
-  LPAREN "LPAREN",
-  RPAREN "RPAREN",
-  DISCARD "DISCARD",
-  LCURLY "LCURLY",
-  RCURLY "RCURLY",
-  COLON "COLON",
-  COMMA "COMMA",
-  EQEQ "EQEQ",
-  NEQ "NEQ",
-  LTE "LTE",
-  GTE "GTE",
-  LT "LT",
-  GT "GT",
-  ANDAND "ANDAND",
-  OROR "OROR",
-  PIPE "PIPE",
-  LSHIFT "LSHIFT",
-  RSHIFT "RSHIFT",
-  PLUS "PLUS",
-  MINUS "MINUS",
-  MULT "MULT",
-  DIVIDE "DIVIDE",
-  MODULUS "MODULUS",
-  DOT "DOT",
-  QUESTION "QUESTION",
+  EQ,
+  SEMICOLON,
+  LPAREN,
+  RPAREN,
+  DISCARD,
+  LCURLY,
+  RCURLY,
+  COLON,
+  COMMA,
+  EQEQ,
+  NEQ,
+  LTE,
+  GTE,
+  LT,
+  GT,
+  ANDAND,
+  OROR,
+  PIPE,
+  LSHIFT,
+  RSHIFT,
+  PLUS,
+  MINUS,
+  MULT,
+  DIVIDE,
+  MODULUS,
+  DOT,
+  QUESTION,
   // PHASE 9.E: ARRAY SLICE SYNTAX - `XS[I..J]`, `XS[..J]`, `XS[I..]`, `XS[..]`.
-  DOTDOT "DOTDOT",
+  DOTDOT,
   // PHASE 9.B: LOGICAL NOT PREFIX - `!FLAG`. LEXER'S LONGEST-FIRST SORT KEEPS
   // `!=` (`NEQ`) WINNING OVER `!` FOR THE BINARY CASE.
-  BANG "BANG",
+  BANG,
   // PHASE 9: BITWISE XOR (`^`) BINARY, BITWISE NOT (`~`) PREFIX.
-  CARET "CARET",
-  TILDE "TILDE",
+  CARET,
+  TILDE,
   // PHASE 9: COMPOUND ASSIGNMENTS - `X += Y` SHORTHAND FOR `X = X + Y`,
   // IMPLEMENTED AS DEDICATED AST NODES SO THE LVALUE IS ADDRESSED ONCE.
-  PLUSEQ "PLUSEQ",
-  MINUSEQ "MINUSEQ",
-  MULTEQ "MULTEQ",
-  DIVIDEEQ "DIVIDEEQ",
-  MODULUSEQ "MODULUSEQ",
+  PLUSEQ,
+  MINUSEQ,
+  MULTEQ,
+  DIVIDEEQ,
+  MODULUSEQ,
   // PHASE 9.G: `=>` SEPARATOR FOR FUNCTION VALUE TYPES IN TYPE POSITION.
   // ONLY LEGAL IN TYPE ANNOTATIONS (STRUCT FIELDS, PARAMETER / RETURN TYPES,
   // VTABLE FIELDS). EXPRESSION-POSITION `=>` IS RESERVED FOR A FUTURE
   // CLOSURE-LITERAL SYNTAX AND IS CURRENTLY A PARSE ERROR THERE.
-  FATARROW "FATARROW",
+  FATARROW,
   // PHASE 11.A: `@` PREFIX INTRODUCING A COMPILE-TIME / STATIC-ANALYSIS
   // ATTRIBUTE (E.G. `@PRECOMPILE`, `@TEST`, `@VERIFY`). ALWAYS A
   // COMPILE-TIME DIRECTIVE - NEVER QUERYABLE FROM RUNTIME CODE.
-  AT "AT",
+  AT,
+}
+
+export function getTokenPrecedence(tag: TokenTags): int {
+  switch(tag) {
+    case TokenTags.EQ: { return 10; }
+    case TokenTags.OROR: { return 20; }
+    case TokenTags.ANDAND: { return 30; }
+    case TokenTags.PIPE: { return 35; }
+    case TokenTags.CARET: { return 36; }
+    case TokenTags.AMP: { return 37; }
+    case TokenTags.EQEQ,
+         TokenTags.NEQ,
+         TokenTags.LT,
+         TokenTags.GT,
+         TokenTags.LTE,
+         TokenTags.GTE: { return 40; }
+    case TokenTags.LSHIFT,
+         TokenTags.RSHIFT: { return 45; }
+    case TokenTags.PLUS,
+         TokenTags.MINUS: { return 50; }
+    case TokenTags.MULT,
+         TokenTags.DIVIDE,
+         TokenTags.MODULUS: { return 60; }
+    default: { return 0; }
+  }
+}
+
+const TOKEN_TAG_NAMES: string[] = [
+  "NOTOKEN",
+  "EOF",
+  "IDENT",
+  "INTLITERAL",
+  "STRLITERAL",
+  "CHARLITERAL",
+  "TEMPLATELITERAL",
+  "FLOATLITERAL",
+  "LET",
+  "FUNCTION",
+  "CONST",
+  "RETURN",
+  "IF",
+  "ELSE",
+  "WHILE",
+  "FOR",
+  "IN",
+  "TYPE",
+  "IMPORT",
+  "EXPORT",
+  "EXTERN",
+  "FROM",
+  "AS",
+  "LIBRARY",
+  "DOTDOTDOT",
+  "REF",
+  "BREAK",
+  "CONTINUE",
+  "LBRACKET",
+  "RBRACKET",
+  "TRUE",
+  "FALSE",
+  "TRAIT",
+  "IMPLEMENTS",
+  "SELF",
+  "EXTENDS",
+  "VTABLE",
+  "KIND",
+  "APPLIESTO",
+  "REQUIRES",
+  "MUSTCALL",
+  "OWNSBLOCK",
+  "BEFORESCOPEEND",
+  "BINDING",
+  "MUSTNOTESCAPE",
+  "MUSTNOTSHARE",
+  "FORBIDS",
+  "SCOPE",
+  "ACROSSSCOPES",
+  "PARAMETER",
+  "FIELD",
+  "IO",
+  "GLOBALSTATE",
+  "TASK",
+  "WAIT",
+  "JOINED",
+  "POOLED",
+  "PROPAGATES",
+  "CONTAINS",
+  "LAYOUT",
+  "ALIGN",
+  "AMP",
+  "SWITCH",
+  "CASE",
+  "DEFAULT",
+  "ENUM",
+  "VARIANT",
+  "UNION",
+  "NULL",
+  "EQ",
+  "SEMICOLON",
+  "LPAREN",
+  "RPAREN",
+  "DISCARD",
+  "LCURLY",
+  "RCURLY",
+  "COLON",
+  "COMMA",
+  "EQEQ",
+  "NEQ",
+  "LTE",
+  "GTE",
+  "LT",
+  "GT",
+  "ANDAND",
+  "OROR",
+  "PIPE",
+  "LSHIFT",
+  "RSHIFT",
+  "PLUS",
+  "MINUS",
+  "MULT",
+  "DIVIDE",
+  "MODULUS",
+  "DOT",
+  "QUESTION",
+  "DOTDOT",
+  "BANG",
+  "CARET",
+  "TILDE",
+  "PLUSEQ",
+  "MINUSEQ",
+  "MULTEQ",
+  "DIVIDEEQ",
+  "MODULUSEQ",
+  "FATARROW",
+  "AT",
+];
+
+// Maps a TokenTags case to its source spelling. Used by Display sites
+// (error messages, token dumps); the int-backed enum decays to its ordinal
+// for the array index. Order MUST mirror the TokenTags decl above.
+export function tagName(v: TokenTags): string {
+  return TOKEN_TAG_NAMES[v];
 }
 
 // should move these into std or something perhaps
@@ -296,111 +443,112 @@ export const keywordList: KeywordDefinition[] = [
 
 // *************** DRIVER CONTRACTS *************
 
-export enum ASTNodeKind<string> {
-  FUNCTION_DECL "FUNCTION_DECL",
-  LET_DECL "LET_DECL",
-  CONST_DECL "CONST_DECL",
-  TYPE_DECL "TYPE_DECL",
-  FIELD_DECL "FIELD_DECL",
-  DESTRUCTURE_DECL "DESTRUCTURE_DECL",
-  IMPORT_DECL "IMPORT_DECL",
-  EXPORT_DECL "EXPORT_DECL",
-  EXTERN_FUNCTION_DECL "EXTERN_FUNCTION_DECL",
-  EXTERN_TYPE_DECL "EXTERN_TYPE_DECL",
-  EXPORT_C_FUNCTION_DECL "EXPORT_C_FUNCTION_DECL",
+export enum ASTNodeKind {
+  FUNCTION_DECL,
+  LET_DECL,
+  CONST_DECL,
+  TYPE_DECL,
+  FIELD_DECL,
+  DESTRUCTURE_DECL,
+  IMPORT_DECL,
+  EXPORT_DECL,
+  EXTERN_FUNCTION_DECL,
+  EXTERN_TYPE_DECL,
+  EXPORT_C_FUNCTION_DECL,
 
   // literals
-  TEMPLATE_LITERAL "TEMPLATE_LITERAL",
-  STRING_PART "STRING_PART",
-  INT_LITERAL "INT_LITERAL",
-  FLOAT_LITERAL "FLOAT_LITERAL",
-  STRING_LITERAL "STRING_LITERAL",
-  BOOL_LITERAL "BOOL_LITERAL",
+  TEMPLATE_LITERAL,
+  STRING_PART,
+  INT_LITERAL,
+  FLOAT_LITERAL,
+  STRING_LITERAL,
+  BOOL_LITERAL,
 
   // expressions
-  CALL_EXPRESSION "CALL_EXPRESSION",
-  EXPRESSION_STATEMENT "EXPRESSION_STATEMENT",
-  EXPR_PART "EXPR_PART",
-  UNARY_EXPRESSION "UNARY_EXPRESSION",
-  BINARY_EXPRESSION "BINARY_EXPRESSION",
-  FIELD_ACCESS "FIELD_ACCESS",
-  STRUCT_LITERAL "STRUCT_LITERAL",
-  STRUCT_LITERAL_FIELD "STRUCT_LITERAL_FIELD",
+  CALL_EXPRESSION,
+  EXPRESSION_STATEMENT,
+  EXPR_PART,
+  UNARY_EXPRESSION,
+  BINARY_EXPRESSION,
+  FIELD_ACCESS,
+  STRUCT_LITERAL,
+  STRUCT_LITERAL_FIELD,
 
   // other
-  EXTERN_BLOCK "EXTERN_BLOCK",
-  BLOCK "BLOCK",
-  PARAM "PARAM",
-  IDENT "IDENT",
-  NAMESPACE_IDENT "NAMESPACE_IDENT",
-  ASSIGNMENT "ASSIGNMENT",
-  PROGRAM "PROGRAM",
-  RETURN_STATEMENT "RETURN_STATEMENT",
-  IF_STATEMENT "IF_STATEMENT",
-  WHILE_STATEMENT "WHILE_STATEMENT",
-  DISCARD_STATEMENT "DISCARD_STATEMENT",
-  TRY_OP "TRY_OP",
+  EXTERN_BLOCK,
+  BLOCK,
+  PARAM,
+  IDENT,
+  NAMESPACE_IDENT,
+  ASSIGNMENT,
+  PROGRAM,
+  RETURN_STATEMENT,
+  IF_STATEMENT,
+  WHILE_STATEMENT,
+  DISCARD_STATEMENT,
+  TRY_OP,
 
   // phase 4 refs, arrays, control flow
-  FOR_LOOP "FOR_LOOP",
+  FOR_LOOP,
   // phase 9.D `for item in xs { ... }` - element-walking loop over an array
   // (default sequential iteration; trait-driven iteration is a later phase).
-  FOR_IN_LOOP "FOR_IN_LOOP",
-  BREAK_STATEMENT "BREAK_STATEMENT",
-  CONTINUE_STATEMENT "CONTINUE_STATEMENT",
-  ARRAY_LITERAL "ARRAY_LITERAL",
-  INDEX_EXPRESSION "INDEX_EXPRESSION",
-  REF_EXPRESSION "REF_EXPRESSION",
+  FOR_IN_LOOP,
+  BREAK_STATEMENT,
+  CONTINUE_STATEMENT,
+  ARRAY_LITERAL,
+  INDEX_EXPRESSION,
+  REF_EXPRESSION,
 
   // phase 5 traits
-  TRAIT_DECL "TRAIT_DECL",
-  METHOD_SIG "METHOD_SIG",
-  METHOD_DECL "METHOD_DECL",
+  TRAIT_DECL,
+  METHOD_SIG,
+  METHOD_DECL,
   // Phase 9.G `vtable Name for TraitName { field (params) => ret, ... }`.
   // A vtable decl is a type-erased shape backing a trait - codegen emits it
   // as a LLVM struct of `{ ctx, methodPtr1, methodPtr2, ... }`.
-  VTABLE_DECL "VTABLE_DECL",
+  VTABLE_DECL,
 
   // phase 6 kinds
-  KIND_DECL "KIND_DECL",
-  KIND_APPLIES_TO_CLAUSE "KIND_APPLIES_TO_CLAUSE",
-  KIND_REQUIRES_CLAUSE "KIND_REQUIRES_CLAUSE",
-  KIND_MUSTCALL_CLAUSE "KIND_MUSTCALL_CLAUSE",
-  KIND_OWNSBLOCK_CLAUSE "KIND_OWNSBLOCK_CLAUSE",
-  CLEANUP_CALL "CLEANUP_CALL",
+  KIND_DECL,
+  KIND_APPLIES_TO_CLAUSE,
+  KIND_REQUIRES_CLAUSE,
+  KIND_MUSTCALL_CLAUSE,
+  KIND_OWNSBLOCK_CLAUSE,
+  CLEANUP_CALL,
   // phase 6.2 escape and sharing
-  KIND_MUST_NOT_ESCAPE_CLAUSE "KIND_MUST_NOT_ESCAPE_CLAUSE",
-  KIND_MUST_NOT_SHARE_CLAUSE "KIND_MUST_NOT_SHARE_CLAUSE",
-  KIND_FORBIDS_CLAUSE "KIND_FORBIDS_CLAUSE",
+  KIND_MUST_NOT_ESCAPE_CLAUSE,
+  KIND_MUST_NOT_SHARE_CLAUSE,
+  KIND_FORBIDS_CLAUSE,
   // phase 6.5 layout / composition / parameterized kinds
-  KIND_LAYOUT_CLAUSE "KIND_LAYOUT_CLAUSE",
+  KIND_LAYOUT_CLAUSE,
   // clearance kinds marker polarity (conferred | restrictive)
-  KIND_MARKER_CLAUSE "KIND_MARKER_CLAUSE",
+  KIND_MARKER_CLAUSE,
   // clearance kinds kind-decl-named transition authority
   // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
-  KIND_TRANSITION_CLAUSE "KIND_TRANSITION_CLAUSE",
+  KIND_TRANSITION_CLAUSE,
+  KIND_PREFIX,
 
   // phase 6.3 task / concurrency sugar
-  WAIT_EXPRESSION "WAIT_EXPRESSION",
-  TASK_AUTO_WAIT "TASK_AUTO_WAIT",
-  TASK_RELEASE "TASK_RELEASE",
-  TASK_RETAIN "TASK_RETAIN",
+  WAIT_EXPRESSION,
+  TASK_AUTO_WAIT,
+  TASK_RELEASE,
+  TASK_RETAIN,
 
   // phase 7.1 generics
-  TYPE_PARAM "TYPE_PARAM",
+  TYPE_PARAM,
 
   // phase 7.5 switch / patterns / sum types / unions
   // Phase 12 ENUM_DECL renamed to VARIANT_DECL (sum types); ENUM_VARIANT
   // renamed to VARIANT_CASE (one case inside a variant decl). The `enum`
   // keyword is reserved for the value-enum construct below.
-  SWITCH_STATEMENT "SWITCH_STATEMENT",
-  SWITCH_ARM "SWITCH_ARM",
-  LITERAL_PATTERN "LITERAL_PATTERN",
-  VARIANT_PATTERN "VARIANT_PATTERN",
-  VARIANT_DECL "VARIANT_DECL",
-  VARIANT_CASE "VARIANT_CASE",
-  UNION_DECL "UNION_DECL",
-  VARIANT_CONSTRUCTOR "VARIANT_CONSTRUCTOR",
+  SWITCH_STATEMENT,
+  SWITCH_ARM,
+  LITERAL_PATTERN,
+  VARIANT_PATTERN,
+  VARIANT_DECL,
+  VARIANT_CASE,
+  UNION_DECL,
+  VARIANT_CONSTRUCTOR,
 
   // Phase 12 value enums - C-style named constants of a primitive
   // underlying type (default int32). `enum<T> Name { Case (value)? , ... }`.
@@ -408,28 +556,28 @@ export enum ASTNodeKind<string> {
   // normal expression and const-evaluated at typecheck. The constructor and
   // pattern AST kinds reuse VARIANT_CONSTRUCTOR / VARIANT_PATTERN - the
   // typechecker stamps the right resolved type onto them.
-  ENUM_DECL "ENUM_DECL",
-  ENUM_CASE "ENUM_CASE",
+  ENUM_DECL,
+  ENUM_CASE,
 
   // phase 8.A unsafe pointers
-  ADDRESS_OF_EXPRESSION "ADDRESS_OF_EXPRESSION",
-  DEREF_EXPRESSION "DEREF_EXPRESSION",
-  NULL_LITERAL "NULL_LITERAL",
-  UNSAFE_PTR_CAST "UNSAFE_PTR_CAST",
+  ADDRESS_OF_EXPRESSION,
+  DEREF_EXPRESSION,
+  NULL_LITERAL,
+  UNSAFE_PTR_CAST,
 
   // phase 8.D errno intrinsics
-  ERRNO_INTRINSIC "ERRNO_INTRINSIC",
+  ERRNO_INTRINSIC,
 
   // phase 9.E array slice syntax `xs[i..j]`
-  SLICE_EXPRESSION "SLICE_EXPRESSION",
+  SLICE_EXPRESSION,
 
   // phase 9 compound assignments `x += y`, `x -= y`, etc. Stored as a
   // dedicated node so codegen can address the lvalue once (no double-eval
   // of expressions inside `xs[f()] += 1`).
-  COMPOUND_ASSIGNMENT "COMPOUND_ASSIGNMENT",
+  COMPOUND_ASSIGNMENT,
 
   // test undefined kind handling for iteration tests
-  FAIL_TEST_KIND "FAIL_TEST_KIND",
+  FAIL_TEST_KIND,
 
   // phase 11.A `@<name>(args?) target` compile-time / static-analysis
   // attribute. The `target` field carries the AST node the attribute
@@ -438,40 +586,318 @@ export enum ASTNodeKind<string> {
   // src/jsyoopattributes/registry.js - the AST node itself is just the
   // carrier. Codegen must consume every ATTRIBUTE node before emission;
   // any that survive are an internal-error.
-  ATTRIBUTE "ATTRIBUTE",
+  ATTRIBUTE,
+  NODE_LIST, // with a fat node, the list of nodes allows a level of indirection
+  // type annotation kinds
+  TYPE_ANNOTATION_REF_TYPE,
+  TYPE_ANNOTATION_TYPE_NAME,
+}
+
+const AST_NODE_KIND_NAMES: string[] = [
+  "FUNCTION_DECL",
+  "LET_DECL",
+  "CONST_DECL",
+  "TYPE_DECL",
+  "FIELD_DECL",
+  "DESTRUCTURE_DECL",
+  "IMPORT_DECL",
+  "EXPORT_DECL",
+  "EXTERN_FUNCTION_DECL",
+  "EXTERN_TYPE_DECL",
+  "EXPORT_C_FUNCTION_DECL",
+  "TEMPLATE_LITERAL",
+  "STRING_PART",
+  "INT_LITERAL",
+  "FLOAT_LITERAL",
+  "STRING_LITERAL",
+  "BOOL_LITERAL",
+  "CALL_EXPRESSION",
+  "EXPRESSION_STATEMENT",
+  "EXPR_PART",
+  "UNARY_EXPRESSION",
+  "BINARY_EXPRESSION",
+  "FIELD_ACCESS",
+  "STRUCT_LITERAL",
+  "STRUCT_LITERAL_FIELD",
+  "EXTERN_BLOCK",
+  "BLOCK",
+  "PARAM",
+  "IDENT",
+  "NAMESPACE_IDENT",
+  "ASSIGNMENT",
+  "PROGRAM",
+  "RETURN_STATEMENT",
+  "IF_STATEMENT",
+  "WHILE_STATEMENT",
+  "DISCARD_STATEMENT",
+  "TRY_OP",
+  "FOR_LOOP",
+  "FOR_IN_LOOP",
+  "BREAK_STATEMENT",
+  "CONTINUE_STATEMENT",
+  "ARRAY_LITERAL",
+  "INDEX_EXPRESSION",
+  "REF_EXPRESSION",
+  "TRAIT_DECL",
+  "METHOD_SIG",
+  "METHOD_DECL",
+  "VTABLE_DECL",
+  "KIND_DECL",
+  "KIND_APPLIES_TO_CLAUSE",
+  "KIND_REQUIRES_CLAUSE",
+  "KIND_MUSTCALL_CLAUSE",
+  "KIND_OWNSBLOCK_CLAUSE",
+  "CLEANUP_CALL",
+  "KIND_MUST_NOT_ESCAPE_CLAUSE",
+  "KIND_MUST_NOT_SHARE_CLAUSE",
+  "KIND_FORBIDS_CLAUSE",
+  "KIND_LAYOUT_CLAUSE",
+  "KIND_MARKER_CLAUSE",
+  "KIND_TRANSITION_CLAUSE",
+  "KIND_PREFIX",
+  "WAIT_EXPRESSION",
+  "TASK_AUTO_WAIT",
+  "TASK_RELEASE",
+  "TASK_RETAIN",
+  "TYPE_PARAM",
+  "SWITCH_STATEMENT",
+  "SWITCH_ARM",
+  "LITERAL_PATTERN",
+  "VARIANT_PATTERN",
+  "VARIANT_DECL",
+  "VARIANT_CASE",
+  "UNION_DECL",
+  "VARIANT_CONSTRUCTOR",
+  "ENUM_DECL",
+  "ENUM_CASE",
+  "ADDRESS_OF_EXPRESSION",
+  "DEREF_EXPRESSION",
+  "NULL_LITERAL",
+  "UNSAFE_PTR_CAST",
+  "ERRNO_INTRINSIC",
+  "SLICE_EXPRESSION",
+  "COMPOUND_ASSIGNMENT",
+  "FAIL_TEST_KIND",
+  "ATTRIBUTE",
+  "NODE_LIST", // node for handling a list of nodes
+  "TYPE_ANNOTATION_REF_TYPE",
+  "TYPE_ANNOTATION_TYPE_NAME",
+];
+
+// Maps an ASTNodeKind case to its source spelling. Used by Display sites
+// (error messages, AST dumps); the int-backed enum decays to its ordinal
+// for the array index. Order MUST mirror the ASTNodeKind decl above.
+export function kindName(v: ASTNodeKind): string {
+  return AST_NODE_KIND_NAMES[v];
+}
+
+export function astNodeFlagAName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.INT_LITERAL: {
+      return "negated";
+    }
+    case ASTNodeKind.PARAM: {
+      return "isRef";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildAName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.TYPE_DECL,
+         ASTNodeKind.FUNCTION_DECL: {
+      return "typeParams";
+    }
+    case ASTNodeKind.KIND_PREFIX: {
+      return "argsList";
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
+      return "inner";
+    }
+    case ASTNodeKind.PARAM,
+         ASTNodeKind.CONST_DECL,
+         ASTNodeKind.LET_DECL: {
+      return "typeAnnotation";
+    }
+    case ASTNodeKind.BLOCK: {
+      return "statementsList";
+    }
+    case ASTNodeKind.RETURN_STATEMENT: {
+      return "returnExpression";
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return "leftNode";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildBName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.TYPE_DECL: {
+      return "kindPrefix";
+    }
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "functionParamList";
+    }
+    case ASTNodeKind.CONST_DECL,
+         ASTNodeKind.LET_DECL: {
+      return "assignmentExpression";
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return "rightNode";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildCName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "returnTypeAnnotation";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildDName(v: ASTNodeKind): string {
+  switch(v) {
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "functionBody";
+    }
+    default: {
+      return "undefined";
+    }
+  }
 }
 
 export type NodeId = usize;
 
-export type SourceLocation {
+export type SourceLocation implements Display {
   pos: usize,
   line: usize,
   column: usize,
   length: usize,
+  function to_string(ref self): string {
+    return `pos: ${self.pos}, line: ${self.line}, column: ${self.column}, length: ${self.length}`;
+  }
 }
 
-export type ASTNode {
+// Flat & Fat nodes for now, node reference and flag reuse.
+// conventions defined in loggable helpers for now.
+export type ASTNode implements Display {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
+  name: string,
 
-  // variable-arity children: a slice into AST.childIds
-  // (PROGRAM.body, CALL.args, STRUCT_LITERAL.fields, SWITCH.arms, ... all use this)
+  // variable-arity children: a slice into AST.childIds. This is the node's
+  // PRIMARY list (PROGRAM.body, CALL.args, STRUCT_LITERAL.fields, SWITCH.arms,
+  // TYPE_DECL.fields, ...). Any ADDITIONAL list a kind needs is reached through
+  // a named single-child slot below pointing at a NODE_LIST whose own
+  // childStart/childCount holds that list.
   childStart: usize,
-  childCount: usize,
+  // Can I actually use this? Since nodes are arbitrarily added to the list?
+  // Wouldn't we only want direct descendents in this count? You can't just
+  // take it from the childStart and count...
+  childCount: usize, 
+
+  // Named single-child slots for the fat node (0 = none, since NodeId 0 is the
+  // reserved "none" sentinel - no real node lives at arena index 0). Each kind
+  // documents its own meaning, e.g.
+  //   TYPE_DECL:     childA = typeParams list-node
+  //   FUNCTION_DECL: childA = typeParams, childB = params, childC = returnType
+  childA: NodeId,
+  childB: NodeId,
+  childC: NodeId,
+  childD: NodeId,
 
   // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
   spanStart: usize,
   spanLen: usize,
+  operator: TokenTags,
 
   strId: usize,
+  intVal: uint64,
+  flagA: bool, // per-kind flags
   // ...the result of the fat-node scalar/NodeId slots
+  function to_string(ref self): string {
+    let nameStr = self.name;
+    if (self.name.len == 0) {
+      nameStr = "none";
+    }
+    return `
+      name: ${nameStr},
+      kind: ${kindName(self.kind)},
+      sourceLoc: (${self.sourceLoc}),
+      childStart: ${self.childStart},
+      childCount: ${self.childCount},
+      childA (slot: ${astNodeChildAName(self.kind)}): ${self.childA},
+      childB (slot: ${astNodeChildBName(self.kind)}): ${self.childB},
+      childC (slot: ${astNodeChildCName(self.kind)}): ${self.childC},
+      childD (slot: ${astNodeChildDName(self.kind)}): ${self.childD},
+      spanStart: ${self.spanStart},
+      spanLen: ${self.spanLen},
+      operator: ${tagName(self.operator)},
+      strId: ${self.strId},
+      intVal: ${self.intVal},
+      flagA (slot: ${astNodeFlagAName(self.kind)}): ${self.flagA}`;
+  }
 }
 
-export type AST propagates<disposable> {
+
+
+export type AST implements Display propagates<disposable> {
   nodes: Vec<ASTNode>,
   childIds: Vec<NodeId>,
   strings: Vec<string>, // string pool: decoded string-literal text
   root: NodeId,
+  function to_string(ref self): string {
+    // Debug dump of the whole arena. We collect each line as its own string
+    // piece and concat once at the end (the path_join pattern in std/fs) -
+    // far cheaper than re-allocating a growing accumulator per node.
+    disposable pieces: Vec<string> = vec.vec_new(self.nodes.len + self.strings.len + self.childIds.len + 4);
+
+    vec.vec_push(ref pieces,
+      `AST { root: ${self.root}, nodes: ${self.nodes.len}, childIds: ${self.childIds.len}, strings: ${self.strings.len} }\n`);
+
+    // Node arena. Index 0 is the reserved "none" sentinel, so real nodes
+    // begin at 1. ASTNode implements Display, so `${n}` dispatches to its
+    // own to_string (Phase 9.F template interpolation).
+    let i: usize = 1;
+    while (i < self.nodes.len) {
+      let n: ASTNode = vec.vec_get(ref self.nodes, i);
+      vec.vec_push(ref pieces, `  node[${i}]: {${n}\n  }\n`);
+      i = i + 1;
+    }
+
+    // Flat child-id pool (nodes index into this via childStart/childCount).
+    vec.vec_push(ref pieces, "  childIds: [ ");
+    let c: usize = 0;
+    while (c < self.childIds.len) {
+      vec.vec_push(ref pieces, `${vec.vec_get(ref self.childIds, c)} `);
+      c = c + 1;
+    }
+    vec.vec_push(ref pieces, "]\n");
+
+    // String pool.
+    let s: usize = 0;
+    while (s < self.strings.len) {
+      vec.vec_push(ref pieces, `  str[${s}]: "${vec.vec_get(ref self.strings, s)}"\n`);
+      s = s + 1;
+    }
+
+    let arr: string[] = vec.vec_as_array(ref pieces);
+    return str.string_concat_all(arr);
+  }
 }
 
 export type ImportEdge {
@@ -493,3 +919,59 @@ export type ModuleGraph propagates<disposable> {
   entry: Module,
   autoLoadModuleIds: Map<string, string>,
 }
+
+export type ParsingError implements Display {
+  sourceLoc: SourceLocation,
+  isParseError: bool,
+  rawMessage: string,
+  src: ref uint8[],
+  err: string,
+  function to_string(ref self): string {
+    let lowerBound: usize;
+    let upperBound: usize;
+    let relativePos: usize = 4;
+    if (self.sourceLoc.column >= 5) {
+      lowerBound = self.sourceLoc.pos - 5;
+    } else {
+      lowerBound = self.sourceLoc.pos - self.sourceLoc.column;
+      relativePos = self.sourceLoc.column;
+    }
+    
+    const srcRef = self.src;
+    let maxOffSet: usize = 5;
+    if (srcRef.len <= 5) {
+      maxOffSet = srcRef.len;
+    }
+    if (self.sourceLoc.column < (srcRef.len - maxOffSet)) {
+      upperBound = self.sourceLoc.pos + maxOffSet;
+    } else {
+      upperBound = self.sourceLoc.pos;
+    }
+
+    let codestr: string = "";
+    const codestrRes = str.string_from_bytes(bytes.bytes_slice(srcRef, lowerBound, upperBound));
+    switch (codestrRes) {
+      case Result.Err { error: e }: {
+        codestr = e;
+      }
+      case Result.Ok { value: v}: {
+        codestr = v;
+      }
+    }
+    let caretStr = "^";
+    let caretStrCtr: usize = 0;
+    while (caretStrCtr < relativePos) {
+      caretStr = ` ${caretStr}`;
+      caretStrCtr += 1;
+    }
+    return `err: ${self.err},
+sourceLoc: ${self.sourceLoc},
+rawMessage: ${self.rawMessage},
+isParseError: ${self.isParseError}
+code:
+\t${codestr}
+\t${caretStr}`;
+  }
+}
+
+export type ParsingResult = Result<NodeId, ParsingError>;

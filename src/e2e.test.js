@@ -1165,6 +1165,22 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "disposing fd=11\n");
   });
 
+  // region kinds (`appliesTo region`): anonymous block-owning bindings with no
+  // visible name, plus type inference on a named block-owning binding.
+  it("region_kind_block: anonymous explicit/implicit region blocks + inferred named binding fire cleanup correctly", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/region_kind_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      // explicit block: dispose at `}`
+      "push 1\ninside\npop 1\nafter\n" +
+        // implicit blocks: LIFO at scope end
+        "push 1\npush 2\nbody\npop 2\npop 1\n" +
+        // named binding, type inferred from the initializer
+        "push 5\nuse 5\npop 5\n",
+    );
+  });
+
   // phase 6.2: scoped kind and escape analysis
   it("scoped_basic: scoped kind with mustNotEscape, kind-prefixed param, dispose fires at scope end", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_basic/main.yoop");
@@ -2762,6 +2778,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /switch over open enum .* requires a 'default'/.test(e.message)),
       `expected open-enum default error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("value_enum_string_switch.yoop rejects a switch over a string-backed enum", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_string_switch.yoop");
+    assert.ok(
+      errors.some((e) => /switch requires an integer-backed enum/.test(e.message)),
+      `expected string-backed-switch error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

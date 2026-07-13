@@ -6,7 +6,9 @@
 
 import * as intr from "std/core/intrinsics.yoop";
 import * as log from "std/log.yoop";
+import * as debug from "std/debug.yoop";
 import { Option, Result } from "std/core/types.yoop";
+import { SourceLocation } from "../contracts.yoop";
 
 const whitespaceCharCodes: uint8[] = [32, 9, 13, 10];
 function isWhitespace(ch: uint8): bool {
@@ -276,4 +278,26 @@ export function digitValue(ch: uint8): int {
   if (ch >= 'a' && ch <= 'f') { return int(ch - 'a') + 10; }
   if (ch >= 'A' && ch <= 'F') { return int(ch - 'A') + 10; }
   return 0;
+}
+
+export function posToSourceLocation(ref src: uint8[], pos: usize, length: usize): SourceLocation {
+  debug.assert(pos <= src.len, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
+
+  let i: usize = 0;
+  let line: usize = 0;
+  let lastNewLinePos: usize = 0;
+  while (i < pos) {
+    if (src[i] == '\n') {
+      line += 1;
+      lastNewLinePos = i;
+    }
+    i += 1;
+  }
+  const column = pos - lastNewLinePos;
+  return {
+    line: line,
+    column: column,
+    pos: pos,
+    length: length
+  };
 }

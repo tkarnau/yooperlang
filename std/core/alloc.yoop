@@ -198,3 +198,15 @@ export function arenaScope(cap: usize): ArenaScope {
     let prev: Allocator = pushAllocator(arenaAllocator(ar));
     return { arena: ar, prev: prev };
 }
+
+export type AllocatorScope implements Disposable {
+  prev: Allocator,
+  function dispose(ref self): void {
+    popAllocator(self.prev);
+  }
+}
+
+export function allocatorScope(arena: Arena): AllocatorScope {
+  let prev: Allocator = pushAllocator(arenaAllocator(arena));
+  return { prev: prev };
+}

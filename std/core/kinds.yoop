@@ -16,3 +16,28 @@ export kind disposable {
     mustCall dispose beforeScopeEnd;
     ownsBlock;
 }
+
+// `ephemeral` is the region-scoped sibling of `disposable`. Where `disposable`
+// binds a named resource you hold and use, `ephemeral` governs a lexical region
+// with no value to name - it is for guards whose whole purpose is the ambient
+// state change they install on entry and undo on exit (an allocator scope, a
+// pushed context, a transaction). `appliesTo region` makes it usable only in
+// the anonymous block form, with no binding:
+//
+//     ephemeral mem.allocatorScope(arena) {   // explicit block:
+//         ...                                  //   dispose() fires at the `}`
+//     }
+//
+//     ephemeral mem.allocatorScope(arena);     // implicit block:
+//     ...                                      //   dispose() fires at the
+//                                              //   enclosing scope end (LIFO)
+//
+// The value is still constructed (running the guard's side effect) and disposed
+// via the same machinery as a name-less `disposable`; you simply cannot refer
+// to it - which is the point.
+export kind ephemeral {
+    appliesTo region;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+    ownsBlock;
+}

@@ -1,0 +1,269 @@
+// diskscope/main.yoop - a WinDirStat-style disk treemap, in Yooperlang.
+//
+//   build:  node src/yoopiler.js examples/playground/diskscope/main.yoop
+//   run:    examples/playground/diskscope/main [directory]   (defaults to ".")
+//
+// It scans a directory tree, sizes every entry by its aggregate bytes, and
+// draws a squarified treemap where each file is a tile sized to its share of
+// the disk. Hover a tile to see its name and size in the header; press `c` to
+// switch between the color-by-kind and color-by-depth schemes; esc/q quits.
+//
+// Feature tour (what this leans on from the language):
+//   * the arena allocator (std/core/alloc.yoop) for the layout buffer - it is
+//     reset and refilled on every window resize, so resizing reuses one region
+//     instead of churning malloc/free (see relayout()).
+//   * the `disposable` kind for the scanned-node Vec (auto cleanup at exit).
+//   * a `ColorScheme` trait with two implementations (treemap.yoop), selected
+//     at runtime.
+//   * generics (Vec<FsNode>, Vec<int32>), enums + switch, the C FFI for both
+//     SDL and the directory-walk runtime helpers.
+
+import.unsafe;
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as mem from "std/core/alloc.yoop";
+import { disposable, ephemeral } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
+
+import * as sdl from "./sdl.yoop";
+import * as fsw, { FsNode, EntryKind } from "./fs_walk.yoop";
+import * as tm, { Rect, ColorMode, DepthColors, KindColors } from "./treemap.yoop";
+
+extern "C" from library "m" {
+    function printf(fmt: string, ...): int32;
+}
+
+const HEADER_H: int32 = 30;
+const FONT_SIZE: int32 = 15;
+// A single-face .ttf libharfbuzz shapes reliably on macOS (same choice as the
+// algoscope playground). Change this for other systems.
+const FONT_PATH: string = "/System/Library/Fonts/Supplemental/Arial Unicode.ttf";
+const DEFAULT_W: int32 = 1100;
+const DEFAULT_H: int32 = 740;
+// Safety valve: stop scanning past this many entries so pointing the tool at a
+// pathologically large tree degrades instead of exhausting memory.
+const MAX_NODES: int32 = 300000;
+
+type Theme {
+    bg: uint32,
+    header_bg: uint32,
+    text: uint32,
+    hover_text: uint32,
+    tile_border: uint32,
+    dir_border: uint32,
+    hilite: uint32,
+}
+
+type State {
+    win_w: int32,
+    win_h: int32,
+    mouse_x: int32,
+    mouse_y: int32,
+    hover: int32,      // hovered node id, or -1
+    mode: ColorMode,
+    root: int32,       // root node id
+    laid_w: int32,     // window width the current layout was computed for
+    laid_h: int32,     // window height ditto
+}
+
+// ----- layout (arena-backed) -----------------------------------------------
+
+// Recompute the whole treemap into a fresh Rect[] drawn from `arena`. The arena
+// is reset first, so across many resizes the layout buffer reuses the same
+// region rather than allocating a new one each time. The returned array points
+// into the arena and is valid until the next relayout (the next reset).
+function relayout(arena: mem.Arena, ref nodes: Vec<FsNode>, root: int32, node_count: int32, x: int32, y: int32, w: int32, h: int32): Rect[] {
+  mem.arenaReset(arena);
+  // Install `arena` as the current allocator for this block only - there is no
+  // value to name, just an ambient state change, so `ephemeral` (a region kind)
+  // fits: `intr.ctx_alloc` below draws from the arena, and the allocator is
+  // popped at the closing `}` (even on the early return).
+  ephemeral mem.allocatorScope(arena) {
+    let rects: Rect[] = intr.ctx_alloc(usize(node_count));
+    let i: int32 = 0;
+    while (i < node_count) {
+      rects[usize(i)] = { x: 0, y: 0, w: 0, h: 0, vis: false };
+      i = i + 1;
+    }
+    if (w > 0 && h > 0) {
+      tm.layout_node(ref nodes, rects, root, x, y, w, h);
+    }
+    return rects;
+  }
+}
+
+// ----- drawing -------------------------------------------------------------
+
+function draw(ref st: State, ref nodes: Vec<FsNode>, rects: Rect[], ref ds: DepthColors, ref ks: KindColors, ref ren: sdl.Ren, ref font: sdl.Font, ref th: Theme): void {
+    sdl.clear(ref ren, th.bg);
+
+    let n: int32 = int32(nodes.len);
+    let i: int32 = 0;
+    while (i < n) {
+        let r: Rect = rects[usize(i)];
+        if (r.vis) {
+            let node: FsNode = vec.vec_get(ref nodes, usize(i));
+            if (node.kind == EntryKind.FILE) {
+                let c: uint32 = tm.tile_color(st.mode, ref ds, ref ks, node);
+                sdl.fill_rect(ref ren, r.x, r.y, r.w, r.h, c);
+                if (r.w >= 4 && r.h >= 4) {
+                    sdl.draw_rect(ref ren, r.x, r.y, r.w, r.h, th.tile_border);
+                }
+            } else {
+                sdl.draw_rect(ref ren, r.x, r.y, r.w, r.h, th.dir_border);
+            }
+        }
+        i = i + 1;
+    }
+
+    // Hover highlight: a double outline so it reads over any tile color.
+    if (st.hover >= 0 && st.hover < n) {
+        let hr: Rect = rects[usize(st.hover)];
+        if (hr.vis) {
+            sdl.draw_rect(ref ren, hr.x, hr.y, hr.w, hr.h, th.hilite);
+            sdl.draw_rect(ref ren, hr.x - 1, hr.y - 1, hr.w + 2, hr.h + 2, th.hilite);
+        }
+    }
+
+    // Header bar on top.
+    sdl.fill_rect(ref ren, 0, 0, st.win_w, HEADER_H, th.header_bg);
+    draw_header(ref st, ref nodes, ref ren, ref font, ref th);
+
+    sdl.present(ref ren);
+}
+
+function draw_header(ref st: State, ref nodes: Vec<FsNode>, ref ren: sdl.Ren, ref font: sdl.Font, ref th: Theme): void {
+    let root_node: FsNode = vec.vec_get(ref nodes, usize(st.root));
+    let mode_name: string = "kind";
+    if (st.mode == ColorMode.Depth) { mode_name = "depth"; }
+    let left: string = str.string_concat_all([
+        root_node.name, "    ", fsw.human_size(root_node.size),
+        "    ", fmt.int_to_string(int64(nodes.len)), " entries    color: ", mode_name,
+        "  [c] toggle  [esc] quit",
+    ]);
+    sdl.draw_text(ref ren, ref font, left, 8, 6, th.text);
+
+    if (st.hover >= 0 && usize(st.hover) < nodes.len) {
+        let h: FsNode = vec.vec_get(ref nodes, usize(st.hover));
+        let info: string = str.string_concat_all([h.name, "   ", fsw.human_size(h.size)]);
+        sdl.draw_text(ref ren, ref font, info, st.win_w / 2 + 60, 6, th.hover_text);
+    }
+}
+
+// ----- main ----------------------------------------------------------------
+
+function main(): int32 {
+    let root_path: string = ".";
+    if (sdl.argc() > 1) { root_path = sdl.argv(1); }
+
+    // Scan the tree into the default (malloc) allocator: robust for a tree of
+    // unknown size. `disposable` injects the buffer cleanup at program exit.
+    disposable nodes: Vec<FsNode> = vec.vec_new(usize(4096));
+    let budget: int32 = MAX_NODES;
+    let root: int32 = fsw.scan(ref nodes, root_path, root_path, 0, ref budget);
+    if (root < 0) {
+        printf("diskscope: cannot scan %s\n", root_path);
+        return 1;
+    }
+    let node_count: int32 = int32(nodes.len);
+    printf("diskscope: %d entries, %s total\n", node_count, fsw.human_size(nodes.data[usize(root)].size));
+
+    // The layout arena, sized to the scanned tree. Holds only the Rect[] the
+    // treemap writes; reset before each relayout (see relayout()).
+    let arena_cap: usize = usize(node_count) * usize(64) + usize(1048576);
+    let arena: mem.Arena = mem.arenaNew(arena_cap);
+
+    if (!sdl.init_video()) {
+        printf("diskscope: SDL init failed\n");
+        mem.arenaDestroy(arena);
+        return 1;
+    }
+    let win: sdl.Win = sdl.make_window("diskscope", DEFAULT_W, DEFAULT_H);
+    let ren: sdl.Ren = sdl.make_renderer(ref win);
+    let font: sdl.Font = sdl.open_font(FONT_PATH, FONT_SIZE);
+
+    let th: Theme = {
+        bg: sdl.rgba(24, 24, 30, 255),
+        header_bg: sdl.rgba(16, 16, 22, 255),
+        text: sdl.rgba(220, 220, 230, 255),
+        hover_text: sdl.rgba(255, 230, 150, 255),
+        tile_border: sdl.rgba(20, 20, 26, 110),
+        dir_border: sdl.rgba(60, 64, 82, 255),
+        hilite: sdl.rgba(255, 255, 255, 255),
+    };
+
+    let ds: DepthColors = tm.depth_scheme();
+    let ks: KindColors = tm.kind_scheme();
+
+    let sz0: sdl.WinSize = sdl.window_size(ref win);
+    let st: State = {
+        win_w: sz0.w,
+        win_h: sz0.h,
+        mouse_x: 0,
+        mouse_y: 0,
+        hover: -1,
+        mode: ColorMode.Kind,
+        root: root,
+        laid_w: sz0.w,
+        laid_h: sz0.h,
+    };
+
+    let rects: Rect[] = relayout(arena, ref nodes, root, node_count, 0, HEADER_H, st.win_w, st.win_h - HEADER_H);
+
+    let ebuf: uint8[] = intr.heap_alloc(usize(256));
+    let running: bool = true;
+    let dirty: bool = true;
+    while (running) {
+        // Re-lay-out on window resize (queried each tick; cheap).
+        let cur: sdl.WinSize = sdl.window_size(ref win);
+        if (cur.w != st.laid_w || cur.h != st.laid_h) {
+            st.win_w = cur.w;
+            st.win_h = cur.h;
+            rects = relayout(arena, ref nodes, root, node_count, 0, HEADER_H, st.win_w, st.win_h - HEADER_H);
+            st.laid_w = cur.w;
+            st.laid_h = cur.h;
+            st.hover = tm.hit_test(ref nodes, rects, root, st.mouse_x, st.mouse_y);
+            dirty = true;
+        }
+
+        if (dirty) {
+            draw(ref st, ref nodes, rects, ref ds, ref ks, ref ren, ref font, ref th);
+            dirty = false;
+        }
+
+        while (sdl.poll_event(ebuf) != 0) {
+            let et: int32 = sdl.event_type(ebuf);
+            if (et == sdl.EVT_QUIT) {
+                running = false;
+            } else if (et == sdl.EVT_KEYDOWN) {
+                let sc: int32 = sdl.event_scancode(ebuf);
+                if (sc == sdl.SC_ESCAPE || sc == sdl.SC_Q) {
+                    running = false;
+                } else if (sc == sdl.SC_C) {
+                    if (st.mode == ColorMode.Kind) {
+                        st.mode = ColorMode.Depth;
+                    } else {
+                        st.mode = ColorMode.Kind;
+                    }
+                    dirty = true;
+                }
+            } else if (et == sdl.EVT_MOUSEMOTION) {
+                st.mouse_x = sdl.event_mouse_x(ebuf);
+                st.mouse_y = sdl.event_mouse_y(ebuf);
+                let h: int32 = tm.hit_test(ref nodes, rects, root, st.mouse_x, st.mouse_y);
+                if (h != st.hover) {
+                    st.hover = h;
+                    dirty = true;
+                }
+            }
+        }
+
+        if (!dirty) { sdl.delay(uint32(8)); }
+    }
+
+    mem.arenaDestroy(arena);
+    sdl.quit(ref win, ref ren, ref font);
+    return 0;
+}

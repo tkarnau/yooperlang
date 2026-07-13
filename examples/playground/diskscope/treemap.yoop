@@ -1,0 +1,301 @@
+// diskscope/treemap.yoop - squarified treemap layout, coloring, and hit-test.
+//
+// The layout is the classic squarified treemap (Bruls/Huizing/van Wijk): a
+// directory's rectangle is filled with its children laid out in rows, greedily
+// growing each row only while doing so keeps the worst tile aspect ratio from
+// getting worse. That is what produces the chunky near-square tiles of the
+// WinDirStat look instead of thin slivers. Children arrive already sorted
+// largest-first (fs_walk sorts them at scan time), which squarify requires.
+//
+// Layout writes one Rect per node into a caller-owned `Rect[]` indexed by node
+// id. In diskscope that array, plus all of squarify's transient float math,
+// runs with a bump arena installed as the current allocator and reset before
+// each (re)layout - the per-recompute scratch pattern arenas are built for.
+//
+// Tile coloring is a `ColorScheme` trait with two implementations the user
+// toggles at runtime: color-by-depth and color-by-file-kind.
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result } from "std/core/types.yoop";
+import { FsNode, EntryKind } from "./fs_walk.yoop";
+
+// A laid-out rectangle in window pixels. `vis` is false when the tile is too
+// small to draw or hover (it is skipped by both the renderer and hit-test).
+export type Rect {
+    x: int32,
+    y: int32,
+    w: int32,
+    h: int32,
+    vis: bool,
+}
+
+export const MIN_TILE: int32 = 2;     // tiles smaller than this are not drawn
+const MIN_SUBDIV: int32 = 14;          // dirs smaller than this are not opened
+const PAD: int32 = 1;                  // border inset around a dir's children
+
+// ----- layout --------------------------------------------------------------
+
+function round_i(f: float64): int32 {
+    return int32(f + 0.5);
+}
+
+function weight_of(ref nodes: Vec<FsNode>, id: int32): float64 {
+    let s: int64 = nodes.data[usize(id)].size;
+    if (s < int64(1)) { s = int64(1); }   // empty entries still get a sliver
+    return float64(s);
+}
+
+// Worst (largest) aspect ratio in a row whose tiles total `sum` in area, with
+// smallest tile `mn` and largest `mx`, laid along a strip of length `side`.
+function worst_ratio(sum: float64, mn: float64, mx: float64, side: float64): float64 {
+    let s2: float64 = sum * sum;
+    let side2: float64 = side * side;
+    let r1: float64 = (side2 * mx) / s2;
+    let r2: float64 = s2 / (side2 * mn);
+    if (r1 > r2) { return r1; }
+    return r2;
+}
+
+// Lay out `n` already-largest-first child ids inside the rect (x0,y0,w0,h0),
+// recursing into each child via layout_node.
+function squarify(ref nodes: Vec<FsNode>, rects: Rect[], ids: int32[], n: int32, x0: int32, y0: int32, w0: int32, h0: int32): void {
+    let total: float64 = 0.0;
+    let i: int32 = 0;
+    while (i < n) {
+        total = total + weight_of(ref nodes, ids[usize(i)]);
+        i = i + 1;
+    }
+    if (total <= 0.0) { return; }
+
+    let fx: float64 = float64(x0);
+    let fy: float64 = float64(y0);
+    let fw: float64 = float64(w0);
+    let fh: float64 = float64(h0);
+    let scale: float64 = (fw * fh) / total;   // pixel area per weight unit
+
+    let start: int32 = 0;
+    while (start < n) {
+        let side: float64 = fw;
+        if (fh < fw) { side = fh; }
+        if (side <= 0.0) { return; }
+
+        // Grow the row [start, end) while the worst ratio keeps improving.
+        let end: int32 = start + 1;
+        let row_sum: float64 = weight_of(ref nodes, ids[usize(start)]) * scale;
+        let row_min: float64 = row_sum;
+        let row_max: float64 = row_sum;
+        let best: float64 = worst_ratio(row_sum, row_min, row_max, side);
+        while (end < n) {
+            let a: float64 = weight_of(ref nodes, ids[usize(end)]) * scale;
+            let n_sum: float64 = row_sum + a;
+            let n_min: float64 = row_min;
+            if (a < n_min) { n_min = a; }
+            let n_max: float64 = row_max;
+            if (a > n_max) { n_max = a; }
+            let n_worst: float64 = worst_ratio(n_sum, n_min, n_max, side);
+            if (n_worst > best) { break; }
+            row_sum = n_sum;
+            row_min = n_min;
+            row_max = n_max;
+            best = n_worst;
+            end = end + 1;
+        }
+
+        // Consume a strip of thickness = row_sum / side from the free rect.
+        let thick: float64 = row_sum / side;
+        if (fw >= fh) {
+            // Wider rect: strip is a left-hand column, tiles stacked vertically.
+            let cy: float64 = fy;
+            let k: int32 = start;
+            while (k < end) {
+                let a: float64 = weight_of(ref nodes, ids[usize(k)]) * scale;
+                let ch: float64 = a / thick;
+                if (k == end - 1) { ch = fy + fh - cy; }   // last tile fills remainder
+                layout_node(ref nodes, rects, ids[usize(k)], round_i(fx), round_i(cy), round_i(thick), round_i(ch));
+                cy = cy + ch;
+                k = k + 1;
+            }
+            fx = fx + thick;
+            fw = fw - thick;
+        } else {
+            // Taller rect: strip is a top row, tiles laid left to right.
+            let cx: float64 = fx;
+            let k: int32 = start;
+            while (k < end) {
+                let a: float64 = weight_of(ref nodes, ids[usize(k)]) * scale;
+                let cw: float64 = a / thick;
+                if (k == end - 1) { cw = fx + fw - cx; }
+                layout_node(ref nodes, rects, ids[usize(k)], round_i(cx), round_i(fy), round_i(cw), round_i(thick));
+                cx = cx + cw;
+                k = k + 1;
+            }
+            fy = fy + thick;
+            fh = fh - thick;
+        }
+        start = end;
+    }
+}
+
+// Place node `id` into `rects` at (x,y,w,h) and, if it is a directory big
+// enough to open, subdivide its children. Mutually recursive with squarify.
+export function layout_node(ref nodes: Vec<FsNode>, rects: Rect[], id: int32, x: int32, y: int32, w: int32, h: int32): void {
+    let vis: bool = w >= MIN_TILE && h >= MIN_TILE;
+    rects[usize(id)] = { x: x, y: y, w: w, h: h, vis: vis };
+    let node: FsNode = vec.vec_get(ref nodes, usize(id));
+    if (node.kind == EntryKind.DIR && node.children.len > usize(0) && w > MIN_SUBDIV && h > MIN_SUBDIV) {
+        let ix: int32 = x + PAD;
+        let iy: int32 = y + PAD;
+        let iw: int32 = w - 2 * PAD;
+        let ih: int32 = h - 2 * PAD;
+        if (iw > 0 && ih > 0) {
+            squarify(ref nodes, rects, node.children.data, int32(node.children.len), ix, iy, iw, ih);
+        }
+    }
+}
+
+// ----- hit-test ------------------------------------------------------------
+
+// Deepest visible node whose tile contains (mx,my), or -1. Children tile their
+// parent disjointly, so the first child hit is the one to descend into.
+export function hit_test(ref nodes: Vec<FsNode>, rects: Rect[], id: int32, mx: int32, my: int32): int32 {
+    let r: Rect = rects[usize(id)];
+    if (!r.vis) { return -1; }
+    if (mx < r.x || mx >= r.x + r.w || my < r.y || my >= r.y + r.h) { return -1; }
+    let node: FsNode = vec.vec_get(ref nodes, usize(id));
+    let i: usize = usize(0);
+    while (i < node.children.len) {
+        let h: int32 = hit_test(ref nodes, rects, node.children.data[i], mx, my);
+        if (h >= 0) { return h; }
+        i = i + usize(1);
+    }
+    return id;
+}
+
+// ----- coloring: a trait with two runtime-selectable implementations -------
+
+trait ColorScheme {
+    function color_of(ref self, node: FsNode): uint32;
+}
+
+export enum ColorMode { Depth, Kind }
+
+// Pack r,g,b (0-255) into the memory-order word SDL expects (alpha = 255).
+function pack(r: int32, g: int32, b: int32): uint32 {
+    return uint32(r) | (uint32(g) << 8) | (uint32(b) << 16) | (uint32(255) << 24);
+}
+
+// HSV (all in 0..1) to a packed color.
+function hsv(h: float64, s: float64, v: float64): uint32 {
+    let i: int32 = int32(h * 6.0);
+    let f: float64 = h * 6.0 - float64(i);
+    let p: float64 = v * (1.0 - s);
+    let q: float64 = v * (1.0 - f * s);
+    let t: float64 = v * (1.0 - (1.0 - f) * s);
+    let m: int32 = i % 6;
+    if (m < 0) { m = m + 6; }
+    let r: float64 = v;
+    let g: float64 = t;
+    let b: float64 = p;
+    if (m == 1) { r = q; g = v; b = p; }
+    else if (m == 2) { r = p; g = v; b = t; }
+    else if (m == 3) { r = p; g = q; b = v; }
+    else if (m == 4) { r = t; g = p; b = v; }
+    else if (m == 5) { r = v; g = p; b = q; }
+    return pack(int32(r * 255.0), int32(g * 255.0), int32(b * 255.0));
+}
+
+function ends_with(s: string, suffix: string): bool {
+    if (suffix.len > s.len) { return false; }
+    switch (str.string_slice(s, s.len - suffix.len, s.len)) {
+        case Result.Ok { value: tail }: { return str.string_eq(tail, suffix); }
+        case Result.Err { error: _ }: { return false; }
+    }
+}
+
+// Coarse file-kind categories used by the by-kind color scheme.
+const CAT_CODE: int32 = 0;
+const CAT_WEB: int32 = 1;
+const CAT_IMAGE: int32 = 2;
+const CAT_MEDIA: int32 = 3;
+const CAT_ARCHIVE: int32 = 4;
+const CAT_DOC: int32 = 5;
+const CAT_OTHER: int32 = 6;
+
+function category_of(name: string): int32 {
+    if (ends_with(name, ".yoop") || ends_with(name, ".js") || ends_with(name, ".ts")
+        || ends_with(name, ".c") || ends_with(name, ".h") || ends_with(name, ".rs")
+        || ends_with(name, ".go") || ends_with(name, ".py") || ends_with(name, ".java")) {
+        return CAT_CODE;
+    }
+    if (ends_with(name, ".html") || ends_with(name, ".css") || ends_with(name, ".json")) {
+        return CAT_WEB;
+    }
+    if (ends_with(name, ".png") || ends_with(name, ".jpg") || ends_with(name, ".jpeg")
+        || ends_with(name, ".gif") || ends_with(name, ".svg") || ends_with(name, ".webp")) {
+        return CAT_IMAGE;
+    }
+    if (ends_with(name, ".mp4") || ends_with(name, ".mov") || ends_with(name, ".mp3")
+        || ends_with(name, ".wav") || ends_with(name, ".ogg")) {
+        return CAT_MEDIA;
+    }
+    if (ends_with(name, ".zip") || ends_with(name, ".gz") || ends_with(name, ".tar")
+        || ends_with(name, ".bz2") || ends_with(name, ".xz") || ends_with(name, ".7z")) {
+        return CAT_ARCHIVE;
+    }
+    if (ends_with(name, ".md") || ends_with(name, ".txt") || ends_with(name, ".pdf")) {
+        return CAT_DOC;
+    }
+    return CAT_OTHER;
+}
+
+function category_color(cat: int32): uint32 {
+    if (cat == CAT_CODE) { return pack(86, 156, 214); }      // blue
+    if (cat == CAT_WEB) { return pack(197, 134, 192); }       // purple
+    if (cat == CAT_IMAGE) { return pack(106, 192, 124); }     // green
+    if (cat == CAT_MEDIA) { return pack(220, 160, 80); }      // orange
+    if (cat == CAT_ARCHIVE) { return pack(200, 90, 90); }     // red
+    if (cat == CAT_DOC) { return pack(210, 200, 120); }       // yellow
+    return pack(150, 150, 160);                                // other: gray
+}
+
+// Color tiles by tree depth (a slowly-rotating hue per level).
+export type DepthColors implements ColorScheme {
+    _pad: int32,
+    function color_of(ref self, node: FsNode): uint32 {
+        let hue: float64 = float64(node.depth) * 0.13;
+        hue = hue - float64(int32(hue));   // keep the fractional part
+        return hsv(hue, 0.5, 0.82);
+    }
+}
+
+// Color tiles by file kind (the WinDirStat-style by-extension palette).
+export type KindColors implements ColorScheme {
+    _pad: int32,
+    function color_of(ref self, node: FsNode): uint32 {
+        if (node.kind == EntryKind.DIR) {
+            return pack(96, 100, 120);
+        }
+        return category_color(category_of(node.name));
+    }
+}
+
+// Zero-cost scheme handles, made once and reused across frames.
+export function depth_scheme(): DepthColors {
+    return { _pad: 0 };
+}
+
+export function kind_scheme(): KindColors {
+    return { _pad: 0 };
+}
+
+// Dispatch to the active scheme. Both impls share the method name `color_of`;
+// the trait-qualified call resolves to the right one by receiver type.
+export function tile_color(mode: ColorMode, ref ds: DepthColors, ref ks: KindColors, node: FsNode): uint32 {
+    switch (mode) {
+        case ColorMode.Depth: { return ColorScheme.color_of(ref ds, node); }
+        case ColorMode.Kind: { return ColorScheme.color_of(ref ks, node); }
+    }
+    return pack(128, 128, 128);
+}
+

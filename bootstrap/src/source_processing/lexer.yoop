@@ -13,7 +13,7 @@ import * as numbers from "std/core/numbers.yoop";
 import * as strings from "std/core/strings.yoop";
 import { Result } from "std/core/types.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
-import { Display } from "std/core/traits.yoop";
+import { Display, Into } from "std/core/traits.yoop";
 import {
   skipWhitespace,
   isHexDigit,
@@ -26,31 +26,49 @@ import {
   scanIdentity,
   isIdentStart,
   digitValue,
+  posToSourceLocation,
 } from "./char_utils.yoop";
-import { TokenTags, tokenScanList, keywordList } from "../contracts.yoop";
+import { TokenTags, ParsingError, tagName, tokenScanList, keywordList } from "../contracts.yoop";
 
 export type Token implements Display {
   tag: TokenTags,
   start: usize,
   length: int,
-  intVal: int,
+  intVal: uint64,
   floatVal: float64,
   function to_string(ref self): string {
-    return `tag: ${self.tag}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
+    return `tag: ${tagName(self.tag)}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
   }
 }
 
-type LexedVal {
+export type LexedVal {
   token: Token,
   nextPos: usize,
 }
 
-type LexedError {
+type LexedError implements (Display, Into<ParsingError>) {
+  src: ref uint8[],
   pos: usize,
   error: string,
+  function to_string(ref self): string {
+    return `pos: ${self.pos}, err: ${self.error}`;
+  }
+  function into(ref self): ParsingError {
+    return {
+      sourceLoc: posToSourceLocation(self.src, self.pos, usize(1)),
+      isParseError: true,
+      rawMessage: self.error,
+      src: self.src,
+      err: `parsing error from lexing: ${self.error}`
+    };
+  }
 }
 
-function createLexedVal(): LexedVal {
+function createLexedError(ref src: uint8[], pos: usize, error: string): Result<LexedVal, LexedError> {
+  return Result.Err { error: { error: error, pos: pos, src: ref src } };
+}
+
+export function createLexedVal(): LexedVal {
   return {
     token: {
       tag: TokenTags.EOF,
@@ -69,18 +87,18 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
 
   let p = pos + 1; // past opening quote
   if (p >= src.len) {
-    return Result.Err { error: { error: "unterminated char literal", pos: p } };
+    return createLexedError(ref src, pos, "unterminated char literal");
   }
 
   if (src[p] == '\'') {
-    return Result.Err { error: { error: "empty char literal", pos: p } };
+    return createLexedError(ref src, pos, "empty char literal");
   }
 
 
   let codepoint: int = 0;
   if (src[p] == '\\') {
     if (p + 1 >= src.len) {
-      return Result.Err { error: { error: "unterminated char literal", pos: p } };
+      return createLexedError(ref src, pos, "unterminated char literal");
     }
     const escChar = src[p + 1];
     switch (escChar) {
@@ -123,16 +141,11 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
         const h1 = src[p + 2];
         const h2 = src[p + 3];
         if (!isHexDigit(h1) || !isHexDigit(h2)) {
-          return Result.Err {
-            error: {
-              error: "invalid \\x escape in char literal (expected two hex digits)",
-              pos: p 
-            }
-          };
+          return createLexedError(ref src, pos, "invalid \\x escape in char literal (expected two hex digits)");
         }
         switch (numbers.parseBytesToInt32([h1, h2], 16)) {
           case Result.Err { error: e }: {
-            return Result.Err { error: { error: `unable to parse hex char literal: ${e}`, pos: p } };
+            return createLexedError(ref src, pos, `unable to parse hex char literal: ${e}`);
           }
           case Result.Ok { value: v }: {
             codepoint = v;
@@ -142,7 +155,7 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
         break;
       }
       default: {
-        return Result.Err { error: { error: `unknown escape '\\${escChar}' in char literal`, pos: p } };
+        return createLexedError(ref src, pos, `unknown escape '\\${escChar}' in char literal`);
       }
     }
   } else {
@@ -178,21 +191,21 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
       codepoint = int(0x07);
       extraBytes = 3;
     } else {
-      return Result.Err { error: { error: "invalid UTF-8 lead byte in char literal", pos: p } };
+      return createLexedError(ref src, pos, "invalid UTF-8 lead byte in char literal");
     }
 
     p += 1;
     let k = 0;
     while (k < extraBytes) {
       if (p >= src.len) {
-        return Result.Err { error: { error: "unterminated char literal", pos: p } };
+        return createLexedError(ref src, pos, "unterminated char literal");
       }
       const cont = src[p];
 
       // continuation byte: 10xx xxxx
       // make sure leftmost 2 bits are 1, 0
       if ((cont & 0b1100_0000) != 0b1000_0000) {
-        return Result.Err { error: { error: "invalid UTF-8 continuation byte", pos: p } };
+        return createLexedError(ref src, pos, "invalid UTF-8 continuation byte");
       }
 
       // append this byte's 6 value bits:
@@ -203,15 +216,15 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
   }
 
   if (p >= src.len) {
-    return Result.Err { error: { error: "unterminated char literal", pos: p } };
+    return createLexedError(ref src, pos, "unterminated char literal");
   }
 
   if (src[p] != '\'') {
-    return Result.Err { error: { error: "char literal must contain a single character", pos: p } };
+    return createLexedError(ref src, pos, "char literal must contain a single character");
   }
 
   res.token.tag = TokenTags.CHARLITERAL;
-  res.token.intVal = codepoint;
+  res.token.intVal = uint64(codepoint); 
   res.token.length = int32(p + 1 - pos);
   res.nextPos = p + 1;
 
@@ -221,7 +234,7 @@ function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
 function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
   let start = pos;
   let isFloat = false;
-  let base = 10;
+  let base: uint64 = 10; // for multiplying without casting
   let digitsStart = pos;
   let end = digitsStart;
 
@@ -234,7 +247,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
       const scanHexResult = scanHexDigitsAndUnderscores(src, pos);
       switch (scanHexResult) {
         case Result.Err { error: e }: {
-          return Result.Err { error: { error: e, pos: pos } };
+          return createLexedError(ref src, pos, e);
         }
         case Result.Ok { value: v }: {
           end = v;
@@ -247,7 +260,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
       const scanBinResult = scanBinDigitsAndUnderscores(src, pos);
       switch (scanBinResult) {
         case Result.Err { error: e }: {
-          return Result.Err { error: { error: e, pos: pos } };
+          return createLexedError(ref src, pos, e);
         }
         case Result.Ok { value: v }: {
           end = v;
@@ -260,7 +273,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
       const scanOctResult = scanOctDigitsAndUnderscores(src, pos);
       switch (scanOctResult) {
         case Result.Err { error: e }: {
-          return Result.Err { error: { error: e, pos: pos } };
+          return createLexedError(ref src, pos, e);
         }
         case Result.Ok { value: v }: {
           end = v;
@@ -270,7 +283,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
       const scanDecResult = scanDecDigitsAndUnderscores(src, pos);
       switch (scanDecResult) {
         case Result.Err { error: e }: {
-          return Result.Err { error: { error: e, pos: pos } };
+          return createLexedError(ref src, pos, e);
         }
         case Result.Ok { value: v }: {
           end = v;
@@ -281,7 +294,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     const scanDecResult = scanDecDigitsAndUnderscores(src, pos);
     switch (scanDecResult) {
       case Result.Err { error: e }: {
-        return Result.Err { error: { error: e, pos: pos } };
+        return createLexedError(ref src, pos, e);
       }
       case Result.Ok { value: v }: {
         end = v;
@@ -296,7 +309,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     const scanDecResult = scanDecDigitsAndUnderscores(src, end);
     switch (scanDecResult) {
       case Result.Err { error: e }: {
-        return Result.Err { error: { error: e, pos: pos } };
+        return createLexedError(ref src, pos, e);
       }
       case Result.Ok { value: v }: {
         end = v;
@@ -314,7 +327,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     const scanDecResult = scanDecDigitsAndUnderscores(src, end);
     switch (scanDecResult) {
       case Result.Err { error: e }: {
-        return Result.Err { error: { error: e, pos: pos } };
+        return createLexedError(ref src, pos, e);
       }
       case Result.Ok { value: v }: {
         end = v;
@@ -364,11 +377,11 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     res.token.tag = TokenTags.FLOATLITERAL;
     res.token.floatVal = value;
   } else {
-    let value = 0;
+    let value: uint64 = 0;
     let i = digitsStart;
     while (i < end) {
       const ch = src[i];
-      if (ch != '_') { value = value * base + digitValue(ch); }
+      if (ch != '_') { value = value * base + uint64(digitValue(ch)); }
       i += 1;
     }
     res.token.tag = TokenTags.INTLITERAL;
@@ -393,7 +406,7 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
   let str: string = "";
   switch (strings.string_from_bytes(byteSubstr)) {
     case Result.Err { error: e }: {
-      return Result.Err { error: { error: `invalid identifier bytes: ${e}`, pos: pos } };
+      return createLexedError(ref src, pos, `invalid identifier bytes: ${e}`);
     }
     case Result.Ok { value: v }: {
       str = v;
@@ -415,7 +428,7 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
   return Result.Ok { value: res };
 }
 
-export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedError> {
   let res = createLexedVal();
   res.token.start = pos;
   res.nextPos = pos;
@@ -461,7 +474,7 @@ export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
     let end = scanStringLiteral(src, p);
     switch (end) {
       case Option.None {}: {
-        return Result.Err { error: { error: "unterminated string litera", pos: p } };
+        return createLexedError(ref src, pos, "unterminated string literal");
       }
       case Option.Some { value: newPos }: {
         if (ch == '`') {
@@ -488,7 +501,7 @@ export function lexNext(src: uint8[], pos: usize): Result<LexedVal, LexedError> 
     return lexIdentifierOrKeyword(src, p);
   }
 
-  return Result.Err { error: { error: "unrecognized character at position", pos: pos  } };
+  return createLexedError(ref src, pos, "unrecognized character at position");
 }
 
 // we need to do so much single-character peeking and processing
@@ -502,7 +515,7 @@ export function tokenize(src: uint8[]): Result<Token[], string> {
 
   while (iters < maxIters) {
     iters = iters + 1;
-    const lexResult = lexNext(src, pos);
+    const lexResult = lexNext(ref src, pos);
     switch (lexResult) {
       case Result.Err { error: e } : {
         return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };

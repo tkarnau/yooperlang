@@ -10,11 +10,12 @@ import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
 import * as strings from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as fs from "std/fs.yoop";
 
 import { isHexDigit } from "./source_processing/char_utils.yoop";
 import { tokenize, Token } from "./source_processing/lexer.yoop";
+import { parse } from "./source_processing/parser.yoop";
 import { tokenScanList } from "./contracts.yoop";
 
 @precompile {
@@ -32,33 +33,54 @@ function main(): int {
 
   // log.info(`is hex digit?: ${isIt}, value: ${testStrBytes[0]}`);
 
+  // const testStr = `
+  //   // test program
+  //   /* 
+  //     this is a test
+  //   */
+  //   ;{}...,'\\xFF'
+  //   "teststr"
+  //   0xFF
+  //   13.54
+  //   return return function main(): int {
+  //     printf("hello, world!");
+
+  //     return 0;
+  //   }
+  //   `;
+
   const testStr = `
-    // test program
-    /* 
-      this is a test
-    */
-    ;{}...,'\\xFF'
-    "teststr"
-    0xFF
-    13.54
-    return return function main(): int {
-      printf("hello, world!");
+function main(): int {
+  const num = 32 + 10;
 
-      return 0;
-    }
-    `;
+  return num;
+}
 
+function foo(bar: int): void {
+
+}
+`;
   const bytes = intr.string_as_bytes(testStr);
 
-  const tokenizeResult = tokenize(bytes);
-  switch (tokenizeResult){
+  // const tokenizeResult = tokenize(bytes);
+  // switch (tokenizeResult){
+  //   case Result.Err { error: e } : {
+  //     log.info(`tokenize error: ${e}`);
+  //   }
+  //   case Result.Ok { value: tokens } : {
+  //     for tok in tokens {
+  //       log.info(`token: ${tok}`);
+  //     }
+  //   }
+  // }
+
+  const parseResult = parse(bytes);
+  switch (parseResult) {
     case Result.Err { error: e } : {
-      log.info(`tokenize error: ${e}`);
+      log.info(`parsing error: ${e}`);
     }
-    case Result.Ok { value: tokens } : {
-      for tok in tokens {
-        log.info(`token: ${tok}`);
-      }
+    case Result.Ok { value: ast } : {
+      log.info(`parsed successfully: ${ast}`);
     }
   }
 

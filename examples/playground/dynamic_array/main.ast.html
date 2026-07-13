@@ -1,0 +1,221 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>Yoopiler AST</title>
+<style>
+  :root { color-scheme: light dark; }
+  body { margin: 0; font-family: system-ui, -apple-system, sans-serif; height: 100vh; display: flex; flex-direction: column; background: #1e1e1e; color: #ddd; }
+  header { padding: 8px 14px; background: #111; color: #eee; font-size: 13px; display: flex; justify-content: space-between; align-items: center; }
+  header .meta { color: #888; font-size: 12px; }
+  main { flex: 1; display: grid; grid-template-columns: 1fr 1fr; gap: 1px; background: #333; overflow: hidden; }
+  .pane { background: #1e1e1e; overflow: auto; position: relative; }
+  #source { margin: 0; padding: 14px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 13px; line-height: 1.45; tab-size: 4; white-space: pre; cursor: default; }
+  #ast { padding: 10px; font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; }
+  .src-highlight { position: absolute; background: rgba(255, 220, 0, 0.30); pointer-events: none; border-radius: 2px; box-shadow: 0 0 0 1px rgba(255, 220, 0, 0.55); }
+  .ast-row { padding: 1px 4px; border-radius: 3px; cursor: default; white-space: nowrap; }
+  .ast-row.highlighted { background: rgba(255, 220, 0, 0.30); box-shadow: 0 0 0 1px rgba(255, 220, 0, 0.55); }
+  .ast-row:hover { background: rgba(120, 180, 255, 0.18); }
+  .ast-kind { color: #7ac6ff; font-weight: 600; }
+  .ast-label { color: #888; margin-right: 4px; }
+  .ast-fields { color: #c9a36c; font-size: 11px; }
+  .ast-children { margin-left: 14px; border-left: 1px dotted #444; padding-left: 8px; }
+  details > summary { list-style: none; outline: none; }
+  details > summary::-webkit-details-marker { display: none; }
+  details > summary::before { content: "\25B6"; display: inline-block; width: 10px; font-size: 8px; color: #666; transition: transform .1s; margin-right: 2px; }
+  details[open] > summary::before { transform: rotate(90deg); }
+  details.leaf > summary::before { content: "\2022"; color: #444; transform: none; }
+  @media (prefers-color-scheme: light) {
+    body { background: #fafafa; color: #222; }
+    header { background: #eaeaea; color: #222; }
+    .pane { background: #fff; }
+    main { background: #ccc; }
+    .ast-kind { color: #06c; }
+    .ast-fields { color: #a05a00; }
+    .ast-children { border-left-color: #ddd; }
+  }
+</style>
+</head>
+<body>
+<header>
+  <span>Yoopiler AST &mdash; <span id="filename"></span></span>
+  <span class="meta">hover source or tree to cross-highlight</span>
+</header>
+<main>
+  <div class="pane" id="source-pane"><pre id="source"></pre></div>
+  <div class="pane" id="ast-pane"><div id="ast"></div></div>
+</main>
+<script type="application/json" id="data">{"filename":"./examples/playground/dynamic_array/main.yoop","source":"// Safe, generic dynamic array.\n//\n//   - `DynArray<T> implements Disposable propagates<usedisposable>`:\n//     the type itself is the disposable thing, and its `propagates<usedisposable>`\n//     clause tells every binding of DynArray<T> to inherit the dispose obligation.\n//   - `new_dynarray<T>(...): DynArray<T> propagates<usedisposable>`:\n//     factory that pushes the obligation through its return type to the caller.\n//   - Calling `let arr: DynArray<int32> = new_dynarray(4)` is enough — no kind\n//     keyword required. The compiler auto-inserts `Disposable.dispose(ref arr)`\n//     before scope end.\n//\n// Try removing `propagates<usedisposable>` from the type and the compiler will\n// no longer auto-inject the cleanup. Try leaking `arr` out of the scope and\n// the kind's `mustNotShare acrossScopes` would (with that clause re-added) be\n// rejected too.\n\n/*\n    This demonstrates a dynamic array implementation for yooperlang\n\n\n*/\n\nextern \"C\" from \"stdio.h\" {\n    function printf(fmt: string, ...): int32;\n}\n\ntrait Disposable {\n    function dispose(ref self): void;\n}\n\n\nkind usedisposable {\n    appliesTo binding;\n    requires Disposable;\n    ownsBlock;\n    mustCall dispose beforeScopeEnd;\n}\n\n// The generic struct *is* the Disposable. `propagates<usedisposable>` says\n// \"every binding of me inherits the dispose obligation.\"\ntype DynArray<T> implements Disposable propagates<usedisposable> {\n    data: T[],\n    len: usize,\n    cap: usize,\n\n    function dispose(ref self): void {\n        printf(`(dispose: freeing DynArray, len=${self.len} cap=${self.cap})\\n`);\n        heap_free(self.data);\n    }\n}\n\n// Factory. `propagates<usedisposable>` documents the contract; the obligation\n// is also surfaced via the type itself, so either is sufficient.\nfunction new_dynarray<T>(initial_cap: usize): DynArray<T> {\n    const newArr: DynArray<T> = { data: heap_alloc(initial_cap), len: 0, cap: initial_cap };\n\n    return newArr;\n}\n\nfunction push<T>(a: ref DynArray<T>, value: T): void {\n    if (a.len >= a.cap) {\n        let new_cap: usize = a.cap * 2;\n        let new_data: T[] = heap_alloc(new_cap);\n        let i: usize = 0;\n        while (i < a.len) {\n            new_data[i] = a.data[i];\n            i = i + 1;\n        }\n        printf(`growing capacity of array to ${new_cap}\\n`);\n        heap_free(a.data);\n        a.data = new_data;\n        a.cap = new_cap;\n    }\n    a.data[a.len] = value;\n    a.len = a.len + 1;\n}\n\nfunction get<T>(a: ref DynArray<T>, i: usize): T {\n    return a.data[i];\n}\n\nfunction main(): int32 {\n    // No `usedisposable` keyword needed — propagates<usedisposable> on\n    // DynArray<T> means the binding auto-acquires the mustCall obligation.\n    let arr: DynArray<int32> = new_dynarray(4) ;\n    // Force two grow passes (4 -> 8 -> 16).\n    let i: int32 = 0;\n    while (i < 10) {\n        push(ref arr, i * i);\n        i = i + 1;\n    }\n\n    printf(`len=${arr.len} cap=${arr.cap}\\n`);\n    let j: usize = 0;\n    while (j < arr.len) {\n        printf(`arr[${j}]=${get(ref arr, j)}\\n`);\n        j = j + 1;\n    }\n\n    // The compiler emits `Disposable.dispose(ref arr)` right here, before return.\n    return 0;\n}\n","ast":{"id":1,"kind":"PROGRAM","fields":{},"children":[{"id":248,"kind":"GROUP","label":"body","children":[{"id":2,"kind":"EXTERN_BLOCK","fields":{"abi":"C","source":{"kind":"header","value":"stdio.h"}},"children":[{"id":6,"kind":"GROUP","label":"decls","children":[{"id":3,"kind":"EXTERN_FUNCTION_DECL","fields":{"name":"printf","variadic":true,"returnTypeAnnotation":{"kind":"typeName","name":"int32"}},"children":[{"id":5,"kind":"GROUP","label":"params","children":[{"id":4,"kind":"PARAM","fields":{"isRef":false,"name":"fmt","typeAnnotation":{"kind":"typeName","name":"string"}},"children":[],"loc":{"pos":995,"length":0,"line":24,"column":24}}]}],"loc":{"pos":991,"length":0,"line":24,"column":20}}]}],"loc":{"pos":950,"length":0,"line":23,"column":7}},{"id":7,"kind":"TRAIT_DECL","fields":{"name":"Disposable"},"children":[{"id":11,"kind":"GROUP","label":"methods","children":[{"id":8,"kind":"METHOD_SIG","fields":{"name":"dispose","returnTypeAnnotation":{"kind":"typeName","name":"void"}},"children":[{"id":10,"kind":"GROUP","label":"params","children":[{"id":9,"kind":"PARAM","fields":{"isRef":true,"name":"self","typeAnnotation":{"kind":"selfType"}},"children":[],"loc":{"pos":1070,"length":0,"line":28,"column":31}}]}],"loc":{"pos":1052,"length":0,"line":28,"column":13}}]}],"loc":{"pos":1026,"length":0,"line":27,"column":6}},{"id":12,"kind":"KIND_DECL","fields":{"name":"usedisposable"},"children":[{"id":17,"kind":"GROUP","label":"clauses","children":[{"id":13,"kind":"KIND_APPLIES_TO_CLAUSE","fields":{"sites":["binding"]},"children":[],"loc":{"pos":1116,"length":0,"line":33,"column":14}},{"id":14,"kind":"KIND_REQUIRES_CLAUSE","fields":{"traitName":"Disposable"},"children":[],"loc":{"pos":1138,"length":0,"line":34,"column":13}},{"id":15,"kind":"KIND_OWNSBLOCK_CLAUSE","fields":{},"children":[],"loc":{"pos":1164,"length":0,"line":35,"column":14}},{"id":16,"kind":"KIND_MUSTCALL_CLAUSE","fields":{"methodName":"dispose","timing":"beforeScopeEnd"},"children":[],"loc":{"pos":1178,"length":0,"line":36,"column":13}}]}],"loc":{"pos":1086,"length":0,"line":32,"column":5}},{"id":18,"kind":"TYPE_DECL","fields":{"name":"DynArray","implements":[{"name":"Disposable","typeArgs":null,"sourceLoc":{"pos":1368,"line":41,"column":29}}],"propagatesClause":{"variant":"propagates","kindNames":[{"name":"usedisposable","args":null,"sourceLoc":{"pos":1390,"line":41,"column":51}}],"sourceLoc":{"pos":1379,"line":41,"column":40}}},"children":[{"id":20,"kind":"GROUP","label":"typeParams","children":[{"id":19,"kind":"TYPE_PARAM","fields":{"name":"T"},"children":[],"loc":{"pos":1354,"length":0,"line":41,"column":15}}]},{"id":24,"kind":"GROUP","label":"fields","children":[{"id":21,"kind":"FIELD_DECL","fields":{"name":"data","typeAnnotation":{"kind":"arrayType","elem":{"kind":"typeName","name":"T"}}},"children":[],"loc":{"pos":1415,"length":0,"line":42,"column":9}},{"id":22,"kind":"FIELD_DECL","fields":{"name":"len","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[],"loc":{"pos":1429,"length":0,"line":43,"column":8}},{"id":23,"kind":"FIELD_DECL","fields":{"name":"cap","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[],"loc":{"pos":1445,"length":0,"line":44,"column":8}}]},{"id":49,"kind":"GROUP","label":"methods","children":[{"id":25,"kind":"METHOD_DECL","fields":{"name":"dispose","returnTypeAnnotation":{"kind":"typeName","name":"void"}},"children":[{"id":27,"kind":"GROUP","label":"params","children":[{"id":26,"kind":"PARAM","fields":{"isRef":true,"name":"self","typeAnnotation":{"kind":"selfType"}},"children":[],"loc":{"pos":1485,"length":0,"line":46,"column":31}}]},{"id":28,"kind":"BLOCK","fields":{},"children":[{"id":48,"kind":"GROUP","label":"body","children":[{"id":29,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":30,"kind":"CALL_EXPRESSION","fields":{"callee":"printf"},"children":[{"id":42,"kind":"GROUP","label":"args","children":[{"id":31,"kind":"TEMPLATE_LITERAL","fields":{},"children":[{"id":41,"kind":"GROUP","label":"parts","children":[{"id":32,"kind":"STRING_PART","fields":{"value":"(dispose: freeing DynArray, len="},"children":[]},{"id":33,"kind":"EXPR_PART","fields":{},"children":[{"id":34,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":36,"line":1,"column":37,"length":3}},"children":[{"id":35,"kind":"IDENT","fields":{"name":"self"},"children":[],"label":"object","loc":{"pos":36,"length":0,"line":1,"column":37}}],"label":"expr","loc":{"pos":36,"length":0,"line":1,"column":37}}]},{"id":36,"kind":"STRING_PART","fields":{"value":" cap="},"children":[]},{"id":37,"kind":"EXPR_PART","fields":{},"children":[{"id":38,"kind":"FIELD_ACCESS","fields":{"field":"cap","fieldSourceLoc":{"pos":36,"line":1,"column":37,"length":3}},"children":[{"id":39,"kind":"IDENT","fields":{"name":"self"},"children":[],"label":"object","loc":{"pos":36,"length":0,"line":1,"column":37}}],"label":"expr","loc":{"pos":36,"length":0,"line":1,"column":37}}]},{"id":40,"kind":"STRING_PART","fields":{"value":")\\n"},"children":[]}]}],"loc":{"pos":1574,"length":0,"line":47,"column":81}}]}],"label":"value","loc":{"pos":1509,"length":0,"line":47,"column":16}}],"loc":{"pos":1508,"length":0,"line":47,"column":15}},{"id":43,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":44,"kind":"CALL_EXPRESSION","fields":{"callee":"heap_free"},"children":[{"id":47,"kind":"GROUP","label":"args","children":[{"id":45,"kind":"FIELD_ACCESS","fields":{"field":"data","fieldSourceLoc":{"pos":1599,"line":48,"column":24,"length":4}},"children":[{"id":46,"kind":"IDENT","fields":{"name":"self"},"children":[],"label":"object","loc":{"pos":1599,"length":0,"line":48,"column":24}}],"loc":{"pos":1599,"length":0,"line":48,"column":24}}]}],"label":"value","loc":{"pos":1594,"length":0,"line":48,"column":19}}],"loc":{"pos":1593,"length":0,"line":48,"column":18}}]}],"label":"body","loc":{"pos":1508,"length":0,"line":47,"column":15}}],"loc":{"pos":1467,"length":0,"line":46,"column":13}}]}],"loc":{"pos":1353,"length":0,"line":41,"column":14}},{"id":50,"kind":"FUNCTION_DECL","fields":{"isTask":false,"name":"new_dynarray","returnTypeAnnotation":{"kind":"typeApplication","name":"DynArray","typeArgs":[{"kind":"typeName","name":"T"}]}},"children":[{"id":52,"kind":"GROUP","label":"typeParams","children":[{"id":51,"kind":"TYPE_PARAM","fields":{"name":"T"},"children":[],"loc":{"pos":1782,"length":0,"line":54,"column":23}}]},{"id":54,"kind":"GROUP","label":"params","children":[{"id":53,"kind":"PARAM","fields":{"isRef":false,"name":"initial_cap","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[],"loc":{"pos":1796,"length":0,"line":54,"column":37}}]},{"id":55,"kind":"BLOCK","fields":{},"children":[{"id":69,"kind":"GROUP","label":"body","children":[{"id":56,"kind":"CONST_DECL","fields":{"name":"newArr","typeAnnotation":{"kind":"typeApplication","name":"DynArray","typeArgs":[{"kind":"typeName","name":"T"}]}},"children":[{"id":57,"kind":"STRUCT_LITERAL","fields":{},"children":[{"id":66,"kind":"GROUP","label":"fields","children":[{"id":58,"kind":"STRUCT_LITERAL_FIELD","fields":{"name":"data"},"children":[{"id":59,"kind":"CALL_EXPRESSION","fields":{"callee":"heap_alloc"},"children":[{"id":61,"kind":"GROUP","label":"args","children":[{"id":60,"kind":"IDENT","fields":{"name":"initial_cap"},"children":[],"loc":{"pos":1883,"length":0,"line":55,"column":64}}]}],"label":"value","loc":{"pos":1871,"length":0,"line":55,"column":52}}],"loc":{"pos":1858,"length":0,"line":55,"column":39}},{"id":62,"kind":"STRUCT_LITERAL_FIELD","fields":{"name":"len"},"children":[{"id":63,"kind":"INT_LITERAL","fields":{"value":0},"children":[],"label":"value","loc":{"pos":1891,"length":0,"line":55,"column":72}}],"loc":{"pos":1888,"length":0,"line":55,"column":69}},{"id":64,"kind":"STRUCT_LITERAL_FIELD","fields":{"name":"cap"},"children":[{"id":65,"kind":"IDENT","fields":{"name":"initial_cap"},"children":[],"label":"value","loc":{"pos":1911,"length":0,"line":55,"column":92}}],"loc":{"pos":1896,"length":0,"line":55,"column":77}}]}],"label":"assignment","loc":{"pos":1858,"length":0,"line":55,"column":39}}],"loc":{"pos":1836,"length":0,"line":55,"column":17}},{"id":67,"kind":"RETURN_STATEMENT","fields":{},"children":[{"id":68,"kind":"IDENT","fields":{"name":"newArr"},"children":[],"label":"value","loc":{"pos":1932,"length":0,"line":57,"column":19}}],"loc":{"pos":1931,"length":0,"line":57,"column":18}}]}],"label":"body","loc":{"pos":1829,"length":0,"line":55,"column":10}}],"loc":{"pos":1781,"length":0,"line":54,"column":22}},{"id":70,"kind":"FUNCTION_DECL","fields":{"isTask":false,"name":"push","returnTypeAnnotation":{"kind":"typeName","name":"void"}},"children":[{"id":72,"kind":"GROUP","label":"typeParams","children":[{"id":71,"kind":"TYPE_PARAM","fields":{"name":"T"},"children":[],"loc":{"pos":1950,"length":0,"line":60,"column":15}}]},{"id":75,"kind":"GROUP","label":"params","children":[{"id":73,"kind":"PARAM","fields":{"isRef":true,"name":"a","typeAnnotation":{"kind":"typeApplication","name":"DynArray","typeArgs":[{"kind":"typeName","name":"T"}]}},"children":[],"loc":{"pos":1954,"length":0,"line":60,"column":19}},{"id":74,"kind":"PARAM","fields":{"isRef":false,"name":"value","typeAnnotation":{"kind":"typeName","name":"T"}},"children":[],"loc":{"pos":1978,"length":0,"line":60,"column":43}}]},{"id":76,"kind":"BLOCK","fields":{},"children":[{"id":158,"kind":"GROUP","label":"body","children":[{"id":77,"kind":"IF_STATEMENT","fields":{},"children":[{"id":78,"kind":"BINARY_EXPRESSION","fields":{"op":"gte"},"children":[{"id":79,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":2001,"line":61,"column":11,"length":3}},"children":[{"id":80,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2001,"length":0,"line":61,"column":11}}],"label":"left","loc":{"pos":2001,"length":0,"line":61,"column":11}},{"id":81,"kind":"FIELD_ACCESS","fields":{"field":"cap","fieldSourceLoc":{"pos":2010,"line":61,"column":20,"length":3}},"children":[{"id":82,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2010,"length":0,"line":61,"column":20}}],"label":"right","loc":{"pos":2010,"length":0,"line":61,"column":20}}],"label":"expression","loc":{"pos":2014,"length":0,"line":61,"column":24}},{"id":83,"kind":"BLOCK","fields":{},"children":[{"id":141,"kind":"GROUP","label":"body","children":[{"id":84,"kind":"LET_DECL","fields":{"name":"new_cap","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[{"id":85,"kind":"BINARY_EXPRESSION","fields":{"op":"mult"},"children":[{"id":86,"kind":"FIELD_ACCESS","fields":{"field":"cap","fieldSourceLoc":{"pos":2048,"line":62,"column":32,"length":3}},"children":[{"id":87,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2048,"length":0,"line":62,"column":32}}],"label":"left","loc":{"pos":2048,"length":0,"line":62,"column":32}},{"id":88,"kind":"INT_LITERAL","fields":{"value":2},"children":[],"label":"right","loc":{"pos":2055,"length":0,"line":62,"column":39}}],"label":"assignment","loc":{"pos":2056,"length":0,"line":62,"column":40}}],"loc":{"pos":2036,"length":0,"line":62,"column":20}},{"id":89,"kind":"LET_DECL","fields":{"name":"new_data","typeAnnotation":{"kind":"arrayType","elem":{"kind":"typeName","name":"T"}}},"children":[{"id":90,"kind":"CALL_EXPRESSION","fields":{"callee":"heap_alloc"},"children":[{"id":92,"kind":"GROUP","label":"args","children":[{"id":91,"kind":"IDENT","fields":{"name":"new_cap"},"children":[],"loc":{"pos":2104,"length":0,"line":63,"column":48}}]}],"label":"assignment","loc":{"pos":2096,"length":0,"line":63,"column":40}}],"loc":{"pos":2077,"length":0,"line":63,"column":21}},{"id":93,"kind":"LET_DECL","fields":{"name":"i","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[{"id":94,"kind":"INT_LITERAL","fields":{"value":0},"children":[],"label":"assignment","loc":{"pos":2130,"length":0,"line":64,"column":25}}],"loc":{"pos":2119,"length":0,"line":64,"column":14}},{"id":95,"kind":"WHILE_STATEMENT","fields":{},"children":[{"id":96,"kind":"BINARY_EXPRESSION","fields":{"op":"lt"},"children":[{"id":97,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"left","loc":{"pos":2150,"length":0,"line":65,"column":19}},{"id":98,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":2153,"line":65,"column":22,"length":3}},"children":[{"id":99,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2153,"length":0,"line":65,"column":22}}],"label":"right","loc":{"pos":2153,"length":0,"line":65,"column":22}}],"label":"expression","loc":{"pos":2157,"length":0,"line":65,"column":26}},{"id":100,"kind":"BLOCK","fields":{},"children":[{"id":116,"kind":"GROUP","label":"body","children":[{"id":101,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":102,"kind":"ASSIGNMENT","fields":{},"children":[{"id":103,"kind":"INDEX_EXPRESSION","fields":{},"children":[{"id":104,"kind":"IDENT","fields":{"name":"new_data"},"children":[],"label":"object","loc":{"pos":2181,"length":0,"line":66,"column":22}},{"id":105,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"index","loc":{"pos":2183,"length":0,"line":66,"column":24}}],"label":"target","loc":{"pos":2182,"length":0,"line":66,"column":23}},{"id":106,"kind":"INDEX_EXPRESSION","fields":{},"children":[{"id":107,"kind":"FIELD_ACCESS","fields":{"field":"data","fieldSourceLoc":{"pos":2188,"line":66,"column":29,"length":4}},"children":[{"id":108,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2188,"length":0,"line":66,"column":29}}],"label":"object","loc":{"pos":2188,"length":0,"line":66,"column":29}},{"id":109,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"index","loc":{"pos":2195,"length":0,"line":66,"column":36}}],"label":"value","loc":{"pos":2194,"length":0,"line":66,"column":35}}],"label":"value","loc":{"pos":2187,"length":0,"line":66,"column":28}}],"loc":{"pos":2180,"length":0,"line":66,"column":21}},{"id":110,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":111,"kind":"ASSIGNMENT","fields":{},"children":[{"id":112,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"target","loc":{"pos":2212,"length":0,"line":67,"column":16}},{"id":113,"kind":"BINARY_EXPRESSION","fields":{"op":"plus"},"children":[{"id":114,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"left","loc":{"pos":2216,"length":0,"line":67,"column":20}},{"id":115,"kind":"INT_LITERAL","fields":{"value":1},"children":[],"label":"right","loc":{"pos":2218,"length":0,"line":67,"column":22}}],"label":"value","loc":{"pos":2219,"length":0,"line":67,"column":23}}],"label":"value","loc":{"pos":2214,"length":0,"line":67,"column":18}}],"loc":{"pos":2210,"length":0,"line":67,"column":14}}]}],"label":"body","loc":{"pos":2180,"length":0,"line":66,"column":21}}],"loc":{"pos":2148,"length":0,"line":65,"column":17}},{"id":117,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":118,"kind":"CALL_EXPRESSION","fields":{"callee":"printf"},"children":[{"id":125,"kind":"GROUP","label":"args","children":[{"id":119,"kind":"TEMPLATE_LITERAL","fields":{},"children":[{"id":124,"kind":"GROUP","label":"parts","children":[{"id":120,"kind":"STRING_PART","fields":{"value":"growing capacity of array to "},"children":[]},{"id":121,"kind":"EXPR_PART","fields":{},"children":[{"id":122,"kind":"IDENT","fields":{"name":"new_cap"},"children":[],"label":"expr","loc":{"pos":39,"length":0,"line":1,"column":40}}]},{"id":123,"kind":"STRING_PART","fields":{"value":"\\n"},"children":[]}]}],"loc":{"pos":2289,"length":0,"line":69,"column":60}}]}],"label":"value","loc":{"pos":2245,"length":0,"line":69,"column":16}}],"loc":{"pos":2244,"length":0,"line":69,"column":15}},{"id":126,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":127,"kind":"CALL_EXPRESSION","fields":{"callee":"heap_free"},"children":[{"id":130,"kind":"GROUP","label":"args","children":[{"id":128,"kind":"FIELD_ACCESS","fields":{"field":"data","fieldSourceLoc":{"pos":2311,"line":70,"column":21,"length":4}},"children":[{"id":129,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2311,"length":0,"line":70,"column":21}}],"loc":{"pos":2311,"length":0,"line":70,"column":21}}]}],"label":"value","loc":{"pos":2309,"length":0,"line":70,"column":19}}],"loc":{"pos":2308,"length":0,"line":70,"column":18}},{"id":131,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":132,"kind":"ASSIGNMENT","fields":{},"children":[{"id":133,"kind":"FIELD_ACCESS","fields":{"field":"data","fieldSourceLoc":{"pos":2328,"line":71,"column":11,"length":4}},"children":[{"id":134,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2328,"length":0,"line":71,"column":11}}],"label":"target","loc":{"pos":2328,"length":0,"line":71,"column":11}},{"id":135,"kind":"IDENT","fields":{"name":"new_data"},"children":[],"label":"value","loc":{"pos":2344,"length":0,"line":71,"column":27}}],"label":"value","loc":{"pos":2343,"length":0,"line":71,"column":26}}],"loc":{"pos":2327,"length":0,"line":71,"column":10}},{"id":136,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":137,"kind":"ASSIGNMENT","fields":{},"children":[{"id":138,"kind":"FIELD_ACCESS","fields":{"field":"cap","fieldSourceLoc":{"pos":2355,"line":72,"column":11,"length":3}},"children":[{"id":139,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2355,"length":0,"line":72,"column":11}}],"label":"target","loc":{"pos":2355,"length":0,"line":72,"column":11}},{"id":140,"kind":"IDENT","fields":{"name":"new_cap"},"children":[],"label":"value","loc":{"pos":2369,"length":0,"line":72,"column":25}}],"label":"value","loc":{"pos":2368,"length":0,"line":72,"column":24}}],"loc":{"pos":2354,"length":0,"line":72,"column":10}}]}],"label":"body","loc":{"pos":2028,"length":0,"line":62,"column":12}}],"loc":{"pos":2000,"length":0,"line":61,"column":10}},{"id":142,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":143,"kind":"ASSIGNMENT","fields":{},"children":[{"id":144,"kind":"INDEX_EXPRESSION","fields":{},"children":[{"id":145,"kind":"FIELD_ACCESS","fields":{"field":"data","fieldSourceLoc":{"pos":2382,"line":74,"column":7,"length":4}},"children":[{"id":146,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2382,"length":0,"line":74,"column":7}}],"label":"object","loc":{"pos":2382,"length":0,"line":74,"column":7}},{"id":147,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":2389,"line":74,"column":14,"length":3}},"children":[{"id":148,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2389,"length":0,"line":74,"column":14}}],"label":"index","loc":{"pos":2389,"length":0,"line":74,"column":14}}],"label":"target","loc":{"pos":2388,"length":0,"line":74,"column":13}},{"id":149,"kind":"IDENT","fields":{"name":"value"},"children":[],"label":"value","loc":{"pos":2402,"length":0,"line":74,"column":27}}],"label":"value","loc":{"pos":2401,"length":0,"line":74,"column":26}}],"loc":{"pos":2381,"length":0,"line":74,"column":6}},{"id":150,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":151,"kind":"ASSIGNMENT","fields":{},"children":[{"id":152,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":2409,"line":75,"column":7,"length":3}},"children":[{"id":153,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2409,"length":0,"line":75,"column":7}}],"label":"target","loc":{"pos":2409,"length":0,"line":75,"column":7}},{"id":154,"kind":"BINARY_EXPRESSION","fields":{"op":"plus"},"children":[{"id":155,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":2417,"line":75,"column":15,"length":3}},"children":[{"id":156,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2417,"length":0,"line":75,"column":15}}],"label":"left","loc":{"pos":2417,"length":0,"line":75,"column":15}},{"id":157,"kind":"INT_LITERAL","fields":{"value":1},"children":[],"label":"right","loc":{"pos":2424,"length":0,"line":75,"column":22}}],"label":"value","loc":{"pos":2425,"length":0,"line":75,"column":23}}],"label":"value","loc":{"pos":2416,"length":0,"line":75,"column":14}}],"loc":{"pos":2408,"length":0,"line":75,"column":6}}]}],"label":"body","loc":{"pos":1997,"length":0,"line":61,"column":7}}],"loc":{"pos":1949,"length":0,"line":60,"column":14}},{"id":159,"kind":"FUNCTION_DECL","fields":{"isTask":false,"name":"get","returnTypeAnnotation":{"kind":"typeName","name":"T"}},"children":[{"id":161,"kind":"GROUP","label":"typeParams","children":[{"id":160,"kind":"TYPE_PARAM","fields":{"name":"T"},"children":[],"loc":{"pos":2442,"length":0,"line":78,"column":14}}]},{"id":164,"kind":"GROUP","label":"params","children":[{"id":162,"kind":"PARAM","fields":{"isRef":true,"name":"a","typeAnnotation":{"kind":"typeApplication","name":"DynArray","typeArgs":[{"kind":"typeName","name":"T"}]}},"children":[],"loc":{"pos":2446,"length":0,"line":78,"column":18}},{"id":163,"kind":"PARAM","fields":{"isRef":false,"name":"i","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[],"loc":{"pos":2466,"length":0,"line":78,"column":38}}]},{"id":165,"kind":"BLOCK","fields":{},"children":[{"id":171,"kind":"GROUP","label":"body","children":[{"id":166,"kind":"RETURN_STATEMENT","fields":{},"children":[{"id":167,"kind":"INDEX_EXPRESSION","fields":{},"children":[{"id":168,"kind":"FIELD_ACCESS","fields":{"field":"data","fieldSourceLoc":{"pos":2493,"line":79,"column":14,"length":4}},"children":[{"id":169,"kind":"IDENT","fields":{"name":"a"},"children":[],"label":"object","loc":{"pos":2493,"length":0,"line":79,"column":14}}],"label":"object","loc":{"pos":2493,"length":0,"line":79,"column":14}},{"id":170,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"index","loc":{"pos":2500,"length":0,"line":79,"column":21}}],"label":"value","loc":{"pos":2499,"length":0,"line":79,"column":20}}],"loc":{"pos":2492,"length":0,"line":79,"column":13}}]}],"label":"body","loc":{"pos":2490,"length":0,"line":79,"column":11}}],"loc":{"pos":2441,"length":0,"line":78,"column":13}},{"id":172,"kind":"FUNCTION_DECL","fields":{"isTask":false,"name":"main","returnTypeAnnotation":{"kind":"typeName","name":"int32"}},"children":[{"id":173,"kind":"BLOCK","fields":{},"children":[{"id":247,"kind":"GROUP","label":"body","children":[{"id":174,"kind":"LET_DECL","fields":{"name":"arr","typeAnnotation":{"kind":"typeApplication","name":"DynArray","typeArgs":[{"kind":"typeName","name":"int32"}]}},"children":[{"id":175,"kind":"CALL_EXPRESSION","fields":{"callee":"new_dynarray"},"children":[{"id":177,"kind":"GROUP","label":"args","children":[{"id":176,"kind":"INT_LITERAL","fields":{"value":4},"children":[],"loc":{"pos":2723,"length":0,"line":85,"column":46}}]}],"label":"assignment","loc":{"pos":2722,"length":0,"line":85,"column":45}}],"loc":{"pos":2689,"length":0,"line":85,"column":12}},{"id":178,"kind":"LET_DECL","fields":{"name":"i","typeAnnotation":{"kind":"typeName","name":"int32"}},"children":[{"id":179,"kind":"INT_LITERAL","fields":{"value":0},"children":[],"label":"assignment","loc":{"pos":2792,"length":0,"line":87,"column":21}}],"loc":{"pos":2781,"length":0,"line":87,"column":10}},{"id":180,"kind":"WHILE_STATEMENT","fields":{},"children":[{"id":181,"kind":"BINARY_EXPRESSION","fields":{"op":"lt"},"children":[{"id":182,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"left","loc":{"pos":2808,"length":0,"line":88,"column":15}},{"id":183,"kind":"INT_LITERAL","fields":{"value":10},"children":[],"label":"right","loc":{"pos":2811,"length":0,"line":88,"column":18}}],"label":"expression","loc":{"pos":2812,"length":0,"line":88,"column":19}},{"id":184,"kind":"BLOCK","fields":{},"children":[{"id":199,"kind":"GROUP","label":"body","children":[{"id":185,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":186,"kind":"CALL_EXPRESSION","fields":{"callee":"push"},"children":[{"id":192,"kind":"GROUP","label":"args","children":[{"id":187,"kind":"REF_EXPRESSION","fields":{},"children":[{"id":188,"kind":"IDENT","fields":{"name":"arr"},"children":[],"label":"operand","loc":{"pos":2836,"length":0,"line":89,"column":22}}],"loc":{"pos":2835,"length":0,"line":89,"column":21}},{"id":189,"kind":"BINARY_EXPRESSION","fields":{"op":"mult"},"children":[{"id":190,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"left","loc":{"pos":2840,"length":0,"line":89,"column":26}},{"id":191,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"right","loc":{"pos":2843,"length":0,"line":89,"column":29}}],"loc":{"pos":2843,"length":0,"line":89,"column":29}}]}],"label":"value","loc":{"pos":2828,"length":0,"line":89,"column":14}}],"loc":{"pos":2827,"length":0,"line":89,"column":13}},{"id":193,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":194,"kind":"ASSIGNMENT","fields":{},"children":[{"id":195,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"target","loc":{"pos":2856,"length":0,"line":90,"column":12}},{"id":196,"kind":"BINARY_EXPRESSION","fields":{"op":"plus"},"children":[{"id":197,"kind":"IDENT","fields":{"name":"i"},"children":[],"label":"left","loc":{"pos":2860,"length":0,"line":90,"column":16}},{"id":198,"kind":"INT_LITERAL","fields":{"value":1},"children":[],"label":"right","loc":{"pos":2862,"length":0,"line":90,"column":18}}],"label":"value","loc":{"pos":2863,"length":0,"line":90,"column":19}}],"label":"value","loc":{"pos":2858,"length":0,"line":90,"column":14}}],"loc":{"pos":2854,"length":0,"line":90,"column":10}}]}],"label":"body","loc":{"pos":2827,"length":0,"line":89,"column":13}}],"loc":{"pos":2806,"length":0,"line":88,"column":13}},{"id":200,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":201,"kind":"CALL_EXPRESSION","fields":{"callee":"printf"},"children":[{"id":213,"kind":"GROUP","label":"args","children":[{"id":202,"kind":"TEMPLATE_LITERAL","fields":{},"children":[{"id":212,"kind":"GROUP","label":"parts","children":[{"id":203,"kind":"STRING_PART","fields":{"value":"len="},"children":[]},{"id":204,"kind":"EXPR_PART","fields":{},"children":[{"id":205,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":35,"line":1,"column":36,"length":3}},"children":[{"id":206,"kind":"IDENT","fields":{"name":"arr"},"children":[],"label":"object","loc":{"pos":35,"length":0,"line":1,"column":36}}],"label":"expr","loc":{"pos":35,"length":0,"line":1,"column":36}}]},{"id":207,"kind":"STRING_PART","fields":{"value":" cap="},"children":[]},{"id":208,"kind":"EXPR_PART","fields":{},"children":[{"id":209,"kind":"FIELD_ACCESS","fields":{"field":"cap","fieldSourceLoc":{"pos":35,"line":1,"column":36,"length":3}},"children":[{"id":210,"kind":"IDENT","fields":{"name":"arr"},"children":[],"label":"object","loc":{"pos":35,"length":0,"line":1,"column":36}}],"label":"expr","loc":{"pos":35,"length":0,"line":1,"column":36}}]},{"id":211,"kind":"STRING_PART","fields":{"value":"\\n"},"children":[]}]}],"loc":{"pos":2916,"length":0,"line":93,"column":46}}]}],"label":"value","loc":{"pos":2882,"length":0,"line":93,"column":12}}],"loc":{"pos":2881,"length":0,"line":93,"column":11}},{"id":214,"kind":"LET_DECL","fields":{"name":"j","typeAnnotation":{"kind":"typeName","name":"usize"}},"children":[{"id":215,"kind":"INT_LITERAL","fields":{"value":0},"children":[],"label":"assignment","loc":{"pos":2938,"length":0,"line":94,"column":21}}],"loc":{"pos":2927,"length":0,"line":94,"column":10}},{"id":216,"kind":"WHILE_STATEMENT","fields":{},"children":[{"id":217,"kind":"BINARY_EXPRESSION","fields":{"op":"lt"},"children":[{"id":218,"kind":"IDENT","fields":{"name":"j"},"children":[],"label":"left","loc":{"pos":2954,"length":0,"line":95,"column":15}},{"id":219,"kind":"FIELD_ACCESS","fields":{"field":"len","fieldSourceLoc":{"pos":2959,"line":95,"column":20,"length":3}},"children":[{"id":220,"kind":"IDENT","fields":{"name":"arr"},"children":[],"label":"object","loc":{"pos":2959,"length":0,"line":95,"column":20}}],"label":"right","loc":{"pos":2959,"length":0,"line":95,"column":20}}],"label":"expression","loc":{"pos":2963,"length":0,"line":95,"column":24}},{"id":221,"kind":"BLOCK","fields":{},"children":[{"id":244,"kind":"GROUP","label":"body","children":[{"id":222,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":223,"kind":"CALL_EXPRESSION","fields":{"callee":"printf"},"children":[{"id":237,"kind":"GROUP","label":"args","children":[{"id":224,"kind":"TEMPLATE_LITERAL","fields":{},"children":[{"id":236,"kind":"GROUP","label":"parts","children":[{"id":225,"kind":"STRING_PART","fields":{"value":"arr["},"children":[]},{"id":226,"kind":"EXPR_PART","fields":{},"children":[{"id":227,"kind":"IDENT","fields":{"name":"j"},"children":[],"label":"expr","loc":{"pos":33,"length":0,"line":1,"column":34}}]},{"id":228,"kind":"STRING_PART","fields":{"value":"]="},"children":[]},{"id":229,"kind":"EXPR_PART","fields":{},"children":[{"id":230,"kind":"CALL_EXPRESSION","fields":{"callee":"get"},"children":[{"id":234,"kind":"GROUP","label":"args","children":[{"id":231,"kind":"REF_EXPRESSION","fields":{},"children":[{"id":232,"kind":"IDENT","fields":{"name":"arr"},"children":[],"label":"operand","loc":{"pos":43,"length":0,"line":1,"column":44}}],"loc":{"pos":42,"length":0,"line":1,"column":43}},{"id":233,"kind":"IDENT","fields":{"name":"j"},"children":[],"loc":{"pos":46,"length":0,"line":1,"column":47}}]}],"label":"expr","loc":{"pos":35,"length":0,"line":1,"column":36}}]},{"id":235,"kind":"STRING_PART","fields":{"value":"\\n"},"children":[]}]}],"loc":{"pos":3014,"length":0,"line":96,"column":49}}]}],"label":"value","loc":{"pos":2981,"length":0,"line":96,"column":16}}],"loc":{"pos":2980,"length":0,"line":96,"column":15}},{"id":238,"kind":"EXPRESSION_STATEMENT","fields":{},"children":[{"id":239,"kind":"ASSIGNMENT","fields":{},"children":[{"id":240,"kind":"IDENT","fields":{"name":"j"},"children":[],"label":"target","loc":{"pos":3027,"length":0,"line":97,"column":12}},{"id":241,"kind":"BINARY_EXPRESSION","fields":{"op":"plus"},"children":[{"id":242,"kind":"IDENT","fields":{"name":"j"},"children":[],"label":"left","loc":{"pos":3031,"length":0,"line":97,"column":16}},{"id":243,"kind":"INT_LITERAL","fields":{"value":1},"children":[],"label":"right","loc":{"pos":3033,"length":0,"line":97,"column":18}}],"label":"value","loc":{"pos":3034,"length":0,"line":97,"column":19}}],"label":"value","loc":{"pos":3029,"length":0,"line":97,"column":14}}],"loc":{"pos":3025,"length":0,"line":97,"column":10}}]}],"label":"body","loc":{"pos":2980,"length":0,"line":96,"column":15}}],"loc":{"pos":2952,"length":0,"line":95,"column":13}},{"id":245,"kind":"RETURN_STATEMENT","fields":{},"children":[{"id":246,"kind":"INT_LITERAL","fields":{"value":0},"children":[],"label":"value","loc":{"pos":3137,"length":0,"line":101,"column":13}}],"loc":{"pos":3137,"length":0,"line":101,"column":13}}]}],"label":"body","loc":{"pos":2685,"length":0,"line":85,"column":8}}],"loc":{"pos":2518,"length":0,"line":82,"column":14}}]}],"loc":{"pos":950,"length":0,"line":23,"column":7}}}</script>
+<script>
+(() => {
+  const data = JSON.parse(document.getElementById('data').textContent);
+  document.getElementById('filename').textContent = data.filename;
+  const sourcePre = document.getElementById('source');
+  sourcePre.textContent = data.source;
+  const astRoot = document.getElementById('ast');
+  const sourcePane = document.getElementById('source-pane');
+  const astPane = document.getElementById('ast-pane');
+
+  const idToRow = new Map();
+  const idToLoc = new Map();
+  const flatNodes = [];
+
+  function esc(s) { return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+  function fieldsToHtml(fields) {
+    const keys = Object.keys(fields);
+    if (!keys.length) return '';
+    const parts = keys.map(k => {
+      const v = fields[k];
+      const s = typeof v === 'string' ? JSON.stringify(v) : JSON.stringify(v);
+      return esc(k) + ': ' + esc(s);
+    });
+    return ' <span class="ast-fields">{' + parts.join(', ') + '}</span>';
+  }
+
+  function render(node) {
+    if (node.kind === 'GROUP') {
+      const det = document.createElement('details');
+      det.open = true;
+      const sum = document.createElement('summary');
+      sum.className = 'ast-row';
+      sum.innerHTML = '<span class="ast-label">' + esc(node.label) + ':</span> <span class="ast-fields">[' + node.children.length + ']</span>';
+      det.appendChild(sum);
+      const ch = document.createElement('div');
+      ch.className = 'ast-children';
+      for (const c of node.children) ch.appendChild(render(c));
+      det.appendChild(ch);
+      return det;
+    }
+    const det = document.createElement('details');
+    det.open = true;
+    const sum = document.createElement('summary');
+    sum.className = 'ast-row';
+    sum.dataset.id = node.id;
+    let html = '';
+    if (node.label) html += '<span class="ast-label">' + esc(node.label) + ':</span> ';
+    html += '<span class="ast-kind">' + esc(node.kind) + '</span>';
+    html += fieldsToHtml(node.fields || {});
+    sum.innerHTML = html;
+    det.appendChild(sum);
+    idToRow.set(node.id, sum);
+    if (node.loc) {
+      idToLoc.set(node.id, node.loc);
+      flatNodes.push({ id: node.id, pos: node.loc.pos, length: node.loc.length || 0 });
+    }
+    if (node.children && node.children.length) {
+      const ch = document.createElement('div');
+      ch.className = 'ast-children';
+      for (const c of node.children) ch.appendChild(render(c));
+      det.appendChild(ch);
+    } else {
+      det.classList.add('leaf');
+    }
+    return det;
+  }
+
+  astRoot.appendChild(render(data.ast));
+  // smallest containing node wins -> sort by length asc
+  flatNodes.sort((a, b) => a.length - b.length);
+
+  // ---- source highlighting via DOM Range overlay ----
+  let srcOverlays = [];
+  function clearSrc() { for (const el of srcOverlays) el.remove(); srcOverlays = []; }
+  function highlightSource(pos, length) {
+    clearSrc();
+    if (!length) return;
+    const text = sourcePre.firstChild;
+    if (!text) return;
+    const end = Math.min(pos + length, text.length);
+    if (pos >= end) return;
+    const range = document.createRange();
+    try { range.setStart(text, pos); range.setEnd(text, end); }
+    catch { return; }
+    const paneRect = sourcePane.getBoundingClientRect();
+    for (const rect of range.getClientRects()) {
+      const div = document.createElement('div');
+      div.className = 'src-highlight';
+      div.style.left = (rect.left - paneRect.left + sourcePane.scrollLeft) + 'px';
+      div.style.top = (rect.top - paneRect.top + sourcePane.scrollTop) + 'px';
+      div.style.width = rect.width + 'px';
+      div.style.height = rect.height + 'px';
+      sourcePane.appendChild(div);
+      srcOverlays.push(div);
+    }
+  }
+
+  // ---- AST highlighting ----
+  let highlightedRow = null;
+  function highlightAst(id, { scroll }) {
+    if (highlightedRow) highlightedRow.classList.remove('highlighted');
+    highlightedRow = null;
+    if (id == null) return;
+    const row = idToRow.get(id);
+    if (!row) return;
+    row.classList.add('highlighted');
+    highlightedRow = row;
+    if (scroll) {
+      let p = row.parentElement;
+      while (p) { if (p.tagName === 'DETAILS') p.open = true; p = p.parentElement; }
+      const r = row.getBoundingClientRect();
+      const pr = astPane.getBoundingClientRect();
+      if (r.top < pr.top + 8 || r.bottom > pr.bottom - 8) row.scrollIntoView({ block: 'center' });
+    }
+  }
+
+  // AST -> source
+  astRoot.addEventListener('mouseover', (e) => {
+    const row = e.target.closest('.ast-row');
+    if (!row || !row.dataset.id) return;
+    const loc = idToLoc.get(+row.dataset.id);
+    if (loc) highlightSource(loc.pos, loc.length || 0);
+  });
+  astPane.addEventListener('mouseleave', clearSrc);
+
+  // source -> AST
+  function caretOffset(x, y) {
+    if (document.caretPositionFromPoint) {
+      const r = document.caretPositionFromPoint(x, y);
+      if (r && r.offsetNode === sourcePre.firstChild) return r.offset;
+    } else if (document.caretRangeFromPoint) {
+      const r = document.caretRangeFromPoint(x, y);
+      if (r && r.startContainer === sourcePre.firstChild) return r.startOffset;
+    }
+    return -1;
+  }
+  let lastId = -1;
+  sourcePane.addEventListener('mousemove', (e) => {
+    const off = caretOffset(e.clientX, e.clientY);
+    if (off < 0) return;
+    let foundId = null, foundLoc = null;
+    for (const n of flatNodes) {
+      if (n.pos <= off && off < n.pos + n.length) {
+        foundId = n.id; foundLoc = n; break;
+      }
+    }
+    if (foundId === lastId) return;
+    lastId = foundId;
+    highlightAst(foundId, { scroll: true });
+    if (foundLoc) highlightSource(foundLoc.pos, foundLoc.length);
+    else clearSrc();
+  });
+  sourcePane.addEventListener('mouseleave', () => {
+    lastId = -1;
+    highlightAst(null, { scroll: false });
+    clearSrc();
+  });
+
+  // recompute overlays after resize / scroll
+  let pendingId = null;
+  function refreshOverlay() {
+    if (highlightedRow && highlightedRow.dataset.id) {
+      const loc = idToLoc.get(+highlightedRow.dataset.id);
+      if (loc) highlightSource(loc.pos, loc.length || 0);
+    }
+  }
+  window.addEventListener('resize', refreshOverlay);
+  sourcePane.addEventListener('scroll', refreshOverlay);
+})();
+</script>
+</body>
+</html>

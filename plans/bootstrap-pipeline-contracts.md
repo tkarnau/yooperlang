@@ -175,7 +175,8 @@ reference, current bootstrap status.
   tag: TokenTags,
   start: usize, // byte offset into src
   length: int, // byte span; text = src[start .. start+length]
-  intVal: int, // int/char literals (codepoint for char)
+  intVal: uint64, // int/char literals (codepoint for char)
+  negated: bool, // the sign doesn't live in the value, so we can support literals with magnitudes larger than int64 max
   floatVal: float64, // float literals
   }
 - Invariants: flat stream terminated by an `EOF` token; spans are byte offsets
