@@ -36,6 +36,7 @@ extern "C" from library "SDL2" {
 
 // SDL_Init flag bits. uint32 so they OR cleanly into the raw flag arg.
 export enum InitFlags<uint32> {
+    Audio 0x00000010,
     Video 0x00000020,
 }
 

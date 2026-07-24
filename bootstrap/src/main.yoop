@@ -65,7 +65,7 @@ function main(): int {
       // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
       // for now (returns a Program with no types/symbols/diagnostics) - this
       // wires the call so the layer can be built out incrementally.
-      const prog = typecheckProgram(ref mg);
+      disposable prog = typecheckProgram(ref mg);
       log.info(`typecheck done: ${prog.diagnostics.len} diagnostic(s), ${prog.types.len} type(s), ${prog.symbols.len} symbol(s), ${prog.modules.len} typed module(s)`);
     }
   }

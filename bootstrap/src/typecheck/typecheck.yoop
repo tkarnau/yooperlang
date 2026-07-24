@@ -13,8 +13,17 @@
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { vecIter } from "../utils/array_utils.yoop";
+import { childAt } from "../utils/ast_utils.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ModuleGraph, Program } from "../contracts.yoop";
+import { ASTNodeKind,
+  Module,
+  ModuleGraph,
+  Program,
+  Type,
+  TypeId,
+  TypedModule
+} from "../contracts.yoop";
 
 // Layer 3 producer. Borrows the parsed, import-ordered module graph (the driver
 // retains ownership so codegen can read the ASTs afterward) and produces the
@@ -27,13 +36,72 @@ import { ModuleGraph, Program } from "../contracts.yoop";
 //   B - wire imports (bind imported names into each module's `names` map).
 //   C - fill shells: struct fields, function signatures, trait methods, kinds.
 //   D - check bodies + module-init inference; decorate resolvedTypes.
-export function typecheckProgram(ref graph: ModuleGraph): Program propagates<disposable> {
-  // TODO(10.K): passes A-D. For now, return an empty program shell so the
-  // signature and Program shape are exercised end to end.
+
+
+/*
+
+Alright, this is where we add all the types into a vector and get a usize
+handle id to use as a reference later so that we can pattern match over
+them as-needed but only have an id as a reference. Other languages would
+build up some map of arbitrary spaces and do string comparisons or something
+but that is not how this language orients or lends itself to.
+
+We then return the "initialized" program struct back which is used for
+typechecking throughout.
+
+*/
+
+const TYPE_NONE_ID: TypeId = 0;
+const TYPE_VOID_ID: TypeId = 1;
+const TYPE_UNTYPEDINT_ID: TypeId = 2;
+
+function initProgram(): Program {
+  let types: Vec<Type>  = vec.vec_new(0);
+
+  // add more types to this array as-needed...
+  // insert in order
+  vec.vec_push(ref types, Type.ErrorT);
+  vec.vec_push(ref types, Type.Void);
+  vec.vec_push(ref types, Type.UntypedInt);
+
   return {
-    types: vec.vec_new(0),
+    types: types,
     symbols: vec.vec_new(0),
     modules: vec.vec_new(0),
     diagnostics: vec.vec_new(0),
   };
+}
+
+function passA_registerShells(prog: Program, m: Module): void {
+  const programNode = vec.vec_get(ref m.ast.nodes, m.ast.root);
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const declId = childAt(ref m.ast, programNode, i);
+    const declNode = vec.vec_get(ref m.ast.nodes, declId);
+    switch (declNode.kind) {
+      case ASTNodeKind.FUNCTION_DECL: {
+
+      }
+      default: {
+        
+      }
+    }
+  }
+}
+
+export function typecheckProgram(ref graph: ModuleGraph): Program propagates<disposable> {
+  // TODO(10.K): passes A-D. For now, return an empty program shell so the
+  // signature and Program shape are exercised end to end.
+
+  let program = initProgram();
+
+  // push an empty typed module for each module in the graph
+  for m in vecIter(ref graph.modules) {
+    let tm: TypedModule;
+    vec.vec_push(ref program.modules, tm);
+  }
+
+  // pass A - register decl shells
+
+  return program;
 }
