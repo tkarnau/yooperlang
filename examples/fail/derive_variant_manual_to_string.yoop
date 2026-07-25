@@ -1,0 +1,13 @@
+import { Display } from "std/core/traits.yoop";
+
+@derive(display)
+variant Shape implements Display {
+  Dot,
+  function to_string(ref self): string {
+    return "manual";
+  }
+}
+
+function main(): int {
+  return 0;
+}

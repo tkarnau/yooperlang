@@ -12,7 +12,9 @@
   errors accumulate in Program.diagnostics and we never throw.
 */
 
+import * as log from "std/log.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { vecIter } from "../utils/array_utils.yoop";
 import { childAt } from "../utils/ast_utils.yoop";
 import { disposable } from "std/core/kinds.yoop";
@@ -20,9 +22,12 @@ import { ASTNodeKind,
   Module,
   ModuleGraph,
   Program,
+  Symbol,
+  SymbolId,
   Type,
   TypeId,
-  TypedModule
+  TypedModule,
+  kindName,
 } from "../contracts.yoop";
 
 // Layer 3 producer. Borrows the parsed, import-ordered module graph (the driver
@@ -55,6 +60,9 @@ const TYPE_NONE_ID: TypeId = 0;
 const TYPE_VOID_ID: TypeId = 1;
 const TYPE_UNTYPEDINT_ID: TypeId = 2;
 
+
+
+
 function initProgram(): Program {
   let types: Vec<Type>  = vec.vec_new(0);
 
@@ -72,22 +80,67 @@ function initProgram(): Program {
   };
 }
 
-function passA_registerShells(prog: Program, m: Module): void {
+function initTypedModule(): TypedModule {
+  return {
+    moduleId: "none",
+    names: map.map_new(0, map.string_key_ops()),
+    exports: map.map_new(0, map.string_key_ops()),
+    resolvedTypes: vec.vec_new(0),
+    allowsUnsafe: false
+  };
+}
+
+function passA_registerShells(prog: Program, m: Module, tmIndex: usize): void {
   const programNode = vec.vec_get(ref m.ast.nodes, m.ast.root);
+  const typedModule = vec.vec_get(ref prog.modules, tmIndex);
   let i: usize = 0;
   while (i < programNode.childCount) {
     const declId = childAt(ref m.ast, programNode, i);
     const declNode = vec.vec_get(ref m.ast.nodes, declId);
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
-
+        log.info(`typechecking function decl shell ${kindName(declNode.kind)}: ${declNode.name}`);
+        // todo type params
+        // todo redeclaration check
+        // normal case
+        const shellFn = internType(
+          ref prog,
+          Type.Func {
+            params: vec.vec_new(0),
+            ret: TYPE_NONE_ID, variadic: false
+          }
+        );
+        const symbolId = internSymbol(ref prog, Symbol.Func { typeId: shellFn });
+        map.map_insert(ref typedModule.names, declNode.name, symbolId);
       }
       default: {
-        
+        // skipping for now.. output a log
+        log.info(`skipping ${declNode.kind} decl typecheck pass A`);
       }
     }
+
+    i += 1;
   }
 }
+
+/*
+  Intern Functions
+    Intern-ing might not be understood from non-systems folks but is similar to
+    the Symbol and other mechanisms from the TS/JS world. Making a one-time,
+    unique, value shared by the rest of the system..
+*/
+
+// program interning
+function internType(ref prog: Program, t: Type): TypeId {
+  vec.vec_push(ref prog.types, t);
+  return prog.types.len - 1;
+}
+
+function internSymbol(ref prog: Program, s: Symbol): SymbolId {
+  vec.vec_push(ref prog.symbols, s);
+  return prog.symbols.len - 1;
+}
+
 
 export function typecheckProgram(ref graph: ModuleGraph): Program propagates<disposable> {
   // TODO(10.K): passes A-D. For now, return an empty program shell so the
@@ -97,8 +150,10 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
 
   // push an empty typed module for each module in the graph
   for m in vecIter(ref graph.modules) {
-    let tm: TypedModule;
+    let tm = initTypedModule();
     vec.vec_push(ref program.modules, tm);
+    let tmIndex = program.modules.len - 1;
+    passA_registerShells(program, m, tmIndex);
   }
 
   // pass A - register decl shells

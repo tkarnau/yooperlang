@@ -977,6 +977,164 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "5 = 5\n");
   });
 
+  // Regression: a Display-bound generic whose T is inferred from a struct
+  // reached only through an imported instantiation (elem type of a Vec<T>
+  // field). The captured elem type is a pass-A shell with empty
+  // implementsTraits/methods; the call-site bound check and the registry
+  // boundChecker must re-canonicalize it before checking.
+  it("generic_bound_imported_shell: bound check canonicalizes imported struct shells", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_bound_imported_shell/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "(1, 2)\n");
+  });
+});
+
+// Phase 13.C: @derive(display) - pre-typecheck expansion generates the
+// Display.to_string method from a struct's field annotations. Fixtures run
+// through runFixtureEntry (compileEntry): the expansion needs the driver's
+// module graph with std/core/traits.yoop autoloaded.
+describe("e2e: Phase 13.C @derive(display)", () => {
+  it("derive_display_basic: derived to_string via explicit printf format arg", () => {
+    // Also the regression test for the printf lowering fix: a template
+    // literal VALUE arg after an explicit format literal fills the %s
+    // instead of contributing a doubled directive.
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "p=Point { x: 3, y: 4 }\n");
+  });
+
+  it("derive_display_nested: derived structs recurse through Display dispatch", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_nested.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 }, label: diag }\n",
+    );
+  });
+
+  it("derive_display_array_vec: array + Vec loops, fn placeholder, empty variants", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_array_vec.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Bag { xs: [1, 2, 3], v: [7, 8], cb: <fn> }\nBag { xs: [], v: [], cb: <fn> }\n",
+    );
+  });
+
+  it("derive_display_mixed: hand-written Display field + pre-listed implements clause", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_mixed.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Wrapper { inner: manual(9), tag: 5 } Listed { n: 6 }\n");
+  });
+
+  it("derive_display_empty: zero-field type prints Name { }", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_empty.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Empty { }\n");
+  });
+
+  it("derive_display_cross_module: derived export interpolated from another module", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Pt { x: 10, y: 20 }\n");
+  });
+
+  it("derive_manual_to_string: deriving over a manual to_string is an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_manual_to_string.yoop");
+    assert.ok(
+      errors.some((e) => /already defines "to_string"/.test(e.message)),
+      `expected the derive clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_generic: generic type decls are rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_generic.yoop");
+    assert.ok(
+      errors.some((e) => /generic type "Pair" is not yet supported/.test(e.message)),
+      `expected the generic derive error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_alias: type aliases are rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_alias.yoop");
+    assert.ok(
+      errors.some((e) => /cannot apply to type alias "NodeId"/.test(e.message)),
+      `expected the alias derive error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 13.D: variants derive too. The generated body is an arm-per-case
+  // switch; per-case control comes from composition (a payload type declared
+  // outside the variant with its own Display impl), not hand-written methods.
+  it("derive_display_variant: arm-per-case switch, payload Display dispatch, collections, bound generic", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_variant.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Shape.Circle { c: <1,2>, r: 5 }\n" +
+        "Shape.Named { label: hi }\n" +
+        "Shape.Bytes { xs: [1, 2, 3] }\n" +
+        "Shape.Many { v: [7, 8], tag: 9 }\n" +
+        "Envelope { body: Shape.Dot, seq: 42 }\n",
+    );
+  });
+
+  it("derive_variant_manual_to_string: deriving over a manual variant to_string is an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_variant_manual_to_string.yoop");
+    assert.ok(
+      errors.some((e) => /variant "Shape" already defines "to_string"/.test(e.message)),
+      `expected the variant clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_generic_variant: generic variants are rejected (needs registry method substitution)", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_generic_variant.yoop");
+    assert.ok(
+      errors.some((e) => /generic variant "Maybe" is not yet supported/.test(e.message)),
+      `expected the generic variant error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // The generated body is not user-written, so a non-printable field must
+  // name the field and the fixes rather than complaining about a template
+  // literal the user never typed. Covers the struct and variant paths - the
+  // variant one resolves a pattern-bound local back to its field name.
+  it("derive_nonprintable_field: diagnostic names the field, not the synthetic template", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_nonprintable_field.yoop");
+    const messages = errors.map((e) => e.message).join(" | ");
+    assert.ok(
+      errors.some((e) =>
+        /@derive\(display\) on "Holder" cannot print field "p" of type struct Plain/.test(e.message),
+      ),
+      `expected the struct-field derive diagnostic, got: ${messages}`,
+    );
+    assert.ok(
+      errors.some((e) =>
+        /@derive\(display\) on "Boxed" cannot print field "p" of type struct Plain/.test(e.message),
+      ),
+      `expected the variant-payload derive diagnostic, got: ${messages}`,
+    );
+    assert.ok(
+      !/template literal interpolation must be/.test(messages),
+      `derived bodies must not surface the raw template wording: ${messages}`,
+    );
+  });
+
+  it("derive parse-stage rejections: deferred names, unknown names, wrong target", () => {
+    assert.throws(
+      () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
+      /@derive\(eq\) is not yet supported/,
+    );
+    assert.throws(
+      () => parse(`@derive(banana)\ntype P {\n  x: int32,\n}\n`),
+      /unknown derive "banana"/,
+    );
+    assert.throws(
+      () => parse(`@derive(display)\nlet x: int32 = 1;\n`),
+      /only applies to a struct 'type' or 'variant' declaration/,
+    );
+  });
+
   it("imports_renamed: import { x as y }", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_renamed/main.yoop");
     assert.equal(exitCode, 0);

@@ -23,6 +23,10 @@ type Inner implements Disposable propagates<disposable> {
     }
 }
 
+type TT {
+  x: int32,
+}
+
 variant Box implements Disposable propagates<disposable> {
     Empty,
     Full { item: Inner },

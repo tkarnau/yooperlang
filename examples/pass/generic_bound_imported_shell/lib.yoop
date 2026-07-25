@@ -1,0 +1,22 @@
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Display } from "std/core/traits.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+export type Point implements Display {
+  x: int32,
+  y: int32,
+  function to_string(ref self): string {
+    return `(${self.x}, ${self.y})`;
+  }
+}
+
+export type Holder propagates<disposable> {
+  points: Vec<Point>,
+}
+
+export function makeHolder(): Holder propagates<disposable> {
+  let ps: Vec<Point> = vec.vec_new(2);
+  vec.vec_push(ref ps, { x: 1, y: 2 });
+  vec.vec_push(ref ps, { x: 3, y: 4 });
+  return { points: ps };
+}

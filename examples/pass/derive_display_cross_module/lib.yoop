@@ -1,0 +1,9 @@
+@derive(display)
+export type Pt {
+  x: int32,
+  y: int32,
+}
+
+export function makePt(x: int32, y: int32): Pt {
+  return { x: x, y: y };
+}

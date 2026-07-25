@@ -1,0 +1,480 @@
+/*
+  Author: Tom Karnau
+
+  debug_utils - stringify-most-things helpers for iterating on the bootstrap
+  without leaning on the (still primitive) debugger.
+
+  Three tiers; pick the cheapest one that fits:
+
+    1. vecToString<T implements Display> - dumps any Vec whose element type
+       implements Display (Token, ASTNode, ParsingError, ...). For a single
+       value just interpolate it: `${node}`.
+    2. Primitive vecs - vecUsizeToString covers Vec<NodeId> / Vec<TypeId> /
+       Vec<SymbolId> too (aliases are transparent, they ARE usize);
+       vecStringToString covers string pools and split results.
+    3. Bespoke dumps for shapes that cannot implement Display today
+       (template-literal Display dispatch is struct-only, so the Type and
+       Symbol variants need free functions):
+         astTreeToString - indented parent/child view of the AST arena;
+                           much easier to read than the flat AST dump
+         typeToString    - one interned Type, recursing through TypeIds
+         symbolToString  - one Symbol with a shallow type reference
+         programToString - the whole typecheck Program: type arena, symbol
+                           arena, per-module name tables, diagnostics
+
+  Everything returns a string; log.info / printf it at the call site, or use
+  dump(label, body) to printf a labeled block directly.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import * as str from "std/core/strings.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Display } from "std/core/traits.yoop";
+import {
+  AST,
+  ASTNode,
+  NodeId,
+  TokenTags,
+  tagName,
+  kindName,
+  astNodeChildAName,
+  astNodeChildBName,
+  astNodeChildCName,
+  astNodeChildDName,
+  astNodeFlagAName,
+  Program,
+  Type,
+  TypeId,
+  Symbol,
+  SymbolId,
+  Diagnostic,
+  Severity,
+  PrimKind,
+  GenericSort,
+  Field,
+  VariantCase,
+  EnumCase,
+} from "../contracts.yoop";
+import { childAt } from "./ast_utils.yoop";
+
+// printf a labeled block: "---- label ----" then the body.
+export function dump(label: string, body: string): void {
+  printf("---- %s ----\n%s\n", label, body);
+}
+
+// ---------------------------------------------------------------------------
+// tier 1: any Vec whose element implements Display
+// ---------------------------------------------------------------------------
+
+export function vecToString<T implements Display>(ref v: Vec<T>): string {
+  disposable pieces: Vec<string> = vec.vec_new(v.len * 2 + 2);
+  vec.vec_push(ref pieces, `vec[${v.len}] {\n`);
+  let i: usize = 0;
+  while (i < v.len) {
+    let item: T = vec.vec_get(ref v, i);
+    vec.vec_push(ref pieces, `  [${i}]: ${Display.to_string(ref item)}\n`);
+    i += 1;
+  }
+  vec.vec_push(ref pieces, "}");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+// ---------------------------------------------------------------------------
+// tier 2: primitive vecs
+// ---------------------------------------------------------------------------
+
+export function vecUsizeToString(ref v: Vec<usize>): string {
+  disposable pieces: Vec<string> = vec.vec_new(v.len + 2);
+  vec.vec_push(ref pieces, "[ ");
+  let i: usize = 0;
+  while (i < v.len) {
+    vec.vec_push(ref pieces, `${vec.vec_get(ref v, i)} `);
+    i += 1;
+  }
+  vec.vec_push(ref pieces, "]");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+export function vecStringToString(ref v: Vec<string>): string {
+  disposable pieces: Vec<string> = vec.vec_new(v.len * 2 + 2);
+  vec.vec_push(ref pieces, `vec[${v.len}] {\n`);
+  let i: usize = 0;
+  while (i < v.len) {
+    vec.vec_push(ref pieces, `  [${i}]: "${vec.vec_get(ref v, i)}"\n`);
+    i += 1;
+  }
+  vec.vec_push(ref pieces, "}");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+// ---------------------------------------------------------------------------
+// tier 3a: AST tree dump
+// ---------------------------------------------------------------------------
+
+// Indented parent/child view starting at `id` (pass ast.root for the whole
+// program). Named child slots (childA..childD) print with their per-kind slot
+// name; the primary childStart/childCount list prints as plain children.
+export function astTreeToString(ref ast: AST, id: NodeId): string {
+  disposable pieces: Vec<string> = vec.vec_new(ast.nodes.len * 4 + 2);
+  astTreeInto(ref ast, id, 0, ref pieces);
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+function pushIndent(ref out: Vec<string>, depth: usize): void {
+  let i: usize = 0;
+  while (i < depth) {
+    vec.vec_push(ref out, "  ");
+    i += 1;
+  }
+}
+
+function astTreeInto(ref ast: AST, id: NodeId, depth: usize, ref out: Vec<string>): void {
+  pushIndent(ref out, depth);
+  if (id >= ast.nodes.len) {
+    vec.vec_push(ref out, `<bad node id ${id}>\n`);
+    return;
+  }
+  const n: ASTNode = vec.vec_get(ref ast.nodes, id);
+
+  vec.vec_push(ref out, `[${id}] ${kindName(n.kind)}`);
+  if (n.name.len > 0) {
+    vec.vec_push(ref out, ` name="${n.name}"`);
+  }
+  if (n.operator != TokenTags.NOTOKEN) {
+    vec.vec_push(ref out, ` op=${tagName(n.operator)}`);
+  }
+  if (n.intVal != 0) {
+    vec.vec_push(ref out, ` intVal=${n.intVal}`);
+  }
+  if (n.flagA) {
+    vec.vec_push(ref out, ` ${astNodeFlagAName(n.kind)}=true`);
+  }
+  if (n.strId != 0 && n.strId < ast.strings.len) {
+    vec.vec_push(ref out, ` str="${vec.vec_get(ref ast.strings, n.strId)}"`);
+  }
+  vec.vec_push(ref out, ` (line ${n.sourceLoc.line}, col ${n.sourceLoc.column})\n`);
+
+  astSlotInto(ref ast, "childA", astNodeChildAName(n.kind), n.childA, depth, ref out);
+  astSlotInto(ref ast, "childB", astNodeChildBName(n.kind), n.childB, depth, ref out);
+  astSlotInto(ref ast, "childC", astNodeChildCName(n.kind), n.childC, depth, ref out);
+  astSlotInto(ref ast, "childD", astNodeChildDName(n.kind), n.childD, depth, ref out);
+
+  let i: usize = 0;
+  while (i < n.childCount) {
+    astTreeInto(ref ast, childAt(ref ast, n, i), depth + 1, ref out);
+    i += 1;
+  }
+}
+
+// One named single-child slot. 0 = absent (NodeId 0 is the reserved sentinel),
+// so nothing prints for empty slots.
+function astSlotInto(ref ast: AST, slotLetter: string, slotName: string, id: NodeId, depth: usize, ref out: Vec<string>): void {
+  if (id == 0) {
+    return;
+  }
+  pushIndent(ref out, depth + 1);
+  if (str.string_eq(slotName, "undefined")) {
+    vec.vec_push(ref out, `.${slotLetter}:\n`);
+  } else {
+    vec.vec_push(ref out, `.${slotName}:\n`);
+  }
+  astTreeInto(ref ast, id, depth + 2, ref out);
+}
+
+// ---------------------------------------------------------------------------
+// tier 3b: typecheck-layer dumps (Type / Symbol / Program)
+// ---------------------------------------------------------------------------
+
+// Order MUST mirror the PrimKind decl in contracts.yoop.
+const PRIM_KIND_NAMES: string[] = [
+  "int8", "int16", "int32", "int64", "isize",
+  "uint8", "uint16", "uint32", "uint64", "usize",
+  "float32", "float64",
+  "bool", "string",
+];
+
+export function primKindName(p: PrimKind): string {
+  return PRIM_KIND_NAMES[p];
+}
+
+// Order MUST mirror the Severity decl in contracts.yoop.
+const SEVERITY_NAMES: string[] = ["error", "warning"];
+
+export function severityName(s: Severity): string {
+  return SEVERITY_NAMES[s];
+}
+
+// Order MUST mirror the GenericSort decl in contracts.yoop.
+const GENERIC_SORT_NAMES: string[] = ["struct", "func", "trait", "variant"];
+
+export function genericSortName(g: GenericSort): string {
+  return GENERIC_SORT_NAMES[g];
+}
+
+// Recursion fuel for nested TypeIds: enough to read `ref Foo[]` fully, and a
+// cycle (a struct reaching its own TypeId through a field) degrades to `#id`
+// instead of recursing forever.
+const MAX_TYPE_DEPTH: usize = 3;
+
+export function typeToString(ref prog: Program, id: TypeId): string {
+  return typeToStringDepth(ref prog, id, 0);
+}
+
+// `#id` plus the shallow spelling - the reference form used anywhere a type
+// is mentioned from a symbol or a table entry.
+function typeRef(ref prog: Program, id: TypeId): string {
+  return `#${id} ${typeToStringDepth(ref prog, id, 1)}`;
+}
+
+function typeToStringDepth(ref prog: Program, id: TypeId, depth: usize): string {
+  if (id >= prog.types.len) {
+    return `<bad type id ${id}>`;
+  }
+  if (depth >= MAX_TYPE_DEPTH) {
+    return `#${id}`;
+  }
+  const t: Type = vec.vec_get(ref prog.types, id);
+  switch (t) {
+    case Type.Prim { prim: p }: { return primKindName(p); }
+    case Type.Void: { return "void"; }
+    case Type.UntypedInt: { return "untyped-int"; }
+    case Type.UntypedFloat: { return "untyped-float"; }
+    case Type.UntypedNull: { return "untyped-null"; }
+    case Type.ErrorT: { return "<error-type>"; }
+    case Type.SelfPlaceholder: { return "Self"; }
+    case Type.Ref { inner: v }: {
+      return `ref ${typeToStringDepth(ref prog, v, depth + 1)}`;
+    }
+    case Type.Array { elem: v }: {
+      return `${typeToStringDepth(ref prog, v, depth + 1)}[]`;
+    }
+    case Type.Task { result: v }: {
+      return `Task<${typeToStringDepth(ref prog, v, depth + 1)}>`;
+    }
+    case Type.UnsafePtr { pointee: v }: {
+      if (v == 0) {
+        return "unsafe_ptr";
+      }
+      return `unsafe_ptr<${typeToStringDepth(ref prog, v, depth + 1)}>`;
+    }
+    case Type.Func { params: ps, ret: r, variadic: isVariadic }: {
+      let inner: string = typeIdListToString(ref prog, ps, depth + 1);
+      if (isVariadic) {
+        if (ps.len == 0) {
+          inner = "...";
+        } else {
+          inner = `${inner}, ...`;
+        }
+      }
+      return `fn(${inner}) -> ${typeToStringDepth(ref prog, r, depth + 1)}`;
+    }
+    case Type.FuncPtr { params: ps, ret: r }: {
+      return `(${typeIdListToString(ref prog, ps, depth + 1)}) => ${typeToStringDepth(ref prog, r, depth + 1)}`;
+    }
+    case Type.Namespace { module: m }: {
+      return `namespace(module ${m})`;
+    }
+    case Type.Struct { decl: d, fields: fs }: {
+      return `struct ${d.name}${shellSuffix(d.populated)}${fieldsSuffix(ref prog, fs, depth)}`;
+    }
+    case Type.Variant { decl: d, cases: cs }: {
+      return `variant ${d.name}${shellSuffix(d.populated)}${variantCasesSuffix(ref prog, cs, depth)}`;
+    }
+    case Type.Union { decl: d, fields: fs }: {
+      return `union ${d.name}${shellSuffix(d.populated)}${fieldsSuffix(ref prog, fs, depth)}`;
+    }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs }: {
+      return `enum<${typeToStringDepth(ref prog, u, depth + 1)}> ${d.name}${shellSuffix(d.populated)}${enumCasesSuffix(cs, depth)}`;
+    }
+    case Type.Trait { decl: d, methods: ms }: {
+      return `trait ${d.name}${shellSuffix(d.populated)}${methodNamesSuffix(ref ms, depth)}`;
+    }
+    case Type.VTable { decl: d, forTrait: ft }: {
+      return `vtable ${d.name} for ${typeToStringDepth(ref prog, ft, depth + 1)}`;
+    }
+    case Type.TypeParam { name: n }: {
+      return n;
+    }
+  }
+  return `<unhandled type #${id}>`;
+}
+
+function shellSuffix(populated: bool): string {
+  if (populated) {
+    return "";
+  }
+  return " (shell)";
+}
+
+// Comma-joined types of a Vec<TypeId> (Func params, generic args, ...).
+function typeIdListToString(ref prog: Program, ids: Vec<TypeId>, depth: usize): string {
+  disposable pieces: Vec<string> = vec.vec_new(ids.len * 2 + 1);
+  let i: usize = 0;
+  while (i < ids.len) {
+    if (i > 0) {
+      vec.vec_push(ref pieces, ", ");
+    }
+    vec.vec_push(ref pieces, typeToStringDepth(ref prog, vec.vec_get(ref ids, i), depth));
+    i += 1;
+  }
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+// ` { name: type, ... }` at the top level only; nested mentions stay short.
+function fieldsSuffix(ref prog: Program, fs: Vec<Field>, depth: usize): string {
+  if (depth > 0 || fs.len == 0) {
+    return "";
+  }
+  disposable pieces: Vec<string> = vec.vec_new(fs.len * 2 + 2);
+  vec.vec_push(ref pieces, " { ");
+  let i: usize = 0;
+  while (i < fs.len) {
+    if (i > 0) {
+      vec.vec_push(ref pieces, ", ");
+    }
+    const f: Field = vec.vec_get(ref fs, i);
+    vec.vec_push(ref pieces, `${f.name}: ${typeToStringDepth(ref prog, f.typeId, depth + 1)}`);
+    i += 1;
+  }
+  vec.vec_push(ref pieces, " }");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+function variantCasesSuffix(ref prog: Program, cs: Vec<VariantCase>, depth: usize): string {
+  if (depth > 0 || cs.len == 0) {
+    return "";
+  }
+  disposable pieces: Vec<string> = vec.vec_new(cs.len * 2 + 2);
+  vec.vec_push(ref pieces, " { ");
+  let i: usize = 0;
+  while (i < cs.len) {
+    if (i > 0) {
+      vec.vec_push(ref pieces, ", ");
+    }
+    const c: VariantCase = vec.vec_get(ref cs, i);
+    vec.vec_push(ref pieces, `${c.name}${fieldsSuffix(ref prog, c.fields, depth)}`);
+    i += 1;
+  }
+  vec.vec_push(ref pieces, " }");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+function enumCasesSuffix(cs: Vec<EnumCase>, depth: usize): string {
+  if (depth > 0 || cs.len == 0) {
+    return "";
+  }
+  disposable pieces: Vec<string> = vec.vec_new(cs.len * 2 + 2);
+  vec.vec_push(ref pieces, " { ");
+  let i: usize = 0;
+  while (i < cs.len) {
+    if (i > 0) {
+      vec.vec_push(ref pieces, ", ");
+    }
+    const c: EnumCase = vec.vec_get(ref cs, i);
+    vec.vec_push(ref pieces, `${c.name} = ${c.value}`);
+    i += 1;
+  }
+  vec.vec_push(ref pieces, " }");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+function methodNamesSuffix(ref ms: Map<string, TypeId>, depth: usize): string {
+  if (depth > 0 || map.map_len(ref ms) == 0) {
+    return "";
+  }
+  disposable pieces: Vec<string> = vec.vec_new(map.map_len(ref ms) * 2 + 2);
+  vec.vec_push(ref pieces, " { ");
+  let first: bool = true;
+  for e in map.map_iter(ref ms) {
+    if (!first) {
+      vec.vec_push(ref pieces, ", ");
+    }
+    first = false;
+    vec.vec_push(ref pieces, e.key);
+  }
+  vec.vec_push(ref pieces, " }");
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}
+
+export function symbolToString(ref prog: Program, id: SymbolId): string {
+  if (id >= prog.symbols.len) {
+    return `<bad symbol id ${id}>`;
+  }
+  const s: Symbol = vec.vec_get(ref prog.symbols, id);
+  switch (s) {
+    case Symbol.Struct { typeId: t }: { return `Struct -> ${typeRef(ref prog, t)}`; }
+    case Symbol.Func { typeId: t }: { return `Func -> ${typeRef(ref prog, t)}`; }
+    case Symbol.Value { typeId: t }: { return `Value -> ${typeRef(ref prog, t)}`; }
+    case Symbol.Trait { typeId: t }: { return `Trait -> ${typeRef(ref prog, t)}`; }
+    case Symbol.VariantT { typeId: t }: { return `VariantT -> ${typeRef(ref prog, t)}`; }
+    case Symbol.Union { typeId: t }: { return `Union -> ${typeRef(ref prog, t)}`; }
+    case Symbol.ValueEnum { typeId: t }: { return `ValueEnum -> ${typeRef(ref prog, t)}`; }
+    case Symbol.Vtable { typeId: t }: { return `Vtable -> ${typeRef(ref prog, t)}`; }
+    case Symbol.Alias { annot: a, home: h }: { return `Alias -> annot node ${a} in module ${h}`; }
+    case Symbol.Kind { kindId: k }: { return `Kind -> kind ${k}`; }
+    case Symbol.GenericDecl { decl: d, sort: srt }: { return `GenericDecl(${genericSortName(srt)}) -> decl ${d}`; }
+    case Symbol.Namespace { module: m }: { return `Namespace -> module ${m}`; }
+    case Symbol.Imported { target: t }: { return `Imported -> sym ${t}`; }
+  }
+  return `<unhandled symbol ${id}>`;
+}
+
+export function diagnosticToString(d: Diagnostic): string {
+  return `${severityName(d.severity)}: ${d.message} (line ${d.sourceLoc.line}, col ${d.sourceLoc.column})`;
+}
+
+// The whole typecheck output: both arenas, each module's name/export tables,
+// and every accumulated diagnostic.
+export function programToString(ref prog: Program): string {
+  disposable pieces: Vec<string> = vec.vec_new(prog.types.len + prog.symbols.len + prog.diagnostics.len + 16);
+
+  vec.vec_push(ref pieces,
+    `Program { types: ${prog.types.len}, symbols: ${prog.symbols.len}, modules: ${prog.modules.len}, diagnostics: ${prog.diagnostics.len} }\n`);
+
+  vec.vec_push(ref pieces, "  types:\n");
+  let ti: usize = 0;
+  while (ti < prog.types.len) {
+    vec.vec_push(ref pieces, `    #${ti} = ${typeToStringDepth(ref prog, ti, 0)}\n`);
+    ti += 1;
+  }
+
+  vec.vec_push(ref pieces, "  symbols:\n");
+  let si: usize = 0;
+  while (si < prog.symbols.len) {
+    vec.vec_push(ref pieces, `    sym ${si} = ${symbolToString(ref prog, si)}\n`);
+    si += 1;
+  }
+
+  let mi: usize = 0;
+  while (mi < prog.modules.len) {
+    let tm = vec.vec_get(ref prog.modules, mi);
+    vec.vec_push(ref pieces,
+      `  module ${mi} "${tm.moduleId}": ${map.map_len(ref tm.names)} name(s), ${map.map_len(ref tm.exports)} export(s)\n`);
+    for e in map.map_iter(ref tm.names) {
+      vec.vec_push(ref pieces, `    ${e.key} -> sym ${e.value} = ${symbolToString(ref prog, e.value)}\n`);
+    }
+    mi += 1;
+  }
+
+  if (prog.diagnostics.len > 0) {
+    vec.vec_push(ref pieces, "  diagnostics:\n");
+    let di: usize = 0;
+    while (di < prog.diagnostics.len) {
+      vec.vec_push(ref pieces, `    ${diagnosticToString(vec.vec_get(ref prog.diagnostics, di))}\n`);
+      di += 1;
+    }
+  }
+
+  let arr: string[] = vec.vec_as_array(ref pieces);
+  return str.string_concat_all(arr);
+}

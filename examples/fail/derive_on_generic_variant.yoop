@@ -1,0 +1,9 @@
+@derive(display)
+variant Maybe<T> {
+  Some { value: T },
+  None,
+}
+
+function main(): int {
+  return 0;
+}

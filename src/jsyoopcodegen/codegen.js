@@ -1495,7 +1495,12 @@ export function codegen(ast) {
         // raw format text - strip the surrounding quotes, keep escapes intact
         const inner = argNode.value.slice(1, -1);
         fmtSpec += inner;
-      } else if (argNode.kind === ASTNodeKind.TEMPLATE_LITERAL) {
+      } else if (
+        argNode.kind === ASTNodeKind.TEMPLATE_LITERAL &&
+        !hasFormatLiteral
+      ) {
+        // The template IS the format string: its text parts become format
+        // text and each interpolation gets a synthesized specifier.
         for (const part of argNode.parts) {
           if (part.kind === ASTNodeKind.STRING_PART) {
             fmtSpec += escapePctsRaw(part.value);
@@ -1506,6 +1511,13 @@ export function codegen(ast) {
           }
         }
       } else {
+        // With an explicit format literal, a template-literal arg is an
+        // ordinary VALUE arg filling a `%s` directive: evaluate the whole
+        // template to its concatenated string (falls through emitExpr).
+        // Contributing its parts to fmtSpec here instead reintroduces the
+        // doubled-directive bug (`printf("p=%s\n", \`${p}\`)` emitting
+        // format "p=%s\n%s" with one value arg - the stray %s reads a
+        // garbage vararg).
         const r = emitExpr(argNode, fnLines);
         if (!hasFormatLiteral) fmtSpec += printfSpec(r.yoopType);
         valueArgs.push(r);
@@ -2773,6 +2785,8 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
   // Phase 7.2: rewrite a bound-method call into a normal struct-method call
   // once the receiver's TypeParamType has been substituted with a concrete
   // struct. The bound check at instantiation guarantees the impl exists.
+  // Phase 13.D: a variant receiver takes the identical path - same `methods`
+  // map, same trait mangling.
   if (
     out.kind === ASTNodeKind.CALL_EXPRESSION &&
     out.boundMethod
@@ -2780,7 +2794,10 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
     const firstArg = out.args?.[0];
     let recvType = firstArg?.resolvedType;
     if (recvType?.kind === typeKinds.ref) recvType = recvType.inner;
-    if (!recvType || recvType.kind !== typeKinds.struct) {
+    if (
+      !recvType ||
+      (recvType.kind !== typeKinds.struct && recvType.kind !== typeKinds.variant)
+    ) {
       // Receiver is still abstract - keep the boundMethod tag. This branch is
       // hit when we're producing an "open" instantiation (the outer T flowed
       // in). Open instances are filtered out before IR emission.
@@ -5228,7 +5245,14 @@ function codegenWithModuleId(
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         fmtSpec += argNode.value.slice(1, -1);
-      } else if (argNode.kind === ASTNodeKind.TEMPLATE_LITERAL) {
+      } else if (
+        argNode.kind === ASTNodeKind.TEMPLATE_LITERAL &&
+        !hasFormatLiteral
+      ) {
+        // Template-as-format-string. With an explicit format literal present
+        // the template instead falls through as a plain VALUE arg (else
+        // branch) filling a %s - contributing its parts here would
+        // reintroduce the doubled-directive bug (see emitPrintfCall).
         for (const part of argNode.parts) {
           if (part.kind === ASTNodeKind.STRING_PART) { fmtSpec += part.value.replace(/%/g, "%%"); }
           else { const r = emitExpr(part.expr, fnLines); fmtSpec += printfSpec(r.yoopType); valueArgs.push(r); }

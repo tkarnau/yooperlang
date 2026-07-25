@@ -69,6 +69,19 @@ REGISTRY.set("precompile", {
         attrNode.sourceLoc,
       );
     }
+    // The parser accepts `type` / `export` targets for @derive; reject
+    // them here so @precompile misuse fails at parse time rather than
+    // through the comptimePhase catch-all.
+    if (
+      attrNode.target.kind !== "BLOCK" &&
+      attrNode.target.kind !== "LET_DECL" &&
+      attrNode.target.kind !== "CONST_DECL"
+    ) {
+      ctx.throwError(
+        `@precompile requires a '{ ... }' block or a 'let' / 'const' declaration (got ${attrNode.target.kind})`,
+        attrNode.sourceLoc,
+      );
+    }
   },
   comptimePhase(attrNode, ctx) {
     const tgt = attrNode.target;
@@ -156,6 +169,59 @@ REGISTRY.set("precompile", {
     ctx.error(
       attrNode,
       `@precompile target shape '${tgt?.kind}' is not supported`,
+    );
+  },
+});
+
+// Derive attribute: `@derive(display)` on a struct type decl auto-generates
+// the Display.to_string method. The actual expansion is NOT an attribute-pass
+// phase - it runs pre-typecheck in src/jsyoopderive/expand.js (called from
+// typecheckProgram), which consumes the ATTRIBUTE node. This entry exists for
+// parse-time shape validation, --list-attributes, and a safety net for derive
+// attributes that survive to the (post-typecheck) attribute pass - only
+// possible in statement position, which the expansion does not scan.
+const DEFERRED_DERIVES = new Set(["eq", "clone", "hash", "debug", "default"]);
+
+REGISTRY.set("derive", {
+  parsePhase(attrNode, ctx) {
+    const args = attrNode.args ?? [];
+    if (args.length !== 1 || args[0].kind !== "IDENT") {
+      ctx.throwError(
+        `@derive requires exactly one derive name argument, e.g. @derive(display)`,
+        attrNode.argsSourceLoc ?? attrNode.sourceLoc,
+      );
+    }
+    const deriveName = args[0].name;
+    if (DEFERRED_DERIVES.has(deriveName)) {
+      ctx.throwError(
+        `@derive(${deriveName}) is not yet supported - only @derive(display) is available today`,
+        attrNode.argsSourceLoc ?? attrNode.sourceLoc,
+      );
+    }
+    if (deriveName !== "display") {
+      ctx.throwError(
+        `unknown derive "${deriveName}" - supported derives: display`,
+        attrNode.argsSourceLoc ?? attrNode.sourceLoc,
+      );
+    }
+    const target = attrNode.target;
+    const inner = target?.kind === "EXPORT_DECL" ? target.decl : target;
+    // Phase 13.D: variants derive too - the generated body is an arm-per-case
+    // switch rather than a single template literal.
+    if (inner?.kind !== "TYPE_DECL" && inner?.kind !== "VARIANT_DECL") {
+      ctx.throwError(
+        `@derive(display) only applies to a struct 'type' or 'variant' declaration (got ${target?.kind ?? "no target"})`,
+        attrNode.sourceLoc,
+      );
+    }
+  },
+  comptimePhase(attrNode, ctx) {
+    // Any @derive still wrapped at attribute-pass time was never seen by the
+    // pre-typecheck expansion - i.e. it sits in statement position inside a
+    // function body rather than at module top level.
+    ctx.error(
+      attrNode,
+      `@derive is only supported on module top-level type declarations`,
     );
   },
 });

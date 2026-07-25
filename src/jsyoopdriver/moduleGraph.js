@@ -39,15 +39,22 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   const readFile = options.readFile ?? (() => null);
   const stdRoot = options.stdRoot ?? DEFAULT_STD_ROOT;
 
-  loadOne(entryAbsPath);
   // Always pull std/core/format.yoop and std/core/strings.yoop into the
   // graph so codegen can lower interpolated template literals to
   // `string_concat_all([..., int_to_string(x), ...])` without requiring
-  // user code to import them explicitly. Loading is idempotent - if
-  // the entry transitively imports either, this is a no-op.
+  // user code to import them explicitly. std/core/traits.yoop rides along
+  // so @derive(display) can synthesize `import { Display }` bindings for
+  // deriving modules. Loading is idempotent - if the entry transitively
+  // imports any of these, this is a no-op.
+  //
+  // Autoloads walk BEFORE the entry so they precede user modules in the
+  // topo order. This is load-bearing for @derive: a deriving module's
+  // pass C validates its grafted to_string against Display's method table,
+  // which is only filled once the traits module's own pass C has run.
   const autoload = [
     path.resolve(stdRoot, "core", "format.yoop"),
     path.resolve(stdRoot, "core", "strings.yoop"),
+    path.resolve(stdRoot, "core", "traits.yoop"),
   ];
   for (const p of autoload) {
     let resolvedAbs;
@@ -58,6 +65,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     }
     loadOne(resolvedAbs);
   }
+  loadOne(entryAbsPath);
   return {
     entry: byPath.get(entryAbsPath),
     modules: order,

@@ -1,0 +1,9 @@
+@derive(display)
+type Empty {
+}
+
+function main(): int {
+  const e: Empty = { };
+  printf(`${e}\n`);
+  return 0;
+}

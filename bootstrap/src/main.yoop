@@ -19,6 +19,7 @@ import { parse } from "./source_processing/parser.yoop";
 import { tokenScanList } from "./contracts.yoop";
 import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
 import { typecheckProgram } from "./typecheck/typecheck.yoop";
+import * as dbg from "./utils/debug_utils.yoop";
 
 @precompile {
   log.info("hello, yooper from a precompile!");
@@ -52,7 +53,7 @@ function main(): int {
   //   `;
 
   // Layer 0 smoke test: load a real source file into a one-module graph.
-  const entryPath = "bootstrap/examples/single_module.yoop";
+  const entryPath = "/Users/tom/dev/personal/yooperlang/bootstrap/examples/single_module.yoop";
   switch (loadModuleGraph(entryPath)) {
     case LoadGraphResult.Err { error: e }: {
       log.info(`module graph load failed: ${e}`);
@@ -62,11 +63,15 @@ function main(): int {
       log.info(`ast: ${entryMod.ast}`);
       log.info(`loaded ${mg.modules.len} module(s); entry ${entryMod.absPath} parsed to ${entryMod.ast.nodes.len} AST nodes`);
 
+      const entryAst = entryMod.ast;
+      dbg.dump("ast tree", dbg.astTreeToString(ref entryAst, entryAst.root));
+
       // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
       // for now (returns a Program with no types/symbols/diagnostics) - this
       // wires the call so the layer can be built out incrementally.
-      disposable prog = typecheckProgram(ref mg);
+      let prog = typecheckProgram(ref mg);
       log.info(`typecheck done: ${prog.diagnostics.len} diagnostic(s), ${prog.types.len} type(s), ${prog.symbols.len} symbol(s), ${prog.modules.len} typed module(s)`);
+      dbg.dump("typechecked program", dbg.programToString(ref prog));
     }
   }
 

@@ -12,6 +12,7 @@
 
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
+import { expandDerives } from "../jsyoopderive/expand.js";
 import {
   ArrayType,
   VariantType,
@@ -532,7 +533,13 @@ export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
     // suppress secondary errors from a type that already failed to resolve
     return { ok: true };
   }
-  if (argType.kind === typeKinds.struct) {
+  // Phase 13.D: variants carry the same `implementsTraits` surface as structs
+  // (13.B) and dispatch through the same mangling, so bound satisfaction is
+  // the identical check.
+  if (
+    argType.kind === typeKinds.struct ||
+    argType.kind === typeKinds.variant
+  ) {
     for (const t of argType.implementsTraits ?? []) {
       if (traitIsOrExtends(t, requiredTrait)) return { ok: true };
     }
@@ -1732,6 +1739,10 @@ function makeBuiltinGenericFuncs() {
 // Returns { modules, errors, moduleEnv }.
 export function typecheckProgram(modules) {
   const errors = [];
+  // Phase 13.C: @derive(display) expansion. Runs before pass A so grafted
+  // to_string methods and appended `implements Display` clauses flow through
+  // the ordinary passes; consumes every top-level derive ATTRIBUTE wrapper.
+  expandDerives(modules, errors);
   const moduleEnv = new Map(); // moduleId -> { localSymbols, structTable, exports, importedNames, linkLibraries }
   // Phase 7.1: program-wide instantiation registry, shared across modules.
   const programState = {
@@ -1753,13 +1764,26 @@ export function typecheckProgram(modules) {
   // pair. Source-location tracking happens via the call-site error path in
   // checkExpr; this back-channel catches instantiations triggered by type
   // annotations (e.g. fields with `Box<NotImpl>`).
+  // Re-fetch the canonical struct / variant for a bound check - an argType
+  // captured through an imported instantiation (e.g. the elem type inside a
+  // Vec<T> field) can be a pass-A shell with an empty `implementsTraits`.
+  // Same hazard and fix as canonicalNominalType in checkExpr.js.
+  const canonicalForBoundCheck = (argType) => {
+    if (!argType) return argType;
+    const isStruct = argType.kind === typeKinds.struct;
+    const isVariant = argType.kind === typeKinds.variant;
+    if (!isStruct && !isVariant) return argType;
+    const env = argType.moduleId ? moduleEnv.get(argType.moduleId) : null;
+    const table = isStruct ? env?.structTable : env?.variantTable;
+    return table?.get(argType.name) ?? argType;
+  };
   programState.registry.boundChecker = ({
     genericDecl,
     argType,
     paramName,
     requiredTrait,
   }) => {
-    const res = checkBoundSatisfied(argType, requiredTrait);
+    const res = checkBoundSatisfied(canonicalForBoundCheck(argType), requiredTrait);
     if (res.ok) return;
     errors.push({
       message: `type argument for parameter "${paramName}" of generic "${genericDecl.name}" does not satisfy bound: ${res.message}`,

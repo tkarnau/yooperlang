@@ -140,7 +140,10 @@ export const ASTNodeKind = Object.freeze({
   // statements). Per-attribute behavior lives in
   // src/jsyoopattributes/registry.js - the AST node itself is just the
   // carrier. Codegen must consume every ATTRIBUTE node before emission;
-  // any that survive are an internal-error.
+  // any that survive are an internal-error. Phase 13.C: @derive attributes
+  // are consumed earlier still - the pre-typecheck expansion in
+  // src/jsyoopderive/expand.js unwraps them; one surviving past it is an
+  // internal error.
   ATTRIBUTE: "ATTRIBUTE",
 });
 
