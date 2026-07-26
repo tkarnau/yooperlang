@@ -39,3 +39,7 @@ export function emptyArena(): AST propagates<disposable> {
     root: 0,
   };
 }
+
+export function childAt(ref ast: AST, node: ASTNode, i: usize): NodeId {
+  return vec.vec_get(ref ast.childIds, node.childStart + i);
+}

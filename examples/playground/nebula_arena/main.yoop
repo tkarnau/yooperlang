@@ -27,6 +27,7 @@ import * as gl from "./gl.yoop";
 import * as shaders from "./shaders.yoop";
 import * as state from "./state.yoop";
 import * as palette from "./palette.yoop";
+import * as audio from "./audio.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -193,9 +194,11 @@ function run_scene(): void {
     let cpu_buf: float32[] = intr.heap_alloc(max_verts * VERT_FLOATS);
 
     let disposable mut_state: state.GameState = state.init_state(int32(sdl.ticks()));
+    let disposable sfx: audio.AudioEngine = audio.init_audio();
     let start_ticks: uint32 = sdl.ticks();
     let last_ticks: uint32 = start_ticks;
     let last_score_print: int32 = 0;
+    let last_shots: int32 = 0;
 
     while (sdl.ticks() > 0) {
         let frame_start: uint32 = sdl.ticks();
@@ -210,7 +213,14 @@ function run_scene(): void {
         let alive: bool = state.tick(ref mut_state, dt, frame_start, keys);
         if (!alive) { break; }
 
+        // Trigger SFX off the deltas `tick` exposes: a new shot fired, or
+        // the score ticking up (which happens once per enemy destroyed).
+        if (mut_state.shots_fired != last_shots) {
+            audio.play_fire(ref sfx);
+            last_shots = mut_state.shots_fired;
+        }
         if (mut_state.score != last_score_print) {
+            audio.play_hit(ref sfx);
             printf(`score: ${mut_state.score}\n`);
             last_score_print = mut_state.score;
         }
@@ -263,7 +273,7 @@ function run_scene(): void {
 function main(): int32 {
     yoop_stdout_linebuf();
     printf(`nebula_arena: starting (A/D move, Space shoot, grab gold orbs for spread, Esc quit)\n`);
-    if (sdl.init(sdl.InitFlags.Video) != 0) {
+    if (sdl.init(sdl.InitFlags.Video | sdl.InitFlags.Audio) != 0) {
         printf(`SDL_Init failed: ${sdl.error()}\n`);
         return 1;
     }

@@ -639,24 +639,50 @@ function resolveUnary(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
-// Re-fetch the canonical, fully-resolved struct from its module's
-// structTable. The struct flowing out of an imported function's return
-// type (or an enum payload, etc.) may be a pass-A shell with an empty
+// Re-fetch the canonical, fully-resolved nominal type from its module's
+// structTable / variantTable. The type flowing out of an imported function's
+// return type (or an enum payload, etc.) may be a pass-A shell with an empty
 // `implementsTraits`, so a direct `.implementsTraits` read misses the
 // trait. Mirrors the technique in `lookupIntoImpl` and
 // `resolveTraitQualifiedCall`.
-function canonicalStructType(structType, ctx) {
-  if (!structType || structType.kind !== typeKinds.struct) return structType;
+//
+// Phase 13.D: variants share the implementsTraits surface with structs, so
+// the same re-fetch applies - only the backing table differs.
+function canonicalNominalType(nominalType, ctx) {
+  if (!nominalType) return nominalType;
+  const isStruct = nominalType.kind === typeKinds.struct;
+  const isVariant = nominalType.kind === typeKinds.variant;
+  if (!isStruct && !isVariant) return nominalType;
+  const tableIn = (src) => (isStruct ? src?.structTable : src?.variantTable);
   const moduleEnv = ctx.typeContext?.moduleEnv;
-  if (structType.moduleId && moduleEnv) {
-    const env = moduleEnv.get(structType.moduleId);
-    const fromTable = env?.structTable?.get(structType.name);
+  if (nominalType.moduleId && moduleEnv) {
+    const fromTable = tableIn(moduleEnv.get(nominalType.moduleId))?.get(
+      nominalType.name,
+    );
     if (fromTable) return fromTable;
-  } else if (ctx.typeContext?.structTable) {
-    const fromTable = ctx.typeContext.structTable.get(structType.name);
+  } else {
+    const fromTable = tableIn(ctx.typeContext)?.get(nominalType.name);
     if (fromTable) return fromTable;
   }
-  return structType;
+  return nominalType;
+}
+
+// Phase 13.D: name the field behind a failed interpolation inside a
+// @derive(display)-generated body. Struct bodies interpolate `self.<field>`
+// directly; variant arms interpolate a pattern-bound local, whose field
+// label the expansion records in the template node's `deriveLabels`.
+function derivedFieldLabel(templateNode, expr) {
+  if (
+    expr?.kind === ASTNodeKind.FIELD_ACCESS &&
+    expr.object?.kind === ASTNodeKind.IDENT &&
+    expr.object.name === "self"
+  ) {
+    return expr.field;
+  }
+  if (expr?.kind === ASTNodeKind.IDENT) {
+    return templateNode.deriveLabels?.[expr.name] ?? null;
+  }
+  return null;
 }
 
 // `` `hi ${name}` `` - every interpolation must be a printable scalar
@@ -671,16 +697,35 @@ function resolveTemplateLiteral(node, scope, ctx) {
       const exprType = resolveExprType(part.expr, scope, ctx);
       if (isPrintableInTemplate(exprType)) continue;
       // Phase 9.F: try Display. Look for a `Display` trait on the
-      // (deref'd) struct's implementsTraits; synthesize a trait call.
-      // Re-fetch the canonical struct first - an imported type's shell
-      // can have an empty implementsTraits (see canonicalStructType).
+      // (deref'd) type's implementsTraits; synthesize a trait call.
+      // Re-fetch the canonical type first - an imported type's shell
+      // can have an empty implementsTraits (see canonicalNominalType).
+      // Phase 13.D: variants dispatch here too (same implementsTraits
+      // surface, same mangling), so a derived or hand-written variant
+      // Display impl is interpolatable.
       const derefed = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
-      const innerType = canonicalStructType(derefed, ctx);
+      const innerType = canonicalNominalType(derefed, ctx);
       if (
-        innerType.kind === typeKinds.struct &&
+        (innerType.kind === typeKinds.struct ||
+          innerType.kind === typeKinds.variant) &&
         (innerType.implementsTraits ?? []).some((t) => t.name === "Display")
       ) {
         part.expr = synthesizeDisplayCall(part.expr, innerType, exprType);
+        continue;
+      }
+      // Phase 13.D: inside a @derive(display)-generated body the user never
+      // wrote this template, so the generic wording ("template literal
+      // interpolation must be...") names nothing they can act on. Point at
+      // the offending field and the two ways to make it printable.
+      if (node.deriveOwner) {
+        const label = derivedFieldLabel(node, part.expr);
+        pushError(
+          ctx.errors,
+          part.expr,
+          `@derive(display) on "${node.deriveOwner}" cannot print ${
+            label ? `field "${label}"` : "a field"
+          } of type ${formatType(exprType)} - add @derive(display) to that type, give it a manual Display impl, or write ${node.deriveOwner}'s to_string by hand`,
+        );
         continue;
       }
       pushError(
@@ -705,7 +750,8 @@ function resolveTemplateLiteral(node, scope, ctx) {
 // resolveTraitQualifiedCall does for source-written trait calls.
 //
 // `exprType` is the type of `originalExpr` (used to materialize the ref
-// arg if needed); `structType` is the (deref'd) struct that carries the
+// arg if needed); `structType` is the (deref'd) struct OR variant (Phase
+// 13.D - both carry implementsTraits and mangle identically) that holds the
 // Display impl - its mangled symbol is what the call dispatches to.
 function synthesizeDisplayCall(originalExpr, structType, exprType) {
   // Arg = `ref originalExpr` when expr isn't already a ref; pass
@@ -2937,7 +2983,11 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     unifyAgainstTypeParam(sig.returnType, expectedReturnType, generic.id, subst);
   }
 
-  // Every type param must be bound.
+  // Every type param must be bound. Canonicalize each struct arg - a struct
+  // captured through an imported instantiation (e.g. the elem type inside a
+  // Vec<T> field) can be a pass-A shell with empty `implementsTraits` /
+  // `methods`, which would fail the bound check below and leave codegen's
+  // bound-method rewrite unable to find the impl after substitution.
   const concreteArgs = [];
   for (const pn of generic.paramNames) {
     const bound = subst.get(pn);
@@ -2949,7 +2999,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       );
       return setType(node, ErrorType());
     }
-    concreteArgs.push(bound);
+    concreteArgs.push(canonicalNominalType(bound, ctx));
   }
 
   // Phase 7.2 / 9.J: call-site bound check. Runs before instantiation so the

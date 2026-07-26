@@ -1,0 +1,26 @@
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+function double(n: int32): int32 {
+  return n * 2;
+}
+
+@derive(display)
+type Bag propagates<disposable> {
+  xs: int32[],
+  v: Vec<int32>,
+  cb: (n: int32) => int32,
+}
+
+function main(): int {
+  let nums: Vec<int32> = vec.vec_new(2);
+  vec.vec_push(ref nums, 7);
+  vec.vec_push(ref nums, 8);
+  const full: Bag = { xs: [1, 2, 3], v: nums, cb: double };
+  printf(`${full}\n`);
+
+  let empty: Vec<int32> = vec.vec_new(0);
+  const bare: Bag = { xs: [], v: empty, cb: double };
+  printf(`${bare}\n`);
+  return 0;
+}

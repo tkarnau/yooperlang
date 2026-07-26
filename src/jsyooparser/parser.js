@@ -894,8 +894,10 @@ export function parse(src) {
       expect(TokenTags.rparen);
     }
 
-    // Target. Three accepted shapes today; future attribute consumers
-    // can extend the dispatch (e.g. decorate a function decl).
+    // Target. Accepted shapes; future attribute consumers can extend the
+    // dispatch (e.g. decorate a function decl). The `type` / `export`
+    // targets exist for @derive(display) (per-attribute validation of
+    // which targets are legal happens in the registry's parsePhase).
     const nextTag = peek().tag;
     if (nextTag === TokenTags.lcurly) {
       node.target = parseBlock();
@@ -904,12 +906,18 @@ export function parse(src) {
       nextTag === TokenTags.const
     ) {
       node.target = parseVarDecl();
+    } else if (nextTag === TokenTags.type) {
+      node.target = parseTypeDecl();
+    } else if (nextTag === TokenTags.variant) {
+      node.target = parseVariantDecl();
+    } else if (nextTag === TokenTags.export) {
+      node.target = parseExportDecl();
     } else if (nextTag === TokenTags.semicolon) {
       advance();
       node.target = null;
     } else {
       throw parseError(
-        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, or ';' (got ${inverseTokenTags[nextTag]})`,
+        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, a 'type' / 'variant' declaration (optionally exported), or ';' (got ${inverseTokenTags[nextTag]})`,
         peek().start,
         peek().length,
       );
@@ -3171,6 +3179,28 @@ export function parse(src) {
       } else {
         // no-payload variant
         variant.fields = null;
+        // Phase 13.D: `Special MyType` is NOT payload syntax - a case payload
+        // is always a record. Without this check the case name and the type
+        // silently parse as TWO payload-less cases (`Special` and `MyType`),
+        // since the separating comma is optional; nothing errors at the decl
+        // and the only symptom is a phantom "missing variants: MyType" from a
+        // later exhaustiveness check, pointing at a `switch` rather than here.
+        //
+        // A plain IDENT is the only ambiguous follower: a method decl starts
+        // with the `function` keyword, and a real next case is comma-separated
+        // in every existing shape.
+        if (peek().tag === TokenTags.ident) {
+          const nextTok = peek();
+          const nextText = src.substring(
+            nextTok.start,
+            nextTok.start + nextTok.length,
+          );
+          throw parseError(
+            `variant case '${variant.name}' is followed by '${nextText}' with no separator - a case payload must be a record, e.g. '${variant.name} { value: ${nextText} }'; if these are two separate cases, put a comma between them`,
+            nextTok.start,
+            nextTok.length,
+          );
+        }
       }
       node.variants.push(variant);
       if (peek().tag === TokenTags.comma) advance();

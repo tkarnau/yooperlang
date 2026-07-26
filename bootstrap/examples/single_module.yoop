@@ -1,0 +1,12 @@
+// A minimal bootstrap-parseable module: top-level functions only, no imports.
+// Used by main.yoop to smoke-test the Layer 0 module-graph loader end to end.
+
+function add(a: int, b: int): int {
+  return a + b;
+}
+
+function main(): int {
+  const num = 32 + 10;
+
+  return num;
+}

@@ -1643,3 +1643,118 @@ describe("parse: parenthesized type groups (array of function pointers)", () => 
     assert.equal(t.elem.elem.kind, "functionType");
   });
 });
+
+describe("Phase 13.C: @derive attribute targets", () => {
+  it("parses @derive(display) on a type decl", () => {
+    const ast = parse(
+      `@derive(display)\ntype Point {\n  x: int32,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.kind, ASTNodeKind.ATTRIBUTE);
+    assert.equal(attr.name, "derive");
+    assert.equal(attr.args.length, 1);
+    assert.equal(attr.args[0].kind, ASTNodeKind.IDENT);
+    assert.equal(attr.args[0].name, "display");
+    assert.equal(attr.target.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(attr.target.name, "Point");
+  });
+
+  it("parses @derive(display) on an exported type decl", () => {
+    const ast = parse(
+      `@derive(display)\nexport type Point {\n  x: int32,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.target.kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(attr.target.decl.kind, ASTNodeKind.TYPE_DECL);
+  });
+
+  it("rejects deferred derive names with a not-yet-supported message", () => {
+    assert.throws(
+      () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
+      /@derive\(eq\) is not yet supported - only @derive\(display\)/,
+    );
+  });
+
+  it("rejects unknown derive names", () => {
+    assert.throws(
+      () => parse(`@derive(banana)\ntype P {\n  x: int32,\n}\n`),
+      /unknown derive "banana" - supported derives: display/,
+    );
+  });
+
+  it("rejects a missing or non-ident derive argument", () => {
+    assert.throws(
+      () => parse(`@derive\ntype P {\n  x: int32,\n}\n`),
+      /@derive requires exactly one derive name argument/,
+    );
+  });
+
+  it("rejects non-type targets", () => {
+    assert.throws(
+      () => parse(`@derive(display)\nlet x: int32 = 1;\n`),
+      /@derive\(display\) only applies to a struct 'type' or 'variant' declaration/,
+    );
+  });
+
+  it("@precompile still rejects type targets at parse time", () => {
+    assert.throws(
+      () => parse(`@precompile\ntype P {\n  x: int32,\n}\n`),
+      /@precompile requires a '\{ \.\.\. \}' block or a 'let' \/ 'const' declaration/,
+    );
+  });
+});
+
+describe("Phase 13.D: @derive on variant decls", () => {
+  it("parses @derive(display) on a variant decl", () => {
+    const ast = parse(
+      `@derive(display)\nvariant Shape {\n  Circle { r: int32 },\n  Dot,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.kind, ASTNodeKind.ATTRIBUTE);
+    assert.equal(attr.target.kind, ASTNodeKind.VARIANT_DECL);
+    assert.equal(attr.target.name, "Shape");
+    assert.equal(attr.target.variants.length, 2);
+  });
+
+  it("parses @derive(display) on an exported variant decl", () => {
+    const ast = parse(
+      `@derive(display)\nexport variant Shape {\n  Dot,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.target.kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(attr.target.decl.kind, ASTNodeKind.VARIANT_DECL);
+  });
+
+});
+
+describe("Phase 13.D: variant case payload must be a record", () => {
+  // `Special MyType` used to parse silently as TWO payload-less cases
+  // (the separating comma is optional), so the only symptom was a phantom
+  // "missing variants: MyType" from a later exhaustiveness check.
+  it("rejects a bare-type payload with a fix-it", () => {
+    assert.throws(
+      () =>
+        parse(
+          `variant MyVariant {\n  Normal { p: int32 },\n  Special MyType,\n}\n`,
+        ),
+      /variant case 'Special' is followed by 'MyType' with no separator - a case payload must be a record, e\.g\. 'Special \{ value: MyType \}'/,
+    );
+  });
+
+  it("still accepts the record payload form", () => {
+    const ast = parse(
+      `variant MyVariant {\n  Normal { p: int32 },\n  Special { value: MyType },\n}\n`,
+    );
+    const cases = ast.body[0].variants;
+    assert.equal(cases.length, 2);
+    assert.deepEqual(cases[1].fields.map((f) => f.name), ["value"]);
+  });
+
+  it("still accepts payload-less cases and trailing methods", () => {
+    const ast = parse(
+      `variant V implements D {\n  A,\n  B { x: int32 },\n  function f(ref self): int32 {\n    return 1;\n  }\n}\n`,
+    );
+    assert.equal(ast.body[0].variants.length, 2);
+    assert.equal(ast.body[0].methods.length, 1);
+  });
+});

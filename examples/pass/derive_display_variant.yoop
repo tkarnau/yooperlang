@@ -1,0 +1,60 @@
+// Phase 13.D: @derive(display) on a variant generates an arm-per-case
+// switch. The escape hatch for per-case control is composition, not a
+// hand-written method: declare the payload type OUTSIDE the variant with
+// its own Display impl, and the derived arm's `${payload}` dispatches to
+// it. That keeps variants free of hand-written methods entirely.
+
+import { Display } from "std/core/traits.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// Explicit control lives here, on a type declared outside the variant.
+type Center implements Display {
+  x: int32,
+  y: int32,
+  function to_string(ref self): string {
+    return `<${self.x},${self.y}>`;
+  }
+}
+
+@derive(display)
+variant Shape propagates<disposable> {
+  Circle { c: Center, r: int32 },   // payload type carries its own Display
+  Named { label: string },
+  Bytes { xs: int32[] },            // array payload -> generated loop
+  Many { v: Vec<int32>, tag: int32 },
+  Dot,                              // payload-less case
+}
+
+// A derived struct holding a derived variant - composition both ways.
+@derive(display)
+type Envelope propagates<disposable> {
+  body: Shape,
+  seq: int32,
+}
+
+// A derived variant satisfies a Display bound like any struct does.
+function describe<T implements Display>(ref x: T): string {
+  return Display.to_string(ref x);
+}
+
+function main(): int {
+  const circle: Shape = Shape.Circle { c: { x: 1, y: 2 }, r: 5 };
+  printf("%s\n", describe(ref circle));
+
+  const named: Shape = Shape.Named { label: "hi" };
+  printf(`${named}\n`);
+
+  const bytes: Shape = Shape.Bytes { xs: [1, 2, 3] };
+  printf(`${bytes}\n`);
+
+  let nums: Vec<int32> = vec.vec_new(2);
+  vec.vec_push(ref nums, 7);
+  vec.vec_push(ref nums, 8);
+  const many: Shape = Shape.Many { v: nums, tag: 9 };
+  printf(`${many}\n`);
+
+  const env: Envelope = { body: Shape.Dot, seq: 42 };
+  printf(`${env}\n`);
+  return 0;
+}

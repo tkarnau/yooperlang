@@ -1495,7 +1495,12 @@ export function codegen(ast) {
         // raw format text - strip the surrounding quotes, keep escapes intact
         const inner = argNode.value.slice(1, -1);
         fmtSpec += inner;
-      } else if (argNode.kind === ASTNodeKind.TEMPLATE_LITERAL) {
+      } else if (
+        argNode.kind === ASTNodeKind.TEMPLATE_LITERAL &&
+        !hasFormatLiteral
+      ) {
+        // The template IS the format string: its text parts become format
+        // text and each interpolation gets a synthesized specifier.
         for (const part of argNode.parts) {
           if (part.kind === ASTNodeKind.STRING_PART) {
             fmtSpec += escapePctsRaw(part.value);
@@ -1506,6 +1511,13 @@ export function codegen(ast) {
           }
         }
       } else {
+        // With an explicit format literal, a template-literal arg is an
+        // ordinary VALUE arg filling a `%s` directive: evaluate the whole
+        // template to its concatenated string (falls through emitExpr).
+        // Contributing its parts to fmtSpec here instead reintroduces the
+        // doubled-directive bug (`printf("p=%s\n", \`${p}\`)` emitting
+        // format "p=%s\n%s" with one value arg - the stray %s reads a
+        // garbage vararg).
         const r = emitExpr(argNode, fnLines);
         if (!hasFormatLiteral) fmtSpec += printfSpec(r.yoopType);
         valueArgs.push(r);
@@ -2552,7 +2564,9 @@ export function codegenProgram(modules, _moduleEnv, programState) {
   // One DebugInfo per program. Each module registers a DIFile + DICompileUnit
   // via beginModule and gets a `{ fileMd, cuMd }` handle threaded into its
   // emitter. The finalize() block is appended after all per-module IR.
-  const debugInfo = createDebugInfo();
+  // sizeOfType / sizeOfAlign are injected so the DWARF member offsets are
+  // derived from the same layout rules codegen uses to emit the LLVM structs.
+  const debugInfo = createDebugInfo({ sizeOfType, sizeOfAlign });
   // llvm.dbg.declare attaches a DILocalVariable to its alloca slot. Declared
   // once globally so per-module emitters can call it without each emitting
   // their own forward declaration.
@@ -2773,6 +2787,8 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
   // Phase 7.2: rewrite a bound-method call into a normal struct-method call
   // once the receiver's TypeParamType has been substituted with a concrete
   // struct. The bound check at instantiation guarantees the impl exists.
+  // Phase 13.D: a variant receiver takes the identical path - same `methods`
+  // map, same trait mangling.
   if (
     out.kind === ASTNodeKind.CALL_EXPRESSION &&
     out.boundMethod
@@ -2780,7 +2796,10 @@ export function cloneAstWithSubstitution(node, sub, registry = null) {
     const firstArg = out.args?.[0];
     let recvType = firstArg?.resolvedType;
     if (recvType?.kind === typeKinds.ref) recvType = recvType.inner;
-    if (!recvType || recvType.kind !== typeKinds.struct) {
+    if (
+      !recvType ||
+      (recvType.kind !== typeKinds.struct && recvType.kind !== typeKinds.variant)
+    ) {
       // Receiver is still abstract - keep the boundMethod tag. This branch is
       // hit when we're producing an "open" instantiation (the outer T flowed
       // in). Open instances are filtered out before IR emission.
@@ -2913,11 +2932,11 @@ function codegenWithModuleId(
   // to attach to the `define` line and to thread into ctx.subprogram for
   // statement-level DILocation lookups. Returns null when DI is disabled (e.g.
   // legacy callers that didn't supply a debugInfo handle).
-  function makeSubprogram(funcName, linkageName, sourceLoc) {
+  function makeSubprogram(funcName, linkageName, sourceLoc, signature = null) {
     if (!debugInfo) return null;
     ensureDebugModule();
     const line = sourceLoc?.line && sourceLoc.line > 0 ? sourceLoc.line : 1;
-    return debugInfo.subprogram(funcName, linkageName, line, diFileMd, diCuMd);
+    return debugInfo.subprogram(funcName, linkageName, line, diFileMd, diCuMd, signature);
   }
   // Look up a DILocation for the given AST node. Returns null when DI is off
   // or the current scope hasn't established a subprogram yet (top-level
@@ -2936,39 +2955,64 @@ function codegenWithModuleId(
   // synthesized lines emit outside emitStmt's wrapper. Sweep the whole
   // function and attach the subprogram's first-line location to anything
   // still unmarked.
-  function finalizeFnDbg(fnLines, subprogramRef, fnSourceLoc) {
+  //
+  // `prologueEnd` is the index just past the parameter alloca/store pairs.
+  // Those stores are deliberately left WITHOUT a !dbg: LLVM derives the DWARF
+  // `prologue_end` marker from the first non-meta instruction carrying a
+  // location, so if they had one, `break <function>` (how VS Code sets a
+  // function breakpoint) would stop BEFORE the arguments were written into
+  // their stack slots and the variables pane would show garbage. Calls in the
+  // prologue region still get one - the verifier requires a location on every
+  // inlinable call site.
+  function finalizeFnDbg(fnLines, subprogramRef, fnSourceLoc, prologueEnd = 0) {
     if (!debugInfo || !subprogramRef) return;
     const line = fnSourceLoc?.line && fnSourceLoc.line > 0 ? fnSourceLoc.line : 1;
     const fallback = debugInfo.location(line, 0, subprogramRef);
-    annotateLinesWithDbg(fnLines, 0, fallback);
+    for (let i = 0; i < prologueEnd && i < fnLines.length; i++) {
+      const l = fnLines[i];
+      if (!/^\s+(?:%[\w.$]+\s*=\s*)?(?:call|invoke)\b/.test(l)) continue;
+      if (/, !dbg !\d+\s*$/.test(l)) continue;
+      fnLines[i] = l.replace(/\s+$/, "") + `, !dbg ${fallback}`;
+    }
+    annotateLinesWithDbg(fnLines, prologueEnd, fallback);
   }
 
   // Map a Yooperlang type to its DI type reference for use in a
-  // DILocalVariable. Returns null for shapes we don't yet describe - caller
-  // should skip emitting llvm.dbg.declare for that binding so lldb just
-  // omits it from `frame variable` rather than showing garbage.
+  // DILocalVariable. debugInfo.typeRef describes structs / arrays / strings /
+  // refs / variants / unions / value enums / vtables structurally; it returns
+  // null only for shapes with no useful DWARF form, in which case the caller
+  // skips llvm.dbg.declare so a debugger omits the variable rather than
+  // showing garbage.
   function diTypeFor(yoopType) {
     if (!yoopType || !debugInfo) return null;
-    switch (yoopType.kind) {
-      case typeKinds.prim:
-        return debugInfo.basicTypeForPrim(yoopType.name);
-      case typeKinds.ref:
-      case typeKinds.task:
-        // Phase MVP+1: refs and Tasks are described as opaque pointers.
-        // Once we emit DICompositeType for the pointee struct, we'll thread
-        // it through here as the DIDerivedType's baseType.
-        return debugInfo.opaquePointer();
-      default:
-        return null;
-    }
+    return debugInfo.typeRef(yoopType);
   }
 
+  // The DISubprogram's DISubroutineType needs the function's own signature so
+  // a debugger can print the frame with real parameter types.
+  function diSignature(returnType, params) {
+    return {
+      returnType: returnType && !isVoidReturn(returnType) ? returnType : null,
+      paramTypes: (params ?? []).map((p) => p.resolvedType),
+    };
+  }
+
+  // The subprogram of the function currently being emitted. Set by emitFn /
+  // emitMethod so every binding site (loop vars, destructured names, switch
+  // pattern bindings, task handles) can emit a dbg.declare without threading
+  // `ctx` through emitters that never needed it.
+  let currentSubprogram = null;
+
   // Emit `call void @llvm.dbg.declare(metadata ptr <slot>, metadata !VAR,
-  // metadata !DIExpression()), !dbg !LOC` so lldb can map %slot -> source
-  // variable name + type. No-op when DI is off, when the type isn't
-  // describable yet, or when the binding has no usable sourceLoc.
+  // metadata !DIExpression()), !dbg !LOC` so a debugger can map %slot ->
+  // source variable name + type. No-op when DI is off, when the type isn't
+  // describable, or when there is no enclosing subprogram.
   function emitDbgDeclare(fnLines, { name, slotPtr, yoopType, sourceLoc, subprogramRef, argIndex }) {
+    subprogramRef = subprogramRef ?? currentSubprogram;
     if (!debugInfo || !subprogramRef) return;
+    // Synthesized bindings (anonymous region `$region$N`, derive locals) are
+    // unspellable in source, so surfacing them in the variables pane is noise.
+    if (!name || name.startsWith("$")) return;
     const typeRef = diTypeFor(yoopType);
     if (!typeRef) return;
     ensureDebugModule();
@@ -3523,7 +3567,14 @@ function codegenWithModuleId(
     const params = node.params ?? [];
     const llvmRet = llvmType(node.resolvedType);
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
-    const subprogramRef = makeSubprogram(node.name ?? symName, symName, node.sourceLoc);
+    const subprogramRef = makeSubprogram(
+      node.name ?? symName,
+      symName,
+      node.sourceLoc,
+      diSignature(node.resolvedType, params),
+    );
+    const prevSubprogram = currentSubprogram;
+    currentSubprogram = subprogramRef;
     const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
     const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
     if (inMainFn) {
@@ -3564,6 +3615,7 @@ function codegenWithModuleId(
         argIndex: i + 1, // DWARF arg index is 1-based
       });
     }
+    const prologueEnd = fnLines.length;
     const ctx = { fnName: symName, returnType: node.resolvedType, subprogram: subprogramRef };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(node.body, fnLines);
@@ -3581,9 +3633,10 @@ function codegenWithModuleId(
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
-    finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc);
+    finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc, prologueEnd);
     lines.push(...fnLines);
     inMainFn = prevInMain;
+    currentSubprogram = prevSubprogram;
   }
 
   // Phase 8.E: synthesize @<modid>__module_init that runs every top-level
@@ -3639,7 +3692,14 @@ function codegenWithModuleId(
 
     const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
     const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
-    const subprogramRef = makeSubprogram(methodDecl.name, mangled, methodDecl.sourceLoc);
+    const subprogramRef = makeSubprogram(
+      methodDecl.name,
+      mangled,
+      methodDecl.sourceLoc,
+      diSignature(returnType, params),
+    );
+    const prevSubprogram = currentSubprogram;
+    currentSubprogram = subprogramRef;
     const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
     const fnLines = [`define ${llvmRet} @${mangled}(${paramSig})${dbgSuffix} {`, "entry:"];
 
@@ -3666,6 +3726,7 @@ function codegenWithModuleId(
       });
     }
 
+    const prologueEnd = fnLines.length;
     const ctx = { fnName: methodDecl.name, returnType, subprogram: subprogramRef };
     methodDecl.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(methodDecl.body, fnLines);
@@ -3680,8 +3741,9 @@ function codegenWithModuleId(
     }
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
-    finalizeFnDbg(fnLines, subprogramRef, methodDecl.sourceLoc);
+    finalizeFnDbg(fnLines, subprogramRef, methodDecl.sourceLoc, prologueEnd);
     lines.push(...fnLines);
+    currentSubprogram = prevSubprogram;
   }
 
   // Phase 6.3: per-task-function thunk. Layout-aware: GEP into the handle's
@@ -5228,7 +5290,14 @@ function codegenWithModuleId(
     for (const argNode of node.args) {
       if (argNode.kind === ASTNodeKind.STRING_LITERAL) {
         fmtSpec += argNode.value.slice(1, -1);
-      } else if (argNode.kind === ASTNodeKind.TEMPLATE_LITERAL) {
+      } else if (
+        argNode.kind === ASTNodeKind.TEMPLATE_LITERAL &&
+        !hasFormatLiteral
+      ) {
+        // Template-as-format-string. With an explicit format literal present
+        // the template instead falls through as a plain VALUE arg (else
+        // branch) filling a %s - contributing its parts here would
+        // reintroduce the doubled-directive bug (see emitPrintfCall).
         for (const part of argNode.parts) {
           if (part.kind === ASTNodeKind.STRING_PART) { fmtSpec += part.value.replace(/%/g, "%%"); }
           else { const r = emitExpr(part.expr, fnLines); fmtSpec += printfSpec(r.yoopType); valueArgs.push(r); }
@@ -5553,6 +5622,12 @@ function codegenWithModuleId(
     bindingDeclTable.set(node.name, { taskFnName: fnName });
     fnLines.push(`  ${slot} = alloca ptr, align 8`);
     fnLines.push(`  store ptr ${handleSlot}, ptr ${slot}`);
+    emitDbgDeclare(fnLines, {
+      name: node.name,
+      slotPtr: slot,
+      yoopType: node.resolvedType,
+      sourceLoc: node.sourceLoc,
+    });
   }
 
   // Phase 6.3: `pooled h = task_call();` - heap-allocate a refcounted handle.
@@ -5574,6 +5649,12 @@ function codegenWithModuleId(
     bindingDeclTable.set(node.name, { taskFnName: fnName });
     fnLines.push(`  ${slot} = alloca ptr, align 8`);
     fnLines.push(`  store ptr ${heapPtr}, ptr ${slot}`);
+    emitDbgDeclare(fnLines, {
+      name: node.name,
+      slotPtr: slot,
+      yoopType: node.resolvedType,
+      sourceLoc: node.sourceLoc,
+    });
   }
 
   // Phase 6.4: `pooled h3 = h2;` - copy the existing handle pointer and
@@ -5584,6 +5665,12 @@ function codegenWithModuleId(
     fnLines.push(`  ${slot} = alloca ptr, align 8`);
     fnLines.push(`  store ptr ${rhs.val}, ptr ${slot}`);
     fnLines.push(`  call void @yoop_task_retain(ptr ${rhs.val})`);
+    emitDbgDeclare(fnLines, {
+      name: node.name,
+      slotPtr: slot,
+      yoopType: node.resolvedType,
+      sourceLoc: node.sourceLoc,
+    });
   }
 
   // Phase 6.3: immediate task call - `const x: T = compute(...);`. Allocate
@@ -5605,6 +5692,12 @@ function codegenWithModuleId(
     const slot = symbols.declare(node.name, declType);
     const llvmTy = llvmType(declType);
     fnLines.push(`  ${slot} = alloca ${llvmTy}, align ${alignOf(llvmTy)}`);
+    emitDbgDeclare(fnLines, {
+      name: node.name,
+      slotPtr: slot,
+      yoopType: declType,
+      sourceLoc: node.sourceLoc,
+    });
     const resPtr = freshTemp();
     fnLines.push(
       `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 6`,
@@ -5864,6 +5957,12 @@ function codegenWithModuleId(
           fnLines.push(
             `  store ${fieldLlvmTy} ${valTmp}, ptr ${bindingSlot}`,
           );
+          emitDbgDeclare(fnLines, {
+            name: fb.bindingName,
+            slotPtr: bindingSlot,
+            yoopType: fieldType,
+            sourceLoc: vp.sourceLoc ?? node.sourceLoc,
+          });
         }
       }
       const armCtx = { ...ctx, breakLabel: endLabel };
@@ -5916,6 +6015,12 @@ function codegenWithModuleId(
       const declSlot = symbols.declare(name, fieldType);
       fnLines.push(`  ${declSlot} = alloca ${llvmTy}, align ${al}`);
       fnLines.push(`  store ${llvmTy} ${valTmp}, ptr ${declSlot}`);
+      emitDbgDeclare(fnLines, {
+        name,
+        slotPtr: declSlot,
+        yoopType: fieldType,
+        sourceLoc: node.sourceLoc,
+      });
     }
   }
 
@@ -6014,6 +6119,12 @@ function codegenWithModuleId(
 
     const loopVarSlot = symbols.declare(node.loopVar, elemType);
     fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvm}, align ${elemAlign}`);
+    emitDbgDeclare(fnLines, {
+      name: node.loopVar,
+      slotPtr: loopVarSlot,
+      yoopType: elemType,
+      sourceLoc: node.sourceLoc,
+    });
 
     const stepSlot = freshTemp();
     fnLines.push(`  ${stepSlot} = alloca ${stepLlvm}, align ${sizeOfAlign(iterStepType)}`);
@@ -6095,6 +6206,12 @@ function codegenWithModuleId(
     symbols.enterScope();
     const loopVarSlot = symbols.declare(node.loopVar, elemType);
     fnLines.push(`  ${loopVarSlot} = alloca ${elemLlvmTy}, align ${elemAlign}`);
+    emitDbgDeclare(fnLines, {
+      name: node.loopVar,
+      slotPtr: loopVarSlot,
+      yoopType: elemType,
+      sourceLoc: node.sourceLoc,
+    });
 
     const condLabel = freshLabel("forin_cond");
     const bodyLabel = freshLabel("forin_body");

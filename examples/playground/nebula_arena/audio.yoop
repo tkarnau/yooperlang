@@ -1,0 +1,178 @@
+// Procedural sound effects for the arena: a "pew" when the player fires
+// and a "boom" when a bullet lands. No asset files - both effects are
+// synthesized into int16 PCM buffers at startup and pushed to SDL2's
+// audio queue on demand, so the only dependency is the SDL2 we already
+// link for the window.
+//
+// The public API is three calls:
+//   init_audio()          open the device + render the clips (Disposable)
+//   play_fire(ref e)      queue the laser blip
+//   play_hit(ref e)       queue the explosion
+//
+// If the device can't be opened the engine degrades silently - the play
+// helpers no-op on a zero device id, so the game runs fine without sound.
+
+import.unsafe;
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as sdl from "./sdl.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from library "m" {
+    function sin(x: float64): float64;
+    function exp(x: float64): float64;
+}
+
+// SDL2 audio entry points. Only main talks to `audio.*`; the raw
+// SDL_Audio* names stay contained here, mirroring how sdl.yoop wraps the
+// video/window surface.
+extern "C" from library "SDL2" {
+    function SDL_OpenAudioDevice(
+        device: unsafe_ptr<uint8>,
+        iscapture: int32,
+        ref desired: AudioSpec,
+        obtained: unsafe_ptr<uint8>,
+        allowed_changes: int32
+    ): uint32;
+    function SDL_PauseAudioDevice(dev: uint32, pause_on: int32): void;
+    function SDL_QueueAudio(dev: uint32, data: unsafe_ptr<uint8>, len: uint32): int32;
+    function SDL_GetQueuedAudioSize(dev: uint32): uint32;
+    function SDL_CloseAudioDevice(dev: uint32): void;
+}
+
+// Mirror of C's SDL_AudioSpec. Field order and types must match the C
+// struct byte-for-byte because SDL reads it through the `ref` pointer we
+// hand it - it lowers to `{ i32, i16, i8, i8, i16, i16, i32, ptr, ptr }`,
+// exactly the 32-byte C layout. We drive playback with the queue API, so
+// callback/userdata are always null.
+type AudioSpec {
+    freq: int32,
+    format: uint16,
+    channels: uint8,
+    silence: uint8,
+    samples: uint16,
+    padding: uint16,
+    size: uint32,
+    callback: unsafe_ptr<uint8>,
+    userdata: unsafe_ptr<uint8>,
+}
+
+// ── Tunables ─────────────────────────────────────────────────────────
+
+const SAMPLE_RATE: int32 = 44100;
+// AUDIO_S16LSB - signed 16-bit little-endian samples. The CI/target
+// matrix is little-endian, so this doubles as AUDIO_S16SYS.
+const AUDIO_S16: uint16 = 0x8010;
+const FIRE_MS: int32 = 70;
+const HIT_MS: int32 = 280;
+// Drop a new effect if this much audio is already queued (~0.27s). Keeps
+// rapid fire/hit bursts from stacking into laggy, delayed playback.
+const MAX_QUEUE_BYTES: uint32 = 48000;
+
+// ── Engine ───────────────────────────────────────────────────────────
+
+export type AudioEngine implements Disposable {
+    dev: uint32,
+    fire: int16[],
+    hit: int16[],
+    function dispose(ref self): void {
+        if (self.dev != 0) { SDL_CloseAudioDevice(self.dev); }
+        intr.heap_free(self.fire);
+        intr.heap_free(self.hit);
+    }
+}
+
+// A tiny LCG (Numerical Recipes constants, same as rng.yoop) used only to
+// texture the explosion with white noise. Returns a value in [-1, 1).
+function noise_sample(ref state: int32): float64 {
+    state = state * 1103515245 + 12345;
+    let r: int32 = state % 32768;
+    if (r < 0) { r = r + 32768; }
+    return float64(r) / 16384.0 - 1.0;
+}
+
+// Laser blip: a short sine that sweeps 880Hz down to 330Hz under a linear
+// decay. Sine starts at phase 0 (amplitude 0) and fades to 0, so there's
+// no click at either end.
+function render_fire(): int16[] {
+    let n: int32 = SAMPLE_RATE * FIRE_MS / 1000;
+    let buf: int16[] = intr.heap_alloc(usize(n));
+    const PI: float64 = 3.141592653589793;
+    let phase: float64 = 0.0;
+    let i: int32 = 0;
+    while (i < n) {
+        let prog: float64 = float64(i) / float64(n);
+        let freq: float64 = 880.0 - 550.0 * prog;
+        phase = phase + 2.0 * PI * freq / float64(SAMPLE_RATE);
+        let env: float64 = 1.0 - prog;
+        let s: float64 = sin(phase) * env * 8000.0;
+        buf[usize(i)] = int16(s);
+        i = i + 1;
+    }
+    return buf;
+}
+
+// Explosion: a low body tone (140Hz dropping to 50Hz) mixed with white
+// noise, all under an exponential decay - a sharp transient with a tail.
+function render_hit(): int16[] {
+    let n: int32 = SAMPLE_RATE * HIT_MS / 1000;
+    let buf: int16[] = intr.heap_alloc(usize(n));
+    const PI: float64 = 3.141592653589793;
+    let phase: float64 = 0.0;
+    let noise_state: int32 = 0x1234567;
+    let i: int32 = 0;
+    while (i < n) {
+        let prog: float64 = float64(i) / float64(n);
+        let env: float64 = exp(-4.0 * prog);
+        let freq: float64 = 140.0 - 90.0 * prog;
+        phase = phase + 2.0 * PI * freq / float64(SAMPLE_RATE);
+        let body: float64 = sin(phase);
+        let noise: float64 = noise_sample(ref noise_state);
+        let s: float64 = (body * 0.6 + noise * 0.4) * env * 11000.0;
+        buf[usize(i)] = int16(s);
+        i = i + 1;
+    }
+    return buf;
+}
+
+// ── Public API ───────────────────────────────────────────────────────
+
+export function init_audio(): AudioEngine {
+    let spec: AudioSpec = {
+        freq: SAMPLE_RATE,
+        format: AUDIO_S16,
+        channels: 1,
+        silence: 0,
+        samples: 512,
+        padding: 0,
+        size: 0,
+        callback: null,
+        userdata: null,
+    };
+    let dev: uint32 = SDL_OpenAudioDevice(null, 0, ref spec, null, 0);
+    if (dev == 0) {
+        printf(`audio: could not open device (${sdl.error()}); running silent\n`);
+    } else {
+        // Devices open paused; unpause so queued samples actually play.
+        SDL_PauseAudioDevice(dev, 0);
+    }
+    return {
+        dev: dev,
+        fire: render_fire(),
+        hit: render_hit(),
+    };
+}
+
+function queue_clip(dev: uint32, clip: int16[]): void {
+    if (dev == 0) { return; }
+    if (SDL_GetQueuedAudioSize(dev) > MAX_QUEUE_BYTES) { return; }
+    let bytes: unsafe_ptr<uint8> = unsafe_ptr.cast<uint8>(clip.ptr);
+    // 2 bytes per int16 sample.
+    SDL_QueueAudio(dev, bytes, uint32(clip.len) * 2);
+}
+
+export function play_fire(ref e: AudioEngine): void { queue_clip(e.dev, e.fire); }
+export function play_hit(ref e: AudioEngine): void { queue_clip(e.dev, e.hit); }

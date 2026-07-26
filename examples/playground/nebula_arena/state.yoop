@@ -135,6 +135,9 @@ export type GameState implements Disposable {
     player_x: float32,
     player_y: float32,
     space_was_down: int32,
+    // Cumulative count of fire *events* (one per trigger pull, so a spread
+    // shot counts once). The scene loop watches this for the fire SFX.
+    shots_fired: int32,
     bullets: BulletPool,
     powerups: PowerupPool,
     enemies: EnemyPool,
@@ -170,6 +173,7 @@ export function init_state(seed: int32): GameState {
         player_x: float32(WIN_W) * 0.5,
         player_y: float32(WIN_H) * PLAYER_Y_FRAC,
         space_was_down: 0,
+        shots_fired: 0,
         bullets: {
             active: false_bools(BULLET_POOL),
             x: zero_floats(BULLET_POOL),
@@ -225,6 +229,7 @@ function spawn_bullet(ref g: GameState, vx: float32, vy: float32): void {
 }
 
 function fire_bullet(ref g: GameState): void {
+    g.shots_fired = g.shots_fired + 1;
     if (g.powerups.spread_shots_remaining > 0) {
         const PI: float32 = 3.14159265;
         let i: int32 = 0;

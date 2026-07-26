@@ -1,0 +1,9 @@
+@derive(display)
+type Pair<T> {
+  a: T,
+  b: T,
+}
+
+function main(): int {
+  return 0;
+}

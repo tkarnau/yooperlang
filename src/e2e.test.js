@@ -977,6 +977,164 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "5 = 5\n");
   });
 
+  // Regression: a Display-bound generic whose T is inferred from a struct
+  // reached only through an imported instantiation (elem type of a Vec<T>
+  // field). The captured elem type is a pass-A shell with empty
+  // implementsTraits/methods; the call-site bound check and the registry
+  // boundChecker must re-canonicalize it before checking.
+  it("generic_bound_imported_shell: bound check canonicalizes imported struct shells", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_bound_imported_shell/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "(1, 2)\n");
+  });
+});
+
+// Phase 13.C: @derive(display) - pre-typecheck expansion generates the
+// Display.to_string method from a struct's field annotations. Fixtures run
+// through runFixtureEntry (compileEntry): the expansion needs the driver's
+// module graph with std/core/traits.yoop autoloaded.
+describe("e2e: Phase 13.C @derive(display)", () => {
+  it("derive_display_basic: derived to_string via explicit printf format arg", () => {
+    // Also the regression test for the printf lowering fix: a template
+    // literal VALUE arg after an explicit format literal fills the %s
+    // instead of contributing a doubled directive.
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "p=Point { x: 3, y: 4 }\n");
+  });
+
+  it("derive_display_nested: derived structs recurse through Display dispatch", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_nested.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 }, label: diag }\n",
+    );
+  });
+
+  it("derive_display_array_vec: array + Vec loops, fn placeholder, empty variants", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_array_vec.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Bag { xs: [1, 2, 3], v: [7, 8], cb: <fn> }\nBag { xs: [], v: [], cb: <fn> }\n",
+    );
+  });
+
+  it("derive_display_mixed: hand-written Display field + pre-listed implements clause", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_mixed.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Wrapper { inner: manual(9), tag: 5 } Listed { n: 6 }\n");
+  });
+
+  it("derive_display_empty: zero-field type prints Name { }", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_empty.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Empty { }\n");
+  });
+
+  it("derive_display_cross_module: derived export interpolated from another module", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Pt { x: 10, y: 20 }\n");
+  });
+
+  it("derive_manual_to_string: deriving over a manual to_string is an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_manual_to_string.yoop");
+    assert.ok(
+      errors.some((e) => /already defines "to_string"/.test(e.message)),
+      `expected the derive clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_generic: generic type decls are rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_generic.yoop");
+    assert.ok(
+      errors.some((e) => /generic type "Pair" is not yet supported/.test(e.message)),
+      `expected the generic derive error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_alias: type aliases are rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_alias.yoop");
+    assert.ok(
+      errors.some((e) => /cannot apply to type alias "NodeId"/.test(e.message)),
+      `expected the alias derive error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 13.D: variants derive too. The generated body is an arm-per-case
+  // switch; per-case control comes from composition (a payload type declared
+  // outside the variant with its own Display impl), not hand-written methods.
+  it("derive_display_variant: arm-per-case switch, payload Display dispatch, collections, bound generic", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_variant.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Shape.Circle { c: <1,2>, r: 5 }\n" +
+        "Shape.Named { label: hi }\n" +
+        "Shape.Bytes { xs: [1, 2, 3] }\n" +
+        "Shape.Many { v: [7, 8], tag: 9 }\n" +
+        "Envelope { body: Shape.Dot, seq: 42 }\n",
+    );
+  });
+
+  it("derive_variant_manual_to_string: deriving over a manual variant to_string is an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_variant_manual_to_string.yoop");
+    assert.ok(
+      errors.some((e) => /variant "Shape" already defines "to_string"/.test(e.message)),
+      `expected the variant clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_generic_variant: generic variants are rejected (needs registry method substitution)", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_generic_variant.yoop");
+    assert.ok(
+      errors.some((e) => /generic variant "Maybe" is not yet supported/.test(e.message)),
+      `expected the generic variant error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // The generated body is not user-written, so a non-printable field must
+  // name the field and the fixes rather than complaining about a template
+  // literal the user never typed. Covers the struct and variant paths - the
+  // variant one resolves a pattern-bound local back to its field name.
+  it("derive_nonprintable_field: diagnostic names the field, not the synthetic template", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_nonprintable_field.yoop");
+    const messages = errors.map((e) => e.message).join(" | ");
+    assert.ok(
+      errors.some((e) =>
+        /@derive\(display\) on "Holder" cannot print field "p" of type struct Plain/.test(e.message),
+      ),
+      `expected the struct-field derive diagnostic, got: ${messages}`,
+    );
+    assert.ok(
+      errors.some((e) =>
+        /@derive\(display\) on "Boxed" cannot print field "p" of type struct Plain/.test(e.message),
+      ),
+      `expected the variant-payload derive diagnostic, got: ${messages}`,
+    );
+    assert.ok(
+      !/template literal interpolation must be/.test(messages),
+      `derived bodies must not surface the raw template wording: ${messages}`,
+    );
+  });
+
+  it("derive parse-stage rejections: deferred names, unknown names, wrong target", () => {
+    assert.throws(
+      () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
+      /@derive\(eq\) is not yet supported/,
+    );
+    assert.throws(
+      () => parse(`@derive(banana)\ntype P {\n  x: int32,\n}\n`),
+      /unknown derive "banana"/,
+    );
+    assert.throws(
+      () => parse(`@derive(display)\nlet x: int32 = 1;\n`),
+      /only applies to a struct 'type' or 'variant' declaration/,
+    );
+  });
+
   it("imports_renamed: import { x as y }", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_renamed/main.yoop");
     assert.equal(exitCode, 0);
@@ -1302,6 +1460,89 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.match(text, /main\.yoop/, `lldb output had no .yoop reference:\n${text}`);
     assert.match(text, /CompileUnit:.*main\.yoop/, `lldb did not surface a CompileUnit for main.yoop:\n${text}`);
     assert.match(text, /LineEntry:.*main\.yoop:\d+/, `lldb did not surface a LineEntry mapping main to a .yoop line:\n${text}`);
+  });
+
+  it("dwarf: locals of every aggregate shape get a typed llvm.dbg.declare", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/dwarf_locals/main.yoop"));
+    // Struct: a DICompositeType with one DW_TAG_member per field.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "Point", size: 64/);
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_member, name: "y",[^)]*offset: 32\)/);
+    // string: typedef over char* so a debugger prints the text, not an address.
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_typedef, name: "string", baseType: !\d+\)/);
+    assert.match(ir, /!DIBasicType\(name: "char", size: 8, encoding: DW_ATE_signed_char\)/);
+    // Array: the `{ ptr, i64 }` fat pointer, with `data` typed as elem*.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "int32\[\]", size: 128/);
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_member, name: "len",[^)]*offset: 64\)/);
+    // Variant: tag described as an enumeration, payload as a union of cases.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_enumeration_type, name: "Shape\.tag"/);
+    assert.match(ir, /!DIEnumerator\(name: "Rect", value: 1\)/);
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_union_type, name: "Shape\.payload"/);
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "Shape\.Rect"/);
+    // ref param: a pointer whose baseType is the pointee's composite type.
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_pointer_type, baseType: !\d+, size: 64\)/);
+    // Every one of these locals gets a dbg.declare against its alloca slot.
+    for (const name of ["pt", "who", "nums", "shape", "flag", "d", "p"]) {
+      assert.match(
+        ir,
+        new RegExp(`!DILocalVariable\\(name: "${name}"`),
+        `no DILocalVariable emitted for "${name}"`,
+      );
+    }
+    // The subprogram carries a real signature (return + params), not `!{}`.
+    assert.match(ir, /!DISubroutineType\(types: !\{!\d+, !\d+\}\)/);
+  });
+
+  // The IR assertions above prove the metadata is shaped right; this one
+  // proves it survives clang and that a debugger can actually READ the values
+  // (the whole point - previously `frame variable` showed nothing but prims).
+  it("dwarf: lldb reads struct / string / array / variant locals by value", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      [
+        "-o", "breakpoint set --file main.yoop --line 38",
+        "-o", "run",
+        "-o", "frame variable",
+        "-o", "p who.name",
+        "-o", "p nums.data[2]",
+        "-o", "p shape.payload.Rect.h",
+        "-o", "quit",
+        "--batch",
+        binPath,
+      ],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    // Struct fields are walked, not shown as an opaque blob.
+    assert.match(text, /\(Point\) pt = \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
+    // `string` gets the C-string summary.
+    assert.match(text, /\(string\).*"tom"/, text);
+    // Arrays expose data + len, and the data pointer is element-typed.
+    assert.match(text, /\(int32\[\]\) nums = \{[\s\S]*?len = 3/, text);
+    assert.match(text, /\(int\) 30/, text);
+    // Variant tag prints its case NAME, and the active payload is reachable.
+    assert.match(text, /tag = Rect/, text);
+    assert.match(text, /\(int\) 9/, text);
+  });
+
+  // Regression: llvm derives the DWARF `prologue_end` marker from the first
+  // non-meta instruction carrying a !dbg. When the parameter stores carried
+  // one, a function breakpoint (`b <name>`, what VS Code's function
+  // breakpoints use) landed BEFORE the arguments reached their stack slots and
+  // the variables pane showed garbage.
+  it("dwarf: a function breakpoint stops after the parameter stores", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      ["-o", "b manhattan", "-o", "run", "-o", "p *p", "-o", "quit", "--batch", binPath],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    assert.match(text, /\(Point\) \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
   });
 
   // ---- 6.3 sugar: task / joined / pooled / wait ----

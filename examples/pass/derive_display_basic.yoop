@@ -1,0 +1,11 @@
+@derive(display)
+type Point {
+  x: int32,
+  y: int32,
+}
+
+function main(): int {
+  const p: Point = { x: 3, y: 4 };
+  printf("p=%s\n", `${p}`);
+  return 0;
+}

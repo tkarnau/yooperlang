@@ -1,0 +1,18 @@
+@derive(display)
+type Point {
+  x: int32,
+  y: int32,
+}
+
+@derive(display)
+type Line {
+  a: Point,
+  b: Point,
+  label: string,
+}
+
+function main(): int {
+  const l: Line = { a: { x: 1, y: 2 }, b: { x: 3, y: 4 }, label: "diag" };
+  printf(`${l}\n`);
+  return 0;
+}
