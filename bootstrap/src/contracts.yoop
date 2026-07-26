@@ -792,10 +792,14 @@ export type SourceLocation implements Display {
   }
 }
 
-// Flat & Fat nodes for now, node reference and flag reuse.
-// conventions defined in loggable helpers for now.
+// note(tom): Flat and Fat nodes for now, child slots and flag slots reused:
+// what each slot means depends on the `astNodeKind` and you just have to
+// look it up for now in the string helpers, it is too big of a headache to stitch a dynamic shape
+// through all the places needed. Childs are 64 bit node ids and Flags are bools.
+// after bootstrapping is done, we can implement a language feature to help, but
+// not sure what we'd want anyhow, yet.
 @derive(display)
-export type ASTNode implements Display {
+export type ASTNode {
   kind: ASTNodeKind,
   sourceLoc: SourceLocation,
   name: string,
@@ -1151,7 +1155,7 @@ export variant Symbol {
 }
 
 // A typecheck diagnostic. Unlike lex/parse (which fail fast via Result), the
-// typechecker ACCUMULATES these and never throws (decision D3) - the whole
+// typechecker ACCUMULATES these and never throws - the whole
 // program is checked so the user sees every error at once. `sourceLoc` points
 // into the original module source.
 export enum Severity { ERROR, WARNING }
