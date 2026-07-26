@@ -1,0 +1,45 @@
+// DWARF composite-type coverage. Every local here is a shape that used to be
+// invisible in a debugger (only prims and opaque pointers got a
+// llvm.dbg.declare); the e2e test drives lldb over this binary and asserts the
+// values are actually readable.
+
+type Point {
+    x: int32,
+    y: int32,
+}
+
+type Person {
+    name: string,
+    age: int32,
+    home: Point,
+}
+
+variant Shape {
+    Circle { r: int32 },
+    Rect { w: int32, h: int32 },
+    Dot,
+}
+
+// `ref` params are described as a real pointer-to-struct now, so `p *p` in a
+// debugger walks the fields instead of showing a void pointer.
+function manhattan(p: ref Point): int32 {
+    return p.x + p.y;
+}
+
+function main(): int32 {
+    const pt: Point = { x: 3, y: 4 };
+    const who: Person = { name: "tom", age: 41, home: { x: 1, y: 2 } };
+    const nums: int32[] = [10, 20, 30];
+    const shape: Shape = Shape.Rect { w: 7, h: 9 };
+    const flag: bool = true;
+    const d: int32 = manhattan(ref pt);
+
+    printf("d=%d\n", d);
+    printf("%s %d %d\n", who.name, who.age, nums.len);
+    printf("home=%d,%d flag=%d\n", who.home.x, who.home.y, flag);
+    return 0;
+}
+
+// expected output: d=7
+// expected output: tom 41 3
+// expected output: home=1,2 flag=1

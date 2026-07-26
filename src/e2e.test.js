@@ -1462,6 +1462,89 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.match(text, /LineEntry:.*main\.yoop:\d+/, `lldb did not surface a LineEntry mapping main to a .yoop line:\n${text}`);
   });
 
+  it("dwarf: locals of every aggregate shape get a typed llvm.dbg.declare", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/dwarf_locals/main.yoop"));
+    // Struct: a DICompositeType with one DW_TAG_member per field.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "Point", size: 64/);
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_member, name: "y",[^)]*offset: 32\)/);
+    // string: typedef over char* so a debugger prints the text, not an address.
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_typedef, name: "string", baseType: !\d+\)/);
+    assert.match(ir, /!DIBasicType\(name: "char", size: 8, encoding: DW_ATE_signed_char\)/);
+    // Array: the `{ ptr, i64 }` fat pointer, with `data` typed as elem*.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "int32\[\]", size: 128/);
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_member, name: "len",[^)]*offset: 64\)/);
+    // Variant: tag described as an enumeration, payload as a union of cases.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_enumeration_type, name: "Shape\.tag"/);
+    assert.match(ir, /!DIEnumerator\(name: "Rect", value: 1\)/);
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_union_type, name: "Shape\.payload"/);
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "Shape\.Rect"/);
+    // ref param: a pointer whose baseType is the pointee's composite type.
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_pointer_type, baseType: !\d+, size: 64\)/);
+    // Every one of these locals gets a dbg.declare against its alloca slot.
+    for (const name of ["pt", "who", "nums", "shape", "flag", "d", "p"]) {
+      assert.match(
+        ir,
+        new RegExp(`!DILocalVariable\\(name: "${name}"`),
+        `no DILocalVariable emitted for "${name}"`,
+      );
+    }
+    // The subprogram carries a real signature (return + params), not `!{}`.
+    assert.match(ir, /!DISubroutineType\(types: !\{!\d+, !\d+\}\)/);
+  });
+
+  // The IR assertions above prove the metadata is shaped right; this one
+  // proves it survives clang and that a debugger can actually READ the values
+  // (the whole point - previously `frame variable` showed nothing but prims).
+  it("dwarf: lldb reads struct / string / array / variant locals by value", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      [
+        "-o", "breakpoint set --file main.yoop --line 38",
+        "-o", "run",
+        "-o", "frame variable",
+        "-o", "p who.name",
+        "-o", "p nums.data[2]",
+        "-o", "p shape.payload.Rect.h",
+        "-o", "quit",
+        "--batch",
+        binPath,
+      ],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    // Struct fields are walked, not shown as an opaque blob.
+    assert.match(text, /\(Point\) pt = \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
+    // `string` gets the C-string summary.
+    assert.match(text, /\(string\).*"tom"/, text);
+    // Arrays expose data + len, and the data pointer is element-typed.
+    assert.match(text, /\(int32\[\]\) nums = \{[\s\S]*?len = 3/, text);
+    assert.match(text, /\(int\) 30/, text);
+    // Variant tag prints its case NAME, and the active payload is reachable.
+    assert.match(text, /tag = Rect/, text);
+    assert.match(text, /\(int\) 9/, text);
+  });
+
+  // Regression: llvm derives the DWARF `prologue_end` marker from the first
+  // non-meta instruction carrying a !dbg. When the parameter stores carried
+  // one, a function breakpoint (`b <name>`, what VS Code's function
+  // breakpoints use) landed BEFORE the arguments reached their stack slots and
+  // the variables pane showed garbage.
+  it("dwarf: a function breakpoint stops after the parameter stores", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      ["-o", "b manhattan", "-o", "run", "-o", "p *p", "-o", "quit", "--batch", binPath],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    assert.match(text, /\(Point\) \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
+  });
+
   // ---- 6.3 sugar: task / joined / pooled / wait ----
 
   it("task_three_forms: immediate, joined, pooled work end-to-end in the same main", () => {
