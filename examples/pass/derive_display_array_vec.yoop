@@ -1,4 +1,5 @@
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 
 function double(n: int32): int32 {
@@ -9,6 +10,7 @@ function double(n: int32): int32 {
 type Bag propagates<disposable> {
   xs: int32[],
   v: Vec<int32>,
+  m: Map<string, int32>,
   cb: (n: int32) => int32,
 }
 
@@ -16,11 +18,15 @@ function main(): int {
   let nums: Vec<int32> = vec.vec_new(2);
   vec.vec_push(ref nums, 7);
   vec.vec_push(ref nums, 8);
-  const full: Bag = { xs: [1, 2, 3], v: nums, cb: double };
+  let mapNums: Map<string, int32> = map.map_new(2, map.string_key_ops());
+  map.map_insert(ref mapNums, "t", 9);
+  map.map_insert(ref mapNums, "u", 10);
+  const full: Bag = { xs: [1, 2, 3], v: nums, cb: double, m: mapNums };
   printf(`${full}\n`);
 
   let empty: Vec<int32> = vec.vec_new(0);
-  const bare: Bag = { xs: [], v: empty, cb: double };
+  let emptyMap: Map<string, int32> = map.map_new(0, map.string_key_ops());
+  const bare: Bag = { xs: [], v: empty, cb: double, m: emptyMap };
   printf(`${bare}\n`);
   return 0;
 }

@@ -1017,7 +1017,7 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
-      "Bag { xs: [1, 2, 3], v: [7, 8], cb: <fn> }\nBag { xs: [], v: [], cb: <fn> }\n",
+      "Bag { xs: [1, 2, 3], v: [7, 8], m: [{ key: t, value: 9 }, { key: u, value: 10 }], cb: <fn> }\nBag { xs: [], v: [], m: [], cb: <fn> }\n",
     );
   });
 
