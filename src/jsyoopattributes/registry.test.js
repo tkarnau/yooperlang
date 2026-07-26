@@ -14,6 +14,11 @@ describe("attributeRegistry", () => {
     assert.equal(getAttributeHandler("nonexistent"), null);
   });
 
+  it("returns @derive as a known attribute (Phase 13.C)", () => {
+    assert.ok(knownAttributeNames().includes("derive"));
+    assert.ok(getAttributeHandler("derive"));
+  });
+
   it("suggests close matches for typos", () => {
     assert.equal(suggestAttributeName("precompil"), "precompile"); // 1 deletion
     assert.equal(suggestAttributeName("precompiel"), "precompile"); // 2 substitutions

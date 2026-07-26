@@ -42,6 +42,19 @@ int yoop_io_exists(const char* path) {
     return stat(path, &st) == 0 ? 1 : 0;
 }
 
+// Canonicalize `path` to an absolute, symlink-resolved path. On success
+// writes a freshly malloc'd nul-terminated string into *out (caller owns it)
+// and returns 0; on failure returns -1 with errno set and leaves *out alone.
+// Passing NULL as realpath's resolved_path makes libc allocate a PATH_MAX-safe
+// buffer for us - NEVER hand realpath a fixed/foreign buffer, it overruns it.
+// Note: realpath requires `path` to exist and always yields an ABSOLUTE path.
+int yoop_io_normalize_real_path(const char* path, char** out) {
+    char* resolved = realpath(path, NULL);
+    if (!resolved) return -1;
+    *out = resolved;
+    return 0;
+}
+
 // Size in bytes of the regular file at `path`, or -1 if it doesn't exist,
 // isn't a regular file, or stat() otherwise fails. Returning -1 (rather than
 // a fallible struct) keeps the yoop side a single int64 read; callers test
@@ -52,6 +65,86 @@ int64_t yoop_io_file_size(const char* path) {
     if (!S_ISREG(st.st_mode)) return -1;
     return (int64_t)st.st_size;
 }
+
+// ----- directory listing -------------------------------------------------
+//
+// A thin opendir/readdir/closedir wrapper plus a combined stat helper, so a
+// yoop caller can walk a tree without hand-mirroring the platform-specific
+// `struct dirent` layout (it differs across macOS/Linux and is a footgun to
+// decode in yoop). Modeled after the yoop_io_mkdir / yoop_io_file_size
+// pattern: a few POSIX-y helpers the std/example layer wraps in safe exports.
+//
+// dirent is POSIX; on Windows these would need FindFirstFile. That backend is
+// not implemented (matching the multiplexer's Windows stub), so the directory
+// helpers return "empty" there rather than failing to link.
+
+#ifndef _WIN32
+#include <dirent.h>
+
+// Open `path` for iteration. Returns an opaque DIR* (as void*) or NULL on
+// failure (errno set). The yoop side treats it as `unsafe_ptr`.
+void* yoop_io_opendir(const char* path) {
+    return (void*)opendir(path);
+}
+
+// Return the next entry name in the directory stream, skipping "." and "..",
+// or the empty string "" once the stream is exhausted (so the yoop caller can
+// test `name.len == 0` rather than reach for a null string). The returned
+// pointer is BORROWED - it lives inside the DIR stream and is invalidated by
+// the next readdir / closedir, so the yoop caller must copy it (e.g.
+// string_concat) before the next call.
+const char* yoop_io_readdir(void* d) {
+    if (!d) return "";
+    struct dirent* e;
+    while ((e = readdir((DIR*)d)) != NULL) {
+        const char* n = e->d_name;
+        if (n[0] == '.' && (n[1] == '\0' || (n[1] == '.' && n[2] == '\0'))) {
+            continue;  // skip "." and ".."
+        }
+        return n;
+    }
+    return "";
+}
+
+void yoop_io_closedir(void* d) {
+    if (d) closedir((DIR*)d);
+}
+
+// Combined "what is this and how big" probe in a single lstat (one syscall
+// per entry instead of two). Writes 1 into *is_dir for a directory, else 0,
+// and returns:
+//   * a regular file's byte size,
+//   * 0 for a directory (its aggregate is summed by the walker),
+//   * 0 for anything else (symlink/socket/fifo - counted as a 0-size leaf),
+//   * -1 if the lstat itself failed (then *is_dir is 0).
+// lstat (not stat) so symlinks are NOT followed: that avoids both infinite
+// recursion through symlink cycles and double-counting linked trees - a
+// symlinked directory reads as a non-dir leaf and is never descended into.
+int64_t yoop_io_stat2(const char* path, int32_t* is_dir) {
+    struct stat st;
+    if (lstat(path, &st) != 0) {
+        if (is_dir) *is_dir = 0;
+        return -1;
+    }
+    if (S_ISDIR(st.st_mode)) {
+        if (is_dir) *is_dir = 1;
+        return 0;
+    }
+    if (is_dir) *is_dir = 0;
+    if (S_ISREG(st.st_mode)) return (int64_t)st.st_size;
+    return 0;
+}
+
+#else  // _WIN32: no dirent backend yet (see header comment).
+
+void*       yoop_io_opendir(const char* path) { (void)path; return NULL; }
+const char* yoop_io_readdir(void* d)          { (void)d; return NULL; }
+void        yoop_io_closedir(void* d)         { (void)d; }
+int64_t     yoop_io_stat2(const char* path, int32_t* is_dir) {
+    (void)path; if (is_dir) *is_dir = 0; return -1;
+}
+
+#endif
 
 #ifdef _WIN32
   // Stub for now - no IOCP backend. Public API returns ENOSYS.

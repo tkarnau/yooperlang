@@ -1,0 +1,21 @@
+import * as log from "std/log.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Result } from "std/core/types.yoop";
+import { scanHexDigitsAndUnderscores } from "./sourceCodeProcessing/charUtils.yoop";
+
+function report(label: string, s: string): void {
+  const bytes = intr.string_as_bytes(s);
+  switch (scanHexDigitsAndUnderscores(bytes, 0)) {
+    case Result.Ok { value: end }: { log.info(`${label}: ok end=${end}`); }
+    case Result.Err { error: e }: { log.info(`${label}: err ${e}`); }
+  }
+}
+
+function main(): int {
+  report("aF3", "aF3");
+  report("a_F", "a_F");
+  report("_aF", "_aF");
+  report("a__F", "a__F");
+  report("aFxyz", "aFxyz");
+  return 0;
+}

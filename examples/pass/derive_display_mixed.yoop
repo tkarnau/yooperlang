@@ -1,0 +1,29 @@
+import { Display } from "std/core/traits.yoop";
+
+type Manual implements Display {
+  code: int32,
+  function to_string(ref self): string {
+    return `manual(${self.code})`;
+  }
+}
+
+// A derived type whose field type hand-writes its Display impl.
+@derive(display)
+type Wrapper {
+  inner: Manual,
+  tag: int32,
+}
+
+// The implements clause is listed but the method omitted - the derive
+// supplies it and must not duplicate the clause.
+@derive(display)
+type Listed implements Display {
+  n: int32,
+}
+
+function main(): int {
+  const w: Wrapper = { inner: { code: 9 }, tag: 5 };
+  const l: Listed = { n: 6 };
+  printf(`${w} ${l}\n`);
+  return 0;
+}

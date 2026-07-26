@@ -112,6 +112,11 @@ export function parse(src) {
   // advancing. The flag is only consulted by `consumeClosingGt`; other parser
   // sites see the underlying token as usual.
   let pendingGtFromRshift = false;
+  // Monotonic counter for synthesized names of anonymous region-kind bindings
+  // (`ephemeral EXPR { ... }`). The `$` prefix can't appear in user source, so
+  // these names are collision-free and unreferenceable - the value exists only
+  // so the cleanup machinery has a slot to dispose at scope/block end.
+  let anonRegionCounter = 0;
 
   // helper functions for token stream management
 
@@ -174,27 +179,51 @@ export function parse(src) {
     return i - 1;
   }
 
-  // Phase 6.5: true if the current tokens look like a kind-prefixed binding
-  // start: `IDENT IDENT :` or `IDENT ( ... ) IDENT :`. Used for both
+  // Phase 6.5: true if the current tokens look like a *named* kind-prefixed
+  // binding start: `IDENT IDENT :` / `IDENT IDENT =` or the kind-with-args
+  // forms `IDENT ( ... ) IDENT :` / `IDENT ( ... ) IDENT =`. Used for both
   // statement-start dispatch (implicit-const form) and the `let|const`
   // kind-prefix recognizer.
+  //
+  // The `=` alternative (no `:` type annotation) is the inferred-type form:
+  // `disposable allocScope = mem.allocatorScope(arena) { ... }` infers the
+  // binding's type from its initializer, exactly like a plain `const x = ...`.
+  // No expression statement begins with two bare identifiers, so `IDENT IDENT`
+  // is an unambiguous kind-prefix lead.
+  function bindingNameFollowedByColonOrEq(idx) {
+    return (
+      peekAhead(idx).tag === TokenTags.ident &&
+      (peekAhead(idx + 1).tag === TokenTags.colon ||
+        peekAhead(idx + 1).tag === TokenTags.eq)
+    );
+  }
   function looksLikeKindPrefixedBindingStart() {
     if (peek().tag !== TokenTags.ident) return false;
-    if (
-      peekAhead(1).tag === TokenTags.ident &&
-      peekAhead(2).tag === TokenTags.colon
-    ) {
+    if (bindingNameFollowedByColonOrEq(1)) {
       return true;
     }
     if (peekAhead(1).tag === TokenTags.lparen) {
       const j = findMatchingRparen(1);
       if (j < 0) return false;
-      return (
-        peekAhead(j + 1).tag === TokenTags.ident &&
-        peekAhead(j + 2).tag === TokenTags.colon
-      );
+      return bindingNameFollowedByColonOrEq(j + 1);
     }
     return false;
+  }
+
+  // True if the current tokens look like an *anonymous* region-kind block:
+  // `IDENT EXPR { ... }` or `IDENT EXPR;` with no binding name (e.g.
+  // `ephemeral mem.allocatorScope(arena) { ... }`). The defining lead is two
+  // adjacent identifiers where the second is NOT a binding name (no following
+  // `:`/`=`); the first identifier is the kind, the second begins the
+  // initializer expression. Must be checked AFTER the named recognizer so the
+  // `IDENT IDENT :`/`IDENT IDENT =` named forms win.
+  function looksLikeAnonymousRegionStart() {
+    return (
+      peek().tag === TokenTags.ident &&
+      peekAhead(1).tag === TokenTags.ident &&
+      peekAhead(2).tag !== TokenTags.colon &&
+      peekAhead(2).tag !== TokenTags.eq
+    );
   }
 
   // Phase 6.5: consume `IDENT ( argList )?` and return a kindPrefix record.
@@ -424,14 +453,37 @@ export function parse(src) {
       return base;
     }
     // Phase 9.G: function value type `(p1: T1, p2: T2, ...) => RetT`. The
-    // disambiguator from a non-existent "parenthesized type" is that
-    // function-type annotations always start with `(` and contain either
-    // `)` (no params) or `IDENT :` (named param) right after it. The
-    // unnamed-param form `(T) => R` would be ambiguous with `(IDENT)` -
-    // we require named params for clarity and to match the function-decl
-    // surface.
+    // disambiguator from a parenthesized type group is that function-type
+    // param lists always start with `(` followed by `)` (no params), `ref`
+    // (a ref param), or `IDENT :` (a named param). The unnamed-param form
+    // `(T) => R` would be ambiguous with a `(T)` group - we require named
+    // params for clarity and to match the function-decl surface.
+    //
+    // Phase 10.K: anything else after `(` is a parenthesized type *group*,
+    // whose only purpose is to attach an array suffix: `((p: T) => R)[]` is
+    // the way to spell an array of function pointers. (A bare
+    // `(p: T) => R[]` binds the `[]` to the return type, since the return
+    // type is parsed greedily - so grouping is required to lift the array
+    // out to the whole function type.)
     if (peek().tag === TokenTags.lparen) {
-      return parseFunctionTypeAnnotation();
+      const after = peekAhead(1);
+      const isFnParamList =
+        after.tag === TokenTags.rparen ||
+        after.tag === TokenTags.ref ||
+        (after.tag === TokenTags.ident && peekAhead(2).tag === TokenTags.colon);
+      if (isFnParamList) {
+        return parseFunctionTypeAnnotation();
+      }
+      // Parenthesized type group: `( type )` with optional `[]` suffix(es).
+      advance(); // consume (
+      let grouped = parseTypeAnnotation();
+      expect(TokenTags.rparen);
+      while (peek().tag === TokenTags.lbracket) {
+        advance(); // consume [
+        expect(TokenTags.rbracket); // must be ]
+        grouped = { kind: "arrayType", elem: grouped };
+      }
+      return grouped;
     }
     // ref T
     if (peek().tag === TokenTags.ref) {
@@ -842,8 +894,10 @@ export function parse(src) {
       expect(TokenTags.rparen);
     }
 
-    // Target. Three accepted shapes today; future attribute consumers
-    // can extend the dispatch (e.g. decorate a function decl).
+    // Target. Accepted shapes; future attribute consumers can extend the
+    // dispatch (e.g. decorate a function decl). The `type` / `export`
+    // targets exist for @derive(display) (per-attribute validation of
+    // which targets are legal happens in the registry's parsePhase).
     const nextTag = peek().tag;
     if (nextTag === TokenTags.lcurly) {
       node.target = parseBlock();
@@ -852,12 +906,18 @@ export function parse(src) {
       nextTag === TokenTags.const
     ) {
       node.target = parseVarDecl();
+    } else if (nextTag === TokenTags.type) {
+      node.target = parseTypeDecl();
+    } else if (nextTag === TokenTags.variant) {
+      node.target = parseVariantDecl();
+    } else if (nextTag === TokenTags.export) {
+      node.target = parseExportDecl();
     } else if (nextTag === TokenTags.semicolon) {
       advance();
       node.target = null;
     } else {
       throw parseError(
-        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, or ';' (got ${inverseTokenTags[nextTag]})`,
+        `@${node.name} requires a '{ ... }' block, a 'let' / 'const' decl, a 'type' / 'variant' declaration (optionally exported), or ';' (got ${inverseTokenTags[nextTag]})`,
         peek().start,
         peek().length,
       );
@@ -1192,6 +1252,14 @@ export function parse(src) {
             tok.tag === TokenTags.ident
               ? src.substring(tok.start, tok.start + tok.length)
               : inverseTokenTags[tok.tag];
+          // `region` is a contextual ident (kept usable as an ordinary
+          // identifier everywhere else). A region kind governs a lexical
+          // scope rather than a named value - it is used in the anonymous
+          // `<kind> EXPR { ... }` / `<kind> EXPR;` block form, with no binding.
+          if (name === "region") {
+            site = "region";
+            break;
+          }
           throw parseError(
             `unrecognized appliesTo site '${name}'`,
             tok.start,
@@ -1896,7 +1964,7 @@ export function parse(src) {
     // captures any postfix tightly, then *falls through* to the binary +
     // assignment loop below. Returning early here was a parser bug -
     // `!a && b` would terminate after `!a` and the trailing `&& b` would
-    // hit "expected semicolon, got andand" (see plans/yoopbinder-papercuts.md
+    // hit "expected semicolon, got andand" (see plans/archive/yoopbinder-papercuts.md
     // Issue 1). Chained into the same prefix if/else group as
     // `amp`/`mult`/`null` below so the trailing `else { primary chain }`
     // is only entered when no prefix matched.
@@ -1969,6 +2037,12 @@ export function parse(src) {
       advance();
       node = buildSourcedNode(ASTNodeKind.NULL_LITERAL);
     } else if (peek().tag === TokenTags.intLiteral) {
+      node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
+      node.value = advance().intVal;
+    } else if (peek().tag === TokenTags.charLiteral) {
+      // char literal: a single-quoted Unicode scalar. The lexer already
+      // decoded it to a codepoint; lower it to an INT_LITERAL so it flows
+      // through the untyped-int pinning path (`ch == '/'` against a uint8).
       node = buildSourcedNode(ASTNodeKind.INT_LITERAL);
       node.value = advance().intVal;
     } else if (
@@ -2471,10 +2545,15 @@ export function parse(src) {
         return parseAttribute();
       }
       case TokenTags.ident: {
-        // kind-prefixed binding form: `IDENT IDENT : ...` or
-        // `IDENT(args) IDENT : ...` (phase 6.5).
+        // kind-prefixed binding form: `IDENT IDENT : ...` / `IDENT IDENT = ...`
+        // or `IDENT(args) IDENT : ...` (phase 6.5; inferred `=` form added later).
         if (looksLikeKindPrefixedBindingStart()) {
           return parseVarDecl();
+        }
+        // Anonymous region-kind block: `IDENT EXPR { ... }` / `IDENT EXPR;`
+        // (no binding name). Checked after the named recognizer.
+        if (looksLikeAnonymousRegionStart()) {
+          return parseAnonymousRegionBinding();
         }
         return parseExpressionStatement();
       }
@@ -2592,6 +2671,33 @@ export function parse(src) {
     expect(TokenTags.eq);
     node.assignment = parseExpression();
     expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // Anonymous region-kind binding: `KIND EXPR { ... }` (explicit block, cleanup
+  // at the trailing `}`) or `KIND EXPR;` (implicit block, cleanup at enclosing
+  // scope end in LIFO order - same as a name-less `disposable`). The kind must
+  // resolve to a region kind (`appliesTo region`) in the typechecker; the
+  // synthesized `$region$N` name is never visible to user code. We reuse the
+  // CONST_DECL shape so the entire downstream pipeline (type inference, kind-
+  // obligation tracking, cleanup codegen) treats it exactly like a name-less
+  // kind-prefixed binding.
+  function parseAnonymousRegionBinding() {
+    const kindPrefix = consumeKindPrefixWithArgs();
+    const node = buildSourcedNode(ASTNodeKind.CONST_DECL);
+    node.kindPrefix = kindPrefix;
+    node.trailingBlock = null;
+    node.anonymousRegion = true;
+    node.name = `$region$${anonRegionCounter++}`;
+    // The type is always inferred from the initializer - there is no name to
+    // annotate, and the value is unobservable anyway.
+    node.typeAnnotation = null;
+    node.assignment = parseExpression();
+    if (peek().tag === TokenTags.lcurly) {
+      node.trailingBlock = parseBlock();
+    } else {
+      expect(TokenTags.semicolon);
+    }
     return node;
   }
 
@@ -2888,7 +2994,8 @@ export function parse(src) {
           after.tag === TokenTags.propagates ||
           after.tag === TokenTags.contains ||
           isContainsKeywordIdent(after) ||
-          after.tag === TokenTags.lcurly
+          after.tag === TokenTags.lcurly ||
+          after.tag === TokenTags.eq
         ) {
           node.kindPrefix = consumeKindPrefixWithArgs();
         }
@@ -2956,8 +3063,17 @@ export function parse(src) {
       }
       expect(TokenTags.rcurly);
     } else {
-      // type alias, just a reference to another type for now
-      node.targetType = parseIdentAsName();
+      // Transparent type alias: `type Name = <type annotation>;`. The RHS is a
+      // full type annotation, parsed identically to any other type position, so
+      // `type Bytes = uint8[];` and `type IdList = NodeId[];` work out of the
+      // box. The alias has no distinct identity in the typechecker - it resolves
+      // to the underlying type at every use site (indexing, coercion, etc. need
+      // no special casing). Storing the parsed annotation (not a bare name) also
+      // leaves room for a future `A & B` / `A | B` type-expression RHS without
+      // reshaping the AST node.
+      expect(TokenTags.eq);
+      node.targetType = parseTypeAnnotation();
+      expect(TokenTags.semicolon);
     }
 
     // constraint: methods only allowed when implements is non-empty
@@ -3063,6 +3179,28 @@ export function parse(src) {
       } else {
         // no-payload variant
         variant.fields = null;
+        // Phase 13.D: `Special MyType` is NOT payload syntax - a case payload
+        // is always a record. Without this check the case name and the type
+        // silently parse as TWO payload-less cases (`Special` and `MyType`),
+        // since the separating comma is optional; nothing errors at the decl
+        // and the only symptom is a phantom "missing variants: MyType" from a
+        // later exhaustiveness check, pointing at a `switch` rather than here.
+        //
+        // A plain IDENT is the only ambiguous follower: a method decl starts
+        // with the `function` keyword, and a real next case is comma-separated
+        // in every existing shape.
+        if (peek().tag === TokenTags.ident) {
+          const nextTok = peek();
+          const nextText = src.substring(
+            nextTok.start,
+            nextTok.start + nextTok.length,
+          );
+          throw parseError(
+            `variant case '${variant.name}' is followed by '${nextText}' with no separator - a case payload must be a record, e.g. '${variant.name} { value: ${nextText} }'; if these are two separate cases, put a comma between them`,
+            nextTok.start,
+            nextTok.length,
+          );
+        }
       }
       node.variants.push(variant);
       if (peek().tag === TokenTags.comma) advance();
@@ -3268,12 +3406,13 @@ export function parse(src) {
   }
 
   // Phase 7.5: parse a single arm pattern. Accepts:
-  //   - INT_LITERAL / BOOL_LITERAL                       → LITERAL_PATTERN
+  //   - INT_LITERAL / CHAR_LITERAL / BOOL_LITERAL        → LITERAL_PATTERN
   //   - `_`                                              → VARIANT_PATTERN { isWildcard: true }
   //   - IDENT.IDENT { fieldBindings? }                   → VARIANT_PATTERN
   //   - IDENT.IDENT                                      → VARIANT_PATTERN (no-payload form)
-  // (Char literals tokenize as strLiterals today; reject string and float
-  // literals at pattern position with explicit diagnostics.)
+  // (Char literals lower to int-valued LITERAL_PATTERNs - their codepoint;
+  // reject string and float literals at pattern position with explicit
+  // diagnostics.)
   function parseSwitchPattern() {
     const tok = peek();
     if (tok.tag === TokenTags.discard) {
@@ -3302,7 +3441,7 @@ export function parse(src) {
       p.value = -num.intVal;
       return p;
     }
-    if (tok.tag === TokenTags.intLiteral) {
+    if (tok.tag === TokenTags.intLiteral || tok.tag === TokenTags.charLiteral) {
       advance();
       const p = buildSourcedNode(ASTNodeKind.LITERAL_PATTERN);
       p.literalKind = "int";

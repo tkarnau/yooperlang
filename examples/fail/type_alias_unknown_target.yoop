@@ -1,0 +1,7 @@
+// A type alias whose RHS names a type that doesn't exist is rejected at the
+// declaration site (not at every use).
+type Foo = DoesNotExist;
+
+function main(): int32 {
+  return 0;
+}

@@ -1,0 +1,241 @@
+// diskscope/sdl.yoop - SDL2 + SDL2_ttf FFI bindings and a thin helper layer.
+//
+// Adapted from the algoscope playground (same opaque-handle wrapping and the
+// same SDL_Color-packed-as-uint32 trick - see that file's header for the ABI
+// reasoning). diskscope adds a few helpers it needs that algoscope did not:
+// a window-size query (the treemap relays out on resize), filled-rect and
+// outlined-rect drawing, and mouse-motion coordinate access for hover.
+//
+// Opaque C handles are wrapped in single-field structs and only ever passed to
+// C as `.handle`. The helper layer above the externs is the only surface the
+// rest of the program talks to.
+
+import.unsafe;
+
+extern "C" from library "SDL2" {
+    type SDL_Window;
+    type SDL_Renderer;
+    type SDL_Texture;
+    type SDL_Surface;
+
+    function SDL_Init(flags: uint32): int32;
+    function SDL_Quit(): void;
+    function SDL_GetError(): string;
+    function SDL_CreateWindow(title: string, x: int32, y: int32, w: int32, h: int32, flags: uint32): ref SDL_Window;
+    function SDL_DestroyWindow(ref win: SDL_Window): void;
+    function SDL_GetWindowSize(ref win: SDL_Window, w: unsafe_ptr<int32>, h: unsafe_ptr<int32>): void;
+    function SDL_CreateRenderer(ref win: SDL_Window, index: int32, flags: uint32): ref SDL_Renderer;
+    function SDL_DestroyRenderer(ref ren: SDL_Renderer): void;
+    function SDL_SetRenderDrawColor(ref ren: SDL_Renderer, r: uint8, g: uint8, b: uint8, a: uint8): int32;
+    function SDL_RenderClear(ref ren: SDL_Renderer): int32;
+    function SDL_RenderPresent(ref ren: SDL_Renderer): void;
+    function SDL_RenderFillRect(ref ren: SDL_Renderer, rect: unsafe_ptr<SDL_Rect>): int32;
+    function SDL_RenderDrawRect(ref ren: SDL_Renderer, rect: unsafe_ptr<SDL_Rect>): int32;
+    function SDL_RenderCopy(ref ren: SDL_Renderer, ref tex: SDL_Texture, src: unsafe_ptr<SDL_Rect>, dst: unsafe_ptr<SDL_Rect>): int32;
+    function SDL_CreateTextureFromSurface(ref ren: SDL_Renderer, surf: unsafe_ptr<SDL_Surface>): ref SDL_Texture;
+    function SDL_DestroyTexture(ref tex: SDL_Texture): void;
+    function SDL_FreeSurface(surf: unsafe_ptr<SDL_Surface>): void;
+    function SDL_QueryTexture(ref tex: SDL_Texture, format: unsafe_ptr<uint32>, access: unsafe_ptr<int32>, w: unsafe_ptr<int32>, h: unsafe_ptr<int32>): int32;
+    function SDL_PollEvent(event: unsafe_ptr<uint8>): int32;
+    function SDL_Delay(ms: uint32): void;
+}
+
+extern "C" from library "SDL2_ttf" {
+    type TTF_Font;
+    function TTF_Init(): int32;
+    function TTF_Quit(): void;
+    function TTF_OpenFont(file: string, ptsize: int32): ref TTF_Font;
+    function TTF_CloseFont(ref font: TTF_Font): void;
+    function TTF_RenderUTF8_Blended(ref font: TTF_Font, text: string, color: uint32): unsafe_ptr<SDL_Surface>;
+    function TTF_FontHeight(ref font: TTF_Font): int32;
+}
+
+// argv access from the yoop runtime (always linked).
+extern "C" from "yoop_runtime" {
+    function yoop_argc(): int32;
+    function yoop_argv(i: int32): string;
+}
+
+kind c_layout {
+    appliesTo type;
+    layout { abi "C"; };
+}
+
+// Exact match for C `SDL_Rect`.
+export type SDL_Rect c_layout {
+    x: int32,
+    y: int32,
+    w: int32,
+    h: int32,
+}
+
+// ---- opaque-handle wrappers ----
+
+export type Win { handle: ref SDL_Window }
+export type Ren { handle: ref SDL_Renderer }
+export type Font { handle: ref TTF_Font }
+export type Tex { handle: ref SDL_Texture }
+
+// ---- SDL flag / event constants ----
+
+export const INIT_VIDEO: uint32 = 0x00000020;
+export const WINDOW_SHOWN: uint32 = 0x00000004;
+export const WINDOW_RESIZABLE: uint32 = 0x00000020;
+export const RENDERER_ACCELERATED: uint32 = 0x00000002;
+export const RENDERER_PRESENTVSYNC: uint32 = 0x00000004;
+
+// Event type tags (SDL_EventType).
+export const EVT_QUIT: int32 = 0x100;
+export const EVT_KEYDOWN: int32 = 0x300;
+export const EVT_MOUSEMOTION: int32 = 0x400;
+export const EVT_MOUSEBUTTONDOWN: int32 = 0x401;
+export const EVT_MOUSEWHEEL: int32 = 0x403;
+
+// USB-HID scancodes (the SDL2 convention).
+export const SC_ESCAPE: int32 = 41;
+export const SC_Q: int32 = 20;
+export const SC_C: int32 = 6;
+
+// ---- argv access ----
+
+export function argc(): int32 {
+    return yoop_argc();
+}
+
+export function argv(i: int32): string {
+    return yoop_argv(i);
+}
+
+// ---- lifecycle helpers ----
+
+export function init_video(): bool {
+    if (SDL_Init(INIT_VIDEO) != 0) { return false; }
+    if (TTF_Init() != 0) { return false; }
+    return true;
+}
+
+export function make_window(title: string, w: int32, h: int32): Win {
+    return { handle: SDL_CreateWindow(title, 100, 80, w, h, WINDOW_SHOWN | WINDOW_RESIZABLE) };
+}
+
+export function make_renderer(ref win: Win): Ren {
+    return { handle: SDL_CreateRenderer(win.handle, -1, RENDERER_ACCELERATED | RENDERER_PRESENTVSYNC) };
+}
+
+export function open_font(path: string, size: int32): Font {
+    return { handle: TTF_OpenFont(path, size) };
+}
+
+export function font_height(ref font: Font): int32 {
+    return TTF_FontHeight(font.handle);
+}
+
+export type WinSize { w: int32, h: int32 }
+
+// Current window size in pixels.
+export function window_size(ref win: Win): WinSize {
+    let w: int32 = 0;
+    let h: int32 = 0;
+    SDL_GetWindowSize(win.handle, &w, &h);
+    return { w: w, h: h };
+}
+
+export function quit(ref win: Win, ref ren: Ren, ref font: Font): void {
+    TTF_CloseFont(font.handle);
+    SDL_DestroyRenderer(ren.handle);
+    SDL_DestroyWindow(win.handle);
+    TTF_Quit();
+    SDL_Quit();
+}
+
+// ---- drawing helpers ----
+
+// Pack r,g,b,a into the memory-order word SDL_Color expects when passed by
+// value (see algoscope/sdl.yoop header).
+export function rgba(r: int32, g: int32, b: int32, a: int32): uint32 {
+    return uint32(r) | (uint32(g) << 8) | (uint32(b) << 16) | (uint32(a) << 24);
+}
+
+function set_color(ref ren: Ren, color: uint32): void {
+    SDL_SetRenderDrawColor(ren.handle,
+        uint8(color & uint32(0xFF)),
+        uint8((color >> 8) & uint32(0xFF)),
+        uint8((color >> 16) & uint32(0xFF)),
+        uint8((color >> 24) & uint32(0xFF)));
+}
+
+export function clear(ref ren: Ren, bg: uint32): void {
+    set_color(ref ren, bg);
+    SDL_RenderClear(ren.handle);
+}
+
+export function present(ref ren: Ren): void {
+    SDL_RenderPresent(ren.handle);
+}
+
+export function delay(ms: uint32): void {
+    SDL_Delay(ms);
+}
+
+export function fill_rect(ref ren: Ren, x: int32, y: int32, w: int32, h: int32, color: uint32): void {
+    set_color(ref ren, color);
+    let r: SDL_Rect = { x: x, y: y, w: w, h: h };
+    SDL_RenderFillRect(ren.handle, &r);
+}
+
+export function draw_rect(ref ren: Ren, x: int32, y: int32, w: int32, h: int32, color: uint32): void {
+    set_color(ref ren, color);
+    let r: SDL_Rect = { x: x, y: y, w: w, h: h };
+    SDL_RenderDrawRect(ren.handle, &r);
+}
+
+// Render `s` at (x, y) in `color`. Returns the drawn text width in pixels (0
+// for empty/failed strings) so the caller can lay out following content.
+export function draw_text(ref ren: Ren, ref font: Font, s: string, x: int32, y: int32, color: uint32): int32 {
+    let surf: unsafe_ptr<SDL_Surface> = TTF_RenderUTF8_Blended(font.handle, s, color);
+    if (surf == null) { return 0; }
+    let tex: Tex = { handle: SDL_CreateTextureFromSurface(ren.handle, surf) };
+    let tw: int32 = 0;
+    let th: int32 = 0;
+    SDL_QueryTexture(tex.handle, null, null, &tw, &th);
+    let dst: SDL_Rect = { x: x, y: y, w: tw, h: th };
+    SDL_RenderCopy(ren.handle, tex.handle, null, &dst);
+    SDL_DestroyTexture(tex.handle);
+    SDL_FreeSurface(surf);
+    return tw;
+}
+
+// ---- event helpers ----
+
+// Read a little-endian int32 at byte offset `off` of an event buffer.
+export function read_i32(buf: uint8[], off: int32): int32 {
+    let o: usize = usize(off);
+    return int32(buf[o])
+        | (int32(buf[o + usize(1)]) << 8)
+        | (int32(buf[o + usize(2)]) << 16)
+        | (int32(buf[o + usize(3)]) << 24);
+}
+
+// Poll one event into `buf` (must be >= 64 bytes). Returns 1 if an event was
+// dequeued, 0 if the queue is empty.
+export function poll_event(buf: uint8[]): int32 {
+    return SDL_PollEvent(buf.ptr);
+}
+
+export function event_type(buf: uint8[]): int32 {
+    return read_i32(buf, 0);
+}
+
+// SDL_KeyboardEvent.keysym.scancode.
+export function event_scancode(buf: uint8[]): int32 {
+    return read_i32(buf, 16);
+}
+
+// SDL_MouseMotionEvent / SDL_MouseButtonEvent share x at offset 20, y at 24.
+export function event_mouse_x(buf: uint8[]): int32 {
+    return read_i32(buf, 20);
+}
+
+export function event_mouse_y(buf: uint8[]): int32 {
+    return read_i32(buf, 24);
+}

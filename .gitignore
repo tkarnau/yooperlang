@@ -1,10 +1,21 @@
-output
-output.exe
+# Compiled output programs are extensionless and sit right next to their
+# .yoop sources. So the default rule is: ignore every extensionless file,
+# but track anything that has an extension (.yoop, .md, .js, .c, ...).
+#
+#   *      ignore everything
+#   !*/    but still descend into directories (so files below can be re-added)
+#   !*.*   and re-add any file whose name contains a "." (i.e. has an extension)
+*
+!*/
+!*.*
 
-examples/**
-!examples/**/
-examples/**/*.exe
-!**/*.yoop
-!examples/**/*.js
+# Extensionless files we DO want to keep tracked:
+!LICENSE
+
+# Re-ignore artifacts that DO have an extension (the rules above would keep
+# them otherwise):
+*.exe
 **/*dSYM/
 
+# Local editor / tooling state (not a source file, just has an extension).
+.claude/

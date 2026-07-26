@@ -1,0 +1,18 @@
+// Vec<T> carries propagates<disposable>. Ownership redesign (2026-06-17,
+// plans/ownership-and-typestate-redesign.md): obligations are ADVISORY, not
+// enforced. Binding a Vec without `disposable` (or any other discharge) is no
+// longer an error - it typechecks cleanly and the user owns the lifetime.
+// (Formerly examples/fail/vec_no_disposable.)
+
+import { Vec, vec_new } from "../../../std/core/vec.yoop";
+import { disposable } from "../../../std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let v: Vec<int32> = vec_new(4);
+    printf(`leaked: ${v.cap}\n`);
+    return 0;
+}

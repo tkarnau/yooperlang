@@ -1,0 +1,83 @@
+// Phase 10.K: an array of function pointers. The element type is a
+// parenthesized function-value type - `((p: T) => R)[]` - which the grouping
+// parens make spellable (a bare `(p: T) => R[]` would bind the `[]` to the
+// return type). No vtable, no struct, no ctx: each element is a plain
+// non-capturing code pointer. A function name materializes into a slot, and a
+// loop variable of function-pointer type is callable directly.
+
+import * as intr from "std/core/intrinsics.yoop";
+import { Result } from "std/core/types.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function isHexDigit(ch: uint8): bool {
+    return (ch >= '0' && ch <= '9') || (ch >= 'a' && ch <= 'f') || (ch >= 'A' && ch <= 'F');
+}
+
+// Each predicate gets the scanner's full context, so none needs to capture
+// state - they are all plain top-level functions.
+function hexDigitPred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+    return Result.Ok { value: isHexDigit(src[pos]) };
+}
+
+function underscorePred(src: uint8[], pos: usize, start: usize): Result<bool, string> {
+    const isU = src[pos] == '_';
+    if (isU) {
+        if (pos == start) {
+            return Result.Err { error: `leading underscore` };
+        }
+    }
+    return Result.Ok { value: isU };
+}
+
+// `preds` is an array of function pointers, passed by ref. Iterating it yields
+// a function-pointer loop variable that is called directly: `pred(...)`.
+function scan(src: uint8[], start: usize,
+    ref preds: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[]
+): Result<usize, string> {
+    let p = start;
+    while (p < src.len) {
+        let passed = false;
+        for pred in preds {
+            switch (pred(src, p, start)) {
+                case Result.Err { error: e }: { return Result.Err { error: e }; }
+                case Result.Ok { value: pass }: {
+                    if (pass) { p += 1; passed = true; break; }
+                }
+            }
+        }
+        if (!passed) { break; }
+    }
+    return Result.Ok { value: p };
+}
+
+function report(label: string, src: uint8[],
+    ref preds: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[]
+): void {
+    switch (scan(src, 0, ref preds)) {
+        case Result.Ok { value: end }: { printf(`${label}: ok end=${end}\n`); }
+        case Result.Err { error: e }: { printf(`${label}: err ${e}\n`); }
+    }
+}
+
+function main(): int32 {
+    let preds: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] = intr.heap_alloc(2);
+    preds[0] = hexDigitPred;       // function name materializes into the slot
+    preds[1] = underscorePred;
+
+    report(`aF3`, [ 'a', 'F', '3' ], ref preds);          // all hex
+    report(`a_3`, [ 'a', '_', '3' ], ref preds);          // underscore in the middle
+    report(`_a3`, [ '_', 'a', '3' ], ref preds);          // leading underscore -> err
+    report(`aFxy`, [ 'a', 'F', 'x', 'y' ], ref preds);    // stops at 'x'
+
+    intr.heap_free(preds);
+    return 0;
+}
+
+// expected output:
+// aF3: ok end=3
+// a_3: ok end=3
+// _a3: err leading underscore
+// aFxy: ok end=2

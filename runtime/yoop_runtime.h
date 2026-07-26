@@ -144,6 +144,10 @@ int yoop_io_exists(const char* path);
 // Size in bytes of the regular file at `path`, or -1 on error.
 int64_t yoop_io_file_size(const char* path);
 
+// Canonicalize `path` into a freshly malloc'd absolute path stored in *out
+// (caller owns it). Returns 0 on success, -1 with errno set on failure.
+int yoop_io_normalize_real_path(const char* path, char** out);
+
 #ifdef __cplusplus
 }
 #endif

@@ -12,6 +12,7 @@
 
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
+import { expandDerives } from "../jsyoopderive/expand.js";
 import {
   ArrayType,
   VariantType,
@@ -34,6 +35,7 @@ import {
   VTableType,
   primTypeFromName,
   resolveTypeAnnotation,
+  lookupAlias,
   formatAnnotation,
   TraitType,
   TraitSelfPlaceholder,
@@ -235,6 +237,24 @@ function resolveTypeAnnotationInModule(annot, modId, moduleEnv, ctx) {
     if (ctx?.typeParamScope) {
       const tp = ctx.typeParamScope.get(annot.name);
       if (tp) return tp;
+    }
+    // Transparent type alias: resolve the alias RHS in the module that declared
+    // it, so the result IS the underlying type (no distinct identity). Threads a
+    // cycle-guard set so `type A = B; type B = A;` terminates (returns null,
+    // surfaced as a clear error by the decl-site validation in pass C). The RHS
+    // is resolved with no type-param/self scope - an alias is a top-level decl.
+    const aliasHit = lookupAlias(annot.namespace, annot.name, modId, moduleEnv);
+    if (aliasHit) {
+      const stack = ctx?.aliasStack;
+      if (stack?.has(aliasHit.key)) return null;
+      const nextStack = new Set(stack ?? []);
+      nextStack.add(aliasHit.key);
+      return resolveTypeAnnotationInModule(aliasHit.annot, aliasHit.homeModId, moduleEnv, {
+        ...ctx,
+        typeParamScope: null,
+        selfType: undefined,
+        aliasStack: nextStack,
+      });
     }
     // Phase 12: `ns.TypeName` qualifies the lookup through an imported
     // namespace's source module.
@@ -475,12 +495,26 @@ function traitExtendsHasCycle(root) {
   return false;
 }
 
+// Two TraitTypes name the same trait when they share (name, moduleId). This
+// is the same nominal identity `typesEqual` uses for traits (see
+// instantiate.js). For generic traits, distinct instantiations
+// (`Comparable<Num>` vs the open bound `Comparable<T>`) are different object
+// instances but the SAME trait nominally - bound satisfaction must treat them
+// as matching, since a struct implementing `Comparable<Num>` does satisfy a
+// `<T implements Comparable<T>>` bound at T = Num. Generic type-arg agreement
+// is not verified here (v0 limitation, consistent with name-based dispatch).
+function traitNominalEq(a, b) {
+  if (a === b) return true;
+  if (!a || !b) return false;
+  return a.name === b.name && a.moduleId === b.moduleId;
+}
+
 // Phase 9.J: true if `subject` is `target` or transitively extends it.
 function traitIsOrExtends(subject, target) {
   if (!subject || !target) return false;
-  if (subject === target) return true;
+  if (traitNominalEq(subject, target)) return true;
   for (const t of walkTraitExtends(subject)) {
-    if (t === target) return true;
+    if (traitNominalEq(t, target)) return true;
   }
   return false;
 }
@@ -499,7 +533,13 @@ export function checkBoundSatisfied(argType, requiredTrait, _mod, _moduleEnv) {
     // suppress secondary errors from a type that already failed to resolve
     return { ok: true };
   }
-  if (argType.kind === typeKinds.struct) {
+  // Phase 13.D: variants carry the same `implementsTraits` surface as structs
+  // (13.B) and dispatch through the same mangling, so bound satisfaction is
+  // the identical check.
+  if (
+    argType.kind === typeKinds.struct ||
+    argType.kind === typeKinds.variant
+  ) {
     for (const t of argType.implementsTraits ?? []) {
       if (traitIsOrExtends(t, requiredTrait)) return { ok: true };
     }
@@ -1205,6 +1245,24 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
       }
     }
   }
+  // region kinds: a kind that `appliesTo region` governs a lexical scope, not a
+  // named value. It is used only in the anonymous block form
+  // (`<kind> EXPR { ... }` / `<kind> EXPR;`), so it must own a block and cannot
+  // also apply to a value site (binding/parameter/field/type/return) - the two
+  // are conceptually distinct (a resource you hold vs. an ambient state change
+  // over a scope), and the use-site syntax for each is disjoint.
+  if (kt.appliesTo.has("region")) {
+    if (!ownsBlockSeen) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' applies to a region but does not declare 'ownsBlock'; a region kind governs a block, so ownsBlock is required`);
+    }
+    for (const valueSite of ["binding", "parameter", "field", "type", "return"]) {
+      if (kt.appliesTo.has(valueSite)) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a region and to '${valueSite}'; a region kind has no named value, so it cannot also apply to a value site`);
+      }
+    }
+  }
 }
 
 // Pass C.2: walk each kind decl and resolve its clauses against the module's
@@ -1519,6 +1577,10 @@ export function effectiveLayoutAlign(app) {
 export const INTRINSIC_DECL_IDS = new Map([
   ["heap_alloc", "$builtin__heap_alloc"],
   ["heap_free", "$builtin__heap_free"],
+  // Context-routed siblings of heap_alloc/heap_free: allocate/free through the
+  // current allocator (std/core/alloc.yoop) instead of raw malloc/free.
+  ["ctx_alloc", "$builtin__ctx_alloc"],
+  ["ctx_free", "$builtin__ctx_free"],
   ["string_as_bytes", "$builtin__string_as_bytes"],
   ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
   ["array_slice", "$builtin__array_slice"],
@@ -1633,7 +1695,41 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked];
+  // Context-routed allocation: same shapes as heap_alloc/heap_free, but codegen
+  // lowers the malloc/free to yoop_ctx_alloc/yoop_ctx_free (current allocator).
+  const ctxAllocDeclId = "$builtin__ctx_alloc";
+  const ctxAllocT = new TypeParamType("T", ctxAllocDeclId);
+  const ctxAlloc = {
+    id: ctxAllocDeclId,
+    name: "ctx_alloc",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", ctxAllocT]]),
+    genericSig: FuncType(
+      [{ name: "n", type: PrimType("usize"), isRef: false }],
+      ArrayType(ctxAllocT),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  const ctxFreeDeclId = "$builtin__ctx_free";
+  const ctxFreeT = new TypeParamType("T", ctxFreeDeclId);
+  const ctxFree = {
+    id: ctxFreeDeclId,
+    name: "ctx_free",
+    moduleId: "$builtin",
+    paramNames: ["T"],
+    paramScope: new Map([["T", ctxFreeT]]),
+    genericSig: FuncType(
+      [{ name: "a", type: ArrayType(ctxFreeT), isRef: false }],
+      VoidType(),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
+  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked, ctxAlloc, ctxFree];
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
@@ -1643,6 +1739,10 @@ function makeBuiltinGenericFuncs() {
 // Returns { modules, errors, moduleEnv }.
 export function typecheckProgram(modules) {
   const errors = [];
+  // Phase 13.C: @derive(display) expansion. Runs before pass A so grafted
+  // to_string methods and appended `implements Display` clauses flow through
+  // the ordinary passes; consumes every top-level derive ATTRIBUTE wrapper.
+  expandDerives(modules, errors);
   const moduleEnv = new Map(); // moduleId -> { localSymbols, structTable, exports, importedNames, linkLibraries }
   // Phase 7.1: program-wide instantiation registry, shared across modules.
   const programState = {
@@ -1664,13 +1764,26 @@ export function typecheckProgram(modules) {
   // pair. Source-location tracking happens via the call-site error path in
   // checkExpr; this back-channel catches instantiations triggered by type
   // annotations (e.g. fields with `Box<NotImpl>`).
+  // Re-fetch the canonical struct / variant for a bound check - an argType
+  // captured through an imported instantiation (e.g. the elem type inside a
+  // Vec<T> field) can be a pass-A shell with an empty `implementsTraits`.
+  // Same hazard and fix as canonicalNominalType in checkExpr.js.
+  const canonicalForBoundCheck = (argType) => {
+    if (!argType) return argType;
+    const isStruct = argType.kind === typeKinds.struct;
+    const isVariant = argType.kind === typeKinds.variant;
+    if (!isStruct && !isVariant) return argType;
+    const env = argType.moduleId ? moduleEnv.get(argType.moduleId) : null;
+    const table = isStruct ? env?.structTable : env?.variantTable;
+    return table?.get(argType.name) ?? argType;
+  };
   programState.registry.boundChecker = ({
     genericDecl,
     argType,
     paramName,
     requiredTrait,
   }) => {
-    const res = checkBoundSatisfied(argType, requiredTrait);
+    const res = checkBoundSatisfied(canonicalForBoundCheck(argType), requiredTrait);
     if (res.ok) return;
     errors.push({
       message: `type argument for parameter "${paramName}" of generic "${genericDecl.name}" does not satisfy bound: ${res.message}`,
@@ -1707,6 +1820,13 @@ export function typecheckProgram(modules) {
     // Phase 9.G: vtable type table. Like structTable, the shell only carries
     // a name in pass A; pass C resolves field types and trait references.
     const vtableTable = new Map();
+    // Transparent type aliases (`type NodeId = usize;`). Maps the alias name to
+    // the parsed RHS type annotation; resolution happens lazily at every use
+    // site (see resolveTypeAnnotationInModule) so an alias to a struct picks up
+    // the same shell-then-filled type object a direct reference would. The alias
+    // is NOT a distinct type - it resolves straight through to the underlying
+    // type, so nothing downstream (coercion, indexing, codegen) sees the name.
+    const aliasTable = new Map();
     // Names this module brought into scope via an `extern "intrinsic"`
     // block. checkExpr.js's special-case paths for `wait_until` / `cancel`
     // gate on membership here so that user code that hasn't imported the
@@ -1730,7 +1850,8 @@ export function typecheckProgram(modules) {
             structTable.has(d.name) ||
             genericStructTable.has(d.name) ||
             unionTable.has(d.name) ||
-            enumTable.has(d.name)
+            enumTable.has(d.name) ||
+            aliasTable.has(d.name)
           ) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
@@ -1763,7 +1884,8 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           structTable.has(d.name) ||
           unionTable.has(d.name) ||
-          enumTable.has(d.name)
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of type "${d.name}"`,
@@ -1781,7 +1903,8 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           structTable.has(d.name) ||
           unionTable.has(d.name) ||
-          enumTable.has(d.name)
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of type "${d.name}"`,
@@ -1801,7 +1924,8 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           structTable.has(d.name) ||
           unionTable.has(d.name) ||
-          enumTable.has(d.name)
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
         ) {
           errors.push({
             message: `redeclaration of type "${d.name}"`,
@@ -1814,11 +1938,36 @@ export function typecheckProgram(modules) {
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
       }
-      if (d.kind === ASTNodeKind.TYPE_DECL) {
+      if (d.kind === ASTNodeKind.TYPE_DECL && d.targetType) {
+        // Transparent type alias: `type Name = <annotation>;`. Registered in a
+        // dedicated table - never in structTable (which holds monomorphic struct
+        // types only). The RHS annotation is resolved lazily at each use site.
+        if (d.typeParams && d.typeParams.length > 0) {
+          errors.push({
+            message: `generic type aliases are not yet supported - declare "${d.name}" without type parameters`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else if (
+          structTable.has(d.name) ||
+          genericStructTable.has(d.name) ||
+          variantTable.has(d.name) ||
+          unionTable.has(d.name) ||
+          enumTable.has(d.name) ||
+          aliasTable.has(d.name)
+        ) {
+          errors.push({
+            message: `redeclaration of type "${d.name}"`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          aliasTable.set(d.name, { annot: d.targetType, sourceLoc: d.sourceLoc });
+        }
+        if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
+      } else if (d.kind === ASTNodeKind.TYPE_DECL) {
         const hasTypeParams = d.typeParams && d.typeParams.length > 0;
         if (hasTypeParams) {
           // Phase 7.1: generic struct decl. Register in genericStructTable.
-          if (genericStructTable.has(d.name) || structTable.has(d.name)) {
+          if (genericStructTable.has(d.name) || structTable.has(d.name) || aliasTable.has(d.name)) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
               sourceLoc: d.sourceLoc,
@@ -1851,7 +2000,7 @@ export function typecheckProgram(modules) {
           }
           if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         } else {
-          if (structTable.has(d.name) || genericStructTable.has(d.name)) {
+          if (structTable.has(d.name) || genericStructTable.has(d.name) || aliasTable.has(d.name)) {
             errors.push({
               message: `redeclaration of type "${d.name}"`,
               sourceLoc: d.sourceLoc,
@@ -2028,6 +2177,7 @@ export function typecheckProgram(modules) {
           variantTable.has(d.name) ||
           unionTable.has(d.name) ||
           traitTable.has(d.name) ||
+          aliasTable.has(d.name) ||
           localSymbols.has(d.name)
         ) {
           errors.push({
@@ -2057,6 +2207,7 @@ export function typecheckProgram(modules) {
           });
         } else {
           const kt = new KindType(d.name, mod.id);
+          kt.sourceLoc = d.sourceLoc ?? null;
           // Phase 6.5: record kind parameters on the shell so use-site
           // resolution can validate arg counts during pass C.
           for (const p of d.params ?? []) {
@@ -2126,6 +2277,7 @@ export function typecheckProgram(modules) {
       unionTable,
       enumTable,
       vtableTable,
+      aliasTable,
       builtinIntrinsicNames,
       // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
       allowsUnsafe: !!mod.ast.allowsUnsafe,
@@ -2163,6 +2315,72 @@ export function typecheckProgram(modules) {
       registry: programState.registry,
       typeParamScope: paramScope,
     });
+
+    // Phase 7.2 fix: generic-trait method sigs must be resolved BEFORE the
+    // main pass-C loop, because that loop resolves generic function/struct
+    // `implements` bounds (resolveAndAttachBounds), which instantiate the
+    // bound generic trait via the registry. instantiateTrait snapshots
+    // `gd.genericMethods` into a fresh (cached) TraitType; if genericMethods
+    // is still empty at snapshot time the instance is permanently method-less,
+    // and trait-qualified dispatch through a bounded type param
+    // (`Comparable.compare(ref x, ...)` for `<T implements Comparable<T>>`)
+    // later fails with "trait has no method". Non-generic bounds don't hit
+    // this because they attach the live mutable trait object whose `.methods`
+    // map is filled in-place by C.1. Hoisting generic-trait population to a
+    // pre-pass keeps the snapshot well-formed; the C.1 generic branch then
+    // just `continue`s.
+    for (const decl of mod.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind !== ASTNodeKind.TRAIT_DECL || !d.genericDecl) continue;
+      const gd = d.genericDecl;
+      resolveAndAttachBounds(
+        gd,
+        d.typeParams,
+        mod,
+        moduleEnv,
+        programState,
+        errors,
+      );
+      const ctxForSig = {
+        ...genericCtx(gd.paramScope),
+        selfType: TraitSelfPlaceholder,
+      };
+      const seen = new Set();
+      for (const sig of d.methods) {
+        if (seen.has(sig.name)) {
+          errors.push({
+            message: `duplicate method name "${sig.name}" in trait "${d.name}"`,
+            sourceLoc: sig.sourceLoc,
+          });
+          continue;
+        }
+        seen.add(sig.name);
+        const params = sig.params.map((p) => {
+          const baseType =
+            resolveTypeAnnotationInModule(
+              p.typeAnnotation,
+              mod.id,
+              moduleEnv,
+              ctxForSig,
+            ) ?? ErrorType();
+          return {
+            name: p.name,
+            type: p.isRef ? RefType(baseType) : baseType,
+            isRef: p.isRef ?? false,
+          };
+        });
+        const returnType =
+          resolveTypeAnnotationInModule(
+            sig.returnTypeAnnotation,
+            mod.id,
+            moduleEnv,
+            ctxForSig,
+          ) ?? ErrorType();
+        const sigFunc = FuncType(params, returnType, false);
+        gd.genericMethods.set(sig.name, sigFunc);
+        sig.resolvedFuncType = sigFunc;
+      }
+    }
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
@@ -2236,7 +2454,28 @@ export function typecheckProgram(modules) {
       }
 
       // struct fields
-      if (d.kind === ASTNodeKind.TYPE_DECL && !d.genericDecl) {
+      // Transparent type alias: resolve its RHS once here so an unknown target
+      // type or a cyclic alias is reported at the declaration, not at every use.
+      // The alias has no struct/resolvedType - codegen never emits anything for
+      // it (every use already resolved through to the underlying type).
+      if (d.kind === ASTNodeKind.TYPE_DECL && d.targetType && !(d.typeParams?.length)) {
+        const resolved = resolveTypeAnnotationInModule(
+          d.targetType,
+          mod.id,
+          moduleEnv,
+          baseCtx(),
+        );
+        if (!resolved) {
+          errors.push({
+            message: `type alias "${d.name}" references an unknown type or is cyclic: ${formatAnnotation(d.targetType)}`,
+            sourceLoc: d.sourceLoc,
+          });
+        } else {
+          d.resolvedAliasType = resolved;
+        }
+      }
+
+      if (d.kind === ASTNodeKind.TYPE_DECL && !d.genericDecl && !d.targetType) {
         // Phase 6.4: reject `contains<K>` at a single point.
         if (d.containsClause) {
           errors.push({
@@ -2415,6 +2654,10 @@ export function typecheckProgram(modules) {
         // only), undersizing every enclosing struct. Mirrors the
         // TraitType pattern (frozen outer, mutable `methods` Map).
         const shell = variantTable.get(d.name);
+        // A name collision (this variant redeclares a struct/alias/etc.) means
+        // pass A pushed a redeclaration error and skipped registering the shell.
+        // Skip body resolution rather than dereferencing the missing shell.
+        if (!shell) continue;
 
         // Phase 13.B: resolve `propagates<...>` on the variant decl and
         // store on the shell. Same shape as the struct branch above.
@@ -2824,59 +3067,10 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind !== ASTNodeKind.TRAIT_DECL) continue;
-      // Phase 7.1: generic trait - resolve method sigs with type-param scope.
-      if (d.genericDecl) {
-        const gd = d.genericDecl;
-        // Phase 7.2: attach bounds before resolving method signatures.
-        resolveAndAttachBounds(
-          gd,
-          d.typeParams,
-          mod,
-          moduleEnv,
-          programState,
-          errors,
-        );
-        const ctxForSig = {
-          ...genericCtx(gd.paramScope),
-          selfType: TraitSelfPlaceholder,
-        };
-        const seen = new Set();
-        for (const sig of d.methods) {
-          if (seen.has(sig.name)) {
-            errors.push({
-              message: `duplicate method name "${sig.name}" in trait "${d.name}"`,
-              sourceLoc: sig.sourceLoc,
-            });
-            continue;
-          }
-          seen.add(sig.name);
-          const params = sig.params.map((p) => {
-            const baseType =
-              resolveTypeAnnotationInModule(
-                p.typeAnnotation,
-                mod.id,
-                moduleEnv,
-                ctxForSig,
-              ) ?? ErrorType();
-            return {
-              name: p.name,
-              type: p.isRef ? RefType(baseType) : baseType,
-              isRef: p.isRef ?? false,
-            };
-          });
-          const returnType =
-            resolveTypeAnnotationInModule(
-              sig.returnTypeAnnotation,
-              mod.id,
-              moduleEnv,
-              ctxForSig,
-            ) ?? ErrorType();
-          const sigFunc = FuncType(params, returnType, false);
-          gd.genericMethods.set(sig.name, sigFunc);
-          sig.resolvedFuncType = sigFunc;
-        }
-        continue;
-      }
+      // Phase 7.1: generic trait method sigs are resolved in the pre-pass
+      // above (so generic bounds instantiate against a populated method map);
+      // nothing left to do here.
+      if (d.genericDecl) continue;
       const trait = traitTable.get(d.name);
       if (!trait) continue; // was rejected in pass A due to redeclaration
       // validate no duplicate method names within the trait
@@ -3048,6 +3242,29 @@ export function typecheckProgram(modules) {
     }
   }
 
+  // Cross-module function-decl index for kindFlow (clearance markers). Resolves
+  // an imported or namespaced callee (`db.runQuery(...)`, or a by-name imported
+  // `readBody()`) to its source decl plus that module's kind table, so a marker
+  // on a std-style signature is enforced across the boundary instead of being
+  // silently dropped at the call site. Built once; keyed by module id then
+  // export name.
+  const funcDeclsByModule = new Map();
+  for (const m of modules) {
+    const t = new Map();
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.FUNCTION_DECL) t.set(d.name, d);
+    }
+    funcDeclsByModule.set(m.id, t);
+  }
+  const resolveCrossModuleCallee = (moduleId, exportName) => {
+    const decl = funcDeclsByModule.get(moduleId)?.get(exportName);
+    if (!decl) return null;
+    const kindTable = moduleEnv.get(moduleId)?.kindTable;
+    if (!kindTable) return null;
+    return { decl, kindTable };
+  };
+
   // pass D: function body typechecking.
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
@@ -3178,18 +3395,18 @@ export function typecheckProgram(modules) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
         runKindCheck(d, errors, funcDeclTable, programState.registry);
-        runKindFlow(d, errors, funcDeclTable, flowKindTable, null);
+        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
         // Phase 13.B: variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
         }
       }
     }
@@ -3237,7 +3454,10 @@ export function typecheck(ast) {
   // pass 1: struct shells
   for (const decl of ast.body) {
     const d = innerDecl(decl);
-    if (d.kind === ASTNodeKind.TYPE_DECL) {
+    // Type aliases aren't supported in the legacy single-module path (only the
+    // multi-module pipeline used by compileEntry/e2e); skip so they aren't
+    // mis-registered as empty structs.
+    if (d.kind === ASTNodeKind.TYPE_DECL && !d.targetType) {
       if (structTable.has(d.name)) {
         errors.push({
           message: `redeclaration of type "${d.name}"`,
@@ -3262,7 +3482,7 @@ export function typecheck(ast) {
   // pass 2: struct fields
   for (const decl of ast.body) {
     const d = innerDecl(decl);
-    if (d.kind === ASTNodeKind.TYPE_DECL) {
+    if (d.kind === ASTNodeKind.TYPE_DECL && !d.targetType) {
       const fields = [];
       for (const field of d.fields ?? []) {
         let fieldType = resolveTypeAnnotation(

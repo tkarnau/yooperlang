@@ -1,0 +1,31 @@
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// returning a value whose type propagates a kind no longer requires the
+// function to declare propagates<K>. `propagates<K>` is now an OPTIONAL
+// advisory signal, not a transfer contract - so this typechecks cleanly.
+// (Formerly examples/fail/propagates_return_not_declared.)
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Widget implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {}
+}
+
+// No propagates<disposable> on the return type. Advisory model: fine. The
+// caller may add the (optional) clause to document that the result owns a
+// resource, but the compiler does not require it.
+function make_widget(): Widget {
+    return { id: 1 };
+}
+
+function main(): int32 {
+    return 0;
+}

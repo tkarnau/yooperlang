@@ -1,0 +1,55 @@
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+
+import { ParsingResult, NodeId, TokenTags, ASTNodeKind } from "../../contracts.yoop";
+import { ParserState, SelfLexing as sl } from "./parser_state.yoop";
+import { posToSourceLocation } from "../char_utils.yoop";
+import { parseExpressionStatement, parseExpression } from "./expressions.yoop";
+import { parseVarDecl } from "./bindings.yoop";
+
+function parseReturnStatement(ref ps: ParserState): ParsingResult {
+  sl.expect(ref ps, TokenTags.RETURN)?;
+  let node = sl.buildSourcedNode(ref ps, ASTNodeKind.RETURN_STATEMENT);
+  if (sl.peek(ref ps).tag != TokenTags.SEMICOLON) {
+    node.childA = parseExpression(ref ps, 0)?;
+  }
+  sl.expect(ref ps, TokenTags.SEMICOLON)?;
+  return Result.Ok { value: sl.pushNode(ref ps, node ) };
+}
+
+export function parseStatement(ref ps: ParserState): ParsingResult {
+  const peekTag = sl.peek(ref ps).tag;
+  switch (peekTag) {
+    case TokenTags.LET, TokenTags.CONST: {
+      return Result.Ok { value: parseVarDecl(ref ps)? };
+    }
+    case TokenTags.RETURN: {
+      return Result.Ok { value: parseReturnStatement(ref ps)? };
+    }
+    default: {
+      return Result.Ok { value: parseExpressionStatement(ref ps)? };
+    }
+  }
+}
+
+export function parseBlock(ref ps: ParserState): ParsingResult {
+  // shape =>> { statements[] }
+  sl.expect(ref ps, TokenTags.LCURLY)?;
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  let node = sl.buildSourcedNode(ref ps, ASTNodeKind.BLOCK);
+
+  // parse rest of statements
+  disposable ids: Vec<NodeId> = vec.vec_new(4);
+  while (sl.peek(ref ps).tag != TokenTags.RCURLY && sl.peek(ref ps).tag != TokenTags.EOF) {
+    // eat statements and add to body...
+    vec.vec_push(ref ids, parseStatement(ref ps)?);
+  }
+  // child start nodeId...
+  // child count
+  node.childA = sl.buildListNode(ref ps, ref ids, loc);
+  sl.expect(ref ps, TokenTags.RCURLY)?;
+
+  // push node into ps...
+  return Result.Ok { value: sl.pushNode(ref ps, node) };
+}

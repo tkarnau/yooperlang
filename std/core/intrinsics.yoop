@@ -13,6 +13,11 @@
 extern "intrinsic" from "compiler" {
     function heap_alloc<T>(n: usize): T[];
     function heap_free<T>(a: T[]): void;
+    // Context-routed allocation: like heap_alloc/heap_free but the bytes come
+    // from (and return to) the current allocator (std/core/alloc.yoop), so an
+    // installed arena captures them. std containers use these.
+    function ctx_alloc<T>(n: usize): T[];
+    function ctx_free<T>(a: T[]): void;
     function string_as_bytes(s: string): uint8[];
     function string_from_bytes_unchecked(buf: uint8[]): string;
     function array_slice<T>(xs: T[], start: usize, end: usize): T[];

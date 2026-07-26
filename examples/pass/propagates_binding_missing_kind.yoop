@@ -1,0 +1,32 @@
+// Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+// obligations are ADVISORY. A binding of a propagating type that is never
+// disposed and never declares the kind keyword is no longer an error - it
+// typechecks cleanly. (Formerly examples/fail/propagates_binding_missing_kind:
+// "binding 'w' has unsatisfied obligation from propagates<disposable>".)
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+}
+
+type Widget implements Disposable propagates<disposable> {
+    id: int32,
+    function dispose(ref self): void {}
+}
+
+function make_widget(): Widget propagates<disposable> {
+    return { id: 1 };
+}
+
+function main(): int32 {
+    // `main` does not propagate the kind and `w` is never disposed. Under the
+    // advisory model this is the user's choice, not a compile error. To opt
+    // into auto-cleanup, write `let disposable w: Widget = make_widget();`.
+    let w: Widget = make_widget();
+    return 0;
+}

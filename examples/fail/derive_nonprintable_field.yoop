@@ -1,0 +1,23 @@
+// The derived body is generated, so the diagnostic must name the offending
+// field and the ways to fix it - not talk about a template literal the user
+// never wrote.
+
+type Plain {
+  w: int32,
+}
+
+@derive(display)
+type Holder {
+  p: Plain,
+  n: int32,
+}
+
+@derive(display)
+variant Boxed {
+  Wrapped { p: Plain },
+  Empty,
+}
+
+function main(): int {
+  return 0;
+}

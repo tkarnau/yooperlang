@@ -1,0 +1,212 @@
+// std/core/alloc.yoop - allocators and the ambient allocation context.
+//
+// An `Allocator` is a small value: a record of function pointers plus an
+// opaque data pointer (the same shape as `KeyOps`, and the same shape Jai and
+// Odin use). The "current allocator" is ambient, held per-thread by the
+// runtime; `pushAllocator` / `popAllocator` swap it for a region of code, and
+// the standard library allocates from whatever is current.
+//
+// v1 scope: the malloc allocator, a bump arena, and the manual push/pop
+// context. The `arena` scope keyword, routing the std containers through the
+// context, and the temp allocator build on top of this. As with anything under
+// std/, value imports here use the namespace form:
+//
+//     import * as mem from "std/core/alloc.yoop";
+//     let a: mem.Arena = mem.arenaNew(64 * 1024);
+//     let prev: mem.Allocator = mem.pushAllocator(mem.arenaAllocator(a));
+//     let p: unsafe_ptr<void> = mem.allocBytes(128, 8);
+//     mem.popAllocator(prev);
+//     mem.arenaDestroy(a);
+
+import.unsafe;
+import { Disposable } from "std/core/kinds.yoop";
+
+// An allocator: alloc / realloc / free function pointers plus opaque state.
+// `free` may be a no-op (arenas reclaim in bulk). `data` is the allocator's
+// own state, passed back to each call (the arena handle, a pool, or null for
+// libc malloc). Field order is the ABI the runtime's per-thread slot copies.
+export type Allocator {
+    alloc:   (data: unsafe_ptr<void>, size: usize, alignment: usize) => unsafe_ptr<void>,
+    realloc: (data: unsafe_ptr<void>, ptr: unsafe_ptr<void>, oldSize: usize, newSize: usize, alignment: usize) => unsafe_ptr<void>,
+    free:    (data: unsafe_ptr<void>, ptr: unsafe_ptr<void>) => void,
+    data:    unsafe_ptr<void>,
+}
+
+extern "C" from "stdlib.h" {
+    function malloc(size: usize): unsafe_ptr<void>;
+    function realloc(ptr: unsafe_ptr<void>, size: usize): unsafe_ptr<void>;
+    function free(ptr: unsafe_ptr<void>): void;
+}
+
+// Backing runtime (runtime/yoop_alloc.c). The per-thread slot stores the
+// current Allocator value by copy; get returns null until the first install.
+extern "C" from "runtime/yoop_alloc.h" {
+    function yoop_get_allocator(): unsafe_ptr<Allocator>;
+    function yoop_set_allocator(src: unsafe_ptr<Allocator>): void;
+    function yoop_arena_new(cap: usize): unsafe_ptr<void>;
+    function yoop_arena_alloc(handle: unsafe_ptr<void>, size: usize, alignment: usize): unsafe_ptr<void>;
+    function yoop_arena_reset(handle: unsafe_ptr<void>): void;
+    function yoop_arena_destroy(handle: unsafe_ptr<void>): void;
+    function yoop_arena_used(handle: unsafe_ptr<void>): usize;
+    function yoop_temp_handle(): unsafe_ptr<void>;
+    function yoop_temp_reset(): void;
+}
+
+// ----- the libc (malloc) allocator ----------------------------------------
+// The fn-pointer targets are thin yoop wrappers, not the C functions directly:
+// an extern C function used as a fn-pointer VALUE is currently mis-mangled by
+// codegen, so a yoop wrapper (matching the KeyOps idiom) is the working shape.
+
+function cAlloc(data: unsafe_ptr<void>, size: usize, alignment: usize): unsafe_ptr<void> {
+    return malloc(size);
+}
+
+function cRealloc(data: unsafe_ptr<void>, ptr: unsafe_ptr<void>, oldSize: usize, newSize: usize, alignment: usize): unsafe_ptr<void> {
+    return realloc(ptr, newSize);
+}
+
+function cFree(data: unsafe_ptr<void>, ptr: unsafe_ptr<void>): void {
+    free(ptr);
+}
+
+export function mallocAllocator(): Allocator {
+    return { alloc: cAlloc, realloc: cRealloc, free: cFree, data: null };
+}
+
+// ----- the ambient context -------------------------------------------------
+
+// The current allocator. Lazily installs the malloc allocator on first use so
+// a program that never opts into an arena still allocates (through malloc).
+export function currentAllocator(): Allocator {
+    let p: unsafe_ptr<Allocator> = yoop_get_allocator();
+    if (p == null) {
+        let m: Allocator = mallocAllocator();
+        yoop_set_allocator(&m);
+        p = yoop_get_allocator();
+    }
+    return *p;
+}
+
+// Install `a` as the current allocator; returns the previous one so the caller
+// can restore it with popAllocator. The runtime copies `a` by value, so the
+// caller's storage does not need to outlive the call.
+export function pushAllocator(a: Allocator): Allocator {
+    let prev: Allocator = currentAllocator();
+    let copy: Allocator = a;
+    yoop_set_allocator(&copy);
+    return prev;
+}
+
+export function popAllocator(prev: Allocator): void {
+    let copy: Allocator = prev;
+    yoop_set_allocator(&copy);
+}
+
+// ----- allocate through the current allocator ------------------------------
+
+export function allocBytes(size: usize, alignment: usize): unsafe_ptr<void> {
+    let a: Allocator = currentAllocator();
+    return a.alloc(a.data, size, alignment);
+}
+
+export function freeBytes(ptr: unsafe_ptr<void>): void {
+    let a: Allocator = currentAllocator();
+    a.free(a.data, ptr);
+}
+
+// ----- bump arena ----------------------------------------------------------
+
+// A handle to a runtime bump arena. Cheap to copy (it is just the handle);
+// the bump state lives in the runtime behind the handle.
+export type Arena {
+    handle: unsafe_ptr<void>,
+}
+
+export function arenaNew(cap: usize): Arena {
+    return { handle: yoop_arena_new(cap) };
+}
+
+function arenaAllocFn(data: unsafe_ptr<void>, size: usize, alignment: usize): unsafe_ptr<void> {
+    return yoop_arena_alloc(data, size, alignment);
+}
+
+// v1 arena realloc: hand back a fresh region. Callers that must preserve old
+// contents (Vec growth) copy explicitly; the arena keeps the old bytes valid
+// until reset, so this is safe even without a copy here.
+function arenaReallocFn(data: unsafe_ptr<void>, ptr: unsafe_ptr<void>, oldSize: usize, newSize: usize, alignment: usize): unsafe_ptr<void> {
+    return yoop_arena_alloc(data, newSize, alignment);
+}
+
+// Arena free is a no-op: the region reclaims in bulk on reset/destroy.
+function arenaFreeFn(data: unsafe_ptr<void>, ptr: unsafe_ptr<void>): void {
+}
+
+export function arenaAllocator(a: Arena): Allocator {
+    return { alloc: arenaAllocFn, realloc: arenaReallocFn, free: arenaFreeFn, data: a.handle };
+}
+
+export function arenaReset(a: Arena): void {
+    yoop_arena_reset(a.handle);
+}
+
+export function arenaDestroy(a: Arena): void {
+    yoop_arena_destroy(a.handle);
+}
+
+export function arenaUsed(a: Arena): usize {
+    return yoop_arena_used(a.handle);
+}
+
+// ----- temporary storage ---------------------------------------------------
+// A per-thread scratch arena for short-lived allocations you never free
+// individually. Allocate from it inside a frame/request, then `resetTemp()`
+// once at the boundary - the reason "most allocations never need a free".
+
+export function tempAllocator(): Allocator {
+    return { alloc: arenaAllocFn, realloc: arenaReallocFn, free: arenaFreeFn, data: yoop_temp_handle() };
+}
+
+export function resetTemp(): void {
+    yoop_temp_reset();
+}
+
+// ----- the scoped arena (the ergonomic surface) ----------------------------
+// `ArenaScope` makes a fresh arena, installs it as the current allocator, and
+// remembers the previous one. Bind it with the `disposable` keyword and a
+// trailing block so the compiler injects the teardown at block end:
+//
+//     disposable scope = arenaScope(64 * 1024) {
+//         let p = allocBytes(128, 8);   // comes from the arena
+//         ...                           // everything here allocates from it
+//     }                                 // <- pop + destroy fire here
+//
+// The "install on entry" is just a side effect of the constructor (it runs
+// before the trailing block); the "reset on exit" rides the existing
+// disposable/ownsBlock teardown. No new compiler machinery required.
+
+export type ArenaScope implements Disposable {
+    arena: Arena,
+    prev:  Allocator,
+    function dispose(ref self): void {
+        popAllocator(self.prev);
+        arenaDestroy(self.arena);
+    }
+}
+
+export function arenaScope(cap: usize): ArenaScope {
+    let ar: Arena = arenaNew(cap);
+    let prev: Allocator = pushAllocator(arenaAllocator(ar));
+    return { arena: ar, prev: prev };
+}
+
+export type AllocatorScope implements Disposable {
+  prev: Allocator,
+  function dispose(ref self): void {
+    popAllocator(self.prev);
+  }
+}
+
+export function allocatorScope(arena: Arena): AllocatorScope {
+  let prev: Allocator = pushAllocator(arenaAllocator(arena));
+  return { prev: prev };
+}

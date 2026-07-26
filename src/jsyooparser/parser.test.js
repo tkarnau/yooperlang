@@ -48,6 +48,18 @@ describe("parse: expressions", () => {
     assert.equal(e.value, 42);
   });
 
+  it("char literal lowers to an INT_LITERAL carrying its codepoint", () => {
+    const e = exprOf("'A'");
+    assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.value, 65);
+  });
+
+  it("char literal escape lowers to its control codepoint", () => {
+    const e = exprOf("'\\n'");
+    assert.equal(e.kind, ASTNodeKind.INT_LITERAL);
+    assert.equal(e.value, 10);
+  });
+
   it("binary + has correct shape", () => {
     const e = exprOf("1 + 2");
     assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
@@ -122,7 +134,7 @@ describe("parse: expressions", () => {
 
   // Regression: unary prefixes used to return early instead of falling
   // through to the binary loop, so `!a && b`, `-a + b`, `~a & b` failed
-  // to parse. See plans/yoopbinder-papercuts.md Issue 1.
+  // to parse. See plans/archive/yoopbinder-papercuts.md Issue 1.
   it("`!a && b` parses as `&&((!a), b)` not as a syntax error", () => {
     const e = exprOf("!a && b");
     assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
@@ -518,6 +530,30 @@ describe("parse: phase 5 - traits", () => {
       name: "int32",
     });
   });
+  it("type alias `type X = Y;` parses targetType as a type annotation", () => {
+    const stmts = parse("type NodeId = usize;").body;
+    assert.equal(stmts.length, 1);
+    const td = stmts[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(td.name, "NodeId");
+    assert.equal(td.fields, undefined); // not a struct
+    assert.deepEqual(td.targetType, { kind: "typeName", name: "usize" });
+  });
+
+  it("type alias accepts a full type annotation RHS (array of an alias)", () => {
+    const td = parse("type IdList = NodeId[];").body[0];
+    assert.equal(td.kind, ASTNodeKind.TYPE_DECL);
+    assert.deepEqual(td.targetType, {
+      kind: "arrayType",
+      elem: { kind: "typeName", name: "NodeId" },
+    });
+  });
+
+  it("type alias requires the `=` and a trailing `;`", () => {
+    assert.throws(() => parse("type NodeId usize;"), /expected/);
+    assert.throws(() => parse("type NodeId = usize"), /expected semicolon/);
+  });
+
   it("type implements parses properly", () => {
     const stmts = parse(
       "type FileHandle implements Disposable { fd: int32, function dispose(ref self): void { } }",
@@ -734,6 +770,19 @@ describe("parse: phase 6.1 - kind decls", () => {
       "kind cleanup { appliesTo binding; mustCall close beforeScopeEnd; }",
     ).body[0];
     assert.equal(k.clauses.length, 2);
+  });
+
+  it("`appliesTo region` parses (contextual site ident)", () => {
+    const k = parse(
+      "kind ephemeral { appliesTo region; requires Disposable; mustCall dispose beforeScopeEnd; ownsBlock; }",
+    ).body[0];
+    assert.equal(k.clauses[0].kind, ASTNodeKind.KIND_APPLIES_TO_CLAUSE);
+    assert.deepEqual(k.clauses[0].sites, ["region"]);
+  });
+
+  it("`region` stays usable as an ordinary identifier outside kind clauses", () => {
+    const s = parse("function f(): int32 { let region: int32 = 1; return region; }");
+    assert.equal(s.body[0].body.body[0].name, "region");
   });
 
   it("multiple requires clauses parse independently", () => {
@@ -961,6 +1010,74 @@ describe("parse: phase 6.1 - kind-prefixed bindings", () => {
         /kind-prefixed binding requires initializer/,
       );
     });
+  });
+
+  // Inferred-type named binding: `disposable a = expr` (no `: T`). The
+  // recognizer now accepts the `=` shape alongside `:`.
+  it("named binding infers its type when the annotation is omitted (implicit block)", () => {
+    const s = stmtOf("disposable a = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.CONST_DECL);
+    assert.equal(s.name, "a");
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.typeAnnotation, null);
+    assert.equal(s.trailingBlock, null);
+    assert.equal(s.assignment.kind, ASTNodeKind.CALL_EXPRESSION);
+  });
+
+  it("named binding infers its type with a trailing block", () => {
+    const s = stmtOf("disposable a = make_handle() { return 0; }");
+    assert.equal(s.name, "a");
+    assert.equal(s.typeAnnotation, null);
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.trailingBlock.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("explicit `let disposable a = expr` infers type too", () => {
+    const s = stmtOf("let disposable a = make_handle();");
+    assert.equal(s.kind, ASTNodeKind.LET_DECL);
+    assert.equal(s.kindPrefix.name, "disposable");
+    assert.equal(s.typeAnnotation, null);
+  });
+});
+
+// Anonymous region-kind blocks: `KIND EXPR { ... }` / `KIND EXPR;` with no
+// binding name. The kind is the first ident, the second ident begins the
+// initializer expression, and there is no `:`/`=`.
+describe("parse: region kinds - anonymous block bindings", () => {
+  function stmtOf(src) {
+    const ast = parse(`function f(): int32 { ${src} return 0; }`);
+    return ast.body[0].body.body[0];
+  }
+
+  it("anonymous explicit block: `ephemeral mem.scope(arena) { ... }`", () => {
+    const s = stmtOf("ephemeral mem.scope(arena) { doThing(); }");
+    assert.equal(s.kind, ASTNodeKind.CONST_DECL);
+    assert.equal(s.anonymousRegion, true);
+    assert.equal(s.kindPrefix.name, "ephemeral");
+    assert.equal(s.typeAnnotation, null);
+    assert.match(s.name, /^\$region\$\d+$/);
+    assert.equal(s.assignment.kind, ASTNodeKind.CALL_EXPRESSION);
+    assert.equal(s.trailingBlock.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("anonymous implicit block (no braces): `ephemeral mem.scope(arena);`", () => {
+    const s = stmtOf("ephemeral mem.scope(arena); doThing();");
+    assert.equal(s.anonymousRegion, true);
+    assert.equal(s.kindPrefix.name, "ephemeral");
+    assert.equal(s.trailingBlock, null);
+  });
+
+  it("synthesized names are unique across multiple anonymous blocks", () => {
+    const ast = parse(
+      "function f(): int32 { ephemeral a(); ephemeral b(); return 0; }",
+    );
+    const [s0, s1] = ast.body[0].body.body;
+    assert.notEqual(s0.name, s1.name);
+  });
+
+  it("does not steal a plain call or member-call statement", () => {
+    assert.equal(stmtOf("doThing(x);").kind, ASTNodeKind.EXPRESSION_STATEMENT);
+    assert.equal(stmtOf("mem.reset(arena);").kind, ASTNodeKind.EXPRESSION_STATEMENT);
   });
 });
 
@@ -1476,5 +1593,168 @@ describe("parse: reserved keywords in name-only positions", () => {
       () => parse("function f(type: int32): void { return; }"),
       /expected rparen, got type/,
     );
+  });
+});
+
+// Phase 10.K: a parenthesized type group lets `[]` attach to a function type,
+// which is the only way to spell an array of function pointers.
+describe("parse: parenthesized type groups (array of function pointers)", () => {
+  function paramType(srcLine) {
+    const ast = parse(`function f(p: ${srcLine}): void { return; }`);
+    return ast.body[0].params[0].typeAnnotation;
+  }
+
+  it("`(a: int32) => bool` still parses as a bare function type", () => {
+    const t = paramType("(a: int32) => bool");
+    assert.equal(t.kind, "functionType");
+    assert.deepEqual(t.params, [{ kind: "typeName", name: "int32" }]);
+    assert.deepEqual(t.returnType, { kind: "typeName", name: "bool" });
+  });
+
+  it("`((a: int32) => bool)[]` is an array whose element is a function type", () => {
+    const t = paramType("((a: int32) => bool)[]");
+    assert.equal(t.kind, "arrayType");
+    assert.equal(t.elem.kind, "functionType");
+    assert.deepEqual(t.elem.params, [{ kind: "typeName", name: "int32" }]);
+    assert.deepEqual(t.elem.returnType, { kind: "typeName", name: "bool" });
+  });
+
+  it("`(a: int32) => bool[]` binds the `[]` to the return type (no grouping)", () => {
+    const t = paramType("(a: int32) => bool[]");
+    assert.equal(t.kind, "functionType");
+    assert.deepEqual(t.returnType, {
+      kind: "arrayType",
+      elem: { kind: "typeName", name: "bool" },
+    });
+  });
+
+  it("a parenthesized simple type with `[]` is an array of that type", () => {
+    const t = paramType("(int32)[]");
+    assert.deepEqual(t, {
+      kind: "arrayType",
+      elem: { kind: "typeName", name: "int32" },
+    });
+  });
+
+  it("nested `[]` suffixes on a group stack into nested array types", () => {
+    const t = paramType("((a: int32) => bool)[][]");
+    assert.equal(t.kind, "arrayType");
+    assert.equal(t.elem.kind, "arrayType");
+    assert.equal(t.elem.elem.kind, "functionType");
+  });
+});
+
+describe("Phase 13.C: @derive attribute targets", () => {
+  it("parses @derive(display) on a type decl", () => {
+    const ast = parse(
+      `@derive(display)\ntype Point {\n  x: int32,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.kind, ASTNodeKind.ATTRIBUTE);
+    assert.equal(attr.name, "derive");
+    assert.equal(attr.args.length, 1);
+    assert.equal(attr.args[0].kind, ASTNodeKind.IDENT);
+    assert.equal(attr.args[0].name, "display");
+    assert.equal(attr.target.kind, ASTNodeKind.TYPE_DECL);
+    assert.equal(attr.target.name, "Point");
+  });
+
+  it("parses @derive(display) on an exported type decl", () => {
+    const ast = parse(
+      `@derive(display)\nexport type Point {\n  x: int32,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.target.kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(attr.target.decl.kind, ASTNodeKind.TYPE_DECL);
+  });
+
+  it("rejects deferred derive names with a not-yet-supported message", () => {
+    assert.throws(
+      () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
+      /@derive\(eq\) is not yet supported - only @derive\(display\)/,
+    );
+  });
+
+  it("rejects unknown derive names", () => {
+    assert.throws(
+      () => parse(`@derive(banana)\ntype P {\n  x: int32,\n}\n`),
+      /unknown derive "banana" - supported derives: display/,
+    );
+  });
+
+  it("rejects a missing or non-ident derive argument", () => {
+    assert.throws(
+      () => parse(`@derive\ntype P {\n  x: int32,\n}\n`),
+      /@derive requires exactly one derive name argument/,
+    );
+  });
+
+  it("rejects non-type targets", () => {
+    assert.throws(
+      () => parse(`@derive(display)\nlet x: int32 = 1;\n`),
+      /@derive\(display\) only applies to a struct 'type' or 'variant' declaration/,
+    );
+  });
+
+  it("@precompile still rejects type targets at parse time", () => {
+    assert.throws(
+      () => parse(`@precompile\ntype P {\n  x: int32,\n}\n`),
+      /@precompile requires a '\{ \.\.\. \}' block or a 'let' \/ 'const' declaration/,
+    );
+  });
+});
+
+describe("Phase 13.D: @derive on variant decls", () => {
+  it("parses @derive(display) on a variant decl", () => {
+    const ast = parse(
+      `@derive(display)\nvariant Shape {\n  Circle { r: int32 },\n  Dot,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.kind, ASTNodeKind.ATTRIBUTE);
+    assert.equal(attr.target.kind, ASTNodeKind.VARIANT_DECL);
+    assert.equal(attr.target.name, "Shape");
+    assert.equal(attr.target.variants.length, 2);
+  });
+
+  it("parses @derive(display) on an exported variant decl", () => {
+    const ast = parse(
+      `@derive(display)\nexport variant Shape {\n  Dot,\n}\n`,
+    );
+    const attr = ast.body[0];
+    assert.equal(attr.target.kind, ASTNodeKind.EXPORT_DECL);
+    assert.equal(attr.target.decl.kind, ASTNodeKind.VARIANT_DECL);
+  });
+
+});
+
+describe("Phase 13.D: variant case payload must be a record", () => {
+  // `Special MyType` used to parse silently as TWO payload-less cases
+  // (the separating comma is optional), so the only symptom was a phantom
+  // "missing variants: MyType" from a later exhaustiveness check.
+  it("rejects a bare-type payload with a fix-it", () => {
+    assert.throws(
+      () =>
+        parse(
+          `variant MyVariant {\n  Normal { p: int32 },\n  Special MyType,\n}\n`,
+        ),
+      /variant case 'Special' is followed by 'MyType' with no separator - a case payload must be a record, e\.g\. 'Special \{ value: MyType \}'/,
+    );
+  });
+
+  it("still accepts the record payload form", () => {
+    const ast = parse(
+      `variant MyVariant {\n  Normal { p: int32 },\n  Special { value: MyType },\n}\n`,
+    );
+    const cases = ast.body[0].variants;
+    assert.equal(cases.length, 2);
+    assert.deepEqual(cases[1].fields.map((f) => f.name), ["value"]);
+  });
+
+  it("still accepts payload-less cases and trailing methods", () => {
+    const ast = parse(
+      `variant V implements D {\n  A,\n  B { x: int32 },\n  function f(ref self): int32 {\n    return 1;\n  }\n}\n`,
+    );
+    assert.equal(ast.body[0].variants.length, 2);
+    assert.equal(ast.body[0].methods.length, 1);
   });
 });

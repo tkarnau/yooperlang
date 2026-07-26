@@ -1,0 +1,51 @@
+// Char literals: single-quoted Unicode scalars. They lower to untyped int
+// codepoints, so they pin to whatever integer type the context wants and
+// compare directly against bytes - the readable replacement for magic numbers
+// in a byte-oriented lexer (`ch == '/'` instead of `ch == 47`).
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// A char literal pins to a uint8 parameter, just like an int literal would.
+function is_slash(ch: uint8): bool {
+    return ch == '/';
+}
+
+// Count slashes in a byte array using char-literal comparisons + a switch
+// whose arms are char-literal patterns.
+function classify(ch: uint8): int32 {
+    switch (ch) {
+        case '/': { return 1; }
+        case '\n': { return 2; }
+        case ' ': { return 3; }
+        default: { return 0; }
+    }
+}
+
+function main(): int32 {
+    let bytes: uint8[] = [104, 47, 47, 32, 10]; // 'h', '/', '/', ' ', '\n'
+
+    let slashes: int32 = 0;
+    for b in bytes {
+        if (is_slash(b)) {
+            slashes = slashes + 1;
+        }
+    }
+    printf(`slashes: ${slashes}\n`);
+
+    // char literal as an untyped int in arithmetic + annotated bindings
+    let newline: uint8 = '\n';
+    let cp: int32 = 'A';
+    printf(`newline=${newline} cp=${cp}\n`);
+
+    // \x escape and switch-pattern dispatch
+    let codes: int32[] = [0, 0, 0, 0];
+    codes[0] = classify('/');
+    codes[1] = classify('\x0A'); // newline
+    codes[2] = classify(' ');
+    codes[3] = classify(120);    // 'x' - default arm
+    printf(`${codes[0]}${codes[1]}${codes[2]}${codes[3]}\n`);
+
+    return 0;
+}

@@ -4,22 +4,31 @@
   Main entry point for the self-hosted yooperlang compiler
 */
 
-// for starters lets define a main function, and start getting a lexer stream of
-// tokens from an input file.
-
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+import * as debug from "std/debug.yoop";
 import { Display } from "std/core/traits.yoop";
+import * as strings from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as fs from "std/fs.yoop";
 
-import { isHexDigit } from "./charUtils.yoop";
-import { tokenize, Token } from "./lexer.yoop";
+import { isHexDigit } from "./source_processing/char_utils.yoop";
+import { tokenize, Token } from "./source_processing/lexer.yoop";
+import { parse } from "./source_processing/parser.yoop";
+import { tokenScanList } from "./contracts.yoop";
+import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
+import { typecheckProgram } from "./typecheck/typecheck.yoop";
+import * as dbg from "./utils/debug_utils.yoop";
 
-// @precompile {
-//   log.info("hello, yooper from a precompile!");
-// }
+@precompile {
+  log.info("hello, yooper from a precompile!");
+}
 
 function main(): int {
   log.info("hello, yooper!");
+
+  runCompilerAssertions();
 
   // const testStr = "ello";
   // const testStrBytes = intr.string_as_bytes(testStr);
@@ -27,26 +36,60 @@ function main(): int {
 
   // log.info(`is hex digit?: ${isIt}, value: ${testStrBytes[0]}`);
 
-  const testStr = `
-    // test program
-    function main(): int {
-      return 0;
-    }
-  `;
+  // const testStr = `
+  //   // test program
+  //   /* 
+  //     this is a test
+  //   */
+  //   ;{}...,'\\xFF'
+  //   "teststr"
+  //   0xFF
+  //   13.54
+  //   return return function main(): int {
+  //     printf("hello, world!");
 
-  const tokenizeResult = tokenize(testStr);
-  switch (tokenizeResult){
-    case Result.Err { error: e } : {
-      log.info(`tokenize error: ${e}`);
+  //     return 0;
+  //   }
+  //   `;
+
+  // Layer 0 smoke test: load a real source file into a one-module graph.
+  const entryPath = "/Users/tom/dev/personal/yooperlang/bootstrap/examples/single_module.yoop";
+  switch (loadModuleGraph(entryPath)) {
+    case LoadGraphResult.Err { error: e }: {
+      log.info(`module graph load failed: ${e}`);
     }
-    case Result.Ok { value: tokens } : {
-      for tok in tokens {
-        log.info(`token: ${tok}`);
-      }
+    case LoadGraphResult.Ok { value: mg }: {
+      const entryMod = vec.vec_get(ref mg.modules, mg.entryIndex);
+      log.info(`ast: ${entryMod.ast}`);
+      log.info(`loaded ${mg.modules.len} module(s); entry ${entryMod.absPath} parsed to ${entryMod.ast.nodes.len} AST nodes`);
+
+      const entryAst = entryMod.ast;
+      dbg.dump("ast tree", dbg.astTreeToString(ref entryAst, entryAst.root));
+
+      // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
+      // for now (returns a Program with no types/symbols/diagnostics) - this
+      // wires the call so the layer can be built out incrementally.
+      let prog = typecheckProgram(ref mg);
+      log.info(`typecheck done: ${prog.diagnostics.len} diagnostic(s), ${prog.types.len} type(s), ${prog.symbols.len} symbol(s), ${prog.modules.len} typed module(s)`);
+      dbg.dump("typechecked program", dbg.programToString(ref prog));
     }
   }
 
-  // log.info(`tokenize result ${tokenizeResult}`);
-
   return 0;
+}
+
+function runCompilerAssertions(): void {
+  debug.assert(strings.string_eq(tokenScanList[0].str, "..."), "tokenScanList is not sorted");
+  const testSplittingStr = "this_is_a_test";
+  disposable pieces: Vec<string> = vec.vec_new(0);
+  const splitResult = strings.split(ref pieces, testSplittingStr, "_", false);
+  debug.assert(pieces.len == 4, `split expected 4 elements, found ${pieces.len}: result ${splitResult}, ${pieces.data[0]}`);
+  debug.assert(strings.string_eq(pieces.data[0], "this"), `split failed, expected "this" in slot 1, found ${pieces.data[0]}`);
+  debug.assert(strings.string_eq(pieces.data[1], "is"), `split failed, expected "is" in slot 2, found ${pieces.data[1]}`);
+  debug.assert(strings.string_eq(pieces.data[2], "a"), `split failed, expected "a" in slot 3, found ${pieces.data[2]}`);
+  debug.assert(strings.string_eq(pieces.data[3], "test"), `split failed, expected "test" in slot 4, found ${pieces.data[3]}`);
+
+  // file stuff
+  // const normalizeResult = fs.normalizePath("./bootstrap/../bootstrap/src/main.yoop");
+  // debug.assert(strings.string_eq(normalizeResult, "main.yoop"), `normalizePath failed, exepected "main.yoop", found ${normalizeResult}`);
 }

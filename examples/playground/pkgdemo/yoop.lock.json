@@ -1,0 +1,13 @@
+{
+  "generatedBy": "yoopkg",
+  "packagesDir": "yoop_packages",
+  "dependencies": {
+    "yooparse": {
+      "version": "0.1.0",
+      "source": "../yooparse",
+      "files": [
+        "json.yoop"
+      ]
+    }
+  }
+}

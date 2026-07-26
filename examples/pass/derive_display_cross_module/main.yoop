@@ -1,0 +1,7 @@
+import { Pt, makePt } from "./lib.yoop";
+
+function main(): int {
+  const p: Pt = makePt(10, 20);
+  printf(`${p}\n`);
+  return 0;
+}

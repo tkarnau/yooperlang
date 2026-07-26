@@ -91,6 +91,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("type_alias.yoop: transparent `type X = Y` aliases resolve through to the underlying type", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/type_alias.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "a=7 b=7 first=7 len=3\nx=3 y=4 n=9\n");
+  });
+
   it("type_inference.yoop: let/const bindings infer their type from the initializer", () => {
     const { stdout, exitCode } = runFixture("examples/pass/type_inference.yoop");
     assert.equal(exitCode, 0);
@@ -109,6 +115,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("char_literals.yoop: single-quoted chars pin like untyped ints and match in switch patterns", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/char_literals.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "slashes: 2\nnewline=10 cp=65\n1230\n");
+  });
+
   it("parens_basic.yoop groups subexpressions and composes with postfix ops", () => {
     const { stdout, exitCode } = runFixture("examples/pass/parens_basic.yoop");
     assert.equal(exitCode, 0);
@@ -124,6 +136,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
         "v[1]=(3,4)\n" +
         "v[2]=(5,6)\n",
     );
+  });
+
+  it("generic_quicksort.yoop: trait-bounded generic fn dispatches a generic trait method through a type param", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/generic_quicksort.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "1 2 3 5 5 7 9 \n");
   });
 
   it("keyword_field_names.yoop: reserved keywords accepted in name-only positions", () => {
@@ -229,6 +247,43 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "total=112 mode=19\n");
+  });
+
+  it("arena_context: malloc default + bump arena installed as the current allocator", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_context.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "mallocOk=1 distinct=1 reused=1 used=128 afterReset=0\n");
+  });
+
+  it("arena_scope: disposable arenaScope installs+tears down a region; temp allocator resets", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_scope.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "scopeUsed=128 tempReused=1\n");
+  });
+
+  it("arena_vec: a Vec created inside an arena scope draws its storage from the arena", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_vec.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "sum=60 len=5\narenaGotData=1\n");
+  });
+
+  it("arena_request_loop: per-request arena reset keeps peak memory bounded across requests", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_request_loop.yoop");
+    assert.equal(exitCode, 0);
+    // 5 requests summed (5*45=225); peak is ONE request's footprint, not 5x.
+    assert.equal(stdout, "totalSum=225 peakUsed=96\n");
+  });
+
+  it("generic_trait_cross_module: an imported generic trait's method is callable via the qualified form", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_trait_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "unwrapped 7\n");
+  });
+
+  it("clearance_namespaced_sink: a laundered value flows into a sink called through its namespace", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/clearance_namespaced_sink/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "ran query\n");
   });
 
   it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", () => {
@@ -482,6 +537,16 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "disposed(7)\n");
   });
 
+  // Ownership redesign (2026-06-17): kindCheck now walks SWITCH_STATEMENT, so a
+  // `disposable`-keyword binding inside a `case` arm gets its auto-cleanup
+  // injected at the arm-block end. dispose fires before "after", proving the
+  // arm body's implicitCleanups were populated and emitted.
+  it("disposable_in_switch_arm.yoop: a `disposable` binding inside a switch arm fires cleanup at arm end", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/disposable_in_switch_arm.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "using(1)\ndisposed(1)\nafter\n");
+  });
+
   // Yoopstore-papercut #11: a returned struct/variant literal that moves a
   // propagating binding into a field transfers the obligation - dispose fires
   // exactly once, at the caller.
@@ -661,6 +726,12 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "level=warn color=2\nfirst=info count=1\n");
   });
 
+  it("value_enum_to_string.yoop: value enum in a string-producing template literal", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/value_enum_to_string.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "level=error color=1\n");
+  });
+
   it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {
     const { stdout, exitCode } = runFixture("examples/pass/enum_showcase.yoop");
     assert.equal(exitCode, 0);
@@ -700,6 +771,34 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     const { stdout, exitCode } = runFixture("examples/pass/vtable_handlers.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "req=10 sum=145\nreq=7  sum=133\nscale-only=33\n");
+  });
+
+  // Phase 10.K: `VTableName.fromFn(f1, ...)` builds a vtable from named
+  // functions (ctx-null + ctx-dropping shim), with no per-predicate struct.
+  // Exercises a heterogeneous array mixing fromFn and from(ref struct) values
+  // through one vtable type, plus a two-method vtable to pin slot ordering.
+  it("vtable_fromfn.yoop: fromFn builds vtables from named functions", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/vtable_fromfn.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "matches=6\nseven-is-digit\nlo=20 hi=11\n");
+  });
+
+  // Phase 10.K: a function-pointer parameter is callable directly by name
+  // (`pred(ch)`), and a bare top-level function name materializes as the
+  // argument - the lightest higher-order form, no vtable/struct/ctx.
+  it("fn_pointer_param.yoop: a function passed as an argument is called indirectly", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fn_pointer_param.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "digits=3\nuppers=2\nagain=2\n");
+  });
+
+  // Phase 10.K: an array of function pointers - element type spelled with a
+  // parenthesized function-value type `((p: T) => R)[]`. Names materialize
+  // into the slots, the loop variable is called directly. No vtable/struct.
+  it("fn_pointer_array.yoop: an array of function pointers scans via indirect calls", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/fn_pointer_array.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "aF3: ok end=3\na_3: ok end=3\n_a3: err leading underscore\naFxy: ok end=2\n");
   });
 
   // Phase 9.I: a nested-wait chain deeper than the worker count must complete.
@@ -876,6 +975,164 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_namespace/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "5 = 5\n");
+  });
+
+  // Regression: a Display-bound generic whose T is inferred from a struct
+  // reached only through an imported instantiation (elem type of a Vec<T>
+  // field). The captured elem type is a pass-A shell with empty
+  // implementsTraits/methods; the call-site bound check and the registry
+  // boundChecker must re-canonicalize it before checking.
+  it("generic_bound_imported_shell: bound check canonicalizes imported struct shells", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_bound_imported_shell/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "(1, 2)\n");
+  });
+});
+
+// Phase 13.C: @derive(display) - pre-typecheck expansion generates the
+// Display.to_string method from a struct's field annotations. Fixtures run
+// through runFixtureEntry (compileEntry): the expansion needs the driver's
+// module graph with std/core/traits.yoop autoloaded.
+describe("e2e: Phase 13.C @derive(display)", () => {
+  it("derive_display_basic: derived to_string via explicit printf format arg", () => {
+    // Also the regression test for the printf lowering fix: a template
+    // literal VALUE arg after an explicit format literal fills the %s
+    // instead of contributing a doubled directive.
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "p=Point { x: 3, y: 4 }\n");
+  });
+
+  it("derive_display_nested: derived structs recurse through Display dispatch", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_nested.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Line { a: Point { x: 1, y: 2 }, b: Point { x: 3, y: 4 }, label: diag }\n",
+    );
+  });
+
+  it("derive_display_array_vec: array + Vec loops, fn placeholder, empty variants", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_array_vec.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Bag { xs: [1, 2, 3], v: [7, 8], cb: <fn> }\nBag { xs: [], v: [], cb: <fn> }\n",
+    );
+  });
+
+  it("derive_display_mixed: hand-written Display field + pre-listed implements clause", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_mixed.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Wrapper { inner: manual(9), tag: 5 } Listed { n: 6 }\n");
+  });
+
+  it("derive_display_empty: zero-field type prints Name { }", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_empty.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Empty { }\n");
+  });
+
+  it("derive_display_cross_module: derived export interpolated from another module", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_cross_module/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "Pt { x: 10, y: 20 }\n");
+  });
+
+  it("derive_manual_to_string: deriving over a manual to_string is an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_manual_to_string.yoop");
+    assert.ok(
+      errors.some((e) => /already defines "to_string"/.test(e.message)),
+      `expected the derive clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_generic: generic type decls are rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_generic.yoop");
+    assert.ok(
+      errors.some((e) => /generic type "Pair" is not yet supported/.test(e.message)),
+      `expected the generic derive error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_alias: type aliases are rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_alias.yoop");
+    assert.ok(
+      errors.some((e) => /cannot apply to type alias "NodeId"/.test(e.message)),
+      `expected the alias derive error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 13.D: variants derive too. The generated body is an arm-per-case
+  // switch; per-case control comes from composition (a payload type declared
+  // outside the variant with its own Display impl), not hand-written methods.
+  it("derive_display_variant: arm-per-case switch, payload Display dispatch, collections, bound generic", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_variant.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "Shape.Circle { c: <1,2>, r: 5 }\n" +
+        "Shape.Named { label: hi }\n" +
+        "Shape.Bytes { xs: [1, 2, 3] }\n" +
+        "Shape.Many { v: [7, 8], tag: 9 }\n" +
+        "Envelope { body: Shape.Dot, seq: 42 }\n",
+    );
+  });
+
+  it("derive_variant_manual_to_string: deriving over a manual variant to_string is an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_variant_manual_to_string.yoop");
+    assert.ok(
+      errors.some((e) => /variant "Shape" already defines "to_string"/.test(e.message)),
+      `expected the variant clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("derive_on_generic_variant: generic variants are rejected (needs registry method substitution)", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_on_generic_variant.yoop");
+    assert.ok(
+      errors.some((e) => /generic variant "Maybe" is not yet supported/.test(e.message)),
+      `expected the generic variant error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // The generated body is not user-written, so a non-printable field must
+  // name the field and the fixes rather than complaining about a template
+  // literal the user never typed. Covers the struct and variant paths - the
+  // variant one resolves a pattern-bound local back to its field name.
+  it("derive_nonprintable_field: diagnostic names the field, not the synthetic template", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/derive_nonprintable_field.yoop");
+    const messages = errors.map((e) => e.message).join(" | ");
+    assert.ok(
+      errors.some((e) =>
+        /@derive\(display\) on "Holder" cannot print field "p" of type struct Plain/.test(e.message),
+      ),
+      `expected the struct-field derive diagnostic, got: ${messages}`,
+    );
+    assert.ok(
+      errors.some((e) =>
+        /@derive\(display\) on "Boxed" cannot print field "p" of type struct Plain/.test(e.message),
+      ),
+      `expected the variant-payload derive diagnostic, got: ${messages}`,
+    );
+    assert.ok(
+      !/template literal interpolation must be/.test(messages),
+      `derived bodies must not surface the raw template wording: ${messages}`,
+    );
+  });
+
+  it("derive parse-stage rejections: deferred names, unknown names, wrong target", () => {
+    assert.throws(
+      () => parse(`@derive(eq)\ntype P {\n  x: int32,\n}\n`),
+      /@derive\(eq\) is not yet supported/,
+    );
+    assert.throws(
+      () => parse(`@derive(banana)\ntype P {\n  x: int32,\n}\n`),
+      /unknown derive "banana"/,
+    );
+    assert.throws(
+      () => parse(`@derive(display)\nlet x: int32 = 1;\n`),
+      /only applies to a struct 'type' or 'variant' declaration/,
+    );
   });
 
   it("imports_renamed: import { x as y }", () => {
@@ -1066,6 +1323,22 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.equal(stdout, "disposing fd=11\n");
   });
 
+  // region kinds (`appliesTo region`): anonymous block-owning bindings with no
+  // visible name, plus type inference on a named block-owning binding.
+  it("region_kind_block: anonymous explicit/implicit region blocks + inferred named binding fire cleanup correctly", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/region_kind_block/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      // explicit block: dispose at `}`
+      "push 1\ninside\npop 1\nafter\n" +
+        // implicit blocks: LIFO at scope end
+        "push 1\npush 2\nbody\npop 2\npop 1\n" +
+        // named binding, type inferred from the initializer
+        "push 5\nuse 5\npop 5\n",
+    );
+  });
+
   // phase 6.2: scoped kind and escape analysis
   it("scoped_basic: scoped kind with mustNotEscape, kind-prefixed param, dispose fires at scope end", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_basic/main.yoop");
@@ -1187,6 +1460,89 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
     assert.match(text, /main\.yoop/, `lldb output had no .yoop reference:\n${text}`);
     assert.match(text, /CompileUnit:.*main\.yoop/, `lldb did not surface a CompileUnit for main.yoop:\n${text}`);
     assert.match(text, /LineEntry:.*main\.yoop:\d+/, `lldb did not surface a LineEntry mapping main to a .yoop line:\n${text}`);
+  });
+
+  it("dwarf: locals of every aggregate shape get a typed llvm.dbg.declare", () => {
+    const { ir } = compileEntry(path.join(repoRoot, "examples/pass/dwarf_locals/main.yoop"));
+    // Struct: a DICompositeType with one DW_TAG_member per field.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "Point", size: 64/);
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_member, name: "y",[^)]*offset: 32\)/);
+    // string: typedef over char* so a debugger prints the text, not an address.
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_typedef, name: "string", baseType: !\d+\)/);
+    assert.match(ir, /!DIBasicType\(name: "char", size: 8, encoding: DW_ATE_signed_char\)/);
+    // Array: the `{ ptr, i64 }` fat pointer, with `data` typed as elem*.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "int32\[\]", size: 128/);
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_member, name: "len",[^)]*offset: 64\)/);
+    // Variant: tag described as an enumeration, payload as a union of cases.
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_enumeration_type, name: "Shape\.tag"/);
+    assert.match(ir, /!DIEnumerator\(name: "Rect", value: 1\)/);
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_union_type, name: "Shape\.payload"/);
+    assert.match(ir, /!DICompositeType\(tag: DW_TAG_structure_type, name: "Shape\.Rect"/);
+    // ref param: a pointer whose baseType is the pointee's composite type.
+    assert.match(ir, /!DIDerivedType\(tag: DW_TAG_pointer_type, baseType: !\d+, size: 64\)/);
+    // Every one of these locals gets a dbg.declare against its alloca slot.
+    for (const name of ["pt", "who", "nums", "shape", "flag", "d", "p"]) {
+      assert.match(
+        ir,
+        new RegExp(`!DILocalVariable\\(name: "${name}"`),
+        `no DILocalVariable emitted for "${name}"`,
+      );
+    }
+    // The subprogram carries a real signature (return + params), not `!{}`.
+    assert.match(ir, /!DISubroutineType\(types: !\{!\d+, !\d+\}\)/);
+  });
+
+  // The IR assertions above prove the metadata is shaped right; this one
+  // proves it survives clang and that a debugger can actually READ the values
+  // (the whole point - previously `frame variable` showed nothing but prims).
+  it("dwarf: lldb reads struct / string / array / variant locals by value", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      [
+        "-o", "breakpoint set --file main.yoop --line 38",
+        "-o", "run",
+        "-o", "frame variable",
+        "-o", "p who.name",
+        "-o", "p nums.data[2]",
+        "-o", "p shape.payload.Rect.h",
+        "-o", "quit",
+        "--batch",
+        binPath,
+      ],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    // Struct fields are walked, not shown as an opaque blob.
+    assert.match(text, /\(Point\) pt = \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
+    // `string` gets the C-string summary.
+    assert.match(text, /\(string\).*"tom"/, text);
+    // Arrays expose data + len, and the data pointer is element-typed.
+    assert.match(text, /\(int32\[\]\) nums = \{[\s\S]*?len = 3/, text);
+    assert.match(text, /\(int\) 30/, text);
+    // Variant tag prints its case NAME, and the active payload is reachable.
+    assert.match(text, /tag = Rect/, text);
+    assert.match(text, /\(int\) 9/, text);
+  });
+
+  // Regression: llvm derives the DWARF `prologue_end` marker from the first
+  // non-meta instruction carrying a !dbg. When the parameter stores carried
+  // one, a function breakpoint (`b <name>`, what VS Code's function
+  // breakpoints use) landed BEFORE the arguments reached their stack slots and
+  // the variables pane showed garbage.
+  it("dwarf: a function breakpoint stops after the parameter stores", (t) => {
+    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
+    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+    const out = spawnSync(
+      "lldb",
+      ["-o", "b manhattan", "-o", "run", "-o", "p *p", "-o", "quit", "--batch", binPath],
+      { encoding: "utf8" },
+    );
+    const text = (out.stdout ?? "") + (out.stderr ?? "");
+    assert.match(text, /\(Point\) \{\s*\n\s*x = 3\s*\n\s*y = 4/, text);
   });
 
   // ---- 6.3 sugar: task / joined / pooled / wait ----
@@ -1495,11 +1851,12 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     );
   });
 
-  it("vec_no_disposable: binding Vec<T> without `disposable` leaves the propagates<disposable> obligation unsatisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/vec_no_disposable/main.yoop");
-    assert.ok(
-      errors.some((e) => /unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
+  it("vec_no_disposable: binding Vec<T> without `disposable` is advisory, not an error (ownership redesign)", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/vec_no_disposable/main.yoop");
+    assert.equal(
+      errors.length,
+      0,
+      `expected clean typecheck under the advisory model, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
@@ -1511,6 +1868,17 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     assert.ok(
       errors.some((e) => /no `Into<struct AppError>` impl on struct IoError/.test(e.message)),
       `expected missing-Into error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Phase 10.K: `VTableName.fromFn(...)` arguments must match the method slot
+  // signature. A return-type mismatch (int32 where the slot wants bool) is
+  // rejected at typecheck.
+  it("vtable_fromfn_sig_mismatch: a fromFn arg whose signature differs from the method slot is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/vtable_fromfn_sig_mismatch.yoop");
+    assert.ok(
+      errors.some((e) => /fromFn.*argument 1.*does not match method "test"/.test(e.message)),
+      `expected fromFn signature-mismatch error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 });
@@ -1943,6 +2311,34 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.throws(() => parse(src), /expected semicolon/);
   });
 
+  it("type_alias_unknown_target.yoop rejects a type alias whose RHS names an unknown type", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_unknown_target.yoop");
+    assert.ok(
+      errors.some((e) => /type alias "Foo" references an unknown type or is cyclic/.test(e.message)),
+      `expected unknown-alias-target error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("type_alias_cyclic.yoop rejects a cyclic alias chain instead of looping", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_cyclic.yoop");
+    assert.ok(
+      errors.some((e) => /type alias "A" references an unknown type or is cyclic/.test(e.message)),
+      `expected cyclic-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("type_alias_generic.yoop rejects a generic type alias with no spurious follow-on error", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/type_alias_generic.yoop");
+    assert.ok(
+      errors.some((e) => /generic type aliases are not yet supported/.test(e.message)),
+      `expected generic-alias error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+    assert.ok(
+      !errors.some((e) => /references an unknown type or is cyclic/.test(e.message)),
+      `did not expect a follow-on resolve error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
   it("ref_return.yoop rejects a function whose return type is ref T", () => {
     const { errors } = typecheckFixture("examples/fail/ref_return.yoop");
     assert.ok(
@@ -2332,47 +2728,39 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  // Phase 6.4 strict propagates enforcement.
-  it("propagates_return_not_declared.yoop rejects a function that returns a propagating type without declaring propagates<K>", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_not_declared.yoop");
-    assert.ok(
-      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
-      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  // Ownership redesign (2026-06-17, plans/ownership-and-typestate-redesign.md):
+  // `propagates<K>` obligations are ADVISORY, not enforced. The five fixtures
+  // below were formerly examples/fail cases asserting hard errors; they now
+  // typecheck cleanly and live in examples/pass. These tests guard that the
+  // relaxation holds (no obligation error is produced).
+  it("propagates_return_not_declared.yoop: returning a propagating type without propagates<K> is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_not_declared.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  // Yoopstore-papercut #11 (negative): moving a propagating binding into a
-  // returned struct literal still needs propagates<K> on the function.
-  it("propagates_return_struct_literal_not_declared.yoop rejects a moved-binding literal return without propagates<K>", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_return_struct_literal_not_declared.yoop");
-    assert.ok(
-      errors.some((e) => /carrying propagates<disposable>.*either declare 'propagates<disposable>'/.test(e.message)),
-      `expected return-without-propagates error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_return_struct_literal_not_declared.yoop: moved-binding literal return without propagates<K> is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_return_struct_literal_not_declared.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_binding_missing_kind.yoop rejects a binding whose propagates<K> obligation is never satisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_binding_missing_kind.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_binding_missing_kind.yoop: an un-disposed binding of a propagating type is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_binding_missing_kind.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_struct_literal_missing_kind.yoop rejects a struct-literal binding whose propagates<K> obligation is never satisfied", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_struct_literal_missing_kind.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'w' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected unsatisfied-obligation error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_struct_literal_missing_kind.yoop: an un-disposed struct-literal binding is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_struct_literal_missing_kind.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
-  it("propagates_dispose_only_then.yoop rejects a binding whose dispose appears in only one arm of an if/else", () => {
-    const { errors } = typecheckFixtureEntry("examples/fail/propagates_dispose_only_then.yoop");
-    assert.ok(
-      errors.some((e) => /binding 'r' has unsatisfied obligation from propagates<disposable>/.test(e.message)),
-      `expected one-arm-only error, got: ${errors.map((e) => e.message).join(" | ")}`,
-    );
+  it("propagates_dispose_only_then.yoop: a manual dispose in only one if/else arm is no longer an error", () => {
+    const { errors } = typecheckFixtureEntry("examples/pass/propagates_dispose_only_then.yoop");
+    assert.equal(errors.length, 0,
+      `expected clean typecheck, got: ${errors.map((e) => e.message).join(" | ")}`);
   });
 
   it("scoped_escape_return.yoop rejects returning a scoped binding", () => {
@@ -2634,6 +3022,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
+  it("value_enum_string_switch.yoop rejects a switch over a string-backed enum", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/value_enum_string_switch.yoop");
+    assert.ok(
+      errors.some((e) => /switch requires an integer-backed enum/.test(e.message)),
+      `expected string-backed-switch error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
   it("value_enum_unrelated_compare.yoop rejects comparing two different value enums", () => {
     const { errors } = typecheckFixtureProgram("examples/fail/value_enum_unrelated_compare.yoop");
     assert.ok(
@@ -2778,6 +3174,14 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /forbids kind 'tainted' but the value carries it/.test(e.message)),
       `expected restrictive-forbidden error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("clearance_namespaced_sink rejects an un-cleared value into a sink called through its namespace", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/clearance_namespaced_sink/main.yoop");
+    assert.ok(
+      errors.some((e) => /parameter 'sql' of 'db\.runQuery' requires kind 'cleared'/.test(e.message)),
+      `expected cross-module namespaced-sink conferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

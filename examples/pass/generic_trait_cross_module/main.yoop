@@ -1,0 +1,15 @@
+// Calls an imported GENERIC trait's method through the trait-qualified form.
+// Compiles and runs, printing "unwrapped 7".
+
+import { Box, IntBox } from "./lib.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    let b: IntBox = { n: 7 };
+    let c: IntBox = Box.unwrap(ref b);
+    printf("unwrapped %d\n", c.n);
+    return 0;
+}

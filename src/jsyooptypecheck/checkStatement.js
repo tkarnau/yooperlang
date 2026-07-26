@@ -20,6 +20,7 @@ import {
   resolveTypeFromName,
   resolveTypeAnnotation,
   formatAnnotation,
+  isIntPrim,
   typeKinds,
   typesEqual,
 } from "./types.js";
@@ -370,6 +371,28 @@ function concretizeInferred(t) {
   return t;
 }
 
+// A struct type captured from an expression site (e.g. a function-call return)
+// may be the pass-A shell, with `implementsTraits`/`methods` still empty.
+// Re-fetch the canonical, fully-resolved version from its home module's
+// structTable so everything downstream of an *inferred* binding type - kind
+// validation, obligation tracking in kindCheck, codegen - sees the populated
+// trait list. Returns the input unchanged when no canonical entry exists (a
+// generic instantiation carries its traits via the registry, not the table).
+// Same technique as `lookupIntoImpl` / the for-in `Iterable` lookup.
+function canonicalizeStruct(type, ctx) {
+  if (!type || type.kind !== typeKinds.struct) return type;
+  const moduleEnv = ctx.typeContext?.moduleEnv;
+  if (type.moduleId && moduleEnv) {
+    const env = moduleEnv.get(type.moduleId);
+    const fromTable = env?.structTable?.get(type.name);
+    if (fromTable) return fromTable;
+  } else if (ctx.typeContext?.structTable) {
+    const fromTable = ctx.typeContext.structTable.get(type.name);
+    if (fromTable) return fromTable;
+  }
+  return type;
+}
+
 function checkLetOrConst(node, scope, ctx) {
   // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
@@ -415,6 +438,11 @@ function checkLetOrConst(node, scope, ctx) {
       pushError(ctx.errors, node, `unknown type "${formatAnnotation(node.typeAnnotation)}"`);
     }
   }
+  // When the type was inferred from a call return (or any expression site), the
+  // struct may be a shell with empty implementsTraits; canonicalize so the kind
+  // machinery below (and kindCheck / codegen) sees the resolved trait list.
+  // No-op for the annotation path, which already yields the canonical struct.
+  declaredType = canonicalizeStruct(declaredType, ctx);
   node.resolvedType = declaredType;
 
   // Resolve kind prefix (phase 6.1, args added in 6.5). null on plain let/const.
@@ -508,10 +536,15 @@ function checkLetOrConst(node, scope, ctx) {
 
   // For trailing-block form, the binding is scoped to the inner block only;
   // declare it there and walk the block's body, then return without leaking
-  // the name into the enclosing scope.
+  // the name into the enclosing scope. An anonymous region block has no
+  // user-visible name, so we open the inner scope and walk it but never
+  // declare the synthetic `$region$N` name (the value is unreferenceable; the
+  // cleanup machinery reaches it by name in codegen, not via scope lookup).
   if (kindType && node.trailingBlock) {
     const inner = pushScope(scope);
-    declareInScope(inner, node.name, declaredType, declKind, node, ctx.errors, kindType);
+    if (!node.anonymousRegion) {
+      declareInScope(inner, node.name, declaredType, declKind, node, ctx.errors, kindType);
+    }
     for (const s of node.trailingBlock.body) {
       validateStatement(s, inner, ctx);
     }
@@ -519,7 +552,12 @@ function checkLetOrConst(node, scope, ctx) {
     return;
   }
 
-  declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors, kindType);
+  // Implicit-block form (no trailing `{}`): the binding lives in the enclosing
+  // scope and its cleanup fires at scope end (LIFO). Anonymous region bindings
+  // skip the declaration for the same reason as above.
+  if (!node.anonymousRegion) {
+    declareInScope(scope, node.name, declaredType, declKind, node, ctx.errors, kindType);
+  }
 }
 
 // Phase 6.3: typecheck `joined h = task_call();` / `pooled h = task_call();`.
@@ -621,8 +659,30 @@ function findScopedIdentInExpr(expr, scope) {
 
 // Validate that a kind-prefixed binding satisfies the kind's clause set.
 function validateKindBinding(node, kindType, declaredType, scope, ctx) {
-  // Phase 6.2: check appliesTo includes "binding".
-  if (!kindType.appliesTo.has("binding")) {
+  const isAnon = node.anonymousRegion === true;
+  // Human-readable subject for diagnostics: an anonymous region block has no
+  // user-visible name (the `$region$N` synthetic name would only confuse).
+  const subject = isAnon
+    ? `the anonymous '${kindType.name}' region`
+    : `binding "${node.name}"`;
+
+  // Region kinds vs. value kinds are disjoint at the use site:
+  //   - anonymous block form (`KIND EXPR { ... }` / `KIND EXPR;`) requires a
+  //     region kind (`appliesTo region`);
+  //   - named binding form (`KIND name = EXPR ...`) requires a value kind
+  //     (`appliesTo binding`), and a region kind is rejected (it has no value
+  //     to name).
+  if (isAnon) {
+    if (!kindType.appliesTo.has("region")) {
+      const sites = [...kindType.appliesTo].join(", ") || "(none)";
+      pushError(ctx.errors, node,
+        `kind '${kindType.name}' does not apply to a region (declared appliesTo: ${sites}); the anonymous '${kindType.name} EXPR { ... }' form requires a region kind. To use it as a named resource, give it a name: '${kindType.name} name = EXPR ...'`);
+    }
+  } else if (kindType.appliesTo.has("region")) {
+    pushError(ctx.errors, node,
+      `kind '${kindType.name}' applies to a region and cannot be bound to a name; drop the name and use the anonymous form: '${kindType.name} EXPR { ... }' (or '${kindType.name} EXPR;')`);
+  } else if (!kindType.appliesTo.has("binding")) {
+    // Phase 6.2: check appliesTo includes "binding".
     const sites = [...kindType.appliesTo].join(", ") || "(none)";
     pushError(ctx.errors, node,
       `kind '${kindType.name}' does not apply to bindings (declared appliesTo: ${sites})`);
@@ -667,7 +727,7 @@ function validateKindBinding(node, kindType, declaredType, scope, ctx) {
       );
       if (!implementsIt) {
         pushError(ctx.errors, node,
-          `binding "${node.name}" has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
+          `${subject} has kind "${kindType.name}" which requires "${reqTrait.name}", but type ${formatType(declaredType)} does not implement "${reqTrait.name}"`);
       }
     }
   }
@@ -957,6 +1017,29 @@ function checkSwitch(node, scope, ctx) {
       ctx.errors,
       node.scrutinee,
       `switch scrutinee must be int, bool, char, a variant, or an enum type; got ${formatType(scrutType)}`,
+    );
+    for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
+    if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);
+    return;
+  }
+
+  // A value-enum scrutinee must be integer-backed: `switch` lowers to the
+  // LLVM `switch` instruction, whose condition must have integer type. A
+  // string-backed enum (`enum Foo<string>`) would otherwise slip through
+  // typecheck and emit `switch ptr ...` IR that clang rejects with a cryptic
+  // "switch condition must have integer type". Reject it here with a real
+  // diagnostic; use `==`/`!=` chains for string-backed enums instead.
+  if (
+    isValueEnum &&
+    !(scrutType.underlying?.kind === typeKinds.prim &&
+      isIntPrim(scrutType.underlying.name))
+  ) {
+    pushError(
+      ctx.errors,
+      node.scrutinee,
+      `cannot switch over ${formatType(scrutType)}: its underlying type is ` +
+        `${formatType(scrutType.underlying)}, but switch requires an ` +
+        `integer-backed enum. Use if/else with == for string-backed enums.`,
     );
     for (const arm of node.arms) validateStatement(arm.body, scope, ctx);
     if (node.defaultArm) validateStatement(node.defaultArm, scope, ctx);

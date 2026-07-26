@@ -1,0 +1,70 @@
+// Region kinds (`appliesTo region`) and anonymous block-owning bindings, plus
+// type inference on a named block-owning binding. `makeGuard` prints on
+// construction and `dispose` prints on teardown, so stdout traces the exact
+// order cleanup fires relative to the block body.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Disposable {
+    function dispose(ref self): void;
+}
+
+type Guard implements Disposable {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`pop ${self.id}\n`);
+    }
+}
+
+// A value kind (named binding) and a region kind (anonymous block) sharing the
+// same Disposable contract - the only difference is the use-site shape.
+kind disposable {
+    appliesTo binding;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+kind ephemeral {
+    appliesTo region;
+    requires Disposable;
+    ownsBlock;
+    mustCall dispose beforeScopeEnd;
+}
+
+function makeGuard(id: int32): Guard {
+    printf(`push ${id}\n`);
+    return { id: id };
+}
+
+// Anonymous explicit block: dispose fires at the closing `}`, before `after`.
+function explicitBlock(): void {
+    ephemeral makeGuard(1) {
+        printf(`inside\n`);
+    }
+    printf(`after\n`);
+}
+
+// Anonymous implicit blocks (no braces): dispose fires at the enclosing scope
+// end, in LIFO order - guard 2 pops before guard 1.
+function implicitLifo(): void {
+    ephemeral makeGuard(1);
+    ephemeral makeGuard(2);
+    printf(`body\n`);
+}
+
+// Named block-owning binding with an INFERRED type (no `: Guard` annotation).
+function namedInfer(): void {
+    disposable g = makeGuard(5) {
+        printf(`use ${g.id}\n`);
+    }
+}
+
+function main(): int32 {
+    explicitBlock();
+    implicitLifo();
+    namedInfer();
+    return 0;
+}

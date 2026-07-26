@@ -26,7 +26,11 @@ export const TokenTags = {
   eof: "eof",
   ident: "ident", // not a keyword
   intLiteral: "intLiteral",
-  strLiteral: "strLiteral", // included wrapping quote characters
+  // single-quoted Unicode scalar, e.g. 'A', '\n', '\x41'. Carries the decoded
+  // codepoint in `intVal`; the parser lowers it to an INT_LITERAL so it pins
+  // like any other untyped int literal (single char == byte against a uint8).
+  charLiteral: "charLiteral",
+  strLiteral: "strLiteral", // double-quoted; included wrapping quote characters
   templateLiteral: "templateLiteral", // backtick-quoted, may contain ${...} interpolations
   floatLiteral: "floatLiteral",
 
@@ -399,6 +403,83 @@ function lexNumericLiteral(src, pos) {
   return res;
 }
 
+// char literal: a single Unicode scalar between single quotes. We commandeer
+// the single quote exclusively for these (double quotes are the string
+// delimiter). The decoded codepoint lands in `intVal`; downstream this is an
+// untyped int literal, so 'A' pins to whatever integer type the context wants
+// and range-checks like any literal (ASCII fits a uint8, astral scalars do
+// not). `pos` points at the opening quote.
+function lexCharLiteral(src, pos) {
+  let res = new LexResult();
+  res.token.start = pos;
+
+  const isHexDigit = (c) => c !== undefined && /^[0-9a-fA-F]$/.test(c);
+  const fail = (msg, len, nextPos) => {
+    res.err = `${msg} at position ${pos}`;
+    res.token.length = len;
+    res.nextPos = nextPos;
+    return res;
+  };
+
+  let p = pos + 1; // past opening quote
+  if (p >= src.length) {
+    return fail("unterminated char literal", 1, src.length);
+  }
+  if (src[p] === "'") {
+    return fail("empty char literal", 2, p + 1);
+  }
+
+  let codepoint;
+  if (src[p] === "\\") {
+    if (p + 1 >= src.length) {
+      return fail("unterminated char literal", src.length - pos, src.length);
+    }
+    const esc = src[p + 1];
+    switch (esc) {
+      case "n": codepoint = 10; p += 2; break;
+      case "r": codepoint = 13; p += 2; break;
+      case "t": codepoint = 9; p += 2; break;
+      case "0": codepoint = 0; p += 2; break;
+      case "\\": codepoint = 92; p += 2; break;
+      case "'": codepoint = 39; p += 2; break;
+      case '"': codepoint = 34; p += 2; break;
+      case "x": {
+        const h1 = src[p + 2];
+        const h2 = src[p + 3];
+        if (!isHexDigit(h1) || !isHexDigit(h2)) {
+          return fail(
+            "invalid \\x escape in char literal (expected two hex digits)",
+            4,
+            Math.min(p + 4, src.length),
+          );
+        }
+        codepoint = parseInt(h1 + h2, 16);
+        p += 4;
+        break;
+      }
+      default:
+        return fail(`unknown escape '\\${esc}' in char literal`, 4, p + 2);
+    }
+  } else {
+    // a single (possibly astral) Unicode scalar
+    codepoint = src.codePointAt(p);
+    p += codepoint > 0xffff ? 2 : 1;
+  }
+
+  if (p >= src.length) {
+    return fail("unterminated char literal", src.length - pos, src.length);
+  }
+  if (src[p] !== "'") {
+    return fail("char literal must contain a single character", p + 1 - pos, p);
+  }
+
+  res.token.tag = TokenTags.charLiteral;
+  res.token.intVal = codepoint;
+  res.token.length = p + 1 - pos; // through closing quote
+  res.nextPos = p + 1;
+  return res;
+}
+
 /*
 **************************
 This is the main logic function for lexing input source code into tokens, it is called in a loop until the input file is consumed, usually. It calls the eater functions.
@@ -442,8 +523,13 @@ export function lexNext(src, pos) {
     }
   }
 
-  // string literal
-  if (ch === '"' || ch === "'" || ch === "`") {
+  // char literal - single quote owns these now (one Unicode scalar)
+  if (ch === "'") {
+    return lexCharLiteral(src, p);
+  }
+
+  // string / template literal
+  if (ch === '"' || ch === "`") {
     let end = scanStringLiteralEnd(src, p);
     if (end === -1) {
       res.err = `unterminated string literal at position ${p}`;

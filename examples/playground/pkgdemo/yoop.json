@@ -1,0 +1,8 @@
+{
+  "name": "pkgdemo",
+  "version": "0.0.0",
+  "description": "consumer project that pulls in yooparse through yoopkg",
+  "dependencies": {
+    "yooparse": "0.1.0"
+  }
+}

@@ -1,0 +1,35 @@
+// Generics with a trait bound.
+//
+// A generic function takes type parameters in angle brackets. The bound
+// `<T implements Display>` says: T can be any type, as long as it
+// implements the Display trait. Inside the body we can therefore call
+// Display's methods on a value of type T.
+//
+// The compiler infers T from the argument at the call site (no turbofish
+// needed), then monomorphizes - it stamps out a concrete version of the
+// function for each type T it is called with.
+
+trait Display {
+    function show(ref self): int32;
+}
+
+type IntBox implements Display {
+    n: int32,
+    function show(ref self): int32 {
+        return self.n;
+    }
+}
+
+function describe<T implements Display>(ref x: T): void {
+    let v: int32 = Display.show(ref x);
+    printf(`value = ${v}\n`);
+}
+
+function main(): int32 {
+    let a: IntBox = { n: 42 };
+    describe(ref a);
+    return 0;
+}
+
+// expected output:
+// value = 42

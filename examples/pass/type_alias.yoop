@@ -1,0 +1,31 @@
+// Transparent type aliases: `type Name = <annotation>;`. An alias has no
+// distinct identity - it resolves straight through to the underlying type, so
+// an aliased value is interchangeable with the underlying type (and an aliased
+// array indexes/`.len`s exactly like the underlying array).
+
+type NodeId = usize;        // alias to a primitive
+type IdList = NodeId[];     // alias to an array of an alias
+type Count = int32;
+
+type Point { x: int32, y: int32 }
+type Pt = Point;            // alias to a struct
+type Coord = Pt;            // alias chain (Coord -> Pt -> Point)
+type Box { p: Pt, n: Count }   // alias in a struct field
+
+function makeP(a: Count, b: Count): Pt {   // alias as param + return type
+  let r: Pt = { x: a, y: b };
+  return r;
+}
+
+function main(): int32 {
+  let a: NodeId = 7;
+  let b: usize = a;             // transparent: NodeId IS usize
+  let xs: IdList = [a, b, 3];
+  let first: NodeId = xs[0];    // aliased-array indexing yields the elem type
+  printf("a=%d b=%d first=%d len=%d\n", a, b, first, xs.len);
+
+  let c: Coord = makeP(3, 4);   // alias chain across a call boundary
+  let bx: Box = { p: c, n: 9 };
+  printf("x=%d y=%d n=%d\n", bx.p.x, bx.p.y, bx.n);
+  return 0;
+}

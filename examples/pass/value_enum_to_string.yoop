@@ -1,0 +1,27 @@
+// Phase 12: a value enum interpolated into a string-producing template
+// literal (one used as a `string`, not inside printf) routes through the
+// same `to_string` shims as its underlying primitive. The `import` forces
+// the multi-module driver so std/core/format + strings autoload.
+
+import * as log from "std/log.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum Level<string> { Info "info", Warn "warn", Error "error" }
+
+enum Color { Red, Green, Blue }
+
+function describe(lvl: Level, col: Color): string {
+    return `level=${lvl} color=${col}`;
+}
+
+function main(): int32 {
+    let msg: string = describe(Level.Error, Color.Green);
+    printf(`${msg}\n`);
+    return 0;
+}
+
+// expected output:
+// level=error color=1

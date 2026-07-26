@@ -10,11 +10,13 @@ import { codegenProgram } from "./jsyoopcodegen/codegen.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
 import { knownAttributeNames } from "./jsyoopattributes/registry.js";
 import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
-import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
+import {
+  RUNTIME_C,
+  RUNTIME_SOURCES,
+  runtimeLinkFlags,
+} from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
-import { dumpAst } from "./dumpAst.js";
-
-const phaseMode = process.env.phaseMode === "true";
+import { dumpAst, dumpAstJson } from "./dumpAst.js";
 
 function main() {
   const { values, positionals } = parseArgs({
@@ -24,6 +26,7 @@ function main() {
       outputFile: { type: "string", short: "o" },
       outputModules: { type: "boolean", short: "a" },
       "dump-ast": { type: "boolean" },
+      "dump-ast-json": { type: "string" },
       "dump-bc": { type: "boolean" },
       "list-attributes": { type: "boolean" },
       "track-heap": { type: "boolean" },
@@ -46,25 +49,29 @@ function main() {
     return;
   }
 
-  let inputFile;
-  if (phaseMode) {
-    inputFile = "phasePrograms/phase_1_3_struct.yoop";
-  } else {
-    inputFile = values.inputFile ?? positionals[0];
-    if (!inputFile || !fs.existsSync(inputFile)) {
-      console.log("input file not found.");
-      process.exit(1);
-    }
+  const inputFile = values.inputFile ?? positionals[0];
+  if (!inputFile || !fs.existsSync(inputFile)) {
+    console.log("input file not found.");
+    process.exit(1);
   }
 
-  
-  const outputFileName = values.outputFile ?? inputFile?.replace(".yoop", "") ?? "output";
-  const modulesOutputFileName = values.outputModules ? `${outputFileName}.m` : null;
+  const outputFileName =
+    values.outputFile ?? inputFile?.replace(".yoop", "") ?? "output";
+  const modulesOutputFileName = values.outputModules
+    ? `${outputFileName}.m`
+    : null;
   const entryAbs = fs.realpathSync(path.resolve(inputFile));
 
   if (values["dump-ast"]) {
     const astOut = values.outputFile ?? `${outputFileName}.ast.html`;
     dumpAst(inputFile, astOut);
+    return;
+  }
+
+  if (values["dump-ast-json"] !== undefined) {
+    // Value is the explicit output path; empty string falls back to a default.
+    const astOut = values["dump-ast-json"] || `${outputFileName}.ast.json`;
+    dumpAstJson(inputFile, astOut);
     return;
   }
 
@@ -82,7 +89,12 @@ function main() {
         formatDiagnostic({
           filePath: inputFile,
           src: fs.readFileSync(entryAbs, "utf8"),
-          loc: { pos: err.pos, line: err.line, column: err.column, length: err.length },
+          loc: {
+            pos: err.pos,
+            line: err.line,
+            column: err.column,
+            length: err.length,
+          },
           message: err.rawMessage ?? err.message,
         }),
       );
@@ -102,7 +114,9 @@ function main() {
 
   if (errors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));
-    console.error(`typecheck failed (${errors.length} error${errors.length === 1 ? "" : "s"}):\n`);
+    console.error(
+      `typecheck failed (${errors.length} error${errors.length === 1 ? "" : "s"}):\n`,
+    );
     for (const error of errors) {
       const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
       console.error(
@@ -144,7 +158,9 @@ function main() {
   runAttributePass(modules, attrErrors);
   if (attrErrors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));
-    console.error(`attribute pass failed (${attrErrors.length} error${attrErrors.length === 1 ? "" : "s"}):\n`);
+    console.error(
+      `attribute pass failed (${attrErrors.length} error${attrErrors.length === 1 ? "" : "s"}):\n`,
+    );
     for (const error of attrErrors) {
       const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
       console.error(

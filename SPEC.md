@@ -21,7 +21,7 @@ Yooperlang separates three ideas that other languages tend to conflate:
 | Layer | Role | Attached to | Example |
 |---|---|---|---|
 | **Trait** | Capability - operations a value supports | Types | `Disposable`, `Task<T>`, `Iterable<T>` |
-| **Kind** | Usage contract - scoping, lifecycle, iteration, sharing rules | Bindings, parameters, fields, functions | `disposable`, `scoped`, `pooled`, `batchable(n)` |
+| **Kind** | Usage contract - scoping, lifecycle, iteration, sharing rules | Bindings, parameters, fields, functions, regions | `disposable`, `ephemeral`, `scoped`, `pooled`, `batchable(n)` |
 | **Type** | Concrete data shape | Variables, fields | `int`, `FileHandle`, `Point` |
 
 A **type** says *what the value is*. A **trait** says *what the value can do*. A
@@ -142,9 +142,24 @@ and ~every example file would otherwise need an extra line.
 | Type | Literal examples | Notes |
 |---|---|---|
 | `bool` | `true`, `false` | |
-| `char` | `'A'`, `'\n'`, `'\x41'` | evaluates to a `uint32` Unicode codepoint |
+| `char` | `'A'`, `'\n'`, `'\x41'` | a Unicode scalar; see below |
 | `string` | `"hello"`, `"line\n"` | immutable, UTF-8, zero-terminated for C interop |
 | `void` | - | function return only |
+
+**Char literals are single-quoted, and the single quote is reserved exclusively
+for them** - strings use double quotes, templates use backticks. A char literal
+is one Unicode scalar between single quotes (`'a'`, `'\n'`, `'\x41'`, or an
+astral scalar like an emoji). Supported escapes: `\n \r \t \0 \\ \' \"` and the
+`\xNN` two-hex-digit byte form. An empty `''` or multi-character `'ab'` literal
+is a lex error.
+
+A char literal evaluates to its codepoint and is **untyped, exactly like an
+integer literal**: it pins to whatever integer type the context requires and is
+range-checked there. So `ch == '/'` against a `uint8` works (`'/'` is `47`,
+fits a byte), while pinning an astral scalar to a `uint8` is the same overflow
+error as `let x: uint8 = 256`. With no pinning context it defaults to `int32`
+like any untyped integer. This is what makes byte-oriented code (a lexer
+scanning `uint8[]`) read as `ch == '\n'` instead of `ch == 10`.
 
 ### Numeric literals
 
@@ -214,6 +229,27 @@ type Result {
 ```
 
 Plain data. No methods defined inside `type`. No inheritance. All fields public.
+
+### Type aliases
+
+```js
+type NodeId = usize;        // alias a primitive
+type IdList = NodeId[];      // RHS is a full type annotation, so arrays work
+type Coord = Point;          // alias a struct (and aliases may chain)
+```
+
+`type Name = <type>;` (note the `=` and the trailing `;`, vs the brace-bodied
+struct form) introduces a *transparent* alias: it has no identity of its own and
+resolves straight through to the underlying type at every use. A `NodeId` IS a
+`usize` everywhere - the two are freely interchangeable, indexing an aliased
+array (`IdList`) yields the underlying element type, and no conversions are
+needed. Aliases are documentation and intent, not a distinct nominal type (so
+they will not stop you passing a raw `usize` where a `NodeId` is expected).
+
+The right-hand side is any type annotation, resolved in the module that declares
+the alias; an unknown target or a cyclic chain (`type A = B; type B = A;`) is a
+compile error at the declaration. Generic aliases (`type Pair<T> = ...`) and
+composed forms (`A & B`, `A | B`) are reserved for a later phase.
 
 ### Arrays
 
@@ -326,6 +362,43 @@ block explicitly, nested in reverse order; the compiler just doesn't make you ty
 A kind-prefixed binding may only have a trailing block when **at least one** of its
 kinds declares `ownsBlock`. For kinds without that clause, no block is allowed.
 
+The `: type` annotation is **optional** on a kind-prefixed binding, exactly as on a
+plain `let` / `const` - the type is inferred from the initializer:
+
+```js
+disposable input = open_input(path) { ... }   // type inferred from open_input
+```
+
+### Region kinds - anonymous block owners
+
+A kind whose definition says `appliesTo region` (rather than `appliesTo binding`)
+governs a **lexical region, not a named value**. It is the right shape when the value
+exists only for the ambient state it installs on entry and undoes on exit - an
+allocator scope, a pushed context, a transaction - and there is nothing to refer to
+inside the block. A region kind is used with **no binding name**:
+
+```js
+// Explicit block - the guard's effect is active inside, undone at `}`
+ephemeral allocator_scope(arena) {
+    const rects = ctx_alloc(n);   // draws from `arena`
+    // ...
+}                                 // dispose() fires here
+
+// Implicit block - effect active for the rest of the enclosing scope (LIFO)
+ephemeral allocator_scope(arena);
+const rects = ctx_alloc(n);
+// dispose() fires at the enclosing scope end
+```
+
+A region kind must declare `ownsBlock` (the region *is* the block) and may not also
+apply to a value site. The two shapes are mutually exclusive at the use site and the
+compiler enforces the distinction: an `appliesTo binding` kind used without a name is
+an error (give it a name), and an `appliesTo region` kind given a name is an error
+(drop it). The cleanup machinery is identical to a name-less `disposable` - the value
+is still constructed and disposed; you simply cannot name it. `ephemeral`
+(`std/core/kinds.yoop`) is the standard-library region kind; define your own for other
+ambient guards.
+
 ### Destructuring (sugar)
 
 Destructuring is **surface sugar**, not a codegen primitive. The callee always returns
@@ -436,6 +509,16 @@ Two builtins on every vtable type:
 - **`VTableName.from(ref x)`** - constructs a vtable value from any
   `ref T` where `T implements TraitName`. The compiler stores `&x` as
   the ctx and pulls the method addresses from `T`'s impl.
+- **`VTableName.fromFn(f1, f2, ...)`** (Phase 10.K) - constructs a vtable
+  value directly from named functions, one per trait method in declaration
+  order, with no struct + impl boilerplate. Each function's signature must
+  match the corresponding method slot (the trait method minus `ref self`).
+  The functions are stateless, so the ctx slot is null; the compiler emits a
+  ctx-dropping shim around each function so the uniform ctx-first dispatch
+  convention still calls them. fromFn-built and from(ref struct)-built values
+  share the same nominal vtable type, so one array can hold a mix of both.
+  Arguments must be named functions (so their address is known statically),
+  not runtime function-pointer values.
 - **`VTableName.method(ref v, ...)`** - dispatches through the vtable's
   method slot. Equivalent to `TraitName.method(ref v, ...)` where v is
   the vtable value; both forms produce the same IR.
@@ -463,10 +546,31 @@ type Handler {
 }
 ```
 
+A function-value type may be wrapped in parentheses to form a type group, so
+an array suffix attaches to the whole function type rather than its return
+type (Phase 10.K). This is the way to spell an **array of function pointers**:
+
+```js
+// array of predicates - each element is a (uint8) => bool function pointer
+preds: ((ch: uint8) => bool)[]
+```
+
+Without the grouping parens, `(ch: uint8) => bool[]` parses as a function
+returning `bool[]` (the return type is parsed greedily). The grouping form
+`( T )` works for any type, but its only load-bearing use is lifting an array
+suffix out past a `=>`.
+
 The form is **only** valid in type position - `=>` is not a closure-literal
-syntax (closures aren't planned). Function values flow into vtables today;
-broader function-value materialization (taking the address of a top-level
-function by name) is a future incremental extension.
+syntax (closures aren't planned). Function-value materialization (Phase
+10.X.2) lets a bare top-level function name be used as a value wherever a
+matching `(p: T) => R` is expected - a struct field initializer
+(`{ handle: my_func }`), a function-pointer parameter
+(`count_where(src, isDigit)`), or a `VTableName.fromFn(...)` argument. A
+function-pointer parameter or local is itself callable by name -
+`pred(ch)` is an indirect call through the stored pointer. A named
+function captures nothing, so it materializes to a plain code-pointer address
+with no environment or allocation - the non-capturing case that needs no
+closure machinery.
 
 ---
 
@@ -534,7 +638,8 @@ Multiple `requires` are written as separate clauses
 
 | Clause | Meaning |
 |---|---|
-| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`. Default: any value-site. |
+| `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`, or the standalone `region`. Default: any value-site. |
+| `appliesTo region` | The kind governs a lexical region, not a named value: used only in the anonymous block form (`KIND EXPR { ... }` / `KIND EXPR;`), with no binding. Requires `ownsBlock`; mutually exclusive with the value sites above. See §4 "Region kinds". |
 | `requires Trait` | Values of this kind must implement the named trait. Repeat to require multiple. |
 | `provides Trait` | The kind supplies the trait's implementation (can transform its initializer). |
 | `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
@@ -1361,8 +1466,13 @@ int             float
 int is 32 bit signed int
 float is 32 bit float
 
-Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Kind and trait names are conventionally
-`snake_case` and `PascalCase` respectively.
+Identifiers: `[A-Za-z_][A-Za-z0-9_]*`. Naming convention: types, traits,
+variants / enums / unions, vtables, type parameters, and `variant` case names
+are `PascalCase`; functions, methods, local bindings, parameters, fields, and
+kind names are `camelCase`; value-`enum` case names and module-level `const`
+declarations are `SCREAMING_SNAKE`. `snake_case` is reserved for file and folder
+names - it is not used in identifiers (the underscore remains legal in the
+grammar above). See CLAUDE.md "Naming and file conventions".
 
 Contextual keywords (reserved only in their syntactic positions): `in`, `layout`,
 `restricts`, `provides`, `requires`, `appliesTo`, `ownsBlock`, `mustCall`,

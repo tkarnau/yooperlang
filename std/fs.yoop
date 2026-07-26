@@ -57,6 +57,7 @@ extern "C" from "stdio.h" {
 extern "C" from "yoop_runtime" {
     function yoop_io_mkdir(path: string): c_int;
     function yoop_io_exists(path: string): c_int;
+    function yoop_io_normalize_real_path(path: string, ref out: string): c_int;
     function yoop_io_file_size(path: string): int64;
 }
 
@@ -217,4 +218,35 @@ export function exists(path: string): bool {
 // common "stat the file I just wrote" path a single read.)
 export function file_size(path: string): int64 {
     return yoop_io_file_size(path);
+}
+
+// odd helpers for now...
+export function hasYoopFileNameSuffix(s: string): bool {
+  const n = s.len;
+  if (n < 5) {
+    return false;
+  }
+  switch (str.string_slice(s, n - 5, n)) {
+    case Result.Ok { value: tail }: { return str.string_eq(tail, ".yoop"); }
+    case Result.Err { error: _ }: { return false; }
+  }
+}
+
+export function dirName(path: string): string {
+  const lastSlashIndex = str.lastIndexOf(path, "/");
+  switch(str.string_slice(path, 0, lastSlashIndex)) {
+    case Result.Ok { value: d }: { return d; }
+    case Result.Err { error: _ }: { return ""; }
+  }
+}
+
+export function normalizePath(path: string): string {
+  let outputString = "";
+  const normalizeResult = yoop_io_normalize_real_path(path, ref outputString);
+
+  if (normalizeResult != 0) {
+    return "";
+  } else {
+    return outputString;
+  }
 }

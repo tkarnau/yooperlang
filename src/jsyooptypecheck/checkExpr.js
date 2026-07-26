@@ -225,14 +225,42 @@ function resolveIdent(node, scope, ctx) {
 
 // `a + b`, `a == b`, `a && b` - recurses into both sides, then asks
 // unifyArith for the resulting type given the operator.
+// Render a binary-op token tag (`node.op`, e.g. "lt") back to its source
+// symbol for diagnostics. Falls back to the tag itself for anything unmapped.
+const BIN_OP_SYMBOLS = {
+  plus: "+", minus: "-", mult: "*", divide: "/", modulus: "%",
+  eqeq: "==", neq: "!=", lt: "<", gt: ">", lte: "<=", gte: ">=",
+  andand: "&&", oror: "||", pipe: "|", amp: "&", caret: "^",
+  lshift: "<<", rshift: ">>",
+};
+function binOpSymbol(op) {
+  return BIN_OP_SYMBOLS[op] ?? op;
+}
+
 function resolveBinary(node, scope, ctx) {
   const leftType = resolveExprType(node.left, scope, ctx);
   const rightType = resolveExprType(node.right, scope, ctx);
   const resultType = unifyArith(leftType, rightType, node.op);
+  // unifyArith is a pure function with no error channel: it returns null for
+  // every operand-type mismatch (e.g. `int32 < usize` - both typed, not
+  // equal, no implicit widening). resolveExprType must never return null (the
+  // statement checkers dereference `.kind` on every result), so convert a null
+  // into a clear diagnostic + ErrorType here. Suppress the secondary error if
+  // an operand already failed - the root cause was reported there.
+  if (!resultType) {
+    if (leftType.kind !== typeKinds.error && rightType.kind !== typeKinds.error) {
+      pushError(
+        ctx.errors,
+        node,
+        `operator "${binOpSymbol(node.op)}" cannot be applied to ${formatType(leftType)} and ${formatType(rightType)}`,
+      );
+    }
+    return setType(node, ErrorType());
+  }
   // Pin untyped literal operands to the unified type so downstream (codegen)
   // doesn't have to second-guess their precision. E.g. `b.hue + 0.015` where
   // b.hue is float32 should coerce 0.015 from untypedFloat to float32.
-  if (resultType && resultType.kind === typeKinds.prim) {
+  if (resultType.kind === typeKinds.prim) {
     coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
     coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
   }
@@ -428,6 +456,20 @@ function resolveCall(node, scope, ctx) {
     }
   }
 
+  // Phase 10.K: a bare identifier callee that resolves to an in-scope binding
+  // of FunctionPointerType is an indirect call through that binding - a
+  // function-pointer parameter or local (`pred(ch)` where `pred:
+  // (ch: uint8) => bool`). This is the bare-identifier sibling of the
+  // FIELD_ACCESS fn-ptr-field call above. Module-level functions live in
+  // moduleSymbols (checked below), not the lexical scope, so a real function
+  // call never reaches here.
+  if (typeof callee === "string") {
+    const binding = lookupInScope(scope, callee);
+    if (binding && binding.type?.kind === typeKinds.functionPointer) {
+      return resolveFunctionPointerCall(node, binding.type, scope, ctx);
+    }
+  }
+
   const sig = ctx.typeContext.moduleSymbols.get(callee) ?? KNOWN_EXTERNS[callee];
   if (!sig) {
     // Phase 7.4: bare-form `m(ref x)` is no longer a trait dispatch path.
@@ -501,6 +543,10 @@ function resolveFunctionPointerCall(node, fptType, scope, ctx) {
     );
   }
   node.fnPointerCall = true;
+  // Phase 10.K: stash the FPT so codegen has it for the bare-identifier
+  // callee case (where node.callee is a string with no .resolvedType, unlike
+  // the FIELD_ACCESS field case which carries its own resolved type).
+  node.fnPointerType = fptType;
   return setType(node, fptType.returnType);
 }
 
@@ -593,24 +639,50 @@ function resolveUnary(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
-// Re-fetch the canonical, fully-resolved struct from its module's
-// structTable. The struct flowing out of an imported function's return
-// type (or an enum payload, etc.) may be a pass-A shell with an empty
+// Re-fetch the canonical, fully-resolved nominal type from its module's
+// structTable / variantTable. The type flowing out of an imported function's
+// return type (or an enum payload, etc.) may be a pass-A shell with an empty
 // `implementsTraits`, so a direct `.implementsTraits` read misses the
 // trait. Mirrors the technique in `lookupIntoImpl` and
 // `resolveTraitQualifiedCall`.
-function canonicalStructType(structType, ctx) {
-  if (!structType || structType.kind !== typeKinds.struct) return structType;
+//
+// Phase 13.D: variants share the implementsTraits surface with structs, so
+// the same re-fetch applies - only the backing table differs.
+function canonicalNominalType(nominalType, ctx) {
+  if (!nominalType) return nominalType;
+  const isStruct = nominalType.kind === typeKinds.struct;
+  const isVariant = nominalType.kind === typeKinds.variant;
+  if (!isStruct && !isVariant) return nominalType;
+  const tableIn = (src) => (isStruct ? src?.structTable : src?.variantTable);
   const moduleEnv = ctx.typeContext?.moduleEnv;
-  if (structType.moduleId && moduleEnv) {
-    const env = moduleEnv.get(structType.moduleId);
-    const fromTable = env?.structTable?.get(structType.name);
+  if (nominalType.moduleId && moduleEnv) {
+    const fromTable = tableIn(moduleEnv.get(nominalType.moduleId))?.get(
+      nominalType.name,
+    );
     if (fromTable) return fromTable;
-  } else if (ctx.typeContext?.structTable) {
-    const fromTable = ctx.typeContext.structTable.get(structType.name);
+  } else {
+    const fromTable = tableIn(ctx.typeContext)?.get(nominalType.name);
     if (fromTable) return fromTable;
   }
-  return structType;
+  return nominalType;
+}
+
+// Phase 13.D: name the field behind a failed interpolation inside a
+// @derive(display)-generated body. Struct bodies interpolate `self.<field>`
+// directly; variant arms interpolate a pattern-bound local, whose field
+// label the expansion records in the template node's `deriveLabels`.
+function derivedFieldLabel(templateNode, expr) {
+  if (
+    expr?.kind === ASTNodeKind.FIELD_ACCESS &&
+    expr.object?.kind === ASTNodeKind.IDENT &&
+    expr.object.name === "self"
+  ) {
+    return expr.field;
+  }
+  if (expr?.kind === ASTNodeKind.IDENT) {
+    return templateNode.deriveLabels?.[expr.name] ?? null;
+  }
+  return null;
 }
 
 // `` `hi ${name}` `` - every interpolation must be a printable scalar
@@ -625,16 +697,35 @@ function resolveTemplateLiteral(node, scope, ctx) {
       const exprType = resolveExprType(part.expr, scope, ctx);
       if (isPrintableInTemplate(exprType)) continue;
       // Phase 9.F: try Display. Look for a `Display` trait on the
-      // (deref'd) struct's implementsTraits; synthesize a trait call.
-      // Re-fetch the canonical struct first - an imported type's shell
-      // can have an empty implementsTraits (see canonicalStructType).
+      // (deref'd) type's implementsTraits; synthesize a trait call.
+      // Re-fetch the canonical type first - an imported type's shell
+      // can have an empty implementsTraits (see canonicalNominalType).
+      // Phase 13.D: variants dispatch here too (same implementsTraits
+      // surface, same mangling), so a derived or hand-written variant
+      // Display impl is interpolatable.
       const derefed = exprType.kind === typeKinds.ref ? exprType.inner : exprType;
-      const innerType = canonicalStructType(derefed, ctx);
+      const innerType = canonicalNominalType(derefed, ctx);
       if (
-        innerType.kind === typeKinds.struct &&
+        (innerType.kind === typeKinds.struct ||
+          innerType.kind === typeKinds.variant) &&
         (innerType.implementsTraits ?? []).some((t) => t.name === "Display")
       ) {
         part.expr = synthesizeDisplayCall(part.expr, innerType, exprType);
+        continue;
+      }
+      // Phase 13.D: inside a @derive(display)-generated body the user never
+      // wrote this template, so the generic wording ("template literal
+      // interpolation must be...") names nothing they can act on. Point at
+      // the offending field and the two ways to make it printable.
+      if (node.deriveOwner) {
+        const label = derivedFieldLabel(node, part.expr);
+        pushError(
+          ctx.errors,
+          part.expr,
+          `@derive(display) on "${node.deriveOwner}" cannot print ${
+            label ? `field "${label}"` : "a field"
+          } of type ${formatType(exprType)} - add @derive(display) to that type, give it a manual Display impl, or write ${node.deriveOwner}'s to_string by hand`,
+        );
         continue;
       }
       pushError(
@@ -659,7 +750,8 @@ function resolveTemplateLiteral(node, scope, ctx) {
 // resolveTraitQualifiedCall does for source-written trait calls.
 //
 // `exprType` is the type of `originalExpr` (used to materialize the ref
-// arg if needed); `structType` is the (deref'd) struct that carries the
+// arg if needed); `structType` is the (deref'd) struct OR variant (Phase
+// 13.D - both carry implementsTraits and mangle identically) that holds the
 // Display impl - its mangled symbol is what the call dispatches to.
 function synthesizeDisplayCall(originalExpr, structType, exprType) {
   // Arg = `ref originalExpr` when expr isn't already a ref; pass
@@ -2530,6 +2622,14 @@ export function lookupVTableByName(name, ctx) {
 //     vtable value, but lets callers use the vtable type as the dispatch
 //     namespace (matches the library-design surface in §8 q1).
 function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
+  // Phase 10.K: `VTableName.fromFn(f1, f2, ...)` - build a vtable value
+  // directly from named functions (one per trait method, in declaration
+  // order), skipping the struct + impl boilerplate. The ctx slot is null
+  // (the functions are stateless); codegen wraps each in a ctx-dropping
+  // shim so the uniform ctx-first dispatch convention still calls them.
+  if (methodName === "fromFn") {
+    return resolveVTableFromFn(node, vtableType, scope, ctx);
+  }
   if (methodName !== "from") {
     // Forwarding to trait dispatch: synthesize a trait reference and route
     // through resolveTraitQualifiedCall, which already knows how to handle
@@ -2602,6 +2702,49 @@ function resolveVTableBuiltinCall(node, vtableType, methodName, scope, ctx) {
   return setType(node, vtableType);
 }
 
+// Phase 10.K: `VTableName.fromFn(f1, f2, ...)`. One named function per trait
+// method, in declaration order. Each function's FuncType must be assignable
+// to the matching method's function-pointer slot (params + return). Args must
+// be *named functions* (FuncType) - not runtime function-pointer values - so
+// codegen can take their address statically and synthesize the ctx-dropping
+// shim. The result is a vtable value with a null ctx.
+function resolveVTableFromFn(node, vtableType, scope, ctx) {
+  const expected = vtableType.methodOrder.length;
+  if (node.args.length !== expected) {
+    pushError(
+      ctx.errors,
+      node,
+      `\`${vtableType.name}.fromFn(...)\` expects ${expected} function argument(s) (one per method of trait "${vtableType.traitName}"), got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, vtableType);
+  }
+  for (let i = 0; i < node.args.length; i++) {
+    const arg = node.args[i];
+    const argType = resolveExprType(arg, scope, ctx);
+    if (!argType || argType.kind === typeKinds.error) continue;
+    if (argType.kind !== typeKinds.func) {
+      pushError(
+        ctx.errors,
+        node,
+        `\`${vtableType.name}.fromFn(...)\` argument ${i + 1} must be a named function, got ${formatType(argType)}`,
+      );
+      continue;
+    }
+    const fieldFpt = vtableType.fields[i].type;
+    if (fieldFpt.kind !== typeKinds.functionPointer) continue; // vtable decl already errored
+    if (!isAssignable(fieldFpt, argType)) {
+      pushError(
+        ctx.errors,
+        node,
+        `\`${vtableType.name}.fromFn(...)\` argument ${i + 1} has type ${formatType(argType)}, which does not match method "${vtableType.methodOrder[i]}" of trait "${vtableType.traitName}" (expected ${formatType(fieldFpt)})`,
+      );
+    }
+  }
+  node.vtableFromFnBuilder = { vtableType };
+  return setType(node, vtableType);
+}
+
 function lookupTraitByName(name, ctx) {
   const tc = ctx.typeContext;
   const local = tc.traitTable?.get(name);
@@ -2619,7 +2762,11 @@ function lookupTraitByName(name, ctx) {
   if (tc.genericTraitTable?.has(name)) {
     return { isGenericTraitRef: true, name };
   }
-  if (imp && imp.kind === "trait") {
+  // Imported generic trait. imports.js registers these with kind
+  // "generic-trait" (not "trait"), so match that; the receiver carries the
+  // instantiated TraitType, so the name-only marker is enough for
+  // resolveTraitQualifiedCall to resolve the concrete method.
+  if (imp && imp.kind === "generic-trait") {
     const srcEnv = tc.moduleEnv?.get(imp.fromModuleId);
     if (srcEnv?.genericTraitTable?.has(imp.exportName)) {
       return { isGenericTraitRef: true, name: imp.exportName };
@@ -2798,7 +2945,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
   // standalone type (resolveOrphanStructLiteral would emit "struct literal
   // has no target type"), but the param's substituted type after
   // unification IS the target. Stash these indices and check them in
-  // the second pass once we know T. See plans/yoopbinder-papercuts.md
+  // the second pass once we know T. See plans/archive/yoopbinder-papercuts.md
   // Issue 2.
   const argTypes = [];
   const deferredStructLits = new Set();
@@ -2836,7 +2983,11 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     unifyAgainstTypeParam(sig.returnType, expectedReturnType, generic.id, subst);
   }
 
-  // Every type param must be bound.
+  // Every type param must be bound. Canonicalize each struct arg - a struct
+  // captured through an imported instantiation (e.g. the elem type inside a
+  // Vec<T> field) can be a pass-A shell with empty `implementsTraits` /
+  // `methods`, which would fail the bound check below and leave codegen's
+  // bound-method rewrite unable to find the impl after substitution.
   const concreteArgs = [];
   for (const pn of generic.paramNames) {
     const bound = subst.get(pn);
@@ -2848,7 +2999,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       );
       return setType(node, ErrorType());
     }
-    concreteArgs.push(bound);
+    concreteArgs.push(canonicalNominalType(bound, ctx));
   }
 
   // Phase 7.2 / 9.J: call-site bound check. Runs before instantiation so the

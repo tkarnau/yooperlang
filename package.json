@@ -1,7 +1,28 @@
 {
   "name": "yooperlang",
+  "version": "0.1.0",
+  "description": "A systems language with a TypeScript feel - no garbage collector, structs plus free functions, traits and kinds. Compiles to LLVM IR.",
   "type": "module",
-  "private": true,
+  "license": "MIT",
+  "author": "Tom Karnau",
+  "homepage": "https://tkarnau.github.io/yooperlang/",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/tkarnau/yooperlang.git"
+  },
+  "bugs": {
+    "url": "https://github.com/tkarnau/yooperlang/issues"
+  },
+  "keywords": [
+    "compiler",
+    "programming-language",
+    "systems-programming",
+    "llvm",
+    "language"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
   "scripts": {
     "test": "node --test --test-reporter=spec 'src/**/*.test.js'",
     "test:unit": "node --test --test-reporter=spec 'src/**/!(e2e).test.js'",
