@@ -23,10 +23,27 @@
   "engines": {
     "node": ">=18"
   },
+  "bin": {
+    "yoopiler_alpha": "src/yoopiler.js"
+  },
+  "files": [
+    "src",
+    "std",
+    "runtime",
+    "SPEC.md",
+    "!src/**/*.test.js",
+    "!runtime/tests"
+  ],
   "scripts": {
     "test": "node --test --test-reporter=spec 'src/**/*.test.js'",
     "test:unit": "node --test --test-reporter=spec 'src/**/!(e2e).test.js'",
     "test:e2e": "node --test --test-reporter=spec src/e2e.test.js",
-    "lsp": "node src/lsp/server.js"
+    "lsp": "node src/lsp/server.js",
+    "build:sea": "node scripts/build_sea.mjs",
+    "package": "node scripts/package_release.mjs"
+  },
+  "devDependencies": {
+    "esbuild": "^0.28.1",
+    "postject": "^1.0.0-alpha.6"
   }
 }

@@ -18,7 +18,13 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <sys/types.h>
+#include <time.h>
 #include <unistd.h>
+
+#ifndef _WIN32
+#include <grp.h>
+#include <pwd.h>
+#endif
 
 // Create a single directory with standard 0755 permissions. The mode bits
 // are computed from the POSIX S_* symbols (the headers resolve them to the
@@ -135,6 +141,75 @@ int64_t yoop_io_stat2(const char* path, int32_t* is_dir) {
     return 0;
 }
 
+// Copy a C string into a fresh malloc'd one. The yoop side treats every
+// string as owned-and-leaked, so the helpers below hand back allocations
+// rather than pointers into a static or libc-owned buffer.
+static char* yoop_io_dup(const char* s) {
+    size_t n = strlen(s);
+    char* out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    memcpy(out, s, n + 1);
+    return out;
+}
+
+// The long-listing sibling of yoop_io_stat2: everything an `ls -l` row needs
+// from one lstat. Writes the entry kind into *kind (0 file, 1 dir, 2 symlink,
+// 3 other - derived from the S_IS* macros so yoop never mirrors platform type
+// bits), the portable 0777 permission mask into *perm, hard-link count into
+// *nlink, owner/group ids into *uid/*gid, and mtime seconds into *mtime.
+// Returns the byte size, or -1 if the lstat failed (out params are zeroed
+// first, so a failed probe reads as an empty "other"). All out params are
+// required.
+int64_t yoop_io_stat_meta(const char* path, int32_t* kind, int32_t* perm,
+                          int32_t* nlink, int32_t* uid, int32_t* gid,
+                          int64_t* mtime) {
+    struct stat st;
+    *kind = 3; *perm = 0; *nlink = 0; *uid = 0; *gid = 0; *mtime = 0;
+    if (lstat(path, &st) != 0) return -1;
+    if (S_ISREG(st.st_mode))      *kind = 0;
+    else if (S_ISDIR(st.st_mode)) *kind = 1;
+    else if (S_ISLNK(st.st_mode)) *kind = 2;
+    *perm  = (int32_t)(st.st_mode & 0777);
+    *nlink = (int32_t)st.st_nlink;
+    *uid   = (int32_t)st.st_uid;
+    *gid   = (int32_t)st.st_gid;
+    *mtime = (int64_t)st.st_mtime;
+    return (int64_t)st.st_size;
+}
+
+// Owner / group name for an id, falling back to the id in decimal when the
+// passwd / group database has no entry for it (the same thing ls does).
+// Caller owns the returned string.
+char* yoop_io_user_name(int32_t uid) {
+    struct passwd* pw = getpwuid((uid_t)uid);
+    if (pw && pw->pw_name) return yoop_io_dup(pw->pw_name);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", (int)uid);
+    return yoop_io_dup(buf);
+}
+
+char* yoop_io_group_name(int32_t gid) {
+    struct group* gr = getgrgid((gid_t)gid);
+    if (gr && gr->gr_name) return yoop_io_dup(gr->gr_name);
+    char buf[32];
+    snprintf(buf, sizeof(buf), "%d", (int)gid);
+    return yoop_io_dup(buf);
+}
+
+// Local-time rendering of a unix timestamp in ls's two shapes: "Mon DD HH:MM"
+// for anything inside the last six months, "Mon DD  YYYY" for older entries
+// (and for anything implausibly far in the future). Caller owns the result.
+char* yoop_io_time_string(int64_t epoch) {
+    time_t t = (time_t)epoch;
+    struct tm* lt = localtime(&t);
+    if (!lt) return yoop_io_dup("");
+    double age = difftime(time(NULL), t);
+    const char* form = (age > 15552000.0 || age < -3600.0) ? "%b %e  %Y" : "%b %e %H:%M";
+    char buf[64];
+    if (strftime(buf, sizeof(buf), form, lt) == 0) buf[0] = '\0';
+    return yoop_io_dup(buf);
+}
+
 #else  // _WIN32: no dirent backend yet (see header comment).
 
 void*       yoop_io_opendir(const char* path) { (void)path; return NULL; }
@@ -143,6 +218,16 @@ void        yoop_io_closedir(void* d)         { (void)d; }
 int64_t     yoop_io_stat2(const char* path, int32_t* is_dir) {
     (void)path; if (is_dir) *is_dir = 0; return -1;
 }
+int64_t     yoop_io_stat_meta(const char* path, int32_t* kind, int32_t* perm,
+                              int32_t* nlink, int32_t* uid, int32_t* gid,
+                              int64_t* mtime) {
+    (void)path;
+    *kind = 3; *perm = 0; *nlink = 0; *uid = 0; *gid = 0; *mtime = 0;
+    return -1;
+}
+char*       yoop_io_user_name(int32_t uid)  { (void)uid; return _strdup(""); }
+char*       yoop_io_group_name(int32_t gid) { (void)gid; return _strdup(""); }
+char*       yoop_io_time_string(int64_t epoch) { (void)epoch; return _strdup(""); }
 
 #endif
 

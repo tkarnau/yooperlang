@@ -31,6 +31,7 @@
 import.unsafe;
 
 import { Disposable, disposable } from "./core/kinds.yoop";
+import { Iterable, IterStep } from "./core/traits.yoop";
 import { Result } from "./core/types.yoop";
 import * as vec, { Vec } from "./core/vec.yoop";
 import * as intr from "./core/intrinsics.yoop";
@@ -59,6 +60,22 @@ extern "C" from "yoop_runtime" {
     function yoop_io_exists(path: string): c_int;
     function yoop_io_normalize_real_path(path: string, ref out: string): c_int;
     function yoop_io_file_size(path: string): int64;
+
+    function yoop_io_opendir(path: string): unsafe_ptr;
+    function yoop_io_readdir(d: unsafe_ptr): string;
+    function yoop_io_closedir(d: unsafe_ptr): void;
+    function yoop_io_stat_meta(
+        path: string,
+        kind: unsafe_ptr<int32>,
+        perm: unsafe_ptr<int32>,
+        nlink: unsafe_ptr<int32>,
+        uid: unsafe_ptr<int32>,
+        gid: unsafe_ptr<int32>,
+        mtime: unsafe_ptr<int64>
+    ): int64;
+    function yoop_io_user_name(uid: int32): string;
+    function yoop_io_group_name(gid: int32): string;
+    function yoop_io_time_string(epoch: int64): string;
 }
 
 const SEEK_SET: c_int = 0;
@@ -218,6 +235,82 @@ export function exists(path: string): bool {
 // common "stat the file I just wrote" path a single read.)
 export function file_size(path: string): int64 {
     return yoop_io_file_size(path);
+}
+
+// ----- directories -------------------------------------------------------
+
+// A directory opened for iteration. `for name in dir` yields each entry name
+// (an owned copy - readdir's own buffer is reused per call), skipping "."
+// and "..". Hidden entries are NOT filtered; that is the caller's policy.
+// Iterating consumes the stream, so a second pass needs a second openDir.
+export type DirIter implements (Disposable, Iterable<string>) propagates<disposable> {
+    handle: unsafe_ptr,
+
+    function next(ref self): IterStep<string> {
+        if (self.handle == null) { return IterStep.Done; }
+        let name: string = yoop_io_readdir(self.handle);
+        if (name.len == 0) { return IterStep.Done; }
+        return IterStep.Yield { value: str.string_concat(name, "") };
+    }
+
+    function dispose(ref self): void {
+        if (self.handle != null) {
+            yoop_io_closedir(self.handle);
+            self.handle = null;
+        }
+    }
+}
+
+// Open `path` for iteration. A path that isn't a readable directory yields an
+// iterator that is immediately Done rather than an error - check `exists`
+// first when the difference matters.
+export function openDir(path: string): DirIter propagates<disposable> {
+    return { handle: yoop_io_opendir(path) };
+}
+
+// What one lstat tells you about a path. `ok` is false when the probe failed
+// (missing, or a permission-denied parent); every other field is then zero.
+// Symlinks are NOT followed, so `isLink` describes the link itself.
+export type FileMeta {
+    ok:     bool,
+    isDir:  bool,
+    isLink: bool,
+    size:   int64,
+    perm:   int32,
+    links:  int32,
+    owner:  string,
+    group:  string,
+    mtime:  int64,
+}
+
+export function statPath(path: string): FileMeta {
+    let tag:   int32 = 0;
+    let perm:  int32 = 0;
+    let links: int32 = 0;
+    let uid:   int32 = 0;
+    let gid:   int32 = 0;
+    let mtime: int64 = 0;
+    let size: int64 = yoop_io_stat_meta(path, &tag, &perm, &links, &uid, &gid, &mtime);
+    if (size < 0) {
+        return { ok: false, isDir: false, isLink: false, size: 0, perm: 0, links: 0, owner: "", group: "", mtime: 0 };
+    }
+    return {
+        ok: true,
+        isDir: tag == 1,
+        isLink: tag == 2,
+        size: size,
+        perm: perm,
+        links: links,
+        owner: yoop_io_user_name(uid),
+        group: yoop_io_group_name(gid),
+        mtime: mtime,
+    };
+}
+
+// Unix seconds rendered in local time the way `ls -l` does it: "Mon DD HH:MM"
+// inside the last six months, "Mon DD  YYYY" beyond it.
+export function timeString(epoch: int64): string {
+    return yoop_io_time_string(epoch);
 }
 
 // odd helpers for now...

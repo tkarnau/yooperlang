@@ -31,31 +31,71 @@ function activate(context) {
   // walk us out of the repo when joining `..`.
   const extDir = fs.realpathSync(__dirname);
   const repoRoot = path.resolve(extDir, "..", "..");
+  const standaloneBin = findStandaloneBinary(extDir);
+  if (standaloneBin) log("standalone yoopiler binary =", standaloneBin);
 
-  startLspClient(context, repoRoot);
-  registerDebugger(context, repoRoot);
+  startLspClient(context, repoRoot, standaloneBin);
+  registerDebugger(context, repoRoot, standaloneBin);
 }
 
-function startLspClient(context, repoRoot) {
+// Locate a packaged yoopiler binary, which lets this extension work with no
+// repo checkout and no Node install. Two sources, in order:
+//
+//   1. The `yoopiler.binaryPath` setting, if the user set one.
+//   2. A sibling binary, for the copy of this extension shipped inside a
+//      distribution: <dist>/editor/vscode/ next to <dist>/bin/yoopiler_alpha.
+//
+// Returns null when neither is found, in which case we fall back to driving
+// the repo's JS directly through Node (the checkout workflow).
+function findStandaloneBinary(extDir) {
+  const configured = vscode.workspace
+    .getConfiguration("yoopiler")
+    .get("binaryPath");
+  if (configured && configured.length > 0) {
+    if (fs.existsSync(configured)) return configured;
+    vscode.window.showWarningMessage(
+      `yoopiler.binaryPath is set to "${configured}" but nothing is there. Falling back to the repo checkout.`,
+    );
+  }
+  const exe = process.platform === "win32" ? "yoopiler_alpha.exe" : "yoopiler_alpha";
+  const sibling = path.resolve(extDir, "..", "..", "bin", exe);
+  return fs.existsSync(sibling) ? sibling : null;
+}
+
+function startLspClient(context, repoRoot, standaloneBin) {
   try {
     const serverModule = path.join(repoRoot, "src", "lsp", "server.js");
-    log("lsp serverModule =", serverModule);
 
-    if (!fs.existsSync(serverModule)) {
-      const msg = `Yoopiler LSP: server file not found at ${serverModule}`;
+    // Prefer the repo's server.js when it exists (edits to the compiler show
+    // up without a rebuild); otherwise drive the packaged binary's `--lsp`
+    // mode, which serves the identical protocol from the bundled compiler.
+    let serverOptions;
+    if (fs.existsSync(serverModule)) {
+      log("lsp serverModule =", serverModule);
+      serverOptions = {
+        run: { module: serverModule, transport: TransportKind.stdio },
+        debug: {
+          module: serverModule,
+          transport: TransportKind.stdio,
+          options: { execArgv: ["--inspect=6009"] },
+        },
+      };
+    } else if (standaloneBin) {
+      log("lsp via standalone binary =", standaloneBin, "--lsp");
+      const spawn = {
+        command: standaloneBin,
+        args: ["--lsp"],
+        transport: TransportKind.stdio,
+      };
+      serverOptions = { run: spawn, debug: spawn };
+    } else {
+      const msg =
+        `Yoopiler LSP: no language server found. Looked for ${serverModule} ` +
+        `and a packaged binary. Set "yoopiler.binaryPath" to your yoopiler_alpha binary.`;
       log(msg);
       vscode.window.showErrorMessage(msg);
       return;
     }
-
-    const serverOptions = {
-      run: { module: serverModule, transport: TransportKind.stdio },
-      debug: {
-        module: serverModule,
-        transport: TransportKind.stdio,
-        options: { execArgv: ["--inspect=6009"] },
-      },
-    };
 
     const clientOptions = {
       documentSelector: [{ scheme: "file", language: "yoop" }],
@@ -88,8 +128,8 @@ function startLspClient(context, repoRoot) {
   }
 }
 
-function registerDebugger(context, repoRoot) {
-  const provider = new YoopConfigurationProvider(repoRoot);
+function registerDebugger(context, repoRoot, standaloneBin) {
+  const provider = new YoopConfigurationProvider(repoRoot, standaloneBin);
   context.subscriptions.push(
     vscode.debug.registerDebugConfigurationProvider("yoop", provider),
   );
@@ -121,8 +161,9 @@ function registerDebugger(context, repoRoot) {
 // (in the substituted-variables pass) compiles the .yoop file and rewrites
 // `program` to point at the resulting binary so lldb-dap launches it.
 class YoopConfigurationProvider {
-  constructor(repoRoot) {
+  constructor(repoRoot, standaloneBin) {
     this.repoRoot = repoRoot;
+    this.standaloneBin = standaloneBin;
   }
 
   // First pass: VSCode hasn't substituted ${...} variables yet. If the user
@@ -173,15 +214,29 @@ class YoopConfigurationProvider {
 
       const binPath = yoopFile.replace(/\.yoop$/, "");
       if (!config.skipBuild) {
-        const yoopilerPath = config.yoopilerPath
+        // Three ways to reach a compiler, most explicit first: a launch-config
+        // override, the repo's yoopiler.js run under Node, or a packaged
+        // binary invoked directly (no Node involved).
+        const override = config.yoopilerPath
           ? path.resolve(folder?.uri?.fsPath ?? process.cwd(), config.yoopilerPath)
-          : path.join(this.repoRoot, "src", "yoopiler.js");
-        if (!fs.existsSync(yoopilerPath)) {
-          vscode.window.showErrorMessage(`yoopiler.js not found at ${yoopilerPath}. Set yoopilerPath in your launch config.`);
+          : null;
+        const repoScript = path.join(this.repoRoot, "src", "yoopiler.js");
+        let compiler = null;
+        if (override) {
+          compiler = { path: override, viaNode: override.endsWith(".js") };
+        } else if (fs.existsSync(repoScript)) {
+          compiler = { path: repoScript, viaNode: true };
+        } else if (this.standaloneBin) {
+          compiler = { path: this.standaloneBin, viaNode: false };
+        }
+        if (!compiler || !fs.existsSync(compiler.path)) {
+          vscode.window.showErrorMessage(
+            `No yoopiler found (looked at ${override ?? repoScript}). Set "yoopilerPath" in your launch config or "yoopiler.binaryPath" in settings.`,
+          );
           return undefined;
         }
-        log(`compiling ${yoopFile} via ${yoopilerPath}`);
-        const ok = await runYoopiler(yoopilerPath, yoopFile);
+        log(`compiling ${yoopFile} via ${compiler.path}`);
+        const ok = await runYoopiler(compiler, yoopFile);
         if (!ok) {
           vscode.window.showErrorMessage("Yoopiler compile failed - see the Yoopiler output channel.");
           return undefined;
@@ -212,11 +267,15 @@ class YoopConfigurationProvider {
   }
 }
 
-// Spawn `node yoopiler.js <entry>` and stream output to the extension log
-// channel. Resolves to true on exit code 0.
-function runYoopiler(yoopilerPath, entryAbs) {
+// Run the compiler and stream output to the extension log channel. Resolves
+// to true on exit code 0. `compiler.viaNode` distinguishes a .js entry (run
+// under VS Code's own Node) from a packaged binary (exec'd directly).
+function runYoopiler(compiler, entryAbs) {
   return new Promise((resolve) => {
-    const proc = cp.spawn(process.execPath, [yoopilerPath, entryAbs], {
+    const [cmd, args] = compiler.viaNode
+      ? [process.execPath, [compiler.path, entryAbs]]
+      : [compiler.path, [entryAbs]];
+    const proc = cp.spawn(cmd, args, {
       cwd: path.dirname(entryAbs),
     });
     proc.stdout.on("data", (d) => log(`yoopiler: ${d.toString().trimEnd()}`));

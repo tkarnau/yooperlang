@@ -1,0 +1,249 @@
+// Author: Tom Karnau
+
+// This is a non-trivial example that explains some of the features that are not
+// obvious, or are unique, to yooperlang.
+
+// should cover: variants, kinds, traits, obligations, and more...
+
+// yoopls - a small `ls`. There are no flags: the output is always what
+// `ls -lrtah` gives you (long rows, hidden entries, human sizes, oldest
+// first). Pass a path, or get the current directory.
+//
+//   yoopls
+//   yoopls /usr/local
+
+// imports always are relative paths, except for `std`, currently
+import * as fs, { FileMeta } from "std/fs.yoop";
+import * as env from "std/env.yoop";
+import * as str from "std/core/strings.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+// A variant: only the things with contents carry a size. (normal ls shows a dir size, but for example)
+// variants are a group of types that the compiler can reason about and are used
+// for expressing exhaustive intent over types. Some languages just use `enum` for this kind and value enums
+variant EntryKind {
+    Dir,
+    File { size: int64 },
+    Link { size: int64 },
+}
+
+// A trait: anything that renders one line of output.
+trait Line {
+    function render(ref self): string; // anything that implements trait must
+                                       // provide a `render` function that takes
+                                       // itself as the first argument (ref arg).
+                                       // ref is a pointer.
+}
+
+// kinds have a few special keywords - see the reference for other things you can do
+// A kind: listing is a binding that owns a scanned listing, freed at the end of its scope.
+kind listing {
+    appliesTo binding; // binding refers to things like variables, other things
+                       // can be functions or regions or blocks
+    requires Disposable; // requires Disposable is the imported trait above, 
+                         // this means that you can only bind a variable as a
+                         // listing if it implements Disposable.
+    mustCall dispose beforeScopeEnd; // mustCall is a kind-obligation, if you 
+                                     // apply a kind, you must satisfy the
+                                     // obligation or the compiler will error.
+    ownsBlock; // this allows this kind to create its own block `{...}` or to
+               // take an ownership of the current block.
+               // Ownership just means that the compiler will use the block to
+               // help enforce obligations. In this case dispose behaves like a
+               // LIFO stack of guarantees that the dispose method will be
+               // called before releasing ownership back to where it came from.
+}
+
+type Row implements Line {
+    name:  string,
+    kind:  EntryKind,
+    perm:  int32,
+    links: int32,
+    owner: string,
+    group: string,
+    mtime: int64,
+
+    function render(ref self): string {
+        return str.string_concat_all([
+            typeChar(self.kind), permString(self.perm), " ",
+            str.padStart(`${self.links}`, 3, " "), " ",
+            str.padEnd(self.owner, 9, " "),
+            str.padEnd(self.group, 7, " "),
+            str.padStart(sizeText(self.kind), 6, " "), " ",
+            fs.timeString(self.mtime), " ",
+            self.name,
+        ]);
+    }
+}
+
+/* 
+  -------     propagates<disposable>     -------
+  This is one of the systems (kind obligations) that helps force
+  context to the surface.
+
+  Propagates means: This structure carries an obligation that can be passed on
+  to a call-site when the type is materialized.
+
+  Some types of obligations can be met by other means, and do not have to
+  propagate the obligation.
+*/
+
+// example implements - multiple traits here
+type Listing implements (Line, Disposable) propagates<disposable> {
+    rows:  Vec<Row>, // Vec (vector) is used a lot internally and is the standard
+                     // 1-dimensional, dynamic array (can grow and shrink).
+                     // Default is plain heap allocation, but you can provide
+                     // an arena context for them as well.
+    bytes: int64,
+
+    function render(ref self): string {
+        return `total ${humanSize(self.bytes)}`;
+    }
+
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.rows);
+    }
+}
+
+// example of a function, which takes a *variant* as an argument and returns a string
+// fairly straightforward but notice the capture for Link and File - this is how
+// you can call this function with different shaped values. `k` is sometimes a struct
+// and sometimes just a type annotation (Dir).
+
+// *switch* is the main way to extract the underlying value of a variant.
+// Variant switch statements must be exhaustive (or use the 'default' case).
+
+// try commenting out the EntryKind.File line here, if you have the LSP running
+// or try compiling it now, you should see the error:
+// switch over variant EntryKind is not exhaustive - missing variants: ...
+
+function typeChar(k: EntryKind): string {
+    switch (k) {
+        case EntryKind.Dir: { return "d"; }
+        case EntryKind.Link { size: _ }: { return "l"; }
+        case EntryKind.File { size: _ }: { return "-"; }
+    }
+}
+
+// A directory has no byte count worth printing, so it gets a dash.
+function sizeText(k: EntryKind): string {
+    switch (k) {
+        case EntryKind.Dir: { return "-"; }
+        case EntryKind.Link { size: n }: { return humanSize(n); }
+        case EntryKind.File { size: n }: { return humanSize(n); }
+    }
+}
+
+function kindOf(ref m: FileMeta): EntryKind {
+    if (m.isDir) { return EntryKind.Dir; }
+    if (m.isLink) { return EntryKind.Link { size: m.size }; }
+    return EntryKind.File { size: m.size };
+}
+
+// "rwxr-xr-x" from the 0777 bits, high bit first.
+function permString(perm: int32): string {
+    const letters: string[] = ["r", "w", "x"];
+    let out: string = "";
+    let i: int32 = 0;
+
+    // plain loops are not super nice quite yet, while is common and
+    // don't forget to increment! - more loops coming soon...
+    // (for-loops require an iterator convention, currently)
+    while (i < 9) {
+        // common, expected, bitwise operations are supported
+        if ((perm & (1 << (8 - i))) != 0) {
+            out = str.string_concat(out, letters[usize(i % 3)]);
+        } else {
+            out = str.string_concat(out, "-");
+        }
+        i = i + 1;
+    }
+    return out;
+}
+
+// One tenth of precision once we leave bytes behind: 1.4K, 22.0M, 3.1G.
+function humanSize(bytes: int64): string {
+    if (bytes < 1024) { return `${bytes}B`; }
+    const units: string[] = ["K", "M", "G", "T", "P"];
+    let div: int64 = 1024;
+    let u: usize = 0;
+    while (u < 4 && bytes / div >= 1024) {
+        div = div * 1024;
+        u = u + 1;
+    }
+    const tenths: int64 = (bytes * 10) / div;
+    return `${tenths / 10}.${tenths % 10}${units[u]}`;
+}
+
+// Oldest first, so the freshest thing is the last line on screen.
+function sortByTime(ref rows: Vec<Row>): void {
+    let i: usize = 1;
+    while (i < rows.len) {
+        // for fast loops, vec exposes the underlying array and you can
+        // reference the memory directly just like a stack allocated
+        // array.
+        const cur: Row = rows.data[i];
+        let j: usize = i;
+        while (j > 0 && rows.data[j - 1].mtime > cur.mtime) {
+            rows.data[j] = rows.data[j - 1];
+            j = j - 1;
+        }
+        rows.data[j] = cur;
+        i = i + 1;
+    }
+}
+
+// this function returns a listing and does NOT fulfill
+// its obligation, so it should also propagate<disposable>...
+// the obligation here is that `rows` is allocated and the reference is returned
+// and the dispose method is not called (we don't want to here anyhow).
+function scan(path: string): Listing propagates<disposable> {
+    let rows: Vec<Row> = vec.vec_new(32);
+    let bytes: int64 = 0;
+    disposable dir = fs.openDir(path); // `dir`'s disposable obligation is marked here (no let/const)
+                                       // this means that the compiler will emit the `Dispose.dispose(ref dir)` at
+                                       // every scope-exit condition, automatically. Like `using` or `defer` in
+                                       // other languages.
+    for name in dir { // for-loop because dir is an iterable type: see DirIter in std/fs.yoop
+        const meta: FileMeta = fs.statPath(str.string_concat_all([path, "/", name]));
+        if (meta.ok) {
+            const row: Row = {
+                name: name,
+                kind: kindOf(ref meta),
+                perm: meta.perm,
+                links: meta.links,
+                owner: meta.owner,
+                group: meta.group,
+                mtime: meta.mtime,
+            };
+            vec.vec_push(ref rows, row);
+            bytes = bytes + meta.size;
+        }
+    }
+    sortByTime(ref rows);
+    return { rows: rows, bytes: bytes };
+}
+
+// main entry point for the program...
+function main(): int32 {
+    let path: string = "."; // cwd...
+    if (env.argCount() > 1) { path = env.argAt(1); }
+    if (!fs.exists(path)) {
+        printf(`yoopls: ${path}: no such file or directory\n`);
+        return 1;
+    }
+    // listing entries: Listing would also work, but this is using inference.
+    listing entries = scan(path); // listing binding means that entries will
+                                  // automatically have its listing obligation
+                                  // fulfilled by the end of the scope.
+
+    // ref used like in other systems languages...
+    // we don't want to copy these large values, we just
+    // want to pass in a pointer to where they live.
+    printf(`${Line.render(ref entries)}\n`);
+    for row in vec.vec_as_array(ref entries.rows) {
+        printf(`${Line.render(ref row)}\n`);
+    }
+    return 0;
+}
