@@ -443,7 +443,7 @@ export const keywordList: KeywordDefinition[] = [
 
 // *************** DRIVER CONTRACTS *************
 
-export enum ASTNodeKind {
+export enum ASTNodeKind implements Display {
   FUNCTION_DECL,
   LET_DECL,
   CONST_DECL,
@@ -591,6 +591,9 @@ export enum ASTNodeKind {
   // type annotation kinds
   TYPE_ANNOTATION_REF_TYPE,
   TYPE_ANNOTATION_TYPE_NAME,
+  function to_string(ref self): string {
+    return kindName(self);
+  }
 }
 
 const AST_NODE_KIND_NAMES: string[] = [

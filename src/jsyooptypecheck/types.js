@@ -253,8 +253,8 @@ export const UnionType = (name, fields, moduleId = null) =>
 //   isOpen: true if any case's value was derived from bitwise operators on
 //     other cases. Switch over an open enum requires `default` because the
 //     reachable set is no longer the named cases alone.
-export const ValueEnumType = (name, underlying, cases, moduleId = null, isOpen = false) =>
-  freezerWrap(typeKinds.valueEnum, { name, underlying, cases, moduleId, isOpen });
+export const ValueEnumType = (name, underlying, cases, implementsTraits = [], methods = new Map(), moduleId = null, isOpen = false) =>
+  freezerWrap(typeKinds.valueEnum, { name, underlying, cases, implementsTraits, methods, moduleId, isOpen });
 
 // Phase 9.G: a first-class function value type - what `(p: T) => R` resolves
 // to in a type annotation. Distinct from FuncType (which describes a named

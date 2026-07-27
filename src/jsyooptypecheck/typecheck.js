@@ -801,6 +801,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   // there's no `genericDecl` path for them today and the open-self
   // dance below is struct-shaped.
   const isVariant = typeDecl.kind === ASTNodeKind.VARIANT_DECL;
+  const isEnum = typeDecl.kind === ASTNodeKind.ENUM_DECL;
   // Phase 7.x: for generic structs, build an "open" struct shell by
   // instantiating the generic decl with its own TypeParamTypes as args.
   // This yields a StructType whose field slots carry TypeParamType, suitable
@@ -810,6 +811,9 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   let structShell;
   if (isVariant) {
     structShell = env.variantTable.get(typeDecl.name);
+    if (!structShell) return;
+  } else if (isEnum) {
+    structShell = env.enumTable.get(typeDecl.name);
     if (!structShell) return;
   } else if (isGeneric) {
     const gd = typeDecl.genericDecl;
@@ -836,7 +840,9 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
     typeDecl.openSelf = structShell;
   } else {
     structShell = env.structTable.get(typeDecl.name);
-    if (!structShell) return;
+    if (!structShell) {
+      return;
+    }
   }
 
   // Step 1: resolve trait names.
@@ -1018,7 +1024,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
   // Phase 9.J: store the flattened impls list (user-declared traits +
   // every extends ancestor, deduped) so downstream trait-method dispatch
   // doesn't need to re-walk the extends chain on every lookup.
-  if (isVariant) {
+  if (isVariant || isEnum) {
     // Phase 13.B: variants mutate the shell in place (same shape as the
     // 13.A variants-Map fix). No fresh VariantType, no table replacement -
     // so struct fields that captured the shell during their own
@@ -1933,7 +1939,7 @@ export function typecheckProgram(modules) {
           });
         } else {
           // Shell - underlying is null + cases empty; pass C fills both.
-          enumTable.set(d.name, ValueEnumType(d.name, null, new Map(), mod.id, false));
+          enumTable.set(d.name, ValueEnumType(d.name, null, new Map(), [], new Map(), mod.id, false));
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
@@ -2835,6 +2841,8 @@ export function typecheckProgram(modules) {
           d.name,
           underlying ?? PrimType("int32"),
           cases,
+          [],
+          new Map(),
           mod.id,
           isOpen,
         );
@@ -3135,7 +3143,8 @@ export function typecheckProgram(modules) {
       const d = innerDecl(decl);
       if (
         (d.kind !== ASTNodeKind.TYPE_DECL &&
-          d.kind !== ASTNodeKind.VARIANT_DECL) ||
+          d.kind !== ASTNodeKind.VARIANT_DECL &&
+          d.kind !== ASTNodeKind.ENUM_DECL) ||
         !d.implements?.length
       ) {
         continue;
@@ -3367,6 +3376,13 @@ export function typecheckProgram(modules) {
         // Phase 13.B: variant methods are typechecked the same way as
         // struct methods, with `self` bound to the variant's shell.
         // Generic variants are not yet supported on the impl side.
+        const selfShell = d.resolvedType;
+        if (selfShell) {
+          for (const method of d.methods) {
+            validateMethod(method, selfShell, typeContext, errors);
+          }
+        }
+      } else if (d.kind === ASTNodeKind.ENUM_DECL && d.methods?.length > 0) {
         const selfShell = d.resolvedType;
         if (selfShell) {
           for (const method of d.methods) {

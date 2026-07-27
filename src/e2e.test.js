@@ -729,7 +729,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   it("value_enum_to_string.yoop: value enum in a string-producing template literal", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/value_enum_to_string.yoop");
     assert.equal(exitCode, 0);
-    assert.equal(stdout, "level=error color=1\n");
+    assert.equal(stdout, "level=error color=1\nRed Str Val: R\n");
   });
 
   it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {
