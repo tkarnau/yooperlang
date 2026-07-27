@@ -695,7 +695,10 @@ function resolveTemplateLiteral(node, scope, ctx) {
     if (part.kind === "STRING_PART") continue;
     if (part.kind === "EXPR_PART") {
       const exprType = resolveExprType(part.expr, scope, ctx);
-      if (isPrintableInTemplate(exprType)) continue;
+      if (isPrintableInTemplate(exprType) && 
+        (exprType.implementsTraits ?? []).every(t => t.name !== "Display")) {
+        continue;
+      }
       // Phase 9.F: try Display. Look for a `Display` trait on the
       // (deref'd) type's implementsTraits; synthesize a trait call.
       // Re-fetch the canonical type first - an imported type's shell
@@ -707,7 +710,8 @@ function resolveTemplateLiteral(node, scope, ctx) {
       const innerType = canonicalNominalType(derefed, ctx);
       if (
         (innerType.kind === typeKinds.struct ||
-          innerType.kind === typeKinds.variant) &&
+          innerType.kind === typeKinds.variant ||
+          innerType.kind === typeKinds.valueEnum) &&
         (innerType.implementsTraits ?? []).some((t) => t.name === "Display")
       ) {
         part.expr = synthesizeDisplayCall(part.expr, innerType, exprType);

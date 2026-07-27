@@ -27,6 +27,22 @@
                 "testMode"  : "true"
             },
             "program": "${workspaceFolder}/src/jsyooptypecheck/typecheckTests.js"
+        },
+        {
+            "type": "node",
+            "request": "launch",
+            "name": "Debug Bootstrap Compilation",
+            "skipFiles": [
+                "<node_internals>/**"
+            ],
+            "env" : {
+                "phaseMode"  : "true"
+            },
+            "args": [
+                "-i",
+                "${workspaceFolder}/bootstrap/src/main.yoop",
+            ],
+            "program": "${workspaceFolder}/src/yoopiler.js"
         }
     ]
 }

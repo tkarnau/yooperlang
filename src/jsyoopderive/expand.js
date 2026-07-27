@@ -216,6 +216,29 @@ function fieldFragment(field, access, slot, lines, labels) {
     );
     return `${field.name}: \${_deriveF${slot}}`;
   }
+  if (cls === "map") {
+    labels[`_deriveElem${slot}`] = `${field.name} (element)`;
+    lines.push(
+      `let _deriveMap${slot} = ${access};`,
+      `let _deriveF${slot}: string = "[";`,
+      `let _deriveI${slot}: usize = 0;`,
+      `while (_deriveI${slot} < _deriveMap${slot}.cap) {`, // need to use cap because of sparse data structure... could be big issue at some point.
+      `  if (_deriveMap${slot}.states[_deriveI${slot}] != 1) {`, // if not occupied...
+      `    _deriveI${slot} = _deriveI${slot} + 1;`,
+      `    continue;`, // skip unoccupied
+      `  }`,
+      `  if (_deriveF${slot}.len > 1) {`, // if we've inserted anything except the '['
+      `    _deriveF${slot} = \`\${_deriveF${slot}}, \`;`,
+      `  }`,
+      `  let _deriveElem${slot}_key = _deriveMap${slot}.keys[_deriveI${slot}];`,
+      `  let _deriveElem${slot}_value = _deriveMap${slot}.values[_deriveI${slot}];`,
+      `  _deriveF${slot} = \`\${_deriveF${slot}}{ key: \${_deriveElem${slot}_key}, value: \${_deriveElem${slot}_value} }\`;`,
+      `  _deriveI${slot} = _deriveI${slot} + 1;`,
+      `}`,
+      `_deriveF${slot} = \`\${_deriveF${slot}}]\`;`,
+    );
+    return `${field.name}: \${_deriveF${slot}}`;
+  }
   // Placeholder classification carries the display text directly.
   return `${field.name}: ${cls}`;
 }
@@ -287,7 +310,12 @@ function classify(annot) {
       if (annot.name === "Vec" && (annot.typeArgs ?? []).length === 1) {
         return classify(annot.typeArgs[0]) === "inline" ? "vec" : "<vec>";
       }
-      if (annot.name === "Map") return "<map>";
+      if (annot.name === "Map" && (annot.typeArgs ?? []).length === 2) {
+        const shouldExpand =
+          classify(annot.typeArgs[0]) === "inline" &&
+          classify(annot.typeArgs[1] === "inline");
+        return shouldExpand ? "map" : "<map>";
+      }
       return `<${annot.name.toLowerCase()}>`;
     case "functionType":
       return "<fn>";

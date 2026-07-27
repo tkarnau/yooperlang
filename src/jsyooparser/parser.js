@@ -3255,12 +3255,39 @@ export function parse(src) {
       }
       consumeClosingGt();
     } else {
+      node.implements = [];
       node.underlying = { kind: "typeName", name: "int32" };
+      // check if implements?
+      if (peek().tag === TokenTags.implements) {
+        advance();
+        if (peek().tag === TokenTags.lparen) {
+          advance();
+          while (peek().tag === TokenTags.ident) {
+            node.implements.push(parseImplementsClauseRef());
+            if (peek().tag === TokenTags.comma) {
+              advance();
+            }
+          }
+          expect(TokenTags.rparen);
+        } else {
+          node.implements.push(parseImplementsClauseRef());
+        }
+      }
     }
     node.cases = [];
+    node.methods = [];
     expect(TokenTags.lcurly);
     const seenNames = new Set();
     while (isIdentLikeTag(peek().tag)) {
+      // if enum is impl functions
+      if (
+        peek().tag === TokenTags.function &&
+        peekAhead(1).tag !== TokenTags.colon
+      ) {
+        node.methods.push(parseMethodDecl());
+        continue;
+      }
+      // else...
       const caseTok = peek();
       const caseNode = buildSourcedNode(ASTNodeKind.ENUM_CASE);
       caseNode.name = parseIdentOrKeywordAsName();
@@ -3291,6 +3318,15 @@ export function parse(src) {
         1,
       );
     }
+    // constraint: methods only allowed when implements is non-empty
+    if (node.methods?.length > 0 && node.implements.length === 0) {
+      throw parseError(
+        `methods are only allowed inside an 'implements' block - type "${node.name}" has methods but no 'implements' clause`,
+        peek().start,
+        peek().length,
+      );
+    }
+
     return node;
   }
 

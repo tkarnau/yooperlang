@@ -3371,6 +3371,14 @@ function codegenWithModuleId(
       for (const method of decl.decl.methods) {
         emitMethodFn(method, decl.decl.resolvedType);
       }
+    } else if (decl.kind === ASTNodeKind.ENUM_DECL && decl.methods?.length > 0 && !decl.genericDecl) {
+      for (const method of decl.methods) {
+        emitMethodFn(method, decl.resolvedType);
+      }
+    } else if (decl.kind === ASTNodeKind.EXPORT_DECL && decl.decl.kind === ASTNodeKind.ENUM_DECL && decl.decl.methods?.length > 0 && !decl.decl.genericDecl) {
+      for (const method of decl.decl.methods) {
+        emitMethodFn(method, decl.decl.resolvedType);
+      }
     }
     // TRAIT_DECL: no codegen - traits are compile-time only
   }

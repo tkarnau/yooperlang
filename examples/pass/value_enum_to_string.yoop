@@ -4,6 +4,7 @@
 // the multi-module driver so std/core/format + strings autoload.
 
 import * as log from "std/log.yoop";
+import { Display } from "std/core/traits.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -13,6 +14,28 @@ enum Level<string> { Info "info", Warn "warn", Error "error" }
 
 enum Color { Red, Green, Blue }
 
+enum ColorDisplay implements Display {
+  Red,
+  Green,
+  Blue,
+  function to_string(ref self): string {
+    switch (self) {
+      case ColorDisplay.Red: {
+        return "R";
+      }
+      case ColorDisplay.Green: {
+        return "G";
+      }
+      case ColorDisplay.Blue: {
+        return "B";
+      }
+      default: {
+        return "X";
+      }
+    }
+  }
+}
+
 function describe(lvl: Level, col: Color): string {
     return `level=${lvl} color=${col}`;
 }
@@ -20,8 +43,11 @@ function describe(lvl: Level, col: Color): string {
 function main(): int32 {
     let msg: string = describe(Level.Error, Color.Green);
     printf(`${msg}\n`);
+    
+    printf(`Red Str Val: ${ColorDisplay.Red}\n`);
     return 0;
 }
 
 // expected output:
 // level=error color=1
+// Red Str Val: R
