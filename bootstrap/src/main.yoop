@@ -19,7 +19,6 @@ import { parse } from "./source_processing/parser.yoop";
 import { tokenScanList } from "./contracts.yoop";
 import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
 import { typecheckProgram } from "./typecheck/typecheck.yoop";
-import * as dbg from "./utils/debug_utils.yoop";
 
 @precompile {
   log.info("hello, yooper from a precompile!");
@@ -28,50 +27,27 @@ import * as dbg from "./utils/debug_utils.yoop";
 function main(): int {
   log.info("hello, yooper!");
 
-  runCompilerAssertions();
+  runCompilerAssertions(); // ensures tokens and other utilties we added here are still working correctly
+  // need unit testing solution of some kind...
 
-  // const testStr = "ello";
-  // const testStrBytes = intr.string_as_bytes(testStr);
-  // const isIt = isHexDigit(testStrBytes[0]);
-
-  // log.info(`is hex digit?: ${isIt}, value: ${testStrBytes[0]}`);
-
-  // const testStr = `
-  //   // test program
-  //   /* 
-  //     this is a test
-  //   */
-  //   ;{}...,'\\xFF'
-  //   "teststr"
-  //   0xFF
-  //   13.54
-  //   return return function main(): int {
-  //     printf("hello, world!");
-
-  //     return 0;
-  //   }
-  //   `;
-
-  // Layer 0 smoke test: load a real source file into a one-module graph.
+  // smoke test for now: load a common source file into a one-module graph (single file program).
   const entryPath = "/Users/tom/dev/personal/yooperlang/bootstrap/examples/single_module.yoop";
-  switch (loadModuleGraph(entryPath)) {
+  // this loadModuleGraph(path) lexes and parses the main source file into a graph (imports and other things add more modules/nodes to that graph)
+  switch (loadModuleGraph(entryPath)) { 
     case LoadGraphResult.Err { error: e }: {
       log.info(`module graph load failed: ${e}`);
     }
-    case LoadGraphResult.Ok { value: mg }: {
-      const entryMod = vec.vec_get(ref mg.modules, mg.entryIndex);
-      log.info(`ast: ${entryMod.ast}`);
-      log.info(`loaded ${mg.modules.len} module(s); entry ${entryMod.absPath} parsed to ${entryMod.ast.nodes.len} AST nodes`);
-
-      const entryAst = entryMod.ast;
-      dbg.dump("ast tree", dbg.astTreeToString(ref entryAst, entryAst.root));
+    case LoadGraphResult.Ok { value: moduleGraph }: {
+      // vec.vec_get: even though modules is an dynamic array (1D vector), you must reference the
+      // Vector module and pass the vector reference pointer and the desired index to get at a pointer to the specific module we want
+      const entryMod = vec.vec_get(ref moduleGraph.modules, moduleGraph.entryIndex);
+      log.info(`entry AST dump: ${entryMod.ast}`); // derive(display) on AST gives us free stringify now.
 
       // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
       // for now (returns a Program with no types/symbols/diagnostics) - this
       // wires the call so the layer can be built out incrementally.
-      let prog = typecheckProgram(ref mg);
-      log.info(`typecheck done: ${prog.diagnostics.len} diagnostic(s), ${prog.types.len} type(s), ${prog.symbols.len} symbol(s), ${prog.modules.len} typed module(s)`);
-      dbg.dump("typechecked program", dbg.programToString(ref prog));
+      let prog = typecheckProgram(ref moduleGraph);
+      log.info(`prog dump: ${prog}`);
     }
   }
 
