@@ -39,6 +39,16 @@
     "breakpoints": [
       { "language": "yoop" }
     ],
+    "configuration": {
+      "title": "Yooperlang",
+      "properties": {
+        "yoopiler.binaryPath": {
+          "type": "string",
+          "default": "",
+          "description": "Full path to a standalone yoopiler binary. Only needed when this extension is installed outside a Yooperlang repo checkout and not alongside a distribution's bin/ directory. Leave empty to auto-detect."
+        }
+      }
+    },
     "configurationDefaults": {
       "[yoop]": {
         "editor.tabSize": 2,

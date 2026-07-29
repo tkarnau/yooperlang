@@ -1,3 +1,4 @@
+#!/usr/bin/env node
 import { parseArgs } from "util";
 import fs from "fs";
 import { execFileSync } from "child_process";
@@ -17,6 +18,55 @@ import {
 } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst, dumpAstJson } from "./dumpAst.js";
+import { checkInstallRoots } from "./install_root.js";
+
+// Locate the clang binary. `YOOP_CLANG` wins if set (and is a hard error if it
+// points at nothing, since that's explicit user intent). On Windows we keep
+// the historical Program Files probe as a fallback, but PATH is consulted
+// first everywhere now, so an LLVM installed anywhere else just works.
+function resolveClang() {
+  const override = process.env.YOOP_CLANG;
+  if (override) {
+    if (!fs.existsSync(override)) {
+      console.error(`YOOP_CLANG points at a file that does not exist: ${override}`);
+      process.exit(1);
+    }
+    return override;
+  }
+  if (process.platform === "win32") {
+    const fallback = "C:\\Program Files\\LLVM\\bin\\clang.exe";
+    // Prefer PATH; only reach for the well-known install if PATH has no clang.
+    try {
+      execFileSync("clang", ["--version"], { stdio: "ignore" });
+      return "clang";
+    } catch {
+      if (fs.existsSync(fallback)) return fallback;
+      return "clang";
+    }
+  }
+  return "clang";
+}
+
+// Run clang, turning its two failure modes into something readable: a missing
+// binary becomes an install hint, and a compile/link failure exits with
+// clang's own status instead of a node stack trace over already-printed
+// diagnostics.
+function runClang(clang, clangArgs) {
+  try {
+    execFileSync(clang, clangArgs, { stdio: "inherit" });
+  } catch (err) {
+    if (err && err.code === "ENOENT") {
+      console.error(
+        `clang not found (tried "${clang}").\n` +
+          `  yoopiler shells out to clang to assemble and link.\n` +
+          `  install LLVM/clang and put it on PATH, or set YOOP_CLANG to its full path.`,
+      );
+      process.exit(1);
+    }
+    if (typeof err?.status === "number") process.exit(err.status);
+    throw err;
+  }
+}
 
 function main() {
   const { values, positionals } = parseArgs({
@@ -30,9 +80,29 @@ function main() {
       "dump-bc": { type: "boolean" },
       "list-attributes": { type: "boolean" },
       "track-heap": { type: "boolean" },
+      "keep-ir": { type: "boolean" },
+      lsp: { type: "boolean" },
     },
     allowPositionals: true,
   });
+
+  // --lsp: become the language server, speaking LSP over stdio, and never
+  // return. This exists so a packaged binary can back an editor extension
+  // with no repo checkout and no Node install - the same reason the compiler
+  // itself got packaged.
+  //
+  // The import is dynamic on purpose: src/lsp/server.js wires up
+  // process.stdin at module scope, so a static import would hijack stdin on
+  // every ordinary compile. Nothing may reach stdout past this point either -
+  // stdout IS the protocol transport - which is why this sits ahead of every
+  // console.log in main().
+  if (values.lsp) {
+    import("./lsp/server.js").catch((err) => {
+      console.error(`failed to start the language server: ${err?.message ?? err}`);
+      process.exit(1);
+    });
+    return;
+  }
 
   // Phase 11.E.4: --list-attributes - dump the registry's known
   // attribute names + each entry's handler phases. Useful for
@@ -47,6 +117,15 @@ function main() {
       for (const n of names) process.stdout.write(`  @${n}\n`);
     }
     return;
+  }
+
+  // A yoopiler whose std/ or runtime/ didn't come along is unusable. Say so
+  // once, up front, instead of failing later as an unresolvable import.
+  const installProblems = checkInstallRoots();
+  if (installProblems.length > 0) {
+    console.error("yoopiler installation looks incomplete:\n");
+    for (const p of installProblems) console.error(`  ${p}\n`);
+    process.exit(1);
   }
 
   const inputFile = values.inputFile ?? positionals[0];
@@ -179,8 +258,19 @@ function main() {
   const { ir, linkFlags } = codegenProgram(modules, moduleEnv, programState);
   console.log("llvm IR: ok");
 
-  const tmpIR = path.join(os.tmpdir(), "yooper_out.ll");
+  // A per-invocation temp directory, not a fixed path: two yoopiler processes
+  // running at once would otherwise clobber each other's IR mid-compile.
+  // Removed on the way out unless --keep-ir asks to inspect it.
+  const keepIR = !!values["keep-ir"];
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoopiler-"));
+  // An exit hook rather than try/finally: the clang failure paths below call
+  // process.exit(), which skips pending finally blocks but does fire "exit".
+  if (!keepIR) {
+    process.on("exit", () => fs.rmSync(tmpDir, { recursive: true, force: true }));
+  }
+  const tmpIR = path.join(tmpDir, "yooper_out.ll");
   fs.writeFileSync(tmpIR, ir, "utf8");
+  if (keepIR) console.log(`llvm IR written to ${tmpIR}`);
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
 
   // Turn each `extern "C" from library "X"` name into the right linker
@@ -202,8 +292,8 @@ function main() {
   // statement's DILocation distinct so `lldb` stepping doesn't fold lines.
   // Once an opt-level flag lands these should respect it.
   const debugFlags = ["-g", "-O0"];
+  const clang = resolveClang();
   if (process.platform === "win32") {
-    const clang = "C:\\Program Files\\LLVM\\bin\\clang.exe";
     const clangArgs = [
       tmpIR,
       ...RUNTIME_SOURCES,
@@ -213,7 +303,7 @@ function main() {
       ...linkArgs,
       "-fuse-ld=link",
     ];
-    execFileSync(clang, clangArgs, { stdio: "inherit" });
+    runClang(clang, clangArgs);
     console.log(`compiled: ${outputFileName}`);
   } else {
     // On macOS, Homebrew installs libraries under /opt/homebrew (Apple Silicon)
@@ -236,7 +326,7 @@ function main() {
       ...extraSearchPaths,
       ...linkArgs,
     ];
-    execFileSync("clang", clangArgs, { stdio: "inherit" });
+    runClang(clang, clangArgs);
     console.log(`compiled: ${outputFileName}`);
   }
 }

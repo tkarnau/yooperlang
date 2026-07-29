@@ -148,6 +148,25 @@ int64_t yoop_io_file_size(const char* path);
 // (caller owns it). Returns 0 on success, -1 with errno set on failure.
 int yoop_io_normalize_real_path(const char* path, char** out);
 
+// Directory iteration. opendir returns NULL on failure; readdir returns the
+// next name (skipping "." and ".."), or "" when the stream is exhausted, in a
+// buffer borrowed from the stream. Backed by dirent; a no-op on Windows.
+void* yoop_io_opendir(const char* path);
+const char* yoop_io_readdir(void* d);
+void yoop_io_closedir(void* d);
+
+// Metadata for one path from a single lstat. Returns the byte size, or -1 on
+// failure. See runtime/yoop_io.c for the out-param contract.
+int64_t yoop_io_stat2(const char* path, int32_t* is_dir);
+int64_t yoop_io_stat_meta(const char* path, int32_t* kind, int32_t* perm,
+                          int32_t* nlink, int32_t* uid, int32_t* gid,
+                          int64_t* mtime);
+
+// Owner/group names and an ls-style local timestamp. Caller owns the results.
+char* yoop_io_user_name(int32_t uid);
+char* yoop_io_group_name(int32_t gid);
+char* yoop_io_time_string(int64_t epoch);
+
 #ifdef __cplusplus
 }
 #endif

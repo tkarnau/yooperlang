@@ -177,6 +177,28 @@ export function string_concat_all(parts: string[]): string {
     return result;
 }
 
+// Pad `s` with `fill` until it is at least `width` BYTES long. Byte length,
+// not display width - fine for the ASCII columns of a table, wrong for text
+// that may hold multi-byte codepoints. A longer `s` is returned untouched,
+// and an empty `fill` is a no-op rather than a hang.
+export function padStart(s: string, width: usize, fill: string): string {
+    if (fill.len == 0) { return s; }
+    let out: string = s;
+    while (out.len < width) {
+        out = string_concat(fill, out);
+    }
+    return out;
+}
+
+export function padEnd(s: string, width: usize, fill: string): string {
+    if (fill.len == 0) { return s; }
+    let out: string = s;
+    while (out.len < width) {
+        out = string_concat(out, fill);
+    }
+    return out;
+}
+
 export function sliceFrom(s: string, start: usize): string {
   switch(string_slice(s, start, s.len)) {
     case Result.Ok { value: v }: { return v; }
