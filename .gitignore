@@ -20,6 +20,8 @@
 # Local editor / tooling state (not a source file, just has an extension).
 .claude/
 
+.DS_Store
+
 # Dependency + build trees. These need naming explicitly: the "!*.*" rule
 # above would otherwise track every .js in node_modules and every .yoop the
 # SEA build copies into dist/*/lib/std.

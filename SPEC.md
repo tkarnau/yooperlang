@@ -1009,8 +1009,8 @@ break;
 continue;
 ```
 
-No `switch` in v2. Pattern-matching on tagged unions is a future addition once the
-error story hardens.
+<!-- No `switch` in v2. Pattern-matching on tagged unions is a future addition once the
+error story hardens. (not true any more) -->
 
 ---
 
