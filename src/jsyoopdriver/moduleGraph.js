@@ -1,21 +1,16 @@
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
 import { moduleIdFor } from "./moduleId.js";
+import { STD_ROOT } from "../install_root.js";
 
-// Phase 9.C: the std/ import root. By default this is the std/ directory at
-// the repo root - i.e. two levels up from this file (src/jsyoopdriver/). The
-// driver can override via the options bag (useful for tests or for an
-// alternate yoopiler distribution layout).
-const DEFAULT_STD_ROOT = path.resolve(
-  path.dirname(fileURLToPath(import.meta.url)),
-  "..",
-  "..",
-  "std",
-);
+// Phase 9.C: the std/ import root. Resolution of the installed location (repo
+// checkout, npm install, or packaged binary) lives in install_root.js. The
+// driver can still override via the options bag, which is what tests that
+// point at a stub std/ directory use.
+const DEFAULT_STD_ROOT = STD_ROOT;
 
 // Loads the full module graph starting at entryAbsPath.
 // Returns { entry: Module, modules: [Module] } where modules is topo-sorted

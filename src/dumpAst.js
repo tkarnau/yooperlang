@@ -1,12 +1,12 @@
 import fs from "fs";
 import path from "path";
-import { fileURLToPath } from "url";
 
 import { parse } from "./jsyooparser/parser.js";
 import { ASTNodeKind } from "./contracts.js";
 import { formatDiagnostic } from "./helpers.js";
+import { resolveAsset } from "./install_root.js";
 
-const TEMPLATE_PATH = fileURLToPath(new URL("./astViewerTemplate.html", import.meta.url));
+const TEMPLATE_PATH = resolveAsset("astViewerTemplate.html");
 
 let nextId = 1;
 

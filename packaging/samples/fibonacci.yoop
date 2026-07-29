@@ -1,0 +1,35 @@
+// Variables, a loop, and string interpolation.
+//
+// `let` introduces a mutable binding; the `: int32` annotation is
+// optional when the initializer makes the type obvious, but spelled out
+// here for clarity. Backtick strings are template literals - `${expr}`
+// splices a value into the text, the same idea as JavaScript.
+
+function main(): int32 {
+    let a: int32 = 0;
+    let b: int32 = 1;
+    let i: int32 = 0;
+
+    // Print the first ten Fibonacci numbers.
+    while (i < 10) {
+        printf(`fib(${i}) = ${a}\n`);
+        let next: int32 = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
+    }
+
+    return 0;
+}
+
+// expected output:
+// fib(0) = 0
+// fib(1) = 1
+// fib(2) = 1
+// fib(3) = 2
+// fib(4) = 3
+// fib(5) = 5
+// fib(6) = 8
+// fib(7) = 13
+// fib(8) = 21
+// fib(9) = 34

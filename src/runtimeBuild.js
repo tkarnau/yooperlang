@@ -3,10 +3,8 @@
 // they stay in lockstep.
 
 import path from "path";
-import { fileURLToPath } from "url";
 
-const __filename = fileURLToPath(import.meta.url);
-const runtimeDir = path.resolve(path.dirname(__filename), "..", "runtime");
+import { RUNTIME_DIR as runtimeDir } from "./install_root.js";
 
 // Primary runtime translation unit. Kept as a single string for backwards
 // compatibility with call sites that don't know about extra runtime files
