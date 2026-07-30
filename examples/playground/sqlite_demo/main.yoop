@@ -1,0 +1,173 @@
+// sqlite_demo - a small on-disk catch log built on std/db/sqlite.yoop.
+//
+// Lives under examples/playground/ rather than examples/pass/ because it needs
+// an external library at link time (`-lsqlite3`, via the extern block in
+// std/db/sqlite_ffi.yoop). Same reason the SDL demos live here.
+//
+//   yoopiler examples/playground/sqlite_demo/main.yoop && ./main
+//
+// libsqlite3 ships in the macOS SDK, so this links with no setup there. On
+// Linux install libsqlite3-dev (or equivalent) first.
+
+import * as sqlite, { Db, Stmt, StepOutcome } from "std/db/sqlite.yoop";
+import * as fs from "std/fs.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+
+const DB_PATH: string = "catches.db";
+
+// One logged fish. Plain data - the db layer deals in columns, and mapping
+// columns to a struct is the caller's job (there is no ORM here and there
+// should not be one).
+type Catch {
+    id:     int32,
+    name:   string,
+    weight: float64,
+    lake:   string,
+}
+
+function createSchema(ref db: Db): Result<int32, string> {
+    return sqlite.exec(ref db, "
+        create table if not exists catches (
+            id     integer primary key,
+            name   text    not null,
+            weight real    not null,
+            lake   text    not null
+        );
+    ");
+}
+
+// Insert a batch through ONE prepared statement, rebinding per row. This is the
+// shape to reach for: compiling the SQL once and reusing it is both faster and
+// the only injection-proof way to get user data into a query.
+//
+// The begin/commit pair is manual for now. A `transaction` region kind
+// (`appliesTo region` + `ownsBlock`, rolling back unless committed) is the
+// natural home for it - see the note at the top of std/db/sqlite.yoop.
+function insertCatches(ref db: Db, rows: Catch[]): Result<int32, string> {
+    let _begin: int32 = sqlite.exec(ref db, "begin;")?;
+
+    disposable ins: Stmt = sqlite.prepare(
+        ref db,
+        "insert into catches (name, weight, lake) values (?1, ?2, ?3);"
+    )?;
+
+    let written: int32 = 0;
+    let i: usize = 0;
+    while (i < rows.len) {
+        let _b1 = sqlite.bindText(ref ins, 1, rows[i].name);
+        let _b2 = sqlite.bindDouble(ref ins, 2, rows[i].weight);
+        let _b3 = sqlite.bindText(ref ins, 3, rows[i].lake);
+
+        switch (sqlite.step(ref ins)) {
+            case StepOutcome.Done: { written = written + 1; }
+            case StepOutcome.Row { row: _r }: {
+                return Result.Err { error: "insert unexpectedly returned a row" };
+            }
+            case StepOutcome.Err { error: e }: {
+                // Give up on the whole batch rather than leaving it half applied.
+                let _rb: int32 = sqlite.exec(ref db, "rollback;")?;
+                return Result.Err { error: e };
+            }
+        }
+        let _r = sqlite.reset(ref ins);
+        i = i + 1;
+    }
+
+    let _commit: int32 = sqlite.exec(ref db, "commit;")?;
+    return Result.Ok { value: written };
+}
+
+// Every catch over `minWeight`, heaviest first. The `for row in` form is the
+// idiomatic read loop; `cursor.err` is how a mid-iteration failure surfaces,
+// because Iterable.next has nowhere to put an error.
+function heaviest(ref db: Db, minWeight: float64): Result<int32, string> {
+    disposable q: Stmt = sqlite.prepare(
+        ref db,
+        "select id, name, weight, lake from catches where weight >= ?1 order by weight desc;"
+    )?;
+    let _b = sqlite.bindDouble(ref q, 1, minWeight);
+
+    let shown: int32 = 0;
+    let cursor = sqlite.rows(ref q);
+    for row in cursor {
+        printf("  %2d  %-14s %6.2f lb  %s\n",
+            sqlite.columnInt(row, 0),
+            sqlite.columnText(row, 1),
+            sqlite.columnDouble(row, 2),
+            sqlite.columnText(row, 3));
+        shown = shown + 1;
+    }
+    if (cursor.err.len > 0) {
+        return Result.Err { error: cursor.err };
+    }
+    return Result.Ok { value: shown };
+}
+
+// A single-row aggregate. Nothing special about it - `step` once, read column 0,
+// and let the statement's disposer finalize it at scope end.
+function totalWeight(ref db: Db): Result<float64, string> {
+    disposable q: Stmt = sqlite.prepare(ref db, "select coalesce(sum(weight), 0.0) from catches;")?;
+    switch (sqlite.step(ref q)) {
+        case StepOutcome.Row { row: r }: { return Result.Ok { value: sqlite.columnDouble(r, 0) }; }
+        case StepOutcome.Done: { return Result.Ok { value: 0.0 }; }
+        case StepOutcome.Err { error: e }: { return Result.Err { error: e }; }
+    }
+}
+
+function run(): Result<int32, string> {
+    printf("libsqlite3 %s\n\n", sqlite.libVersion());
+
+    // Start from a clean file so repeated runs report the same numbers.
+    if (fs.exists(DB_PATH)) {
+        let _d: string = fs.delete_file(DB_PATH);
+    }
+
+    disposable db: Db = sqlite.open(DB_PATH)?;
+    let _schema: int32 = createSchema(ref db)?;
+
+    let logged: Catch[] = [
+        { id: 0, name: "walleye",      weight: 4.50,  lake: "Lake Gogebic" },
+        { id: 0, name: "lake trout",   weight: 12.25, lake: "Superior" },
+        { id: 0, name: "yellow perch", weight: 0.75,  lake: "Lake Gogebic" },
+        { id: 0, name: "northern pike", weight: 8.10, lake: "Manistique" },
+    ];
+
+    let written: int32 = insertCatches(ref db, logged)?;
+    printf("logged %d catches (last rowid %lld)\n\n", written, sqlite.lastInsertRowid(ref db));
+
+    printf("catches at or above 4 lb:\n");
+    let shown: int32 = heaviest(ref db, 4.0)?;
+    printf("  (%d rows)\n\n", shown);
+
+    let total: float64 = totalWeight(ref db)?;
+    printf("total weight on the log: %.2f lb\n", total);
+
+    // A value that would be SQL if it were concatenated in. Bound, it is just
+    // a string that matches nothing, and the table is still there afterward.
+    disposable probe: Stmt = sqlite.prepare(ref db, "select count(*) from catches where lake = ?1;")?;
+    let _bp = sqlite.bindText(ref probe, 1, "Superior'; drop table catches; --");
+    switch (sqlite.step(ref probe)) {
+        case StepOutcome.Row { row: r }: {
+            printf("injection-shaped lookup matched %d rows\n", sqlite.columnInt(r, 0));
+        }
+        case StepOutcome.Done: { }
+        case StepOutcome.Err { error: e }: { return Result.Err { error: e }; }
+    }
+    let after: float64 = totalWeight(ref db)?;
+    printf("table intact, total still %.2f lb\n", after);
+
+    // Close before deleting the file. The `disposable` binding would do this at
+    // scope end anyway, but the disposer is idempotent so doing it early is
+    // fine and keeps the delete from racing an open handle.
+    Disposable.dispose(ref db);
+    let _cleanup: string = fs.delete_file(DB_PATH);
+    return Result.Ok { value: 0 };
+}
+
+function main(): void {
+    switch (run()) {
+        case Result.Ok { value: _v }: { printf("\ndone\n"); }
+        case Result.Err { error: e }: { printf("\nfailed: %s\n", e); }
+    }
+}

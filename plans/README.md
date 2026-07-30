@@ -88,6 +88,11 @@ informal personal version):
 
 - Bootstrap: create a `Vec` iterator concept (needed to write the layers
   idiomatically without index plumbing).
+- Typecheck: a struct used as a variant payload has to be declared before the
+  variant or its fields resolve against an unpopulated shell, and the resulting
+  diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).
+  Surfaced by the sqlite binding; see
+  [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md).
 - Figure out the idempotent cleanup/dispose pattern (free-then-null, guard on
   null) so `dispose` is safe to call more than once - this is the discipline the
   advisory ownership model leans on instead of compiler-enforced affine moves.
@@ -108,6 +113,13 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
   and its v0 implementation (conferred/restrictive transitions, decl-authority).
 - [library-design.md](library-design.md) - the standard-library design contract
   (library principles, foundational traits/kinds, the networking + HTTP layers).
+
+- [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md) - what binding
+  libsqlite3 (`std/db/`) proved the FFI surface can already do without a compiler
+  change (opaque handles, `void **` out-params, pointer-sized-int sentinels, and
+  the envelope-struct trick that keeps `unsafe_ptr` out of a safe module), plus
+  the one typecheck papercut it found and the `transaction` region kind it wants
+  next.
 
 One design exploration, not a shipped system and not scheduled:
 
