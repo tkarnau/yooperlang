@@ -614,6 +614,9 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     if (e.kind === ASTNodeKind.TRY_OP) {
       e.pendingCleanups = projectCleanups(flattenStackReverse());
       walkExpr(e.operand);
+      // Phase 10.E.2: the optional context string runs on the failure
+      // branch, so anything it interpolates is still a use of that binding.
+      if (e.context) walkExpr(e.context);
       return;
     }
 

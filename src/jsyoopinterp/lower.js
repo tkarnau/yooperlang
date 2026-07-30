@@ -1566,7 +1566,95 @@ function lowerExpr(node, ctx, scope) {
       const retPayloadFields = returnErr?.fields ?? [];
       const fieldRegs = [];
       const fieldNames = [];
-      if (node.tryConvert) {
+      if (node.tryContext || node.tryContextConcat) {
+        // Phase 10.E.2: `expr? "context"`. Lowered in the err branch, so
+        // an interpolated context is only formatted when the error fires.
+        const opErrField = errPayloadFields[0];
+        const retErrField = retPayloadFields[0];
+        if (!opErrField || !retErrField) {
+          throw new ComptimeError(
+            `comptime: '?' with a context string expects single-field Err on both sides`,
+            node.sourceLoc,
+          );
+        }
+        const ctxReg = lowerExpr(node.context, ctx, scope);
+        const decoratedReg = ctx.allocReg(retErrField.type);
+        if (node.tryContextConcat) {
+          // Both payloads are `string` - build "<context>: <err>" with the
+          // same string-building opcode template literals use.
+          const errReg = ctx.allocReg(opErrField.type);
+          ctx.emit(
+            instruction(OP.VARIANT_PAYLOAD_FIELD, {
+              dst: errReg,
+              args: [operandReg],
+              type: opErrField.type,
+              immediate: opErrField.name,
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+          ctx.emit(
+            instruction(OP.TEMPLATE_FORMAT, {
+              dst: decoratedReg,
+              args: [ctxReg, errReg],
+              type: retErrField.type,
+              immediate: [
+                { kind: "expr" },
+                { kind: "str", value: ": " },
+                { kind: "expr" },
+              ],
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+        } else {
+          // WithContext.withContext(ref operandErr, context) - resolved the
+          // same way as Into.into below.
+          const opErrStruct = opErrField.type;
+          if (opErrStruct.kind !== typeKinds.struct) {
+            throw new ComptimeError(
+              `comptime: '?' context via WithContext expects a struct Err payload (got ${opErrStruct.kind})`,
+              node.sourceLoc,
+            );
+          }
+          if (!ctx.traitMethodResolver) {
+            throw new ComptimeError(
+              `comptime: '?' with a context string requires a traitMethodResolver to find WithContext.withContext`,
+              node.sourceLoc,
+            );
+          }
+          const withCtxBc = ctx.traitMethodResolver(
+            opErrStruct,
+            "WithContext",
+            "withContext",
+          );
+          if (!withCtxBc) {
+            throw new ComptimeError(
+              `comptime: '?' context couldn't resolve WithContext.withContext on ${opErrStruct.name}`,
+              node.sourceLoc,
+            );
+          }
+          const selfRefReg = ctx.allocReg({ kind: typeKinds.ref, inner: opErrStruct });
+          ctx.emit(
+            instruction(OP.VARIANT_PAYLOAD_REF, {
+              dst: selfRefReg,
+              args: [operandReg],
+              type: { kind: typeKinds.ref, inner: opErrStruct },
+              immediate: opErrField.name,
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+          ctx.emit(
+            instruction(OP.CALL_DIRECT, {
+              dst: decoratedReg,
+              args: [selfRefReg, ctxReg],
+              type: retErrField.type,
+              immediate: withCtxBc,
+              sourceLoc: node.sourceLoc,
+            }),
+          );
+        }
+        fieldRegs.push(decoratedReg);
+        fieldNames.push(retErrField.name);
+      } else if (node.tryConvert) {
         // Phase 10.E cross-shape: operandErr.error → returnErr.error
         // through `Into<TargetType>.into(ref self)` on the operand
         // payload's struct type. Resolve the Into.into bytecode at

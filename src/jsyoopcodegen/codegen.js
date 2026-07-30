@@ -820,7 +820,23 @@ export function codegen(ast) {
       const retFieldPtr = freshTemp();
       fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
 
-      if (tryNode.tryConvert) {
+      if (tryNode.tryContextConcat) {
+        // Phase 10.E.2: the string-payload context concat needs
+        // std/core/strings.yoop, which only the multi-module driver
+        // autoloads - same limitation as interpolated template literals.
+        throw new Error(
+          "codegen: `?` with a context string on `string` Err payloads requires the multi-module driver (autoloaded std/core/strings.yoop missing)",
+        );
+      } else if (tryNode.tryContext) {
+        // Phase 10.E.2: call WithContext.withContext(ref operandErr, ctx)
+        // and store the decorated payload. Emitted inside the failure
+        // block, so the context expression is free on the success path.
+        const retFieldLlvm = llvmType(retFieldType);
+        const ctxVal = emitExpr(tryNode.context, fnLines).val;
+        const decorated = freshTemp();
+        fnLines.push(`  ${decorated} = call ${retFieldLlvm} @${tryNode.tryContext.mangledName}(ptr ${opFieldPtr}, ptr ${ctxVal})`);
+        fnLines.push(`  store ${retFieldLlvm} ${decorated}, ptr ${retFieldPtr}`);
+      } else if (tryNode.tryConvert) {
         // Phase 10.E: cross-shape - call Into.into(ref operandErr) and
         // store the returned target value.
         const retFieldLlvm = llvmType(retFieldType);
@@ -4895,17 +4911,10 @@ function codegenWithModuleId(
   // feeding that to `string_concat_all`. Requires the driver to have
   // autoloaded std/core/format.yoop + std/core/strings.yoop.
   function emitInterpolatedTemplateLiteral(node, fnLines) {
-    const std = programState?.autoloadedStdModuleIds;
-    if (!std || !std.format || !std.strings) {
-      throw new Error(
-        "codegen: template literals with ${...} interpolation require the multi-module driver (autoloaded std/core/format.yoop + strings.yoop missing)",
-      );
-    }
-    const fmtMod = std.format;
-    const strMod = std.strings;
-    const stringTy = PrimType("string");
-    const arrType = { kind: typeKinds.array, elem: stringTy };
-    ensureArrayTypeDef(stringTy);
+    const fmtMod = requireAutoloadedStd(
+      "format",
+      "template literals with ${...} interpolation",
+    );
 
     const partVals = [];
     for (const part of node.parts) {
@@ -4966,6 +4975,18 @@ function codegenWithModuleId(
       );
     }
 
+    return emitStringConcatParts(partVals, fnLines);
+  }
+
+  // Build a `string[]` fat pointer over already-emitted string values and
+  // hand it to std/core/strings.yoop's `string_concat_all`. Shared by
+  // interpolated template literals and the Phase 10.E.2 `?` context concat.
+  function emitStringConcatParts(partVals, fnLines) {
+    const strMod = requireAutoloadedStd("strings", "string concatenation");
+    const stringTy = PrimType("string");
+    const arrType = { kind: typeKinds.array, elem: stringTy };
+    ensureArrayTypeDef(stringTy);
+
     const n = partVals.length;
     const storage = freshTemp();
     fnLines.push(`  ${storage} = alloca [${n} x ptr], align 8`);
@@ -4992,6 +5013,19 @@ function codegenWithModuleId(
     const result = freshTemp();
     fnLines.push(`  ${result} = call ptr @${strMod}__string_concat_all(${arrLlvm} ${fatVal})`);
     return { val: result, yoopType: stringTy };
+  }
+
+  // Autoloaded-std module id lookup with a diagnostic that names what
+  // needed it. Only the multi-module driver autoloads std/core/format.yoop +
+  // strings.yoop, so the legacy single-module entry can't reach either.
+  function requireAutoloadedStd(which, feature) {
+    const id = programState?.autoloadedStdModuleIds?.[which];
+    if (!id) {
+      throw new Error(
+        `codegen: ${feature} requires the multi-module driver (autoloaded std/core/${which}.yoop missing)`,
+      );
+    }
+    return id;
   }
 
   function emitCallExpr(node, fnLines) {
@@ -5522,7 +5556,12 @@ function codegenWithModuleId(
       const retFieldPtr = freshTemp();
       fnLines.push(`  ${retFieldPtr} = getelementptr inbounds ${retPayloadLlvm}, ptr ${retPayloadPtr}, i32 0, i32 0`);
 
-      if (tryNode.tryConvert) {
+      if (tryNode.tryContext || tryNode.tryContextConcat) {
+        // Phase 10.E.2: `expr? "context"`. The context expression is
+        // emitted HERE, inside the failure block, so an interpolated
+        // template costs nothing on the success path.
+        emitTryContextPayload(tryNode, opFieldPtr, retFieldPtr, retFieldType, fnLines);
+      } else if (tryNode.tryConvert) {
         // Phase 10.E: cross-shape - call Into.into(ref operandErr) and
         // store the returned target value.
         const retFieldLlvm = llvmType(retFieldType);
@@ -5541,6 +5580,33 @@ function codegenWithModuleId(
     fnLines.push(`  ${retVal} = load ${retLlvm}, ptr ${retSlot}`);
     if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
     fnLines.push(`  ret ${retLlvm} ${retVal}`);
+  }
+
+  // Phase 10.E.2: store the context-decorated Err payload into the outgoing
+  // Err variant. Two shapes, stamped by the typechecker:
+  //
+  //   tryContextConcat - both payloads are `string`; concatenate
+  //                      "<context>: <err>" via std/core/strings.yoop.
+  //   tryContext       - call `WithContext.withContext(ref operandErr, ctx)`
+  //                      on the operand's Err type and store the result.
+  //                      This also performs the cross-shape conversion, so
+  //                      tryConvert is not consulted alongside it.
+  function emitTryContextPayload(tryNode, opFieldPtr, retFieldPtr, retFieldType, fnLines) {
+    const ctxVal = emitExpr(tryNode.context, fnLines).val;
+    if (tryNode.tryContextConcat) {
+      const errVal = freshTemp();
+      fnLines.push(`  ${errVal} = load ptr, ptr ${opFieldPtr}`);
+      const { name, byteLen } = emitRawStringGlobal(": ");
+      const sep = freshTemp();
+      fnLines.push(`  ${sep} = getelementptr inbounds [${byteLen} x i8], ptr ${name}, i32 0, i32 0`);
+      const joined = emitStringConcatParts([ctxVal, sep, errVal], fnLines);
+      fnLines.push(`  store ptr ${joined.val}, ptr ${retFieldPtr}`);
+      return;
+    }
+    const retFieldLlvm = llvmType(retFieldType);
+    const decorated = freshTemp();
+    fnLines.push(`  ${decorated} = call ${retFieldLlvm} @${tryNode.tryContext.mangledName}(ptr ${opFieldPtr}, ptr ${ctxVal})`);
+    fnLines.push(`  store ${retFieldLlvm} ${decorated}, ptr ${retFieldPtr}`);
   }
 
   // Phase 6.1: emit a single CLEANUP_CALL node. The binding's alloca slot is

@@ -1645,6 +1645,11 @@ function resolveSliceExpression(node, scope, ctx) {
 // variant.
 function resolveTryOp(node, scope, ctx) {
   const operandType = resolveExprType(node.operand, scope, ctx);
+  // Phase 10.E.2: type the optional context string up front, so a bad
+  // interpolation inside it gets its own diagnostic even when the rest of
+  // the `?` fails to check. The parser only ever puts a string or template
+  // literal here, so the result is always `string`.
+  if (node.context) resolveExprType(node.context, scope, ctx);
   if (operandType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
@@ -1670,7 +1675,14 @@ function resolveTryOp(node, scope, ctx) {
 
   const operandErr = variantErrPayloadType(operandType);
   const returnErr = variantErrPayloadType(retType);
-  if (!typesEqual(operandErr, returnErr)) {
+  if (node.context) {
+    // Phase 10.E.2: a context string subsumes the plain Into<T> conversion -
+    // `WithContext<ReturnErr>` produces the outer Err payload directly, so
+    // the same clause covers the same-shape and cross-shape cases.
+    if (!resolveTryContext(node, operandErr, returnErr, ctx)) {
+      return setType(node, ErrorType());
+    }
+  } else if (!typesEqual(operandErr, returnErr)) {
     // Phase 10.E: same-type fast path failed - try the cross-shape path
     // via `Into<ReturnErr>` on the operand's Err payload type. Only
     // struct payloads can carry an `implementsTraits` list today, so
@@ -1690,6 +1702,77 @@ function resolveTryOp(node, scope, ctx) {
 
   node.fallibleEnum = true;
   return setType(node, strippedVariantOkType(operandType));
+}
+
+// Phase 10.E.2 - `expr? "context"`. Decides HOW the context string reaches
+// the propagated error and stamps the choice onto the node for codegen.
+// Two shapes, in order:
+//
+//   1. Both Err payloads are `string` (every Result in std/): the compiler
+//      concatenates `"<context>: <err>"` itself. Stamped as
+//      `tryContextConcat`.
+//   2. Anything else: the operand's Err payload type must implement
+//      `WithContext<ReturnErr>` from std/core/traits.yoop, and the failure
+//      branch calls `WithContext.withContext(ref operandErr, context)`.
+//      Stamped as `tryContext` (which also does the cross-shape conversion,
+//      so `tryConvert` is not consulted when a context is present).
+//
+// Returns false (having pushed a diagnostic) when neither applies.
+function resolveTryContext(node, operandErr, returnErr, ctx) {
+  if (operandErr.kind === typeKinds.void || returnErr.kind === typeKinds.void) {
+    pushError(
+      ctx.errors,
+      node,
+      `'?' context string needs an Err payload to attach to - ${
+        operandErr.kind === typeKinds.void ? "the operand's" : "the enclosing function's"
+      } Err variant carries no payload`,
+    );
+    return false;
+  }
+  if (isStringPrim(operandErr) && isStringPrim(returnErr)) {
+    node.tryContextConcat = true;
+    return true;
+  }
+  const withContext = lookupTraitImplByArg(
+    operandErr,
+    "WithContext",
+    "withContext",
+    returnErr,
+    ctx,
+  );
+  if (!withContext) {
+    // The target type is rendered source-spellable here (`ParseError`, not
+    // `struct ParseError`) because the tail of this message is meant to be
+    // copy-pasted into an `implements` clause.
+    const target = sourceTypeName(returnErr);
+    pushError(
+      ctx.errors,
+      node,
+      `'?' with a context string needs a \`WithContext<${target}>\` impl on ${formatType(operandErr)} (or \`string\` Err payloads on both sides) - add \`implements WithContext<${target}>\` with \`function withContext(ref self, context: string): ${target}\``,
+    );
+    return false;
+  }
+  node.tryContext = withContext;
+  return true;
+}
+
+function isStringPrim(type) {
+  return type?.kind === typeKinds.prim && type.name === "string";
+}
+
+// Render a type the way a user would WRITE it, for the copy-pasteable part
+// of a fix-it. formatType is the diagnostic-prose form and prefixes nominal
+// aggregates with their declaration keyword ("struct Foo"), which isn't
+// valid in a type position.
+function sourceTypeName(type) {
+  if (type?.kind === typeKinds.struct) {
+    if (type.genericInstance) {
+      const args = type.genericInstance.args.map(sourceTypeName).join(", ");
+      return `${type.name.split("__")[0]}<${args}>`;
+    }
+    return type.name;
+  }
+  return formatType(type);
 }
 
 // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` - bounded-wait
@@ -1811,6 +1894,14 @@ function resolveCancelCall(node, scope, ctx) {
 // lowering - the std/core trait isn't blessed by identity, it's blessed by
 // shape.
 function lookupIntoImpl(sourceType, targetType, ctx) {
+  return lookupTraitImplByArg(sourceType, "Into", "into", targetType, ctx);
+}
+
+// Shared by the two `?` conversion lookups (Phase 10.E `Into<T>` and Phase
+// 10.E.2 `WithContext<T>`): find a one-type-arg generic trait impl on
+// `sourceType` whose single type arg is `targetType`, and return the mangled
+// symbol for `methodName` on it. Returns null on a miss.
+function lookupTraitImplByArg(sourceType, traitName, methodName, targetType, ctx) {
   if (!sourceType || sourceType.kind !== typeKinds.struct) return null;
   // The struct flowing in from an enum payload field may be the pass-A
   // shell (empty implementsTraits) - re-fetch the canonical version from
@@ -1828,12 +1919,12 @@ function lookupIntoImpl(sourceType, targetType, ctx) {
   }
   const registry = ctx.typeContext?.registry;
   for (const trait of canonical.implementsTraits ?? []) {
-    if (trait.name !== "Into") continue;
+    if (trait.name !== traitName) continue;
     const args = registry?.traitArgsByInstance?.get(trait);
     if (!args || args.length !== 1) continue;
     if (!typesEqual(args[0], targetType)) continue;
     return {
-      mangledName: mangleTraitMethod(canonical, "Into", "into"),
+      mangledName: mangleTraitMethod(canonical, traitName, methodName),
       targetType,
     };
   }

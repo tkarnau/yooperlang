@@ -395,6 +395,47 @@ describe("parse: phase 2 - postfix '?'", () => {
   it("'r? = 5' is rejected - TRY_OP is not a valid lvalue", () => {
     assert.throws(() => bodyOf("r? = 5;"), /invalid assignment target: TRY_OP/);
   });
+
+  // Phase 10.E.2: the optional context clause.
+  it("'f()?' has a null context", () => {
+    assert.equal(exprOf("f()?").context, null);
+  });
+
+  it("'f()? \"loading\"' attaches a STRING_LITERAL context", () => {
+    const t = exprOf('f()? "loading"');
+    assert.equal(t.kind, ASTNodeKind.TRY_OP);
+    assert.equal(t.operand.kind, ASTNodeKind.CALL_EXPRESSION);
+    assert.equal(t.context.kind, ASTNodeKind.STRING_LITERAL);
+    assert.equal(t.context.value, '"loading"');
+  });
+
+  it("'f()? `at ${n}`' attaches an interpolated TEMPLATE_LITERAL context", () => {
+    const t = exprOf("f()? `at ${n}`");
+    assert.equal(t.kind, ASTNodeKind.TRY_OP);
+    assert.equal(t.context.kind, ASTNodeKind.TEMPLATE_LITERAL);
+    const exprParts = t.context.parts.filter((p) => p.kind === ASTNodeKind.EXPR_PART);
+    assert.equal(exprParts.length, 1);
+    assert.equal(exprParts[0].expr.name, "n");
+  });
+
+  // The context is restricted to the two literal token forms precisely so
+  // this stays subtraction rather than a context expression.
+  it("'f()? - x' is still a subtraction, not a context", () => {
+    const e = exprOf("f()? - x");
+    assert.equal(e.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(e.op, "minus");
+    assert.equal(e.left.kind, ASTNodeKind.TRY_OP);
+    assert.equal(e.left.context, null);
+  });
+
+  it("a context binds to the nearest '?': 'f()? \"a\" .b?' keeps them separate", () => {
+    const t = exprOf('f()? "a".b? "c"');
+    assert.equal(t.kind, ASTNodeKind.TRY_OP);
+    assert.equal(t.context.value, '"c"');
+    assert.equal(t.operand.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(t.operand.object.kind, ASTNodeKind.TRY_OP);
+    assert.equal(t.operand.object.context.value, '"a"');
+  });
 });
 
 describe("parse: phase 2 - destructuring decl", () => {

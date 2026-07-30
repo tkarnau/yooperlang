@@ -100,12 +100,13 @@ the struct-fallible shape, so we only had two codegen sites to update.
   call site, and the source-side `Into` is enough to unblock every
   current consumer (`std/http` + `std/net` calling into user-defined Err
   enums), so the symmetry waits for a real ergonomic complaint.
-- **`?` chained over `Display`-style context strings.** SPEC §11.6
-  reserves `expr? "loading config"` as a context-prepending form. For
-  enum errors the payload is whatever the user puts there, so attaching
-  a string requires either a per-payload-type hook or a blessed
-  "context-attachable" sub-trait. Out of scope here; Phase 10.E only
-  fixes the type-shape gap.
+- ~~**`?` chained over `Display`-style context strings.**~~ LANDED as
+  Phase 10.E.2 - see
+  [phase-10-e-2-qmark-context.md](phase-10-e-2-qmark-context.md). The
+  resolution was the "per-payload-type hook" option: a `WithContext<T>`
+  trait mirroring `Into<T>`, plus a compiler-side concat for the
+  string/string case. `WithContext<T>` subsumes `Into<T>`, so a `?` that
+  carries a context needs only the one impl.
 - **Non-struct Err payloads.** `Into<T>` requires `implementsTraits`,
   which structs carry but enums, primitives, refs, arrays, and unions
   do not. A real consumer that wants `?` between, say, an enum-payload

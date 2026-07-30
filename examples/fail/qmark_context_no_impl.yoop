@@ -1,0 +1,27 @@
+// Phase 10.E.2: a context string on a `?` whose Err payload is neither a
+// plain `string` nor a `WithContext<RetErr>` implementer is rejected. The
+// diagnostic spells out the impl to add, including the method signature.
+
+import { Result } from "std/core/types.yoop";
+
+type ParseError {
+    msg: string,
+}
+
+function leaf(): Result<int32, ParseError> {
+    return Result.Err { error: { msg: "bad" } };
+}
+
+function wrap(): Result<int32, ParseError> {
+    let x: int32 = leaf()? "reading header";
+    return Result.Ok { value: x };
+}
+
+function main(): int32 {
+    switch (wrap()) {
+        case Result.Ok { value: v }: { return v; }
+        case Result.Err { error: e }: { return 1; }
+    }
+}
+
+// expected error: needs a `WithContext<ParseError>` impl on struct ParseError

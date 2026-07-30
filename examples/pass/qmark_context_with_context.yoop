@@ -1,0 +1,96 @@
+// Phase 10.E.2: `expr? "context"` on a structured Err payload via the
+// `WithContext<T>` trait.
+//
+// A struct Err payload has no single "the error string" to prepend to, so
+// the type itself decides where the context lands. `WithContext<T>` mirrors
+// `Into<T>`: the source type is `self`, the target is the type parameter.
+//
+//   - `ParseError implements WithContext<ParseError>` is the same-shape
+//     case: the impl prefixes its own `msg` field and leaves `line` alone.
+//   - `IoError implements WithContext<AppError>` is the cross-shape case:
+//     one impl does the conversion AND attaches the context, so a `?`
+//     between two different Err types needs no separate `Into<AppError>`.
+
+import { Result } from "std/core/types.yoop";
+import { WithContext } from "std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// ----- same-shape: WithContext<Self> ------------------------------------
+
+type ParseError implements WithContext<ParseError> {
+    msg: string,
+    line: int32,
+    function withContext(ref self, context: string): ParseError {
+        // The context goes on the message; `line` is preserved, which is
+        // the whole point of routing through an impl instead of a blind
+        // string concat.
+        return { msg: `${context}: ${self.msg}`, line: self.line };
+    }
+}
+
+function parse_field(n: int32): Result<int32, ParseError> {
+    if (n < 0) {
+        return Result.Err { error: { msg: "not a number", line: 12 } };
+    }
+    return Result.Ok { value: n };
+}
+
+function parse_record(n: int32): Result<int32, ParseError> {
+    const v: int32 = parse_field(n)? `field ${n}`;
+    return Result.Ok { value: v * 2 };
+}
+
+// ----- cross-shape: WithContext<Other> ---------------------------------
+
+type AppError {
+    detail: string,
+    code: int32,
+}
+
+type IoError implements WithContext<AppError> {
+    code: int32,
+    function withContext(ref self, context: string): AppError {
+        return { detail: `${context} (io ${self.code})`, code: self.code };
+    }
+}
+
+function read_byte(n: int32): Result<int32, IoError> {
+    if (n < 0) {
+        return Result.Err { error: { code: 5 } };
+    }
+    return Result.Ok { value: n };
+}
+
+function load(n: int32): Result<int32, AppError> {
+    const b: int32 = read_byte(n)? "loading header";
+    return Result.Ok { value: b };
+}
+
+function main(): int32 {
+    switch (parse_record(3)) {
+        case Result.Ok { value: v }: { printf(`same ok ${v}\n`); }
+        case Result.Err { error: e }: { printf(`same err "${e.msg}" line=${e.line}\n`); }
+    }
+    switch (parse_record(-1)) {
+        case Result.Ok { value: v }: { printf(`same ok ${v}\n`); }
+        case Result.Err { error: e }: { printf(`same err "${e.msg}" line=${e.line}\n`); }
+    }
+    switch (load(7)) {
+        case Result.Ok { value: v }: { printf(`cross ok ${v}\n`); }
+        case Result.Err { error: e }: { printf(`cross err "${e.detail}" code=${e.code}\n`); }
+    }
+    switch (load(-1)) {
+        case Result.Ok { value: v }: { printf(`cross ok ${v}\n`); }
+        case Result.Err { error: e }: { printf(`cross err "${e.detail}" code=${e.code}\n`); }
+    }
+    return 0;
+}
+
+// expected output:
+// same ok 6
+// same err "field -1: not a number" line=12
+// cross ok 7
+// cross err "loading header (io 5)" code=5

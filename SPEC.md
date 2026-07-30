@@ -1122,15 +1122,58 @@ a hit rewrites the `?` failure branch to call
 outer `Err` variant. The Phase 9.H same-type fast path is unchanged - the
 conversion is paid only when the shapes actually differ.
 
-### Attaching context (optional, reserved)
+### Attaching context (optional)
 
-A suffix string on `?` prepends a context message to the propagated error. Reserved
-syntactically; not required for the first cut:
+A suffix string on `?` attaches a context message to the propagated error. Both
+literal forms are accepted - a double-quoted string, or a backtick template with
+`${...}` interpolation:
 
 ```js
 const bytes = read_all(path)? "loading config";
-// on error, propagates err with "loading config: " prefixed
+const field = parse_field(ref ps)? `parsing field ${n}`;
 ```
+
+The context expression is evaluated **only on the failure branch**, so an
+interpolated template costs nothing when the call succeeds.
+
+Only those two literal forms are legal - not a general expression. `f()? -x`
+would otherwise be ambiguous with subtraction.
+
+Where the context lands depends on the `Err` payload type:
+
+- **`string` payload on both sides** (the shape every `Result` in `std/` uses):
+  the compiler concatenates `"<context>: <err>"` itself. No impl needed. Contexts
+  stack as the error propagates outward through successive `?`s.
+- **Any other payload type**: the operand's `Err` payload type must implement
+  `WithContext<RetErr>` from [std/core/traits.yoop](std/core/traits.yoop), and the
+  failure branch calls it to build the outer `Err` payload.
+
+```js
+trait WithContext<T> {
+    function withContext(ref self, context: string): T;
+}
+
+type ParseError implements WithContext<ParseError> {
+    msg: string,
+    line: int32,
+    function withContext(ref self, context: string): ParseError {
+        return { msg: `${context}: ${self.msg}`, line: self.line };
+    }
+}
+```
+
+The impl decides where the context goes - a message prefix, a dedicated field, or
+an accumulated breadcrumb list - which is why a structured payload routes through
+a method instead of a blind string concat (`line` above survives untouched).
+
+`WithContext<T>` subsumes `Into<T>`: because the target type is the trait's type
+parameter, a single `IoError implements WithContext<AppError>` impl handles the
+cross-shape conversion *and* the context, so a `?`-with-context between differing
+`Err` types does not additionally need `Into<AppError>`. A `?` with no context
+still uses `Into<T>` as described above.
+
+A context string on a `?` whose `Err` variant carries no payload is an error -
+there is nothing to attach to.
 
 ### Interaction with concurrency kinds
 

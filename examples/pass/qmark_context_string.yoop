@@ -1,0 +1,74 @@
+// Phase 10.E.2: `expr? "context"` on `string` Err payloads.
+//
+// When both the operand's and the enclosing function's Err payload are
+// plain strings - the shape every `Result` in std/ uses - the compiler
+// builds "<context>: <err>" itself, no trait impl needed.
+//
+// Two things this fixture proves:
+//
+//   1. Both literal forms work: a plain double-quoted string and a
+//      backtick template with `${...}` interpolation.
+//   2. The context expression is emitted INSIDE the failure branch, so an
+//      interpolated template costs nothing when the call succeeds. `noisy`
+//      prints when it runs, and the happy path never prints it.
+
+import { Result } from "std/core/types.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function parse_positive(n: int32): Result<int32, string> {
+    if (n < 0) {
+        return Result.Err { error: "negative input" };
+    }
+    return Result.Ok { value: n };
+}
+
+// Interpolated into the context template. If it ever runs on the success
+// path, the expected output below stops matching.
+function noisy(tag: int32): int32 {
+    printf(`  (formatting context for tag ${tag})\n`);
+    return tag;
+}
+
+function plain_context(n: int32): Result<int32, string> {
+    const v: int32 = parse_positive(n)? "reading count";
+    return Result.Ok { value: v + 1 };
+}
+
+function template_context(n: int32, tag: int32): Result<int32, string> {
+    const v: int32 = parse_positive(n)? `reading field ${noisy(tag)}`;
+    return Result.Ok { value: v + 1 };
+}
+
+// Contexts stack as the error propagates outward: the inner `?` prefixes
+// first, the outer one prefixes the already-prefixed string.
+function nested_context(n: int32): Result<int32, string> {
+    const v: int32 = plain_context(n)? "loading config";
+    return Result.Ok { value: v };
+}
+
+function show(label: string, r: Result<int32, string>): void {
+    switch (r) {
+        case Result.Ok { value: v }: { printf(`${label}: ok ${v}\n`); }
+        case Result.Err { error: e }: { printf(`${label}: err "${e}"\n`); }
+    }
+}
+
+function main(): int32 {
+    show("plain happy", plain_context(4));
+    show("plain sad", plain_context(-1));
+    show("template happy", template_context(4, 9));
+    show("template sad", template_context(-1, 9));
+    show("nested sad", nested_context(-1));
+    return 0;
+}
+
+// expected output:
+// plain happy: ok 5
+// plain sad: err "reading count: negative input"
+// template happy: ok 5
+//   (formatting context for tag 9)
+// template sad: err "reading field 9: negative input"
+// nested sad: err "loading config: reading count: negative input"

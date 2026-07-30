@@ -102,3 +102,22 @@ export trait Iterable<T> {
 export trait Into<T> {
     function into(ref self): T;
 }
+
+// ----- WithContext -----------------------------------------------------
+
+// Context-attaching `?` (Phase 10.E.2). `expr? "loading config"` prepends a
+// message to the propagated error. When both Err payloads are plain strings
+// the compiler concatenates `"<context>: <err>"` itself and no impl is
+// needed; for any other payload type the operand's Err type must implement
+// `WithContext<TargetErr>`, and the failure branch calls
+// `WithContext.withContext(ref operandErr, context)` to build the outer Err
+// payload.
+//
+// Like `Into<T>`, the source type is `self` and the target is the type
+// parameter, so a same-shape impl reads `ParsingError implements
+// WithContext<ParsingError>`. The impl decides where the context lands - a
+// message prefix, a separate field, or an accumulated breadcrumb list - and
+// it doubles as the cross-shape conversion, so one impl covers both.
+export trait WithContext<T> {
+    function withContext(ref self, context: string): T;
+}

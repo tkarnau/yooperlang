@@ -225,6 +225,43 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "happy sum=7\nsad err code=-7 tag=7\n");
   });
 
+  // Phase 10.E.2: `expr? "context"` on `string` Err payloads. Both literal
+  // forms (plain + interpolated template) prefix the propagated error, and
+  // contexts stack as the error passes through each `?`. The interleaved
+  // "(formatting context...)" line proves the context expression is emitted
+  // inside the failure branch: it appears only for the sad call, and before
+  // that call's own output line.
+  it("qmark_context_string: `?` with a context string prefixes a string Err payload", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_context_string.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      'plain happy: ok 5\n' +
+        'plain sad: err "reading count: negative input"\n' +
+        'template happy: ok 5\n' +
+        "  (formatting context for tag 9)\n" +
+        'template sad: err "reading field 9: negative input"\n' +
+        'nested sad: err "loading config: reading count: negative input"\n',
+    );
+  });
+
+  // Phase 10.E.2: a structured Err payload routes the context through a
+  // `WithContext<T>` impl. Same-shape (ParseError -> ParseError) preserves
+  // the untouched `line` field, which a blind string concat could not do;
+  // cross-shape (IoError -> AppError) shows one impl covering both the
+  // conversion and the context, with no separate `Into<AppError>`.
+  it("qmark_context_with_context: `?` context routes through WithContext.withContext", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_context_with_context.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "same ok 6\n" +
+        'same err "field -1: not a number" line=12\n' +
+        "cross ok 7\n" +
+        'cross err "loading header (io 5)" code=5\n',
+    );
+  });
+
   // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` covers Done +
   // Timeout. The fast task completes well inside its 1s deadline; the slow
   // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.
@@ -1871,6 +1908,19 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
     );
   });
 
+  // Phase 10.E.2: a context string on a `?` whose Err payload is a struct
+  // with no `WithContext<RetErr>` impl is rejected, with the impl to add
+  // spelled out in source-writable form.
+  it("qmark_context_no_impl: `?` context on a payload with no WithContext impl is a typecheck error", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/qmark_context_no_impl.yoop");
+    assert.ok(
+      errors.some((e) =>
+        /needs a `WithContext<ParseError>` impl on struct ParseError/.test(e.message),
+      ),
+      `expected missing-WithContext error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
   // Phase 10.K: `VTableName.fromFn(...)` arguments must match the method slot
   // signature. A return-type mismatch (int32 where the slot wants bool) is
   // rejected at typecheck.
@@ -2205,6 +2255,27 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.match(ir, /GOOD = internal global i32 13,/);
     assert.match(ir, /BAD = internal global i32 0,/);
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
+  });
+
+  // Phase 10.E.2 at comptime. Multi-module fixture (imports std/core/types +
+  // std/core/traits) so it goes through the module-graph compile path.
+  // CONCAT_CMP=0 means the string-payload path built exactly
+  // "step -1: boom"; TRAIT_SCORE=500 means WithContext.withContext ran with
+  // both the receiver (code 5) and an intact context string (strcmp 0);
+  // TRAIT_OK=7 means the context never ran on the success path.
+  it("at_precompile_qmark_context.yoop: `?` context strings fold at comptime (concat + WithContext)", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/at_precompile_qmark_context.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "CONCAT_CMP=0 TRAIT_SCORE=500 TRAIT_OK=7\n");
+    const entryAbs = path.join(repoRoot, "examples/pass/at_precompile_qmark_context.yoop");
+    const { ir } = compileEntry(entryAbs);
+    assert.match(ir, /CONCAT_CMP = internal global i32 0,/);
+    assert.match(ir, /TRAIT_SCORE = internal global i32 500,/);
+    assert.match(ir, /TRAIT_OK = internal global i32 7,/);
+    assert.doesNotMatch(
+      ir,
+      /define internal void @at_precompile_qmark_context_[0-9a-f]+__module_init\(\)/,
+    );
   });
 
   it("at_precompile_tasks.yoop: task fns execute synchronously inline at comptime (immediate / joined+wait / pooled+wait)", () => {

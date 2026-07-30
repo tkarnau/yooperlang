@@ -1,0 +1,94 @@
+// Phase 10.E.2 at comptime: a `?` context string folds inside
+// `@precompile`. The bytecode lowerer emits the context expression in
+// the err branch of the TRY_OP, then either builds "<context>: <err>"
+// with the same OP.TEMPLATE_FORMAT template literals use (string
+// payloads) or resolves `WithContext.withContext` through
+// traitMethodResolver and emits a CALL_DIRECT with
+// `[ref payload.error, context]` (structured payloads) - the same two
+// shapes codegen emits at runtime.
+//
+// The folded constants are ints rather than strings so the whitelisted
+// comptime `strcmp` can prove the exact contents.
+
+import { Result } from "std/core/types.yoop";
+import { WithContext } from "std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+    function strcmp(a: string, b: string): int32;
+    function printf(fmt: string, ...): int32;
+}
+
+// ----- string payload: compiler-side concat --------------------------
+
+function leaf(n: int32): Result<int32, string> {
+    if (n < 0) {
+        return Result.Err { error: "boom" };
+    }
+    return Result.Ok { value: n };
+}
+
+function wrapped(n: int32): Result<int32, string> {
+    const v: int32 = leaf(n)? `step ${n}`;
+    return Result.Ok { value: v };
+}
+
+function err_or_blank(r: Result<int32, string>): string {
+    switch (r) {
+        case Result.Ok { value: _v }: { return "<ok>"; }
+        case Result.Err { error: e }: { return e; }
+    }
+    return "<unreachable>";
+}
+
+// 0 means the propagated error is exactly "step -1: boom" - the context
+// prefix, the ": " separator, and the original payload.
+@precompile const CONCAT_CMP: int32 = strcmp(err_or_blank(wrapped(-1)), "step -1: boom");
+
+// ----- structured payload: WithContext impl --------------------------
+
+type AppError {
+    code: int32,
+    ctxCmp: int32,
+}
+
+type IoError implements WithContext<AppError> {
+    code: int32,
+    function withContext(ref self, context: string): AppError {
+        // Recording strcmp against the expected context proves the
+        // second argument arrived intact through the CALL_DIRECT.
+        return { code: self.code, ctxCmp: strcmp(context, "loading header") };
+    }
+}
+
+function read_byte(n: int32): Result<int32, IoError> {
+    if (n < 0) {
+        return Result.Err { error: { code: 5 } };
+    }
+    return Result.Ok { value: n };
+}
+
+function load(n: int32): Result<int32, AppError> {
+    const b: int32 = read_byte(n)? "loading header";
+    return Result.Ok { value: b };
+}
+
+function score(r: Result<int32, AppError>): int32 {
+    switch (r) {
+        case Result.Ok { value: v }: { return v; }
+        case Result.Err { error: e }: { return e.code * 100 + e.ctxCmp; }
+    }
+    return 0;
+}
+
+// Sad path: code 5, ctxCmp 0 -> 500.
+@precompile const TRAIT_SCORE: int32 = score(load(-1));
+// Happy path: the `?` succeeds, so the context never runs -> 7.
+@precompile const TRAIT_OK: int32 = score(load(7));
+
+function main(): int32 {
+    printf(`CONCAT_CMP=${CONCAT_CMP} TRAIT_SCORE=${TRAIT_SCORE} TRAIT_OK=${TRAIT_OK}\n`);
+    return 0;
+}
+
+// expected stdout:
+//   CONCAT_CMP=0 TRAIT_SCORE=500 TRAIT_OK=7

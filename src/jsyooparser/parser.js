@@ -2364,6 +2364,17 @@ export function parse(src) {
         advance(); // consume '?'
         const tryOpNode = buildSourcedNode(ASTNodeKind.TRY_OP);
         tryOpNode.operand = node;
+        // Phase 10.E.2 (SPEC 11 "attaching context"): an optional context
+        // string after the `?`, prepended to the propagated error.
+        //
+        //   parseTypeParams(ref ps)? "type params"
+        //   parseTypeParams(ref ps)? `type params for ${node.name}`
+        //
+        // Deliberately restricted to the two literal token forms rather
+        // than a general expression: `f()? -x` would otherwise be
+        // ambiguous with subtraction, and a string can never continue an
+        // expression, so this stays a zero-lookahead decision.
+        tryOpNode.context = parseTryContext();
         node = tryOpNode;
         continue;
       }
@@ -2492,6 +2503,25 @@ export function parse(src) {
     }
 
     return node;
+  }
+
+  // Phase 10.E.2: the optional context clause on a postfix `?`. Returns the
+  // context expression node, or null when the `?` has no context. Only a
+  // double-quoted string or a backtick template is accepted - see the call
+  // site for why this isn't a general expression.
+  function parseTryContext() {
+    if (peek().tag === TokenTags.strLiteral) {
+      const tok = advance();
+      const strNode = buildSourcedNode(ASTNodeKind.STRING_LITERAL);
+      strNode.value = src.substring(tok.start, tok.start + tok.length);
+      return strNode;
+    }
+    if (peek().tag === TokenTags.templateLiteral) {
+      const tok = advance();
+      const raw = src.substring(tok.start, tok.start + tok.length);
+      return parseTemplateLiteralBody(raw, tok.start);
+    }
+    return null;
   }
 
   // a template literal token still has its surrounding backticks. split it into
