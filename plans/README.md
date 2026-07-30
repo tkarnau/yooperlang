@@ -86,8 +86,13 @@ Immediate build sequence (from the contracts doc):
 Small, concrete next steps (the running scratch list; `scratch.md` is the
 informal personal version):
 
-- Bootstrap: create a `Vec` iterator concept (needed to write the layers
-  idiomatically without index plumbing).
+- ~~Bootstrap: create a `Vec` iterator concept (needed to write the layers
+  idiomatically without index plumbing).~~ DONE: `vecIter` +
+  `VecIter<T> implements Iterable<T>` in `std/core/vec.yoop`, landed alongside
+  two other loop-ergonomics fixes the layers wanted - a loop-scoped counter
+  (`for (let i = 0; i < n; i += 1)`, with the counter's type taken from the
+  condition so it lands on `usize`) and `a..b` ranges (`for i in 0..n`, sugar
+  for a `Range` value in `std/core/range.yoop`). See SPEC.md section 9.
 - Typecheck: a struct used as a variant payload has to be declared before the
   variant or its fields resolve against an unpopulated shell, and the resulting
   diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).

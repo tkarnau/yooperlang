@@ -267,6 +267,24 @@ function resolveBinary(node, scope, ctx) {
   return setType(node, resultType);
 }
 
+// Wording for an argument-type mismatch at a call site. A call synthesized by
+// the `..` lowering is described as the RANGE it came from: the user never
+// wrote `$range.exclusive`, so naming it (or an argument position) would be a
+// diagnostic about compiler internals. See jsyoopdriver/lower_range.js.
+export function argMismatchMessage(node, i, param, argType) {
+  if (node.rangeOperator) {
+    return (
+      `${i === 0 ? "start" : "end"} bound of range "..": cannot use ` +
+      `${formatType(argType)} - a range is over ${formatType(param.type)}, ` +
+      `so convert the bound (e.g. ${formatType(param.type)}(x))`
+    );
+  }
+  return (
+    `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": ` +
+    `cannot pass ${formatType(argType)} to ${formatType(param.type)}`
+  );
+}
+
 // Render the callee expression as a short string for use in diagnostics.
 // Bare identifiers stay as-is; FIELD_ACCESS (namespace / trait-qualified
 // calls) renders as `ns.name`. Anything more exotic falls back to "call".
@@ -2439,8 +2457,7 @@ export function resolveCallType(node, sig, scope, ctx) {
         param.type,
         scope,
         ctx,
-        (argType) =>
-          `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": cannot pass ${formatType(argType)} to ${formatType(param.type)}`,
+        (argType) => argMismatchMessage(node, i, param, argType),
       );
     }
   }
@@ -3182,7 +3199,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
       pushError(
         ctx.errors,
         argNode,
-        `arg ${i + 1}(${param.name}) of "${calleeDisplayName(node.callee)}": cannot pass ${formatType(argTypes[i])} to ${formatType(param.type)}`,
+        argMismatchMessage(node, i, param, argTypes[i]),
       );
     } else {
       coerceUntypedLiteralToTyped(argNode, argTypes[i], param.type, ctx.errors);

@@ -4,6 +4,7 @@ import path from "node:path";
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
 import { moduleIdFor } from "./moduleId.js";
+import { lowerRangeExprs } from "./lower_range.js";
 import { STD_ROOT } from "../install_root.js";
 
 // Phase 9.C: the std/ import root. Resolution of the installed location (repo
@@ -77,6 +78,11 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     const overlay = readFile(absPath);
     const src = overlay != null ? overlay : fs.readFileSync(absPath, "utf8");
     const ast = parse(src);
+    // Rewrite `a..b` into a call to std/core/range.yoop and unshift the import
+    // it needs. Runs before the import walk below so the synthesized import is
+    // resolved like any other - which is also what pulls range.yoop into the
+    // graph, and only for modules that use `..`.
+    lowerRangeExprs(ast);
     const id = moduleIdFor(absPath);
     const mod = { id, absPath, src, ast, imports: [] };
     byPath.set(absPath, mod);

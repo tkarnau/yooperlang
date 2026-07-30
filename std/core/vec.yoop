@@ -19,6 +19,7 @@
 import { Disposable, disposable } from "./kinds.yoop";
 import * as intr from "./intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./alloc.yoop";
+import { Iterable, IterStep } from "./traits.yoop";
 
 // `Vec<T>` is container-owned: it remembers the allocator it was built with
 // (whatever was current at `vec_new`) and routes every later grow and the
@@ -144,4 +145,36 @@ export function vec_from_array<T>(src: T[]): Vec<T> propagates<disposable> {
         i = i + 1;
     }
     return { data: data, len: src.len, cap: src.len, alloc: a };
+}
+
+// ----- Iteration ---------------------------------------------------------
+
+// `VecIter<T>` walks the populated prefix (indices 0 .. len-1) in order, so
+// `for x in vecIter(ref v)` replaces the index-plumbing while-loop that
+// reading a Vec used to require.
+//
+// Like `MapIter`, the iterator holds a BORROWING view of the backing buffer:
+// the `T[]` fat pointer is a copy, the heap data is shared. Any mutation that
+// can reallocate (`vec_push` at capacity, `vec_extend_from`, `dispose`)
+// invalidates it and leaves the view dangling - keep the iterator scoped
+// tightly around its loop and re-fetch after mutating.
+export type VecIter<T> implements Iterable<T> {
+    data: T[],
+    len: usize,
+    i: usize,
+
+    function next(ref self): IterStep<T> {
+        if (self.i >= self.len) {
+            return IterStep.Done;
+        }
+        let cur: usize = self.i;
+        self.i = self.i + 1;
+        return IterStep.Yield { value: self.data[cur] };
+    }
+}
+
+// Build a `VecIter<T>` over the populated prefix of `v`, for `for ... in`.
+// The iterator yields `T` values via the `Iterable<T>` trait (Phase 10.B).
+export function vecIter<T>(v: ref Vec<T>): VecIter<T> {
+    return { data: v.data, len: v.len, i: 0 };
 }

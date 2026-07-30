@@ -924,16 +924,20 @@ Iteration *strategy* is expressed as a **trait method call on the collection** i
 RHS of `in`. This keeps the `for … in` slot recognizable as a loop while letting kinds
 and traits extend the strategy set.
 
-> **v0 status.** Phase 9.D implements the default `for ITEM in EXPR { ... }` form
-> over arrays only - the body runs once per element with a fresh `ITEM` bound to
-> a copy of the current slot. The trait-driven strategy slots below (`Iterable`,
-> `BatchIterable`, `SimdIterable`, `ParIterable`) and the user-extensible
-> machinery are the long-term shape; until those land, the only legal RHS is an
-> array expression and the only legal strategy is the implicit sequential walk.
+> **v0 status.** The `for ITEM in EXPR { ... }` form works over arrays (Phase
+> 9.D) and over any type implementing `Iterable<T>` (Phase 10.B), which is what
+> `a..b` ranges, `Vec`, and `Map` ride on. The remaining trait-driven strategy
+> slots below (`BatchIterable`, `SimdIterable`, `ParIterable`) are the long-term
+> shape and are not implemented; the only strategy today is the sequential walk.
 
 ```js
-// C-style numeric counter
-for (i = 0; i < n; i = i + 1) { ... }
+// C-style numeric counter. The counter may be declared in the head, in which
+// case it is scoped to the loop; the step slot takes `=` or a compound op.
+for (let i = 0; i < n; i += 1) { ... }
+for (i = 0; i < n; i = i + 1) { ... }        // counter declared before the loop
+
+// Over an index space, via a range value (see "Ranges" below)
+for i in 0..n { ... }
 
 // Iteration over a collection - strategy comes from a trait method
 for item  in xs                    { ... }   // default, from Iterable
@@ -941,6 +945,56 @@ for chunk in xs.batched(4)         { ... }   // chunk: T[] - from BatchIterable
 for v     in xs.simd(8)            { ... }   // v is a SIMD lane - from SimdIterable
 for item  in xs.parallel()         { ... }   // each iter a concurrent task - from ParIterable
 ```
+
+### The C-style counter
+
+The init slot accepts either an assignment to an existing binding
+(`for (i = 0; ...)`) or a `let` declaration (`for (let i = 0; ...)`). A
+`let`-declared counter is **scoped to the loop**: it does not leak into the
+enclosing scope, and it may shadow a same-named binding out there. `const` is
+rejected in the init slot, since the step mutates the counter.
+
+The counter's type annotation is optional. When it is omitted and the
+initializer is a bare numeric literal, the type comes from the **loop
+condition**: if the condition compares the counter against a concrete numeric
+operand, that operand's type wins. So `for (let i = 0; i < xs.len; i += 1)`
+gives `i: usize`, not the `int32` a plain `let i = 0;` binding would infer.
+Without such a comparison the ordinary literal defaults apply (`int32` /
+`float64`). Annotate the counter to say something else:
+
+```js
+for (let i: int32 = 0; i < 10; i += 3) { ... }
+for (let k: int32 = 3; k > 0; k -= 1) { ... }     // counting down
+```
+
+The step slot accepts `i = <expr>` or any compound-assignment operator
+(`+= -= *= /= %=`), which means the same thing: `i += 2` is `i = i + 2`.
+
+### Ranges
+
+`a..b` is a half-open integer range: it yields `a`, `a + 1`, ... `b - 1`, and
+nothing at all when `b <= a`. Elements are `usize`, matching every length and
+index in the language, so `0..xs.len` needs no casts.
+
+```js
+for i in 0..xs.len { ... }         // the common index walk
+for i in 1..xs.len - 1 { ... }     // `..` binds looser than arithmetic
+```
+
+The operator is **sugar, not a loop form**: `a..b` lowers to a call to
+`exclusive` in `std/core/range.yoop`, so a range is an ordinary `Range` value
+implementing `Iterable<usize>`. It can be bound, passed, returned, and walked
+more than once (each walk gets its own copy of the cursor).
+
+```js
+const rows = 0..3;
+paintEvery(rows);                  // Range is just a value
+for i in rows { ... }
+for i in rows { ... }              // walks again from 0
+```
+
+Bounds cannot be chained (`a..b..c` is an error). Inside brackets `..` keeps its
+existing slice meaning (`xs[i..j]`, Phase 9.E) and never builds a range.
 
 The body's bound variable's **type** tells you the mode: a `T[]` binding means you're
 iterating in chunks; a parallel iterator's body runs under concurrent-task rules
