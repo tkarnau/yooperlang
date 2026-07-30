@@ -1,0 +1,155 @@
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+// ---------------------------------------------------------------------------
+// The results log. Exactly ONE of these exists; everything else holds an
+// erased handle to it rather than a copy of the Vec. Structs are value types
+// in yoop, so a `Vec<string>` field copied into the suite and into each case
+// is three independent {data, len, cap} triples - pushing through one of them
+// bumps only that copy's `len`, which is why the suite printed `results: []`.
+// ---------------------------------------------------------------------------
+
+trait Collects {
+  function record(ref self, line: string): void;
+  function report(ref self): void;
+  function claimPrint(ref self, suiteName: string): bool;
+}
+
+@derive(display)
+type Results implements (Collects, Disposable) propagates<disposable> {
+  lines: Vec<string>,
+  printClaimed: bool,
+  function record(ref self, line: string): void {
+    vec.vec_push(ref self.lines, line);
+  }
+  function report(ref self): void {
+    printf(`${self}\n`);
+  }
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.lines);
+  }
+  function claimPrint(ref self, suiteName: string): bool {
+    if (!self.printClaimed) {
+      self.printClaimed = true;
+      return true;
+    }
+
+    vec.vec_push(ref self.lines, suiteName);
+    return false;
+  }
+}
+
+// `Recorder.from(ref r)` stores &r as the vtable's ctx, so every copy of a
+// Recorder dispatches back into the same Results. This is the one indirection
+// the language gives you today - a `ref` or `unsafe_ptr` struct field cannot
+// be handed on to a `ref`-taking function.
+vtable Recorder for Collects {
+  record: (line: string) => void,
+  report: () => void,
+  claimPrint: (suiteName: string) => bool
+}
+
+// ---------------------------------------------------------------------------
+// Suite / case
+// ---------------------------------------------------------------------------
+
+trait HoldsTestSuite {
+  function printResults(ref self): void;
+}
+
+trait HandlesTest {
+  function recordResults(ref self): void;
+}
+
+type TestSuite implements HoldsTestSuite {
+  name: string,
+  sink: Recorder,
+  hasPrintClaim: bool,
+  function printResults(ref self): void {
+    // The rebind is load-bearing: a vtable-typed struct FIELD still carries
+    // the pre-population shell type, so `Recorder.report(ref self.sink)` fails
+    // with `vtable "Recorder" has no slot for trait method "report"`.
+    let sink: Recorder = self.sink;
+    if (self.hasPrintClaim) {
+      printf(`Test Results for ${self.name}\n`);
+      Recorder.report(ref sink);
+    }
+
+    self.hasPrintClaim = false;
+  }
+}
+
+type TestCase implements HandlesTest {
+  isSuccessful: bool,
+  name: string,
+  sink: Recorder,
+  function recordResults(ref self): void {
+    let sink: Recorder = self.sink;
+    if (self.isSuccessful) {
+      Recorder.record(ref sink, `success: ${self.name}`);
+    } else {
+      Recorder.record(ref sink, `failure: ${self.name}`);
+    }
+  }
+}
+
+function describeSuite(desc: string, sink: Recorder): TestSuite {
+  const didWinPrintClaim = Recorder.claimPrint(ref sink, desc);
+  return {
+    name: desc,
+    sink: sink,
+    hasPrintClaim: didWinPrintClaim,
+  };
+}
+
+function assertsThat(desc: string, sink: Recorder): TestCase {
+  return {
+    name: desc,
+    isSuccessful: false,
+    sink: sink,
+  };
+}
+
+kind suite {
+  appliesTo region;
+  requires HoldsTestSuite;
+  mustCall printResults beforeScopeEnd;
+  ownsBlock;
+}
+
+kind test {
+  appliesTo binding;
+  requires HandlesTest;
+  mustCall recordResults beforeScopeEnd;
+  ownsBlock;
+}
+
+// example code under test
+function strangeAdd(a: int, b: int): int {
+  if (a % 5 == 2) {
+    return a + b + 1;
+  }
+
+  return a + b;
+}
+
+function main(): int {
+  disposable results: Results = { lines: vec.vec_new(8), printClaimed: false };
+  let sink: Recorder = Recorder.from(ref results);
+
+  suite describeSuite("my tests", sink) {
+    suite describeSuite("strange add tests", sink) {
+      let test theory: TestCase = assertsThat("it adds two numbers strangely when the first number is equal to mod 5 plus 2", sink) {
+        theory.isSuccessful = strangeAdd(2, 2) == 5;
+      }
+      let test theory: TestCase = assertsThat("it adds two numbers when the first number is not equal to mod 5 plus 2", sink) {
+        theory.isSuccessful = strangeAdd(1, 2) == 3;
+      }
+      let test theory: TestCase = assertsThat("it adds very wrong", sink) {
+        theory.isSuccessful = strangeAdd(1, 1) == 10;
+      }
+    }
+  }
+
+  return 0;
+}

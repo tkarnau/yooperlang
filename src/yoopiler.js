@@ -19,6 +19,15 @@ import {
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst, dumpAstJson } from "./dumpAst.js";
 import { checkInstallRoots } from "./install_root.js";
+import {
+  collectSuiteModules,
+  discoverTestFiles,
+  entryPathFor,
+  exportSuiteFunctions,
+  generateEntrySource,
+  isTestModuleFile,
+  verifyCollectedSuites,
+} from "./jsyoopdriver/test_mode.js";
 
 // Locate the clang binary. `YOOP_CLANG` wins if set (and is a hard error if it
 // points at nothing, since that's explicit user intent). On Windows we keep
@@ -82,6 +91,7 @@ function main() {
       "track-heap": { type: "boolean" },
       "keep-ir": { type: "boolean" },
       lsp: { type: "boolean" },
+      test: { type: "boolean" },
     },
     allowPositionals: true,
   });
@@ -128,8 +138,18 @@ function main() {
     process.exit(1);
   }
 
-  const inputFile = values.inputFile ?? positionals[0];
-  if (!inputFile || !fs.existsSync(inputFile)) {
+  // Test mode. Entered by `--test [path]`, or implicitly when the entry is a
+  // `*.test.yoop` declaring `import.test;` - such a module has no `main`, so
+  // without this it would just fail to compile. Everything downstream is the
+  // ordinary pipeline; the only difference is a synthetic entry module carrying
+  // a generated `main`, and that the executable lands in the temp dir and is
+  // run instead of being left in the tree.
+  const testCtx = setUpTestMode(values, positionals);
+
+  const inputFile = testCtx
+    ? testCtx.entryAbs
+    : (values.inputFile ?? positionals[0]);
+  if (!inputFile || (!testCtx && !fs.existsSync(inputFile))) {
     console.log("input file not found.");
     process.exit(1);
   }
@@ -139,7 +159,10 @@ function main() {
   const modulesOutputFileName = values.outputModules
     ? `${outputFileName}.m`
     : null;
-  const entryAbs = fs.realpathSync(path.resolve(inputFile));
+  // The synthetic test entry has no file on disk, so it cannot be realpath'd.
+  const entryAbs = testCtx
+    ? testCtx.entryAbs
+    : fs.realpathSync(path.resolve(inputFile));
 
   if (values["dump-ast"]) {
     const astOut = values.outputFile ?? `${outputFileName}.ast.html`;
@@ -157,7 +180,10 @@ function main() {
   let modules;
   let autoloadedStdModuleIds;
   try {
-    ({ modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbs));
+    ({ modules, autoloadedStdModuleIds } = loadModuleGraph(
+      entryAbs,
+      testCtx ? { readFile: testCtx.readFile } : {},
+    ));
   } catch (err) {
     if (err && err.isParseError) {
       // Parse error from the lexer/parser: it has line/column/length and
@@ -182,7 +208,27 @@ function main() {
     throw err;
   }
 
+  // Test mode: give every suite function its export wrapper before typecheck,
+  // so the generated entry's `import { name as suiteN }` resolves without the
+  // author having to write `export` on each one.
+  if (testCtx) {
+    testCtx.testModuleIds = new Set(
+      modules
+        .filter((m) => testCtx.testFilePaths.has(m.absPath))
+        .map((m) => m.id),
+    );
+    exportSuiteFunctions(modules, testCtx.testModuleIds);
+  }
+
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
+  // Test mode: the syntactic collection pass took every kind-prefixed function.
+  // Now that kinds are resolved, reject any that is not enumerable into the
+  // table `--test` asked for.
+  if (testCtx && errors.length === 0) {
+    for (const p of verifyCollectedSuites(modules, testCtx.testModuleIds)) {
+      errors.push(p);
+    }
+  }
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
   // --track-heap: instruct codegen to emit yoop_diag_record_alloc /
   // yoop_diag_record_free calls around the heap_alloc / heap_free
@@ -193,10 +239,29 @@ function main() {
 
   if (errors.length > 0) {
     const modById = new Map(modules.map((m) => [m.id, m]));
+    // Test mode: a bad suite (wrong signature, unresolvable kind) also breaks
+    // the generated entry's suite table, producing a second diagnostic that
+    // points into source the user never wrote. Report only the real ones. If
+    // the ONLY errors are in the generated module, that is a bug in the
+    // generator, so those still print - labeled, so it is obvious whose fault
+    // it is.
+    let reported = errors;
+    if (testCtx) {
+      const entryModuleId = modules.find((m) => m.absPath === testCtx.entryAbs)?.id;
+      const real = errors.filter((e) => e.moduleId !== entryModuleId);
+      if (real.length > 0) {
+        reported = real;
+      } else {
+        console.error(
+          "internal error: yoopiler's generated test entry failed to typecheck.\n" +
+            "  This is a compiler bug, not a problem with your tests.\n",
+        );
+      }
+    }
     console.error(
-      `typecheck failed (${errors.length} error${errors.length === 1 ? "" : "s"}):\n`,
+      `typecheck failed (${reported.length} error${reported.length === 1 ? "" : "s"}):\n`,
     );
-    for (const error of errors) {
+    for (const error of reported) {
       const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
       console.error(
         formatDiagnostic({
@@ -271,6 +336,11 @@ function main() {
   const tmpIR = path.join(tmpDir, "yooper_out.ll");
   fs.writeFileSync(tmpIR, ir, "utf8");
   if (keepIR) console.log(`llvm IR written to ${tmpIR}`);
+  // Test mode: the binary is an artifact of the run, not of the project, so it
+  // goes in the temp dir and rides the same exit-hook cleanup as the IR.
+  // --keep-ir keeps both, which is how you get it under lldb.
+  const testExe = testCtx ? path.join(tmpDir, "yoop_tests") : null;
+  const linkOutput = testExe ?? outputFileName;
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
 
   // Turn each `extern "C" from library "X"` name into the right linker
@@ -298,12 +368,16 @@ function main() {
       tmpIR,
       ...RUNTIME_SOURCES,
       "-o",
-      `${outputFileName}.exe`,
+      `${linkOutput}.exe`,
       ...debugFlags,
       ...linkArgs,
       "-fuse-ld=link",
     ];
     runClang(clang, clangArgs);
+    if (testCtx) {
+      runTestBinary(`${linkOutput}.exe`, positionals.slice(1), keepIR);
+      return;
+    }
     console.log(`compiled: ${outputFileName}`);
   } else {
     // On macOS, Homebrew installs libraries under /opt/homebrew (Apple Silicon)
@@ -321,14 +395,111 @@ function main() {
       tmpIR,
       ...RUNTIME_SOURCES,
       "-o",
-      outputFileName,
+      linkOutput,
       ...debugFlags,
       ...extraSearchPaths,
       ...linkArgs,
     ];
     runClang(clang, clangArgs);
+    if (testCtx) {
+      runTestBinary(linkOutput, positionals.slice(1), keepIR);
+      return;
+    }
     console.log(`compiled: ${outputFileName}`);
   }
+}
+
+// Run the freshly-linked test binary, forwarding any extra positionals as
+// suite-name filters (std/test.yoop reads them via std/env.yoop) and
+// propagating its exit code, which is the failure count.
+function runTestBinary(exePath, filterArgs, keepExe) {
+  if (keepExe) console.log(`test binary written to ${exePath}`);
+  try {
+    execFileSync(exePath, filterArgs, { stdio: "inherit" });
+  } catch (err) {
+    if (typeof err?.status === "number") process.exit(err.status);
+    throw err;
+  }
+  process.exit(0);
+}
+
+// Decide whether this invocation is a test run, and if so do the discovery and
+// entry synthesis. Returns null for an ordinary compile.
+//
+// Two ways in:
+//   yoopiler --test [dir-or-file]   - glob **/*.test.yoop under the path
+//   yoopiler foo.test.yoop          - the in-file `import.test;` flag
+function setUpTestMode(values, positionals) {
+  const target = values.inputFile ?? positionals[0];
+  let rootDir;
+  let files;
+
+  if (values.test) {
+    const at = path.resolve(target ?? process.cwd());
+    if (!fs.existsSync(at)) {
+      console.error(`--test: path not found: ${at}`);
+      process.exit(1);
+    }
+    if (fs.statSync(at).isDirectory()) {
+      rootDir = fs.realpathSync(at);
+      files = discoverTestFiles(rootDir);
+      if (files.length === 0) {
+        console.error(`--test: no *.test.yoop files found under ${rootDir}`);
+        process.exit(1);
+      }
+    } else {
+      const abs = fs.realpathSync(at);
+      rootDir = path.dirname(abs);
+      files = [abs];
+    }
+  } else if (
+    target &&
+    target.endsWith(".test.yoop") &&
+    fs.existsSync(target) &&
+    isTestModuleFile(fs.realpathSync(path.resolve(target)))
+  ) {
+    const abs = fs.realpathSync(path.resolve(target));
+    rootDir = path.dirname(abs);
+    files = [abs];
+  } else {
+    return null;
+  }
+
+  const { modules: suiteModules, errors } = collectSuiteModules(files, rootDir);
+  if (errors.length > 0) {
+    for (const e of errors) {
+      if (e.message) {
+        console.error(e.message);
+      } else {
+        console.error(`${e.absPath}: ${e.err?.message ?? e.err}`);
+      }
+      console.error("");
+    }
+    process.exit(1);
+  }
+
+  const suiteCount = suiteModules.reduce((n, m) => n + m.suites.length, 0);
+  if (suiteCount === 0) {
+    console.error(
+      `--test: found ${suiteModules.length} test file(s) but no suites.\n` +
+        `  A suite is a top-level function carrying the \`suite\` kind:\n` +
+        `    suite function myBehavior(): void { ... }`,
+    );
+    process.exit(1);
+  }
+  console.log(
+    `test: ${suiteCount} suite(s) in ${suiteModules.length} file(s)`,
+  );
+
+  const entryAbs = entryPathFor(rootDir);
+  const entrySrc = generateEntrySource(suiteModules);
+  return {
+    entryAbs,
+    entrySrc,
+    testFilePaths: new Set(files),
+    testModuleIds: new Set(),
+    readFile: (absPath) => (absPath === entryAbs ? entrySrc : null),
+  };
 }
 
 // start

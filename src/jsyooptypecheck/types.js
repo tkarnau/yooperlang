@@ -353,6 +353,14 @@ export function KindType(name, moduleId) {
   this.params = [];                         // [{ name, type, sourceLoc }]
   this.layoutAlign = null;                  // { kind: "const", value } | { kind: "param", name } | null
   this.composedFrom = null;                 // KindRef[] | null (diagnostics only)
+  // testing-via-kinds: `appliesTo function` support. `signature` holds the
+  // resolved FuncType every function carrying this kind must match (filled in
+  // pass C, since it names user types); `enumerableAs` is the table name a
+  // consumer asks for, and the join key that keeps two enumerable kinds
+  // distinct. Both null on every non-function kind.
+  this.signature = null;                    // FuncType | null
+  this.signatureAnnotation = null;          // raw annot, kept for pass-C resolution
+  this.enumerableAs = null;                 // string | null
 }
 
 // Phase 6.5: a KindApplication is a `KindType` paired with the constant

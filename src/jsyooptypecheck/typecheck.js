@@ -1186,6 +1186,69 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
         if (c.abiC) kt.layoutAbiC = true;
         break;
       }
+      // testing-via-kinds: `signature (p: T) => R;` - the raw annotation is
+      // stashed here and resolved in pass C (resolveFunctionKindSignatures),
+      // because it names user types that pass A has only registered as shells.
+      case ASTNodeKind.KIND_SIGNATURE_CLAUSE:
+        if (kt.signatureAnnotation) {
+          pushError(errors, c, `duplicate signature clause in kind '${displayName}'`);
+          break;
+        }
+        kt.signatureAnnotation = c.signatureAnnotation;
+        break;
+      // testing-via-kinds: `enumerable as "suites";`
+      case ASTNodeKind.KIND_ENUMERABLE_CLAUSE:
+        if (kt.enumerableAs !== null) {
+          pushError(errors, c, `duplicate enumerable clause in kind '${displayName}'`);
+          break;
+        }
+        kt.enumerableAs = c.tableName;
+        break;
+    }
+  }
+  // testing-via-kinds: a function-position kind is deliberately narrow. It has
+  // no value to be the receiver of a `mustCall`, no scope of its own to own,
+  // and nothing to escape - the lifecycle of whatever it marks belongs to the
+  // consumer that enumerates it. Only `signature` and `enumerable as` are legal
+  // alongside `appliesTo function`, and both are required: without a signature
+  // the collected table has no type, and without a table name nothing can ask
+  // for it.
+  if (kt.appliesTo.has("function")) {
+    for (const otherSite of ["binding", "parameter", "field", "type", "return", "region"]) {
+      if (kt.appliesTo.has(otherSite)) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a function and to '${otherSite}'; a function kind marks a declaration rather than a value, so it cannot also apply to a value site`);
+      }
+    }
+    const disallowed = [];
+    if (mustCallClause) disallowed.push("mustCall");
+    if (ownsBlockSeen) disallowed.push("ownsBlock");
+    if (mustNotEscapeSeen) disallowed.push("mustNotEscape");
+    if (mustNotShareSeen) disallowed.push("mustNotShare");
+    if (layoutSeen) disallowed.push("layout");
+    if (markerSeen) disallowed.push("conferred/restrictive");
+    if (kt.requires.length > 0) disallowed.push("requires");
+    if (kt.forbids.length > 0) disallowed.push("forbids");
+    for (const clauseName of disallowed) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' applies to a function and declares '${clauseName}'; a function kind supports only 'signature' and 'enumerable as' (a function has no value for '${clauseName}' to act on)`);
+    }
+    if (!kt.signatureAnnotation) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' applies to a function but declares no 'signature'; add e.g. \`signature (run: ref Run) => void;\` so functions carrying the kind can be checked and collected`);
+    }
+    if (kt.enumerableAs === null) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' applies to a function but declares no 'enumerable as "<table>"'; without a table name nothing can ask the compiler for these functions`);
+    }
+  } else {
+    if (kt.signatureAnnotation) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares 'signature' but does not declare 'appliesTo function'; a signature only constrains a function declaration`);
+    }
+    if (kt.enumerableAs !== null) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares 'enumerable as' but does not declare 'appliesTo function'; only function kinds can be enumerated`);
     }
   }
   // clearance kinds: a marker kind (conferred/restrictive) carries no
@@ -3410,6 +3473,13 @@ export function typecheckProgram(modules) {
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) {
+        // testing-via-kinds: `<kind> function foo(...)`. Runs here rather than
+        // in the signature pass because `kindTable` only has imported kinds
+        // merged into it by pass C.4, and the kind almost always comes from
+        // another module (`suite` from std/test.yoop).
+        if (d.kindPrefix) {
+          validateFunctionKindPrefix(d, mod, moduleEnv, flowKindTable, errors);
+        }
         runKindCheck(d, errors, funcDeclTable, programState.registry);
         runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
@@ -3430,6 +3500,75 @@ export function typecheckProgram(modules) {
   }
 
   return { modules, errors, moduleEnv, programState };
+}
+
+// testing-via-kinds: validate `<kind> function foo(...)`.
+//
+// Resolves the prefix against the module's (import-merged) kind table, checks
+// that the kind is a function kind, and checks the decl against the kind's
+// declared `signature`. On success, stamps `resolvedKindType` plus
+// `enumerableAs` onto the decl - the latter is what the driver's --test mode
+// reads to collect a table without needing to resolve kinds itself.
+function validateFunctionKindPrefix(funcDecl, mod, moduleEnv, kindTable, errors) {
+  const prefixName = funcDecl.kindPrefix.name;
+  const at = { sourceLoc: funcDecl.kindPrefix.sourceLoc ?? funcDecl.sourceLoc };
+  const kt = kindTable?.get(prefixName);
+  if (!kt) {
+    pushError(errors, at, `unknown kind "${prefixName}" on function "${funcDecl.name}"`);
+    return;
+  }
+  if (!kt.appliesTo.has("function")) {
+    const sites = [...kt.appliesTo].join(", ");
+    pushError(errors, at,
+      `kind '${prefixName}' cannot prefix a function declaration; it applies to ${sites}`);
+    return;
+  }
+  // A generic function has no single concrete signature, so there is nothing to
+  // put in an enumerated table. Reject rather than silently skip.
+  if (funcDecl.genericDecl || funcDecl.typeParams?.length) {
+    pushError(errors, at,
+      `kind '${prefixName}' cannot prefix generic function "${funcDecl.name}"; an enumerated function needs one concrete signature`);
+    return;
+  }
+  // Resolve the kind's declared signature once, lazily, in the kind's OWN
+  // module - the annotation names types visible there (`Run` in std/test.yoop),
+  // not necessarily in the module carrying the prefix.
+  if (!kt.signature && kt.signatureAnnotation) {
+    kt.signature = resolveTypeAnnotationInModule(
+      kt.signatureAnnotation,
+      kt.moduleId ?? mod.id,
+      moduleEnv,
+      { typeParamScope: null },
+    );
+  }
+  const want = kt.signature;
+  if (!want) return; // the kind decl itself already errored
+  const got = moduleEnv.get(mod.id)?.localSymbols.get(funcDecl.name);
+  if (!got || got.kind === typeKinds.error) return; // signature pass already errored
+
+  const describe = () =>
+    `\`${formatType(want)}\` (declared by kind '${prefixName}')`;
+  if (got.params.length !== want.params.length) {
+    pushError(errors, at,
+      `function "${funcDecl.name}" carries kind '${prefixName}' and must match ${describe()}, but takes ${got.params.length} parameter(s) instead of ${want.params.length}`);
+    return;
+  }
+  for (let i = 0; i < want.params.length; i++) {
+    // FuncType params are { name, type, isRef } records; a function-value type's
+    // params are bare types. Compare the types positionally.
+    if (!typesEqual(got.params[i].type, want.params[i])) {
+      pushError(errors, at,
+        `function "${funcDecl.name}" carries kind '${prefixName}' and must match ${describe()}, but parameter ${i + 1} is ${formatType(got.params[i].type)} instead of ${formatType(want.params[i])}`);
+      return;
+    }
+  }
+  if (!typesEqual(got.returnType, want.returnType)) {
+    pushError(errors, at,
+      `function "${funcDecl.name}" carries kind '${prefixName}' and must match ${describe()}, but returns ${formatType(got.returnType)} instead of ${formatType(want.returnType)}`);
+    return;
+  }
+  funcDecl.resolvedKindType = kt;
+  funcDecl.enumerableAs = kt.enumerableAs;
 }
 
 // Stamp `moduleId` onto error records added to `errors` since `startIdx`.

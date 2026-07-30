@@ -1,0 +1,22 @@
+// Exercises the failure path: the detail string is what gets reported, and the
+// process exit code is the failure count. `detail` is deliberately NOT an
+// expected/got comparison - a check is a bool plus whatever explanation the
+// test wants to write.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+
+suite function reportsFailures(): void {
+    let test theory: Case = t.asserts("passes") {
+        theory.isSuccessful = true;
+    }
+    let test theory: Case = t.asserts("fails with detail") {
+        const n = 2;
+        theory.isSuccessful = n == 10;
+        theory.detail = `n was ${n}, which is not 10`;
+    }
+    let test theory: Case = t.asserts("fails with no detail") {
+        theory.isSuccessful = false;
+    }
+}

@@ -1,0 +1,789 @@
+# Testing via kinds and traits
+
+Status: PARTLY IMPLEMENTED. Gap 1 (the module flag, the `suite` function kind,
+the synthetic entry, the temp-dir executable) and the harness in
+[../std/test.yoop](../std/test.yoop) have landed; gaps 2 and 3 have not. Gap 4
+turned out to need nothing. Supersedes
+[archive/testing-design.md](archive/testing-design.md), which argued for an
+attribute-driven `@test` / `@expect` framework baked into the compiler.
+
+What works today:
+
+```text
+yoopiler --test [path]           # every *.test.yoop under path (default cwd)
+yoopiler --test [path] <filter>  # only suites whose name contains <filter>
+yoopiler foo.test.yoop           # just that file, via its `import.test;` flag
+```
+
+Fixtures: [../examples/testing/pass/](../examples/testing/pass/) and
+[../examples/testing/fail/](../examples/testing/fail/). Coverage lives in the
+`--test mode` describe block in [../src/e2e.test.js](../src/e2e.test.js).
+Deviations from the design as first written are marked **AS BUILT** below.
+
+Style: ASCII only. No em-dashes, no curly quotes, no fancy markdown tables.
+
+---
+
+## The premise
+
+A working test DSL already exists, written entirely in userland Yoop, using no
+feature that was designed for testing. It lives at
+[../examples/playground/yooptest/main.yoop](../examples/playground/yooptest/main.yoop):
+
+```js
+suite describeSuite("strangeAdd tests", sink) {
+  let test theory: TestCase = assertsThat("adds strangely when a % 5 == 2", sink) {
+    theory.isSuccessful = strangeAdd(2, 2) == 5;
+  }
+}
+```
+
+`suite` and `test` are ordinary user-declared kinds. `HoldsTestSuite` and
+`HandlesTest` are ordinary user-declared traits. The suite's summary fires at the
+closing brace because its kind says `mustCall printResults beforeScopeEnd`; each
+case records its outcome at its own closing brace for the same reason. No
+compiler support for testing exists, and none was needed to get this far.
+
+That reframes the whole question. The archived draft asked "which attribute marks
+a test, and what runner do we build." The right question is: **what small set of
+general-purpose primitives is a userland test framework still missing, and what
+does the compiler owe it?**
+
+This matters beyond testing. Kinds were designed for contracts that travel with a
+value or a scope. If a test harness (setup, teardown, per-case bracketing,
+resource isolation) can be written in kinds, that is strong evidence the kind
+system is carrying its weight, and every primitive added here pays off again for
+transactions, request scopes, tracing spans, and benchmark harnesses.
+
+### The design rule
+
+> Testing gets no compiler-baked semantics. Where a test framework needs
+> something the language cannot express, add the general primitive, not the
+> test-shaped special case.
+
+Corollary: `test`, `suite`, `expect`, `assert`, and `bench` stay ordinary
+identifiers. Nothing gets reserved. This falls out for free, because a kind name
+is declared in userland like any other symbol.
+
+The compiler's total contribution to testing, under this design, is: **recognize
+a module flag, enumerate the functions carrying one kind, and generate a
+three-line `main` that hands them to std.** Everything else - ordering,
+isolation, filtering, reporting, exit codes - is Yoop code in `std/test.yoop`.
+
+---
+
+## The shape being designed for
+
+A test file. Named `*.test.yoop`, flagged in its first line, and containing no
+`main`:
+
+```js
+import.test;                                   // this module is a test module
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { strangeAdd } from "./strange_add.yoop";
+
+suite function addsStrangelyWhenFirstIsTwoModFive(): void {
+  let test theory: Case = t.asserts("adds an extra 1 when a % 5 == 2") {
+    const got = strangeAdd(2, 2);
+    theory.isSuccessful = got == 5;
+    theory.detail = `strangeAdd(2, 2) gave ${got}, wanted 5`;
+  }
+}
+
+suite function addsPlainlyOtherwise(): void {
+  ...
+}
+```
+
+`suite` here is a **function-position kind** declared in `std/test.yoop`; `test`
+is the binding-position kind from the playground, unchanged. Nothing about the
+file is compiler-special except `import.test;`.
+
+**AS BUILT: a suite takes no parameters, and run state is module-level.** The
+design above passed `ref Run` into every suite. That does not survive contact
+with value semantics: `Case` is a struct, so a `Run` copied into it would be a
+copy rather than a view, and threading one would mean the `vtable` sink dance
+from the playground - which also cannot be built inside a suite, because the
+`run` parameter is already a `ref` and `Recorder.from(ref run)` is "cannot take
+ref of a ref". Module-level state in `std/test.yoop` is both simpler and more
+honest: a test run *is* process-wide, one binary and one serial pass. It deletes
+the sink, the `Run` type, and every parameter. Settled item 4 below is therefore
+moot rather than decided.
+
+And what the driver generates, in memory, as a synthetic entry module:
+
+```js
+// Generated by yoopiler --test. Not written to disk.
+import * as harness from "std/test.yoop";
+import { addsStrangelyWhenFirstIsTwoModFive as suite0 } from "/abs/path/strange_add.test.yoop";
+import { addsPlainlyOtherwise as suite1 } from "/abs/path/strange_add.test.yoop";
+import { parsesHeaders as suite2 } from "/abs/path/parser.test.yoop";
+
+function main(): int {
+  const fns: (() => void)[] = [suite0, suite1, suite2];
+  const names: string[] = [
+    "strange_add.test.yoop:addsStrangelyWhenFirstIsTwoModFive",
+    "strange_add.test.yoop:addsPlainlyOtherwise",
+    "parser.test.yoop:parsesHeaders",
+  ];
+  return harness.runAll(fns, names);
+}
+```
+
+That is the whole injected artifact. `runAll` is ordinary Yoop in std: it
+iterates serially, brackets each suite in an `ephemeral` isolation region,
+filters against argv, and returns the exit code. The compiler does not know what
+a suite *does*, only how to find one and hand it over.
+
+**AS BUILT: aliased named imports, not a namespace.** The design used
+`import * as m0` plus `m0.addsNumbers`. A namespaced function reference in VALUE
+position typechecks and then crashes codegen with
+`llvmType: unhandled yooper type kind "func"` - the Phase 10.X.2 fn-as-value
+lift covered bare names only. Aliasing per suite works, and has the side benefit
+of handling two test files that each define a `setup`.
+
+**AS BUILT: suite functions are auto-exported.** The generated entry has to
+import them, but making every author write `export suite function` in a file that
+exists only to hold tests is ceremony. The driver adds the `EXPORT_DECL` wrapper
+itself, after the graph loads and before typecheck. Writing `export` explicitly
+also works - the wrapper step is idempotent.
+
+---
+
+## How a run actually works
+
+Yes: a temporary executable. One of them, for the whole run, in the temp
+directory the compiler already creates.
+
+`yoopiler --test [path]`:
+
+1. Glob `**/*.test.yoop` under `path` (default cwd), skipping the usual ignore
+   dirs. Each hit must carry `import.test;` or it is an error, not a silent skip.
+2. Build the synthetic entry module shown above, in memory. This needs no new
+   loader plumbing: `loadModuleGraph` already accepts a
+   `readFile(absPath) -> string | null` override
+   ([../src/jsyoopdriver/moduleGraph.js](../src/jsyoopdriver/moduleGraph.js)),
+   added for the LSP's unsaved buffers. Hand it a synthetic path plus a
+   `readFile` that returns the generated source for exactly that path;
+   `moduleIdFor` derives a stable id from it like any other module.
+3. Run the ordinary pipeline. No second codegen path, no attribute pass, no
+   separate test-mode typechecker.
+4. Point clang's `-o` into `tmpDir` instead of the user's tree. The driver
+   already makes a per-invocation `mkdtempSync` dir and removes it via an exit
+   hook unless `--keep-ir`
+   ([../src/yoopiler.js:265](../src/yoopiler.js#L265)), so the binary inherits
+   that lifecycle for free. Extend `--keep-ir` (or add `--keep-exe`) to keep it
+   for debugging under lldb.
+5. Spawn it, forward stdout, propagate the exit code.
+
+Nothing is left in the user's tree, and there is exactly one compile and one
+link per run - which matters, because clang link time dominates everything else
+in this pipeline.
+
+`yoopiler strange_add.test.yoop` (no `--test`) does the same thing scoped to one
+file. This is the concrete payoff for the in-file flag: a test module has no
+`main`, so compiling one as an entry today is just an error. With
+`import.test;` present, the driver knows to synthesize an entry for it instead of
+complaining. Running a single test file is then the same gesture as running any
+other program.
+
+Why one binary rather than one per file: N test files means N link steps, and
+symbol collisions are already impossible (multi-module mangling is
+`<moduleId>__<symbolName>`, so two test files may both define a helper named
+`setup`). The tradeoff is that a segfaulting suite takes down the run - see
+isolation below.
+
+---
+
+## What already works, verified
+
+Confirmed by compiling and running probes against the tree as of this draft.
+
+**`beforeAll` and `afterAll` need nothing new.** A region kind's constructor
+expression *is* `beforeAll`, and `mustCall M beforeScopeEnd` *is* `afterAll`.
+Both halves of the suite-level lifecycle are already expressible.
+
+**Region kinds give you a block with a hook at the end.** `appliesTo region` plus
+`ownsBlock` is the anonymous form; `appliesTo binding` plus `ownsBlock` is the
+named form. See `ephemeral` in [../std/core/kinds.yoop](../std/core/kinds.yoop).
+
+**Teardown survives early exit for free.** Codegen fires a scope's pending
+cleanups before every `ret`
+([../src/jsyoopcodegen/codegen.js:5720](../src/jsyoopcodegen/codegen.js#L5720)),
+and `kindCheck` intersects the satisfied-state across `if` and `switch` arms. Any
+hook mechanism built on the same slots inherits that.
+
+**Arrays of function values work.** `((p: T) => R)[]` is spellable and callable -
+see [../examples/pass/fn_pointer_array.yoop](../examples/pass/fn_pointer_array.yoop).
+A top-level function's name in expression position lowers to its mangled symbol
+address (Phase 10.X.2). This is what makes the generated suite table possible
+without any new codegen.
+
+**argv is available to std.** [../std/env.yoop](../std/env.yoop) exposes
+`argCount()` / `argAt(i)` over a runtime shim, so suite selection, filtering, and
+a `--isolate` re-exec are all expressible in std today.
+
+**Per-scope allocator isolation already exists.** `ephemeral
+mem.allocatorScope(arena)` installs an arena for a block and reclaims in bulk at
+the closing brace
+([arena-and-context-allocators.md](arena-and-context-allocators.md)).
+
+**`@derive(display)` gives readable failure dumps at no cost.** Attributes are
+not banished by this design; they just do formatting, not test semantics.
+
+**Generic traits work, at one instantiation per type.** See gap 4.
+
+---
+
+## Gap 1: the module flag and the suite marker
+
+Two small additions, both landing in slots that already exist and are already
+reserved.
+
+### `import.test;`
+
+The pragma slot is built and gated. `parseImportDecl`'s caller handles
+`import` `.` ident `;`, sets a flag on the PROGRAM node, and rejects anything
+else with `unknown import attribute 'import.<x>' - only 'import.unsafe' is
+supported`
+([../src/jsyooparser/parser.js:755](../src/jsyooparser/parser.js#L755)). So
+`import.test;` setting `node.isTestModule = true` alongside `node.allowsUnsafe`
+is a handful of lines.
+
+What the flag buys, concretely:
+
+- A test module can legally have no `main`. The driver synthesizes one.
+- `yoopiler foo.test.yoop` works directly, as above.
+- Test-only relaxations get a single gate to hang on if any turn out to be
+  wanted later (there is no need for one yet).
+- It is greppable, and it is a declaration rather than a filename convention, so
+  a mis-named file fails loudly instead of being silently skipped.
+
+### `suite`: a function-position kind
+
+`appliesTo function` is already in the grammar and deliberately deferred for user
+kinds:
+
+```text
+user-declared `appliesTo function` kinds are deferred (phase 7+);
+the built-in task kind covers the only current use case
+```
+
+([../src/jsyooparser/parser.js:1238](../src/jsyooparser/parser.js#L1238))
+
+This is the reserved slot for exactly this. The declaration in std:
+
+```js
+// std/test.yoop
+export kind suite {
+    appliesTo function;
+    signature () => void;
+    enumerable as "suites";
+}
+```
+
+Two new clauses, both general rather than test-shaped:
+
+- **`signature <fn-type>;`** constrains what a function carrying the kind may
+  look like. `parseTypeAnnotation` already parses `(p: T) => R`, so this is a
+  type annotation in a new clause position. Without it the generated suite
+  array has no type to be declared at, and a signature mismatch would surface as
+  a confusing error inside generated code instead of at the offending function.
+- **`enumerable as "<table>";`** is the honest name for the discovery bit: it
+  tells the compiler that functions carrying this kind may be collected into a
+  table, and names the table. This is the one clause that exists because of
+  testing, and it is worth being explicit that it is *metadata*, not a lifecycle
+  contract like the rest of the kind system.
+
+### How a second enumerable kind stays distinct
+
+The table name is the join key, and it is the whole answer. A consumer asks the
+compiler for a named table; the kind decl declares which table it feeds. Nothing
+hardcodes the identifier `suite`, and nothing resolves kinds by module path.
+
+```js
+export kind bench {                     // std/bench.yoop, later
+    appliesTo function;
+    signature (b: ref Bench) => void;
+    enumerable as "benches";
+}
+```
+
+`--test` asks for `"suites"`; a future `--bench` asks for `"benches"`. A test
+module containing a `bench`-kinded function is a clear error naming both tables,
+not a silently uncollected function. `migration`, `route`, and `startup` are the
+same shape, and each would otherwise want its own bespoke attribute.
+
+One consequence worth knowing up front: collection is **syntactic** in the
+driver, then validated in typecheck. The driver cannot resolve `enumerable as`
+before typecheck has run (that is what typecheck is for), so it collects every
+kind-prefixed top-level function in every flagged module and lets typecheck
+reject any whose kind is not enumerable, or enumerates into a table this mode did
+not ask for. That works because a kind-prefixed top-level *function* has no other
+meaning - `task` is a keyword, not an ident prefix - so there is nothing else for
+the syntactic pass to confuse a suite with.
+
+Deliberately **not** supported on a function-position kind, at least at first:
+`requires`, `mustCall`, `ownsBlock`, and the escape/marker clauses. A function
+kind has no value to be the receiver of a `mustCall`, and the suite's lifecycle
+belongs in std's `runAll` loop, not in the kind. Keeping `appliesTo function`
+restricted to `signature` plus `enumerable` makes this a much smaller lift than
+"enable function kinds" sounds, and leaves the door open.
+
+### Alternatives considered
+
+- **Shape-based discovery**: any exported `(): void` in a flagged module
+  is a suite. Zero new grammar, and safe here (a false positive just runs an
+  already-exported test function). Rejected for being implicit: nothing at the
+  declaration says "this is a suite," and the failure mode of a typo'd signature
+  is a silently-uncollected test.
+- **One conventional entry function per file**, with suites staying as regions
+  inside it exactly as the playground reads today. The most economical option -
+  no new marking at all, and per-suite isolation falls out of gap 2. Rejected
+  because per-suite crash isolation and per-suite filtering both want suites to
+  be individually callable symbols.
+
+---
+
+## Gap 2: one hook per kind
+
+A kind may declare exactly one `mustCall`. Two is
+`duplicate mustCall clause in kind 'test'`
+([../src/jsyooptypecheck/typecheck.js:1136](../src/jsyooptypecheck/typecheck.js#L1136)),
+and composing two kinds that each have one is
+`composition contradiction in kind 'isolatedTest': mustCall recordResults vs mustCall dispose`
+([../src/jsyooptypecheck/typecheck.js:1487](../src/jsyooptypecheck/typecheck.js#L1487)).
+
+So this does not compile:
+
+```js
+kind isolatedTest = test & ephemeral;   // composition contradiction
+```
+
+That single restriction blocks the whole isolation-by-composition story, because
+isolation in Yoop is *supposed* to be composition: a test case that is also an
+arena scope, also a transaction, also a tracing span. Each is an existing kind
+with its own cleanup method, and stacking them is the entire point of `&`.
+
+The fix is to treat `mustCall` as a list rather than a slot: fire in declaration
+order for a single kind, and in operand order for a composition, with duplicate
+`(method, timing)` pairs deduped. Downstream is already close to ready -
+`kt.mustCall` is read as an array in several places, and `projectCleanups`
+([../src/jsyooptypecheck/kindCheck.js:342](../src/jsyooptypecheck/kindCheck.js#L342))
+maps a list of obligations to a list of cleanup nodes with no arity assumption.
+The single-slot assumption is concentrated in `populateKindFromClauses` and the
+composition merge.
+
+Ordering across a composition needs a rule and a doc line: cleanups fire in
+reverse declaration order (last-declared undoes first), matching LIFO scope
+discipline and the implicit-region ordering already specified for `ephemeral`.
+
+---
+
+## Gap 3: per-child hooks (`beforeEach` / `afterEach`)
+
+A kind can only hook **its own** scope end. There is no way for an enclosing
+region to learn that a `test` binding opened inside it. So `beforeEach` and
+`afterEach` have no expression today, at any level of contortion.
+
+The `mustCall` timing slot was built to grow. `parseMustCallClause`
+([../src/jsyooparser/parser.js:1489](../src/jsyooparser/parser.js#L1489)) accepts
+exactly `beforeScopeEnd` and emits a deferred-feature message for `beforeAny` /
+`afterAny`, which lex as plain idents. Widening that slot is the intended
+extension point.
+
+### Proposed surface
+
+```js
+kind fixture {
+  appliesTo region;
+  requires ProvidesFixture;
+  ownsBlock;
+  mustCall tearDownAll beforeScopeEnd;
+  mustCall setUp       beforeEach test;
+  mustCall tearDown    afterEach  test;
+}
+```
+
+Used inside a suite function, which is where the owner lives now that suites are
+functions rather than regions:
+
+```js
+suite function addsNumbers(ref run: Run): void {
+  fixture freshDatabase(ref run) {
+    let test theory: Case = t.asserts("...") { ... }
+    let test theory: Case = t.asserts("...") { ... }
+  }
+}
+```
+
+Attaching the hooks to a user-opened region rather than to the suite function is
+strictly more flexible: several fixture groups can coexist in one suite, which is
+what nested `describe` blocks are for.
+
+`beforeEach K` / `afterEach K` name the **child kind** being bracketed, not a
+type. Keying on the kind is what keeps an unrelated `disposable buf = ...` inside
+a test body from triggering the hooks.
+
+### Semantics
+
+- **Firing site.** For every child site inside the owner's block whose kind is
+  `K`, `setUp` fires immediately **before the child's initializer is
+  evaluated**, and `tearDown` fires **after the child's own `beforeScopeEnd`
+  cleanup**. Before-the-initializer is the load-bearing half: a fixture must
+  exist before `t.asserts(...)` runs, or `beforeEach` is useless for setup.
+- **Nesting.** Walk the scope chain outward; every enclosing binding whose kind
+  declares a hook for `K` participates. `beforeEach` fires outer-to-inner,
+  `afterEach` inner-to-outer. Nested owners (`beforeEach fixture` on `fixture`)
+  are a legitimate use of this, not a cycle to reject.
+- **What the hook receives: `ref self` only.** Not the child. At `beforeEach` the
+  child value does not exist yet, and at `afterEach` its concrete type is
+  unknowable from the kind decl, which constrains the child by *kind*, not by
+  type. Child-to-parent data flows through whatever sink the user built. In the
+  playground that is a `vtable Recorder for Collects` whose ctx is the single
+  results value; every copy of the handle dispatches back into the same object.
+  This keeps the primitive type-agnostic and pushes the data shape into userland.
+- **Method resolution.** Identical to `mustCall`: the named method must be
+  declared by one of the kind's `requires` traits, checked at kind-decl time.
+- **Validation.** `beforeEach K` where `K` is not a kind in scope is an error, and
+  `K` must declare `ownsBlock` (without a child block there is no interval to
+  bracket, and both hooks collapse to one point).
+
+### Implementation sketch
+
+Small, and it reuses existing plumbing. `kindCheck`'s `walkStatement`
+([../src/jsyooptypecheck/kindCheck.js:419](../src/jsyooptypecheck/kindCheck.js#L419))
+already sees every kind-prefixed statement and already tracks the scope chain.
+`afterEach` nodes append to the child block's existing `implicitCleanups` tail,
+after the child's own cleanup, so early-return and arm-intersection handling come
+along unchanged. `beforeEach` is the only new slot: a `preHooks` list on the
+statement, emitted by a near-copy of `emitPendingCleanups`. Hook nodes are the
+same synthetic `CLEANUP_CALL` shape `makeCleanupCall` already builds
+([../src/jsyooptypecheck/kindCheck.js:89](../src/jsyooptypecheck/kindCheck.js#L89)).
+
+### Alternative spellings considered
+
+- A nested `encloses test { mustCall setUp beforeScopeStart; ... }` block: groups
+  hooks per observed child kind, at the cost of a second level of kind-body
+  grammar.
+- `observes test via ObservesCases;`, naming a trait whose methods are the hooks.
+  Follows the clearance-kind precedent ([clearance-kinds.md](clearance-kinds.md)),
+  but splits the lifecycle across two declarations for no gain, since `requires`
+  already names the trait.
+
+Growing the timing slot wins on being one line per hook and zero new grammar
+shapes.
+
+---
+
+## Gap 4: none. Assertions are a message, not a comparison
+
+Resolved without a compiler change, by narrowing what an assertion *is*.
+
+The tempting design is `Asserts.equals(ref theory, got, want)`, which prints
+`expected 5, got 4`. It is also the wrong default: it bakes in the assumption
+that every check is a two-value comparison, and the context that made the check
+meaningful gets flattened into two operands. A test that asserts "the parser
+consumed the whole input and left no diagnostics" is not an `equals`.
+
+So the primitive is: **say what happened, in a string.** The outcome is a bool
+the test sets; the explanation is a string the test builds. Template literals
+already interpolate any `Display` value, so full formatting power is there
+without any comparison machinery:
+
+```js
+suite function addsNumbers(ref run: Run): void {
+  let test theory: Case = t.asserts("adds strangely when a % 5 == 2") {
+    const got = strangeAdd(2, 2);
+    theory.isSuccessful = got == 5;
+    theory.detail = `strangeAdd(2, 2) gave ${got}, wanted 5`;
+  }
+}
+```
+
+`detail` is reported only on failure, so the happy path stays quiet. Helpers for
+common shapes (an `equals` that fills in `detail` for you, a `hasNoDiagnostics`,
+a golden-file comparer) are then ordinary Yoop functions in std or in the user's
+own test-support module, added as the need actually shows up rather than guessed
+at now.
+
+What this gives up, stated plainly: neither the source text of the asserted
+expression (which `@expect` could have captured, and which nothing userland can)
+nor an automatic `expected/got` line. What it buys is that the framework never
+mis-frames a check, and that gap 4 needs nothing from the compiler at all.
+
+Generic trait methods (`function equals<T implements Display>(...)`) do not parse
+today and would be needed for a comparison-shaped API. That is now a separate
+want, not a testing blocker, and it is recorded as such in
+[archive/phase-10.md](archive/phase-10.md) territory rather than here.
+
+### The structural cost: assertions cannot fail fast
+
+Worth stating plainly, because it is the main thing the kinds-first design gives
+up versus `@test function` plus `@expect`. A test body is a **region block**, not
+a function body. There is no exception to throw, no `return` that means "abandon
+this case and continue the run", and no closure to bail out of (capturing
+closures are permanently out of scope per [README.md](README.md)). So a failed
+assertion can only *record*, and the rest of the block runs with bad state.
+
+Consequences to design around, not fix:
+
+- Assertions are soft. One logical assertion per `test` region is the idiomatic
+  shape, which is what the playground already does.
+- A multi-assertion body that must stop early guards explicitly
+  (`if (theory.isSuccessful) { ... }`), or splits into more `test` regions.
+- A `breakScope`-style early exit from an `ownsBlock` region would fix this
+  generally, and is a much larger language question than testing. Not proposed
+  here; noted as the thing that would unlock fail-fast if it lands for other
+  reasons.
+
+Note the asymmetry that makes this bearable: a crashing *suite* is a whole
+function, so process isolation can contain it. A failing *case* is a block, so it
+cannot be abandoned. Suites are the unit of isolation; cases are the unit of
+reporting.
+
+---
+
+## Isolation
+
+Serial, one process, one binary, with each suite bracketed by an arena scope.
+
+`runAll` in std does the bracketing, in ordinary Yoop, using the kind system.
+This is the shipped shape, not a sketch:
+
+```js
+// std/test.yoop
+export function runAll(suites: (() => void)[], names: string[]): int {
+    let i: usize = 0;
+    while (i < suites.len) {
+        const name = names[i];
+        if (selected(name)) {
+            printf("# %s\n", name);
+            ephemeral arenaScope(SUITE_ARENA_BYTES) {
+                const runSuite = suites[i];
+                runSuite();
+            }
+        }
+        i = i + 1;
+    }
+    return finish();
+}
+```
+
+`arenaScope` (from [../std/core/alloc.yoop](../std/core/alloc.yoop)) returns a
+`Disposable` guard. On construction it installs a fresh arena as the ambient
+allocator; on dispose it pops the allocator and reclaims the arena in bulk. So
+every allocation a suite made is gone before the next one starts, and a leaking
+test cannot poison its successor. This needs **zero compiler work** - `ephemeral` and
+the context allocators are both shipped.
+
+Three levels, and what each costs:
+
+1. **Allocation isolation.** Free today, as above.
+2. **Module-state isolation.** Per-suite reset is just code in `suiteScope`'s
+   constructor, since suites are separate functions. Per-*case* reset is gap 3.
+3. **Crash isolation.** A segfaulting suite takes down the process. Not solved
+   by the default, and deliberately so - it costs a process spawn per suite.
+
+The decision that matters for the design now: **the generated `main` honors an
+argv suite selector from day one.** `t.runAll` consults
+[../std/env.yoop](../std/env.yoop) to filter by name, which serves ordinary
+filtering (`yoopiler --test -k "empty path"`, forwarded as argv) and *also* means
+a future `--isolate=process` needs no compiler change at all. The runner re-execs
+itself once per suite via `argAt(0)`, and the parent stitches the output back
+together. That is entirely std-side work, deferred until a crashing test actually
+costs someone an afternoon.
+
+---
+
+## What stays in std, not the compiler
+
+The archived draft spent three decisions (4, 5, 6) plus a section on execution
+model, CLI surface, filtering, and TAP output. Under this design most of that is
+Yoop code in `std/test.yoop`.
+
+- **Ordering and iteration.** The `while` loop above.
+- **Reporting.** The results type owns it; TAP output is a `to_string`, and the
+  process exit code is whatever `finish` returns. The archived draft's TAP shape
+  is still the right format, it just is not the compiler's job.
+- **Filtering.** argv, in `selected`.
+- **Skipping.** Also `selected`, checked before the suite is entered. Note this
+  works at *suite* granularity for free, because a suite is a function call that
+  can simply not happen. Skipping an individual `test` region is a different
+  problem: a region body always runs, since the kind machinery brackets the block
+  but does not gate it. `if (run.selected("case name")) { ... }` works and is
+  honest. A gating clause (`skipWhen <method>`, called before the initializer,
+  eliding the block when it returns true) is the obvious follow-on to gap 3 and
+  shares its firing-site machinery. Not proposed until gap 3 exists.
+- **Comptime tests.** The archived draft's Decision 4B (run pure test bodies in
+  the comptime interpreter and fail the build directly) is genuinely attractive
+  and genuinely orthogonal. `@precompile` already exists, and nothing here
+  forecloses pointing it at a suite body later.
+
+---
+
+## What the compiler owes, and what it costs
+
+Ordered as a build sequence. None of this is scheduled.
+
+1. **`import.test;` plus the synthetic entry module and temp-dir executable**
+   (gap 1, first half, and the run mechanics). Small. This alone makes a test
+   file runnable, with suites marked by convention in the interim. Touches the
+   pragma switch in the parser, a new glob-and-generate step in the driver, and
+   the `-o` path plus a spawn in the existing clang block.
+2. **`appliesTo function` restricted to `signature` plus `enumerable as`** (gap 1,
+   second half). Small to medium. Replaces the interim convention with an
+   explicit marker, and unlocks a slot that has been reserved since phase 7.
+3. **`mustCall` as a list, and composition that unions instead of erroring**
+   (gap 2). Small, concentrated in `populateKindFromClauses` and the composition
+   merge. Unblocks isolation-by-composition, which is the reason `&` exists.
+4. **`beforeEach K` / `afterEach K` timings on `mustCall`** (gap 3). Small to
+   medium. Widen the timing slot, resolve `K` in `populateKindFromClauses`, fire
+   from the scope-chain walk in `kindCheck`, add a `preHooks` slot to the
+   statement emitter. Generalizes to request scopes, transactions, tracing spans.
+
+Steps 1 and 2 are the minimum viable harness. Steps 3 and 4 are ergonomics, and
+both are independently useful outside testing. Assertions (gap 4) need nothing.
+
+### Dropped from the earlier draft of this doc
+
+`onlyIn "<profile>"` (elide a kind-governed region unless the build declares a
+profile) was proposed as a second colocation tier for same-file test code. The
+`*.test.yoop` route makes it unnecessary for testing: an unimported module is
+never compiled, so there is nothing to strip. The idea still stands on its own
+for debug-only instrumentation, and if it lands it should land for that reason,
+not this one.
+
+### Bugs on the critical path
+
+Found while building the playground framework and then the real harness. The
+first is hit by *any* sink-based design, since a shared collector has to live in
+a struct field; the second forced the generated entry to alias its imports.
+Neither now blocks the harness, but both are still wrong.
+
+- **A namespaced function reference in value position crashes codegen.**
+  `import * as m from "./x.yoop";` then `const f: (() => void) = m.someFn;`
+  typechecks and then dies in `llvmType: unhandled yooper type kind "func"`
+  ([../src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js), the
+  `emitExpr` FIELD_ACCESS path). The Phase 10.X.2 fn-as-value lift handled bare
+  names; the namespaced member path never learned to lower a `func` type to a
+  function pointer. Workaround in use: `import { someFn as f }`.
+
+- **A vtable-typed struct field carries the unpopulated shell `VTableType`.**
+  `Recorder.report(ref self.sink)` fails with
+  `vtable "Recorder" has no slot for trait method "report"`; rebinding to a local
+  first (`let sink: Recorder = self.sink;`) works. Struct field types resolve
+  before `validateVTableDecl` fills `methodOrder` from `trait.methods`
+  ([../src/jsyooptypecheck/typecheck.js:735](../src/jsyooptypecheck/typecheck.js#L735)).
+  Same shape as the `canonicalizeStruct` shell problem noted in
+  [../CLAUDE.md](../CLAUDE.md).
+- **A module-level `let` passed as `ref` emits invalid IR.** Typecheck passes,
+  then clang rejects `use of undefined value '%RESULTS'`. This kills the simplest
+  possible shared collector (a module-level `Vec`), which is the obvious thing to
+  reach for before discovering vtables.
+- **`ref` and `unsafe_ptr` struct fields are dead ends.** `results: ref Vec<T>` is
+  accepted as a field type, but `ref h.results` is "cannot take ref of a ref" and
+  bare `h.results` is "parameter expects a ref argument", so it can never be
+  passed on. `unsafe_ptr<Vec<T>>` fares no better: `ref *p` is "cannot take ref of
+  a non-lvalue" and `p[0]` (documented as an lvalue in SPEC section 12) is
+  "cannot index non-array type". Vtables are currently the *only* working
+  indirection, which is worth either fixing or documenting as intentional.
+- **Parser:** `results: unsafe_ptr<Vec<string>>,` as a struct field reports
+  `trailing comma in type argument list is not allowed`; the `>>` split leaves the
+  field's comma inside the type-argument list.
+
+---
+
+## Settled
+
+Recording these so they are not relitigated. Each was an open question in the
+first draft of this doc.
+
+1. **`enumerable` stays a kind clause**, rather than moving to an attribute. It is
+   still metadata rather than a lifecycle contract, and that remains the one
+   place this design bends its own rule - accepted knowingly. Distinctness
+   between enumerable kinds is handled by the table name; see gap 1.
+2. **Hooks receive `ref self` only**, and child-to-parent data routes through the
+   user's own sink. Keeps the primitive type-agnostic. Revisit only if routing
+   through a sink turns out to be real friction in practice.
+3. **Stacked cleanups fire in reverse declaration order.** Going with it as
+   specified; if an allocator-teardown-ordering problem shows up, that is the
+   signal to revisit, and it will come with a concrete fixture.
+4. **`Run` stays one type**, carrying sink, filter, and report accumulator.
+   MOOT as built: there is no `Run` value at all. Value semantics made passing
+   one into a suite either useless (a copy) or a vtable-sink exercise, so the run
+   state is module-level in `std/test.yoop` and suites take no parameters. The
+   question the decision was answering - how many things does a suite have to be
+   handed - answered itself as "none."
+5. **The bootstrap moves onto this harness**, and artifact-diffing tests (token
+   streams, AST dumps, `.ll` text) get separate tooling rather than being bent
+   into assert-per-case. Likely a golden-file comparer in std/test.yoop, or
+   distinct test files with their own driver.
+6. **`bench` lands as the second consumer** of `appliesTo function` plus
+   `enumerable as`, which is the check on whether these primitives are general or
+   test-shaped. If `bench` needs something `suite` did not, the abstraction is
+   wrong.
+
+## Open questions
+
+1. **Where do test-support helpers live?** The gap 4 decision means helpers
+   accrete over time. `std/test.yoop` itself, a sibling `std/test_helpers.yoop`,
+   or the user's own module? Leaning on keeping `std/test.yoop` small and letting
+   projects grow their own, but std will want the common ones eventually.
+2. **Does the arena-per-suite isolation actually bite?** It is in place and
+   costs nothing, but nothing yet proves it catches a real cross-suite leak.
+   The first test that allocates heavily is the one to watch.
+3. **Should `--test` take a `-k`-style flag instead of bare positionals?**
+   Filters currently ride as extra positionals after the path, forwarded to the
+   binary as argv. That is minimal but reads oddly next to the other flags, and
+   it means a typo'd path becomes a filter rather than an error.
+
+Resolved during implementation: **reporting granularity for a crashed suite.**
+TAP lines are written as each case completes rather than buffered to the end, so
+a segfault keeps everything already reported. The plan line comes last and is
+simply absent on a crash, which is exactly the TAP signal for "the run died."
+
+---
+
+## What changed from the archived draft
+
+For the reasoning trail. The full pros-and-cons treatment of the attribute
+approach is preserved in [archive/testing-design.md](archive/testing-design.md).
+
+- **Decision 1 (how a test is marked).** Reversed. The draft's Option D, "a
+  `test` kind", was rejected as *"semantic mismatch. Kinds are usage/lifecycle/
+  sharing contracts; 'this is a test' is not one. Would force `test` to become
+  reserved. Wrong tool."* Both halves are falsified by the working playground: a
+  test **is** a scope-lifecycle contract, and `test` was never reserved, because
+  kind names are userland identifiers. Options A and B (`@test` block, `@test` on
+  a function decl) are now the alternatives.
+- **Decision 2 (where tests live).** Kept the draft's Option A (sibling
+  `*.test.yoop`), but the machinery it assumed is unnecessary. The draft wanted a
+  driver file-naming rule *and* a pre-codegen stripping pass for inline tests;
+  the import-driven module graph already gives both, since an unimported module
+  is never compiled.
+- **Decision 3 (assertions).** Changed target. `@expect` lowering was chosen for
+  its free source-text capture; trait-method assertions trade that for value
+  printing, which is more useful. The real cost is losing fail-fast, documented
+  above rather than glossed.
+- **Decision 4 (execution model).** Same conclusion (a runtime test binary),
+  different construction. The draft synthesized a runner `main` in codegen as
+  "the one genuinely new codegen piece"; here `main` is *generated Yoop source*
+  in a synthetic entry module and goes through the ordinary pipeline, the way
+  `@derive` already generates and reparses source
+  ([../src/jsyoopderive/](../src/jsyoopderive/)). No new codegen at all.
+- **Decision 5 (CLI).** Same conclusion (`--test` flag), plus the draft's step 2
+  ("run the attribute pass to gather every `@test` node") and step 3 ("synthesize
+  a runner main") collapse into a glob and a template.
+- **Decision 6 and 7 (filtering, reporting).** Both moved into `std/test.yoop`.
+  The draft's TAP output shape survives verbatim as the target format.
+- **Open question 3 in the draft** ("Setup/teardown: none in v1. Likely later via
+  `@test.before` / `@test.after`") is now gap 3, a centerpiece rather than a
+  deferral.
+- **Open question 2 in the draft** ("Per-test isolation... process-per-test is
+  heavier but robust; defer unless it bites") is settled the same way, but with
+  the argv hook designed in now so it costs no compiler change later.
+- **Open question 6 in the draft** ("Interaction with kinds: a `@test` body that
+  opens a `disposable` should still get auto-cleanup") is moot. Kinds are the
+  mechanism now, not a thing to be compatible with.
