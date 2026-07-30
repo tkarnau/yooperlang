@@ -1,0 +1,227 @@
+// std/db/sqlite_ffi.yoop - unsafe libc/sqlite3 FFI for the db layer.
+//
+// The /only/ module under std/db that imports unsafe. Every safe wrapper in
+// std/db/sqlite.yoop calls the helpers exported from here; users never reach
+// this file directly. Same split as std/net/socket_ffi.yoop.
+//
+// Two things this module exists to contain:
+//
+//   1. `unsafe_ptr`. sqlite3's `sqlite3 *` and `sqlite3_stmt *` are opaque
+//      handles. They are wrapped in the one-field `RawDb` / `RawStmt`
+//      envelopes below so the public module can hold a handle without
+//      declaring `import.unsafe;` itself (library-design.md 2.1 - no pointer
+//      types in an exported safe signature).
+//   2. C types. Every helper here takes and returns plain yoop types
+//      (int32 / int64 / float64 / bool / string), so `c_int` and friends stop
+//      at this file too.
+//
+// Linking: `extern "C" from library "sqlite3"` lowers to `-lsqlite3`. That
+// resolves with no extra setup on macOS (libsqlite3 ships in the SDK) and on
+// any Linux with libsqlite3 installed. There is deliberately no vendored
+// sqlite3.c: adding one to RUNTIME_SOURCES would link sqlite into every yoop
+// program ever compiled, not just the ones that ask for it.
+
+import.unsafe;
+
+// ----- externs -------------------------------------------------------------
+//
+// The out-param entry points (`sqlite3_open`, `sqlite3_prepare_v2`) take a
+// `sqlite3 **`. `ref x: unsafe_ptr` is exactly that - the same shape
+// std/fs.yoop uses for yoop_io_normalize_real_path's `char **`.
+//
+// `sqlite3_bind_text`'s last argument is a `void (*)(void *)` destructor, and
+// the value we always want is SQLITE_TRANSIENT - the `(void *)-1` sentinel
+// meaning "copy the buffer, do not alias it". Yoop has no int-to-pointer cast,
+// so the slot is declared as a pointer-sized integer instead: identical ABI
+// (same register class on arm64, x86_64 SysV, and Win64), no cast needed.
+
+extern "C" from library "sqlite3" {
+    function sqlite3_libversion(): string;
+
+    function sqlite3_open(path: string, ref db: unsafe_ptr): c_int;
+    function sqlite3_close(db: unsafe_ptr): c_int;
+    function sqlite3_errmsg(db: unsafe_ptr): string;
+    function sqlite3_exec(
+        db: unsafe_ptr,
+        sql: string,
+        cb: unsafe_ptr,
+        arg: unsafe_ptr,
+        err: unsafe_ptr
+    ): c_int;
+    function sqlite3_changes(db: unsafe_ptr): c_int;
+    function sqlite3_last_insert_rowid(db: unsafe_ptr): int64;
+
+    function sqlite3_prepare_v2(
+        db: unsafe_ptr,
+        sql: string,
+        nbyte: c_int,
+        ref stmt: unsafe_ptr,
+        tail: unsafe_ptr
+    ): c_int;
+    function sqlite3_finalize(stmt: unsafe_ptr): c_int;
+    function sqlite3_step(stmt: unsafe_ptr): c_int;
+    function sqlite3_reset(stmt: unsafe_ptr): c_int;
+    function sqlite3_clear_bindings(stmt: unsafe_ptr): c_int;
+
+    function sqlite3_bind_parameter_count(stmt: unsafe_ptr): c_int;
+    function sqlite3_bind_int(stmt: unsafe_ptr, idx: c_int, v: c_int): c_int;
+    function sqlite3_bind_int64(stmt: unsafe_ptr, idx: c_int, v: int64): c_int;
+    function sqlite3_bind_double(stmt: unsafe_ptr, idx: c_int, v: float64): c_int;
+    function sqlite3_bind_text(
+        stmt: unsafe_ptr,
+        idx: c_int,
+        v: string,
+        n: c_int,
+        dtor: c_ssize_t
+    ): c_int;
+    function sqlite3_bind_null(stmt: unsafe_ptr, idx: c_int): c_int;
+
+    function sqlite3_column_count(stmt: unsafe_ptr): c_int;
+    function sqlite3_column_name(stmt: unsafe_ptr, col: c_int): string;
+    function sqlite3_column_type(stmt: unsafe_ptr, col: c_int): c_int;
+    function sqlite3_column_int(stmt: unsafe_ptr, col: c_int): c_int;
+    function sqlite3_column_int64(stmt: unsafe_ptr, col: c_int): int64;
+    function sqlite3_column_double(stmt: unsafe_ptr, col: c_int): float64;
+    function sqlite3_column_text(stmt: unsafe_ptr, col: c_int): string;
+}
+
+// SQLITE_TRANSIENT. See the extern note above for why this is an integer.
+const TRANSIENT: c_ssize_t = -1;
+
+// Passed as sqlite3_prepare_v2's `nbyte`: "the SQL is nul-terminated, measure
+// it yourself".
+const NUL_TERMINATED: c_int = -1;
+
+// ----- opaque handle envelopes ---------------------------------------------
+
+// A `sqlite3 *`. One pointer field, so `ref RawDb` is ABI-identical to the
+// `sqlite3 **` the open entry point wants.
+export type RawDb { p: unsafe_ptr }
+
+// A `sqlite3_stmt *`.
+export type RawStmt { p: unsafe_ptr }
+
+export function rawDbNull(): RawDb { return { p: null }; }
+export function rawDbIsNull(d: RawDb): bool { return d.p == null; }
+export function rawStmtNull(): RawStmt { return { p: null }; }
+export function rawStmtIsNull(s: RawStmt): bool { return s.p == null; }
+
+// ----- connection ----------------------------------------------------------
+
+// sqlite3_open allocates and returns a handle even on most failures, so `out`
+// is filled unconditionally and the caller must close it on the error path
+// too (otherwise the failed-open handle leaks along with its error message).
+export function rawOpen(path: string, ref out: RawDb): int32 {
+    let h: unsafe_ptr = null;
+    let rc: c_int = sqlite3_open(path, ref h);
+    out = { p: h };
+    return int32(rc);
+}
+
+export function rawClose(d: RawDb): int32 { return int32(sqlite3_close(d.p)); }
+
+// Borrowed - points into sqlite's own storage and is invalidated by the next
+// call on this connection. Copy before holding on to it.
+export function rawErrmsg(d: RawDb): string { return sqlite3_errmsg(d.p); }
+
+export function rawExec(d: RawDb, sql: string): int32 {
+    // No callback, no callback arg, and no errmsg out-param: the caller reads
+    // rawErrmsg instead, which avoids having to sqlite3_free the message.
+    return int32(sqlite3_exec(d.p, sql, null, null, null));
+}
+
+export function rawChanges(d: RawDb): int32 { return int32(sqlite3_changes(d.p)); }
+
+export function rawLastInsertRowid(d: RawDb): int64 {
+    return sqlite3_last_insert_rowid(d.p);
+}
+
+// ----- statements ----------------------------------------------------------
+
+export function rawPrepare(d: RawDb, sql: string, ref out: RawStmt): int32 {
+    let h: unsafe_ptr = null;
+    let rc: c_int = sqlite3_prepare_v2(d.p, sql, NUL_TERMINATED, ref h, null);
+    out = { p: h };
+    return int32(rc);
+}
+
+export function rawFinalize(s: RawStmt): int32 { return int32(sqlite3_finalize(s.p)); }
+export function rawStep(s: RawStmt): int32 { return int32(sqlite3_step(s.p)); }
+export function rawReset(s: RawStmt): int32 { return int32(sqlite3_reset(s.p)); }
+
+export function rawClearBindings(s: RawStmt): int32 {
+    return int32(sqlite3_clear_bindings(s.p));
+}
+
+export function rawBindParameterCount(s: RawStmt): int32 {
+    return int32(sqlite3_bind_parameter_count(s.p));
+}
+
+// ----- binding -------------------------------------------------------------
+//
+// Parameter indices are 1-based, matching sqlite (`?1` is index 1). The safe
+// layer keeps that convention rather than inventing a 0-based one, so the SQL
+// and the bind calls read the same.
+
+export function rawBindInt(s: RawStmt, idx: int32, v: int32): int32 {
+    return int32(sqlite3_bind_int(s.p, idx, v));
+}
+
+export function rawBindInt64(s: RawStmt, idx: int32, v: int64): int32 {
+    return int32(sqlite3_bind_int64(s.p, idx, v));
+}
+
+export function rawBindDouble(s: RawStmt, idx: int32, v: float64): int32 {
+    return int32(sqlite3_bind_double(s.p, idx, v));
+}
+
+// Always TRANSIENT: sqlite copies the bytes, so the yoop string does not have
+// to outlive the statement. This is the whole reason binding is safer than
+// string-concatenating a query.
+export function rawBindText(s: RawStmt, idx: int32, v: string): int32 {
+    return int32(sqlite3_bind_text(s.p, idx, v, NUL_TERMINATED, TRANSIENT));
+}
+
+export function rawBindNull(s: RawStmt, idx: int32): int32 {
+    return int32(sqlite3_bind_null(s.p, idx));
+}
+
+// ----- column access -------------------------------------------------------
+//
+// Column indices are 0-based (also matching sqlite).
+
+export function rawColumnCount(s: RawStmt): int32 {
+    return int32(sqlite3_column_count(s.p));
+}
+
+// Borrowed, like rawErrmsg / rawColumnText.
+export function rawColumnName(s: RawStmt, col: int32): string {
+    return sqlite3_column_name(s.p, col);
+}
+
+export function rawColumnType(s: RawStmt, col: int32): int32 {
+    return int32(sqlite3_column_type(s.p, col));
+}
+
+export function rawColumnInt(s: RawStmt, col: int32): int32 {
+    return int32(sqlite3_column_int(s.p, col));
+}
+
+export function rawColumnInt64(s: RawStmt, col: int32): int64 {
+    return sqlite3_column_int64(s.p, col);
+}
+
+export function rawColumnDouble(s: RawStmt, col: int32): float64 {
+    return sqlite3_column_double(s.p, col);
+}
+
+// BORROWED. Points into sqlite's per-statement storage and is invalidated by
+// the next step / reset / finalize. The safe layer copies it before handing it
+// out; do not return this pointer's contents to a user directly.
+export function rawColumnText(s: RawStmt, col: int32): string {
+    return sqlite3_column_text(s.p, col);
+}
+
+// ----- misc ----------------------------------------------------------------
+
+export function libVersion(): string { return sqlite3_libversion(); }
