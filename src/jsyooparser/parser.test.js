@@ -818,10 +818,62 @@ describe("parse: phase 6.1 - kind decls", () => {
         /duplicate appliesTo clause/,
       );
     });
-    it("rejects appliesTo function site", () => {
+    // testing-via-kinds: `appliesTo function` parses now. The requirement that
+    // it also declare `signature` + `enumerable as` is a typecheck rule, not a
+    // grammar one, so the parser accepts the bare site.
+    it("accepts appliesTo function site", () => {
+      const ast = parse("kind k { appliesTo function; }");
+      const clause = ast.body[0].clauses[0];
+      assert.deepEqual(clause.sites, ["function"]);
+    });
+
+    it("parses a function kind's signature and enumerable clauses", () => {
+      const ast = parse(
+        'kind suite { appliesTo function; signature (run: ref Run) => void; enumerable as "suites"; }',
+      );
+      const [applies, signature, enumerable] = ast.body[0].clauses;
+      assert.deepEqual(applies.sites, ["function"]);
+      assert.equal(signature.signatureAnnotation.kind, "functionType");
+      assert.deepEqual(signature.signatureAnnotation.params, [
+        { kind: "refType", inner: { kind: "typeName", name: "Run" } },
+      ]);
+      assert.equal(enumerable.tableName, "suites");
+    });
+
+    it("rejects a signature clause that is not a function type", () => {
       assert.throws(
-        () => parse("kind k { appliesTo function; }"),
-        /user-declared `appliesTo function` kinds are deferred/,
+        () => parse("kind k { appliesTo function; signature int32; }"),
+        /signature clause requires a function type/,
+      );
+    });
+
+    it("rejects an enumerable clause with no table name", () => {
+      assert.throws(
+        () => parse("kind k { appliesTo function; enumerable; }"),
+        /enumerable clause requires a table name/,
+      );
+    });
+
+    it("parses a kind-prefixed top-level function decl", () => {
+      const ast = parse(
+        'kind suite { appliesTo function; signature () => void; enumerable as "suites"; }\n' +
+          "suite function myBehavior(): void {}",
+      );
+      assert.equal(ast.body[1].kind, "FUNCTION_DECL");
+      assert.equal(ast.body[1].name, "myBehavior");
+      assert.equal(ast.body[1].kindPrefix.name, "suite");
+    });
+
+    it("parses `import.test;` as a module flag", () => {
+      assert.equal(parse("import.test;\nfunction main(): int { return 0; }").isTestModule, true);
+      assert.equal(parse("function main(): int { return 0; }").isTestModule, false);
+      assert.throws(
+        () => parse("import.test;\nimport.test;"),
+        /duplicate 'import.test;' declaration/,
+      );
+      assert.throws(
+        () => parse("import.bogus;"),
+        /only 'import.unsafe' and 'import.test' are supported/,
       );
     });
     it("rejects duplicate appliesTo site", () => {

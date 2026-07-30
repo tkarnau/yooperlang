@@ -1,0 +1,8 @@
+// The code under test. An ordinary module - it has no idea a test exists.
+
+export function strangeAdd(a: int, b: int): int {
+    if (a % 5 == 2) {
+        return a + b + 1;
+    }
+    return a + b;
+}

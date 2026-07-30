@@ -691,6 +691,10 @@ export function parse(src) {
       // Phase 8.A: `import.unsafe;` enables `unsafe_ptr<T>` and friends.
       // Defaults to false; set true if the module opts in at top.
       node.allowsUnsafe = false;
+      // testing-via-kinds: `import.test;` marks this module as a test module.
+      // A test module is allowed to have no `main` - the driver's --test mode
+      // synthesizes an entry module that calls its enumerable-kinded functions.
+      node.isTestModule = false;
       let seenNonImport = false;
       while (peek().tag !== TokenTags.eof) {
         // only allow declarations
@@ -750,23 +754,25 @@ export function parse(src) {
                   featTok.start,
                   featTok.start + featTok.length,
                 );
-                if (featName !== "unsafe") {
+                if (featName !== "unsafe" && featName !== "test") {
                   throw parseError(
-                    `unknown import attribute 'import.${featName}' - only 'import.unsafe' is supported`,
+                    `unknown import attribute 'import.${featName}' - only 'import.unsafe' and 'import.test' are supported`,
                     featTok.start,
                     featTok.length,
                   );
                 }
-                advance(); // unsafe
+                advance(); // the feature name
                 expect(TokenTags.semicolon);
-                if (node.allowsUnsafe) {
+                const flagSlot =
+                  featName === "unsafe" ? "allowsUnsafe" : "isTestModule";
+                if (node[flagSlot]) {
                   throw parseError(
-                    `duplicate 'import.unsafe;' declaration`,
+                    `duplicate 'import.${featName};' declaration`,
                     importTok.start,
                     importTok.length,
                   );
                 }
-                node.allowsUnsafe = true;
+                node[flagSlot] = true;
                 break;
               }
               node.body.push(parseImportDecl());
@@ -840,6 +846,22 @@ export function parse(src) {
             }
             break;
           default: {
+            // testing-via-kinds: `<kind> function foo(...)` - a kind-prefixed
+            // top-level function decl. Two adjacent tokens are enough to
+            // recognize it, since `function` is a keyword and can never be an
+            // ordinary identifier. The prefix is resolved against the kind
+            // table in typecheck; here it is just a name.
+            if (peekTag === TokenTags.ident && peekAhead(1).tag === TokenTags.function) {
+              seenNonImport = true;
+              const kindTok = advance();
+              const decl = parseFunctionDecl();
+              decl.kindPrefix = {
+                name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+                sourceLoc: posToSourceLocation(src, kindTok.start),
+              };
+              node.body.push(decl);
+              break;
+            }
             throw parseError(
               `unexpected token at top level: ${inverseTokenTags[peekTag]}`,
               peek().start,
@@ -1100,6 +1122,17 @@ export function parse(src) {
         node.clauses.push(parseTransitionClause());
         continue;
       }
+      // testing-via-kinds: `signature (p: T) => R;` and `enumerable as "x";`
+      // for `appliesTo function` kinds. Contextual idents for the same reason
+      // as above - `signature` and `enumerable` stay ordinary identifiers.
+      if (identTextIs("signature")) {
+        node.clauses.push(parseSignatureClause());
+        continue;
+      }
+      if (identTextIs("enumerable")) {
+        node.clauses.push(parseEnumerableClause());
+        continue;
+      }
       // Surface a precise message for deferred-feature clause keywords
       // (they currently lex as plain idents).
       if (peek().tag === TokenTags.ident) {
@@ -1189,6 +1222,62 @@ export function parse(src) {
     return null;
   }
 
+  // testing-via-kinds: true when the current token is the given contextual
+  // ident. Used for clause keywords that must stay ordinary identifiers
+  // everywhere outside a kind body.
+  function identTextIs(word) {
+    if (peek().tag !== TokenTags.ident) return false;
+    return src.substring(peek().start, peek().start + peek().length) === word;
+  }
+
+  // testing-via-kinds: `signature (p: T) => R;` constrains the shape of a
+  // function carrying an `appliesTo function` kind. The annotation goes
+  // through the ordinary type-annotation parser, so it is exactly the Phase
+  // 9.G function-value type - no separate grammar for signatures.
+  function parseSignatureClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_SIGNATURE_CLAUSE);
+    advance(); // signature
+    node.signatureAnnotation = parseTypeAnnotation();
+    if (node.signatureAnnotation?.kind !== "functionType") {
+      throw parseError(
+        "signature clause requires a function type, e.g. `signature (ref Run) => void;`",
+        node.sourceLoc.pos,
+        1,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // testing-via-kinds: `enumerable as "suites";` authorizes the compiler to
+  // collect every function carrying this kind into a table, and names the
+  // table. The name is the join key between a kind decl and whichever driver
+  // mode consumes it, so a second enumerable kind (`bench`) never collides
+  // with the first.
+  function parseEnumerableClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_ENUMERABLE_CLAUSE);
+    advance(); // enumerable
+    if (peek().tag !== TokenTags.as) {
+      throw parseError(
+        'enumerable clause requires a table name, e.g. `enumerable as "suites";`',
+        peek().start,
+        peek().length,
+      );
+    }
+    advance(); // as
+    const nameTok = expect(TokenTags.strLiteral);
+    node.tableName = unquoteStringLiteral(nameTok);
+    if (node.tableName.length === 0) {
+      throw parseError(
+        "enumerable table name must not be empty",
+        nameTok.start,
+        nameTok.length,
+      );
+    }
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
   // clearance kinds: `clearedBy <fn>;` on a restrictive kind names the
   // function authorized to strip the kind from a value; `appliedBy <fn>;`
   // on a conferred kind names the function authorized to confer the kind.
@@ -1235,11 +1324,13 @@ export function parse(src) {
           site = "field";
           break;
         case TokenTags.function:
-          throw parseError(
-            "user-declared `appliesTo function` kinds are deferred (phase 7+); the built-in task kind covers the only current use case",
-            tok.start,
-            tok.length,
-          );
+          // testing-via-kinds: a function-position kind. Deliberately narrow -
+          // only `signature` and `enumerable as` are legal alongside it (a
+          // function kind has no value to be a `mustCall` receiver). Enforced
+          // in populateKindFromClauses, not here, so the diagnostic can name
+          // the offending clause.
+          site = "function";
+          break;
         case TokenTags.type:
           site = "type";
           break;
@@ -1708,6 +1799,21 @@ export function parse(src) {
         node.decl = parseUnionDecl();
         break;
       default:
+        // testing-via-kinds: `export <kind> function foo(...)`. In a test
+        // module the driver adds the export wrapper itself, so this is the
+        // explicit form for anyone who prefers to write it out.
+        if (
+          peek().tag === TokenTags.ident &&
+          peekAhead(1).tag === TokenTags.function
+        ) {
+          const kindTok = advance();
+          node.decl = parseFunctionDecl();
+          node.decl.kindPrefix = {
+            name: src.substring(kindTok.start, kindTok.start + kindTok.length),
+            sourceLoc: posToSourceLocation(src, kindTok.start),
+          };
+          break;
+        }
         throw parseError(
           `unexpected token after export: ${inverseTokenTags[peek().tag]}`,
           peek().start,

@@ -8,4 +8,7 @@ function main(): int32 {
     return 0;
 }
 
-// Fails: appliesTo function not yet supported (phase 6.5)
+// Fails: a function kind marks a declaration, not a value, so it cannot also
+// apply to a value site. (Before testing-via-kinds enabled `appliesTo
+// function`, this failed earlier and for a different reason - the site itself
+// was rejected at parse time.)

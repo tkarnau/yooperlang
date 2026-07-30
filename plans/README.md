@@ -109,6 +109,19 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
 - [library-design.md](library-design.md) - the standard-library design contract
   (library principles, foundational traits/kinds, the networking + HTTP layers).
 
+One design exploration, not a shipped system and not scheduled:
+
+- [testing-via-kinds.md](testing-via-kinds.md) - a test harness written in
+  userland kinds and traits rather than compiler-baked `@test` attributes. A
+  working DSL already exists at
+  [../examples/playground/yooptest/main.yoop](../examples/playground/yooptest/main.yoop).
+  Tests live in `*.test.yoop`, flagged with `import.test;`, with suites marked by
+  a function-position `suite` kind; the driver globs them, generates a synthetic
+  entry module whose `main` hands the suite table to `std/test.yoop`, and builds
+  one throwaway executable in the temp dir it already makes. All policy
+  (ordering, arena isolation, filtering, reporting) is Yoop code in std. Doubles
+  as a stress test of whether the kind system is carrying its weight.
+
 ---
 
 ## What is deliberately NOT being worked on
