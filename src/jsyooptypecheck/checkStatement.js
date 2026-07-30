@@ -30,6 +30,7 @@ import {
   resolveTypeInCtx,
 } from "./instantiate.js";
 import { pushError, formatType } from "./errors.js";
+import { isNumeric } from "./coerce.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
@@ -853,19 +854,115 @@ function checkWhile(node, scope, ctx) {
   validateStatement(node.body, scope, loopCtx);
 }
 
-function checkForLoop(node, scope, ctx) {
-  // init: initIdent must be in scope, initExpr must match its type
-  const initBinding = lookupInScope(scope, node.initIdent);
-  if (!initBinding) {
-    pushError(ctx.errors, node,
-      `for-loop variable "${node.initIdent}" is not declared - declare it before the loop`);
+// Comparison operators whose *other* operand can name an unannotated
+// counter's type. `==`/`!=` are included because a countdown-to-sentinel loop
+// (`for (let i = n; i != 0; i -= 1)`) is as much a type constraint as `<`.
+const COUNTER_PINNING_OPS = new Set(["lt", "lte", "gt", "gte", "eqeq", "neq"]);
+
+// True if `n` reads the loop's counter by name - the anchor that tells us
+// which side of the condition is the counter and which side can type it.
+function isCounterRead(n, counterName) {
+  return n?.kind === ASTNodeKind.IDENT && n.name === counterName;
+}
+
+// The type an unannotated `let` counter takes when its initializer is a bare
+// integer/float literal. The ordinary binding rule (untypedInt -> int32) is
+// wrong here often enough to be a papercut: virtually every counted loop
+// compares against a length, and `int32 < usize` is not implicitly widened
+// (see unifyArith), so `for (let i = 0; i < xs.len; i += 1)` would fail on the
+// condition the counter exists to serve. So when the condition compares the
+// counter against a concrete numeric operand, that operand names the counter's
+// type. Returns null when the condition has no such shape, leaving the
+// ordinary literal default in place.
+//
+// `probeCtx` carries a throwaway error channel - see declareForCounter.
+function counterTypeFromCondition(node, scope, probeCtx) {
+  const cond = node.cond;
+  if (cond?.kind !== ASTNodeKind.BINARY_EXPRESSION) return null;
+  if (!COUNTER_PINNING_OPS.has(cond.op)) return null;
+
+  let other = null;
+  if (isCounterRead(cond.left, node.initIdent)) other = cond.right;
+  else if (isCounterRead(cond.right, node.initIdent)) other = cond.left;
+  if (!other) return null;
+
+  const t = resolveExprType(other, scope, probeCtx);
+  return t.kind === typeKinds.prim && isNumeric(t) ? t : null;
+}
+
+// Resolve the type of a `for (let i = ...; ...)` counter and declare it in the
+// loop's own scope.
+function declareForCounter(node, loopScope, ctx) {
+  let counterType;
+  if (node.initTypeAnnotation) {
+    counterType =
+      resolveTypeInCtx(node.initTypeAnnotation, ctx.typeContext) ?? ErrorType();
+    if (counterType.kind === typeKinds.error) {
+      pushError(ctx.errors, node,
+        `unknown type "${formatAnnotation(node.initTypeAnnotation)}"`);
+    }
   } else {
-    const initExprType = resolveExprType(node.initExpr, scope, ctx);
-    checkAssignable(initBinding.type, initExprType, node, ctx);
+    // Probe the initializer on a throwaway error channel: checkInitializer
+    // below is what actually reports on it, and one broken initializer should
+    // produce one diagnostic, not two.
+    const probeCtx = { ...ctx, errors: [] };
+    const initType = resolveExprType(node.initExpr, loopScope, probeCtx);
+    if (initType.kind === typeKinds.untypedInt || initType.kind === typeKinds.untypedFloat) {
+      counterType =
+        counterTypeFromCondition(node, loopScope, probeCtx) ??
+        concretizeInferred(initType);
+    } else {
+      counterType = canonicalizeStruct(initType, ctx);
+    }
+    if (counterType.kind === typeKinds.error) {
+      pushError(ctx.errors, node,
+        `cannot infer a type for for-loop counter "${node.initIdent}"; add an explicit type annotation`);
+    }
+  }
+
+  // Runs for both paths: checks assignability and, crucially, pins an untyped
+  // literal initializer to the counter's type so codegen never sees an
+  // untypedInt in the loop's init store.
+  checkInitializer(
+    node.initExpr,
+    counterType,
+    loopScope,
+    ctx,
+    (rhsType) =>
+      `cannot assign ${formatType(rhsType)} to ${formatType(counterType)} in initializer of for-loop counter "${node.initIdent}"`,
+  );
+
+  node.resolvedCounterType = counterType;
+  declareInScope(
+    loopScope, node.initIdent, counterType, "let", node, ctx.errors, null,
+  );
+}
+
+// Two head shapes:
+//   for (i = 0; i < n; i = i + 1)       counter declared before the loop
+//   for (let i = 0; i < n; i += 1)      counter scoped TO the loop
+// The `let` form opens a scope covering the head and the body, so the counter
+// neither leaks into the enclosing scope nor collides with a same-named
+// binding out there.
+function checkForLoop(node, scope, ctx) {
+  const loopScope = node.initDeclares ? pushScope(scope) : scope;
+
+  if (node.initDeclares) {
+    declareForCounter(node, loopScope, ctx);
+  } else {
+    // init: initIdent must be in scope, initExpr must match its type
+    const initBinding = lookupInScope(loopScope, node.initIdent);
+    if (!initBinding) {
+      pushError(ctx.errors, node,
+        `for-loop variable "${node.initIdent}" is not declared - declare it before the loop, or write "for (let ${node.initIdent} = ...; ...)"`);
+    } else {
+      const initExprType = resolveExprType(node.initExpr, loopScope, ctx);
+      checkAssignable(initBinding.type, initExprType, node, ctx);
+    }
   }
 
   // cond: must be bool
-  const condType = resolveExprType(node.cond, scope, ctx);
+  const condType = resolveExprType(node.cond, loopScope, ctx);
   if (condType.kind !== typeKinds.prim || condType.name !== "bool") {
     if (condType.kind !== typeKinds.error) {
       pushError(ctx.errors, node.cond,
@@ -874,18 +971,20 @@ function checkForLoop(node, scope, ctx) {
   }
 
   // step: stepIdent must be in scope, stepExpr must match its type
-  const stepBinding = lookupInScope(scope, node.stepIdent);
+  const stepBinding = lookupInScope(loopScope, node.stepIdent);
   if (!stepBinding) {
     pushError(ctx.errors, node,
       `for-loop step variable "${node.stepIdent}" is not declared`);
   } else {
-    const stepExprType = resolveExprType(node.stepExpr, scope, ctx);
+    const stepExprType = resolveExprType(node.stepExpr, loopScope, ctx);
     checkAssignable(stepBinding.type, stepExprType, node, ctx);
   }
 
   // body with inLoop: true
   const loopCtx = { ...ctx, inLoop: true };
-  validateStatement(node.body, scope, loopCtx);
+  validateStatement(node.body, loopScope, loopCtx);
+
+  if (node.initDeclares) popScope(loopScope, ctx.errors);
 }
 
 // Phase 9.D + 10.B: `for item in xs { ... }`. The RHS may be either:
@@ -902,12 +1001,13 @@ function checkForInLoop(node, scope, ctx) {
     elemType = iterType.elem;
   } else if (iterType.kind === typeKinds.struct) {
     // The struct type captured from an expression site (e.g. a function-call
-    // return) may be the pass-A shell - re-fetch the canonical version from
-    // structTable so we see the fully-resolved implementsTraits/methods.
-    if (ctx.typeContext.structTable) {
-      const canonical = ctx.typeContext.structTable.get(iterType.name);
-      if (canonical) iterType = canonical;
-    }
+    // return) may be the pass-A shell - re-fetch the canonical version so we
+    // see the fully-resolved implementsTraits/methods. Goes through
+    // canonicalizeStruct (not just the local structTable) so an iterator
+    // returned from ANOTHER module's function resolves too - that is what
+    // `for i in 0..n` needs, since `..` lowers to a call into
+    // std/core/range.yoop.
+    iterType = canonicalizeStruct(iterType, ctx);
     const iterableTrait = (iterType.implementsTraits ?? []).find(
       (t) => t.name === "Iterable",
     );

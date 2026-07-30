@@ -1,0 +1,55 @@
+// `vecIter(ref v)` gives a Vec the same `for x in ...` walk arrays and maps
+// already had, so reading a Vec no longer needs an index at all:
+//
+//     for x in vec.vecIter(ref v) { ... }
+//
+// The iterator borrows the backing buffer - it is invalidated by any mutation
+// that can reallocate (a push at capacity), so keep it scoped to its loop.
+
+import { disposable } from "std/core/kinds.yoop";
+import * as vec from "std/core/vec.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    disposable v: vec.Vec<int32> = vec.vec_new(2);
+    vec.vec_push(ref v, 10);
+    vec.vec_push(ref v, 20);
+    vec.vec_push(ref v, 30);
+
+    let sum: int32 = 0;
+    for x in vec.vecIter(ref v) {
+        printf(`x=${x}\n`);
+        sum = sum + x;
+    }
+    printf(`sum=${sum}\n`);
+
+    // Walks the populated prefix only, so capacity is invisible.
+    printf(`len=${v.len} cap=${v.cap}\n`);
+
+    // break works, and the walk sees writes made through vec_set.
+    vec.vec_set(ref v, 1, 99);
+    for x in vec.vecIter(ref v) {
+        if (x == 99) { break; }
+        printf(`pre=${x}\n`);
+    }
+
+    // An empty Vec yields nothing.
+    disposable empty: vec.Vec<int32> = vec.vec_new(4);
+    for x in vec.vecIter(ref empty) {
+        printf(`never=${x}\n`);
+    }
+    printf("done\n");
+    return 0;
+}
+
+// expected output:
+// x=10
+// x=20
+// x=30
+// sum=60
+// len=3 cap=4
+// pre=10
+// done

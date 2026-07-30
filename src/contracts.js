@@ -49,6 +49,11 @@ export const ASTNodeKind = Object.freeze({
   // phase 9.D: `for item in xs { ... }` - element-walking loop over an array
   // (default sequential iteration; trait-driven iteration is a later phase).
   FOR_IN_LOOP: "FOR_IN_LOOP",
+  // `a..b` - a half-open integer range. Sugar only: the driver rewrites every
+  // RANGE_EXPR into a call to `exclusive` in std/core/range.yoop before
+  // typecheck runs (see jsyoopdriver/lower_range.js), so no later stage
+  // handles this kind.
+  RANGE_EXPR: "RANGE_EXPR",
   BREAK_STATEMENT: "BREAK_STATEMENT",
   CONTINUE_STATEMENT: "CONTINUE_STATEMENT",
   ARRAY_LITERAL: "ARRAY_LITERAL",

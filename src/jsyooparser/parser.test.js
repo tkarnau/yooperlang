@@ -300,6 +300,147 @@ describe("Phase 9.D: for ... in loop", () => {
     assert.equal(stmts2[0].kind, ASTNodeKind.FOR_IN_LOOP);
     assert.equal(stmts2[0].iterExpr.kind, ASTNodeKind.CALL_EXPRESSION);
   });
+
+  // A `{` after an `IDENT.IDENT` RHS used to be swallowed as a variant
+  // constructor's payload, making `for x in self.items {` a parse error that
+  // callers had to work around by prebinding the RHS to a local.
+  it("a field-access RHS does not swallow the loop body's brace", () => {
+    const stmts = bodyOf("for x in self.items { }");
+    assert.equal(stmts[0].kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(stmts[0].iterExpr.kind, ASTNodeKind.FIELD_ACCESS);
+    assert.equal(stmts[0].iterExpr.field, "items");
+    assert.equal(stmts[0].body.kind, ASTNodeKind.BLOCK);
+  });
+
+  it("a genuine variant payload nested in the RHS still parses as one", () => {
+    const stmts = bodyOf("for c in iterOf(Shape.Circle { r: 3 }) { }");
+    const arg = stmts[0].iterExpr.args[0];
+    assert.equal(stmts[0].kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(arg.kind, ASTNodeKind.VARIANT_CONSTRUCTOR);
+    assert.equal(arg.enumName, "Shape");
+    assert.equal(arg.variantName, "Circle");
+  });
+});
+
+// The `for (let i = ...; ...; ...)` head. The counter is declared by the loop
+// (and scoped to it), the type annotation is optional, and the step slot
+// accepts the compound-assignment operators.
+describe("for-loop: let-declared counter and compound step", () => {
+  function forLoopIn(src) {
+    return parse(`function f(): int32 { ${src} return 0; }`).body[0].body.body[0];
+  }
+
+  it("`let` in the init marks the counter as loop-declared", () => {
+    const loop = forLoopIn("for (let i = 0; i < 5; i = i + 1) { }");
+    assert.equal(loop.kind, ASTNodeKind.FOR_LOOP);
+    assert.equal(loop.initDeclares, true);
+    assert.equal(loop.initIdent, "i");
+    assert.equal(loop.initTypeAnnotation, null);
+  });
+
+  it("a type annotation on the counter is captured", () => {
+    const loop = forLoopIn("for (let i: usize = 0; i < 5; i += 1) { }");
+    assert.equal(loop.initDeclares, true);
+    assert.deepEqual(loop.initTypeAnnotation, {
+      kind: "typeName",
+      name: "usize",
+    });
+  });
+
+  it("the pre-declared form leaves initDeclares false", () => {
+    const loop = forLoopIn("for (i = 0; i < 5; i = i + 1) { }");
+    assert.equal(loop.initDeclares, false);
+    assert.equal(loop.initTypeAnnotation, null);
+  });
+
+  it("`i += 2` in the step desugars to `i = i + 2`", () => {
+    const loop = forLoopIn("for (let i = 0; i < 5; i += 2) { }");
+    assert.equal(loop.stepIdent, "i");
+    assert.equal(loop.stepExpr.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(loop.stepExpr.op, "plus");
+    assert.equal(loop.stepExpr.left.kind, ASTNodeKind.IDENT);
+    assert.equal(loop.stepExpr.left.name, "i");
+    assert.equal(loop.stepExpr.right.value, 2);
+  });
+
+  it("every compound step operator maps to its binary op", () => {
+    for (const [src, op] of [
+      ["i -= 1", "minus"],
+      ["i *= 2", "mult"],
+      ["i /= 2", "divide"],
+      ["i %= 3", "modulus"],
+    ]) {
+      const loop = forLoopIn(`for (let i = 1; i < 5; ${src}) { }`);
+      assert.equal(loop.stepExpr.op, op);
+    }
+  });
+
+  it("rejects `const` as the counter declaration", () => {
+    assert.throws(
+      () => forLoopIn("for (const i = 0; i < 5; i += 1) { }"),
+      /must be declared with "let"/,
+    );
+  });
+});
+
+// `a..b` builds a RANGE_EXPR, collected on the PROGRAM node so the driver can
+// rewrite each one into a std/core/range.yoop call without an AST walk.
+describe("range operator: `a..b`", () => {
+  function exprOf(src) {
+    return parse(`function f(): int32 { const r = ${src}; return 0; }`)
+      .body[0].body.body[0].assignment;
+  }
+
+  it("builds a RANGE_EXPR with both bounds", () => {
+    const r = exprOf("0..10");
+    assert.equal(r.kind, ASTNodeKind.RANGE_EXPR);
+    assert.equal(r.start.value, 0);
+    assert.equal(r.end.value, 10);
+  });
+
+  it("collects every range on the PROGRAM node", () => {
+    const ast = parse(
+      "function f(): int32 { const a = 0..1; const b = 2..3; return 0; }",
+    );
+    assert.equal(ast.rangeExprs.length, 2);
+    assert.equal(ast.rangeExprs[0].kind, ASTNodeKind.RANGE_EXPR);
+  });
+
+  it("binds looser than arithmetic, so `0..n - 1` is `0..(n - 1)`", () => {
+    const r = exprOf("0..n - 1");
+    assert.equal(r.kind, ASTNodeKind.RANGE_EXPR);
+    assert.equal(r.end.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(r.end.op, "minus");
+  });
+
+  it("rejects chained bounds", () => {
+    assert.throws(() => exprOf("0..2..4"), /cannot be chained/);
+  });
+
+  it("leaves the Phase 9.E slice form alone", () => {
+    // Inside brackets `i..j` is the slice separator, never a range value.
+    const s = exprOf("xs[1..3]");
+    assert.equal(s.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(s.start.value, 1);
+    assert.equal(s.end.value, 3);
+    const open = exprOf("xs[..2]");
+    assert.equal(open.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(open.start, null);
+    // A slice whose start is itself arithmetic still finds its `..`.
+    const arith = exprOf("xs[a + 1..b]");
+    assert.equal(arith.kind, ASTNodeKind.SLICE_EXPRESSION);
+    assert.equal(arith.start.kind, ASTNodeKind.BINARY_EXPRESSION);
+    assert.equal(arith.end.name, "b");
+  });
+
+  it("a range is a plain expression, usable as a for-in RHS", () => {
+    const loop = parse(
+      "function f(): int32 { for i in 0..3 { } return 0; }",
+    ).body[0].body.body[0];
+    assert.equal(loop.kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(loop.iterExpr.kind, ASTNodeKind.RANGE_EXPR);
+    assert.equal(loop.body.kind, ASTNodeKind.BLOCK);
+  });
 });
 
 // Phase 9.G.1: function value types in type position - `(p: T) => R`. The

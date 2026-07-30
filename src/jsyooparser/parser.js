@@ -68,6 +68,10 @@ const DeferredKindClauseMessages = {
 
 const Precedence = {
   [TokenTags.eq]: 10,
+  // `a..b` binds looser than every arithmetic and comparison operator, so
+  // `0..n - 1` is `0..(n - 1)` and `i < a..b` is a (nonsensical, and rejected)
+  // comparison of a Range - never a range of comparisons. Matches Rust.
+  [TokenTags.dotdot]: 15,
   [TokenTags.oror]: 20,
   [TokenTags.andand]: 30,
   [TokenTags.pipe]: 35,
@@ -91,6 +95,22 @@ const Precedence = {
   [TokenTags.mult]: 60,
   [TokenTags.divide]: 60,
   [TokenTags.modulus]: 60,
+};
+
+// The `..` operator's precedence, named because the slice form `xs[i..j]` has
+// to parse its bounds at exactly this level to keep its own `..` visible.
+const RANGE_PRECEDENCE = Precedence[TokenTags.dotdot];
+
+// Compound-assignment operators accepted in a for-loop's step slot, mapped to
+// the binary op they desugar to. Same token set as the statement-position
+// compound assignment; the step slot is already an implicit assignment to a
+// plain ident, so `i += 1` becomes the `i = i + 1` the node has always held.
+const ForStepCompoundOps = {
+  [TokenTags.plusEq]: "plus",
+  [TokenTags.minusEq]: "minus",
+  [TokenTags.multEq]: "mult",
+  [TokenTags.divideEq]: "divide",
+  [TokenTags.modulusEq]: "modulus",
 };
 
 /*
@@ -117,6 +137,19 @@ export function parse(src) {
   // these names are collision-free and unreferenceable - the value exists only
   // so the cleanup machinery has a slot to dispose at scope/block end.
   let anonRegionCounter = 0;
+  // Every RANGE_EXPR (`a..b`) built during this parse, published on the
+  // PROGRAM node so the driver's range lowering can rewrite them without an
+  // AST walk.
+  const rangeExprs = [];
+  // Set while parsing the RHS of `for ITEM in EXPR { ... }`, where a `{` after
+  // an `IDENT.IDENT` path is ambiguous: it can open a variant constructor's
+  // payload (`Shape.Circle { r: 5 }`) or the loop's own body (`for x in
+  // self.items {`). The constructor used to win unconditionally, so
+  // `for x in self.f {` was a parse error and callers had to prebind the RHS to
+  // a local first (the workaround @derive still carries for arrays). Inside the
+  // RHS the brace must LOOK like a payload to be read as one - see
+  // looksLikeVariantPayload.
+  let inForInIterExpr = false;
 
   // helper functions for token stream management
 
@@ -208,6 +241,19 @@ export function parse(src) {
       return bindingNameFollowedByColonOrEq(j + 1);
     }
     return false;
+  }
+
+  // True if the `{` at the cursor looks like a variant constructor's payload
+  // rather than a block: a payload always starts `{ <name> :`, and no statement
+  // can. Only consulted inside a for-in RHS (see inForInIterExpr), so the
+  // ordinary constructor path keeps accepting the empty `Shape.Dot {}` form.
+  // A nested payload still matches, so `for x in iterOf(Shape.Circle { r: 5 })`
+  // is unaffected by the suppression.
+  function looksLikeVariantPayload() {
+    return (
+      peekAhead(1).tag !== TokenTags.rcurly &&
+      peekAhead(2).tag === TokenTags.colon
+    );
   }
 
   // True if the current tokens look like an *anonymous* region-kind block:
@@ -873,6 +919,11 @@ export function parse(src) {
     } catch (parseErr) {
       throw parseErr;
     }
+
+    // Every `a..b` in this module, in parse order. The driver rewrites these
+    // in place (see jsyoopdriver/lower_range.js) instead of re-walking the
+    // whole AST looking for them.
+    node.rangeExprs = rangeExprs;
 
     return node;
   }
@@ -2337,7 +2388,8 @@ export function parse(src) {
       if (
         peek().tag === TokenTags.lcurly &&
         node.kind === ASTNodeKind.FIELD_ACCESS &&
-        node.object?.kind === ASTNodeKind.IDENT
+        node.object?.kind === ASTNodeKind.IDENT &&
+        (!inForInIterExpr || looksLikeVariantPayload())
       ) {
         const vc = buildSourcedNode(ASTNodeKind.VARIANT_CONSTRUCTOR);
         vc.enumName = node.object.name;
@@ -2394,9 +2446,12 @@ export function parse(src) {
       if (peek().tag === TokenTags.lbracket) {
         advance(); // consume [
         // Sniff the start: either expression or bare `..` for an open start.
+        // Both bounds parse at the range operator's own precedence so the `..`
+        // separating them stays visible here instead of being consumed as a
+        // range value - inside brackets `i..j` is this slice, never a Range.
         let startExpr = null;
         if (peek().tag !== TokenTags.dotdot) {
-          startExpr = parseExpression();
+          startExpr = parseExpression(RANGE_PRECEDENCE);
         }
         if (peek().tag === TokenTags.dotdot) {
           advance(); // consume ..
@@ -2404,7 +2459,9 @@ export function parse(src) {
           sliceNode.object = node;
           sliceNode.start = startExpr;
           sliceNode.end =
-            peek().tag === TokenTags.rbracket ? null : parseExpression();
+            peek().tag === TokenTags.rbracket
+              ? null
+              : parseExpression(RANGE_PRECEDENCE);
           expect(TokenTags.rbracket);
           node = sliceNode;
           continue;
@@ -2494,6 +2551,26 @@ export function parse(src) {
 
       advance(); // consume op
       const right = parseExpression(precedence);
+
+      // `a..b` is not an arithmetic binary op - it builds a range value. The
+      // node is collected on the PROGRAM so the driver can rewrite it into a
+      // call to std/core/range.yoop without re-walking the AST.
+      if (opToken.tag === TokenTags.dotdot) {
+        if (node.kind === ASTNodeKind.RANGE_EXPR || right.kind === ASTNodeKind.RANGE_EXPR) {
+          throw parseError(
+            `range bounds cannot be chained - "a..b..c" has no meaning`,
+            opToken.start,
+            opToken.length,
+          );
+        }
+        const rangeNode = buildSourcedNode(ASTNodeKind.RANGE_EXPR);
+        rangeNode.sourceLoc = node.sourceLoc; // point at the start bound
+        rangeNode.start = node;
+        rangeNode.end = right;
+        rangeExprs.push(rangeNode);
+        node = rangeNode;
+        continue;
+      }
 
       const binNode = buildSourcedNode(ASTNodeKind.BINARY_EXPRESSION);
       binNode.op = inverseTokenTags[opToken.tag];
@@ -2963,8 +3040,29 @@ export function parse(src) {
     expect(TokenTags.lparen);
     const node = buildSourcedNode(ASTNodeKind.FOR_LOOP);
 
-    // init: ident = expr ;
+    // init: `i = expr` steps a counter declared before the loop;
+    // `let i = expr` / `let i: T = expr` declares one scoped TO the loop
+    // (the common case - it keeps the counter from leaking into the
+    // enclosing scope and drops the separate declaration line). The type
+    // annotation is optional; see checkForLoop for how an omitted one is
+    // inferred.
+    if (peek().tag === TokenTags.const) {
+      throw parseError(
+        `a for-loop counter must be declared with "let" - "const" cannot be stepped`,
+        peek().start,
+        peek().length,
+      );
+    }
+    node.initDeclares = peek().tag === TokenTags.let;
+    if (node.initDeclares) {
+      advance(); // consume `let`
+    }
     node.initIdent = parseIdentAsName();
+    node.initTypeAnnotation = null;
+    if (node.initDeclares && peek().tag === TokenTags.colon) {
+      advance(); // consume `:`
+      node.initTypeAnnotation = parseTypeAnnotation();
+    }
     expect(TokenTags.eq);
     node.initExpr = parseExpression();
     expect(TokenTags.semicolon);
@@ -2973,10 +3071,26 @@ export function parse(src) {
     node.cond = parseExpression();
     expect(TokenTags.semicolon);
 
-    // step: ident = expr
+    // step: `i = expr`, or a compound form (`i += 1`) which lowers to the
+    // same `i = i + expr` shape the node has always carried. The step slot
+    // is an implicit assignment to `stepIdent`, so the compound operators
+    // need no new node kind - and a plain-ident target can be re-read for
+    // free, which is what COMPOUND_ASSIGNMENT exists to avoid elsewhere.
     node.stepIdent = parseIdentAsName();
-    expect(TokenTags.eq);
-    node.stepExpr = parseExpression();
+    const stepOp = ForStepCompoundOps[peek().tag];
+    if (stepOp) {
+      advance(); // consume `+=` / `-=` / `*=` / `/=` / `%=`
+      const counterRead = buildSourcedNode(ASTNodeKind.IDENT);
+      counterRead.name = node.stepIdent;
+      const binNode = buildSourcedNode(ASTNodeKind.BINARY_EXPRESSION);
+      binNode.op = stepOp;
+      binNode.left = counterRead;
+      binNode.right = parseExpression();
+      node.stepExpr = binNode;
+    } else {
+      expect(TokenTags.eq);
+      node.stepExpr = parseExpression();
+    }
 
     expect(TokenTags.rparen);
     node.body = parseBlock();
@@ -2990,7 +3104,15 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.FOR_IN_LOOP);
     node.loopVar = parseIdentAsName();
     expect(TokenTags.in);
-    node.iterExpr = parseExpression();
+    // The RHS runs to the loop body's `{`, so a trailing `IDENT.IDENT` path
+    // must not swallow that brace as a variant payload - see inForInIterExpr.
+    const savedForIn = inForInIterExpr;
+    inForInIterExpr = true;
+    try {
+      node.iterExpr = parseExpression();
+    } finally {
+      inForInIterExpr = savedForIn;
+    }
     node.body = parseBlock();
     return node;
   }

@@ -1,7 +1,11 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 
-import { pinStructLiteral, resolveExprType } from "./checkExpr.js";
+import {
+  argMismatchMessage,
+  pinStructLiteral,
+  resolveExprType,
+} from "./checkExpr.js";
 import { ASTNode, ASTNodeKind } from "../contracts.js";
 import {
   PrimType,
@@ -256,5 +260,38 @@ describe("resolveExprType: self outside method context", () => {
     assert.ok(
       errors.some((e) => /'self'.*inside.*trait|trait.*method.*self/.test(e.message)),
     );
+  });
+});
+
+// A call the `..` lowering synthesized must not be described by its internal
+// name - the user wrote `0..count`, never `$range.exclusive(0, count)`.
+describe("argMismatchMessage", () => {
+  const param = { name: "end", type: PrimType("usize") };
+
+  it("names the offending range bound for a lowered `..` call", () => {
+    const msg = argMismatchMessage(
+      { rangeOperator: true, callee: { field: "exclusive" } },
+      1,
+      param,
+      PrimType("int32"),
+    );
+    assert.match(msg, /end bound of range/);
+    assert.match(msg, /usize\(x\)/);
+    assert.ok(!msg.includes("$range"), `leaked internals: ${msg}`);
+  });
+
+  it("distinguishes the start bound", () => {
+    const msg = argMismatchMessage(
+      { rangeOperator: true },
+      0,
+      { name: "start", type: PrimType("usize") },
+      PrimType("int32"),
+    );
+    assert.match(msg, /start bound of range/);
+  });
+
+  it("keeps the ordinary wording for a user-written call", () => {
+    const msg = argMismatchMessage({ callee: "f" }, 1, param, PrimType("int32"));
+    assert.match(msg, /arg 2\(end\) of "f": cannot pass int32 to usize/);
   });
 });

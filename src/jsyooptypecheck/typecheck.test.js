@@ -232,6 +232,81 @@ describe("typecheckProgram: binary operator on mismatched types", () => {
   });
 });
 
+describe("typecheckProgram: for-loop with a let-declared counter", () => {
+  // The counterpart to the mismatch test above: the SAME comparison is fine
+  // when the loop declares the counter, because an unannotated counter takes
+  // its type from the condition instead of defaulting to int32.
+  it("an unannotated counter is typed by the condition, not defaulted", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        "  let xs: int32[] = [1, 2, 3];\n" +
+        "  for (let i = 0; i < xs.len; i += 1) {}\n" +
+        "  return 0;\n" +
+        "}\n",
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("honors an explicit annotation on the counter", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        "  for (let i: usize = 0; i < 3; i += 1) {}\n" +
+        "  return 0;\n" +
+        "}\n",
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects an initializer that does not fit the annotation", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        '  for (let i: usize = "nope"; i < 3; i += 1) {}\n' +
+        "  return 0;\n" +
+        "}\n",
+    );
+    assert.ok(
+      errors.some((e) => /initializer of for-loop counter "i"/.test(e.message)),
+      `expected counter-initializer error, got: ${JSON.stringify(errors.map((e) => e.message))}`,
+    );
+  });
+
+  it("scopes the counter to the loop", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        "  for (let i = 0; i < 3; i += 1) {}\n" +
+        "  return int32(i);\n" +
+        "}\n",
+    );
+    assert.ok(
+      errors.some((e) => /undefined variable "i"/.test(e.message)),
+      `expected the counter to be out of scope after the loop, got: ${JSON.stringify(errors.map((e) => e.message))}`,
+    );
+  });
+
+  it("a loop counter may shadow an outer binding of another type", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        "  let xs: int32[] = [1, 2];\n" +
+        "  let i: int32 = 99;\n" +
+        "  for (let i = 0; i < xs.len; i += 1) {}\n" +
+        "  return i;\n" +
+        "}\n",
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("with nothing to pin from, an unannotated counter defaults to int32", () => {
+    const { errors } = typecheckSource(
+      "function main(): int32 {\n" +
+        "  let total: int32 = 0;\n" +
+        "  for (let i = 0; true; i += 1) { total = total + i; break; }\n" +
+        "  return total;\n" +
+        "}\n",
+    );
+    assert.deepEqual(errors, []);
+  });
+});
+
 describe("typecheckProgram: impl block validation - pass C.3", () => {
   it("well-formed impl produces no errors", () => {
     const { errors } = typecheckProgram(

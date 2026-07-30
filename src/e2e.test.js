@@ -209,6 +209,52 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  it("for_let_counter.yoop declares and scopes its own counter", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/for_let_counter.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "xs[0]=10\nxs[1]=20\nxs[2]=30\nxs[3]=40\n" +
+        "j=0\nj=3\nj=6\nj=9\n" +
+        "k=3\nk=2\nk=1\n" +
+        "inner i=0\ninner i=1\n" +
+        "outer i=99\n" +
+        "nested a=10\nnested a=11\nnested a=10\nnested a=11\n" +
+        "m=0\nm=2\n" +
+        "n=0\nn=1\n" +
+        "n after=2\n",
+    );
+  });
+
+  it("range_basic.yoop walks `a..b` and treats a Range as a value", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/range_basic.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "xs[0]=10\nxs[1]=20\nxs[2]=30\nxs[3]=40\n" +
+        "mid 1\nmid 2\n" +
+        "count=3\n" +
+        "a0\na1\na2\n" +
+        "b0\nb1\nb2\n" +
+        "sum=3\n" +
+        "e0\ne1\n" +
+        "k0\nk1\n",
+    );
+  });
+
+  it("vec_iter.yoop walks a Vec through vecIter without an index", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/vec_iter.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "x=10\nx=20\nx=30\n" +
+        "sum=60\n" +
+        "len=3 cap=4\n" +
+        "pre=10\n" +
+        "done\n",
+    );
+  });
+
   it("fn_ptr_field: generic KeyOps<K> with function-pointer fields + indirect call", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/fn_ptr_field.yoop");
     assert.equal(exitCode, 0);

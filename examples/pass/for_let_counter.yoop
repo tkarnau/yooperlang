@@ -1,0 +1,88 @@
+// The `for (let i = ...; ...; ...)` head: the counter is declared by the loop
+// and scoped to it, which replaces the older two-line shape
+//
+//     let i: usize = 0;
+//     while (i < someLen) { ...; i = i + 1; }
+//
+// An unannotated counter takes its type from the loop condition, so
+// `let i = 0` against `i < xs.len` is a usize (NOT the int32 a plain
+// `let i = 0;` binding would infer) - which is what makes the common
+// walk-an-array loop work without an annotation.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    const xs: int32[] = [10, 20, 30, 40];
+
+    // Unannotated counter, typed usize by the comparison against xs.len.
+    for (let i = 0; i < xs.len; i += 1) {
+        printf("xs[%zu]=%d\n", i, xs[i]);
+    }
+
+    // Annotated counter + an irregular stride.
+    for (let j: int32 = 0; j < 10; j += 3) {
+        printf(`j=${j}\n`);
+    }
+
+    // Counting down.
+    for (let k: int32 = 3; k > 0; k -= 1) {
+        printf(`k=${k}\n`);
+    }
+
+    // The counter is scoped to its loop, so it neither leaks out nor
+    // disturbs a same-named binding in the enclosing scope.
+    let i: int32 = 99;
+    for (let i = 0; i < 2; i += 1) {
+        printf(`inner i=${i}\n`);
+    }
+    printf(`outer i=${i}\n`);
+
+    // Nested loops can reuse a counter name for the same reason.
+    for (let a: int32 = 0; a < 2; a += 1) {
+        for (let a: int32 = 10; a < 12; a += 1) {
+            printf(`nested a=${a}\n`);
+        }
+    }
+
+    // break / continue still target the loop.
+    for (let m: int32 = 0; m < 10; m += 1) {
+        if (m == 1) { continue; }
+        if (m == 3) { break; }
+        printf(`m=${m}\n`);
+    }
+
+    // The pre-declared form is unchanged: no `let`, counter from outside.
+    let n: int32 = 0;
+    for (n = 0; n < 2; n = n + 1) {
+        printf(`n=${n}\n`);
+    }
+    printf(`n after=${n}\n`);
+    return 0;
+}
+
+// expected output:
+// xs[0]=10
+// xs[1]=20
+// xs[2]=30
+// xs[3]=40
+// j=0
+// j=3
+// j=6
+// j=9
+// k=3
+// k=2
+// k=1
+// inner i=0
+// inner i=1
+// outer i=99
+// nested a=10
+// nested a=11
+// nested a=10
+// nested a=11
+// m=0
+// m=2
+// n=0
+// n=1
+// n after=2

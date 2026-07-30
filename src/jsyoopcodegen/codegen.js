@@ -1784,6 +1784,17 @@ export function codegen(ast) {
   }
 
   function emitForLoop(node, fnLines, ctx) {
+    // `for (let i = ...)` owns its counter: open a scope and give the counter
+    // its own slot, so it neither collides with nor outlives a same-named
+    // binding outside the loop. The alloca lands in the entry block via
+    // hoistAllocasToEntry, so a nested loop doesn't grow the frame per
+    // iteration.
+    if (node.initDeclares) {
+      symbols.enterScope();
+      const counterLlvm = llvmType(node.resolvedCounterType);
+      const counterSlot = symbols.declare(node.initIdent, node.resolvedCounterType);
+      fnLines.push(`  ${counterSlot} = alloca ${counterLlvm}, align ${alignOf(counterLlvm)}`);
+    }
     const initType = symbols.get(node.initIdent);
     const initVal = emitExpr(node.initExpr, fnLines);
     fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr ${symbols.slotFor(node.initIdent)}`);
@@ -1810,6 +1821,7 @@ export function codegen(ast) {
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
+    if (node.initDeclares) symbols.leaveScope();
   }
 
   // Phase 10.B: shared lowering for `for x in EXPR` when EXPR's type
@@ -6129,6 +6141,21 @@ function codegenWithModuleId(
   }
 
   function emitForLoopStmt(node, fnLines, ctx) {
+    // `for (let i = ...)` owns its counter - see emitForLoop (single-module
+    // twin) for the rationale. The alloca is hoisted to the entry block, so a
+    // nested loop doesn't grow the frame per iteration.
+    if (node.initDeclares) {
+      symbols.enterScope();
+      const counterLlvm = llvmType(node.resolvedCounterType);
+      const counterSlot = symbols.declare(node.initIdent, node.resolvedCounterType);
+      fnLines.push(`  ${counterSlot} = alloca ${counterLlvm}, align ${alignOf(counterLlvm)}`);
+      emitDbgDeclare(fnLines, {
+        name: node.initIdent,
+        slotPtr: counterSlot,
+        yoopType: node.resolvedCounterType,
+        sourceLoc: node.sourceLoc,
+      });
+    }
     const initType = symbols.get(node.initIdent);
     const initVal = emitExpr(node.initExpr, fnLines);
     fnLines.push(`  store ${llvmType(initType)} ${initVal.val}, ptr ${symbols.slotFor(node.initIdent)}`);
@@ -6155,6 +6182,7 @@ function codegenWithModuleId(
     fnLines.push(`  br label %${condLabel}`);
 
     fnLines.push(`${afterLabel}:`);
+    if (node.initDeclares) symbols.leaveScope();
   }
 
   function emitBlockStmt(blockOrNode, fnLines, ctx) {
