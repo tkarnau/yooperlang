@@ -1,0 +1,29 @@
+// A test module. `import.test;` is the flag: it says this module has no `main`
+// on purpose, and `yoopiler --test` (or `yoopiler <this file>`) should
+// synthesize one. Suites are ordinary functions carrying the `suite` kind.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import { strangeAdd } from "./strange_add.yoop";
+
+suite function addsStrangelyWhenFirstIsTwoModFive(): void {
+    let test theory: Case = t.asserts("adds an extra 1 when a % 5 == 2") {
+        const got = strangeAdd(2, 2);
+        theory.isSuccessful = got == 5;
+        theory.detail = `strangeAdd(2, 2) gave ${got}, wanted 5`;
+    }
+    let test theory: Case = t.asserts("still adds the extra 1 at 7") {
+        const got = strangeAdd(7, 0);
+        theory.isSuccessful = got == 8;
+        theory.detail = `strangeAdd(7, 0) gave ${got}, wanted 8`;
+    }
+}
+
+suite function addsPlainlyOtherwise(): void {
+    let test theory: Case = t.asserts("adds plainly when a % 5 is not 2") {
+        const got = strangeAdd(1, 2);
+        theory.isSuccessful = got == 3;
+        theory.detail = `strangeAdd(1, 2) gave ${got}, wanted 3`;
+    }
+}

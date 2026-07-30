@@ -82,6 +82,11 @@ export const ASTNodeKind = Object.freeze({
   // clearance kinds: kind-decl-named transition authority
   // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
   KIND_TRANSITION_CLAUSE: "KIND_TRANSITION_CLAUSE",
+  // testing-via-kinds: `appliesTo function` support. `signature (p: T) => R;`
+  // constrains the shape of a function carrying the kind; `enumerable as "x";`
+  // authorizes the compiler to collect every such function into a named table.
+  KIND_SIGNATURE_CLAUSE: "KIND_SIGNATURE_CLAUSE",
+  KIND_ENUMERABLE_CLAUSE: "KIND_ENUMERABLE_CLAUSE",
 
   // phase 6.3: task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",

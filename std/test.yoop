@@ -1,0 +1,163 @@
+// std/test.yoop - the test harness.
+//
+// Testing in yoop is not a compiler feature. A test file is an ordinary module
+// that declares `import.test;`, and its suites are ordinary functions carrying
+// the `suite` kind declared below. The compiler's whole contribution is to
+// notice the flag, collect the `suite`-kinded functions, and generate a `main`
+// that hands them to `runAll`. Everything you can see from here down - ordering,
+// isolation, filtering, reporting, the exit code - is plain yoop.
+//
+// See plans/testing-via-kinds.md for the design and its tradeoffs.
+//
+//     // strange_add.test.yoop
+//     import.test;
+//     import { suite, test, Case, asserts } from "std/test.yoop";
+//     import { strangeAdd } from "./strange_add.yoop";
+//
+//     suite function addsNumbers(): void {
+//         let test theory: Case = asserts("adds strangely when a % 5 == 2") {
+//             const got = strangeAdd(2, 2);
+//             theory.isSuccessful = got == 5;
+//             theory.detail = `strangeAdd(2, 2) gave ${got}, wanted 5`;
+//         }
+//     }
+//
+// Run it with `yoopiler --test` (every *.test.yoop under the current
+// directory) or `yoopiler strange_add.test.yoop` (just that file).
+
+import { ephemeral } from "./core/kinds.yoop";
+import { string_eq, string_index_of } from "./core/strings.yoop";
+import { arenaScope } from "./core/alloc.yoop";
+import { argCount, argAt } from "./env.yoop";
+
+// ----- run state --------------------------------------------------------
+
+// A test run is inherently process-wide: one binary, one serial pass, one
+// summary. Module-level state is the honest representation of that, and it
+// keeps `Case` free of any pointer back to a run object - which matters,
+// because a struct copied into a `Case` would be a copy, not a view.
+let CASE_INDEX: int32 = 0;
+let PASSED: int32 = 0;
+let FAILED: int32 = 0;
+
+// Bytes of arena handed to each suite. Every allocation a suite makes through
+// the ambient allocator comes from here and is reclaimed in bulk when the
+// suite ends, so a leaking test cannot poison the next one.
+const SUITE_ARENA_BYTES: usize = 1048576;
+
+// ----- a single case ----------------------------------------------------
+
+trait HandlesCase {
+    function recordOutcome(ref self): void;
+}
+
+// `Case` deliberately does NOT model an assertion as a comparison. A check is
+// a bool the test sets, plus a string the test writes to explain what
+// happened. Two-value `expected/got` flattens the context that made a check
+// meaningful; a string does not, and template literals already interpolate any
+// Display value. Build helpers for the shapes you actually repeat.
+export type Case implements HandlesCase {
+    name: string,
+    isSuccessful: bool,
+    // Reported only on failure, so the passing path stays quiet.
+    detail: string,
+    function recordOutcome(ref self): void {
+        CASE_INDEX = CASE_INDEX + 1;
+        if (self.isSuccessful) {
+            PASSED = PASSED + 1;
+            printf("ok %d - %s\n", CASE_INDEX, self.name);
+        } else {
+            FAILED = FAILED + 1;
+            printf("not ok %d - %s\n", CASE_INDEX, self.name);
+            if (!string_eq(self.detail, "")) {
+                printf("    %s\n", self.detail);
+            }
+        }
+    }
+}
+
+// The per-case kind. `ownsBlock` plus `mustCall recordOutcome beforeScopeEnd`
+// is the whole mechanism: the case's outcome is reported at the closing brace
+// of its own block, on every path out of it.
+export kind test {
+    appliesTo binding;
+    requires HandlesCase;
+    mustCall recordOutcome beforeScopeEnd;
+    ownsBlock;
+}
+
+// Open a case. The name is the prose - it is what a failure is reported under,
+// so write it as a claim about behavior.
+export function asserts(name: string): Case {
+    return { name: name, isSuccessful: false, detail: "" };
+}
+
+// ----- the suite marker -------------------------------------------------
+
+// A function-position kind. `enumerable as "suites"` is what authorizes the
+// compiler to collect every function carrying this kind into a table, and
+// names the table so a second enumerable kind (a future `bench`) stays
+// distinct. `signature` pins the shape, so a suite with the wrong arity is an
+// error at the suite rather than inside generated code.
+export kind suite {
+    appliesTo function;
+    signature () => void;
+    enumerable as "suites";
+}
+
+// ----- the runner -------------------------------------------------------
+
+// True when `name` should run: every suite runs unless the command line named
+// filters, in which case a suite runs if its name contains one of them.
+// argAt(0) is the program name, so filters start at 1.
+function selected(name: string): bool {
+    const argc = argCount();
+    if (argc < 2) {
+        return true;
+    }
+    let i: int32 = 1;
+    while (i < argc) {
+        if (contains(name, argAt(i))) {
+            return true;
+        }
+        i = i + 1;
+    }
+    return false;
+}
+
+// Substring test. `string_index_of` returns the haystack length on a miss.
+function contains(haystack: string, needle: string): bool {
+    const found = string_index_of(haystack, needle);
+    return found < haystack.len;
+}
+
+// The entry point the generated `main` calls. `suites` and `names` are
+// positionally paired; the compiler builds both.
+export function runAll(suites: (() => void)[], names: string[]): int {
+    let i: usize = 0;
+    while (i < suites.len) {
+        const name = names[i];
+        if (selected(name)) {
+            printf("# %s\n", name);
+            // Isolation, expressed as a kind rather than a runner feature. The
+            // arena is installed as the ambient allocator on entry and
+            // reclaimed in bulk at the closing brace, so each suite starts
+            // from the same heap state. A crash still takes the process down -
+            // suites are the unit of isolation, cases the unit of reporting.
+            ephemeral arenaScope(SUITE_ARENA_BYTES) {
+                const runSuite = suites[i];
+                runSuite();
+            }
+        }
+        i = i + 1;
+    }
+    return finish();
+}
+
+// Print the TAP plan and summary. Returns the process exit code: 0 when
+// everything passed, otherwise the failure count, so CI gates on it directly.
+function finish(): int {
+    printf("1..%d\n", CASE_INDEX);
+    printf("# %d passed, %d failed\n", PASSED, FAILED);
+    return FAILED;
+}

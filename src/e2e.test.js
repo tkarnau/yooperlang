@@ -2633,13 +2633,18 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  // phase 6.2 parser rejections
-  it("kind_appliesto_function.yoop rejects appliesTo function (deferred past 6.5)", () => {
-    assert.throws(
-      () => parseFixture("examples/fail/kind_appliesto_function.yoop"),
-      /user-declared `appliesTo function` kinds are deferred/,
+  // testing-via-kinds: `appliesTo function` now parses (it backs the `suite`
+  // kind in std/test.yoop), but a function kind marks a DECLARATION, so it
+  // cannot also name a value site.
+  it("kind_appliesto_function.yoop rejects appliesTo function mixed with a value site", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/kind_appliesto_function.yoop");
+    assert.ok(
+      errors.some((e) => /applies to a function and to 'binding'/.test(e.message)),
+      `expected function-plus-value-site error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
+
+  // phase 6.2 parser rejections
 
   it("kind_appliesto_duplicate.yoop rejects duplicate appliesTo site", () => {
     assert.throws(
@@ -3223,5 +3228,125 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
       errors.some((e) => /clearedBy only applies to restrictive marker kinds/.test(e.message)),
       `expected clearedBy-polarity error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
+  });
+});
+
+// testing-via-kinds: the test harness. These drive the driver itself as a
+// subprocess rather than calling compileEntry, because the thing under test IS
+// the driver's --test mode: discovery, the synthetic entry module, the
+// temp-dir executable, and the exit code. See plans/testing-via-kinds.md.
+describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", () => {
+  function runTestMode(relDir, extraArgs = []) {
+    const result = spawnSync(
+      process.execPath,
+      [path.join(repoRoot, "src/yoopiler.js"), "--test", path.join(repoRoot, relDir), ...extraArgs],
+      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
+    );
+    return { stdout: result.stdout ?? "", stderr: result.stderr ?? "", exitCode: result.status };
+  }
+
+  it("runs every suite in a passing test module and exits 0", () => {
+    const { stdout, exitCode } = runTestMode("examples/testing/pass");
+    assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}\n${stdout}`);
+    // TAP: one line per case, in declaration order, grouped by suite.
+    assert.match(stdout, /# strange_add\.test\.yoop:addsStrangelyWhenFirstIsTwoModFive/);
+    assert.match(stdout, /^ok 1 - adds an extra 1 when a % 5 == 2$/m);
+    assert.match(stdout, /^ok 2 - still adds the extra 1 at 7$/m);
+    assert.match(stdout, /^ok 3 - adds plainly when a % 5 is not 2$/m);
+    assert.match(stdout, /^1\.\.3$/m);
+    assert.match(stdout, /# 3 passed, 0 failed/);
+  });
+
+  it("reports the detail string on failure and exits with the failure count", () => {
+    const { stdout, exitCode } = runTestMode("examples/testing/fail");
+    assert.equal(exitCode, 2, `expected exit 2 (two failures), got ${exitCode}\n${stdout}`);
+    assert.match(stdout, /^ok 1 - passes$/m);
+    assert.match(stdout, /^not ok 2 - fails with detail$/m);
+    // `detail` is reported only on failure, indented under its case.
+    assert.match(stdout, /^ {4}n was 2, which is not 10$/m);
+    assert.match(stdout, /^not ok 3 - fails with no detail$/m);
+    // ...and a case that set no detail gets no blank indented line.
+    assert.doesNotMatch(stdout, /^ {4}$/m);
+    assert.match(stdout, /# 1 passed, 2 failed/);
+  });
+
+  it("filters suites by a name substring passed after the path", () => {
+    const { stdout, exitCode } = runTestMode("examples/testing/pass", ["addsPlainly"]);
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /^ok 1 - adds plainly when a % 5 is not 2$/m);
+    assert.doesNotMatch(stdout, /adds an extra 1/);
+    assert.match(stdout, /# 1 passed, 0 failed/);
+  });
+
+  it("leaves no executable behind in the source tree", () => {
+    runTestMode("examples/testing/pass");
+    const strays = fs
+      .readdirSync(path.join(repoRoot, "examples/testing/pass"))
+      .filter((f) => !f.endsWith(".yoop"));
+    assert.deepEqual(strays, [], `--test left files behind: ${strays.join(", ")}`);
+  });
+
+  it("runs a single test file directly, with no --test flag (the import.test; payoff)", () => {
+    // A test module has no `main`, so without the in-file flag this would be a
+    // compile error rather than a test run.
+    const result = spawnSync(
+      process.execPath,
+      [
+        path.join(repoRoot, "src/yoopiler.js"),
+        path.join(repoRoot, "examples/testing/pass/strange_add.test.yoop"),
+      ],
+      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
+    );
+    assert.equal(result.status, 0, `expected exit 0, got ${result.status}\n${result.stdout}`);
+    assert.match(result.stdout, /# 3 passed, 0 failed/);
+  });
+
+  it("rejects a *.test.yoop that forgot import.test;", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_testmode_"));
+    fs.writeFileSync(
+      path.join(tmp, "unflagged.test.yoop"),
+      'import { suite } from "std/test.yoop";\nsuite function nope(): void {}\n',
+    );
+    const result = spawnSync(
+      process.execPath,
+      [path.join(repoRoot, "src/yoopiler.js"), "--test", tmp],
+      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /does not declare 'import\.test;'/);
+  });
+
+  it("reports a suite signature mismatch at the suite, not inside generated code", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_testmode_"));
+    fs.writeFileSync(
+      path.join(tmp, "badsig.test.yoop"),
+      'import.test;\nimport { suite } from "std/test.yoop";\nsuite function nope(n: int32): void {}\n',
+    );
+    const result = spawnSync(
+      process.execPath,
+      [path.join(repoRoot, "src/yoopiler.js"), "--test", tmp],
+      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /carries kind 'suite' and must match/);
+    // The generated entry's cascade must be suppressed - a diagnostic pointing
+    // into source the user never wrote is worse than no diagnostic.
+    assert.doesNotMatch(result.stderr, /yoopiler_generated_test_entry/);
+    assert.match(result.stderr, /typecheck failed \(1 error\)/);
+  });
+
+  it("rejects a kind prefix whose kind is not enumerable into \"suites\"", () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_testmode_"));
+    fs.writeFileSync(
+      path.join(tmp, "wrongkind.test.yoop"),
+      'import.test;\nimport { disposable } from "std/core/kinds.yoop";\ndisposable function nope(): void {}\n',
+    );
+    const result = spawnSync(
+      process.execPath,
+      [path.join(repoRoot, "src/yoopiler.js"), "--test", tmp],
+      { encoding: "utf8", cwd: repoRoot, timeout: 120000 },
+    );
+    assert.equal(result.status, 1);
+    assert.match(result.stderr, /cannot prefix a function declaration/);
   });
 });

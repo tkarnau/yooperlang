@@ -1,9 +1,17 @@
-# Testing in Yooperlang - design exploration
+# Testing in Yooperlang - design exploration (SUPERSEDED)
 
-Status: DRAFT / not committed. This is a pros-and-cons document to read over,
-not a build order. Nothing here is scheduled against the current focus
-(self-hosting bootstrap); it lands when testing earns its place. If/when a
-direction is chosen, the rest moves to archive/ and a build plan replaces this.
+Status: ARCHIVED. Superseded by [../testing-via-kinds.md](../testing-via-kinds.md),
+which takes the opposite direction: a test harness written in userland kinds and
+traits, with the compiler adding only general-purpose primitives. Kept for the
+pros-and-cons trail on the attribute-driven approach, and because its reporting
+format (Decision 7) and comptime-routing idea (Decision 4B) both survive.
+
+Note that Decision 1's Option D ("a `test` kind") is rejected below on grounds
+that turned out to be wrong on both counts - see "What changed from the archived
+draft" in the superseding doc.
+
+Original status: DRAFT / not committed. This is a pros-and-cons document to read
+over, not a build order.
 
 Style: ASCII only. No em-dashes, no curly quotes, no fancy tables.
 
