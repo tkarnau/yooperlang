@@ -326,6 +326,55 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "cancelled as expected\n");
   });
 
+  // Cancellation tokens: the explicit-value form. Covers the deadline
+  // path (TimedOut, not Cancelled - the two reasons stay distinct), an
+  // explicit cross-thread cancel waking a parked sleep, parent/child
+  // cascade, a child with its own shorter budget, and the null `none()`
+  // token being a working no-op.
+  it("cancel_token_smoke: deadlines, explicit cancel, child tokens, and none()", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/cancel_token_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "deadline: timed out\ndeadline: expired\nmanual: cancelled\nmanual: flagged\n" +
+        "child: cancelled with parent\nchild2: timed out\nparent2: still live\nnone: ready\n",
+    );
+  });
+
+  // Bounded socket I/O. Every std/net call used to park on the
+  // multiplexer with no way out; these give up on a deadline instead.
+  // The accept-with-no-client and read-from-a-silent-peer cases are the
+  // two shapes that used to wedge a thread permanently.
+  it("io_timeout_smoke: accept and read give up on a deadline instead of parking forever", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/io_timeout_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "accept: timed out\naccept: connected\nread: timed out\n" +
+        "write: sent 3\nclient read: 3\n",
+    );
+  });
+
+  // Cancelling a thread parked INSIDE the multiplexer - the case the
+  // runtime could not express at all before. The accept has no deadline,
+  // so the cancellation is the only path out of the loop.
+  //
+  // The "ambient" line is the regression guard for the trait path: a
+  // token attached to the STREAM (via tcpSetToken) has to reach a plain
+  // `Readable.read`. A structural is-this-the-none-token check is what
+  // makes that work - testing "has the token fired yet" instead makes a
+  // live deadline-less token look absent, which silently routes back to
+  // the uninterruptible ffi_recv and hangs this test forever.
+  it("io_cancel_smoke: a cancel token unparks an accept blocked in the multiplexer", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/io_cancel_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "loop: shutdown requested\nloop: exited after 0 connections\n" +
+        "post: still cancelled\nambient: cancelled\n",
+    );
+  });
+
   it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);

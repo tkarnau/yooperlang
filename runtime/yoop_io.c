@@ -10,9 +10,11 @@
 // work, but the body returns ENOSYS for now.
 
 #include "yoop_runtime.h"
+#include "yoop_platform.h"
 
 #include <errno.h>
 #include <fcntl.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -20,6 +22,10 @@
 #include <sys/types.h>
 #include <time.h>
 #include <unistd.h>
+
+#ifndef _WIN32
+#include <sys/socket.h>
+#endif
 
 #ifndef _WIN32
 #include <grp.h>
@@ -235,6 +241,12 @@ char*       yoop_io_time_string(int64_t epoch) { (void)epoch; return _strdup("")
   // Stub for now - no IOCP backend. Public API returns ENOSYS.
   int yoop_io_wait_readable(int fd) { (void)fd; errno = ENOSYS; return -1; }
   int yoop_io_wait_writable(int fd) { (void)fd; errno = ENOSYS; return -1; }
+  int yoop_io_wait_readable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {
+      (void)fd; (void)ct; (void)deadline_ns; errno = ENOSYS; return -1;
+  }
+  int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {
+      (void)fd; (void)ct; (void)deadline_ns; errno = ENOSYS; return -1;
+  }
   void yoop_io_shutdown(void) {}
 #else
 
@@ -251,23 +263,48 @@ char*       yoop_io_time_string(int64_t epoch) { (void)epoch; return _strdup("")
   #error "Unsupported platform - add a yoop_io.c backend"
 #endif
 
-// Per-wait state. Lives on the caller's stack; the multiplexer
-// dereferences it only between register_interest() and unpark(). Once
-// unpark fires, the parker returns and the stack is reclaimed; the
-// multiplexer must not touch this struct after that point. The
-// one-shot semantics from kqueue/epoll ensure exactly one unpark per
-// registration.
+// Per-wait state. Lives on the caller's stack. The multiplexer only
+// ever reaches it through the registration table below, and only while
+// holding io_mu - which is what lets a waiter abandon (on a timeout or
+// a cancellation) and reclaim its frame without racing the I/O thread.
 typedef struct yoop_io_wait {
     yoop_park_token_t token;
     int               result_errno; // 0 on ready, else errno
+    int               fired;        // multiplexer delivered a wake (io_mu)
 } yoop_io_wait_t;
 
-// Multiplexer state, all guarded by io_mu where needed.
-static pthread_once_t io_once       = PTHREAD_ONCE_INIT;
-static int            io_started    = 0;
-static pthread_t      io_thread;
-static int            io_shutdown_w = -1; // write end of self-pipe
-static int            io_shutdown_r = -1; // read  end
+// One live registration. Registrations are identified by a monotonically
+// increasing sequence number rather than by the address of the wait
+// struct: a stack frame can be reused by the next waiter at the very
+// same address, and a stale event carrying that address would then be
+// misdelivered to an unrelated wait. Sequence numbers are never reused,
+// so a stale event simply fails to find its entry and is dropped.
+typedef struct yoop_io_reg {
+    uint64_t            seq;
+    int                 fd;
+    int                 want_write;
+    yoop_io_wait_t*     w;
+    struct yoop_io_reg* next;
+} yoop_io_reg;
+
+// Multiplexer state.
+//
+// io_init_mu guards startup/shutdown; io_mu guards the registration
+// table and the fired/unpark handshake. The pair used to be a
+// pthread_once_t, which could not be reset - so an init after a
+// shutdown left the multiplexer permanently dead (the TODO at the
+// bottom of yoop_io_shutdown). A plain flag under a mutex restarts
+// cleanly.
+static pthread_mutex_t io_init_mu   = PTHREAD_MUTEX_INITIALIZER;
+static int             io_started   = 0;
+static pthread_t       io_thread;
+static int             io_shutdown_w = -1; // write end of self-pipe
+static int             io_shutdown_r = -1; // read  end
+
+static yoop_mutex_t io_mu;
+static int          io_mu_ready = 0;   // io_mu is never destroyed (see below)
+static yoop_io_reg* io_regs     = NULL;
+static uint64_t     io_seq_next = 1;   // 0 is the self-pipe sentinel
 
 #ifdef YOOP_IO_KQUEUE
 static int io_kq = -1;
@@ -276,11 +313,89 @@ static int io_kq = -1;
 static int io_ep = -1;
 #endif
 
+// ---- registration table (all callers hold io_mu) --------------------------
+
+static yoop_io_reg* reg_find_seq_locked(uint64_t seq) {
+    for (yoop_io_reg* r = io_regs; r; r = r->next) {
+        if (r->seq == seq) return r;
+    }
+    return NULL;
+}
+
+static int reg_fd_taken_locked(int fd, int want_write) {
+    for (yoop_io_reg* r = io_regs; r; r = r->next) {
+        if (r->fd == fd && r->want_write == want_write) return 1;
+    }
+    return 0;
+}
+
+static void reg_remove_locked(yoop_io_reg* target) {
+    yoop_io_reg** link = &io_regs;
+    while (*link) {
+        if (*link == target) { *link = target->next; free(target); return; }
+        link = &(*link)->next;
+    }
+}
+
+// Drop a still-armed interest from the kernel's set. Failures are
+// ignored on purpose: the fd may already have been closed by the
+// caller, or the event may have been consumed one-shot before we got
+// here. Either way there is nothing left to disarm.
+static void io_deregister(int fd, int want_write) {
+#ifdef YOOP_IO_KQUEUE
+    struct kevent ev;
+    EV_SET(&ev, fd, want_write ? EVFILT_WRITE : EVFILT_READ, EV_DELETE, 0, 0, NULL);
+    (void)kevent(io_kq, &ev, 1, NULL, 0, NULL);
+#endif
+#ifdef YOOP_IO_EPOLL
+    (void)want_write;
+    (void)epoll_ctl(io_ep, EPOLL_CTL_DEL, fd, NULL);
+#endif
+}
+
 // Drain the self-pipe so the next read sees fresh shutdown bytes.
 static void drain_self_pipe(int fd) {
     char buf[64];
     while (read(fd, buf, sizeof(buf)) > 0) { /* keep going */ }
 }
+
+// Deliver one readiness (or error) event to whichever wait registered
+// `seq`. Returns with the waiter unparked, or does nothing at all if
+// the registration is gone - which is exactly what happens when the
+// waiter abandoned on a timeout or a cancellation.
+//
+// The whole body runs under io_mu, and `fired` is set before the
+// unpark. That is the contract the abandon path relies on: a waiter
+// that takes io_mu and sees fired == 0 knows the multiplexer can never
+// reach its stack frame again once it removes the entry.
+static void io_deliver(uint64_t seq, int err) {
+    yoop_mutex_lock(&io_mu);
+    yoop_io_reg* r = reg_find_seq_locked(seq);
+    if (r) {
+        r->w->result_errno = err;
+        r->w->fired        = 1;
+        yoop_unpark(&r->w->token);
+        reg_remove_locked(r);
+    }
+    yoop_mutex_unlock(&io_mu);
+}
+
+#ifdef YOOP_IO_EPOLL
+// Pull the real error off a socket that reported EPOLLERR/EPOLLHUP.
+// epoll only tells you "something went wrong"; SO_ERROR is where the
+// actual code lives. Reporting a blanket EIO (which is what this used
+// to do) turns every connection refused / reset into the same
+// uninformative message. kqueue needs no equivalent - EV_ERROR already
+// carries the errno in ev->data.
+static int io_socket_error(int fd, int fallback) {
+    int err = 0;
+    socklen_t len = sizeof(err);
+    if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &len) == 0 && err != 0) {
+        return err;
+    }
+    return fallback;
+}
+#endif
 
 static void* io_thread_main(void* arg) {
     (void)arg;
@@ -290,26 +405,21 @@ static void* io_thread_main(void* arg) {
         int n = kevent(io_kq, NULL, 0, events, 64, NULL);
         if (n < 0) {
             if (errno == EINTR) continue;
-            // Fatal - log and exit the loop. The runtime is shutting down.
+            // Fatal - exit the loop. The runtime is shutting down.
             break;
         }
         int should_exit = 0;
         for (int i = 0; i < n; i++) {
             struct kevent* ev = &events[i];
-            // Self-pipe shutdown wake: ident == read end of the pipe.
-            if (ev->udata == NULL && (int)ev->ident == io_shutdown_r) {
+            uint64_t seq = (uint64_t)(uintptr_t)ev->udata;
+            // Self-pipe shutdown wake: seq 0 is the reserved sentinel.
+            if (seq == 0 && (int)ev->ident == io_shutdown_r) {
                 drain_self_pipe(io_shutdown_r);
                 should_exit = 1;
                 continue;
             }
-            yoop_io_wait_t* w = (yoop_io_wait_t*)ev->udata;
-            if (!w) continue;
-            if (ev->flags & EV_ERROR) {
-                w->result_errno = (int)ev->data;
-            } else {
-                w->result_errno = 0;
-            }
-            yoop_unpark(&w->token);
+            if (seq == 0) continue;
+            io_deliver(seq, (ev->flags & EV_ERROR) ? (int)ev->data : 0);
         }
         if (should_exit) break;
     }
@@ -325,24 +435,25 @@ static void* io_thread_main(void* arg) {
         int should_exit = 0;
         for (int i = 0; i < n; i++) {
             struct epoll_event* ev = &events[i];
-            if (ev->data.ptr == NULL) {
+            uint64_t seq = ev->data.u64;
+            if (seq == 0) {
                 // Self-pipe wake.
                 drain_self_pipe(io_shutdown_r);
                 should_exit = 1;
                 continue;
             }
-            yoop_io_wait_t* w = (yoop_io_wait_t*)ev->data.ptr;
-            // Remove the fd from the set (one-shot semantics). We don't
-            // know the fd off the bat - but epoll's data.ptr is the
-            // token, not the fd. The fd is recoverable only if we stash
-            // it; for one-shot we just rely on EPOLLONESHOT having
-            // disarmed the fd. The caller re-arms on next wait_*.
+            int err = 0;
             if (ev->events & (EPOLLERR | EPOLLHUP)) {
-                w->result_errno = EIO;
-            } else {
-                w->result_errno = 0;
+                // Look up the fd through the table so SO_ERROR can be
+                // read - epoll's payload carries the seq, not the fd.
+                int fd = -1;
+                yoop_mutex_lock(&io_mu);
+                yoop_io_reg* r = reg_find_seq_locked(seq);
+                if (r) fd = r->fd;
+                yoop_mutex_unlock(&io_mu);
+                err = (fd >= 0) ? io_socket_error(fd, EIO) : EIO;
             }
-            yoop_unpark(&w->token);
+            io_deliver(seq, err);
         }
         if (should_exit) break;
     }
@@ -350,7 +461,17 @@ static void* io_thread_main(void* arg) {
     return NULL;
 }
 
-static void io_init_once(void) {
+// Start the I/O thread. Caller holds io_init_mu; no-op if already up.
+static void io_start_locked(void) {
+    if (io_started) return;
+
+    // io_mu guards the registration table and outlives every
+    // start/shutdown cycle. It is deliberately never destroyed: a
+    // waiter woken by shutdown still has to take it on its way out, and
+    // destroying a mutex someone is about to lock is UB. One
+    // process-lifetime mutex is a fair price.
+    if (!io_mu_ready) { yoop_mutex_init(&io_mu); io_mu_ready = 1; }
+
 #ifdef YOOP_IO_KQUEUE
     io_kq = kqueue();
     if (io_kq < 0) return;
@@ -379,14 +500,14 @@ static void io_init_once(void) {
 
 #ifdef YOOP_IO_KQUEUE
     struct kevent ev;
-    // udata = NULL is the shutdown sentinel.
+    // seq 0 is the reserved shutdown sentinel.
     EV_SET(&ev, io_shutdown_r, EVFILT_READ, EV_ADD, 0, 0, NULL);
     kevent(io_kq, &ev, 1, NULL, 0, NULL);
 #endif
 #ifdef YOOP_IO_EPOLL
     struct epoll_event ev;
     ev.events = EPOLLIN;
-    ev.data.ptr = NULL; // shutdown sentinel
+    ev.data.u64 = 0; // shutdown sentinel
     epoll_ctl(io_ep, EPOLL_CTL_ADD, io_shutdown_r, &ev);
 #endif
 
@@ -405,11 +526,29 @@ static void io_init_once(void) {
 }
 
 void yoop_io_shutdown(void) {
-    if (!io_started) return;
+    pthread_mutex_lock(&io_init_mu);
+    if (!io_started) { pthread_mutex_unlock(&io_init_mu); return; }
+
     // Wake the I/O thread by writing one byte to the self-pipe.
     char b = 'x';
     (void)write(io_shutdown_w, &b, 1);
     pthread_join(io_thread, NULL);
+
+    // Release anyone still parked. Without this a thread waiting on an
+    // fd that never becomes ready would block past runtime shutdown
+    // with nothing left running to wake it. ESHUTDOWN surfaces as an
+    // ordinary I/O error to the caller.
+    yoop_mutex_lock(&io_mu);
+    while (io_regs) {
+        yoop_io_reg* r = io_regs;
+        r->w->result_errno = ESHUTDOWN;
+        r->w->fired        = 1;
+        yoop_unpark(&r->w->token);
+        io_regs = r->next;
+        free(r);
+    }
+    yoop_mutex_unlock(&io_mu);
+
 #ifdef YOOP_IO_KQUEUE
     if (io_kq >= 0) { close(io_kq); io_kq = -1; }
 #endif
@@ -419,75 +558,176 @@ void yoop_io_shutdown(void) {
     if (io_shutdown_r >= 0) { close(io_shutdown_r); io_shutdown_r = -1; }
     if (io_shutdown_w >= 0) { close(io_shutdown_w); io_shutdown_w = -1; }
     io_started = 0;
-    // Note: pthread_once doesn't reset across shutdown/init cycles in this
-    // process. If yoop_runtime_init runs a second time within the same
-    // process, the io_once guard prevents re-initialization. For the
-    // current test suite that's fine; lifting this is a TODO if needed.
+    pthread_mutex_unlock(&io_init_mu);
+    // Restartable: io_started is a plain flag under io_init_mu, so a
+    // later yoop_runtime_init spins the multiplexer back up. (The old
+    // pthread_once guard made the second init a silent no-op.)
 }
 
-static int io_wait_common(int fd, int want_write) {
-    pthread_once(&io_once, io_init_once);
-    if (!io_started) { errno = ENOSYS; return -1; }
+static int io_ensure_started(void) {
+    pthread_mutex_lock(&io_init_mu);
+    if (!io_started) io_start_locked();
+    int ok = io_started;
+    pthread_mutex_unlock(&io_init_mu);
+    return ok;
+}
+
+// Arm a one-shot interest in `fd` carrying `seq`. Returns 0 on success,
+// -1 with errno set.
+static int io_register(int fd, int want_write, uint64_t seq) {
+#ifdef YOOP_IO_KQUEUE
+    struct kevent ev;
+    int filter = want_write ? EVFILT_WRITE : EVFILT_READ;
+    EV_SET(&ev, fd, filter, EV_ADD | EV_ONESHOT, 0, 0, (void*)(uintptr_t)seq);
+    return kevent(io_kq, &ev, 1, NULL, 0, NULL) < 0 ? -1 : 0;
+#endif
+#ifdef YOOP_IO_EPOLL
+    struct epoll_event ev;
+    ev.events   = (unsigned)(want_write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT;
+    ev.data.u64 = seq;
+    if (epoll_ctl(io_ep, EPOLL_CTL_ADD, fd, &ev) == 0) return 0;
+    // A stale disarmed registration from an earlier wait on this fd can
+    // linger; MOD re-arms it. This is safe here in a way it was NOT
+    // before, because the table above already proved no OTHER waiter
+    // currently owns this (fd, direction) - which is precisely the case
+    // where MOD used to silently steal the first waiter's wakeup.
+    if (errno == EEXIST) {
+        return epoll_ctl(io_ep, EPOLL_CTL_MOD, fd, &ev) < 0 ? -1 : 0;
+    }
+    return -1;
+#endif
+}
+
+// The one wait implementation. Returns YOOP_WAIT_READY / TIMEDOUT /
+// CANCELLED, or -1 with errno set.
+static int io_wait_common(int fd, int want_write,
+                          yoop_cancel_t* ct, uint64_t deadline_ns) {
+    if (!io_ensure_started()) { errno = ENOSYS; return -1; }
+
+    // The token's own deadline and the caller's both apply; whichever
+    // lands first wins. This is what makes "this request gets 5
+    // seconds total" work without threading a deadline through every
+    // intermediate call.
+    uint64_t deadline = yoop_cancel_effective_deadline(ct, deadline_ns);
+
+    // Cheap pre-checks so an already-cancelled token or an already-past
+    // deadline never touches the kernel. An elapsed token deadline is a
+    // TIMEDOUT, not a CANCELLED - only an explicit request is a
+    // cancellation (see yoop_cancel_flagged).
+    if (yoop_cancel_flagged(ct))                       return YOOP_WAIT_CANCELLED;
+    if (deadline != 0 && yoop_now_ns() >= deadline)    return YOOP_WAIT_TIMEDOUT;
 
     yoop_io_wait_t w;
     yoop_park_token_init(&w.token);
     w.result_errno = 0;
+    w.fired        = 0;
 
-#ifdef YOOP_IO_KQUEUE
-    struct kevent ev;
-    int filter = want_write ? EVFILT_WRITE : EVFILT_READ;
-    EV_SET(&ev, fd, filter, EV_ADD | EV_ONESHOT, 0, 0, &w);
-    if (kevent(io_kq, &ev, 1, NULL, 0, NULL) < 0) {
+    // Claim the (fd, direction) slot before touching the kernel. Only
+    // one waiter per pair: epoll's MOD and kqueue's EV_SET both
+    // overwrite the stored payload, so a second concurrent registration
+    // used to strand the first waiter forever with no wakeup coming.
+    yoop_mutex_lock(&io_mu);
+    if (reg_fd_taken_locked(fd, want_write)) {
+        yoop_mutex_unlock(&io_mu);
+        yoop_park_token_destroy(&w.token);
+        errno = EAGAIN;
+        return -1;
+    }
+    yoop_io_reg* reg = (yoop_io_reg*)malloc(sizeof(yoop_io_reg));
+    if (!reg) {
+        yoop_mutex_unlock(&io_mu);
+        yoop_park_token_destroy(&w.token);
+        errno = ENOMEM;
+        return -1;
+    }
+    uint64_t seq = io_seq_next++;
+    reg->seq        = seq;
+    reg->fd         = fd;
+    reg->want_write = want_write;
+    reg->w          = &w;
+    reg->next       = io_regs;
+    io_regs         = reg;
+
+    if (io_register(fd, want_write, seq) < 0) {
         int saved = errno;
+        reg_remove_locked(reg);
+        yoop_mutex_unlock(&io_mu);
         yoop_park_token_destroy(&w.token);
         errno = saved;
         return -1;
     }
-#endif
-#ifdef YOOP_IO_EPOLL
-    struct epoll_event ev;
-    ev.events = (want_write ? EPOLLOUT : EPOLLIN) | EPOLLONESHOT;
-    ev.data.ptr = &w;
-    // Try ADD first; if the fd is already registered (e.g. from a prior
-    // wait that was disarmed but not removed), MOD to re-arm.
-    if (epoll_ctl(io_ep, EPOLL_CTL_ADD, fd, &ev) < 0) {
-        if (errno == EEXIST) {
-            if (epoll_ctl(io_ep, EPOLL_CTL_MOD, fd, &ev) < 0) {
-                int saved = errno;
-                yoop_park_token_destroy(&w.token);
-                errno = saved;
-                return -1;
-            }
-        } else {
-            int saved = errno;
-            yoop_park_token_destroy(&w.token);
-            errno = saved;
-            return -1;
+    yoop_mutex_unlock(&io_mu);
+
+    // Ask the token to unpark us on cancellation. A token cancelled
+    // between the pre-check above and here reports it here instead.
+    yoop_cancel_waiter_t cw;
+    int registered_with_token = 0;
+    if (yoop_cancel_add_waiter(ct, &cw, &w.token) == 0) {
+        registered_with_token = (ct != NULL);
+    }
+
+    int outcome;
+    for (;;) {
+        int timed_out = yoop_park_until(&w.token, deadline);
+
+        yoop_mutex_lock(&io_mu);
+        if (w.fired) {
+            // The multiplexer already delivered (and removed the entry)
+            // while holding io_mu, so it is provably done with `w`.
+            yoop_mutex_unlock(&io_mu);
+            outcome = (w.result_errno != 0) ? -1 : YOOP_WAIT_READY;
+            break;
         }
+        // Not fired: we still own the registration, so tearing it down
+        // under io_mu guarantees the multiplexer can never reach this
+        // stack frame again.
+        if (yoop_cancel_flagged(ct)) {
+            io_deregister(fd, want_write);
+            reg_remove_locked(reg);
+            yoop_mutex_unlock(&io_mu);
+            outcome = YOOP_WAIT_CANCELLED;
+            break;
+        }
+        if (timed_out || (deadline != 0 && yoop_now_ns() >= deadline)) {
+            io_deregister(fd, want_write);
+            reg_remove_locked(reg);
+            yoop_mutex_unlock(&io_mu);
+            outcome = YOOP_WAIT_TIMEDOUT;
+            break;
+        }
+        // Spurious wake (e.g. a deadline change nudged the token).
+        // Nothing decided yet - go back to parking.
+        yoop_mutex_unlock(&io_mu);
     }
-#endif
 
-    yoop_park(&w.token);
+    // Deregister from the token BEFORE the park token dies: once this
+    // returns, yoop_cancel_request can no longer unpark `w.token`.
+    if (registered_with_token) yoop_cancel_remove_waiter(ct, &cw);
 
-#ifdef YOOP_IO_EPOLL
-    // One-shot: explicitly remove so a future wait can ADD freshly.
-    // Ignore failures - the fd may already have been closed by the
-    // caller.
-    epoll_ctl(io_ep, EPOLL_CTL_DEL, fd, NULL);
-#endif
-
-    int rc;
-    if (w.result_errno != 0) {
-        errno = w.result_errno;
-        rc = -1;
-    } else {
-        rc = 0;
-    }
+    int saved_errno = w.result_errno;
     yoop_park_token_destroy(&w.token);
-    return rc;
+    if (outcome == -1) errno = saved_errno;
+    return outcome;
 }
 
-int yoop_io_wait_readable(int fd) { return io_wait_common(fd, 0); }
-int yoop_io_wait_writable(int fd) { return io_wait_common(fd, 1); }
+int yoop_io_wait_readable(int fd) {
+    int rc = io_wait_common(fd, 0, NULL, 0);
+    // The legacy two-arg form has no deadline and no token, so READY
+    // and error are the only reachable outcomes.
+    return rc == YOOP_WAIT_READY ? 0 : -1;
+}
+
+int yoop_io_wait_writable(int fd) {
+    int rc = io_wait_common(fd, 1, NULL, 0);
+    return rc == YOOP_WAIT_READY ? 0 : -1;
+}
+
+int yoop_io_wait_readable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {
+    return io_wait_common(fd, 0, ct, deadline_ns);
+}
+
+int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {
+    return io_wait_common(fd, 1, ct, deadline_ns);
+}
 
 #endif // !_WIN32

@@ -30,6 +30,9 @@ export const RUNTIME_SOURCES = [
   // Arena/context allocators backing std/core/alloc.yoop: the per-thread
   // current-allocator slot and the bump arena.
   path.resolve(runtimeDir, "yoop_alloc.c"),
+  // Cancellation tokens backing std/core/cancel.yoop: the cancelled
+  // flag, the deadline, and the waiter list the multiplexer parks on.
+  path.resolve(runtimeDir, "yoop_cancel.c"),
 ];
 
 export function runtimeLinkFlags() {

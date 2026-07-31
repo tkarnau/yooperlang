@@ -18,11 +18,23 @@ In scope:
 
 Out of scope (future runtime work):
 
-- I/O multiplexing (epoll/kqueue/io_uring/IOCP).
-- Suspendable task bodies (a task hitting `wait` mid-body and yielding the worker).
 - Work-stealing scheduling.
-- Cancellation / cancellation tokens.
 - ABI versioning across compiler revisions.
+- Releasing a worker thread that is parked on I/O (see section 11).
+
+**Written against the 6.3 MVP; several of its "not yet" statements have
+since been overtaken.** What has landed since:
+
+- **I/O multiplexing** - a kqueue/epoll thread (8.F.2,
+  `runtime/yoop_io.c`).
+- **Suspendable wait** - 9.I made `yoop_task_wait` re-entrant, so a
+  blocked waiter drains queued work instead of deadlocking the pool.
+- **Deadlines** - `wait_until(h, deadline_ns)` (10.F.1).
+- **Cancellation** - `cancel(h)` on a task handle (10.F.2.A), and then
+  first-class cancellation tokens plus deadline-aware I/O. Those are
+  documented in
+  [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md),
+  which supersedes the "no cancellation" line in section 11 below.
 
 ## 2. Concurrency model
 
@@ -288,10 +300,13 @@ The clean fix is suspendable wait inside task bodies - which is what the corouti
 
 ## 11. What this design does NOT do
 
-- **No I/O multiplexing.** Tasks are CPU work units. I/O calls inside a task body block the worker thread. Future phase: integrate epoll/kqueue/io_uring/IOCP so I/O calls cooperatively yield.
-- **No abandon or cancellation.** Tasks always run to completion. `_ = task_call()` lowers to spawn-then-drop-ref; the worker still runs the body and discards the result. If the language needs cancellation later, it'll be its own sub-phase (likely cancellation tokens passed as parameters).
+The list below is as-of 6.3. Items marked LANDED have since been built;
+they are kept here because the reasoning still explains the shape.
+
+- **No I/O multiplexing.** LANDED in 8.F.2 - `runtime/yoop_io.c` runs a kqueue/epoll thread and `yoop_io_wait_readable` / `wait_writable` park the calling thread on it. What is still true: a task parked on I/O **holds its worker thread**. Making an I/O wait release the worker needs real coroutine suspension across the wait, which the section 7 IR shape was designed for but nothing implements yet.
+- **No abandon or cancellation.** LANDED, in two steps. 10.F.2.A added `cancel(h)` on a task handle, which is abandon-the-wait only - the body still runs to its natural end. Then cancellation tokens (`std/core/cancel.yoop`) made cancellation a first-class value: explicit, passable to plain functions, carrying an optional deadline, and able to unpark a thread blocked inside the multiplexer. The guess in the original text was right - "cancellation tokens passed as parameters" is exactly the shape. See [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md). Still true: a cancelled task's BODY is not interrupted; cooperative in-body polling means the body reads the token it was handed.
 - **No work-stealing.** Central FIFO queue. Workers contend on one mutex. Acceptable until profiling shows contention; then we'd swap the queue for a lock-free MPMC or per-worker queues + stealing.
-- **No suspendable bodies.** Run-to-completion only. The coroutine IR shape is the forward-compat investment for this.
+- **No suspendable bodies.** Run-to-completion only, at the coroutine level. 9.I got most of the practical benefit a different way: `yoop_task_wait` drains queued work on the calling thread instead of parking, so the nested-wait deadlock in section 10.a no longer bites. The coroutine IR shape remains the forward-compat investment for true suspension.
 - **No structured exception handling.** A task body that crashes (segfault, abort, unhandled FFI error) leaves its handle's state at 0 forever. Anyone calling `wait` on it blocks forever. Phase 7 runtime work addresses this - likely by reserving a `state = 2 (crashed)` value and propagating to the waiter.
 - **No introspection.** No `yoop_runtime_stats()`, no per-task tracing hooks. Add when there's a user need.
 

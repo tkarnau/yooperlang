@@ -7,12 +7,15 @@
 // choose between consuming the result and falling through to its own
 // timeout handling without having to switch on an external error type.
 //
-// Companion helper `now_ns()` returns the current wall-clock reading in
+// Companion helper `now_ns()` returns the current MONOTONIC reading in
 // nanoseconds, suitable for computing deadlines (`now_ns() + duration`).
-// Both the deadline arithmetic and the cv timeout inside the runtime
-// use the same clock (CLOCK_REALTIME on POSIX, FILETIME-rebased on
-// Windows), so a deadline computed locally is directly usable by
-// wait_until.
+// Every timed wait inside the runtime is pinned to this same clock, so
+// a deadline computed locally is directly usable by wait_until and a
+// system clock change (NTP, a manual `date` set) cannot move it.
+//
+// The readings are only meaningful relative to each other - this is not
+// a timestamp. For cancellation tokens and I/O deadlines see
+// std/core/cancel.yoop, which shares this clock.
 
 export variant WaitResult<T> {
     Done { value: T },
@@ -35,7 +38,7 @@ extern "C" from "yoop_runtime" {
     function yoop_sleep_ms(ms: uint64): int32;
 }
 
-// Current wall-clock reading in nanoseconds. The intended call shape is
+// Current monotonic reading in nanoseconds. The intended call shape is
 // `let deadline: uint64 = now_ns() + 250_000_000;` (250ms from now), then
 // pass `deadline` to `wait_until`.
 export function now_ns(): uint64 {

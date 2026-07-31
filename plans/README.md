@@ -122,7 +122,13 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
 
 - [runtime-design.md](runtime-design.md) - the concurrency runtime contract
   (pthread worker pool, task struct layout, refcounted pooled handles). The
-  implementation reference for the task/`wait` machinery.
+  implementation reference for the task/`wait` machinery. Written against the
+  6.3 MVP, so read its scope lists with the "since landed" note at the top.
+- [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md) -
+  cancellation tokens (`std/core/cancel.yoop`), deadline- and cancel-aware
+  I/O waits, and the multiplexer fixes that went with them (the same-fd
+  waiter conflict, the monotonic deadline clock, restartable init). Read
+  this alongside runtime-design.md, which it supersedes on cancellation.
 - [kinds-design.md](kinds-design.md) - heuristics for when a kind earns its
   cost, and in-tree opportunities (`validated`, `authenticated`, `tainted`).
 - [clearance-kinds.md](clearance-kinds.md) - the marker/clearance kind design

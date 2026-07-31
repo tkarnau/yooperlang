@@ -83,4 +83,34 @@ describe("runtime: C-level smoke tests", () => {
     assert.equal(exitCode, 0, `stderr: ${stderr}`);
     assert.equal(stdout, "io_pipe: ok\n");
   });
+
+  it("cancel_token: flags, deadlines, parent/child cascade, and the blocking helpers", () => {
+    const { exitCode, stdout, stderr } = buildAndRun("cancel_token");
+    assert.equal(exitCode, 0, `stderr: ${stderr}`);
+    assert.match(stdout, /cancel_token: ok\n$/);
+  });
+
+  it("io_deadline: a wait on a silent fd gives up on its deadline and frees the slot", () => {
+    const { exitCode, stdout, stderr } = buildAndRun("io_deadline");
+    assert.equal(exitCode, 0, `stderr: ${stderr}`);
+    assert.match(stdout, /io_deadline: ok\n$/);
+  });
+
+  // Includes a 200-round storm that races the abandon teardown against
+  // the multiplexer's delivery - the fired-under-io_mu handshake is
+  // what keeps that from being a use-after-free on the parker's frame.
+  it("io_cancel: a token unparks a thread blocked in the multiplexer, incl. a 200-round race", () => {
+    const { exitCode, stdout, stderr } = buildAndRun("io_cancel");
+    assert.equal(exitCode, 0, `stderr: ${stderr}`);
+    assert.match(stdout, /io_cancel: ok\n$/);
+  });
+
+  // Regression: a second waiter on one (fd, direction) used to overwrite
+  // the first's payload via EPOLL_CTL_MOD / EV_SET and strand it with no
+  // wakeup coming. It is now refused with EAGAIN.
+  it("io_fd_conflict: a second waiter on one fd is refused instead of stranding the first", () => {
+    const { exitCode, stdout, stderr } = buildAndRun("io_fd_conflict");
+    assert.equal(exitCode, 0, `stderr: ${stderr}`);
+    assert.match(stdout, /io_fd_conflict: ok\n$/);
+  });
 });

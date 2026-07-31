@@ -19,6 +19,7 @@
 import.unsafe;
 
 import { Result } from "../core/types.yoop";
+import { RawCancel } from "../core/cancel_ffi.yoop";
 import * as intr from "../core/intrinsics.yoop";
 
 // ----- POSIX socket constants (stable across Linux / macOS / BSD) ----------
@@ -75,6 +76,12 @@ extern "C" from "arpa/inet.h" {
 extern "C" from "yoop_runtime" {
     function yoop_io_wait_readable(fd: c_int): c_int;
     function yoop_io_wait_writable(fd: c_int): c_int;
+    // Deadline- and cancellation-aware readiness waits. `ct` may be a
+    // null RawCancel and `deadlineNs` may be 0; either way the other
+    // still applies, and with both absent these behave exactly like the
+    // two-argument forms above. Return one of the IO_* codes below.
+    function yoop_io_wait_readable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
+    function yoop_io_wait_writable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
     // Cross-platform SO_REUSEADDR helper. SOL_SOCKET / SO_REUSEADDR have
     // different numeric values on Linux vs macOS, so we resolve them in
     // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
@@ -265,4 +272,119 @@ export function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string>
 // matters for a server).
 export function ffi_close(fd: c_int): c_int {
     return close(fd);
+}
+
+// ----- cancel-aware operations ---------------------------------------------
+//
+// The functions above park forever: a socket whose peer stopped talking
+// holds its thread for the life of the process. The variants below take
+// a cancellation token and an optional absolute deadline, and report
+// WHY they stopped rather than only succeeding or failing.
+//
+// These are the primitives; std/net/tcp.yoop wraps them into the safe
+// variant-returning surface. Both layers are additive - the original
+// entry points still exist and behave exactly as before.
+
+// Outcome codes, mirroring the runtime's YOOP_WAIT_* values.
+export const IO_READY:     int32 = 0;
+export const IO_TIMEDOUT:  int32 = 1;
+export const IO_CANCELLED: int32 = 2;
+export const IO_ERROR:     int32 = -1;
+
+// A cancel-aware byte-transfer outcome. `code` is one of the IO_*
+// constants; `n` is meaningful only when `code == IO_READY`, and
+// `error` only when `code == IO_ERROR`. Returned as a plain struct so
+// the variant shape lives in the safe layer (tcp.yoop) rather than
+// here, where it would drag `unsafe_ptr` into a public signature.
+export type IoResult { code: int32, n: c_ssize_t, error: string }
+
+// A cancel-aware accept outcome. Same convention: `fd` / `peerHost` /
+// `peerPort` are meaningful only when `code == IO_READY`.
+export type AcceptCtResult {
+    code:     int32,
+    fd:       c_int,
+    peerHost: uint32,
+    peerPort: uint16,
+    error:    string,
+}
+
+function ioErr(msg: string): IoResult {
+    return { code: IO_ERROR, n: 0, error: msg };
+}
+
+function ioStop(code: int32): IoResult {
+    return { code: code, n: 0, error: "" };
+}
+
+// Wait for readability under a token + deadline, mapping a -1 return
+// into the errno message. Shared by every read-side helper below.
+function waitReadable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
+    let rc: c_int = yoop_io_wait_readable_ex(fd, ct.p, deadlineNs);
+    if (rc == IO_ERROR) { return ioErr(errno.message(errno.get())); }
+    return ioStop(int32(rc));
+}
+
+function waitWritable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
+    let rc: c_int = yoop_io_wait_writable_ex(fd, ct.p, deadlineNs);
+    if (rc == IO_ERROR) { return ioErr(errno.message(errno.get())); }
+    return ioStop(int32(rc));
+}
+
+// Park on the listening fd's readability under `ct`, then accept().
+// Returns IO_TIMEDOUT / IO_CANCELLED instead of blocking forever when
+// no connection arrives - which is what makes a server loop able to
+// notice a shutdown request.
+export function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResult {
+    let w: IoResult = waitReadable(fd, ct, deadlineNs);
+    if (w.code != IO_READY) {
+        return { code: w.code, fd: -1, peerHost: 0, peerPort: 0, error: w.error };
+    }
+    let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
+    let len: c_int = 16;
+    let cfd: c_int = accept(fd, &peer, &len);
+    if (cfd < 0) {
+        return {
+            code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+            error: errno.message(errno.get()),
+        };
+    }
+    return {
+        code:     IO_READY,
+        fd:       cfd,
+        peerHost: peer.sin_addr,
+        peerPort: peer.sin_port,
+        error:    "",
+    };
+}
+
+// Park on readability under `ct`, then recv() once into `buf`.
+// `n == 0` with `code == IO_READY` is EOF, exactly as for ffi_recv.
+export function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
+    let w: IoResult = waitReadable(fd, ct, deadlineNs);
+    if (w.code != IO_READY) { return w; }
+    let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+    if (n < 0) { return ioErr(errno.message(errno.get())); }
+    return { code: IO_READY, n: n, error: "" };
+}
+
+// Park on writability under `ct` and send until every byte of `buf` has
+// gone out. A timeout or cancellation mid-stream reports how many bytes
+// DID make it in `n` - a partially-written message is exactly the thing
+// the caller needs to know about, and silently reporting 0 would hide
+// it.
+export function ffiSendAllCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
+    let total: usize = 0;
+    while (total < buf.len) {
+        let w: IoResult = waitWritable(fd, ct, deadlineNs);
+        if (w.code != IO_READY) {
+            return { code: w.code, n: c_ssize_t(total), error: w.error };
+        }
+        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        if (n < 0) {
+            return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
+        }
+        total = total + usize(n);
+    }
+    return { code: IO_READY, n: c_ssize_t(total), error: "" };
 }

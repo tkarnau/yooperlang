@@ -1,0 +1,95 @@
+// std/core/cancel_ffi.yoop - unsafe runtime FFI for cancellation tokens.
+//
+// The only module under the cancellation layer that imports unsafe.
+// `std/core/cancel.yoop` is the public face; users never reach here.
+// Same split as std/net/socket_ffi.yoop and std/db/sqlite_ffi.yoop.
+//
+// The runtime's `yoop_cancel_t *` is an opaque handle, so it rides
+// inside the one-field `RawCancel` envelope below and the public module
+// can hold a token without declaring `import.unsafe;` itself
+// (library-design.md 2.1 - no pointer types in an exported safe
+// signature).
+
+import.unsafe;
+
+// A `yoop_cancel_t *`. One pointer field, so `RawCancel` is
+// ABI-identical to the bare pointer at every call boundary.
+export type RawCancel { p: unsafe_ptr }
+
+export function rawCancelNull(): RawCancel { return { p: null }; }
+export function rawCancelIsNull(c: RawCancel): bool { return c.p == null; }
+
+extern "C" from "yoop_runtime" {
+    function yoop_cancel_new(): unsafe_ptr;
+    function yoop_cancel_new_deadline(deadlineNs: uint64): unsafe_ptr;
+    function yoop_cancel_retain(t: unsafe_ptr): void;
+    function yoop_cancel_release(t: unsafe_ptr): void;
+    function yoop_cancel_request(t: unsafe_ptr): void;
+    function yoop_cancel_requested(t: unsafe_ptr): c_int;
+    function yoop_cancel_flagged(t: unsafe_ptr): c_int;
+    function yoop_cancel_deadline_ns(t: unsafe_ptr): uint64;
+    function yoop_cancel_set_deadline_ns(t: unsafe_ptr, deadlineNs: uint64): void;
+    function yoop_cancel_link(child: unsafe_ptr, parent: unsafe_ptr): c_int;
+    function yoop_cancel_sleep_ns(t: unsafe_ptr, ns: uint64): c_int;
+    function yoop_cancel_wait(t: unsafe_ptr, deadlineNs: uint64): c_int;
+    function yoop_now_ns(): uint64;
+}
+
+// ----- thin wrappers -------------------------------------------------------
+//
+// Every helper takes and returns plain yoop types, so `c_int` and
+// `unsafe_ptr` both stop at this file.
+
+export function rawNew(): RawCancel {
+    return { p: yoop_cancel_new() };
+}
+
+export function rawNewDeadline(deadlineNs: uint64): RawCancel {
+    return { p: yoop_cancel_new_deadline(deadlineNs) };
+}
+
+export function rawRetain(c: RawCancel): void {
+    yoop_cancel_retain(c.p);
+}
+
+export function rawRelease(c: RawCancel): void {
+    yoop_cancel_release(c.p);
+}
+
+export function rawRequest(c: RawCancel): void {
+    yoop_cancel_request(c.p);
+}
+
+export function rawRequested(c: RawCancel): bool {
+    return yoop_cancel_requested(c.p) != 0;
+}
+
+export function rawFlagged(c: RawCancel): bool {
+    return yoop_cancel_flagged(c.p) != 0;
+}
+
+export function rawDeadlineNs(c: RawCancel): uint64 {
+    return yoop_cancel_deadline_ns(c.p);
+}
+
+export function rawSetDeadlineNs(c: RawCancel, deadlineNs: uint64): void {
+    yoop_cancel_set_deadline_ns(c.p, deadlineNs);
+}
+
+export function rawLink(child: RawCancel, parent: RawCancel): int32 {
+    return int32(yoop_cancel_link(child.p, parent.p));
+}
+
+export function rawSleepNs(c: RawCancel, ns: uint64): int32 {
+    return int32(yoop_cancel_sleep_ns(c.p, ns));
+}
+
+export function rawWait(c: RawCancel, deadlineNs: uint64): int32 {
+    return int32(yoop_cancel_wait(c.p, deadlineNs));
+}
+
+// The monotonic deadline clock. Re-exported here so std/core/cancel.yoop
+// does not need its own extern block for the one call it needs.
+export function rawNowNs(): uint64 {
+    return yoop_now_ns();
+}
