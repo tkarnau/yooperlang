@@ -1,0 +1,99 @@
+// EPISODE 5 - Sum types and exhaustive switch
+//
+// `variant` is a tagged union: a value is exactly one of the listed cases,
+// and cases can carry payloads. `switch` destructures them, and the compiler
+// requires you to handle every case - that is the whole point.
+//
+// Two other flavors exist and are worth a sentence each on camera:
+//   `enum`  - C-style value enum (named integer/string constants)
+//   `union` - genuinely untagged, C layout, for FFI. No safety, by design.
+
+import { Display } from "std/core/traits.yoop";
+
+// A payload type declared OUTSIDE the variant, with its own Display impl.
+// Note: a struct used as a variant payload must be declared BEFORE the
+// variant, in the same file. (Declaration order does not otherwise matter in
+// this language - this one is a known papercut, not a design rule.)
+type Center implements Display {
+    x: int32,
+    y: int32,
+    function to_string(ref self): string {
+        return `<${self.x},${self.y}>`;
+    }
+}
+
+@derive(display)
+variant Shape {
+    Circle { c: Center, r: int32 },
+    Rect { w: int32, h: int32 },
+    Dot,                              // a case with no payload
+}
+
+function area(ref s: Shape): int32 {
+    switch (s) {
+        case Shape.Circle { c: _c, r: r }: { return 3 * r * r; }
+        case Shape.Rect { w: w, h: h }:    { return w * h; }
+        case Shape.Dot:                    { return 0; }
+    }
+}
+
+function main(): int32 {
+    const circle: Shape = Shape.Circle { c: { x: 1, y: 2 }, r: 5 };
+    const rect: Shape = Shape.Rect { w: 3, h: 4 };
+    const dot: Shape = Shape.Dot;
+
+    // @derive(display) generated a to_string for the whole variant - one arm
+    // per case - so these interpolate. The output mirrors constructor syntax,
+    // which means a dump reads back as the source that would rebuild it.
+    printf(`${circle} area=${area(ref circle)}\n`);
+    printf(`${rect} area=${area(ref rect)}\n`);
+    printf(`${dot} area=${area(ref dot)}\n`);
+
+    return 0;
+}
+
+// expected output:
+// Shape.Circle { c: <1,2>, r: 5 } area=75
+// Shape.Rect { w: 3, h: 4 } area=12
+// Shape.Dot area=0
+
+// ---------------------------------------------------------------------------
+// BREAK IT #1 - exhaustiveness is enforced, and it names what you forgot
+//
+// Comment out the `case Shape.Dot:` arm in `area`:
+//
+//   ep05_variants.yoop:4:13: switch over variant Shape is not exhaustive - missing variants: Dot
+//     |
+//   4 |     switch (s) {
+//     |             ^
+//
+// Talking point: this is the feature that makes adding a variant case safe.
+// Add a fourth case to `Shape` on camera - `Triangle { b: int32, h: int32 }` -
+// and watch the compiler walk you to every switch that now needs an arm. That
+// is the refactor story for sum types in one move.
+
+// BREAK IT #2 - the derived Display is generated from the FIELDS
+//
+// Add a field to a case that has no way to print - say `Rect { w: int32,
+// h: int32, cb: () => int32 }`. The derive does not fail; function types get
+// a fixed `<fn>` placeholder. But swap in a plain struct that does NOT
+// implement Display and you get a targeted message naming the field:
+//
+//   @derive(display) on "Shape" cannot print field "..." of type ... -
+//   add @derive(display) to that type, ...
+//
+// Talking point: the derive generates SOURCE TEXT and reparses it, then
+// restamps the original source locations onto the result - so a diagnostic
+// about generated code still points at your decl, never at text you never
+// wrote. Good "the details matter" moment.
+
+// BREAK IT #3 - a payload struct declared too late
+//
+// Move `type Center { ... }` to the BOTTOM of the file. You get:
+//
+//   type "Center" has no field "x"
+//
+// ...which is actively misleading, because the field IS declared. The variant
+// resolved `Center` against an unpopulated shell. Worth showing as an honest
+// "here is a rough edge I know about" beat - it is written up in
+// plans/sqlite-binding-papercuts.md rather than hidden.
