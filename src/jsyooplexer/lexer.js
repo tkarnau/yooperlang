@@ -89,6 +89,10 @@ export const TokenTags = {
   // phase 6.3: task/concurrency
   task: "task",
   wait: "wait",
+  // async coroutines: `async` replaces `function` on a decl (like `task`
+  // does); `await` is a prefix operator on an async call.
+  async: "async",
+  await: "await",
   joined: "joined",
   pooled: "pooled",
   // phase 6.4: containment / propagation
@@ -266,6 +270,8 @@ export const keywordTagList = {
   globalState: TokenTags.globalState,
   task: TokenTags.task,
   wait: TokenTags.wait,
+  async: TokenTags.async,
+  await: TokenTags.await,
   joined: TokenTags.joined,
   pooled: TokenTags.pooled,
   propagates: TokenTags.propagates,

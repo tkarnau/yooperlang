@@ -41,9 +41,13 @@ import {
     IO_ERROR,
     IO_READY,
     IO_TIMEDOUT,
+    ffiAcceptAsync,
     ffiAcceptCt,
+    ffiRecvAsync,
     ffiRecvCt,
+    ffiSendAllAsync,
     ffiSendAllCt,
+    ffiSetNonblocking,
     ffi_accept,
     ffi_close,
     ffi_connect,
@@ -149,17 +153,27 @@ export type TcpStream implements (Disposable, Readable, Writable) propagates<dis
         Disposable.dispose(ref self.token);
     }
 
-    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+    // Async: on a worker these SUSPEND the calling task rather than
+    // parking its thread, so one worker carries many connections. Off a
+    // worker (called from main) the underlying helper falls back to a
+    // blocking wait, so the same code is correct either way.
+    //
+    // The ambient deadline/token path still uses the blocking
+    // cancel-aware helpers - those already have their own abandon
+    // handshake, and combining two suspension mechanisms in one call is
+    // not worth the complexity. A stream with a timeout blocks its
+    // thread; a stream without one suspends.
+    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {
-            return ffi_recv(self.socket.fd, buf);
+            return ioResultToResult(await ffiRecvAsync(self.socket.fd, buf));
         }
         return ioResultToResult(
             ffiRecvCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));
     }
 
-    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {
-            return ffi_send_all(self.socket.fd, buf);
+            return ioResultToResult(await ffiSendAllAsync(self.socket.fd, buf));
         }
         return ioResultToResult(
             ffiSendAllCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));
@@ -186,6 +200,10 @@ export variant AcceptOutcome {
 // place TcpStream is constructed, so adding a field here does not mean
 // touching every accept/connect return.
 function newStream(fd: c_int): TcpStream propagates<disposable> {
+    // Non-blocking is a precondition of the async path: "try, and on
+    // EAGAIN suspend" only works if the syscall actually returns EAGAIN.
+    // Doing it here means no accept/connect site has to remember.
+    if (fd >= 0) { let _rc: c_int = ffiSetNonblocking(fd); }
     return { socket: { fd: fd }, timeoutMs: 0, token: cancel.none() };
 }
 
@@ -330,6 +348,14 @@ function acceptOutcome(r: AcceptCtResult): AcceptOutcome propagates<disposable> 
     if (r.code == IO_TIMEDOUT)  { return AcceptOutcome.TimedOut; }
     if (r.code == IO_CANCELLED) { return AcceptOutcome.Cancelled; }
     return AcceptOutcome.Err { error: r.error };
+}
+
+// Accept one inbound connection, SUSPENDING the calling task while it
+// waits instead of holding a worker thread. This is the accept a server
+// loop wants: N concurrent connections cost N coroutine frames, not N
+// threads.
+export async tcpAcceptAsync(ref l: TcpListener): AcceptOutcome propagates<disposable> {
+    return acceptOutcome(await ffiAcceptAsync(l.socket.fd));
 }
 
 // ----- Connect (client-side) ----------------------------------------------

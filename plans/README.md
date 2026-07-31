@@ -124,6 +124,13 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
   (pthread worker pool, task struct layout, refcounted pooled handles). The
   implementation reference for the task/`wait` machinery. Written against the
   6.3 MVP, so read its scope lists with the "since landed" note at the top.
+- [async-coroutines.md](async-coroutines.md) - `async`/`await` and the
+  LLVM-coroutine lowering that lets a task blocked on I/O give its worker
+  thread back. Explains why this needed a language change (a suspend has
+  to propagate up a call chain, and `llvm.coro.suspend` only suspends one
+  frame). `std/net` and `std/http` are converted; the doc records the
+  coloring cascade that caused, and what is still blocking-only
+  (ambient stream timeouts, `flush`).
 - [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md) -
   cancellation tokens (`std/core/cancel.yoop`), deadline- and cancel-aware
   I/O waits, and the multiplexer fixes that went with them (the same-fd

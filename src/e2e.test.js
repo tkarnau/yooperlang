@@ -375,6 +375,54 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  // async/await: `async` functions lower to LLVM switched-resume
+  // coroutines, and a task body is implicitly async. Covers composition
+  // (an async fn awaiting another), mixing async and ordinary calls in
+  // one body, and a loop whose locals cross the await.
+  it("async_await_smoke: async functions compose and are driven by the task scheduler", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/async_await_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "compute=15\nmixed=20\nlooping=20\n");
+  });
+
+  // The payoff: a suspended task releases its worker thread. Pinned to
+  // ONE worker, so if suspension did not actually free the thread the
+  // single worker would park inside the first read and this would hang
+  // rather than fail. The suspend also happens two frames below the task
+  // body, which is the propagation the coloring rules exist to make safe.
+  //
+  // The two "woke" lines race, so only their multiset is asserted.
+  it("async_yield_smoke: two tasks park on I/O simultaneously with a single worker thread", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/async_yield_smoke.yoop", {
+      env: { YOOP_NUM_WORKERS: "1" },
+    });
+    assert.equal(exitCode, 0);
+    const lines = stdout.trim().split("\n");
+    assert.equal(lines[0], "both parked");
+    assert.deepEqual(
+      lines.slice(1, 3).sort(),
+      ["reader 1 woke", "reader 2 woke"],
+    );
+    assert.equal(lines[3], "total bytes=2");
+  });
+
+  // The end of the async story: std/net and std/http are async top to
+  // bottom, so an HTTP server plus three concurrent clients - four tasks
+  // all doing socket I/O - multiplex onto ONE worker thread.
+  //
+  // Pinned to YOOP_NUM_WORKERS=1 on purpose. Under blocking I/O this
+  // deadlocks rather than fails: the single worker parks inside the
+  // server's accept() and no client ever gets a turn. So a regression
+  // here shows up as a timeout, which is the signal we want.
+  it("async_server_smoke: an HTTP server and 3 concurrent clients share a single worker", () => {
+    const { stdout, exitCode } = runFixtureEntry(
+      "examples/pass/async_server_smoke/main.yoop",
+      { env: { YOOP_NUM_WORKERS: "1" }, timeoutMs: 30000 },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "served=3 ok=3\n");
+  });
+
   it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
@@ -1061,7 +1109,14 @@ function runFixtureEntry(relPath, opts = {}) {
     ...allLinkFlags.map((f) => `-l${f}`),
   ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
-  const result = spawnSync(binPath, [], { encoding: "utf8" });
+  // `env` mirrors runFixture's option - needed by fixtures that pin
+  // YOOP_NUM_WORKERS to prove a scheduling property.
+  const env = opts.env ? { ...process.env, ...opts.env } : process.env;
+  const result = spawnSync(binPath, [], {
+    encoding: "utf8",
+    env,
+    timeout: opts.timeoutMs ?? 30000,
+  });
   return {
     stdout: result.stdout,
     stderr: result.stderr,
@@ -1859,10 +1914,27 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     // The serve loop takes the erased Dispatcher, so there is exactly one
     // copy of it and the handler is reached through the vtable.
     assert.match(ir, /%vtable\..*__Dispatcher = type/);
-    assert.match(ir, /define i32 @server_.*__serveConnection/);
-    assert.match(ir, /define .*@main_.*__HelloHandler__Handler__handle/);
-    // The TCP layer must call into the multiplexer.
-    assert.match(ir, /declare i32 @yoop_io_wait_readable/);
+    // serveConnection is async now, so it has the coroutine ABI: returns
+    // `ptr` (the handle), takes a trailing result slot, and carries
+    // presplitcoroutine. That is what lets a connection suspend on a
+    // read and hand its worker thread back.
+    assert.match(ir, /define ptr @server_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
+    // The handler itself stays SYNCHRONOUS - it takes a buffered request
+    // and fills a response, so there is nothing for it to await. Async
+    // stops at the I/O boundary rather than coloring user handlers, and
+    // the absence of presplitcoroutine on this define is what proves it.
+    const handlerDefine = ir
+      .split("\n")
+      .find((l) => l.startsWith("define") && l.includes("__HelloHandler__Handler__handle("));
+    assert.ok(handlerDefine, "handler define not found");
+    assert.ok(
+      !handlerDefine.includes("presplitcoroutine"),
+      `handler should stay synchronous, got: ${handlerDefine}`,
+    );
+    // The TCP layer reaches the multiplexer through the async arming path.
+    assert.match(ir, /declare i32 @yoop_io_arm_readable/);
+    // And the coroutine trampolines are installed for the scheduler.
+    assert.match(ir, /call void @yoop_runtime_set_coro_ops/);
     // The libc socket-family externs are declared.
     assert.match(ir, /declare i32 @socket\(/);
     assert.match(ir, /declare i32 @bind\(/);

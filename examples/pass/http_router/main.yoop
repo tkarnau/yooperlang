@@ -59,7 +59,9 @@ type FallbackHandler implements Handler {
     }
 }
 
-function run(): Result<int32, HttpError> {
+// Async: the accept and every read/write below suspend rather than
+// blocking a worker thread.
+async run(): Result<int32, HttpError> {
     let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18081, 128);
     if (lr.error.len > 0) {
         return Result.Err { error: types.errIo(lr.error) };
@@ -81,13 +83,20 @@ function run(): Result<int32, HttpError> {
     // The router is itself a Handler, so it erases into a Dispatcher exactly
     // like the handlers it holds.
     let d: Dispatcher = Dispatcher.from(ref r);
-    let served: int32 = http.serveDefault(ref lr.listener, ref d, 1)?;
+    let served: int32 = await http.serveDefault(ref lr.listener, ref d, 1)?;
     printf(`served=${served}\n`);
     return Result.Ok { value: served };
 }
 
+// main is the sync/async boundary: spawn the async work as a task and
+// join it.
+task serveTask(): Result<int32, HttpError> {
+    return await run();
+}
+
 function main(): int32 {
-    switch (run()) {
+    pooled h = serveTask();
+    switch (wait h) {
         case Result.Ok { value: _n }: { return 0; }
         case Result.Err { error: e }: { printf(`server failed: ${e}\n`); return 1; }
     }

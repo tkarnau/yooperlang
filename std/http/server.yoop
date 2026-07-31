@@ -38,7 +38,7 @@ import * as vec, { Vec } from "../core/vec.yoop";
 import * as str from "../core/strings.yoop";
 import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import * as tcp, { TcpListener, TcpStream, AcceptResult } from "../net/tcp.yoop";
+import * as tcp, { AcceptOutcome, TcpListener, TcpStream } from "../net/tcp.yoop";
 import * as wire from "./wire.yoop";
 import * as parser, { ParsedRequest } from "./parser.yoop";
 import * as types, {
@@ -108,7 +108,7 @@ export function defaultConfig(): ServerConfig {
 // Read until the head-terminating blank line is in `buf`, or the head limit
 // is hit. Returns `None` when the peer closed cleanly before sending anything
 // (the normal end of a keep-alive connection) and `Some { offset }` otherwise.
-function readHead(
+async readHead(
     ref stream: TcpStream,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
@@ -121,7 +121,7 @@ function readHead(
 
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (true) {
-        let n: usize = readSome(ref stream, ref window)? "reading the request head";
+        let n: usize = await readSome(ref stream, ref window)? "reading the request head";
         if (n == 0) {
             if (buf.len == 0) { return Result.Ok { value: Option.None }; }
             return Result.Err { error: types.errBadRequest("connection closed mid-head") };
@@ -140,8 +140,8 @@ function readHead(
 }
 
 // One recv, with the error mapped into the layer's error type.
-function readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
-    switch (Readable.read(ref stream, ref window)) {
+async readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
+    switch (await Readable.read(ref stream, ref window)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -149,7 +149,7 @@ function readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, Htt
 }
 
 // Top up `buf` until it holds `bodyStart + need` bytes.
-function readBody(
+async readBody(
     ref stream: TcpStream,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
@@ -158,7 +158,7 @@ function readBody(
 ): Result<usize, HttpError> {
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (buf.len < bodyStart + need) {
-        let n: usize = readSome(ref stream, ref window)? "reading the request body";
+        let n: usize = await readSome(ref stream, ref window)? "reading the request body";
         if (n == 0) {
             return Result.Err { error: types.errBadRequest("connection closed mid-body") };
         }
@@ -184,7 +184,7 @@ function compact(ref buf: Vec<uint8>, n: usize): void {
 
 // Serialize and send. `headOnly` suppresses the body (a HEAD reply carries
 // the headers the GET would have, including its Content-Length, and no body).
-function writeResponse(
+async writeResponse(
     ref stream: TcpStream,
     ref resp: Response,
     keepAlive: bool,
@@ -217,7 +217,7 @@ function writeResponse(
     }
 
     let view: uint8[] = vec.vec_as_array(ref out);
-    switch (Writable.write(ref stream, ref view)) {
+    switch (await Writable.write(ref stream, ref view)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -247,7 +247,7 @@ function checkResponseHeaders(ref resp: Response): bool {
 
 // Parse, dispatch, and let the caller turn any failure into a response. The
 // request lives only for the duration of this call.
-function exchange(
+async exchange(
     ref stream: TcpStream,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
@@ -264,7 +264,7 @@ function exchange(
             error: httpError(payloadTooLarge(), `body of ${need} bytes exceeds the ${cfg.maxBodyBytes} byte limit`),
         };
     }
-    let _got: usize = readBody(ref stream, ref buf, ref scratch, pr.bodyStart, need)?;
+    let _got: usize = await readBody(ref stream, ref buf, ref scratch, pr.bodyStart, need)?;
 
     // The read above may have grown (and moved) the buffer, so the body view
     // has to be taken after it, not before.
@@ -303,7 +303,7 @@ function newMeta(): ExchangeMeta {
 // number of requests answered. Connection-level failures end the connection,
 // not the server, so this swallows its error after reporting it as a
 // response where that is still possible.
-function serveConnection(
+async serveConnection(
     ref stream: TcpStream,
     ref d: Dispatcher,
     cfg: ServerConfig,
@@ -322,10 +322,10 @@ function serveConnection(
     while (served < limit) {
         // Head first: a clean close here is how a keep-alive connection ends.
         let headAt: Option<usize> = Option.None;
-        switch (readHead(ref stream, ref buf, ref scratch, cfg)) {
+        switch (await readHead(ref stream, ref buf, ref scratch, cfg)) {
             case Result.Ok { value: at }: { headAt = at; }
             case Result.Err { error: e }: {
-                let _ignored: bool = replyWithError(ref stream, ref e, cfg);
+                let _ignored: bool = await replyWithError(ref stream, ref e, cfg);
                 return served;
             }
         }
@@ -337,7 +337,7 @@ function serveConnection(
         disposable resp: Response = responseNew();
         let meta: ExchangeMeta = newMeta();
         let failed: bool = false;
-        switch (exchange(ref stream, ref buf, ref scratch, ref d, cfg, ref resp, ref meta)) {
+        switch (await exchange(ref stream, ref buf, ref scratch, ref d, cfg, ref resp, ref meta)) {
             case Result.Ok { value: _n }: { }
             case Result.Err { error: e }: {
                 types.respondError(ref resp, ref e);
@@ -360,7 +360,7 @@ function serveConnection(
             let _f: int32 = fflush(0);
         }
 
-        switch (writeResponse(ref stream, ref resp, keepAlive, meta.headOnly)) {
+        switch (await writeResponse(ref stream, ref resp, keepAlive, meta.headOnly)) {
             case Result.Ok { value: _n }: { }
             case Result.Err { error: _e }: { return served; }
         }
@@ -373,14 +373,14 @@ function serveConnection(
 // Last-ditch reply for a failure that happened before there was a response to
 // put it in (a head that was too large, a socket that died mid-head). Best
 // effort: if this write fails too, the connection is gone anyway.
-function replyWithError(ref stream: TcpStream, ref e: HttpError, cfg: ServerConfig): bool {
+async replyWithError(ref stream: TcpStream, ref e: HttpError, cfg: ServerConfig): bool {
     disposable resp: Response = responseNew();
     types.respondError(ref resp, ref e);
     if (cfg.logRequests) {
         printf(`- -> ${resp.status.code} (${e.message})\n`);
         let _f: int32 = fflush(0);
     }
-    switch (writeResponse(ref stream, ref resp, false, false)) {
+    switch (await writeResponse(ref stream, ref resp, false, false)) {
         case Result.Ok { value: _n }: { return true; }
         case Result.Err { error: _e2 }: { return false; }
     }
@@ -396,7 +396,7 @@ function replyWithError(ref stream: TcpStream, ref e: HttpError, cfg: ServerConf
 // Only a listener failure ends this loop. Anything a connection does to
 // itself - malformed bytes, an abrupt close, a handler error - costs that
 // connection and nothing else.
-export function serve(
+export async serve(
     ref l: TcpListener,
     ref d: Dispatcher,
     cfg: ServerConfig,
@@ -405,13 +405,27 @@ export function serve(
     let served: int32 = 0;
     let unbounded: bool = n <= 0;
     while (unbounded || served < n) {
-        disposable ar: AcceptResult = tcp.tcp_accept(ref l);
-        if (ar.error.len > 0) {
-            return Result.Err { error: errIo(ar.error) };
-        }
         let budget: int32 = 0;
         if (!unbounded) { budget = n - served; }
-        served = served + serveConnection(ref ar.stream, ref d, cfg, budget);
+        // The accept SUSPENDS rather than parking a thread, so a server
+        // waiting on an idle listener costs a coroutine frame and no
+        // worker. Same for every read and write inside serveConnection.
+        switch (await tcp.tcpAcceptAsync(ref l)) {
+            case AcceptOutcome.Accepted { stream: st, peerHost: _h, peerPort: _p }: {
+                disposable conn: TcpStream = st;
+                served = served + await serveConnection(ref conn, ref d, cfg, budget);
+            }
+            case AcceptOutcome.TimedOut: {
+                // No deadline was set, so this is not reachable today.
+                // Treated as "keep waiting" rather than an error.
+            }
+            case AcceptOutcome.Cancelled: {
+                return Result.Ok { value: served };
+            }
+            case AcceptOutcome.Err { error: e }: {
+                return Result.Err { error: errIo(e) };
+            }
+        }
     }
     return Result.Ok { value: served };
 }
@@ -426,10 +440,10 @@ export function serve(
 //
 //     let d: Dispatcher = Dispatcher.from(ref handler);
 //     let served: int32 = http.serveDefault(ref lr.listener, ref d, 0)?;
-export function serveDefault(
+export async serveDefault(
     ref l: TcpListener,
     ref d: Dispatcher,
     n: int32,
 ): Result<int32, HttpError> {
-    return serve(ref l, ref d, defaultConfig(), n);
+    return await serve(ref l, ref d, defaultConfig(), n);
 }

@@ -37,9 +37,11 @@ task shutdownAfter(t: CancelToken, ms: uint64): int32 {
 // the code path that has to honor them. A timeout or cancellation
 // arrives as an Err, since the trait signature has nowhere else to put
 // it.
-function readViaTrait(ref s: TcpStream): void {
+// Async because Readable.read is - the ambient token still reaches it,
+// which is the point of this case.
+async readViaTrait(ref s: TcpStream): void {
     let buf: uint8[] = [0, 0, 0, 0];
-    switch (Readable.read(ref s, ref buf)) {
+    switch (await Readable.read(ref s, ref buf)) {
         case Result.Ok { value: n }:   { printf("ambient: unexpected read\n"); }
         case Result.Err { error: e }:  { printf("ambient: %s\n", e); }
     }
@@ -93,23 +95,30 @@ function main(): int32 {
         case AcceptOutcome.Err { error: e2 }: { printf("post: err %s\n", e2); }
     }
 
-    // The AMBIENT form: attach a token to the stream itself and the
-    // plain `Readable.read` trait method honors it. This is what lets
-    // code that only knows the traits (all of std/http) inherit
-    // cancellation without a signature change. Note the token here has
-    // NO deadline - only the explicit cancel ends the read.
+    // The AMBIENT form runs in a task: `Readable.read` is async now, and
+    // main is the sync/async boundary.
+    disposable readToken: CancelToken = cancel.newToken();
+    pooled amb = ambientTask(cancel.share(ref readToken));
+    pooled stopper2 = shutdownAfter(cancel.share(ref readToken), 60);
+    let _a: int32 = wait amb;
+    let _s2: int32 = wait stopper2;
+
+    return 0;
+}
+
+// Attach a token to the STREAM itself and let the plain `Readable.read`
+// trait method honor it. This is what lets code that only knows the
+// traits (all of std/http) inherit cancellation without a signature
+// change. The token here has NO deadline - only the explicit cancel ends
+// the read.
+task ambientTask(t: CancelToken): int32 {
     disposable cr: ConnectResult = tcp.tcp_connect("127.0.0.1", PORT);
     if (cr.error.len > 0) {
         printf("connect failed: %s\n", cr.error);
         return 1;
     }
-    disposable readToken: CancelToken = cancel.newToken();
-    tcp.tcpSetToken(ref cr.stream, ref readToken);
-    pooled stopper2 = shutdownAfter(cancel.share(ref readToken), 60);
-
-    readViaTrait(ref cr.stream);
-    let _s2: int32 = wait stopper2;
-
+    tcp.tcpSetToken(ref cr.stream, ref t);
+    await readViaTrait(ref cr.stream);
     return 0;
 }
 

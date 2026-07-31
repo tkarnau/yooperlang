@@ -648,7 +648,10 @@ function substituteSelfInSig(traitSig, thisStruct) {
     }
     return p;
   });
-  return FuncType(params, traitSig.returnType, false);
+  // Carry asyncness through the self-substitution, or the trait's
+  // requirement arrives at sigsEqual looking synchronous and an impl
+  // that disagrees is silently accepted.
+  return FuncType(params, traitSig.returnType, false, [], !!traitSig.isAsync);
 }
 
 function sigsEqual(a, b) {
@@ -656,12 +659,17 @@ function sigsEqual(a, b) {
   for (let i = 0; i < a.params.length; i++) {
     if (!typesEqual(a.params[i].type, b.params[i].type)) return false;
   }
+  // Asyncness is part of the signature: an async method has a different
+  // ABI (it returns a coroutine handle) and a different calling rule
+  // (`await`), so an impl that disagrees with its trait is a real
+  // mismatch, not a cosmetic one.
+  if (!!a.isAsync !== !!b.isAsync) return false;
   return typesEqual(a.returnType, b.returnType);
 }
 
 function formatSig(sig) {
   const params = sig.params.map((p) => `${p.isRef ? "ref " : ""}${formatType(p.type)}`).join(", ");
-  return `(${params}): ${formatType(sig.returnType)}`;
+  return `${sig.isAsync ? "async " : ""}(${params}): ${formatType(sig.returnType)}`;
 }
 
 // Phase 9.G: validate a `vtable Name for TraitName { ... }` decl. The decl
@@ -772,9 +780,17 @@ function validateVTableDecl(d, mod, moduleEnv, errors, programState) {
       });
       mismatch = true;
     }
+    // Stamp the trait method's asyncness onto the slot. An async trait
+    // method needs an async-shaped slot (coroutine handle return + result
+    // slot argument); the user's `=>` annotation has no way to say so, and
+    // the trait is the authority for everything else about this field too.
+    const finalFpt =
+      fpt.isAsync === !!methodSig.isAsync
+        ? fpt
+        : FunctionPointerType(fpt.params, fpt.returnType, !!methodSig.isAsync);
     resolvedFields.push({
       name: methodName,
-      type: mismatch ? ErrorType() : fpt,
+      type: mismatch ? ErrorType() : finalFpt,
     });
   }
 
@@ -989,7 +1005,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
       return { name: p.name, type: t, isRef: p.isRef ?? false };
     });
     const returnType = resolveTypeAnnotationInModule(methodDecl.returnTypeAnnotation, mod.id, moduleEnv, ctxForMethod) ?? ErrorType();
-    const implSig = FuncType(params, returnType, false);
+    const implSig = FuncType(params, returnType, false, [], !!methodDecl.isAsync);
 
     const requiredSig = requiredList[0].sig;
     if (!sigsEqual(implSig, requiredSig)) {
@@ -1654,6 +1670,10 @@ export const INTRINSIC_DECL_IDS = new Map([
   ["array_slice", "$builtin__array_slice"],
   ["wait_until", "$builtin__wait_until"],
   ["cancel", "$builtin__cancel"],
+  // The async suspend primitive. Non-generic, and lowered inline by
+  // codegen (a bare coro.suspend) rather than to any call, so unlike the
+  // entries above it needs no makeBuiltinGenericFuncs counterpart.
+  ["suspendNow", "$builtin__suspendNow"],
   // Note: `printf` stays magic - it's used by ~all examples and the name
   // never collides with user identifiers in practice. Lives outside this
   // map so it isn't subject to the import-required rule.
@@ -3020,6 +3040,9 @@ export function typecheckProgram(modules) {
           externalReturnType,
           false,
           returnPropagatedKinds,
+          // A `task` body is implicitly async (the parser sets isAsync on
+          // it too); an `async` decl says so directly.
+          !!funcDecl.isAsync,
         );
         if (isGenericFunc) {
           // Stash on the generic decl record for later instantiation.
@@ -3066,7 +3089,7 @@ export function typecheckProgram(modules) {
           ext.resolvedType = retType;
           localSymbols.set(
             ext.name,
-            FuncType(paramTypes, retType, ext.variadic),
+            FuncType(paramTypes, retType, ext.variadic, [], !!ext.isAsync),
           );
         }
       }
@@ -3176,7 +3199,10 @@ export function typecheckProgram(modules) {
             moduleEnv,
             ctxForSig,
           ) ?? ErrorType();
-        trait.methods.set(sig.name, FuncType(params, returnType, false));
+        trait.methods.set(
+          sig.name,
+          FuncType(params, returnType, false, [], !!sig.isAsync),
+        );
         sig.resolvedFuncType = trait.methods.get(sig.name);
       }
     }
@@ -3696,6 +3722,13 @@ export function typecheck(ast) {
             }),
             resolveTypeAnnotation(d.returnTypeAnnotation, structTable) ??
               ErrorType(),
+            false,
+            [],
+            // The legacy single-module path builds its own signatures, so
+            // asyncness has to be carried here too - otherwise every
+            // await in a single-module program reports "callee is not
+            // async" and the coloring rules silently do not apply.
+            !!d.isAsync,
           ),
         );
       }
@@ -3724,7 +3757,7 @@ export function typecheck(ast) {
         ext.resolvedType = retType;
         moduleSymbols.set(
           ext.name,
-          FuncType(paramTypes, retType, ext.variadic),
+          FuncType(paramTypes, retType, ext.variadic, [], !!ext.isAsync),
         );
       }
     }

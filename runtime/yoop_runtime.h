@@ -70,6 +70,49 @@ void  yoop_task_release(void* handle);
 // implicit reference.
 void yoop_handle_signal_done(void* handle);
 
+// ----- async task scheduling ----------------------------------------------
+//
+// A task body is an LLVM coroutine. The thunk STARTS it (handing it the
+// task's own result slot) and stores the handle at handle offset 32;
+// everything after that is resume-driven, so a task that blocks on I/O
+// gives its worker thread back instead of holding it.
+//
+// The coroutine trampolines are emitted by CODEGEN, because they wrap
+// LLVM intrinsics that C cannot call. The runtime receives them as
+// function pointers rather than linking against them by name: the C
+// runtime has to stay linkable on its own (the runtime/tests/ programs
+// build it with no generated IR at all), and a direct call would make
+// every one of those an undefined symbol.
+//
+// main installs them right after yoop_runtime_init. When they are absent
+// - a pure-C program, or yoop code with no task in it - a task is
+// treated as finishing in one step, which is exactly the pre-async
+// behavior.
+typedef void (*yoop_coro_fn)(void* coro);
+typedef int  (*yoop_coro_pred)(void* coro);
+void yoop_runtime_set_coro_ops(yoop_coro_fn resume,
+                               yoop_coro_fn destroy,
+                               yoop_coro_pred done);
+
+// Called at the end of every task step - the initial start and each
+// later resume. Decides whether the coroutine reached its final suspend
+// (result is in the slot: signal completion and destroy the frame) or
+// merely suspended (leave it parked; whatever suspended it registered a
+// wakeup). This is the single place that distinction is made.
+void yoop_task_settle(void* handle);
+
+// Push a suspended task back onto the run queue. Called by whatever
+// resolved the thing the task was waiting on - the I/O multiplexer on
+// readiness, a timer on expiry. Safe from any thread.
+void yoop_task_make_runnable(void* handle);
+
+// The task currently executing on this thread, or NULL when the calling
+// thread is not running one (e.g. main). Set by the worker around each
+// step, so a suspend primitive deep in a call chain can register a
+// wakeup against the right task without threading a handle through every
+// intermediate signature.
+void* yoop_current_task(void);
+
 // Stack-handle cleanup helper. For stack-allocated handles, codegen calls this
 // at scope exit to release the mutex/cond pair allocated by yoop_task_submit.
 void yoop_task_free_sync_pair(void* handle);
@@ -275,6 +318,40 @@ int yoop_io_wait_writable(int fd);
 // user pointer, which used to strand the original waiter forever.
 int yoop_io_wait_readable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns);
 int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns);
+
+// ----- async (non-blocking) readiness -------------------------------------
+//
+// The async counterpart of the wait_* calls above. Instead of parking the
+// calling thread, this ARMS a one-shot interest in `fd` and returns
+// immediately; when the fd becomes ready the multiplexer calls
+// yoop_task_make_runnable on the task that armed it.
+//
+// The caller is expected to `await suspendNow()` right after a successful
+// arm, so the pattern in yoop is:
+//
+//     let rc = armReadable(fd);      // 0 = armed, will be woken
+//     if (rc != 0) { return rc; }
+//     await conc.suspendNow();       // worker goes free here
+//
+// Returns 0 when armed, -1 with errno set on failure, and 1 when there is
+// no current task to wake (called off a worker thread) - in which case
+// the caller must fall back to the blocking wait_* form rather than
+// suspend, because nothing would ever resume it.
+int yoop_io_arm_readable(int fd);
+int yoop_io_arm_writable(int fd);
+
+// Put `fd` into non-blocking mode. Async reads and writes are
+// "try the syscall, and if it would block, arm and suspend", which only
+// works if the syscall actually returns EAGAIN instead of sleeping.
+// Returns 0 on success, -1 with errno set.
+//
+// A runtime helper rather than an fcntl mirror in yoop because F_GETFL /
+// F_SETFL / O_NONBLOCK are platform-specific values.
+int yoop_io_set_nonblocking(int fd);
+
+// 1 if `e` is the "would block, try again" errno. EAGAIN/EWOULDBLOCK
+// have no portable numeric value, so this is resolved in C.
+int yoop_io_would_block(int e);
 
 void yoop_io_shutdown(void);
 

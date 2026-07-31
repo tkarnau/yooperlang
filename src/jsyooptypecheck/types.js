@@ -173,8 +173,26 @@ export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // returnPropagatedKinds (phase 6.4): list of KindType the function's return
 // type propagates. Mirrors the StructType.propagatedKinds slot so callers see
 // the kinds without re-resolving the return type.
-export const FuncType = (params, returnType, variadic = false, returnPropagatedKinds = []) =>
-  freezerWrap(typeKinds.func, { params, returnType, variadic, returnPropagatedKinds });
+// isAsync: the function is a coroutine. It may only be called through
+// `await`, and `await` may only appear inside another async function (or
+// a task body, which is implicitly async). That pair of rules is what
+// makes the coloring checkable locally - there is no path to an async
+// function except from an async caller, so a suspend always has a frame
+// to propagate into. See plans/async-coroutines.md.
+export const FuncType = (
+  params,
+  returnType,
+  variadic = false,
+  returnPropagatedKinds = [],
+  isAsync = false,
+) =>
+  freezerWrap(typeKinds.func, {
+    params,
+    returnType,
+    variadic,
+    returnPropagatedKinds,
+    isAsync,
+  });
 export const VoidType = () => freezerWrap(typeKinds.void, {});
 // exports: Set<string> of exported names in the source module
 export const NamespaceType = (moduleId, exports) =>
@@ -261,8 +279,13 @@ export const ValueEnumType = (name, underlying, cases, implementsTraits = [], me
 // function decl) so call resolution can tell the two apart: FuncType callees
 // resolve to a global mangled symbol, FunctionPointerType callees lower to
 // an indirect call through a value slot.
-export const FunctionPointerType = (params, returnType) =>
-  freezerWrap(typeKinds.functionPointer, { params, returnType });
+// isAsync: the slot holds a coroutine-returning function (the async ABI -
+// returns a handle, takes a trailing result slot). Users never write this
+// on a `=>` annotation; for a vtable field it is stamped from the trait
+// method's own asyncness during validateVTableDecl, so the trait stays
+// the single authority and the two cannot drift.
+export const FunctionPointerType = (params, returnType, isAsync = false) =>
+  freezerWrap(typeKinds.functionPointer, { params, returnType, isAsync });
 
 // Phase 9.G: a type-erased shape for a trait. Conceptually a struct with one
 // `ctx` pointer + one function-pointer field per trait method. The compiler
@@ -786,6 +809,11 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
         substituteTypeParams(type.returnType, substitution, inst),
         type.variadic ?? false,
         type.returnPropagatedKinds ?? [],
+        // Asyncness survives monomorphization - an instantiated generic
+        // async function is still a coroutine, and dropping the flag
+        // here makes every generic async call site report "callee is not
+        // async" at the await.
+        type.isAsync ?? false,
       );
     }
     case typeKinds.struct: {

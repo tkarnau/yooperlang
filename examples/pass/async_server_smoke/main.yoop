@@ -1,0 +1,108 @@
+// An HTTP server and three concurrent clients, all on ONE worker thread.
+//
+// This is the end of the async story: `std/net` and `std/http` are async
+// top to bottom, so every accept, read, and write suspends the calling
+// task rather than parking its worker. The e2e case runs this with
+// YOOP_NUM_WORKERS=1.
+//
+// Under the old blocking runtime this deadlocks rather than fails: the
+// single worker parks inside the server's accept(), and no client task
+// ever gets a turn to connect. Concurrency used to cost one thread per
+// in-flight connection; now it costs one coroutine frame.
+//
+// Note what did NOT have to become async: `Handler.handle`. It takes a
+// fully-buffered request and fills a response, so there is nothing for it
+// to await. The coloring stops at the I/O boundary.
+
+import { disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import * as conc from "../../../std/core/concurrency.yoop";
+import * as tcp, { ListenResult } from "../../../std/net/tcp.yoop";
+import * as http, {
+    Handler, HandleOutcome, Dispatcher,
+} from "../../../std/http/server.yoop";
+import * as client, { Client, ClientResponse } from "../../../std/http/client.yoop";
+import * as types, {
+    Request, Response, HttpError,
+} from "../../../std/http/types.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const PORT: int32 = 18099;
+const CLIENTS: int32 = 3;
+
+// Synchronous, deliberately: a handler is pure request-in / response-out.
+type EchoHandler implements Handler {
+    greeting: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        types.respondText(ref resp, types.ok(), self.greeting);
+        return HandleOutcome.Ok;
+    }
+}
+
+// Serves exactly CLIENTS requests and returns. Every blocking point in
+// here - the accept, the head read, the body read, the response write -
+// is a suspend.
+task serverTask(): int32 {
+    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", PORT, 32);
+    if (lr.error.len > 0) {
+        printf(`server bind failed: ${lr.error}\n`);
+        return -1;
+    }
+    let h: EchoHandler = { greeting: "pong\n" };
+    let d: Dispatcher = Dispatcher.from(ref h);
+    switch (await http.serveDefault(ref lr.listener, ref d, CLIENTS)) {
+        case Result.Ok { value: n }: { return n; }
+        case Result.Err { error: e }: {
+            printf(`server error: ${e}\n`);
+            return -1;
+        }
+    }
+    return -1;
+}
+
+// One client request. Returns 1 on a 200 with the expected body.
+task clientTask(): int32 {
+    let c: Client = client.clientNew();
+    switch (await client.get(ref c, "http://127.0.0.1:18099/")) {
+        case Result.Ok { value: r }: {
+            disposable resp: ClientResponse = r;
+            if (resp.status.code == 200) { return 1; }
+            return 0;
+        }
+        case Result.Err { error: e }: {
+            printf(`client error: ${e}\n`);
+            return 0;
+        }
+    }
+    return 0;
+}
+
+function main(): int32 {
+    pooled server = serverTask();
+
+    // Let the listener bind before dialing. The clients would retry
+    // anyway, but this keeps the output deterministic.
+    let _s: int32 = conc.sleep_ms(100);
+
+    // All three are in flight at once. On a single worker they can only
+    // make progress because each one suspends while waiting on the
+    // socket instead of holding the thread.
+    pooled c1 = clientTask();
+    pooled c2 = clientTask();
+    pooled c3 = clientTask();
+
+    let ok: int32 = 0;
+    ok = ok + wait c1;
+    ok = ok + wait c2;
+    ok = ok + wait c3;
+
+    let served: int32 = wait server;
+    printf(`served=${served} ok=${ok}\n`);
+    return 0;
+}
+
+// expected output:
+// served=3 ok=3

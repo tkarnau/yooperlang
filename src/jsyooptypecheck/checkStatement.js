@@ -87,6 +87,9 @@ export function validateMethod(methodDecl, structType, typeContext, errors) {
     errors,
     inLoop: false,
     inMethodBody: true,
+    // Same coloring flag as validateFunction - an `async` method body is
+    // a coroutine and may contain `await`.
+    inAsyncBody: !!methodDecl.isAsync,
     enclosingType: structType,
   };
   validateStatement(methodDecl.body, scope, ctx);
@@ -211,6 +214,10 @@ export function validateFunction(funcNode, typeContext, errors) {
     errors,
     inLoop: false,
     inTaskBody: !!funcNode.isTask,
+    // Coloring: `await` is legal only where a suspend has a coroutine
+    // frame to propagate into. A task body is implicitly async, so the
+    // parser has already set isAsync on it.
+    inAsyncBody: !!funcNode.isAsync,
   };
   validateStatement(funcNode.body, scope, ctx);
   // params + the synthetic outer body share `scope`. Block-statement

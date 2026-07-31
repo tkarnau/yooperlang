@@ -95,6 +95,10 @@ export const ASTNodeKind = Object.freeze({
 
   // phase 6.3: task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",
+  // `await g(...)` - drive an async callee inline, propagating its
+  // suspension into the enclosing coroutine frame. Distinct from
+  // WAIT_EXPRESSION, which joins an already-spawned Task<T> handle.
+  AWAIT_EXPRESSION: "AWAIT_EXPRESSION",
   TASK_AUTO_WAIT: "TASK_AUTO_WAIT",
   TASK_RELEASE: "TASK_RELEASE",
   TASK_RETAIN: "TASK_RETAIN",

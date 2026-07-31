@@ -45,23 +45,28 @@ task serverTask(): int32 {
     }
     let h: EchoHandler = { greeting: "ping-pong\n" };
     let d: Dispatcher = Dispatcher.from(ref h);
-    switch (http.serveDefault(ref lr.listener, ref d, 2)) {
+    switch (await http.serveDefault(ref lr.listener, ref d, 2)) {
         case Result.Ok { value: n }: { printf(`server done served=${n}\n`); }
         case Result.Err { error: e }: { printf(`server done err=${e}\n`); }
     }
     return 0;
 }
 
-function exercise(): Result<int32, HttpError> {
+// Async: every client call suspends rather than blocking a worker.
+async exercise(): Result<int32, HttpError> {
     let c: Client = client.clientNew();
 
-    disposable got: ClientResponse = client.get(ref c, "http://127.0.0.1:18082/")?;
+    disposable got: ClientResponse = await client.get(ref c, "http://127.0.0.1:18082/")?;
     printf(`status=${got.status.code} body=${client.responseText(ref got)}`);
 
     disposable posted: ClientResponse =
-        client.post(ref c, "http://127.0.0.1:18082/items", "text/plain", "hello")?;
+        await client.post(ref c, "http://127.0.0.1:18082/items", "text/plain", "hello")?;
     printf(`status=${posted.status.code} body=${client.responseText(ref posted)}`);
     return Result.Ok { value: 0 };
+}
+
+task exerciseTask(): Result<int32, HttpError> {
+    return await exercise();
 }
 
 function main(): int32 {
@@ -70,8 +75,10 @@ function main(): int32 {
     // tcp_connect retries until accept(2) takes the fd.
     let _slept: int32 = usleep(100000);    // 100ms
 
+    // main is the sync/async boundary - spawn the async work as a task.
+    pooled ex = exerciseTask();
     let code: int32 = 0;
-    switch (exercise()) {
+    switch (wait ex) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: e }: {
             printf(`client err: ${e}\n`);

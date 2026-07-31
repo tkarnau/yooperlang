@@ -7,7 +7,8 @@
 //   offset 12: int32_t         refcount (0 = stack, >=1 = pooled)
 //   offset 16: yoop_mutex_t*   per-handle mutex (heap-allocated)
 //   offset 24: yoop_cond_t*    per-handle cond  (heap-allocated)
-//   offset 32+: compiler-owned (result slot + args blob)
+//   offset 32: void*           coroutine handle (async task body)
+//   offset 40+: compiler-owned (result slot + args blob)
 
 #include "yoop_runtime.h"
 #include "yoop_platform.h"
@@ -38,6 +39,10 @@ static inline void*          handle_state_ptr (void* h) { return (char*)h + 8;  
 // - the byte just stops being padding.
 static inline void*          handle_cancel_ptr(void* h) { return (char*)h + 9;  }
 static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; }
+// Async: the task body's coroutine handle, stored by the thunk. Sits at
+// offset 32, immediately after the cond pointer, so every offset the
+// prefix accessors above hard-code is unchanged.
+static inline void**         handle_coro_slot (void* h) { return (void**)((char*)h + 32); }
 
 // ---- queue ----------------------------------------------------------------
 
@@ -80,6 +85,10 @@ static struct {
 
 // ---- worker loop ----------------------------------------------------------
 
+// Defined below, next to the other queue operations; declared here
+// because yoop_task_submit (further up) is its first caller.
+static void queue_push(void* handle, void (*thunk)(void*));
+
 // Phase 9.I: pop one task from the front of the queue and return it. Caller
 // must hold queue_mu and is responsible for free()-ing the returned node.
 // Returns NULL when the queue is empty.
@@ -89,6 +98,55 @@ static task_node* try_pop_task_locked(void) {
     g_rt.queue_head = node->next;
     if (!g_rt.queue_head) g_rt.queue_tail = NULL;
     return node;
+}
+
+// The task this thread is currently stepping. A suspend primitive deep
+// in a call chain reads it to register a wakeup against the right task,
+// so no intermediate signature has to carry a task handle.
+//
+// Thread-local because a step runs to its next suspend point on exactly
+// one thread; the value is set around each step and cleared after.
+#ifdef _WIN32
+  static __declspec(thread) void* tls_current_task = NULL;
+#else
+  static __thread void* tls_current_task = NULL;
+#endif
+
+void* yoop_current_task(void) { return tls_current_task; }
+
+// Coroutine trampolines, installed by main (see the note in the header
+// on why these are pointers rather than direct calls). NULL until then.
+static yoop_coro_fn   g_coro_resume  = NULL;
+static yoop_coro_fn   g_coro_destroy = NULL;
+static yoop_coro_pred g_coro_done    = NULL;
+
+void yoop_runtime_set_coro_ops(yoop_coro_fn resume,
+                               yoop_coro_fn destroy,
+                               yoop_coro_pred done) {
+    g_coro_resume  = resume;
+    g_coro_destroy = destroy;
+    g_coro_done    = done;
+}
+
+// Run one step of a task: the initial start (thunk != NULL) or a resume
+// of an already-started coroutine. The step ends at the task's next
+// suspend point or at its completion; either way the worker is free
+// afterwards, which is the entire point of the async runtime.
+static void run_task_step(void* handle, void (*thunk)(void*)) {
+    void* prev = tls_current_task;
+    tls_current_task = handle;
+    if (thunk) {
+        // Start: the thunk calls the body, stashes the coroutine handle,
+        // and calls yoop_task_settle itself.
+        thunk(handle);
+    } else {
+        void* coro = *handle_coro_slot(handle);
+        if (coro && g_coro_resume) {
+            g_coro_resume(coro);
+            yoop_task_settle(handle);
+        }
+    }
+    tls_current_task = prev;
 }
 
 static void worker_loop(void) {
@@ -104,7 +162,7 @@ static void worker_loop(void) {
         task_node* node = try_pop_task_locked();
         yoop_mutex_unlock(&g_rt.queue_mu);
 
-        node->thunk(node->handle);
+        run_task_step(node->handle, node->thunk);
         free(node);
     }
 }
@@ -255,18 +313,7 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
     *handle_cond_slot(handle)  = c;
     A_STORE_U8(handle_state_ptr(handle), 0);
 
-    task_node* node = (task_node*)malloc(sizeof(task_node));
-    node->handle = handle;
-    node->thunk  = thunk;
-    node->next   = NULL;
-
-    yoop_mutex_lock(&g_rt.queue_mu);
-    ensure_workers_spawned_locked();
-    if (g_rt.queue_tail) g_rt.queue_tail->next = node;
-    else                 g_rt.queue_head = node;
-    g_rt.queue_tail = node;
-    yoop_cond_signal(&g_rt.queue_cv);
-    yoop_mutex_unlock(&g_rt.queue_mu);
+    queue_push(handle, thunk);
 }
 
 // Phase 10.F: wait_until passes its absolute monotonic deadline through to
@@ -311,7 +358,7 @@ void yoop_task_wait(void* handle) {
         task_node* n = try_pop_task_locked();
         if (n) {
             yoop_mutex_unlock(&g_rt.queue_mu);
-            n->thunk(n->handle);
+            run_task_step(n->handle, n->thunk);
             free(n);
             continue;
         }
@@ -402,6 +449,54 @@ void yoop_task_cancel(void* handle) {
     yoop_mutex_lock(&g_rt.queue_mu);
     yoop_cond_broadcast(&g_rt.queue_cv);
     yoop_mutex_unlock(&g_rt.queue_mu);
+}
+
+// Push a node onto the run queue. Caller must NOT hold queue_mu.
+static void queue_push(void* handle, void (*thunk)(void*)) {
+    task_node* node = (task_node*)malloc(sizeof(task_node));
+    if (!node) return;
+    node->handle = handle;
+    node->thunk  = thunk;
+    node->next   = NULL;
+
+    yoop_mutex_lock(&g_rt.queue_mu);
+    ensure_workers_spawned_locked();
+    if (g_rt.queue_tail) g_rt.queue_tail->next = node;
+    else                 g_rt.queue_head = node;
+    g_rt.queue_tail = node;
+    yoop_cond_signal(&g_rt.queue_cv);
+    yoop_mutex_unlock(&g_rt.queue_mu);
+}
+
+// A suspended task became runnable again. thunk == NULL marks a resume
+// rather than a start, so run_task_step drives the stored coroutine
+// handle instead of re-running the body from the top.
+void yoop_task_make_runnable(void* handle) {
+    if (!handle) return;
+    queue_push(handle, NULL);
+}
+
+// End of one task step. Either the coroutine reached its final suspend -
+// its result is already sitting in the task's own slot, because the
+// thunk handed the body that slot as its return destination - or it
+// merely suspended and something else will make it runnable later.
+void yoop_task_settle(void* handle) {
+    void* coro = *handle_coro_slot(handle);
+    if (!coro || !g_coro_done) {
+        // No coroutine (or no ops installed): the step ran to completion
+        // synchronously. Anything else would leave the task unfinished
+        // forever and hang every waiter.
+        yoop_handle_signal_done(handle);
+        return;
+    }
+    if (!g_coro_done(coro)) {
+        return;   // suspended - the worker is free, the task stays parked
+    }
+    // Finished. Destroy the frame BEFORE signalling: once state flips, a
+    // waiter can return and drop the last reference to the handle.
+    *handle_coro_slot(handle) = NULL;
+    if (g_coro_destroy) g_coro_destroy(coro);
+    yoop_handle_signal_done(handle);
 }
 
 void yoop_handle_signal_done(void* handle) {

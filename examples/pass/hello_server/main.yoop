@@ -31,7 +31,9 @@ type HelloHandler implements Handler {
     }
 }
 
-function run(): Result<int32, HttpError> {
+// `run` is async because everything under it is: the accept, the reads,
+// and the writes all suspend rather than blocking a worker thread.
+async run(): Result<int32, HttpError> {
     let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128);
     if (lr.error.len > 0) {
         return Result.Err { error: types.errIo(lr.error) };
@@ -42,13 +44,21 @@ function run(): Result<int32, HttpError> {
     // `Dispatcher.from` erases the handler's concrete type, so the serve loop
     // is compiled once no matter how many handler types the program has.
     let d: Dispatcher = Dispatcher.from(ref handler);
-    let served: int32 = http.serveDefault(ref lr.listener, ref d, 1)?;
+    let served: int32 = await http.serveDefault(ref lr.listener, ref d, 1)?;
     printf(`served=${served}\n`);
     return Result.Ok { value: served };
 }
 
+// `main` cannot be async - it is the sync/async boundary. The bridge is
+// the one that already existed: spawn a task (whose body IS async) and
+// join it with `wait`.
+task serveTask(): Result<int32, HttpError> {
+    return await run();
+}
+
 function main(): int32 {
-    switch (run()) {
+    pooled h = serveTask();
+    switch (wait h) {
         case Result.Ok { value: _n }: { return 0; }
         case Result.Err { error: e }: {
             printf(`server failed: ${e}\n`);

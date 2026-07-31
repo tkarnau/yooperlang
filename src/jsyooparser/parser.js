@@ -748,6 +748,7 @@ export function parse(src) {
         switch (peekTag) {
           case TokenTags.function:
           case TokenTags.task:
+          case TokenTags.async:
           case TokenTags.type:
             {
               seenNonImport = true;
@@ -1817,6 +1818,8 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.EXPORT_DECL);
     switch (peek().tag) {
       case TokenTags.function:
+      case TokenTags.task:
+      case TokenTags.async:
         node.decl = parseFunctionDecl();
         break;
       case TokenTags.type:
@@ -1919,7 +1922,10 @@ export function parse(src) {
 
     expect(TokenTags.lcurly);
     node.methods = [];
-    while (peek().tag === TokenTags.function) {
+    while (
+      peek().tag === TokenTags.function ||
+      peek().tag === TokenTags.async
+    ) {
       node.methods.push(parseMethodSig());
     }
 
@@ -1973,7 +1979,11 @@ export function parse(src) {
 
   function parseMethodSig() {
     const node = buildSourcedNode(ASTNodeKind.METHOD_SIG);
-    expect(TokenTags.function);
+    // A trait may declare a method async; an impl has to match (checked
+    // in the typechecker, so the diagnostic can name both sites).
+    node.isAsync = peek().tag === TokenTags.async;
+    if (node.isAsync) advance();
+    else expect(TokenTags.function);
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     // must be ref self as first param
@@ -2033,7 +2043,10 @@ export function parse(src) {
     expect(TokenTags.lcurly);
     node.decls = [];
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
-      if (peek().tag === TokenTags.function)
+      if (
+        peek().tag === TokenTags.function ||
+        peek().tag === TokenTags.async
+      )
         node.decls.push(parseExternFunctionDecl());
       else if (peek().tag === TokenTags.type)
         node.decls.push(parseExternTypeDecl());
@@ -2049,8 +2062,15 @@ export function parse(src) {
   }
 
   function parseExternFunctionDecl() {
+    // `async function f(): T;` inside an extern "intrinsic" block - the
+    // suspend primitive is declared this way. Here `async` PREFIXES
+    // `function` rather than replacing it, matching how the rest of an
+    // extern signature reads.
+    const isAsync = peek().tag === TokenTags.async;
+    if (isAsync) advance();
     expect(TokenTags.function);
     const node = buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
+    node.isAsync = isAsync;
     node.name = parseIdentAsName();
     // Optional type params, e.g. `function heap_alloc<T>(n: usize): T[];`.
     // Only useful inside `extern "intrinsic"` blocks where the canonical
@@ -2171,6 +2191,33 @@ export function parse(src) {
       const waitNode = buildSourcedNode(ASTNodeKind.WAIT_EXPRESSION);
       waitNode.operand = parseExpression(70);
       return waitNode;
+    } else if (peek().tag === TokenTags.await) {
+      // await g(...) - suspend until an async call completes. Same tight
+      // precedence as ref/wait so postfixes bind to the operand.
+      //
+      // Distinct from `wait`: `wait h` joins an already-spawned Task<T>
+      // handle, while `await` drives a coroutine inline and propagates
+      // its suspension into the enclosing frame.
+      advance();
+      const awaitNode = buildSourcedNode(ASTNodeKind.AWAIT_EXPRESSION);
+      const operand = parseExpression(70);
+      // `await f(x)?` must mean `(await f(x))?` - await the call, THEN
+      // propagate its error. The postfix `?` binds inside parseExpression,
+      // so it lands on the call and we get `await (f(x)?)`, which is
+      // backwards: it would try to propagate before the value exists and
+      // then await a non-call.
+      //
+      // Rather than restructure the postfix loop (the `?` postfix is
+      // shared by every expression form), swap the two nodes here. Same
+      // fix every language with both operators needs - Rust spells it
+      // `foo().await?` precisely to dodge the ambiguity.
+      if (operand && operand.kind === ASTNodeKind.TRY_OP) {
+        awaitNode.operand = operand.operand;
+        operand.operand = awaitNode;
+        return operand;
+      }
+      awaitNode.operand = operand;
+      return awaitNode;
     } else if (peek().tag === TokenTags.amp) {
       // Phase 8.A: prefix `&x` - address-of an lvalue. Same tight precedence
       // as `ref` so postfixes bind to the operand. The `&` token also serves
@@ -3140,16 +3187,40 @@ export function parse(src) {
   // expects an identifier, args, curlys, statements...
   function parseFunctionDecl() {
     let isTask = false;
-    // Two accepted shapes:
+    let isAsync = false;
+    // Three accepted shapes, each keyword REPLACING `function`:
     //   function foo(...) {...}
-    //   task foo(...) {...}          (task replaces `function`)
-    // The `task function foo(...)` shape is rejected - it's redundant.
+    //   task foo(...) {...}
+    //   async foo(...) {...}
+    // The redundant `task function` / `async function` spellings are
+    // rejected with a fix-it.
     if (peek().tag === TokenTags.task) {
       advance();
       isTask = true;
+      // A task body is implicitly async - it IS the scheduler's unit of
+      // work, so it is exactly where a suspend can land. Writing
+      // `async task` would be noise.
+      isAsync = true;
       if (peek().tag === TokenTags.function) {
         throw parseError(
           "`task function` is redundant - use `task <name>(...)`",
+          peek().start,
+          peek().length,
+        );
+      }
+    } else if (peek().tag === TokenTags.async) {
+      advance();
+      isAsync = true;
+      if (peek().tag === TokenTags.function) {
+        throw parseError(
+          "`async function` is redundant - use `async <name>(...)`",
+          peek().start,
+          peek().length,
+        );
+      }
+      if (peek().tag === TokenTags.task) {
+        throw parseError(
+          "`async task` is redundant - a task body is already async",
           peek().start,
           peek().length,
         );
@@ -3159,6 +3230,7 @@ export function parse(src) {
     }
     const node = parseFunctionDeclBody();
     node.isTask = isTask;
+    node.isAsync = isAsync;
     return node;
   }
 
@@ -3294,7 +3366,8 @@ export function parse(src) {
         // colon. Reserved keywords are accepted as field names so C-style
         // names like `type`, `kind`, `enum` don't collide with the grammar.
         if (
-          peek().tag === TokenTags.function &&
+          (peek().tag === TokenTags.function ||
+            peek().tag === TokenTags.async) &&
           peekAhead(1).tag !== TokenTags.colon
         ) {
           node.methods.push(parseMethodDecl());
@@ -3394,7 +3467,8 @@ export function parse(src) {
       // use the trailing `(` to disambiguate, mirroring how struct bodies
       // distinguish `function name(...)` (method) from `function: T` (field).
       if (
-        peek().tag === TokenTags.function &&
+        (peek().tag === TokenTags.function ||
+          peek().tag === TokenTags.async) &&
         peekAhead(1).tag !== TokenTags.lcurly &&
         peekAhead(1).tag !== TokenTags.comma &&
         peekAhead(1).tag !== TokenTags.rcurly
@@ -3539,7 +3613,8 @@ export function parse(src) {
     while (isIdentLikeTag(peek().tag)) {
       // if enum is impl functions
       if (
-        peek().tag === TokenTags.function &&
+        (peek().tag === TokenTags.function ||
+          peek().tag === TokenTags.async) &&
         peekAhead(1).tag !== TokenTags.colon
       ) {
         node.methods.push(parseMethodDecl());
@@ -3841,7 +3916,12 @@ export function parse(src) {
 
   function parseMethodDecl() {
     const node = buildSourcedNode(ASTNodeKind.METHOD_DECL);
-    expect(TokenTags.function);
+    // `async NAME(ref self, ...)` is an async method, the same way `async
+    // NAME(...)` is an async free function - the keyword REPLACES
+    // `function`.
+    node.isAsync = peek().tag === TokenTags.async;
+    if (node.isAsync) advance();
+    else expect(TokenTags.function);
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     // must be ref self as first param

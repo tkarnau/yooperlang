@@ -247,6 +247,12 @@ char*       yoop_io_time_string(int64_t epoch) { (void)epoch; return _strdup("")
   int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {
       (void)fd; (void)ct; (void)deadline_ns; errno = ENOSYS; return -1;
   }
+  // 1 = "no async path available", which makes the yoop side fall back
+  // to the blocking wait rather than suspend with no way to be resumed.
+  int yoop_io_arm_readable(int fd) { (void)fd; return 1; }
+  int yoop_io_arm_writable(int fd) { (void)fd; return 1; }
+  int yoop_io_set_nonblocking(int fd) { (void)fd; return 0; }
+  int yoop_io_would_block(int e) { (void)e; return 0; }
   void yoop_io_shutdown(void) {}
 #else
 
@@ -283,7 +289,13 @@ typedef struct yoop_io_reg {
     uint64_t            seq;
     int                 fd;
     int                 want_write;
+    // Exactly one of these is set. `w` means a thread is PARKED on this
+    // fd (the blocking flavor): delivery unparks it. `task` means a
+    // coroutine ARMED it and then suspended (the async flavor): delivery
+    // pushes the task back onto the run queue instead, so no thread was
+    // tied up waiting in the first place.
     yoop_io_wait_t*     w;
+    void*               task;
     struct yoop_io_reg* next;
 } yoop_io_reg;
 
@@ -369,15 +381,24 @@ static void drain_self_pipe(int fd) {
 // that takes io_mu and sees fired == 0 knows the multiplexer can never
 // reach its stack frame again once it removes the entry.
 static void io_deliver(uint64_t seq, int err) {
+    void* wake_task = NULL;
     yoop_mutex_lock(&io_mu);
     yoop_io_reg* r = reg_find_seq_locked(seq);
     if (r) {
-        r->w->result_errno = err;
-        r->w->fired        = 1;
-        yoop_unpark(&r->w->token);
+        if (r->task) {
+            // Async flavor: hand the task back to the scheduler. Deferred
+            // until after the unlock - make_runnable takes the queue lock
+            // and there is no reason to hold both.
+            wake_task = r->task;
+        } else {
+            r->w->result_errno = err;
+            r->w->fired        = 1;
+            yoop_unpark(&r->w->token);
+        }
         reg_remove_locked(r);
     }
     yoop_mutex_unlock(&io_mu);
+    if (wake_task) yoop_task_make_runnable(wake_task);
 }
 
 #ifdef YOOP_IO_EPOLL
@@ -541,6 +562,17 @@ void yoop_io_shutdown(void) {
     yoop_mutex_lock(&io_mu);
     while (io_regs) {
         yoop_io_reg* r = io_regs;
+        if (r->task) {
+            // Let the task run again so it can observe the failure and
+            // unwind, rather than stranding it forever.
+            void* t = r->task;
+            io_regs = r->next;
+            free(r);
+            yoop_mutex_unlock(&io_mu);
+            yoop_task_make_runnable(t);
+            yoop_mutex_lock(&io_mu);
+            continue;
+        }
         r->w->result_errno = ESHUTDOWN;
         r->w->fired        = 1;
         yoop_unpark(&r->w->token);
@@ -645,6 +677,7 @@ static int io_wait_common(int fd, int want_write,
     reg->fd         = fd;
     reg->want_write = want_write;
     reg->w          = &w;
+    reg->task       = NULL;
     reg->next       = io_regs;
     io_regs         = reg;
 
@@ -724,6 +757,72 @@ int yoop_io_wait_writable(int fd) {
 
 int yoop_io_wait_readable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {
     return io_wait_common(fd, 0, ct, deadline_ns);
+}
+
+// ----- async arming --------------------------------------------------------
+//
+// The whole point of the async runtime: register interest and RETURN,
+// rather than parking the thread. The caller suspends its coroutine
+// immediately afterwards, which releases the worker; delivery pushes the
+// task back onto the run queue.
+static int io_arm_common(int fd, int want_write) {
+    void* task = yoop_current_task();
+    if (!task) {
+        // Not running on a worker (e.g. called straight from main). There
+        // would be nothing to make runnable, so refuse rather than let
+        // the caller suspend into a hole it can never come back from -
+        // the yoop side falls back to the blocking wait on a 1.
+        return 1;
+    }
+    if (!io_ensure_started()) { errno = ENOSYS; return -1; }
+
+    yoop_mutex_lock(&io_mu);
+    if (reg_fd_taken_locked(fd, want_write)) {
+        yoop_mutex_unlock(&io_mu);
+        errno = EAGAIN;
+        return -1;
+    }
+    yoop_io_reg* reg = (yoop_io_reg*)malloc(sizeof(yoop_io_reg));
+    if (!reg) {
+        yoop_mutex_unlock(&io_mu);
+        errno = ENOMEM;
+        return -1;
+    }
+    uint64_t seq = io_seq_next++;
+    reg->seq        = seq;
+    reg->fd         = fd;
+    reg->want_write = want_write;
+    reg->w          = NULL;
+    reg->task       = task;
+    reg->next       = io_regs;
+    io_regs         = reg;
+
+    if (io_register(fd, want_write, seq) < 0) {
+        int saved = errno;
+        reg_remove_locked(reg);
+        yoop_mutex_unlock(&io_mu);
+        errno = saved;
+        return -1;
+    }
+    yoop_mutex_unlock(&io_mu);
+    return 0;
+}
+
+int yoop_io_arm_readable(int fd) { return io_arm_common(fd, 0); }
+int yoop_io_arm_writable(int fd) { return io_arm_common(fd, 1); }
+
+// Is this errno the "try again later" code? EAGAIN and EWOULDBLOCK are
+// the same value on Linux and macOS but are not required to be, and
+// neither has a stable numeric value across platforms - so the test
+// lives here rather than as a mirrored constant in yoop.
+int yoop_io_would_block(int e) {
+    return (e == EAGAIN || e == EWOULDBLOCK || e == EINPROGRESS) ? 1 : 0;
+}
+
+int yoop_io_set_nonblocking(int fd) {
+    int fl = fcntl(fd, F_GETFL, 0);
+    if (fl < 0) return -1;
+    return fcntl(fd, F_SETFL, fl | O_NONBLOCK);
 }
 
 int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns) {

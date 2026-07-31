@@ -20,6 +20,7 @@ import.unsafe;
 
 import { Result } from "../core/types.yoop";
 import { RawCancel } from "../core/cancel_ffi.yoop";
+import * as conc from "../core/concurrency.yoop";
 import * as intr from "../core/intrinsics.yoop";
 
 // ----- POSIX socket constants (stable across Linux / macOS / BSD) ----------
@@ -82,6 +83,10 @@ extern "C" from "yoop_runtime" {
     // two-argument forms above. Return one of the IO_* codes below.
     function yoop_io_wait_readable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
     function yoop_io_wait_writable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
+    // Non-blocking mode + the portable EAGAIN test, both needed by the
+    // async helpers at the bottom of this file.
+    function yoop_io_set_nonblocking(fd: c_int): c_int;
+    function yoop_io_would_block(e: int32): c_int;
     // Cross-platform SO_REUSEADDR helper. SOL_SOCKET / SO_REUSEADDR have
     // different numeric values on Linux vs macOS, so we resolve them in
     // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
@@ -159,6 +164,10 @@ export function ffi_listen(host: string, port: int32, backlog: int32): Result<c_
         let close_rc_b: c_int = close(fd);
         return Result.Err { error: msg_bind };
     }
+
+    // The listening socket goes non-blocking too, so the async accept can
+    // retry around EAGAIN rather than sleeping inside accept().
+    let nb_rc: c_int = yoop_io_set_nonblocking(fd);
 
     let listen_rc: c_int = listen(fd, backlog);
     if (listen_rc != 0) {
@@ -272,6 +281,112 @@ export function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string>
 // matters for a server).
 export function ffi_close(fd: c_int): c_int {
     return close(fd);
+}
+
+// ----- async (suspending) operations ---------------------------------------
+//
+// The blocking helpers above park the calling thread inside the
+// multiplexer. These suspend the calling TASK instead, handing its worker
+// back to the pool, so one worker can carry many in-flight connections.
+//
+// The shape is always "try the syscall; if it would block, wait for
+// readiness and retry", which is why the fd has to be non-blocking - a
+// blocking fd would sleep inside recv and never reach the wait.
+//
+// `awaitReady` hides the one wrinkle: `conc.awaitReadable` reports 1 when
+// there is no current task (called straight from main rather than from a
+// worker). Suspending there would park a coroutine nothing can resume, so
+// that case falls back to the blocking wait. The upshot is that the same
+// std/net code is correct on a worker and on main; it just suspends in
+// one and blocks in the other.
+function wouldBlock(e: int32): bool {
+    return yoop_io_would_block(e) != 0;
+}
+
+async awaitReady(fd: c_int, wantWrite: bool): c_int {
+    let armed: c_int = 0;
+    if (wantWrite) { armed = await conc.awaitWritable(fd); }
+    else           { armed = await conc.awaitReadable(fd); }
+    if (armed == 1) {
+        // Not on a worker - block this thread instead.
+        if (wantWrite) { return yoop_io_wait_writable(fd); }
+        return yoop_io_wait_readable(fd);
+    }
+    return armed;
+}
+
+// Put a socket into non-blocking mode. Every fd that reaches the async
+// helpers must go through this first; std/net does it in `newStream` and
+// in `ffi_listen`, so callers never have to remember.
+export function ffiSetNonblocking(fd: c_int): c_int {
+    return yoop_io_set_nonblocking(fd);
+}
+
+// Suspending accept. Retries around EAGAIN, which on a listening socket
+// means "no pending connection right now".
+export async ffiAcceptAsync(fd: c_int): AcceptCtResult {
+    while (true) {
+        let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
+        let len: c_int = 16;
+        let cfd: c_int = accept(fd, &peer, &len);
+        if (cfd >= 0) {
+            return {
+                code: IO_READY, fd: cfd,
+                peerHost: peer.sin_addr, peerPort: peer.sin_port, error: "",
+            };
+        }
+        let e: int32 = errno.get();
+        if (!wouldBlock(e)) {
+            return {
+                code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+                error: errno.message(e),
+            };
+        }
+        let rc: c_int = await awaitReady(fd, false);
+        if (rc != 0) {
+            return {
+                code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+                error: errno.message(errno.get()),
+            };
+        }
+    }
+    return { code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0, error: "" };
+}
+
+// Suspending single read. `n == 0` with code IO_READY is EOF.
+export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
+    while (true) {
+        let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+        if (n >= 0) { return { code: IO_READY, n: n, error: "" }; }
+        let e: int32 = errno.get();
+        if (!wouldBlock(e)) { return ioErr(errno.message(e)); }
+        let rc: c_int = await awaitReady(fd, false);
+        if (rc != 0) { return ioErr(errno.message(errno.get())); }
+    }
+    return ioErr("unreachable");
+}
+
+// Suspending write-everything. Loops until the whole buffer is out,
+// suspending whenever the socket buffer fills.
+export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
+    let total: usize = 0;
+    while (total < buf.len) {
+        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        if (n >= 0) {
+            total = total + usize(n);
+        } else {
+            let e: int32 = errno.get();
+            if (!wouldBlock(e)) {
+                return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(e) };
+            }
+            let rc: c_int = await awaitReady(fd, true);
+            if (rc != 0) {
+                return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
+            }
+        }
+    }
+    return { code: IO_READY, n: c_ssize_t(total), error: "" };
 }
 
 // ----- cancel-aware operations ---------------------------------------------
