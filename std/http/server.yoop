@@ -1,298 +1,435 @@
-// std/http/server.yoop - HTTP server loop + Handler trait.
+// std/http/server.yoop - the accept loop, the `Handler` trait, and the
+// request/response exchange on one connection.
 //
-// Glues std/net (TCP) and std/http/parser (request parse) +
-// std/http/types (Request, Response). Per-connection processing is
-// sequential - one request at a time. Spawning a task per connection
-// for true concurrency is the obvious next step (library-design.md
-// §7.3 follow-ups) and becomes straightforward once `task` accepts
-// `ref` parameters more broadly.
+// Shape of the module:
+//
+//   Handler        the trait user code implements
+//   Dispatcher     the vtable for it, so the server is not generic
+//   ServerConfig   the limits (head size, body size, requests per connection)
+//   serve          the loop, over a `Dispatcher` and a config
+//   serveDefault   the same loop with the default config
+//
+// Three things changed from the first cut and are worth knowing:
+//
+//   1. **The loop is not generic.** It takes a `Dispatcher`, the Phase 9.G
+//      vtable for `Handler`, so there is one copy of the serve machinery no
+//      matter how many handler types a program has - and the per-connection
+//      work could finally be split into named functions, which a generic
+//      calling a generic across module boundaries would not survive.
+//   2. **A bad client no longer kills the server.** A malformed request gets
+//      the status its error carries (400, 413, 501, 505) and the connection
+//      is dropped; the accept loop keeps going. Only a failure of the
+//      listener itself ends `serve`.
+//   3. **Connections are reused.** HTTP/1.1 keep-alive is the default; a
+//      request asking for `Connection: close`, a 1.0 request, or hitting
+//      `maxRequestsPerConnection` ends the connection cleanly.
+//
+// Known limitation, stated plainly: one connection is served at a time. The
+// accept loop does not spawn a task per connection yet, so a slow client
+// blocks the next one. Also, strings built while parsing a request are never
+// freed (Yoop has no string free), so a long-lived server's memory grows with
+// distinct header values seen; a per-request arena does not help, because
+// string allocation goes straight to malloc.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
-import { Result } from "../core/types.yoop";
+import { Result, Option } from "../core/types.yoop";
 import { Readable, Writable } from "../core/traits.yoop";
+import * as vec, { Vec } from "../core/vec.yoop";
+import * as str from "../core/strings.yoop";
+import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import {
-  Vec, vec_new, vec_push, vec_get, vec_as_array, vec_set,
-} from "../core/vec.yoop";
-import { SocketAddr } from "../net/addr.yoop";
-import {
-  TcpListener, TcpStream, AcceptResult, ListenResult,
-  tcp_listen, tcp_accept,
-} from "../net/tcp.yoop";
-import {
-  StatusCode, reason_phrase,
-  Headers, headers_new, headers_add, headers_get, headers_has,
-  HeaderEntry, Request, Response, response_new,
-  response_body_bytes, server_err,
+import * as tcp, { TcpListener, TcpStream, AcceptResult } from "../net/tcp.yoop";
+import * as wire from "./wire.yoop";
+import * as parser, { ParsedRequest } from "./parser.yoop";
+import * as types, {
+    HttpError, HttpMethod, Request, Response, StatusCode,
+    errIo, errInternal, headersView, httpError, methodEq, methodLabel,
+    payloadTooLarge, reasonPhrase, responseNew, responseBodyBytes, status,
 } from "./types.yoop";
-import {
-  ParsedRequest, parse_request_head, find_header_end,
-  parsed_content_length,
-} from "./parser.yoop";
 
-// ----- Handler trait -----------------------------------------------------
+// stdout is block-buffered when it is not a terminal, which would make the
+// access log appear in bursts (or not at all, if the process is killed).
+// A server's log is only useful live, so each line is flushed. Passing 0 for
+// the `FILE *` is the null-stream form, which flushes every open stream.
+extern "C" from "stdio.h" {
+    function fflush(stream: int64): int32;
+}
 
-// `HandleOutcome` distinguishes "handler ran cleanly" from "it errored".
-// A non-empty `error` is observed by the server; the connection is closed
-// in either case (no keep-alive in the MVP).
+// ----- Handler ------------------------------------------------------------
+
+// What a handler reports. `Ok` means it wrote a response; `Err` hands the
+// failure back to the server, which renders it with the status the error
+// carries. A handler that cannot decide should return an `HttpError` rather
+// than writing a 500 itself, so the shape of an error page stays in one place.
 export variant HandleOutcome {
-  Ok,
-  Err { error: string },
+    Ok,
+    Err { error: HttpError },
 }
 
 export trait Handler {
-  function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
 }
 
-// Phase 10.I: the Phase 9.G vtable for `Handler`. Built once at the
-// trait's home so `Dispatcher.from(ref h)` works from anywhere a Handler
-// impl is in scope. Routers and middleware compose handlers by holding
-// `Dispatcher` values rather than monomorphizing per impl type.
+// The type-erased view of a Handler. Routers and middleware hold these
+// instead of monomorphizing over every handler type.
+//
+// A `Dispatcher` stores a POINTER to the handler it was built from, so the
+// handler has to outlive it. Build them from bindings that live as long as
+// the server does (locals in `main` is the usual shape), never from a value
+// that goes out of scope while the route table keeps running.
 export vtable Dispatcher for Handler {
-  handle: (ref req: Request, ref resp: Response) => HandleOutcome,
+    handle: (ref req: Request, ref resp: Response) => HandleOutcome,
 }
 
-// ----- ServeOutcome -----------------------------------------------------
-//
-// Ordinary struct, not a fallible struct: the server reports how many
-// requests it served plus an optional `error`. Caller checks both fields
-// explicitly (no `?` propagation).
-export type ServeOutcome { served: int32, error: string }
+// ----- configuration ------------------------------------------------------
 
-// ----- int-to-decimal helper -------------------------------------------
-
-// Push the ASCII decimal representation of `n` onto the back of `out`.
-function push_decimal(ref out: Vec<uint8>, n: usize): void {
-  if (n == 0) {
-    vec_push(ref out, 48);
-    return;
-  }
-  let digits: usize = 0;
-  let count: usize = n;
-  while (count > 0) {
-    count = count / 10;
-    digits = digits + 1;
-  }
-  let start: usize = out.len;
-  let i: usize = 0;
-  while (i < digits) {
-    vec_push(ref out, 0);
-    i = i + 1;
-  }
-  let val: usize = n;
-  let j: usize = digits;
-  while (val > 0) {
-    j = j - 1;
-    let q: usize = val / 10;
-    let rem: usize = val - q * 10;
-    vec_set(ref out, start + j, uint8(48 + rem));
-    val = q;
-  }
+// The limits that keep one client from being able to exhaust the server.
+// Every one of them has a defensible default and none of them is unlimited.
+export type ServerConfig {
+    maxHeadBytes:              usize,   // request line + headers
+    maxBodyBytes:              usize,   // Content-Length ceiling
+    readChunk:                 usize,   // per-recv scratch size
+    maxRequestsPerConnection:  int32,   // keep-alive ceiling, <= 0 for one
+    logRequests:               bool,
 }
 
-function push_decimal_i32(ref out: Vec<uint8>, n: int32): void {
-  if (n < 0) {
-    vec_push(ref out, 45);   // '-'
-    push_decimal(ref out, usize(0 - int64(n)));
-    return;
-  }
-  push_decimal(ref out, usize(n));
+export function defaultConfig(): ServerConfig {
+    return {
+        maxHeadBytes:             16384,
+        maxBodyBytes:             1048576,   // 1 MiB
+        readChunk:                4096,
+        maxRequestsPerConnection: 100,
+        logRequests:              false,
+    };
 }
 
-function push_str(ref out: Vec<uint8>, s: string): void {
-  let bs: uint8[] = intr.string_as_bytes(s);
-  let i: usize = 0;
-  while (i < bs.len) {
-    vec_push(ref out, bs[i]);
-    i = i + 1;
-  }
+// ----- reading ------------------------------------------------------------
+
+// Read until the head-terminating blank line is in `buf`, or the head limit
+// is hit. Returns `None` when the peer closed cleanly before sending anything
+// (the normal end of a keep-alive connection) and `Some { offset }` otherwise.
+function readHead(
+    ref stream: TcpStream,
+    ref buf: Vec<uint8>,
+    ref scratch: Bytes,
+    cfg: ServerConfig,
+): Result<Option<usize>, HttpError> {
+    // Bytes left over from the previous request on this connection may
+    // already contain a whole head.
+    let pre: usize = wire.findHeadEnd(vec.vec_as_array(ref buf));
+    if (pre != buf.len) { return Result.Ok { value: Option.Some { value: pre } }; }
+
+    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    while (true) {
+        let n: usize = readSome(ref stream, ref window)? "reading the request head";
+        if (n == 0) {
+            if (buf.len == 0) { return Result.Ok { value: Option.None }; }
+            return Result.Err { error: types.errBadRequest("connection closed mid-head") };
+        }
+        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+
+        let at: usize = wire.findHeadEnd(vec.vec_as_array(ref buf));
+        if (at != buf.len) { return Result.Ok { value: Option.Some { value: at } }; }
+        if (buf.len > cfg.maxHeadBytes) {
+            return Result.Err {
+                error: httpError(status(431), `request head exceeded ${cfg.maxHeadBytes} bytes`),
+            };
+        }
+    }
+    return Result.Ok { value: Option.None };
 }
 
-function push_bytes(ref out: Vec<uint8>, bs: uint8[]): void {
-  let i: usize = 0;
-  while (i < bs.len) {
-    vec_push(ref out, bs[i]);
-    i = i + 1;
-  }
+// One recv, with the error mapped into the layer's error type.
+function readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
+    switch (Readable.read(ref stream, ref window)) {
+        case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
+        case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
+    }
+    return Result.Ok { value: 0 };
 }
 
-// ----- Response serialization ------------------------------------------
-
-function write_response(ref resp: Response, ref out: Vec<uint8>): void {
-  // Borrowing view of the body bytes (Static string or Owned buffer). Valid
-  // for the duration of this call - we only read from `resp` below.
-  let body_view: uint8[] = response_body_bytes(ref resp);
-
-  push_str(ref out, "HTTP/1.1 ");
-  push_decimal_i32(ref out, resp.status.code);
-  vec_push(ref out, 32);
-  push_str(ref out, reason_phrase(resp.status.code));
-  vec_push(ref out, 13);
-  vec_push(ref out, 10);
-
-  if (headers_has(ref resp.headers, "Content-Length")) {
-    // Handler already set Content-Length explicitly; trust it.
-  } else {
-    push_str(ref out, "Content-Length: ");
-    push_decimal(ref out, body_view.len);
-    vec_push(ref out, 13);
-    vec_push(ref out, 10);
-  }
-
-  if (headers_has(ref resp.headers, "Connection")) {
-    // Handler already set Connection; respect it.
-  } else {
-    push_str(ref out, "Connection: close\r\n");
-  }
-
-  let entries: HeaderEntry[] = vec_as_array(ref resp.headers.entries);
-  let i: usize = 0;
-  while (i < entries.len) {
-    push_str(ref out, entries[i].name);
-    push_str(ref out, ": ");
-    push_str(ref out, entries[i].value);
-    vec_push(ref out, 13);
-    vec_push(ref out, 10);
-    i = i + 1;
-  }
-
-  vec_push(ref out, 13);
-  vec_push(ref out, 10);
-  push_bytes(ref out, body_view);
+// Top up `buf` until it holds `bodyStart + need` bytes.
+function readBody(
+    ref stream: TcpStream,
+    ref buf: Vec<uint8>,
+    ref scratch: Bytes,
+    bodyStart: usize,
+    need: usize,
+): Result<usize, HttpError> {
+    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    while (buf.len < bodyStart + need) {
+        let n: usize = readSome(ref stream, ref window)? "reading the request body";
+        if (n == 0) {
+            return Result.Err { error: types.errBadRequest("connection closed mid-body") };
+        }
+        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+    }
+    return Result.Ok { value: need };
 }
 
-// ----- Serve loop --------------------------------------------------------
-//
-// All per-connection processing is inlined here. We previously had a
-// `handle_one_connection<H>` helper that serve_n called recursively,
-// but generic-calls-generic across module-instantiation boundaries
-// doesn't yet emit the second instantiation cleanly - until that's
-// fixed in the registry walk, keeping the per-connection body in serve_n
-// is the simplest path.
-//
-// serve_n takes the listener by ref so the listener's lifetime stays
-// with the caller (typical pattern is `disposable lr: ListenResult =
-// tcp_listen(...);` - see examples/pass/hello_server). `n <= 0` loops
-// forever; n > 0 handles exactly N requests then returns.
+// Drop the first `n` bytes of `buf`, keeping whatever followed at the front.
+// That tail is the start of the next pipelined request; it is usually empty.
+function compact(ref buf: Vec<uint8>, n: usize): void {
+    if (n >= buf.len) {
+        vec.vec_clear(ref buf);
+        return;
+    }
+    let view: uint8[] = vec.vec_as_array(ref buf);
+    disposable tail: Bytes = bytes.bytes_from_array(intr.array_slice(view, n, view.len));
+    vec.vec_clear(ref buf);
+    vec.vec_extend_from(ref buf, bytes.bytes_to_array(ref tail));
+}
 
-export function serve_n<H implements Handler>(ref l: TcpListener, ref handler: H, n: int32): ServeOutcome {
-  let served: int32 = 0;
-  let unbounded: bool = n <= 0;
-  while (true) {
-    if (unbounded) {
-      // loop forever; no count check
+// ----- writing ------------------------------------------------------------
+
+// Serialize and send. `headOnly` suppresses the body (a HEAD reply carries
+// the headers the GET would have, including its Content-Length, and no body).
+function writeResponse(
+    ref stream: TcpStream,
+    ref resp: Response,
+    keepAlive: bool,
+    headOnly: bool,
+): Result<usize, HttpError> {
+    let body: uint8[] = responseBodyBytes(ref resp);
+
+    disposable out: Vec<uint8> = vec.vec_new(512 + body.len);
+    wire.pushStr(ref out, `HTTP/1.1 ${resp.status.code} ${reasonPhrase(resp.status.code)}`);
+    wire.pushCrlf(ref out);
+
+    // The server owns framing. A handler that set Content-Length or
+    // Connection itself would be able to desynchronize the stream from the
+    // client's idea of it, so those two are written here and skipped below.
+    wire.pushHeaderLine(ref out, "Content-Length", `${body.len}`);
+    if (keepAlive) {
+        wire.pushHeaderLine(ref out, "Connection", "keep-alive");
     } else {
-      if (served >= n) {
-        return { served: served, error: "" };
-      }
-    }
-    let disposable ar: AcceptResult = tcp_accept(ref l);
-    if (ar.error.len > 0) {
-      return { served: served, error: ar.error };
+        wire.pushHeaderLine(ref out, "Connection", "close");
     }
 
-    // ----- per-connection read + parse + dispatch + write -----
-    let disposable buf: Vec<uint8> = vec_new(2048);
-    let scratch: uint8[] = intr.heap_alloc(2048);
-    let found: bool = false;
-    let dos_limit: usize = 65536;
-    while (buf.len < dos_limit) {
-      let r: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref scratch);
-      let r_n: c_ssize_t = 0;
-      let r_err: string = "";
-      switch (r) {
-        case Result.Ok { value: read_n_ok }: { r_n = read_n_ok; }
-        case Result.Err { error: read_e_ok }: { r_err = read_e_ok; }
-      }
-      if (r_err.len > 0) {
-        intr.heap_free(scratch);
-        return { served: served, error: r_err };
-      }
-      if (r_n == 0) {
-        intr.heap_free(scratch);
-        return { served: served, error: "client closed before request head completed" };
-      }
-      let i: usize = 0;
-      let avail: usize = usize(r_n);
-      while (i < avail) {
-        vec_push(ref buf, scratch[i]);
-        i = i + 1;
-      }
-      let view_in: uint8[] = vec_as_array(ref buf);
-      let he: usize = find_header_end(view_in);
-      if (he != view_in.len) {
-        found = true;
-        break;
-      }
+    for e in headersView(ref resp.headers) {
+        if (isFramingHeader(e.name)) { continue; }
+        wire.pushHeaderLine(ref out, e.name, e.value);
     }
-    intr.heap_free(scratch);
-    if (found) {
-      // fall through to parsing
-    } else {
-      return { served: served, error: "request head exceeded DoS limit" };
+    wire.pushCrlf(ref out);
+
+    if (!headOnly) {
+        wire.pushBytes(ref out, body);
     }
 
-    let parse_view: uint8[] = vec_as_array(ref buf);
-    let disposable pr: ParsedRequest = parse_request_head(parse_view);
-    if (pr.error.len > 0) {
-      return { served: served, error: pr.error };
+    let view: uint8[] = vec.vec_as_array(ref out);
+    switch (Writable.write(ref stream, ref view)) {
+        case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
+        case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
+    return Result.Ok { value: 0 };
+}
 
-    let body_start: usize = pr.body_start;
-    let need: usize = parsed_content_length(ref pr);
-    let have: usize = 0;
-    if (parse_view.len > body_start) {
-      have = parse_view.len - body_start;
-    }
-    if (have < need) {
-      let extra: uint8[] = intr.heap_alloc(2048);
-      while (have < need) {
-        let rr: Result<c_ssize_t, string> = Readable.read(ref ar.stream, ref extra);
-        let rr_n: c_ssize_t = 0;
-        let rr_err: string = "";
-        switch (rr) {
-          case Result.Ok { value: rr_n_ok }: { rr_n = rr_n_ok; }
-          case Result.Err { error: rr_e_ok }: { rr_err = rr_e_ok; }
+function isFramingHeader(name: string): bool {
+    return str.string_eq_ignore_ascii_case(name, "Content-Length")
+        || str.string_eq_ignore_ascii_case(name, "Connection")
+        || str.string_eq_ignore_ascii_case(name, "Transfer-Encoding");
+}
+
+// A header value carrying CR or LF would let a handler inject a second
+// message into the stream (response splitting). Rather than sanitize and
+// carry on, the whole response is replaced: a handler that produced one is
+// broken, and truncating its output quietly is worse than a visible 500.
+function checkResponseHeaders(ref resp: Response): bool {
+    for e in headersView(ref resp.headers) {
+        if (!wire.isValidHeaderValue(e.value) || !wire.isValidHeaderValue(e.name)) {
+            return false;
         }
-        if (rr_err.len > 0) {
-          intr.heap_free(extra);
-          return { served: served, error: rr_err };
-        }
-        if (rr_n == 0) {
-          intr.heap_free(extra);
-          return { served: served, error: "client closed before body complete" };
-        }
-        let k: usize = 0;
-        let avail2: usize = usize(rr_n);
-        while (k < avail2) {
-          vec_push(ref buf, extra[k]);
-          k = k + 1;
-        }
-        have = have + avail2;
-      }
-      intr.heap_free(extra);
     }
-    let final_view: uint8[] = vec_as_array(ref buf);
-    pr.request.body = intr.array_slice(final_view, body_start, body_start + need);
+    return true;
+}
 
-    let disposable resp: Response = response_new();
-    let outcome: HandleOutcome = Handler.handle(ref handler, ref pr.request, ref resp);
-    // observe outcome; the server logs and continues on either branch
-    switch (outcome) {
-      case HandleOutcome.Ok: { }
-      case HandleOutcome.Err { error: _he }: { }
+// ----- one exchange -------------------------------------------------------
+
+// Parse, dispatch, and let the caller turn any failure into a response. The
+// request lives only for the duration of this call.
+function exchange(
+    ref stream: TcpStream,
+    ref buf: Vec<uint8>,
+    ref scratch: Bytes,
+    ref d: Dispatcher,
+    cfg: ServerConfig,
+    ref resp: Response,
+    ref meta: ExchangeMeta,
+): Result<usize, HttpError> {
+    let disposable pr: ParsedRequest = parser.parseRequestHead(vec.vec_as_array(ref buf))?;
+
+    let need: usize = parser.expectedBodyLen(ref pr);
+    if (need > cfg.maxBodyBytes) {
+        return Result.Err {
+            error: httpError(payloadTooLarge(), `body of ${need} bytes exceeds the ${cfg.maxBodyBytes} byte limit`),
+        };
     }
+    let _got: usize = readBody(ref stream, ref buf, ref scratch, pr.bodyStart, need)?;
 
-    let disposable out: Vec<uint8> = vec_new(512);
-    write_response(ref resp, ref out);
-    let out_view: uint8[] = vec_as_array(ref out);
-    let wo: Result<c_ssize_t, string> = Writable.write(ref ar.stream, ref out_view);
-    switch (wo) {
-      case Result.Ok { value: write_n }: { }
-      case Result.Err { error: write_e }: { }
+    // The read above may have grown (and moved) the buffer, so the body view
+    // has to be taken after it, not before.
+    let view: uint8[] = vec.vec_as_array(ref buf);
+    pr.request.body = intr.array_slice(view, pr.bodyStart, pr.bodyStart + need);
+
+    meta.consumed = pr.bodyStart + need;
+    meta.headOnly = methodEq(pr.request.method, HttpMethod.Head);
+    // HTTP/1.0 defaults to close; 1.1 defaults to keep-alive.
+    meta.clientWantsClose = pr.info.connectionClose
+        || !str.string_eq(pr.request.version, "HTTP/1.1");
+    meta.line = `${methodLabel(pr.request.method)} ${pr.request.target}`;
+
+    switch (Dispatcher.handle(ref d, ref pr.request, ref resp)) {
+        case HandleOutcome.Ok: { return Result.Ok { value: meta.consumed }; }
+        case HandleOutcome.Err { error: e }: { return Result.Err { error: e }; }
     }
+    return Result.Ok { value: meta.consumed };
+}
 
-    served = served + 1;
-  }
-  return { served: served, error: "" };
+// What `exchange` learned about the message, for the connection loop. It is
+// filled even on the failure paths that got far enough to know it, so the
+// access log and the framing decision do not depend on the handler running.
+type ExchangeMeta {
+    consumed:         usize,
+    headOnly:         bool,
+    clientWantsClose: bool,
+    line:             string,
+}
+
+function newMeta(): ExchangeMeta {
+    return { consumed: 0, headOnly: false, clientWantsClose: false, line: "-" };
+}
+
+// Serve requests on one accepted connection until it closes. Returns the
+// number of requests answered. Connection-level failures end the connection,
+// not the server, so this swallows its error after reporting it as a
+// response where that is still possible.
+function serveConnection(
+    ref stream: TcpStream,
+    ref d: Dispatcher,
+    cfg: ServerConfig,
+    budget: int32,
+): int32 {
+    let served: int32 = 0;
+    let limit: int32 = cfg.maxRequestsPerConnection;
+    if (limit <= 0) { limit = 1; }
+    // `budget` is what is left of the caller's `n`; a bounded run must not
+    // overshoot it just because keep-alive would have allowed more.
+    if (budget > 0 && budget < limit) { limit = budget; }
+
+    disposable buf: Vec<uint8> = vec.vec_new(cfg.readChunk);
+    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(cfg.readChunk), cfg.readChunk);
+
+    while (served < limit) {
+        // Head first: a clean close here is how a keep-alive connection ends.
+        let headAt: Option<usize> = Option.None;
+        switch (readHead(ref stream, ref buf, ref scratch, cfg)) {
+            case Result.Ok { value: at }: { headAt = at; }
+            case Result.Err { error: e }: {
+                let _ignored: bool = replyWithError(ref stream, ref e, cfg);
+                return served;
+            }
+        }
+        switch (headAt) {
+            case Option.Some { value: _at }: { }
+            case Option.None: { return served; }
+        }
+
+        disposable resp: Response = responseNew();
+        let meta: ExchangeMeta = newMeta();
+        let failed: bool = false;
+        switch (exchange(ref stream, ref buf, ref scratch, ref d, cfg, ref resp, ref meta)) {
+            case Result.Ok { value: _n }: { }
+            case Result.Err { error: e }: {
+                types.respondError(ref resp, ref e);
+                failed = true;
+            }
+        }
+        if (!checkResponseHeaders(ref resp)) {
+            let broken: HttpError = errInternal("handler produced a header value containing CR or LF");
+            types.respondError(ref resp, ref broken);
+            failed = true;
+        }
+
+        served = served + 1;
+        let keepAlive: bool = !failed
+            && !meta.clientWantsClose
+            && served < limit;
+
+        if (cfg.logRequests) {
+            printf(`${meta.line} -> ${resp.status.code}\n`);
+            let _f: int32 = fflush(0);
+        }
+
+        switch (writeResponse(ref stream, ref resp, keepAlive, meta.headOnly)) {
+            case Result.Ok { value: _n }: { }
+            case Result.Err { error: _e }: { return served; }
+        }
+        if (!keepAlive) { return served; }
+        compact(ref buf, meta.consumed);
+    }
+    return served;
+}
+
+// Last-ditch reply for a failure that happened before there was a response to
+// put it in (a head that was too large, a socket that died mid-head). Best
+// effort: if this write fails too, the connection is gone anyway.
+function replyWithError(ref stream: TcpStream, ref e: HttpError, cfg: ServerConfig): bool {
+    disposable resp: Response = responseNew();
+    types.respondError(ref resp, ref e);
+    if (cfg.logRequests) {
+        printf(`- -> ${resp.status.code} (${e.message})\n`);
+        let _f: int32 = fflush(0);
+    }
+    switch (writeResponse(ref stream, ref resp, false, false)) {
+        case Result.Ok { value: _n }: { return true; }
+        case Result.Err { error: _e2 }: { return false; }
+    }
+    return false;
+}
+
+// ----- the loop -----------------------------------------------------------
+
+// Accept and serve until `n` requests have been answered. `n <= 0` runs
+// forever. The listener stays owned by the caller (the usual shape is a
+// `disposable lr: ListenResult = tcp.tcp_listen(...)`).
+//
+// Only a listener failure ends this loop. Anything a connection does to
+// itself - malformed bytes, an abrupt close, a handler error - costs that
+// connection and nothing else.
+export function serve(
+    ref l: TcpListener,
+    ref d: Dispatcher,
+    cfg: ServerConfig,
+    n: int32,
+): Result<int32, HttpError> {
+    let served: int32 = 0;
+    let unbounded: bool = n <= 0;
+    while (unbounded || served < n) {
+        disposable ar: AcceptResult = tcp.tcp_accept(ref l);
+        if (ar.error.len > 0) {
+            return Result.Err { error: errIo(ar.error) };
+        }
+        let budget: int32 = 0;
+        if (!unbounded) { budget = n - served; }
+        served = served + serveConnection(ref ar.stream, ref d, cfg, budget);
+    }
+    return Result.Ok { value: served };
+}
+
+// `serve` with the default limits.
+//
+// Note there is no `serveN<H implements Handler>` convenience wrapper that
+// erases the handler for you: `Dispatcher.from(ref h)` needs a concrete
+// struct receiver and rejects a type parameter, so the erasure has to happen
+// at a call site that knows the handler's real type. One line at the top of
+// main, and in exchange the serve loop exists exactly once in the binary:
+//
+//     let d: Dispatcher = Dispatcher.from(ref handler);
+//     let served: int32 = http.serveDefault(ref lr.listener, ref d, 0)?;
+export function serveDefault(
+    ref l: TcpListener,
+    ref d: Dispatcher,
+    n: int32,
+): Result<int32, HttpError> {
+    return serve(ref l, ref d, defaultConfig(), n);
 }

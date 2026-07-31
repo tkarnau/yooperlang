@@ -29,13 +29,16 @@
 // this is the free-then-null discipline the advisory ownership model leans on
 // instead of compiler-enforced moves.
 //
+// Transactions ride the `transaction` kind (below): the binding owns the
+// transaction, and leaving its scope without committing rolls back.
+//
+//     transaction tx: Tx = sqlite.begin(ref db)?;
+//     let _n: int32 = sqlite.exec(ref db, "...")?;   // a `?` here rolls back
+//     let _c: int32 = sqlite.commit(ref tx)?;
+//
 // Deliberately absent from this first cut:
 //   * Blobs. sqlite3_bind_blob / column_blob want a length pair; the shape
 //     wants `uint8[]` plumbing that is worth its own pass.
-//   * A `transaction` region kind. `appliesTo region` + `ownsBlock` is the
-//     right home for begin/commit-or-rollback (the doc comment on `ephemeral`
-//     in std/core/kinds.yoop already names transactions as the motivating
-//     case), but it is a separate design step - see plans/.
 //   * Connection pooling, and any notion of a query builder.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
@@ -121,6 +124,132 @@ export type Stmt implements Disposable propagates<disposable> {
             self.raw = ffi.rawStmtNull();
         }
     }
+}
+
+// ----- borrowing a connection ----------------------------------------------
+//
+// `Db` declares `propagates<disposable>`, so a struct that stores one is
+// saying it owns the connection - and the compiler makes it say so out loud,
+// by requiring the enclosing struct to propagate the obligation too.
+//
+// That is the right default and the wrong answer for the common server shape,
+// where `main` owns one connection and every handler merely uses it. `DbRef`
+// is the handle for that case: the same pointer, explicitly not ownership.
+//
+//     disposable db: Db = sqlite.open(path)?;        // main owns it
+//     let h: ListHandler = { conn: sqlite.dbRef(ref db) };
+//     ...
+//     let db: Db = sqlite.borrow(self.conn);         // inside the handler
+//     let n: int32 = sqlite.changes(ref db);
+//
+// Bind the result of `borrow` with a plain `let`, never with `disposable` -
+// the owner is somewhere else, and the borrow must not outlive it.
+export type DbRef {
+    raw: RawDb,
+}
+
+export function dbRef(ref db: Db): DbRef {
+    return { raw: db.raw };
+}
+
+export function borrow(h: DbRef): Db {
+    return { raw: h.raw };
+}
+
+// ----- transactions --------------------------------------------------------
+//
+// A transaction is a scope whose exit means something: commit if the work
+// finished, roll back otherwise. That is exactly the shape a kind expresses,
+// so `transaction` is a kind and the rollback is the disposer.
+//
+//     transaction tx: Tx = sqlite.begin(ref db)?;
+//     for row in rows { ... insert ... }
+//     let _c: int32 = sqlite.commit(ref tx)?;
+//
+// Every path out of that scope is covered, including the ones an author
+// forgets: an `expr?` propagating from the middle of the loop rolls back on
+// the way past, because the injected cleanup runs before the return does.
+//
+// Why a BINDING kind and not the `appliesTo region` form that
+// std/core/kinds.yoop's `ephemeral` doc comment predicted: a region has no
+// name, and with no name there is nothing to call `commit` on. The commit has
+// to be an explicit act - a transaction that committed itself whenever the
+// block ended normally would commit on paths the author never considered
+// successful. So the value is named, the rollback is automatic, and the
+// commit is the one thing you have to say out loud.
+
+export kind transaction {
+    appliesTo binding;
+    requires Disposable;
+    mustCall dispose beforeScopeEnd;
+    ownsBlock;
+}
+
+// An open transaction on a connection. Not `Db`-owning: the connection
+// outlives it. `open` is what makes the disposer idempotent - after a commit
+// or an explicit rollback there is nothing left to undo, and the scope-end
+// cleanup becomes a no-op.
+export type Tx implements Disposable {
+    db:   RawDb,
+    open: bool,
+
+    function dispose(ref self): void {
+        if (self.open) {
+            let _rc: int32 = ffi.rawExec(self.db, "rollback;");
+            self.open = false;
+        }
+    }
+}
+
+// Open a deferred transaction. sqlite takes the write lock lazily, on the
+// first statement that needs it.
+export function begin(ref db: Db): Result<Tx, string> {
+    let rc: int32 = ffi.rawExec(db.raw, "begin;");
+    if (rc != SQLITE_OK) {
+        return Result.Err { error: failure(db.raw, "begin") };
+    }
+    return Result.Ok { value: { db: db.raw, open: true } };
+}
+
+// Open a transaction that takes the write lock immediately. Use it when two
+// writers would otherwise both start deferred, both read, and one then fail
+// to upgrade - `begin immediate` turns that into a wait instead of a
+// SQLITE_BUSY at commit time.
+export function beginImmediate(ref db: Db): Result<Tx, string> {
+    let rc: int32 = ffi.rawExec(db.raw, "begin immediate;");
+    if (rc != SQLITE_OK) {
+        return Result.Err { error: failure(db.raw, "begin immediate") };
+    }
+    return Result.Ok { value: { db: db.raw, open: true } };
+}
+
+// Commit. After this the transaction is closed and its scope-end rollback is
+// a no-op; a failed commit leaves it open so the disposer still cleans up.
+export function commit(ref tx: Tx): Result<int32, string> {
+    if (!tx.open) {
+        return Result.Err { error: "sqlite: commit on a transaction that is already closed" };
+    }
+    let rc: int32 = ffi.rawExec(tx.db, "commit;");
+    if (rc != SQLITE_OK) {
+        return Result.Err { error: failure(tx.db, "commit") };
+    }
+    tx.open = false;
+    return Result.Ok { value: ffi.rawChanges(tx.db) };
+}
+
+// Roll back early, before the scope ends. Rarely needed - dropping out of the
+// scope does this - but explicit when the decision to abandon the work is
+// itself the normal path.
+export function rollback(ref tx: Tx): Result<int32, string> {
+    if (!tx.open) {
+        return Result.Ok { value: 0 };
+    }
+    let rc: int32 = ffi.rawExec(tx.db, "rollback;");
+    tx.open = false;
+    if (rc != SQLITE_OK) {
+        return Result.Err { error: failure(tx.db, "rollback") };
+    }
+    return Result.Ok { value: 0 };
 }
 
 // ----- error plumbing ------------------------------------------------------

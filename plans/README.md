@@ -101,6 +101,17 @@ informal personal version):
 - Figure out the idempotent cleanup/dispose pattern (free-then-null, guard on
   null) so `dispose` is safe to call more than once - this is the discipline the
   advisory ownership model leans on instead of compiler-enforced affine moves.
+- Generic call-site inference cannot see through a generic enum's type
+  arguments: `function bridge<T>(r: Result<T, string>): Result<T, E>` will not
+  infer `T` from a `Result<int32, string>` argument, and there is no turbofish
+  to say it out loud. The workaround is one bridging helper per payload type
+  (`examples/playground/todo_api/store.yoop` has four). Surfaced by the
+  std/http rework; see [completed/std-http-rework.md](completed/std-http-rework.md).
+- The std/http rework (DONE, same doc) fixed four compiler bugs on its way
+  through - two `sizeOfType` under-counts that corrupted memory, a module-level
+  `const` string that kept its escapes undecoded, and a `switch` payload
+  binding that could carry an unpopulated struct shell. Worth reading as a list
+  of the shapes that go wrong when a layout or a pass-order assumption drifts.
 
 ---
 
@@ -123,8 +134,13 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
   libsqlite3 (`std/db/`) proved the FFI surface can already do without a compiler
   change (opaque handles, `void **` out-params, pointer-sized-int sentinels, and
   the envelope-struct trick that keeps `unsafe_ptr` out of a safe module), plus
-  the one typecheck papercut it found and the `transaction` region kind it wants
-  next.
+  the one typecheck papercut it found. The `transaction` kind it asked for is
+  now built (as a binding kind, not a region kind - a region has no name, and
+  with no name there is nothing to call `commit` on).
+- [completed/std-http-rework.md](completed/std-http-rework.md) - the as-built
+  notes for `std/http`: one `Result<T, HttpError>` error channel, a non-generic
+  serve loop over the `Dispatcher` vtable, keep-alive, router path captures, and
+  the compiler bugs and ergonomic gaps the rewrite surfaced.
 
 One design exploration, not a shipped system and not scheduled:
 

@@ -1,6 +1,6 @@
 // yoopstore/handler.yoop - StorageHandler implements the Handler trait from
 // std/http/server.yoop. Dispatches GET / HEAD / PUT / POST / DELETE against
-// the on-disk storage rooted at `root_dir`.
+// the on-disk storage rooted at `rootDir`.
 //
 // Response bodies are owned now (yoopstore-papercut #6): the GET path reads
 // the file into a local Vec and *seals* it into the Response via
@@ -15,7 +15,7 @@ import * as vec, { Vec } from "std/core/vec.yoop";
 import * as bytes from "std/core/bytes.yoop";
 
 import { Handler, HandleOutcome } from "std/http/server.yoop";
-import * as http_types, { Request, Response, HttpMethod } from "std/http/types.yoop";
+import * as http, { Request, Response, HttpMethod, StatusCode } from "std/http/types.yoop";
 
 import * as safepath from "./safepath.yoop";
 import * as storage from "./storage.yoop";
@@ -25,7 +25,7 @@ extern "C" from "stdio.h" {
 }
 
 export type StorageHandler implements Handler {
-    root_dir: string,
+    rootDir: string,
 
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let san: Result<string, string> = safepath.sanitize(req.path);
@@ -33,27 +33,26 @@ export type StorageHandler implements Handler {
         switch (san) {
             case Result.Ok  { value: ok }:  { rel = ok; }
             case Result.Err { error: err }: {
-                respond_text(ref resp, http_types.bad_request(), err);
+                respondText(ref resp, http.badRequest(), err);
                 return HandleOutcome.Ok;
             }
         }
 
-        let full: string = storage.join_path(self.root_dir, rel);
+        let full: string = storage.join_path(self.rootDir, rel);
 
         switch (req.method) {
             case HttpMethod.Get: {
                 disposable buf: Vec<uint8> = vec.vec_new(4096);
                 let err: string = storage.read_file_into(ref buf, full);
                 if (err.len > 0) {
-                    respond_text(ref resp, http_types.not_found(), `not found: ${rel}\n`);
+                    respondText(ref resp, http.notFound(), `not found: ${rel}\n`);
                     return HandleOutcome.Ok;
                 }
                 let n: usize = buf.len;
-                resp.status = http_types.ok();
-                http_types.headers_add(ref resp.headers, "Content-Type", "application/octet-stream");
                 // Hand the read buffer straight to the Response (no copy);
                 // `buf` is left empty, its auto-cleanup becomes a no-op.
-                http_types.respond_bytes(ref resp, bytes.bytes_from_vec(ref buf));
+                http.respondBytes(ref resp, http.ok(), "application/octet-stream",
+                    bytes.bytes_from_vec(ref buf));
                 printf(`GET   /${rel} -> ${n} bytes\n`);
                 return HandleOutcome.Ok;
             }
@@ -62,57 +61,58 @@ export type StorageHandler implements Handler {
                 // file_size) without reading or sending the body.
                 let sz: int64 = storage.file_size(full);
                 if (sz < 0) {
-                    respond_text(ref resp, http_types.not_found(), `not found: ${rel}\n`);
+                    respondText(ref resp, http.notFound(), `not found: ${rel}\n`);
                     return HandleOutcome.Ok;
                 }
-                resp.status = http_types.ok();
-                http_types.headers_add(ref resp.headers, "Content-Type", "application/octet-stream");
-                http_types.headers_add(ref resp.headers, "Content-Length", `${sz}`);
+                // A HEAD reply carries the headers the GET would have. The
+                // server writes Content-Length from the body it would have
+                // sent, so this one is informational only.
+                http.respondEmpty(ref resp, http.ok());
+                http.setHeader(ref resp, "Content-Type", "application/octet-stream");
+                http.setHeader(ref resp, "X-Content-Length", `${sz}`);
                 printf(`HEAD  /${rel} -> ${sz} bytes\n`);
                 return HandleOutcome.Ok;
             }
             case HttpMethod.Put, HttpMethod.Post: {
-                return store_body(rel, full, ref req, ref resp);
+                return storeBody(rel, full, ref req, ref resp);
             }
             case HttpMethod.Delete: {
                 let err: string = storage.delete_file(full);
                 if (err.len > 0) {
-                    respond_text(ref resp, http_types.not_found(), `not found: ${rel}\n`);
+                    respondText(ref resp, http.notFound(), `not found: ${rel}\n`);
                     return HandleOutcome.Ok;
                 }
-                respond_text(ref resp, http_types.ok(), `deleted /${rel}\n`);
+                respondText(ref resp, http.ok(), `deleted /${rel}\n`);
                 printf(`DEL   /${rel}\n`);
                 return HandleOutcome.Ok;
             }
             default: {
                 // PATCH / OPTIONS - not supported.
-                respond_text(ref resp, http_types.method_not_allowed(), "method not allowed\n");
+                respondText(ref resp, http.methodNotAllowed(), "method not allowed\n");
                 return HandleOutcome.Ok;
             }
         }
     }
 }
 
-function store_body(rel: string, full: string, ref req: Request, ref resp: Response): HandleOutcome {
+function storeBody(rel: string, full: string, ref req: Request, ref resp: Response): HandleOutcome {
     let err: string = storage.write_file(full, req.body);
     if (err.len > 0) {
-        respond_text(ref resp, http_types.server_err(), err);
+        respondText(ref resp, http.serverError(), err);
         return HandleOutcome.Ok;
     }
-    respond_text(ref resp, http_types.ok(), `stored /${rel} (${req.body.len} bytes)\n`);
+    respondText(ref resp, http.ok(), `stored /${rel} (${req.body.len} bytes)\n`);
     printf(`STORE /${rel} <- ${req.body.len} bytes\n`);
     return HandleOutcome.Ok;
 }
 
-// Set status + a plain-text body. The body is a borrowed-static string
-// (respond_static); literals and template-literal results both outlive the
-// response, and the Response owns nothing to free for them.
-function respond_text(ref resp: Response, code: http_types.StatusCode, msg: string): void {
-    resp.status = code;
-    http_types.headers_add(ref resp.headers, "Content-Type", "text/plain");
-    http_types.respond_static(ref resp, msg);
+// Set status + a plain-text body. `respondText` borrows the string; literals
+// and template-literal results both outlive the response, so there is nothing
+// for the response to free.
+function respondText(ref resp: Response, code: StatusCode, msg: string): void {
+    http.respondText(ref resp, code, msg);
 }
 
-export function storage_handler_new(root_dir: string): StorageHandler {
-    return { root_dir: root_dir };
+export function storageHandlerNew(rootDir: string): StorageHandler {
+    return { rootDir: rootDir };
 }

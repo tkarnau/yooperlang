@@ -1356,10 +1356,16 @@ function checkSwitch(node, scope, ctx) {
         if (!fb.fieldName || !fb.bindingName) continue;
         const fieldDef = variant.fields.find((f) => f.name === fb.fieldName);
         if (!fieldDef) continue;
+        // canonicalizeStruct for the same reason inferred `let` bindings do it:
+        // a payload field type resolved while the payload's own module was
+        // mid-pass can be a shell whose `implementsTraits` is still empty, and
+        // the binding would then fail `Disposable.dispose(ref x)` on a type
+        // that plainly does implement it. Swapping in the structTable entry
+        // gives the arm the populated type. No-op for non-structs.
         declareInScope(
           armScope,
           fb.bindingName,
-          fieldDef.type,
+          canonicalizeStruct(fieldDef.type, ctx),
           "const",
           pat,
           ctx.errors,

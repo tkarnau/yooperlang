@@ -29,17 +29,15 @@ import { string_index_of } from "../../../std/core/strings.yoop";
 import { Vec, vec_new, vec_push, vec_as_array } from "../../../std/core/vec.yoop";
 import { Bytes, bytes_from_vec } from "../../../std/core/bytes.yoop";
 
+import { Result } from "../../../std/core/types.yoop";
 import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
-import {
-    serve_n, ServeOutcome, Handler, HandleOutcome,
+import * as httpServer, {
+    Handler, HandleOutcome, Dispatcher,
 } from "../../../std/http/server.yoop";
-import {
-    Request, Response, HttpMethod, ok, headers_add, respond_bytes,
+import * as http, {
+    Request, Response, HttpMethod,
 } from "../../../std/http/types.yoop";
-import {
-    Client, ClientRequest, ClientSendResult,
-    make_client, client_request, client_send,
-} from "../../../std/http/client.yoop";
+import * as client, { Client, ClientRequest, ClientResponse } from "../../../std/http/client.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -200,12 +198,11 @@ type ChatHandler implements Handler {
         let disposable reply: Vec<uint8> = vec_new(128);
         ChatBrain.reply(ref self.brain, clean, self.turns, ref reply);
 
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain; charset=utf-8");
         // Owned bytes (zero-copy hand-off): the buffer outlives `handle`,
         // is disposed with the Response, and is still valid when the server
         // serializes the response after handle returns.
-        respond_bytes(ref resp, bytes_from_vec(ref reply));
+        http.respondBytes(ref resp, http.ok(), "text/plain; charset=utf-8",
+            bytes_from_vec(ref reply));
         return HandleOutcome.Ok;
     }
 }
@@ -223,9 +220,10 @@ task chat_server(port: int32, turns: int32): int32 {
     }
     let bot: RuleBot = { name: "Yoopbot" };
     let handler: ChatHandler = { brain: bot, turns: 0 };
-    let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, turns);
-    if (outcome.error.len > 0) {
-        printf(`server err: ${outcome.error}\n`);
+    let d: Dispatcher = Dispatcher.from(ref handler);
+    switch (httpServer.serveDefault(ref lr.listener, ref d, turns)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { printf(`server err: ${e}\n`); }
     }
     return 0;
 }
@@ -234,20 +232,19 @@ task chat_server(port: int32, turns: int32): int32 {
 
 // Send one chat turn: POST the user's message and print the reply.
 function send_turn(ref c: Client, user_msg: string): void {
-    let disposable req: ClientRequest = client_request(HttpMethod.Post, "http://127.0.0.1:18085/chat");
+    let disposable req: ClientRequest = client.request(HttpMethod.Post, "http://127.0.0.1:18085/chat");
     // The body is a borrowing view of the literal; string literals live in
     // immutable rodata, so it is safe to hand off without a copy.
-    req.body = intr.string_as_bytes(user_msg);
+    client.setBody(ref req, "text/plain; charset=utf-8", intr.string_as_bytes(user_msg));
 
-    let disposable r: ClientSendResult = client_send(ref c, ref req);
-    if (r.error.len > 0) {
-        printf(`client err: ${r.error}\n`);
-        return;
+    switch (client.send(ref c, ref req)) {
+        case Result.Ok { value: r }: {
+            let disposable resp: ClientResponse = r;
+            printf(`You: ${user_msg}\n`);
+            printf(`Bot: ${client.responseText(ref resp)}\n\n`);
+        }
+        case Result.Err { error: e }: { printf(`client err: ${e}\n`); }
     }
-    let body_view: uint8[] = vec_as_array(ref r.response.body);
-    let bot_says: string = intr.string_from_bytes_unchecked(body_view);
-    printf(`You: ${user_msg}\n`);
-    printf(`Bot: ${bot_says}\n\n`);
 }
 
 function main(): int32 {
@@ -258,7 +255,7 @@ function main(): int32 {
     // but it cannot connect before listen() has run.
     let _slept: int32 = usleep(150000);   // 150ms
 
-    let c: Client = make_client();
+    let c: Client = client.clientNew();
     send_turn(ref c, "hello there");
     send_turn(ref c, "what is the capital of Michigan?");
     send_turn(ref c, "tell me a joke");

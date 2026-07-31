@@ -778,17 +778,16 @@ function validateVTableDecl(d, mod, moduleEnv, errors, programState) {
     });
   }
 
-  // Replace the shell with the fully-populated VTableType.
-  const populated = VTableType(
-    d.name,
-    trait.name,
-    trait.moduleId,
-    resolvedFields,
-    methodOrder,
-    mod.id,
-  );
-  env.vtableTable.set(d.name, populated);
-  d.resolvedType = populated;
+  // Fill the pass-A shell IN PLACE rather than replacing it. A struct field
+  // annotated with this vtable resolved during an earlier pass and is holding
+  // a reference to the shell object; swapping the table entry would leave that
+  // field pointing at a type with no method slots.
+  shell.traitName = trait.name;
+  shell.traitModuleId = trait.moduleId;
+  shell.fields = resolvedFields;
+  shell.methodOrder = methodOrder;
+  env.vtableTable.set(d.name, shell);
+  d.resolvedType = shell;
   d.resolvedTrait = trait;
 }
 

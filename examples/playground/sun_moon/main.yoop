@@ -18,8 +18,10 @@ import.unsafe;
 
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-import { Client, ClientSendResult } from "std/http/client.yoop";
+import { Client, ClientResponse } from "std/http/client.yoop";
 import * as client from "std/http/client.yoop";
+import { Result } from "std/core/types.yoop";
+import * as http, { HttpError } from "std/http/types.yoop";
 import * as vec from "std/core/vec.yoop";
 
 extern "C" from library "m" {
@@ -228,23 +230,31 @@ function parse_wttr_temp(body: uint8[]): TempParse {
 // Fetch the temperature once. On any failure returns a sentinel value so
 // the scene still has *something* to render (and the failure is printed).
 function fetch_temperature(): TempParse {
-    let c: Client = client.make_client();
-    let disposable r: ClientSendResult = client.http_get(ref c, WEATHER_URL);
-    if (r.error.len > 0) {
-        printf(`weather fetch failed: ${r.error}\n`);
-        return { value: 0, ok: false };
+    switch (fetch_temperature_inner()) {
+        case Result.Ok { value: parsed }: { return parsed; }
+        case Result.Err { error: e }: {
+            printf(`weather fetch failed: ${e}\n`);
+            return { value: 0, ok: false };
+        }
     }
-    if (r.response.status.code != 200) {
-        printf(`weather fetch got status %d\n`, r.response.status.code);
-        return { value: 0, ok: false };
+    return { value: 0, ok: false };
+}
+
+// The fallible half. `?` on the GET means the whole failure path above is one
+// arm instead of an error check per step.
+function fetch_temperature_inner(): Result<TempParse, HttpError> {
+    let c: Client = client.clientNew();
+    disposable r: ClientResponse = client.get(ref c, WEATHER_URL)? "fetching the current temperature";
+    if (r.status.code != 200) {
+        return Result.Err { error: http.errIo(`weather service answered ${r.status}`) };
     }
-    let body: uint8[] = vec.vec_as_array(ref r.response.body);
+    let body: uint8[] = client.responseBytes(ref r);
     let parsed: TempParse = parse_wttr_temp(body);
     if (!parsed.ok) {
         let body_str: string = intr.string_from_bytes_unchecked(body);
         printf(`weather parse failed for body: %s\n`, body_str);
     }
-    return parsed;
+    return Result.Ok { value: parsed };
 }
 
 // ── Color helpers ────────────────────────────────────────────────────────────

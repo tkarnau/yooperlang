@@ -1,0 +1,312 @@
+// todo_api/store.yoop - the data layer, over std/db/sqlite.yoop.
+//
+// Everything that touches SQL lives here. Handlers never see a statement, a
+// row cursor, or a sqlite error string; they get `Todo` values and a
+// `StoreError` that already knows whether it is a 404 or a 500.
+//
+// Two things in here are worth reading closely:
+//
+//   1. `StoreError implements Into<HttpError>` and `WithContext<HttpError>`.
+//      That is what lets a handler write `store.find(ref db, id)? "GET
+//      /todos/:id"` and have a database failure arrive at the client as the
+//      right status, with context, without a single conversion switch in the
+//      handler.
+//   2. `importMany` runs inside a `transaction` binding. There is no rollback
+//      call anywhere in it - the kind's disposer does that on every path out,
+//      including the `?` in the middle of the loop.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import { Display, Into, WithContext } from "std/core/traits.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as http, { HttpError, StatusCode } from "std/http/types.yoop";
+import * as sqlite, { Db, Stmt, Tx, Row, StepOutcome, transaction } from "std/db/sqlite.yoop";
+
+// ----- errors -------------------------------------------------------------
+
+// One error type for the layer. It carries the status the client should see,
+// because the store is the layer that knows WHY something failed: a row that
+// is not there is a 404, a title that breaks a rule is a 400, and a query
+// that blew up is a 500. A handler should never have to guess.
+export type StoreError implements (Display, Into<HttpError>, WithContext<HttpError>) {
+    message: string,
+    status:  StatusCode,
+
+    function to_string(ref self): string {
+        return self.message;
+    }
+
+    // Used by a bare `?` crossing from Result<_, StoreError> into
+    // Result<_, HttpError>.
+    function into(ref self): HttpError {
+        return http.httpError(self.status, self.message);
+    }
+
+    // Used by `?` with a context string. Same mapping, message prefixed.
+    function withContext(ref self, context: string): HttpError {
+        return http.httpError(self.status, `${context}: ${self.message}`);
+    }
+}
+
+// The query broke: our problem, not the caller's.
+function failed(message: string): StoreError {
+    return { message: message, status: http.serverError() };
+}
+
+// The row is not there.
+function missing(message: string): StoreError {
+    return { message: message, status: http.notFound() };
+}
+
+// The caller sent something the rules reject.
+function invalid(message: string): StoreError {
+    return { message: message, status: http.badRequest() };
+}
+
+// Bridges from sqlite's `Result<T, string>` into this layer's error type.
+// One per payload type rather than one generic function: call-site inference
+// cannot recover `T` through a `Result<T, string>` parameter, and there is no
+// turbofish to tell it.
+function dbInt(r: Result<int32, string>, what: string): Result<int32, StoreError> {
+    switch (r) {
+        case Result.Ok { value: v }: { return Result.Ok { value: v }; }
+        case Result.Err { error: e }: { return Result.Err { error: failed(`${what}: ${e}`) }; }
+    }
+}
+
+function dbStmt(r: Result<Stmt, string>, what: string): Result<Stmt, StoreError> {
+    switch (r) {
+        case Result.Ok { value: v }: { return Result.Ok { value: v }; }
+        case Result.Err { error: e }: { return Result.Err { error: failed(`${what}: ${e}`) }; }
+    }
+}
+
+function dbTx(r: Result<Tx, string>, what: string): Result<Tx, StoreError> {
+    switch (r) {
+        case Result.Ok { value: v }: { return Result.Ok { value: v }; }
+        case Result.Err { error: e }: { return Result.Err { error: failed(`${what}: ${e}`) }; }
+    }
+}
+
+function dbOpen(r: Result<Db, string>, what: string): Result<Db, StoreError> {
+    switch (r) {
+        case Result.Ok { value: v }: { return Result.Ok { value: v }; }
+        case Result.Err { error: e }: { return Result.Err { error: failed(`${what}: ${e}`) }; }
+    }
+}
+
+// ----- the record ---------------------------------------------------------
+
+export type Todo {
+    id:       int64,
+    title:    string,
+    done:     bool,
+    priority: int32,
+}
+
+// Column order matches SELECT_COLUMNS below. Keeping the two next to each
+// other is the whole discipline here - there is no ORM to keep them in sync.
+const SELECT_COLUMNS: string = "id, title, done, priority";
+
+function readTodo(row: Row): Todo {
+    return {
+        id:       sqlite.columnInt64(row, 0),
+        title:    sqlite.columnText(row, 1),
+        done:     sqlite.columnInt(row, 2) != 0,
+        priority: sqlite.columnInt(row, 3),
+    };
+}
+
+// ----- schema -------------------------------------------------------------
+
+export function open(path: string): Result<Db, StoreError> {
+    let db: Db = dbOpen(sqlite.open(path), `opening ${path}`)?;
+    return Result.Ok { value: db };
+}
+
+export function initSchema(ref db: Db): Result<int32, StoreError> {
+    // `strict` makes sqlite enforce the declared column types instead of
+    // accepting anything anywhere, which is the behavior every other database
+    // has and the one a reader assumes.
+    let _n: int32 = dbInt(sqlite.exec(ref db, "
+        create table if not exists todos (
+            id       integer primary key autoincrement,
+            title    text    not null,
+            done     integer not null default 0,
+            priority integer not null default 1
+        ) strict;
+    "), "creating the todos table")?;
+    return Result.Ok { value: 0 };
+}
+
+// ----- reads --------------------------------------------------------------
+
+export function count(ref db: Db): Result<int32, StoreError> {
+    disposable q: Stmt = dbStmt(
+        sqlite.prepare(ref db, "select count(*) from todos;"), "counting todos")?;
+    switch (sqlite.step(ref q)) {
+        case StepOutcome.Row { row: r }: { return Result.Ok { value: sqlite.columnInt(r, 0) }; }
+        case StepOutcome.Done: { return Result.Ok { value: 0 }; }
+        case StepOutcome.Err { error: e }: { return Result.Err { error: failed(`counting todos: ${e}`) }; }
+    }
+}
+
+// All todos, newest first, optionally filtered by `done` and capped at
+// `limit`. The filter is a bound parameter rather than a spliced fragment:
+// the SQL text is fixed at compile time and the only thing that varies is a
+// value, which is what makes the whole surface injection-proof.
+export function list(
+    ref db: Db,
+    ref out: Vec<Todo>,
+    onlyDone: Option<bool>,
+    limit: int32,
+): Result<usize, StoreError> {
+    let wantDone: int32 = -1;
+    switch (onlyDone) {
+        case Option.Some { value: d }: { if (d) { wantDone = 1; } else { wantDone = 0; } }
+        case Option.None: { }
+    }
+
+    disposable q: Stmt = dbStmt(sqlite.prepare(ref db, `
+        select ${SELECT_COLUMNS} from todos
+        where (?1 < 0 or done = ?1)
+        order by id desc
+        limit ?2;
+    `), "listing todos")?;
+    let _b1 = sqlite.bindInt(ref q, 1, wantDone);
+    let _b2 = sqlite.bindInt(ref q, 2, limit);
+
+    let cursor = sqlite.rows(ref q);
+    for row in cursor {
+        vec.vec_push(ref out, readTodo(row));
+    }
+    // `Iterable.next` has no error channel, so a mid-iteration failure ends
+    // the loop quietly and lands here. Checking it is the difference between
+    // "no more rows" and "the query broke".
+    if (cursor.err.len > 0) {
+        return Result.Err { error: failed(`listing todos: ${cursor.err}`) };
+    }
+    return Result.Ok { value: out.len };
+}
+
+export function find(ref db: Db, id: int64): Result<Todo, StoreError> {
+    disposable q: Stmt = dbStmt(
+        sqlite.prepare(ref db, `select ${SELECT_COLUMNS} from todos where id = ?1;`),
+        "loading a todo")?;
+    let _b = sqlite.bindInt64(ref q, 1, id);
+    switch (sqlite.step(ref q)) {
+        case StepOutcome.Row { row: r }: { return Result.Ok { value: readTodo(r) }; }
+        case StepOutcome.Done: { return Result.Err { error: missing(`no todo with id ${id}`) }; }
+        case StepOutcome.Err { error: e }: { return Result.Err { error: failed(`loading todo ${id}: ${e}`) }; }
+    }
+}
+
+// ----- writes -------------------------------------------------------------
+
+// Titles are the one piece of user input with a rule, so the rule lives in
+// one place and every write path goes through it.
+const MAX_TITLE: usize = 200;
+
+// The message names the offending value, because this error travels: a bulk
+// import reports it for one row out of many, and "title must not be empty" on
+// its own would not say which one.
+export function validateTitle(title: string): Result<usize, StoreError> {
+    if (title.len == 0) {
+        return Result.Err { error: invalid("a title must not be empty") };
+    }
+    if (title.len > MAX_TITLE) {
+        return Result.Err {
+            error: invalid(`title "${title}" is ${title.len} bytes, limit is ${MAX_TITLE}`),
+        };
+    }
+    return Result.Ok { value: title.len };
+}
+
+export function create(ref db: Db, title: string, priority: int32): Result<Todo, StoreError> {
+    let _v: usize = validateTitle(title)?;
+    disposable ins: Stmt = dbStmt(
+        sqlite.prepare(ref db, "insert into todos (title, done, priority) values (?1, 0, ?2);"),
+        "inserting a todo")?;
+    let _b1 = sqlite.bindText(ref ins, 1, title);
+    let _b2 = sqlite.bindInt(ref ins, 2, priority);
+    let _n: int32 = runToDone(ref db, ref ins, "inserting a todo")?;
+    return find(ref db, sqlite.lastInsertRowid(ref db));
+}
+
+export function update(ref db: Db, id: int64, title: string, done: bool, priority: int32): Result<Todo, StoreError> {
+    let _v: usize = validateTitle(title)?;
+    // Confirm it exists first so a no-op update is a 404 and not a silent 200.
+    let _existing: Todo = find(ref db, id)?;
+
+    disposable up: Stmt = dbStmt(
+        sqlite.prepare(ref db, "update todos set title = ?1, done = ?2, priority = ?3 where id = ?4;"),
+        "updating a todo")?;
+    let doneVal: int32 = 0;
+    if (done) { doneVal = 1; }
+    let _b1 = sqlite.bindText(ref up, 1, title);
+    let _b2 = sqlite.bindInt(ref up, 2, doneVal);
+    let _b3 = sqlite.bindInt(ref up, 3, priority);
+    let _b4 = sqlite.bindInt64(ref up, 4, id);
+    let _n: int32 = runToDone(ref db, ref up, "updating a todo")?;
+    return find(ref db, id);
+}
+
+export function remove(ref db: Db, id: int64): Result<int32, StoreError> {
+    disposable del: Stmt = dbStmt(
+        sqlite.prepare(ref db, "delete from todos where id = ?1;"), "deleting a todo")?;
+    let _b = sqlite.bindInt64(ref del, 1, id);
+    let changed: int32 = runToDone(ref db, ref del, "deleting a todo")?;
+    if (changed == 0) {
+        return Result.Err { error: missing(`no todo with id ${id}`) };
+    }
+    return Result.Ok { value: changed };
+}
+
+// Insert many titles as one unit: either all of them land or none do.
+//
+// This is the `transaction` kind carrying its weight. There is no rollback
+// call in this function. The `?` on `validateTitle` in the middle of the loop
+// returns straight out of here, and the kind's disposer runs on the way past
+// and undoes every insert that already happened. Getting that right by hand
+// means remembering a rollback at every early return, which is exactly the
+// thing people forget on the third one.
+export function importMany(ref db: Db, titles: string[], priority: int32): Result<int32, StoreError> {
+    transaction tx: Tx = dbTx(sqlite.begin(ref db), "starting the import")?;
+
+    disposable ins: Stmt = dbStmt(
+        sqlite.prepare(ref db, "insert into todos (title, done, priority) values (?1, 0, ?2);"),
+        "inserting an imported todo")?;
+
+    let written: int32 = 0;
+    for title in titles {
+        // No context string here: a `?` between two Results with the SAME Err
+        // type takes the fast path, and adding context would ask StoreError to
+        // implement WithContext<StoreError> as well as WithContext<HttpError>.
+        // The message already names the row, which is what context would add.
+        let _v: usize = validateTitle(title)?;
+        let _b1 = sqlite.bindText(ref ins, 1, title);
+        let _b2 = sqlite.bindInt(ref ins, 2, priority);
+        let _n: int32 = runToDone(ref db, ref ins, "inserting an imported todo")?;
+        let _r = sqlite.reset(ref ins);
+        written = written + 1;
+    }
+
+    let _c: int32 = dbInt(sqlite.commit(ref tx), "committing the import")?;
+    return Result.Ok { value: written };
+}
+
+// ----- statement plumbing -------------------------------------------------
+
+// Advance a statement that should produce no rows, and report how many rows
+// it changed.
+function runToDone(ref db: Db, ref s: Stmt, what: string): Result<int32, StoreError> {
+    switch (sqlite.step(ref s)) {
+        case StepOutcome.Done: { return Result.Ok { value: sqlite.changes(ref db) }; }
+        case StepOutcome.Row { row: _r }: {
+            return Result.Err { error: failed(`${what}: statement unexpectedly returned a row`) };
+        }
+        case StepOutcome.Err { error: e }: {
+            return Result.Err { error: failed(`${what}: ${e}`) };
+        }
+    }
+}

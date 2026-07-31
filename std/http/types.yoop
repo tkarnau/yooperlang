@@ -1,24 +1,38 @@
-// std/http/types.yoop - HTTP wire-level types.
+// std/http/types.yoop - the HTTP vocabulary types.
 //
-// Per library-design.md §7.1, but consolidated into one module for the
-// MVP. HttpMethod / StatusCode / Headers are first-class types; Request
-// + Response are the structured forms the handler and server work with.
+// Everything a handler touches lives here: methods, status codes, headers,
+// name/value params (route captures and query string), the request, the
+// response, and the error type the whole layer propagates.
 //
-// Body is `uint8[]` (fully materialized). Streaming bodies are deferred
-// until vtables/trait-objects land (library-design.md §8 question 2).
+// Conventions this module follows, and why:
+//
+//   * Errors are `Result<T, HttpError>`. `HttpError` carries the status the
+//     server should send if nobody handles it, so a failure deep in the parse
+//     still knows it is a 400 and not a 500. It implements `WithContext`, so
+//     `expr? "reading the body"` stacks context as an error propagates without
+//     losing the status.
+//   * Lookups return `Option<T>` rather than a sentinel. A header that is
+//     present and empty is a different thing from a header that is absent, and
+//     only one of those is expressible with "" as the miss value.
+//   * Anything holding a `Vec` is `Disposable` and propagates the obligation,
+//     so a caller writes `disposable resp: Response = ...` and never has to
+//     remember the teardown order.
+//
+// Body storage is `ResponseBody`: either a borrowed string (literals and
+// interpolated strings never dangle) or an owned `Bytes` the response frees.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
-import { Vec, vec_new, vec_push, vec_get, vec_as_array } from "../core/vec.yoop";
-import { string_eq_ignore_ascii_case } from "../core/strings.yoop";
-import { Bytes, bytes_to_array } from "../core/bytes.yoop";
+import { Display, WithContext } from "../core/traits.yoop";
+import { Result, Option } from "../core/types.yoop";
+import * as vec, { Vec } from "../core/vec.yoop";
+import * as str from "../core/strings.yoop";
+import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
 
 // ----- HttpMethod ---------------------------------------------------------
 //
-// Enum lookups are cheap (i32 tag compare); the parser converts the
-// request-line method bytes via `parse_method`. Unknown methods are
-// rejected at parse time rather than reified as a variant - keeps the
-// switch closed.
+// Unknown method tokens are rejected at parse time rather than reified as a
+// variant case, which keeps every `switch` over a method closed.
 
 export variant HttpMethod {
     Get,
@@ -30,95 +44,27 @@ export variant HttpMethod {
     Options,
 }
 
-// Yoop enums don't yet support `==` directly. `http_method_eq` is the
-// helper consumers use when they need to compare two HttpMethod values
-// (e.g. router dispatch, client request-line construction).
-export function http_method_eq(a: HttpMethod, b: HttpMethod): bool {
-    switch (a) {
-        case HttpMethod.Get: {
-            switch (b) {
-                case HttpMethod.Get:     { return true;  }
-                case HttpMethod.Post:    { return false; }
-                case HttpMethod.Put:     { return false; }
-                case HttpMethod.Delete:  { return false; }
-                case HttpMethod.Head:    { return false; }
-                case HttpMethod.Patch:   { return false; }
-                case HttpMethod.Options: { return false; }
-            }
-        }
-        case HttpMethod.Post: {
-            switch (b) {
-                case HttpMethod.Get:     { return false; }
-                case HttpMethod.Post:    { return true;  }
-                case HttpMethod.Put:     { return false; }
-                case HttpMethod.Delete:  { return false; }
-                case HttpMethod.Head:    { return false; }
-                case HttpMethod.Patch:   { return false; }
-                case HttpMethod.Options: { return false; }
-            }
-        }
-        case HttpMethod.Put: {
-            switch (b) {
-                case HttpMethod.Get:     { return false; }
-                case HttpMethod.Post:    { return false; }
-                case HttpMethod.Put:     { return true;  }
-                case HttpMethod.Delete:  { return false; }
-                case HttpMethod.Head:    { return false; }
-                case HttpMethod.Patch:   { return false; }
-                case HttpMethod.Options: { return false; }
-            }
-        }
-        case HttpMethod.Delete: {
-            switch (b) {
-                case HttpMethod.Get:     { return false; }
-                case HttpMethod.Post:    { return false; }
-                case HttpMethod.Put:     { return false; }
-                case HttpMethod.Delete:  { return true;  }
-                case HttpMethod.Head:    { return false; }
-                case HttpMethod.Patch:   { return false; }
-                case HttpMethod.Options: { return false; }
-            }
-        }
-        case HttpMethod.Head: {
-            switch (b) {
-                case HttpMethod.Get:     { return false; }
-                case HttpMethod.Post:    { return false; }
-                case HttpMethod.Put:     { return false; }
-                case HttpMethod.Delete:  { return false; }
-                case HttpMethod.Head:    { return true;  }
-                case HttpMethod.Patch:   { return false; }
-                case HttpMethod.Options: { return false; }
-            }
-        }
-        case HttpMethod.Patch: {
-            switch (b) {
-                case HttpMethod.Get:     { return false; }
-                case HttpMethod.Post:    { return false; }
-                case HttpMethod.Put:     { return false; }
-                case HttpMethod.Delete:  { return false; }
-                case HttpMethod.Head:    { return false; }
-                case HttpMethod.Patch:   { return true;  }
-                case HttpMethod.Options: { return false; }
-            }
-        }
-        case HttpMethod.Options: {
-            switch (b) {
-                case HttpMethod.Get:     { return false; }
-                case HttpMethod.Post:    { return false; }
-                case HttpMethod.Put:     { return false; }
-                case HttpMethod.Delete:  { return false; }
-                case HttpMethod.Head:    { return false; }
-                case HttpMethod.Patch:   { return false; }
-                case HttpMethod.Options: { return true;  }
-            }
-        }
+// Declaration-order ordinal. One switch, and every other method operation
+// (equality, table lookup, logging) is written in terms of it.
+export function methodOrdinal(m: HttpMethod): int32 {
+    switch (m) {
+        case HttpMethod.Get:     { return 0; }
+        case HttpMethod.Post:    { return 1; }
+        case HttpMethod.Put:     { return 2; }
+        case HttpMethod.Delete:  { return 3; }
+        case HttpMethod.Head:    { return 4; }
+        case HttpMethod.Patch:   { return 5; }
+        case HttpMethod.Options: { return 6; }
     }
-    return false;
+    return -1;
 }
 
-// Canonical uppercase ASCII byte form of a method, used by the client
-// to construct request lines.
-export function http_method_label(m: HttpMethod): string {
+export function methodEq(a: HttpMethod, b: HttpMethod): bool {
+    return methodOrdinal(a) == methodOrdinal(b);
+}
+
+// The canonical uppercase token, for request lines and log output.
+export function methodLabel(m: HttpMethod): string {
     switch (m) {
         case HttpMethod.Get:     { return "GET";     }
         case HttpMethod.Post:    { return "POST";    }
@@ -129,6 +75,34 @@ export function http_method_label(m: HttpMethod): string {
         case HttpMethod.Options: { return "OPTIONS"; }
     }
     return "GET";
+}
+
+// The method tokens, spelled as characters rather than as decimal byte values.
+// A reader can check these against RFC 9110 without a lookup table.
+const GET_TOKEN:     uint8[] = ['G', 'E', 'T'];
+const POST_TOKEN:    uint8[] = ['P', 'O', 'S', 'T'];
+const PUT_TOKEN:     uint8[] = ['P', 'U', 'T'];
+const DELETE_TOKEN:  uint8[] = ['D', 'E', 'L', 'E', 'T', 'E'];
+const HEAD_TOKEN:    uint8[] = ['H', 'E', 'A', 'D'];
+const PATCH_TOKEN:   uint8[] = ['P', 'A', 'T', 'C', 'H'];
+const OPTIONS_TOKEN: uint8[] = ['O', 'P', 'T', 'I', 'O', 'N', 'S'];
+
+// Match a request-line method token. Methods are case sensitive per RFC 9110,
+// so this compares exactly; anything unrecognized is `None` and the caller
+// decides between 400 and 501.
+export function methodFromBytes(token: uint8[]): Option<HttpMethod> {
+    if (bytes.bytes_eq(token, GET_TOKEN))     { return Option.Some { value: HttpMethod.Get     }; }
+    if (bytes.bytes_eq(token, POST_TOKEN))    { return Option.Some { value: HttpMethod.Post    }; }
+    if (bytes.bytes_eq(token, PUT_TOKEN))     { return Option.Some { value: HttpMethod.Put     }; }
+    if (bytes.bytes_eq(token, DELETE_TOKEN))  { return Option.Some { value: HttpMethod.Delete  }; }
+    if (bytes.bytes_eq(token, HEAD_TOKEN))    { return Option.Some { value: HttpMethod.Head    }; }
+    if (bytes.bytes_eq(token, PATCH_TOKEN))   { return Option.Some { value: HttpMethod.Patch   }; }
+    if (bytes.bytes_eq(token, OPTIONS_TOKEN)) { return Option.Some { value: HttpMethod.Options }; }
+    return Option.None;
+}
+
+export function methodFromString(token: string): Option<HttpMethod> {
+    return methodFromBytes(intr.string_as_bytes(token));
 }
 
 // ----- StatusCode ---------------------------------------------------------
@@ -142,12 +116,18 @@ export variant StatusClass {
     Unknown,
 }
 
-export type StatusCode {
-    code: int32,
+// `StatusCode` implements `Display`, so `${resp.status}` renders "404 Not
+// Found" in a template literal and log lines need no helper call.
+export type StatusCode implements Display {
+    code:  int32,
     class: StatusClass,
+
+    function to_string(ref self): string {
+        return `${self.code} ${reasonPhrase(self.code)}`;
+    }
 }
 
-export function status_class_for(code: int32): StatusClass {
+export function statusClassFor(code: int32): StatusClass {
     if (code >= 100 && code < 200) { return StatusClass.Informational; }
     if (code >= 200 && code < 300) { return StatusClass.Success; }
     if (code >= 300 && code < 400) { return StatusClass.Redirect; }
@@ -157,40 +137,117 @@ export function status_class_for(code: int32): StatusClass {
 }
 
 export function status(code: int32): StatusCode {
-    return { code: code, class: status_class_for(code) };
+    return { code: code, class: statusClassFor(code) };
 }
 
-export function ok(): StatusCode         { return status(200); }
-export function bad_request(): StatusCode { return status(400); }
-export function not_found(): StatusCode  { return status(404); }
-export function method_not_allowed(): StatusCode { return status(405); }
-export function server_err(): StatusCode { return status(500); }
+export function isSuccess(s: StatusCode): bool {
+    return s.code >= 200 && s.code < 300;
+}
 
-// Canonical "reason phrase" for the small subset of status codes the
-// server emits. Anything else falls back to a generic phrase per class.
-export function reason_phrase(code: int32): string {
+// The statuses this layer actually produces. Anything else goes through
+// `status(code)`; these exist so call sites read as prose.
+export function ok(): StatusCode                  { return status(200); }
+export function created(): StatusCode             { return status(201); }
+export function noContent(): StatusCode           { return status(204); }
+export function badRequest(): StatusCode          { return status(400); }
+export function unauthorized(): StatusCode        { return status(401); }
+export function forbidden(): StatusCode           { return status(403); }
+export function notFound(): StatusCode            { return status(404); }
+export function methodNotAllowed(): StatusCode    { return status(405); }
+export function conflict(): StatusCode            { return status(409); }
+export function payloadTooLarge(): StatusCode     { return status(413); }
+export function unsupportedMedia(): StatusCode    { return status(415); }
+export function unprocessable(): StatusCode       { return status(422); }
+export function serverError(): StatusCode         { return status(500); }
+export function notImplemented(): StatusCode      { return status(501); }
+export function serviceUnavailable(): StatusCode  { return status(503); }
+
+// Reason phrases for the codes above, plus the handful a proxy or client is
+// likely to send us. Unknown codes get a per-class phrase, which is legal:
+// RFC 9110 lets the reason phrase be anything, including empty.
+export function reasonPhrase(code: int32): string {
     if (code == 200) { return "OK"; }
     if (code == 201) { return "Created"; }
+    if (code == 202) { return "Accepted"; }
     if (code == 204) { return "No Content"; }
     if (code == 301) { return "Moved Permanently"; }
     if (code == 302) { return "Found"; }
+    if (code == 304) { return "Not Modified"; }
     if (code == 400) { return "Bad Request"; }
     if (code == 401) { return "Unauthorized"; }
     if (code == 403) { return "Forbidden"; }
     if (code == 404) { return "Not Found"; }
     if (code == 405) { return "Method Not Allowed"; }
+    if (code == 409) { return "Conflict"; }
+    if (code == 411) { return "Length Required"; }
+    if (code == 413) { return "Content Too Large"; }
+    if (code == 415) { return "Unsupported Media Type"; }
+    if (code == 422) { return "Unprocessable Content"; }
+    if (code == 429) { return "Too Many Requests"; }
+    // 431 and 505 are the two the server itself produces for an oversized
+    // head and an unknown HTTP version.
+    if (code == 431) { return "Request Header Fields Too Large"; }
     if (code == 500) { return "Internal Server Error"; }
     if (code == 501) { return "Not Implemented"; }
     if (code == 503) { return "Service Unavailable"; }
+    if (code == 505) { return "HTTP Version Not Supported"; }
+    switch (statusClassFor(code)) {
+        case StatusClass.Informational: { return "Informational"; }
+        case StatusClass.Success:       { return "Success"; }
+        case StatusClass.Redirect:      { return "Redirection"; }
+        case StatusClass.ClientError:   { return "Client Error"; }
+        case StatusClass.ServerError:   { return "Server Error"; }
+        case StatusClass.Unknown:       { return "Status"; }
+    }
     return "Status";
 }
 
+// ----- HttpError ----------------------------------------------------------
+//
+// One error type for the whole layer. The `status` field is the answer to
+// "if this reaches the top without being handled, what does the client see?",
+// which is the question a bare error string cannot answer: a malformed
+// request line is a 400 and a failed socket write is a 500, and only the code
+// that detected it knows which.
+//
+// `WithContext<HttpError>` is what makes `expr? "parsing the request line"`
+// work on it: the context is prepended to the message and the status rides
+// through untouched. That is the whole reason a structured payload beats a
+// plain string here - a compiler-side string concat would flatten the status
+// away at the first `?`.
+
+export type HttpError implements (Display, WithContext<HttpError>) {
+    status:  StatusCode,
+    message: string,
+
+    function to_string(ref self): string {
+        return `${self.status.code} ${self.message}`;
+    }
+
+    function withContext(ref self, context: string): HttpError {
+        return { status: self.status, message: `${context}: ${self.message}` };
+    }
+}
+
+export function httpError(s: StatusCode, message: string): HttpError {
+    return { status: s, message: message };
+}
+
+// The four shapes that actually come up. `errIo` is a 500 because a socket
+// that failed mid-exchange is our problem, not the client's.
+export function errBadRequest(message: string): HttpError { return httpError(badRequest(), message); }
+export function errNotFound(message: string): HttpError   { return httpError(notFound(), message); }
+export function errIo(message: string): HttpError         { return httpError(serverError(), message); }
+export function errInternal(message: string): HttpError   { return httpError(serverError(), message); }
+
 // ----- Headers ------------------------------------------------------------
+//
+// A `Vec` and not a `Map`: header order is observable on the wire, duplicate
+// names are legal and meaningful (`Set-Cookie`), and a request carries a
+// handful of them, where a linear scan beats hashing.
 
 export type HeaderEntry { name: string, value: string }
 
-// Wrapped Vec<HeaderEntry> so the typechecker tracks the disposable
-// obligation on the backing vec without leaking it through HeaderEntry.
 export type Headers implements Disposable propagates<disposable> {
     entries: Vec<HeaderEntry>,
     function dispose(ref self): void {
@@ -198,64 +255,220 @@ export type Headers implements Disposable propagates<disposable> {
     }
 }
 
-export function headers_new(cap: usize): Headers propagates<disposable> {
-    return { entries: vec_new(cap) };
+export function headersNew(cap: usize): Headers propagates<disposable> {
+    return { entries: vec.vec_new(cap) };
 }
 
-export function headers_add(ref h: Headers, name: string, value: string): void {
+// Append. Duplicates are preserved; use `headersSet` to replace.
+export function headersAdd(ref h: Headers, name: string, value: string): void {
     let e: HeaderEntry = { name: name, value: value };
-    vec_push(ref h.entries, e);
+    vec.vec_push(ref h.entries, e);
 }
 
-// Case-insensitive lookup. Returns "" if absent (HTTP header values are
-// never legitimately empty *after* the colon-trim, so empty is a
-// reasonable sentinel for the simple-server MVP).
-export function headers_get(ref h: Headers, name: string): string {
-    let view: HeaderEntry[] = vec_as_array(ref h.entries);
-    let i: usize = 0;
-    while (i < view.len) {
-        if (string_eq_ignore_ascii_case(view[i].name, name)) {
-            return view[i].value;
+// Replace the first match in place and drop nothing else, or append when the
+// name is absent. Field names are compared case insensitively, per RFC 9110.
+export function headersSet(ref h: Headers, name: string, value: string): void {
+    let view: HeaderEntry[] = vec.vec_as_array(ref h.entries);
+    for (let i = 0; i < view.len; i += 1) {
+        if (str.string_eq_ignore_ascii_case(view[i].name, name)) {
+            let replaced: HeaderEntry = { name: view[i].name, value: value };
+            vec.vec_set(ref h.entries, i, replaced);
+            return;
         }
-        i = i + 1;
     }
-    return "";
+    headersAdd(ref h, name, value);
 }
 
-export function headers_has(ref h: Headers, name: string): bool {
-    let view: HeaderEntry[] = vec_as_array(ref h.entries);
-    let i: usize = 0;
-    while (i < view.len) {
-        if (string_eq_ignore_ascii_case(view[i].name, name)) {
-            return true;
+// First value for `name`, or `None`. A present-but-empty header returns
+// `Some { value: "" }`, which is why this is an Option and not a "" sentinel.
+export function headersGet(ref h: Headers, name: string): Option<string> {
+    let view: HeaderEntry[] = vec.vec_as_array(ref h.entries);
+    for e in view {
+        if (str.string_eq_ignore_ascii_case(e.name, name)) {
+            return Option.Some { value: e.value };
         }
-        i = i + 1;
+    }
+    return Option.None;
+}
+
+export function headersGetOr(ref h: Headers, name: string, fallback: string): string {
+    switch (headersGet(ref h, name)) {
+        case Option.Some { value: v }: { return v; }
+        case Option.None: { return fallback; }
+    }
+    return fallback;
+}
+
+export function headersHas(ref h: Headers, name: string): bool {
+    switch (headersGet(ref h, name)) {
+        case Option.Some { value: _v }: { return true; }
+        case Option.None: { return false; }
     }
     return false;
 }
 
+export function headersLen(ref h: Headers): usize {
+    return h.entries.len;
+}
+
+export function headersView(ref h: Headers): HeaderEntry[] {
+    return vec.vec_as_array(ref h.entries);
+}
+
+// ----- Params -------------------------------------------------------------
+//
+// Ordered name/value pairs, used for both route captures (`/todos/:id`) and
+// the query string. Same shape as Headers minus the case-insensitive lookup:
+// `?Name=x` and `?name=x` are different params, and `:id` is whatever the
+// route pattern spelled.
+
+export type Param { name: string, value: string }
+
+export type Params implements Disposable propagates<disposable> {
+    entries: Vec<Param>,
+    function dispose(ref self): void {
+        Disposable.dispose(ref self.entries);
+    }
+}
+
+export function paramsNew(cap: usize): Params propagates<disposable> {
+    return { entries: vec.vec_new(cap) };
+}
+
+export function paramsAdd(ref p: Params, name: string, value: string): void {
+    let e: Param = { name: name, value: value };
+    vec.vec_push(ref p.entries, e);
+}
+
+export function paramsClear(ref p: Params): void {
+    vec.vec_clear(ref p.entries);
+}
+
+export function paramsGet(ref p: Params, name: string): Option<string> {
+    let view: Param[] = vec.vec_as_array(ref p.entries);
+    for e in view {
+        if (str.string_eq(e.name, name)) {
+            return Option.Some { value: e.value };
+        }
+    }
+    return Option.None;
+}
+
+export function paramsGetOr(ref p: Params, name: string, fallback: string): string {
+    switch (paramsGet(ref p, name)) {
+        case Option.Some { value: v }: { return v; }
+        case Option.None: { return fallback; }
+    }
+    return fallback;
+}
+
+export function paramsHas(ref p: Params, name: string): bool {
+    switch (paramsGet(ref p, name)) {
+        case Option.Some { value: _v }: { return true; }
+        case Option.None: { return false; }
+    }
+    return false;
+}
+
+export function paramsLen(ref p: Params): usize {
+    return p.entries.len;
+}
+
+export function paramsView(ref p: Params): Param[] {
+    return vec.vec_as_array(ref p.entries);
+}
+
 // ----- Request ------------------------------------------------------------
+//
+// `target` is the raw request-target off the wire. `path` is its
+// percent-decoded path portion and `query` its parsed query string; the
+// parser fills both so no handler has to re-split them. `params` starts empty
+// and is filled by the router when a pattern with captures matches.
+//
+// `body` is a borrowed view into the connection's read buffer, so it stops
+// being valid when the buffer is reused. Copy it (`bodyBytes`) to keep it.
 
 export type Request implements Disposable propagates<disposable> {
     method:  HttpMethod,
-    path:    string,        // request-target only (server-side parse)
-    version: string,        // "HTTP/1.1" etc.
+    target:  string,
+    path:    string,
+    version: string,
     headers: Headers,
-    body:    uint8[],       // borrowed view into the read buffer
+    query:   Params,
+    params:  Params,
+    body:    uint8[],
+
     function dispose(ref self): void {
         Disposable.dispose(ref self.headers);
+        Disposable.dispose(ref self.query);
+        Disposable.dispose(ref self.params);
     }
+}
+
+export function requestNew(method: HttpMethod, target: string): Request propagates<disposable> {
+    return {
+        method:  method,
+        target:  target,
+        path:    target,
+        version: "HTTP/1.1",
+        headers: headersNew(8),
+        query:   paramsNew(4),
+        params:  paramsNew(4),
+        body:    [],
+    };
+}
+
+// Route capture, e.g. `id` from a `/todos/:id` pattern.
+export function param(ref req: Request, name: string): Option<string> {
+    return paramsGet(ref req.params, name);
+}
+
+export function paramOr(ref req: Request, name: string, fallback: string): string {
+    return paramsGetOr(ref req.params, name, fallback);
+}
+
+// Query-string value, e.g. `done` from `/todos?done=true`.
+export function query(ref req: Request, name: string): Option<string> {
+    return paramsGet(ref req.query, name);
+}
+
+export function queryOr(ref req: Request, name: string, fallback: string): string {
+    return paramsGetOr(ref req.query, name, fallback);
+}
+
+export function header(ref req: Request, name: string): Option<string> {
+    return headersGet(ref req.headers, name);
+}
+
+export function headerOr(ref req: Request, name: string, fallback: string): string {
+    return headersGetOr(ref req.headers, name, fallback);
+}
+
+// The Content-Type minus any `; charset=...` parameter, lowercased by the
+// comparison rather than by a copy. "" when the header is absent.
+export function contentType(ref req: Request): string {
+    let raw: string = headerOr(ref req, "Content-Type", "");
+    let semi: usize = str.string_index_of(raw, ";");
+    if (semi == raw.len) { return raw; }
+    switch (str.string_slice(raw, 0, semi)) {
+        case Result.Ok { value: head }: { return head; }
+        case Result.Err { error: _e }: { return raw; }
+    }
+    return raw;
+}
+
+// The body as text. The bytes are not validated as UTF-8 - HTTP bodies are
+// arbitrary octets and the caller is the one who knows what it asked for.
+export function bodyText(ref req: Request): string {
+    return intr.string_from_bytes_unchecked(req.body);
 }
 
 // ----- Response -----------------------------------------------------------
 
-// yoopstore-papercut #6: a Response body is either a borrowed static string
-// (string literals and handler-owned strings never dangle, so no copy is
-// needed) or an owned heap buffer (`Bytes`, disposed with the Response).
-// Making the body own its storage removes the old footgun where `body` was a
-// bare `uint8[]` view and a handler could hand back a pointer into a freed
-// local. The lifetime contract is now enforced by the `disposable` kind
-// rather than living in a comment.
+// A body is either a borrowed string (literals and interpolated strings are
+// never freed, so no copy is needed) or an owned buffer the response frees.
+// Making the body own its storage is what keeps a handler from returning a
+// view into one of its own locals.
 export variant ResponseBody implements Disposable propagates<disposable> {
     Static { text: string },
     Owned  { bytes: Bytes },
@@ -271,43 +484,90 @@ export type Response implements Disposable propagates<disposable> {
     status:  StatusCode,
     headers: Headers,
     body:    ResponseBody,
+
     function dispose(ref self): void {
         Disposable.dispose(ref self.headers);
         Disposable.dispose(ref self.body);
     }
 }
 
-export function response_new(): Response propagates<disposable> {
+// A fresh response defaults to 500 with an empty body: a handler that returns
+// without deciding anything produces an honest error rather than a silent 200.
+export function responseNew(): Response propagates<disposable> {
     return {
-        status:  server_err(),
-        headers: headers_new(8),
+        status:  serverError(),
+        headers: headersNew(8),
         body:    ResponseBody.Static { text: "" },
     };
 }
 
-// Set the body to a borrowed static string - a literal, a handler field, or
-// a template-literal result. No copy; the caller guarantees the string
-// outlives the response (string storage is never freed by yoop, so literals
-// and stamped strings are always safe). Disposes any previous owned body.
-export function respond_static(ref resp: Response, text: string): void {
+export function setHeader(ref resp: Response, name: string, value: string): void {
+    headersSet(ref resp.headers, name, value);
+}
+
+export function addHeader(ref resp: Response, name: string, value: string): void {
+    headersAdd(ref resp.headers, name, value);
+}
+
+// Point the body at a borrowed string. Any previously owned body is freed.
+export function setBodyStatic(ref resp: Response, text: string): void {
     Disposable.dispose(ref resp.body);
     resp.body = ResponseBody.Static { text: text };
 }
 
-// Set the body to owned bytes, taking ownership of `take` - the Response
-// disposes it. Disposes any previous owned body first. Build the argument
-// inline (e.g. `respond_bytes(ref resp, bytes_from_array(view))`) so no
-// leftover binding is left holding the obligation at the call site.
-export function respond_bytes(ref resp: Response, take: Bytes): void {
+// Hand the body owned bytes; the response frees them. Build the argument
+// inline (`setBodyBytes(ref resp, bytes.bytes_from_vec(ref buf))`) so no
+// binding is left holding a value the response now owns.
+export function setBodyBytes(ref resp: Response, take: Bytes): void {
     Disposable.dispose(ref resp.body);
     resp.body = ResponseBody.Owned { bytes: take };
 }
 
-// Borrowing view of the body as raw bytes, for serialization. Valid until
-// the Response (or its body) is disposed or reassigned.
-export function response_body_bytes(ref resp: Response): uint8[] {
+// The four one-liners a handler actually writes. Each sets status, the
+// matching Content-Type, and the body in one call.
+export function respondText(ref resp: Response, s: StatusCode, text: string): void {
+    resp.status = s;
+    setHeader(ref resp, "Content-Type", "text/plain; charset=utf-8");
+    setBodyStatic(ref resp, text);
+}
+
+export function respondHtml(ref resp: Response, s: StatusCode, html: string): void {
+    resp.status = s;
+    setHeader(ref resp, "Content-Type", "text/html; charset=utf-8");
+    setBodyStatic(ref resp, html);
+}
+
+export function respondJson(ref resp: Response, s: StatusCode, json: string): void {
+    resp.status = s;
+    setHeader(ref resp, "Content-Type", "application/json");
+    setBodyStatic(ref resp, json);
+}
+
+export function respondBytes(ref resp: Response, s: StatusCode, mediaType: string, take: Bytes): void {
+    resp.status = s;
+    setHeader(ref resp, "Content-Type", mediaType);
+    setBodyBytes(ref resp, take);
+}
+
+// No body at all, for 204 / 304 and for a HEAD reply.
+export function respondEmpty(ref resp: Response, s: StatusCode): void {
+    resp.status = s;
+    setBodyStatic(ref resp, "");
+}
+
+// Render an error the way the layer renders every other one, so a handler
+// that gives up and a server that catches a failure produce the same wire
+// shape. Plain text: the client asked for who-knows-what and a JSON body
+// would be a guess.
+export function respondError(ref resp: Response, ref e: HttpError): void {
+    respondText(ref resp, e.status, `${e.status.code} ${reasonPhrase(e.status.code)}: ${e.message}\n`);
+}
+
+// A borrowing view of the body bytes, for serialization. Valid until the
+// response (or its body) is disposed or reassigned.
+export function responseBodyBytes(ref resp: Response): uint8[] {
     switch (resp.body) {
         case ResponseBody.Static { text: t }:  { return intr.string_as_bytes(t); }
-        case ResponseBody.Owned  { bytes: b }: { return bytes_to_array(ref b); }
+        case ResponseBody.Owned  { bytes: b }: { return bytes.bytes_to_array(ref b); }
     }
 }

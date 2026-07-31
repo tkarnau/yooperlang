@@ -1,28 +1,24 @@
-// Phase 10.I: an HTTP server that uses std/http/router.yoop to dispatch
-// across three handlers behind one type-erased route table.
+// An HTTP server that uses std/http/router.yoop to dispatch across several
+// handlers behind one type-erased route table.
 //
 // Build: node ./src/yoopiler.js examples/pass/http_router/main.yoop -o /tmp/http_router
 // Run:   /tmp/http_router
 // Test:  curl http://localhost:18081/hello
+//        curl http://localhost:18081/greet/marquette      (a captured segment)
 //        curl http://localhost:18081/healthz
-//        curl http://localhost:18081/anything-else
-//
-// Each curl exits the server after one request (serve_n with n=1).
+//        curl -X DELETE http://localhost:18081/hello      (405 with Allow)
+//        curl http://localhost:18081/anything-else        (the fallback)
 
 import { disposable } from "../../../std/core/kinds.yoop";
-import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
-import {
-    serve_n, ServeOutcome,
+import { Result } from "../../../std/core/types.yoop";
+import * as tcp, { ListenResult } from "../../../std/net/tcp.yoop";
+import * as http, {
     Handler, HandleOutcome, Dispatcher,
 } from "../../../std/http/server.yoop";
-import {
-    Request, Response, HttpMethod,
-    ok, headers_add, respond_static,
+import * as types, {
+    Request, Response, HttpError, HttpMethod,
 } from "../../../std/http/types.yoop";
-import {
-    Router,
-    router_new, router_add, router_set_fallback,
-} from "../../../std/http/router.yoop";
+import * as router, { Router } from "../../../std/http/router.yoop";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
@@ -32,51 +28,68 @@ extern "C" from "stdio.h" {
 type HelloHandler implements Handler {
     greeting: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain");
-        respond_static(ref resp, self.greeting);
+        types.respondText(ref resp, types.ok(), self.greeting);
+        return HandleOutcome.Ok;
+    }
+}
+
+// Reads the `:name` segment the router captured out of the path.
+type GreetHandler implements Handler {
+    fallbackName: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let who: string = types.paramOr(ref req, "name", self.fallbackName);
+        types.respondText(ref resp, types.ok(), `Hello, ${who}!\n`);
         return HandleOutcome.Ok;
     }
 }
 
 type HealthHandler implements Handler {
-    status_text: string,
+    statusText: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain");
-        respond_static(ref resp, self.status_text);
+        types.respondJson(ref resp, types.ok(), self.statusText);
         return HandleOutcome.Ok;
     }
 }
 
-type EchoHandler implements Handler {
-    prefix: string,
+type FallbackHandler implements Handler {
+    note: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain");
-        respond_static(ref resp, self.prefix);
+        types.respondText(ref resp, types.notFound(), `${self.note}: ${req.path}\n`);
         return HandleOutcome.Ok;
     }
+}
+
+function run(): Result<int32, HttpError> {
+    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18081, 128);
+    if (lr.error.len > 0) {
+        return Result.Err { error: types.errIo(lr.error) };
+    }
+
+    let hello: HelloHandler       = { greeting: "Hello via router!\n" };
+    let greet: GreetHandler       = { fallbackName: "stranger" };
+    let health: HealthHandler     = { statusText: "{\"status\":\"ok\"}\n" };
+    let missing: FallbackHandler  = { note: "no route" };
+
+    let disposable r: Router = router.routerNew();
+    router.routerGet(ref r, "/hello", Dispatcher.from(ref hello));
+    router.routerGet(ref r, "/greet/:name", Dispatcher.from(ref greet));
+    router.routerGet(ref r, "/healthz", Dispatcher.from(ref health));
+    router.routerFallback(ref r, Dispatcher.from(ref missing));
+
+    printf("router listening on 127.0.0.1:18081\n");
+
+    // The router is itself a Handler, so it erases into a Dispatcher exactly
+    // like the handlers it holds.
+    let d: Dispatcher = Dispatcher.from(ref r);
+    let served: int32 = http.serveDefault(ref lr.listener, ref d, 1)?;
+    printf(`served=${served}\n`);
+    return Result.Ok { value: served };
 }
 
 function main(): int32 {
-    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18081, 128);
-    if (lr.error.len > 0) {
-        printf(`bind failed: ${lr.error}\n`);
-        return 1;
+    switch (run()) {
+        case Result.Ok { value: _n }: { return 0; }
+        case Result.Err { error: e }: { printf(`server failed: ${e}\n`); return 1; }
     }
-
-    let hello: HelloHandler   = { greeting:    "Hello via router!\n" };
-    let health: HealthHandler = { status_text: "ok\n" };
-    let echo: EchoHandler     = { prefix:      "fallback\n" };
-
-    let disposable r: Router = router_new();
-    router_add(ref r, HttpMethod.Get, "/hello",   Dispatcher.from(ref hello));
-    router_add(ref r, HttpMethod.Get, "/healthz", Dispatcher.from(ref health));
-    router_set_fallback(ref r, Dispatcher.from(ref echo));
-
-    printf(`router listening on 127.0.0.1:18081\n`);
-    let outcome: ServeOutcome = serve_n(ref lr.listener, ref r, 1);
-    printf(`served=${outcome.served} err=${outcome.error}\n`);
     return 0;
 }

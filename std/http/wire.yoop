@@ -1,0 +1,223 @@
+// std/http/wire.yoop - the byte level shared by the server and the client.
+//
+// Two jobs, both of which used to be copy-pasted between server.yoop and
+// client.yoop:
+//
+//   1. Building a message into a `Vec<uint8>` (`pushStr`, `pushHeaderLine`).
+//   2. Reading the head of one (`findHeadEnd`, `readHeaderLines`).
+//
+// A request head and a response head differ only in their first line, so the
+// header-field loop below is written once and both parsers call it.
+//
+// Nothing here is exported to user code by convention - it is imported by
+// std/http/parser.yoop, server.yoop and client.yoop. It has no dependency on
+// sockets, which is what lets the parsers be tested against a byte literal.
+
+import { Result, Option } from "../core/types.yoop";
+import * as vec, { Vec } from "../core/vec.yoop";
+import * as bytes from "../core/bytes.yoop";
+import * as intr from "../core/intrinsics.yoop";
+import {
+    Headers, HttpError, headersAdd, errBadRequest, httpError, notImplemented,
+} from "./types.yoop";
+
+// The two structural separators of HTTP/1.1, spelled as the characters they
+// are rather than as 13/10.
+export const CRLF: uint8[] = ['\r', '\n'];
+export const HEAD_END: uint8[] = ['\r', '\n', '\r', '\n'];
+
+// ----- building -----------------------------------------------------------
+
+export function pushByte(ref out: Vec<uint8>, b: uint8): void {
+    vec.vec_push(ref out, b);
+}
+
+export function pushBytes(ref out: Vec<uint8>, src: uint8[]): void {
+    vec.vec_extend_from(ref out, src);
+}
+
+// Strings go out as their UTF-8 bytes. Numbers ride in through a template
+// literal at the call site (`pushStr(ref out, `${n}`)`), which is why there is
+// no decimal formatter here any more.
+export function pushStr(ref out: Vec<uint8>, s: string): void {
+    vec.vec_extend_from(ref out, intr.string_as_bytes(s));
+}
+
+export function pushCrlf(ref out: Vec<uint8>): void {
+    vec.vec_extend_from(ref out, CRLF);
+}
+
+// `Name: value\r\n`. No validation: a header value containing CR or LF would
+// be a response-splitting hole, so callers building headers from untrusted
+// input must reject those first (see `isValidHeaderValue`).
+export function pushHeaderLine(ref out: Vec<uint8>, name: string, value: string): void {
+    pushStr(ref out, name);
+    pushStr(ref out, ": ");
+    pushStr(ref out, value);
+    pushCrlf(ref out);
+}
+
+// A header value is safe iff it contains no CR, LF, or NUL. Anything that
+// smuggles those into a response can inject an entire extra message into the
+// stream, so this is checked at the point a value reaches the wire.
+export function isValidHeaderValue(value: string): bool {
+    for c in intr.string_as_bytes(value) {
+        if (c == '\r' || c == '\n' || c == 0) { return false; }
+    }
+    return true;
+}
+
+// ----- reading ------------------------------------------------------------
+
+// Offset of the blank line that ends the head, or `buf.len` when the head is
+// not complete yet. The read loop calls this after every recv to decide
+// whether it has enough to parse.
+export function findHeadEnd(buf: uint8[]): usize {
+    return bytes.bytes_index_of_seq(buf, HEAD_END);
+}
+
+// What the header block told us about the body that follows it.
+//
+// `chunked` is tracked rather than ignored: without it, a chunked body reads
+// as a body with chunk-size lines embedded in it, which is worse than an
+// honest 501.
+export type HeadInfo {
+    contentLength:   Option<usize>,
+    chunked:         bool,
+    connectionClose: bool,
+}
+
+// Optional whitespace either side of a field value (RFC 9110 says to strip
+// it, and a client that sends "Host: example.com " is common enough).
+function trimOws(raw: uint8[]): uint8[] {
+    let start: usize = 0;
+    let end: usize = raw.len;
+    while (start < end && (raw[start] == ' ' || raw[start] == '\t')) {
+        start = start + 1;
+    }
+    while (end > start && (raw[end - 1] == ' ' || raw[end - 1] == '\t')) {
+        end = end - 1;
+    }
+    return bytes.bytes_slice(raw, start, end);
+}
+
+function asString(raw: uint8[]): string {
+    return intr.string_from_bytes_unchecked(raw);
+}
+
+// Parse the header fields into `out`, and report what they say about the
+// body. `start` is the offset just past the first line's CRLF and `headEnd`
+// is what `findHeadEnd` returned.
+//
+// The scan runs to `headEnd + 2`, not to `headEnd`: `findHeadEnd` points at
+// the CR that *terminates the last header line*, so a region ending there
+// holds a final line with no CRLF of its own. Stopping at `headEnd` silently
+// drops that last field - which is exactly what the pre-rewrite parser did,
+// and why a malformed Content-Length in last position used to sail through.
+//
+// Lines are `name: value`, one per CRLF; a line with no colon is malformed
+// and rejected rather than skipped, because a header this server silently
+// drops is a header some proxy in front of it did not.
+export function readHeaderLines(
+    buf: uint8[],
+    start: usize,
+    headEnd: usize,
+    ref out: Headers,
+): Result<HeadInfo, HttpError> {
+    let info: HeadInfo = {
+        contentLength:   Option.None,
+        chunked:         false,
+        connectionClose: false,
+    };
+
+    // Safe: a buffer with a head end has at least the four bytes of the
+    // terminating CRLF CRLF after it.
+    let end: usize = headEnd + 2;
+    let pos: usize = start;
+    while (pos < end) {
+        let rest: uint8[] = bytes.bytes_slice(buf, pos, end);
+        let lineLen: usize = bytes.bytes_index_of(rest, '\r');
+        if (lineLen == rest.len) { break; }
+        let line: uint8[] = bytes.bytes_slice(rest, 0, lineLen);
+
+        // A leading space or tab means an obs-fold continuation line. RFC 9112
+        // says a server must reject those (they are a request-smuggling
+        // vector), so this does.
+        if (line.len > 0 && (line[0] == ' ' || line[0] == '\t')) {
+            return Result.Err { error: errBadRequest("obsolete line folding in header block") };
+        }
+
+        let colon: usize = bytes.bytes_index_of(line, ':');
+        if (colon == line.len) {
+            return Result.Err { error: errBadRequest("header line has no \":\"") };
+        }
+        // No space is allowed between the field name and the colon.
+        let nameBytes: uint8[] = bytes.bytes_slice(line, 0, colon);
+        if (nameBytes.len == 0) {
+            return Result.Err { error: errBadRequest("header line has an empty field name") };
+        }
+        if (nameBytes[nameBytes.len - 1] == ' ' || nameBytes[nameBytes.len - 1] == '\t') {
+            return Result.Err { error: errBadRequest("whitespace between header name and \":\"") };
+        }
+        let valueBytes: uint8[] = trimOws(bytes.bytes_slice(line, colon + 1, line.len));
+
+        let name: string = asString(nameBytes);
+        let value: string = asString(valueBytes);
+        headersAdd(ref out, name, value);
+
+        // Sniff the three fields that change how the body is read. The
+        // comparisons are case insensitive, per RFC 9110 field-name rules.
+        if (bytes.bytes_eq_ignore_ascii_case(nameBytes, intr.string_as_bytes("Content-Length"))) {
+            info.contentLength = parseContentLength(valueBytes, info.contentLength)?;
+        } else if (bytes.bytes_eq_ignore_ascii_case(nameBytes, intr.string_as_bytes("Transfer-Encoding"))) {
+            if (bytes.bytes_eq_ignore_ascii_case(valueBytes, intr.string_as_bytes("chunked"))) {
+                info.chunked = true;
+            }
+        } else if (bytes.bytes_eq_ignore_ascii_case(nameBytes, intr.string_as_bytes("Connection"))) {
+            if (bytes.bytes_eq_ignore_ascii_case(valueBytes, intr.string_as_bytes("close"))) {
+                info.connectionClose = true;
+            }
+        }
+
+        pos = pos + lineLen + 2;
+    }
+
+    if (info.chunked) {
+        return Result.Err {
+            error: httpError(notImplemented(), "chunked transfer encoding is not supported"),
+        };
+    }
+    return Result.Ok { value: info };
+}
+
+// One Content-Length value. A non-numeric value, a negative one, or a second
+// one that disagrees with the first are all rejected: a message whose length
+// is ambiguous is exactly the shape a request-smuggling attack takes.
+function parseContentLength(value: uint8[], prior: Option<usize>): Result<Option<usize>, HttpError> {
+    let parsed: Result<bytes.BytesParsed, string> = bytes.bytes_parse_int(value);
+    let n: int64 = 0;
+    switch (parsed) {
+        case Result.Ok { value: bp }: {
+            if (bp.consumed != value.len) {
+                return Result.Err { error: errBadRequest("Content-Length has trailing characters") };
+            }
+            n = bp.value;
+        }
+        case Result.Err { error: _e }: {
+            return Result.Err { error: errBadRequest("Content-Length is not a number") };
+        }
+    }
+    if (n < 0) {
+        return Result.Err { error: errBadRequest("Content-Length is negative") };
+    }
+    let value2: usize = usize(n);
+    switch (prior) {
+        case Option.Some { value: seen }: {
+            if (seen != value2) {
+                return Result.Err { error: errBadRequest("conflicting Content-Length headers") };
+            }
+        }
+        case Option.None: { }
+    }
+    return Result.Ok { value: Option.Some { value: value2 } };
+}

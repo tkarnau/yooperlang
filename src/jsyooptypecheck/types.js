@@ -271,15 +271,24 @@ export const FunctionPointerType = (params, returnType) =>
 // `(name, moduleId)` match - they are nominal types, like structs.
 //   methodOrder: list of method names in trait declaration order. Codegen
 //                uses this to pick a stable LLVM field index for each.
-export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) =>
-  freezerWrap(typeKinds.vtable, {
-    name,
-    traitName,
-    traitModuleId,
-    fields,
-    methodOrder,
-    moduleId,
-  });
+//
+// NOT frozen, unlike every other type but KindType / TypeParamType. Pass A
+// registers a shell (no trait module, no fields, no methodOrder) and pass
+// C.3b fills it in ON THE SAME OBJECT. Building a fresh populated type and
+// swapping the table entry, which is what this used to do, left any struct
+// field that had already resolved `d: MyVtable` pointing at the shell - and a
+// shell has no method slots, so a same-module `MyVtable.method(ref x.d, ...)`
+// failed with "vtable has no slot for trait method". Same shell-mutation
+// pattern variants use (Phase 13.A) and for the same reason.
+export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) => ({
+  kind: typeKinds.vtable,
+  name,
+  traitName,
+  traitModuleId,
+  fields,
+  methodOrder,
+  moduleId,
+});
 
 // Phase 8.A: raw, nullable, arithmetic-capable pointer for FFI. Gated by
 // `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the

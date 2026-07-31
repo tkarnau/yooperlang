@@ -1782,26 +1782,36 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.equal(stdout, "wrote=2 read=2 bytes=72,73\n");
   });
 
-  // Library Phase C: HTTP/1.1 request-head parser (request line + headers
-  // + Content-Length sniff). No sockets; pure parse over a literal buffer.
-  it("http_parse_smoke: parse_request_head extracts method/path/version/cl + headers", () => {
+  // HTTP/1.1 request-head parser: request line, header block, target split
+  // into path + query, and the malformed-request rejections. No sockets;
+  // pure parse over a literal buffer.
+  it("http_parse_smoke: parseRequestHead extracts the head and rejects bad ones", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/http_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
-      "method=GET path=/hello version=HTTP/1.1 cl=0 host=localhost\n",
+      "method=GET path=/hello version=HTTP/1.1 cl=0 host=localhost\n" +
+      "query name=yoop\n" +
+      "bad-method : 501 unsupported method \"BREW\"\n" +
+      "bad-version: 505 unsupported HTTP version \"HTTP/9.9\"\n" +
+      "bad-length : 400 Content-Length is not a number\n" +
+      "chunked    : 501 chunked transfer encoding is not supported\n" +
+      "encoded-sep: 400 decoding request path \"/a%2Fb\": encoded path separator is not allowed\n",
     );
   });
 
-  // Library Phase D: the hello-world HTTP server compiles end-to-end.
-  // Running it binds to localhost:18080 (out of scope for the test harness
-  // - see plans/library-phase-d-server.md). We just verify the build.
+  // The hello-world HTTP server compiles end-to-end. Running it binds to
+  // localhost:18080 (out of scope for the test harness), so this verifies
+  // the build.
   it("hello_server: builds end-to-end (server requires manual curl test)", () => {
     const { ir, linkFlags } = compileEntry(
       path.join(repoRoot, "examples/pass/hello_server/main.yoop"),
     );
-    // The server's generic serve_n monomorphizes against HelloHandler.
-    assert.match(ir, /serve_n.*HelloHandler/);
+    // The serve loop takes the erased Dispatcher, so there is exactly one
+    // copy of it and the handler is reached through the vtable.
+    assert.match(ir, /%vtable\..*__Dispatcher = type/);
+    assert.match(ir, /define i32 @server_.*__serveConnection/);
+    assert.match(ir, /define .*@main_.*__HelloHandler__Handler__handle/);
     // The TCP layer must call into the multiplexer.
     assert.match(ir, /declare i32 @yoop_io_wait_readable/);
     // The libc socket-family externs are declared.
@@ -1835,35 +1845,79 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  // Phase 10.I: the http_router example exercises std/http/router.yoop.
-  // Building requires that the `Dispatcher` vtable type-checks and that
-  // a Router whose impl carries a vtable field instantiates cleanly.
+  // Pure exercise of std/http/url.yoop plus the router's path matcher: target
+  // splitting, percent coding, urlencoded parsing, and pattern matching are
+  // all functions over strings, so this runs with no sockets.
+  it("http_url_smoke: target splitting, percent coding, and route patterns", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_url_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "target /todos/7?done=true&note=a%20b+c&flag#frag -> path=/todos/7 pairs=3 done=[true] note=[a b c] flag=[]\n" +
+      "target /todos -> path=/todos pairs=0\n" +
+      "segments=2 [a] [b-c]\n" +
+      "encode=a%20b%2Fc%3Fd%3De\n" +
+      "match /todos vs /todos -> hit\n" +
+      "match /todos vs /todos/ -> hit\n" +
+      "match /todos/:id vs /todos/42 -> hit id=42\n" +
+      "match /todos/:id vs /todos -> miss\n" +
+      "match /todos/:id vs /todos/42/notes -> miss\n" +
+      "match /static/* vs /static/css/app.css -> hit rest=css/app.css\n" +
+      "match /static/* vs /static -> hit rest=\n" +
+      "decodePath rejected: 400 encoded path separator is not allowed\n",
+    );
+  });
+
+  // Layout regressions. Each of these used to corrupt memory rather than fail
+  // to compile: a variant nested in a variant payload was sized without its
+  // payload floor + pad, a vtable had no size case at all (so a Vec of structs
+  // holding one overran its buffer), and a module-level const string reached
+  // the binary with its escape sequences undecoded.
+  it("variant_layout: nested variant payload, vtable in a Vec, const escapes", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/variant_layout/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "code=7 message=payload survived the round trip\n" +
+      "entries=6 total=150 last=slot5\n" +
+      "greetingLen=5\n",
+    );
+  });
+
+  // The http_router example exercises std/http/router.yoop. Building
+  // requires that the `Dispatcher` vtable type-checks and that a Router
+  // whose route entries carry a vtable field instantiates cleanly.
   // Running binds a port + needs curl - manual test.
-  it("http_router: builds end-to-end (manual curl test against /hello + /healthz)", () => {
+  it("http_router: builds end-to-end (manual curl test against /hello + /greet/:name)", () => {
     const { ir } = compileEntry(
       path.join(repoRoot, "examples/pass/http_router/main.yoop"),
     );
     // The Dispatcher vtable must materialize in the IR.
     assert.match(ir, /%vtable\..*__Dispatcher/);
-    // The router must be threaded into serve_n.
-    assert.match(ir, /serve_n.*Router/);
+    // The Router implements Handler, so it has its own trait-method define
+    // and reaches the route table's dispatchers through the same vtable.
+    assert.match(ir, /define .*@router_.*__Router__Handler__handle/);
+    assert.match(ir, /define .*@router_.*__matchPath/);
   });
 
   // Phase 10.I: end-to-end client+server in one process. A background
   // task serves one request; the main thread issues an http_get and
   // prints the response body.
-  it("http_client_loopback: in-process server task + client.send round-trip prints body", () => {
+  it("http_client_loopback: in-process server task + client GET/POST round-trip", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/http_client_loopback/main.yoop");
     assert.equal(exitCode, 0);
-    // The two task threads can interleave their stdout writes; the
-    // server's "server done" line and the client's "status= body=" line
-    // are the only writes, so a contains-check is robust to ordering.
+    // The two task threads can interleave their stdout writes, so these are
+    // contains-checks rather than an exact-output comparison.
     assert.ok(
       stdout.includes("status=200 body=ping-pong"),
-      `expected response in stdout, got: ${stdout}`,
+      `expected GET response in stdout, got: ${stdout}`,
     );
     assert.ok(
-      stdout.includes("server done served=1"),
+      stdout.includes("status=200 body=echo:hello"),
+      `expected POST echo in stdout, got: ${stdout}`,
+    );
+    assert.ok(
+      stdout.includes("server done served=2"),
       `expected server-done in stdout, got: ${stdout}`,
     );
   });

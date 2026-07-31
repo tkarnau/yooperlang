@@ -95,21 +95,33 @@ constructs, and pattern-matches correctly. The public API keeps
 
 Per the kinds-design.md question of "what trait or kind would help here":
 
-- **A `transaction` region kind is the clear win, and is not built.** The demo's
-  begin/commit/rollback is hand-written, and the rollback-on-error path is
-  exactly the kind of thing an author forgets on the third early return.
-  `appliesTo region` + `ownsBlock` + `requires Disposable` (the `ephemeral` shape
-  in [std/core/kinds.yoop](../std/core/kinds.yoop), whose own doc comment already
-  names transactions as a motivating case) gives `transaction begin(ref db) {
-  ... }` where the disposer rolls back unless a `commit` flag was set. Because
-  cleanup fires on every path out, an `expr?` propagating mid-block rolls back
-  for free. No compiler change needed - this is a userland kind plus a struct.
+- **A `transaction` kind was the clear win. BUILT** - see
+  [completed/std-http-rework.md](completed/std-http-rework.md). It landed as a
+  BINDING kind rather than the region kind predicted here, and the reason is
+  worth recording: a region has no name, and with no name there is nothing to
+  call `commit` on. A transaction that committed itself whenever the block
+  ended normally would commit on paths the author never considered successful,
+  so the value is named, the rollback is automatic, and the commit is the one
+  thing you have to say out loud.
+
+      transaction tx: Tx = sqlite.begin(ref db)?;
+      ... work, any `?` here rolls back on the way out ...
+      let _c: int32 = sqlite.commit(ref tx)?;
+
+  No compiler change was needed - a userland kind plus a struct, exactly as
+  predicted. `examples/playground/todo_api/store.yoop` uses it for an
+  all-or-nothing bulk import.
 - **A `bound` / `tainted` clearance pair is the flashy one, and is premature.**
   The injection story here is structural: values go through
   `sqlite3_bind_*` and never become SQL text, so there is no escaping question to
   get wrong. A clearance kind would only earn its cost once something in-tree
   builds SQL by concatenation, which nothing does. Revisit if a query builder
   ever lands.
+- **`DbRef` covers the shared-connection case.** A struct that stores a `Db`
+  has to declare `propagates<disposable>`, because storing one is a claim of
+  ownership. That is right for an owner and wrong for a server whose handlers
+  all use the one connection `main` owns, so the binding grew an explicit
+  non-owning handle (`sqlite.dbRef(ref db)` / `sqlite.borrow(h)`).
 - **No kind for `Db` / `Stmt` beyond `disposable`.** Both are plain Disposable
   handles with idempotent disposers (close/finalize, then null). That is the
   discipline the advisory ownership model asks for, and the demo verifies a

@@ -289,36 +289,20 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
   }
   if (name === "string") {
     if (typeof opts.emitRawStringGlobal !== "function") return null;
-    // Comptime string values store the unquoted, unescaped JS string.
-    // Re-encode through the same path as inline literals so escape
-    // sequences (\n, \t, ...) round-trip identically to today.
-    const inner = encodeStringForRawGlobal(wrapped.v);
-    const { name: strSym } = opts.emitRawStringGlobal(inner);
+    // A comptime string value is the literal's INNER SOURCE TEXT, quotes
+    // stripped and escape sequences left alone (see lower.js's
+    // STRING_LITERAL case) - a template that interpolated a number splices
+    // in digits, which can never introduce a backslash, so the raw form
+    // survives folding. That is exactly what emitRawStringGlobal wants, so
+    // it goes straight there. Running it through encodeStringForRawGlobal
+    // first (which assumes an already-DECODED JS string) doubled every
+    // backslash, and a module-level `const S: string = "a\r\nb";` reached
+    // the binary as the seven characters a-\-r-\-n-b instead of the five it
+    // reads as everywhere else in the language.
+    const { name: strSym } = opts.emitRawStringGlobal(String(wrapped.v));
     return strSym;
   }
   return null;
-}
-
-// Convert a JS-side string (from a comptime-folded value) into the
-// "inner" form that emitRawStringGlobal/encodeStringBytes expects -
-// i.e. with literal escape sequences re-escaped so encodeStringBytes
-// emits them as LLVM byte-array escape codes. JS already decoded \n
-// to a newline character; we need to re-encode it as the two-char
-// sequence `\n` so encodeStringBytes can map it back to `\0A`.
-function encodeStringForRawGlobal(s) {
-  let out = "";
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    const code = ch.charCodeAt(0);
-    if (ch === "\\") { out += "\\\\"; continue; }
-    if (ch === '"')  { out += '\\"';  continue; }
-    if (ch === "\n") { out += "\\n";  continue; }
-    if (ch === "\t") { out += "\\t";  continue; }
-    if (ch === "\r") { out += "\\r";  continue; }
-    if (code === 0)  { out += "\\0";  continue; }
-    out += ch; // encodeStringBytes handles non-printables via hex
-  }
-  return out;
 }
 
 // Phase 12: a value enum collapses to its underlying primitive at the LLVM
@@ -2417,7 +2401,27 @@ export function sizeOfType(t) {
       const padded = roundUp(off, maxAlign);
       if (padded > maxPayload) maxPayload = padded;
     }
-    return 4 /* tag */ + maxPayload;
+    // A variant is emitted as `{ i32, [N x i8] }` with N = max(maxPayload, 1)
+    // (see the enum/variant type definitions in codegenProgram), so its size is
+    // the tag plus that buffer, padded to its own alignment. Reporting the
+    // unrounded `4 + maxPayload` under-counted it two ways: it dropped the
+    // one-byte floor a payload-free variant still occupies, and it ignored the
+    // trailing pad. That mattered whenever a variant appeared INSIDE another
+    // variant's payload - the enclosing `[N x i8]` came out too small and
+    // storing the payload wrote past its end, corrupting whatever field
+    // followed. Over-reporting is harmless (a slightly roomier payload
+    // buffer); under-reporting is a memory stomp.
+    return roundUp(4 /* tag */ + Math.max(maxPayload, 1), sizeOfAlign(t));
+  }
+  if (t.kind === typeKinds.vtable) {
+    // Phase 9.G: a vtable is `{ ptr ctx, ptr m1, ptr m2, ... }` - one pointer
+    // for the receiver plus one per trait method. Falling through to the
+    // default 8 reported a one-method vtable as half its real size, so a
+    // `Vec<T>` whose element embedded one (a router's route table, say)
+    // allocated half the bytes it then wrote, and overran its buffer once
+    // enough entries were pushed to reach past the slack.
+    const slots = t.methodOrder?.length ?? t.fields?.length ?? 0;
+    return 8 * (1 + slots);
   }
   return 8;
 }
