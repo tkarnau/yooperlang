@@ -2070,47 +2070,55 @@ export function typecheckProgram(modules) {
   setCoreKinds(coreKinds);
   for (const mod of modules) {
     const errStart = errors.length;
-    const localSymbols = new Map();
-    const structTable = new Map();
-    const exports = new Set();
-    const importedNames = new Map();
-    const linkLibraries = new Set();
-    const traitTable = new Map();
-    const kindTable = new Map();
+    // modules-as-directories: every table below belongs to the MODULE, not to
+    // this source file, so a directory module's second and later files reuse
+    // the ones its first file created. `reused` gates the one-time seeding
+    // below (re-seeding coreKinds into a populated kindTable would report a
+    // redeclaration against the module's own first file).
+    const reused = moduleEnv.get(mod.id);
+    const localSymbols = reused?.localSymbols ?? new Map();
+    const structTable = reused?.structTable ?? new Map();
+    const exports = reused?.exports ?? new Set();
+    const importedNames = reused?.importedNames ?? new Map();
+    const linkLibraries = reused?.linkLibraries ?? new Set();
+    const traitTable = reused?.traitTable ?? new Map();
+    const kindTable = reused?.kindTable ?? new Map();
     // The declaring module itself gets nothing here (coreKinds is still
     // empty when it runs), so this never trips the redeclaration check.
-    for (const [coreName, coreKind] of coreKinds) kindTable.set(coreName, coreKind);
+    if (!reused) {
+      for (const [coreName, coreKind] of coreKinds) kindTable.set(coreName, coreKind);
+    }
     // Phase 7.1: generic decl tables - generic decls live here and never
     // enter structTable/localSymbols/traitTable (those are monomorphic only).
-    const genericStructTable = new Map();
-    const genericFuncTable = new Map();
-    const genericTraitTable = new Map();
+    const genericStructTable = reused?.genericStructTable ?? new Map();
+    const genericFuncTable = reused?.genericFuncTable ?? new Map();
+    const genericTraitTable = reused?.genericTraitTable ?? new Map();
     // Phase 10.A: generic enum decls. Sibling of genericStructTable; variantTable
     // stays monomorphic.
-    const genericVariantTable = new Map();
+    const genericVariantTable = reused?.genericVariantTable ?? new Map();
     // Phase 7.5: variant / union tables. Like structTable, these hold a "shell"
     // value after pass A and are populated with field types in pass C.
-    const variantTable = new Map();
-    const unionTable = new Map();
+    const variantTable = reused?.variantTable ?? new Map();
+    const unionTable = reused?.unionTable ?? new Map();
     // Phase 12: value-enum table - nominal aliases over primitive underlying
     // types. Separate from variantTable: different runtime shape (raw
     // primitive vs tagged payload) and different switch semantics.
-    const enumTable = new Map();
+    const enumTable = reused?.enumTable ?? new Map();
     // Phase 9.G: vtable type table. Like structTable, the shell only carries
     // a name in pass A; pass C resolves field types and trait references.
-    const vtableTable = new Map();
+    const vtableTable = reused?.vtableTable ?? new Map();
     // Transparent type aliases (`type NodeId = usize;`). Maps the alias name to
     // the parsed RHS type annotation; resolution happens lazily at every use
     // site (see resolveTypeAnnotationInModule) so an alias to a struct picks up
     // the same shell-then-filled type object a direct reference would. The alias
     // is NOT a distinct type - it resolves straight through to the underlying
     // type, so nothing downstream (coercion, indexing, codegen) sees the name.
-    const aliasTable = new Map();
+    const aliasTable = reused?.aliasTable ?? new Map();
     // Names this module brought into scope via an `extern "intrinsic"`
     // block. checkExpr.js's special-case paths for `wait_until` / `cancel`
     // gate on membership here so that user code that hasn't imported the
     // intrinsics module can freely shadow these names.
-    const builtinIntrinsicNames = new Set();
+    const builtinIntrinsicNames = reused?.builtinIntrinsicNames ?? new Set();
     // `Task` used to be seeded here from a hardcoded object. It is declared
     // in std/core/kinds.yoop now and arrives via the coreKinds seeding
     // above, like `pooled` and `joined`.
@@ -2568,6 +2576,14 @@ export function typecheckProgram(modules) {
     // which user code triggers by importing std/core/intrinsics.yoop (or, for
     // wait_until/cancel, std/core/concurrency.yoop).
 
+    // modules-as-directories: the env object is created by the FIRST source
+    // file of a module and reused (not replaced) by the rest, which is what
+    // makes a module's declarations visible to its siblings with no import and
+    // makes a cross-file duplicate report as an ordinary redeclaration. Note
+    // there is no `allowsUnsafe` here on purpose: `import.unsafe;` is a
+    // per-source-file pragma, so it is read off `mod.ast` at each use rather
+    // than cached on the shared env, where one file's opt-in would silently
+    // cover its siblings.
     moduleEnv.set(mod.id, {
       localSymbols,
       structTable,
@@ -2586,28 +2602,25 @@ export function typecheckProgram(modules) {
       vtableTable,
       aliasTable,
       builtinIntrinsicNames,
-      // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
-      allowsUnsafe: !!mod.ast.allowsUnsafe,
     });
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   // pass B: wire imports (so pass C can resolve cross-module type names)
   for (const mod of modules) {
     const errStart = errors.length;
     resolveImports(mod, moduleEnv, errors);
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   // Phase 8.A: `import.unsafe;` gating pass - scan each non-unsafe module
   // for any unsafe_ptr type annotation, address-of/deref/null/cast node, and
   // surface a precise diagnostic. Cheap recursive walk; runs once per module.
   for (const mod of modules) {
-    const env = moduleEnv.get(mod.id);
-    if (env?.allowsUnsafe) continue;
+    if (mod.ast.allowsUnsafe) continue;
     const errStart = errors.length;
     walkAstForUnsafe(mod.ast, errors);
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   // pass C: struct fields + function sigs + extern decls
@@ -3531,7 +3544,7 @@ export function typecheckProgram(modules) {
     // Mirror onto env so resolve-assignment-to-module-global (which only has
     // the typeContext) can find the decl list without re-walking the AST.
     env.moduleInitDecls = mod.moduleInitDecls;
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.
@@ -3628,7 +3641,7 @@ export function typecheckProgram(modules) {
       // Gates wait_until/cancel special-cases in checkExpr.js.
       builtinIntrinsicNames: env.builtinIntrinsicNames,
       // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
-      allowsUnsafe: env.allowsUnsafe,
+      allowsUnsafe: !!mod.ast.allowsUnsafe,
       // Phase 8.A: callback that resolves a parser-emitted type annotation
       // to a Type in this module's scope. Used by expression-level type-arg
       // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`).
@@ -3752,7 +3765,7 @@ export function typecheckProgram(modules) {
         }
       }
     }
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   return { modules, errors, moduleEnv, programState };
@@ -3830,9 +3843,19 @@ function validateFunctionKindPrefix(funcDecl, mod, moduleEnv, kindTable, errors)
 // Stamp `moduleId` onto error records added to `errors` since `startIdx`.
 // Used by typecheckProgram to attribute errors to the module being processed
 // without threading moduleId through every pushError call site.
-function stampModuleId(errors, startIdx, moduleId) {
+// Tag every error a pass just produced with where it came from.
+//
+// TWO ids, deliberately: `moduleId` is the namespace/mangling unit and
+// `srcPath` is the SOURCE FILE. Under modules-as-directories several source
+// files share one moduleId, so moduleId alone can no longer find the text to
+// render a code frame against - a diagnostic keyed only by module would print
+// the caret against whichever file happened to be last. `srcPath` is what
+// diagnostic rendering keys on; `moduleId` stays because --test filters the
+// synthetic entry MODULE, which is a module-level question.
+function stampErrorOrigin(errors, startIdx, mod) {
   for (let i = startIdx; i < errors.length; i++) {
-    if (errors[i].moduleId === undefined) errors[i].moduleId = moduleId;
+    if (errors[i].moduleId === undefined) errors[i].moduleId = mod.id;
+    if (errors[i].srcPath === undefined) errors[i].srcPath = mod.absPath;
   }
 }
 

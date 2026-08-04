@@ -52,7 +52,11 @@ export function request(method: HttpMethod, url: string): ClientRequest propagat
     return { method: method, url: url, headers: headersNew(8), body: [] };
 }
 
-export function setHeader(ref req: ClientRequest, name: string, value: string): void {
+// Named for the direction rather than shortened to `setHeader`, because
+// types.yoop already owns `setHeader` for a `Response` and Yoop has no
+// overloading - once std/http is one module the two would collide. The
+// Response one keeps the short name; it has all the callers.
+export function setRequestHeader(ref req: ClientRequest, name: string, value: string): void {
     headersSet(ref req.headers, name, value);
 }
 
@@ -171,7 +175,9 @@ function checkRequestHeaders(ref req: ClientRequest): Result<usize, HttpError> {
 
 // ----- send ---------------------------------------------------------------
 
-async readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
+// One recv, with the error mapped into the layer's error type. See the twin
+// `readRequestBytes` in server.yoop for why the duplicate is deliberate.
+async readResponseBytes(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
     switch (await Readable.read(ref stream, ref window)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
@@ -182,7 +188,7 @@ async readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpEr
 // Read until the response head is complete. Unlike the server side, an EOF
 // here is always an error: a peer that closes without a status line answered
 // nothing.
-async readHead(
+async readResponseHead(
     ref stream: TcpStream,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
@@ -190,7 +196,7 @@ async readHead(
 ): Result<usize, HttpError> {
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (true) {
-        let n: usize = await readSome(ref stream, ref window)? "reading the response head";
+        let n: usize = await readResponseBytes(ref stream, ref window)? "reading the response head";
         if (n == 0) {
             return Result.Err { error: errIo("peer closed before the response head was complete") };
         }
@@ -236,7 +242,7 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
     // -- read the head --
     disposable buf: Vec<uint8> = vec.vec_new(c.readChunk);
     disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(c.readChunk), c.readChunk);
-    let _headEnd: usize = await readHead(ref cr.stream, ref buf, ref scratch, ref c)?;
+    let _headEnd: usize = await readResponseHead(ref cr.stream, ref buf, ref scratch, ref c)?;
 
     let disposable head: ParsedResponse = parser.parseResponseHead(vec.vec_as_array(ref buf))?;
 
@@ -291,7 +297,7 @@ async readRest(
 
     while (true) {
         if (bounded && body.len >= want) { break; }
-        let n: usize = await readSome(ref stream, ref window)? "reading the response body";
+        let n: usize = await readResponseBytes(ref stream, ref window)? "reading the response body";
         if (n == 0) {
             // EOF. With a declared length this is a truncated response; with
             // no length it is how the peer signals the end.

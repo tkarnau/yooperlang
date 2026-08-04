@@ -2044,7 +2044,73 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   });
 });
 
+// modules-as-directories: a module is either one source file (no header) or a
+// DIRECTORY of source files that each declare `module <name>;`. See
+// plans/modules-as-directories.md.
+describe("e2e: directory modules", () => {
+  it("dir_module: two source files form one module and share a namespace", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/dir_module/main.yoop");
+    assert.strictEqual(exitCode, 0);
+    // areaOf/doubledArea live in area.yoop; Point and the PRIVATE `doubled`
+    // live in point.yoop. area.yoop imports neither - siblings in a module see
+    // each other's declarations, exported or not, with no import.
+    assert.match(stdout, /area=12/);
+    assert.match(stdout, /doubledArea=24/);
+    assert.match(stdout, /stretched=6,8/);
+    // Both files declare a module-level const with an unfoldable initializer,
+    // so both really go through a runtime module-init. 4 + 8 proves both ran.
+    assert.match(stdout, /scratchCaps=12/);
+  });
+
+  it("dir_module: both source files mangle against ONE module id", () => {
+    const { ir } = compileEntry(
+      path.join(repoRoot, "examples/pass/dir_module/main.yoop"),
+    );
+    // areaOf (area.yoop) and stretched (point.yoop) are different FILES but one
+    // module, so they carry the same mangling prefix. That prefix is derived
+    // from the directory, and the declared name supplies its readable part.
+    const areaOf = ir.match(/@(shapes_[0-9a-f]+)__areaOf\(/);
+    const stretched = ir.match(/@(shapes_[0-9a-f]+)__stretched\(/);
+    assert.ok(areaOf, "expected an areaOf define mangled under a shapes_* module id");
+    assert.ok(stretched, "expected a stretched define mangled under a shapes_* module id");
+    assert.strictEqual(areaOf[1], stretched[1]);
+    // The module-init symbol is per SOURCE FILE, because one define per module
+    // would be an LLVM redefinition when two files both have module-level decls.
+    const inits = [...ir.matchAll(/define internal void @(\S*?__module_init\S*)\(\)/g)]
+      .map((m) => m[1])
+      .filter((s) => s.startsWith("shapes_"));
+    assert.strictEqual(inits.length, 2, `expected 2 shapes module inits, got ${inits.join(", ")}`);
+    assert.strictEqual(new Set(inits).size, 2, "the two inits must have distinct symbols");
+  });
+});
+
 describe("e2e: multi-file fail fixtures produce the right errors", () => {
+  // A half-opted-in directory is an error rather than a silently-split module.
+  // This is what catches a file added later by someone who did not notice the
+  // directory had a `module` header.
+  it("dir_module_mixed: a source file without the module header is rejected", () => {
+    assert.throws(
+      () =>
+        loadModuleGraph(
+          path.join(repoRoot, "examples/fail/dir_module_mixed/main.yoop"),
+        ),
+      /b\.yoop is in module directory .* but has no `module m;` header/,
+    );
+  });
+
+  // The module is the unit, so one of its source files cannot be imported on
+  // its own. The error names the form that works instead of quietly pulling in
+  // the whole directory.
+  it("dir_module_file_import: importing one source file of a module is rejected", () => {
+    assert.throws(
+      () =>
+        loadModuleGraph(
+          path.join(repoRoot, "examples/fail/dir_module_file_import/main.yoop"),
+        ),
+      /names one source file of module "m" - import the module itself instead/,
+    );
+  });
+
   it("import_no_yoop_ext.yoop: import path must end in .yoop", () => {
     const entryAbs = path.join(repoRoot, "examples/fail/import_no_yoop_ext.yoop");
     assert.throws(

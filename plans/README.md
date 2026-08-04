@@ -98,6 +98,11 @@ informal personal version):
   diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).
   Surfaced by the sqlite binding; see
   [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md).
+- Two playground examples are stale since the async conversion and no longer
+  compile: `examples/playground/todo_api` and `examples/playground/yoopstore`
+  both hit `async function must be awaited` on `serve` / `serveDefault`. Nothing
+  under playground/ is covered by e2e, which is why this sat unnoticed. Fixing
+  them is a call-site `await` plus whatever coloring that cascades into.
 - Figure out the idempotent cleanup/dispose pattern (free-then-null, guard on
   null) so `dispose` is safe to call more than once - this is the discipline the
   advisory ownership model leans on instead of compiler-enforced affine moves.
@@ -112,6 +117,29 @@ informal personal version):
   `const` string that kept its escapes undecoded, and a `switch` payload
   binding that could carry an unpopulated struct shell. Worth reading as a list
   of the shapes that go wrong when a layout or a pass-order assumption drifts.
+
+---
+
+## Pending plan
+
+- [modules-as-directories.md](modules-as-directories.md) - make a module a
+  DIRECTORY of source files rather than a single file. Motivated by the
+  bootstrap: acyclicity at file granularity is what forces a shared-vocabulary
+  dumping ground (`bootstrap/src/contracts.yoop`, 1199 lines), and that is
+  costing more reading context than the file split saves. Sequenced so there is
+  no flip day: a directory becomes a module only when its files declare
+  `module <name>;`, so the compiler change lands green with zero std changes and
+  each directory opts in as its own revertable commit. Distinct from the archived
+  package MANAGER plan - different axis, and the doc pins the terminology so they
+  stay apart. **Phases 1 and 2 have landed** and the doc records where the plan
+  itself turned out to be wrong. Phase 1: the five cross-file name collisions in
+  std are gone, no compiler change. Phase 2: directory modules work end to end
+  behind the opt-in `module <name>;` header, so nothing in the tree behaves
+  differently until a directory opts in. One phase-2 item is deliberately
+  outstanding - import scope is module-wide rather than per source file; see the
+  doc's "Import scope" section for the measured cost and the narrow stopgap that
+  keeps directory modules usable meanwhile. Phase 3 (opting std in, one directory
+  per commit) is next and is not blocked by it.
 
 ---
 

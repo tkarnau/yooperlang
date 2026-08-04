@@ -30,6 +30,7 @@ import { Option } from "../core/types.yoop";
 import { Iterable, IterStep } from "../core/traits.yoop";
 import { string_eq, string_hash } from "../core/strings.yoop";
 import { bytes_eq } from "../core/bytes.yoop";
+import { nextPow2Floor8 } from "../core/numbers.yoop";
 import * as intr from "../core/intrinsics.yoop";
 
 const STATE_EMPTY:     uint8 = 0;
@@ -66,15 +67,6 @@ export type Map<K, V> implements Disposable propagates<disposable> {
             self.cap = 0;
         }
     }
-}
-
-// Round `n` up to the next power of two, with a floor of 8.
-function next_pow2_floor8(n: usize): usize {
-    let cap: usize = 8;
-    while (cap < n) {
-        cap = cap * 2;
-    }
-    return cap;
 }
 
 // Hash a key into a bucket index for this map's current capacity.
@@ -142,7 +134,7 @@ function find_insert_slot<K, V>(ref m: Map<K, V>, key: K): usize {
 // Construct a fresh map. `initial_cap` is a hint; the real capacity
 // is the next power of two ≥ initial_cap, floor of 8.
 export function map_new<K, V>(initial_cap: usize, ops: KeyOps<K>): Map<K, V> propagates<disposable> {
-    let cap: usize = next_pow2_floor8(initial_cap);
+    let cap: usize = nextPow2Floor8(initial_cap);
     let keys:   K[]      = intr.heap_alloc(cap);
     let values: V[]      = intr.heap_alloc(cap);
     let states: uint8[]  = intr.heap_alloc(cap);

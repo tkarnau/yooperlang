@@ -1,0 +1,19 @@
+module shapes;
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+
+export const SCRATCH_B: Vec<int32> = vec.vec_new(8);
+
+// `Point` (an exported sibling type) and `doubled` (a PRIVATE sibling
+// function) both resolve with no import.
+export function areaOf(p: Point): int32 {
+    return p.x * p.y;
+}
+
+export function doubledArea(p: Point): int32 {
+    return doubled(areaOf(p));
+}
+
+export function scratchCaps(): usize {
+    return SCRATCH_A.cap + SCRATCH_B.cap;
+}

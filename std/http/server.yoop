@@ -108,7 +108,7 @@ export function defaultConfig(): ServerConfig {
 // Read until the head-terminating blank line is in `buf`, or the head limit
 // is hit. Returns `None` when the peer closed cleanly before sending anything
 // (the normal end of a keep-alive connection) and `Some { offset }` otherwise.
-async readHead(
+async readRequestHead(
     ref stream: TcpStream,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
@@ -121,7 +121,7 @@ async readHead(
 
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (true) {
-        let n: usize = await readSome(ref stream, ref window)? "reading the request head";
+        let n: usize = await readRequestBytes(ref stream, ref window)? "reading the request head";
         if (n == 0) {
             if (buf.len == 0) { return Result.Ok { value: Option.None }; }
             return Result.Err { error: types.errBadRequest("connection closed mid-head") };
@@ -139,8 +139,13 @@ async readHead(
     return Result.Ok { value: Option.None };
 }
 
-// One recv, with the error mapped into the layer's error type.
-async readSome(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
+// One recv, with the error mapped into the layer's error type. Byte-identical
+// to `readResponseBytes` in client.yoop; the two differ only in the peer they
+// are reading from. It does not live in wire.yoop because wire.yoop is
+// deliberately socket-free (that is what lets the parsers be tested against a
+// byte literal), so the duplicate stands until std/http is one module and one
+// private copy can serve both directions.
+async readRequestBytes(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
     switch (await Readable.read(ref stream, ref window)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
@@ -158,7 +163,7 @@ async readBody(
 ): Result<usize, HttpError> {
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (buf.len < bodyStart + need) {
-        let n: usize = await readSome(ref stream, ref window)? "reading the request body";
+        let n: usize = await readRequestBytes(ref stream, ref window)? "reading the request body";
         if (n == 0) {
             return Result.Err { error: types.errBadRequest("connection closed mid-body") };
         }
@@ -322,7 +327,7 @@ async serveConnection(
     while (served < limit) {
         // Head first: a clean close here is how a keep-alive connection ends.
         let headAt: Option<usize> = Option.None;
-        switch (await readHead(ref stream, ref buf, ref scratch, cfg)) {
+        switch (await readRequestHead(ref stream, ref buf, ref scratch, cfg)) {
             case Result.Ok { value: at }: { headAt = at; }
             case Result.Err { error: e }: {
                 let _ignored: bool = await replyWithError(ref stream, ref e, cfg);

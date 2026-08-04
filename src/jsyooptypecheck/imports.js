@@ -5,6 +5,20 @@ import { ASTNodeKind } from "../contracts.js";
 import { NamespaceType, typeKinds } from "./types.js";
 import { pushError } from "./errors.js";
 
+// True when `localName` is already bound by an import of exactly the same thing
+// (same source module, same exported name). Under modules-as-directories the
+// import tables belong to the MODULE, so sibling source files that legitimately
+// import the same namespace or type land here; an exact match is idempotent
+// rather than a redeclaration. Anything else is a genuine conflict.
+function sameImportAlready(importedNames, localName, fromModuleId, exportName) {
+  const prior = importedNames.get(localName);
+  return (
+    !!prior &&
+    prior.fromModuleId === fromModuleId &&
+    prior.exportName === exportName
+  );
+}
+
 // resolveImports - pass B of typecheckProgram.
 // For each IMPORT_DECL in mod, validates exports exist and populates the
 // module's local symbol/struct tables with the imported bindings.
@@ -30,7 +44,16 @@ export function resolveImports(mod, moduleEnv, errors) {
     // `continue`-ing.
     if (imp.namespaceName) {
       if (localSymbols.has(imp.namespaceName)) {
-        pushError(errors, imp, `local name "${imp.namespaceName}" collides with an existing declaration`);
+        // modules-as-directories: the import tables are shared by every source
+        // file of a module, so two sibling files that both `import * as vec
+        // from "std/core/vec.yoop"` would otherwise collide with each other -
+        // which would make a directory module unusable, since essentially every
+        // file of a real module imports the same handful of namespaces. An
+        // IDENTICAL re-import (same local name, same source module) is a no-op.
+        // A different target under the same local name is still a real conflict.
+        if (!sameImportAlready(importedNames, imp.namespaceName, imp.resolvedModuleId, imp.namespaceName)) {
+          pushError(errors, imp, `local name "${imp.namespaceName}" collides with an existing declaration`);
+        }
       } else {
         const nsType = NamespaceType(srcEnv === modEnv ? mod.id : imp.resolvedModuleId, srcEnv.exports);
         localSymbols.set(imp.namespaceName, nsType);
@@ -46,6 +69,12 @@ export function resolveImports(mod, moduleEnv, errors) {
       }
 
       if (localSymbols.has(spec.localName) || structTable.has(spec.localName)) {
+        // Same idempotence rule as the namespace clause above: a sibling source
+        // file in the same module re-importing the same name from the same
+        // module is a no-op, not a collision.
+        if (sameImportAlready(importedNames, spec.localName, imp.resolvedModuleId, spec.exportName)) {
+          continue;
+        }
         pushError(errors, imp, `local name "${spec.localName}" collides with an existing declaration`);
         continue;
       }

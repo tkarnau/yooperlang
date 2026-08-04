@@ -237,8 +237,20 @@ function main() {
   // jsyoopcodegen/codegen.js.
   programState.trackHeap = !!values["track-heap"];
 
+  // Resolve a diagnostic back to the SOURCE FILE whose text it should be
+  // rendered against. Keyed on srcPath, not moduleId: under
+  // modules-as-directories many source files share one moduleId, so a
+  // moduleId-keyed map keeps only one of them and every other file's
+  // diagnostics would print a caret into the wrong source. moduleId is the
+  // fallback for anything stamped before srcPath existed.
+  const modByPath = new Map(modules.map((m) => [m.absPath, m]));
+  const modById = new Map(modules.map((m) => [m.id, m]));
+  const ownerOf = (error) =>
+    modByPath.get(error.srcPath) ??
+    modById.get(error.moduleId) ??
+    modules[modules.length - 1];
+
   if (errors.length > 0) {
-    const modById = new Map(modules.map((m) => [m.id, m]));
     // Test mode: a bad suite (wrong signature, unresolvable kind) also breaks
     // the generated entry's suite table, producing a second diagnostic that
     // points into source the user never wrote. Report only the real ones. If
@@ -262,7 +274,7 @@ function main() {
       `typecheck failed (${reported.length} error${reported.length === 1 ? "" : "s"}):\n`,
     );
     for (const error of reported) {
-      const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
+      const mod = ownerOf(error);
       console.error(
         formatDiagnostic({
           filePath: mod?.absPath ?? inputFile,
@@ -301,12 +313,11 @@ function main() {
   const attrErrors = [];
   runAttributePass(modules, attrErrors);
   if (attrErrors.length > 0) {
-    const modById = new Map(modules.map((m) => [m.id, m]));
     console.error(
       `attribute pass failed (${attrErrors.length} error${attrErrors.length === 1 ? "" : "s"}):\n`,
     );
     for (const error of attrErrors) {
-      const mod = modById.get(error.moduleId) ?? modules[modules.length - 1];
+      const mod = ownerOf(error);
       console.error(
         formatDiagnostic({
           filePath: mod?.absPath ?? inputFile,

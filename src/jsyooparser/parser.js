@@ -800,6 +800,26 @@ export function parse(src) {
       // A test module is allowed to have no `main` - the driver's --test mode
       // synthesizes an entry module that calls its enumerable-kinded functions.
       node.isTestModule = false;
+      // modules-as-directories: an optional `module <name>;` header. Declaring
+      // it is what opts this file's DIRECTORY in as a module (several source
+      // files sharing one namespace and one mangling prefix); a file without
+      // one stays a single-file module, exactly as before. Recognized
+      // CONTEXTUALLY as the very first item in the file, so `module` remains an
+      // ordinary identifier everywhere else - bootstrap/src/contracts.yoop uses
+      // it as a struct field name. `IDENT IDENT ;` has no other meaning at top
+      // level (a kind-prefixed binding needs `=`, a function needs `(`), so the
+      // three-token lookahead is unambiguous. See plans/modules-as-directories.md.
+      node.moduleName = null;
+      if (
+        peek().tag === TokenTags.ident &&
+        src.substring(peek().start, peek().start + peek().length) === "module" &&
+        peekAhead(1).tag === TokenTags.ident &&
+        peekAhead(2).tag === TokenTags.semicolon
+      ) {
+        advance(); // module
+        node.moduleName = parseIdentAsName();
+        expect(TokenTags.semicolon);
+      }
       let seenNonImport = false;
       while (peek().tag !== TokenTags.eof) {
         // only allow declarations

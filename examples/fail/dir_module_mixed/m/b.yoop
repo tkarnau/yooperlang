@@ -1,0 +1,3 @@
+// Deliberately missing the `module m;` header - a half-opted-in directory
+// must be an error, not a silently-split module.
+export function b(): int32 { return 2; }

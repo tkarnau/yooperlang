@@ -486,5 +486,5 @@ export function lastInsertRowid(ref db: Db): int64 {
 // The linked libsqlite3's version, e.g. "3.43.2". Handy for confirming which
 // sqlite the binary actually picked up.
 export function libVersion(): string {
-    return str.string_concat(ffi.libVersion(), "");
+    return str.string_concat(ffi.rawLibVersion(), "");
 }

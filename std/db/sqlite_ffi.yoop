@@ -224,4 +224,4 @@ export function rawColumnText(s: RawStmt, col: int32): string {
 
 // ----- misc ----------------------------------------------------------------
 
-export function libVersion(): string { return sqlite3_libversion(); }
+export function rawLibVersion(): string { return sqlite3_libversion(); }

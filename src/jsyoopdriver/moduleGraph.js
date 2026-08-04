@@ -3,7 +3,7 @@ import path from "node:path";
 
 import { parse } from "../jsyooparser/parser.js";
 import { ASTNodeKind } from "../contracts.js";
-import { moduleIdFor } from "./moduleId.js";
+import { moduleIdFor, directoryModuleIdFor } from "./moduleId.js";
 import { lowerRangeExprs } from "./lower_range.js";
 import { STD_ROOT } from "../install_root.js";
 
@@ -17,21 +17,33 @@ const DEFAULT_STD_ROOT = STD_ROOT;
 // Returns { entry: Module, modules: [Module] } where modules is topo-sorted
 // leaves-first (so each module's dependencies appear before it).
 //
-// Each Module:
-//   id: string               - stable module identifier
-//   absPath: string          - canonicalized absolute path
-//   src: string              - file contents
+// Each Module is ONE SOURCE FILE:
+//   id: string               - the MODULE id (see below - shared by siblings)
+//   absPath: string          - canonicalized absolute path of this source file
+//   src: string              - this file's contents
 //   ast: ProgramNode
 //   imports: [IMPORT_DECL]   - decls with resolvedAbsPath/resolvedModuleId set
+//
+// modules-as-directories: a MODULE is either one source file (no header) or a
+// DIRECTORY of source files that each declare `module <name>;`. A source file
+// stays the compilation unit either way - it keeps its own ast/src/absPath, so
+// diagnostics, DWARF and the LSP are unaffected - while `id` becomes the
+// namespace and mangling unit and is SHARED by every file of a directory
+// module. Identity is the resolved directory path; the declared name is only a
+// label. Cycle detection is at module granularity, which is the payoff: files
+// inside one module do not import each other, so intra-module cycles stop
+// existing as a category. See plans/modules-as-directories.md.
 //
 // Options:
 //   readFile(absPath) -> string | null
 //     Optional override for reading a module's source. Returning null falls
 //     back to fs. Used by the LSP to inject unsaved buffers.
 export function loadModuleGraph(entryAbsPath, options = {}) {
-  const byPath = new Map(); // absPath -> Module
-  const onStack = new Set(); // for cycle detection
-  const order = []; // post-order (leaves first)
+  const byPath = new Map(); // source-file absPath -> Module
+  const unitById = new Map(); // moduleId -> { id, dir, name, files: [Module] }
+  const onStack = new Set(); // moduleIds mid-load, for cycle detection
+  const order = []; // post-order over source files (leaves first)
+  const parsedCache = new Map(); // absPath -> { src, ast }
   const readFile = options.readFile ?? (() => null);
   const stdRoot = options.stdRoot ?? DEFAULT_STD_ROOT;
 
@@ -65,22 +77,22 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     } catch {
       continue; // tests that point stdRoot at a stub directory may not have these
     }
-    loadOne(resolvedAbs);
+    loadOwningUnit(resolvedAbs);
   }
-  loadOne(entryAbsPath);
+  loadOwningUnit(entryAbsPath);
   return {
     entry: byPath.get(entryAbsPath),
     modules: order,
     autoloadedStdModuleIds: collectAutoloadIds(byPath, autoload),
   };
 
-  function loadOne(absPath) {
-    if (onStack.has(absPath)) {
-      throw new Error(`import cycle detected involving ${absPath}`);
-    }
-    if (byPath.has(absPath)) return byPath.get(absPath);
-    onStack.add(absPath);
+  // ─── reading ──────────────────────────────────────────────────────────────
 
+  // Memoized so learning a file's `module` header (which needs a parse) does
+  // not cost a second parse when the file is then loaded for real.
+  function readAndParse(absPath) {
+    const hit = parsedCache.get(absPath);
+    if (hit) return hit;
     const overlay = readFile(absPath);
     const src = overlay != null ? overlay : fs.readFileSync(absPath, "utf8");
     const ast = parse(src);
@@ -89,51 +101,217 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     // resolved like any other - which is also what pulls range.yoop into the
     // graph, and only for modules that use `..`.
     lowerRangeExprs(ast);
-    const id = moduleIdFor(absPath);
-    const mod = { id, absPath, src, ast, imports: [] };
-    byPath.set(absPath, mod);
+    const parsed = { src, ast };
+    parsedCache.set(absPath, parsed);
+    return parsed;
+  }
 
-    for (const decl of ast.body) {
-      if (decl.kind !== ASTNodeKind.IMPORT_DECL) break; // imports-first rule
-      const sourcePath = decl.sourcePath;
-      if (!sourcePath.endsWith(".yoop")) {
-        throw new Error(`import path "${sourcePath}" must end in .yoop`);
-      }
-      // Phase 9.C: `std/...` paths resolve against the std root, not relative
-      // to the importing file. Everything else must be `./...`, `../...`, or
-      // absolute - preserves the SPEC §1 relative-only contract for non-std
-      // imports.
-      const isStdImport = sourcePath.startsWith("std/");
-      if (
-        !isStdImport &&
-        !sourcePath.startsWith("./") &&
-        !sourcePath.startsWith("../") &&
-        !path.isAbsolute(sourcePath)
-      ) {
-        throw new Error(
-          `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`,
-        );
-      }
-      const resolved = isStdImport
-        ? path.resolve(stdRoot, sourcePath.slice("std/".length))
-        : path.resolve(path.dirname(absPath), sourcePath);
-      let resolvedAbs;
-      try {
-        resolvedAbs = fs.realpathSync(resolved);
-      } catch {
-        throw new Error(
-          `cannot resolve import "${sourcePath}" from ${absPath}: file not found`,
-        );
-      }
-      const child = loadOne(resolvedAbs);
-      decl.resolvedAbsPath = resolvedAbs;
-      decl.resolvedModuleId = child.id;
-      mod.imports.push(decl);
+  function makeFileRecord(absPath, moduleId) {
+    const { src, ast } = readAndParse(absPath);
+    return { id: moduleId, absPath, src, ast, imports: [] };
+  }
+
+  // The source files a directory module is made of: every `.yoop` directly in
+  // the directory, sorted for determinism, minus test files. `*.test.yoop` is
+  // excluded because a test module is its own thing (`import.test;`, no main)
+  // and must not be absorbed into the module it tests.
+  function listModuleSourceFiles(dir) {
+    return fs
+      .readdirSync(dir, { withFileTypes: true })
+      .filter(
+        (e) =>
+          e.isFile() && e.name.endsWith(".yoop") && !e.name.endsWith(".test.yoop"),
+      )
+      .map((e) => e.name)
+      .sort()
+      .map((name) => fs.realpathSync(path.join(dir, name)));
+  }
+
+  // ─── loading ──────────────────────────────────────────────────────────────
+
+  // Load whatever MODULE owns this source file, and return that unit.
+  function loadOwningUnit(absPath) {
+    const known = byPath.get(absPath);
+    if (known) return reuseUnit(known.id, absPath);
+    const { ast } = readAndParse(absPath);
+    if (ast.moduleName === null) return loadSingleFileUnit(absPath);
+    return loadDirectoryUnit(path.dirname(absPath), absPath);
+  }
+
+  // A unit we have already seen. Still has to fail if it is mid-load, which is
+  // exactly what an import cycle looks like from here.
+  function reuseUnit(id, blameAbsPath) {
+    if (onStack.has(id)) {
+      throw new Error(`import cycle detected involving ${blameAbsPath}`);
+    }
+    return unitById.get(id);
+  }
+
+  function loadSingleFileUnit(absPath) {
+    const id = moduleIdFor(absPath);
+    if (unitById.has(id)) return reuseUnit(id, absPath);
+    onStack.add(id);
+    const mod = makeFileRecord(absPath, id);
+    const unit = { id, dir: null, name: null, files: [mod] };
+    unitById.set(id, unit);
+    byPath.set(absPath, mod);
+    walkUnitImports(unit);
+    onStack.delete(id);
+    order.push(mod);
+    return unit;
+  }
+
+  // `blameAbsPath` is whatever made us look here - a source file with a header,
+  // or the importing file for a directory import. Used only in diagnostics.
+  function loadDirectoryUnit(dir, blameAbsPath) {
+    const files = listModuleSourceFiles(dir);
+    if (files.length === 0) {
+      throw new Error(
+        `import of directory "${dir}" from ${blameAbsPath}: the directory holds no .yoop source files`,
+      );
     }
 
-    onStack.delete(absPath);
-    order.push(mod);
-    return mod;
+    // The name comes from the first file; every other file must agree. Identity
+    // is the DIRECTORY, so a disagreement cannot split one directory into two
+    // modules - it is just an error.
+    const first = readAndParse(files[0]);
+    if (first.ast.moduleName === null) {
+      throw new Error(
+        `"${dir}" is not a module: ${files[0]} has no \`module <name>;\` header. ` +
+          `Add the header to every .yoop file in the directory to make it one, ` +
+          `or import a specific source file instead.`,
+      );
+    }
+    const declaredName = first.ast.moduleName;
+    const id = directoryModuleIdFor(dir, declaredName);
+    if (unitById.has(id)) return reuseUnit(id, blameAbsPath);
+    onStack.add(id);
+
+    const records = [];
+    for (const f of files) {
+      const { ast } = readAndParse(f);
+      // A mixed directory is an error: half a module is not a state worth
+      // supporting, and this is what catches a file dropped in later by
+      // someone who did not notice the directory had opted in.
+      if (ast.moduleName === null) {
+        throw new Error(
+          `${f} is in module directory "${dir}" but has no \`module ${declaredName};\` header - ` +
+            `every .yoop file in a module directory must declare it (*.test.yoop is exempt)`,
+        );
+      }
+      if (ast.moduleName !== declaredName) {
+        throw new Error(
+          `${f} declares \`module ${ast.moduleName};\` but "${dir}" is module "${declaredName}" ` +
+            `(from ${path.basename(files[0])}) - every .yoop file in a directory must declare the same name`,
+        );
+      }
+      records.push(makeFileRecord(f, id));
+    }
+
+    const unit = { id, dir, name: declaredName, files: records };
+    unitById.set(id, unit);
+    for (const r of records) byPath.set(r.absPath, r);
+    walkUnitImports(unit);
+    onStack.delete(id);
+    for (const r of records) order.push(r);
+    return unit;
+  }
+
+  // ─── imports ──────────────────────────────────────────────────────────────
+
+  function walkUnitImports(unit) {
+    for (const mod of unit.files) {
+      for (const decl of mod.ast.body) {
+        if (decl.kind !== ASTNodeKind.IMPORT_DECL) break; // imports-first rule
+        const target = resolveImportTarget(decl.sourcePath, mod.absPath);
+
+        let childUnit;
+        if (target.isDir) {
+          if (unit.dir !== null && target.abs === unit.dir) {
+            throw new Error(
+              `${mod.absPath} imports its own module ("${decl.sourcePath}") - ` +
+                `a module's source files already see each other, so drop the import`,
+            );
+          }
+          childUnit = loadDirectoryUnit(target.abs, mod.absPath);
+        } else {
+          // A source file that belongs to a directory module is not importable
+          // on its own: the module is the unit. Say so, and name the form that
+          // works, rather than silently pulling in the whole directory.
+          const { ast } = readAndParse(target.abs);
+          if (ast.moduleName !== null) {
+            const asDir = path.dirname(target.abs);
+            if (unit.dir !== null && asDir === unit.dir) {
+              throw new Error(
+                `${mod.absPath} imports "${decl.sourcePath}", a source file of its own module ` +
+                  `"${ast.moduleName}" - siblings in a module already see each other, so drop the import`,
+              );
+            }
+            throw new Error(
+              `import "${decl.sourcePath}" from ${mod.absPath} names one source file of module ` +
+                `"${ast.moduleName}" - import the module itself instead ` +
+                `(drop the file name and the .yoop extension)`,
+            );
+          }
+          childUnit = loadOwningUnit(target.abs);
+        }
+
+        decl.resolvedAbsPath = target.abs;
+        decl.resolvedModuleId = childUnit.id;
+        mod.imports.push(decl);
+      }
+    }
+  }
+
+  // Phase 9.C: `std/...` paths resolve against the std root, not relative
+  // to the importing file. Everything else must be `./...`, `../...`, or
+  // absolute - preserves the SPEC §1 relative-only contract for non-std
+  // imports. A path may name a `.yoop` source file or, for a directory
+  // module, the directory.
+  function resolveImportTarget(sourcePath, fromAbsPath) {
+    const isStdImport = sourcePath.startsWith("std/");
+    if (
+      !isStdImport &&
+      !sourcePath.startsWith("./") &&
+      !sourcePath.startsWith("../") &&
+      !path.isAbsolute(sourcePath)
+    ) {
+      throw new Error(
+        `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`,
+      );
+    }
+    // A path carrying a non-.yoop file extension can never name a module
+    // directory, so reject it up front with the extension message. Without this
+    // a typo'd `"./m.txt"` would fail as "not found", which points at the wrong
+    // problem. `.` / `..` / `.hidden` are not extensions.
+    const lastSegment = sourcePath
+      .replace(/[/\\]+$/, "")
+      .replace(/^.*[/\\]/, "");
+    const hasFileExtension =
+      lastSegment !== "." && lastSegment !== ".." && /.\./.test(lastSegment);
+    if (hasFileExtension && !sourcePath.endsWith(".yoop")) {
+      throw new Error(`import path "${sourcePath}" must end in .yoop`);
+    }
+
+    const resolved = isStdImport
+      ? path.resolve(stdRoot, sourcePath.slice("std/".length))
+      : path.resolve(path.dirname(fromAbsPath), sourcePath);
+
+    let abs;
+    try {
+      abs = fs.realpathSync(resolved);
+    } catch {
+      throw new Error(
+        `cannot resolve import "${sourcePath}" from ${fromAbsPath}: not found`,
+      );
+    }
+    const isDir = fs.statSync(abs).isDirectory();
+    if (!isDir && !sourcePath.endsWith(".yoop")) {
+      throw new Error(
+        `import path "${sourcePath}" must end in .yoop (or name a module directory)`,
+      );
+    }
+    return { abs, isDir };
   }
 }
 

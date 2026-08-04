@@ -2712,6 +2712,15 @@ export function codegenProgram(modules, _moduleEnv, programState) {
   // registry slot after its sweep finished, so we re-run all modules'
   // flushers in a cross-module fixed-point below before extracting
   // lines.
+  // modules-as-directories: how many source files each module spans. Read when
+  // building the per-file module-init symbol, so a single-file module keeps its
+  // historical unsuffixed name and a directory module gets one init per file.
+  if (programState) {
+    const counts = new Map();
+    for (const mod of modules) counts.set(mod.id, (counts.get(mod.id) ?? 0) + 1);
+    programState.moduleSourceFileCount = counts;
+  }
+
   const moduleIRs = [];
   for (const mod of modules) {
     for (const decl of mod.ast.body) {
@@ -2998,6 +3007,21 @@ function codegenWithModuleId(
   let labelCounter = 0;
   const functionSigs = new Map();
   let symbols = createLocalSymbols();
+  // modules-as-directories: a module can span several source files, and each
+  // one emits its own module-init for the module-level decls IT declares. The
+  // symbol therefore has to be per source file - two files of one module
+  // emitting `@<moduleId>__module_init` is an LLVM redefinition. Single-file
+  // modules (every module before this feature, and most after) keep the
+  // unsuffixed name, so their IR is byte-identical to before. Init ORDER is the
+  // order these land in programState.moduleInitSymbols, which follows the
+  // module graph's file order - sorted by basename within a directory module.
+  const moduleInitSymName =
+    (programState?.moduleSourceFileCount?.get(moduleId) ?? 1) > 1
+      ? `${moduleId}__module_init__${String(moduleAbsPath ?? "")
+          .replace(/^.*[/\\]/, "")
+          .replace(/\.yoop$/, "")
+          .replace(/[^a-zA-Z0-9_]/g, "_")}`
+      : `${moduleId}__module_init`;
   // Per-module DWARF handles. Lazily initialized via beginModule on first
   // function emission so callers (like compileSource) that synthesize a
   // module without an absPath still get a stable synthetic file name.
@@ -3396,7 +3420,7 @@ function codegenWithModuleId(
       programState.moduleInitSymbols = [];
     }
     if (programState?.moduleInitSymbols) {
-      programState.moduleInitSymbols.push(`${moduleId}__module_init`);
+      programState.moduleInitSymbols.push(moduleInitSymName);
     }
   }
 
@@ -3860,7 +3884,7 @@ function codegenWithModuleId(
     tempCounter = 0;
     labelCounter = 0;
     symbols = createLocalSymbols();
-    const symName = `${moduleId}__module_init`;
+    const symName = moduleInitSymName;
     const fnLines = [
       `define internal void @${symName}() {`,
       "entry:",

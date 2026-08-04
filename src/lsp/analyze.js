@@ -48,6 +48,7 @@ export function analyze(entryAbsPath, overlays = new Map()) {
   // Entry is the last module in the topo order (post-order leaves-first).
   const entryMod = graph.modules[graph.modules.length - 1];
   const modById = new Map(graph.modules.map((m) => [m.id, m]));
+  const modByPath = new Map(graph.modules.map((m) => [m.absPath, m]));
 
   let typecheckResult;
   try {
@@ -74,7 +75,13 @@ export function analyze(entryAbsPath, overlays = new Map()) {
 
   for (const err of typecheckResult.errors) {
     const loc = err.sourceLoc;
-    const owningMod = (err.moduleId && modById.get(err.moduleId)) ?? entryMod;
+    // srcPath first: several source files can share one moduleId under
+    // modules-as-directories, and modById keeps only one of them, so a
+    // moduleId lookup would attribute a sibling's diagnostic to the wrong file.
+    const owningMod =
+      (err.srcPath && modByPath.get(err.srcPath)) ??
+      (err.moduleId && modById.get(err.moduleId)) ??
+      entryMod;
     diagnostics.push({
       absPath: owningMod?.absPath ?? entryAbsPath,
       pos: loc?.pos ?? 0,
