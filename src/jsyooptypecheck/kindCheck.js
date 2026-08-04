@@ -742,9 +742,25 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const args = callNode.args ?? [];
     for (let i = 0; i < Math.min(args.length, params.length); i++) {
       const pkt = params[i].resolvedKindType;
-      if (isRefcountedKind(pkt)) {
-        args[i].pooledArgRetain = true;
-      }
+      if (!isRefcountedKind(pkt)) continue;
+      // The retain codegen emits is `yoop_task_retain`, which is only valid
+      // for a `Task<T>` - its retain/release bodies are compiler-provided
+      // (coreKinds.js), and a Task is a raw pointer. A refcounted kind on a
+      // NON-task receiver (a user struct implementing the required trait)
+      // would previously be marked here too, and codegen would then hand a
+      // struct VALUE to yoop_task_retain - IR that does not even verify.
+      //
+      // Only mark what codegen can actually emit. A refcounted kind on a
+      // struct parameter is left unmarked rather than rejected, because
+      // `pooled j: Job` where Job PROPAGATES pooled is a legitimate shape -
+      // its handle lives in a field, and the field walk in obligationsFor
+      // owns that release. A struct that is itself refcounted (implements the
+      // required trait directly) gets no retain here; that would need a
+      // trait-dispatched retain, which is the same gap as the release side.
+      const pt = params[i].resolvedType ?? null;
+      const base = pt?.kind === typeKinds.ref ? pt.inner : pt;
+      if (base?.kind !== typeKinds.task) continue;
+      args[i].pooledArgRetain = true;
     }
   }
 

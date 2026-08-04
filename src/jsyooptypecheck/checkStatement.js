@@ -55,7 +55,7 @@ function isNamespaceGenericCall(callExpr, ctx) {
   const srcEnv = ctx.typeContext.moduleEnv?.get(ns.moduleId);
   return !!srcEnv?.genericFuncTable?.has(callee.field);
 }
-import { lookupCoreKind, taskSatisfiesKind } from "./coreKinds.js";
+import { lookupCoreKind, taskSatisfiesKind, isRefcountedKind } from "./coreKinds.js";
 
 // Phase 6.4: kind-prefix resolution walks both the local kindTable (user
 // kinds + the seeded `Task` builtin) and the builtin-kind table (joined /
@@ -423,12 +423,23 @@ function checkLetOrConst(node, scope, ctx) {
   // (`pooled j: Job = launch(6);`), which is an ordinary kind binding and
   // must NOT be routed through the task path - it has no task call to
   // infer from.
-  const builtinName =
-    prefixName && node.typeAnnotation == null && lookupCoreKind(prefixName)
-      ? prefixName
-      : null;
-  if (builtinName === "joined" || builtinName === "pooled") {
-    return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
+  //
+  // The kind is matched by its CLAUSES, not its name. `taskSatisfiesKind` is
+  // true exactly when every trait the kind requires is one `Task<T>` provides
+  // (Shared / Joinable), which is the real question being asked here: "can a
+  // task handle satisfy this kind?" Keying on the names `joined` / `pooled`
+  // meant a user kind declaring the identical clauses was rejected on the one
+  // type its `refcounted` clause was designed for. The PARAMETER path has
+  // always used taskSatisfiesKind; this brings the binding path in line.
+  const prefixKind = prefixName
+    ? (resolveKindByName(prefixName, ctx.typeContext) ?? lookupCoreKind(prefixName))
+    : null;
+  if (
+    prefixKind &&
+    node.typeAnnotation == null &&
+    taskSatisfiesKind(prefixKind)
+  ) {
+    return checkTaskBuiltinBinding(node, scope, ctx, prefixKind);
   }
 
   // No annotation: infer the binding's type from its initializer. The parser
@@ -599,10 +610,17 @@ function checkLetOrConst(node, scope, ctx) {
 // Phase 6.4: `pooled` additionally accepts a Task<T>-typed expression (e.g.
 // `pooled h3 = h2;` where h2 is pooled). Codegen detects the copy site and
 // emits a retain. `joined` still requires a fresh task call.
-function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
-  const kt = lookupCoreKind(builtinName);
+function checkTaskBuiltinBinding(node, scope, ctx, kt) {
+  const builtinName = kt.name;
   node.resolvedKindType = kt;
   node.builtinKind = builtinName;
+  // The storage/cleanup shape, derived from the kind's clauses rather than its
+  // name - this is what codegen switches on. A `refcounted` kind heap
+  // allocates and may be copied (each copy retains, scope exit releases); a
+  // kind without it owns the handle outright, lives in a stack slot, and must
+  // bind a FRESH call because there is no refcount to share.
+  const isRefcounted = isRefcountedKind(kt);
+  node.taskHandleMode = isRefcounted ? "refcount" : "join";
 
   if (!node.assignment) {
     pushError(ctx.errors, node,
@@ -629,15 +647,15 @@ function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
   // joined requires a fresh task call (allocates on stack, can't copy).
   // pooled accepts both task calls and Task<T>-typed copies (phase 6.4).
   const rhsIsCall = node.assignment.kind === ASTNodeKind.CALL_EXPRESSION;
-  if (builtinName === "joined" && !rhsIsCall) {
+  if (!isRefcounted && !rhsIsCall) {
     pushError(ctx.errors, node,
-      `joined binding "${node.name}" requires a task call RHS, got ${formatType(rhsType)}`);
+      `${builtinName} binding "${node.name}" requires a task call RHS, got ${formatType(rhsType)}`);
     node.resolvedType = ErrorType();
     declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
     return;
   }
-  // Mark pooled-copy bindings so codegen branches between submit-vs-retain.
-  if (builtinName === "pooled" && !rhsIsCall) {
+  // Mark refcounted-copy bindings so codegen branches between submit-vs-retain.
+  if (isRefcounted && !rhsIsCall) {
     node.pooledCopy = true;
   }
 

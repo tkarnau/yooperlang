@@ -1102,6 +1102,13 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
   let layoutSeen = false;
   let markerSeen = false;
   let mustCallClause = null;
+  // Duplicate detection for the two clauses pass A pre-scans (see the KIND_DECL
+  // registration there). These MUST be local flags rather than a read of
+  // `kt.pausable` / `kt.provides` - pass A has already populated those, so
+  // testing the slot would report every pausable/provides kind as a duplicate.
+  let pausableSeen = false;
+  let providesSeen = false;
+  let refcountedSeen = false;
   for (const c of clauses) {
     switch (c.kind) {
       case ASTNodeKind.KIND_MARKER_CLAUSE:
@@ -1222,30 +1229,39 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
         break;
       // `pausable;` - functions carrying this kind are coroutines.
       case ASTNodeKind.KIND_PAUSABLE_CLAUSE:
-        if (kt.pausable) {
+        if (pausableSeen) {
           pushError(errors, c, `duplicate pausable clause in kind '${displayName}'`);
           break;
         }
+        pausableSeen = true;
         kt.pausable = true;
         break;
       // `provides <Kind>;` - rewrites the call-site result type.
       case ASTNodeKind.KIND_PROVIDES_CLAUSE:
-        if (kt.provides !== null) {
+        if (providesSeen) {
           pushError(errors, c, `duplicate provides clause in kind '${displayName}'`);
           break;
         }
+        providesSeen = true;
         kt.provides = c.providedName;
         break;
       // `refcounted <retain> <release>;` - names the two methods of the
       // required trait the compiler calls to bump and drop a reference.
       case ASTNodeKind.KIND_REFCOUNTED_CLAUSE:
-        if (kt.refcounted !== null) {
+        if (refcountedSeen) {
           pushError(errors, c, `duplicate refcounted clause in kind '${displayName}'`);
           break;
         }
+        refcountedSeen = true;
         kt.refcounted = {
           retainMethod: c.retainMethod,
           releaseMethod: c.releaseMethod,
+          // Filled in below, once `requires` has been collected. Null means
+          // "no declaring trait found" - only a Task<T> receiver can be
+          // refcounted then, since its retain/release bodies are compiler
+          // provided rather than dispatched through a trait.
+          traitType: null,
+          sourceLoc: c.sourceLoc ?? null,
         };
         break;
     }
@@ -1377,6 +1393,27 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
       }
     }
   }
+  // refcounted resolution runs after `requires` has been collected, exactly
+  // like mustCall above: the clause names two METHODS, and the trait that
+  // declares them is how a NON-Task receiver dispatches them. `Task<T>` is the
+  // exception - it is a compiler type that cannot carry an `implements` list,
+  // and its retain/release bodies lower to yoop_task_* directly (see
+  // coreKinds.js), so an unresolved trait is not an error here. It only means
+  // this kind can be applied to a Task and nothing else.
+  if (kt.refcounted && kt.requires.length > 0) {
+    const { retainMethod, releaseMethod } = kt.refcounted;
+    const traitWithBoth = kt.requires.find((t) => {
+      const m = t.methods ?? t.genericMethods;
+      return !!m?.has(retainMethod) && !!m?.has(releaseMethod);
+    });
+    if (traitWithBoth) {
+      kt.refcounted.traitType = traitWithBoth;
+    } else {
+      const traitNames = kt.requires.map((t) => t.name).join(", ");
+      pushError(errors, { sourceLoc: kt.refcounted.sourceLoc },
+        `refcounted ${retainMethod} ${releaseMethod}: no required trait (${traitNames}) declares both methods in kind '${displayName}'`);
+    }
+  }
   // region kinds: a kind that `appliesTo region` governs a lexical scope, not a
   // named value. It is used only in the anonymous block form
   // (`<kind> EXPR { ... }` / `<kind> EXPR;`), so it must own a block and cannot
@@ -1477,6 +1514,41 @@ function resolveLayoutAlign(expr, kt, errors) {
 // Resolve a kind reference by name into a KindType. Looks up the local
 // kindTable (which includes imports + the seeded builtin Task) plus the
 // builtin kind table for joined/pooled/Task.
+// Derive a function decl's coroutine flags from the CLAUSES of the kinds it
+// carries, rather than from the kind's name.
+//
+// The parser sets `isTask`/`isAsync` from the literal names `task`/`async`
+// (parser.js `applyFunctionKindPrefixes`) because it cannot resolve kinds - it
+// runs before there is a kind table at all. That is still the fallback, and it
+// is what keeps the legacy single-module path (no module graph, therefore no
+// std) working. This runs on top of it, in pass C where kinds ARE resolvable,
+// so a kind that declares the clauses gets the behavior the clauses describe:
+//
+//   kind spawn { appliesTo function; pausable; provides Task; }
+//   spawn function work(): int32 { ... }     // now a coroutine returning Task<int32>
+//
+// Additive on purpose - it can only turn a flag ON. std's `task` and `async`
+// therefore behave identically whether they resolve here or not, which keeps
+// this from becoming a second, disagreeing source of truth for the core kinds.
+// `lookupCoreKind` is the reason `task`/`async` resolve at all in a module that
+// never imported them.
+function deriveFunctionKindFlags(funcDecl, modEnv) {
+  for (const prefix of funcDecl.kindPrefixes ?? []) {
+    const kt =
+      (modEnv ? lookupKindByName(prefix.name, modEnv) : null) ??
+      lookupCoreKind(prefix.name);
+    if (!kt) continue;
+    // `provides` implies the function is spawned rather than called, and
+    // every such spawn needs a frame to suspend into - so it implies async
+    // the same way std's `task` does (which is why `async task` is noise).
+    if (kt.provides === "Task") {
+      funcDecl.isTask = true;
+      funcDecl.isAsync = true;
+    }
+    if (kt.pausable) funcDecl.isAsync = true;
+  }
+}
+
 function lookupKindByName(name, modEnv) {
   const fromTable = modEnv.kindTable?.get(name);
   if (fromTable) return fromTable;
@@ -2430,6 +2502,25 @@ export function typecheckProgram(modules) {
             }
             kt.params.push({ name: p.name, typeName, sourceLoc: p.sourceLoc });
           }
+          // Pre-scan the two clauses a FUNCTION SIGNATURE depends on.
+          // `pausable` decides the coroutine ABI and `provides` rewrites the
+          // call-site result type, and signatures are built in pass C - which
+          // runs BEFORE pass C.2 resolves clauses, and before C.2 has run at
+          // all for a kind declared in the same module that uses it. Neither
+          // clause needs the trait table (one is a bare flag, the other a
+          // name), so both are safe to read this early. C.2 still owns
+          // validation; it tracks duplicates with local flags rather than by
+          // reading these slots, so populating them here is not a "duplicate".
+          for (const c of d.clauses ?? []) {
+            if (c.kind === ASTNodeKind.KIND_PAUSABLE_CLAUSE) {
+              kt.pausable = true;
+            } else if (
+              c.kind === ASTNodeKind.KIND_PROVIDES_CLAUSE &&
+              kt.provides === null
+            ) {
+              kt.provides = c.providedName;
+            }
+          }
           kindTable.set(d.name, kt);
           d.resolvedKindType = kt;
           // Capture the concurrency core as std declares it, so every other
@@ -3126,6 +3217,8 @@ export function typecheckProgram(modules) {
           }
         }
         funcDecl.returnPropagatedKinds = returnPropagatedKinds;
+
+        deriveFunctionKindFlags(funcDecl, moduleEnv.get(mod.id));
 
         let externalReturnType = declaredReturnType;
         if (funcDecl.isTask) {

@@ -6288,12 +6288,17 @@ function codegenWithModuleId(
         // Set by the typechecker (checkTaskBuiltinBinding) rather than the
         // parser: `joined` / `pooled` are ordinary kind names now, so the
         // storage decision follows the resolved kind, not a lexer tag.
-        const builtin = node.builtinKind;
-        if (builtin === "joined") {
+        // `taskHandleMode` is the CLAUSE-derived shape ("join" | "refcount"),
+        // so a user kind declaring the same clauses as std's joined/pooled
+        // lands on the same emission path. `builtinKind` is still stamped
+        // alongside it (AST dumps / debugging), but nothing dispatches on the
+        // name any more.
+        const builtin = node.taskHandleMode;
+        if (builtin === "join") {
           emitJoinedBinding(node, fnLines);
           break;
         }
-        if (builtin === "pooled") {
+        if (builtin === "refcount") {
           if (node.pooledCopy) {
             emitPooledCopyBinding(node, fnLines);
           } else {
