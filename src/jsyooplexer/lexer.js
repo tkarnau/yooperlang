@@ -86,15 +86,18 @@ export const TokenTags = {
   field: "field",
   io: "io",
   globalState: "globalState",
-  // phase 6.3: task/concurrency
-  task: "task",
+  // phase 6.3: task/concurrency.
+  //
+  // `task`, `async`, `joined` and `pooled` are deliberately NOT here: they
+  // are kind names declared in std/core/kinds.yoop and lex as ordinary
+  // identifiers, the same way `test` and `suite` do in std/test.yoop. That
+  // is what lets the kind vocabulary define them instead of the compiler
+  // assuming them - and it hands those four words back to users.
+  //
+  // `wait` and `await` stay keywords: they are expression operators, not
+  // declaration prefixes, so there is no kind for them to be.
   wait: "wait",
-  // async coroutines: `async` replaces `function` on a decl (like `task`
-  // does); `await` is a prefix operator on an async call.
-  async: "async",
   await: "await",
-  joined: "joined",
-  pooled: "pooled",
   // phase 6.4: containment / propagation
   propagates: "propagates",
   contains: "contains",
@@ -268,12 +271,8 @@ export const keywordTagList = {
   field: TokenTags.field,
   io: TokenTags.io,
   globalState: TokenTags.globalState,
-  task: TokenTags.task,
   wait: TokenTags.wait,
-  async: TokenTags.async,
   await: TokenTags.await,
-  joined: TokenTags.joined,
-  pooled: TokenTags.pooled,
   propagates: TokenTags.propagates,
   // `contains` is recognized CONTEXTUALLY by the parser inside kind decls and
   // propagation clauses (`isContainsKeywordIdent`). It lexes as an ordinary

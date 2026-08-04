@@ -3,15 +3,33 @@
   "name": "Yooperlang",
   "scopeName": "source.yoop",
   "patterns": [
-    { "include": "#comments" },
-    { "include": "#strings" },
-    { "include": "#numbers" },
-    { "include": "#keywords" },
-    { "include": "#types" },
-    { "include": "#functions" },
-    { "include": "#operators" },
-    { "include": "#punctuation" },
-    { "include": "#identifiers" }
+    {
+      "include": "#comments"
+    },
+    {
+      "include": "#strings"
+    },
+    {
+      "include": "#numbers"
+    },
+    {
+      "include": "#keywords"
+    },
+    {
+      "include": "#types"
+    },
+    {
+      "include": "#functions"
+    },
+    {
+      "include": "#operators"
+    },
+    {
+      "include": "#punctuation"
+    },
+    {
+      "include": "#identifiers"
+    }
   ],
   "repository": {
     "comments": {
@@ -20,41 +38,65 @@
           "name": "comment.line.double-slash.yoop",
           "match": "//.*$"
         },
-        { "include": "#block-comment" }
+        {
+          "include": "#block-comment"
+        }
       ]
     },
     "block-comment": {
       "name": "comment.block.yoop",
       "begin": "/\\*",
       "end": "\\*/",
-      "patterns": [{ "include": "#block-comment" }]
+      "patterns": [
+        {
+          "include": "#block-comment"
+        }
+      ]
     },
     "strings": {
       "patterns": [
-        { "include": "#string-double" },
-        { "include": "#string-single" },
-        { "include": "#string-template" }
+        {
+          "include": "#string-double"
+        },
+        {
+          "include": "#string-single"
+        },
+        {
+          "include": "#string-template"
+        }
       ]
     },
     "string-double": {
       "name": "string.quoted.double.yoop",
       "begin": "\"",
       "end": "\"",
-      "patterns": [{ "include": "#string-escape" }]
+      "patterns": [
+        {
+          "include": "#string-escape"
+        }
+      ]
     },
     "string-single": {
       "name": "string.quoted.single.yoop",
       "begin": "'",
       "end": "'",
-      "patterns": [{ "include": "#string-escape" }]
+      "patterns": [
+        {
+          "include": "#string-escape"
+        }
+      ]
     },
     "string-template": {
       "name": "string.template.yoop",
       "begin": "`",
       "end": "`",
       "patterns": [
-        { "include": "#string-escape" },
-        { "include": "#template-interpolation" }
+        {
+          "include": "#string-escape"
+        },
+        {
+          "include": "#template-interpolation"
+        }
       ]
     },
     "template-interpolation": {
@@ -62,18 +104,28 @@
       "begin": "\\$\\{",
       "end": "\\}",
       "beginCaptures": {
-        "0": { "name": "punctuation.section.embedded.begin.yoop" }
+        "0": {
+          "name": "punctuation.section.embedded.begin.yoop"
+        }
       },
       "endCaptures": {
-        "0": { "name": "punctuation.section.embedded.end.yoop" }
+        "0": {
+          "name": "punctuation.section.embedded.end.yoop"
+        }
       },
       "patterns": [
         {
           "begin": "\\{",
           "end": "\\}",
-          "patterns": [{ "include": "$self" }]
+          "patterns": [
+            {
+              "include": "$self"
+            }
+          ]
         },
-        { "include": "$self" }
+        {
+          "include": "$self"
+        }
       ]
     },
     "string-escape": {
@@ -123,12 +175,27 @@
           "match": "\\b(implements|extends|extern|export|import|from|as|ref)\\b"
         },
         {
+          "name": "storage.modifier.kind.yoop",
+          "comment": "Kinds declared in std (std/core/kinds.yoop, std/test.yoop).",
+          "match": "\\b(disposable|ephemeral|task|async|joined|pooled|test|suite)\\b"
+        },
+        {
+          "name": "storage.modifier.kind.yoop",
+          "comment": "User-declared kind prefixes, matched structurally: an identifier followed by a binding name and `:`/`=`, or by a function name and `(`. Keyword rules run first, so let/const/function never reach here.",
+          "match": "^\\s*([a-z][A-Za-z0-9_]*)(?=\\s+[A-Za-z_][A-Za-z0-9_]*\\s*[:=(])",
+          "captures": {
+            "1": {
+              "name": "storage.modifier.kind.yoop"
+            }
+          }
+        },
+        {
           "name": "keyword.other.kindclause.yoop",
-          "match": "\\b(appliesTo|requires|mustCall|ownsBlock|beforeScopeEnd|binding|mustNotEscape|mustNotShare|forbids|scope|acrossScopes|parameter|field|io|globalState|propagates|contains|layout|align)\\b"
+          "match": "\\b(appliesTo|requires|mustCall|ownsBlock|beforeScopeEnd|binding|mustNotEscape|mustNotShare|forbids|scope|acrossScopes|parameter|field|region|io|globalState|propagates|contains|layout|align|provides|pausable|refcounted|signature|enumerable|conferred|restrictive|clearedBy|appliedBy)\\b"
         },
         {
           "name": "keyword.other.concurrency.yoop",
-          "match": "\\b(task|wait|joined|pooled)\\b"
+          "match": "\\b(wait|await)\\b"
         },
         {
           "name": "storage.intrinsic.yoop",
@@ -136,7 +203,8 @@
         },
         {
           "name": "invalid.deprecated.reserved.yoop",
-          "match": "\\b(provides|restricts|autoJoin)\\b"
+          "comment": "Still-deferred kind clauses. `provides` moved out of this list when it was implemented; `autoJoin` is now an error pointing at `mustCall join beforeScopeEnd`.",
+          "match": "\\b(restricts|autoJoin)\\b"
         },
         {
           "name": "constant.language.boolean.yoop",
@@ -169,8 +237,12 @@
         {
           "match": "\\b(function)\\s+([a-zA-Z_][a-zA-Z0-9_]*)",
           "captures": {
-            "1": { "name": "keyword.declaration.yoop" },
-            "2": { "name": "entity.name.function.yoop" }
+            "1": {
+              "name": "keyword.declaration.yoop"
+            },
+            "2": {
+              "name": "entity.name.function.yoop"
+            }
           }
         },
         {
@@ -213,11 +285,26 @@
     },
     "punctuation": {
       "patterns": [
-        { "name": "punctuation.terminator.yoop", "match": ";" },
-        { "name": "punctuation.separator.yoop", "match": "[,:.]" },
-        { "name": "punctuation.section.parens.yoop", "match": "[()]" },
-        { "name": "punctuation.section.brackets.yoop", "match": "[\\[\\]]" },
-        { "name": "punctuation.section.braces.yoop", "match": "[{}]" }
+        {
+          "name": "punctuation.terminator.yoop",
+          "match": ";"
+        },
+        {
+          "name": "punctuation.separator.yoop",
+          "match": "[,:.]"
+        },
+        {
+          "name": "punctuation.section.parens.yoop",
+          "match": "[()]"
+        },
+        {
+          "name": "punctuation.section.brackets.yoop",
+          "match": "[\\[\\]]"
+        },
+        {
+          "name": "punctuation.section.braces.yoop",
+          "match": "[{}]"
+        }
       ]
     },
     "identifiers": {

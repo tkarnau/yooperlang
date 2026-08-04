@@ -378,6 +378,12 @@ export function KindType(name, moduleId) {
   // with a matching signature shape are NOT authorized.
   this.clearedBy = null;                   // string | null (only on restrictive)
   this.appliedBy = null;                 // string | null (only on conferred)
+  // Concurrency-core clauses (plans/kinds-in-std.md). These used to be
+  // hardcoded booleans on objects in builtinKinds.js; they are populated
+  // from real clauses now.
+  this.pausable = false;                   // `pausable;`  - function is a coroutine
+  this.provides = null;                    // `provides X;` - call-site result rewrite
+  this.refcounted = null;                  // `refcounted <retain> <release>;`
   this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
   this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
   this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)

@@ -1,3 +1,8 @@
+// The concurrency kinds (`task`, `joined`, `pooled`) are ordinary kind
+// declarations in std now rather than reserved words, so a program using
+// them names where they come from. See plans/kinds-in-std.md.
+import { joined, pooled, task } from "std/core/kinds.yoop";
+
 // Phase 11.D.9: tasks execute synchronously inline at compile time.
 // A `task fn` declaration is treated like a normal function whose
 // body returns the inner T; the call-site lowering inserts a

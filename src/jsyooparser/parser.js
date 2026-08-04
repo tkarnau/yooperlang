@@ -60,8 +60,10 @@ function isKindClauseStartTag(tag) {
 // to produce a precise "not yet supported" error for clause keywords that
 // later sub-phases will introduce; today they lex as plain idents.
 const DeferredKindClauseMessages = {
-  provides: "provides clause not yet supported in phase 6.1",
-  autoJoin: "autoJoin not yet supported (phase 6.3)",
+  // `autoJoin` was only ever `mustCall wait beforeScopeEnd` under another
+  // name; `joined` in std/core/kinds.yoop spells it that way now.
+  autoJoin:
+    "autoJoin is not a clause - write `mustCall wait beforeScopeEnd;` instead",
   restricts:
     "iteration restrictions deferred until for-in iteration lands (phase 7)",
 };
@@ -241,6 +243,63 @@ export function parse(src) {
       return bindingNameFollowedByColonOrEq(j + 1);
     }
     return false;
+  }
+
+  // SPEC section 7: a run of one or more kind-prefix identifiers followed by
+  // `name(params)` is a function declaration, with `function` optional:
+  //
+  //     task fetch(url: string): Bytes { ... }
+  //     task function fetch(url: string): Bytes { ... }   // equivalent
+  //     async disposable openRemote(url: string): Handle { ... }
+  //
+  // The parser only checks the SHAPE - whether each prefix names a kind whose
+  // appliesTo includes `function` is the typechecker's job, because kinds are
+  // resolved there. That is the same division `disposable x = ...` already
+  // uses for bindings.
+  //
+  // Returns the number of prefix identifiers, or 0 when this is not a
+  // kind-prefixed function. Capped because peekAhead re-lexes: a real decl
+  // never stacks more than a couple of prefixes.
+  const MAX_KIND_PREFIXES = 8;
+  function kindPrefixedFunctionArity() {
+    if (peek().tag !== TokenTags.ident) return 0;
+    let i = 0;
+    while (i <= MAX_KIND_PREFIXES && peekAhead(i).tag === TokenTags.ident) i++;
+    if (i > MAX_KIND_PREFIXES) return 0;
+    // Optional explicit `function` between the prefixes and the name.
+    if (peekAhead(i).tag === TokenTags.function) {
+      const nameAt = i + 1;
+      if (peekAhead(nameAt).tag !== TokenTags.ident) return 0;
+      return startsParamListOrTypeParams(nameAt + 1) ? i : 0;
+    }
+    // Otherwise the last identifier in the run IS the function name, so we
+    // need at least two (one prefix + the name).
+    if (i < 2) return 0;
+    return startsParamListOrTypeParams(i) ? i - 1 : 0;
+  }
+
+  // Method form of the same rule: `async read(ref self)` / `function read(...)`
+  // / `async function read(...)`. Returns the prefix list.
+  function parseMethodKindPrefixes() {
+    const prefixCount = kindPrefixedFunctionArity();
+    const prefixes = [];
+    for (let i = 0; i < prefixCount; i++) {
+      const tok = peek();
+      prefixes.push({
+        name: parseIdentAsName(),
+        sourceLoc: posToSourceLocation(src, tok.start),
+      });
+    }
+    if (peek().tag === TokenTags.function) advance();
+    else if (prefixCount === 0) expect(TokenTags.function);
+    return prefixes;
+  }
+
+  // `(` opens the parameter list; `<` opens a type-parameter list on a
+  // generic decl (`task compute<T>(x: T)`).
+  function startsParamListOrTypeParams(offset) {
+    const tag = peekAhead(offset).tag;
+    return tag === TokenTags.lparen || tag === TokenTags.lt;
   }
 
   // True if the `{` at the cursor looks like a variant constructor's payload
@@ -747,8 +806,6 @@ export function parse(src) {
         const peekTag = peek().tag;
         switch (peekTag) {
           case TokenTags.function:
-          case TokenTags.task:
-          case TokenTags.async:
           case TokenTags.type:
             {
               seenNonImport = true;
@@ -898,15 +955,9 @@ export function parse(src) {
             // recognize it, since `function` is a keyword and can never be an
             // ordinary identifier. The prefix is resolved against the kind
             // table in typecheck; here it is just a name.
-            if (peekTag === TokenTags.ident && peekAhead(1).tag === TokenTags.function) {
+            if (kindPrefixedFunctionArity() > 0) {
               seenNonImport = true;
-              const kindTok = advance();
-              const decl = parseFunctionDecl();
-              decl.kindPrefix = {
-                name: src.substring(kindTok.start, kindTok.start + kindTok.length),
-                sourceLoc: posToSourceLocation(src, kindTok.start),
-              };
-              node.body.push(decl);
+              node.body.push(parseFunctionDecl());
               break;
             }
             throw parseError(
@@ -1185,6 +1236,18 @@ export function parse(src) {
         node.clauses.push(parseEnumerableClause());
         continue;
       }
+      if (identTextIs("refcounted")) {
+        node.clauses.push(parseRefcountedClause());
+        continue;
+      }
+      if (identTextIs("provides")) {
+        node.clauses.push(parseProvidesClause());
+        continue;
+      }
+      if (identTextIs("pausable")) {
+        node.clauses.push(parsePausableClause());
+        continue;
+      }
       // Surface a precise message for deferred-feature clause keywords
       // (they currently lex as plain idents).
       if (peek().tag === TokenTags.ident) {
@@ -1280,6 +1343,39 @@ export function parse(src) {
   function identTextIs(word) {
     if (peek().tag !== TokenTags.ident) return false;
     return src.substring(peek().start, peek().start + peek().length) === word;
+  }
+
+  // `refcounted <retain> <release>;` - names the two methods of the kind's
+  // required trait that the compiler calls to bump and drop a reference.
+  // Contextual ident, like every other clause keyword, so `refcounted`
+  // stays usable as an ordinary identifier outside a kind body.
+  function parseRefcountedClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_REFCOUNTED_CLAUSE);
+    advance(); // refcounted
+    node.retainMethod = parseIdentAsName();
+    node.releaseMethod = parseIdentAsName();
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // `pausable;` - the function may stop partway through and continue later.
+  // No arguments; the clause is the whole statement.
+  function parsePausableClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_PAUSABLE_CLAUSE);
+    advance(); // pausable
+    expect(TokenTags.semicolon);
+    return node;
+  }
+
+  // `provides <Kind>;` - the call-site result type of a function carrying
+  // this kind is rewritten. Today the only provider is `task`
+  // (`provides Task` -> the call yields `Task<ReturnType>`).
+  function parseProvidesClause() {
+    const node = buildSourcedNode(ASTNodeKind.KIND_PROVIDES_CLAUSE);
+    advance(); // provides
+    node.providedName = parseIdentAsName();
+    expect(TokenTags.semicolon);
+    return node;
   }
 
   // testing-via-kinds: `signature (p: T) => R;` constrains the shape of a
@@ -1818,8 +1914,6 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.EXPORT_DECL);
     switch (peek().tag) {
       case TokenTags.function:
-      case TokenTags.task:
-      case TokenTags.async:
         node.decl = parseFunctionDecl();
         break;
       case TokenTags.type:
@@ -1853,19 +1947,13 @@ export function parse(src) {
         node.decl = parseUnionDecl();
         break;
       default:
-        // testing-via-kinds: `export <kind> function foo(...)`. In a test
-        // module the driver adds the export wrapper itself, so this is the
-        // explicit form for anyone who prefers to write it out.
-        if (
-          peek().tag === TokenTags.ident &&
-          peekAhead(1).tag === TokenTags.function
-        ) {
-          const kindTok = advance();
+        // `export <kind> ... name(...)` - any kind-prefixed function, with
+        // `function` optional per SPEC section 7. Covers `export task f()`,
+        // `export async f()`, and the testing-via-kinds `export suite
+        // function f()` (in a test module the driver adds the wrapper
+        // itself, so that spelling is for anyone who prefers it explicit).
+        if (kindPrefixedFunctionArity() > 0) {
           node.decl = parseFunctionDecl();
-          node.decl.kindPrefix = {
-            name: src.substring(kindTok.start, kindTok.start + kindTok.length),
-            sourceLoc: posToSourceLocation(src, kindTok.start),
-          };
           break;
         }
         throw parseError(
@@ -1924,7 +2012,7 @@ export function parse(src) {
     node.methods = [];
     while (
       peek().tag === TokenTags.function ||
-      peek().tag === TokenTags.async
+      kindPrefixedFunctionArity() > 0
     ) {
       node.methods.push(parseMethodSig());
     }
@@ -1981,9 +2069,8 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.METHOD_SIG);
     // A trait may declare a method async; an impl has to match (checked
     // in the typechecker, so the diagnostic can name both sites).
-    node.isAsync = peek().tag === TokenTags.async;
-    if (node.isAsync) advance();
-    else expect(TokenTags.function);
+    node.kindPrefixes = parseMethodKindPrefixes();
+    applyFunctionKindPrefixes(node);
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     // must be ref self as first param
@@ -2045,7 +2132,7 @@ export function parse(src) {
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
       if (
         peek().tag === TokenTags.function ||
-        peek().tag === TokenTags.async
+        identTextIs("async")
       )
         node.decls.push(parseExternFunctionDecl());
       else if (peek().tag === TokenTags.type)
@@ -2066,7 +2153,7 @@ export function parse(src) {
     // suspend primitive is declared this way. Here `async` PREFIXES
     // `function` rather than replacing it, matching how the rest of an
     // extern signature reads.
-    const isAsync = peek().tag === TokenTags.async;
+    const isAsync = identTextIs("async");
     if (isAsync) advance();
     expect(TokenTags.function);
     const node = buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
@@ -2776,10 +2863,6 @@ export function parse(src) {
       case TokenTags.const: {
         return parseVarDecl();
       }
-      case TokenTags.joined:
-      case TokenTags.pooled: {
-        return parseTaskBinding();
-      }
       case TokenTags.if: {
         return parseIfStatement();
       }
@@ -3000,45 +3083,6 @@ export function parse(src) {
     }
   }
 
-  // Phase 6.3: `joined h = expr;` / `pooled h = expr;` - task-builtin binding
-  // prefixes that infer their type from the task call on the RHS. No type
-  // annotation is permitted (Task<T> is compiler-internal).
-  function parseTaskBinding() {
-    const prefixTok = advance(); // joined | pooled
-    const builtinName =
-      prefixTok.tag === TokenTags.joined ? "joined" : "pooled";
-
-    const node = buildSourcedNode(ASTNodeKind.CONST_DECL);
-    node.kindPrefix = {
-      name: builtinName,
-      builtin: builtinName,
-      sourceLoc: posToSourceLocation(src, prefixTok.start),
-    };
-    node.trailingBlock = null;
-    node.name = parseIdentAsName();
-
-    if (peek().tag === TokenTags.colon) {
-      throw parseError(
-        `${builtinName} bindings infer their type from the task call; remove the type annotation`,
-        peek().start,
-        peek().length,
-      );
-    }
-    node.typeAnnotation = null;
-
-    if (peek().tag !== TokenTags.eq) {
-      throw parseError(
-        `${builtinName} binding requires initializer`,
-        peek().start,
-        peek().length,
-      );
-    }
-    advance(); // =
-    node.assignment = parseExpression();
-    expect(TokenTags.semicolon);
-    return node;
-  }
-
   function parseIfStatement() {
     expect(TokenTags.if);
     expect(TokenTags.lparen);
@@ -3185,53 +3229,59 @@ export function parse(src) {
   }
 
   // expects an identifier, args, curlys, statements...
+  // SPEC section 7. A function decl is an optional run of kind prefixes,
+  // then an optional `function` keyword, then the name. At least one of the
+  // two must be present:
+  //
+  //     function foo(...)                 // no prefixes
+  //     task foo(...)                     // prefix, `function` dropped
+  //     task function foo(...)            // both - equivalent
+  //     async disposable openRemote(...)  // stacked prefixes
+  //
+  // Which prefixes are legal here is a typecheck question (each must name a
+  // kind whose appliesTo includes `function`), so the parser records them
+  // verbatim on `node.kindPrefixes`.
   function parseFunctionDecl() {
-    let isTask = false;
-    let isAsync = false;
-    // Three accepted shapes, each keyword REPLACING `function`:
-    //   function foo(...) {...}
-    //   task foo(...) {...}
-    //   async foo(...) {...}
-    // The redundant `task function` / `async function` spellings are
-    // rejected with a fix-it.
-    if (peek().tag === TokenTags.task) {
+    const prefixCount = kindPrefixedFunctionArity();
+    const kindPrefixes = [];
+    for (let i = 0; i < prefixCount; i++) {
+      const tok = peek();
+      kindPrefixes.push({
+        name: parseIdentAsName(),
+        sourceLoc: posToSourceLocation(src, tok.start),
+      });
+    }
+    // `function` is optional once a prefix is present, required otherwise.
+    if (peek().tag === TokenTags.function) {
       advance();
-      isTask = true;
-      // A task body is implicitly async - it IS the scheduler's unit of
-      // work, so it is exactly where a suspend can land. Writing
-      // `async task` would be noise.
-      isAsync = true;
-      if (peek().tag === TokenTags.function) {
-        throw parseError(
-          "`task function` is redundant - use `task <name>(...)`",
-          peek().start,
-          peek().length,
-        );
-      }
-    } else if (peek().tag === TokenTags.async) {
-      advance();
-      isAsync = true;
-      if (peek().tag === TokenTags.function) {
-        throw parseError(
-          "`async function` is redundant - use `async <name>(...)`",
-          peek().start,
-          peek().length,
-        );
-      }
-      if (peek().tag === TokenTags.task) {
-        throw parseError(
-          "`async task` is redundant - a task body is already async",
-          peek().start,
-          peek().length,
-        );
-      }
-    } else {
+    } else if (prefixCount === 0) {
       expect(TokenTags.function);
     }
     const node = parseFunctionDeclBody();
-    node.isTask = isTask;
-    node.isAsync = isAsync;
+    node.kindPrefixes = kindPrefixes;
+    applyFunctionKindPrefixes(node);
     return node;
+  }
+
+  // The parser cannot resolve kinds - that happens in the typechecker, which
+  // also asserts these names are the required-core kinds declared in
+  // std/core/kinds.yoop. What it can do is record the shape, so the flags the
+  // rest of the pipeline already reads stay populated.
+  //
+  // A `task` body is implicitly async: a task IS the scheduler's unit of
+  // work, so it is exactly where a suspend can land, and writing
+  // `async task` would be noise.
+  const CORE_FUNCTION_KINDS = new Set(["task", "async"]);
+  function applyFunctionKindPrefixes(node) {
+    const prefixes = node.kindPrefixes ?? [];
+    const names = prefixes.map((k) => k.name);
+    node.isTask = names.includes("task");
+    node.isAsync = node.isTask || names.includes("async");
+    // `kindPrefix` (singular) is what the enumerable-kind machinery reads
+    // (`suite function addsNumbers()`); the core concurrency kinds ride the
+    // flags above instead, so they must not occupy that slot.
+    const userPrefix = prefixes.find((k) => !CORE_FUNCTION_KINDS.has(k.name));
+    if (userPrefix) node.kindPrefix = userPrefix;
   }
 
   function parseFunctionDeclBody() {
@@ -3242,13 +3292,12 @@ export function parse(src) {
     node.typeParams = parseTypeParamList();
     expect(TokenTags.lparen);
     node.params = [];
-    // params can start with: ident (name/kind-prefix), ref (modifier), comma
-    // (separator), or a kind keyword (phase 6.4: `pooled` is a kind prefix).
+    // params can start with: ident (name, or a kind prefix like `pooled`),
+    // ref (modifier), or comma (separator).
     while (
       peek().tag === TokenTags.ident ||
       peek().tag === TokenTags.ref ||
-      peek().tag === TokenTags.comma ||
-      peek().tag === TokenTags.pooled
+      peek().tag === TokenTags.comma
     ) {
       if (peek().tag === TokenTags.comma) advance();
       if (peek().tag !== TokenTags.rparen && peek().tag !== TokenTags.eof) {
@@ -3366,9 +3415,9 @@ export function parse(src) {
         // colon. Reserved keywords are accepted as field names so C-style
         // names like `type`, `kind`, `enum` don't collide with the grammar.
         if (
-          (peek().tag === TokenTags.function ||
-            peek().tag === TokenTags.async) &&
-          peekAhead(1).tag !== TokenTags.colon
+          (peek().tag === TokenTags.function &&
+            peekAhead(1).tag !== TokenTags.colon) ||
+          kindPrefixedFunctionArity() > 0
         ) {
           node.methods.push(parseMethodDecl());
           continue;
@@ -3467,11 +3516,11 @@ export function parse(src) {
       // use the trailing `(` to disambiguate, mirroring how struct bodies
       // distinguish `function name(...)` (method) from `function: T` (field).
       if (
-        (peek().tag === TokenTags.function ||
-          peek().tag === TokenTags.async) &&
-        peekAhead(1).tag !== TokenTags.lcurly &&
-        peekAhead(1).tag !== TokenTags.comma &&
-        peekAhead(1).tag !== TokenTags.rcurly
+        (peek().tag === TokenTags.function &&
+          peekAhead(1).tag !== TokenTags.lcurly &&
+          peekAhead(1).tag !== TokenTags.comma &&
+          peekAhead(1).tag !== TokenTags.rcurly) ||
+        kindPrefixedFunctionArity() > 0
       ) {
         node.methods.push(parseMethodDecl());
         continue;
@@ -3613,9 +3662,9 @@ export function parse(src) {
     while (isIdentLikeTag(peek().tag)) {
       // if enum is impl functions
       if (
-        (peek().tag === TokenTags.function ||
-          peek().tag === TokenTags.async) &&
-        peekAhead(1).tag !== TokenTags.colon
+        (peek().tag === TokenTags.function &&
+          peekAhead(1).tag !== TokenTags.colon) ||
+        kindPrefixedFunctionArity() > 0
       ) {
         node.methods.push(parseMethodDecl());
         continue;
@@ -3919,9 +3968,8 @@ export function parse(src) {
     // `async NAME(ref self, ...)` is an async method, the same way `async
     // NAME(...)` is an async free function - the keyword REPLACES
     // `function`.
-    node.isAsync = peek().tag === TokenTags.async;
-    if (node.isAsync) advance();
-    else expect(TokenTags.function);
+    node.kindPrefixes = parseMethodKindPrefixes();
+    applyFunctionKindPrefixes(node);
     node.name = parseIdentAsName();
     expect(TokenTags.lparen);
     // must be ref self as first param
@@ -3949,18 +3997,6 @@ export function parse(src) {
   function parseFunctionParam() {
     const node = buildSourcedNode(ASTNodeKind.PARAM);
     node.kindPrefix = null;
-
-    // Phase 6.4: `pooled` is a reserved kind keyword; it lexes as a non-ident
-    // token but is a valid param prefix (`pooled h: Task<int32>`). Built-in
-    // kind keywords are handled via the same kindPrefix shape as user kinds.
-    if (peek().tag === TokenTags.pooled) {
-      const kindTok = advance();
-      node.kindPrefix = {
-        name: "pooled",
-        builtin: "pooled",
-        sourceLoc: posToSourceLocation(src, kindTok.start),
-      };
-    }
 
     // Detect kind prefix: IDENT followed by (IDENT or ref) means kind-prefixed param.
     // Also supports `IDENT(args) IDENT|ref` (phase 6.5 parameterized kinds).

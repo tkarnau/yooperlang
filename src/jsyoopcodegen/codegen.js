@@ -6285,7 +6285,10 @@ function codegenWithModuleId(
       case ASTNodeKind.CONST_DECL: {
         // Phase 6.3: builtin task-binding kinds (joined / pooled) and the
         // immediate-task-call shape have their own emission paths.
-        const builtin = node.kindPrefix?.builtin;
+        // Set by the typechecker (checkTaskBuiltinBinding) rather than the
+        // parser: `joined` / `pooled` are ordinary kind names now, so the
+        // storage decision follows the resolved kind, not a lexer tag.
+        const builtin = node.builtinKind;
         if (builtin === "joined") {
           emitJoinedBinding(node, fnLines);
           break;

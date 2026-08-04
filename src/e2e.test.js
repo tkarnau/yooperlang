@@ -2503,11 +2503,12 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_tasks.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "IMM=50 JOIN=66 POOL=84 MULTI=42\n");
-    const src = fs.readFileSync(
+    // compileEntry, not compileSource: the concurrency kinds live in
+    // std/core/kinds.yoop now, so this fixture needs the module graph (which
+    // autoloads it). The legacy single-module path has no std at all.
+    const { ir } = compileEntry(
       path.join(repoRoot, "examples/pass/at_precompile_tasks.yoop"),
-      "utf8",
     );
-    const ir = compileSource(src);
     assert.match(ir, /IMM = internal global i32 50,/);
     assert.match(ir, /JOIN = internal global i32 66,/);
     assert.match(ir, /POOL = internal global i32 84,/);
@@ -3109,11 +3110,18 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("wait_in_task_body.yoop rejects wait inside a task fn body", () => {
+  it("wait_in_task_body.yoop rejects wait inside a task fn body, pointing at await", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/wait_in_task_body.yoop");
     assert.ok(
-      errors.some((e) => /wait inside task body not supported/.test(e.message)),
+      errors.some((e) => /wait is not allowed inside a task body/.test(e.message)),
       `expected wait-in-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+    // The diagnostic has to name the alternative - `await` is the in-task
+    // form now, and the old message promised a "future phase" that has
+    // since landed.
+    assert.ok(
+      errors.some((e) => /use "await f\(\.\.\.\)"/.test(e.message)),
+      `expected the await fix-it, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

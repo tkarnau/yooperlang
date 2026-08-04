@@ -7,9 +7,34 @@ import assert from "node:assert/strict";
 import { typecheckSource, typecheckProgram } from "./typecheck.js";
 import { parse } from "../jsyooparser/parser.js";
 import { typeKinds } from "./types.js";
+import fs from "node:fs";
+import path from "node:path";
 
 function singleModule(src, id = "test") {
   return [{ id, ast: parse(src) }];
+}
+
+// The concurrency kinds (`task`, `async`, `joined`, `pooled`) live in
+// std/core/kinds.yoop now rather than being reserved words, so anything
+// exercising them needs that module in the graph. The driver autoloads it;
+// a hand-built module list has to include it explicitly.
+const CORE_KINDS_PATH = path.resolve(
+  import.meta.dirname,
+  "..",
+  "..",
+  "std",
+  "core",
+  "kinds.yoop",
+);
+function withCoreKinds(src, id = "test") {
+  return [
+    {
+      id: "std_core_kinds",
+      absPath: CORE_KINDS_PATH,
+      ast: parse(fs.readFileSync(CORE_KINDS_PATH, "utf8")),
+    },
+    { id, ast: parse(src) },
+  ];
 }
 
 describe("typecheckSource: well-typed programs produce zero errors", () => {
@@ -640,7 +665,7 @@ describe("typecheck: async/await coloring", () => {
   // go through typecheckProgram.
   it("accepts await inside a task body (implicitly async)", () => {
     const { errors } = typecheckProgram(
-      singleModule(
+      withCoreKinds(
         "async inner(x: int32): int32 { return x + 1; }\n" +
           "task worker(x: int32): int32 { return await inner(x); }\n" +
           "function main(): int32 { pooled h = worker(1); return wait h; }",
@@ -683,7 +708,7 @@ describe("typecheck: async/await coloring", () => {
   // without the spawn carve-out every spawn would report as un-awaited.
   it("does not require await at a task spawn site", () => {
     const { errors } = typecheckProgram(
-      singleModule(
+      withCoreKinds(
         "task worker(x: int32): int32 { return x; }\n" +
           "function main(): int32 { pooled h = worker(1); return wait h; }",
       ),
@@ -714,7 +739,7 @@ describe("typecheck: async/await coloring", () => {
   // resolve, which it does via substituteTypeParams.
   it("accepts a generic function awaiting a bound async trait method", () => {
     const { errors } = typecheckProgram(
-      singleModule(
+      withCoreKinds(
         "trait F { async fetch(ref self): int32; }\n" +
           "type C implements F { n: int32, async fetch(ref self): int32 { return self.n; } }\n" +
           "async twice<T implements F>(ref f: T): int32 {\n" +
@@ -732,7 +757,7 @@ describe("typecheck: async/await coloring", () => {
   // through the erased view is awaited like any other async call.
   it("accepts awaiting an async trait method through a vtable", () => {
     const { errors } = typecheckProgram(
-      singleModule(
+      withCoreKinds(
         "trait F { async fetch(ref self): int32; }\n" +
           "vtable FView for F { fetch: () => int32, }\n" +
           "type C implements F { n: int32, async fetch(ref self): int32 { return self.n; } }\n" +

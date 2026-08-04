@@ -16,11 +16,11 @@ task fetch(x: int32): int32 {
     return x * x;
 }
 
-type Job propagates<Task> {
+type Job propagates<pooled> {
     work: Task<int32>,
 }
 
-function launch(x: int32): Job propagates<Task> {
+function launch(x: int32): Job propagates<pooled> {
     pooled h = fetch(x);
     return { work: h };
 }
@@ -31,7 +31,7 @@ function take_pooled(pooled h: Task<int32>): int32 {
 
 function main(): int32 {
     disposable s: Session = load_session("x.txt");
-    Task j: Job = launch(6);
+    pooled j: Job = launch(6);
     pooled h2 = fetch(5);
     pooled h3 = h2;
     const n: int32 = take_pooled(h3);

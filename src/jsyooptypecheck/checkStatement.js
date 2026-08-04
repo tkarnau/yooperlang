@@ -55,14 +55,14 @@ function isNamespaceGenericCall(callExpr, ctx) {
   const srcEnv = ctx.typeContext.moduleEnv?.get(ns.moduleId);
   return !!srcEnv?.genericFuncTable?.has(callee.field);
 }
-import { lookupBuiltinKind } from "./builtinKinds.js";
+import { lookupCoreKind, taskSatisfiesKind } from "./coreKinds.js";
 
 // Phase 6.4: kind-prefix resolution walks both the local kindTable (user
 // kinds + the seeded `Task` builtin) and the builtin-kind table (joined /
 // pooled / Task). Returns null if neither matches.
 function resolveKindByName(name, typeContext) {
   return (
-    typeContext.kindTable?.get(name) ?? lookupBuiltinKind(name) ?? null
+    typeContext.kindTable?.get(name) ?? lookupCoreKind(name) ?? null
   );
 }
 import { TaskType } from "./types.js";
@@ -120,10 +120,15 @@ export function validateFunction(funcNode, typeContext, errors) {
           const sites = [...kt.appliesTo].join(", ") || "(none)";
           pushError(errors, param,
             `kind '${kt.name}' does not apply to parameters (declared appliesTo: ${sites})`);
-        } else if (kt.builtin) {
-          // Phase 6.4: builtin kinds (e.g. `pooled`) carry their own type rules;
-          // skip the struct-shape check. The associated type (Task<T>) is
-          // validated by the binding-resolution path.
+        } else if (
+          (baseType.kind === typeKinds.ref ? baseType.inner : baseType).kind ===
+            typeKinds.task && taskSatisfiesKind(kt)
+        ) {
+          // `pooled h: Task<int32>` - Task<T> is a compiler type rather than
+          // a nominal struct, so it cannot carry an `implements` list. It
+          // does satisfy the traits the core kinds require (see
+          // taskSatisfiesKind), so skip the struct-shape check here; the
+          // associated type is validated by the binding-resolution path.
           paramKindType = kt;
         } else {
           // Unwrap ref to get the underlying nominal type. Phase 13.B:
@@ -404,7 +409,24 @@ function canonicalizeStruct(type, ctx) {
 function checkLetOrConst(node, scope, ctx) {
   // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
-  const builtinName = node.kindPrefix?.builtin ?? null;
+  // `joined` / `pooled` used to arrive with a parser-stamped `builtin`
+  // marker because they were lexer keywords. They are ordinary kind names
+  // now, so the task-binding path keys on the name resolving to a builtin
+  // kind instead.
+  const prefixName = node.kindPrefix?.name ?? null;
+  // The task-handle binding forms (`joined d = f()` / `pooled h = f()`)
+  // never carry a type annotation - Task<T> is compiler-internal, and the
+  // binding infers it from the task call on the right.
+  //
+  // That absence is the discriminator. The same `pooled` kind also applies
+  // at FIELD position and to a binding of a struct that propagates it
+  // (`pooled j: Job = launch(6);`), which is an ordinary kind binding and
+  // must NOT be routed through the task path - it has no task call to
+  // infer from.
+  const builtinName =
+    prefixName && node.typeAnnotation == null && lookupCoreKind(prefixName)
+      ? prefixName
+      : null;
   if (builtinName === "joined" || builtinName === "pooled") {
     return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
   }
@@ -457,7 +479,10 @@ function checkLetOrConst(node, scope, ctx) {
   let kindType = null;
   let kindApp = null;
   if (node.kindPrefix) {
-    kindType = ctx.typeContext.kindTable?.get(node.kindPrefix.name) ?? null;
+    kindType =
+      ctx.typeContext.kindTable?.get(node.kindPrefix.name) ??
+      lookupCoreKind(node.kindPrefix.name) ??
+      null;
     if (!kindType) {
       pushError(ctx.errors, node, `unknown kind "${node.kindPrefix.name}"`);
     } else {
@@ -575,7 +600,7 @@ function checkLetOrConst(node, scope, ctx) {
 // `pooled h3 = h2;` where h2 is pooled). Codegen detects the copy site and
 // emits a retain. `joined` still requires a fresh task call.
 function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
-  const kt = lookupBuiltinKind(builtinName);
+  const kt = lookupCoreKind(builtinName);
   node.resolvedKindType = kt;
   node.builtinKind = builtinName;
 
@@ -649,6 +674,13 @@ function findScopedIdentInExpr(expr, scope) {
   // REF_EXPRESSION wrapping an IDENT: also an alias
   if (expr.kind === ASTNodeKind.REF_EXPRESSION) {
     return findScopedIdentInExpr(expr.operand, scope);
+  }
+  // `wait h` is NOT an alias of `h`: it evaluates to the RESULT, a plain
+  // value, and the handle itself stays put. Without this carve-out
+  // `joined`'s `mustNotEscape scope` clause rejects the ordinary
+  // `let v = wait d;` that is the entire point of a joined binding.
+  if (expr.kind === ASTNodeKind.WAIT_EXPRESSION) {
+    return null;
   }
   // Recursively check children
   for (const val of Object.values(expr)) {

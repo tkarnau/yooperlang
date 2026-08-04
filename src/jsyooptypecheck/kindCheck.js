@@ -26,6 +26,7 @@
 import { ASTNodeKind, ASTNode } from "../contracts.js";
 import { pushError } from "./errors.js";
 import { typeKinds } from "./types.js";
+import { isRefcountedKind } from "./coreKinds.js";
 
 export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, registry = null) {
   const body = fnOrMethodDecl.body;
@@ -143,7 +144,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
 
     // Phase 6.3: builtin kinds bound directly to Task<T> - joined / pooled.
     // These are always opt-in via keyword, so `autoCleanup` is true.
-    if (kt?.builtin && rt?.kind === "task") {
+    if ((kt?.refcounted || kt?.mustCall?.length) && rt?.kind === "task") {
       if (kt.autoJoin) {
         out.push(mkObligation({
           type: "autoWait",
@@ -206,7 +207,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       const calleeDecl = funcDeclTable.get(stmt.assignment.callee);
       for (const app of calleeDecl?.returnPropagatedKinds ?? []) addKind(app, false);
     }
-    // The kt.builtin && rt is task case is handled above by the early return;
+    // The core-kind + Task case is handled above by the early return;
     // here we additionally flip autoCleanup=true when a builtin kind keyword
     // (e.g. `Task`) is applied to a struct binding whose propagatedKinds
     // includes the kind.
@@ -354,7 +355,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // Does a struct field carry the given kind?
   function fieldCarriesKind(field, kindType) {
     if (field.kindType === kindType) return true;
-    if (kindType.builtin && kindType.refcounted && field.type?.kind === "task") {
+    if (isRefcountedKind(kindType) && field.type?.kind === "task") {
       return true;
     }
     if (
@@ -741,7 +742,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const args = callNode.args ?? [];
     for (let i = 0; i < Math.min(args.length, params.length); i++) {
       const pkt = params[i].resolvedKindType;
-      if (pkt?.builtin && pkt.refcounted) {
+      if (isRefcountedKind(pkt)) {
         args[i].pooledArgRetain = true;
       }
     }
@@ -760,7 +761,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         sourceLoc: p.sourceLoc,
       });
     }
-    if (kt?.builtin && kt.refcounted) {
+    if (isRefcountedKind(kt)) {
       outerFrame.obligations.push(mkObligation({
         type: "release",
         bindingName: p.name,

@@ -64,7 +64,7 @@ import {
 import { resolveImports } from "./imports.js";
 import { runKindCheck } from "./kindCheck.js";
 import { runKindFlow } from "./kindFlow.js";
-import { TASK_KIND } from "./builtinKinds.js";
+import { lookupCoreKind, setCoreKinds } from "./coreKinds.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
@@ -442,7 +442,8 @@ export function fieldCarriedKinds(field) {
   const out = [];
   if (field.kindType) out.push(field.kindType);
   if (field.type?.kind === "task") {
-    if (!out.includes(TASK_KIND)) out.push(TASK_KIND);
+    const taskKind = lookupCoreKind("pooled");
+    if (taskKind && !out.includes(taskKind)) out.push(taskKind);
   }
   if (field.type?.kind === "struct" && field.type.propagatedKinds?.length) {
     for (const a of field.type.propagatedKinds) {
@@ -1219,6 +1220,34 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
         }
         kt.enumerableAs = c.tableName;
         break;
+      // `pausable;` - functions carrying this kind are coroutines.
+      case ASTNodeKind.KIND_PAUSABLE_CLAUSE:
+        if (kt.pausable) {
+          pushError(errors, c, `duplicate pausable clause in kind '${displayName}'`);
+          break;
+        }
+        kt.pausable = true;
+        break;
+      // `provides <Kind>;` - rewrites the call-site result type.
+      case ASTNodeKind.KIND_PROVIDES_CLAUSE:
+        if (kt.provides !== null) {
+          pushError(errors, c, `duplicate provides clause in kind '${displayName}'`);
+          break;
+        }
+        kt.provides = c.providedName;
+        break;
+      // `refcounted <retain> <release>;` - names the two methods of the
+      // required trait the compiler calls to bump and drop a reference.
+      case ASTNodeKind.KIND_REFCOUNTED_CLAUSE:
+        if (kt.refcounted !== null) {
+          pushError(errors, c, `duplicate refcounted clause in kind '${displayName}'`);
+          break;
+        }
+        kt.refcounted = {
+          retainMethod: c.retainMethod,
+          releaseMethod: c.releaseMethod,
+        };
+        break;
     }
   }
   // testing-via-kinds: a function-position kind is deliberately narrow. It has
@@ -1244,19 +1273,38 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
     if (markerSeen) disallowed.push("conferred/restrictive");
     if (kt.requires.length > 0) disallowed.push("requires");
     if (kt.forbids.length > 0) disallowed.push("forbids");
+    if (kt.refcounted) disallowed.push("refcounted");
     for (const clauseName of disallowed) {
       pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
-        `kind '${displayName}' applies to a function and declares '${clauseName}'; a function kind supports only 'signature' and 'enumerable as' (a function has no value for '${clauseName}' to act on)`);
+        `kind '${displayName}' applies to a function and declares '${clauseName}'; a function kind marks a declaration rather than a value, so there is nothing for '${clauseName}' to act on`);
     }
-    if (!kt.signatureAnnotation) {
-      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
-        `kind '${displayName}' applies to a function but declares no 'signature'; add e.g. \`signature (run: ref Run) => void;\` so functions carrying the kind can be checked and collected`);
-    }
-    if (kt.enumerableAs === null) {
-      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
-        `kind '${displayName}' applies to a function but declares no 'enumerable as "<table>"'; without a table name nothing can ask the compiler for these functions`);
+    // `signature` + `enumerable as` are required only for a COLLECTED
+    // function kind - one a consumer asks the compiler to enumerate, like
+    // `suite`. A kind that instead changes what the function IS
+    // (`pausable`, `provides`) is complete on its own: there is no table
+    // for it to land in and no shared shape for its members. Requiring
+    // both of every function kind is what kept `task` and `async` out of
+    // std in the first place.
+    const changesTheFunction = kt.pausable || kt.provides !== null;
+    if (!changesTheFunction) {
+      if (!kt.signatureAnnotation) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a function but declares no 'signature'; add e.g. \`signature (run: ref Run) => void;\` so functions carrying the kind can be checked and collected`);
+      }
+      if (kt.enumerableAs === null) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a function but declares no 'enumerable as "<table>"'; without a table name nothing can ask the compiler for these functions`);
+      }
     }
   } else {
+    if (kt.pausable) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares 'pausable' but does not declare 'appliesTo function'; only a function can pause`);
+    }
+    if (kt.provides !== null) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares 'provides' but does not declare 'appliesTo function'; only a function call has a result type to rewrite`);
+    }
     if (kt.signatureAnnotation) {
       pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
         `kind '${displayName}' declares 'signature' but does not declare 'appliesTo function'; a signature only constrains a function declaration`);
@@ -1352,6 +1400,37 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
 // Pass C.2: walk each kind decl and resolve its clauses against the module's
 // trait table. `requires` clauses populate kt.requires; `mustCall` clauses
 // resolve their method name against the union of required-trait method sets.
+// Verify std/core/kinds.yoop declared every kind the compiler depends on,
+// with the clauses it depends on. See REQUIRED_CORE_KINDS.
+//
+// Silent when NOTHING was found: the legacy single-module typecheck path
+// has no module graph and therefore no std, and it does not support tasks
+// either. A PARTIAL core is a real error - that means the file exists and
+// something was edited out of it.
+function assertRequiredCoreKinds(coreKinds, errors) {
+  if (coreKinds.size === 0) return;
+  for (const [name, spec] of REQUIRED_CORE_KINDS) {
+    const kt = coreKinds.get(name);
+    if (!kt) {
+      errors.push({
+        message:
+          `${CORE_KINDS_MODULE} must declare the kind '${name}' - the compiler depends on it. ` +
+          `Expected: kind ${name} { ${spec.want} }`,
+        sourceLoc: null,
+      });
+      continue;
+    }
+    if (!spec.check(kt)) {
+      errors.push({
+        message:
+          `${CORE_KINDS_MODULE}'s kind '${name}' is missing a clause the compiler depends on. ` +
+          `Expected at least: kind ${name} { ${spec.want} }`,
+        sourceLoc: kt.sourceLoc ?? null,
+      });
+    }
+  }
+}
+
 function resolveKindClauses(mod, moduleEnv, errors) {
   for (const decl of mod.ast.body) {
     const d = innerDecl(decl);
@@ -1658,6 +1737,38 @@ export function effectiveLayoutAlign(app) {
 // in pass A. A user-defined function with one of these names is allowed -
 // the auto-injection that used to shadow such names was removed when these
 // became opt-in via import.
+// The concurrency kinds the compiler depends on. They are declared as
+// ordinary `kind { ... }` decls in std/core/kinds.yoop (autoloaded into
+// every module graph); this table is the carve-out that makes it a CHECKED
+// contract rather than a convention - each entry names the clauses the
+// compiler will actually consult, and a missing or reshaped decl is an
+// error naming the file.
+//
+// See plans/kinds-in-std.md.
+export const CORE_KINDS_MODULE = "std/core/kinds.yoop";
+export const REQUIRED_CORE_KINDS = new Map([
+  ["task", {
+    check: (k) => k.appliesTo.has("function") && k.pausable && k.provides === "Task",
+    want: "appliesTo function; pausable; provides Task;",
+  }],
+  ["async", {
+    check: (k) => k.appliesTo.has("function") && k.pausable,
+    want: "appliesTo function; pausable;",
+  }],
+  ["joined", {
+    check: (k) =>
+      k.appliesTo.has("binding") &&
+      k.mustCall.length > 0 &&
+      k.mustNotEscape,
+    want: "appliesTo binding; requires Joinable; mustCall join beforeScopeEnd; mustNotEscape scope;",
+  }],
+  ["pooled", {
+    check: (k) =>
+      k.appliesTo.has("binding") && k.appliesTo.has("field") && k.refcounted !== null,
+    want: "appliesTo binding parameter field; requires Shared; refcounted retain release;",
+  }],
+]);
+
 export const INTRINSIC_DECL_IDS = new Map([
   ["heap_alloc", "$builtin__heap_alloc"],
   ["heap_free", "$builtin__heap_free"],
@@ -1880,6 +1991,11 @@ export function typecheckProgram(modules) {
   };
 
   // pass A: register struct shells so cross-module struct refs work in pass B
+  // Populated as the autoloaded std/core/kinds.yoop declares them, then
+  // seeded into every later module so `pooled h = f()` resolves without an
+  // explicit import - which is the behavior these had as reserved words.
+  const coreKinds = new Map();
+  setCoreKinds(coreKinds);
   for (const mod of modules) {
     const errStart = errors.length;
     const localSymbols = new Map();
@@ -1889,6 +2005,9 @@ export function typecheckProgram(modules) {
     const linkLibraries = new Set();
     const traitTable = new Map();
     const kindTable = new Map();
+    // The declaring module itself gets nothing here (coreKinds is still
+    // empty when it runs), so this never trips the redeclaration check.
+    for (const [coreName, coreKind] of coreKinds) kindTable.set(coreName, coreKind);
     // Phase 7.1: generic decl tables - generic decls live here and never
     // enter structTable/localSymbols/traitTable (those are monomorphic only).
     const genericStructTable = new Map();
@@ -1920,9 +2039,9 @@ export function typecheckProgram(modules) {
     // gate on membership here so that user code that hasn't imported the
     // intrinsics module can freely shadow these names.
     const builtinIntrinsicNames = new Set();
-    // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
-    // the kind-name that pairs with the built-in `Task<T>` type.
-    kindTable.set("Task", TASK_KIND);
+    // `Task` used to be seeded here from a hardcoded object. It is declared
+    // in std/core/kinds.yoop now and arrives via the coreKinds seeding
+    // above, like `pooled` and `joined`.
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
@@ -2313,6 +2432,15 @@ export function typecheckProgram(modules) {
           }
           kindTable.set(d.name, kt);
           d.resolvedKindType = kt;
+          // Capture the concurrency core as std declares it, so every other
+          // module in the graph sees the same KindType objects (kinds
+          // compare by reference).
+          if (
+            REQUIRED_CORE_KINDS.has(d.name) &&
+            (mod.absPath ?? "").replace(/\\/g, "/").endsWith(CORE_KINDS_MODULE)
+          ) {
+            coreKinds.set(d.name, kt);
+          }
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
@@ -3361,6 +3489,16 @@ export function typecheckProgram(modules) {
     if (!kindTable) return null;
     return { decl, kindTable };
   };
+
+  // The required-core assertion. Clauses are populated in pass C.2, so this
+  // runs after every module has been through it.
+  //
+  // This is the carve-out the whole design rests on: the compiler does not
+  // define these kinds, but it does insist they exist with the shape it
+  // consults. A std that dropped `refcounted` from `pooled`, or `provides
+  // Task` from `task`, would silently miscompile every task program - so it
+  // is an error naming the file and the expected clauses instead.
+  assertRequiredCoreKinds(coreKinds, errors);
 
   // pass D: function body typechecking.
   // Split into two sub-passes so that all param kind types are resolved before

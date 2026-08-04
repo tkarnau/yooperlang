@@ -635,10 +635,18 @@ function resolveWaitExpression(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   if (ctx.inTaskBody) {
+    // `await` is the in-task form. `wait` blocks its worker until the
+    // handle completes, which is the one thing a task body must not do -
+    // that is what the async machinery exists to avoid. Suspending on a
+    // Task<T> handle would need a task-completion wakeup that re-queues
+    // the waiter (the multiplexer already does the equivalent for fds);
+    // until that exists, the restriction stands.
     pushError(
       ctx.errors,
       node,
-      `wait inside task body not supported (future phase will land coroutine suspension)`,
+      `wait is not allowed inside a task body - use "await f(...)" on an async call instead. ` +
+        `await is the in-task form: it suspends this task and releases its worker thread, ` +
+        `where wait would block the worker`,
     );
   }
   return setType(node, operandType.resultType);

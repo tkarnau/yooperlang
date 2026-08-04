@@ -47,9 +47,15 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   // topo order. This is load-bearing for @derive: a deriving module's
   // pass C validates its grafted to_string against Display's method table,
   // which is only filled once the traits module's own pass C has run.
+  // std/core/kinds.yoop rides along too: it declares the concurrency core
+  // (`task`, `async`, `joined`, `pooled`, `Task`), which used to be reserved
+  // words and so was always in scope. Autoloading keeps that true now that
+  // they are ordinary kind decls, and gives the typechecker something to
+  // assert the required core against. See plans/kinds-in-std.md.
   const autoload = [
     path.resolve(stdRoot, "core", "format.yoop"),
     path.resolve(stdRoot, "core", "strings.yoop"),
+    path.resolve(stdRoot, "core", "kinds.yoop"),
     path.resolve(stdRoot, "core", "traits.yoop"),
   ];
   for (const p of autoload) {
