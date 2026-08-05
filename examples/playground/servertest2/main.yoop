@@ -1,0 +1,7 @@
+task createServer(): void {
+  
+}
+
+function main(): int32 {
+    await createServer();
+}

@@ -7,12 +7,15 @@
 // choose between consuming the result and falling through to its own
 // timeout handling without having to switch on an external error type.
 //
-// Companion helper `now_ns()` returns the current wall-clock reading in
+// Companion helper `now_ns()` returns the current MONOTONIC reading in
 // nanoseconds, suitable for computing deadlines (`now_ns() + duration`).
-// Both the deadline arithmetic and the cv timeout inside the runtime
-// use the same clock (CLOCK_REALTIME on POSIX, FILETIME-rebased on
-// Windows), so a deadline computed locally is directly usable by
-// wait_until.
+// Every timed wait inside the runtime is pinned to this same clock, so
+// a deadline computed locally is directly usable by wait_until and a
+// system clock change (NTP, a manual `date` set) cannot move it.
+//
+// The readings are only meaningful relative to each other - this is not
+// a timestamp. For cancellation tokens and I/O deadlines see
+// std/core/cancel.yoop, which shares this clock.
 
 export variant WaitResult<T> {
     Done { value: T },
@@ -28,14 +31,67 @@ export variant WaitResult<T> {
 extern "intrinsic" from "compiler" {
     function wait_until<T>(h: Task<T>, deadline_ns: uint64): WaitResult<T>;
     function cancel<T>(h: Task<T>): void;
+    // The suspend primitive. Lowers to a bare LLVM coro.suspend, so
+    // `await conc.suspendNow()` parks the enclosing task and hands the
+    // worker thread back to the pool. Something must already have
+    // arranged a wakeup (an armed I/O interest, a timer) before this is
+    // reached, or the task never runs again.
+    //
+    // Library code is the intended caller - see armReadable/armWritable
+    // in std/net/socket_ffi.yoop for the shape.
+    async function suspendNow(): void;
 }
 
 extern "C" from "yoop_runtime" {
     function yoop_now_ns(): uint64;
     function yoop_sleep_ms(ms: uint64): int32;
+    // Arm a one-shot readiness interest against the CURRENT task and
+    // return immediately. On readiness the multiplexer pushes that task
+    // back onto the run queue. Returns 0 when armed, 1 when there is no
+    // current task (so the caller must not suspend - nothing would ever
+    // resume it), -1 on error.
+    function yoop_io_arm_readable(fd: c_int): c_int;
+    function yoop_io_arm_writable(fd: c_int): c_int;
 }
 
-// Current wall-clock reading in nanoseconds. The intended call shape is
+// ----- async readiness -----------------------------------------------------
+//
+// Suspend the calling task until `fd` is ready, handing the worker
+// thread back to the pool while parked. This is the bridge between the
+// coroutine machinery and the I/O reactor, and the reason `async` exists
+// in the language at all - see plans/async-coroutines.md.
+//
+// Returns 0 when the fd is ready. A non-zero result means the wait could
+// not be set up:
+//   1  - not running on a worker (called from main, say). The caller
+//        should fall back to a blocking read rather than suspend.
+//   -1 - the arm itself failed; errno carries the reason.
+//
+// The fd should be non-blocking, since readiness is level-triggered and
+// a subsequent read can still come up short.
+//
+//     async function readSome(fd: c_int): int64 {
+//         let rc: c_int = await conc.awaitReadable(fd);
+//         if (rc != 0) { return -1; }
+//         return recv(fd, ...);
+//     }
+export async awaitReadable(fd: c_int): c_int {
+    let rc: c_int = yoop_io_arm_readable(fd);
+    if (rc != 0) { return rc; }
+    // The worker is released here and the task stays parked until the
+    // multiplexer makes it runnable again.
+    await suspendNow();
+    return 0;
+}
+
+export async awaitWritable(fd: c_int): c_int {
+    let rc: c_int = yoop_io_arm_writable(fd);
+    if (rc != 0) { return rc; }
+    await suspendNow();
+    return 0;
+}
+
+// Current monotonic reading in nanoseconds. The intended call shape is
 // `let deadline: uint64 = now_ns() + 250_000_000;` (250ms from now), then
 // pass `deadline` to `wait_until`.
 export function now_ns(): uint64 {

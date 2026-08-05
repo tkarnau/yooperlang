@@ -19,7 +19,9 @@ type MemBuffer implements (Readable, Writable) {
     write_pos: usize,
     read_pos: usize,
 
-    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+    // `async` to match the trait, even though an in-memory buffer never
+    // suspends - it simply completes on its first step.
+    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         let want: usize = buf.len;
         let avail: usize = self.write_pos - self.read_pos;
         let take: usize = want;
@@ -35,7 +37,7 @@ type MemBuffer implements (Readable, Writable) {
         return Result.Ok { value: c_ssize_t(take) };
     }
 
-    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         let cap: usize = self.storage.len;
         let free: usize = cap - self.write_pos;
         let take: usize = buf.len;
@@ -56,12 +58,13 @@ type MemBuffer implements (Readable, Writable) {
     }
 }
 
-function main(): int32 {
+// Async work runs in a task; main is the sync/async boundary.
+task run(): int32 {
     let storage: uint8[] = [0, 0, 0, 0, 0, 0, 0, 0];
     let mb: MemBuffer = { storage: storage, write_pos: 0, read_pos: 0 };
 
     let payload: uint8[] = [72, 73];        // "HI"
-    let wo: Result<c_ssize_t, string> = Writable.write(ref mb, ref payload);
+    let wo: Result<c_ssize_t, string> = await Writable.write(ref mb, ref payload);
     let wrote: c_ssize_t = 0;
     switch (wo) {
         case Result.Ok { value: wn }: { wrote = wn; }
@@ -69,7 +72,7 @@ function main(): int32 {
     }
 
     let out: uint8[] = [0, 0];
-    let ro: Result<c_ssize_t, string> = Readable.read(ref mb, ref out);
+    let ro: Result<c_ssize_t, string> = await Readable.read(ref mb, ref out);
     let read_n: c_ssize_t = 0;
     switch (ro) {
         case Result.Ok { value: rn }: { read_n = rn; }
@@ -78,4 +81,9 @@ function main(): int32 {
 
     printf(`wrote=${wrote} read=${read_n} bytes=${out[0]},${out[1]}\n`);
     return 0;
+}
+
+function main(): int32 {
+    pooled h = run();
+    return wait h;
 }

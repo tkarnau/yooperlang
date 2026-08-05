@@ -1,0 +1,235 @@
+// EPISODE 11 - Inventing a test framework, live, in one file
+//
+// THE PITCH FOR THIS EPISODE:
+//
+// I wanted `describe` / `it` blocks. Not "call a function that takes a
+// closure" - actual blocks, where the result reports itself at the closing
+// brace, nesting works, and a failure count falls out as the exit code.
+//
+// I did not add a keyword. I did not touch the compiler. I wrote two kinds
+// and about sixty lines, and it worked. That is the episode.
+//
+// Watch what the compiler is NOT doing here:
+//   - it has no concept of a test, a suite, an assertion, or a runner
+//   - `it` and `describing` are ordinary identifiers I picked
+//   - nothing below is privileged; you could write all of it
+//
+// The only two mechanisms in play are the ones from episodes 8 and 9:
+//   `mustCall X beforeScopeEnd` on a BINDING kind  -> `it`
+//   `mustCall X beforeScopeEnd` on a REGION kind   -> `describe`
+
+// ---------------------------------------------------------------------------
+// Run state. A run is process-wide - one binary, one serial pass, one summary.
+// Module-level state is the honest representation of that.
+
+let DEPTH: int32 = 0;
+let PASSED: int32 = 0;
+let FAILED: int32 = 0;
+
+function indent(): void {
+    let i: int32 = 0;
+    while (i < DEPTH) { printf("  "); i = i + 1; }
+}
+
+// ---------------------------------------------------------------------------
+// `it` - a BINDING kind. Episode 8's shape.
+//
+// A check is deliberately NOT a comparison helper. It is a bool the test sets
+// plus a string the test writes. `equals(got, want)` flattens the context that
+// made a check meaningful; a sentence does not, and template literals already
+// interpolate anything implementing Display.
+
+trait Reports {
+    function report(ref self): void;
+}
+
+type Check implements Reports {
+    what: string,
+    ok: bool,
+    detail: string,
+    function report(ref self): void {
+        indent();
+        if (self.ok) {
+            PASSED = PASSED + 1;
+            printf(`ok - ${self.what}\n`);
+        } else {
+            FAILED = FAILED + 1;
+            printf(`NOT OK - ${self.what}\n`);
+            indent();
+            printf(`      ${self.detail}\n`);
+        }
+    }
+}
+
+// The whole mechanism. `ownsBlock` gives it a body; `mustCall report
+// beforeScopeEnd` reports the outcome at that body's closing brace, on every
+// path out of it.
+kind it {
+    appliesTo binding;
+    requires Reports;
+    mustCall report beforeScopeEnd;
+    ownsBlock;
+}
+
+function checks(what: string): Check {
+    return { what: what, ok: false, detail: "(no detail set)" };
+}
+
+// ---------------------------------------------------------------------------
+// `describe` - a REGION kind. Episode 9's shape.
+//
+// There is no value worth naming here: the group's whole job is the header it
+// prints on entry and the summary line it prints on exit. That is exactly what
+// `appliesTo region` is for.
+
+trait Closes {
+    function dispose(ref self): void;
+}
+
+type Group implements Closes {
+    label: string,
+    function dispose(ref self): void {
+        DEPTH = DEPTH - 1;
+        indent();
+        printf(`end ${self.label}\n`);
+    }
+}
+
+kind describing {
+    appliesTo region;
+    requires Closes;
+    mustCall dispose beforeScopeEnd;
+    ownsBlock;
+}
+
+function group(label: string): Group {
+    indent();
+    printf(`describe ${label}\n`);
+    DEPTH = DEPTH + 1;
+    return { label: label };
+}
+
+// ---------------------------------------------------------------------------
+// The code under test. An ordinary function with no idea a test exists.
+
+function add(a: int32, b: int32): int32 {
+    return a + b;
+}
+
+// ---------------------------------------------------------------------------
+// And here is what all of that bought. Read this block and notice that it
+// looks like a test file in any language you have used.
+
+function main(): int32 {
+    describing group("add") {
+
+        let it c1: Check = checks("adds two positives") {
+            const got = add(2, 3);
+            c1.ok = got == 5;
+            c1.detail = `add(2, 3) gave ${got}, wanted 5`;
+        }
+
+        let it c2: Check = checks("adds a negative") {
+            const got = add(2, -3);
+            c2.ok = got == -1;
+            c2.detail = `add(2, -3) gave ${got}, wanted -1`;
+        }
+
+        // Nesting just works - a region kind inside a region kind.
+        describing group("edge cases") {
+
+            let it c3: Check = checks("zero is the identity") {
+                const got = add(0, 41);
+                c3.ok = got == 41;
+                c3.detail = `add(0, 41) gave ${got}, wanted 41`;
+            }
+
+            // Deliberately failing, so the output shows both shapes.
+            let it c4: Check = checks("deliberately broken") {
+                const got = add(1, 1);
+                c4.ok = got == 3;
+                c4.detail = `add(1, 1) gave ${got}, wanted 3`;
+            }
+        }
+    }
+
+    printf(`\n${PASSED} passed, ${FAILED} failed\n`);
+
+    // Episode 1 called back: the exit code is the failure count, so CI gates
+    // on it with no wrapper script.
+    return FAILED;
+}
+
+// expected output:
+// describe add
+//   ok - adds two positives
+//   ok - adds a negative
+//   describe edge cases
+//     ok - zero is the identity
+//     NOT OK - deliberately broken
+//           add(1, 1) gave 2, wanted 3
+//   end edge cases
+// end add
+//
+// 3 passed, 1 failed
+//
+// ...and `echo $?` prints 1.
+
+// ---------------------------------------------------------------------------
+// THINGS TO POINT AT ON CAMERA
+//
+// 1. There is no runner. Nothing collects the checks into a list and walks
+//    them. Each `it` block reports itself, in place, at its own closing brace.
+//    The indentation is right because DEPTH is maintained by the enclosing
+//    region's constructor and its dispose.
+//
+// 2. Delete the `it` keyword from c4 - just `let c4: Check = ...`. It still
+//    compiles (advisory by default, episode 8) and the check silently
+//    vanishes from the output. One word is the difference between a test that
+//    reports and a test that does not exist.
+//
+// 3. `it` is not a keyword. Add `let it: int32 = 5;` to main. Works fine.
+//    So is `test`, `suite`, `describing`, `disposable`. Every one of these is
+//    a name someone chose in userland.
+//
+// 4. Time yourself writing the equivalent in your favorite language WITHOUT
+//    closures. That is the comparison that makes the point.
+
+// BREAK IT #1 - the kind enforces its own contract
+//
+// Remove `implements Reports` from `Check`:
+//
+//   binding "c1" has kind "it" which requires "Reports", but type struct
+//     Check does not implement "Reports"
+//
+// The kind declaration is the contract. `requires Reports` is why you cannot
+// tag an arbitrary struct with `it` and get a confusing failure later.
+
+// BREAK IT #2 - the wall I actually hit (worth showing, it is the honest bit)
+//
+// I wanted per-CASE isolation: each check in its own arena, composed out of
+// the two kinds I already had. That should be `test & ephemeral`. Try it:
+//
+//     kind isolatedTest = it & describing;
+//
+//   composition has no common application site in kind 'isolatedTest'
+//   composition contradiction in kind 'isolatedTest': mustCall report vs
+//     mustCall dispose
+//
+// Both complaints are legitimate - one kind applies to a binding and the
+// other to a region, and a composed kind cannot have two different
+// beforeScopeEnd obligations under the current model. But it means suites,
+// not cases, are the unit of isolation in the real harness.
+//
+// This is a good place to be straight with the audience: the mechanism is
+// nice, and here is precisely where it runs out. Multi-`mustCall` kinds are
+// an open design question, not a shipped feature.
+
+// ---------------------------------------------------------------------------
+// WHERE THIS WENT
+//
+// The real version is std/test.yoop, and it is the same two ideas with a
+// runner bolted on. Episode 12 walks it: `suite` is an `appliesTo function`
+// kind with `enumerable as "suites"`, which is the one clause that asks the
+// compiler for help - it authorizes collecting every function carrying that
+// kind into a table so a generated `main` can call them.

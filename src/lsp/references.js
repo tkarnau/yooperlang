@@ -29,7 +29,7 @@
 
 import { ASTNodeKind } from "../contracts.js";
 import { typeKinds } from "../jsyooptypecheck/types.js";
-import { findNodeAt } from "./nav.js";
+import { findInModule, findNodeAt } from "./nav.js";
 
 const SKIP_FIELDS = new Set([
   "sourceLoc",
@@ -84,11 +84,11 @@ export function identifyTarget(node, ctx) {
       const targetMod = modById.get(node.calleeModuleId);
       if (targetMod) {
         const exported = node.calleeExportName ?? node.callee;
-        const decl = findTopLevelByName(targetMod.ast, exported);
+        const decl = findInModule(targetMod, exported)?.decl;
         if (decl) return targetFromDecl(decl, targetMod, modById);
       }
     }
-    const localDecl = findTopLevelByName(module.ast, node.callee);
+    const localDecl = findInModule(module, node.callee)?.decl;
     if (localDecl) return targetFromDecl(localDecl, module, modById);
   }
 
@@ -140,7 +140,7 @@ export function identifyTarget(node, ctx) {
     const enumType = node.resolvedVariantType;
     if (enumType?.kind === typeKinds.variant) {
       const targetMod = modById.get(enumType.moduleId) ?? module;
-      const enumDecl = findTopLevelByName(targetMod.ast, enumType.name);
+      const enumDecl = findInModule(targetMod, enumType.name)?.decl;
       const variant = (enumDecl?.variants ?? []).find((v) => v.name === node.variantName);
       if (variant) {
         return {
@@ -156,7 +156,7 @@ export function identifyTarget(node, ctx) {
 
   // Final fallback: name-based lookup for type / kind names in annotations.
   if (tokenText) {
-    const local = findTopLevelByName(module.ast, tokenText);
+    const local = findInModule(module, tokenText)?.decl;
     if (local) return targetFromDecl(local, module, modById);
     if (moduleEnv) {
       const env = moduleEnv.get(module.id);
@@ -165,7 +165,7 @@ export function identifyTarget(node, ctx) {
         const targetMod = modById.get(imp.fromModuleId);
         if (targetMod) {
           const exported = imp.exportName ?? tokenText;
-          const decl = findTopLevelByName(targetMod.ast, exported);
+          const decl = findInModule(targetMod, exported)?.decl;
           if (decl) return targetFromDecl(decl, targetMod, modById);
         }
       }
@@ -620,18 +620,11 @@ function resolveStructDecl(structType, module, modById, programState) {
     }
   }
   const targetMod = modById.get(structType.moduleId) ?? module;
-  const typeDecl = findTopLevelByName(targetMod.ast, structType.name);
+  const typeDecl = findInModule(targetMod, structType.name)?.decl;
   if (typeDecl) return { typeDecl, targetMod };
   return null;
 }
 
-function findTopLevelByName(ast, name) {
-  for (const decl of ast.body) {
-    const inner = innerDecl(decl);
-    if (inner && inner.name === name) return inner;
-  }
-  return null;
-}
 
 function isDecl(kind) {
   return (

@@ -589,21 +589,28 @@ kind disposable {
     mustCall dispose beforeScopeEnd;
 }
 
+// The three below are the real declarations from std/core/kinds.yoop.
+// The concurrency kinds are not compiler keywords - they are ordinary kind
+// decls, and the compiler checks that std declares them with the clauses it
+// consults. See "Clauses you can use vs. clauses that describe a builtin".
+
 kind pooled {
-    appliesTo binding;
-    requires Task;
+    appliesTo binding parameter field;
+    requires Shared;
+    refcounted retain release;               // names the two methods to bump/drop a ref
 }
 
 kind joined {
     appliesTo binding;
-    requires Task;
-    autoJoin beforeScopeEnd;
+    requires Joinable;
+    mustCall join beforeScopeEnd;
     mustNotEscape scope;
 }
 
 kind task {
     appliesTo function;
-    provides Task;                           // call results are Task<ReturnType>
+    pausable;                                // the function is a coroutine
+    provides Task;                           // the CALL SITE yields Task<ReturnType>
 }
 
 kind batchable(n: usize) {
@@ -641,7 +648,13 @@ Multiple `requires` are written as separate clauses
 | `appliesTo X...` | One or more of `binding`, `parameter`, `field`, `function`, `type`, or the standalone `region`. Default: any value-site. |
 | `appliesTo region` | The kind governs a lexical region, not a named value: used only in the anonymous block form (`KIND EXPR { ... }` / `KIND EXPR;`), with no binding. Requires `ownsBlock`; mutually exclusive with the value sites above. See §4 "Region kinds". |
 | `requires Trait` | Values of this kind must implement the named trait. Repeat to require multiple. |
-| `provides Trait` | The kind supplies the trait's implementation (can transform its initializer). |
+| `provides Name` | Rewrites the **call-site result type** of a function carrying the kind: the body returns `T`, the call evaluates to `Name<T>`. Requires `appliesTo function`. `Name` resolves only to `Task` today. |
+| `pausable` | Functions carrying the kind are coroutines: they may suspend, which forces the `await` calling convention. Requires `appliesTo function`. |
+| `refcounted retain release` | Names the two methods of the required trait the compiler calls to bump and drop a reference. Dispatched for a `Task<T>` receiver; on any other receiver use `mustCall`. |
+| `signature (p: T) => R` | The shape every function carrying this kind must have. Required on a *collected* function kind. |
+| `enumerable as "table"` | Names the table a consumer asks the compiler for (e.g. `suite` is `enumerable as "suites"`). Required on a *collected* function kind. |
+| `conferred` / `restrictive` | Makes this a **marker kind** - a static type-level tag with no obligation and no codegen. See §6 "Marker kinds". |
+| `clearedBy m` / `appliedBy m` | Names the method of the `requires` trait authorized to strip (`restrictive`) or grant (`conferred`) the marker. |
 | `ownsBlock` | Binding may take a trailing `{ ... }` that narrows its scope. Without one, compiler synthesizes an implicit block at the tail of the enclosing scope; multiple such bindings nest in reverse declaration order (LIFO). |
 | `mustCall fn beforeScopeEnd` | Fn must run before the binding's scope exits - an explicit block if present, otherwise the enclosing scope. |
 | `mustCall fn beforeAny` | *(reserved - not implemented.)* Fn must run before any other method. |
@@ -650,8 +663,8 @@ Multiple `requires` are written as separate clauses
 | `mustNotShare acrossScopes` | Cannot cross into a concurrent task. |
 | `mustNotShare acrossThreads` | Cannot flow into a `task` spawn. Statically rejected at every task-call argument site. |
 | `mustNotEscape scope` | Cannot be returned or stored outside its scope. |
-| `autoJoin beforeScopeEnd` | Compiler inserts `wait` at scope exit. |
-| `restricts iteration { ... }` | Which `for*` forms are legal on this value. |
+| `autoJoin beforeScopeEnd` | *(Removed - not a clause.)* It was `mustCall wait beforeScopeEnd` under another name. Writing it is an error with a fix-it; `joined` in std/core/kinds.yoop spells it `mustCall join beforeScopeEnd`. |
+| `restricts iteration { ... }` | *(Reserved - not implemented.)* Which `for*` forms are legal on this value. Writing it is a "not yet supported" error. |
 | `layout { ... }` | Memory layout contract (align, packing, SoA/AoS). |
 | `propagates<K>` / `contains<K>` | How containers surface or absorb another kind's constraints. |
 | `forbids X...` | Categories a function may not touch (`io`, `globalState`, …). |
@@ -660,6 +673,73 @@ Multiple `requires` are written as separate clauses
 point a `?` triggers an early return must be satisfied before the return actually
 happens. The compiler inserts the call. This is how `disposable input = open(p) { … ?
 … }` can promise `dispose(input)` runs even when the block exits via `?`.
+
+### Clause behavior comes from the clause, not the kind's name
+
+Every clause in the table above works on any kind you declare. The compiler
+reads the clause off whatever kind decl it finds, so your kind gets the same
+treatment std's does. Nothing in the system is reserved to std. (A small group
+of clauses is reserved and rejected outright with a "not yet supported"
+message; those are marked in the table.)
+
+That is worth stating explicitly because the concurrency kinds look built in
+and are not. `task`, `async`, `joined`, and `pooled` are ordinary
+`kind { ... }` decls in [std/core/kinds.yoop](std/core/kinds.yoop), autoloaded
+into every module graph, and `task`/`async` lex as ordinary identifiers exactly
+like `test` and `suite` do. Declaring their clauses under your own name gets
+you their behavior:
+
+```js
+// `spawn` is `task` under another name. This is a real coroutine, and the
+// call site really does produce Task<int32>.
+kind spawn {
+    appliesTo function;
+    pausable;                 // the function is a coroutine
+    provides Task;            // the call site yields Task<ReturnType>
+}
+
+spawn function work(): int32 { return 7; }
+
+function main(): int32 {
+    pooled h = work();        // h is Task<int32>
+    printf("v=%d\n", wait h);
+    return 0;
+}
+```
+
+The same holds for the handle-binding side. A kind declaring `requires Shared`
+plus `refcounted retain release` binds a task handle exactly the way `pooled`
+does, copy-retain included; one declaring `mustCall join beforeScopeEnd`
+behaves like `joined`.
+
+**What the compiler still owns.** Three things are not derived from clauses and
+cannot be spelled by a user kind:
+
+- **`Task<T>` itself.** It is a compiler type, so it cannot carry an
+  `implements` list, and its `retain` / `release` / `join` bodies lower to the
+  runtime's `yoop_task_*` calls directly. A kind may `require` the traits a
+  Task satisfies (`Shared`, `Joinable`), which is what lets your kind bind one.
+- **`refcounted` on a non-Task receiver.** The retain/release the clause names
+  are only dispatched for a task handle today. A struct that implements the
+  required trait directly gets no automatic retain or release; use `mustCall`
+  for that, which is trait-dispatched and works on any receiver.
+- **`provides <Name>`** resolves only to `Task`. There is no general
+  call-site wrapping into an arbitrary user generic - see §17 open question 1.
+
+**The core-kind contract.** Because the compiler consults these clauses rather
+than the names, std's declaration is load-bearing, and the compiler checks it.
+Delete `provides Task` from std's `task` and every program that spawns a task
+stops building:
+
+```text
+std/core/kinds.yoop's kind 'task' is missing a clause the compiler depends on.
+Expected at least: kind task { appliesTo function; pausable; provides Task; }
+```
+
+So `kind task { appliesTo function; pausable; provides Task; }` is both the
+definition of `task` and a checked description of what the compiler does with
+it. Read it when you want to know why `task fetch(): Bytes` produces a
+`Task<Bytes>` at the call site, rather than leaving that as folklore.
 
 ### Applying a kind
 
@@ -924,16 +1004,20 @@ Iteration *strategy* is expressed as a **trait method call on the collection** i
 RHS of `in`. This keeps the `for … in` slot recognizable as a loop while letting kinds
 and traits extend the strategy set.
 
-> **v0 status.** Phase 9.D implements the default `for ITEM in EXPR { ... }` form
-> over arrays only - the body runs once per element with a fresh `ITEM` bound to
-> a copy of the current slot. The trait-driven strategy slots below (`Iterable`,
-> `BatchIterable`, `SimdIterable`, `ParIterable`) and the user-extensible
-> machinery are the long-term shape; until those land, the only legal RHS is an
-> array expression and the only legal strategy is the implicit sequential walk.
+> **v0 status.** The `for ITEM in EXPR { ... }` form works over arrays (Phase
+> 9.D) and over any type implementing `Iterable<T>` (Phase 10.B), which is what
+> `a..b` ranges, `Vec`, and `Map` ride on. The remaining trait-driven strategy
+> slots below (`BatchIterable`, `SimdIterable`, `ParIterable`) are the long-term
+> shape and are not implemented; the only strategy today is the sequential walk.
 
 ```js
-// C-style numeric counter
-for (i = 0; i < n; i = i + 1) { ... }
+// C-style numeric counter. The counter may be declared in the head, in which
+// case it is scoped to the loop; the step slot takes `=` or a compound op.
+for (let i = 0; i < n; i += 1) { ... }
+for (i = 0; i < n; i = i + 1) { ... }        // counter declared before the loop
+
+// Over an index space, via a range value (see "Ranges" below)
+for i in 0..n { ... }
 
 // Iteration over a collection - strategy comes from a trait method
 for item  in xs                    { ... }   // default, from Iterable
@@ -941,6 +1025,56 @@ for chunk in xs.batched(4)         { ... }   // chunk: T[] - from BatchIterable
 for v     in xs.simd(8)            { ... }   // v is a SIMD lane - from SimdIterable
 for item  in xs.parallel()         { ... }   // each iter a concurrent task - from ParIterable
 ```
+
+### The C-style counter
+
+The init slot accepts either an assignment to an existing binding
+(`for (i = 0; ...)`) or a `let` declaration (`for (let i = 0; ...)`). A
+`let`-declared counter is **scoped to the loop**: it does not leak into the
+enclosing scope, and it may shadow a same-named binding out there. `const` is
+rejected in the init slot, since the step mutates the counter.
+
+The counter's type annotation is optional. When it is omitted and the
+initializer is a bare numeric literal, the type comes from the **loop
+condition**: if the condition compares the counter against a concrete numeric
+operand, that operand's type wins. So `for (let i = 0; i < xs.len; i += 1)`
+gives `i: usize`, not the `int32` a plain `let i = 0;` binding would infer.
+Without such a comparison the ordinary literal defaults apply (`int32` /
+`float64`). Annotate the counter to say something else:
+
+```js
+for (let i: int32 = 0; i < 10; i += 3) { ... }
+for (let k: int32 = 3; k > 0; k -= 1) { ... }     // counting down
+```
+
+The step slot accepts `i = <expr>` or any compound-assignment operator
+(`+= -= *= /= %=`), which means the same thing: `i += 2` is `i = i + 2`.
+
+### Ranges
+
+`a..b` is a half-open integer range: it yields `a`, `a + 1`, ... `b - 1`, and
+nothing at all when `b <= a`. Elements are `usize`, matching every length and
+index in the language, so `0..xs.len` needs no casts.
+
+```js
+for i in 0..xs.len { ... }         // the common index walk
+for i in 1..xs.len - 1 { ... }     // `..` binds looser than arithmetic
+```
+
+The operator is **sugar, not a loop form**: `a..b` lowers to a call to
+`exclusive` in `std/core/range.yoop`, so a range is an ordinary `Range` value
+implementing `Iterable<usize>`. It can be bound, passed, returned, and walked
+more than once (each walk gets its own copy of the cursor).
+
+```js
+const rows = 0..3;
+paintEvery(rows);                  // Range is just a value
+for i in rows { ... }
+for i in rows { ... }              // walks again from 0
+```
+
+Bounds cannot be chained (`a..b..c` is an error). Inside brackets `..` keeps its
+existing slice meaning (`xs[i..j]`, Phase 9.E) and never builds a range.
 
 The body's bound variable's **type** tells you the mode: a `T[]` binding means you're
 iterating in chunks; a parallel iterator's body runs under concurrent-task rules
@@ -1625,7 +1759,7 @@ What this example demonstrates:
 
 ## 17. Open questions
 
-1. **Kind-transforms-RHS (`provides` semantics).** When `scoped` / `pooled` bind a call expression, the kind supplies the spawn wrapping. This is the one place a kind modifies *code*, not just enforces rules. Worth giving it a distinct grammar (`provides … intercepts { … }`) to keep it visible?
+1. **What `provides` may wrap into.** Mostly settled. `provides Name` means the call-site result type of a function carrying the kind becomes `Name<DeclaredReturn>` - `task f(): T` yields `Task<T>` where it is called - and it is now derived from the clause, so a user kind declaring `pausable; provides Task;` gets a real coroutine and a real task handle (§6 "Clause behavior comes from the clause, not the kind's name"). What remains open is the *range* of `Name`: it resolves only to `Task` today. Letting it name an arbitrary user generic needs an answer for how the wrap and unwrap happen - `Task<T>` is not just a type, it carries a worker pool, `wait`, and cancellation, so a kind that wrapped into a plain `MyBox<T>` would mint a value with no way to get the `T` back out. That is what the `provides … intercepts { … }` sketch was reaching for: a companion clause naming the wrap/unwrap pair, so a code-transforming kind stays visibly different from a constraining one. Related and smaller: `refcounted` dispatches its named retain/release only for a `Task<T>` receiver; generalizing it to any type implementing the required trait would make it a true sibling of `mustCall`.
 2. **Trait method resolution.** Methods live on `type … implements Trait` blocks. Call syntax is **trait-qualified**: `Disposable.dispose(ref x)` - the trait name must be in scope at the call site. (Phase 7.4 settled this: bare-form `dispose(ref x)` and dotted form `x.dispose()` are both rejected. Trait method names live in the trait's namespace and may freely coincide with module-level free-function names or with method names from other traits implemented by the same type, because every call site is unambiguously qualified.)
 3. **String ↔ cstr.** UTF-8 immutable `string` is TypeScript-adjacent; C expects null-terminated bytes. Options: implicit cstr view, explicit conversion, or two types.
 4. **Array length & FFI.** `xs.len` intrinsic means fat pointers; worth a separate `c_array<T>` for ABI-exact interop.

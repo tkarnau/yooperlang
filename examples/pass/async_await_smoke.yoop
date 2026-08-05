@@ -1,0 +1,85 @@
+// `async` functions and `await` - LLVM coroutines under the hood.
+//
+// An `async` function is a coroutine. It can only be called through
+// `await`, and `await` can only appear inside another async function or
+// a `task` body (which is implicitly async). Those two rules together
+// guarantee a suspend always has a frame to propagate into - that is the
+// whole reason the language has to know about it rather than the runtime
+// figuring it out alone. See plans/async-coroutines.md.
+//
+// Nothing here actually suspends: an async call that never blocks runs
+// straight through on the first step. The suspension case is
+// async_yield_smoke.yoop.
+
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// A leaf async function. `async` REPLACES `function`, the same way
+// `task` does.
+async double(x: int32): int32 {
+    return x * 2;
+}
+
+// Async calls compose: `outer` awaits `double`, and its own suspension
+// (if it had one) would propagate to whoever awaits `outer`.
+async addAndDouble(a: int32, b: int32): int32 {
+    let sum: int32 = a + b;
+    return await double(sum);
+}
+
+// A task body is implicitly async, so `await` is legal here with no
+// extra annotation. This is the bridge from the scheduler into async
+// code.
+task compute(a: int32, b: int32): int32 {
+    let v: int32 = await addAndDouble(a, b);
+    return v + 1;
+}
+
+// Async and ordinary calls mix freely in one body - only the awaited
+// ones are coroutines.
+function plainHelper(x: int32): int32 {
+    return x - 5;
+}
+
+task mixed(x: int32): int32 {
+    let a: int32 = plainHelper(x);      // ordinary call
+    let b: int32 = await double(a);     // coroutine
+    return b;
+}
+
+// Async functions can loop and branch like any other; the coroutine
+// frame carries the locals across whatever suspend points appear.
+async sumTo(n: int32): int32 {
+    let total: int32 = 0;
+    for (let i = 1; i <= n; i += 1) {
+        total = total + await double(i);
+    }
+    return total;
+}
+
+task looping(n: int32): int32 {
+    return await sumTo(n);
+}
+
+function main(): int32 {
+    // Spawning a task is NOT an await - it hands the body to the
+    // scheduler and evaluates to a Task<T>, joined later with `wait`.
+    pooled c = compute(3, 4);
+    printf("compute=%d\n", wait c);
+
+    pooled m = mixed(15);
+    printf("mixed=%d\n", wait m);
+
+    pooled l = looping(4);
+    printf("looping=%d\n", wait l);
+
+    return 0;
+}
+
+// expected output:
+// compute=15
+// mixed=20
+// looping=20

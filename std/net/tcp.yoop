@@ -1,3 +1,5 @@
+module net;
+
 // std/net/tcp.yoop - TcpListener + TcpStream.
 //
 // Safe wrappers over std/net/socket_ffi. `TcpListener` owns a listening
@@ -7,24 +9,54 @@
 // All blocking operations (accept, read, write) park the calling pthread
 // on the runtime multiplexer; if the caller wraps these in a `task` the
 // suspension cooperates with the scheduler.
+//
+// Timeouts and cancellation come in two flavors:
+//
+//   * Per-call, explicit: `tcpAcceptCt` / `tcpReadCt` / `tcpWriteAllCt`
+//     take a `CancelToken` and return an `IoOutcome` that says whether
+//     the call finished, ran out of time, or was cancelled.
+//   * Per-stream, ambient: `tcpSetTimeoutMs` / `tcpSetToken` attach a
+//     deadline and a token to the stream itself, and the `Readable` /
+//     `Writable` trait methods honor them. This is the SO_RCVTIMEO
+//     shape - it works through code that only knows the traits (all of
+//     std/http, for instance) without changing a single signature.
+//
+// The trait methods have to squeeze a three-way outcome into
+// `Result<c_ssize_t, string>`, so a timeout arrives as an `Err`. Callers
+// that need to tell a timeout from a genuine socket error should use
+// the `Ct` variants.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result } from "../core/types.yoop";
 import {
     Readable, Writable, FlushOutcome,
 } from "../core/traits.yoop";
-import { Socket } from "./socket.yoop";
-import {
-    AcceptedFd,
-    ConnectOutcome,
-    ffi_accept,
-    ffi_close,
-    ffi_connect,
-    ffi_listen,
-    ffi_recv,
-    ffi_send_all,
-    ffi_socket_open,
-} from "./socket_ffi.yoop";
+import { CancelToken } from "../core/cancel";
+import * as cancel from "../core/cancel";
+
+// ----- cancel-aware outcomes ----------------------------------------------
+
+// What a cancel-aware socket call did. `Bytes { n: 0 }` on a read is
+// EOF (the peer closed); on a write it means nothing was sent.
+//
+// `TimedOut` and `Cancelled` carry the byte count that DID transfer,
+// because a partially-written message is exactly what a caller needs to
+// know about before deciding whether the connection is still usable.
+export variant IoOutcome {
+    Bytes     { n: usize },
+    TimedOut  { sent: usize },
+    Cancelled { sent: usize },
+    Err       { error: string },
+}
+
+// Map a raw IoResult onto the variant. One place, so the code-to-case
+// mapping cannot drift between read and write.
+function toIoOutcome(r: IoResult): IoOutcome {
+    if (r.code == IO_READY)     { return IoOutcome.Bytes { n: usize(r.n) }; }
+    if (r.code == IO_TIMEDOUT)  { return IoOutcome.TimedOut { sent: usize(r.n) }; }
+    if (r.code == IO_CANCELLED) { return IoOutcome.Cancelled { sent: usize(r.n) }; }
+    return IoOutcome.Err { error: r.error };
+}
 
 // ----- TcpListener --------------------------------------------------------
 
@@ -72,25 +104,153 @@ export function tcp_listen(host: string, port: int32, backlog: int32): ListenRes
 // Readable + Writable + Disposable. Both read and write delegate to the
 // task-shaped ffi helpers in socket_ffi, which park on the multiplexer
 // before issuing recv/send.
+//
+// `timeoutMs` and `token` are the ambient (SO_RCVTIMEO-shaped) controls:
+// both default to "none", and setting either makes the trait methods
+// abandon a call that would otherwise park forever. They live on the
+// stream rather than in the trait signatures so existing generic code
+// over `Readable` / `Writable` gains timeouts without any change.
 export type TcpStream implements (Disposable, Readable, Writable) propagates<disposable> {
     socket: Socket,
 
+    // Per-call budget in milliseconds; 0 means "no timeout". Applied
+    // fresh to EACH read/write, not to the stream's whole lifetime -
+    // for a lifetime budget, put a deadline on `token` instead.
+    timeoutMs: uint64,
+
+    // Ambient cancellation. A null token (cancel.none()) is the default
+    // and disables the feature. Deadlines on the token combine with
+    // `timeoutMs`; whichever expires first wins.
+    token: CancelToken,
+
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
+        // The stream does not own the token - it holds a shared handle,
+        // and disposing that handle only drops this stream's reference.
+        Disposable.dispose(ref self.token);
     }
 
-    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
-        return ffi_recv(self.socket.fd, buf);
+    // Async: on a worker these SUSPEND the calling task rather than
+    // parking its thread, so one worker carries many connections. Off a
+    // worker (called from main) the underlying helper falls back to a
+    // blocking wait, so the same code is correct either way.
+    //
+    // The ambient deadline/token path still uses the blocking
+    // cancel-aware helpers - those already have their own abandon
+    // handshake, and combining two suspension mechanisms in one call is
+    // not worth the complexity. A stream with a timeout blocks its
+    // thread; a stream without one suspends.
+    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {
+            return ioResultToResult(await ffiRecvAsync(self.socket.fd, buf));
+        }
+        return ioResultToResult(
+            ffiRecvCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));
     }
 
-    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
-        return ffi_send_all(self.socket.fd, buf);
+    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        if (self.timeoutMs == 0 && cancelIsNone(ref self.token)) {
+            return ioResultToResult(await ffiSendAllAsync(self.socket.fd, buf));
+        }
+        return ioResultToResult(
+            ffiSendAllCt(self.socket.fd, buf, self.token.raw, streamDeadline(ref self)));
     }
 
     function flush(ref self): FlushOutcome {
         // Unbuffered stream - flush is a no-op.
         return FlushOutcome.Ok;
     }
+}
+
+// The accept-side outcome sibling of IoOutcome. Declared after
+// TcpStream because a struct used as a variant payload has to be
+// declared first - otherwise its fields resolve against an unpopulated
+// shell and the constructor fails with a misleading "no field" error.
+export variant AcceptOutcome {
+    Accepted  { stream: TcpStream, peerHost: uint32, peerPort: uint16 },
+    TimedOut,
+    Cancelled,
+    Err       { error: string },
+}
+
+// Build a stream around a raw fd with the ambient controls off. The one
+// place TcpStream is constructed, so adding a field here does not mean
+// touching every accept/connect return.
+function newStream(fd: c_int): TcpStream propagates<disposable> {
+    // Non-blocking is a precondition of the async path: "try, and on
+    // EAGAIN suspend" only works if the syscall actually returns EAGAIN.
+    // Doing it here means no accept/connect site has to remember.
+    if (fd >= 0) { let _rc: c_int = ffiSetNonblocking(fd); }
+    return { socket: { fd: fd }, timeoutMs: 0, token: cancel.none() };
+}
+
+// ----- ambient timeout / token plumbing ------------------------------------
+
+// True when the stream has no ambient token installed. Must be the
+// structural "is this the none() token" test - checking "has it fired
+// yet" instead would make a live, deadline-less token look absent and
+// silently skip the cancel-aware path.
+function cancelIsNone(ref t: CancelToken): bool {
+    return cancel.isNone(ref t);
+}
+
+// The absolute deadline for one operation on this stream: `timeoutMs`
+// from now, or 0 when unset. The token's own deadline is folded in by
+// the runtime, so this only has to express the per-call budget.
+function streamDeadline(ref stream: TcpStream): uint64 {
+    if (stream.timeoutMs == 0) { return 0; }
+    return cancel.deadlineFromMs(stream.timeoutMs);
+}
+
+// Squeeze a three-way outcome into the trait's Result. Callers that
+// need to branch on timeout-vs-cancel-vs-error should use tcpReadCt /
+// tcpWriteAllCt, which keep the variant intact.
+function ioResultToResult(r: IoResult): Result<c_ssize_t, string> {
+    if (r.code == IO_READY)     { return Result.Ok { value: r.n }; }
+    if (r.code == IO_TIMEDOUT)  { return Result.Err { error: "timed out" }; }
+    if (r.code == IO_CANCELLED) { return Result.Err { error: "cancelled" }; }
+    return Result.Err { error: r.error };
+}
+
+// Give every subsequent read/write on this stream an `ms` budget.
+// Pass 0 to remove the timeout.
+export function tcpSetTimeoutMs(ref stream: TcpStream, ms: uint64): void {
+    stream.timeoutMs = ms;
+}
+
+// Attach an ambient cancellation token. The stream takes its own shared
+// handle, so the caller's token can go out of scope independently. Any
+// previously attached token is released.
+export function tcpSetToken(ref stream: TcpStream, ref t: CancelToken): void {
+    Disposable.dispose(ref stream.token);
+    stream.token = cancel.share(ref t);
+}
+
+// ----- cancel-aware operations --------------------------------------------
+
+// Read once into `buf` under an explicit token, ignoring the stream's
+// ambient settings. `Bytes { n: 0 }` is EOF.
+export function tcpReadCt(ref stream: TcpStream, ref buf: uint8[], ref t: CancelToken): IoOutcome {
+    return toIoOutcome(ffiRecvCt(stream.socket.fd, buf, t.raw, 0));
+}
+
+// Read once with a plain millisecond budget and no token.
+export function tcpReadTimeoutMs(ref stream: TcpStream, ref buf: uint8[], ms: uint64): IoOutcome {
+    let deadline: uint64 = 0;
+    if (ms > 0) { deadline = cancel.deadlineFromMs(ms); }
+    return toIoOutcome(ffiRecvCt(stream.socket.fd, buf, cancel.none().raw, deadline));
+}
+
+// Write every byte of `buf` under an explicit token. On TimedOut /
+// Cancelled the `sent` payload says how much made it out.
+export function tcpWriteAllCt(ref stream: TcpStream, ref buf: uint8[], ref t: CancelToken): IoOutcome {
+    return toIoOutcome(ffiSendAllCt(stream.socket.fd, buf, t.raw, 0));
+}
+
+export function tcpWriteAllTimeoutMs(ref stream: TcpStream, ref buf: uint8[], ms: uint64): IoOutcome {
+    let deadline: uint64 = 0;
+    if (ms > 0) { deadline = cancel.deadlineFromMs(ms); }
+    return toIoOutcome(ffiSendAllCt(stream.socket.fd, buf, cancel.none().raw, deadline));
 }
 
 // ----- Accept --------------------------------------------------------------
@@ -124,11 +284,55 @@ export function tcp_accept(ref l: TcpListener): AcceptResult propagates<disposab
         case Result.Err { error: e }: { err_msg = e; }
     }
     return {
-        stream:    { socket: { fd: fd } },
+        stream:    newStream(fd),
         peer_host: peer_host,
         peer_port: peer_port,
         error:     err_msg,
     };
+}
+
+// Accept one inbound connection, giving up when `t` fires. This is what
+// lets an accept loop notice a shutdown request: the plain `tcp_accept`
+// parks until a client arrives and nothing short of a signal gets it
+// back.
+//
+//     switch (tcp.tcpAcceptCt(ref listener, ref shutdownToken)) {
+//         case AcceptOutcome.Accepted { stream: s, ... }: { serve(s); }
+//         case AcceptOutcome.Cancelled: { break; }
+//         ...
+//     }
+export function tcpAcceptCt(ref l: TcpListener, ref t: CancelToken): AcceptOutcome propagates<disposable> {
+    return acceptOutcome(ffiAcceptCt(l.socket.fd, t.raw, 0));
+}
+
+// Accept with a plain millisecond budget and no token. Returns
+// `TimedOut` when no connection arrived in time, so a loop can poll
+// some other condition between attempts.
+export function tcpAcceptTimeoutMs(ref l: TcpListener, ms: uint64): AcceptOutcome propagates<disposable> {
+    let deadline: uint64 = 0;
+    if (ms > 0) { deadline = cancel.deadlineFromMs(ms); }
+    return acceptOutcome(ffiAcceptCt(l.socket.fd, cancel.none().raw, deadline));
+}
+
+function acceptOutcome(r: AcceptCtResult): AcceptOutcome propagates<disposable> {
+    if (r.code == IO_READY) {
+        return AcceptOutcome.Accepted {
+            stream:   newStream(r.fd),
+            peerHost: r.peerHost,
+            peerPort: r.peerPort,
+        };
+    }
+    if (r.code == IO_TIMEDOUT)  { return AcceptOutcome.TimedOut; }
+    if (r.code == IO_CANCELLED) { return AcceptOutcome.Cancelled; }
+    return AcceptOutcome.Err { error: r.error };
+}
+
+// Accept one inbound connection, SUSPENDING the calling task while it
+// waits instead of holding a worker thread. This is the accept a server
+// loop wants: N concurrent connections cost N coroutine frames, not N
+// threads.
+export async tcpAcceptAsync(ref l: TcpListener): AcceptOutcome propagates<disposable> {
+    return acceptOutcome(await ffiAcceptAsync(l.socket.fd));
 }
 
 // ----- Connect (client-side) ----------------------------------------------
@@ -153,7 +357,7 @@ export function tcp_connect(host: string, port: int32): ConnectResult propagates
     }
     if (fd < 0) {
         return {
-            stream: { socket: { fd: -1 } },
+            stream: newStream(-1),
             error:  open_err,
         };
     }
@@ -161,18 +365,18 @@ export function tcp_connect(host: string, port: int32): ConnectResult propagates
     switch (c) {
         case ConnectOutcome.Ok: {
             return {
-                stream: { socket: { fd: fd } },
+                stream: newStream(fd),
                 error:  "",
             };
         }
         case ConnectOutcome.Err { error: connect_e }: {
             let _rc: c_int = ffi_close(fd);
             return {
-                stream: { socket: { fd: -1 } },
+                stream: newStream(-1),
                 error:  connect_e,
             };
         }
     }
     // Unreachable.
-    return { stream: { socket: { fd: -1 } }, error: "" };
+    return { stream: newStream(-1), error: "" };
 }

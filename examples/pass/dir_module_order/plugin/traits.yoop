@@ -1,0 +1,11 @@
+module plugin;
+
+// Declared in the LATER-sorting file of the module, and used by impls.yoop with
+// no import between them.
+export trait Greets {
+    function greet(ref self): int32;
+}
+
+export type Box<T> { item: T }
+
+export function unbox<T>(b: Box<T>): T { return b.item; }

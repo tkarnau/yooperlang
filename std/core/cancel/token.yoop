@@ -1,0 +1,237 @@
+module cancel;
+
+// std/core/cancel/token.yoop - cancellation tokens and deadlines.
+//
+// One of two source files in the `cancel` module. The other, ffi.yoop, holds the
+// `extern "C"` block and the `unsafe_ptr` envelope; it is a sibling in the same
+// module, so everything it declares is visible here with no import, and its
+// `raw*` functions are module-private rather than public API.
+//
+// A cancellation token is an ordinary value you create and pass down a
+// call chain. Nothing is implicitly attached to a task or a thread, so
+// the same token works in a plain function and in a `task` body, and a
+// function three levels down can honor a deadline set at the top
+// without every intermediate signature growing a timeout parameter.
+//
+//     import * as cancel from "std/core/cancel";
+//     import { CancelToken, WaitOutcome } from "std/core/cancel";
+//
+//     disposable ct: CancelToken = cancel.withTimeoutMs(5000);
+//     let r: Result<usize, string> = readEverything(ref ct, ref stream);
+//
+//     // ...from any other thread:
+//     cancel.request(ref ct);
+//
+// A token carries two independent reasons to stop:
+//
+//   * the CANCELLED flag - someone called `request`, and
+//   * a DEADLINE - an absolute reading on the monotonic clock.
+//
+// They are reported differently on purpose. Running out of time and
+// being told to stop usually want different handling (retry vs. give
+// up), so every blocking call returns a three-way `WaitOutcome` rather
+// than a bool. `isCancelled` folds them back together for the common
+// "should I keep going?" check.
+//
+// Deadlines need no timer thread: every blocking call folds the token's
+// deadline into its own wait, so the deadline fires as an ordinary
+// timed wait rather than something a scheduler has to notice.
+//
+// Ownership: `CancelToken` is `Disposable`, so the idiomatic use is the
+// `disposable` keyword on the binding and no explicit cleanup call. The
+// disposer is idempotent (release-then-null), so a hand-written
+// `Disposable.dispose(ref ct)` followed by scope exit is safe.
+
+import { Disposable, disposable } from "../kinds.yoop";
+
+// ----- outcomes ------------------------------------------------------------
+
+// The result of any cancel-aware blocking call. Mirrors the runtime's
+// YOOP_WAIT_* codes.
+//
+//   Ready     - the thing you waited for happened
+//   TimedOut  - a deadline elapsed first (yours or the token's)
+//   Cancelled - someone explicitly called `request`
+export variant WaitOutcome {
+    Ready,
+    TimedOut,
+    Cancelled,
+}
+
+// Runtime code -> variant. Anything unrecognized reads as TimedOut,
+// which is the conservative answer: it makes the caller stop rather
+// than spin.
+export function outcomeOf(code: int32): WaitOutcome {
+    if (code == 0) { return WaitOutcome.Ready; }
+    if (code == 2) { return WaitOutcome.Cancelled; }
+    return WaitOutcome.TimedOut;
+}
+
+// ----- the token -----------------------------------------------------------
+
+// A refcounted handle on a runtime cancellation token. A null handle is
+// the legitimate "no cancellation" value (see `none()`): every
+// operation on it is a no-op and every predicate reads false, so a call
+// chain that does not care about cancellation still type-checks
+// unchanged.
+export type CancelToken implements Disposable propagates<disposable> {
+    raw: RawCancel,
+
+    // Idempotent: guard on null, release, then null. Same free-then-null
+    // discipline as std/db's Db.dispose.
+    function dispose(ref self): void {
+        if (!rawCancelIsNull(self.raw)) {
+            rawRelease(self.raw);
+            self.raw = rawCancelNull();
+        }
+    }
+}
+
+// ----- construction --------------------------------------------------------
+
+// A token that can only be cancelled explicitly - no deadline.
+export function newToken(): CancelToken propagates<disposable> {
+    return { raw: rawNew() };
+}
+
+// The "no cancellation" token. Nothing can cancel it, it never expires,
+// and disposing it is a no-op. Pass it where an API wants a token but
+// the caller has nothing to hand it.
+export function none(): CancelToken propagates<disposable> {
+    return { raw: rawCancelNull() };
+}
+
+// A token that expires at an absolute monotonic reading (see `nowNs`).
+export function withDeadlineNs(deadlineNs: uint64): CancelToken propagates<disposable> {
+    return { raw: rawNewDeadline(deadlineNs) };
+}
+
+// A token that expires `ms` milliseconds from now. The common shape:
+//
+//     disposable ct: CancelToken = cancel.withTimeoutMs(2000);
+export function withTimeoutMs(ms: uint64): CancelToken propagates<disposable> {
+    return { raw: rawNewDeadline(deadlineFromMs(ms)) };
+}
+
+// A token cancelled whenever `parent` is - the request-scoped-token
+// shape. The child may also carry its own (shorter) deadline, and
+// cancelling the child does NOT cancel the parent.
+//
+// The child holds a reference to the parent, so the parent outlives the
+// link even if its own binding goes out of scope first.
+export function childOf(ref parent: CancelToken): CancelToken propagates<disposable> {
+    let child: CancelToken = { raw: rawNew() };
+    let _rc: int32 = rawLink(child.raw, parent.raw);
+    return child;
+}
+
+// A child of `parent` that also expires after `ms`. Equivalent to
+// `childOf` followed by `setTimeoutMs`.
+export function childWithTimeoutMs(ref parent: CancelToken, ms: uint64): CancelToken propagates<disposable> {
+    let child: CancelToken = { raw: rawNewDeadline(deadlineFromMs(ms)) };
+    let _rc: int32 = rawLink(child.raw, parent.raw);
+    return child;
+}
+
+// A second owning handle on the SAME underlying token. Use this when a
+// token has to outlive the scope that made it - handing one to a task,
+// or storing one in a struct. Both handles must be disposed; the
+// runtime object dies with the last one.
+export function share(ref t: CancelToken): CancelToken propagates<disposable> {
+    if (rawCancelIsNull(t.raw)) {
+        return { raw: rawCancelNull() };
+    }
+    rawRetain(t.raw);
+    return { raw: t.raw };
+}
+
+// ----- state ---------------------------------------------------------------
+
+// "Should I stop?" - true if the token was cancelled OR its deadline
+// has elapsed. This is the predicate a loop body polls.
+export function isCancelled(ref t: CancelToken): bool {
+    return rawRequested(t.raw);
+}
+
+// True for the `none()` token - no underlying runtime object, so
+// nothing can ever cancel it and every operation is a no-op.
+//
+// This is a structural check, NOT "is it currently un-cancelled". A live
+// token that merely has no deadline and has not fired yet is very much
+// not none, and code that conflates the two ends up ignoring a
+// perfectly good token.
+export function isNone(ref t: CancelToken): bool {
+    return rawCancelIsNull(t.raw);
+}
+
+// True only if someone explicitly called `request`. An elapsed deadline
+// does not count. Use this when the two reasons need different
+// handling and you are not going through a `WaitOutcome`.
+export function isFlagged(ref t: CancelToken): bool {
+    return rawFlagged(t.raw);
+}
+
+// Cancel the token: wakes every blocked call waiting on it and cascades
+// to every child. Idempotent, and safe to call from any thread.
+export function request(ref t: CancelToken): void {
+    rawRequest(t.raw);
+}
+
+// The token's absolute deadline, or 0 if it has none.
+export function deadlineNs(ref t: CancelToken): uint64 {
+    return rawDeadlineNs(t.raw);
+}
+
+// Install or replace the deadline. Takes effect immediately, including
+// for calls already blocked on this token - shortening a deadline wakes
+// them so they can re-evaluate. Pass 0 to remove the deadline.
+export function setDeadlineNs(ref t: CancelToken, deadlineNs: uint64): void {
+    rawSetDeadlineNs(t.raw, deadlineNs);
+}
+
+export function setTimeoutMs(ref t: CancelToken, ms: uint64): void {
+    rawSetDeadlineNs(t.raw, deadlineFromMs(ms));
+}
+
+// Remaining time in milliseconds, or 0 if the deadline has passed or
+// the token has none. Handy for logging and for handing a budget to an
+// API that wants milliseconds rather than a token.
+export function remainingMs(ref t: CancelToken): uint64 {
+    let d: uint64 = rawDeadlineNs(t.raw);
+    if (d == 0) { return 0; }
+    let now: uint64 = rawNowNs();
+    if (now >= d) { return 0; }
+    return (d - now) / 1_000_000;
+}
+
+// ----- blocking ------------------------------------------------------------
+
+// Sleep for `ms`, waking early if the token fires. Ready means the full
+// duration elapsed.
+export function sleepMs(ref t: CancelToken, ms: uint64): WaitOutcome {
+    return outcomeOf(rawSleepNs(t.raw, ms * 1_000_000));
+}
+
+// Block until the token is cancelled or `timeoutMs` elapses. Unlike the
+// calls that are doing work, this one is OBSERVING the token, so a
+// token that fires for either reason reports Cancelled and TimedOut is
+// reserved for the caller's own timeout winning the race.
+export function awaitCancel(ref t: CancelToken, timeoutMs: uint64): WaitOutcome {
+    let deadline: uint64 = 0;
+    if (timeoutMs > 0) { deadline = deadlineFromMs(timeoutMs); }
+    return outcomeOf(rawWait(t.raw, deadline));
+}
+
+// ----- clock ---------------------------------------------------------------
+
+// The monotonic deadline clock, in nanoseconds. Monotonic, so a system
+// clock change cannot move a deadline; the readings are only meaningful
+// relative to each other.
+export function nowNs(): uint64 {
+    return rawNowNs();
+}
+
+// An absolute deadline `ms` milliseconds from now.
+export function deadlineFromMs(ms: uint64): uint64 {
+    return rawNowNs() + ms * 1_000_000;
+}

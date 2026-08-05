@@ -25,6 +25,8 @@ import {
   PrimType,
   RefType,
   StructType,
+  StructShell,
+  fillStructShell,
   TaskType,
   TypeParamType,
   UnionType,
@@ -62,9 +64,10 @@ import {
   validatePrecompileBlock,
 } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
+import { checkImportLocality } from "./importLocality.js";
 import { runKindCheck } from "./kindCheck.js";
 import { runKindFlow } from "./kindFlow.js";
-import { TASK_KIND } from "./builtinKinds.js";
+import { lookupCoreKind, setCoreKinds } from "./coreKinds.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
@@ -442,7 +445,8 @@ export function fieldCarriedKinds(field) {
   const out = [];
   if (field.kindType) out.push(field.kindType);
   if (field.type?.kind === "task") {
-    if (!out.includes(TASK_KIND)) out.push(TASK_KIND);
+    const taskKind = lookupCoreKind("pooled");
+    if (taskKind && !out.includes(taskKind)) out.push(taskKind);
   }
   if (field.type?.kind === "struct" && field.type.propagatedKinds?.length) {
     for (const a of field.type.propagatedKinds) {
@@ -648,7 +652,10 @@ function substituteSelfInSig(traitSig, thisStruct) {
     }
     return p;
   });
-  return FuncType(params, traitSig.returnType, false);
+  // Carry asyncness through the self-substitution, or the trait's
+  // requirement arrives at sigsEqual looking synchronous and an impl
+  // that disagrees is silently accepted.
+  return FuncType(params, traitSig.returnType, false, [], !!traitSig.isAsync);
 }
 
 function sigsEqual(a, b) {
@@ -656,12 +663,17 @@ function sigsEqual(a, b) {
   for (let i = 0; i < a.params.length; i++) {
     if (!typesEqual(a.params[i].type, b.params[i].type)) return false;
   }
+  // Asyncness is part of the signature: an async method has a different
+  // ABI (it returns a coroutine handle) and a different calling rule
+  // (`await`), so an impl that disagrees with its trait is a real
+  // mismatch, not a cosmetic one.
+  if (!!a.isAsync !== !!b.isAsync) return false;
   return typesEqual(a.returnType, b.returnType);
 }
 
 function formatSig(sig) {
   const params = sig.params.map((p) => `${p.isRef ? "ref " : ""}${formatType(p.type)}`).join(", ");
-  return `(${params}): ${formatType(sig.returnType)}`;
+  return `${sig.isAsync ? "async " : ""}(${params}): ${formatType(sig.returnType)}`;
 }
 
 // Phase 9.G: validate a `vtable Name for TraitName { ... }` decl. The decl
@@ -772,23 +784,30 @@ function validateVTableDecl(d, mod, moduleEnv, errors, programState) {
       });
       mismatch = true;
     }
+    // Stamp the trait method's asyncness onto the slot. An async trait
+    // method needs an async-shaped slot (coroutine handle return + result
+    // slot argument); the user's `=>` annotation has no way to say so, and
+    // the trait is the authority for everything else about this field too.
+    const finalFpt =
+      fpt.isAsync === !!methodSig.isAsync
+        ? fpt
+        : FunctionPointerType(fpt.params, fpt.returnType, !!methodSig.isAsync);
     resolvedFields.push({
       name: methodName,
-      type: mismatch ? ErrorType() : fpt,
+      type: mismatch ? ErrorType() : finalFpt,
     });
   }
 
-  // Replace the shell with the fully-populated VTableType.
-  const populated = VTableType(
-    d.name,
-    trait.name,
-    trait.moduleId,
-    resolvedFields,
-    methodOrder,
-    mod.id,
-  );
-  env.vtableTable.set(d.name, populated);
-  d.resolvedType = populated;
+  // Fill the pass-A shell IN PLACE rather than replacing it. A struct field
+  // annotated with this vtable resolved during an earlier pass and is holding
+  // a reference to the shell object; swapping the table entry would leave that
+  // field pointing at a type with no method slots.
+  shell.traitName = trait.name;
+  shell.traitModuleId = trait.moduleId;
+  shell.fields = resolvedFields;
+  shell.methodOrder = methodOrder;
+  env.vtableTable.set(d.name, shell);
+  d.resolvedType = shell;
   d.resolvedTrait = trait;
 }
 
@@ -990,7 +1009,7 @@ function validateImplBlock(typeDecl, mod, moduleEnv, errors, programState) {
       return { name: p.name, type: t, isRef: p.isRef ?? false };
     });
     const returnType = resolveTypeAnnotationInModule(methodDecl.returnTypeAnnotation, mod.id, moduleEnv, ctxForMethod) ?? ErrorType();
-    const implSig = FuncType(params, returnType, false);
+    const implSig = FuncType(params, returnType, false, [], !!methodDecl.isAsync);
 
     const requiredSig = requiredList[0].sig;
     if (!sigsEqual(implSig, requiredSig)) {
@@ -1086,6 +1105,13 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
   let layoutSeen = false;
   let markerSeen = false;
   let mustCallClause = null;
+  // Duplicate detection for the two clauses pass A pre-scans (see the KIND_DECL
+  // registration there). These MUST be local flags rather than a read of
+  // `kt.pausable` / `kt.provides` - pass A has already populated those, so
+  // testing the slot would report every pausable/provides kind as a duplicate.
+  let pausableSeen = false;
+  let providesSeen = false;
+  let refcountedSeen = false;
   for (const c of clauses) {
     switch (c.kind) {
       case ASTNodeKind.KIND_MARKER_CLAUSE:
@@ -1204,6 +1230,43 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
         }
         kt.enumerableAs = c.tableName;
         break;
+      // `pausable;` - functions carrying this kind are coroutines.
+      case ASTNodeKind.KIND_PAUSABLE_CLAUSE:
+        if (pausableSeen) {
+          pushError(errors, c, `duplicate pausable clause in kind '${displayName}'`);
+          break;
+        }
+        pausableSeen = true;
+        kt.pausable = true;
+        break;
+      // `provides <Kind>;` - rewrites the call-site result type.
+      case ASTNodeKind.KIND_PROVIDES_CLAUSE:
+        if (providesSeen) {
+          pushError(errors, c, `duplicate provides clause in kind '${displayName}'`);
+          break;
+        }
+        providesSeen = true;
+        kt.provides = c.providedName;
+        break;
+      // `refcounted <retain> <release>;` - names the two methods of the
+      // required trait the compiler calls to bump and drop a reference.
+      case ASTNodeKind.KIND_REFCOUNTED_CLAUSE:
+        if (refcountedSeen) {
+          pushError(errors, c, `duplicate refcounted clause in kind '${displayName}'`);
+          break;
+        }
+        refcountedSeen = true;
+        kt.refcounted = {
+          retainMethod: c.retainMethod,
+          releaseMethod: c.releaseMethod,
+          // Filled in below, once `requires` has been collected. Null means
+          // "no declaring trait found" - only a Task<T> receiver can be
+          // refcounted then, since its retain/release bodies are compiler
+          // provided rather than dispatched through a trait.
+          traitType: null,
+          sourceLoc: c.sourceLoc ?? null,
+        };
+        break;
     }
   }
   // testing-via-kinds: a function-position kind is deliberately narrow. It has
@@ -1229,19 +1292,38 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
     if (markerSeen) disallowed.push("conferred/restrictive");
     if (kt.requires.length > 0) disallowed.push("requires");
     if (kt.forbids.length > 0) disallowed.push("forbids");
+    if (kt.refcounted) disallowed.push("refcounted");
     for (const clauseName of disallowed) {
       pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
-        `kind '${displayName}' applies to a function and declares '${clauseName}'; a function kind supports only 'signature' and 'enumerable as' (a function has no value for '${clauseName}' to act on)`);
+        `kind '${displayName}' applies to a function and declares '${clauseName}'; a function kind marks a declaration rather than a value, so there is nothing for '${clauseName}' to act on`);
     }
-    if (!kt.signatureAnnotation) {
-      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
-        `kind '${displayName}' applies to a function but declares no 'signature'; add e.g. \`signature (run: ref Run) => void;\` so functions carrying the kind can be checked and collected`);
-    }
-    if (kt.enumerableAs === null) {
-      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
-        `kind '${displayName}' applies to a function but declares no 'enumerable as "<table>"'; without a table name nothing can ask the compiler for these functions`);
+    // `signature` + `enumerable as` are required only for a COLLECTED
+    // function kind - one a consumer asks the compiler to enumerate, like
+    // `suite`. A kind that instead changes what the function IS
+    // (`pausable`, `provides`) is complete on its own: there is no table
+    // for it to land in and no shared shape for its members. Requiring
+    // both of every function kind is what kept `task` and `async` out of
+    // std in the first place.
+    const changesTheFunction = kt.pausable || kt.provides !== null;
+    if (!changesTheFunction) {
+      if (!kt.signatureAnnotation) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a function but declares no 'signature'; add e.g. \`signature (run: ref Run) => void;\` so functions carrying the kind can be checked and collected`);
+      }
+      if (kt.enumerableAs === null) {
+        pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+          `kind '${displayName}' applies to a function but declares no 'enumerable as "<table>"'; without a table name nothing can ask the compiler for these functions`);
+      }
     }
   } else {
+    if (kt.pausable) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares 'pausable' but does not declare 'appliesTo function'; only a function can pause`);
+    }
+    if (kt.provides !== null) {
+      pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
+        `kind '${displayName}' declares 'provides' but does not declare 'appliesTo function'; only a function call has a result type to rewrite`);
+    }
     if (kt.signatureAnnotation) {
       pushError(errors, { sourceLoc: kt.sourceLoc ?? null },
         `kind '${displayName}' declares 'signature' but does not declare 'appliesTo function'; a signature only constrains a function declaration`);
@@ -1314,6 +1396,27 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
       }
     }
   }
+  // refcounted resolution runs after `requires` has been collected, exactly
+  // like mustCall above: the clause names two METHODS, and the trait that
+  // declares them is how a NON-Task receiver dispatches them. `Task<T>` is the
+  // exception - it is a compiler type that cannot carry an `implements` list,
+  // and its retain/release bodies lower to yoop_task_* directly (see
+  // coreKinds.js), so an unresolved trait is not an error here. It only means
+  // this kind can be applied to a Task and nothing else.
+  if (kt.refcounted && kt.requires.length > 0) {
+    const { retainMethod, releaseMethod } = kt.refcounted;
+    const traitWithBoth = kt.requires.find((t) => {
+      const m = t.methods ?? t.genericMethods;
+      return !!m?.has(retainMethod) && !!m?.has(releaseMethod);
+    });
+    if (traitWithBoth) {
+      kt.refcounted.traitType = traitWithBoth;
+    } else {
+      const traitNames = kt.requires.map((t) => t.name).join(", ");
+      pushError(errors, { sourceLoc: kt.refcounted.sourceLoc },
+        `refcounted ${retainMethod} ${releaseMethod}: no required trait (${traitNames}) declares both methods in kind '${displayName}'`);
+    }
+  }
   // region kinds: a kind that `appliesTo region` governs a lexical scope, not a
   // named value. It is used only in the anonymous block form
   // (`<kind> EXPR { ... }` / `<kind> EXPR;`), so it must own a block and cannot
@@ -1337,6 +1440,37 @@ function populateKindFromClauses(kt, clauses, displayName, mod, moduleEnv, error
 // Pass C.2: walk each kind decl and resolve its clauses against the module's
 // trait table. `requires` clauses populate kt.requires; `mustCall` clauses
 // resolve their method name against the union of required-trait method sets.
+// Verify std/core/kinds.yoop declared every kind the compiler depends on,
+// with the clauses it depends on. See REQUIRED_CORE_KINDS.
+//
+// Silent when NOTHING was found: the legacy single-module typecheck path
+// has no module graph and therefore no std, and it does not support tasks
+// either. A PARTIAL core is a real error - that means the file exists and
+// something was edited out of it.
+function assertRequiredCoreKinds(coreKinds, errors) {
+  if (coreKinds.size === 0) return;
+  for (const [name, spec] of REQUIRED_CORE_KINDS) {
+    const kt = coreKinds.get(name);
+    if (!kt) {
+      errors.push({
+        message:
+          `${CORE_KINDS_MODULE} must declare the kind '${name}' - the compiler depends on it. ` +
+          `Expected: kind ${name} { ${spec.want} }`,
+        sourceLoc: null,
+      });
+      continue;
+    }
+    if (!spec.check(kt)) {
+      errors.push({
+        message:
+          `${CORE_KINDS_MODULE}'s kind '${name}' is missing a clause the compiler depends on. ` +
+          `Expected at least: kind ${name} { ${spec.want} }`,
+        sourceLoc: kt.sourceLoc ?? null,
+      });
+    }
+  }
+}
+
 function resolveKindClauses(mod, moduleEnv, errors) {
   for (const decl of mod.ast.body) {
     const d = innerDecl(decl);
@@ -1383,6 +1517,41 @@ function resolveLayoutAlign(expr, kt, errors) {
 // Resolve a kind reference by name into a KindType. Looks up the local
 // kindTable (which includes imports + the seeded builtin Task) plus the
 // builtin kind table for joined/pooled/Task.
+// Derive a function decl's coroutine flags from the CLAUSES of the kinds it
+// carries, rather than from the kind's name.
+//
+// The parser sets `isTask`/`isAsync` from the literal names `task`/`async`
+// (parser.js `applyFunctionKindPrefixes`) because it cannot resolve kinds - it
+// runs before there is a kind table at all. That is still the fallback, and it
+// is what keeps the legacy single-module path (no module graph, therefore no
+// std) working. This runs on top of it, in pass C where kinds ARE resolvable,
+// so a kind that declares the clauses gets the behavior the clauses describe:
+//
+//   kind spawn { appliesTo function; pausable; provides Task; }
+//   spawn function work(): int32 { ... }     // now a coroutine returning Task<int32>
+//
+// Additive on purpose - it can only turn a flag ON. std's `task` and `async`
+// therefore behave identically whether they resolve here or not, which keeps
+// this from becoming a second, disagreeing source of truth for the core kinds.
+// `lookupCoreKind` is the reason `task`/`async` resolve at all in a module that
+// never imported them.
+function deriveFunctionKindFlags(funcDecl, modEnv) {
+  for (const prefix of funcDecl.kindPrefixes ?? []) {
+    const kt =
+      (modEnv ? lookupKindByName(prefix.name, modEnv) : null) ??
+      lookupCoreKind(prefix.name);
+    if (!kt) continue;
+    // `provides` implies the function is spawned rather than called, and
+    // every such spawn needs a frame to suspend into - so it implies async
+    // the same way std's `task` does (which is why `async task` is noise).
+    if (kt.provides === "Task") {
+      funcDecl.isTask = true;
+      funcDecl.isAsync = true;
+    }
+    if (kt.pausable) funcDecl.isAsync = true;
+  }
+}
+
 function lookupKindByName(name, modEnv) {
   const fromTable = modEnv.kindTable?.get(name);
   if (fromTable) return fromTable;
@@ -1643,6 +1812,38 @@ export function effectiveLayoutAlign(app) {
 // in pass A. A user-defined function with one of these names is allowed -
 // the auto-injection that used to shadow such names was removed when these
 // became opt-in via import.
+// The concurrency kinds the compiler depends on. They are declared as
+// ordinary `kind { ... }` decls in std/core/kinds.yoop (autoloaded into
+// every module graph); this table is the carve-out that makes it a CHECKED
+// contract rather than a convention - each entry names the clauses the
+// compiler will actually consult, and a missing or reshaped decl is an
+// error naming the file.
+//
+// See plans/kinds-in-std.md.
+export const CORE_KINDS_MODULE = "std/core/kinds.yoop";
+export const REQUIRED_CORE_KINDS = new Map([
+  ["task", {
+    check: (k) => k.appliesTo.has("function") && k.pausable && k.provides === "Task",
+    want: "appliesTo function; pausable; provides Task;",
+  }],
+  ["async", {
+    check: (k) => k.appliesTo.has("function") && k.pausable,
+    want: "appliesTo function; pausable;",
+  }],
+  ["joined", {
+    check: (k) =>
+      k.appliesTo.has("binding") &&
+      k.mustCall.length > 0 &&
+      k.mustNotEscape,
+    want: "appliesTo binding; requires Joinable; mustCall join beforeScopeEnd; mustNotEscape scope;",
+  }],
+  ["pooled", {
+    check: (k) =>
+      k.appliesTo.has("binding") && k.appliesTo.has("field") && k.refcounted !== null,
+    want: "appliesTo binding parameter field; requires Shared; refcounted retain release;",
+  }],
+]);
+
 export const INTRINSIC_DECL_IDS = new Map([
   ["heap_alloc", "$builtin__heap_alloc"],
   ["heap_free", "$builtin__heap_free"],
@@ -1655,6 +1856,10 @@ export const INTRINSIC_DECL_IDS = new Map([
   ["array_slice", "$builtin__array_slice"],
   ["wait_until", "$builtin__wait_until"],
   ["cancel", "$builtin__cancel"],
+  // The async suspend primitive. Non-generic, and lowered inline by
+  // codegen (a bare coro.suspend) rather than to any call, so unlike the
+  // entries above it needs no makeBuiltinGenericFuncs counterpart.
+  ["suspendNow", "$builtin__suspendNow"],
   // Note: `printf` stays magic - it's used by ~all examples and the name
   // never collides with user identifiers in practice. Lives outside this
   // map so it isn't subject to the import-required rule.
@@ -1861,49 +2066,65 @@ export function typecheckProgram(modules) {
   };
 
   // pass A: register struct shells so cross-module struct refs work in pass B
+  // Populated as the autoloaded std/core/kinds.yoop declares them, then
+  // seeded into every later module so `pooled h = f()` resolves without an
+  // explicit import - which is the behavior these had as reserved words.
+  const coreKinds = new Map();
+  setCoreKinds(coreKinds);
   for (const mod of modules) {
     const errStart = errors.length;
-    const localSymbols = new Map();
-    const structTable = new Map();
-    const exports = new Set();
-    const importedNames = new Map();
-    const linkLibraries = new Set();
-    const traitTable = new Map();
-    const kindTable = new Map();
+    // modules-as-directories: every table below belongs to the MODULE, not to
+    // this source file, so a directory module's second and later files reuse
+    // the ones its first file created. `reused` gates the one-time seeding
+    // below (re-seeding coreKinds into a populated kindTable would report a
+    // redeclaration against the module's own first file).
+    const reused = moduleEnv.get(mod.id);
+    const localSymbols = reused?.localSymbols ?? new Map();
+    const structTable = reused?.structTable ?? new Map();
+    const exports = reused?.exports ?? new Set();
+    const importedNames = reused?.importedNames ?? new Map();
+    const linkLibraries = reused?.linkLibraries ?? new Set();
+    const traitTable = reused?.traitTable ?? new Map();
+    const kindTable = reused?.kindTable ?? new Map();
+    // The declaring module itself gets nothing here (coreKinds is still
+    // empty when it runs), so this never trips the redeclaration check.
+    if (!reused) {
+      for (const [coreName, coreKind] of coreKinds) kindTable.set(coreName, coreKind);
+    }
     // Phase 7.1: generic decl tables - generic decls live here and never
     // enter structTable/localSymbols/traitTable (those are monomorphic only).
-    const genericStructTable = new Map();
-    const genericFuncTable = new Map();
-    const genericTraitTable = new Map();
+    const genericStructTable = reused?.genericStructTable ?? new Map();
+    const genericFuncTable = reused?.genericFuncTable ?? new Map();
+    const genericTraitTable = reused?.genericTraitTable ?? new Map();
     // Phase 10.A: generic enum decls. Sibling of genericStructTable; variantTable
     // stays monomorphic.
-    const genericVariantTable = new Map();
+    const genericVariantTable = reused?.genericVariantTable ?? new Map();
     // Phase 7.5: variant / union tables. Like structTable, these hold a "shell"
     // value after pass A and are populated with field types in pass C.
-    const variantTable = new Map();
-    const unionTable = new Map();
+    const variantTable = reused?.variantTable ?? new Map();
+    const unionTable = reused?.unionTable ?? new Map();
     // Phase 12: value-enum table - nominal aliases over primitive underlying
     // types. Separate from variantTable: different runtime shape (raw
     // primitive vs tagged payload) and different switch semantics.
-    const enumTable = new Map();
+    const enumTable = reused?.enumTable ?? new Map();
     // Phase 9.G: vtable type table. Like structTable, the shell only carries
     // a name in pass A; pass C resolves field types and trait references.
-    const vtableTable = new Map();
+    const vtableTable = reused?.vtableTable ?? new Map();
     // Transparent type aliases (`type NodeId = usize;`). Maps the alias name to
     // the parsed RHS type annotation; resolution happens lazily at every use
     // site (see resolveTypeAnnotationInModule) so an alias to a struct picks up
     // the same shell-then-filled type object a direct reference would. The alias
     // is NOT a distinct type - it resolves straight through to the underlying
     // type, so nothing downstream (coercion, indexing, codegen) sees the name.
-    const aliasTable = new Map();
+    const aliasTable = reused?.aliasTable ?? new Map();
     // Names this module brought into scope via an `extern "intrinsic"`
     // block. checkExpr.js's special-case paths for `wait_until` / `cancel`
     // gate on membership here so that user code that hasn't imported the
     // intrinsics module can freely shadow these names.
-    const builtinIntrinsicNames = new Set();
-    // Phase 6.4: seed the kind table with the `Task` builtin kind, which is
-    // the kind-name that pairs with the built-in `Task<T>` type.
-    kindTable.set("Task", TASK_KIND);
+    const builtinIntrinsicNames = reused?.builtinIntrinsicNames ?? new Set();
+    // `Task` used to be seeded here from a hardcoded object. It is declared
+    // in std/core/kinds.yoop now and arrives via the coreKinds seeding
+    // above, like `pooled` and `joined`.
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
@@ -2075,7 +2296,11 @@ export function typecheckProgram(modules) {
               sourceLoc: d.sourceLoc,
             });
           } else {
-            structTable.set(d.name, StructType(d.name, null, mod.id));
+            // Unfrozen shell: pass C fills THIS object rather than replacing
+            // the table entry, so a field that resolves to this struct before
+            // its body is resolved still ends up pointing at the populated
+            // type. See StructShell in types.js for what replacing broke.
+            structTable.set(d.name, StructShell(d.name, mod.id));
           }
           if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         }
@@ -2292,8 +2517,36 @@ export function typecheckProgram(modules) {
             }
             kt.params.push({ name: p.name, typeName, sourceLoc: p.sourceLoc });
           }
+          // Pre-scan the two clauses a FUNCTION SIGNATURE depends on.
+          // `pausable` decides the coroutine ABI and `provides` rewrites the
+          // call-site result type, and signatures are built in pass C - which
+          // runs BEFORE pass C.2 resolves clauses, and before C.2 has run at
+          // all for a kind declared in the same module that uses it. Neither
+          // clause needs the trait table (one is a bare flag, the other a
+          // name), so both are safe to read this early. C.2 still owns
+          // validation; it tracks duplicates with local flags rather than by
+          // reading these slots, so populating them here is not a "duplicate".
+          for (const c of d.clauses ?? []) {
+            if (c.kind === ASTNodeKind.KIND_PAUSABLE_CLAUSE) {
+              kt.pausable = true;
+            } else if (
+              c.kind === ASTNodeKind.KIND_PROVIDES_CLAUSE &&
+              kt.provides === null
+            ) {
+              kt.provides = c.providedName;
+            }
+          }
           kindTable.set(d.name, kt);
           d.resolvedKindType = kt;
+          // Capture the concurrency core as std declares it, so every other
+          // module in the graph sees the same KindType objects (kinds
+          // compare by reference).
+          if (
+            REQUIRED_CORE_KINDS.has(d.name) &&
+            (mod.absPath ?? "").replace(/\\/g, "/").endsWith(CORE_KINDS_MODULE)
+          ) {
+            coreKinds.set(d.name, kt);
+          }
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
       }
@@ -2330,6 +2583,14 @@ export function typecheckProgram(modules) {
     // which user code triggers by importing std/core/intrinsics.yoop (or, for
     // wait_until/cancel, std/core/concurrency.yoop).
 
+    // modules-as-directories: the env object is created by the FIRST source
+    // file of a module and reused (not replaced) by the rest, which is what
+    // makes a module's declarations visible to its siblings with no import and
+    // makes a cross-file duplicate report as an ordinary redeclaration. Note
+    // there is no `allowsUnsafe` here on purpose: `import.unsafe;` is a
+    // per-source-file pragma, so it is read off `mod.ast` at each use rather
+    // than cached on the shared env, where one file's opt-in would silently
+    // cover its siblings.
     moduleEnv.set(mod.id, {
       localSymbols,
       structTable,
@@ -2348,32 +2609,93 @@ export function typecheckProgram(modules) {
       vtableTable,
       aliasTable,
       builtinIntrinsicNames,
-      // Phase 8.A: `import.unsafe;` opt-in flag, plumbed from the parser.
-      allowsUnsafe: !!mod.ast.allowsUnsafe,
     });
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   // pass B: wire imports (so pass C can resolve cross-module type names)
   for (const mod of modules) {
     const errStart = errors.length;
     resolveImports(mod, moduleEnv, errors);
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
+
+  // pass B.1 - import locality for directory modules. A module's source files
+  // share its DECLARATIONS but not its IMPORTS: using a name a sibling imported
+  // is an error, so a file's head still tells you what it depends on. No-op for
+  // single-file modules. See importLocality.js for why this is enforcement
+  // rather than lexical per-file scope.
+  // Stamps its own errors, since it reports per source FILE across a group.
+  checkImportLocality(modules, moduleEnv, errors);
 
   // Phase 8.A: `import.unsafe;` gating pass - scan each non-unsafe module
   // for any unsafe_ptr type annotation, address-of/deref/null/cast node, and
   // surface a precise diagnostic. Cheap recursive walk; runs once per module.
   for (const mod of modules) {
-    const env = moduleEnv.get(mod.id);
-    if (env?.allowsUnsafe) continue;
+    if (mod.ast.allowsUnsafe) continue;
     const errStart = errors.length;
     walkAstForUnsafe(mod.ast, errors);
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
+  }
+
+  // modules-as-directories: pass C's sub-stages are ordered relative to each
+  // OTHER (generic bodies -> trait method sigs -> impl validation), and across
+  // separate modules the topological order of `modules` satisfies that. It does
+  // NOT satisfy it across the SOURCE FILES OF ONE MODULE, because siblings have
+  // no dependency order between them - the graph lists them in basename order.
+  // So `validateImplBlock` in router.yoop could run against the still-empty
+  // `methods` map of a trait declared in server.yoop, which made a directory
+  // module's semantics depend on the alphabetical spelling of its filenames:
+  // renaming a file turned a hard error ("'self' can only be used inside a trait
+  // method body") into a working program.
+  //
+  // The fix is to run pass C GROUP-MAJOR, STAGE-MINOR: group the source files by
+  // module (topo order preserved, since a module's files are contiguous), and
+  // inside a group run each stage for every file before starting the next stage.
+  // A single-file module is a group of one, so this is behavior-identical to the
+  // old single loop for every module that predates the feature - which is the
+  // reason to structure it this way rather than making all of pass C
+  // stage-major across modules. That stronger form was tried first and broke:
+  // trait signature resolution instantiates generic types, and instantiation
+  // snapshots the generic decl, so trait sigs cannot precede generic-body
+  // resolution program-wide. See plans/modules-as-directories.md.
+  const passCGroups = [];
+  {
+    const groupById = new Map();
+    for (const mod of modules) {
+      let group = groupById.get(mod.id);
+      if (!group) {
+        group = [];
+        groupById.set(mod.id, group);
+        passCGroups.push(group);
+      }
+      group.push(mod);
+    }
   }
 
   // pass C: struct fields + function sigs + extern decls
-  for (const mod of modules) {
+  for (const group of passCGroups) {
+    // STAGE 1 of the group - generic pre-pass, struct/variant/enum/union
+    // bodies, function signatures, extern decls.
+    //
+    // Split into two sub-stages, and the split is load-bearing. Instantiating a
+    // generic type SNAPSHOTS the generic decl: `instantiateStruct` copies
+    // `genericDecl.genericFields` into a fresh cached StructType. If a concrete
+    // field names `Bag<int32>` before `type Bag<T>`'s own body has been
+    // resolved, that snapshot is taken from an EMPTY field list and the cached
+    // instance is permanently field-less - reported downstream as the actively
+    // misleading `type "Bag__int32" has no field "item"`. Declaration order
+    // decided it inside one file, and basename order decided it across the
+    // source files of a directory module.
+    //
+    // So: every generic TYPE body in the group is resolved before any concrete
+    // decl in the group. This is the "broader use will need a pre-pass before
+    // field resolution" that the Phase 7.x comment below predicted, and it is
+    // the same shape as the Phase 7.2 generic-TRAIT pre-pass that already exists
+    // for exactly this reason. The unfrozen-shell fix in types.js handles the
+    // non-generic half of the same hazard.
+    for (const subStage of ["genericTypes", "rest"]) {
+    for (const mod of group) {
     const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
     const { localSymbols, structTable, exports, traitTable, variantTable, unionTable, enumTable, genericFuncTable } = env;
@@ -2453,6 +2775,18 @@ export function typecheckProgram(modules) {
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
+
+      // Partition the decls across the two sub-stages (see the comment on the
+      // subStage loop). Generic TYPE decls go first because instantiating one
+      // snapshots its body; generic FUNCTION decls stay with "rest" - their
+      // signatures do not feed any layout, and moving them earlier would only
+      // widen the blast radius. Every decl is handled in exactly one sub-stage.
+      const isGenericTypeDecl =
+        !!d.genericDecl &&
+        (d.kind === ASTNodeKind.TYPE_DECL || d.kind === ASTNodeKind.VARIANT_DECL);
+      if (subStage === "genericTypes" ? !isGenericTypeDecl : isGenericTypeDecl) {
+        continue;
+      }
 
       // Phase 7.1: generic struct decl - resolve field types with type params
       // in scope and stash on the genericDecl record.
@@ -2651,15 +2985,16 @@ export function typecheckProgram(modules) {
           d.resolvedKindApplication = typeKindApp;
         }
 
-        const fullType = StructType(
-          d.name,
-          fields,
-          mod.id,
-          [],
-          new Map(),
-          propagatedKinds,
-          typeKindApp,
-        );
+        // Fill the pass-A shell IN PLACE. Replacing the table entry here left
+        // every already-resolved field pointing at an empty struct, which
+        // undersized the enclosing layout and silently miscompiled (see
+        // StructShell in types.js). Falls back to a fresh StructType if the
+        // entry is not our shell - e.g. a redeclaration replaced it.
+        const shell = structTable.get(d.name);
+        const fullType =
+          shell && !Object.isFrozen(shell) && shell.fields === null
+            ? fillStructShell(shell, fields, propagatedKinds, typeKindApp)
+            : StructType(d.name, fields, mod.id, [], new Map(), propagatedKinds, typeKindApp);
         d.resolvedType = fullType;
         structTable.set(d.name, fullType);
       }
@@ -2980,6 +3315,8 @@ export function typecheckProgram(modules) {
         }
         funcDecl.returnPropagatedKinds = returnPropagatedKinds;
 
+        deriveFunctionKindFlags(funcDecl, moduleEnv.get(mod.id));
+
         let externalReturnType = declaredReturnType;
         if (funcDecl.isTask) {
           if (funcDecl.name === "main") {
@@ -3021,6 +3358,9 @@ export function typecheckProgram(modules) {
           externalReturnType,
           false,
           returnPropagatedKinds,
+          // A `task` body is implicitly async (the parser sets isAsync on
+          // it too); an `async` decl says so directly.
+          !!funcDecl.isAsync,
         );
         if (isGenericFunc) {
           // Stash on the generic decl record for later instantiation.
@@ -3067,11 +3407,32 @@ export function typecheckProgram(modules) {
           ext.resolvedType = retType;
           localSymbols.set(
             ext.name,
-            FuncType(paramTypes, retType, ext.variadic),
+            FuncType(paramTypes, retType, ext.variadic, [], !!ext.isAsync),
           );
         }
       }
     }
+    stampErrorOrigin(errors, errStart, mod);
+    }
+    }
+
+    // STAGE 2 of the group - every trait's SHAPE: extends chains, then method
+    // signatures. Runs for EVERY source file of the module before stage 3 (which
+    // consumes those method tables) runs for any of them. Stage 1 above has
+    // already resolved this module's generic bodies, which trait signature
+    // resolution depends on: a signature mentioning `Result<isize, string>`
+    // instantiates that generic enum, and instantiation SNAPSHOTS the generic
+    // decl - so hoisting this any earlier yields a permanently variant-less
+    // instance ("enum Result__isize__string has no variant Ok").
+    for (const mod of group) {
+    const errStart = errors.length;
+    const { traitTable } = moduleEnv.get(mod.id);
+    const baseCtx = () => ({ registry: programState.registry });
+    const genericCtx = (paramScope) => ({
+      registry: programState.registry,
+      typeParamScope: paramScope,
+    });
+
     // Phase 9.J: resolve every trait's `extends` list first, before any
     // method signatures. Method-sig resolution doesn't depend on parents'
     // method tables (extends is only consulted at impl-block validation and at
@@ -3177,10 +3538,30 @@ export function typecheckProgram(modules) {
             moduleEnv,
             ctxForSig,
           ) ?? ErrorType();
-        trait.methods.set(sig.name, FuncType(params, returnType, false));
+        trait.methods.set(
+          sig.name,
+          FuncType(params, returnType, false, [], !!sig.isAsync),
+        );
         sig.resolvedFuncType = trait.methods.get(sig.name);
       }
     }
+    stampErrorOrigin(errors, errStart, mod);
+    }
+
+    // STAGE 3 of the group - everything that CONSUMES a trait's method table:
+    // kind clauses (`requires`/`mustCall`), impl-block validation, vtable slot
+    // matching, and module-level decls. Because stage 2 above already ran for
+    // every source file of this module, an impl in one file now sees the fully
+    // populated methods map of a trait declared in a sibling file.
+    for (const mod of group) {
+    const errStart = errors.length;
+    const env = moduleEnv.get(mod.id);
+    const { localSymbols, structTable, exports, traitTable, variantTable, unionTable, enumTable, genericFuncTable } = env;
+    const baseCtx = () => ({ registry: programState.registry });
+    const genericCtx = (paramScope) => ({
+      registry: programState.registry,
+      typeParamScope: paramScope,
+    });
 
     // pass C.2 - kind clause resolution (between trait sigs and impl blocks).
     // After C.1, every trait shell has its method map populated, which is what
@@ -3285,7 +3666,8 @@ export function typecheckProgram(modules) {
     // Mirror onto env so resolve-assignment-to-module-global (which only has
     // the typeContext) can find the decl list without re-walking the AST.
     env.moduleInitDecls = mod.moduleInitDecls;
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
+    }
   }
 
   // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.
@@ -3337,6 +3719,16 @@ export function typecheckProgram(modules) {
     return { decl, kindTable };
   };
 
+  // The required-core assertion. Clauses are populated in pass C.2, so this
+  // runs after every module has been through it.
+  //
+  // This is the carve-out the whole design rests on: the compiler does not
+  // define these kinds, but it does insist they exist with the shape it
+  // consults. A std that dropped `refcounted` from `pooled`, or `provides
+  // Task` from `task`, would silently miscompile every task program - so it
+  // is an error naming the file and the expected clauses instead.
+  assertRequiredCoreKinds(coreKinds, errors);
+
   // pass D: function body typechecking.
   // Split into two sub-passes so that all param kind types are resolved before
   // any runKindCheck runs (escape analysis needs param kinds from callees).
@@ -3372,7 +3764,7 @@ export function typecheckProgram(modules) {
       // Gates wait_until/cancel special-cases in checkExpr.js.
       builtinIntrinsicNames: env.builtinIntrinsicNames,
       // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
-      allowsUnsafe: env.allowsUnsafe,
+      allowsUnsafe: !!mod.ast.allowsUnsafe,
       // Phase 8.A: callback that resolves a parser-emitted type annotation
       // to a Type in this module's scope. Used by expression-level type-arg
       // intrinsics (`unsafe_ptr.cast<U>(p)`, `unsafe_ptr.fromInt<T>(n)`).
@@ -3496,7 +3888,7 @@ export function typecheckProgram(modules) {
         }
       }
     }
-    stampModuleId(errors, errStart, mod.id);
+    stampErrorOrigin(errors, errStart, mod);
   }
 
   return { modules, errors, moduleEnv, programState };
@@ -3574,9 +3966,19 @@ function validateFunctionKindPrefix(funcDecl, mod, moduleEnv, kindTable, errors)
 // Stamp `moduleId` onto error records added to `errors` since `startIdx`.
 // Used by typecheckProgram to attribute errors to the module being processed
 // without threading moduleId through every pushError call site.
-function stampModuleId(errors, startIdx, moduleId) {
+// Tag every error a pass just produced with where it came from.
+//
+// TWO ids, deliberately: `moduleId` is the namespace/mangling unit and
+// `srcPath` is the SOURCE FILE. Under modules-as-directories several source
+// files share one moduleId, so moduleId alone can no longer find the text to
+// render a code frame against - a diagnostic keyed only by module would print
+// the caret against whichever file happened to be last. `srcPath` is what
+// diagnostic rendering keys on; `moduleId` stays because --test filters the
+// synthetic entry MODULE, which is a module-level question.
+function stampErrorOrigin(errors, startIdx, mod) {
   for (let i = startIdx; i < errors.length; i++) {
-    if (errors[i].moduleId === undefined) errors[i].moduleId = moduleId;
+    if (errors[i].moduleId === undefined) errors[i].moduleId = mod.id;
+    if (errors[i].srcPath === undefined) errors[i].srcPath = mod.absPath;
   }
 }
 
@@ -3697,6 +4099,13 @@ export function typecheck(ast) {
             }),
             resolveTypeAnnotation(d.returnTypeAnnotation, structTable) ??
               ErrorType(),
+            false,
+            [],
+            // The legacy single-module path builds its own signatures, so
+            // asyncness has to be carried here too - otherwise every
+            // await in a single-module program reports "callee is not
+            // async" and the coloring rules silently do not apply.
+            !!d.isAsync,
           ),
         );
       }
@@ -3725,7 +4134,7 @@ export function typecheck(ast) {
         ext.resolvedType = retType;
         moduleSymbols.set(
           ext.name,
-          FuncType(paramTypes, retType, ext.variadic),
+          FuncType(paramTypes, retType, ext.variadic, [], !!ext.isAsync),
         );
       }
     }

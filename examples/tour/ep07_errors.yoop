@@ -1,0 +1,121 @@
+// EPISODE 7 - Errors are values, and `?` is the only shorthand
+//
+// No exceptions. No panics in normal control flow. A fallible function
+// returns `Result<T, E>` - an ordinary generic variant declared in
+// std/core/types.yoop, nothing built in - and the caller must deal with it.
+//
+// `?` is the propagation operator: on Ok it unwraps, on Err it returns the
+// error from the enclosing function. It is only legal inside a function that
+// itself returns a fallible shape, which is what keeps the chain honest.
+//
+// The bit worth the video: `? "context"`. It prefixes the error as it
+// propagates, and the context expression is emitted INSIDE the failure
+// branch - so an interpolated template costs nothing on the happy path.
+
+import { Result } from "std/core/types.yoop";
+
+function parsePositive(n: int32): Result<int32, string> {
+    if (n < 0) {
+        return Result.Err { error: "negative input" };
+    }
+    return Result.Ok { value: n };
+}
+
+// Plain propagation: no context, error passes through untouched.
+function doubled(n: int32): Result<int32, string> {
+    const v: int32 = parsePositive(n)?;
+    return Result.Ok { value: v * 2 };
+}
+
+// With a context string. On failure this becomes "reading width: negative input".
+function readWidth(n: int32): Result<int32, string> {
+    const v: int32 = parsePositive(n)? "reading width";
+    return Result.Ok { value: v };
+}
+
+// Contexts STACK as the error travels outward. The inner `?` prefixes first,
+// then the outer one prefixes the already-prefixed string.
+function loadConfig(n: int32): Result<int32, string> {
+    const w: int32 = readWidth(n)? "loading config";
+    return Result.Ok { value: w + 1 };
+}
+
+// Only evaluated when the context is actually needed - proof below.
+function noisy(tag: int32): int32 {
+    printf(`  (building context for tag ${tag})\n`);
+    return tag;
+}
+
+function withTemplate(n: int32, tag: int32): Result<int32, string> {
+    const v: int32 = parsePositive(n)? `reading field ${noisy(tag)}`;
+    return Result.Ok { value: v };
+}
+
+function show(label: string, r: Result<int32, string>): void {
+    switch (r) {
+        case Result.Ok { value: v }:  { printf(`${label}: ok ${v}\n`); }
+        case Result.Err { error: e }: { printf(`${label}: err "${e}"\n`); }
+    }
+}
+
+function main(): int32 {
+    show("doubled happy", doubled(21));
+    show("doubled sad", doubled(-1));
+    show("width sad", readWidth(-1));
+    show("config sad", loadConfig(-1));
+
+    // Happy path: `noisy` never runs, so no "(building context...)" line.
+    show("template happy", withTemplate(4, 9));
+    // Sad path: now it runs.
+    show("template sad", withTemplate(-1, 9));
+
+    return 0;
+}
+
+// expected output:
+// doubled happy: ok 42
+// doubled sad: err "negative input"
+// width sad: err "reading width: negative input"
+// config sad: err "loading config: reading width: negative input"
+// template happy: ok 4
+//   (building context for tag 9)
+// template sad: err "reading field 9: negative input"
+
+// ---------------------------------------------------------------------------
+// BREAK IT #1 - `?` needs a fallible enclosing function
+//
+// Move a `?` into main. Add `const x: int32 = parsePositive(3)?;` to main:
+//
+//   ep07_errors.yoop:7:33: '?' is only legal inside a function that returns a
+//     fallible enum (Ok/Err); 'main' returns int32
+//     |
+//   7 |     let x: int32 = parsePositive(3)?;
+//     |                                     ^
+//
+// Talking point: `?` cannot silently swallow anything. If you want to stop
+// propagating you must `switch` and say what happens - which is exactly what
+// `show` does. The buck stops at a real handler, and the compiler makes the
+// place it stops visible.
+
+// BREAK IT #2 - prove the context is lazy
+//
+// This is the fun one to demo. Look at the expected output: "template happy"
+// prints WITHOUT a "(building context for tag 9)" line above it, and
+// "template sad" prints WITH one. Same expression, same call. The context
+// template is only evaluated on the error branch.
+//
+// To show it is not a fluke, make `noisy` do something expensive or obviously
+// side-effecting and run again. Then compile with `--keep-ir` and find the
+// call to `noisy` sitting inside the error basic block.
+
+// BREAK IT #3 - Result is not built in
+//
+// Comment out the `import { Result }` line:
+//
+//   unknown type "Result"
+//
+// Talking point: `Result` is a plain generic variant in std/core/types.yoop.
+// `?` is compiler syntax, but it works structurally against anything with the
+// Ok/Err shape - see examples/pass/generic_enum_result.yoop, which declares
+// its OWN `variant Result<T, E>` and gets `?` for free. Worth showing: define
+// a local `variant Maybe<T, E> { Ok {...}, Err {...} }` and watch `?` work.

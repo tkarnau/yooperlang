@@ -1,0 +1,120 @@
+// EPISODE 2 - Values, loops, and the first surprise
+//
+// `let` is mutable, `const` is not. The `: type` annotation is optional
+// whenever the initializer makes the type obvious. Backtick strings are
+// template literals - `${expr}` splices a value in, same as JavaScript.
+//
+// The surprise at the bottom is the first real "oh, this is a systems
+// language" moment: lengths and indices are `usize`, and `usize` does not
+// silently mix with `int32`.
+
+function main(): int32 {
+    // ---- bindings ---------------------------------------------------------
+    const greeting = "hello";        // string
+    let count = 10;                  // untyped int literal defaults to int32
+    const ratio = 1.5;               // untyped float literal defaults to float64
+    const flag = true;               // bool
+
+    count = count + 5;
+    printf(`${greeting}: count=${count} ratio=${ratio} flag=${flag}\n`);
+
+    // ---- while ------------------------------------------------------------
+    let a: int32 = 0;
+    let b: int32 = 1;
+    let i: int32 = 0;
+    while (i < 8) {
+        printf(`fib(${i}) = ${a}\n`);
+        const next = a + b;
+        a = b;
+        b = next;
+        i = i + 1;
+    }
+
+    // ---- arrays and for-in ------------------------------------------------
+    // `for x in xs` walks elements. No index, no bounds arithmetic.
+    const xs: int32[] = [10, 20, 30, 40];
+    let sum: int32 = 0;
+    for x in xs {
+        sum = sum + x;
+    }
+    printf(`sum=${sum}\n`);
+
+    // ---- ranges -----------------------------------------------------------
+    // `a..b` is half-open. It is NOT a loop keyword - it is an operator that
+    // lowers to a call into std/core/range.yoop, so a range is an ordinary
+    // value you can bind, pass and walk twice. Elements are `usize`, which is
+    // exactly what indexing wants.
+    for idx in 0..xs.len {
+        printf(`xs[${idx}]=${xs[idx]}\n`);
+    }
+
+    // ---- the counted loop -------------------------------------------------
+    // An unannotated `for (let i = ...)` counter takes its type from the loop
+    // CONDITION, not from the literal. `xs.len` is usize, so `j` is usize -
+    // not the int32 a bare `let j = 0;` would have given you.
+    for (let j = 0; j < xs.len; j += 1) {
+        printf(`j=${j}\n`);
+    }
+
+    return 0;
+}
+
+// expected output:
+// hello: count=15 ratio=1.500000 flag=1
+// fib(0) = 0
+// fib(1) = 1
+// fib(2) = 1
+// fib(3) = 2
+// fib(4) = 3
+// fib(5) = 5
+// fib(6) = 8
+// fib(7) = 13
+// sum=100
+// xs[0]=10
+// xs[1]=20
+// xs[2]=30
+// xs[3]=40
+// j=0
+// j=1
+// j=2
+// j=3
+
+// ---------------------------------------------------------------------------
+// BREAK IT #1 - int32 vs usize, the papercut that teaches the model
+//
+// Write the counted loop by hand the way you would in C. Add this to main:
+//
+//     let k: int32 = 0;
+//     while (k < xs.len) {
+//         printf("%d\n", xs[k]);
+//         k = k + 1;
+//     }
+//
+//   ep02_values_and_loops.yoop:4:23: operator "<" cannot be applied to int32 and usize
+//     |
+//   4 |     while (k < xs.len) {
+//     |                       ^
+//
+// Talking point: this is the whole no-implicit-conversion rule biting on the
+// single most common loop in programming. Which is exactly why the language
+// special-cases the `for (let j = 0; ...)` head above - the counter gets its
+// type from what it is compared against. It is the one place a literal's
+// default type is overridden by context, and it exists because otherwise the
+// most ordinary loop you can write would fail on its own condition.
+//
+// Two fixes, both worth showing:
+//   1. `let k: usize = 0;`        - agree with the length
+//   2. `for k in 0..xs.len`       - stop hand-rolling the loop
+
+// BREAK IT #2 - const means const
+//
+// Add `greeting = "goodbye";` after the first printf:
+//
+//   ep02_values_and_loops.yoop:3:25: cannot assign to const "greeting"
+//     |
+//   3 |     greeting = "goodbye";
+//     |                         ^
+//
+// Talking point: note `flag=1` in the output, not `flag=true`. A bool
+// interpolates as its integer value today. Small, honest wart - good place to
+// say out loud that this is a young language and that is what the tour is for.

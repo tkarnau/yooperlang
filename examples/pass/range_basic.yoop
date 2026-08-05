@@ -1,0 +1,90 @@
+// `a..b` - a half-open integer range, and the loop form that reads best over
+// an index space:
+//
+//     for i in 0..xs.len { ... }
+//
+// The operator is sugar, not a loop keyword: it lowers to a call to
+// `exclusive` in std/core/range.yoop, so a range is an ordinary `Range` value
+// that can be stored, passed, returned, and walked more than once. Elements
+// are `usize` (the type of every length and index), so no casts are needed to
+// index with one.
+
+import * as rng from "std/core/range.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    const xs: int32[] = [10, 20, 30, 40];
+
+    for i in 0..xs.len {
+        printf("xs[%zu]=%d\n", i, xs[i]);
+    }
+
+    // Bounds are ordinary expressions - `..` binds looser than arithmetic,
+    // so this is 1..(xs.len - 1).
+    for i in 1..xs.len - 1 {
+        printf("mid %zu\n", i);
+    }
+
+    // An empty (or inverted) range yields nothing rather than wrapping.
+    for i in 0..0 {
+        printf("never\n");
+    }
+    for i in 3..1 {
+        printf("never\n");
+    }
+
+    // A Range is a value: bind it, ask it things, walk it twice.
+    const rows = 0..3;
+    printf("count=%zu\n", rng.count(ref rows));
+    for i in rows {
+        printf("a%zu\n", i);
+    }
+    for i in rows {
+        printf("b%zu\n", i);
+    }
+
+    // ...and pass it across a function boundary.
+    printf(`sum=${sumOf(rows)}\n`);
+
+    // Calling the lowering target by name is equivalent to the operator.
+    for i in rng.exclusive(0, 2) {
+        printf("e%zu\n", i);
+    }
+
+    for i in 0..100 {
+        if (i == 2) { break; }
+        printf("k%zu\n", i);
+    }
+    return 0;
+}
+
+function sumOf(r: rng.Range): int32 {
+    let total: int32 = 0;
+    for i in r {
+        total = total + int32(i);
+    }
+    return total;
+}
+
+// expected output:
+// xs[0]=10
+// xs[1]=20
+// xs[2]=30
+// xs[3]=40
+// mid 1
+// mid 2
+// count=3
+// a0
+// a1
+// a2
+// b0
+// b1
+// b2
+// sum=3
+// e0
+// e1
+// k0
+// k1

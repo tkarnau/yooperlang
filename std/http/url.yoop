@@ -1,0 +1,255 @@
+module http;
+
+// std/http/url.yoop - request-target splitting, percent coding, and
+// `application/x-www-form-urlencoded` name/value parsing.
+//
+// The same grammar covers a query string and a POSTed form body, so one
+// parser serves both: `parseQuery` for the part after `?`, `parseForm` for a
+// urlencoded request body. The only difference is the caller's intent.
+//
+// Percent decoding is deliberately NOT applied to the raw target as a whole.
+// Decoding before splitting is the classic path-traversal bug: a `%2F` in a
+// path segment would turn into a `/` and silently become a segment boundary.
+// Split first (on the raw bytes), decode the pieces after.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result, Option } from "../core/types.yoop";
+import * as vec, { Vec } from "../core/vec.yoop";
+import * as bytes from "../core/bytes.yoop";
+import * as intr from "../core/intrinsics.yoop";
+
+// ----- small byte helpers -------------------------------------------------
+
+// Fresh string from a byte range. `string_from_bytes_unchecked` copies, so
+// the result does not borrow `raw`.
+function sliceStr(raw: uint8[], start: usize, end: usize): string {
+    return intr.string_from_bytes_unchecked(bytes.bytes_slice(raw, start, end));
+}
+
+// Hex digit value, or -1. Written against characters rather than the decimal
+// byte values they happen to have.
+function hexValue(c: uint8): int32 {
+    if (c >= '0' && c <= '9') { return int32(c - '0'); }
+    if (c >= 'a' && c <= 'f') { return int32(c - 'a') + 10; }
+    if (c >= 'A' && c <= 'F') { return int32(c - 'A') + 10; }
+    return -1;
+}
+
+const HEX_DIGITS: uint8[] = [
+    '0', '1', '2', '3', '4', '5', '6', '7',
+    '8', '9', 'A', 'B', 'C', 'D', 'E', 'F',
+];
+
+// RFC 3986 unreserved: ALPHA / DIGIT / "-" / "." / "_" / "~". Everything else
+// gets escaped by `percentEncode`.
+function isUnreserved(c: uint8): bool {
+    if (c >= 'a' && c <= 'z') { return true; }
+    if (c >= 'A' && c <= 'Z') { return true; }
+    if (c >= '0' && c <= '9') { return true; }
+    return c == '-' || c == '.' || c == '_' || c == '~';
+}
+
+// ----- target splitting ---------------------------------------------------
+
+// A request-target split into its path and its raw (still-encoded) query.
+// Both are owned strings; `queryString` is "" when there was no `?`.
+export type TargetParts {
+    path:        string,
+    queryString: string,
+}
+
+// Split "/todos/7?done=true" into "/todos/7" and "done=true". A `#fragment`
+// is stripped: fragments are a client-side concept and never legitimately
+// reach a server, but a sloppy client sends them and the path should not
+// silently grow a "#..." suffix.
+export function splitTarget(target: string): TargetParts {
+    let raw: uint8[] = intr.string_as_bytes(target);
+    let end: usize = bytes.bytes_index_of(raw, '#');
+    let q: usize = bytes.bytes_index_of(bytes.bytes_slice(raw, 0, end), '?');
+    if (q == end) {
+        return { path: sliceStr(raw, 0, end), queryString: "" };
+    }
+    return {
+        path:        sliceStr(raw, 0, q),
+        queryString: sliceStr(raw, q + 1, end),
+    };
+}
+
+// ----- percent coding -----------------------------------------------------
+
+// Decode `%XX` escapes. With `plusIsSpace`, a literal `+` also decodes to a
+// space, which is the form-encoding rule and NOT the path rule - a `+` in a
+// path is a plain plus sign.
+//
+// Invalid escapes are an error rather than a pass-through: a truncated or
+// non-hex escape means the client and the server disagree about the bytes,
+// and guessing is how a decoder ends up with a different string than the
+// validator saw.
+export function percentDecode(s: string, plusIsSpace: bool): Result<string, HttpError> {
+    let raw: uint8[] = intr.string_as_bytes(s);
+
+    // Nothing to do is the common case for paths; skip the allocation.
+    let interesting: bool = false;
+    for c in raw {
+        if (c == '%' || (plusIsSpace && c == '+')) { interesting = true; }
+    }
+    if (!interesting) { return Result.Ok { value: s }; }
+
+    disposable out: Vec<uint8> = vec.vec_new(raw.len);
+    let i: usize = 0;
+    while (i < raw.len) {
+        let c: uint8 = raw[i];
+        if (c == '%') {
+            if (i + 2 >= raw.len) {
+                return Result.Err { error: errBadRequest(`percent escape truncated at offset ${i}`) };
+            }
+            let hi: int32 = hexValue(raw[i + 1]);
+            let lo: int32 = hexValue(raw[i + 2]);
+            if (hi < 0 || lo < 0) {
+                return Result.Err { error: errBadRequest(`invalid percent escape at offset ${i}`) };
+            }
+            vec.vec_push(ref out, uint8(hi * 16 + lo));
+            i = i + 3;
+        } else if (plusIsSpace && c == '+') {
+            vec.vec_push(ref out, ' ');
+            i = i + 1;
+        } else {
+            vec.vec_push(ref out, c);
+            i = i + 1;
+        }
+    }
+    return Result.Ok { value: intr.string_from_bytes_unchecked(vec.vec_as_array(ref out)) };
+}
+
+// Percent-encode everything outside the unreserved set. Used by the client to
+// build a query string; a space becomes `%20` and not `+`, which is valid in
+// both a query and a form body.
+export function percentEncode(s: string): string {
+    let raw: uint8[] = intr.string_as_bytes(s);
+    let needsWork: bool = false;
+    for c in raw {
+        if (!isUnreserved(c)) { needsWork = true; }
+    }
+    if (!needsWork) { return s; }
+
+    disposable out: Vec<uint8> = vec.vec_new(raw.len * 3);
+    for c in raw {
+        if (isUnreserved(c)) {
+            vec.vec_push(ref out, c);
+        } else {
+            vec.vec_push(ref out, '%');
+            vec.vec_push(ref out, HEX_DIGITS[usize(c) / 16]);
+            vec.vec_push(ref out, HEX_DIGITS[usize(c) % 16]);
+        }
+    }
+    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref out));
+}
+
+// Decode the path portion of a request-target.
+//
+// This rejects an encoded separator (`%2F`, `%5C`) instead of decoding it.
+// Once decoded, such a byte is indistinguishable from a real separator, so
+// anything that routes or resolves the path afterwards sees a segment
+// boundary the client manufactured - which is how `/files/a%2f..%2fetc` turns
+// into a traversal. Rejecting keeps one decoded `path` field usable by
+// everything downstream, at the cost of a request shape nobody legitimately
+// sends.
+export function decodePath(rawPath: string): Result<string, HttpError> {
+    let raw: uint8[] = intr.string_as_bytes(rawPath);
+    let i: usize = 0;
+    while (i + 2 < raw.len) {
+        if (raw[i] == '%') {
+            let hi: int32 = hexValue(raw[i + 1]);
+            let lo: int32 = hexValue(raw[i + 2]);
+            if (hi >= 0 && lo >= 0) {
+                let b: int32 = hi * 16 + lo;
+                if (b == '/' || b == '\\') {
+                    return Result.Err {
+                        error: errBadRequest("encoded path separator is not allowed"),
+                    };
+                }
+            }
+        }
+        i = i + 1;
+    }
+    return percentDecode(rawPath, false);
+}
+
+// ----- name/value pairs ---------------------------------------------------
+
+// Parse `a=1&b=two&flag` into `out`. A pair with no `=` gets an empty value,
+// which is how a bare flag (`?verbose`) is conventionally read. Empty pairs
+// (from `a=1&&b=2` or a trailing `&`) are skipped rather than rejected.
+//
+// Both halves are percent-decoded with `+` meaning space, so this is the
+// urlencoded rule for query strings and form bodies alike.
+export function parseUrlEncoded(s: string, ref out: Params): Result<usize, HttpError> {
+    let raw: uint8[] = intr.string_as_bytes(s);
+    let count: usize = 0;
+    let start: usize = 0;
+    while (start <= raw.len) {
+        let rest: uint8[] = bytes.bytes_slice(raw, start, raw.len);
+        let rel: usize = bytes.bytes_index_of(rest, '&');
+        let end: usize = start + rel;
+
+        if (end > start) {
+            let pair: uint8[] = bytes.bytes_slice(raw, start, end);
+            let eq: usize = bytes.bytes_index_of(pair, '=');
+            let nameRaw: string = sliceStr(pair, 0, eq);
+            let valueRaw: string = "";
+            if (eq != pair.len) {
+                valueRaw = sliceStr(pair, eq + 1, pair.len);
+            }
+            let name: string = percentDecode(nameRaw, true)? `decoding parameter name "${nameRaw}"`;
+            let value: string = percentDecode(valueRaw, true)? `decoding value of parameter "${nameRaw}"`;
+            paramsAdd(ref out, name, value);
+            count = count + 1;
+        }
+
+        if (rel == rest.len) { break; }
+        start = end + 1;
+    }
+    return Result.Ok { value: count };
+}
+
+// The query string of a request-target (the part after `?`, already split off
+// by `splitTarget`).
+export function parseQuery(queryString: string, ref out: Params): Result<usize, HttpError> {
+    let n: usize = parseUrlEncoded(queryString, ref out)? "parsing the query string";
+    return Result.Ok { value: n };
+}
+
+// An `application/x-www-form-urlencoded` request body.
+export function parseForm(body: uint8[], ref out: Params): Result<usize, HttpError> {
+    let text: string = intr.string_from_bytes_unchecked(body);
+    let n: usize = parseUrlEncoded(text, ref out)? "parsing the form body";
+    return Result.Ok { value: n };
+}
+
+// ----- path segments ------------------------------------------------------
+
+// Split a path into its non-empty segments, each percent-decoded. "/a/b/" and
+// "/a/b" both give ["a", "b"]; "/" gives []. The router matches on these, and
+// a handler that wants the tail of a wildcard route can reuse it.
+//
+// The decode happens per segment, after the split, so a `%2F` inside a
+// segment stays data and cannot forge a boundary.
+export function pathSegments(path: string, ref out: Vec<string>): Result<usize, HttpError> {
+    let raw: uint8[] = intr.string_as_bytes(path);
+    let count: usize = 0;
+    let start: usize = 0;
+    while (start <= raw.len) {
+        let rest: uint8[] = bytes.bytes_slice(raw, start, raw.len);
+        let rel: usize = bytes.bytes_index_of(rest, '/');
+        let end: usize = start + rel;
+        if (end > start) {
+            let segRaw: string = sliceStr(raw, start, end);
+            let seg: string = percentDecode(segRaw, false)? `decoding path segment "${segRaw}"`;
+            vec.vec_push(ref out, seg);
+            count = count + 1;
+        }
+        if (rel == rest.len) { break; }
+        start = end + 1;
+    }
+    return Result.Ok { value: count };
+}

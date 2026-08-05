@@ -9,7 +9,7 @@
 // libsqlite3 ships in the macOS SDK, so this links with no setup there. On
 // Linux install libsqlite3-dev (or equivalent) first.
 
-import * as sqlite, { Db, Stmt, StepOutcome } from "std/db/sqlite.yoop";
+import * as sqlite, { Db, Stmt, StepOutcome } from "std/db/sqlite";
 import * as fs from "std/fs.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";

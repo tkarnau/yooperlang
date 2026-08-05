@@ -41,3 +41,93 @@ export kind ephemeral {
     mustCall dispose beforeScopeEnd;
     ownsBlock;
 }
+
+// ----- the concurrency core ---------------------------------------------
+//
+// `task`, `async`, `joined`, `pooled` and `Task` used to be reserved words
+// backed by hardcoded kind objects in the compiler. They are ordinary kind
+// declarations now, and their behavior comes from the clauses below rather
+// than from a name the compiler recognizes.
+//
+// The compiler does still REQUIRE these to exist - it asserts this file
+// declares them with at least the clauses it depends on, and errors naming
+// this file if one is missing or reshaped. That is the carve-out: a fixed
+// requirement, not a fixed implementation.
+//
+// The one genuinely built-in part is `Task<T>` SATISFYING the two traits
+// below. Its `retain` / `release` / `wait` bodies are compiler-provided and
+// lower to the runtime's yoop_task_* calls - those have to come from
+// somewhere, and this is the smallest possible somewhere.
+
+// A reference-counted handle. `refcounted` names these two methods, so the
+// compiler calls them by name instead of assuming what a "refcounted" kind
+// means.
+export trait Shared {
+    function retain(ref self): void;
+    function release(ref self): void;
+}
+
+// A handle whose result can be joined. `joined`'s auto-join is an ordinary
+// `mustCall join beforeScopeEnd` against this.
+//
+// The method is `join`, not `wait`, because `wait` is an expression operator
+// and cannot also be an identifier - and `joined` calling `join` reads
+// better than `joined` calling `wait` anyway.
+export trait Joinable<T> {
+    function join(ref self): T;
+}
+
+// ----- function kinds ----------------------------------------------------
+
+// `pausable` is the clause that makes a function a coroutine: it may stop
+// partway through and continue later, and while stopped it is not holding a
+// worker thread. That is what forces the `await` calling convention - a
+// pause has to have somewhere to propagate to.
+export kind async {
+    appliesTo function;
+    pausable;
+}
+
+// A task is the scheduler's unit of work. `provides Task` is what rewrites
+// the call site: the body returns T, but `task f(): T` evaluates to
+// `Task<T>` where it is called, which is then joined with `wait`.
+//
+// Also `pausable`, because a task body is exactly where a pause can land -
+// requiring `async task` would be noise.
+export kind task {
+    appliesTo function;
+    pausable;
+    provides Task;
+}
+
+// ----- handle-binding kinds ----------------------------------------------
+
+// `joined d = f();` - the handle is joined automatically at scope end.
+//
+// `mustNotEscape scope` is load-bearing beyond documentation: a binding that
+// provably cannot outlive its frame can live in a stack slot, which is how
+// the compiler decides storage for this kind without matching on its name.
+export kind joined {
+    appliesTo binding;
+    requires Joinable;
+    mustCall join beforeScopeEnd;
+    mustNotEscape scope;
+}
+
+// `pooled h = f();` - a refcounted handle that MAY outlive its scope, which
+// is the whole point of refcounting it. No `mustNotEscape`, so it needs the
+// heap.
+//
+// Also the FIELD form: a struct storing a task handle participates in the
+// same refcount lifecycle, and says so with `propagates<pooled>`.
+//
+// There used to be a separate `kind Task` for the field position with
+// byte-identical clauses - only its `appliesTo` differed, so it was the
+// same kind wearing a second name. Worse, that name collided with the
+// `Task<T>` TYPE, giving you `type Job propagates<Task> { work: Task<int32> }`
+// where the two `Task`s meant different things.
+export kind pooled {
+    appliesTo binding parameter field;
+    requires Shared;
+    refcounted retain release;
+}

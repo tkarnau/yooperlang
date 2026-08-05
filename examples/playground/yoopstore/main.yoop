@@ -19,10 +19,11 @@
 //   curl -X DELETE http://127.0.0.1:18080/tom/test/file1
 
 import { disposable } from "std/core/kinds.yoop";
-import { ListenResult } from "std/net/tcp.yoop";
-import * as tcp from "std/net/tcp.yoop";
-import { ServeOutcome } from "std/http/server.yoop";
-import * as http_server from "std/http/server.yoop";
+import { Result } from "std/core/types.yoop";
+import { ListenResult } from "std/net";
+import * as tcp from "std/net";
+import { Dispatcher } from "std/http";
+import * as httpServer from "std/http";
 
 import { StorageHandler } from "./handler.yoop";
 import * as handler from "./handler.yoop";
@@ -45,14 +46,16 @@ function main(): int32 {
 
         // The handler owns nothing to dispose now that Response bodies are
         // owned (papercut #6) - a plain `let` is enough.
-        let h: StorageHandler = handler.storage_handler_new(DATA_ROOT);
+        let h: StorageHandler = handler.storageHandlerNew(DATA_ROOT);
+        let d: Dispatcher = Dispatcher.from(ref h);
         // n=0 -> serve forever.
-        let outcome: ServeOutcome = http_server.serve_n(ref lr.listener, ref h, 0);
-        if (outcome.error.len > 0) {
-            printf(`server stopped: served=${outcome.served} err=${outcome.error}\n`);
-            return 1;
+        switch (httpServer.serveDefault(ref lr.listener, ref d, 0)) {
+            case Result.Ok { value: n }: { printf(`served ${n} requests\n`); }
+            case Result.Err { error: e }: {
+                printf(`server stopped: ${e}\n`);
+                return 1;
+            }
         }
-        printf(`served ${outcome.served} requests\n`);
     }
 
     return 0;

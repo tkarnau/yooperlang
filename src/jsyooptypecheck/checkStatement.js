@@ -30,6 +30,7 @@ import {
   resolveTypeInCtx,
 } from "./instantiate.js";
 import { pushError, formatType } from "./errors.js";
+import { isNumeric } from "./coerce.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
@@ -54,14 +55,14 @@ function isNamespaceGenericCall(callExpr, ctx) {
   const srcEnv = ctx.typeContext.moduleEnv?.get(ns.moduleId);
   return !!srcEnv?.genericFuncTable?.has(callee.field);
 }
-import { lookupBuiltinKind } from "./builtinKinds.js";
+import { lookupCoreKind, taskSatisfiesKind, isRefcountedKind } from "./coreKinds.js";
 
 // Phase 6.4: kind-prefix resolution walks both the local kindTable (user
 // kinds + the seeded `Task` builtin) and the builtin-kind table (joined /
 // pooled / Task). Returns null if neither matches.
 function resolveKindByName(name, typeContext) {
   return (
-    typeContext.kindTable?.get(name) ?? lookupBuiltinKind(name) ?? null
+    typeContext.kindTable?.get(name) ?? lookupCoreKind(name) ?? null
   );
 }
 import { TaskType } from "./types.js";
@@ -86,6 +87,9 @@ export function validateMethod(methodDecl, structType, typeContext, errors) {
     errors,
     inLoop: false,
     inMethodBody: true,
+    // Same coloring flag as validateFunction - an `async` method body is
+    // a coroutine and may contain `await`.
+    inAsyncBody: !!methodDecl.isAsync,
     enclosingType: structType,
   };
   validateStatement(methodDecl.body, scope, ctx);
@@ -116,10 +120,15 @@ export function validateFunction(funcNode, typeContext, errors) {
           const sites = [...kt.appliesTo].join(", ") || "(none)";
           pushError(errors, param,
             `kind '${kt.name}' does not apply to parameters (declared appliesTo: ${sites})`);
-        } else if (kt.builtin) {
-          // Phase 6.4: builtin kinds (e.g. `pooled`) carry their own type rules;
-          // skip the struct-shape check. The associated type (Task<T>) is
-          // validated by the binding-resolution path.
+        } else if (
+          (baseType.kind === typeKinds.ref ? baseType.inner : baseType).kind ===
+            typeKinds.task && taskSatisfiesKind(kt)
+        ) {
+          // `pooled h: Task<int32>` - Task<T> is a compiler type rather than
+          // a nominal struct, so it cannot carry an `implements` list. It
+          // does satisfy the traits the core kinds require (see
+          // taskSatisfiesKind), so skip the struct-shape check here; the
+          // associated type is validated by the binding-resolution path.
           paramKindType = kt;
         } else {
           // Unwrap ref to get the underlying nominal type. Phase 13.B:
@@ -210,6 +219,10 @@ export function validateFunction(funcNode, typeContext, errors) {
     errors,
     inLoop: false,
     inTaskBody: !!funcNode.isTask,
+    // Coloring: `await` is legal only where a suspend has a coroutine
+    // frame to propagate into. A task body is implicitly async, so the
+    // parser has already set isAsync on it.
+    inAsyncBody: !!funcNode.isAsync,
   };
   validateStatement(funcNode.body, scope, ctx);
   // params + the synthetic outer body share `scope`. Block-statement
@@ -396,9 +409,37 @@ function canonicalizeStruct(type, ctx) {
 function checkLetOrConst(node, scope, ctx) {
   // Phase 6.3: `joined h = task_call();` / `pooled h = task_call();` -
   // built-in kind prefix; type is inferred as Task<T> from the RHS.
-  const builtinName = node.kindPrefix?.builtin ?? null;
-  if (builtinName === "joined" || builtinName === "pooled") {
-    return checkTaskBuiltinBinding(node, scope, ctx, builtinName);
+  // `joined` / `pooled` used to arrive with a parser-stamped `builtin`
+  // marker because they were lexer keywords. They are ordinary kind names
+  // now, so the task-binding path keys on the name resolving to a builtin
+  // kind instead.
+  const prefixName = node.kindPrefix?.name ?? null;
+  // The task-handle binding forms (`joined d = f()` / `pooled h = f()`)
+  // never carry a type annotation - Task<T> is compiler-internal, and the
+  // binding infers it from the task call on the right.
+  //
+  // That absence is the discriminator. The same `pooled` kind also applies
+  // at FIELD position and to a binding of a struct that propagates it
+  // (`pooled j: Job = launch(6);`), which is an ordinary kind binding and
+  // must NOT be routed through the task path - it has no task call to
+  // infer from.
+  //
+  // The kind is matched by its CLAUSES, not its name. `taskSatisfiesKind` is
+  // true exactly when every trait the kind requires is one `Task<T>` provides
+  // (Shared / Joinable), which is the real question being asked here: "can a
+  // task handle satisfy this kind?" Keying on the names `joined` / `pooled`
+  // meant a user kind declaring the identical clauses was rejected on the one
+  // type its `refcounted` clause was designed for. The PARAMETER path has
+  // always used taskSatisfiesKind; this brings the binding path in line.
+  const prefixKind = prefixName
+    ? (resolveKindByName(prefixName, ctx.typeContext) ?? lookupCoreKind(prefixName))
+    : null;
+  if (
+    prefixKind &&
+    node.typeAnnotation == null &&
+    taskSatisfiesKind(prefixKind)
+  ) {
+    return checkTaskBuiltinBinding(node, scope, ctx, prefixKind);
   }
 
   // No annotation: infer the binding's type from its initializer. The parser
@@ -449,7 +490,10 @@ function checkLetOrConst(node, scope, ctx) {
   let kindType = null;
   let kindApp = null;
   if (node.kindPrefix) {
-    kindType = ctx.typeContext.kindTable?.get(node.kindPrefix.name) ?? null;
+    kindType =
+      ctx.typeContext.kindTable?.get(node.kindPrefix.name) ??
+      lookupCoreKind(node.kindPrefix.name) ??
+      null;
     if (!kindType) {
       pushError(ctx.errors, node, `unknown kind "${node.kindPrefix.name}"`);
     } else {
@@ -566,10 +610,17 @@ function checkLetOrConst(node, scope, ctx) {
 // Phase 6.4: `pooled` additionally accepts a Task<T>-typed expression (e.g.
 // `pooled h3 = h2;` where h2 is pooled). Codegen detects the copy site and
 // emits a retain. `joined` still requires a fresh task call.
-function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
-  const kt = lookupBuiltinKind(builtinName);
+function checkTaskBuiltinBinding(node, scope, ctx, kt) {
+  const builtinName = kt.name;
   node.resolvedKindType = kt;
   node.builtinKind = builtinName;
+  // The storage/cleanup shape, derived from the kind's clauses rather than its
+  // name - this is what codegen switches on. A `refcounted` kind heap
+  // allocates and may be copied (each copy retains, scope exit releases); a
+  // kind without it owns the handle outright, lives in a stack slot, and must
+  // bind a FRESH call because there is no refcount to share.
+  const isRefcounted = isRefcountedKind(kt);
+  node.taskHandleMode = isRefcounted ? "refcount" : "join";
 
   if (!node.assignment) {
     pushError(ctx.errors, node,
@@ -596,15 +647,15 @@ function checkTaskBuiltinBinding(node, scope, ctx, builtinName) {
   // joined requires a fresh task call (allocates on stack, can't copy).
   // pooled accepts both task calls and Task<T>-typed copies (phase 6.4).
   const rhsIsCall = node.assignment.kind === ASTNodeKind.CALL_EXPRESSION;
-  if (builtinName === "joined" && !rhsIsCall) {
+  if (!isRefcounted && !rhsIsCall) {
     pushError(ctx.errors, node,
-      `joined binding "${node.name}" requires a task call RHS, got ${formatType(rhsType)}`);
+      `${builtinName} binding "${node.name}" requires a task call RHS, got ${formatType(rhsType)}`);
     node.resolvedType = ErrorType();
     declareInScope(scope, node.name, ErrorType(), "const", node, ctx.errors, kt);
     return;
   }
-  // Mark pooled-copy bindings so codegen branches between submit-vs-retain.
-  if (builtinName === "pooled" && !rhsIsCall) {
+  // Mark refcounted-copy bindings so codegen branches between submit-vs-retain.
+  if (isRefcounted && !rhsIsCall) {
     node.pooledCopy = true;
   }
 
@@ -641,6 +692,13 @@ function findScopedIdentInExpr(expr, scope) {
   // REF_EXPRESSION wrapping an IDENT: also an alias
   if (expr.kind === ASTNodeKind.REF_EXPRESSION) {
     return findScopedIdentInExpr(expr.operand, scope);
+  }
+  // `wait h` is NOT an alias of `h`: it evaluates to the RESULT, a plain
+  // value, and the handle itself stays put. Without this carve-out
+  // `joined`'s `mustNotEscape scope` clause rejects the ordinary
+  // `let v = wait d;` that is the entire point of a joined binding.
+  if (expr.kind === ASTNodeKind.WAIT_EXPRESSION) {
+    return null;
   }
   // Recursively check children
   for (const val of Object.values(expr)) {
@@ -853,19 +911,115 @@ function checkWhile(node, scope, ctx) {
   validateStatement(node.body, scope, loopCtx);
 }
 
-function checkForLoop(node, scope, ctx) {
-  // init: initIdent must be in scope, initExpr must match its type
-  const initBinding = lookupInScope(scope, node.initIdent);
-  if (!initBinding) {
-    pushError(ctx.errors, node,
-      `for-loop variable "${node.initIdent}" is not declared - declare it before the loop`);
+// Comparison operators whose *other* operand can name an unannotated
+// counter's type. `==`/`!=` are included because a countdown-to-sentinel loop
+// (`for (let i = n; i != 0; i -= 1)`) is as much a type constraint as `<`.
+const COUNTER_PINNING_OPS = new Set(["lt", "lte", "gt", "gte", "eqeq", "neq"]);
+
+// True if `n` reads the loop's counter by name - the anchor that tells us
+// which side of the condition is the counter and which side can type it.
+function isCounterRead(n, counterName) {
+  return n?.kind === ASTNodeKind.IDENT && n.name === counterName;
+}
+
+// The type an unannotated `let` counter takes when its initializer is a bare
+// integer/float literal. The ordinary binding rule (untypedInt -> int32) is
+// wrong here often enough to be a papercut: virtually every counted loop
+// compares against a length, and `int32 < usize` is not implicitly widened
+// (see unifyArith), so `for (let i = 0; i < xs.len; i += 1)` would fail on the
+// condition the counter exists to serve. So when the condition compares the
+// counter against a concrete numeric operand, that operand names the counter's
+// type. Returns null when the condition has no such shape, leaving the
+// ordinary literal default in place.
+//
+// `probeCtx` carries a throwaway error channel - see declareForCounter.
+function counterTypeFromCondition(node, scope, probeCtx) {
+  const cond = node.cond;
+  if (cond?.kind !== ASTNodeKind.BINARY_EXPRESSION) return null;
+  if (!COUNTER_PINNING_OPS.has(cond.op)) return null;
+
+  let other = null;
+  if (isCounterRead(cond.left, node.initIdent)) other = cond.right;
+  else if (isCounterRead(cond.right, node.initIdent)) other = cond.left;
+  if (!other) return null;
+
+  const t = resolveExprType(other, scope, probeCtx);
+  return t.kind === typeKinds.prim && isNumeric(t) ? t : null;
+}
+
+// Resolve the type of a `for (let i = ...; ...)` counter and declare it in the
+// loop's own scope.
+function declareForCounter(node, loopScope, ctx) {
+  let counterType;
+  if (node.initTypeAnnotation) {
+    counterType =
+      resolveTypeInCtx(node.initTypeAnnotation, ctx.typeContext) ?? ErrorType();
+    if (counterType.kind === typeKinds.error) {
+      pushError(ctx.errors, node,
+        `unknown type "${formatAnnotation(node.initTypeAnnotation)}"`);
+    }
   } else {
-    const initExprType = resolveExprType(node.initExpr, scope, ctx);
-    checkAssignable(initBinding.type, initExprType, node, ctx);
+    // Probe the initializer on a throwaway error channel: checkInitializer
+    // below is what actually reports on it, and one broken initializer should
+    // produce one diagnostic, not two.
+    const probeCtx = { ...ctx, errors: [] };
+    const initType = resolveExprType(node.initExpr, loopScope, probeCtx);
+    if (initType.kind === typeKinds.untypedInt || initType.kind === typeKinds.untypedFloat) {
+      counterType =
+        counterTypeFromCondition(node, loopScope, probeCtx) ??
+        concretizeInferred(initType);
+    } else {
+      counterType = canonicalizeStruct(initType, ctx);
+    }
+    if (counterType.kind === typeKinds.error) {
+      pushError(ctx.errors, node,
+        `cannot infer a type for for-loop counter "${node.initIdent}"; add an explicit type annotation`);
+    }
+  }
+
+  // Runs for both paths: checks assignability and, crucially, pins an untyped
+  // literal initializer to the counter's type so codegen never sees an
+  // untypedInt in the loop's init store.
+  checkInitializer(
+    node.initExpr,
+    counterType,
+    loopScope,
+    ctx,
+    (rhsType) =>
+      `cannot assign ${formatType(rhsType)} to ${formatType(counterType)} in initializer of for-loop counter "${node.initIdent}"`,
+  );
+
+  node.resolvedCounterType = counterType;
+  declareInScope(
+    loopScope, node.initIdent, counterType, "let", node, ctx.errors, null,
+  );
+}
+
+// Two head shapes:
+//   for (i = 0; i < n; i = i + 1)       counter declared before the loop
+//   for (let i = 0; i < n; i += 1)      counter scoped TO the loop
+// The `let` form opens a scope covering the head and the body, so the counter
+// neither leaks into the enclosing scope nor collides with a same-named
+// binding out there.
+function checkForLoop(node, scope, ctx) {
+  const loopScope = node.initDeclares ? pushScope(scope) : scope;
+
+  if (node.initDeclares) {
+    declareForCounter(node, loopScope, ctx);
+  } else {
+    // init: initIdent must be in scope, initExpr must match its type
+    const initBinding = lookupInScope(loopScope, node.initIdent);
+    if (!initBinding) {
+      pushError(ctx.errors, node,
+        `for-loop variable "${node.initIdent}" is not declared - declare it before the loop, or write "for (let ${node.initIdent} = ...; ...)"`);
+    } else {
+      const initExprType = resolveExprType(node.initExpr, loopScope, ctx);
+      checkAssignable(initBinding.type, initExprType, node, ctx);
+    }
   }
 
   // cond: must be bool
-  const condType = resolveExprType(node.cond, scope, ctx);
+  const condType = resolveExprType(node.cond, loopScope, ctx);
   if (condType.kind !== typeKinds.prim || condType.name !== "bool") {
     if (condType.kind !== typeKinds.error) {
       pushError(ctx.errors, node.cond,
@@ -874,18 +1028,20 @@ function checkForLoop(node, scope, ctx) {
   }
 
   // step: stepIdent must be in scope, stepExpr must match its type
-  const stepBinding = lookupInScope(scope, node.stepIdent);
+  const stepBinding = lookupInScope(loopScope, node.stepIdent);
   if (!stepBinding) {
     pushError(ctx.errors, node,
       `for-loop step variable "${node.stepIdent}" is not declared`);
   } else {
-    const stepExprType = resolveExprType(node.stepExpr, scope, ctx);
+    const stepExprType = resolveExprType(node.stepExpr, loopScope, ctx);
     checkAssignable(stepBinding.type, stepExprType, node, ctx);
   }
 
   // body with inLoop: true
   const loopCtx = { ...ctx, inLoop: true };
-  validateStatement(node.body, scope, loopCtx);
+  validateStatement(node.body, loopScope, loopCtx);
+
+  if (node.initDeclares) popScope(loopScope, ctx.errors);
 }
 
 // Phase 9.D + 10.B: `for item in xs { ... }`. The RHS may be either:
@@ -902,12 +1058,13 @@ function checkForInLoop(node, scope, ctx) {
     elemType = iterType.elem;
   } else if (iterType.kind === typeKinds.struct) {
     // The struct type captured from an expression site (e.g. a function-call
-    // return) may be the pass-A shell - re-fetch the canonical version from
-    // structTable so we see the fully-resolved implementsTraits/methods.
-    if (ctx.typeContext.structTable) {
-      const canonical = ctx.typeContext.structTable.get(iterType.name);
-      if (canonical) iterType = canonical;
-    }
+    // return) may be the pass-A shell - re-fetch the canonical version so we
+    // see the fully-resolved implementsTraits/methods. Goes through
+    // canonicalizeStruct (not just the local structTable) so an iterator
+    // returned from ANOTHER module's function resolves too - that is what
+    // `for i in 0..n` needs, since `..` lowers to a call into
+    // std/core/range.yoop.
+    iterType = canonicalizeStruct(iterType, ctx);
     const iterableTrait = (iterType.implementsTraits ?? []).find(
       (t) => t.name === "Iterable",
     );
@@ -1256,10 +1413,16 @@ function checkSwitch(node, scope, ctx) {
         if (!fb.fieldName || !fb.bindingName) continue;
         const fieldDef = variant.fields.find((f) => f.name === fb.fieldName);
         if (!fieldDef) continue;
+        // canonicalizeStruct for the same reason inferred `let` bindings do it:
+        // a payload field type resolved while the payload's own module was
+        // mid-pass can be a shell whose `implementsTraits` is still empty, and
+        // the binding would then fail `Disposable.dispose(ref x)` on a type
+        // that plainly does implement it. Swapping in the structTable entry
+        // gives the arm the populated type. No-op for non-structs.
         declareInScope(
           armScope,
           fb.bindingName,
-          fieldDef.type,
+          canonicalizeStruct(fieldDef.type, ctx),
           "const",
           pat,
           ctx.errors,

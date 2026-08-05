@@ -1,0 +1,99 @@
+// EPISODE 3 - Data is a struct, behavior is a free function
+//
+// There are no classes. `type` declares a struct: fields, nothing else.
+// Functions live outside it. If a function needs to mutate its argument,
+// it takes `ref` - an explicit reference, visible at the call site too.
+//
+// The one rule that catches everyone: a struct literal cannot be typed on
+// its own. `{ x: 1, y: 2 }` has no name in it, so the compiler needs a target
+// type from context - an annotation, a return type, or a parameter type.
+
+type Point {
+    x: int32,
+    y: int32,
+}
+
+// Structs nest by value. No pointers involved, no allocation.
+type Line {
+    from: Point,
+    to: Point,
+}
+
+// Takes a copy - the caller's Point is untouched.
+function shifted(p: Point, dx: int32): Point {
+    return { x: p.x + dx, y: p.y };
+}
+
+// Takes a reference - mutates the caller's Point in place.
+function shiftInPlace(ref p: Point, dx: int32): void {
+    p.x = p.x + dx;
+}
+
+function describe(ref l: Line): string {
+    return `(${l.from.x},${l.from.y}) -> (${l.to.x},${l.to.y})`;
+}
+
+function main(): int32 {
+    // The annotation is the target type, so the literal is unambiguous.
+    let p: Point = { x: 1, y: 2 };
+
+    // Copy semantics: `shifted` cannot touch `p`.
+    const moved = shifted(p, 10);
+    printf(`p=(${p.x},${p.y}) moved=(${moved.x},${moved.y})\n`);
+
+    // Reference semantics: `ref` at the call site, so it is obvious on sight.
+    shiftInPlace(ref p, 100);
+    printf(`p after shiftInPlace=(${p.x},${p.y})\n`);
+
+    // Nested literals pin through the outer target type.
+    let l: Line = { from: { x: 0, y: 0 }, to: { x: 3, y: 4 } };
+    printf(`line ${describe(ref l)}\n`);
+
+    return 0;
+}
+
+// expected output:
+// p=(1,2) moved=(11,2)
+// p after shiftInPlace=(101,2)
+// line (0,0) -> (3,4)
+
+// ---------------------------------------------------------------------------
+// BREAK IT #1 - a struct literal has no name in it
+//
+// Drop the annotation: change `let p: Point = { x: 1, y: 2 };` to
+// `let p = { x: 1, y: 2 };`
+//
+//   ep03_structs.yoop:3:19: struct literal has no target type
+//     |
+//   3 |     let p = { x: 1, y: 2 };
+//     |                   ^
+//   ep03_structs.yoop:3:10: cannot infer a type for "p"; add an explicit type annotation
+//     |
+//   3 |     let p = { x: 1, y: 2 };
+//     |          ^
+//
+// Talking point: inference in this language flows one direction - from the
+// initializer to the binding. A struct literal is the case where the
+// initializer genuinely has no type of its own, so the arrow has to reverse.
+// Rather than guess (structurally? by field-name match? first declared type
+// that fits?) the compiler asks. Contrast `const moved = shifted(p, 10);`
+// above, which infers fine because a call has a return type.
+
+// BREAK IT #2 - ref is not optional at the call site
+//
+// Change `shiftInPlace(ref p, 100);` to `shiftInPlace(p, 100);`:
+//
+//   ep03_structs.yoop:5:20: parameter "p" expects a ref argument - pass with 'ref p'
+//     |
+//   5 |     shiftInPlace(p, 100);
+//     |                    ^
+//
+// Talking point: the `ref` is part of the CALL, deliberately. You can never
+// read a line of code and wonder whether the callee can mutate the argument.
+
+// BREAK IT #3 - copies really are copies
+//
+// Change `shifted` to try mutating its parameter - add `p.x = 999;` as the
+// first line of its body. It compiles (it is a local copy) but `p` in main
+// is unchanged. Run it and show the output is identical. This is the cheap
+// way to demonstrate value semantics without saying the words.

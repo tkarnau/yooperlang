@@ -1,0 +1,9 @@
+import * as plugin, { Widget } from "./plugin";
+
+function main(): int32 {
+    let w: Widget = { id: 4 };
+    printf("greet=%d\n", plugin.greetIt(ref w));
+    printf("boxed=%d\n", plugin.boxedId(w));
+    printf("cleanup=%d\n", plugin.withCleanup());
+    return 0;
+}

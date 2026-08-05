@@ -1,50 +1,69 @@
-// Library Phase D headline demo - a hello-world HTTP server.
+// The hello-world HTTP server.
 //
 // Build:  node ./src/yoopiler.js examples/pass/hello_server/main.yoop -o /tmp/hello_server
 // Run:    /tmp/hello_server
 // Test:   curl -v http://localhost:18080/
 //
-// The server handles N requests and then exits (serve_n's `n` arg).
-// Use n <= 0 for a forever loop.
+// The server answers N requests and then exits (`serveDefault`'s `n`). Use
+// n <= 0 for a forever loop.
 
 import { disposable } from "../../../std/core/kinds.yoop";
-import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
-import {
-    Handler, HandleOutcome,
-    serve_n, ServeOutcome,
-} from "../../../std/http/server.yoop";
-import {
-    Request, Response, ok, headers_add, respond_static,
-} from "../../../std/http/types.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import * as tcp, { ListenResult } from "std/net";
+import * as http, {
+    Handler, HandleOutcome, Dispatcher,
+} from "std/http";
+import * as types, {
+    Request, Response, HttpError,
+} from "std/http";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-// User-defined handler. Lives in main.yoop because the handler is the
-// extension point - different programs supply different handlers and the
-// server is generic over them.
+// The handler is the extension point: the server is written against the
+// `Handler` trait, and this is one implementation of it.
 type HelloHandler implements Handler {
     greeting: string,
     function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        resp.status = ok();
-        headers_add(ref resp.headers, "Content-Type", "text/plain");
-        respond_static(ref resp, self.greeting);
+        types.respondText(ref resp, types.ok(), self.greeting);
         return HandleOutcome.Ok;
     }
 }
 
-function main(): int32 {
-    let disposable lr: ListenResult = tcp_listen("127.0.0.1", 18080, 128);
+// `run` is async because everything under it is: the accept, the reads,
+// and the writes all suspend rather than blocking a worker thread.
+async run(): Result<int32, HttpError> {
+    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128);
     if (lr.error.len > 0) {
-        printf(`bind failed: ${lr.error}\n`);
-        return 1;
+        return Result.Err { error: types.errIo(lr.error) };
     }
-    printf(`listening on 127.0.0.1:18080\n`);
+    printf("listening on 127.0.0.1:18080\n");
+
     let handler: HelloHandler = { greeting: "Hello, World!\n" };
-    // serve_n with n=1 → exit after one request (test-friendly).
-    // Switch to a large N or <=0 for a long-running server.
-    let outcome: ServeOutcome = serve_n(ref lr.listener, ref handler, 1);
-    printf(`served=${outcome.served} err=${outcome.error}\n`);
+    // `Dispatcher.from` erases the handler's concrete type, so the serve loop
+    // is compiled once no matter how many handler types the program has.
+    let d: Dispatcher = Dispatcher.from(ref handler);
+    let served: int32 = await http.serveDefault(ref lr.listener, ref d, 1)?;
+    printf(`served=${served}\n`);
+    return Result.Ok { value: served };
+}
+
+// `main` cannot be async - it is the sync/async boundary. The bridge is
+// the one that already existed: spawn a task (whose body IS async) and
+// join it with `wait`.
+task serveTask(): Result<int32, HttpError> {
+    return await run();
+}
+
+function main(): int32 {
+    pooled h = serveTask();
+    switch (wait h) {
+        case Result.Ok { value: _n }: { return 0; }
+        case Result.Err { error: e }: {
+            printf(`server failed: ${e}\n`);
+            return 1;
+        }
+    }
     return 0;
 }

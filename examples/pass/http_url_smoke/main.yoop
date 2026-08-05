@@ -1,0 +1,77 @@
+// Pure exercise of std/http/url.yoop and the router's path matcher. No
+// sockets: target splitting, percent coding, urlencoded parsing, path
+// segments, and pattern matching are all functions over strings.
+
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import * as vec, { Vec } from "../../../std/core/vec.yoop";
+import * as types, { Params, HttpError } from "std/http";
+import * as url from "std/http";
+import * as router from "std/http";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function showTarget(raw: string): Result<int32, HttpError> {
+    let parts: url.TargetParts = url.splitTarget(raw);
+    disposable q: Params = types.paramsNew(4);
+    let n: usize = url.parseQuery(parts.queryString, ref q)?;
+    printf(`target ${raw} -> path=${parts.path} pairs=${n}`);
+    for p in types.paramsView(ref q) {
+        printf(` ${p.name}=[${p.value}]`);
+    }
+    printf("\n");
+    return Result.Ok { value: 0 };
+}
+
+function showMatch(pattern: string, path: string): void {
+    disposable captured: Params = types.paramsNew(4);
+    let hit: bool = router.matchPath(pattern, path, ref captured);
+    let verdict: string = "miss";
+    if (hit) { verdict = "hit"; }
+    printf(`match ${pattern} vs ${path} -> ${verdict}`);
+    if (hit) {
+        for p in types.paramsView(ref captured) {
+            printf(` ${p.name}=${p.value}`);
+        }
+    }
+    printf("\n");
+}
+
+function run(): Result<int32, HttpError> {
+    let _a: int32 = showTarget("/todos/7?done=true&note=a%20b+c&flag#frag")?;
+    let _b: int32 = showTarget("/todos")?;
+
+    disposable segs: Vec<string> = vec.vec_new(4);
+    let count: usize = url.pathSegments("/a/b%2Dc/", ref segs)?;
+    printf(`segments=${count}`);
+    for s in vec.vec_as_array(ref segs) {
+        printf(` [${s}]`);
+    }
+    printf("\n");
+
+    printf(`encode=${url.percentEncode("a b/c?d=e")}\n`);
+
+    showMatch("/todos", "/todos");
+    showMatch("/todos", "/todos/");
+    showMatch("/todos/:id", "/todos/42");
+    showMatch("/todos/:id", "/todos");
+    showMatch("/todos/:id", "/todos/42/notes");
+    showMatch("/static/*", "/static/css/app.css");
+    showMatch("/static/*", "/static");
+
+    switch (url.decodePath("/a%2Fb")) {
+        case Result.Ok { value: p }: { printf(`decodePath UNEXPECTEDLY ok: ${p}\n`); }
+        case Result.Err { error: e }: { printf(`decodePath rejected: ${e}\n`); }
+    }
+    return Result.Ok { value: 0 };
+}
+
+function main(): int32 {
+    switch (run()) {
+        case Result.Ok { value: _n }: { return 0; }
+        case Result.Err { error: e }: { printf(`failed: ${e}\n`); return 1; }
+    }
+    return 0;
+}

@@ -167,14 +167,70 @@ export const StructType = (
     kindApplication,
     genericInstance,
   });
+// An UNFROZEN struct shell for pass A, filled in place by pass C via
+// fillStructShell.
+//
+// Identity is the whole point. Pass C used to build a fresh StructType and
+// REPLACE the table entry, which left any field that had already resolved to
+// this struct pointing at the empty shell - and `sizeOfType` on an empty struct
+// reports no fields, so every enclosing struct was undersized and the emitted
+// IR read its own fields at the wrong offsets. Inside one file that surfaced as
+// the misleading `type "T" has no field "f"` papercut; across the source files
+// of one directory module it SILENTLY MISCOMPILED (a sqlite `RawStmt` handle
+// came back as a shifted pointer and segfaulted in libsqlite3).
+//
+// Same fix already applied to variant shells (Phase 13.A) and vtable shells
+// (9.G). `fields` stays null until filled so the "is this a shell?" checks
+// across the checker keep working.
+export const StructShell = (name, moduleId = null) => ({
+  kind: typeKinds.struct,
+  name,
+  fields: null,
+  moduleId,
+  implementsTraits: [],
+  methods: new Map(),
+  propagatedKinds: [],
+  kindApplication: null,
+  genericInstance: null,
+});
+
+// Fill a shell in place and freeze it, so it is indistinguishable from a
+// StructType built in one shot. `implementsTraits` / `methods` are deliberately
+// left alone: they are mutable containers the impl-validation stage populates
+// later, and they are already present on the shell.
+export function fillStructShell(shell, fields, propagatedKinds, kindApplication) {
+  shell.fields = fields;
+  shell.propagatedKinds = propagatedKinds;
+  shell.kindApplication = kindApplication;
+  return Object.freeze(shell);
+}
+
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // variadic: true for C variadic externs (e.g. printf). Skips arity check past fixed params.
 // returnPropagatedKinds (phase 6.4): list of KindType the function's return
 // type propagates. Mirrors the StructType.propagatedKinds slot so callers see
 // the kinds without re-resolving the return type.
-export const FuncType = (params, returnType, variadic = false, returnPropagatedKinds = []) =>
-  freezerWrap(typeKinds.func, { params, returnType, variadic, returnPropagatedKinds });
+// isAsync: the function is a coroutine. It may only be called through
+// `await`, and `await` may only appear inside another async function (or
+// a task body, which is implicitly async). That pair of rules is what
+// makes the coloring checkable locally - there is no path to an async
+// function except from an async caller, so a suspend always has a frame
+// to propagate into. See plans/async-coroutines.md.
+export const FuncType = (
+  params,
+  returnType,
+  variadic = false,
+  returnPropagatedKinds = [],
+  isAsync = false,
+) =>
+  freezerWrap(typeKinds.func, {
+    params,
+    returnType,
+    variadic,
+    returnPropagatedKinds,
+    isAsync,
+  });
 export const VoidType = () => freezerWrap(typeKinds.void, {});
 // exports: Set<string> of exported names in the source module
 export const NamespaceType = (moduleId, exports) =>
@@ -261,8 +317,13 @@ export const ValueEnumType = (name, underlying, cases, implementsTraits = [], me
 // function decl) so call resolution can tell the two apart: FuncType callees
 // resolve to a global mangled symbol, FunctionPointerType callees lower to
 // an indirect call through a value slot.
-export const FunctionPointerType = (params, returnType) =>
-  freezerWrap(typeKinds.functionPointer, { params, returnType });
+// isAsync: the slot holds a coroutine-returning function (the async ABI -
+// returns a handle, takes a trailing result slot). Users never write this
+// on a `=>` annotation; for a vtable field it is stamped from the trait
+// method's own asyncness during validateVTableDecl, so the trait stays
+// the single authority and the two cannot drift.
+export const FunctionPointerType = (params, returnType, isAsync = false) =>
+  freezerWrap(typeKinds.functionPointer, { params, returnType, isAsync });
 
 // Phase 9.G: a type-erased shape for a trait. Conceptually a struct with one
 // `ctx` pointer + one function-pointer field per trait method. The compiler
@@ -271,15 +332,24 @@ export const FunctionPointerType = (params, returnType) =>
 // `(name, moduleId)` match - they are nominal types, like structs.
 //   methodOrder: list of method names in trait declaration order. Codegen
 //                uses this to pick a stable LLVM field index for each.
-export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) =>
-  freezerWrap(typeKinds.vtable, {
-    name,
-    traitName,
-    traitModuleId,
-    fields,
-    methodOrder,
-    moduleId,
-  });
+//
+// NOT frozen, unlike every other type but KindType / TypeParamType. Pass A
+// registers a shell (no trait module, no fields, no methodOrder) and pass
+// C.3b fills it in ON THE SAME OBJECT. Building a fresh populated type and
+// swapping the table entry, which is what this used to do, left any struct
+// field that had already resolved `d: MyVtable` pointing at the shell - and a
+// shell has no method slots, so a same-module `MyVtable.method(ref x.d, ...)`
+// failed with "vtable has no slot for trait method". Same shell-mutation
+// pattern variants use (Phase 13.A) and for the same reason.
+export const VTableType = (name, traitName, traitModuleId, fields, methodOrder, moduleId = null) => ({
+  kind: typeKinds.vtable,
+  name,
+  traitName,
+  traitModuleId,
+  fields,
+  methodOrder,
+  moduleId,
+});
 
 // Phase 8.A: raw, nullable, arithmetic-capable pointer for FFI. Gated by
 // `import.unsafe;` at module top. Lowers to LLVM opaque `ptr`; the
@@ -346,6 +416,12 @@ export function KindType(name, moduleId) {
   // with a matching signature shape are NOT authorized.
   this.clearedBy = null;                   // string | null (only on restrictive)
   this.appliedBy = null;                 // string | null (only on conferred)
+  // Concurrency-core clauses (plans/kinds-in-std.md). These used to be
+  // hardcoded booleans on objects in builtinKinds.js; they are populated
+  // from real clauses now.
+  this.pausable = false;                   // `pausable;`  - function is a coroutine
+  this.provides = null;                    // `provides X;` - call-site result rewrite
+  this.refcounted = null;                  // `refcounted <retain> <release>;`
   this.mustNotEscape = false;              // 6.2: true iff mustNotEscape clause is present
   this.mustNotShare = [];                  // 6.2: array of "acrossScopes" (stored, not enforced)
   this.forbids = [];                       // 6.2: array of "io"|"globalState" (stored, not enforced)
@@ -777,6 +853,11 @@ export function substituteTypeParams(type, substitution, instantiator = null) {
         substituteTypeParams(type.returnType, substitution, inst),
         type.variadic ?? false,
         type.returnPropagatedKinds ?? [],
+        // Asyncness survives monomorphization - an instantiated generic
+        // async function is still a coroutine, and dropping the flag
+        // here makes every generic async call site report "callee is not
+        // async" at the await.
+        type.isAsync ?? false,
       );
     }
     case typeKinds.struct: {

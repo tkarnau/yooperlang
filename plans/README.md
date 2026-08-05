@@ -86,16 +86,85 @@ Immediate build sequence (from the contracts doc):
 Small, concrete next steps (the running scratch list; `scratch.md` is the
 informal personal version):
 
-- Bootstrap: create a `Vec` iterator concept (needed to write the layers
-  idiomatically without index plumbing).
-- Typecheck: a struct used as a variant payload has to be declared before the
+- ~~Bootstrap: create a `Vec` iterator concept (needed to write the layers
+  idiomatically without index plumbing).~~ DONE: `vecIter` +
+  `VecIter<T> implements Iterable<T>` in `std/core/vec.yoop`, landed alongside
+  two other loop-ergonomics fixes the layers wanted - a loop-scoped counter
+  (`for (let i = 0; i < n; i += 1)`, with the counter's type taken from the
+  condition so it lands on `usize`) and `a..b` ranges (`for i in 0..n`, sugar
+  for a `Range` value in `std/core/range.yoop`). See SPEC.md section 9.
+- ~~Typecheck: a struct used as a variant payload has to be declared before the
   variant or its fields resolve against an unpopulated shell, and the resulting
-  diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).
-  Surfaced by the sqlite binding; see
-  [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md).
+  diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).~~
+  DONE, fixed while merging std/db/sqlite into a directory module. Pass C built a
+  fresh `StructType` and REPLACED the table entry, so any field that had already
+  resolved to that struct kept pointing at the empty pass-A shell. `StructShell`
+  is now unfrozen and pass C fills it IN PLACE (`fillStructShell` in
+  [../src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js)) - the same
+  fix variant shells got in 13.A and vtable shells in 9.G. Declaration order no
+  longer matters for struct fields OR variant payloads. A related crash in
+  `detectRecursiveField` (it walked a shell's null `fields`) is fixed too; a plain
+  forward reference used to abort the compiler with a TypeError. Across the source
+  files of a directory module the same bug SILENTLY MISCOMPILED rather than
+  erroring, which is how it was found: a sqlite handle came back as a shifted
+  pointer and segfaulted inside libsqlite3. See
+  [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md) for the original
+  report.
+- Two playground examples are stale since the async conversion and no longer
+  compile: `examples/playground/todo_api` and `examples/playground/yoopstore`
+  both hit `async function must be awaited` on `serve` / `serveDefault`. Nothing
+  under playground/ is covered by e2e, which is why this sat unnoticed. Fixing
+  them is a call-site `await` plus whatever coloring that cascades into.
 - Figure out the idempotent cleanup/dispose pattern (free-then-null, guard on
   null) so `dispose` is safe to call more than once - this is the discipline the
   advisory ownership model leans on instead of compiler-enforced affine moves.
+- Generic call-site inference cannot see through a generic enum's type
+  arguments: `function bridge<T>(r: Result<T, string>): Result<T, E>` will not
+  infer `T` from a `Result<int32, string>` argument, and there is no turbofish
+  to say it out loud. The workaround is one bridging helper per payload type
+  (`examples/playground/todo_api/store.yoop` has four). Surfaced by the
+  std/http rework; see [completed/std-http-rework.md](completed/std-http-rework.md).
+- The std/http rework (DONE, same doc) fixed four compiler bugs on its way
+  through - two `sizeOfType` under-counts that corrupted memory, a module-level
+  `const` string that kept its escapes undecoded, and a `switch` payload
+  binding that could carry an unpopulated struct shell. Worth reading as a list
+  of the shapes that go wrong when a layout or a pass-order assumption drifts.
+
+---
+
+## Recently landed
+
+- [modules-as-directories.md](modules-as-directories.md) - make a module a
+  DIRECTORY of source files rather than a single file. Motivated by the
+  bootstrap: acyclicity at file granularity is what forces a shared-vocabulary
+  dumping ground (`bootstrap/src/contracts.yoop`, 1199 lines), and that is
+  costing more reading context than the file split saves. Sequenced so there is
+  no flip day: a directory becomes a module only when its files declare
+  `module <name>;`, so the compiler change lands green with zero std changes and
+  each directory opts in as its own revertable commit. Distinct from the archived
+  package MANAGER plan - different axis, and the doc pins the terminology so they
+  stay apart. **Phases 1 and 2 have landed** and the doc records where the plan
+  itself turned out to be wrong. Phase 1: the five cross-file name collisions in
+  std are gone, no compiler change. Phase 2: directory modules work end to end
+  behind the opt-in `module <name>;` header, so nothing in the tree behaves
+  differently until a directory opts in. A pass C ordering bug found right after
+  phase 2 (a module's semantics depended on the alphabetical spelling of its
+  filenames) is also fixed - pass C is now group-major / stage-minor. Import
+  locality is enforced too: a module's files share its declarations but not its
+  imports, so using a name only a sibling imported is an error. That is a
+  checking pass rather than true lexical per-file scope, deliberately - the doc
+  records why (deferred resolution would have to carry file identity) and what
+  the two conservative-rejection differences are. **Phase 3 has landed** for four
+  directories - `std/core/cancel`, `std/db/sqlite`, `std/net`, `std/http` - and
+  std/collections is deliberately skipped (merging it privatizes nothing, and
+  phase 1 already removed the duplicated helper that was the reason to). The
+  merges paid for themselves: `std/http/wire.yoop` now exports NOTHING where its
+  header used to say "internal by convention" while exporting everything, and the
+  whole sqlite and socket FFI surfaces went private. They also flushed out three
+  compiler bugs, all recorded in the doc: the struct-shell replacement (a silent
+  MISCOMPILE, plus a pre-existing crash on any forward struct reference), the
+  string/array literal global counter, and a per-invocation `fromFn` shim set.
+  Remaining, optional: true lexical per-file import scope.
 
 ---
 
@@ -106,7 +175,20 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
 
 - [runtime-design.md](runtime-design.md) - the concurrency runtime contract
   (pthread worker pool, task struct layout, refcounted pooled handles). The
-  implementation reference for the task/`wait` machinery.
+  implementation reference for the task/`wait` machinery. Written against the
+  6.3 MVP, so read its scope lists with the "since landed" note at the top.
+- [async-coroutines.md](async-coroutines.md) - `async`/`await` and the
+  LLVM-coroutine lowering that lets a task blocked on I/O give its worker
+  thread back. Explains why this needed a language change (a suspend has
+  to propagate up a call chain, and `llvm.coro.suspend` only suspends one
+  frame). `std/net` and `std/http` are converted; the doc records the
+  coloring cascade that caused, and what is still blocking-only
+  (ambient stream timeouts, `flush`).
+- [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md) -
+  cancellation tokens (`std/core/cancel/`), deadline- and cancel-aware
+  I/O waits, and the multiplexer fixes that went with them (the same-fd
+  waiter conflict, the monotonic deadline clock, restartable init). Read
+  this alongside runtime-design.md, which it supersedes on cancellation.
 - [kinds-design.md](kinds-design.md) - heuristics for when a kind earns its
   cost, and in-tree opportunities (`validated`, `authenticated`, `tainted`).
 - [clearance-kinds.md](clearance-kinds.md) - the marker/clearance kind design
@@ -118,8 +200,13 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
   libsqlite3 (`std/db/`) proved the FFI surface can already do without a compiler
   change (opaque handles, `void **` out-params, pointer-sized-int sentinels, and
   the envelope-struct trick that keeps `unsafe_ptr` out of a safe module), plus
-  the one typecheck papercut it found and the `transaction` region kind it wants
-  next.
+  the one typecheck papercut it found. The `transaction` kind it asked for is
+  now built (as a binding kind, not a region kind - a region has no name, and
+  with no name there is nothing to call `commit` on).
+- [completed/std-http-rework.md](completed/std-http-rework.md) - the as-built
+  notes for `std/http`: one `Result<T, HttpError>` error channel, a non-generic
+  serve loop over the `Dispatcher` vtable, keep-alive, router path captures, and
+  the compiler bugs and ergonomic gaps the rewrite surfaced.
 
 One design exploration, not a shipped system and not scheduled:
 

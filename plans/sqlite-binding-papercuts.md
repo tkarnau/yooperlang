@@ -2,8 +2,8 @@
 
 ## Context
 
-[std/db/sqlite_ffi.yoop](../std/db/sqlite_ffi.yoop) +
-[std/db/sqlite.yoop](../std/db/sqlite.yoop) bind libsqlite3, and
+[std/db/sqlite/ffi.yoop](../std/db/sqlite/ffi.yoop) +
+[std/db/sqlite/db.yoop](../std/db/sqlite/db.yoop) bind libsqlite3, and
 [examples/playground/sqlite_demo/main.yoop](../examples/playground/sqlite_demo/main.yoop)
 drives them from the application side (on-disk db, schema, batched prepared
 insert inside a transaction, two read shapes, cleanup).
@@ -31,14 +31,44 @@ Worth recording because none of it was obvious going in:
   identical ABI (same register class on arm64, x86_64 SysV, Win64). Verified the
   copy really happens by binding a template-literal string built at runtime.
 - **A one-field envelope struct keeps `unsafe_ptr` out of the safe module.**
-  `type RawDb { p: unsafe_ptr }` in the ffi module means std/db/sqlite.yoop holds
+  `type RawDb { p: unsafe_ptr }` in the ffi module means std/db/sqlite/db.yoop holds
   handles, passes them around, and never declares `import.unsafe;` - satisfying
   library-design.md 2.1 for a handle-based library, which std/net never had to
   because a socket is an `int` fd. This is the pattern for future bindings.
 - **`float64` maps to C `double`** through an extern signature, both directions.
 - **Multi-line string literals** work, which keeps embedded DDL readable.
 
-## Issue 1 - a variant payload type must be declared before the variant
+## Issue 1 - a variant payload type must be declared before the variant - FIXED
+
+FIXED while merging std/db into a directory module. Declaration order no longer
+affects struct fields, variant payloads, or generic type arguments. Regression
+fixture: examples/pass/decl_order_independence.yoop, which uses every type above
+the line that declares it.
+
+The root cause was one thing wearing three faces. Pass A registers a shell and
+pass C fills it, but pass C REPLACED the table entry with a freshly built
+`StructType` instead of filling the shell - so any field that had already
+resolved to that struct kept pointing at the empty shell:
+
+- a **variant payload** or **struct field** naming a later struct gave the
+  misleading `type "T" has no field "f"` below;
+- a plain **forward struct reference** was worse than misleading, it CRASHED the
+  compiler (`TypeError: fieldType.fields is not iterable` out of
+  `detectRecursiveField`, which walked a shell's null `fields`);
+- and across the source files of a directory module, where basename order decides
+  what "later" means, the same bug SILENTLY MISCOMPILED - a sqlite `RawStmt`
+  handle came back as a shifted pointer and segfaulted inside libsqlite3, which
+  is how it was finally caught.
+
+Fixes: `StructShell` is unfrozen and `fillStructShell` fills it in place (the
+same treatment variant shells got in 13.A and vtable shells in 9.G),
+`detectRecursiveField` tolerates a shell, and pass C now resolves every generic
+TYPE body before any concrete decl - because instantiating a generic SNAPSHOTS
+its field list, which was the separate generic-flavored half
+(`type "Bag__int32" has no field "item"`). See
+[modules-as-directories.md](modules-as-directories.md).
+
+The original report follows.
 
 Confirmed, and the only real papercut found.
 
@@ -95,21 +125,33 @@ constructs, and pattern-matches correctly. The public API keeps
 
 Per the kinds-design.md question of "what trait or kind would help here":
 
-- **A `transaction` region kind is the clear win, and is not built.** The demo's
-  begin/commit/rollback is hand-written, and the rollback-on-error path is
-  exactly the kind of thing an author forgets on the third early return.
-  `appliesTo region` + `ownsBlock` + `requires Disposable` (the `ephemeral` shape
-  in [std/core/kinds.yoop](../std/core/kinds.yoop), whose own doc comment already
-  names transactions as a motivating case) gives `transaction begin(ref db) {
-  ... }` where the disposer rolls back unless a `commit` flag was set. Because
-  cleanup fires on every path out, an `expr?` propagating mid-block rolls back
-  for free. No compiler change needed - this is a userland kind plus a struct.
+- **A `transaction` kind was the clear win. BUILT** - see
+  [completed/std-http-rework.md](completed/std-http-rework.md). It landed as a
+  BINDING kind rather than the region kind predicted here, and the reason is
+  worth recording: a region has no name, and with no name there is nothing to
+  call `commit` on. A transaction that committed itself whenever the block
+  ended normally would commit on paths the author never considered successful,
+  so the value is named, the rollback is automatic, and the commit is the one
+  thing you have to say out loud.
+
+      transaction tx: Tx = sqlite.begin(ref db)?;
+      ... work, any `?` here rolls back on the way out ...
+      let _c: int32 = sqlite.commit(ref tx)?;
+
+  No compiler change was needed - a userland kind plus a struct, exactly as
+  predicted. `examples/playground/todo_api/store.yoop` uses it for an
+  all-or-nothing bulk import.
 - **A `bound` / `tainted` clearance pair is the flashy one, and is premature.**
   The injection story here is structural: values go through
   `sqlite3_bind_*` and never become SQL text, so there is no escaping question to
   get wrong. A clearance kind would only earn its cost once something in-tree
   builds SQL by concatenation, which nothing does. Revisit if a query builder
   ever lands.
+- **`DbRef` covers the shared-connection case.** A struct that stores a `Db`
+  has to declare `propagates<disposable>`, because storing one is a claim of
+  ownership. That is right for an owner and wrong for a server whose handlers
+  all use the one connection `main` owns, so the binding grew an explicit
+  non-owning handle (`sqlite.dbRef(ref db)` / `sqlite.borrow(h)`).
 - **No kind for `Db` / `Stmt` beyond `disposable`.** Both are plain Disposable
   handles with idempotent disposers (close/finalize, then null). That is the
   discipline the advisory ownership model asks for, and the demo verifies a

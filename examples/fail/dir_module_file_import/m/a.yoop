@@ -1,0 +1,2 @@
+module m;
+export function a(): int32 { return 1; }

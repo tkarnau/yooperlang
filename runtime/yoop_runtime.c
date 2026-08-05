@@ -7,9 +7,11 @@
 //   offset 12: int32_t         refcount (0 = stack, >=1 = pooled)
 //   offset 16: yoop_mutex_t*   per-handle mutex (heap-allocated)
 //   offset 24: yoop_cond_t*    per-handle cond  (heap-allocated)
-//   offset 32+: compiler-owned (result slot + args blob)
+//   offset 32: void*           coroutine handle (async task body)
+//   offset 40+: compiler-owned (result slot + args blob)
 
 #include "yoop_runtime.h"
+#include "yoop_platform.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -18,55 +20,6 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
-
-#ifdef _WIN32
-  #include <windows.h>
-  struct yoop_mutex  { CRITICAL_SECTION cs; };
-  struct yoop_cond   { CONDITION_VARIABLE cv; };
-  struct yoop_thread { HANDLE h; };
-
-  static inline void yoop_mutex_init(yoop_mutex_t* m)    { InitializeCriticalSection(&m->cs); }
-  static inline void yoop_mutex_destroy(yoop_mutex_t* m) { DeleteCriticalSection(&m->cs); }
-  static inline void yoop_mutex_lock(yoop_mutex_t* m)    { EnterCriticalSection(&m->cs); }
-  static inline void yoop_mutex_unlock(yoop_mutex_t* m)  { LeaveCriticalSection(&m->cs); }
-
-  static inline void yoop_cond_init(yoop_cond_t* c)      { InitializeConditionVariable(&c->cv); }
-  static inline void yoop_cond_destroy(yoop_cond_t* c)   { (void)c; }
-  static inline void yoop_cond_wait(yoop_cond_t* c, yoop_mutex_t* m) {
-      SleepConditionVariableCS(&c->cv, &m->cs, INFINITE);
-  }
-  static inline void yoop_cond_signal(yoop_cond_t* c)    { WakeConditionVariable(&c->cv); }
-  static inline void yoop_cond_broadcast(yoop_cond_t* c) { WakeAllConditionVariable(&c->cv); }
-
-  static int yoop_cpu_count(void) {
-      SYSTEM_INFO si; GetSystemInfo(&si);
-      return (int)si.dwNumberOfProcessors;
-  }
-#else
-  #include <pthread.h>
-  #include <unistd.h>
-  struct yoop_mutex  { pthread_mutex_t m; };
-  struct yoop_cond   { pthread_cond_t  c; };
-  struct yoop_thread { pthread_t       t; };
-
-  static inline void yoop_mutex_init(yoop_mutex_t* m)    { pthread_mutex_init(&m->m, NULL); }
-  static inline void yoop_mutex_destroy(yoop_mutex_t* m) { pthread_mutex_destroy(&m->m); }
-  static inline void yoop_mutex_lock(yoop_mutex_t* m)    { pthread_mutex_lock(&m->m); }
-  static inline void yoop_mutex_unlock(yoop_mutex_t* m)  { pthread_mutex_unlock(&m->m); }
-
-  static inline void yoop_cond_init(yoop_cond_t* c)      { pthread_cond_init(&c->c, NULL); }
-  static inline void yoop_cond_destroy(yoop_cond_t* c)   { pthread_cond_destroy(&c->c); }
-  static inline void yoop_cond_wait(yoop_cond_t* c, yoop_mutex_t* m) {
-      pthread_cond_wait(&c->c, &m->m);
-  }
-  static inline void yoop_cond_signal(yoop_cond_t* c)    { pthread_cond_signal(&c->c); }
-  static inline void yoop_cond_broadcast(yoop_cond_t* c) { pthread_cond_broadcast(&c->c); }
-
-  static int yoop_cpu_count(void) {
-      long n = sysconf(_SC_NPROCESSORS_ONLN);
-      return (n > 0) ? (int)n : 1;
-  }
-#endif
 
 #define A_LOAD_U8(p)      atomic_load_explicit((_Atomic uint8_t*)(p),  memory_order_acquire)
 #define A_STORE_U8(p, v)  atomic_store_explicit((_Atomic uint8_t*)(p), (v), memory_order_release)
@@ -86,6 +39,10 @@ static inline void*          handle_state_ptr (void* h) { return (char*)h + 8;  
 // - the byte just stops being padding.
 static inline void*          handle_cancel_ptr(void* h) { return (char*)h + 9;  }
 static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; }
+// Async: the task body's coroutine handle, stored by the thunk. Sits at
+// offset 32, immediately after the cond pointer, so every offset the
+// prefix accessors above hard-code is unchanged.
+static inline void**         handle_coro_slot (void* h) { return (void**)((char*)h + 32); }
 
 // ---- queue ----------------------------------------------------------------
 
@@ -128,6 +85,10 @@ static struct {
 
 // ---- worker loop ----------------------------------------------------------
 
+// Defined below, next to the other queue operations; declared here
+// because yoop_task_submit (further up) is its first caller.
+static void queue_push(void* handle, void (*thunk)(void*));
+
 // Phase 9.I: pop one task from the front of the queue and return it. Caller
 // must hold queue_mu and is responsible for free()-ing the returned node.
 // Returns NULL when the queue is empty.
@@ -137,6 +98,55 @@ static task_node* try_pop_task_locked(void) {
     g_rt.queue_head = node->next;
     if (!g_rt.queue_head) g_rt.queue_tail = NULL;
     return node;
+}
+
+// The task this thread is currently stepping. A suspend primitive deep
+// in a call chain reads it to register a wakeup against the right task,
+// so no intermediate signature has to carry a task handle.
+//
+// Thread-local because a step runs to its next suspend point on exactly
+// one thread; the value is set around each step and cleared after.
+#ifdef _WIN32
+  static __declspec(thread) void* tls_current_task = NULL;
+#else
+  static __thread void* tls_current_task = NULL;
+#endif
+
+void* yoop_current_task(void) { return tls_current_task; }
+
+// Coroutine trampolines, installed by main (see the note in the header
+// on why these are pointers rather than direct calls). NULL until then.
+static yoop_coro_fn   g_coro_resume  = NULL;
+static yoop_coro_fn   g_coro_destroy = NULL;
+static yoop_coro_pred g_coro_done    = NULL;
+
+void yoop_runtime_set_coro_ops(yoop_coro_fn resume,
+                               yoop_coro_fn destroy,
+                               yoop_coro_pred done) {
+    g_coro_resume  = resume;
+    g_coro_destroy = destroy;
+    g_coro_done    = done;
+}
+
+// Run one step of a task: the initial start (thunk != NULL) or a resume
+// of an already-started coroutine. The step ends at the task's next
+// suspend point or at its completion; either way the worker is free
+// afterwards, which is the entire point of the async runtime.
+static void run_task_step(void* handle, void (*thunk)(void*)) {
+    void* prev = tls_current_task;
+    tls_current_task = handle;
+    if (thunk) {
+        // Start: the thunk calls the body, stashes the coroutine handle,
+        // and calls yoop_task_settle itself.
+        thunk(handle);
+    } else {
+        void* coro = *handle_coro_slot(handle);
+        if (coro && g_coro_resume) {
+            g_coro_resume(coro);
+            yoop_task_settle(handle);
+        }
+    }
+    tls_current_task = prev;
 }
 
 static void worker_loop(void) {
@@ -152,7 +162,7 @@ static void worker_loop(void) {
         task_node* node = try_pop_task_locked();
         yoop_mutex_unlock(&g_rt.queue_mu);
 
-        node->thunk(node->handle);
+        run_task_step(node->handle, node->thunk);
         free(node);
     }
 }
@@ -303,18 +313,7 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
     *handle_cond_slot(handle)  = c;
     A_STORE_U8(handle_state_ptr(handle), 0);
 
-    task_node* node = (task_node*)malloc(sizeof(task_node));
-    node->handle = handle;
-    node->thunk  = thunk;
-    node->next   = NULL;
-
-    yoop_mutex_lock(&g_rt.queue_mu);
-    ensure_workers_spawned_locked();
-    if (g_rt.queue_tail) g_rt.queue_tail->next = node;
-    else                 g_rt.queue_head = node;
-    g_rt.queue_tail = node;
-    yoop_cond_signal(&g_rt.queue_cv);
-    yoop_mutex_unlock(&g_rt.queue_mu);
+    queue_push(handle, thunk);
 }
 
 // Phase 10.F: wait_until passes its absolute monotonic deadline through to
@@ -325,33 +324,19 @@ void yoop_task_submit(void* handle, void (*thunk)(void*)) {
 // broadcast wakes us."
 #define YOOP_WAIT_NO_DEADLINE ((uint64_t)0)
 
-#ifndef _WIN32
-// POSIX: block on queue_cv until either a broadcast wakes us or the
-// given absolute monotonic deadline elapses. deadline_ns == 0 means
-// "no deadline" - use pthread_cond_wait. Returns 0 on signal,
-// ETIMEDOUT on timer expiry, other on error.
+// Block on queue_cv until a broadcast wakes us or the absolute
+// monotonic `deadline_ns` elapses (0 = no deadline). Returns 0 on a
+// wake, 1 on deadline expiry.
+//
+// This used to be two hand-written #ifdef bodies that disagreed with
+// each other: the POSIX branch returned ETIMEDOUT while the Windows
+// branch returned 1, and the single call site only tested for
+// ETIMEDOUT - so a Windows timeout was silently read as a wake. Both
+// now share yoop_cv_wait_until_locked, which also pins the wait to the
+// same monotonic clock yoop_now_ns reads.
 static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
-    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
-        return pthread_cond_wait(&g_rt.queue_cv.c, &g_rt.queue_mu.m);
-    }
-    struct timespec deadline;
-    deadline.tv_sec  = (time_t)(deadline_ns / 1000000000ULL);
-    deadline.tv_nsec = (long)(deadline_ns % 1000000000ULL);
-    return pthread_cond_timedwait(&g_rt.queue_cv.c, &g_rt.queue_mu.m, &deadline);
+    return yoop_cv_wait_until_locked(&g_rt.queue_cv, &g_rt.queue_mu, deadline_ns);
 }
-#else
-static int queue_cv_wait_until_locked(uint64_t deadline_ns) {
-    if (deadline_ns == YOOP_WAIT_NO_DEADLINE) {
-        BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, INFINITE);
-        return ok ? 0 : -1;
-    }
-    uint64_t now = yoop_now_ns();
-    DWORD ms = now >= deadline_ns ? 0
-        : (DWORD)((deadline_ns - now + 999999ULL) / 1000000ULL);
-    BOOL ok = SleepConditionVariableCS(&g_rt.queue_cv.cv, &g_rt.queue_mu.cs, ms);
-    return ok ? 0 : (GetLastError() == ERROR_TIMEOUT ? 1 : -1);
-}
-#endif
 
 // Phase 9.I: suspendable wait.
 //
@@ -373,7 +358,7 @@ void yoop_task_wait(void* handle) {
         task_node* n = try_pop_task_locked();
         if (n) {
             yoop_mutex_unlock(&g_rt.queue_mu);
-            n->thunk(n->handle);
+            run_task_step(n->handle, n->thunk);
             free(n);
             continue;
         }
@@ -437,7 +422,7 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns) {
         }
         int rc = queue_cv_wait_until_locked(deadline_ns);
         yoop_mutex_unlock(&g_rt.queue_mu);
-        if (rc == ETIMEDOUT) {
+        if (rc == 1) {
             // Last-look at state + cancel - a broadcast may have raced
             // with the timeout; prefer Done, then Cancelled, over Timeout.
             if (A_LOAD_U8(handle_state_ptr(handle)) != 0) return 0;
@@ -464,6 +449,54 @@ void yoop_task_cancel(void* handle) {
     yoop_mutex_lock(&g_rt.queue_mu);
     yoop_cond_broadcast(&g_rt.queue_cv);
     yoop_mutex_unlock(&g_rt.queue_mu);
+}
+
+// Push a node onto the run queue. Caller must NOT hold queue_mu.
+static void queue_push(void* handle, void (*thunk)(void*)) {
+    task_node* node = (task_node*)malloc(sizeof(task_node));
+    if (!node) return;
+    node->handle = handle;
+    node->thunk  = thunk;
+    node->next   = NULL;
+
+    yoop_mutex_lock(&g_rt.queue_mu);
+    ensure_workers_spawned_locked();
+    if (g_rt.queue_tail) g_rt.queue_tail->next = node;
+    else                 g_rt.queue_head = node;
+    g_rt.queue_tail = node;
+    yoop_cond_signal(&g_rt.queue_cv);
+    yoop_mutex_unlock(&g_rt.queue_mu);
+}
+
+// A suspended task became runnable again. thunk == NULL marks a resume
+// rather than a start, so run_task_step drives the stored coroutine
+// handle instead of re-running the body from the top.
+void yoop_task_make_runnable(void* handle) {
+    if (!handle) return;
+    queue_push(handle, NULL);
+}
+
+// End of one task step. Either the coroutine reached its final suspend -
+// its result is already sitting in the task's own slot, because the
+// thunk handed the body that slot as its return destination - or it
+// merely suspended and something else will make it runnable later.
+void yoop_task_settle(void* handle) {
+    void* coro = *handle_coro_slot(handle);
+    if (!coro || !g_coro_done) {
+        // No coroutine (or no ops installed): the step ran to completion
+        // synchronously. Anything else would leave the task unfinished
+        // forever and hang every waiter.
+        yoop_handle_signal_done(handle);
+        return;
+    }
+    if (!g_coro_done(coro)) {
+        return;   // suspended - the worker is free, the task stays parked
+    }
+    // Finished. Destroy the frame BEFORE signalling: once state flips, a
+    // waiter can return and drop the last reference to the handle.
+    *handle_coro_slot(handle) = NULL;
+    if (g_coro_destroy) g_coro_destroy(coro);
+    yoop_handle_signal_done(handle);
 }
 
 void yoop_handle_signal_done(void* handle) {
@@ -571,6 +604,49 @@ void yoop_park(yoop_park_token_t* t) {
     yoop_mutex_unlock(t->mu);
 }
 
+// Timed park. Returns 0 when an unpark was consumed, 1 when
+// `deadline_ns` elapsed first (0 = no deadline, identical to yoop_park).
+//
+// On the timeout path the token is restored to idle rather than left in
+// the "parking" state, so an unpark that lands a moment later is
+// remembered as a pending wake instead of being dropped on the floor.
+// That keeps the token reusable, but it does NOT by itself make
+// abandoning safe: whoever owns the token still has to prove no unpark
+// is in flight before freeing the storage. yoop_io.c does that with the
+// fired-under-io_mu handshake.
+int yoop_park_until(yoop_park_token_t* t, uint64_t deadline_ns) {
+    yoop_mutex_lock(t->mu);
+    if (t->state == 1) {
+        t->state = 0;
+        yoop_mutex_unlock(t->mu);
+        return 0;
+    }
+    if (deadline_ns == 0) {
+        t->state = 2;
+        while (t->state == 2) {
+            yoop_cond_wait(t->cv, t->mu);
+        }
+        yoop_mutex_unlock(t->mu);
+        return 0;
+    }
+
+    t->state = 2; // parking
+    int timed_out = 0;
+    while (t->state == 2) {
+        if (yoop_cv_wait_until_locked(t->cv, t->mu, deadline_ns) == 1) {
+            // Deadline hit. Re-check state under the lock: an unpark may
+            // have raced in, in which case it wins (state is already 0).
+            if (t->state == 2) {
+                t->state = 0;
+                timed_out = 1;
+            }
+            break;
+        }
+    }
+    yoop_mutex_unlock(t->mu);
+    return timed_out;
+}
+
 void yoop_unpark(yoop_park_token_t* t) {
     yoop_mutex_lock(t->mu);
     if (t->state == 2) {
@@ -590,80 +666,67 @@ void yoop_unpark(yoop_park_token_t* t) {
 #include <time.h>
 #include <errno.h>
 
-// Compute deadline.tv_sec / tv_nsec = now + ns. `clock_id` is the clock
-// that pthread_cond_timedwait will use; on Linux this is set via
-// pthread_condattr_setclock(CLOCK_MONOTONIC), on macOS it's always
-// CLOCK_REALTIME.
-static void deadline_from_now(struct timespec* deadline, uint64_t ns,
-                              clockid_t clock_id) {
-    clock_gettime(clock_id, deadline);
-    deadline->tv_sec  += (time_t)(ns / 1000000000ULL);
-    long add_ns        = (long)(ns % 1000000000ULL);
-    deadline->tv_nsec += add_ns;
-    if (deadline->tv_nsec >= 1000000000L) {
-        deadline->tv_sec  += 1;
-        deadline->tv_nsec -= 1000000000L;
-    }
-}
-
+// Sleep for `ns`. Built on the same mutex/cond pair + shared timed wait
+// every other blocking path uses, so it agrees with yoop_now_ns by
+// construction. It used to hand-roll its own condattr dance inline,
+// which is how the clock choice managed to differ from the deadline
+// clock the task waits used.
 int yoop_sleep_ns(uint64_t ns) {
-#ifdef _WIN32
-    // Windows uses sleep/SleepEx for ms granularity; ns gets rounded.
-    DWORD ms = (DWORD)((ns + 999999ULL) / 1000000ULL);
-    Sleep(ms);
+    if (ns == 0) return 0;
+
+    yoop_mutex_t mu;
+    yoop_cond_t  cv;
+    yoop_mutex_init(&mu);
+    yoop_cond_init(&cv);
+
+    uint64_t deadline = yoop_now_ns() + ns;
+
+    yoop_mutex_lock(&mu);
+    // Nobody holds cv, so every wake is spurious - loop until the
+    // deadline actually elapses.
+    while (yoop_cv_wait_until_locked(&cv, &mu, deadline) == 0) {
+        if (yoop_now_ns() >= deadline) break;
+    }
+    yoop_mutex_unlock(&mu);
+
+    yoop_cond_destroy(&cv);
+    yoop_mutex_destroy(&mu);
     return 0;
-#else
-    pthread_mutex_t mu;
-    pthread_cond_t  cv;
-    pthread_mutex_init(&mu, NULL);
-
-  #if defined(__linux__)
-    // Linux supports overriding the cond's clock. Use CLOCK_MONOTONIC so
-    // wall-clock jumps (NTP) don't move the deadline.
-    pthread_condattr_t attrs;
-    pthread_condattr_init(&attrs);
-    pthread_condattr_setclock(&attrs, CLOCK_MONOTONIC);
-    pthread_cond_init(&cv, &attrs);
-    pthread_condattr_destroy(&attrs);
-    clockid_t clock_id = CLOCK_MONOTONIC;
-  #else
-    // macOS / BSD: pthread_cond_timedwait always uses CLOCK_REALTIME.
-    pthread_cond_init(&cv, NULL);
-    clockid_t clock_id = CLOCK_REALTIME;
-  #endif
-
-    struct timespec deadline;
-    deadline_from_now(&deadline, ns, clock_id);
-
-    pthread_mutex_lock(&mu);
-    int rc;
-    do {
-        rc = pthread_cond_timedwait(&cv, &mu, &deadline);
-        // rc == 0 means "signaled," which can't happen since no one
-        // holds cv. Treat as a spurious wake and re-wait.
-    } while (rc == 0);
-    pthread_mutex_unlock(&mu);
-
-    pthread_cond_destroy(&cv);
-    pthread_mutex_destroy(&mu);
-
-    return rc == ETIMEDOUT ? 0 : -1;
-#endif
 }
 
 int yoop_sleep_ms(uint64_t ms) {
     return yoop_sleep_ns(ms * 1000000ULL);
 }
 
-// Phase 10.F: return the current wall-clock time in nanoseconds. The clock
-// source matches what the queue_cv pthread_cond_timedwait uses (default
-// CLOCK_REALTIME on both Linux and macOS), so a deadline computed as
-// `yoop_now_ns() + duration_ns` is directly usable by
-// yoop_task_wait_until_ns. On Windows we use GetSystemTimeAsFileTime and
-// rebase off the Unix epoch - the same SleepConditionVariableCS path uses
-// relative ms anyway, so the absolute reading just needs to compare
-// monotonically with itself for deadline arithmetic.
+// Phase 10.F: the deadline clock. Monotonic on every platform - it used
+// to read CLOCK_REALTIME, so an NTP step (or any manual clock change)
+// moved every in-flight deadline. Every timed wait in the runtime goes
+// through yoop_cv_wait_until_locked, which is pinned to this same
+// clock, so `yoop_now_ns() + duration` is always a valid deadline.
+//
+// Callers who want an actual timestamp want yoop_wall_ns instead.
 uint64_t yoop_now_ns(void) {
+#ifdef _WIN32
+    static LARGE_INTEGER freq;
+    static int freq_ready = 0;
+    if (!freq_ready) { QueryPerformanceFrequency(&freq); freq_ready = 1; }
+    LARGE_INTEGER c;
+    QueryPerformanceCounter(&c);
+    // Split to avoid overflowing the multiply on long-running processes.
+    uint64_t q = (uint64_t)freq.QuadPart;
+    uint64_t whole = (uint64_t)c.QuadPart / q;
+    uint64_t rem   = (uint64_t)c.QuadPart % q;
+    return whole * 1000000000ULL + (rem * 1000000000ULL) / q;
+#else
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+// Wall-clock nanoseconds since the Unix epoch. Can step backwards -
+// never use it as a deadline base.
+uint64_t yoop_wall_ns(void) {
 #ifdef _WIN32
     FILETIME ft;
     GetSystemTimeAsFileTime(&ft);

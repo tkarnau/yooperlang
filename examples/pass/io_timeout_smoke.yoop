@@ -1,0 +1,95 @@
+// Bounded socket I/O: accept and read that give up instead of hanging.
+//
+// Before this landed, every std/net operation parked on the runtime
+// multiplexer with no way out. A listener with no inbound connection,
+// or a peer that stopped talking mid-request, held its thread for the
+// life of the process. The `TimeoutMs` variants put a ceiling on that.
+//
+// The three-way `IoOutcome` / `AcceptOutcome` is deliberate: "no data
+// yet" and "the socket broke" are different situations and a caller
+// almost always handles them differently.
+
+import { disposable } from "std/core/kinds.yoop";
+import {
+    AcceptOutcome, ConnectResult, IoOutcome, ListenResult,
+} from "std/net";
+import * as tcp from "std/net";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const PORT: int32 = 34571;
+
+function main(): int32 {
+    disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", PORT, 8);
+    if (lr.error.len > 0) {
+        printf("listen failed: %s\n", lr.error);
+        return 1;
+    }
+
+    // 1. Nobody is dialing in, so a bounded accept gives up on time.
+    //    The plain tcp_accept would still be parked here.
+    switch (tcp.tcpAcceptTimeoutMs(ref lr.listener, 120)) {
+        case AcceptOutcome.Accepted { stream: s0, peerHost: h0, peerPort: p0 }: {
+            printf("accept: unexpected connection\n");
+        }
+        case AcceptOutcome.TimedOut:  { printf("accept: timed out\n"); }
+        case AcceptOutcome.Cancelled: { printf("accept: unexpected cancel\n"); }
+        case AcceptOutcome.Err { error: e0 }: { printf("accept: err %s\n", e0); }
+    }
+
+    // 2. Dial in for real, then accept with room to spare.
+    disposable cr: ConnectResult = tcp.tcp_connect("127.0.0.1", PORT);
+    if (cr.error.len > 0) {
+        printf("connect failed: %s\n", cr.error);
+        return 1;
+    }
+
+    switch (tcp.tcpAcceptTimeoutMs(ref lr.listener, 3000)) {
+        case AcceptOutcome.Accepted { stream: srv, peerHost: h1, peerPort: p1 }: {
+            printf("accept: connected\n");
+
+            // 3. The client connected but never sent a byte - exactly
+            //    the slow-loris shape that used to wedge a worker.
+            let buf: uint8[] = [0, 0, 0, 0, 0, 0, 0, 0];
+            switch (tcp.tcpReadTimeoutMs(ref srv, ref buf, 120)) {
+                case IoOutcome.Bytes { n: n1 }:      { printf("read: unexpected bytes\n"); }
+                case IoOutcome.TimedOut { sent: s1 }: { printf("read: timed out\n"); }
+                case IoOutcome.Cancelled { sent: s2 }: { printf("read: unexpected cancel\n"); }
+                case IoOutcome.Err { error: e1 }:     { printf("read: err %s\n", e1); }
+            }
+
+            // 4. Send something back; a write with headroom completes
+            //    normally and reports how much went out.
+            let msg: uint8[] = [104, 105, 10];   // "hi\n"
+            switch (tcp.tcpWriteAllTimeoutMs(ref srv, ref msg, 3000)) {
+                case IoOutcome.Bytes { n: n2 }:        { printf("write: sent %d\n", int32(n2)); }
+                case IoOutcome.TimedOut { sent: s3 }:  { printf("write: timed out\n"); }
+                case IoOutcome.Cancelled { sent: s4 }: { printf("write: cancelled\n"); }
+                case IoOutcome.Err { error: e2 }:      { printf("write: err %s\n", e2); }
+            }
+
+            // 5. The client end can now read what the server wrote.
+            let inbuf: uint8[] = [0, 0, 0, 0];
+            switch (tcp.tcpReadTimeoutMs(ref cr.stream, ref inbuf, 3000)) {
+                case IoOutcome.Bytes { n: n3 }:        { printf("client read: %d\n", int32(n3)); }
+                case IoOutcome.TimedOut { sent: s5 }:  { printf("client read: timed out\n"); }
+                case IoOutcome.Cancelled { sent: s6 }: { printf("client read: cancelled\n"); }
+                case IoOutcome.Err { error: e3 }:      { printf("client read: err %s\n", e3); }
+            }
+        }
+        case AcceptOutcome.TimedOut:  { printf("accept: unexpected timeout\n"); }
+        case AcceptOutcome.Cancelled: { printf("accept: unexpected cancel\n"); }
+        case AcceptOutcome.Err { error: e4 }: { printf("accept: err %s\n", e4); }
+    }
+
+    return 0;
+}
+
+// expected output:
+// accept: timed out
+// accept: connected
+// read: timed out
+// write: sent 3
+// client read: 3

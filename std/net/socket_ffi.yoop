@@ -1,3 +1,5 @@
+module net;
+
 // std/net/socket_ffi.yoop - unsafe libc + runtime FFI for the net layer.
 //
 // The /only/ module under std/net that imports unsafe. Every safe wrapper
@@ -19,14 +21,16 @@
 import.unsafe;
 
 import { Result } from "../core/types.yoop";
+import { RawCancel } from "../core/cancel";
+import * as conc from "../core/concurrency.yoop";
 import * as intr from "../core/intrinsics.yoop";
 
 // ----- POSIX socket constants (stable across Linux / macOS / BSD) ----------
 
-export const AF_INET:     c_int = 2;
-export const SOCK_STREAM: c_int = 1;
-export const IPPROTO_TCP: c_int = 6;
-export const INADDR_ANY:  uint32 = 0;
+const AF_INET:     c_int = 2;
+const SOCK_STREAM: c_int = 1;
+const IPPROTO_TCP: c_int = 6;
+const INADDR_ANY:  uint32 = 0;
 
 // ----- sockaddr_in mirror (C ABI, 16 bytes) --------------------------------
 
@@ -44,7 +48,7 @@ kind c_layout {
 // Total: 16 bytes. We model sin_zero as a single uint64 because (a) it's
 // the right size and (b) yoop doesn't yet have fixed-size byte arrays as
 // struct fields.
-export type SockAddrIn c_layout {
+type SockAddrIn c_layout {
     sin_family: uint16,
     sin_port:   uint16,
     sin_addr:   uint32,
@@ -75,6 +79,16 @@ extern "C" from "arpa/inet.h" {
 extern "C" from "yoop_runtime" {
     function yoop_io_wait_readable(fd: c_int): c_int;
     function yoop_io_wait_writable(fd: c_int): c_int;
+    // Deadline- and cancellation-aware readiness waits. `ct` may be a
+    // null RawCancel and `deadlineNs` may be 0; either way the other
+    // still applies, and with both absent these behave exactly like the
+    // two-argument forms above. Return one of the IO_* codes below.
+    function yoop_io_wait_readable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
+    function yoop_io_wait_writable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
+    // Non-blocking mode + the portable EAGAIN test, both needed by the
+    // async helpers at the bottom of this file.
+    function yoop_io_set_nonblocking(fd: c_int): c_int;
+    function yoop_io_would_block(e: int32): c_int;
     // Cross-platform SO_REUSEADDR helper. SOL_SOCKET / SO_REUSEADDR have
     // different numeric values on Linux vs macOS, so we resolve them in
     // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
@@ -90,7 +104,7 @@ extern "C" from "yoop_runtime" {
 // Build a sockaddr_in for "host:port". host must be a numeric IPv4
 // dotted-quad ("127.0.0.1", "0.0.0.0"). inet_addr returns 0xFFFFFFFF on
 // failure; we surface that as `Err`.
-export function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
+function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
     let ipv4: uint32 = inet_addr(host);
     // inet_addr returns INADDR_NONE (0xFFFFFFFF) on bad input - except
     // "255.255.255.255" which is the broadcast address. We don't bind to
@@ -111,7 +125,7 @@ export function build_sockaddr(host: string, port: int32): Result<SockAddrIn, st
 
 // Allocate a TCP/IPv4 socket. Returns the raw fd in `Ok` or an errno
 // message in `Err`.
-export function ffi_socket_open(): Result<c_int, string> {
+function ffi_socket_open(): Result<c_int, string> {
     let fd: c_int = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         return Result.Err { error: errno.message(errno.get()) };
@@ -123,7 +137,7 @@ export function ffi_socket_open(): Result<c_int, string> {
 // hand it to a Socket envelope) or an `Err` on any step's failure.
 // Closes the fd on bind/listen failure so we don't leak fds across error
 // returns.
-export function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, string> {
+function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, string> {
     let open: Result<c_int, string> = ffi_socket_open();
     let fd: c_int = 0;
     switch (open) {
@@ -153,6 +167,10 @@ export function ffi_listen(host: string, port: int32, backlog: int32): Result<c_
         return Result.Err { error: msg_bind };
     }
 
+    // The listening socket goes non-blocking too, so the async accept can
+    // retry around EAGAIN rather than sleeping inside accept().
+    let nb_rc: c_int = yoop_io_set_nonblocking(fd);
+
     let listen_rc: c_int = listen(fd, backlog);
     if (listen_rc != 0) {
         let msg_listen: string = errno.message(errno.get());
@@ -165,7 +183,7 @@ export function ffi_listen(host: string, port: int32, backlog: int32): Result<c_
 
 // Multi-field success payload for `ffi_accept` - bundles the new client
 // fd with the peer's address. Named so it can ride inside Result.Ok.
-export type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
+type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
 
 // Park on the listening fd's readability, then accept(). Returns the
 // new client fd plus the peer's address (parsed back out of the
@@ -175,7 +193,7 @@ export type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
 // pthread on the multiplexer regardless of task/function context. The
 // caller is expected to spawn a task wrapping this if it wants
 // per-connection concurrency (see std/net/tcp.yoop's higher-level wrapper).
-export function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
+function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
     let wait_rc: c_int = yoop_io_wait_readable(fd);
     if (wait_rc != 0) {
         return Result.Err { error: errno.message(errno.get()) };
@@ -193,12 +211,12 @@ export function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
 
 // Connect a freshly opened fd to host:port. Caller owns the fd.
 // Err-only outcome: `Ok` on success, `Err { error }` on failure.
-export variant ConnectOutcome {
+variant ConnectOutcome {
     Ok,
     Err { error: string },
 }
 
-export function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
+function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
     // inet_addr only handles dotted-quad. If that fails, fall back to a
     // DNS lookup via the runtime helper. Numeric hosts skip the resolve
     // and dial directly.
@@ -228,7 +246,7 @@ export function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcom
 // pointer; passing by value copies the (ptr,len) header but the bytes
 // are still the caller's storage. Returns bytes read in `Ok` (0 = EOF),
 // or `Err` on a syscall failure.
-export function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
+function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     let wait_rc: c_int = yoop_io_wait_readable(fd);
     if (wait_rc != 0) {
         return Result.Err { error: errno.message(errno.get()) };
@@ -243,7 +261,7 @@ export function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
 // Park on writability, then send() in a loop until every byte of `buf`
 // has been transmitted or an error occurs. Returns total bytes sent in
 // `Ok` (== buf.len on success).
-export function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
+function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     let total: usize = 0;
     while (total < buf.len) {
         let wait_rc: c_int = yoop_io_wait_writable(fd);
@@ -263,6 +281,227 @@ export function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string>
 // Thin close wrapper exported for the Socket disposer. Returns the libc
 // rc as-is so the caller can log + continue (a failed close almost never
 // matters for a server).
-export function ffi_close(fd: c_int): c_int {
+function ffi_close(fd: c_int): c_int {
     return close(fd);
+}
+
+// ----- async (suspending) operations ---------------------------------------
+//
+// The blocking helpers above park the calling thread inside the
+// multiplexer. These suspend the calling TASK instead, handing its worker
+// back to the pool, so one worker can carry many in-flight connections.
+//
+// The shape is always "try the syscall; if it would block, wait for
+// readiness and retry", which is why the fd has to be non-blocking - a
+// blocking fd would sleep inside recv and never reach the wait.
+//
+// `awaitReady` hides the one wrinkle: `conc.awaitReadable` reports 1 when
+// there is no current task (called straight from main rather than from a
+// worker). Suspending there would park a coroutine nothing can resume, so
+// that case falls back to the blocking wait. The upshot is that the same
+// std/net code is correct on a worker and on main; it just suspends in
+// one and blocks in the other.
+function wouldBlock(e: int32): bool {
+    return yoop_io_would_block(e) != 0;
+}
+
+async awaitReady(fd: c_int, wantWrite: bool): c_int {
+    let armed: c_int = 0;
+    if (wantWrite) { armed = await conc.awaitWritable(fd); }
+    else           { armed = await conc.awaitReadable(fd); }
+    if (armed == 1) {
+        // Not on a worker - block this thread instead.
+        if (wantWrite) { return yoop_io_wait_writable(fd); }
+        return yoop_io_wait_readable(fd);
+    }
+    return armed;
+}
+
+// Put a socket into non-blocking mode. Every fd that reaches the async
+// helpers must go through this first; std/net does it in `newStream` and
+// in `ffi_listen`, so callers never have to remember.
+function ffiSetNonblocking(fd: c_int): c_int {
+    return yoop_io_set_nonblocking(fd);
+}
+
+// Suspending accept. Retries around EAGAIN, which on a listening socket
+// means "no pending connection right now".
+export async ffiAcceptAsync(fd: c_int): AcceptCtResult {
+    while (true) {
+        let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
+        let len: c_int = 16;
+        let cfd: c_int = accept(fd, &peer, &len);
+        if (cfd >= 0) {
+            return {
+                code: IO_READY, fd: cfd,
+                peerHost: peer.sin_addr, peerPort: peer.sin_port, error: "",
+            };
+        }
+        let e: int32 = errno.get();
+        if (!wouldBlock(e)) {
+            return {
+                code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+                error: errno.message(e),
+            };
+        }
+        let rc: c_int = await awaitReady(fd, false);
+        if (rc != 0) {
+            return {
+                code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+                error: errno.message(errno.get()),
+            };
+        }
+    }
+    return { code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0, error: "" };
+}
+
+// Suspending single read. `n == 0` with code IO_READY is EOF.
+export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
+    while (true) {
+        let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+        if (n >= 0) { return { code: IO_READY, n: n, error: "" }; }
+        let e: int32 = errno.get();
+        if (!wouldBlock(e)) { return ioErr(errno.message(e)); }
+        let rc: c_int = await awaitReady(fd, false);
+        if (rc != 0) { return ioErr(errno.message(errno.get())); }
+    }
+    return ioErr("unreachable");
+}
+
+// Suspending write-everything. Loops until the whole buffer is out,
+// suspending whenever the socket buffer fills.
+export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
+    let total: usize = 0;
+    while (total < buf.len) {
+        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        if (n >= 0) {
+            total = total + usize(n);
+        } else {
+            let e: int32 = errno.get();
+            if (!wouldBlock(e)) {
+                return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(e) };
+            }
+            let rc: c_int = await awaitReady(fd, true);
+            if (rc != 0) {
+                return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
+            }
+        }
+    }
+    return { code: IO_READY, n: c_ssize_t(total), error: "" };
+}
+
+// ----- cancel-aware operations ---------------------------------------------
+//
+// The functions above park forever: a socket whose peer stopped talking
+// holds its thread for the life of the process. The variants below take
+// a cancellation token and an optional absolute deadline, and report
+// WHY they stopped rather than only succeeding or failing.
+//
+// These are the primitives; std/net/tcp.yoop wraps them into the safe
+// variant-returning surface. Both layers are additive - the original
+// entry points still exist and behave exactly as before.
+
+// Outcome codes, mirroring the runtime's YOOP_WAIT_* values.
+const IO_READY:     int32 = 0;
+const IO_TIMEDOUT:  int32 = 1;
+const IO_CANCELLED: int32 = 2;
+const IO_ERROR:     int32 = -1;
+
+// A cancel-aware byte-transfer outcome. `code` is one of the IO_*
+// constants; `n` is meaningful only when `code == IO_READY`, and
+// `error` only when `code == IO_ERROR`. Returned as a plain struct so
+// the variant shape lives in the safe layer (tcp.yoop) rather than
+// here, where it would drag `unsafe_ptr` into a public signature.
+type IoResult { code: int32, n: c_ssize_t, error: string }
+
+// A cancel-aware accept outcome. Same convention: `fd` / `peerHost` /
+// `peerPort` are meaningful only when `code == IO_READY`.
+type AcceptCtResult {
+    code:     int32,
+    fd:       c_int,
+    peerHost: uint32,
+    peerPort: uint16,
+    error:    string,
+}
+
+function ioErr(msg: string): IoResult {
+    return { code: IO_ERROR, n: 0, error: msg };
+}
+
+function ioStop(code: int32): IoResult {
+    return { code: code, n: 0, error: "" };
+}
+
+// Wait for readability under a token + deadline, mapping a -1 return
+// into the errno message. Shared by every read-side helper below.
+function waitReadable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
+    let rc: c_int = yoop_io_wait_readable_ex(fd, ct.p, deadlineNs);
+    if (rc == IO_ERROR) { return ioErr(errno.message(errno.get())); }
+    return ioStop(int32(rc));
+}
+
+function waitWritable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
+    let rc: c_int = yoop_io_wait_writable_ex(fd, ct.p, deadlineNs);
+    if (rc == IO_ERROR) { return ioErr(errno.message(errno.get())); }
+    return ioStop(int32(rc));
+}
+
+// Park on the listening fd's readability under `ct`, then accept().
+// Returns IO_TIMEDOUT / IO_CANCELLED instead of blocking forever when
+// no connection arrives - which is what makes a server loop able to
+// notice a shutdown request.
+function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResult {
+    let w: IoResult = waitReadable(fd, ct, deadlineNs);
+    if (w.code != IO_READY) {
+        return { code: w.code, fd: -1, peerHost: 0, peerPort: 0, error: w.error };
+    }
+    let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
+    let len: c_int = 16;
+    let cfd: c_int = accept(fd, &peer, &len);
+    if (cfd < 0) {
+        return {
+            code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+            error: errno.message(errno.get()),
+        };
+    }
+    return {
+        code:     IO_READY,
+        fd:       cfd,
+        peerHost: peer.sin_addr,
+        peerPort: peer.sin_port,
+        error:    "",
+    };
+}
+
+// Park on readability under `ct`, then recv() once into `buf`.
+// `n == 0` with `code == IO_READY` is EOF, exactly as for ffi_recv.
+function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
+    let w: IoResult = waitReadable(fd, ct, deadlineNs);
+    if (w.code != IO_READY) { return w; }
+    let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+    if (n < 0) { return ioErr(errno.message(errno.get())); }
+    return { code: IO_READY, n: n, error: "" };
+}
+
+// Park on writability under `ct` and send until every byte of `buf` has
+// gone out. A timeout or cancellation mid-stream reports how many bytes
+// DID make it in `n` - a partially-written message is exactly the thing
+// the caller needs to know about, and silently reporting 0 would hide
+// it.
+function ffiSendAllCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
+    let total: usize = 0;
+    while (total < buf.len) {
+        let w: IoResult = waitWritable(fd, ct, deadlineNs);
+        if (w.code != IO_READY) {
+            return { code: w.code, n: c_ssize_t(total), error: w.error };
+        }
+        let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
+        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        if (n < 0) {
+            return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
+        }
+        total = total + usize(n);
+    }
+    return { code: IO_READY, n: c_ssize_t(total), error: "" };
 }

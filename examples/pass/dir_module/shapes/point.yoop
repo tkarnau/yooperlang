@@ -1,0 +1,24 @@
+module shapes;
+
+// One of TWO source files that make up the `shapes` module. Neither imports
+// the other: files in a directory module share one namespace, so everything
+// declared here is visible in area.yoop with no import at all - including the
+// things that are NOT exported.
+import * as vec, { Vec } from "std/core/vec.yoop";
+
+export type Point { x: int32, y: int32 }
+
+// Private to the module. area.yoop calls it anyway (that is the point).
+function doubled(v: int32): int32 {
+    return v * 2;
+}
+
+export function stretched(p: Point): Point {
+    return { x: doubled(p.x), y: doubled(p.y) };
+}
+
+// A module-level const whose initializer cannot be comptime-folded, so it
+// really does go through a runtime module-init. area.yoop has one too, which is
+// what makes this fixture cover the per-source-file init symbol: one
+// `@<moduleId>__module_init` for both files would be an LLVM redefinition.
+export const SCRATCH_A: Vec<int32> = vec.vec_new(4);

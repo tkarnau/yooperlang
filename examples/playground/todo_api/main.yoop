@@ -1,0 +1,444 @@
+// todo_api - a CRUD JSON API over sqlite.
+//
+//   GET    /healthz            service + row count
+//   GET    /todos              list, ?done=true|false and ?limit=N
+//   POST   /todos              create      (form body: title, priority)
+//   POST   /todos/import       bulk create (form body: repeated title=)
+//   GET    /todos/:id          one todo
+//   PUT    /todos/:id          replace     (form body: title, done, priority)
+//   DELETE /todos/:id          remove
+//
+// Build and run:
+//
+//   yoopiler examples/playground/todo_api/main.yoop -o todo_api && ./todo_api
+//   ./examples/playground/todo_api/smoke.sh          (in another terminal)
+//
+// It lives under playground/ rather than pass/ because it links libsqlite3.
+//
+// Input is `application/x-www-form-urlencoded` because std/http parses it
+// already and it is a real content type that curl sends with `-d`. Output is
+// JSON because that is what a client expects to read. There is no JSON
+// parser in the tree and this example does not pretend otherwise.
+//
+// The three layers stay separate on purpose: store.yoop owns SQL and knows
+// nothing about HTTP, json.yoop owns encoding, and this file is only glue -
+// read a request, call the store, write a response.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { Result, Option } from "std/core/types.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import * as strings from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as fs from "std/fs.yoop";
+
+import * as tcp, { ListenResult } from "std/net";
+import * as http, { Request, Response, HttpError, Params, HttpMethod } from "std/http";
+import * as url from "std/http";
+import * as server, { Handler, HandleOutcome, Dispatcher, ServerConfig } from "std/http";
+import * as router, { Router } from "std/http";
+import * as sqlite, { Db, DbRef } from "std/db/sqlite";
+
+import * as store, { Todo } from "./store.yoop";
+import * as json from "./json.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const HOST: string    = "127.0.0.1";
+const PORT: int32     = 18086;
+const DB_PATH: string = "todos.db";
+const DEFAULT_LIMIT: int32 = 50;
+const MAX_LIMIT: int32     = 500;
+
+// ----- request helpers ----------------------------------------------------
+
+// Every handler funnels through this. A handler body returns
+// `Result<int32, HttpError>` so it can use `?`, and this turns the failure
+// into the API's own JSON error shape.
+//
+// Returning `HandleOutcome.Ok` after rendering the error is deliberate: the
+// exchange completed and the client got a well-formed answer. Handing the
+// error back to the server instead would produce its plain-text fallback,
+// which is the right shape for a request that never reached a handler and
+// the wrong one for a JSON API.
+function finish(ref resp: Response, r: Result<int32, HttpError>): HandleOutcome {
+    switch (r) {
+        case Result.Ok { value: _v }: { return HandleOutcome.Ok; }
+        case Result.Err { error: e }: {
+            http.respondJson(ref resp, e.status, json.errorObject(e.message));
+            return HandleOutcome.Ok;
+        }
+    }
+}
+
+// Parse a decimal integer, rejecting trailing junk. "12abc" is a client
+// mistake worth reporting, not a 12.
+function parseInt64(s: string, what: string): Result<int64, HttpError> {
+    let raw: uint8[] = intr.string_as_bytes(s);
+    switch (bytes.bytes_parse_int(raw)) {
+        case Result.Ok { value: p }: {
+            if (p.consumed != raw.len || raw.len == 0) {
+                return Result.Err { error: http.errBadRequest(`${what} is not a number: "${s}"`) };
+            }
+            return Result.Ok { value: p.value };
+        }
+        case Result.Err { error: _e }: {
+            return Result.Err { error: http.errBadRequest(`${what} is not a number: "${s}"`) };
+        }
+    }
+}
+
+// The `:id` the router captured.
+function routeId(ref req: Request): Result<int64, HttpError> {
+    switch (http.param(ref req, "id")) {
+        case Option.Some { value: raw }: { return parseInt64(raw, "id"); }
+        case Option.None: {
+            return Result.Err { error: http.errInternal("route has no :id capture") };
+        }
+    }
+}
+
+// Parse a urlencoded body into `out`, after checking the client said that is
+// what it sent. A 415 here is more useful than parsing whatever arrived and
+// reporting a missing field.
+function formBody(ref req: Request, ref out: Params): Result<usize, HttpError> {
+    let ct: string = http.contentType(ref req);
+    if (ct.len > 0 && !strings.string_eq_ignore_ascii_case(ct, "application/x-www-form-urlencoded")) {
+        return Result.Err {
+            error: http.httpError(http.unsupportedMedia(),
+                `expected application/x-www-form-urlencoded, got "${ct}"`),
+        };
+    }
+    if (req.body.len == 0) {
+        return Result.Err { error: http.errBadRequest("request body is empty") };
+    }
+    let n: usize = url.parseForm(req.body, ref out)?;
+    return Result.Ok { value: n };
+}
+
+function requiredField(ref form: Params, name: string): Result<string, HttpError> {
+    switch (http.paramsGet(ref form, name)) {
+        case Option.Some { value: v }: { return Result.Ok { value: v }; }
+        case Option.None: {
+            return Result.Err { error: http.errBadRequest(`missing form field "${name}"`) };
+        }
+    }
+}
+
+// "true"/"1"/"yes"/"on" are all true; anything else present is false.
+function truthy(s: string): bool {
+    return strings.string_eq_ignore_ascii_case(s, "true")
+        || strings.string_eq(s, "1")
+        || strings.string_eq_ignore_ascii_case(s, "yes")
+        || strings.string_eq_ignore_ascii_case(s, "on");
+}
+
+function optionalInt(ref form: Params, name: string, fallback: int32): Result<int32, HttpError> {
+    switch (http.paramsGet(ref form, name)) {
+        case Option.Some { value: raw }: {
+            let n: int64 = parseInt64(raw, name)?;
+            return Result.Ok { value: int32(n) };
+        }
+        case Option.None: { return Result.Ok { value: fallback }; }
+    }
+}
+
+// ----- response helpers ---------------------------------------------------
+
+function writeTodo(ref out: Vec<uint8>, ref t: Todo): void {
+    json.pushRaw(ref out, "{");
+    json.pushField(ref out, "id");
+    json.pushRaw(ref out, `${t.id},`);
+    json.pushField(ref out, "title");
+    json.pushString(ref out, t.title);
+    json.pushRaw(ref out, ",");
+    json.pushField(ref out, "done");
+    json.pushBool(ref out, t.done);
+    json.pushRaw(ref out, ",");
+    json.pushField(ref out, "priority");
+    json.pushRaw(ref out, `${t.priority}`);
+    json.pushRaw(ref out, "}");
+}
+
+// One todo as the whole body. The buffer is sealed into the response with
+// `bytes_from_vec`, a zero-copy hand-off: the Vec is left empty and the
+// response owns (and frees) the storage.
+function respondTodo(ref resp: Response, status: http.StatusCode, ref t: Todo): void {
+    disposable out: Vec<uint8> = vec.vec_new(256);
+    writeTodo(ref out, ref t);
+    json.pushRaw(ref out, "\n");
+    http.respondBytes(ref resp, status, "application/json", bytes.bytes_from_vec(ref out));
+}
+
+function respondTodoList(ref resp: Response, ref todos: Vec<Todo>): void {
+    disposable out: Vec<uint8> = vec.vec_new(128 + todos.len * 96);
+    json.pushRaw(ref out, "{");
+    json.pushField(ref out, "count");
+    json.pushRaw(ref out, `${todos.len},`);
+    json.pushField(ref out, "todos");
+    json.pushRaw(ref out, "[");
+    let view: Todo[] = vec.vec_as_array(ref todos);
+    for (let i = 0; i < view.len; i += 1) {
+        if (i > 0) { json.pushRaw(ref out, ","); }
+        writeTodo(ref out, ref view[i]);
+    }
+    json.pushRaw(ref out, "]}\n");
+    http.respondBytes(ref resp, http.ok(), "application/json", bytes.bytes_from_vec(ref out));
+}
+
+// ----- handlers -----------------------------------------------------------
+//
+// Every handler holds a `DbRef`, sqlite's explicit borrow of a connection.
+// Storing a `Db` would be a claim of ownership - the compiler asks any struct
+// with a `propagates<disposable>` field to propagate it too - and these
+// handlers do not own the connection. `main` does, and disposes it once.
+
+type HealthHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, health(ref db, ref resp));
+    }
+}
+
+function health(ref db: Db, ref resp: Response): Result<int32, HttpError> {
+    let n: int32 = store.count(ref db)? "GET /healthz";
+    http.respondJson(ref resp, http.ok(), `{"status":"ok","todos":${n}}\n`);
+    return Result.Ok { value: 0 };
+}
+
+type ListHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, listTodos(ref db, ref req, ref resp));
+    }
+}
+
+function listTodos(ref db: Db, ref req: Request, ref resp: Response): Result<int32, HttpError> {
+    let onlyDone: Option<bool> = Option.None;
+    switch (http.query(ref req, "done")) {
+        case Option.Some { value: raw }: { onlyDone = Option.Some { value: truthy(raw) }; }
+        case Option.None: { }
+    }
+
+    let limit: int32 = DEFAULT_LIMIT;
+    switch (http.query(ref req, "limit")) {
+        case Option.Some { value: raw }: {
+            let n: int64 = parseInt64(raw, "limit")?;
+            if (n <= 0) {
+                return Result.Err { error: http.errBadRequest("limit must be positive") };
+            }
+            limit = int32(n);
+            if (limit > MAX_LIMIT) { limit = MAX_LIMIT; }
+        }
+        case Option.None: { }
+    }
+
+    disposable todos: Vec<Todo> = vec.vec_new(16);
+    let _n: usize = store.list(ref db, ref todos, onlyDone, limit)? "GET /todos";
+    respondTodoList(ref resp, ref todos);
+    return Result.Ok { value: 0 };
+}
+
+type ShowHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, showTodo(ref db, ref req, ref resp));
+    }
+}
+
+function showTodo(ref db: Db, ref req: Request, ref resp: Response): Result<int32, HttpError> {
+    let id: int64 = routeId(ref req)?;
+    // A missing row arrives here as a StoreError with `missing` set, and
+    // `Into<HttpError>` turns that into a 404. No status decision in this
+    // function at all.
+    let t: Todo = store.find(ref db, id)? `GET /todos/${id}`;
+    respondTodo(ref resp, http.ok(), ref t);
+    return Result.Ok { value: 0 };
+}
+
+type CreateHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, createTodo(ref db, ref req, ref resp));
+    }
+}
+
+function createTodo(ref db: Db, ref req: Request, ref resp: Response): Result<int32, HttpError> {
+    disposable form: Params = http.paramsNew(4);
+    let _n: usize = formBody(ref req, ref form)?;
+
+    let title: string = requiredField(ref form, "title")?;
+    let priority: int32 = optionalInt(ref form, "priority", 1)?;
+
+    let t: Todo = store.create(ref db, title, priority)? "POST /todos";
+    http.setHeader(ref resp, "Location", `/todos/${t.id}`);
+    respondTodo(ref resp, http.created(), ref t);
+    return Result.Ok { value: 0 };
+}
+
+type UpdateHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, updateTodo(ref db, ref req, ref resp));
+    }
+}
+
+function updateTodo(ref db: Db, ref req: Request, ref resp: Response): Result<int32, HttpError> {
+    let id: int64 = routeId(ref req)?;
+    disposable form: Params = http.paramsNew(4);
+    let _n: usize = formBody(ref req, ref form)?;
+
+    // PUT replaces, so the current row supplies the defaults for whatever the
+    // client left out.
+    let current: Todo = store.find(ref db, id)? `PUT /todos/${id}`;
+    let title: string = http.paramsGetOr(ref form, "title", current.title);
+    let done: bool = truthy(http.paramsGetOr(ref form, "done", "false"));
+    let priority: int32 = optionalInt(ref form, "priority", current.priority)?;
+
+    let updated: Todo = store.update(ref db, id, title, done, priority)? `PUT /todos/${id}`;
+    respondTodo(ref resp, http.ok(), ref updated);
+    return Result.Ok { value: 0 };
+}
+
+type DeleteHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, deleteTodo(ref db, ref req, ref resp));
+    }
+}
+
+function deleteTodo(ref db: Db, ref req: Request, ref resp: Response): Result<int32, HttpError> {
+    let id: int64 = routeId(ref req)?;
+    let _n: int32 = store.remove(ref db, id)? `DELETE /todos/${id}`;
+    http.respondEmpty(ref resp, http.noContent());
+    return Result.Ok { value: 0 };
+}
+
+// The transaction showcase: every title lands or none does.
+type ImportHandler implements Handler {
+    conn: DbRef,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let db: Db = sqlite.borrow(self.conn);
+        return finish(ref resp, importTodos(ref db, ref req, ref resp));
+    }
+}
+
+function importTodos(ref db: Db, ref req: Request, ref resp: Response): Result<int32, HttpError> {
+    disposable form: Params = http.paramsNew(8);
+    let _n: usize = formBody(ref req, ref form)?;
+
+    // Repeated `title=` fields, in order. `Params` keeps duplicates for
+    // exactly this reason.
+    disposable titles: Vec<string> = vec.vec_new(8);
+    for p in http.paramsView(ref form) {
+        if (strings.string_eq(p.name, "title")) {
+            vec.vec_push(ref titles, p.value);
+        }
+    }
+    if (titles.len == 0) {
+        return Result.Err { error: http.errBadRequest("no title fields in the import body") };
+    }
+    let priority: int32 = optionalInt(ref form, "priority", 1)?;
+
+    // If any title is invalid, store.importMany returns Err and its
+    // `transaction` binding has already rolled the earlier inserts back, so
+    // the client's "all or nothing" expectation holds without this function
+    // knowing anything about it.
+    let written: int32 = store.importMany(ref db, vec.vec_as_array(ref titles), priority)?
+        "POST /todos/import";
+    http.respondJson(ref resp, http.created(), `{"imported":${written}}\n`);
+    return Result.Ok { value: 0 };
+}
+
+// The router's fallback, which it uses for both a 404 and a 405. Without it
+// those two responses would be the only plain-text ones the API emits, which
+// is a nasty surprise for a client that parses every body as JSON.
+//
+// `resp.status` arrives already set (404 or 405) and, for a 405, the `Allow`
+// header is already written - this only changes the body.
+type NoRouteHandler implements Handler {
+    unused: int32,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let what: string = `${http.methodLabel(req.method)} ${req.path}`;
+        if (resp.status.code == 405) {
+            http.respondJson(ref resp, resp.status,
+                json.errorObject(`method not allowed: ${what}`));
+        } else {
+            http.respondJson(ref resp, resp.status, json.errorObject(`no route for ${what}`));
+        }
+        return HandleOutcome.Ok;
+    }
+}
+
+// ----- wiring -------------------------------------------------------------
+
+function run(): Result<int32, HttpError> {
+    // Start from a clean database so a repeated run reports the same numbers.
+    if (fs.exists(DB_PATH)) {
+        let _d: string = fs.delete_file(DB_PATH);
+    }
+
+    disposable db: Db = store.open(DB_PATH)? "opening the database";
+    let _schema: int32 = store.initSchema(ref db)? "creating the schema";
+    let _seed: int32 = store.importMany(ref db,
+        ["walk the dog", "split firewood", "call ma"], 2)? "seeding";
+
+    disposable lr: ListenResult = tcp.tcp_listen(HOST, PORT, 128);
+    if (lr.error.len > 0) {
+        return Result.Err { error: http.errIo(`binding ${HOST}:${PORT}: ${lr.error}`) };
+    }
+
+    // One connection, borrowed by every handler. `main` is the only owner.
+    let conn: DbRef = sqlite.dbRef(ref db);
+    let healthH: HealthHandler = { conn: conn };
+    let listH:   ListHandler   = { conn: conn };
+    let showH:   ShowHandler   = { conn: conn };
+    let createH: CreateHandler = { conn: conn };
+    let updateH: UpdateHandler = { conn: conn };
+    let deleteH: DeleteHandler = { conn: conn };
+    let importH: ImportHandler = { conn: conn };
+    let missingH: NoRouteHandler = { unused: 0 };
+
+    disposable r: Router = router.routerNew();
+    router.routerGet(ref r, "/healthz", Dispatcher.from(ref healthH));
+    router.routerGet(ref r, "/todos", Dispatcher.from(ref listH));
+    router.routerPost(ref r, "/todos", Dispatcher.from(ref createH));
+    // Registered BEFORE "/todos/:id" - routes match in registration order, so
+    // the literal has to come first or ":id" would swallow "import".
+    router.routerPost(ref r, "/todos/import", Dispatcher.from(ref importH));
+    router.routerGet(ref r, "/todos/:id", Dispatcher.from(ref showH));
+    router.routerPut(ref r, "/todos/:id", Dispatcher.from(ref updateH));
+    router.routerDelete(ref r, "/todos/:id", Dispatcher.from(ref deleteH));
+    router.routerFallback(ref r, Dispatcher.from(ref missingH));
+
+    let cfg: ServerConfig = server.defaultConfig();
+    cfg.logRequests = true;
+    cfg.maxBodyBytes = 65536;
+
+    printf(`todo_api listening on http://${HOST}:${PORT} (db: ${DB_PATH})\n`);
+    printf("try: curl -s http://%s:%d/todos\n\n", HOST, PORT);
+
+    let d: Dispatcher = Dispatcher.from(ref r);
+    let served: int32 = server.serve(ref lr.listener, ref d, cfg, 0)?;
+    printf(`served ${served} requests\n`);
+    return Result.Ok { value: served };
+}
+
+function main(): int32 {
+    switch (run()) {
+        case Result.Ok { value: _n }: { return 0; }
+        case Result.Err { error: e }: {
+            printf(`todo_api failed: ${e}\n`);
+            return 1;
+        }
+    }
+    return 0;
+}

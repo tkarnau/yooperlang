@@ -1,0 +1,153 @@
+// EPISODE 8 - Kinds: the third axis (THIS IS THE PIVOT EPISODE)
+//
+// Everything so far exists in other languages. This does not, quite.
+//
+// The model has three layers, and keeping them separate is the whole idea:
+//
+//   type   - what the value IS         (int32, Conn, Shape)
+//   trait  - what the value CAN DO     (Disposable, Display, Iterable)
+//   kind   - how the BINDING is USED   (disposable, ephemeral, test)
+//
+// A kind is attached to the binding, not the type. Same type, two bindings,
+// different obligations. A kind can require a trait ("to be used this way you
+// must support these operations") and can make the compiler inject code.
+//
+// Here is the entire declaration of `disposable`, from std/core/kinds.yoop -
+// there is no compiler magic in it, you could have written it:
+//
+//     export trait Disposable {
+//         function dispose(ref self): void;
+//     }
+//
+//     export kind disposable {
+//         appliesTo binding;                  // attaches to a let/const site
+//         requires Disposable;                // the type must implement it
+//         mustCall dispose beforeScopeEnd;    // inject the call at scope exit
+//         ownsBlock;                          // may take a trailing { } block
+//     }
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+type Conn implements Disposable {
+    id: int32,
+    function dispose(ref self): void {
+        printf(`  close ${self.id}\n`);
+    }
+}
+
+// 1. A plain `let`. No kind, so NO cleanup is injected - and, importantly,
+//    NO error either. Ownership in this language is advisory by default.
+function plainLet(): void {
+    printf("plainLet:\n");
+    let c: Conn = { id: 1 };
+    printf(`  use ${c.id}\n`);
+}
+
+// 2. The kind keyword on the binding. Now the compiler injects
+//    `Disposable.dispose(ref c)` at scope end.
+function withKind(): void {
+    printf("withKind:\n");
+    disposable c: Conn = { id: 2 };
+    printf(`  use ${c.id}\n`);
+}
+
+// 3. Dispose it yourself and the compiler does NOT double up. It tracks that
+//    the obligation was already discharged on this path.
+function manualDispose(): void {
+    printf("manualDispose:\n");
+    disposable c: Conn = { id: 3 };
+    printf(`  use ${c.id}\n`);
+    Disposable.dispose(ref c);
+    printf("  after manual dispose\n");
+}
+
+// 4. `ownsBlock` - a trailing block scopes the lifetime tighter than the
+//    function. Cleanup fires at the closing brace, not at function end.
+function withBlock(): void {
+    printf("withBlock:\n");
+    disposable c: Conn = { id: 4 } {
+        printf(`  inside block, use ${c.id}\n`);
+    }
+    printf("  after block\n");
+}
+
+// 5. Every path out, including an early return.
+function earlyReturn(flag: bool): void {
+    printf("earlyReturn:\n");
+    disposable c: Conn = { id: 5 };
+    if (flag) {
+        printf("  bailing early\n");
+        return;
+    }
+    printf("  normal path\n");
+}
+
+function main(): int32 {
+    plainLet();
+    withKind();
+    manualDispose();
+    withBlock();
+    earlyReturn(true);
+    return 0;
+}
+
+// expected output:
+// plainLet:
+//   use 1
+// withKind:
+//   use 2
+//   close 2
+// manualDispose:
+//   use 3
+//   close 3
+//   after manual dispose
+// withBlock:
+//   inside block, use 4
+//   close 4
+//   after block
+// earlyReturn:
+//   bailing early
+//   close 5
+
+// ---------------------------------------------------------------------------
+// THE THING TO LINGER ON
+//
+// Compare `plainLet` and `withKind` in the output. Same type. Same literal.
+// One word of difference at the binding site, and one of them cleans up.
+//
+// Then look at `earlyReturn`: "close 5" prints after "bailing early". The
+// compiler placed the call on the return path too. That is the payoff - you
+// are not remembering to clean up on every branch, you are declaring that
+// this binding owns something and letting the compiler place the calls.
+
+// BREAK IT #1 - a kind can require a trait
+//
+// Delete `implements Disposable` from `Conn` (and its `dispose` body), then
+// keep the `disposable c: Conn = ...` binding:
+//
+//   ep08_kinds.yoop:4:17: binding "c" has kind "disposable" which requires
+//     "Disposable", but type struct Conn does not implement "Disposable"
+//     |
+//   4 |     disposable c: Conn = { id: 7 };
+//     |                 ^
+//
+// Talking point: `requires Disposable` in the kind declaration is what makes
+// this a real contract instead of a naming convention.
+
+// BREAK IT #2 - the advisory part, said plainly
+//
+// `plainLet` leaks and the compiler says NOTHING. That is deliberate and it
+// is a reversal - an earlier version of this language made unhandled
+// resources a hard error, and it was miserable to use. The current model:
+// silent by default, opt in to enforcement with the keyword.
+//
+// Good honest beat for the video: show the leak, admit the compiler allows
+// it, explain why you backed off the strict version. Avoiding double-free is
+// the `dispose` implementer's job (make it idempotent - free then null).
+// Design writeup is in plans/ownership-and-typestate-redesign.md.
+
+// BREAK IT #3 - kinds are ordinary identifiers
+//
+// `disposable` is imported, not reserved. Add `let disposable: int32 = 5;` -
+// it works. Nothing about `test`, `suite`, `disposable` or `ephemeral` is a
+// keyword. That matters a lot in episode 11.

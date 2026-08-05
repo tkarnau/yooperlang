@@ -37,21 +37,38 @@
 
 ## Still open
 
-### 10.F.2.b - In-body cancellation polling
+### 10.F.2.b - In-body cancellation polling - RESOLVED, differently
 
-The external half of cancellation landed in 10.F.2.A. The cooperative
-in-body half is still open: a `cancellation: ref Cancel` parameter
-implicitly synthesized on task bodies + a `cancellation_requested(ref c)`
-predicate the task polls. Needs a synthesized task-body parameter +
-an identifier-resolution special case.
+Superseded by cancellation tokens. See
+[cancellation-and-io-deadlines.md](../cancellation-and-io-deadlines.md).
 
-### 10.F.3 - Multiplexer-integrated timers
+The original design here was a compiler-synthesized `cancellation`
+parameter on every task body plus a `cancellation_requested(ref c)`
+predicate. What shipped instead is an ordinary `CancelToken` value
+(`std/core/cancel.yoop`) passed as a normal parameter. It needs no
+compiler change at all, and it does strictly more: it works in plain
+functions as well as task bodies, carries a deadline, links parent to
+child, and can unpark a thread blocked inside the I/O multiplexer -
+none of which a synthesized task-only parameter would have done.
 
-The 10.F.1 deadline path eliminated the 25ms safety poll by trusting
-the broadcast wake. A `timerfd` / `EVFILT_TIMER` integration would
-share one I/O thread across `sleep_ms` and any deadline-driven
-primitive but is no longer urgent for bench correctness. Drop in
-when a real consumer (rate limiter, scheduled task) emerges.
+A task body polls `cancel.isCancelled(ref t)` on the token it was
+handed. Implicit sugar over that could still be added later, but there
+is no longer a gap it would close.
+
+### 10.F.3 - Multiplexer-integrated timers - RESOLVED, not needed
+
+The deadline story turned out not to need a timer at all. Every
+blocking call folds the token's deadline into its own timed wait
+(`yoop_cancel_effective_deadline`), so a deadline fires as an ordinary
+`pthread_cond_timedwait` expiry rather than something a timer wheel has
+to notice. There is nothing for a `timerfd` / `EVFILT_TIMER` to do that
+is not already happening.
+
+The one real timing bug that WAS here got fixed on the way: `yoop_now_ns`
+read `CLOCK_REALTIME` (despite the header claiming otherwise), so an NTP
+step moved every in-flight deadline. It is monotonic on all three
+platforms now, and every timed wait in the runtime shares the clock via
+one `yoop_cv_wait_until_locked` helper.
 
 ### 10.H rest - Codegen quality + diagnostics
 
@@ -172,5 +189,8 @@ Priority by DX:
    consumer turns up.
 4. **10.H rest (diagnostics, bounds checking)** - opportunistic; ship
    when something else surfaces the gap.
-5. **10.F.2.b, 10.F.3** - cancellation polling + multiplexer timers
-   are nice-to-have; no forcing function yet.
+5. ~~**10.F.2.b, 10.F.3**~~ - both resolved (see above): cancellation
+   tokens subsumed the in-body polling design, and the deadline path
+   never needed a timer thread. What is left on the concurrency side is
+   releasing a worker thread parked on I/O, which needs real coroutine
+   suspension and is its own project.

@@ -1,0 +1,77 @@
+// A suspended task hands its worker thread back to the pool.
+//
+// This is the payoff of the coroutine work, and the thing the runtime
+// could not do before at any price: a task blocked on I/O used to hold
+// its worker for the whole wait, so N concurrent blocking tasks needed N
+// worker threads.
+//
+// The fixture runs with ONE worker (see the e2e case, which sets
+// YOOP_NUM_WORKERS=1) and parks four tasks on four different pipes at
+// the same time. Under the old blocking runtime the single worker would
+// park inside the first read and the other three would never start.
+//
+// The mechanism, bottom to top:
+//   * conc.awaitReadable arms a one-shot interest (which RETURNS rather
+//     than parking the thread) and then awaits the suspend primitive.
+//   * `await suspendNow()` suspends the coroutine, which unwinds the
+//     whole await chain and frees the worker.
+//   * When the fd is ready the multiplexer pushes the task back onto the
+//     run queue, and any worker resumes it.
+
+import.unsafe;
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "unistd.h" {
+    function pipe(fds: unsafe_ptr<int32>): int32;
+    function read(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
+    function write(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
+}
+// Note the suspend happens TWO frames down from this body: inside
+// conc.awaitReadable, which arms the interest and then awaits
+// suspendNow. That is exactly what plain LLVM coroutines cannot do
+// without the coloring rules - the suspend has to propagate up through
+// every frame between the primitive and the task.
+task reader(fd: int32, id: int32): int32 {
+    let rc: c_int = await conc.awaitReadable(fd);
+    if (rc != 0) { return -1; }
+    let buf: uint8[] = [0];
+    let n: int64 = read(fd, buf.ptr, 1);
+    printf("reader %d woke\n", id);
+    return int32(n);
+}
+
+function main(): int32 {
+    let a: int32[] = [0, 0];
+    let b: int32[] = [0, 0];
+    if (pipe(a.ptr) != 0) { printf("pipe failed\n"); return 1; }
+    if (pipe(b.ptr) != 0) { printf("pipe failed\n"); return 1; }
+
+    pooled r1 = reader(a[0], 1);
+    pooled r2 = reader(b[0], 2);
+
+    // Both readers are parked in the multiplexer now, with no worker
+    // thread tied up by either of them.
+    conc.sleep_ms(120);
+    printf("both parked\n");
+
+    let msg: uint8[] = [88];
+    let w1: int64 = write(a[1], msg.ptr, 1);
+    let w2: int64 = write(b[1], msg.ptr, 1);
+
+    // Reader 1 is joined first, but the two wake independently - the
+    // ordering of the "woke" lines is up to the scheduler, so only the
+    // total is asserted.
+    let total: int32 = wait r1;
+    total = total + wait r2;
+    printf("total bytes=%d\n", total);
+    return 0;
+}
+
+// expected output (the two "woke" lines may arrive in either order):
+// both parked
+// reader 1 woke
+// reader 2 woke
+// total bytes=2

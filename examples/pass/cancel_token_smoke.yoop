@@ -1,0 +1,88 @@
+// Cancellation tokens: the explicit-value form of "stop doing that".
+//
+// A token is an ordinary Disposable value you create and pass around.
+// It carries two independent reasons to stop, and they are reported
+// separately because they usually want different handling:
+//
+//   * a deadline elapsed  -> WaitOutcome.TimedOut
+//   * someone cancelled   -> WaitOutcome.Cancelled
+//
+// `isCancelled` folds both back together for the common "should I keep
+// going?" poll. See plans/cancellation-and-io-deadlines.md.
+
+import { disposable } from "std/core/kinds.yoop";
+import { CancelToken, WaitOutcome } from "std/core/cancel";
+import * as cancel from "std/core/cancel";
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function report(label: string, o: WaitOutcome): void {
+    switch (o) {
+        case WaitOutcome.Ready:     { printf("%s: ready\n", label); }
+        case WaitOutcome.TimedOut:  { printf("%s: timed out\n", label); }
+        case WaitOutcome.Cancelled: { printf("%s: cancelled\n", label); }
+    }
+}
+
+// Runs on a worker: let the main thread get parked, then cancel.
+task canceller(t: CancelToken): int32 {
+    conc.sleep_ms(40);
+    cancel.request(ref t);
+    return 0;
+}
+
+function main(): int32 {
+    // 1. A deadline cuts a long sleep short, and reports TIMED OUT -
+    //    running out of time is not the same event as being cancelled.
+    disposable timed: CancelToken = cancel.withTimeoutMs(50);
+    report("deadline", cancel.sleepMs(ref timed, 5000));
+    if (cancel.isCancelled(ref timed)) { printf("deadline: expired\n"); }
+    if (cancel.isFlagged(ref timed))   { printf("deadline: unexpectedly flagged\n"); }
+
+    // 2. An explicit cancel from another thread wakes a parked sleep
+    //    and reports CANCELLED.
+    disposable manual: CancelToken = cancel.newToken();
+    pooled killer = canceller(cancel.share(ref manual));
+    report("manual", cancel.sleepMs(ref manual, 5000));
+    if (cancel.isFlagged(ref manual)) { printf("manual: flagged\n"); }
+    let _k: int32 = wait killer;
+
+    // 3. A child token inherits its parent's cancellation. This is the
+    //    request-scoped-token shape: one token per server, one child
+    //    per request, cancel the parent to drain everything.
+    disposable parent: CancelToken = cancel.newToken();
+    disposable child: CancelToken = cancel.childOf(ref parent);
+    if (cancel.isCancelled(ref child)) { printf("child: unexpectedly cancelled\n"); }
+    cancel.request(ref parent);
+    if (cancel.isCancelled(ref child)) { printf("child: cancelled with parent\n"); }
+
+    // 4. A child may hold a SHORTER budget than its parent. Cancelling
+    //    the child leaves the parent alone.
+    disposable parent2: CancelToken = cancel.newToken();
+    disposable child2: CancelToken = cancel.childWithTimeoutMs(ref parent2, 30);
+    report("child2", cancel.sleepMs(ref child2, 5000));
+    if (cancel.isCancelled(ref parent2)) { printf("parent2: unexpectedly cancelled\n"); }
+    else                                 { printf("parent2: still live\n"); }
+
+    // 5. `none()` is the "no cancellation" token: every operation on it
+    //    is a no-op, so a call chain that does not care still compiles
+    //    and runs unchanged.
+    disposable nothing: CancelToken = cancel.none();
+    if (cancel.isCancelled(ref nothing)) { printf("none: unexpectedly cancelled\n"); }
+    report("none", cancel.sleepMs(ref nothing, 10));
+
+    return 0;
+}
+
+// expected output:
+// deadline: timed out
+// deadline: expired
+// manual: cancelled
+// manual: flagged
+// child: cancelled with parent
+// child2: timed out
+// parent2: still live
+// none: ready
