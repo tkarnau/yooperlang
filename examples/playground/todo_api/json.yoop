@@ -1,0 +1,76 @@
+// todo_api/json.yoop - just enough JSON to write a response body.
+//
+// Encoding only. There is no JSON parser here and the API does not need one:
+// input arrives as `application/x-www-form-urlencoded`, which std/http
+// already parses, and output is JSON because that is what an HTTP client
+// expects to read.
+//
+// Everything writes into a caller-owned `Vec<uint8>` so a list of a thousand
+// todos is one growing buffer and not a thousand intermediate strings.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+// Escape and quote a string per RFC 8259. The five short escapes are spelled
+// as the characters they produce; everything else below 0x20 goes out as
+// \u00XX, which is the only legal way to carry a control byte in JSON.
+export function pushString(ref out: Vec<uint8>, s: string): void {
+    vec.vec_push(ref out, '"');
+    for c in intr.string_as_bytes(s) {
+        if (c == '"') {
+            pushRaw(ref out, "\\\"");
+        } else if (c == '\\') {
+            pushRaw(ref out, "\\\\");
+        } else if (c == '\n') {
+            pushRaw(ref out, "\\n");
+        } else if (c == '\r') {
+            pushRaw(ref out, "\\r");
+        } else if (c == '\t') {
+            pushRaw(ref out, "\\t");
+        } else if (c < 32) {
+            pushRaw(ref out, "\\u00");
+            vec.vec_push(ref out, hexDigit(c / 16));
+            vec.vec_push(ref out, hexDigit(c % 16));
+        } else {
+            // Bytes at or above 0x20 pass through, which keeps multi-byte
+            // UTF-8 intact: JSON strings are UTF-8 and need no escaping above
+            // the ASCII range.
+            vec.vec_push(ref out, c);
+        }
+    }
+    vec.vec_push(ref out, '"');
+}
+
+// Literal text, no escaping - punctuation, numbers, `true`/`false`.
+export function pushRaw(ref out: Vec<uint8>, s: string): void {
+    vec.vec_extend_from(ref out, intr.string_as_bytes(s));
+}
+
+export function pushBool(ref out: Vec<uint8>, b: bool): void {
+    if (b) { pushRaw(ref out, "true"); } else { pushRaw(ref out, "false"); }
+}
+
+// `"name":` - the field name plus its colon, so an object body reads as a
+// sequence of field writes.
+export function pushField(ref out: Vec<uint8>, name: string): void {
+    pushString(ref out, name);
+    vec.vec_push(ref out, ':');
+}
+
+function hexDigit(n: uint8): uint8 {
+    if (n < 10) { return '0' + n; }
+    return 'a' + (n - 10);
+}
+
+// A one-field error object, for the failure responses. Built as a string
+// rather than into a buffer because it is always short and the caller wants
+// to hand it straight to `respondJson`.
+export function errorObject(message: string): string {
+    disposable out: Vec<uint8> = vec.vec_new(64 + message.len);
+    pushRaw(ref out, "{");
+    pushField(ref out, "error");
+    pushString(ref out, message);
+    pushRaw(ref out, "}\n");
+    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref out));
+}

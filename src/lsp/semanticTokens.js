@@ -23,6 +23,7 @@ const TOKEN_TYPES = [
   "enumMember", // 6  EnumName.Variant
   "namespace",  // 7  imported module alias
   "keyword",    // 8  reserved-for-later keywords (provides/restricts/etc.)
+  "decorator",  // 9  a KIND prefix (disposable / task / pooled / suite ...)
 ];
 
 // Token modifier names. Bit positions in the modifier bitmask correspond
@@ -45,6 +46,7 @@ const TT_PROPERTY = 4;
 const TT_TYPE = 5;
 const TT_ENUM_MEMBER = 6;
 const TT_NAMESPACE = 7;
+const TT_DECORATOR = 9;
 const TM_DECLARATION = 1 << 0;
 const TM_READONLY = 1 << 1;
 
@@ -141,7 +143,25 @@ function walk(node, cb, visited = new WeakSet()) {
 // And `sourceLoc.length` is almost never set. So every emit helper here
 // uses `findNameSpan(src, anchor, name)` which scans both directions
 // from the sourceLoc anchor and picks the closest word-boundary match.
+// A kind prefix is painted as `decorator` - it modifies the declaration it
+// sits on rather than naming a value or a type, which is exactly what a
+// decorator token means to a theme.
+//
+// This needs no new analysis: the parser already records prefixes on every
+// site that can carry one (`kindPrefixes` on function/method decls,
+// `kindPrefix` on bindings, params and fields), so the LSP paints the ones
+// that really ARE kinds rather than guessing from a word list the way a
+// TextMate grammar has to.
+function emitKindPrefixes(tokens, src, node) {
+  for (const k of node.kindPrefixes ?? []) {
+    if (k?.name) emitNamed(tokens, src, k, k.name, TT_DECORATOR, 0);
+  }
+  const single = node.kindPrefix;
+  if (single?.name) emitNamed(tokens, src, single, single.name, TT_DECORATOR, 0);
+}
+
 function emitTokensForNode(node, src, tokens) {
+  emitKindPrefixes(tokens, src, node);
   switch (node.kind) {
     case ASTNodeKind.FUNCTION_DECL: {
       emitNamed(tokens, src, node, node.name, TT_FUNCTION, TM_DECLARATION);

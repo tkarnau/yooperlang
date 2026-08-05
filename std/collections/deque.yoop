@@ -16,6 +16,7 @@ import { Disposable, disposable } from "../core/kinds.yoop";
 import { Option } from "../core/types.yoop";
 import * as intr from "../core/intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "../core/alloc.yoop";
+import { nextPow2Floor8 } from "../core/numbers.yoop";
 
 // Container-owned, like Vec: the Deque remembers the allocator it was built
 // with and routes grows and the final free back through it, so a Deque built
@@ -36,16 +37,8 @@ export type Deque<T> implements Disposable propagates<disposable> {
     }
 }
 
-function next_pow2_floor8(n: usize): usize {
-    let cap: usize = 8;
-    while (cap < n) {
-        cap = cap * 2;
-    }
-    return cap;
-}
-
 export function deque_new<T>(initial_cap: usize): Deque<T> propagates<disposable> {
-    let cap: usize = next_pow2_floor8(initial_cap);
+    let cap: usize = nextPow2Floor8(initial_cap);
     let a: Allocator = currentAllocator();
     return { data: intr.ctx_alloc(cap), head: 0, len: 0, cap: cap, alloc: a };
 }

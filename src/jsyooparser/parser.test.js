@@ -1137,11 +1137,35 @@ describe("parse: phase 6.1 - kind decls", () => {
         /inline kind body must contain at least one clause/,
       );
     });
-    it("rejects provides clause", () => {
+    // `provides <Kind>` is implemented now - it is what lets `task` rewrite
+    // its call-site result type to Task<T>. See plans/kinds-in-std.md.
+    it("parses a provides clause", () => {
+      const ast = parse("kind k { appliesTo function; provides Task; }");
+      const clause = ast.body[0].clauses.find(
+        (c) => c.kind === "KIND_PROVIDES_CLAUSE",
+      );
+      assert.ok(clause, "expected a provides clause");
+      assert.equal(clause.providedName, "Task");
+    });
+
+    it("parses a refcounted clause naming its two methods", () => {
+      const ast = parse(
+        "kind k { appliesTo binding; requires Shared; refcounted retain release; }",
+      );
+      const clause = ast.body[0].clauses.find(
+        (c) => c.kind === "KIND_REFCOUNTED_CLAUSE",
+      );
+      assert.ok(clause, "expected a refcounted clause");
+      assert.equal(clause.retainMethod, "retain");
+      assert.equal(clause.releaseMethod, "release");
+    });
+
+    // autoJoin was only ever `mustCall wait beforeScopeEnd` spelled
+    // differently; the diagnostic now says so.
+    it("rejects autoJoin with a pointer at mustCall", () => {
       assert.throws(
-        () =>
-          parse("kind k { appliesTo binding; provides Foo; }"),
-        /provides clause not yet supported/,
+        () => parse("kind k { appliesTo binding; autoJoin beforeScopeEnd; }"),
+        /mustCall wait beforeScopeEnd/,
       );
     });
     it("rejects mustNotEscape without 'scope' keyword", () => {

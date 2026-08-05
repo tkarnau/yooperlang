@@ -2,14 +2,14 @@
 // URL shapes and prints the components so the e2e test can pattern-match.
 
 import { Result } from "../../../std/core/types.yoop";
-import { Uri, parse_uri } from "../../../std/net/uri.yoop";
+import * as net, { Uri } from "std/net";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
 function show(label: string, url: string): void {
-    let p: Result<Uri, string> = parse_uri(url);
+    let p: Result<Uri, string> = net.parse_uri(url);
     switch (p) {
         case Result.Ok { value: u }: {
             printf(`${label} scheme=${u.scheme} host=${u.host} port=${u.port} target=${u.target}\n`);

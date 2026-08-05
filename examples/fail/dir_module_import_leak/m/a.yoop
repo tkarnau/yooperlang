@@ -1,0 +1,11 @@
+module m;
+
+// This file imports vec + Vec. Its sibling b.yoop uses them without importing
+// them, which is an error: a module's source files share its DECLARATIONS but
+// not its IMPORTS, so reading a file's head still tells you what it depends on.
+import * as vec, { Vec } from "std/core/vec.yoop";
+
+export function capA(): usize {
+    let v: Vec<int32> = vec.vec_new(4);
+    return v.cap;
+}

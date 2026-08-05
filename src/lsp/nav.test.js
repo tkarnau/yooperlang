@@ -444,3 +444,136 @@ function distance(p: Point): int32 {
     assert.deepEqual(fieldNames.sort(), ["x", "y"]);
   });
 });
+
+// modules-as-directories: the LSP has to keep working when the file under the
+// cursor is one SOURCE FILE of a directory module. Everything below is a
+// property that only exists because a source file stays the compilation unit
+// while the namespace moves to the directory - if `moduleEnv` had been keyed per
+// file, or diagnostics keyed by moduleId, these would break.
+// See plans/modules-as-directories.md.
+function writeDirModuleFixture(files, moduleDirName = "geom") {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_dirmod_"));
+  const dir = path.join(root, moduleDirName);
+  fs.mkdirSync(dir);
+  const written = {};
+  for (const [name, text] of Object.entries(files)) {
+    const p = path.join(dir, name);
+    fs.writeFileSync(p, text);
+    written[name] = fs.realpathSync(p);
+  }
+  return written;
+}
+
+const POINT_YOOP = `module geom;
+
+export type Point { x: int32, y: int32 }
+
+function doubled(v: int32): int32 { return v * 2; }
+`;
+
+// Uses `Point` (an exported sibling type) and `doubled` (a PRIVATE sibling
+// function) with no import between them.
+const AREA_YOOP = `module geom;
+
+export function areaOf(p: Point): int32 {
+    return p.x * p.y;
+}
+
+export function doubledArea(p: Point): int32 {
+    return doubled(areaOf(p));
+}
+`;
+
+describe("nav: directory modules", () => {
+  it("analyzes a source file of a directory module with no spurious diagnostics", () => {
+    const files = writeDirModuleFixture({
+      "point.yoop": POINT_YOOP,
+      "area.yoop": AREA_YOOP,
+    });
+    const result = analyze(files["area.yoop"], new Map());
+    assert.deepEqual(
+      result.diagnostics.map((d) => `${path.basename(d.absPath)}:${d.message}`),
+      [],
+      "sibling declarations must resolve without an import",
+    );
+    // Both files are one module, so they share the id moduleEnv is keyed by.
+    const geom = result.modules.filter((m) => m.absPath.includes(`${path.sep}geom${path.sep}`));
+    assert.equal(geom.length, 2);
+    assert.equal(geom[0].id, geom[1].id);
+  });
+
+  it("goto-definition crosses into a sibling file of the same module", () => {
+    const files = writeDirModuleFixture({
+      "point.yoop": POINT_YOOP,
+      "area.yoop": AREA_YOOP,
+    });
+    const areaAbs = files["area.yoop"];
+    const result = analyze(areaAbs, new Map());
+    const mod = result.modules.find((m) => m.absPath === areaAbs);
+    assert.ok(mod, "expected area.yoop in the analysis result");
+
+    // `doubled(...)` is declared in point.yoop, with no import in area.yoop.
+    const callOff = AREA_YOOP.indexOf("doubled(areaOf");
+    const node = findNodeAt(mod.ast, callOff, AREA_YOOP);
+    const def = findDefinition(node, {
+      module: mod,
+      modById: result.modById,
+      moduleEnv: result.moduleEnv,
+      tokenText: "doubled",
+      tokenStart: callOff,
+      cursorOffset: callOff,
+    });
+    assert.ok(def, "expected a definition for a sibling-file function");
+    assert.equal(
+      def.absPath,
+      files["point.yoop"],
+      "definition must land in the sibling FILE, not the file under the cursor",
+    );
+    assert.equal(def.pos, POINT_YOOP.indexOf("doubled"));
+  });
+
+  it("documentSymbols lists only the open file's decls, not the whole module", () => {
+    const files = writeDirModuleFixture({
+      "point.yoop": POINT_YOOP,
+      "area.yoop": AREA_YOOP,
+    });
+    const areaAbs = files["area.yoop"];
+    const result = analyze(areaAbs, new Map());
+    const mod = result.modules.find((m) => m.absPath === areaAbs);
+    const names = collectDocumentSymbols(mod.ast, AREA_YOOP).map((s) => s.name);
+    assert.deepEqual(names.sort(), ["areaOf", "doubledArea"]);
+    // The outline is per FILE: the sibling's decls belong to point.yoop's outline.
+    assert.ok(!names.includes("Point"), `Point leaked into area.yoop's outline: ${names}`);
+  });
+
+  it("attributes an import-locality error to the file that used the name", () => {
+    // a.yoop imports vec; b.yoop uses it without importing it.
+    const files = writeDirModuleFixture(
+      {
+        "a.yoop": `module m;
+import * as vec, { Vec } from "std/core/vec.yoop";
+export function capA(): usize {
+    let v: Vec<int32> = vec.vec_new(4);
+    return v.cap;
+}
+`,
+        "b.yoop": `module m;
+export function capB(): usize {
+    let v: Vec<int32> = vec.vec_new(8);
+    return v.cap;
+}
+`,
+      },
+      "m",
+    );
+    const result = analyze(files["b.yoop"], new Map());
+    const leaks = result.diagnostics.filter((d) =>
+      /is not imported by this file/.test(d.message),
+    );
+    assert.ok(leaks.length >= 1, "expected an import-locality diagnostic");
+    // Squiggled in b.yoop, not the sibling that owns the import.
+    for (const d of leaks) {
+      assert.equal(d.absPath, files["b.yoop"], `wrong file for: ${d.message}`);
+    }
+  });
+});

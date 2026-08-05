@@ -1,70 +1,73 @@
-// std/http/client.yoop - minimal HTTP/1.1 client.
+module http;
+
+// std/http/client.yoop - a minimal HTTP/1.1 client.
 //
-// Phase 10.I: a `Client.send` that takes an absolute URL + method,
-// opens a TCP connection, writes the request, reads the response head
-// + body, and returns it as a `ClientResponse`. One connection per
-// call - keep-alive / pipelining / pooling all wait for follow-up.
+//     let c: Client = clientNew();
+//     disposable resp: ClientResponse = get(ref c, "http://127.0.0.1:8080/todos")?;
+//     printf(`${resp.status} ${responseText(ref resp)}\n`);
 //
-// Limitations (deferred):
-//   * No TLS. https:// URLs are parsed but `tcp_connect` is plain TCP.
-//   * No chunked transfer encoding response support. The client trusts
-//     `Content-Length` and falls back to reading until the peer closes
-//     when the header is absent.
-//   * No redirects. The handler that receives a 3xx response sees it
-//     unmodified; following the `Location` header is the caller's job.
-//   * No connection reuse. Pooling per `(scheme, host, port)` is the
-//     follow-up sketched in plans/phase-10.md.
+// One connection per call, closed when the response is complete. Everything
+// about framing the request and reading the response head is shared with the
+// server through std/http/wire.yoop and std/http/parser.yoop, so the two
+// directions cannot drift apart.
+//
+// Limitations, all deliberate and all deferred:
+//   * No TLS. `https://` URLs parse, but the connection is plain TCP and the
+//     peer will drop it at the handshake.
+//   * No chunked responses. A `Transfer-Encoding: chunked` reply is rejected
+//     by the shared header reader with a 501-shaped error rather than being
+//     mis-read as a body with chunk headers in it.
+//   * No redirect following and no connection pooling. A 3xx comes back as
+//     it arrived; the `Location` header is the caller's to act on.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result, Option } from "../core/types.yoop";
 import { Readable, Writable } from "../core/traits.yoop";
-import { Vec, vec_new, vec_push, vec_as_array, vec_set } from "../core/vec.yoop";
-import { string_eq_ignore_ascii_case, string_eq } from "../core/strings.yoop";
+import * as vec, { Vec } from "../core/vec.yoop";
+import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import {
-    bytes_eq, bytes_index_of, bytes_index_of_seq, bytes_slice, bytes_parse_int,
-    BytesParsed,
-} from "../core/bytes.yoop";
+import * as uri, { Uri } from "../net";
+import * as tcp, { TcpStream, ConnectResult } from "../net";
 
-import { Uri, parse_uri } from "../net/uri.yoop";
-import { TcpStream, ConnectResult, tcp_connect } from "../net/tcp.yoop";
-import {
-    HttpMethod, Headers, HeaderEntry, headers_new, headers_add, headers_get,
-    StatusCode, status_class_for, http_method_label,
-} from "./types.yoop";
+// ----- request ------------------------------------------------------------
 
-// ----- ClientRequest ---------------------------------------------------
-
-// What the caller hands to `client_send`. Only the bits that are
-// genuinely per-call are here; the HTTP/1.1 wire format is the client's
-// job. `body` is `uint8[]` because the client is generally producing
-// short request bodies (form data, JSON); streaming request bodies are
-// deferred along with the parser-side `Reader` switch.
+// What the caller hands to `send`. `body` is a borrowed view: the client
+// copies it onto the wire during the call and never holds it afterwards.
 export type ClientRequest implements Disposable propagates<disposable> {
-    method:       HttpMethod,
-    url:          string,
-    headers:      Headers,
-    body:         uint8[],     // empty for GET / HEAD / etc.
+    method:  HttpMethod,
+    url:     string,
+    headers: Headers,
+    body:    uint8[],
     function dispose(ref self): void {
         Disposable.dispose(ref self.headers);
     }
 }
 
-export function client_request(method: HttpMethod, url: string): ClientRequest propagates<disposable> {
-    let empty: uint8[] = [];
-    return {
-        method:  method,
-        url:     url,
-        headers: headers_new(8),
-        body:    empty,
-    };
+export function request(method: HttpMethod, url: string): ClientRequest propagates<disposable> {
+    return { method: method, url: url, headers: headersNew(8), body: [] };
 }
 
-// ----- ClientResponse --------------------------------------------------
+// Named for the direction rather than shortened to `setHeader`, because
+// yoop already owns `setHeader` for a `Response` and Yoop has no
+// overloading - once std/http is one module the two would collide. The
+// Response one keeps the short name; it has all the callers.
+export function setRequestHeader(ref req: ClientRequest, name: string, value: string): void {
+    headersSet(ref req.headers, name, value);
+}
 
-// What `client_send` returns on success. `body` is a `Vec<uint8>`
-// because we read it off the wire incrementally; the caller can view it
-// via `vec_as_array(ref resp.body)`.
+// Attach a body and declare what it is. The Content-Length is computed at
+// send time, so it cannot disagree with what is actually written.
+export function setBody(ref req: ClientRequest, mediaType: string, body: uint8[]): void {
+    req.body = body;
+    headersSet(ref req.headers, "Content-Type", mediaType);
+}
+
+export function setTextBody(ref req: ClientRequest, mediaType: string, body: string): void {
+    setBody(ref req, mediaType, intr.string_as_bytes(body));
+}
+
+// ----- response -----------------------------------------------------------
+
 export type ClientResponse implements Disposable propagates<disposable> {
     status:  StatusCode,
     headers: Headers,
@@ -75,424 +78,276 @@ export type ClientResponse implements Disposable propagates<disposable> {
     }
 }
 
-// `client_send` returns this directly rather than `Result<ClientResponse,
-// string>` so the propagating obligation on the response transfers
-// cleanly through an IDENT return (the obligation tracker doesn't yet
-// follow propagating values into enum-variant payloads - same pattern
-// std/http/parser.yoop's `ParsedRequest` uses for its `error` slot).
-export type ClientSendResult implements Disposable propagates<disposable> {
-    response: ClientResponse,
-    error:    string,
-    function dispose(ref self): void {
-        Disposable.dispose(ref self.response);
-    }
+export function responseBytes(ref r: ClientResponse): uint8[] {
+    return vec.vec_as_array(ref r.body);
 }
 
-// ----- Wire-format helpers (private) -----------------------------------
-
-function push_str(ref out: Vec<uint8>, s: string): void {
-    let bs: uint8[] = intr.string_as_bytes(s);
-    let i: usize = 0;
-    while (i < bs.len) {
-        vec_push(ref out, bs[i]);
-        i = i + 1;
-    }
+// The body as text. Not UTF-8 validated, for the same reason the server side
+// is not: the bytes are whatever the peer sent.
+export function responseText(ref r: ClientResponse): string {
+    return intr.string_from_bytes_unchecked(responseBytes(ref r));
 }
 
-function push_bytes(ref out: Vec<uint8>, bs: uint8[]): void {
-    let i: usize = 0;
-    while (i < bs.len) {
-        vec_push(ref out, bs[i]);
-        i = i + 1;
-    }
+export function responseHeader(ref r: ClientResponse, name: string): Option<string> {
+    return headersGet(ref r.headers, name);
 }
 
-function push_decimal(ref out: Vec<uint8>, n: usize): void {
-    if (n == 0) {
-        vec_push(ref out, 48);
-        return;
-    }
-    let digits: usize = 0;
-    let count: usize = n;
-    while (count > 0) {
-        count = count / 10;
-        digits = digits + 1;
-    }
-    let start: usize = out.len;
-    let i: usize = 0;
-    while (i < digits) {
-        vec_push(ref out, 0);
-        i = i + 1;
-    }
-    let val: usize = n;
-    let j: usize = digits;
-    while (val > 0) {
-        j = j - 1;
-        let q: usize = val / 10;
-        let rem: usize = val - q * 10;
-        vec_set(ref out, start + j, uint8(48 + rem));
-        val = q;
-    }
+export function responseOk(ref r: ClientResponse): bool {
+    return isSuccess(r.status);
 }
 
-// Serialize the request into `out`. The wire format is:
-//   METHOD target HTTP/1.1
-//   Host: host[:port]
-//   Content-Length: N (if body is non-empty)
-//   Connection: close
-//   <user headers>
-//   \r\n
-//   <body>
-function serialize_request(ref req: ClientRequest, ref u: Uri, ref out: Vec<uint8>): void {
-    push_str(ref out, http_method_label(req.method));
-    vec_push(ref out, 32);
-    push_str(ref out, u.target);
-    push_str(ref out, " HTTP/1.1\r\n");
+// ----- client -------------------------------------------------------------
 
-    // Host header. RFC says always include host, with `:port` when not
-    // the scheme's default. We always include the port to keep the wire
-    // format deterministic.
-    push_str(ref out, "Host: ");
-    push_str(ref out, u.host);
-    vec_push(ref out, 58);    // ':'
-    push_decimal(ref out, usize(u.port));
-    push_str(ref out, "\r\n");
+// Per-client configuration. `maxResponseBytes` is the ceiling on a single
+// response; without one, a hostile or broken peer can make the client
+// allocate until it dies.
+export type Client {
+    readChunk:        usize,
+    maxHeadBytes:     usize,
+    maxResponseBytes: usize,
+    userAgent:        string,
+}
 
+export function clientNew(): Client {
+    return {
+        readChunk:        4096,
+        maxHeadBytes:     16384,
+        maxResponseBytes: 8388608,   // 8 MiB
+        userAgent:        "yoop-http/1.1",
+    };
+}
+
+// ----- wire format --------------------------------------------------------
+
+// Serialize the request. Host, Content-Length, Connection and User-Agent are
+// written here rather than trusted from the caller's header list, so a caller
+// cannot desynchronize the framing; a caller-supplied copy of one of those is
+// skipped below.
+function serializeRequest(ref req: ClientRequest, ref u: Uri, ref c: Client, ref out: Vec<uint8>): void {
+    pushStr(ref out, `${methodLabel(req.method)} ${u.target} HTTP/1.1`);
+    pushCrlf(ref out);
+
+    pushHeaderLine(ref out, "Host", `${u.host}:${u.port}`);
+    pushHeaderLine(ref out, "User-Agent", c.userAgent);
+    pushHeaderLine(ref out, "Connection", "close");
     if (req.body.len > 0) {
-        push_str(ref out, "Content-Length: ");
-        push_decimal(ref out, req.body.len);
-        push_str(ref out, "\r\n");
+        pushHeaderLine(ref out, "Content-Length", `${req.body.len}`);
     }
 
-    // Connection: close so the server signals end-of-body by closing
-    // the socket. Keep-alive parsing is a follow-up.
-    push_str(ref out, "Connection: close\r\n");
-
-    let entries: HeaderEntry[] = vec_as_array(ref req.headers.entries);
-    let i: usize = 0;
-    while (i < entries.len) {
-        push_str(ref out, entries[i].name);
-        push_str(ref out, ": ");
-        push_str(ref out, entries[i].value);
-        push_str(ref out, "\r\n");
-    i = i + 1;
+    for e in headersView(ref req.headers) {
+        if (isClientFramingHeader(e.name)) { continue; }
+        pushHeaderLine(ref out, e.name, e.value);
     }
 
-    push_str(ref out, "\r\n");
-    push_bytes(ref out, req.body);
+    pushCrlf(ref out);
+    pushBytes(ref out, req.body);
 }
 
-// ----- Response head parsing ------------------------------------------
-
-// Mirrors `parsed_request_head` shape but for HTTP responses. Returns
-// the resolved status code + headers + the body byte-offset into the
-// raw buffer + the optional Content-Length value.
-type ParsedResponseHead implements Disposable propagates<disposable> {
-    status:         StatusCode,
-    headers:        Headers,
-    body_start:     usize,
-    content_length: Option<usize>,
-    error:          string,
-    function dispose(ref self): void {
-        Disposable.dispose(ref self.headers);
-    }
+function isClientFramingHeader(name: string): bool {
+    return strEq(name, "Host")
+        || strEq(name, "Content-Length")
+        || strEq(name, "Connection")
+        || strEq(name, "Transfer-Encoding")
+        || strEq(name, "User-Agent");
 }
 
-function parse_response_head(buf: uint8[]): ParsedResponseHead propagates<disposable> {
-    let crlfcrlf: uint8[] = [13, 10, 13, 10];
-    let head_end: usize = bytes_index_of_seq(buf, crlfcrlf);
-    let empty_status: StatusCode = { code: 0, class: status_class_for(0) };
-    if (head_end == buf.len) {
-        return {
-            status: empty_status,
-            headers: headers_new(0),
-            body_start: 0,
-            content_length: Option.None,
-            error: "parse_response_head: missing CRLF CRLF",
-        };
-    }
-    let body_start: usize = head_end + 4;
+function strEq(a: string, b: string): bool {
+    return bytes.bytes_eq_ignore_ascii_case(intr.string_as_bytes(a), intr.string_as_bytes(b));
+}
 
-    // -- status line: "HTTP/1.1 200 OK" -------------------------------
-    let cr_idx: usize = bytes_index_of(buf, 13);
-    if (cr_idx == buf.len || cr_idx > head_end) {
-        return {
-            status: empty_status, headers: headers_new(0),
-            body_start: 0, content_length: Option.None,
-            error: "parse_response_head: malformed status line",
-        };
-    }
-    let status_line: uint8[] = bytes_slice(buf, 0, cr_idx);
-    let s1: usize = bytes_index_of(status_line, 32);
-    if (s1 == status_line.len) {
-        return {
-            status: empty_status, headers: headers_new(0),
-            body_start: 0, content_length: Option.None,
-            error: "parse_response_head: missing version separator",
-        };
-    }
-    let after_version: uint8[] = bytes_slice(status_line, s1 + 1, status_line.len);
-    let s2_rel: usize = bytes_index_of(after_version, 32);
-    let code_bytes: uint8[] = bytes_slice(after_version, 0, s2_rel);
-    let code_val: int32 = 0;
-    let parsed: Result<BytesParsed, string> = bytes_parse_int(code_bytes);
-    switch (parsed) {
-        case Result.Ok { value: bp }: { code_val = int32(bp.value); }
-        case Result.Err { error: e }: {
-            return {
-                status: empty_status, headers: headers_new(0),
-                body_start: 0, content_length: Option.None,
-                error: e,
+// A header a caller set must not be able to inject a second request into the
+// stream. Same check the server does on the way out.
+function checkRequestHeaders(ref req: ClientRequest): Result<usize, HttpError> {
+    for e in headersView(ref req.headers) {
+        if (!isValidHeaderValue(e.name) || !isValidHeaderValue(e.value)) {
+            return Result.Err {
+                error: errBadRequest(`header "${e.name}" contains CR or LF`),
             };
         }
     }
-    let st: StatusCode = { code: code_val, class: status_class_for(code_val) };
+    return Result.Ok { value: 0 };
+}
 
-    // -- headers (same shape as parse_request_head) -------------------
-    let pr: ParsedResponseHead = {
-        status:         st,
-        headers:        headers_new(8),
-        body_start:     body_start,
-        content_length: Option.None,
-        error:          "",
-    };
-    let pos: usize = cr_idx + 2;
-    while (pos < head_end) {
-        let rest: uint8[] = bytes_slice(buf, pos, head_end);
-        let line_end_rel: usize = bytes_index_of(rest, 13);
-        if (line_end_rel == rest.len) {
-            break;
-        }
-        let line: uint8[] = bytes_slice(rest, 0, line_end_rel);
-        let colon_rel: usize = bytes_index_of(line, 58);
-        if (colon_rel != line.len) {
-            let name_bytes: uint8[] = bytes_slice(line, 0, colon_rel);
-            let val_start_rel: usize = colon_rel + 1;
-            if (val_start_rel < line.len && line[val_start_rel] == 32) {
-                val_start_rel = val_start_rel + 1;
-            }
-            let val_bytes: uint8[] = bytes_slice(line, val_start_rel, line.len);
-            let name_str: string = intr.string_from_bytes_unchecked(name_bytes);
-            let val_str:  string = intr.string_from_bytes_unchecked(val_bytes);
-            headers_add(ref pr.headers, name_str, val_str);
+// ----- send ---------------------------------------------------------------
 
-            let cl_name:  uint8[] = [67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104];
-            let cl_name2: uint8[] = [99, 111, 110, 116, 101, 110, 116, 45, 108, 101, 110, 103, 116, 104];
-            if (bytes_eq(name_bytes, cl_name) || bytes_eq(name_bytes, cl_name2)) {
-                let pp: Result<BytesParsed, string> = bytes_parse_int(val_bytes);
-                switch (pp) {
-                    case Result.Ok { value: bp2 }: {
-                        if (bp2.value >= 0) {
-                            pr.content_length = Option.Some { value: usize(bp2.value) };
-                        }
-                    }
-                    case Result.Err { error: _e }: { }
-                }
-            }
-        }
-        pos = pos + line_end_rel + 2;
+// One recv, with the error mapped into the layer's error type. See the twin
+// `readRequestBytes` in server.yoop for why the duplicate is deliberate.
+async readResponseBytes(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
+    switch (await Readable.read(ref stream, ref window)) {
+        case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
+        case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
-    return pr;
+    return Result.Ok { value: 0 };
 }
 
-// ----- Client ---------------------------------------------------------
-
-// `Client` is currently a placeholder for per-client configuration
-// (default headers, future connection pool). Built via `make_client()`
-// and threaded into `client_send`; for now it has no fields beyond a
-// signal value so future additions are non-breaking.
-export type Client {
-    _unused: int32,
+// Read until the response head is complete. Unlike the server side, an EOF
+// here is always an error: a peer that closes without a status line answered
+// nothing.
+async readResponseHead(
+    ref stream: TcpStream,
+    ref buf: Vec<uint8>,
+    ref scratch: Bytes,
+    ref c: Client,
+): Result<usize, HttpError> {
+    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    while (true) {
+        let n: usize = await readResponseBytes(ref stream, ref window)? "reading the response head";
+        if (n == 0) {
+            return Result.Err { error: errIo("peer closed before the response head was complete") };
+        }
+        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+        let at: usize = findHeadEnd(vec.vec_as_array(ref buf));
+        if (at != buf.len) { return Result.Ok { value: at }; }
+        if (buf.len > c.maxHeadBytes) {
+            return Result.Err {
+                error: errIo(`response head exceeded ${c.maxHeadBytes} bytes`),
+            };
+        }
+    }
+    return Result.Ok { value: 0 };
 }
 
-export function make_client(): Client {
-    return { _unused: 0 };
-}
+// Send `req` and read the whole response. The connection is opened, used, and
+// closed inside this call.
+export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse, HttpError> propagates<disposable> {
+    let _checked: usize = checkRequestHeaders(ref req)?;
 
-// Send the request and return the response. Opens one TCP connection,
-// writes the serialized request, reads the response head + body
-// (trusting Content-Length when present, otherwise reading until EOF),
-// and closes the connection.
-//
-// `https://` URLs parse successfully but `tcp_connect` only speaks
-// plain TCP - the connection attempt will likely fail at the TLS
-// handshake step on the peer.
-// Helper for failure paths: builds an empty ClientSendResult shell
-// with `error` set.
-function fail_send(msg: string): ClientSendResult propagates<disposable> {
-    return {
-        response: {
-            status:  { code: 0, class: status_class_for(0) },
-            headers: headers_new(0),
-            body:    vec_new(0),
-        },
-        error: msg,
-    };
-}
-
-export function client_send(ref c: Client, ref req: ClientRequest): ClientSendResult propagates<disposable> {
-    let parsed: Result<Uri, string> = parse_uri(req.url);
     let u: Uri = { scheme: "", host: "", port: 0, target: "/" };
-    switch (parsed) {
-        case Result.Ok { value: parsed_u }: { u = parsed_u; }
-        case Result.Err { error: e }: { return fail_send(e); }
+    switch (uri.parse_uri(req.url)) {
+        case Result.Ok { value: parsed }: { u = parsed; }
+        case Result.Err { error: e }: {
+            return Result.Err { error: errBadRequest(`${e} (url "${req.url}")`) };
+        }
     }
 
-    let disposable cr: ConnectResult = tcp_connect(u.host, u.port);
+    disposable cr: ConnectResult = tcp.tcp_connect(u.host, u.port);
     if (cr.error.len > 0) {
-        return fail_send(cr.error);
+        return Result.Err { error: errIo(`${cr.error} (connecting to ${u.host}:${u.port})`) };
     }
 
-    // Write the request.
-    let disposable out: Vec<uint8> = vec_new(512);
-    serialize_request(ref req, ref u, ref out);
-    let out_view: uint8[] = vec_as_array(ref out);
-    let w: Result<c_ssize_t, string> = Writable.write(ref cr.stream, ref out_view);
-    switch (w) {
-        case Result.Ok { value: _wn }: { }
-        case Result.Err { error: we }: { return fail_send(we); }
+    // -- write the request --
+    disposable out: Vec<uint8> = vec.vec_new(512 + req.body.len);
+    serializeRequest(ref req, ref u, ref c, ref out);
+    let outView: uint8[] = vec.vec_as_array(ref out);
+    switch (await Writable.write(ref cr.stream, ref outView)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
 
-    // Read until we see CRLF CRLF, capped at the DoS limit.
-    let disposable buf: Vec<uint8> = vec_new(2048);
-    let scratch: uint8[] = intr.heap_alloc(2048);
-    let dos_limit: usize = 65536;
-    let head_done: bool = false;
-    while (buf.len < dos_limit) {
-        let r: Result<c_ssize_t, string> = Readable.read(ref cr.stream, ref scratch);
-        let r_n: c_ssize_t = 0;
-        let r_err: string = "";
-        switch (r) {
-            case Result.Ok { value: rn }: { r_n = rn; }
-            case Result.Err { error: re }: { r_err = re; }
-        }
-        if (r_err.len > 0) {
-            intr.heap_free(scratch);
-            return fail_send(r_err);
-        }
-        if (r_n == 0) {
-            // EOF before we saw CRLF CRLF.
-            break;
-        }
-        let i: usize = 0;
-        let avail: usize = usize(r_n);
-        while (i < avail) {
-            vec_push(ref buf, scratch[i]);
-            i = i + 1;
-        }
-        let view: uint8[] = vec_as_array(ref buf);
-        let crlfcrlf: uint8[] = [13, 10, 13, 10];
-        if (bytes_index_of_seq(view, crlfcrlf) != view.len) {
-            head_done = true;
-            break;
-        }
-    }
-    if (head_done) {
-        // fall through to parse
-    } else {
-        intr.heap_free(scratch);
-        return fail_send("client_send: response head incomplete (EOF or DoS limit)");
-    }
+    // -- read the head --
+    disposable buf: Vec<uint8> = vec.vec_new(c.readChunk);
+    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(c.readChunk), c.readChunk);
+    let _headEnd: usize = await readResponseHead(ref cr.stream, ref buf, ref scratch, ref c)?;
 
-    let head_view: uint8[] = vec_as_array(ref buf);
-    let disposable head: ParsedResponseHead = parse_response_head(head_view);
-    if (head.error.len > 0) {
-        intr.heap_free(scratch);
-        return fail_send(head.error);
-    }
+    let disposable head: ParsedResponse = parseResponseHead(vec.vec_as_array(ref buf))?;
 
-    // Build the result shell up front so the propagating `body` Vec lives
-    // inside `out_result.response` from creation. Subsequent reads push
-    // into `out_result.response.body` directly - the obligation tracker
-    // then transfers everything through a single IDENT return at the
-    // end. Mirrors the `pr.request.headers` pattern in parser.yoop.
-    let out_result: ClientSendResult = {
-        response: {
-            status:  head.status,
-            headers: headers_new(8),
-            body:    vec_new(512),
-        },
-        error: "",
+    // -- read the body --
+    // Whatever came in with the head is already body; the rest is read either
+    // to the declared length or to EOF.
+    let resp: ClientResponse = {
+        status:  head.status,
+        headers: headersNew(8),
+        body:    vec.vec_new(c.readChunk),
     };
-
-    // Body: read either `Content-Length` bytes, or until EOF.
-    let body_start: usize = head.body_start;
-    if (head_view.len > body_start) {
-        let view2: uint8[] = vec_as_array(ref buf);
-        let already_view: uint8[] = bytes_slice(view2, body_start, view2.len);
-        push_bytes(ref out_result.response.body, already_view);
+    for e in headersView(ref head.headers) {
+        headersAdd(ref resp.headers, e.name, e.value);
     }
-    let need: usize = 0;
-    let have_cl: bool = false;
-    switch (head.content_length) {
-        case Option.Some { value: cl }: { need = cl; have_cl = true; }
+
+    let seen: uint8[] = vec.vec_as_array(ref buf);
+    if (seen.len > head.bodyStart) {
+        vec.vec_extend_from(ref resp.body, intr.array_slice(seen, head.bodyStart, seen.len));
+    }
+
+    switch (await readRest(ref cr.stream, ref scratch, ref c, ref head, ref resp.body)) {
+        case Result.Ok { value: _n }: { return Result.Ok { value: resp }; }
+        case Result.Err { error: e }: {
+            Disposable.dispose(ref resp);
+            return Result.Err { error: e };
+        }
+    }
+}
+
+// Body-reading half of `send`, split out so the failure path has one place to
+// give the half-built response back.
+async readRest(
+    ref stream: TcpStream,
+    ref scratch: Bytes,
+    ref c: Client,
+    ref head: ParsedResponse,
+    ref body: Vec<uint8>,
+): Result<usize, HttpError> {
+    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let want: usize = 0;
+    let bounded: bool = false;
+    switch (head.info.contentLength) {
+        case Option.Some { value: n }: { want = n; bounded = true; }
         case Option.None: { }
     }
-    if (have_cl) {
-        while (out_result.response.body.len < need) {
-            let r2: Result<c_ssize_t, string> = Readable.read(ref cr.stream, ref scratch);
-            let r2_n: c_ssize_t = 0;
-            let r2_err: string = "";
-            switch (r2) {
-                case Result.Ok { value: rn2 }: { r2_n = rn2; }
-                case Result.Err { error: re2 }: { r2_err = re2; }
-            }
-            if (r2_err.len > 0) {
-                intr.heap_free(scratch);
-                out_result.error = r2_err;
-                return out_result;
-            }
-            if (r2_n == 0) {
-                break;
-            }
-            let k: usize = 0;
-            let avail2: usize = usize(r2_n);
-            while (k < avail2) {
-                vec_push(ref out_result.response.body, scratch[k]);
-                k = k + 1;
-            }
-        }
-    } else {
-        // No Content-Length - read until EOF.
-        while (true) {
-            let r3: Result<c_ssize_t, string> = Readable.read(ref cr.stream, ref scratch);
-            let r3_n: c_ssize_t = 0;
-            let r3_err: string = "";
-            switch (r3) {
-                case Result.Ok { value: rn3 }: { r3_n = rn3; }
-                case Result.Err { error: re3 }: { r3_err = re3; }
-            }
-            if (r3_err.len > 0) {
-                intr.heap_free(scratch);
-                out_result.error = r3_err;
-                return out_result;
-            }
-            if (r3_n == 0) {
-                break;
-            }
-            let kk: usize = 0;
-            let availk: usize = usize(r3_n);
-            while (kk < availk) {
-                vec_push(ref out_result.response.body, scratch[kk]);
-                kk = kk + 1;
-            }
-        }
+    if (bounded && want > c.maxResponseBytes) {
+        return Result.Err {
+            error: httpError(payloadTooLarge(),
+                `response of ${want} bytes exceeds the ${c.maxResponseBytes} byte limit`),
+        };
     }
-    intr.heap_free(scratch);
 
-    // Copy header entries over from the parsed head into the response.
-    let entries: HeaderEntry[] = vec_as_array(ref head.headers.entries);
-    let h: usize = 0;
-    while (h < entries.len) {
-        headers_add(ref out_result.response.headers, entries[h].name, entries[h].value);
-        h = h + 1;
+    while (true) {
+        if (bounded && body.len >= want) { break; }
+        let n: usize = await readResponseBytes(ref stream, ref window)? "reading the response body";
+        if (n == 0) {
+            // EOF. With a declared length this is a truncated response; with
+            // no length it is how the peer signals the end.
+            if (bounded && body.len < want) {
+                return Result.Err {
+                    error: errIo(`response body truncated at ${body.len} of ${want} bytes`),
+                };
+            }
+            break;
+        }
+        vec.vec_extend_from(ref body, intr.array_slice(window, 0, n));
+        if (body.len > c.maxResponseBytes) {
+            return Result.Err {
+                error: httpError(payloadTooLarge(),
+                    `response body exceeded the ${c.maxResponseBytes} byte limit`),
+            };
+        }
     }
-    return out_result;
+    // A bounded read can overshoot into the next message only on a connection
+    // we reuse, and this client never reuses one - so trim and move on.
+    return Result.Ok { value: body.len };
 }
 
-// Convenience: GET. Builds a ClientRequest with no body and ships it
-// through `client_send`.
-export function http_get(ref c: Client, url: string): ClientSendResult propagates<disposable> {
-    let disposable req: ClientRequest = client_request(HttpMethod.Get, url);
-    return client_send(ref c, ref req);
+// ----- convenience --------------------------------------------------------
+
+export async get(ref c: Client, url: string): Result<ClientResponse, HttpError> propagates<disposable> {
+    disposable req: ClientRequest = request(HttpMethod.Get, url);
+    return await send(ref c, ref req);
+}
+
+// POST with a body and its media type, e.g.
+// `post(ref c, url, "application/json", "{\"a\":1}")`.
+export async post(
+    ref c: Client,
+    url: string,
+    mediaType: string,
+    body: string,
+): Result<ClientResponse, HttpError> propagates<disposable> {
+    disposable req: ClientRequest = request(HttpMethod.Post, url);
+    setTextBody(ref req, mediaType, body);
+    return await send(ref c, ref req);
+}
+
+export async put(
+    ref c: Client,
+    url: string,
+    mediaType: string,
+    body: string,
+): Result<ClientResponse, HttpError> propagates<disposable> {
+    disposable req: ClientRequest = request(HttpMethod.Put, url);
+    setTextBody(ref req, mediaType, body);
+    return await send(ref c, ref req);
+}
+
+export async delete(ref c: Client, url: string): Result<ClientResponse, HttpError> propagates<disposable> {
+    disposable req: ClientRequest = request(HttpMethod.Delete, url);
+    return await send(ref c, ref req);
 }

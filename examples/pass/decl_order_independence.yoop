@@ -1,0 +1,57 @@
+// Declaration order must not change whether a program compiles or what it does.
+//
+// Every type below is USED above the line that declares it. Each shape used to
+// fail differently, and all four were the same root cause: a type reference
+// resolved against a pass-A shell that pass C had not filled yet.
+//
+//   1. concrete struct field  -> the compiler CRASHED with
+//      `TypeError: fieldType.fields is not iterable` out of detectRecursiveField
+//   2. variant payload        -> `type "Payload" has no field "n"` on a field
+//      that IS declared (the documented sqlite-binding papercut)
+//   3. generic type arg       -> `type "Bag__int32" has no field "item"`,
+//      because instantiating a generic SNAPSHOTS its field list and the
+//      snapshot was taken from an empty one
+//   4. generic in a variant   -> same as 3, through a payload
+//
+// Fixes: struct shells are unfrozen and filled in place (fillStructShell in
+// jsyooptypecheck/types.js), detectRecursiveField tolerates a shell, and pass C
+// resolves every generic TYPE body before any concrete decl. Across the source
+// files of a directory module case 1 did not even error - it silently
+// miscompiled - so this fixture guards a real correctness property, not a
+// diagnostic nicety. See plans/modules-as-directories.md.
+
+// ----- 1. concrete struct field naming a later struct -----------------------
+type Holder { inner: Leaf, tag: int32 }
+type Leaf { n: int32 }
+
+// ----- 2. variant payload naming a later struct -----------------------------
+variant Shape { Boxed { p: Payload }, Empty }
+type Payload { w: int32 }
+
+// ----- 3. concrete field naming a later GENERIC -----------------------------
+type Carrier { bag: Bag<int32>, extra: int32 }
+type Bag<T> { item: T }
+
+// ----- 4. variant payload naming a later generic ---------------------------
+variant Wrapped { One { b: Bag<int32> }, None }
+
+function main(): int32 {
+    let h: Holder = { inner: { n: 3 }, tag: 4 };
+    printf("holder=%d\n", h.inner.n + h.tag);
+
+    let s: Shape = Shape.Boxed { p: { w: 9 } };
+    switch (s) {
+        case Shape.Boxed { p: got }: { printf("boxed=%d\n", got.w); }
+        case Shape.Empty: { printf("empty\n"); }
+    }
+
+    let c: Carrier = { bag: { item: 5 }, extra: 6 };
+    printf("carrier=%d\n", c.bag.item + c.extra);
+
+    let w: Wrapped = Wrapped.One { b: { item: 7 } };
+    switch (w) {
+        case Wrapped.One { b: bb }: { printf("wrapped=%d\n", bb.item); }
+        case Wrapped.None: { printf("none\n"); }
+    }
+    return 0;
+}

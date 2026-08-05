@@ -1,48 +1,52 @@
-// Library Phase C smoke: parse a hard-coded HTTP/1.1 request buffer
-// through std/http/parser and print the structured fields. No sockets,
-// no FFI - exercises the request-line + headers + body-offset path.
+// Parse a hard-coded HTTP/1.1 request through std/http/parser and print the
+// structured fields. No sockets, no FFI - just the request line, the header
+// block, the split target, and the body offset.
+//
+// The buffer is a string literal rather than a table of decimal byte values:
+// `string_as_bytes` is a view, not a copy, so this is the same bytes the
+// socket would have delivered.
 
-import { disposable } from "../../../std/core/kinds.yoop";
-import { HttpMethod, headers_get } from "../../../std/http/types.yoop";
-import {
-    ParsedRequest, parse_request_head, parsed_content_length,
-} from "../../../std/http/parser.yoop";
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import * as intr from "../../../std/core/intrinsics.yoop";
+import * as types, { HttpError } from "std/http";
+import * as parser, { ParsedRequest } from "std/http";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-function method_label(m: HttpMethod): string {
-    switch (m) {
-        case HttpMethod.Get:     { return "GET";     }
-        case HttpMethod.Post:    { return "POST";    }
-        case HttpMethod.Put:     { return "PUT";     }
-        case HttpMethod.Delete:  { return "DELETE";  }
-        case HttpMethod.Head:    { return "HEAD";    }
-        case HttpMethod.Patch:   { return "PATCH";   }
-        case HttpMethod.Options: { return "OPTIONS"; }
+const REQUEST: string = "GET /hello?name=yoop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
+
+function run(): Result<int32, HttpError> {
+    let disposable p: ParsedRequest = parser.parseRequestHead(intr.string_as_bytes(REQUEST))?;
+    printf(`method=${types.methodLabel(p.request.method)} path=${p.request.path} version=${p.request.version} cl=${parser.expectedBodyLen(ref p)} host=${types.headerOr(ref p.request, "host", "?")}\n`);
+    printf(`query name=${types.queryOr(ref p.request, "name", "?")}\n`);
+    return Result.Ok { value: 0 };
+}
+
+// A request the parser must refuse. The last header line is where a
+// too-permissive parser stops looking, so this one puts the bad field there
+// on purpose.
+function rejects(what: string, raw: string): void {
+    switch (parser.parseRequestHead(intr.string_as_bytes(raw))) {
+        case Result.Ok { value: p }: {
+            printf(`${what}: UNEXPECTEDLY ACCEPTED\n`);
+            Disposable.dispose(ref p);
+        }
+        case Result.Err { error: e }: { printf(`${what}: ${e}\n`); }
     }
-    return "?";
 }
 
 function main(): int32 {
-    // "GET /hello HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n"
-    let raw: uint8[] = [
-        71, 69, 84, 32,
-        47, 104, 101, 108, 108, 111, 32,
-        72, 84, 84, 80, 47, 49, 46, 49, 13, 10,
-        72, 111, 115, 116, 58, 32, 108, 111, 99, 97, 108, 104, 111, 115, 116, 13, 10,
-        67, 111, 110, 116, 101, 110, 116, 45, 76, 101, 110, 103, 116, 104, 58, 32, 48, 13, 10,
-        13, 10,
-    ];
-    let disposable p: ParsedRequest = parse_request_head(raw);
-    if (p.error.len > 0) {
-        printf(`parse err: ${p.error}\n`);
-        return 1;
+    switch (run()) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { printf(`parse failed: ${e}\n`); return 1; }
     }
-    let m: string = method_label(p.request.method);
-    let host: string = headers_get(ref p.request.headers, "host");
-    let cl: usize = parsed_content_length(ref p);
-    printf(`method=${m} path=${p.request.path} version=${p.request.version} cl=${cl} host=${host}\n`);
+    rejects("bad-method ", "BREW /x HTTP/1.1\r\nHost: h\r\n\r\n");
+    rejects("bad-version", "GET /x HTTP/9.9\r\nHost: h\r\n\r\n");
+    rejects("bad-length ", "GET /x HTTP/1.1\r\nContent-Length: eight\r\n\r\n");
+    rejects("chunked    ", "GET /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+    rejects("encoded-sep", "GET /a%2Fb HTTP/1.1\r\nHost: h\r\n\r\n");
     return 0;
 }

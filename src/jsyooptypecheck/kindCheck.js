@@ -26,6 +26,7 @@
 import { ASTNodeKind, ASTNode } from "../contracts.js";
 import { pushError } from "./errors.js";
 import { typeKinds } from "./types.js";
+import { isRefcountedKind } from "./coreKinds.js";
 
 export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, registry = null) {
   const body = fnOrMethodDecl.body;
@@ -143,7 +144,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
 
     // Phase 6.3: builtin kinds bound directly to Task<T> - joined / pooled.
     // These are always opt-in via keyword, so `autoCleanup` is true.
-    if (kt?.builtin && rt?.kind === "task") {
+    if ((kt?.refcounted || kt?.mustCall?.length) && rt?.kind === "task") {
       if (kt.autoJoin) {
         out.push(mkObligation({
           type: "autoWait",
@@ -206,7 +207,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       const calleeDecl = funcDeclTable.get(stmt.assignment.callee);
       for (const app of calleeDecl?.returnPropagatedKinds ?? []) addKind(app, false);
     }
-    // The kt.builtin && rt is task case is handled above by the early return;
+    // The core-kind + Task case is handled above by the early return;
     // here we additionally flip autoCleanup=true when a builtin kind keyword
     // (e.g. `Task`) is applied to a struct binding whose propagatedKinds
     // includes the kind.
@@ -354,7 +355,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   // Does a struct field carry the given kind?
   function fieldCarriesKind(field, kindType) {
     if (field.kindType === kindType) return true;
-    if (kindType.builtin && kindType.refcounted && field.type?.kind === "task") {
+    if (isRefcountedKind(kindType) && field.type?.kind === "task") {
       return true;
     }
     if (
@@ -741,9 +742,25 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
     const args = callNode.args ?? [];
     for (let i = 0; i < Math.min(args.length, params.length); i++) {
       const pkt = params[i].resolvedKindType;
-      if (pkt?.builtin && pkt.refcounted) {
-        args[i].pooledArgRetain = true;
-      }
+      if (!isRefcountedKind(pkt)) continue;
+      // The retain codegen emits is `yoop_task_retain`, which is only valid
+      // for a `Task<T>` - its retain/release bodies are compiler-provided
+      // (coreKinds.js), and a Task is a raw pointer. A refcounted kind on a
+      // NON-task receiver (a user struct implementing the required trait)
+      // would previously be marked here too, and codegen would then hand a
+      // struct VALUE to yoop_task_retain - IR that does not even verify.
+      //
+      // Only mark what codegen can actually emit. A refcounted kind on a
+      // struct parameter is left unmarked rather than rejected, because
+      // `pooled j: Job` where Job PROPAGATES pooled is a legitimate shape -
+      // its handle lives in a field, and the field walk in obligationsFor
+      // owns that release. A struct that is itself refcounted (implements the
+      // required trait directly) gets no retain here; that would need a
+      // trait-dispatched retain, which is the same gap as the release side.
+      const pt = params[i].resolvedType ?? null;
+      const base = pt?.kind === typeKinds.ref ? pt.inner : pt;
+      if (base?.kind !== typeKinds.task) continue;
+      args[i].pooledArgRetain = true;
     }
   }
 
@@ -760,7 +777,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
         sourceLoc: p.sourceLoc,
       });
     }
-    if (kt?.builtin && kt.refcounted) {
+    if (isRefcountedKind(kt)) {
       outerFrame.obligations.push(mkObligation({
         type: "release",
         bindingName: p.name,

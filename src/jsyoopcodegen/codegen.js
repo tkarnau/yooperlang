@@ -51,6 +51,33 @@ const LLVM_TYPES = {
 // LLVM `declare` lines for the C runtime ABI. Emitted unconditionally so the
 // codegen-injected init/shutdown calls in `main` (and any future task
 // scheduling) resolve at link time.
+// coro.resume / destroy / done are LLVM intrinsics, so the C runtime
+// cannot call them - and it must not hard-code the frame layout either
+// (the resume/destroy pointer pair at the head of a coroutine frame is an
+// implementation detail). These three ordinary functions are the bridge:
+// the scheduler in runtime/yoop_runtime.c drives a task through them.
+//
+// External linkage, emitted exactly once for the program. They must NOT
+// be linkonce_odr: nothing inside the IR ever calls them (only the C
+// runtime does, from a different translation unit), so a discardable
+// linkage lets globaldce delete them and the link fails on three
+// undefined symbols.
+const CORO_TRAMPOLINES = [
+  "define void @yoop_coro_resume(ptr %h) {",
+  "  call void @llvm.coro.resume(ptr %h)",
+  "  ret void",
+  "}",
+  "define void @yoop_coro_destroy(ptr %h) {",
+  "  call void @llvm.coro.destroy(ptr %h)",
+  "  ret void",
+  "}",
+  "define i32 @yoop_coro_done(ptr %h) {",
+  "  %d = call i1 @llvm.coro.done(ptr %h)",
+  "  %z = zext i1 %d to i32",
+  "  ret i32 %z",
+  "}",
+];
+
 const RUNTIME_DECLARES = [
   "declare void @yoop_runtime_init()",
   "declare void @yoop_runtime_shutdown()",
@@ -65,9 +92,27 @@ const RUNTIME_DECLARES = [
   "declare void @yoop_task_retain(ptr)",
   "declare void @yoop_task_release(ptr)",
   "declare void @yoop_handle_signal_done(ptr)",
+  // Async scheduling: settle decides whether a just-stepped task
+  // finished or suspended, and is called from every task thunk.
+  "declare void @yoop_task_settle(ptr)",
+  "declare void @yoop_runtime_set_coro_ops(ptr, ptr, ptr)",
+  "declare void @yoop_task_make_runnable(ptr)",
+  "declare ptr @yoop_current_task()",
   "declare void @yoop_task_free_sync_pair(ptr)",
   "declare ptr @malloc(i64)",
   "declare void @free(ptr)",
+  // LLVM switched-resume coroutines - the lowering for `async` functions.
+  // See plans/async-coroutines.md. The frame is heap-allocated via malloc
+  // and released by coro.free at the cleanup edge.
+  "declare token @llvm.coro.id(i32, ptr, ptr, ptr)",
+  "declare i64 @llvm.coro.size.i64()",
+  "declare ptr @llvm.coro.begin(token, ptr)",
+  "declare i8 @llvm.coro.suspend(token, i1)",
+  "declare ptr @llvm.coro.free(token, ptr)",
+  "declare i1 @llvm.coro.end(ptr, i1)",
+  "declare void @llvm.coro.resume(ptr)",
+  "declare void @llvm.coro.destroy(ptr)",
+  "declare i1 @llvm.coro.done(ptr)",
   // Context-routed allocation (runtime/yoop_alloc.c): dispatch through the
   // current allocator. Back the ctx_alloc/ctx_free intrinsics.
   "declare ptr @yoop_ctx_alloc(i64, i64)",
@@ -289,36 +334,20 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
   }
   if (name === "string") {
     if (typeof opts.emitRawStringGlobal !== "function") return null;
-    // Comptime string values store the unquoted, unescaped JS string.
-    // Re-encode through the same path as inline literals so escape
-    // sequences (\n, \t, ...) round-trip identically to today.
-    const inner = encodeStringForRawGlobal(wrapped.v);
-    const { name: strSym } = opts.emitRawStringGlobal(inner);
+    // A comptime string value is the literal's INNER SOURCE TEXT, quotes
+    // stripped and escape sequences left alone (see lower.js's
+    // STRING_LITERAL case) - a template that interpolated a number splices
+    // in digits, which can never introduce a backslash, so the raw form
+    // survives folding. That is exactly what emitRawStringGlobal wants, so
+    // it goes straight there. Running it through encodeStringForRawGlobal
+    // first (which assumes an already-DECODED JS string) doubled every
+    // backslash, and a module-level `const S: string = "a\r\nb";` reached
+    // the binary as the seven characters a-\-r-\-n-b instead of the five it
+    // reads as everywhere else in the language.
+    const { name: strSym } = opts.emitRawStringGlobal(String(wrapped.v));
     return strSym;
   }
   return null;
-}
-
-// Convert a JS-side string (from a comptime-folded value) into the
-// "inner" form that emitRawStringGlobal/encodeStringBytes expects -
-// i.e. with literal escape sequences re-escaped so encodeStringBytes
-// emits them as LLVM byte-array escape codes. JS already decoded \n
-// to a newline character; we need to re-encode it as the two-char
-// sequence `\n` so encodeStringBytes can map it back to `\0A`.
-function encodeStringForRawGlobal(s) {
-  let out = "";
-  for (let i = 0; i < s.length; i++) {
-    const ch = s[i];
-    const code = ch.charCodeAt(0);
-    if (ch === "\\") { out += "\\\\"; continue; }
-    if (ch === '"')  { out += '\\"';  continue; }
-    if (ch === "\n") { out += "\\n";  continue; }
-    if (ch === "\t") { out += "\\t";  continue; }
-    if (ch === "\r") { out += "\\r";  continue; }
-    if (code === 0)  { out += "\\0";  continue; }
-    out += ch; // encodeStringBytes handles non-printables via hex
-  }
-  return out;
 }
 
 // Phase 12: a value enum collapses to its underlying primitive at the LLVM
@@ -2417,7 +2446,27 @@ export function sizeOfType(t) {
       const padded = roundUp(off, maxAlign);
       if (padded > maxPayload) maxPayload = padded;
     }
-    return 4 /* tag */ + maxPayload;
+    // A variant is emitted as `{ i32, [N x i8] }` with N = max(maxPayload, 1)
+    // (see the enum/variant type definitions in codegenProgram), so its size is
+    // the tag plus that buffer, padded to its own alignment. Reporting the
+    // unrounded `4 + maxPayload` under-counted it two ways: it dropped the
+    // one-byte floor a payload-free variant still occupies, and it ignored the
+    // trailing pad. That mattered whenever a variant appeared INSIDE another
+    // variant's payload - the enclosing `[N x i8]` came out too small and
+    // storing the payload wrote past its end, corrupting whatever field
+    // followed. Over-reporting is harmless (a slightly roomier payload
+    // buffer); under-reporting is a memory stomp.
+    return roundUp(4 /* tag */ + Math.max(maxPayload, 1), sizeOfAlign(t));
+  }
+  if (t.kind === typeKinds.vtable) {
+    // Phase 9.G: a vtable is `{ ptr ctx, ptr m1, ptr m2, ... }` - one pointer
+    // for the receiver plus one per trait method. Falling through to the
+    // default 8 reported a one-method vtable as half its real size, so a
+    // `Vec<T>` whose element embedded one (a router's route table, say)
+    // allocated half the bytes it then wrote, and overran its buffer once
+    // enough entries were pushed to reach past the slack.
+    const slots = t.methodOrder?.length ?? t.fields?.length ?? 0;
+    return 8 * (1 + slots);
   }
   return 8;
 }
@@ -2599,6 +2648,10 @@ export function codegenProgram(modules, _moduleEnv, programState) {
   // once globally so per-module emitters can call it without each emitting
   // their own forward declaration.
   allExterns.add("declare void @llvm.dbg.declare(metadata, metadata, metadata)");
+  // Coroutine trampolines - emitted ONCE for the whole program. Every
+  // module is concatenated into a single .ll, so a per-module copy would
+  // be a redefinition rather than something the linker folds.
+  allLines.push(...CORO_TRAMPOLINES, "");
 
   // Phase 7.1: emit each generic-struct instantiation as a struct def.
   // Done before per-module codegen so call-site references resolve.
@@ -2659,6 +2712,15 @@ export function codegenProgram(modules, _moduleEnv, programState) {
   // registry slot after its sweep finished, so we re-run all modules'
   // flushers in a cross-module fixed-point below before extracting
   // lines.
+  // modules-as-directories: how many source files each module spans. Read when
+  // building the per-file module-init symbol, so a single-file module keeps its
+  // historical unsuffixed name and a directory module gets one init per file.
+  if (programState) {
+    const counts = new Map();
+    for (const mod of modules) counts.set(mod.id, (counts.get(mod.id) ?? 0) + 1);
+    programState.moduleSourceFileCount = counts;
+  }
+
   const moduleIRs = [];
   for (const mod of modules) {
     for (const decl of mod.ast.body) {
@@ -2939,12 +3001,38 @@ function codegenWithModuleId(
   const structDefs = [];
   // Phase 10.K: ctx-dropping shims emitted for `VTableName.fromFn(...)`, keyed
   // by shim symbol so each (module, target function) pair is emitted once.
-  const emittedFromFnShims = new Set();
+  //
+  // modules-as-directories: this has to be PROGRAM-wide, not per invocation.
+  // codegenWithModuleId runs once per SOURCE FILE, so two files of one module
+  // each keeping their own set would emit the same shim symbol twice (the symbol
+  // already carries moduleId + target, so program-wide dedupe is what it always
+  // meant). Same family of bug as the string-constant counter below.
+  const emittedFromFnShims =
+    programState && (programState.emittedFromFnShims ??= new Set());
   let strConstCounter = 0;
   let tempCounter = 0;
   let labelCounter = 0;
   const functionSigs = new Map();
   let symbols = createLocalSymbols();
+  // modules-as-directories: a module can span several SOURCE FILES, and
+  // codegenWithModuleId runs once per file, so anything named
+  // `<moduleId>_<per-invocation counter>` collides between siblings. `fileTag`
+  // disambiguates those: "" for a single-file module (so its IR stays
+  // byte-identical to before the feature) and `__<basename>` otherwise.
+  //
+  // Two symbol families need it, and both were real LLVM redefinition errors:
+  // the module-init function, and the string/array literal globals whose
+  // counter restarts at 0 for every file.
+  const fileTag =
+    (programState?.moduleSourceFileCount?.get(moduleId) ?? 1) > 1
+      ? `__${String(moduleAbsPath ?? "")
+          .replace(/^.*[/\\]/, "")
+          .replace(/\.yoop$/, "")
+          .replace(/[^a-zA-Z0-9_]/g, "_")}`
+      : "";
+  // Init ORDER is the order these land in programState.moduleInitSymbols, which
+  // follows the module graph's file order - sorted by basename within a module.
+  const moduleInitSymName = `${moduleId}__module_init${fileTag}`;
   // Per-module DWARF handles. Lazily initialized via beginModule on first
   // function emission so callers (like compileSource) that synthesize a
   // module without an absPath still get a stable synthetic file name.
@@ -3066,7 +3154,7 @@ function codegenWithModuleId(
   let bindingDeclTable = new Map();
 
   function freshTemp() { return `%t${tempCounter++}`; }
-  function freshStrGlobal() { return `@.str_${moduleId}_${strConstCounter++}`; }
+  function freshStrGlobal() { return `@.str_${moduleId}${fileTag}_${strConstCounter++}`; }
   function freshLabel(hint) { return `${hint}_${labelCounter++}`; }
 
   function ensureArrayTypeDef(elemType) {
@@ -3103,7 +3191,7 @@ function codegenWithModuleId(
   // it. Reuses the string-global counter for naming since both produce
   // private aggregates in the same flat namespace.
   function emitRawArrayGlobal({ elemLlvm, count, elemInits }) {
-    const name = `@.arr_${moduleId}_${strConstCounter++}`;
+    const name = `@.arr_${moduleId}${fileTag}_${strConstCounter++}`;
     globals.push(
       `${name} = private unnamed_addr constant [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
     );
@@ -3112,6 +3200,10 @@ function codegenWithModuleId(
 
   let currentReturnType = null;
   let inMainFn = false;
+  // Non-null while emitting an `async` function body. Carries the shared
+  // trailer labels every `return` and every `await` branches to, so the
+  // suspend/cleanup blocks exist exactly once per coroutine.
+  let currentCoro = null;
 
   // For now, emit struct defs using mangled names. Phase 7.1: generic type
   // decls (with typeParams) have no resolvedType - their instantiations are
@@ -3254,11 +3346,17 @@ function codegenWithModuleId(
       const fields = [
         "ptr",                  // 0: thunk
         "i8",                   // 8: state
-        "[3 x i8]",             // 9: pad
+        "[3 x i8]",             // 9: pad (byte 9 = cancel flag, Phase 10.F.2)
         "i32",                  // 12: refcount
         "ptr",                  // 16: mutex_ptr
         "ptr",                  // 24: cond_ptr
-        llvmType(resultType),   // 32: result slot
+        // 32: coroutine handle. A task body is a coroutine now, and the
+        // scheduler has to be able to resume it across worker threads, so
+        // the handle lives on the task rather than on any one stack.
+        // Added AFTER cond_ptr on purpose - every offset the C runtime
+        // hard-codes (0/8/9/12/16/24) is below 32 and stays valid.
+        "ptr",                  // 32: coro handle
+        llvmType(resultType),   // 40: result slot
         ...args.map((a) => llvmType(a)),
       ];
       structDefs.push(`${structName} = type { ${fields.join(", ")} }`);
@@ -3333,7 +3431,7 @@ function codegenWithModuleId(
       programState.moduleInitSymbols = [];
     }
     if (programState?.moduleInitSymbols) {
-      programState.moduleInitSymbols.push(`${moduleId}__module_init`);
+      programState.moduleInitSymbols.push(moduleInitSymName);
     }
   }
 
@@ -3601,8 +3699,19 @@ function codegenWithModuleId(
     const prevInMain = inMainFn;
     inMainFn = symName === "main";
     const params = node.params ?? [];
-    const llvmRet = llvmType(node.resolvedType);
-    const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
+    // An async function lowers to a switched-resume coroutine: it RETURNS
+    // the handle, and its declared result is written through a
+    // caller-owned slot passed as a trailing `ptr %__ret`. The slot lives
+    // in the caller's frame, which is what keeps it alive across the
+    // caller's own suspends. Void-returning async functions still take
+    // the (unused) slot so there is one ABI rather than two.
+    const isAsyncFn = !!node.isAsync;
+    const llvmRet = isAsyncFn ? "ptr" : llvmType(node.resolvedType);
+    const paramParts = params.map(
+      (p) => `${llvmType(p.resolvedType)} %${p.name}.arg`,
+    );
+    if (isAsyncFn) paramParts.push("ptr %__ret");
+    const paramSig = paramParts.join(", ");
     const subprogramRef = makeSubprogram(
       node.name ?? symName,
       symName,
@@ -3612,9 +3721,25 @@ function codegenWithModuleId(
     const prevSubprogram = currentSubprogram;
     currentSubprogram = subprogramRef;
     const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
-    const fnLines = [`define ${llvmRet} @${symName}(${paramSig})${dbgSuffix} {`, "entry:"];
+    const attrs = isAsyncFn ? " presplitcoroutine" : "";
+    const fnLines = [
+      `define ${llvmRet} @${symName}(${paramSig})${attrs}${dbgSuffix} {`,
+      "entry:",
+    ];
+    const prevCoro = currentCoro;
+    currentCoro = null;
+    if (isAsyncFn) currentCoro = emitCoroPrologue(fnLines, symName);
     if (inMainFn) {
       fnLines.push("  call void @yoop_runtime_init()");
+      // Hand the runtime the coroutine trampolines. It cannot call the
+      // LLVM intrinsics itself and must not link against these by name
+      // (the C runtime has to build standalone for runtime/tests/), so
+      // the scheduler receives them as pointers. Installed before any
+      // task can be submitted.
+      fnLines.push(
+        "  call void @yoop_runtime_set_coro_ops(ptr @yoop_coro_resume, " +
+          "ptr @yoop_coro_destroy, ptr @yoop_coro_done)",
+      );
       // --track-heap: register the dump as an atexit handler so every
       // exit path prints heap totals once. Registered before module_init
       // so allocations made during static initializers are counted.
@@ -3652,10 +3777,29 @@ function codegenWithModuleId(
       });
     }
     const prologueEnd = fnLines.length;
+    // Close the coroutine's entry block so allocas hoist to just before
+    // this branch - i.e. AFTER coro.begin, which is where the coro passes
+    // expect frame-resident allocas to live.
+    if (currentCoro) {
+      fnLines.push(`  br label %${currentCoro.bodyLabel}`);
+      fnLines.push(`${currentCoro.bodyLabel}:`);
+    }
     const ctx = { fnName: symName, returnType: node.resolvedType, subprogram: subprogramRef };
     node.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(node.body, fnLines);
-    if (isVoidReturn(node.resolvedType)) {
+    if (currentCoro) {
+      // Fall-through out of the body: void async functions just reach the
+      // final suspend; a non-void one that falls off the end was proven
+      // unreachable by the typechecker.
+      if (!blockIsTerminated(fnLines)) {
+        if (isVoidReturn(node.resolvedType)) {
+          fnLines.push(`  br label %${currentCoro.finalLabel}`);
+        } else {
+          fnLines.push("  unreachable");
+        }
+      }
+      emitCoroTrailer(fnLines, currentCoro);
+    } else if (isVoidReturn(node.resolvedType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) {
         if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
@@ -3672,7 +3816,69 @@ function codegenWithModuleId(
     finalizeFnDbg(fnLines, subprogramRef, node.sourceLoc, prologueEnd);
     lines.push(...fnLines);
     inMainFn = prevInMain;
+    currentCoro = prevCoro;
     currentSubprogram = prevSubprogram;
+  }
+
+  // Coroutine frame setup, shared by async free functions and async
+  // methods. No initial suspend: calling an async function runs it
+  // eagerly until it hits a real suspend point, so a call that never
+  // blocks completes with no resume at all.
+  //
+  // Returns the `currentCoro` record carrying the labels that `return`
+  // and every `await` in the body branch to.
+  function emitCoroPrologue(fnLines, symName) {
+    const safe = symName.replace(/[^A-Za-z0-9_]/g, "_");
+    const coroId = freshTemp();
+    const coroSize = freshTemp();
+    const coroMem = freshTemp();
+    const coroHdl = freshTemp();
+    fnLines.push(
+      `  ${coroId} = call token @llvm.coro.id(i32 0, ptr null, ptr null, ptr null)`,
+    );
+    fnLines.push(`  ${coroSize} = call i64 @llvm.coro.size.i64()`);
+    fnLines.push(`  ${coroMem} = call ptr @malloc(i64 ${coroSize})`);
+    fnLines.push(
+      `  ${coroHdl} = call ptr @llvm.coro.begin(token ${coroId}, ptr ${coroMem})`,
+    );
+    return {
+      id: coroId,
+      hdl: coroHdl,
+      bodyLabel: `coro.body.${safe}`,
+      finalLabel: `coro.final.${safe}`,
+      cleanupLabel: `coro.cleanup.${safe}`,
+      suspendLabel: `coro.suspend.${safe}`,
+    };
+  }
+
+  // The three shared trailer blocks every coroutine ends with. `return`
+  // branches to finalLabel with the result already stored; an `await`
+  // that suspends routes its unwind edges to cleanupLabel and its
+  // "stay suspended" edge to suspendLabel.
+  //
+  // coro.done() reports true once the coroutine is parked at the FINAL
+  // suspend, which is how the driver knows the result slot is filled.
+  function emitCoroTrailer(fnLines, coro) {
+    const sf = freshTemp();
+    fnLines.push(`${coro.finalLabel}:`);
+    fnLines.push(`  ${sf} = call i8 @llvm.coro.suspend(token none, i1 true)`);
+    fnLines.push(
+      `  switch i8 ${sf}, label %${coro.suspendLabel} ` +
+        `[i8 0, label %${coro.cleanupLabel} i8 1, label %${coro.cleanupLabel}]`,
+    );
+    const mem = freshTemp();
+    fnLines.push(`${coro.cleanupLabel}:`);
+    fnLines.push(
+      `  ${mem} = call ptr @llvm.coro.free(token ${coro.id}, ptr ${coro.hdl})`,
+    );
+    fnLines.push(`  call void @free(ptr ${mem})`);
+    fnLines.push(`  br label %${coro.suspendLabel}`);
+    const unused = freshTemp();
+    fnLines.push(`${coro.suspendLabel}:`);
+    fnLines.push(
+      `  ${unused} = call i1 @llvm.coro.end(ptr ${coro.hdl}, i1 false)`,
+    );
+    fnLines.push(`  ret ptr ${coro.hdl}`);
   }
 
   // Phase 8.E: synthesize @<modid>__module_init that runs every top-level
@@ -3689,7 +3895,7 @@ function codegenWithModuleId(
     tempCounter = 0;
     labelCounter = 0;
     symbols = createLocalSymbols();
-    const symName = `${moduleId}__module_init`;
+    const symName = moduleInitSymName;
     const fnLines = [
       `define internal void @${symName}() {`,
       "entry:",
@@ -3724,9 +3930,18 @@ function codegenWithModuleId(
 
     const returnType = methodDecl.resolvedFuncType.returnType;
     const params = methodDecl.params;
-    const llvmRet = llvmType(returnType);
+    // An async method is a coroutine exactly like an async free
+    // function: same `ptr` return, same trailing `%__ret` slot. Keeping
+    // the two ABIs identical is what lets a trait-qualified call reuse
+    // emitAsyncCall without a method-specific path.
+    const isAsyncFn = !!methodDecl.isAsync;
+    const llvmRet = isAsyncFn ? "ptr" : llvmType(returnType);
 
-    const paramSig = params.map((p) => `${llvmType(p.resolvedType)} %${p.name}.arg`).join(", ");
+    const paramParts = params.map(
+      (p) => `${llvmType(p.resolvedType)} %${p.name}.arg`,
+    );
+    if (isAsyncFn) paramParts.push("ptr %__ret");
+    const paramSig = paramParts.join(", ");
     const mangled = mangleTraitMethod(structType, traitName, methodDecl.name);
     const subprogramRef = makeSubprogram(
       methodDecl.name,
@@ -3737,7 +3952,14 @@ function codegenWithModuleId(
     const prevSubprogram = currentSubprogram;
     currentSubprogram = subprogramRef;
     const dbgSuffix = subprogramRef ? ` !dbg ${subprogramRef}` : "";
-    const fnLines = [`define ${llvmRet} @${mangled}(${paramSig})${dbgSuffix} {`, "entry:"];
+    const attrs = isAsyncFn ? " presplitcoroutine" : "";
+    const fnLines = [
+      `define ${llvmRet} @${mangled}(${paramSig})${attrs}${dbgSuffix} {`,
+      "entry:",
+    ];
+    const prevCoro = currentCoro;
+    currentCoro = null;
+    if (isAsyncFn) currentCoro = emitCoroPrologue(fnLines, mangled);
 
     for (let i = 0; i < params.length; i++) {
       const p = params[i];
@@ -3763,11 +3985,26 @@ function codegenWithModuleId(
     }
 
     const prologueEnd = fnLines.length;
+    if (currentCoro) {
+      // Close the entry block so allocas hoist AFTER coro.begin - see the
+      // matching note in emitFn.
+      fnLines.push(`  br label %${currentCoro.bodyLabel}`);
+      fnLines.push(`${currentCoro.bodyLabel}:`);
+    }
     const ctx = { fnName: methodDecl.name, returnType, subprogram: subprogramRef };
     methodDecl.body.body.forEach((s) => emitStmt(s, fnLines, ctx));
     emitImplicitCleanups(methodDecl.body, fnLines);
 
-    if (isVoidReturn(returnType)) {
+    if (currentCoro) {
+      if (!blockIsTerminated(fnLines)) {
+        if (isVoidReturn(returnType)) {
+          fnLines.push(`  br label %${currentCoro.finalLabel}`);
+        } else {
+          fnLines.push("  unreachable");
+        }
+      }
+      emitCoroTrailer(fnLines, currentCoro);
+    } else if (isVoidReturn(returnType)) {
       const last = fnLines[fnLines.length - 1].trim();
       if (!last.startsWith("ret")) fnLines.push("  ret void");
     } else if (!blockIsTerminated(fnLines)) {
@@ -3779,6 +4016,7 @@ function codegenWithModuleId(
     hoistAllocasToEntry(fnLines);
     finalizeFnDbg(fnLines, subprogramRef, methodDecl.sourceLoc, prologueEnd);
     lines.push(...fnLines);
+    currentCoro = prevCoro;
     currentSubprogram = prevSubprogram;
   }
 
@@ -3794,35 +4032,46 @@ function codegenWithModuleId(
     const thunkSym = `${mangle(moduleId, taskDecl.name)}__thunk`;
     fnLines.push(`define void @${thunkSym}(ptr %ts) {`);
     fnLines.push("entry:");
-    // Load each arg from its corresponding struct field (7 + i).
+    // Load each arg from its corresponding struct field (8 + i).
     const argVals = [];
     for (let i = 0; i < meta.args.length; i++) {
       const argType = meta.args[i];
       const llvmArgTy = llvmType(argType);
       const gep = tcount(tn++);
       fnLines.push(
-        `  ${gep} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 ${7 + i}`,
+        `  ${gep} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 ${8 + i}`,
       );
       const val = tcount(tn++);
       fnLines.push(`  ${val} = load ${llvmArgTy}, ptr ${gep}`);
       argVals.push({ val, ty: llvmArgTy });
     }
     const bodySym = mangle(moduleId, taskDecl.name);
-    const argList = argVals.map((a) => `${a.ty} ${a.val}`).join(", ");
-    const resultLlvm = llvmType(meta.resultType);
-    if (isVoidReturn(meta.resultType)) {
-      fnLines.push(`  call void @${bodySym}(${argList})`);
-    } else {
-      const resVal = tcount(tn++);
-      fnLines.push(`  ${resVal} = call ${resultLlvm} @${bodySym}(${argList})`);
-      // Store the result at field 6.
-      const resPtr = tcount(tn++);
-      fnLines.push(
-        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 6`,
-      );
-      fnLines.push(`  store ${resultLlvm} ${resVal}, ptr ${resPtr}`);
-    }
-    fnLines.push("  call void @yoop_handle_signal_done(ptr %ts)");
+    // A task body is a coroutine, so the thunk STARTS it rather than
+    // running it: it hands the body the task's own result slot, stashes
+    // the returned handle on the task, and returns. The runtime then
+    // decides whether the task finished or suspended - see
+    // yoop_task_step in runtime/yoop_runtime.c.
+    //
+    // The result slot is field 7 of the task struct; passing it directly
+    // means a completed coroutine has already written its result where
+    // `wait` expects to find it, with no copy.
+    const resPtr = tcount(tn++);
+    fnLines.push(
+      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 7`,
+    );
+    const startArgs = argVals.map((a) => `${a.ty} ${a.val}`);
+    startArgs.push(`ptr ${resPtr}`);
+    const hdl = tcount(tn++);
+    fnLines.push(`  ${hdl} = call ptr @${bodySym}(${startArgs.join(", ")})`);
+    // Stash the handle at field 6 so a later resume can find it.
+    const hdlPtr = tcount(tn++);
+    fnLines.push(
+      `  ${hdlPtr} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 6`,
+    );
+    fnLines.push(`  store ptr ${hdl}, ptr ${hdlPtr}`);
+    // Let the runtime observe completion-vs-suspension uniformly, for
+    // both this initial start and every later resume.
+    fnLines.push("  call void @yoop_task_settle(ptr %ts)");
     fnLines.push("  ret void");
     fnLines.push("}");
     hoistAllocasToEntry(fnLines);
@@ -3874,7 +4123,7 @@ function codegenWithModuleId(
       const llvmArgTy = llvmType(meta.args[i]);
       const slotPtr = freshTemp();
       fnLines.push(
-        `  ${slotPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 ${7 + i}`,
+        `  ${slotPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 ${8 + i}`,
       );
       fnLines.push(`  store ${llvmArgTy} ${arg.val}, ptr ${slotPtr}`);
     }
@@ -4466,11 +4715,168 @@ function codegenWithModuleId(
       case ASTNodeKind.WAIT_EXPRESSION: {
         return emitWaitExpression(node, fnLines);
       }
+      case ASTNodeKind.AWAIT_EXPRESSION: {
+        return emitAwaitExpression(node, fnLines);
+      }
       case ASTNodeKind.VARIANT_CONSTRUCTOR: {
         return emitVariantConstructor(node, fnLines);
       }
       default: throw new Error(`codegen: unhandled expression kind "${node.kind}"`);
     }
+  }
+
+  // `await g(args)` - drive an async callee inline, propagating its
+  // suspension into this frame. Shape (validated as hand-written IR
+  // before any of this was built - see plans/async-coroutines.md):
+  //
+  //   %slot = alloca T                  ; in OUR frame, so it survives
+  //   %h    = call ptr @g(args, %slot)  ; runs eagerly to first suspend
+  //   loop:  %d = coro.done(%h) ? done : block
+  //   block: coro.suspend -> [resume: coro.resume(%h); goto loop]
+  //   done:  load %slot; coro.destroy(%h)
+  //
+  // The callee runs eagerly, so a call that never blocks reaches `done`
+  // on the first iteration and this costs one frame allocation.
+  function emitAwaitExpression(node, fnLines) {
+    if (!currentCoro) {
+      // The typechecker rejects this, so reaching here is a compiler bug.
+      throw new Error("codegen: await outside a coroutine");
+    }
+    const call = node.operand;
+
+    // `await suspendNow()` is the primitive, not a call: park THIS
+    // coroutine right here. There is no callee to drive, so it lowers to
+    // a lone coro.suspend whose resume edge just falls through to the
+    // next statement.
+    //
+    // Whoever is about to call this has already armed a wakeup (an I/O
+    // interest, a timer). Without one the task simply never runs again.
+    if (call && call.builtinSuspendNow) {
+      const resumeLbl = freshLabel("suspend.resume");
+      const susp = freshTemp();
+      fnLines.push(
+        `  ${susp} = call i8 @llvm.coro.suspend(token none, i1 false)`,
+      );
+      fnLines.push(
+        `  switch i8 ${susp}, label %${currentCoro.suspendLabel} ` +
+          `[i8 0, label %${resumeLbl} i8 1, label %${currentCoro.cleanupLabel}]`,
+      );
+      fnLines.push(`${resumeLbl}:`);
+      return { val: "void", yoopType: VoidType() };
+    }
+
+    const resultType = node.resolvedType;
+    const isVoid = isVoidReturn(resultType);
+
+    // Result slot. Void callees still get a slot (one ABI), sized i8 so
+    // the alloca is well-formed.
+    const slot = freshTemp();
+    fnLines.push(`  ${slot} = alloca ${isVoid ? "i8" : llvmType(resultType)}, align 8`);
+
+    const hdl = emitAsyncCall(call, slot, fnLines);
+
+    const loopLbl = freshLabel("await.loop");
+    const blockLbl = freshLabel("await.block");
+    const resumeLbl = freshLabel("await.resume");
+    const doneLbl = freshLabel("await.done");
+
+    fnLines.push(`  br label %${loopLbl}`);
+    fnLines.push(`${loopLbl}:`);
+    const doneFlag = freshTemp();
+    fnLines.push(`  ${doneFlag} = call i1 @llvm.coro.done(ptr ${hdl})`);
+    fnLines.push(`  br i1 ${doneFlag}, label %${doneLbl}, label %${blockLbl}`);
+
+    // Not finished: suspend OURSELVES. The unwind edge routes to this
+    // function's shared cleanup so a destroyed caller tears the frame
+    // down properly.
+    fnLines.push(`${blockLbl}:`);
+    const susp = freshTemp();
+    fnLines.push(`  ${susp} = call i8 @llvm.coro.suspend(token none, i1 false)`);
+    fnLines.push(
+      `  switch i8 ${susp}, label %${currentCoro.suspendLabel} ` +
+        `[i8 0, label %${resumeLbl} i8 1, label %${currentCoro.cleanupLabel}]`,
+    );
+
+    // Resumed by the scheduler: drive the callee one more step, then
+    // re-test. This is what makes a whole call chain re-drive from a
+    // single top-level resume.
+    fnLines.push(`${resumeLbl}:`);
+    fnLines.push(`  call void @llvm.coro.resume(ptr ${hdl})`);
+    fnLines.push(`  br label %${loopLbl}`);
+
+    fnLines.push(`${doneLbl}:`);
+    if (isVoid) {
+      fnLines.push(`  call void @llvm.coro.destroy(ptr ${hdl})`);
+      return { val: "void", yoopType: VoidType() };
+    }
+    const out = freshTemp();
+    fnLines.push(`  ${out} = load ${llvmType(resultType)}, ptr ${slot}`);
+    // Read the result BEFORE destroying - destroy releases the frame.
+    fnLines.push(`  call void @llvm.coro.destroy(ptr ${hdl})`);
+    return { val: out, yoopType: resultType };
+  }
+
+  // Emit the call half of an await: same argument evaluation as an
+  // ordinary call, but with the result slot appended and `ptr` (the
+  // coroutine handle) as the return type.
+  //
+  // Covers the callee shapes async functions can currently take: a plain
+  // same-module/imported name, and a namespaced `ns.f(...)`. Generic and
+  // trait-dispatched async callees are deferred (see the plan) and the
+  // typechecker has no way to produce them yet.
+  function emitAsyncCall(call, retSlot, fnLines) {
+    // Trait-qualified: `Trait.method(ref x, ...)`. This is also where a
+    // GENERIC async trait call lands - cloneAstWithSubstitution resolves
+    // `boundMethod` into a concrete `calleeMangledName` during
+    // monomorphization, so by codegen time there is no abstract receiver
+    // left and the two cases are one path.
+    if (call.calleeMangledName && call.calleeMethodOf) {
+      const argResults = call.args.map((a) => emitExpr(a, fnLines));
+      const methodSig = call.calleeMethodOf.methods.get(call.calleeMethodName);
+      const parts = methodSig.params.map((p, i) => {
+        const llvmTy = p.isRef ? "ptr" : llvmType(p.type);
+        return `${llvmTy} ${argResults[i].val}`;
+      });
+      parts.push(`ptr ${retSlot}`);
+      const hdl = freshTemp();
+      fnLines.push(
+        `  ${hdl} = call ptr @${call.calleeMangledName}(${parts.join(", ")})`,
+      );
+      return hdl;
+    }
+
+    // Vtable dispatch: `Trait.method(ref vt, ...)` through a stored
+    // function pointer. The slot's type has the async ABI baked in
+    // (returns ptr, takes the trailing result slot), so this is an
+    // indirect call with the same shape as the direct one.
+    if (call.vtableCall) {
+      return emitAsyncVTableCall(call, retSlot, fnLines);
+    }
+
+    const argResults = call.args.map((a) => emitExpr(a, fnLines));
+    const parts = argResults.map((r) => `${llvmType(r.yoopType)} ${r.val}`);
+    parts.push(`ptr ${retSlot}`);
+    const argList = parts.join(", ");
+
+    let sym;
+    if (call.genericInstantiation) {
+      // Monomorphized async function - the symbol carries the type-arg
+      // suffix, so the base name would not resolve.
+      sym = mangle(
+        call.genericInstantiation.moduleId,
+        call.genericInstantiation.mangledName,
+      );
+    } else if (call.callee && typeof call.callee === "object" && call.callee.namespaceLookup) {
+      sym = mangle(
+        call.callee.namespaceLookup.moduleId,
+        call.callee.namespaceLookup.exportName,
+      );
+    } else {
+      sym = calleeSymbol(call);
+    }
+    const hdl = freshTemp();
+    fnLines.push(`  ${hdl} = call ptr @${sym}(${argList})`);
+    return hdl;
   }
 
   // Phase 7.5: emit `Variant.Case { f1: v1, ... }` (or no-payload `Variant.C`).
@@ -4565,7 +4971,7 @@ function codegenWithModuleId(
       const resultLlvm = llvmType(meta.resultType);
       const resPtr = freshTemp();
       fnLines.push(
-        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 6`,
+        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 7`,
       );
       const resVal = freshTemp();
       fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
@@ -4573,13 +4979,13 @@ function codegenWithModuleId(
     }
 
     // Anonymous source (e.g. `pooled h` parameter). The result type comes
-    // from the operand's TaskType; the result slot lives at byte offset 32
+    // from the operand's TaskType; the result slot lives at byte offset 40
     // of every task struct (prefix layout is universal - see runtime-design.md).
     const operandType = symbols.get(operand.name);
     const resultType = operandType.resultType;
     const resultLlvm = llvmType(resultType);
     const resPtr = freshTemp();
-    fnLines.push(`  ${resPtr} = getelementptr inbounds i8, ptr ${handlePtr}, i64 32`);
+    fnLines.push(`  ${resPtr} = getelementptr inbounds i8, ptr ${handlePtr}, i64 40`);
     const resVal = freshTemp();
     fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
     return { val: resVal, yoopType: resultType };
@@ -4640,11 +5046,11 @@ function codegenWithModuleId(
       );
       fnLines.push(`  store i32 ${doneVariant.ordinal}, ptr ${tagPtr}`);
 
-      // Copy the task's result (handle byte offset 32) into the Done variant's
+      // Copy the task's result (handle byte offset 40) into the Done variant's
       // single payload field `value`.
       const resPtr = freshTemp();
       fnLines.push(
-        `  ${resPtr} = getelementptr inbounds i8, ptr ${handleVal.val}, i64 32`,
+        `  ${resPtr} = getelementptr inbounds i8, ptr ${handleVal.val}, i64 40`,
       );
       const resultLlvm = llvmType(resultT);
       const resVal = freshTemp();
@@ -5330,6 +5736,47 @@ function codegenWithModuleId(
     return { val: tmp, yoopType: fpt.returnType };
   }
 
+  // Async sibling of emitVTableMethodCall. Same slot load and same ctx
+  // threading; the difference is entirely in the call signature - an
+  // async slot returns `ptr` (the coroutine handle) and takes the
+  // caller's result slot as a trailing argument.
+  //
+  // The vtable field's FPT is built from the trait method's signature, so
+  // an async trait method produces an async-shaped slot automatically and
+  // the two sides cannot drift.
+  function emitAsyncVTableCall(node, retSlot, fnLines) {
+    const { vtableType, fieldIndex } = node.vtableCall;
+    const vtLlvm = llvmType(vtableType);
+
+    const refArg = node.args[0];
+    const vtPtr = emitLval(refArg.operand, fnLines).ptr;
+
+    const ctxGep = freshTemp();
+    fnLines.push(`  ${ctxGep} = getelementptr inbounds ${vtLlvm}, ptr ${vtPtr}, i32 0, i32 0`);
+    const ctxVal = freshTemp();
+    fnLines.push(`  ${ctxVal} = load ptr, ptr ${ctxGep}`);
+
+    const fnSlot = freshTemp();
+    fnLines.push(`  ${fnSlot} = getelementptr inbounds ${vtLlvm}, ptr ${vtPtr}, i32 0, i32 ${fieldIndex + 1}`);
+    const fnPtr = freshTemp();
+    fnLines.push(`  ${fnPtr} = load ptr, ptr ${fnSlot}`);
+
+    const userArgResults = node.args.slice(1).map((a) => emitExpr(a, fnLines));
+    const fpt = vtableType.fields[fieldIndex].type;
+    const userParamTypes = fpt.params;
+
+    const userArgList = userParamTypes
+      .map((pt, i) => `${llvmType(pt)} ${userArgResults[i].val}`)
+      .join(", ");
+    const fullArgList =
+      `ptr ${ctxVal}${userArgList ? ", " + userArgList : ""}, ptr ${retSlot}`;
+    const sigParamList = ["ptr", ...userParamTypes.map((p) => llvmType(p)), "ptr"].join(", ");
+
+    const hdl = freshTemp();
+    fnLines.push(`  ${hdl} = call ptr (${sigParamList}) ${fnPtr}(${fullArgList})`);
+    return hdl;
+  }
+
   function emitPrintfCallInner(node, fnLines) {
     if (node.args.length === 0) throw new Error("codegen: printf called with no arguments");
     let fmtSpec = "";
@@ -5590,6 +6037,16 @@ function codegenWithModuleId(
 
     const retVal = freshTemp();
     fnLines.push(`  ${retVal} = load ${retLlvm}, ptr ${retSlot}`);
+    // `?` is an early RETURN, so in a coroutine it has to leave the same
+    // way an explicit `return` does: store through the caller-owned slot
+    // and branch to the final-suspend trailer. Emitting a bare `ret` here
+    // produced IR whose return value did not match the coroutine's `ptr`
+    // result type.
+    if (currentCoro) {
+      fnLines.push(`  store ${retLlvm} ${retVal}, ptr %__ret`);
+      fnLines.push(`  br label %${currentCoro.finalLabel}`);
+      return;
+    }
     if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
     fnLines.push(`  ret ${retLlvm} ${retVal}`);
   }
@@ -5786,7 +6243,7 @@ function codegenWithModuleId(
     });
     const resPtr = freshTemp();
     fnLines.push(
-      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 6`,
+      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 7`,
     );
     const resVal = freshTemp();
     fnLines.push(`  ${resVal} = load ${llvmTy}, ptr ${resPtr}`);
@@ -5830,15 +6287,32 @@ function codegenWithModuleId(
         // value reads from a binding being cleaned up) but BEFORE `ret`.
         // Runtime shutdown comes AFTER cleanups (cleanups may call into user /
         // FFI code) and immediately before the `ret`.
+        //
+        // In a coroutine there is no `ret <value>`: the result goes into
+        // the caller-owned slot and control falls into the shared final
+        // -suspend trailer, which is what hands the handle back.
         if (!node.value || (node.value.kind === ASTNodeKind.IDENT && node.value.name === "void")) {
           emitPendingCleanups(node, fnLines);
-          if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
-          fnLines.push("  ret void");
+          if (currentCoro) {
+            fnLines.push(`  br label %${currentCoro.finalLabel}`);
+          } else {
+            if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
+            fnLines.push("  ret void");
+          }
         } else {
           const r = emitExpr(node.value, fnLines);
           emitPendingCleanups(node, fnLines);
-          if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
-          fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
+          if (currentCoro) {
+            if (!isVoidReturn(ctx.returnType)) {
+              fnLines.push(
+                `  store ${llvmType(ctx.returnType)} ${r.val}, ptr %__ret`,
+              );
+            }
+            fnLines.push(`  br label %${currentCoro.finalLabel}`);
+          } else {
+            if (inMainFn) fnLines.push("  call void @yoop_runtime_shutdown()");
+            fnLines.push(`  ret ${llvmType(ctx.returnType)} ${r.val}`);
+          }
         }
         break;
       }
@@ -5846,12 +6320,20 @@ function codegenWithModuleId(
       case ASTNodeKind.CONST_DECL: {
         // Phase 6.3: builtin task-binding kinds (joined / pooled) and the
         // immediate-task-call shape have their own emission paths.
-        const builtin = node.kindPrefix?.builtin;
-        if (builtin === "joined") {
+        // Set by the typechecker (checkTaskBuiltinBinding) rather than the
+        // parser: `joined` / `pooled` are ordinary kind names now, so the
+        // storage decision follows the resolved kind, not a lexer tag.
+        // `taskHandleMode` is the CLAUSE-derived shape ("join" | "refcount"),
+        // so a user kind declaring the same clauses as std's joined/pooled
+        // lands on the same emission path. `builtinKind` is still stamped
+        // alongside it (AST dumps / debugging), but nothing dispatches on the
+        // name any more.
+        const builtin = node.taskHandleMode;
+        if (builtin === "join") {
           emitJoinedBinding(node, fnLines);
           break;
         }
-        if (builtin === "pooled") {
+        if (builtin === "refcount") {
           if (node.pooledCopy) {
             emitPooledCopyBinding(node, fnLines);
           } else {

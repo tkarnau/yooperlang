@@ -20,7 +20,7 @@
 
 import { ASTNodeKind } from "../contracts.js";
 import { formatType } from "../jsyooptypecheck/errors.js";
-import { posToOffset } from "./nav.js";
+import { findInModule, posToOffset } from "./nav.js";
 
 // LSP CompletionItemKind constants. Full enum is in the LSP spec; only
 // the values we emit are listed.
@@ -110,7 +110,7 @@ export function collectCompletions(module, src, position, ctx = {}) {
       // useful detail line.
       const targetMod = ctx.modById?.get(imp.fromModuleId);
       const sourceDecl = targetMod
-        ? findTopLevelByName(targetMod.ast, imp.exportName ?? name)
+        ? findInModule(targetMod, imp.exportName ?? name)?.decl
         : null;
       const fallback = sourceDecl ? completionForDecl(sourceDecl) : { kind: CompletionItemKind.Variable };
       push(name, fallback.kind ?? CompletionItemKind.Variable, fallback.detail);
@@ -162,15 +162,6 @@ function completionForDecl(decl) {
   }
 }
 
-function findTopLevelByName(ast, name) {
-  for (const decl of ast.body) {
-    const inner = decl.kind === ASTNodeKind.EXPORT_DECL ? decl.decl
-      : decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL ? decl.fn
-      : decl;
-    if (inner?.name === name) return inner;
-  }
-  return null;
-}
 
 // Walk the AST and collect every LET/CONST/PARAM binding whose
 // enclosing function/method body contains `offset`. PARAM bindings on

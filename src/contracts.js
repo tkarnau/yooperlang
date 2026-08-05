@@ -92,9 +92,26 @@ export const ASTNodeKind = Object.freeze({
   // authorizes the compiler to collect every such function into a named table.
   KIND_SIGNATURE_CLAUSE: "KIND_SIGNATURE_CLAUSE",
   KIND_ENUMERABLE_CLAUSE: "KIND_ENUMERABLE_CLAUSE",
+  // `refcounted <retain> <release>;` - the kind's value is reference
+  // counted, and these two methods of its `requires` trait are what the
+  // compiler calls. Replaces the old hardcoded `refcounted: true` boolean,
+  // which named nothing and left codegen to assume the runtime calls.
+  KIND_REFCOUNTED_CLAUSE: "KIND_REFCOUNTED_CLAUSE",
+  // `provides <Kind>;` - a function-position kind that rewrites the
+  // call-site result type. `task` uses it: the body returns T, the call
+  // site yields Task<T>.
+  KIND_PROVIDES_CLAUSE: "KIND_PROVIDES_CLAUSE",
+  // `pausable;` - a function carrying this kind is a coroutine: it may stop
+  // partway through and continue later, and while stopped it holds no
+  // worker thread. This is what forces the `await` calling convention.
+  KIND_PAUSABLE_CLAUSE: "KIND_PAUSABLE_CLAUSE",
 
   // phase 6.3: task / concurrency sugar
   WAIT_EXPRESSION: "WAIT_EXPRESSION",
+  // `await g(...)` - drive an async callee inline, propagating its
+  // suspension into the enclosing coroutine frame. Distinct from
+  // WAIT_EXPRESSION, which joins an already-spawned Task<T> handle.
+  AWAIT_EXPRESSION: "AWAIT_EXPRESSION",
   TASK_AUTO_WAIT: "TASK_AUTO_WAIT",
   TASK_RELEASE: "TASK_RELEASE",
   TASK_RETAIN: "TASK_RETAIN",

@@ -46,10 +46,19 @@ int yoop_task_wait_until_ns(void* handle, uint64_t deadline_ns);
 void yoop_task_cancel(void* handle);
 
 // Phase 10.F: monotonic clock reading in nanoseconds, suitable for
-// computing wait_until deadlines (`now_ns() + duration_ns`). The clock
-// source matches the one the cv timeouts use (CLOCK_MONOTONIC on Linux,
-// CLOCK_REALTIME on macOS) so deltas stay consistent across both.
+// computing wait_until deadlines (`now_ns() + duration_ns`).
+//
+// This is genuinely monotonic on every platform now (CLOCK_MONOTONIC on
+// Linux and macOS, QueryPerformanceCounter on Windows). It used to read
+// CLOCK_REALTIME, which meant an NTP step moved every in-flight
+// deadline; every timed wait in the runtime shares this clock via
+// yoop_cv_wait_until, so the two can't drift apart. Use yoop_wall_ns if
+// you actually want a timestamp rather than a deadline base.
 uint64_t yoop_now_ns(void);
+
+// Wall-clock reading in nanoseconds since the Unix epoch. NOT usable as
+// a deadline base - it can step backwards. Use yoop_now_ns for that.
+uint64_t yoop_wall_ns(void);
 
 // pooled lifecycle
 void* yoop_task_alloc(size_t size);
@@ -60,6 +69,49 @@ void  yoop_task_release(void* handle);
 // 1, broadcasts the condvar, and (for pooled handles) drops the worker's
 // implicit reference.
 void yoop_handle_signal_done(void* handle);
+
+// ----- async task scheduling ----------------------------------------------
+//
+// A task body is an LLVM coroutine. The thunk STARTS it (handing it the
+// task's own result slot) and stores the handle at handle offset 32;
+// everything after that is resume-driven, so a task that blocks on I/O
+// gives its worker thread back instead of holding it.
+//
+// The coroutine trampolines are emitted by CODEGEN, because they wrap
+// LLVM intrinsics that C cannot call. The runtime receives them as
+// function pointers rather than linking against them by name: the C
+// runtime has to stay linkable on its own (the runtime/tests/ programs
+// build it with no generated IR at all), and a direct call would make
+// every one of those an undefined symbol.
+//
+// main installs them right after yoop_runtime_init. When they are absent
+// - a pure-C program, or yoop code with no task in it - a task is
+// treated as finishing in one step, which is exactly the pre-async
+// behavior.
+typedef void (*yoop_coro_fn)(void* coro);
+typedef int  (*yoop_coro_pred)(void* coro);
+void yoop_runtime_set_coro_ops(yoop_coro_fn resume,
+                               yoop_coro_fn destroy,
+                               yoop_coro_pred done);
+
+// Called at the end of every task step - the initial start and each
+// later resume. Decides whether the coroutine reached its final suspend
+// (result is in the slot: signal completion and destroy the frame) or
+// merely suspended (leave it parked; whatever suspended it registered a
+// wakeup). This is the single place that distinction is made.
+void yoop_task_settle(void* handle);
+
+// Push a suspended task back onto the run queue. Called by whatever
+// resolved the thing the task was waiting on - the I/O multiplexer on
+// readiness, a timer on expiry. Safe from any thread.
+void yoop_task_make_runnable(void* handle);
+
+// The task currently executing on this thread, or NULL when the calling
+// thread is not running one (e.g. main). Set by the worker around each
+// step, so a suspend primitive deep in a call chain can register a
+// wakeup against the right task without threading a handle through every
+// intermediate signature.
+void* yoop_current_task(void);
 
 // Stack-handle cleanup helper. For stack-allocated handles, codegen calls this
 // at scope exit to release the mutex/cond pair allocated by yoop_task_submit.
@@ -105,6 +157,125 @@ void yoop_park_token_destroy(yoop_park_token_t* t);
 void yoop_park(yoop_park_token_t* t);
 void yoop_unpark(yoop_park_token_t* t);
 
+// Timed sibling of yoop_park. Blocks until unparked or until the
+// monotonic reading `deadline_ns` (from yoop_now_ns) elapses. Returns 0
+// when an unpark was consumed, 1 when the deadline elapsed first.
+// A deadline of 0 means "no deadline" and is identical to yoop_park.
+//
+// On a 1 return the token is left in the idle state, so a later unpark
+// from a racing thread is remembered as a pending wake rather than
+// lost - callers that abandon a wait must still prove no unpark is
+// in flight before destroying the token (see yoop_io.c's fired/io_mu
+// handshake for the pattern).
+int yoop_park_until(yoop_park_token_t* t, uint64_t deadline_ns);
+
+// ----- Cancellation tokens (runtime/yoop_cancel.c) -------------------------
+//
+// A cancellation token is a refcounted, thread-safe object carrying a
+// cancelled flag, an optional deadline, and a list of parked threads to
+// wake. It is the unit of "stop waiting" for everything in the runtime
+// that can block: I/O waits, sleeps, and task waits.
+//
+// Tokens are explicit values - nothing is implicitly attached to a task
+// or a thread. Pass one down a call chain and every nested blocking
+// call inherits both the cancellation and the deadline.
+//
+// Outcome codes, shared by every cancel-aware blocking call:
+//   0 = the thing you waited for happened
+//   1 = the deadline elapsed first
+//   2 = the token was cancelled first
+//  -1 = error, errno set
+#define YOOP_WAIT_READY     0
+#define YOOP_WAIT_TIMEDOUT  1
+#define YOOP_WAIT_CANCELLED 2
+
+typedef struct yoop_cancel yoop_cancel_t;
+
+// new: refcount 1, not cancelled, no deadline.
+// new_deadline: same, with an absolute yoop_now_ns deadline (0 = none).
+yoop_cancel_t* yoop_cancel_new(void);
+yoop_cancel_t* yoop_cancel_new_deadline(uint64_t deadline_ns);
+
+void yoop_cancel_retain(yoop_cancel_t* t);
+void yoop_cancel_release(yoop_cancel_t* t);
+
+// Set the cancelled flag, wake every parked waiter, and cascade to
+// every linked child. Idempotent; safe from any thread.
+void yoop_cancel_request(yoop_cancel_t* t);
+
+// 1 if cancelled OR the deadline has elapsed, else 0. A null token is
+// never cancelled (so callers can pass NULL for "no token" without
+// branching). This is the "should I stop?" predicate - it deliberately
+// does not say WHY.
+int yoop_cancel_requested(yoop_cancel_t* t);
+
+// 1 only if someone explicitly called yoop_cancel_request; an elapsed
+// deadline does NOT count.
+//
+// The split exists because the two reasons deserve different outcomes.
+// A call that was doing work (an I/O wait, a sleep) reports
+// YOOP_WAIT_TIMEDOUT when it ran out of time and YOOP_WAIT_CANCELLED
+// when someone asked it to stop - "you ran out of time" and "you were
+// cancelled" lead to different handling at the call site, and folding
+// a token deadline into "cancelled" loses that.
+//
+// yoop_cancel_wait is the one exception: it OBSERVES a token rather
+// than doing work, so a token that fires for either reason is
+// YOOP_WAIT_CANCELLED there and YOOP_WAIT_TIMEDOUT is reserved for the
+// caller's own deadline winning the race.
+int yoop_cancel_flagged(yoop_cancel_t* t);
+
+// The token's absolute deadline, or 0 for none.
+uint64_t yoop_cancel_deadline_ns(yoop_cancel_t* t);
+
+// Install/replace the deadline. Passing a deadline already in the past
+// makes the token immediately "requested".
+void yoop_cancel_set_deadline_ns(yoop_cancel_t* t, uint64_t deadline_ns);
+
+// Cancel `child` whenever `parent` is cancelled. The child retains the
+// parent, so the parent outlives the link. Returns 0 on success, -1 if
+// either argument is null or they are the same token. If the parent is
+// already cancelled the child is cancelled immediately.
+//
+// Links must form a tree - linking a token into its own ancestry is
+// caller error and will spin the cascade.
+int yoop_cancel_link(yoop_cancel_t* child, yoop_cancel_t* parent);
+
+// Sleep for `ns`, waking early if the token fires. Returns
+// YOOP_WAIT_READY when the full duration elapsed, YOOP_WAIT_CANCELLED
+// on an explicit cancel, YOOP_WAIT_TIMEDOUT when the token's own
+// deadline cut the sleep short.
+int yoop_cancel_sleep_ns(yoop_cancel_t* t, uint64_t ns);
+
+// Block until the token is cancelled, its own deadline elapses, or the
+// caller's `deadline_ns` elapses (0 = no caller deadline). Returns
+// YOOP_WAIT_CANCELLED when the token fired, YOOP_WAIT_TIMEDOUT when the
+// caller's deadline won.
+int yoop_cancel_wait(yoop_cancel_t* t, uint64_t deadline_ns);
+
+// ----- waiter registration (internal; used by yoop_io.c) -------------------
+//
+// Splice a park token onto a cancel token's wake list so a cancel
+// request unparks it. The waiter node is caller-allocated (typically on
+// the parking thread's stack) and must be removed before that storage
+// dies.
+//
+// add_waiter returns 1 if the token was ALREADY cancelled - in that
+// case the node is NOT registered and the caller must not remove it.
+typedef struct yoop_cancel_waiter {
+    yoop_park_token_t*         token;
+    struct yoop_cancel_waiter* next;
+    struct yoop_cancel_waiter* prev;
+} yoop_cancel_waiter_t;
+
+int  yoop_cancel_add_waiter(yoop_cancel_t* t, yoop_cancel_waiter_t* w,
+                            yoop_park_token_t* park);
+void yoop_cancel_remove_waiter(yoop_cancel_t* t, yoop_cancel_waiter_t* w);
+
+// Combine a caller-supplied deadline with the token's own, returning
+// whichever comes first (0 from either side means "no deadline").
+uint64_t yoop_cancel_effective_deadline(yoop_cancel_t* t, uint64_t deadline_ns);
+
 // ----- Phase 8.F.3 - Timers ------------------------------------------------
 //
 // Block the calling thread for `ns` nanoseconds (or `ms` milliseconds).
@@ -130,8 +301,58 @@ void yoop_diag_dump(void);
 // Implemented in runtime/yoop_io.c. Declared here so callers don't need
 // a second header. Lazy init on first call; shutdown is hooked into
 // yoop_runtime_shutdown if init ran.
+// Park until `fd` is ready. Return 0 on ready, -1 on error with errno
+// set. These block indefinitely - prefer the _ex forms below for
+// anything that should be abandonable.
 int yoop_io_wait_readable(int fd);
 int yoop_io_wait_writable(int fd);
+
+// Deadline- and cancellation-aware readiness wait. `ct` may be NULL for
+// "no token"; `deadline_ns` may be 0 for "no deadline" (the token's own
+// deadline, if any, still applies). Returns one of the YOOP_WAIT_*
+// codes: READY, TIMEDOUT, CANCELLED, or -1 with errno set.
+//
+// Only ONE waiter per (fd, direction) is permitted. A second concurrent
+// registration fails with -1 / EAGAIN rather than silently displacing
+// the first - epoll's MOD and kqueue's EV_SET both overwrite the stored
+// user pointer, which used to strand the original waiter forever.
+int yoop_io_wait_readable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns);
+int yoop_io_wait_writable_ex(int fd, yoop_cancel_t* ct, uint64_t deadline_ns);
+
+// ----- async (non-blocking) readiness -------------------------------------
+//
+// The async counterpart of the wait_* calls above. Instead of parking the
+// calling thread, this ARMS a one-shot interest in `fd` and returns
+// immediately; when the fd becomes ready the multiplexer calls
+// yoop_task_make_runnable on the task that armed it.
+//
+// The caller is expected to `await suspendNow()` right after a successful
+// arm, so the pattern in yoop is:
+//
+//     let rc = armReadable(fd);      // 0 = armed, will be woken
+//     if (rc != 0) { return rc; }
+//     await conc.suspendNow();       // worker goes free here
+//
+// Returns 0 when armed, -1 with errno set on failure, and 1 when there is
+// no current task to wake (called off a worker thread) - in which case
+// the caller must fall back to the blocking wait_* form rather than
+// suspend, because nothing would ever resume it.
+int yoop_io_arm_readable(int fd);
+int yoop_io_arm_writable(int fd);
+
+// Put `fd` into non-blocking mode. Async reads and writes are
+// "try the syscall, and if it would block, arm and suspend", which only
+// works if the syscall actually returns EAGAIN instead of sleeping.
+// Returns 0 on success, -1 with errno set.
+//
+// A runtime helper rather than an fcntl mirror in yoop because F_GETFL /
+// F_SETFL / O_NONBLOCK are platform-specific values.
+int yoop_io_set_nonblocking(int fd);
+
+// 1 if `e` is the "would block, try again" errno. EAGAIN/EWOULDBLOCK
+// have no portable numeric value, so this is resolved in C.
+int yoop_io_would_block(int e);
+
 void yoop_io_shutdown(void);
 
 // Create a directory with standard 0755 permissions (mode computed from

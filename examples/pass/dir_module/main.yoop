@@ -1,0 +1,14 @@
+// modules-as-directories: `./shapes` names a DIRECTORY, and the two .yoop files
+// inside it are one module with one namespace. This file has no `module` header,
+// so it is an ordinary single-file module, exactly as before.
+import * as shapes, { Point } from "./shapes";
+
+function main(): int32 {
+    let p: Point = { x: 3, y: 4 };
+    printf("area=%d\n", shapes.areaOf(p));
+    printf("doubledArea=%d\n", shapes.doubledArea(p));
+    let s: Point = shapes.stretched(p);
+    printf("stretched=%d,%d\n", s.x, s.y);
+    printf("scratchCaps=%zu\n", shapes.scratchCaps());
+    return 0;
+}

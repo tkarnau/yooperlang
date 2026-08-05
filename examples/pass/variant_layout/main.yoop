@@ -1,0 +1,92 @@
+// Layout regressions for values that live inside a variant payload or a Vec.
+//
+// Three shapes codegen used to size wrong. Each corrupted memory rather than
+// failing to compile, so they are checked by reading the values back.
+
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import * as vec, { Vec } from "../../../std/core/vec.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// (1) A struct with a VARIANT field, used as a variant payload. The inner
+// variant's size was reported as 4 (tag only), missing the one-byte payload
+// floor and the trailing pad, so the enclosing payload buffer came out too
+// small and the store ran past `code` into whatever followed it.
+variant Severity { Warning, Fatal }
+
+type Diagnostic {
+    severity: Severity,
+    code:     int32,
+    message:  string,
+}
+
+function diagnose(bad: bool): Result<int32, Diagnostic> {
+    if (bad) {
+        return Result.Err {
+            error: { severity: Severity.Fatal, code: 7, message: "payload survived the round trip" },
+        };
+    }
+    return Result.Ok { value: 0 };
+}
+
+// (2) A VTABLE inside a struct inside a Vec. Vtables had no size case at all
+// and fell through to the default 8 bytes, so a Vec of these allocated half
+// of what it wrote and overran its buffer once enough entries were pushed to
+// get past the slack.
+trait Greeter {
+    function greet(ref self, n: int32): int32;
+}
+
+vtable GreeterVt for Greeter {
+    greet: (n: int32) => int32,
+}
+
+type Scaler implements Greeter {
+    factor: int32,
+    function greet(ref self, n: int32): int32 { return n * self.factor; }
+}
+
+// The vtable field has to live in a different module-level struct than the
+// vtable declaration would allow inside one module, so this mirrors the
+// std/http arrangement: the vtable above, the holder here.
+type Entry {
+    name: string,
+    vt:   GreeterVt,
+}
+
+// (3) A module-level const string. Escape sequences in one used to be emitted
+// literally, so this was seven characters instead of five.
+const GREETING: string = "hi\r\n!";
+
+function main(): int32 {
+    switch (diagnose(true)) {
+        case Result.Ok { value: _v }: { printf("unexpected ok\n"); }
+        case Result.Err { error: d }: { printf(`code=${d.code} message=${d.message}\n`); }
+    }
+
+    // Both impls outlive the table: a vtable stores a pointer to its
+    // receiver, so building one from a loop-local would leave every entry
+    // aimed at the same reused stack slot.
+    let a: Scaler = { factor: 2 };
+    let b: Scaler = { factor: 3 };
+    disposable table: Vec<Entry> = vec.vec_new(2);
+    for i in 0..6 {
+        if (i % 2 == 1) {
+            vec.vec_push(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref b) });
+        } else {
+            vec.vec_push(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref a) });
+        }
+    }
+    let total: int32 = 0;
+    let entries: Entry[] = vec.vec_as_array(ref table);
+    for (let i = 0; i < entries.len; i += 1) {
+        total = total + GreeterVt.greet(ref entries[i].vt, 10);
+    }
+    printf(`entries=${entries.len} total=${total} last=${entries[entries.len - 1].name}\n`);
+
+    printf(`greetingLen=${GREETING.len}\n`);
+    return 0;
+}

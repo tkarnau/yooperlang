@@ -405,8 +405,8 @@ export function findDefinition(node, ctx) {
             (s) => s.localName === tokenText || s.exportName === tokenText,
           );
           if (spec) {
-            const decl = findTopLevelByName(targetMod.ast, spec.exportName);
-            if (decl) return locOfDecl(decl, targetMod);
+            const hit = findInModule(targetMod, spec.exportName);
+            if (hit) return locOfDecl(hit.decl, hit.mod);
           }
         }
         // Namespace ident or path-string cursor - jump into the file.
@@ -448,8 +448,8 @@ export function findDefinition(node, ctx) {
           (s) => s.localName === tokenText || s.exportName === tokenText,
         );
         if (spec) {
-          const decl = findTopLevelByName(targetMod.ast, spec.exportName);
-          if (decl) return locOfDecl(decl, targetMod);
+          const hit = findInModule(targetMod, spec.exportName);
+          if (hit) return locOfDecl(hit.decl, hit.mod);
         }
       }
       // Namespace import or unmatched-specifier cursor: jump to the file's
@@ -470,8 +470,8 @@ export function findDefinition(node, ctx) {
   // (e.g. a namespace import or a function name appearing as a value).
   // Fall back to a top-level decl lookup by name.
   if (node.kind === ASTNodeKind.IDENT || node.kind === ASTNodeKind.NAMESPACE_IDENT) {
-    const decl = findTopLevelByName(module.ast, node.name);
-    if (decl) return locOfDecl(decl, module);
+    const hit = findInModule(module, node.name);
+    if (hit) return locOfDecl(hit.decl, hit.mod);
   }
 
   // CALL_EXPRESSION with a string callee: cross-module via calleeModuleId,
@@ -481,12 +481,12 @@ export function findDefinition(node, ctx) {
       const targetMod = modById.get(node.calleeModuleId);
       if (targetMod) {
         const exported = node.calleeExportName ?? node.callee;
-        const decl = findTopLevelByName(targetMod.ast, exported);
-        if (decl) return locOfDecl(decl, targetMod);
+        const hit = findInModule(targetMod, exported);
+        if (hit) return locOfDecl(hit.decl, hit.mod);
       }
     }
-    const decl = findTopLevelByName(module.ast, node.callee);
-    if (decl) return locOfDecl(decl, module);
+    const hit = findInModule(module, node.callee);
+    if (hit) return locOfDecl(hit.decl, hit.mod);
   }
 
   // CALL_EXPRESSION on a trait method: jump to the method decl on the
@@ -499,10 +499,10 @@ export function findDefinition(node, ctx) {
     const recv = node.calleeMethodOf;
     if (recv.kind === typeKinds.struct) {
       const targetMod = modById.get(recv.moduleId) ?? module;
-      const typeDecl = findTopLevelByName(targetMod.ast, recv.name);
-      if (typeDecl?.methods?.length) {
-        const m = typeDecl.methods.find((mm) => mm.name === node.calleeMethodName);
-        if (m) return locOfDecl(m, targetMod);
+      const typeHit = findInModule(targetMod, recv.name);
+      if (typeHit?.decl?.methods?.length) {
+        const m = typeHit.decl.methods.find((mm) => mm.name === node.calleeMethodName);
+        if (m) return locOfDecl(m, typeHit.mod);
       }
     }
   }
@@ -513,8 +513,8 @@ export function findDefinition(node, ctx) {
   if (node.kind === ASTNodeKind.FIELD_ACCESS && node.namespaceLookup) {
     const targetMod = modById.get(node.namespaceLookup.moduleId);
     if (targetMod) {
-      const decl = findTopLevelByName(targetMod.ast, node.namespaceLookup.exportName);
-      if (decl) return locOfDecl(decl, targetMod);
+      const hit = findInModule(targetMod, node.namespaceLookup.exportName);
+      if (hit) return locOfDecl(hit.decl, hit.mod);
     }
   }
 
@@ -531,8 +531,9 @@ export function findDefinition(node, ctx) {
     const targetMod = carrier?.moduleId
       ? modById.get(carrier.moduleId) ?? module
       : module;
-    const decl = findTopLevelByName(targetMod.ast, node.enumName);
-    if (decl) {
+    const enumHit = findInModule(targetMod, node.enumName);
+    if (enumHit) {
+      const decl = enumHit.decl;
       // Cursor on case name -> the case AST node; cursor on type name (or
       // anywhere else inside the constructor) -> the decl itself.
       const wantCase = tokenText && tokenText === node.variantName;
@@ -540,9 +541,9 @@ export function findDefinition(node, ctx) {
         const cases =
           decl.kind === ASTNodeKind.ENUM_DECL ? decl.cases : decl.variants;
         const found = (cases ?? []).find((c) => c.name === node.variantName);
-        if (found) return locOfDecl(found, targetMod);
+        if (found) return locOfDecl(found, enumHit.mod);
       }
-      return locOfDecl(decl, targetMod);
+      return locOfDecl(decl, enumHit.mod);
     }
   }
 
@@ -599,22 +600,22 @@ export function hoverFromName(name, module, analysis, cursor) {
         if (dotted.onNs) return `(namespace) ${dotted.ns}`;
         const target = analysis.modById.get(imp.fromModuleId);
         if (target) {
-          const decl = findTopLevelByName(target.ast, dotted.name);
-          if (decl) return summarizeDecl(decl);
+          const hit = findInModule(target, dotted.name);
+          if (hit) return summarizeDecl(hit.decl);
         }
       }
     }
   }
-  const localDecl = findTopLevelByName(module.ast, name);
-  if (localDecl) return summarizeDecl(localDecl);
+  const localHit = findInModule(module, name);
+  if (localHit) return summarizeDecl(localHit.decl);
   const env = analysis?.moduleEnv?.get(module.id);
   const imp = env?.importedNames?.get(name);
   if (imp?.fromModuleId) {
     const targetMod = analysis.modById.get(imp.fromModuleId);
     if (targetMod) {
       const exported = imp.exportName ?? name;
-      const decl = findTopLevelByName(targetMod.ast, exported);
-      if (decl) return summarizeDecl(decl);
+      const hit = findInModule(targetMod, exported);
+      if (hit) return summarizeDecl(hit.decl);
     }
   }
   return null;
@@ -703,8 +704,8 @@ function resolveDottedName(dotted, module, modById, moduleEnv) {
   }
   const targetMod = modById.get(imp.fromModuleId);
   if (!targetMod) return null;
-  const decl = findTopLevelByName(targetMod.ast, dotted.name);
-  if (decl) return locOfDecl(decl, targetMod);
+  const hit = findInModule(targetMod, dotted.name);
+  if (hit) return locOfDecl(hit.decl, hit.mod);
   return null;
 }
 
@@ -744,8 +745,8 @@ function findByName(name, module, modById, moduleEnv) {
   if (!name || !module) return null;
   // First, prefer the same-module AST since walking AST decls is cheap
   // and always available even when moduleEnv is null.
-  const local = findTopLevelByName(module.ast, name);
-  if (local) return locOfDecl(local, module);
+  const local = findInModule(module, name);
+  if (local) return locOfDecl(local.decl, local.mod);
   // Cross-module: check importedNames for this module via moduleEnv.
   if (moduleEnv) {
     const env = moduleEnv.get(module.id);
@@ -754,8 +755,8 @@ function findByName(name, module, modById, moduleEnv) {
       const targetMod = modById.get(imp.fromModuleId);
       if (targetMod) {
         const exported = imp.exportName ?? name;
-        const decl = findTopLevelByName(targetMod.ast, exported);
-        if (decl) return locOfDecl(decl, targetMod);
+        const hit = findInModule(targetMod, exported);
+        if (hit) return locOfDecl(hit.decl, hit.mod);
       }
     }
   }
@@ -892,6 +893,30 @@ function symbolFor(decl, src) {
   }
 }
 
+// Find a top-level decl by name anywhere in the MODULE that owns `mod`, and
+// report WHICH SOURCE FILE it came from.
+//
+// modules-as-directories: a module's declarations are spread across its source
+// files, so `findTopLevelByName(mod.ast, name)` only ever sees the file it was
+// handed. That made the LSP miss anything a sibling declared - goto-definition
+// and hover both came back empty for a name that resolves fine at compile time.
+// `modById` cannot substitute, because it maps one entry per moduleId and so
+// holds just ONE of a directory module's files.
+//
+// Cheap for the common case: a single-file module has `siblings.length === 1`
+// and the loop below exits after the file we already checked.
+export function findInModule(mod, name) {
+  if (!mod || !name) return null;
+  const own = findTopLevelByName(mod.ast, name);
+  if (own) return { decl: own, mod };
+  for (const sib of mod.siblings ?? []) {
+    if (sib === mod) continue;
+    const decl = findTopLevelByName(sib.ast, name);
+    if (decl) return { decl, mod: sib };
+  }
+  return null;
+}
+
 function findTopLevelByName(ast, name) {
   for (const decl of ast.body) {
     const inner = decl.kind === ASTNodeKind.EXPORT_DECL
@@ -941,8 +966,8 @@ function resolveStructDecl(structType, module, modById, programState) {
     }
   }
   const targetMod = modById.get(structType.moduleId) ?? module;
-  const typeDecl = findTopLevelByName(targetMod.ast, structType.name);
-  if (typeDecl) return { typeDecl, targetMod };
+  const hit = findInModule(targetMod, structType.name);
+  if (hit) return { typeDecl: hit.decl, targetMod: hit.mod };
   return null;
 }
 

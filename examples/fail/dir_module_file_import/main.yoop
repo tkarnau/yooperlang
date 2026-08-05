@@ -1,0 +1,5 @@
+// A source file of a directory module is not importable on its own: the
+// module is the unit. Importing "./m" is the working form.
+import * as m from "./m/a.yoop";
+
+function main(): int32 { return m.a(); }

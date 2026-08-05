@@ -113,6 +113,8 @@ export function resolveExprType(node, scope, ctx) {
       return resolveSliceExpression(node, scope, ctx);
     case ASTNodeKind.WAIT_EXPRESSION:
       return resolveWaitExpression(node, scope, ctx);
+    case ASTNodeKind.AWAIT_EXPRESSION:
+      return resolveAwaitExpression(node, scope, ctx);
     case ASTNodeKind.VARIANT_CONSTRUCTOR:
       return resolveVariantConstructor(node, scope, ctx);
     case ASTNodeKind.ADDRESS_OF_EXPRESSION:
@@ -389,6 +391,15 @@ function resolveCall(node, scope, ctx) {
           callee.object.resolvedType = nsType;
           return resolveWaitUntilCall(node, scope, ctx);
         }
+        if (callee.field === "suspendNow") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveSuspendNowCall(node, scope, ctx);
+        }
         if (callee.field === "cancel") {
           callee.namespaceLookup = {
             moduleId: nsType.moduleId,
@@ -450,6 +461,9 @@ function resolveCall(node, scope, ctx) {
   }
   if (callee === "cancel" && builtinIntrinsicNames?.has("cancel")) {
     return resolveCancelCall(node, scope, ctx);
+  }
+  if (callee === "suspendNow" && builtinIntrinsicNames?.has("suspendNow")) {
+    return resolveSuspendNowCall(node, scope, ctx);
   }
 
   // printf legacy path - variadic, type-resolve each arg, no arity check.
@@ -518,7 +532,44 @@ function resolveCall(node, scope, ctx) {
 }
 
 // Shared call resolution once the sig is known. Handles variadic externs.
+// Coloring, second half: an async callee may only be reached through
+// `await`. Stamps `calleeIsAsync` so resolveAwaitExpression can confirm
+// the operand really is async, and reports a bare async call.
+//
+// Idempotent - a call site can reach this from more than one resolution
+// path (variadic prefix, generic instantiation), and reporting twice for
+// one call would be noise.
+function noteAsyncCallee(node, sig, ctx) {
+  if (node.calleeIsAsync !== undefined) return;
+  // A `task` call site is a SPAWN, not an await: it hands the body to
+  // the scheduler and evaluates to a Task<T> handle, which is joined
+  // later with `wait`. Task bodies are implicitly async, so without this
+  // every spawn would be reported as an un-awaited async call.
+  if (sig.returnType?.kind === typeKinds.task) {
+    node.calleeIsAsync = false;
+    return;
+  }
+  node.calleeIsAsync = !!sig.isAsync;
+  if (!sig.isAsync || node.awaitedCall) return;
+  pushError(
+    ctx.errors,
+    node,
+    `async function must be awaited - write "await ${describeCallee(node)}(...)"`,
+  );
+}
+
+// Best-effort callee name for the diagnostic above.
+function describeCallee(node) {
+  const c = node.callee;
+  if (!c) return "f";
+  if (typeof c === "string") return c;
+  if (c.name) return c.name;
+  if (c.property && c.object?.name) return `${c.object.name}.${c.property}`;
+  return "f";
+}
+
 function resolveCallWithSig(node, sig, scope, ctx) {
+  noteAsyncCallee(node, sig, ctx);
   if (sig.variadic) {
     // Check the fixed prefix, then resolve variadic tail freely.
     const fixedParams = sig.params ?? [];
@@ -584,13 +635,75 @@ function resolveWaitExpression(node, scope, ctx) {
     return setType(node, ErrorType());
   }
   if (ctx.inTaskBody) {
+    // `await` is the in-task form. `wait` blocks its worker until the
+    // handle completes, which is the one thing a task body must not do -
+    // that is what the async machinery exists to avoid. Suspending on a
+    // Task<T> handle would need a task-completion wakeup that re-queues
+    // the waiter (the multiplexer already does the equivalent for fds);
+    // until that exists, the restriction stands.
     pushError(
       ctx.errors,
       node,
-      `wait inside task body not supported (future phase will land coroutine suspension)`,
+      `wait is not allowed inside a task body - use "await f(...)" on an async call instead. ` +
+        `await is the in-task form: it suspends this task and releases its worker thread, ` +
+        `where wait would block the worker`,
     );
   }
   return setType(node, operandType.resultType);
+}
+
+// `await g(...)` - drive an async callee inline. The two coloring rules
+// live here and in resolveCall (which rejects an un-awaited async call):
+// together they guarantee there is no path to an async function except
+// from an async caller, so a suspend always has a frame to propagate
+// into. See plans/async-coroutines.md.
+function resolveAwaitExpression(node, scope, ctx) {
+  if (!ctx.inAsyncBody) {
+    pushError(
+      ctx.errors,
+      node,
+      `await is only allowed inside an async function or a task body - ` +
+        `declare the enclosing function with "async" (or spawn a task and "wait" its handle)`,
+    );
+    // Still resolve the operand so a second, unrelated error in the
+    // arguments is reported on the same pass. Mark it awaited first:
+    // the user DID write `await`, so also telling them the call must be
+    // awaited is noise on top of the real diagnostic.
+    if (node.operand && node.operand.kind === ASTNodeKind.CALL_EXPRESSION) {
+      node.operand.awaitedCall = true;
+    }
+    resolveExprType(node.operand, scope, ctx);
+    return setType(node, ErrorType());
+  }
+
+  // `awaitedCall` tells resolveCall this call site is the legitimate
+  // await, so it doesn't also report "async function must be awaited".
+  if (node.operand && node.operand.kind === ASTNodeKind.CALL_EXPRESSION) {
+    node.operand.awaitedCall = true;
+  }
+  const operandType = resolveExprType(node.operand, scope, ctx);
+  if (operandType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (!node.operand || node.operand.kind !== ASTNodeKind.CALL_EXPRESSION) {
+    pushError(
+      ctx.errors,
+      node,
+      `await requires a call to an async function`,
+    );
+    return setType(node, ErrorType());
+  }
+  if (!node.operand.calleeIsAsync) {
+    pushError(
+      ctx.errors,
+      node,
+      `await requires a call to an async function - this callee is not async, so drop the "await"`,
+    );
+    return setType(node, ErrorType());
+  }
+  // The awaited value is the callee's declared return type; the
+  // coroutine handle never surfaces in the type system.
+  return setType(node, operandType);
 }
 
 // `-x` or `!x`. Minus accepts any numeric type; not requires bool.
@@ -1901,6 +2014,28 @@ function resolveCancelCall(node, scope, ctx) {
   return setType(node, VoidType());
 }
 
+// `suspendNow()` - the suspend primitive. Takes no arguments and yields
+// void; codegen lowers it to a bare coro.suspend inside the enclosing
+// coroutine rather than to a call.
+//
+// It is marked async so the ordinary coloring rules apply: it can only
+// be reached through `await`, and therefore only from a frame that can
+// actually suspend.
+function resolveSuspendNowCall(node, scope, ctx) {
+  if (node.args.length !== 0) {
+    pushError(
+      ctx.errors,
+      node,
+      `suspendNow takes no arguments, got ${node.args.length}`,
+    );
+    for (const a of node.args) resolveExprType(a, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  node.builtinSuspendNow = true;
+  node.calleeIsAsync = true;
+  return setType(node, VoidType());
+}
+
 // Phase 10.E: look for a `trait Into<T> { function into(ref self): T; }`
 // impl that converts `sourceType` into `targetType`. Returns
 // `{ mangledName, targetType }` (so codegen knows the symbol to call and
@@ -2386,6 +2521,9 @@ function checkArrayLiteralAgainstType(litNode, arrayType, scope, ctx) {
 // `f(a, b)` - checks arity, then runs each arg through checkInitializer
 // against the parameter's declared type.
 export function resolveCallType(node, sig, scope, ctx) {
+  // Also here, not just in resolveCallWithSig: trait-qualified and
+  // generic call sites reach this directly.
+  noteAsyncCallee(node, sig, ctx);
   if (sig.params.length !== node.args.length) {
     pushError(
       ctx.errors,
@@ -2704,7 +2842,9 @@ function substituteSelfPlaceholder(methodSig, concreteType) {
     }
     return p;
   });
-  return FuncType(params, methodSig.returnType, false);
+  // Asyncness survives self-substitution - see the note on the
+  // matching helper in typecheck.js.
+  return FuncType(params, methodSig.returnType, false, [], !!methodSig.isAsync);
 }
 
 // Look up a trait by name in the current module's trait table or its imports.
@@ -3209,6 +3349,10 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
   // Annotate the call for codegen.
   node.genericInstantiation = inst;
   node.calleeMangledName = `${inst.moduleId}__${inst.mangledName}`;
+  // Coloring applies to generic callees too. This path never reaches
+  // resolveCallType, so without the explicit call an `await` on a
+  // generic async function reports "callee is not async".
+  noteAsyncCallee(node, inst.funcType, ctx);
   // If the function was imported, the IR symbol still mangles by source module.
   return setType(node, inst.funcType.returnType);
 }

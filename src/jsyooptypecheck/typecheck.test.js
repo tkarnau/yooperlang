@@ -7,9 +7,34 @@ import assert from "node:assert/strict";
 import { typecheckSource, typecheckProgram } from "./typecheck.js";
 import { parse } from "../jsyooparser/parser.js";
 import { typeKinds } from "./types.js";
+import fs from "node:fs";
+import path from "node:path";
 
 function singleModule(src, id = "test") {
   return [{ id, ast: parse(src) }];
+}
+
+// The concurrency kinds (`task`, `async`, `joined`, `pooled`) live in
+// std/core/kinds.yoop now rather than being reserved words, so anything
+// exercising them needs that module in the graph. The driver autoloads it;
+// a hand-built module list has to include it explicitly.
+const CORE_KINDS_PATH = path.resolve(
+  import.meta.dirname,
+  "..",
+  "..",
+  "std",
+  "core",
+  "kinds.yoop",
+);
+function withCoreKinds(src, id = "test") {
+  return [
+    {
+      id: "std_core_kinds",
+      absPath: CORE_KINDS_PATH,
+      ast: parse(fs.readFileSync(CORE_KINDS_PATH, "utf8")),
+    },
+    { id, ast: parse(src) },
+  ];
 }
 
 describe("typecheckSource: well-typed programs produce zero errors", () => {
@@ -616,3 +641,145 @@ describe("Phase 7.5: switch statement", () => {
   });
 });
 
+
+// ---------------------------------------------------------------------------
+// Async coloring (plans/async-coroutines.md)
+//
+// The two rules are mutually reinforcing: `await` only inside an async
+// body, and an async callee only reachable through `await`. Together they
+// guarantee a suspend always has a coroutine frame to propagate into, which
+// is the property that makes the whole design sound - so each direction is
+// pinned here rather than only exercised end-to-end.
+describe("typecheck: async/await coloring", () => {
+  it("accepts an async function awaited from another async function", () => {
+    const { errors } = typecheckSource(
+      "async inner(x: int32): int32 { return x + 1; }\n" +
+        "async outer(x: int32): int32 { return await inner(x); }\n" +
+        "function main(): int32 { return 0; }",
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  // Task support (and trait-impl validation, below) only exists on the
+  // multi-module path; the legacy typecheckSource has neither, so these
+  // go through typecheckProgram.
+  it("accepts await inside a task body (implicitly async)", () => {
+    const { errors } = typecheckProgram(
+      withCoreKinds(
+        "async inner(x: int32): int32 { return x + 1; }\n" +
+          "task worker(x: int32): int32 { return await inner(x); }\n" +
+          "function main(): int32 { pooled h = worker(1); return wait h; }",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("rejects await in a plain function", () => {
+    const { errors } = typecheckSource(
+      "async inner(x: int32): int32 { return x + 1; }\n" +
+        "function main(): int32 { return await inner(1); }",
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /await is only allowed inside an async function/);
+  });
+
+  it("rejects calling an async function without await", () => {
+    const { errors } = typecheckSource(
+      "async inner(x: int32): int32 { return x + 1; }\n" +
+        "async outer(x: int32): int32 { return inner(x); }\n" +
+        "function main(): int32 { return 0; }",
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /async function must be awaited/);
+  });
+
+  it("rejects awaiting a non-async callee", () => {
+    const { errors } = typecheckSource(
+      "function plain(x: int32): int32 { return x; }\n" +
+        "async outer(x: int32): int32 { return await plain(x); }\n" +
+        "function main(): int32 { return 0; }",
+    );
+    assert.equal(errors.length, 1);
+    assert.match(errors[0].message, /this callee is not async/);
+  });
+
+  // A task call site is a SPAWN, not an await: it evaluates to Task<T>
+  // and is joined with `wait`. Task bodies are implicitly async, so
+  // without the spawn carve-out every spawn would report as un-awaited.
+  it("does not require await at a task spawn site", () => {
+    const { errors } = typecheckProgram(
+      withCoreKinds(
+        "task worker(x: int32): int32 { return x; }\n" +
+          "function main(): int32 { pooled h = worker(1); return wait h; }",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  // Asyncness is part of a signature: an async method has a different ABI
+  // and a different calling rule, so an impl that disagrees with its trait
+  // is a real mismatch.
+  it("rejects a sync impl of an async trait method", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+      "trait R { async read(ref self): int32; }\n" +
+        "type S implements R {\n" +
+        "  n: int32,\n" +
+        "  function read(ref self): int32 { return self.n; }\n" +
+        "}\n" +
+        "function main(): int32 { return 0; }",
+      ),
+    );
+    assert.ok(errors.length >= 1);
+    assert.match(errors[0].message, /expected async \(/);
+  });
+
+  // Generic async trait dispatch. The generic body awaits a bound
+  // method; asyncness has to survive monomorphization for the await to
+  // resolve, which it does via substituteTypeParams.
+  it("accepts a generic function awaiting a bound async trait method", () => {
+    const { errors } = typecheckProgram(
+      withCoreKinds(
+        "trait F { async fetch(ref self): int32; }\n" +
+          "type C implements F { n: int32, async fetch(ref self): int32 { return self.n; } }\n" +
+          "async twice<T implements F>(ref f: T): int32 {\n" +
+          "  let a: int32 = await F.fetch(ref f);\n" +
+          "  return a + await F.fetch(ref f);\n" +
+          "}\n" +
+          "task run(): int32 { let c: C = { n: 2 }; return await twice(ref c); }\n" +
+          "function main(): int32 { pooled h = run(); return wait h; }",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  // A vtable slot inherits the trait method's asyncness, so dispatch
+  // through the erased view is awaited like any other async call.
+  it("accepts awaiting an async trait method through a vtable", () => {
+    const { errors } = typecheckProgram(
+      withCoreKinds(
+        "trait F { async fetch(ref self): int32; }\n" +
+          "vtable FView for F { fetch: () => int32, }\n" +
+          "type C implements F { n: int32, async fetch(ref self): int32 { return self.n; } }\n" +
+          "async useIt(ref v: FView): int32 { return await F.fetch(ref v); }\n" +
+          "task run(): int32 { let c: C = { n: 5 }; let v: FView = FView.from(ref c); return await useIt(ref v); }\n" +
+          "function main(): int32 { pooled h = run(); return wait h; }",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+
+  it("accepts a matching async impl of an async trait method", () => {
+    const { errors } = typecheckProgram(
+      singleModule(
+      "trait R { async read(ref self): int32; }\n" +
+        "type S implements R {\n" +
+        "  n: int32,\n" +
+        "  async read(ref self): int32 { return self.n; }\n" +
+        "}\n" +
+        "function main(): int32 { return 0; }",
+      ),
+    );
+    assert.deepEqual(errors, []);
+  });
+});

@@ -12,8 +12,18 @@ import { Result } from "./types.yoop";
 // Result of a single read attempt. `Ok { value }` carries the count of
 // bytes written into the caller's buffer (0 = EOF on a stream); `Err`
 // carries a non-empty diagnostic when the underlying source failed.
+// `read` is ASYNC: a network read suspends the calling task and hands
+// its worker thread back to the pool rather than blocking it. That makes
+// every consumer of this trait async too - which is the coloring cost,
+// and the reason the trait is worth declaring async rather than adding a
+// parallel AsyncReadable: a stream you cannot await is not much use for
+// real I/O.
+//
+// An implementation over an already-buffered source can simply never
+// suspend; an async function that does no awaiting costs one frame
+// allocation and runs straight through.
 export trait Readable {
-    function read(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
+    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
 }
 
 // ----- Writable ----------------------------------------------------------
@@ -30,7 +40,12 @@ export variant FlushOutcome {
 }
 
 export trait Writable {
-    function write(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
+    // Async for the same reason as Readable.read - a socket write can
+    // fill the kernel buffer and has to wait for drain.
+    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string>;
+    // `flush` stays synchronous: the implementations that have one are
+    // buffer swaps, and making it async would color a lot of code for no
+    // suspension.
     function flush(ref self): FlushOutcome;
 }
 

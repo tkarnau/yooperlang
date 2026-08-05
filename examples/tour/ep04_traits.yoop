@@ -1,0 +1,131 @@
+// EPISODE 4 - Traits: what a value can DO
+//
+// A trait is a capability. A struct opts in with `implements` and supplies
+// the methods inline. Methods take `ref self` first. Multiple traits are
+// parenthesized: `implements (A, B)`.
+//
+// The part that makes people stop the video: you do NOT call `x.method()`.
+// You call `Trait.method(ref x)`. The trait name is part of the call, always.
+// That looks verbose for about five minutes, and then you notice what it
+// buys - see BREAK IT #1 and the free-function demo below.
+
+import { Display } from "std/core/traits.yoop";
+
+trait Greeter {
+    function greet(ref self): string;
+}
+
+trait Measured {
+    function size(ref self): int32;
+}
+
+// One type, two traits.
+type Town implements (Greeter, Measured) {
+    name: string,
+    population: int32,
+
+    function greet(ref self): string {
+        return `hello from ${self.name}`;
+    }
+
+    function size(ref self): int32 {
+        return self.population;
+    }
+}
+
+// A FREE function named `greet` - the exact same name as the trait method
+// above. No collision, no shadowing, no resolution order. Trait method names
+// live in the trait's namespace; free functions live in the module's. Because
+// every trait call is qualified, the two can never be confused.
+function greet(who: string): string {
+    return `hi there, ${who}`;
+}
+
+// `Display` is the std trait behind template-literal interpolation. Implement
+// it and your type becomes printable with `${value}` - no special casing.
+type Point implements Display {
+    x: int32,
+    y: int32,
+    function to_string(ref self): string {
+        return `(${self.x},${self.y})`;
+    }
+}
+
+function main(): int32 {
+    let t: Town = { name: "Marquette", population: 20629 };
+
+    printf(`${Greeter.greet(ref t)}\n`);
+    printf(`population ${Measured.size(ref t)}\n`);
+
+    // Same identifier, different namespace, both callable in one scope.
+    printf(`${greet("stranger")}\n`);
+
+    // Display in action: interpolation dispatches through the trait.
+    let p: Point = { x: 3, y: 4 };
+    printf(`the point is ${p}\n`);
+
+    return 0;
+}
+
+// expected output:
+// hello from Marquette
+// population 20629
+// hi there, stranger
+// the point is (3,4)
+
+// ---------------------------------------------------------------------------
+// BREAK IT #1 - there is no method-call syntax
+//
+// Change to `printf(`${t.greet()}\n`);`
+//
+//   ep04_traits.yoop:1:34: method-call form '.greet()' is not supported - use the free-function form 'greet(ref value)'
+//
+// Talking point: dot-call is not "not implemented yet", it is declined. And
+// this file is the argument for why - there is already a free function called
+// `greet` in scope. Under `t.greet()` a reader has to know the type of `t` and
+// the full trait list of that type to know what runs. `Greeter.greet(ref t)`
+// tells you at the call site.
+
+// BREAK IT #2 - and the bare form is declined too, with a fix-it
+//
+// Change to `printf(`${greet(ref t)}\n`);`
+//
+//   ep04_traits.yoop:8:21: unknown function "greet" - did you mean `Greeter.greet(...)`?
+//     Trait methods must be called via the qualified form 'Trait.method(ref x, ...)'.
+//
+// Nice moment: the compiler finds the trait for you. (In this file the free
+// `greet` exists, so you will get an arity/type complaint instead - delete the
+// free function first if you want the clean fix-it message on camera.)
+
+// BREAK IT #3 - Display is not magic
+//
+// Delete `implements Display` from `Point` along with its `to_string`, then
+// interpolate it:
+//
+//   template literal interpolation must be a string, bool, int, or float type,
+//   or implement Display; found struct Point
+//
+// Talking point: `${...}` is not a compiler feature with a hardcoded list of
+// printable types. It is a trait lookup. Anything implementing Display drops
+// into a template literal, including types you write. Remember this one -
+// episode 11 leans on exactly this kind of "the feature is in userland".
+
+// WHAT YOU CANNOT DO (worth saying out loud, it is a fair question)
+//
+// Two traits that both declare `greet`, implemented by ONE type with two
+// DIFFERENT bodies, is not expressible today. There is no `function
+// Greeter.greet(ref self)` qualified-declaration form:
+//
+//   ep04_traits.yoop:5:21: expected lparen, got dot
+//
+// One `function greet(ref self)` body satisfies both traits. The call sites
+// stay unambiguous, but they reach the same code. Honest gap; mention it
+// rather than let a viewer discover it and assume you did not know.
+
+// BONUS TAKE - @derive(display)
+//
+// Writing `to_string` by hand gets old. Delete Point's `implements Display`
+// AND its `to_string`, then put `@derive(display)` on the line above
+// `type Point`. It generates the method from the field list at compile time -
+// literally by emitting source text and reparsing it - and `${p}` keeps
+// working. See examples/pass/derive_display_basic.yoop.

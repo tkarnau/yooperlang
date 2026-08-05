@@ -1,0 +1,3 @@
+import * as m from "./m";
+
+function main(): int32 { return m.a(); }

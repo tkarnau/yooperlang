@@ -1,0 +1,129 @@
+// Cancelling a thread that is parked inside the I/O multiplexer.
+//
+// This is the case the runtime simply could not express before. A
+// thread blocked on `accept` for a connection that never comes was
+// unreachable: no deadline, no signal, nothing. Now a token reaches
+// into the multiplexer and unparks it.
+//
+// The shape below is the one a real server wants - a shutdown token
+// the accept loop respects, so the process can drain and exit instead
+// of being killed.
+
+import { disposable } from "std/core/kinds.yoop";
+import { Readable } from "std/core/traits.yoop";
+import { Result } from "std/core/types.yoop";
+import { CancelToken } from "std/core/cancel";
+import * as cancel from "std/core/cancel";
+import * as conc from "std/core/concurrency.yoop";
+import { AcceptOutcome, ConnectResult, ListenResult, TcpStream } from "std/net";
+import * as tcp from "std/net";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const PORT: int32 = 34572;
+
+// Stands in for a signal handler or an admin endpoint: waits a beat,
+// then asks the accept loop to stop.
+task shutdownAfter(t: CancelToken, ms: uint64): int32 {
+    conc.sleep_ms(ms);
+    cancel.request(ref t);
+    return 0;
+}
+
+// Reads through the plain `Readable` trait - no knowledge of tokens or
+// deadlines at all. Whatever the stream's ambient settings are, this is
+// the code path that has to honor them. A timeout or cancellation
+// arrives as an Err, since the trait signature has nowhere else to put
+// it.
+// Async because Readable.read is - the ambient token still reaches it,
+// which is the point of this case.
+async readViaTrait(ref s: TcpStream): void {
+    let buf: uint8[] = [0, 0, 0, 0];
+    switch (await Readable.read(ref s, ref buf)) {
+        case Result.Ok { value: n }:   { printf("ambient: unexpected read\n"); }
+        case Result.Err { error: e }:  { printf("ambient: %s\n", e); }
+    }
+}
+
+function main(): int32 {
+    disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", PORT, 8);
+    if (lr.error.len > 0) {
+        printf("listen failed: %s\n", lr.error);
+        return 1;
+    }
+
+    disposable shutdown: CancelToken = cancel.newToken();
+    pooled stopper = shutdownAfter(cancel.share(ref shutdown), 60);
+
+    // No deadline at all on this accept - the ONLY way out is the
+    // cancellation. Without a token this parks until the process dies.
+    let served: int32 = 0;
+    let running: bool = true;
+    while (running) {
+        switch (tcp.tcpAcceptCt(ref lr.listener, ref shutdown)) {
+            case AcceptOutcome.Accepted { stream: s, peerHost: h, peerPort: p }: {
+                served = served + 1;
+            }
+            case AcceptOutcome.TimedOut: {
+                printf("loop: unexpected timeout\n");
+                running = false;
+            }
+            case AcceptOutcome.Cancelled: {
+                printf("loop: shutdown requested\n");
+                running = false;
+            }
+            case AcceptOutcome.Err { error: e }: {
+                printf("loop: err %s\n", e);
+                running = false;
+            }
+        }
+    }
+
+    printf("loop: exited after %d connections\n", served);
+    let _s: int32 = wait stopper;
+
+    // A token already cancelled short-circuits the next wait rather
+    // than registering with the kernel at all.
+    switch (tcp.tcpAcceptCt(ref lr.listener, ref shutdown)) {
+        case AcceptOutcome.Accepted { stream: s2, peerHost: h2, peerPort: p2 }: {
+            printf("post: unexpected accept\n");
+        }
+        case AcceptOutcome.TimedOut:  { printf("post: unexpected timeout\n"); }
+        case AcceptOutcome.Cancelled: { printf("post: still cancelled\n"); }
+        case AcceptOutcome.Err { error: e2 }: { printf("post: err %s\n", e2); }
+    }
+
+    // The AMBIENT form runs in a task: `Readable.read` is async now, and
+    // main is the sync/async boundary.
+    disposable readToken: CancelToken = cancel.newToken();
+    pooled amb = ambientTask(cancel.share(ref readToken));
+    pooled stopper2 = shutdownAfter(cancel.share(ref readToken), 60);
+    let _a: int32 = wait amb;
+    let _s2: int32 = wait stopper2;
+
+    return 0;
+}
+
+// Attach a token to the STREAM itself and let the plain `Readable.read`
+// trait method honor it. This is what lets code that only knows the
+// traits (all of std/http) inherit cancellation without a signature
+// change. The token here has NO deadline - only the explicit cancel ends
+// the read.
+task ambientTask(t: CancelToken): int32 {
+    disposable cr: ConnectResult = tcp.tcp_connect("127.0.0.1", PORT);
+    if (cr.error.len > 0) {
+        printf("connect failed: %s\n", cr.error);
+        return 1;
+    }
+    tcp.tcpSetToken(ref cr.stream, ref t);
+    await readViaTrait(ref cr.stream);
+    return 0;
+}
+
+// expected output:
+// loop: shutdown requested
+// loop: exited after 0 connections
+// post: still cancelled
+// ambient: cancelled

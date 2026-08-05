@@ -326,6 +326,103 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "cancelled as expected\n");
   });
 
+  // Cancellation tokens: the explicit-value form. Covers the deadline
+  // path (TimedOut, not Cancelled - the two reasons stay distinct), an
+  // explicit cross-thread cancel waking a parked sleep, parent/child
+  // cascade, a child with its own shorter budget, and the null `none()`
+  // token being a working no-op.
+  it("cancel_token_smoke: deadlines, explicit cancel, child tokens, and none()", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/cancel_token_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "deadline: timed out\ndeadline: expired\nmanual: cancelled\nmanual: flagged\n" +
+        "child: cancelled with parent\nchild2: timed out\nparent2: still live\nnone: ready\n",
+    );
+  });
+
+  // Bounded socket I/O. Every std/net call used to park on the
+  // multiplexer with no way out; these give up on a deadline instead.
+  // The accept-with-no-client and read-from-a-silent-peer cases are the
+  // two shapes that used to wedge a thread permanently.
+  it("io_timeout_smoke: accept and read give up on a deadline instead of parking forever", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/io_timeout_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "accept: timed out\naccept: connected\nread: timed out\n" +
+        "write: sent 3\nclient read: 3\n",
+    );
+  });
+
+  // Cancelling a thread parked INSIDE the multiplexer - the case the
+  // runtime could not express at all before. The accept has no deadline,
+  // so the cancellation is the only path out of the loop.
+  //
+  // The "ambient" line is the regression guard for the trait path: a
+  // token attached to the STREAM (via tcpSetToken) has to reach a plain
+  // `Readable.read`. A structural is-this-the-none-token check is what
+  // makes that work - testing "has the token fired yet" instead makes a
+  // live deadline-less token look absent, which silently routes back to
+  // the uninterruptible ffi_recv and hangs this test forever.
+  it("io_cancel_smoke: a cancel token unparks an accept blocked in the multiplexer", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/io_cancel_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "loop: shutdown requested\nloop: exited after 0 connections\n" +
+        "post: still cancelled\nambient: cancelled\n",
+    );
+  });
+
+  // async/await: `async` functions lower to LLVM switched-resume
+  // coroutines, and a task body is implicitly async. Covers composition
+  // (an async fn awaiting another), mixing async and ordinary calls in
+  // one body, and a loop whose locals cross the await.
+  it("async_await_smoke: async functions compose and are driven by the task scheduler", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/async_await_smoke.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "compute=15\nmixed=20\nlooping=20\n");
+  });
+
+  // The payoff: a suspended task releases its worker thread. Pinned to
+  // ONE worker, so if suspension did not actually free the thread the
+  // single worker would park inside the first read and this would hang
+  // rather than fail. The suspend also happens two frames below the task
+  // body, which is the propagation the coloring rules exist to make safe.
+  //
+  // The two "woke" lines race, so only their multiset is asserted.
+  it("async_yield_smoke: two tasks park on I/O simultaneously with a single worker thread", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/async_yield_smoke.yoop", {
+      env: { YOOP_NUM_WORKERS: "1" },
+    });
+    assert.equal(exitCode, 0);
+    const lines = stdout.trim().split("\n");
+    assert.equal(lines[0], "both parked");
+    assert.deepEqual(
+      lines.slice(1, 3).sort(),
+      ["reader 1 woke", "reader 2 woke"],
+    );
+    assert.equal(lines[3], "total bytes=2");
+  });
+
+  // The end of the async story: std/net and std/http are async top to
+  // bottom, so an HTTP server plus three concurrent clients - four tasks
+  // all doing socket I/O - multiplex onto ONE worker thread.
+  //
+  // Pinned to YOOP_NUM_WORKERS=1 on purpose. Under blocking I/O this
+  // deadlocks rather than fails: the single worker parks inside the
+  // server's accept() and no client ever gets a turn. So a regression
+  // here shows up as a timeout, which is the signal we want.
+  it("async_server_smoke: an HTTP server and 3 concurrent clients share a single worker", () => {
+    const { stdout, exitCode } = runFixtureEntry(
+      "examples/pass/async_server_smoke/main.yoop",
+      { env: { YOOP_NUM_WORKERS: "1" }, timeoutMs: 30000 },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "served=3 ok=3\n");
+  });
+
   it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
@@ -1012,7 +1109,14 @@ function runFixtureEntry(relPath, opts = {}) {
     ...allLinkFlags.map((f) => `-l${f}`),
   ];
   execFileSync("clang", clangArgs, { stdio: "pipe" });
-  const result = spawnSync(binPath, [], { encoding: "utf8" });
+  // `env` mirrors runFixture's option - needed by fixtures that pin
+  // YOOP_NUM_WORKERS to prove a scheduling property.
+  const env = opts.env ? { ...process.env, ...opts.env } : process.env;
+  const result = spawnSync(binPath, [], {
+    encoding: "utf8",
+    env,
+    timeout: opts.timeoutMs ?? 30000,
+  });
   return {
     stdout: result.stdout,
     stderr: result.stderr,
@@ -1782,28 +1886,59 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.equal(stdout, "wrote=2 read=2 bytes=72,73\n");
   });
 
-  // Library Phase C: HTTP/1.1 request-head parser (request line + headers
-  // + Content-Length sniff). No sockets; pure parse over a literal buffer.
-  it("http_parse_smoke: parse_request_head extracts method/path/version/cl + headers", () => {
+  // HTTP/1.1 request-head parser: request line, header block, target split
+  // into path + query, and the malformed-request rejections. No sockets;
+  // pure parse over a literal buffer.
+  it("http_parse_smoke: parseRequestHead extracts the head and rejects bad ones", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/http_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
-      "method=GET path=/hello version=HTTP/1.1 cl=0 host=localhost\n",
+      "method=GET path=/hello version=HTTP/1.1 cl=0 host=localhost\n" +
+      "query name=yoop\n" +
+      "bad-method : 501 unsupported method \"BREW\"\n" +
+      "bad-version: 505 unsupported HTTP version \"HTTP/9.9\"\n" +
+      "bad-length : 400 Content-Length is not a number\n" +
+      "chunked    : 501 chunked transfer encoding is not supported\n" +
+      "encoded-sep: 400 decoding request path \"/a%2Fb\": encoded path separator is not allowed\n",
     );
   });
 
-  // Library Phase D: the hello-world HTTP server compiles end-to-end.
-  // Running it binds to localhost:18080 (out of scope for the test harness
-  // - see plans/library-phase-d-server.md). We just verify the build.
+  // The hello-world HTTP server compiles end-to-end. Running it binds to
+  // localhost:18080 (out of scope for the test harness), so this verifies
+  // the build.
   it("hello_server: builds end-to-end (server requires manual curl test)", () => {
     const { ir, linkFlags } = compileEntry(
       path.join(repoRoot, "examples/pass/hello_server/main.yoop"),
     );
-    // The server's generic serve_n monomorphizes against HelloHandler.
-    assert.match(ir, /serve_n.*HelloHandler/);
-    // The TCP layer must call into the multiplexer.
-    assert.match(ir, /declare i32 @yoop_io_wait_readable/);
+    // The serve loop takes the erased Dispatcher, so there is exactly one
+    // copy of it and the handler is reached through the vtable.
+    assert.match(ir, /%vtable\..*__Dispatcher = type/);
+    // serveConnection is async now, so it has the coroutine ABI: returns
+    // `ptr` (the handle), takes a trailing result slot, and carries
+    // presplitcoroutine. That is what lets a connection suspend on a
+    // read and hand its worker thread back.
+    //
+    // The prefix is `http_` rather than `server_`: std/http is a DIRECTORY
+    // MODULE, so all seven of its source files mangle against one module id
+    // derived from the directory. Same for the router assertions below.
+    assert.match(ir, /define ptr @http_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
+    // The handler itself stays SYNCHRONOUS - it takes a buffered request
+    // and fills a response, so there is nothing for it to await. Async
+    // stops at the I/O boundary rather than coloring user handlers, and
+    // the absence of presplitcoroutine on this define is what proves it.
+    const handlerDefine = ir
+      .split("\n")
+      .find((l) => l.startsWith("define") && l.includes("__HelloHandler__Handler__handle("));
+    assert.ok(handlerDefine, "handler define not found");
+    assert.ok(
+      !handlerDefine.includes("presplitcoroutine"),
+      `handler should stay synchronous, got: ${handlerDefine}`,
+    );
+    // The TCP layer reaches the multiplexer through the async arming path.
+    assert.match(ir, /declare i32 @yoop_io_arm_readable/);
+    // And the coroutine trampolines are installed for the scheduler.
+    assert.match(ir, /call void @yoop_runtime_set_coro_ops/);
     // The libc socket-family externs are declared.
     assert.match(ir, /declare i32 @socket\(/);
     assert.match(ir, /declare i32 @bind\(/);
@@ -1835,41 +1970,205 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  // Phase 10.I: the http_router example exercises std/http/router.yoop.
-  // Building requires that the `Dispatcher` vtable type-checks and that
-  // a Router whose impl carries a vtable field instantiates cleanly.
+  // Pure exercise of std/http/url.yoop plus the router's path matcher: target
+  // splitting, percent coding, urlencoded parsing, and pattern matching are
+  // all functions over strings, so this runs with no sockets.
+  it("http_url_smoke: target splitting, percent coding, and route patterns", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_url_smoke/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "target /todos/7?done=true&note=a%20b+c&flag#frag -> path=/todos/7 pairs=3 done=[true] note=[a b c] flag=[]\n" +
+      "target /todos -> path=/todos pairs=0\n" +
+      "segments=2 [a] [b-c]\n" +
+      "encode=a%20b%2Fc%3Fd%3De\n" +
+      "match /todos vs /todos -> hit\n" +
+      "match /todos vs /todos/ -> hit\n" +
+      "match /todos/:id vs /todos/42 -> hit id=42\n" +
+      "match /todos/:id vs /todos -> miss\n" +
+      "match /todos/:id vs /todos/42/notes -> miss\n" +
+      "match /static/* vs /static/css/app.css -> hit rest=css/app.css\n" +
+      "match /static/* vs /static -> hit rest=\n" +
+      "decodePath rejected: 400 encoded path separator is not allowed\n",
+    );
+  });
+
+  // Layout regressions. Each of these used to corrupt memory rather than fail
+  // to compile: a variant nested in a variant payload was sized without its
+  // payload floor + pad, a vtable had no size case at all (so a Vec of structs
+  // holding one overran its buffer), and a module-level const string reached
+  // the binary with its escape sequences undecoded.
+  it("variant_layout: nested variant payload, vtable in a Vec, const escapes", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/variant_layout/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "code=7 message=payload survived the round trip\n" +
+      "entries=6 total=150 last=slot5\n" +
+      "greetingLen=5\n",
+    );
+  });
+
+  // The http_router example exercises std/http/router.yoop. Building
+  // requires that the `Dispatcher` vtable type-checks and that a Router
+  // whose route entries carry a vtable field instantiates cleanly.
   // Running binds a port + needs curl - manual test.
-  it("http_router: builds end-to-end (manual curl test against /hello + /healthz)", () => {
+  it("http_router: builds end-to-end (manual curl test against /hello + /greet/:name)", () => {
     const { ir } = compileEntry(
       path.join(repoRoot, "examples/pass/http_router/main.yoop"),
     );
     // The Dispatcher vtable must materialize in the IR.
     assert.match(ir, /%vtable\..*__Dispatcher/);
-    // The router must be threaded into serve_n.
-    assert.match(ir, /serve_n.*Router/);
+    // The Router implements Handler, so it has its own trait-method define
+    // and reaches the route table's dispatchers through the same vtable.
+    assert.match(ir, /define .*@http_.*__Router__Handler__handle/);
+    assert.match(ir, /define .*@http_.*__matchPath/);
   });
 
   // Phase 10.I: end-to-end client+server in one process. A background
   // task serves one request; the main thread issues an http_get and
   // prints the response body.
-  it("http_client_loopback: in-process server task + client.send round-trip prints body", () => {
+  it("http_client_loopback: in-process server task + client GET/POST round-trip", () => {
     const { stdout, exitCode } = runFixtureEntry("examples/pass/http_client_loopback/main.yoop");
     assert.equal(exitCode, 0);
-    // The two task threads can interleave their stdout writes; the
-    // server's "server done" line and the client's "status= body=" line
-    // are the only writes, so a contains-check is robust to ordering.
+    // The two task threads can interleave their stdout writes, so these are
+    // contains-checks rather than an exact-output comparison.
     assert.ok(
       stdout.includes("status=200 body=ping-pong"),
-      `expected response in stdout, got: ${stdout}`,
+      `expected GET response in stdout, got: ${stdout}`,
     );
     assert.ok(
-      stdout.includes("server done served=1"),
+      stdout.includes("status=200 body=echo:hello"),
+      `expected POST echo in stdout, got: ${stdout}`,
+    );
+    assert.ok(
+      stdout.includes("server done served=2"),
       `expected server-done in stdout, got: ${stdout}`,
     );
   });
 });
 
+// Declaration order must not decide whether a program compiles or what it does.
+// Every type in the fixture is USED above the line that declares it. All four
+// shapes shared one root cause - a reference resolving against a pass-A shell
+// that pass C had not filled yet - and they failed in four different ways,
+// including a compiler CRASH and (across the files of a directory module) a
+// SILENT MISCOMPILE. See plans/modules-as-directories.md.
+describe("e2e: declaration order independence", () => {
+  it("decl_order_independence: struct field, variant payload, and generic arg all resolve when declared later", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/decl_order_independence.yoop",
+    );
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /holder=7/); // concrete field -> later struct (was a crash)
+    assert.match(stdout, /boxed=9/); // variant payload -> later struct
+    assert.match(stdout, /carrier=11/); // concrete field -> later generic
+    assert.match(stdout, /wrapped=7/); // variant payload -> later generic
+  });
+
+  it("parse_error_in_import: a syntax error in an imported module blames THAT file", () => {
+    assert.throws(
+      () =>
+        loadModuleGraph(
+          path.join(repoRoot, "examples/fail/parse_error_in_import/main.yoop"),
+        ),
+      (err) => {
+        assert.ok(err.isParseError, "expected a parse error");
+        // The point of the fix: the failing FILE is stamped on the throw, so the
+        // driver stops rendering every parse error against the entry file.
+        assert.match(err.srcPath ?? "", /parse_error_in_import\/lib\.yoop$/);
+        assert.match(err.srcText ?? "", /export function ok/);
+        return true;
+      },
+    );
+  });
+});
+
+// modules-as-directories: a module is either one source file (no header) or a
+// DIRECTORY of source files that each declare `module <name>;`. See
+// plans/modules-as-directories.md.
+describe("e2e: directory modules", () => {
+  it("dir_module: two source files form one module and share a namespace", () => {
+    const { stdout, exitCode } = runFixture("examples/pass/dir_module/main.yoop");
+    assert.strictEqual(exitCode, 0);
+    // areaOf/doubledArea live in area.yoop; Point and the PRIVATE `doubled`
+    // live in point.yoop. area.yoop imports neither - siblings in a module see
+    // each other's declarations, exported or not, with no import.
+    assert.match(stdout, /area=12/);
+    assert.match(stdout, /doubledArea=24/);
+    assert.match(stdout, /stretched=6,8/);
+    // Both files declare a module-level const with an unfoldable initializer,
+    // so both really go through a runtime module-init. 4 + 8 proves both ran.
+    assert.match(stdout, /scratchCaps=12/);
+  });
+
+  // A module's semantics must not depend on the alphabetical spelling of its
+  // filenames. This fixture's impl file is deliberately named so it sorts BEFORE
+  // the file declaring the trait, the generic, and the type the kind governs.
+  // Pass C used to be module-major (every sub-stage per source file), so an impl
+  // could be validated against a still-empty trait method map and this failed
+  // with "'self' can only be used inside a trait method body". Pass C is now
+  // group-major / stage-minor: every file of a module completes a stage before
+  // the next stage starts for any of them.
+  it("dir_module_order: a trait/generic/kind used from an EARLIER-sorting sibling file", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/dir_module_order/main.yoop",
+    );
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /greet=40/); // trait impl + trait-qualified dispatch
+    assert.match(stdout, /boxed=4/); // generic declared in the later file
+    assert.match(stdout, /cleanup=70/); // kind-governed binding, auto-dispose
+  });
+
+  it("dir_module: both source files mangle against ONE module id", () => {
+    const { ir } = compileEntry(
+      path.join(repoRoot, "examples/pass/dir_module/main.yoop"),
+    );
+    // areaOf (area.yoop) and stretched (point.yoop) are different FILES but one
+    // module, so they carry the same mangling prefix. That prefix is derived
+    // from the directory, and the declared name supplies its readable part.
+    const areaOf = ir.match(/@(shapes_[0-9a-f]+)__areaOf\(/);
+    const stretched = ir.match(/@(shapes_[0-9a-f]+)__stretched\(/);
+    assert.ok(areaOf, "expected an areaOf define mangled under a shapes_* module id");
+    assert.ok(stretched, "expected a stretched define mangled under a shapes_* module id");
+    assert.strictEqual(areaOf[1], stretched[1]);
+    // The module-init symbol is per SOURCE FILE, because one define per module
+    // would be an LLVM redefinition when two files both have module-level decls.
+    const inits = [...ir.matchAll(/define internal void @(\S*?__module_init\S*)\(\)/g)]
+      .map((m) => m[1])
+      .filter((s) => s.startsWith("shapes_"));
+    assert.strictEqual(inits.length, 2, `expected 2 shapes module inits, got ${inits.join(", ")}`);
+    assert.strictEqual(new Set(inits).size, 2, "the two inits must have distinct symbols");
+  });
+});
+
 describe("e2e: multi-file fail fixtures produce the right errors", () => {
+  // A half-opted-in directory is an error rather than a silently-split module.
+  // This is what catches a file added later by someone who did not notice the
+  // directory had a `module` header.
+  it("dir_module_mixed: a source file without the module header is rejected", () => {
+    assert.throws(
+      () =>
+        loadModuleGraph(
+          path.join(repoRoot, "examples/fail/dir_module_mixed/main.yoop"),
+        ),
+      /b\.yoop is in module directory .* but has no `module m;` header/,
+    );
+  });
+
+  // The module is the unit, so one of its source files cannot be imported on
+  // its own. The error names the form that works instead of quietly pulling in
+  // the whole directory.
+  it("dir_module_file_import: importing one source file of a module is rejected", () => {
+    assert.throws(
+      () =>
+        loadModuleGraph(
+          path.join(repoRoot, "examples/fail/dir_module_file_import/main.yoop"),
+        ),
+      /names one source file of module "m" - import the module itself instead/,
+    );
+  });
+
   it("import_no_yoop_ext.yoop: import path must end in .yoop", () => {
     const entryAbs = path.join(repoRoot, "examples/fail/import_no_yoop_ext.yoop");
     assert.throws(
@@ -2328,11 +2627,12 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     const { stdout, exitCode } = runFixture("examples/pass/at_precompile_tasks.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "IMM=50 JOIN=66 POOL=84 MULTI=42\n");
-    const src = fs.readFileSync(
+    // compileEntry, not compileSource: the concurrency kinds live in
+    // std/core/kinds.yoop now, so this fixture needs the module graph (which
+    // autoloads it). The legacy single-module path has no std at all.
+    const { ir } = compileEntry(
       path.join(repoRoot, "examples/pass/at_precompile_tasks.yoop"),
-      "utf8",
     );
-    const ir = compileSource(src);
     assert.match(ir, /IMM = internal global i32 50,/);
     assert.match(ir, /JOIN = internal global i32 66,/);
     assert.match(ir, /POOL = internal global i32 84,/);
@@ -2604,6 +2904,28 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /unknown function "dispose".*Disposable\.dispose/.test(e.message)),
       `expected bare-form rejection with hint, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // modules-as-directories: a module's source files share its DECLARATIONS but
+  // not its IMPORTS. Without this, a file could use `vec` because a sibling
+  // imported it, and reading a file's head would no longer tell you what it
+  // depends on - which is the locality the whole feature exists to recover.
+  it("dir_module_import_leak: using a name only a SIBLING file imported is rejected", () => {
+    const { errors } = typecheckFixtureEntry(
+      "examples/fail/dir_module_import_leak/main.yoop",
+    );
+    const leaks = errors.filter((e) => /is not imported by this file/.test(e.message));
+    // Both the namespace (`vec`) and the named type (`Vec`) are caught.
+    assert.strictEqual(leaks.length, 2, leaks.map((e) => e.message).join("\n"));
+    assert.ok(
+      leaks.every((e) => /imported by a\.yoop/.test(e.message)),
+      "each error should name the sibling that did import it",
+    );
+    // Reported against b.yoop, not the entry or the sibling.
+    assert.ok(
+      leaks.every((e) => /b\.yoop$/.test(e.srcPath ?? "")),
+      `expected b.yoop, got ${leaks.map((e) => e.srcPath).join(", ")}`,
     );
   });
 
@@ -2934,11 +3256,18 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("wait_in_task_body.yoop rejects wait inside a task fn body", () => {
+  it("wait_in_task_body.yoop rejects wait inside a task fn body, pointing at await", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/wait_in_task_body.yoop");
     assert.ok(
-      errors.some((e) => /wait inside task body not supported/.test(e.message)),
+      errors.some((e) => /wait is not allowed inside a task body/.test(e.message)),
       `expected wait-in-task error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+    // The diagnostic has to name the alternative - `await` is the in-task
+    // form now, and the old message promised a "future phase" that has
+    // since landed.
+    assert.ok(
+      errors.some((e) => /use "await f\(\.\.\.\)"/.test(e.message)),
+      `expected the await fix-it, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 
