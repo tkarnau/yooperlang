@@ -25,6 +25,8 @@ import {
   PrimType,
   RefType,
   StructType,
+  StructShell,
+  fillStructShell,
   TaskType,
   TypeParamType,
   UnionType,
@@ -62,6 +64,7 @@ import {
   validatePrecompileBlock,
 } from "./checkStatement.js";
 import { resolveImports } from "./imports.js";
+import { checkImportLocality } from "./importLocality.js";
 import { runKindCheck } from "./kindCheck.js";
 import { runKindFlow } from "./kindFlow.js";
 import { lookupCoreKind, setCoreKinds } from "./coreKinds.js";
@@ -2293,7 +2296,11 @@ export function typecheckProgram(modules) {
               sourceLoc: d.sourceLoc,
             });
           } else {
-            structTable.set(d.name, StructType(d.name, null, mod.id));
+            // Unfrozen shell: pass C fills THIS object rather than replacing
+            // the table entry, so a field that resolves to this struct before
+            // its body is resolved still ends up pointing at the populated
+            // type. See StructShell in types.js for what replacing broke.
+            structTable.set(d.name, StructShell(d.name, mod.id));
           }
           if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         }
@@ -2613,6 +2620,14 @@ export function typecheckProgram(modules) {
     stampErrorOrigin(errors, errStart, mod);
   }
 
+  // pass B.1 - import locality for directory modules. A module's source files
+  // share its DECLARATIONS but not its IMPORTS: using a name a sibling imported
+  // is an error, so a file's head still tells you what it depends on. No-op for
+  // single-file modules. See importLocality.js for why this is enforcement
+  // rather than lexical per-file scope.
+  // Stamps its own errors, since it reports per source FILE across a group.
+  checkImportLocality(modules, moduleEnv, errors);
+
   // Phase 8.A: `import.unsafe;` gating pass - scan each non-unsafe module
   // for any unsafe_ptr type annotation, address-of/deref/null/cast node, and
   // surface a precise diagnostic. Cheap recursive walk; runs once per module.
@@ -2623,8 +2638,64 @@ export function typecheckProgram(modules) {
     stampErrorOrigin(errors, errStart, mod);
   }
 
+  // modules-as-directories: pass C's sub-stages are ordered relative to each
+  // OTHER (generic bodies -> trait method sigs -> impl validation), and across
+  // separate modules the topological order of `modules` satisfies that. It does
+  // NOT satisfy it across the SOURCE FILES OF ONE MODULE, because siblings have
+  // no dependency order between them - the graph lists them in basename order.
+  // So `validateImplBlock` in router.yoop could run against the still-empty
+  // `methods` map of a trait declared in server.yoop, which made a directory
+  // module's semantics depend on the alphabetical spelling of its filenames:
+  // renaming a file turned a hard error ("'self' can only be used inside a trait
+  // method body") into a working program.
+  //
+  // The fix is to run pass C GROUP-MAJOR, STAGE-MINOR: group the source files by
+  // module (topo order preserved, since a module's files are contiguous), and
+  // inside a group run each stage for every file before starting the next stage.
+  // A single-file module is a group of one, so this is behavior-identical to the
+  // old single loop for every module that predates the feature - which is the
+  // reason to structure it this way rather than making all of pass C
+  // stage-major across modules. That stronger form was tried first and broke:
+  // trait signature resolution instantiates generic types, and instantiation
+  // snapshots the generic decl, so trait sigs cannot precede generic-body
+  // resolution program-wide. See plans/modules-as-directories.md.
+  const passCGroups = [];
+  {
+    const groupById = new Map();
+    for (const mod of modules) {
+      let group = groupById.get(mod.id);
+      if (!group) {
+        group = [];
+        groupById.set(mod.id, group);
+        passCGroups.push(group);
+      }
+      group.push(mod);
+    }
+  }
+
   // pass C: struct fields + function sigs + extern decls
-  for (const mod of modules) {
+  for (const group of passCGroups) {
+    // STAGE 1 of the group - generic pre-pass, struct/variant/enum/union
+    // bodies, function signatures, extern decls.
+    //
+    // Split into two sub-stages, and the split is load-bearing. Instantiating a
+    // generic type SNAPSHOTS the generic decl: `instantiateStruct` copies
+    // `genericDecl.genericFields` into a fresh cached StructType. If a concrete
+    // field names `Bag<int32>` before `type Bag<T>`'s own body has been
+    // resolved, that snapshot is taken from an EMPTY field list and the cached
+    // instance is permanently field-less - reported downstream as the actively
+    // misleading `type "Bag__int32" has no field "item"`. Declaration order
+    // decided it inside one file, and basename order decided it across the
+    // source files of a directory module.
+    //
+    // So: every generic TYPE body in the group is resolved before any concrete
+    // decl in the group. This is the "broader use will need a pre-pass before
+    // field resolution" that the Phase 7.x comment below predicted, and it is
+    // the same shape as the Phase 7.2 generic-TRAIT pre-pass that already exists
+    // for exactly this reason. The unfrozen-shell fix in types.js handles the
+    // non-generic half of the same hazard.
+    for (const subStage of ["genericTypes", "rest"]) {
+    for (const mod of group) {
     const errStart = errors.length;
     const env = moduleEnv.get(mod.id);
     const { localSymbols, structTable, exports, traitTable, variantTable, unionTable, enumTable, genericFuncTable } = env;
@@ -2704,6 +2775,18 @@ export function typecheckProgram(modules) {
 
     for (const decl of mod.ast.body) {
       const d = innerDecl(decl);
+
+      // Partition the decls across the two sub-stages (see the comment on the
+      // subStage loop). Generic TYPE decls go first because instantiating one
+      // snapshots its body; generic FUNCTION decls stay with "rest" - their
+      // signatures do not feed any layout, and moving them earlier would only
+      // widen the blast radius. Every decl is handled in exactly one sub-stage.
+      const isGenericTypeDecl =
+        !!d.genericDecl &&
+        (d.kind === ASTNodeKind.TYPE_DECL || d.kind === ASTNodeKind.VARIANT_DECL);
+      if (subStage === "genericTypes" ? !isGenericTypeDecl : isGenericTypeDecl) {
+        continue;
+      }
 
       // Phase 7.1: generic struct decl - resolve field types with type params
       // in scope and stash on the genericDecl record.
@@ -2902,15 +2985,16 @@ export function typecheckProgram(modules) {
           d.resolvedKindApplication = typeKindApp;
         }
 
-        const fullType = StructType(
-          d.name,
-          fields,
-          mod.id,
-          [],
-          new Map(),
-          propagatedKinds,
-          typeKindApp,
-        );
+        // Fill the pass-A shell IN PLACE. Replacing the table entry here left
+        // every already-resolved field pointing at an empty struct, which
+        // undersized the enclosing layout and silently miscompiled (see
+        // StructShell in types.js). Falls back to a fresh StructType if the
+        // entry is not our shell - e.g. a redeclaration replaced it.
+        const shell = structTable.get(d.name);
+        const fullType =
+          shell && !Object.isFrozen(shell) && shell.fields === null
+            ? fillStructShell(shell, fields, propagatedKinds, typeKindApp)
+            : StructType(d.name, fields, mod.id, [], new Map(), propagatedKinds, typeKindApp);
         d.resolvedType = fullType;
         structTable.set(d.name, fullType);
       }
@@ -3328,6 +3412,27 @@ export function typecheckProgram(modules) {
         }
       }
     }
+    stampErrorOrigin(errors, errStart, mod);
+    }
+    }
+
+    // STAGE 2 of the group - every trait's SHAPE: extends chains, then method
+    // signatures. Runs for EVERY source file of the module before stage 3 (which
+    // consumes those method tables) runs for any of them. Stage 1 above has
+    // already resolved this module's generic bodies, which trait signature
+    // resolution depends on: a signature mentioning `Result<isize, string>`
+    // instantiates that generic enum, and instantiation SNAPSHOTS the generic
+    // decl - so hoisting this any earlier yields a permanently variant-less
+    // instance ("enum Result__isize__string has no variant Ok").
+    for (const mod of group) {
+    const errStart = errors.length;
+    const { traitTable } = moduleEnv.get(mod.id);
+    const baseCtx = () => ({ registry: programState.registry });
+    const genericCtx = (paramScope) => ({
+      registry: programState.registry,
+      typeParamScope: paramScope,
+    });
+
     // Phase 9.J: resolve every trait's `extends` list first, before any
     // method signatures. Method-sig resolution doesn't depend on parents'
     // method tables (extends is only consulted at impl-block validation and at
@@ -3440,6 +3545,23 @@ export function typecheckProgram(modules) {
         sig.resolvedFuncType = trait.methods.get(sig.name);
       }
     }
+    stampErrorOrigin(errors, errStart, mod);
+    }
+
+    // STAGE 3 of the group - everything that CONSUMES a trait's method table:
+    // kind clauses (`requires`/`mustCall`), impl-block validation, vtable slot
+    // matching, and module-level decls. Because stage 2 above already ran for
+    // every source file of this module, an impl in one file now sees the fully
+    // populated methods map of a trait declared in a sibling file.
+    for (const mod of group) {
+    const errStart = errors.length;
+    const env = moduleEnv.get(mod.id);
+    const { localSymbols, structTable, exports, traitTable, variantTable, unionTable, enumTable, genericFuncTable } = env;
+    const baseCtx = () => ({ registry: programState.registry });
+    const genericCtx = (paramScope) => ({
+      registry: programState.registry,
+      typeParamScope: paramScope,
+    });
 
     // pass C.2 - kind clause resolution (between trait sigs and impl blocks).
     // After C.1, every trait shell has its method map populated, which is what
@@ -3545,6 +3667,7 @@ export function typecheckProgram(modules) {
     // the typeContext) can find the decl list without re-walking the AST.
     env.moduleInitDecls = mod.moduleInitDecls;
     stampErrorOrigin(errors, errStart, mod);
+    }
   }
 
   // pass C.5: re-sync imported types now that pass C resolved proper sigs + fields.

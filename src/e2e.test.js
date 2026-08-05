@@ -1918,7 +1918,11 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     // `ptr` (the handle), takes a trailing result slot, and carries
     // presplitcoroutine. That is what lets a connection suspend on a
     // read and hand its worker thread back.
-    assert.match(ir, /define ptr @server_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
+    //
+    // The prefix is `http_` rather than `server_`: std/http is a DIRECTORY
+    // MODULE, so all seven of its source files mangle against one module id
+    // derived from the directory. Same for the router assertions below.
+    assert.match(ir, /define ptr @http_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
     // The handler itself stays SYNCHRONOUS - it takes a buffered request
     // and fills a response, so there is nothing for it to await. Async
     // stops at the I/O boundary rather than coloring user handlers, and
@@ -2017,8 +2021,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.match(ir, /%vtable\..*__Dispatcher/);
     // The Router implements Handler, so it has its own trait-method define
     // and reaches the route table's dispatchers through the same vtable.
-    assert.match(ir, /define .*@router_.*__Router__Handler__handle/);
-    assert.match(ir, /define .*@router_.*__matchPath/);
+    assert.match(ir, /define .*@http_.*__Router__Handler__handle/);
+    assert.match(ir, /define .*@http_.*__matchPath/);
   });
 
   // Phase 10.I: end-to-end client+server in one process. A background
@@ -2044,6 +2048,42 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   });
 });
 
+// Declaration order must not decide whether a program compiles or what it does.
+// Every type in the fixture is USED above the line that declares it. All four
+// shapes shared one root cause - a reference resolving against a pass-A shell
+// that pass C had not filled yet - and they failed in four different ways,
+// including a compiler CRASH and (across the files of a directory module) a
+// SILENT MISCOMPILE. See plans/modules-as-directories.md.
+describe("e2e: declaration order independence", () => {
+  it("decl_order_independence: struct field, variant payload, and generic arg all resolve when declared later", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/decl_order_independence.yoop",
+    );
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /holder=7/); // concrete field -> later struct (was a crash)
+    assert.match(stdout, /boxed=9/); // variant payload -> later struct
+    assert.match(stdout, /carrier=11/); // concrete field -> later generic
+    assert.match(stdout, /wrapped=7/); // variant payload -> later generic
+  });
+
+  it("parse_error_in_import: a syntax error in an imported module blames THAT file", () => {
+    assert.throws(
+      () =>
+        loadModuleGraph(
+          path.join(repoRoot, "examples/fail/parse_error_in_import/main.yoop"),
+        ),
+      (err) => {
+        assert.ok(err.isParseError, "expected a parse error");
+        // The point of the fix: the failing FILE is stamped on the throw, so the
+        // driver stops rendering every parse error against the entry file.
+        assert.match(err.srcPath ?? "", /parse_error_in_import\/lib\.yoop$/);
+        assert.match(err.srcText ?? "", /export function ok/);
+        return true;
+      },
+    );
+  });
+});
+
 // modules-as-directories: a module is either one source file (no header) or a
 // DIRECTORY of source files that each declare `module <name>;`. See
 // plans/modules-as-directories.md.
@@ -2060,6 +2100,24 @@ describe("e2e: directory modules", () => {
     // Both files declare a module-level const with an unfoldable initializer,
     // so both really go through a runtime module-init. 4 + 8 proves both ran.
     assert.match(stdout, /scratchCaps=12/);
+  });
+
+  // A module's semantics must not depend on the alphabetical spelling of its
+  // filenames. This fixture's impl file is deliberately named so it sorts BEFORE
+  // the file declaring the trait, the generic, and the type the kind governs.
+  // Pass C used to be module-major (every sub-stage per source file), so an impl
+  // could be validated against a still-empty trait method map and this failed
+  // with "'self' can only be used inside a trait method body". Pass C is now
+  // group-major / stage-minor: every file of a module completes a stage before
+  // the next stage starts for any of them.
+  it("dir_module_order: a trait/generic/kind used from an EARLIER-sorting sibling file", () => {
+    const { stdout, exitCode } = runFixture(
+      "examples/pass/dir_module_order/main.yoop",
+    );
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /greet=40/); // trait impl + trait-qualified dispatch
+    assert.match(stdout, /boxed=4/); // generic declared in the later file
+    assert.match(stdout, /cleanup=70/); // kind-governed binding, auto-dispose
   });
 
   it("dir_module: both source files mangle against ONE module id", () => {
@@ -2846,6 +2904,28 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     assert.ok(
       errors.some((e) => /unknown function "dispose".*Disposable\.dispose/.test(e.message)),
       `expected bare-form rejection with hint, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // modules-as-directories: a module's source files share its DECLARATIONS but
+  // not its IMPORTS. Without this, a file could use `vec` because a sibling
+  // imported it, and reading a file's head would no longer tell you what it
+  // depends on - which is the locality the whole feature exists to recover.
+  it("dir_module_import_leak: using a name only a SIBLING file imported is rejected", () => {
+    const { errors } = typecheckFixtureEntry(
+      "examples/fail/dir_module_import_leak/main.yoop",
+    );
+    const leaks = errors.filter((e) => /is not imported by this file/.test(e.message));
+    // Both the namespace (`vec`) and the named type (`Vec`) are caught.
+    assert.strictEqual(leaks.length, 2, leaks.map((e) => e.message).join("\n"));
+    assert.ok(
+      leaks.every((e) => /imported by a\.yoop/.test(e.message)),
+      "each error should name the sibling that did import it",
+    );
+    // Reported against b.yoop, not the entry or the sibling.
+    assert.ok(
+      leaks.every((e) => /b\.yoop$/.test(e.srcPath ?? "")),
+      `expected b.yoop, got ${leaks.map((e) => e.srcPath).join(", ")}`,
     );
   });
 

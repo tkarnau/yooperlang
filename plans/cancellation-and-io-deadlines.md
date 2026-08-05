@@ -132,11 +132,11 @@ direction gets `EAGAIN` instead of silently stomping the first waiter.
 
 ### std/core
 
-`std/core/cancel_ffi.yoop` - the one `import.unsafe` module, holding the
-`RawCancel` envelope (the same trick `std/db/sqlite_ffi.yoop` uses to
+`std/core/cancel/ffi.yoop` - the one `import.unsafe` module, holding the
+`RawCancel` envelope (the same trick `std/db/sqlite/ffi.yoop` uses to
 keep `unsafe_ptr` out of the safe surface).
 
-`std/core/cancel.yoop` - the safe API:
+`std/core/cancel/token.yoop` - the safe API:
 
     CancelToken implements Disposable
 

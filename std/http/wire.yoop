@@ -1,3 +1,5 @@
+module http;
+
 // std/http/wire.yoop - the byte level shared by the server and the client.
 //
 // Two jobs, both of which used to be copy-pasted between server.yoop and
@@ -9,48 +11,52 @@
 // A request head and a response head differ only in their first line, so the
 // header-field loop below is written once and both parsers call it.
 //
-// Nothing here is exported to user code by convention - it is imported by
-// std/http/parser.yoop, server.yoop and client.yoop. It has no dependency on
-// sockets, which is what lets the parsers be tested against a byte literal.
+// Nothing here is exported, FULL STOP - it used to say "by convention", because
+// under file-as-module every one of these had to be `export`ed just so its three
+// consumers could import it. Now that the seven files of std/http are one
+// module, parser.yoop / server.yoop / client.yoop reach these as siblings and
+// none of it is public API. This is the clearest single win of the merge.
+//
+// It has no dependency on sockets, which is what lets the parsers be tested
+// against a byte literal - and that invariant is why `readRequestBytes` /
+// `readResponseBytes` live in server.yoop and client.yoop rather than here,
+// despite being byte-identical twins.
 
 import { Result, Option } from "../core/types.yoop";
 import * as vec, { Vec } from "../core/vec.yoop";
 import * as bytes from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import {
-    Headers, HttpError, headersAdd, errBadRequest, httpError, notImplemented,
-} from "./types.yoop";
 
 // The two structural separators of HTTP/1.1, spelled as the characters they
 // are rather than as 13/10.
-export const CRLF: uint8[] = ['\r', '\n'];
-export const HEAD_END: uint8[] = ['\r', '\n', '\r', '\n'];
+const CRLF: uint8[] = ['\r', '\n'];
+const HEAD_END: uint8[] = ['\r', '\n', '\r', '\n'];
 
 // ----- building -----------------------------------------------------------
 
-export function pushByte(ref out: Vec<uint8>, b: uint8): void {
+function pushByte(ref out: Vec<uint8>, b: uint8): void {
     vec.vec_push(ref out, b);
 }
 
-export function pushBytes(ref out: Vec<uint8>, src: uint8[]): void {
+function pushBytes(ref out: Vec<uint8>, src: uint8[]): void {
     vec.vec_extend_from(ref out, src);
 }
 
 // Strings go out as their UTF-8 bytes. Numbers ride in through a template
 // literal at the call site (`pushStr(ref out, `${n}`)`), which is why there is
 // no decimal formatter here any more.
-export function pushStr(ref out: Vec<uint8>, s: string): void {
+function pushStr(ref out: Vec<uint8>, s: string): void {
     vec.vec_extend_from(ref out, intr.string_as_bytes(s));
 }
 
-export function pushCrlf(ref out: Vec<uint8>): void {
+function pushCrlf(ref out: Vec<uint8>): void {
     vec.vec_extend_from(ref out, CRLF);
 }
 
 // `Name: value\r\n`. No validation: a header value containing CR or LF would
 // be a response-splitting hole, so callers building headers from untrusted
 // input must reject those first (see `isValidHeaderValue`).
-export function pushHeaderLine(ref out: Vec<uint8>, name: string, value: string): void {
+function pushHeaderLine(ref out: Vec<uint8>, name: string, value: string): void {
     pushStr(ref out, name);
     pushStr(ref out, ": ");
     pushStr(ref out, value);
@@ -60,7 +66,7 @@ export function pushHeaderLine(ref out: Vec<uint8>, name: string, value: string)
 // A header value is safe iff it contains no CR, LF, or NUL. Anything that
 // smuggles those into a response can inject an entire extra message into the
 // stream, so this is checked at the point a value reaches the wire.
-export function isValidHeaderValue(value: string): bool {
+function isValidHeaderValue(value: string): bool {
     for c in intr.string_as_bytes(value) {
         if (c == '\r' || c == '\n' || c == 0) { return false; }
     }
@@ -72,7 +78,7 @@ export function isValidHeaderValue(value: string): bool {
 // Offset of the blank line that ends the head, or `buf.len` when the head is
 // not complete yet. The read loop calls this after every recv to decide
 // whether it has enough to parse.
-export function findHeadEnd(buf: uint8[]): usize {
+function findHeadEnd(buf: uint8[]): usize {
     return bytes.bytes_index_of_seq(buf, HEAD_END);
 }
 
@@ -81,7 +87,7 @@ export function findHeadEnd(buf: uint8[]): usize {
 // `chunked` is tracked rather than ignored: without it, a chunked body reads
 // as a body with chunk-size lines embedded in it, which is worse than an
 // honest 501.
-export type HeadInfo {
+type HeadInfo {
     contentLength:   Option<usize>,
     chunked:         bool,
     connectionClose: bool,
@@ -118,7 +124,7 @@ function asString(raw: uint8[]): string {
 // Lines are `name: value`, one per CRLF; a line with no colon is malformed
 // and rejected rather than skipped, because a header this server silently
 // drops is a header some proxy in front of it did not.
-export function readHeaderLines(
+function readHeaderLines(
     buf: uint8[],
     start: usize,
     headEnd: usize,

@@ -1,3 +1,5 @@
+module net;
+
 // std/net/uri.yoop - minimal URI / URL parser.
 //
 // Phase 10.I: extract scheme, host, port, path+query from absolute

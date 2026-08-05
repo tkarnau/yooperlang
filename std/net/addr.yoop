@@ -1,3 +1,5 @@
+module net;
+
 // std/net/addr.yoop - IPv4 SocketAddr.
 //
 // IPv4-only in the MVP per library-design.md §6.1. host is a dotted-quad

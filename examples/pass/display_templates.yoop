@@ -5,9 +5,9 @@
 // (SocketAddr from std/net/addr.yoop).
 
 import { Display } from "std/core/traits.yoop";
-import { SocketAddr } from "std/net/addr.yoop";
-import * as addr from "std/net/addr.yoop";
-import * as net from "std/net/addr.yoop";
+import { SocketAddr } from "std/net";
+import * as addr from "std/net";
+import * as net from "std/net";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

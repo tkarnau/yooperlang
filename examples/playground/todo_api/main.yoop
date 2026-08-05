@@ -32,12 +32,12 @@ import * as strings from "std/core/strings.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import * as fs from "std/fs.yoop";
 
-import * as tcp, { ListenResult } from "std/net/tcp.yoop";
-import * as http, { Request, Response, HttpError, Params, HttpMethod } from "std/http/types.yoop";
-import * as url from "std/http/url.yoop";
-import * as server, { Handler, HandleOutcome, Dispatcher, ServerConfig } from "std/http/server.yoop";
-import * as router, { Router } from "std/http/router.yoop";
-import * as sqlite, { Db, DbRef } from "std/db/sqlite.yoop";
+import * as tcp, { ListenResult } from "std/net";
+import * as http, { Request, Response, HttpError, Params, HttpMethod } from "std/http";
+import * as url from "std/http";
+import * as server, { Handler, HandleOutcome, Dispatcher, ServerConfig } from "std/http";
+import * as router, { Router } from "std/http";
+import * as sqlite, { Db, DbRef } from "std/db/sqlite";
 
 import * as store, { Todo } from "./store.yoop";
 import * as json from "./json.yoop";

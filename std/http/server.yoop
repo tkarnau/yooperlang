@@ -1,3 +1,5 @@
+module http;
+
 // std/http/server.yoop - the accept loop, the `Handler` trait, and the
 // request/response exchange on one connection.
 //
@@ -38,14 +40,7 @@ import * as vec, { Vec } from "../core/vec.yoop";
 import * as str from "../core/strings.yoop";
 import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import * as tcp, { AcceptOutcome, TcpListener, TcpStream } from "../net/tcp.yoop";
-import * as wire from "./wire.yoop";
-import * as parser, { ParsedRequest } from "./parser.yoop";
-import * as types, {
-    HttpError, HttpMethod, Request, Response, StatusCode,
-    errIo, errInternal, headersView, httpError, methodEq, methodLabel,
-    payloadTooLarge, reasonPhrase, responseNew, responseBodyBytes, status,
-} from "./types.yoop";
+import * as tcp, { AcceptOutcome, TcpListener, TcpStream } from "../net";
 
 // stdout is block-buffered when it is not a terminal, which would make the
 // access log appear in bursts (or not at all, if the process is killed).
@@ -116,7 +111,7 @@ async readRequestHead(
 ): Result<Option<usize>, HttpError> {
     // Bytes left over from the previous request on this connection may
     // already contain a whole head.
-    let pre: usize = wire.findHeadEnd(vec.vec_as_array(ref buf));
+    let pre: usize = findHeadEnd(vec.vec_as_array(ref buf));
     if (pre != buf.len) { return Result.Ok { value: Option.Some { value: pre } }; }
 
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
@@ -124,11 +119,11 @@ async readRequestHead(
         let n: usize = await readRequestBytes(ref stream, ref window)? "reading the request head";
         if (n == 0) {
             if (buf.len == 0) { return Result.Ok { value: Option.None }; }
-            return Result.Err { error: types.errBadRequest("connection closed mid-head") };
+            return Result.Err { error: errBadRequest("connection closed mid-head") };
         }
         vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
 
-        let at: usize = wire.findHeadEnd(vec.vec_as_array(ref buf));
+        let at: usize = findHeadEnd(vec.vec_as_array(ref buf));
         if (at != buf.len) { return Result.Ok { value: Option.Some { value: at } }; }
         if (buf.len > cfg.maxHeadBytes) {
             return Result.Err {
@@ -141,7 +136,7 @@ async readRequestHead(
 
 // One recv, with the error mapped into the layer's error type. Byte-identical
 // to `readResponseBytes` in client.yoop; the two differ only in the peer they
-// are reading from. It does not live in wire.yoop because wire.yoop is
+// are reading from. It does not live in yoop because yoop is
 // deliberately socket-free (that is what lets the parsers be tested against a
 // byte literal), so the duplicate stands until std/http is one module and one
 // private copy can serve both directions.
@@ -165,7 +160,7 @@ async readBody(
     while (buf.len < bodyStart + need) {
         let n: usize = await readRequestBytes(ref stream, ref window)? "reading the request body";
         if (n == 0) {
-            return Result.Err { error: types.errBadRequest("connection closed mid-body") };
+            return Result.Err { error: errBadRequest("connection closed mid-body") };
         }
         vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
     }
@@ -198,27 +193,27 @@ async writeResponse(
     let body: uint8[] = responseBodyBytes(ref resp);
 
     disposable out: Vec<uint8> = vec.vec_new(512 + body.len);
-    wire.pushStr(ref out, `HTTP/1.1 ${resp.status.code} ${reasonPhrase(resp.status.code)}`);
-    wire.pushCrlf(ref out);
+    pushStr(ref out, `HTTP/1.1 ${resp.status.code} ${reasonPhrase(resp.status.code)}`);
+    pushCrlf(ref out);
 
     // The server owns framing. A handler that set Content-Length or
     // Connection itself would be able to desynchronize the stream from the
     // client's idea of it, so those two are written here and skipped below.
-    wire.pushHeaderLine(ref out, "Content-Length", `${body.len}`);
+    pushHeaderLine(ref out, "Content-Length", `${body.len}`);
     if (keepAlive) {
-        wire.pushHeaderLine(ref out, "Connection", "keep-alive");
+        pushHeaderLine(ref out, "Connection", "keep-alive");
     } else {
-        wire.pushHeaderLine(ref out, "Connection", "close");
+        pushHeaderLine(ref out, "Connection", "close");
     }
 
     for e in headersView(ref resp.headers) {
         if (isFramingHeader(e.name)) { continue; }
-        wire.pushHeaderLine(ref out, e.name, e.value);
+        pushHeaderLine(ref out, e.name, e.value);
     }
-    wire.pushCrlf(ref out);
+    pushCrlf(ref out);
 
     if (!headOnly) {
-        wire.pushBytes(ref out, body);
+        pushBytes(ref out, body);
     }
 
     let view: uint8[] = vec.vec_as_array(ref out);
@@ -241,7 +236,7 @@ function isFramingHeader(name: string): bool {
 // broken, and truncating its output quietly is worse than a visible 500.
 function checkResponseHeaders(ref resp: Response): bool {
     for e in headersView(ref resp.headers) {
-        if (!wire.isValidHeaderValue(e.value) || !wire.isValidHeaderValue(e.name)) {
+        if (!isValidHeaderValue(e.value) || !isValidHeaderValue(e.name)) {
             return false;
         }
     }
@@ -261,9 +256,9 @@ async exchange(
     ref resp: Response,
     ref meta: ExchangeMeta,
 ): Result<usize, HttpError> {
-    let disposable pr: ParsedRequest = parser.parseRequestHead(vec.vec_as_array(ref buf))?;
+    let disposable pr: ParsedRequest = parseRequestHead(vec.vec_as_array(ref buf))?;
 
-    let need: usize = parser.expectedBodyLen(ref pr);
+    let need: usize = expectedBodyLen(ref pr);
     if (need > cfg.maxBodyBytes) {
         return Result.Err {
             error: httpError(payloadTooLarge(), `body of ${need} bytes exceeds the ${cfg.maxBodyBytes} byte limit`),
@@ -345,13 +340,13 @@ async serveConnection(
         switch (await exchange(ref stream, ref buf, ref scratch, ref d, cfg, ref resp, ref meta)) {
             case Result.Ok { value: _n }: { }
             case Result.Err { error: e }: {
-                types.respondError(ref resp, ref e);
+                respondError(ref resp, ref e);
                 failed = true;
             }
         }
         if (!checkResponseHeaders(ref resp)) {
             let broken: HttpError = errInternal("handler produced a header value containing CR or LF");
-            types.respondError(ref resp, ref broken);
+            respondError(ref resp, ref broken);
             failed = true;
         }
 
@@ -380,7 +375,7 @@ async serveConnection(
 // effort: if this write fails too, the connection is gone anyway.
 async replyWithError(ref stream: TcpStream, ref e: HttpError, cfg: ServerConfig): bool {
     disposable resp: Response = responseNew();
-    types.respondError(ref resp, ref e);
+    respondError(ref resp, ref e);
     if (cfg.logRequests) {
         printf(`- -> ${resp.status.code} (${e.message})\n`);
         let _f: int32 = fflush(0);

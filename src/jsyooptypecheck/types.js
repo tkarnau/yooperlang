@@ -167,6 +167,44 @@ export const StructType = (
     kindApplication,
     genericInstance,
   });
+// An UNFROZEN struct shell for pass A, filled in place by pass C via
+// fillStructShell.
+//
+// Identity is the whole point. Pass C used to build a fresh StructType and
+// REPLACE the table entry, which left any field that had already resolved to
+// this struct pointing at the empty shell - and `sizeOfType` on an empty struct
+// reports no fields, so every enclosing struct was undersized and the emitted
+// IR read its own fields at the wrong offsets. Inside one file that surfaced as
+// the misleading `type "T" has no field "f"` papercut; across the source files
+// of one directory module it SILENTLY MISCOMPILED (a sqlite `RawStmt` handle
+// came back as a shifted pointer and segfaulted in libsqlite3).
+//
+// Same fix already applied to variant shells (Phase 13.A) and vtable shells
+// (9.G). `fields` stays null until filled so the "is this a shell?" checks
+// across the checker keep working.
+export const StructShell = (name, moduleId = null) => ({
+  kind: typeKinds.struct,
+  name,
+  fields: null,
+  moduleId,
+  implementsTraits: [],
+  methods: new Map(),
+  propagatedKinds: [],
+  kindApplication: null,
+  genericInstance: null,
+});
+
+// Fill a shell in place and freeze it, so it is indistinguishable from a
+// StructType built in one shot. `implementsTraits` / `methods` are deliberately
+// left alone: they are mutable containers the impl-validation stage populates
+// later, and they are already present on the shell.
+export function fillStructShell(shell, fields, propagatedKinds, kindApplication) {
+  shell.fields = fields;
+  shell.propagatedKinds = propagatedKinds;
+  shell.kindApplication = kindApplication;
+  return Object.freeze(shell);
+}
+
 export const RefType = (inner) => freezerWrap(typeKinds.ref, { inner });
 export const ArrayType = (elem) => freezerWrap(typeKinds.array, { elem });
 // variadic: true for C variadic externs (e.g. printf). Skips arity check past fixed params.

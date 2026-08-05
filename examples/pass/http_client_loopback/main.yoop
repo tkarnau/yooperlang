@@ -8,14 +8,14 @@
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
 import { Result } from "../../../std/core/types.yoop";
 
-import * as tcp, { ListenResult } from "../../../std/net/tcp.yoop";
+import * as tcp, { ListenResult } from "std/net";
 import * as http, {
     Handler, HandleOutcome, Dispatcher,
-} from "../../../std/http/server.yoop";
+} from "std/http";
 import * as types, {
     Request, Response, HttpError, HttpMethod,
-} from "../../../std/http/types.yoop";
-import * as client, { Client, ClientResponse } from "../../../std/http/client.yoop";
+} from "std/http";
+import * as client, { Client, ClientResponse } from "std/http";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

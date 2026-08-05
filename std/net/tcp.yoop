@@ -1,3 +1,5 @@
+module net;
+
 // std/net/tcp.yoop - TcpListener + TcpStream.
 //
 // Safe wrappers over std/net/socket_ffi. `TcpListener` owns a listening
@@ -29,33 +31,8 @@ import { Result } from "../core/types.yoop";
 import {
     Readable, Writable, FlushOutcome,
 } from "../core/traits.yoop";
-import { CancelToken } from "../core/cancel.yoop";
-import * as cancel from "../core/cancel.yoop";
-import { Socket } from "./socket.yoop";
-import {
-    AcceptCtResult,
-    AcceptedFd,
-    ConnectOutcome,
-    IoResult,
-    IO_CANCELLED,
-    IO_ERROR,
-    IO_READY,
-    IO_TIMEDOUT,
-    ffiAcceptAsync,
-    ffiAcceptCt,
-    ffiRecvAsync,
-    ffiRecvCt,
-    ffiSendAllAsync,
-    ffiSendAllCt,
-    ffiSetNonblocking,
-    ffi_accept,
-    ffi_close,
-    ffi_connect,
-    ffi_listen,
-    ffi_recv,
-    ffi_send_all,
-    ffi_socket_open,
-} from "./socket_ffi.yoop";
+import { CancelToken } from "../core/cancel";
+import * as cancel from "../core/cancel";
 
 // ----- cancel-aware outcomes ----------------------------------------------
 

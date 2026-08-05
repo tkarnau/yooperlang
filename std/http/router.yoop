@@ -1,3 +1,5 @@
+module http;
+
 // std/http/router.yoop - method + path routing over `Handler`.
 //
 // A `Router` holds routes, each pairing a method and a path pattern with a
@@ -34,12 +36,6 @@ import { Option } from "../core/types.yoop";
 import * as vec, { Vec } from "../core/vec.yoop";
 import * as bytes from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import * as types, {
-    HttpMethod, Params, Request, Response,
-    methodEq, methodLabel, methodNotAllowed, notFound, paramsAdd, paramsClear,
-    respondText, serverError,
-} from "./types.yoop";
-import { Handler, HandleOutcome, Dispatcher } from "./server.yoop";
 
 // ----- pattern matching ---------------------------------------------------
 
@@ -139,7 +135,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
         // have worked; if not, it is a 404.
         let allow: string = allowedMethods(ref self, ref req);
         if (allow.len > 0) {
-            types.setHeader(ref resp, "Allow", allow);
+            setHeader(ref resp, "Allow", allow);
             resp.status = methodNotAllowed();
         } else {
             resp.status = notFound();
@@ -168,7 +164,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
 function allowedMethods(ref r: Router, ref req: Request): string {
     let entries: Route[] = vec.vec_as_array(ref r.routes);
     let allow: string = "";
-    disposable scratch: Params = types.paramsNew(4);
+    disposable scratch: Params = paramsNew(4);
     for (let i = 0; i < entries.len; i += 1) {
         paramsClear(ref scratch);
         if (!matchPath(entries[i].pattern, req.path, ref scratch)) { continue; }

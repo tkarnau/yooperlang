@@ -19,10 +19,10 @@
 
 import { disposable, task } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
-import { ListenResult } from "std/net/tcp.yoop";
-import * as tcp from "std/net/tcp.yoop";
-import * as httpServer, { Handler, HandleOutcome, Dispatcher } from "std/http/server.yoop";
-import * as http, { Request, Response, HttpError } from "std/http/types.yoop";
+import { ListenResult } from "std/net";
+import * as tcp from "std/net";
+import * as httpServer, { Handler, HandleOutcome, Dispatcher } from "std/http";
+import * as http, { Request, Response, HttpError } from "std/http";
 
 extern "C" from "stdio.h" {
   function printf(fmt: string, ...): int32;

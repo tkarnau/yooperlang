@@ -2,8 +2,8 @@
 
 ## Context
 
-[std/db/sqlite_ffi.yoop](../std/db/sqlite_ffi.yoop) +
-[std/db/sqlite.yoop](../std/db/sqlite.yoop) bind libsqlite3, and
+[std/db/sqlite/ffi.yoop](../std/db/sqlite/ffi.yoop) +
+[std/db/sqlite/db.yoop](../std/db/sqlite/db.yoop) bind libsqlite3, and
 [examples/playground/sqlite_demo/main.yoop](../examples/playground/sqlite_demo/main.yoop)
 drives them from the application side (on-disk db, schema, batched prepared
 insert inside a transaction, two read shapes, cleanup).
@@ -31,14 +31,44 @@ Worth recording because none of it was obvious going in:
   identical ABI (same register class on arm64, x86_64 SysV, Win64). Verified the
   copy really happens by binding a template-literal string built at runtime.
 - **A one-field envelope struct keeps `unsafe_ptr` out of the safe module.**
-  `type RawDb { p: unsafe_ptr }` in the ffi module means std/db/sqlite.yoop holds
+  `type RawDb { p: unsafe_ptr }` in the ffi module means std/db/sqlite/db.yoop holds
   handles, passes them around, and never declares `import.unsafe;` - satisfying
   library-design.md 2.1 for a handle-based library, which std/net never had to
   because a socket is an `int` fd. This is the pattern for future bindings.
 - **`float64` maps to C `double`** through an extern signature, both directions.
 - **Multi-line string literals** work, which keeps embedded DDL readable.
 
-## Issue 1 - a variant payload type must be declared before the variant
+## Issue 1 - a variant payload type must be declared before the variant - FIXED
+
+FIXED while merging std/db into a directory module. Declaration order no longer
+affects struct fields, variant payloads, or generic type arguments. Regression
+fixture: examples/pass/decl_order_independence.yoop, which uses every type above
+the line that declares it.
+
+The root cause was one thing wearing three faces. Pass A registers a shell and
+pass C fills it, but pass C REPLACED the table entry with a freshly built
+`StructType` instead of filling the shell - so any field that had already
+resolved to that struct kept pointing at the empty shell:
+
+- a **variant payload** or **struct field** naming a later struct gave the
+  misleading `type "T" has no field "f"` below;
+- a plain **forward struct reference** was worse than misleading, it CRASHED the
+  compiler (`TypeError: fieldType.fields is not iterable` out of
+  `detectRecursiveField`, which walked a shell's null `fields`);
+- and across the source files of a directory module, where basename order decides
+  what "later" means, the same bug SILENTLY MISCOMPILED - a sqlite `RawStmt`
+  handle came back as a shifted pointer and segfaulted inside libsqlite3, which
+  is how it was finally caught.
+
+Fixes: `StructShell` is unfrozen and `fillStructShell` fills it in place (the
+same treatment variant shells got in 13.A and vtable shells in 9.G),
+`detectRecursiveField` tolerates a shell, and pass C now resolves every generic
+TYPE body before any concrete decl - because instantiating a generic SNAPSHOTS
+its field list, which was the separate generic-flavored half
+(`type "Bag__int32" has no field "item"`). See
+[modules-as-directories.md](modules-as-directories.md).
+
+The original report follows.
 
 Confirmed, and the only real papercut found.
 

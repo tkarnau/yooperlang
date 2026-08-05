@@ -1,3 +1,5 @@
+module sqlite;
+
 // std/db/sqlite.yoop - safe SQLite bindings.
 //
 // The public face of std/db. Compiles without `import.unsafe;` and never names
@@ -41,11 +43,10 @@
 //     wants `uint8[]` plumbing that is worth its own pass.
 //   * Connection pooling, and any notion of a query builder.
 
-import { Disposable, disposable } from "../core/kinds.yoop";
-import { Iterable, IterStep } from "../core/traits.yoop";
-import { Result } from "../core/types.yoop";
-import * as str from "../core/strings.yoop";
-import * as ffi, { RawDb, RawStmt } from "./sqlite_ffi.yoop";
+import { Disposable, disposable } from "../../core/kinds.yoop";
+import { Iterable, IterStep } from "../../core/traits.yoop";
+import { Result } from "../../core/types.yoop";
+import * as str from "../../core/strings.yoop";
 
 // ----- result codes --------------------------------------------------------
 //
@@ -104,9 +105,9 @@ export type Db implements Disposable propagates<disposable> {
     // Idempotent: guard on null, close, then null. Safe to call twice, which
     // is what lets a manual dispose coexist with a `disposable` binding.
     function dispose(ref self): void {
-        if (!ffi.rawDbIsNull(self.raw)) {
-            let _rc: int32 = ffi.rawClose(self.raw);
-            self.raw = ffi.rawDbNull();
+        if (!rawDbIsNull(self.raw)) {
+            let _rc: int32 = rawClose(self.raw);
+            self.raw = rawDbNull();
         }
     }
 }
@@ -119,9 +120,9 @@ export type Stmt implements Disposable propagates<disposable> {
 
     // Idempotent, same discipline as Db.dispose.
     function dispose(ref self): void {
-        if (!ffi.rawStmtIsNull(self.raw)) {
-            let _rc: int32 = ffi.rawFinalize(self.raw);
-            self.raw = ffi.rawStmtNull();
+        if (!rawStmtIsNull(self.raw)) {
+            let _rc: int32 = rawFinalize(self.raw);
+            self.raw = rawStmtNull();
         }
     }
 }
@@ -195,7 +196,7 @@ export type Tx implements Disposable {
 
     function dispose(ref self): void {
         if (self.open) {
-            let _rc: int32 = ffi.rawExec(self.db, "rollback;");
+            let _rc: int32 = rawExec(self.db, "rollback;");
             self.open = false;
         }
     }
@@ -204,7 +205,7 @@ export type Tx implements Disposable {
 // Open a deferred transaction. sqlite takes the write lock lazily, on the
 // first statement that needs it.
 export function begin(ref db: Db): Result<Tx, string> {
-    let rc: int32 = ffi.rawExec(db.raw, "begin;");
+    let rc: int32 = rawExec(db.raw, "begin;");
     if (rc != SQLITE_OK) {
         return Result.Err { error: failure(db.raw, "begin") };
     }
@@ -216,7 +217,7 @@ export function begin(ref db: Db): Result<Tx, string> {
 // to upgrade - `begin immediate` turns that into a wait instead of a
 // SQLITE_BUSY at commit time.
 export function beginImmediate(ref db: Db): Result<Tx, string> {
-    let rc: int32 = ffi.rawExec(db.raw, "begin immediate;");
+    let rc: int32 = rawExec(db.raw, "begin immediate;");
     if (rc != SQLITE_OK) {
         return Result.Err { error: failure(db.raw, "begin immediate") };
     }
@@ -229,12 +230,12 @@ export function commit(ref tx: Tx): Result<int32, string> {
     if (!tx.open) {
         return Result.Err { error: "sqlite: commit on a transaction that is already closed" };
     }
-    let rc: int32 = ffi.rawExec(tx.db, "commit;");
+    let rc: int32 = rawExec(tx.db, "commit;");
     if (rc != SQLITE_OK) {
         return Result.Err { error: failure(tx.db, "commit") };
     }
     tx.open = false;
-    return Result.Ok { value: ffi.rawChanges(tx.db) };
+    return Result.Ok { value: rawChanges(tx.db) };
 }
 
 // Roll back early, before the scope ends. Rarely needed - dropping out of the
@@ -244,7 +245,7 @@ export function rollback(ref tx: Tx): Result<int32, string> {
     if (!tx.open) {
         return Result.Ok { value: 0 };
     }
-    let rc: int32 = ffi.rawExec(tx.db, "rollback;");
+    let rc: int32 = rawExec(tx.db, "rollback;");
     tx.open = false;
     if (rc != SQLITE_OK) {
         return Result.Err { error: failure(tx.db, "rollback") };
@@ -258,7 +259,7 @@ export function rollback(ref tx: Tx): Result<int32, string> {
 // message. Interpolating copies the borrowed sqlite3_errmsg pointer, so the
 // returned string outlives the next call on the connection.
 function failure(d: RawDb, op: string): string {
-    return `sqlite: ${op} failed: ${ffi.rawErrmsg(d)}`;
+    return `sqlite: ${op} failed: ${rawErrmsg(d)}`;
 }
 
 // ----- open / close --------------------------------------------------------
@@ -267,11 +268,11 @@ function failure(d: RawDb, op: string): string {
 // sqlite allocated anyway is closed before returning, so a failed open leaks
 // nothing.
 export function open(path: string): Result<Db, string> {
-    let raw: RawDb = ffi.rawDbNull();
-    let rc: int32 = ffi.rawOpen(path, ref raw);
+    let raw: RawDb = rawDbNull();
+    let rc: int32 = rawOpen(path, ref raw);
     if (rc != SQLITE_OK) {
         let why: string = failure(raw, `open("${path}")`);
-        let _c: int32 = ffi.rawClose(raw);
+        let _c: int32 = rawClose(raw);
         return Result.Err { error: why };
     }
     return Result.Ok { value: { raw: raw } };
@@ -293,11 +294,11 @@ export function openMemory(): Result<Db, string> {
 // It also takes the SQL as one finished string, so it is the wrong tool for
 // anything containing user input - use `prepare` plus the bind functions.
 export function exec(ref db: Db, sql: string): Result<int32, string> {
-    let rc: int32 = ffi.rawExec(db.raw, sql);
+    let rc: int32 = rawExec(db.raw, sql);
     if (rc != SQLITE_OK) {
         return Result.Err { error: failure(db.raw, "exec") };
     }
-    return Result.Ok { value: ffi.rawChanges(db.raw) };
+    return Result.Ok { value: rawChanges(db.raw) };
 }
 
 // ----- prepared statements -------------------------------------------------
@@ -305,8 +306,8 @@ export function exec(ref db: Db, sql: string): Result<int32, string> {
 // Compile one SQL statement. Parameters are sqlite's own `?`, `?N`, or `:name`
 // placeholders; bind them by 1-based index with the bind functions below.
 export function prepare(ref db: Db, sql: string): Result<Stmt, string> {
-    let raw: RawStmt = ffi.rawStmtNull();
-    let rc: int32 = ffi.rawPrepare(db.raw, sql, ref raw);
+    let raw: RawStmt = rawStmtNull();
+    let rc: int32 = rawPrepare(db.raw, sql, ref raw);
     if (rc != SQLITE_OK) {
         return Result.Err { error: failure(db.raw, "prepare") };
     }
@@ -316,13 +317,13 @@ export function prepare(ref db: Db, sql: string): Result<Stmt, string> {
 // How many `?` placeholders the compiled statement has. Useful as an assertion
 // that the SQL and the bind calls agree.
 export function parameterCount(ref s: Stmt): int32 {
-    return ffi.rawBindParameterCount(s.raw);
+    return rawBindParameterCount(s.raw);
 }
 
 // Advance the statement one row. A `Row` outcome carries the cursor for the
 // row now available; `Done` means there are no more rows.
 export function step(ref s: Stmt): StepOutcome {
-    let rc: int32 = ffi.rawStep(s.raw);
+    let rc: int32 = rawStep(s.raw);
     if (rc == SQLITE_ROW) {
         return StepOutcome.Row { row: { raw: s.raw } };
     }
@@ -336,7 +337,7 @@ export function step(ref s: Stmt): StepOutcome {
 // parameters SURVIVE a reset - that is sqlite's rule, not ours - so rebind
 // only what changes, or call `clearBindings` to drop them all.
 export function reset(ref s: Stmt): DbOutcome {
-    let rc: int32 = ffi.rawReset(s.raw);
+    let rc: int32 = rawReset(s.raw);
     if (rc != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, "reset") };
     }
@@ -345,7 +346,7 @@ export function reset(ref s: Stmt): DbOutcome {
 
 // Set every bound parameter back to NULL.
 export function clearBindings(ref s: Stmt): DbOutcome {
-    let rc: int32 = ffi.rawClearBindings(s.raw);
+    let rc: int32 = rawClearBindings(s.raw);
     if (rc != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, "clearBindings") };
     }
@@ -365,35 +366,35 @@ export function clearBindings(ref s: Stmt): DbOutcome {
 // them fall through to `step`, which reports the same underlying error.
 
 export function bindInt(ref s: Stmt, idx: int32, v: int32): DbOutcome {
-    if (ffi.rawBindInt(s.raw, idx, v) != SQLITE_OK) {
+    if (rawBindInt(s.raw, idx, v) != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, `bindInt(${idx})`) };
     }
     return DbOutcome.Ok;
 }
 
 export function bindInt64(ref s: Stmt, idx: int32, v: int64): DbOutcome {
-    if (ffi.rawBindInt64(s.raw, idx, v) != SQLITE_OK) {
+    if (rawBindInt64(s.raw, idx, v) != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, `bindInt64(${idx})`) };
     }
     return DbOutcome.Ok;
 }
 
 export function bindDouble(ref s: Stmt, idx: int32, v: float64): DbOutcome {
-    if (ffi.rawBindDouble(s.raw, idx, v) != SQLITE_OK) {
+    if (rawBindDouble(s.raw, idx, v) != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, `bindDouble(${idx})`) };
     }
     return DbOutcome.Ok;
 }
 
 export function bindText(ref s: Stmt, idx: int32, v: string): DbOutcome {
-    if (ffi.rawBindText(s.raw, idx, v) != SQLITE_OK) {
+    if (rawBindText(s.raw, idx, v) != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, `bindText(${idx})`) };
     }
     return DbOutcome.Ok;
 }
 
 export function bindNull(ref s: Stmt, idx: int32): DbOutcome {
-    if (ffi.rawBindNull(s.raw, idx) != SQLITE_OK) {
+    if (rawBindNull(s.raw, idx) != SQLITE_OK) {
         return DbOutcome.Err { error: failure(s.db, `bindNull(${idx})`) };
     }
     return DbOutcome.Ok;
@@ -407,34 +408,34 @@ export function bindNull(ref s: Stmt, idx: int32): DbOutcome {
 // first when the difference between NULL and 0 matters.
 
 export function columnCount(row: Row): int32 {
-    return ffi.rawColumnCount(row.raw);
+    return rawColumnCount(row.raw);
 }
 
 // The declared name of a column. Copied out of sqlite's storage.
 export function columnName(row: Row, col: int32): string {
-    return str.string_concat(ffi.rawColumnName(row.raw, col), "");
+    return str.string_concat(rawColumnName(row.raw, col), "");
 }
 
 export function columnIsNull(row: Row, col: int32): bool {
-    return ffi.rawColumnType(row.raw, col) == SQLITE_NULL;
+    return rawColumnType(row.raw, col) == SQLITE_NULL;
 }
 
 export function columnInt(row: Row, col: int32): int32 {
-    return ffi.rawColumnInt(row.raw, col);
+    return rawColumnInt(row.raw, col);
 }
 
 export function columnInt64(row: Row, col: int32): int64 {
-    return ffi.rawColumnInt64(row.raw, col);
+    return rawColumnInt64(row.raw, col);
 }
 
 export function columnDouble(row: Row, col: int32): float64 {
-    return ffi.rawColumnDouble(row.raw, col);
+    return rawColumnDouble(row.raw, col);
 }
 
 // Copies. sqlite's own pointer dies at the next step, so handing it straight
 // back would be a dangling read the moment the caller advanced the cursor.
 export function columnText(row: Row, col: int32): string {
-    return str.string_concat(ffi.rawColumnText(row.raw, col), "");
+    return str.string_concat(rawColumnText(row.raw, col), "");
 }
 
 // ----- iteration -----------------------------------------------------------
@@ -455,13 +456,13 @@ export type Rows implements Iterable<Row> {
 
     function next(ref self): IterStep<Row> {
         if (self.done) { return IterStep.Done; }
-        let rc: int32 = ffi.rawStep(self.raw);
+        let rc: int32 = rawStep(self.raw);
         if (rc == SQLITE_ROW) {
             return IterStep.Yield { value: { raw: self.raw } };
         }
         self.done = true;
         if (rc != SQLITE_DONE) {
-            self.err = `sqlite: step failed: ${ffi.rawErrmsg(self.db)}`;
+            self.err = `sqlite: step failed: ${rawErrmsg(self.db)}`;
         }
         return IterStep.Done;
     }
@@ -475,16 +476,16 @@ export function rows(ref s: Stmt): Rows {
 
 // Rows changed by the most recent statement on this connection.
 export function changes(ref db: Db): int32 {
-    return ffi.rawChanges(db.raw);
+    return rawChanges(db.raw);
 }
 
 // The rowid of the most recent successful insert on this connection.
 export function lastInsertRowid(ref db: Db): int64 {
-    return ffi.rawLastInsertRowid(db.raw);
+    return rawLastInsertRowid(db.raw);
 }
 
 // The linked libsqlite3's version, e.g. "3.43.2". Handy for confirming which
 // sqlite the binary actually picked up.
 export function libVersion(): string {
-    return str.string_concat(ffi.rawLibVersion(), "");
+    return str.string_concat(rawLibVersion(), "");
 }

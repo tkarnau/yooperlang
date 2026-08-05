@@ -106,7 +106,9 @@ export function analyze(entryAbsPath, overlays = new Map()) {
 function diagFromThrown(err, entryAbsPath) {
   if (err && err.isParseError) {
     return {
-      absPath: entryAbsPath,
+      // moduleGraph stamps the failing file on the thrown parse error; without
+      // it a syntax error in an imported module got squiggled in the entry file.
+      absPath: err.srcPath ?? entryAbsPath,
       pos: err.pos ?? 0,
       length: err.length ?? 1,
       line: err.line ?? 1,

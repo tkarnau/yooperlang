@@ -20,10 +20,10 @@
 
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
-import { ListenResult } from "std/net/tcp.yoop";
-import * as tcp from "std/net/tcp.yoop";
-import { Dispatcher } from "std/http/server.yoop";
-import * as httpServer from "std/http/server.yoop";
+import { ListenResult } from "std/net";
+import * as tcp from "std/net";
+import { Dispatcher } from "std/http";
+import * as httpServer from "std/http";
 
 import { StorageHandler } from "./handler.yoop";
 import * as handler from "./handler.yoop";

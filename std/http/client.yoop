@@ -1,3 +1,5 @@
+module http;
+
 // std/http/client.yoop - a minimal HTTP/1.1 client.
 //
 //     let c: Client = clientNew();
@@ -24,15 +26,8 @@ import { Readable, Writable } from "../core/traits.yoop";
 import * as vec, { Vec } from "../core/vec.yoop";
 import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import * as uri, { Uri } from "../net/uri.yoop";
-import * as tcp, { TcpStream, ConnectResult } from "../net/tcp.yoop";
-import * as wire from "./wire.yoop";
-import * as parser, { ParsedResponse } from "./parser.yoop";
-import * as types, {
-    Headers, HttpError, HttpMethod, StatusCode,
-    errBadRequest, errIo, headersNew, headersAdd, headersGet, headersSet,
-    headersView, httpError, isSuccess, methodLabel, payloadTooLarge,
-} from "./types.yoop";
+import * as uri, { Uri } from "../net";
+import * as tcp, { TcpStream, ConnectResult } from "../net";
 
 // ----- request ------------------------------------------------------------
 
@@ -53,7 +48,7 @@ export function request(method: HttpMethod, url: string): ClientRequest propagat
 }
 
 // Named for the direction rather than shortened to `setHeader`, because
-// types.yoop already owns `setHeader` for a `Response` and Yoop has no
+// yoop already owns `setHeader` for a `Response` and Yoop has no
 // overloading - once std/http is one module the two would collide. The
 // Response one keeps the short name; it has all the callers.
 export function setRequestHeader(ref req: ClientRequest, name: string, value: string): void {
@@ -129,23 +124,23 @@ export function clientNew(): Client {
 // cannot desynchronize the framing; a caller-supplied copy of one of those is
 // skipped below.
 function serializeRequest(ref req: ClientRequest, ref u: Uri, ref c: Client, ref out: Vec<uint8>): void {
-    wire.pushStr(ref out, `${methodLabel(req.method)} ${u.target} HTTP/1.1`);
-    wire.pushCrlf(ref out);
+    pushStr(ref out, `${methodLabel(req.method)} ${u.target} HTTP/1.1`);
+    pushCrlf(ref out);
 
-    wire.pushHeaderLine(ref out, "Host", `${u.host}:${u.port}`);
-    wire.pushHeaderLine(ref out, "User-Agent", c.userAgent);
-    wire.pushHeaderLine(ref out, "Connection", "close");
+    pushHeaderLine(ref out, "Host", `${u.host}:${u.port}`);
+    pushHeaderLine(ref out, "User-Agent", c.userAgent);
+    pushHeaderLine(ref out, "Connection", "close");
     if (req.body.len > 0) {
-        wire.pushHeaderLine(ref out, "Content-Length", `${req.body.len}`);
+        pushHeaderLine(ref out, "Content-Length", `${req.body.len}`);
     }
 
     for e in headersView(ref req.headers) {
         if (isClientFramingHeader(e.name)) { continue; }
-        wire.pushHeaderLine(ref out, e.name, e.value);
+        pushHeaderLine(ref out, e.name, e.value);
     }
 
-    wire.pushCrlf(ref out);
-    wire.pushBytes(ref out, req.body);
+    pushCrlf(ref out);
+    pushBytes(ref out, req.body);
 }
 
 function isClientFramingHeader(name: string): bool {
@@ -164,7 +159,7 @@ function strEq(a: string, b: string): bool {
 // stream. Same check the server does on the way out.
 function checkRequestHeaders(ref req: ClientRequest): Result<usize, HttpError> {
     for e in headersView(ref req.headers) {
-        if (!wire.isValidHeaderValue(e.name) || !wire.isValidHeaderValue(e.value)) {
+        if (!isValidHeaderValue(e.name) || !isValidHeaderValue(e.value)) {
             return Result.Err {
                 error: errBadRequest(`header "${e.name}" contains CR or LF`),
             };
@@ -201,7 +196,7 @@ async readResponseHead(
             return Result.Err { error: errIo("peer closed before the response head was complete") };
         }
         vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
-        let at: usize = wire.findHeadEnd(vec.vec_as_array(ref buf));
+        let at: usize = findHeadEnd(vec.vec_as_array(ref buf));
         if (at != buf.len) { return Result.Ok { value: at }; }
         if (buf.len > c.maxHeadBytes) {
             return Result.Err {
@@ -244,7 +239,7 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
     disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(c.readChunk), c.readChunk);
     let _headEnd: usize = await readResponseHead(ref cr.stream, ref buf, ref scratch, ref c)?;
 
-    let disposable head: ParsedResponse = parser.parseResponseHead(vec.vec_as_array(ref buf))?;
+    let disposable head: ParsedResponse = parseResponseHead(vec.vec_as_array(ref buf))?;
 
     // -- read the body --
     // Whatever came in with the head is already body; the rest is read either

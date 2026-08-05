@@ -30,14 +30,14 @@ import { Vec, vec_new, vec_push, vec_as_array } from "../../../std/core/vec.yoop
 import { Bytes, bytes_from_vec } from "../../../std/core/bytes.yoop";
 
 import { Result } from "../../../std/core/types.yoop";
-import { ListenResult, tcp_listen } from "../../../std/net/tcp.yoop";
+import { ListenResult, tcp_listen } from "std/net";
 import * as httpServer, {
     Handler, HandleOutcome, Dispatcher,
-} from "../../../std/http/server.yoop";
+} from "std/http";
 import * as http, {
     Request, Response, HttpMethod,
-} from "../../../std/http/types.yoop";
-import * as client, { Client, ClientRequest, ClientResponse } from "../../../std/http/client.yoop";
+} from "std/http";
+import * as client, { Client, ClientRequest, ClientResponse } from "std/http";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

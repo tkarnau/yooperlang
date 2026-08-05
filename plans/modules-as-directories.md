@@ -318,7 +318,158 @@ directory (a file missing the header), a name mismatch between siblings,
 importing one source file of a directory module (names the working form),
 importing your own module, and a self-import via a sibling file path.
 
-### Import scope: module-wide today, per-file still to do
+### Pass C intra-module order sensitivity - FIXED
+
+Found after phase 2, fixed before starting phase 3. 910 pass / 0 fail.
+
+**The fix: pass C is now GROUP-MAJOR, STAGE-MINOR.** Source files are grouped by
+module id (topo order preserved, since a module's files are contiguous in the
+graph), and inside a group each stage runs for every file before the next stage
+starts for any of them. Three stages, split at the boundaries the sub-stages
+already had:
+
+1. generic pre-pass, struct/variant/enum/union bodies, function sigs, externs
+2. trait shape: extends chains, then method signatures (C.1)
+3. everything that CONSUMES a trait's method table: kind clauses, impl-block
+   validation (C.3), vtable slots (C.3b), module-level decls (C.4)
+
+A single-file module is a group of one, so this is behavior-identical to the old
+single loop for every module predating the feature. That property is the reason
+to structure it this way.
+
+**A stronger version was tried first and broke.** Hoisting the trait stages into
+their own pass over ALL modules ahead of the main loop failed with
+`enum "Result__isize__string" has no variant "Ok"` across ten fixtures: trait
+signature resolution instantiates generic types, and instantiation SNAPSHOTS the
+generic decl, so trait sigs can never precede generic-body resolution
+program-wide. Group-major keeps generic bodies first within each module while
+still ordering the trait stages ahead of their consumers.
+
+Locked in by examples/pass/dir_module_order/, whose impl file is deliberately
+named to sort BEFORE the file declaring the trait, the generic, and the type its
+kind governs.
+
+### Probe results for the other stages
+
+The trait case was the one with proof, so the other pass C stages were probed the
+same way (build the module twice, renaming files to flip the order):
+
+- **Kinds** (`requires Trait` + `mustCall`, trait in the later-sorting file):
+  order-independent, works both ways.
+- **Vtables** (`vtable V for T` in the earlier file, trait in the later one):
+  fails identically in BOTH orders, and passes in both once the backing trait is
+  imported at the use site. That is the existing "vtable's trait must be in
+  scope" rule, not an ordering bug.
+- **A struct field naming a sibling's generic type**: ORDER-DEPENDENT, and
+  **pre-existing** - `type Holder { bag: Bag<int32> }` before `type Bag<T>`
+  fails with `type "Bag__int32" has no field "item"` in a SINGLE FILE with no
+  modules involved. Same family as the "variant payload must be declared before
+  the variant" papercut in sqlite-binding-papercuts.md, and the same thing the
+  pass C comment means by "broader use will need a pre-pass before field
+  resolution". Not introduced here and deliberately not fixed here.
+
+  Directory modules do make its remedy worse: inside a file you reorder
+  declarations, but across siblings you would have to rename a file - exactly the
+  pathology just fixed for traits. It does not block phase 3: the only cross-file
+  generic field reference in any merge-target directory is
+  `inner: Map<K, bool>` in std/collections/set.yoop, and it happens to be safe
+  because `map` sorts before `set` (and it sits inside a generic decl, whose
+  fields resolve at instantiation). Safe by alphabetical accident is worth
+  recording as the reason a pre-pass is still wanted.
+
+### The original finding, kept for the record
+
+Found while probing whether traits/generics/kinds work across files of one
+module. They do not, reliably, and the failure is filename-order dependent:
+
+```text
+m/impls.yoop    + m/traits.yoop   -> error: 'self' can only be used inside
+                                     a trait method body
+m/a_traits.yoop + m/b_impls.yoop  -> compiles and runs
+```
+
+**Identical code. Only the filenames changed.** A trait declared in one file of
+a module and implemented in another works only if the trait's file sorts first.
+
+Cause: pass C is a single MODULE-MAJOR loop (`for (const mod of modules)` around
+roughly 920 lines) in which C.1 resolves trait method signatures and C.3
+(`validateImplBlock`) consumes them. Across separate modules the topological
+order guarantees the trait's module completes pass C first. Files inside one
+module have no dependency order, so the loop visits them in basename order and
+an impl can be validated against a still-empty `TraitType.methods` map. This is
+the intra-module twin of the @derive ordering hazard CLAUDE.md already documents.
+
+**This blocks phase 3 outright, not just theoretically.** `Handler` is declared
+in std/http/server.yoop and implemented by `Router` and `NoRoute` in
+std/http/router.yoop, and `router` sorts before `server` - so the very first
+directory the plan wants to merge hits it.
+
+It also undercuts the point of the feature: "files in a module see each other"
+has to be order-independent, or the module is not really one namespace.
+
+Fix direction: hoist the order-sensitive stage(s) out of the module-major loop
+into their own pass over all modules, so every module's C.1 completes before any
+module's C.3 begins. Files keep their own loop iteration, so `mod` stays in hand
+and the per-source-file diagnostics stamping is unaffected. Hoisting only the
+extends pre-pass + C.1 is the surgical version; making all of pass C stage-major
+is the general version and carries more regression risk. Either way the other
+intra-module order sensitivities (C.2 kinds, C.3b vtables, struct-field
+resolution vs a sibling's generic) need probing the same way, since the same
+argument applies to each.
+
+**This ranks ahead of both phase 3 and per-file import scope.** Per-file import
+scope is a tightening of something that works; this is a correctness gap that
+makes directory modules silently depend on filename spelling.
+
+### Import locality - LANDED as enforcement, not lexical scope
+
+A module's source files share its DECLARATIONS but not its IMPORTS: using a name
+only a sibling imported is an error naming the sibling and the fix. 911 pass /
+0 fail. New pass B.1 in src/jsyooptypecheck/importLocality.js.
+
+**Why enforcement rather than true lexical per-file scope.** The lexical version
+was scoped first and the audit found a landmine beyond the site count.
+`moduleEnv.get(...)` splits into 29 own-scope reads that would become file-keyed
+and ~23 cross-module reads that stay module-keyed - but
+`resolveTypeAnnotationInModule(annot, modId, ...)` is ALSO called with another
+module's id, because an alias RHS resolves "in the alias's home module". Under
+per-file scope that has to become "in the alias's home FILE", so `aliasTable`
+and every other deferred resolution would need to record file identity. That is
+a multi-session refactor of the checker's resolution plumbing with real
+wrong-scope failure modes, and half of it is worse than none.
+
+The pass instead leaves resolution module-wide (a sibling's import is still
+*resolvable*) and makes USING one an error. It collects, per source file, the
+names it references and the names it imports, and reports a reference that is in
+the module's `importedNames`, not in this file's own imports, and not bound as a
+local anywhere in this file. Only modules with 2+ source files are examined, so
+every pre-existing module costs nothing.
+
+Two behavioral differences from true lexical scope, both CONSERVATIVE REJECTIONS
+rather than unsoundness, and both arguably wanted anyway:
+
+- a name one file imports and another declares is a redeclaration error;
+- two siblings binding the same local name to DIFFERENT modules is an error
+  (the phase-2 stopgap already allows the identical-re-import case, which is the
+  one that actually matters - every file of a real module imports the same
+  handful of namespaces).
+
+The collector is deliberately allowed to be incomplete: a missed name category
+is a false NEGATIVE (the wart persists in one spot), which is harmless, while a
+false positive would be noise. Guards against the latter: own-imports, and
+locally-bound names anywhere in the file.
+
+Verified by probe, beyond the fixture: a LOCAL shadowing a sibling's imported
+name is correctly not flagged; a trait reached through `implements` is caught; a
+kind used as a binding prefix is caught. One shape worth knowing about was found
+while writing it - a direct call stores its callee as a plain STRING, not an
+IDENT node, so `someImportedFn(...)` is invisible to an IDENT-only walk.
+
+Fixture: examples/fail/dir_module_import_leak/, asserting both the namespace and
+the named-type reference are caught, that each error names the sibling, and that
+they are attributed to b.yoop rather than the entry or the sibling.
+
+### The original per-file-scope analysis, kept for the record
 
 The plan called for per-file import scope up front. It is NOT done, and the
 reason it is worth its own increment is that measuring the call sites changed the
@@ -407,7 +558,130 @@ on by reading its head), and retrofitting the two-level lookup later means
 touching the same 20 sites anyway, just with more code sitting on top of them.
 Pay it once, up front.
 
-## Phase 3 - opt in, one directory at a time
+## Phase 3 - LANDED (four of five directories; collections deliberately skipped)
+
+911 pass / 0 fail. Four directory modules now exist: `std/core/cancel`,
+`std/db/sqlite`, `std/net`, `std/http`.
+
+What each merge bought, measured:
+
+- **std/core/cancel** (cancel.yoop + cancel_ffi.yoop -> token.yoop + ffi.yoop).
+  All 15 `raw*` wrappers went private; only `RawCancel` stays exported, because
+  std/net/socket_ffi legitimately needs the envelope type. `import.unsafe;` being
+  a per-FILE pragma is what keeps the split meaningful now that the two files are
+  one module: ffi.yoop names `unsafe_ptr`, token.yoop still may not.
+- **std/db/sqlite** (sqlite.yoop + sqlite_ffi.yoop -> db.yoop + ffi.yoop). The
+  entire 31-name FFI surface went private; nothing outside std/db referenced any
+  of it. 41 `ffi.` qualifiers stripped.
+- **std/net** (5 files). 22 of socket_ffi's 25 exports plus 2 of socket.yoop's
+  went private.
+- **std/http** (7 files). 59 intra-module qualifiers stripped
+  (`wire.` / `types.` / `parser.` / `url.`), 13 sibling imports deleted, and
+  **wire.yoop now exports NOTHING** - its header used to say "nothing here is
+  exported by convention" while exporting its whole surface, because that was the
+  only way its three consumers could reach it. That is the single clearest win of
+  the whole plan.
+
+**std/collections was skipped, and the plan's rationale for including it turned
+out to be void.** The plan wanted it merged partly because deque.yoop and map.yoop
+duplicated `next_pow2_floor8` - but phase 1 already fixed that by hoisting the
+helper to std/core/numbers.yoop. Measuring the rest: every name set.yoop imports
+from map.yoop (`Map`, `KeyOps`, `map_new`, `map_insert`, ...) is ALSO used outside
+std/collections, so merging privatizes nothing. That leaves only churn: 15
+external import sites, and a `collections.` prefix replacing the meaningful
+`map.` / `deque.` / `set.` distinction. That is the same argument this plan
+already used to keep std/core as a directory OF modules rather than one module,
+so consistency says leave collections alone. Reverse it only if a genuinely
+internal shared helper appears.
+
+**API surface is a design question, not a mechanical one.** A script that
+un-exports every name with no in-tree consumer wanted to privatize 60 decls in
+std/http, including 39 in types.yoop (`Headers`, `headersNew`, `reasonPhrase`,
+the status constructors). Those are the module's public vocabulary; "unused by our
+own examples" is a weak signal for a standard library. Only wire.yoop was
+privatized wholesale, because its own header already declared it internal. The
+same caution applied to std/net (`tcpReadCt` / `tcpWriteAllCt` are documented
+public API in CLAUDE.md despite having no in-tree caller). Deciding what std's
+public surface SHOULD be is worth doing on purpose, separately.
+
+### Declaration order no longer matters at all - FIXED in two halves
+
+The struct-shell fix (recorded under phase 3b) covered the non-generic half. The
+generic half needed a separate fix, because in-place shell filling cannot help
+there: instantiating a generic SNAPSHOTS `genericDecl.genericFields` into a fresh
+cached type, and substitution builds new field types rather than sharing the
+generic's. A snapshot taken before the generic's own body resolved is permanently
+field-less, reported as `type "Bag__int32" has no field "item"`.
+
+Fix: pass C stage 1 is split into two sub-stages - every generic TYPE body in the
+module group, then everything else. Exactly the "broader use will need a pre-pass
+before field resolution" the Phase 7.x comment predicted, and the same shape as
+the Phase 7.2 generic-TRAIT pre-pass that already existed for the same reason.
+Generic FUNCTION decls deliberately stay in the second sub-stage: their
+signatures feed no layout, so moving them would only widen the blast radius.
+
+Now order-independent, all verified: a concrete field naming a later struct, a
+variant payload naming a later struct, a concrete field naming a later generic, a
+variant payload naming a later generic, a generic naming a LATER generic, and all
+of the above across the source files of a directory module in either basename
+order. Regression fixture: examples/pass/decl_order_independence.yoop.
+
+### Parse errors blamed the wrong file - FIXED
+
+Not a modules bug, but found twice while writing directory-module fixtures and
+worth fixing before phase 3's churn made it common: the parser reports
+line/column/length but has no idea which file it was handed, and every caller fell
+back to the ENTRY file. A syntax error in an imported module printed the ENTRY's
+source with a caret at the imported module's offsets - pointing at unrelated code
+in the wrong file. The driver comment said so outright ("we don't know which file
+the parser threw from ... assume the entry until we plumb that through").
+
+moduleGraph's `readAndParse` now stamps `srcPath` + `srcText` on the thrown parse
+error; the two callers that render a graph-load failure - the driver
+(src/yoopiler.js) and the LSP (src/lsp/analyze.js) - prefer them and keep the
+entry only as a fallback for a parse that never went through the graph.
+`--dump-ast` needs nothing: it parses one file directly, so its `inputFile` was
+always the right one. Fixture: examples/fail/parse_error_in_import/.
+
+### Two more codegen bugs, same family as the module-init one
+
+Both are LLVM redefinitions caused by `codegenWithModuleId` running once per
+SOURCE FILE while emitting symbols named after the MODULE:
+
+- **String and array literal globals.** `@.str_<moduleId>_<n>` and
+  `@.arr_<moduleId>_<n>` share a `strConstCounter` that restarts at 0 for every
+  file, so two files of one module both emitted `@.str_net_..._0`. Surfaced the
+  moment std/net merged. cancel and sqlite had escaped it only by luck (their ffi
+  files happen to contain no string literals).
+- **`emittedFromFnShims`** was a per-invocation Set, so two files needing the same
+  `fromFn` shim would each emit it. Moved to `programState` (program-wide, which
+  is what the symbol's own naming always implied). Latent rather than observed.
+
+Both now go through one `fileTag` helper: `""` for a single-file module, so its IR
+stays byte-identical to before the feature, and `__<basename>` otherwise. The
+module-init symbol uses the same helper. **If you add a module-scoped generated
+symbol in codegen, it needs `fileTag` or a shared counter** - this family has bitten
+three times.
+
+### Mechanical hazards worth knowing before the next merge
+
+Both of these were self-inflicted and caught by tests, but they cost time:
+
+- **A qualifier-stripping regex eats import paths and comments.**
+  `s/\bwire|parser|types|url\.(\w)/$1/g` turned `"../core/types.yoop"` into
+  `"../core/yoop"` in seven files and `std/http/wire.yoop` into `std/http/yoop` in
+  six comments. Anchor the substitution away from string literals and comments, or
+  fix up afterwards by grepping for `"[^"]*/yoop"` and `[/_]yoop\b`.
+- **Normalizing a relative std path to a `std/`-prefixed one changes the rules.**
+  The std-imports-must-be-namespaced check keys on `sourcePath.startsWith("std/")`,
+  so an example importing `"../../../std/net/uri.yoop"` was exempt and the same
+  import written `"std/net"` is not. uri_parse_smoke had to move to the namespace
+  form (which is the convention anyway).
+- **e2e assertions can pin the old per-file module id.** Two hello_server/http_router
+  assertions matched `@server_.*__serveConnection` and `@router_.*__matchPath`;
+  after the merge those symbols mangle under `http_*`.
+
+### The original phase 3 recipe
 
 Each of these is one commit, green before and after, revertable on its own:
 

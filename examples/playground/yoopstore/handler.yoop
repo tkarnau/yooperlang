@@ -14,8 +14,8 @@ import { Result } from "std/core/types.yoop";
 import * as vec, { Vec } from "std/core/vec.yoop";
 import * as bytes from "std/core/bytes.yoop";
 
-import { Handler, HandleOutcome } from "std/http/server.yoop";
-import * as http, { Request, Response, HttpMethod, StatusCode } from "std/http/types.yoop";
+import { Handler, HandleOutcome } from "std/http";
+import * as http, { Request, Response, HttpMethod, StatusCode } from "std/http";
 
 import * as safepath from "./safepath.yoop";
 import * as storage from "./storage.yoop";

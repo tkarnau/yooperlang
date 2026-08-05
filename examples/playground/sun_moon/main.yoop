@@ -18,10 +18,10 @@ import.unsafe;
 
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-import { Client, ClientResponse } from "std/http/client.yoop";
-import * as client from "std/http/client.yoop";
+import { Client, ClientResponse } from "std/http";
+import * as client from "std/http";
 import { Result } from "std/core/types.yoop";
-import * as http, { HttpError } from "std/http/types.yoop";
+import * as http, { HttpError } from "std/http";
 import * as vec from "std/core/vec.yoop";
 
 extern "C" from library "m" {

@@ -1,4 +1,11 @@
-// std/core/cancel.yoop - cancellation tokens and deadlines.
+module cancel;
+
+// std/core/cancel/token.yoop - cancellation tokens and deadlines.
+//
+// One of two source files in the `cancel` module. The other, ffi.yoop, holds the
+// `extern "C"` block and the `unsafe_ptr` envelope; it is a sibling in the same
+// module, so everything it declares is visible here with no import, and its
+// `raw*` functions are module-private rather than public API.
 //
 // A cancellation token is an ordinary value you create and pass down a
 // call chain. Nothing is implicitly attached to a task or a thread, so
@@ -6,8 +13,8 @@
 // function three levels down can honor a deadline set at the top
 // without every intermediate signature growing a timeout parameter.
 //
-//     import * as cancel from "std/core/cancel.yoop";
-//     import { CancelToken, WaitOutcome } from "std/core/cancel.yoop";
+//     import * as cancel from "std/core/cancel";
+//     import { CancelToken, WaitOutcome } from "std/core/cancel";
 //
 //     disposable ct: CancelToken = cancel.withTimeoutMs(5000);
 //     let r: Result<usize, string> = readEverything(ref ct, ref stream);
@@ -35,8 +42,7 @@
 // disposer is idempotent (release-then-null), so a hand-written
 // `Disposable.dispose(ref ct)` followed by scope exit is safe.
 
-import { Disposable, disposable } from "./kinds.yoop";
-import * as ffi, { RawCancel } from "./cancel_ffi.yoop";
+import { Disposable, disposable } from "../kinds.yoop";
 
 // ----- outcomes ------------------------------------------------------------
 
@@ -74,9 +80,9 @@ export type CancelToken implements Disposable propagates<disposable> {
     // Idempotent: guard on null, release, then null. Same free-then-null
     // discipline as std/db's Db.dispose.
     function dispose(ref self): void {
-        if (!ffi.rawCancelIsNull(self.raw)) {
-            ffi.rawRelease(self.raw);
-            self.raw = ffi.rawCancelNull();
+        if (!rawCancelIsNull(self.raw)) {
+            rawRelease(self.raw);
+            self.raw = rawCancelNull();
         }
     }
 }
@@ -85,26 +91,26 @@ export type CancelToken implements Disposable propagates<disposable> {
 
 // A token that can only be cancelled explicitly - no deadline.
 export function newToken(): CancelToken propagates<disposable> {
-    return { raw: ffi.rawNew() };
+    return { raw: rawNew() };
 }
 
 // The "no cancellation" token. Nothing can cancel it, it never expires,
 // and disposing it is a no-op. Pass it where an API wants a token but
 // the caller has nothing to hand it.
 export function none(): CancelToken propagates<disposable> {
-    return { raw: ffi.rawCancelNull() };
+    return { raw: rawCancelNull() };
 }
 
 // A token that expires at an absolute monotonic reading (see `nowNs`).
 export function withDeadlineNs(deadlineNs: uint64): CancelToken propagates<disposable> {
-    return { raw: ffi.rawNewDeadline(deadlineNs) };
+    return { raw: rawNewDeadline(deadlineNs) };
 }
 
 // A token that expires `ms` milliseconds from now. The common shape:
 //
 //     disposable ct: CancelToken = cancel.withTimeoutMs(2000);
 export function withTimeoutMs(ms: uint64): CancelToken propagates<disposable> {
-    return { raw: ffi.rawNewDeadline(deadlineFromMs(ms)) };
+    return { raw: rawNewDeadline(deadlineFromMs(ms)) };
 }
 
 // A token cancelled whenever `parent` is - the request-scoped-token
@@ -114,16 +120,16 @@ export function withTimeoutMs(ms: uint64): CancelToken propagates<disposable> {
 // The child holds a reference to the parent, so the parent outlives the
 // link even if its own binding goes out of scope first.
 export function childOf(ref parent: CancelToken): CancelToken propagates<disposable> {
-    let child: CancelToken = { raw: ffi.rawNew() };
-    let _rc: int32 = ffi.rawLink(child.raw, parent.raw);
+    let child: CancelToken = { raw: rawNew() };
+    let _rc: int32 = rawLink(child.raw, parent.raw);
     return child;
 }
 
 // A child of `parent` that also expires after `ms`. Equivalent to
 // `childOf` followed by `setTimeoutMs`.
 export function childWithTimeoutMs(ref parent: CancelToken, ms: uint64): CancelToken propagates<disposable> {
-    let child: CancelToken = { raw: ffi.rawNewDeadline(deadlineFromMs(ms)) };
-    let _rc: int32 = ffi.rawLink(child.raw, parent.raw);
+    let child: CancelToken = { raw: rawNewDeadline(deadlineFromMs(ms)) };
+    let _rc: int32 = rawLink(child.raw, parent.raw);
     return child;
 }
 
@@ -132,10 +138,10 @@ export function childWithTimeoutMs(ref parent: CancelToken, ms: uint64): CancelT
 // or storing one in a struct. Both handles must be disposed; the
 // runtime object dies with the last one.
 export function share(ref t: CancelToken): CancelToken propagates<disposable> {
-    if (ffi.rawCancelIsNull(t.raw)) {
-        return { raw: ffi.rawCancelNull() };
+    if (rawCancelIsNull(t.raw)) {
+        return { raw: rawCancelNull() };
     }
-    ffi.rawRetain(t.raw);
+    rawRetain(t.raw);
     return { raw: t.raw };
 }
 
@@ -144,7 +150,7 @@ export function share(ref t: CancelToken): CancelToken propagates<disposable> {
 // "Should I stop?" - true if the token was cancelled OR its deadline
 // has elapsed. This is the predicate a loop body polls.
 export function isCancelled(ref t: CancelToken): bool {
-    return ffi.rawRequested(t.raw);
+    return rawRequested(t.raw);
 }
 
 // True for the `none()` token - no underlying runtime object, so
@@ -155,45 +161,45 @@ export function isCancelled(ref t: CancelToken): bool {
 // not none, and code that conflates the two ends up ignoring a
 // perfectly good token.
 export function isNone(ref t: CancelToken): bool {
-    return ffi.rawCancelIsNull(t.raw);
+    return rawCancelIsNull(t.raw);
 }
 
 // True only if someone explicitly called `request`. An elapsed deadline
 // does not count. Use this when the two reasons need different
 // handling and you are not going through a `WaitOutcome`.
 export function isFlagged(ref t: CancelToken): bool {
-    return ffi.rawFlagged(t.raw);
+    return rawFlagged(t.raw);
 }
 
 // Cancel the token: wakes every blocked call waiting on it and cascades
 // to every child. Idempotent, and safe to call from any thread.
 export function request(ref t: CancelToken): void {
-    ffi.rawRequest(t.raw);
+    rawRequest(t.raw);
 }
 
 // The token's absolute deadline, or 0 if it has none.
 export function deadlineNs(ref t: CancelToken): uint64 {
-    return ffi.rawDeadlineNs(t.raw);
+    return rawDeadlineNs(t.raw);
 }
 
 // Install or replace the deadline. Takes effect immediately, including
 // for calls already blocked on this token - shortening a deadline wakes
 // them so they can re-evaluate. Pass 0 to remove the deadline.
 export function setDeadlineNs(ref t: CancelToken, deadlineNs: uint64): void {
-    ffi.rawSetDeadlineNs(t.raw, deadlineNs);
+    rawSetDeadlineNs(t.raw, deadlineNs);
 }
 
 export function setTimeoutMs(ref t: CancelToken, ms: uint64): void {
-    ffi.rawSetDeadlineNs(t.raw, deadlineFromMs(ms));
+    rawSetDeadlineNs(t.raw, deadlineFromMs(ms));
 }
 
 // Remaining time in milliseconds, or 0 if the deadline has passed or
 // the token has none. Handy for logging and for handing a budget to an
 // API that wants milliseconds rather than a token.
 export function remainingMs(ref t: CancelToken): uint64 {
-    let d: uint64 = ffi.rawDeadlineNs(t.raw);
+    let d: uint64 = rawDeadlineNs(t.raw);
     if (d == 0) { return 0; }
-    let now: uint64 = ffi.rawNowNs();
+    let now: uint64 = rawNowNs();
     if (now >= d) { return 0; }
     return (d - now) / 1_000_000;
 }
@@ -203,7 +209,7 @@ export function remainingMs(ref t: CancelToken): uint64 {
 // Sleep for `ms`, waking early if the token fires. Ready means the full
 // duration elapsed.
 export function sleepMs(ref t: CancelToken, ms: uint64): WaitOutcome {
-    return outcomeOf(ffi.rawSleepNs(t.raw, ms * 1_000_000));
+    return outcomeOf(rawSleepNs(t.raw, ms * 1_000_000));
 }
 
 // Block until the token is cancelled or `timeoutMs` elapses. Unlike the
@@ -213,7 +219,7 @@ export function sleepMs(ref t: CancelToken, ms: uint64): WaitOutcome {
 export function awaitCancel(ref t: CancelToken, timeoutMs: uint64): WaitOutcome {
     let deadline: uint64 = 0;
     if (timeoutMs > 0) { deadline = deadlineFromMs(timeoutMs); }
-    return outcomeOf(ffi.rawWait(t.raw, deadline));
+    return outcomeOf(rawWait(t.raw, deadline));
 }
 
 // ----- clock ---------------------------------------------------------------
@@ -222,10 +228,10 @@ export function awaitCancel(ref t: CancelToken, timeoutMs: uint64): WaitOutcome 
 // clock change cannot move a deadline; the readings are only meaningful
 // relative to each other.
 export function nowNs(): uint64 {
-    return ffi.rawNowNs();
+    return rawNowNs();
 }
 
 // An absolute deadline `ms` milliseconds from now.
 export function deadlineFromMs(ms: uint64): uint64 {
-    return ffi.rawNowNs() + ms * 1_000_000;
+    return rawNowNs() + ms * 1_000_000;
 }

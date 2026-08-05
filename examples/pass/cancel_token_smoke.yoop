@@ -11,8 +11,8 @@
 // going?" poll. See plans/cancellation-and-io-deadlines.md.
 
 import { disposable } from "std/core/kinds.yoop";
-import { CancelToken, WaitOutcome } from "std/core/cancel.yoop";
-import * as cancel from "std/core/cancel.yoop";
+import { CancelToken, WaitOutcome } from "std/core/cancel";
+import * as cancel from "std/core/cancel";
 import * as conc from "std/core/concurrency.yoop";
 
 extern "C" from "stdio.h" {

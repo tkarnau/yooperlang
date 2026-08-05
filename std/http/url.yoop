@@ -1,3 +1,5 @@
+module http;
+
 // std/http/url.yoop - request-target splitting, percent coding, and
 // `application/x-www-form-urlencoded` name/value parsing.
 //
@@ -15,7 +17,6 @@ import { Result, Option } from "../core/types.yoop";
 import * as vec, { Vec } from "../core/vec.yoop";
 import * as bytes from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import { HttpError, Params, errBadRequest, paramsAdd } from "./types.yoop";
 
 // ----- small byte helpers -------------------------------------------------
 

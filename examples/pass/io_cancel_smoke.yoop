@@ -12,11 +12,11 @@
 import { disposable } from "std/core/kinds.yoop";
 import { Readable } from "std/core/traits.yoop";
 import { Result } from "std/core/types.yoop";
-import { CancelToken } from "std/core/cancel.yoop";
-import * as cancel from "std/core/cancel.yoop";
+import { CancelToken } from "std/core/cancel";
+import * as cancel from "std/core/cancel";
 import * as conc from "std/core/concurrency.yoop";
-import { AcceptOutcome, ConnectResult, ListenResult, TcpStream } from "std/net/tcp.yoop";
-import * as tcp from "std/net/tcp.yoop";
+import { AcceptOutcome, ConnectResult, ListenResult, TcpStream } from "std/net";
+import * as tcp from "std/net";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

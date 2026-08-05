@@ -95,7 +95,21 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     if (hit) return hit;
     const overlay = readFile(absPath);
     const src = overlay != null ? overlay : fs.readFileSync(absPath, "utf8");
-    const ast = parse(src);
+    let ast;
+    try {
+      ast = parse(src);
+    } catch (err) {
+      // Attach WHERE the parse failed. The parser reports line/column/length but
+      // has no idea which file it was handed, and every caller fell back to the
+      // ENTRY file - so a syntax error in an imported module printed the entry's
+      // source with a caret at the imported module's offsets, pointing at
+      // unrelated code. Callers prefer `srcPath`/`srcText` when present.
+      if (err !== null && typeof err === "object" && err.isParseError) {
+        err.srcPath ??= absPath;
+        err.srcText ??= src;
+      }
+      throw err;
+    }
     // Rewrite `a..b` into a call to std/core/range.yoop and unshift the import
     // it needs. Runs before the import walk below so the synthesized import is
     // resolved like any other - which is also what pulls range.yoop into the

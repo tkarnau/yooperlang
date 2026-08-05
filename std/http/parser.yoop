@@ -1,3 +1,5 @@
+module http;
+
 // std/http/parser.yoop - HTTP/1.1 message-head parsing.
 //
 // Two entry points, one for each direction:
@@ -18,13 +20,6 @@ import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result, Option } from "../core/types.yoop";
 import * as bytes from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
-import * as wire, { HeadInfo } from "./wire.yoop";
-import * as url from "./url.yoop";
-import {
-    HttpMethod, HttpError, Headers, Request, StatusCode,
-    errBadRequest, headersNew, httpError, methodFromBytes, notImplemented,
-    requestNew, status, statusClassFor,
-} from "./types.yoop";
 
 // ----- parsed request -----------------------------------------------------
 
@@ -66,10 +61,10 @@ export type ParsedResponse implements Disposable propagates<disposable> {
 // ----- shared bits --------------------------------------------------------
 
 // Offset of the head-terminating blank line, or an error when the caller
-// handed us an incomplete head. Callers loop on `wire.findHeadEnd` before
+// handed us an incomplete head. Callers loop on `findHeadEnd` before
 // getting here, so reaching this error means a genuinely malformed message.
 function requireHeadEnd(buf: uint8[], what: string): Result<usize, HttpError> {
-    let headEnd: usize = wire.findHeadEnd(buf);
+    let headEnd: usize = findHeadEnd(buf);
     if (headEnd == buf.len) {
         return Result.Err { error: errBadRequest(`${what} head is missing the blank line that ends it`) };
     }
@@ -111,15 +106,15 @@ function fillRequest(
     headEnd: usize,
     ref req: Request,
 ): Result<HeadInfo, HttpError> {
-    let info: HeadInfo = wire.readHeaderLines(buf, headerStart, headEnd, ref req.headers)?;
+    let info: HeadInfo = readHeaderLines(buf, headerStart, headEnd, ref req.headers)?;
 
     // Split the raw target first, decode the pieces after. Decoding before
     // splitting would let "%2F" forge a path separator or an extra query
     // parameter; `decodePath` additionally rejects an encoded separator
     // rather than folding it into the decoded path.
-    let parts: url.TargetParts = url.splitTarget(req.target);
-    req.path = url.decodePath(parts.path)? `decoding request path "${parts.path}"`;
-    let _pairs: usize = url.parseQuery(parts.queryString, ref req.query)?;
+    let parts: TargetParts = splitTarget(req.target);
+    req.path = decodePath(parts.path)? `decoding request path "${parts.path}"`;
+    let _pairs: usize = parseQuery(parts.queryString, ref req.query)?;
     return Result.Ok { value: info };
 }
 
@@ -211,7 +206,7 @@ export function parseResponseHead(buf: uint8[]): Result<ParsedResponse, HttpErro
     }
 
     let headers: Headers = headersNew(8);
-    switch (wire.readHeaderLines(buf, lineEnd + 2, headEnd, ref headers)) {
+    switch (readHeaderLines(buf, lineEnd + 2, headEnd, ref headers)) {
         case Result.Ok { value: info }: {
             return Result.Ok {
                 value: {

@@ -1,3 +1,5 @@
+module net;
+
 // std/net/socket.yoop - safe envelope around a TCP socket fd.
 //
 // `Socket` is a thin Disposable around the raw fd returned by socket_ffi.
@@ -20,10 +22,6 @@
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result } from "../core/types.yoop";
-import {
-    ffi_socket_open,
-    ffi_close,
-} from "./socket_ffi.yoop";
 
 // Hold an fd. fd < 0 means "no fd" (the result of an error path or
 // after-dispose). dispose only calls close() when the fd is valid.
@@ -41,7 +39,7 @@ export type Socket implements Disposable propagates<disposable> {
 // need a raw socket reach through this rather than going to socket_ffi.
 // Implements Disposable so the caller can `disposable r: SocketResult =
 // open_tcp_socket()` and let autocleanup do the right thing.
-export type SocketResult implements Disposable propagates<disposable> {
+type SocketResult implements Disposable propagates<disposable> {
     socket: Socket,
     error:  string,
     function dispose(ref self): void {
@@ -49,7 +47,7 @@ export type SocketResult implements Disposable propagates<disposable> {
     }
 }
 
-export function open_tcp_socket(): SocketResult propagates<disposable> {
+function open_tcp_socket(): SocketResult propagates<disposable> {
     let r: Result<c_int, string> = ffi_socket_open();
     let fd: c_int = -1;
     let err_msg: string = "";

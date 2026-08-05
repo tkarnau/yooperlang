@@ -12,8 +12,8 @@
 import { disposable } from "std/core/kinds.yoop";
 import {
     AcceptOutcome, ConnectResult, IoOutcome, ListenResult,
-} from "std/net/tcp.yoop";
-import * as tcp from "std/net/tcp.yoop";
+} from "std/net";
+import * as tcp from "std/net";
 
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;

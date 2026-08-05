@@ -1,0 +1,31 @@
+module plugin;
+
+// This file is named so it sorts BEFORE traits.yoop on purpose. It implements a
+// trait, declares a kind-governed binding, and instantiates a generic - all
+// declared in the sibling file that the module graph visits AFTER this one.
+//
+// Before the pass C fix this was a hard error ("'self' can only be used inside a
+// trait method body") purely because "impls" < "traits". A module's semantics
+// must not depend on the alphabetical spelling of its filenames.
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+export type Widget implements (Greets, Disposable) {
+    id: int32,
+    function greet(ref self): int32 { return self.id * 10; }
+    function dispose(ref self): void { self.id = 0; }
+}
+
+export function greetIt(ref w: Widget): int32 {
+    return Greets.greet(ref w);
+}
+
+// Generic declared in traits.yoop, instantiated here.
+export function boxedId(w: Widget): int32 {
+    let b: Box<int32> = { item: w.id };
+    return unbox(b);
+}
+
+export function withCleanup(): int32 {
+    disposable w: Widget = { id: 7 };
+    return greetIt(ref w);
+}

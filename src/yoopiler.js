@@ -186,14 +186,15 @@ function main() {
     ));
   } catch (err) {
     if (err && err.isParseError) {
-      // Parse error from the lexer/parser: it has line/column/length and
-      // already includes a formatted code frame in `message`. We don't know
-      // which file the parser threw from (loadModuleGraph throws bare), so
-      // assume the entry until we plumb that through.
+      // Parse error from the lexer/parser: it has line/column/length. Which FILE
+      // it came from is stamped by moduleGraph's readAndParse (`srcPath` /
+      // `srcText`); the entry is only a fallback for a parse that did not go
+      // through the graph. Without the stamp, a syntax error in an imported
+      // module rendered against the entry's source - wrong file, wrong caret.
       console.error(
         formatDiagnostic({
-          filePath: inputFile,
-          src: fs.readFileSync(entryAbs, "utf8"),
+          filePath: err.srcPath ?? inputFile,
+          src: err.srcText ?? fs.readFileSync(entryAbs, "utf8"),
           loc: {
             pos: err.pos,
             line: err.line,

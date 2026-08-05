@@ -1,3 +1,5 @@
+module http;
+
 // std/http/types.yoop - the HTTP vocabulary types.
 //
 // Everything a handler touches lives here: methods, status codes, headers,

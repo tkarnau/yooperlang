@@ -93,11 +93,23 @@ informal personal version):
   (`for (let i = 0; i < n; i += 1)`, with the counter's type taken from the
   condition so it lands on `usize`) and `a..b` ranges (`for i in 0..n`, sugar
   for a `Range` value in `std/core/range.yoop`). See SPEC.md section 9.
-- Typecheck: a struct used as a variant payload has to be declared before the
+- ~~Typecheck: a struct used as a variant payload has to be declared before the
   variant or its fields resolve against an unpopulated shell, and the resulting
-  diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).
-  Surfaced by the sqlite binding; see
-  [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md).
+  diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).~~
+  DONE, fixed while merging std/db/sqlite into a directory module. Pass C built a
+  fresh `StructType` and REPLACED the table entry, so any field that had already
+  resolved to that struct kept pointing at the empty pass-A shell. `StructShell`
+  is now unfrozen and pass C fills it IN PLACE (`fillStructShell` in
+  [../src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js)) - the same
+  fix variant shells got in 13.A and vtable shells in 9.G. Declaration order no
+  longer matters for struct fields OR variant payloads. A related crash in
+  `detectRecursiveField` (it walked a shell's null `fields`) is fixed too; a plain
+  forward reference used to abort the compiler with a TypeError. Across the source
+  files of a directory module the same bug SILENTLY MISCOMPILED rather than
+  erroring, which is how it was found: a sqlite handle came back as a shifted
+  pointer and segfaulted inside libsqlite3. See
+  [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md) for the original
+  report.
 - Two playground examples are stale since the async conversion and no longer
   compile: `examples/playground/todo_api` and `examples/playground/yoopstore`
   both hit `async function must be awaited` on `serve` / `serveDefault`. Nothing
@@ -120,7 +132,7 @@ informal personal version):
 
 ---
 
-## Pending plan
+## Recently landed
 
 - [modules-as-directories.md](modules-as-directories.md) - make a module a
   DIRECTORY of source files rather than a single file. Motivated by the
@@ -135,11 +147,24 @@ informal personal version):
   itself turned out to be wrong. Phase 1: the five cross-file name collisions in
   std are gone, no compiler change. Phase 2: directory modules work end to end
   behind the opt-in `module <name>;` header, so nothing in the tree behaves
-  differently until a directory opts in. One phase-2 item is deliberately
-  outstanding - import scope is module-wide rather than per source file; see the
-  doc's "Import scope" section for the measured cost and the narrow stopgap that
-  keeps directory modules usable meanwhile. Phase 3 (opting std in, one directory
-  per commit) is next and is not blocked by it.
+  differently until a directory opts in. A pass C ordering bug found right after
+  phase 2 (a module's semantics depended on the alphabetical spelling of its
+  filenames) is also fixed - pass C is now group-major / stage-minor. Import
+  locality is enforced too: a module's files share its declarations but not its
+  imports, so using a name only a sibling imported is an error. That is a
+  checking pass rather than true lexical per-file scope, deliberately - the doc
+  records why (deferred resolution would have to carry file identity) and what
+  the two conservative-rejection differences are. **Phase 3 has landed** for four
+  directories - `std/core/cancel`, `std/db/sqlite`, `std/net`, `std/http` - and
+  std/collections is deliberately skipped (merging it privatizes nothing, and
+  phase 1 already removed the duplicated helper that was the reason to). The
+  merges paid for themselves: `std/http/wire.yoop` now exports NOTHING where its
+  header used to say "internal by convention" while exporting everything, and the
+  whole sqlite and socket FFI surfaces went private. They also flushed out three
+  compiler bugs, all recorded in the doc: the struct-shell replacement (a silent
+  MISCOMPILE, plus a pre-existing crash on any forward struct reference), the
+  string/array literal global counter, and a per-invocation `fromFn` shim set.
+  Remaining, optional: true lexical per-file import scope.
 
 ---
 
@@ -160,7 +185,7 @@ the top level because the day-to-day work and the CLAUDE.md notes cite them.
   coloring cascade that caused, and what is still blocking-only
   (ambient stream timeouts, `flush`).
 - [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md) -
-  cancellation tokens (`std/core/cancel.yoop`), deadline- and cancel-aware
+  cancellation tokens (`std/core/cancel/`), deadline- and cancel-aware
   I/O waits, and the multiplexer fixes that went with them (the same-fd
   waiter conflict, the monotonic deadline clock, restartable init). Read
   this alongside runtime-design.md, which it supersedes on cancellation.

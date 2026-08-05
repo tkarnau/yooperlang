@@ -3001,27 +3001,38 @@ function codegenWithModuleId(
   const structDefs = [];
   // Phase 10.K: ctx-dropping shims emitted for `VTableName.fromFn(...)`, keyed
   // by shim symbol so each (module, target function) pair is emitted once.
-  const emittedFromFnShims = new Set();
+  //
+  // modules-as-directories: this has to be PROGRAM-wide, not per invocation.
+  // codegenWithModuleId runs once per SOURCE FILE, so two files of one module
+  // each keeping their own set would emit the same shim symbol twice (the symbol
+  // already carries moduleId + target, so program-wide dedupe is what it always
+  // meant). Same family of bug as the string-constant counter below.
+  const emittedFromFnShims =
+    programState && (programState.emittedFromFnShims ??= new Set());
   let strConstCounter = 0;
   let tempCounter = 0;
   let labelCounter = 0;
   const functionSigs = new Map();
   let symbols = createLocalSymbols();
-  // modules-as-directories: a module can span several source files, and each
-  // one emits its own module-init for the module-level decls IT declares. The
-  // symbol therefore has to be per source file - two files of one module
-  // emitting `@<moduleId>__module_init` is an LLVM redefinition. Single-file
-  // modules (every module before this feature, and most after) keep the
-  // unsuffixed name, so their IR is byte-identical to before. Init ORDER is the
-  // order these land in programState.moduleInitSymbols, which follows the
-  // module graph's file order - sorted by basename within a directory module.
-  const moduleInitSymName =
+  // modules-as-directories: a module can span several SOURCE FILES, and
+  // codegenWithModuleId runs once per file, so anything named
+  // `<moduleId>_<per-invocation counter>` collides between siblings. `fileTag`
+  // disambiguates those: "" for a single-file module (so its IR stays
+  // byte-identical to before the feature) and `__<basename>` otherwise.
+  //
+  // Two symbol families need it, and both were real LLVM redefinition errors:
+  // the module-init function, and the string/array literal globals whose
+  // counter restarts at 0 for every file.
+  const fileTag =
     (programState?.moduleSourceFileCount?.get(moduleId) ?? 1) > 1
-      ? `${moduleId}__module_init__${String(moduleAbsPath ?? "")
+      ? `__${String(moduleAbsPath ?? "")
           .replace(/^.*[/\\]/, "")
           .replace(/\.yoop$/, "")
           .replace(/[^a-zA-Z0-9_]/g, "_")}`
-      : `${moduleId}__module_init`;
+      : "";
+  // Init ORDER is the order these land in programState.moduleInitSymbols, which
+  // follows the module graph's file order - sorted by basename within a module.
+  const moduleInitSymName = `${moduleId}__module_init${fileTag}`;
   // Per-module DWARF handles. Lazily initialized via beginModule on first
   // function emission so callers (like compileSource) that synthesize a
   // module without an absPath still get a stable synthetic file name.
@@ -3143,7 +3154,7 @@ function codegenWithModuleId(
   let bindingDeclTable = new Map();
 
   function freshTemp() { return `%t${tempCounter++}`; }
-  function freshStrGlobal() { return `@.str_${moduleId}_${strConstCounter++}`; }
+  function freshStrGlobal() { return `@.str_${moduleId}${fileTag}_${strConstCounter++}`; }
   function freshLabel(hint) { return `${hint}_${labelCounter++}`; }
 
   function ensureArrayTypeDef(elemType) {
@@ -3180,7 +3191,7 @@ function codegenWithModuleId(
   // it. Reuses the string-global counter for naming since both produce
   // private aggregates in the same flat namespace.
   function emitRawArrayGlobal({ elemLlvm, count, elemInits }) {
-    const name = `@.arr_${moduleId}_${strConstCounter++}`;
+    const name = `@.arr_${moduleId}${fileTag}_${strConstCounter++}`;
     globals.push(
       `${name} = private unnamed_addr constant [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
     );

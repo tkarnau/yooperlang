@@ -19,8 +19,8 @@ import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Result, Option } from "std/core/types.yoop";
 import { Display, Into, WithContext } from "std/core/traits.yoop";
 import * as vec, { Vec } from "std/core/vec.yoop";
-import * as http, { HttpError, StatusCode } from "std/http/types.yoop";
-import * as sqlite, { Db, Stmt, Tx, Row, StepOutcome, transaction } from "std/db/sqlite.yoop";
+import * as http, { HttpError, StatusCode } from "std/http";
+import * as sqlite, { Db, Stmt, Tx, Row, StepOutcome, transaction } from "std/db/sqlite";
 
 // ----- errors -------------------------------------------------------------
 

@@ -1,0 +1,6 @@
+import * as m from "./m";
+
+function main(): int32 {
+    printf("%zu %zu\n", m.capA(), m.capB());
+    return 0;
+}
