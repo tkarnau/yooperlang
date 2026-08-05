@@ -23,6 +23,13 @@ const DEFAULT_STD_ROOT = STD_ROOT;
 //   src: string              - this file's contents
 //   ast: ProgramNode
 //   imports: [IMPORT_DECL]   - decls with resolvedAbsPath/resolvedModuleId set
+//   siblings: [Module]       - every source file of this module, INCLUDING this
+//                              one (length 1 for a single-file module). Carried
+//                              on the record so anything holding a Module can
+//                              reach the whole namespace without a second map:
+//                              a `Map<moduleId, Module>` keeps only ONE file per
+//                              module, which is exactly what made the LSP miss
+//                              declarations living in a sibling file.
 //
 // modules-as-directories: a MODULE is either one source file (no header) or a
 // DIRECTORY of source files that each declare `module <name>;`. A source file
@@ -167,6 +174,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     onStack.add(id);
     const mod = makeFileRecord(absPath, id);
     const unit = { id, dir: null, name: null, files: [mod] };
+    mod.siblings = unit.files;
     unitById.set(id, unit);
     byPath.set(absPath, mod);
     walkUnitImports(unit);
@@ -223,6 +231,7 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
     }
 
     const unit = { id, dir, name: declaredName, files: records };
+    for (const r of records) r.siblings = unit.files;
     unitById.set(id, unit);
     for (const r of records) byPath.set(r.absPath, r);
     walkUnitImports(unit);

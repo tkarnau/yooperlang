@@ -163,6 +163,21 @@
     "keywords": {
       "patterns": [
         {
+          "comment": "The `module <name>;` header, which is what makes a DIRECTORY of source files one module. Matched CONTEXTUALLY - only at column 0 followed by a name and a semicolon - because `module` is not a reserved word and stays an ordinary identifier everywhere else (bootstrap/src/contracts.yoop uses it as a struct field name, where it appears indented and followed by `:`). Must come before the structural kind-prefix rule below, which would otherwise be a candidate.",
+          "match": "^(module)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(;)",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.module.yoop"
+            },
+            "2": {
+              "name": "entity.name.namespace.yoop"
+            },
+            "3": {
+              "name": "punctuation.terminator.yoop"
+            }
+          }
+        },
+        {
           "name": "keyword.control.yoop",
           "match": "\\b(if|else|while|for|break|continue|return|case|switch|default)\\b"
         },
