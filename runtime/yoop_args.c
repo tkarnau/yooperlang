@@ -7,6 +7,8 @@
 //   macOS:  _NSGetArgc() / _NSGetArgv() from <crt_externs.h> are safe to
 //           call from anywhere after dyld load.
 //   Linux:  parse /proc/self/cmdline on first call and cache the result.
+//   Windows: __argc / __argv, the CRT globals the startup code fills in
+//           before main - the direct analogue of the macOS pair.
 //   Other:  return 0 / "".
 //
 // The returned strings are owned by libc / the cached buffer; callers
@@ -79,6 +81,8 @@ int32_t yoop_argc(void) {
 #elif defined(__linux__)
     load_linux_args();
     return (int32_t)(g_linux_argc < 0 ? 0 : g_linux_argc);
+#elif defined(_WIN32)
+    return (int32_t)__argc;
 #else
     return 0;
 #endif
@@ -106,6 +110,13 @@ const char* yoop_argv(int32_t i) {
     load_linux_args();
     if (i < 0 || i >= g_linux_argc || !g_linux_argv) return "";
     return g_linux_argv[i];
+#elif defined(_WIN32)
+    // __argv is the narrow (ANSI) vector, which is what the rest of the
+    // runtime's string handling expects. It is NULL only in a program built
+    // against the wide entry point (wmain), which codegen never emits.
+    if (!__argv) return "";
+    if (i < 0 || i >= __argc) return "";
+    return __argv[i];
 #else
     (void)i;
     return "";

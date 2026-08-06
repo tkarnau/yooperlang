@@ -20,6 +20,14 @@ import { formatDiagnostic } from "./helpers.js";
 import { dumpAst, dumpAstJson } from "./dumpAst.js";
 import { checkInstallRoots } from "./install_root.js";
 import {
+  clangEnv,
+  lowerLinkFlag,
+  msvcLinkerDir,
+  resolveClang,
+  toolchainHint,
+  windowsClangArgs,
+} from "./toolchain.js";
+import {
   collectSuiteModules,
   discoverTestFiles,
   entryPathFor,
@@ -29,32 +37,6 @@ import {
   verifyCollectedSuites,
 } from "./jsyoopdriver/test_mode.js";
 
-// Locate the clang binary. `YOOP_CLANG` wins if set (and is a hard error if it
-// points at nothing, since that's explicit user intent). On Windows we keep
-// the historical Program Files probe as a fallback, but PATH is consulted
-// first everywhere now, so an LLVM installed anywhere else just works.
-function resolveClang() {
-  const override = process.env.YOOP_CLANG;
-  if (override) {
-    if (!fs.existsSync(override)) {
-      console.error(`YOOP_CLANG points at a file that does not exist: ${override}`);
-      process.exit(1);
-    }
-    return override;
-  }
-  if (process.platform === "win32") {
-    const fallback = "C:\\Program Files\\LLVM\\bin\\clang.exe";
-    // Prefer PATH; only reach for the well-known install if PATH has no clang.
-    try {
-      execFileSync("clang", ["--version"], { stdio: "ignore" });
-      return "clang";
-    } catch {
-      if (fs.existsSync(fallback)) return fallback;
-      return "clang";
-    }
-  }
-  return "clang";
-}
 
 // Run clang, turning its two failure modes into something readable: a missing
 // binary becomes an install hint, and a compile/link failure exits with
@@ -62,7 +44,7 @@ function resolveClang() {
 // diagnostics.
 function runClang(clang, clangArgs) {
   try {
-    execFileSync(clang, clangArgs, { stdio: "inherit" });
+    execFileSync(clang, clangArgs, { stdio: "inherit", env: clangEnv() });
   } catch (err) {
     if (err && err.code === "ENOENT") {
       console.error(
@@ -72,6 +54,11 @@ function runClang(clang, clangArgs) {
       );
       process.exit(1);
     }
+    // A link failure on Windows is usually a missing MSVC toolchain rather
+    // than anything wrong with the program, and clang's own message for it
+    // ("unable to execute command") does not say so. Name the real cause.
+    const hint = toolchainHint();
+    if (hint) console.error(`\n${hint}`);
     if (typeof err?.status === "number") process.exit(err.status);
     throw err;
   }
@@ -362,12 +349,6 @@ function main() {
   // every yoop call site. Ignored / passes through as `-lframework:NAME`
   // on Windows + Linux, which won't link -- the convention is meant for
   // macOS-targeted demos.
-  function lowerLinkFlag(name) {
-    if (name.startsWith("framework:")) {
-      return ["-framework", name.slice("framework:".length)];
-    }
-    return [`-l${name}`];
-  }
   const linkArgs = allLinkFlags.flatMap(lowerLinkFlag);
 
   // `-g` keeps the DWARF metadata that codegen emits; `-O0` keeps every
@@ -383,7 +364,7 @@ function main() {
       `${linkOutput}.exe`,
       ...debugFlags,
       ...linkArgs,
-      "-fuse-ld=link",
+      ...windowsClangArgs(),
     ];
     runClang(clang, clangArgs);
     if (testCtx) {

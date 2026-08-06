@@ -2,9 +2,9 @@
 // helpers. See plans/cancellation-and-io-deadlines.md.
 
 #include "../yoop_runtime.h"
+#include "test_support.h"
 
 #include <assert.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -123,23 +123,22 @@ static void test_link_release_orders(void) {
     printf("  link-release-orders ok\n");
 }
 
-static void* canceller(void* p) {
+static void canceller(void* p) {
     yoop_cancel_t* t = (yoop_cancel_t*)p;
     yoop_sleep_ms(30);
     yoop_cancel_request(t);
-    return NULL;
 }
 
 static void test_sleep_interrupted(void) {
     yoop_cancel_t* t = yoop_cancel_new();
-    pthread_t th;
-    pthread_create(&th, NULL, canceller, t);
+    test_thread_t th;
+    test_thread_spawn(&th, canceller, t);
 
     uint64_t start = yoop_now_ns();
     int rc = yoop_cancel_sleep_ns(t, 2000 * MS);
     uint64_t elapsed = yoop_now_ns() - start;
 
-    pthread_join(th, NULL);
+    test_thread_join(&th);
     assert(rc == YOOP_WAIT_CANCELLED);
     // Woken by the cancel at ~30ms, nowhere near the 2s sleep.
     assert(elapsed < 1000 * MS);
@@ -194,10 +193,10 @@ static void test_wait(void) {
     assert(yoop_now_ns() - start >= 25 * MS);
 
     // Cancellation wins when it arrives first.
-    pthread_t th;
-    pthread_create(&th, NULL, canceller, t);
+    test_thread_t th;
+    test_thread_spawn(&th, canceller, t);
     rc = yoop_cancel_wait(t, yoop_now_ns() + 5000 * MS);
-    pthread_join(th, NULL);
+    test_thread_join(&th);
     assert(rc == YOOP_WAIT_CANCELLED);
 
     yoop_cancel_release(t);
@@ -206,21 +205,20 @@ static void test_wait(void) {
 
 // Shortening a deadline after a thread has already parked must take
 // effect - that is what the wake in set_deadline_ns is for.
-static void* deadline_shortener(void* p) {
+static void deadline_shortener(void* p) {
     yoop_cancel_t* t = (yoop_cancel_t*)p;
     yoop_sleep_ms(30);
     yoop_cancel_set_deadline_ns(t, yoop_now_ns() + 1);
-    return NULL;
 }
 
 static void test_deadline_shortened_while_parked(void) {
     yoop_cancel_t* t = yoop_cancel_new();
-    pthread_t th;
-    pthread_create(&th, NULL, deadline_shortener, t);
+    test_thread_t th;
+    test_thread_spawn(&th, deadline_shortener, t);
     uint64_t start = yoop_now_ns();
     int rc = yoop_cancel_sleep_ns(t, 3000 * MS);
     uint64_t elapsed = yoop_now_ns() - start;
-    pthread_join(th, NULL);
+    test_thread_join(&th);
     // Shortening the deadline is a time budget change, so the sleep
     // ends as TIMEDOUT rather than CANCELLED.
     assert(rc == YOOP_WAIT_TIMEDOUT);

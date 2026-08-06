@@ -13,6 +13,7 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const SERVER = path.resolve(import.meta.dirname, "server.js");
 
@@ -25,6 +26,15 @@ function startClient() {
   let buf = Buffer.alloc(0);
   let seq = 1;
   const pending = new Map();
+
+  // A notification sent just before close() can still be in flight when the
+  // child dies, and writing to a dead child's stdin raises EPIPE. Windows
+  // surfaces this where POSIX does not: proc.kill() is TerminateProcess and
+  // takes effect immediately, whereas on POSIX the queued write has already
+  // drained by the time SIGTERM is handled. With no listener the stream's
+  // 'error' event is unhandled and fails whichever test happens to be running.
+  // Losing writes to a child we are killing on purpose is fine.
+  proc.stdin.on("error", () => {});
 
   proc.stdout.on("data", (chunk) => {
     buf = Buffer.concat([buf, chunk]);
@@ -83,9 +93,15 @@ function writeFixture(src, filename = "main.yoop") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_"));
   const file = path.join(dir, filename);
   fs.writeFileSync(file, src);
+  const absPath = fs.realpathSync(file);
   return {
-    absPath: fs.realpathSync(file),
-    uri: "file://" + fs.realpathSync(file),
+    absPath,
+    // Must go through pathToFileURL rather than "file://" + absPath: on
+    // Windows the latter yields "file://C:\dir\main.yoop", which is neither
+    // what the server emits nor a valid file URI (a drive path needs the
+    // third slash, and separators have to be forward slashes). The server
+    // was always right here; only the test's hand-rolled URI was wrong.
+    uri: pathToFileURL(absPath).href,
     src,
   };
 }

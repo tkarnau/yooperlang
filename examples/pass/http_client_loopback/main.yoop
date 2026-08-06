@@ -20,8 +20,11 @@ import * as client, { Client, ClientResponse } from "std/http";
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
-extern "C" from "unistd.h" {
-    function usleep(microseconds: uint32): int32;
+// yoop_sleep_ms rather than libc usleep: usleep is POSIX-only and does not
+// exist in the MSVC CRT, while the runtime's own sleep is portable and is
+// what the rest of the tree already uses to pause.
+extern "C" from "yoop_runtime" {
+    function yoop_sleep_ms(ms: uint64): int32;
 }
 
 // Answers a GET with a fixed body, and a POST with the body it was sent.
@@ -73,7 +76,7 @@ function main(): int32 {
     joined sh = serverTask();
     // Give the server a moment to bind. Racing the accept loop is fine -
     // tcp_connect retries until accept(2) takes the fd.
-    let _slept: int32 = usleep(100000);    // 100ms
+    let _slept: int32 = yoop_sleep_ms(100);
 
     // main is the sync/async boundary - spawn the async work as a task.
     pooled ex = exerciseTask();

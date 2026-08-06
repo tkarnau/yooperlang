@@ -57,23 +57,28 @@ type SockAddrIn c_layout {
 
 // ----- libc externs --------------------------------------------------------
 
-extern "C" from "sys/socket.h" {
-    function socket(domain: c_int, sock_type: c_int, proto: c_int): c_int;
-    function bind(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
-    function listen(fd: c_int, backlog: c_int): c_int;
-    function accept(fd: c_int, addr: unsafe_ptr<SockAddrIn>, addr_len: unsafe_ptr<c_int>): c_int;
-    function connect(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
-    function send(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
-    function recv(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
-}
-
-extern "C" from "unistd.h" {
-    function close(fd: c_int): c_int;
-}
-
-extern "C" from "arpa/inet.h" {
-    function htons(host_short: uint16): uint16;
-    function inet_addr(addr: string): uint32;
+// The socket calls go through the runtime's yoop_sock_* shims rather than
+// straight to libc.
+//
+// On POSIX each shim is a direct passthrough, so nothing about this layer's
+// behavior changes there. On Windows the difference is load-bearing: a socket
+// is a SOCKET handle rather than a file descriptor (so `close` is wrong and
+// `closesocket` is required), failures report through WSAGetLastError instead
+// of errno (so `errno.message(errno.get())` below would otherwise print a
+// stale, unrelated error), and the library needs WSAStartup before its first
+// call. Keeping all of that in C means this file stays one implementation
+// instead of growing a platform split. See runtime/yoop_net.c.
+extern "C" from "yoop_runtime" {
+    function yoop_sock_socket(domain: c_int, sock_type: c_int, proto: c_int): c_int;
+    function yoop_sock_bind(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
+    function yoop_sock_listen(fd: c_int, backlog: c_int): c_int;
+    function yoop_sock_accept(fd: c_int, addr: unsafe_ptr<SockAddrIn>, addr_len: unsafe_ptr<c_int>): c_int;
+    function yoop_sock_connect(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
+    function yoop_sock_send(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
+    function yoop_sock_recv(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
+    function yoop_sock_close(fd: c_int): c_int;
+    function yoop_sock_htons(host_short: uint16): uint16;
+    function yoop_sock_inet_addr(addr: string): uint32;
 }
 
 extern "C" from "yoop_runtime" {
@@ -105,14 +110,14 @@ extern "C" from "yoop_runtime" {
 // dotted-quad ("127.0.0.1", "0.0.0.0"). inet_addr returns 0xFFFFFFFF on
 // failure; we surface that as `Err`.
 function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
-    let ipv4: uint32 = inet_addr(host);
+    let ipv4: uint32 = yoop_sock_inet_addr(host);
     // inet_addr returns INADDR_NONE (0xFFFFFFFF) on bad input - except
     // "255.255.255.255" which is the broadcast address. We don't bind to
     // that, so we treat the value as the error sentinel.
     if (ipv4 == 4294967295) {
         return Result.Err { error: "build_sockaddr: invalid IPv4 host" };
     }
-    let port_be: uint16 = htons(uint16(port));
+    let port_be: uint16 = yoop_sock_htons(uint16(port));
     return Result.Ok {
         value: {
             sin_family: uint16(AF_INET),
@@ -126,7 +131,7 @@ function build_sockaddr(host: string, port: int32): Result<SockAddrIn, string> {
 // Allocate a TCP/IPv4 socket. Returns the raw fd in `Ok` or an errno
 // message in `Err`.
 function ffi_socket_open(): Result<c_int, string> {
-    let fd: c_int = socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
+    let fd: c_int = yoop_sock_socket(AF_INET, SOCK_STREAM, IPPROTO_TCP);
     if (fd < 0) {
         return Result.Err { error: errno.message(errno.get()) };
     }
@@ -155,26 +160,26 @@ function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, st
     switch (built) {
         case Result.Ok { value: ok_addr }: { addr = ok_addr; }
         case Result.Err { error: addr_err }: {
-            let close_rc_a: c_int = close(fd);
+            let close_rc_a: c_int = yoop_sock_close(fd);
             return Result.Err { error: addr_err };
         }
     }
 
-    let bind_rc: c_int = bind(fd, &addr, 16);
+    let bind_rc: c_int = yoop_sock_bind(fd, &addr, 16);
     if (bind_rc != 0) {
         let msg_bind: string = errno.message(errno.get());
-        let close_rc_b: c_int = close(fd);
+        let close_rc_b: c_int = yoop_sock_close(fd);
         return Result.Err { error: msg_bind };
     }
 
     // The listening socket goes non-blocking too, so the async accept can
-    // retry around EAGAIN rather than sleeping inside accept().
+    // retry around EAGAIN rather than sleeping inside yoop_sock_accept().
     let nb_rc: c_int = yoop_io_set_nonblocking(fd);
 
-    let listen_rc: c_int = listen(fd, backlog);
+    let listen_rc: c_int = yoop_sock_listen(fd, backlog);
     if (listen_rc != 0) {
         let msg_listen: string = errno.message(errno.get());
-        let close_rc_c: c_int = close(fd);
+        let close_rc_c: c_int = yoop_sock_close(fd);
         return Result.Err { error: msg_listen };
     }
 
@@ -185,7 +190,7 @@ function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, st
 // fd with the peer's address. Named so it can ride inside Result.Ok.
 type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
 
-// Park on the listening fd's readability, then accept(). Returns the
+// Park on the listening fd's readability, then yoop_sock_accept(). Returns the
 // new client fd plus the peer's address (parsed back out of the
 // sockaddr_in the kernel filled). On error returns `Err`.
 //
@@ -200,7 +205,7 @@ function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
     }
     let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
     let len: c_int = 16;
-    let cfd: c_int = accept(fd, &peer, &len);
+    let cfd: c_int = yoop_sock_accept(fd, &peer, &len);
     if (cfd < 0) {
         return Result.Err { error: errno.message(errno.get()) };
     }
@@ -221,7 +226,7 @@ function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
     // DNS lookup via the runtime helper. Numeric hosts skip the resolve
     // and dial directly.
     let dial_host: string = host;
-    let probe: uint32 = inet_addr(host);
+    let probe: uint32 = yoop_sock_inet_addr(host);
     if (probe == 4294967295) {
         let resolved: string = yoop_net_resolve_ipv4(host);
         if (resolved.len == 0) {
@@ -235,14 +240,14 @@ function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
         case Result.Ok { value: ok_addr }: { addr = ok_addr; }
         case Result.Err { error: addr_err }: { return ConnectOutcome.Err { error: addr_err }; }
     }
-    let rc: c_int = connect(fd, &addr, 16);
+    let rc: c_int = yoop_sock_connect(fd, &addr, 16);
     if (rc != 0) {
         return ConnectOutcome.Err { error: errno.message(errno.get()) };
     }
     return ConnectOutcome.Ok;
 }
 
-// Park on readability, then recv() once into `buf`. uint8[] is a fat
+// Park on readability, then yoop_sock_recv() once into `buf`. uint8[] is a fat
 // pointer; passing by value copies the (ptr,len) header but the bytes
 // are still the caller's storage. Returns bytes read in `Ok` (0 = EOF),
 // or `Err` on a syscall failure.
@@ -251,14 +256,14 @@ function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     if (wait_rc != 0) {
         return Result.Err { error: errno.message(errno.get()) };
     }
-    let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+    let n: c_ssize_t = yoop_sock_recv(fd, buf.ptr, buf.len, 0);
     if (n < 0) {
         return Result.Err { error: errno.message(errno.get()) };
     }
     return Result.Ok { value: n };
 }
 
-// Park on writability, then send() in a loop until every byte of `buf`
+// Park on writability, then yoop_sock_send() in a loop until every byte of `buf`
 // has been transmitted or an error occurs. Returns total bytes sent in
 // `Ok` (== buf.len on success).
 function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
@@ -269,7 +274,7 @@ function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
             return Result.Err { error: errno.message(errno.get()) };
         }
         let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
-        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        let n: c_ssize_t = yoop_sock_send(fd, chunk.ptr, chunk.len, 0);
         if (n < 0) {
             return Result.Err { error: errno.message(errno.get()) };
         }
@@ -282,7 +287,7 @@ function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
 // rc as-is so the caller can log + continue (a failed close almost never
 // matters for a server).
 function ffi_close(fd: c_int): c_int {
-    return close(fd);
+    return yoop_sock_close(fd);
 }
 
 // ----- async (suspending) operations ---------------------------------------
@@ -330,7 +335,7 @@ export async ffiAcceptAsync(fd: c_int): AcceptCtResult {
     while (true) {
         let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
         let len: c_int = 16;
-        let cfd: c_int = accept(fd, &peer, &len);
+        let cfd: c_int = yoop_sock_accept(fd, &peer, &len);
         if (cfd >= 0) {
             return {
                 code: IO_READY, fd: cfd,
@@ -358,7 +363,7 @@ export async ffiAcceptAsync(fd: c_int): AcceptCtResult {
 // Suspending single read. `n == 0` with code IO_READY is EOF.
 export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
     while (true) {
-        let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+        let n: c_ssize_t = yoop_sock_recv(fd, buf.ptr, buf.len, 0);
         if (n >= 0) { return { code: IO_READY, n: n, error: "" }; }
         let e: int32 = errno.get();
         if (!wouldBlock(e)) { return ioErr(errno.message(e)); }
@@ -374,7 +379,7 @@ export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
         let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
-        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        let n: c_ssize_t = yoop_sock_send(fd, chunk.ptr, chunk.len, 0);
         if (n >= 0) {
             total = total + usize(n);
         } else {
@@ -447,7 +452,7 @@ function waitWritable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
     return ioStop(int32(rc));
 }
 
-// Park on the listening fd's readability under `ct`, then accept().
+// Park on the listening fd's readability under `ct`, then yoop_sock_accept().
 // Returns IO_TIMEDOUT / IO_CANCELLED instead of blocking forever when
 // no connection arrives - which is what makes a server loop able to
 // notice a shutdown request.
@@ -458,7 +463,7 @@ function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResu
     }
     let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
     let len: c_int = 16;
-    let cfd: c_int = accept(fd, &peer, &len);
+    let cfd: c_int = yoop_sock_accept(fd, &peer, &len);
     if (cfd < 0) {
         return {
             code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
@@ -474,12 +479,12 @@ function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResu
     };
 }
 
-// Park on readability under `ct`, then recv() once into `buf`.
+// Park on readability under `ct`, then yoop_sock_recv() once into `buf`.
 // `n == 0` with `code == IO_READY` is EOF, exactly as for ffi_recv.
 function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
     let w: IoResult = waitReadable(fd, ct, deadlineNs);
     if (w.code != IO_READY) { return w; }
-    let n: c_ssize_t = recv(fd, buf.ptr, buf.len, 0);
+    let n: c_ssize_t = yoop_sock_recv(fd, buf.ptr, buf.len, 0);
     if (n < 0) { return ioErr(errno.message(errno.get())); }
     return { code: IO_READY, n: n, error: "" };
 }
@@ -497,7 +502,7 @@ function ffiSendAllCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64
             return { code: w.code, n: c_ssize_t(total), error: w.error };
         }
         let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
-        let n: c_ssize_t = send(fd, chunk.ptr, chunk.len, 0);
+        let n: c_ssize_t = yoop_sock_send(fd, chunk.ptr, chunk.len, 0);
         if (n < 0) {
             return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
         }

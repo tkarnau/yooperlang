@@ -3174,11 +3174,30 @@ function codegenWithModuleId(
     return false;
   }
 
+  // Identical string literals share ONE global.
+  //
+  // This is not only a size optimization - `enum<string>` equality is the one
+  // place the language compares strings, and it lowers to `icmp eq ptr`
+  // (INT_OP_MAP), so `dir == SortDir.Asc` is only correct if both sides name
+  // the same global. Emitting a fresh global per occurrence left that to the
+  // linker's constant merger, which dedupes identical `unnamed_addr`
+  // constants on Mach-O/ELF but not for MSVC at -O0 - so the comparison
+  // silently evaluated false on Windows while passing everywhere else.
+  //
+  // Interning here makes the guarantee explicit instead of accidental. It is
+  // keyed on the ENCODED bytes so two literals that differ only in source
+  // spelling (an escape vs. the raw character) still land on one global, and
+  // it is per emission unit, which is all the pointer comparison needs.
+  const strGlobalPool = new Map(); // encoded content -> { name, byteLen }
   function emitRawStringGlobal(inner) {
-    const name = freshStrGlobal();
     const { llvmStr, byteLen } = encodeStringBytes(inner);
+    const cached = strGlobalPool.get(llvmStr);
+    if (cached) return cached;
+    const name = freshStrGlobal();
     globals.push(`${name} = private unnamed_addr constant [${byteLen} x i8] c"${llvmStr}", align 1`);
-    return { name, byteLen };
+    const entry = { name, byteLen };
+    strGlobalPool.set(llvmStr, entry);
+    return entry;
   }
 
   function emitQuotedStringGlobal(quotedValue) {
@@ -3873,10 +3892,20 @@ function codegenWithModuleId(
     );
     fnLines.push(`  call void @free(ptr ${mem})`);
     fnLines.push(`  br label %${coro.suspendLabel}`);
-    const unused = freshTemp();
     fnLines.push(`${coro.suspendLabel}:`);
+    // The result is deliberately DISCARDED rather than bound to a temp.
+    //
+    // llvm.coro.end changed shape in LLVM 19/20: it used to be
+    // `i1 (ptr, i1)` and is now `void (ptr, i1, token)`. Newer LLVM
+    // auto-upgrades the old spelling on read, which is fine on its own - but
+    // if the call's result is bound to a name, the upgrade rewrites the call
+    // to `void` and leaves `%tN =` in front of it, and the module fails
+    // verification with "Broken module found". Discarding the result is legal
+    // in both worlds (an unused non-void result needs no name), so this one
+    // line is correct against every LLVM the project supports without having
+    // to detect a version.
     fnLines.push(
-      `  ${unused} = call i1 @llvm.coro.end(ptr ${coro.hdl}, i1 false)`,
+      `  call i1 @llvm.coro.end(ptr ${coro.hdl}, i1 false)`,
     );
     fnLines.push(`  ret ptr ${coro.hdl}`);
   }

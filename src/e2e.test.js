@@ -16,8 +16,32 @@ import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
 import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
+import {
+  EXE_SUFFIX,
+  clangEnv,
+  lowerLinkFlag,
+  resolveClang,
+  windowsClangArgs,
+} from "./toolchain.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
+
+// Why the DWARF-via-lldb tests below cannot run here, or null if they can.
+//
+// Two separate reasons, and keeping them distinct matters because a skip that
+// names the wrong cause is worse than no skip at all. On Windows the probe
+// itself was broken (`which` is a POSIX command; the Windows equivalent is
+// `where`), so those tests reported "lldb not on PATH" even with lldb.exe
+// installed - masking the real reason, which is that clang drives the MSVC
+// target with -gcodeview and therefore emits CodeView rather than DWARF.
+// Getting a debugger working on Windows is deferred; see the porting notes.
+function dwarfSkipReason() {
+  if (process.platform === "win32") {
+    return "debug info on the MSVC target is CodeView, not DWARF";
+  }
+  const probe = spawnSync("which", ["lldb"], { encoding: "utf8" });
+  return probe.status === 0 ? null : "lldb not on PATH";
+}
 
 function runFixture(relPath, opts = {}) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
@@ -35,17 +59,18 @@ function runFixture(relPath, opts = {}) {
   }
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
-  const binPath = path.join(tmpDir, "out");
+  const binPath = path.join(tmpDir, "out" + EXE_SUFFIX);
   fs.writeFileSync(llPath, ir);
   const clangArgs = [
     llPath,
     ...RUNTIME_SOURCES,
     "-o",
     binPath,
-    ...runtimeLinkFlags().map((f) => `-l${f}`),
-    ...extraLinkFlags.map((f) => `-l${f}`),
+    ...runtimeLinkFlags().flatMap(lowerLinkFlag),
+    ...extraLinkFlags.flatMap(lowerLinkFlag),
+    ...windowsClangArgs(),
   ];
-  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  execFileSync(resolveClang(), clangArgs, { stdio: "pipe", env: clangEnv() });
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
   const result = spawnSync(binPath, [], {
     encoding: "utf8",
@@ -63,7 +88,7 @@ function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
   const ir = compileSource(src);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
-  const binPath = path.join(tmpDir, "out");
+  const binPath = path.join(tmpDir, "out" + EXE_SUFFIX);
   fs.writeFileSync(llPath, ir);
   fs.copyFileSync(
     path.join(repoRoot, assetRelPath),
@@ -74,9 +99,10 @@ function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
     ...RUNTIME_SOURCES,
     "-o",
     binPath,
-    ...runtimeLinkFlags().map((f) => `-l${f}`),
+    ...runtimeLinkFlags().flatMap(lowerLinkFlag),
+    ...windowsClangArgs(),
   ];
-  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  execFileSync(resolveClang(), clangArgs, { stdio: "pipe", env: clangEnv() });
   const result = spawnSync(binPath, [], { encoding: "utf8", cwd: tmpDir });
   return { stdout: result.stdout, exitCode: result.status };
 }
@@ -1020,13 +1046,28 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "opened=0 nz=1 v=7\n");
   });
 
-  it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", () => {
+  // Both of these mirror POSIX's `struct timespec` and call clock_gettime,
+  // neither of which exists on Windows: the MSVC CRT has no clock_gettime,
+  // and `struct timespec` is not layout-compatible across the three targets
+  // anyway (tv_nsec is a 4-byte long on Windows and an 8-byte long on
+  // Linux/macOS), so one yoop struct cannot mirror it without conditional
+  // compilation the language does not have.
+  //
+  // The compiler features they cover - `c_*` type aliases in an extern
+  // signature and a C-ABI struct passed by pointer - are still exercised on
+  // Windows through std/net, where SockAddrIn is a `layout { abi "C"; }`
+  // struct handed to yoop_sock_bind/connect (see http_client_loopback).
+  const posixLibc = process.platform === "win32";
+
+  it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", (t) => {
+    if (posixLibc) { t.skip("clock_gettime is POSIX-only"); return; }
     const { stdout, exitCode } = runFixture("examples/pass/clock_gettime.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "plausible=1 nsec_ok=1\n");
   });
 
-  it("clock_gettime_layout.yoop: layout { abi \"C\"; } on a C-mirroring struct compiles + runs", () => {
+  it("clock_gettime_layout.yoop: layout { abi \"C\"; } on a C-mirroring struct compiles + runs", (t) => {
+    if (posixLibc) { t.skip("clock_gettime is POSIX-only"); return; }
     const { stdout, exitCode } = runFixture("examples/pass/clock_gettime_layout.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "ok=1\n");
@@ -1094,7 +1135,7 @@ function runFixtureEntry(relPath, opts = {}) {
   const { ir, linkFlags } = compileEntry(entryAbs, { trackHeap: !!opts.trackHeap });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
-  const binPath = path.join(tmpDir, "out");
+  const binPath = path.join(tmpDir, "out" + EXE_SUFFIX);
   fs.writeFileSync(llPath, ir);
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
   // -g preserves the DWARF metadata yoopiler emits; -O0 mirrors the
@@ -1106,9 +1147,10 @@ function runFixtureEntry(relPath, opts = {}) {
     "-O0",
     "-o",
     binPath,
-    ...allLinkFlags.map((f) => `-l${f}`),
+    ...allLinkFlags.flatMap(lowerLinkFlag),
+    ...windowsClangArgs(),
   ];
-  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  execFileSync(resolveClang(), clangArgs, { stdio: "pipe", env: clangEnv() });
   // `env` mirrors runFixture's option - needed by fixtures that pin
   // YOOP_NUM_WORKERS to prove a scheduling property.
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
@@ -1635,8 +1677,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // right. We use `image lookup` (no process attach) so this works in CI
   // without debugger-attach permissions.
   it("dwarf: lldb resolves main to its .yoop source file and line", (t) => {
-    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
-    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const skip = dwarfSkipReason();
+    if (skip) { t.skip(skip); return; }
     const { binPath } = runFixtureEntry("examples/pass/runtime_linked/main.yoop");
     const out = spawnSync(
       "lldb",
@@ -1683,8 +1725,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // proves it survives clang and that a debugger can actually READ the values
   // (the whole point - previously `frame variable` showed nothing but prims).
   it("dwarf: lldb reads struct / string / array / variant locals by value", (t) => {
-    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
-    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const skip = dwarfSkipReason();
+    if (skip) { t.skip(skip); return; }
     const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
     const out = spawnSync(
       "lldb",
@@ -1720,8 +1762,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // breakpoints use) landed BEFORE the arguments reached their stack slots and
   // the variables pane showed garbage.
   it("dwarf: a function breakpoint stops after the parameter stores", (t) => {
-    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
-    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
+    const skip = dwarfSkipReason();
+    if (skip) { t.skip(skip); return; }
     const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
     const out = spawnSync(
       "lldb",
@@ -1939,11 +1981,15 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.match(ir, /declare i32 @yoop_io_arm_readable/);
     // And the coroutine trampolines are installed for the scheduler.
     assert.match(ir, /call void @yoop_runtime_set_coro_ops/);
-    // The libc socket-family externs are declared.
-    assert.match(ir, /declare i32 @socket\(/);
-    assert.match(ir, /declare i32 @bind\(/);
-    assert.match(ir, /declare i32 @listen\(/);
-    assert.match(ir, /declare i32 @accept\(/);
+    // The socket-family externs are declared. These name the runtime's
+    // yoop_sock_* shims rather than libc directly: a Windows socket is a
+    // SOCKET handle rather than a file descriptor and reports errors through
+    // WSAGetLastError, so std/net goes through C wrappers that present the
+    // POSIX shape on every platform (see runtime/yoop_net.c).
+    assert.match(ir, /declare i32 @yoop_sock_socket\(/);
+    assert.match(ir, /declare i32 @yoop_sock_bind\(/);
+    assert.match(ir, /declare i32 @yoop_sock_listen\(/);
+    assert.match(ir, /declare i32 @yoop_sock_accept\(/);
   });
 
   // Phase 10.I: `vtable Reader for Readable` round-trips through a
@@ -2076,7 +2122,9 @@ describe("e2e: declaration order independence", () => {
         assert.ok(err.isParseError, "expected a parse error");
         // The point of the fix: the failing FILE is stamped on the throw, so the
         // driver stops rendering every parse error against the entry file.
-        assert.match(err.srcPath ?? "", /parse_error_in_import\/lib\.yoop$/);
+        // Either separator: srcPath comes from path.join, so it is
+        // backslash-separated on Windows.
+        assert.match(err.srcPath ?? "", /parse_error_in_import[\\/]lib\.yoop$/);
         assert.match(err.srcText ?? "", /export function ok/);
         return true;
       },

@@ -1,13 +1,22 @@
 import.unsafe;
 
-extern "C" from "unistd.h" {
-    function pipe(fds: unsafe_ptr<c_int>): c_int;
-    function read(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
-    function write(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
-    function close(fd: c_int): c_int;
-}
-
+// The descriptor pair comes from the runtime rather than from libc's pipe().
+//
+// Two reasons, and the second is the one that matters. pipe() is POSIX-only,
+// so it does not link on Windows at all. More importantly, the point of this
+// fixture is that a task PARKS INSIDE THE MULTIPLEXER on `rfd` - and the
+// Windows multiplexer is WSAPoll-based, which can only wait on sockets. A
+// Windows pipe handle would link (via _pipe) and then never wake, which is a
+// far worse failure than not compiling. yoop_socketpair returns a pair the
+// multiplexer can always wait on: pipe() on POSIX, loopback sockets on
+// Windows. Its read/write/close siblings exist for the same reason - a
+// Windows socket is not a CRT file descriptor, so read()/close() are wrong
+// for it.
 extern "C" from "yoop_runtime" {
+    function yoop_socketpair(fds: unsafe_ptr<c_int>): c_int;
+    function yoop_socketpair_read(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
+    function yoop_socketpair_write(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
+    function yoop_socketpair_close(fd: c_int): c_int;
     function yoop_io_wait_readable(fd: c_int): c_int;
     function yoop_sleep_ms(ms: c_size_t): c_int;
 }
@@ -18,7 +27,7 @@ task reader(rfd: c_int): int32 {
         return -1;
     }
     let buf: uint8[] = [0];
-    let n: c_ssize_t = read(rfd, buf.ptr, 1);
+    let n: c_ssize_t = yoop_socketpair_read(rfd, buf.ptr, 1);
     if (n != 1) {
         return -2;
     }
@@ -27,7 +36,7 @@ task reader(rfd: c_int): int32 {
 
 function main(): int32 {
     let fds: c_int[] = [0, 0];
-    let rc_pipe: c_int = pipe(fds.ptr);
+    let rc_pipe: c_int = yoop_socketpair(fds.ptr);
     if (rc_pipe != 0) {
         printf(`pipe failed\n`);
         return 1;
@@ -42,12 +51,12 @@ function main(): int32 {
     let s_rc: c_int = yoop_sleep_ms(20);
 
     let msg: uint8[] = [88];  // ASCII 'X'
-    let wn: c_ssize_t = write(wfd, msg.ptr, 1);
+    let wn: c_ssize_t = yoop_socketpair_write(wfd, msg.ptr, 1);
 
     let got: int32 = wait r;
     printf(`got=${got}\n`);
 
-    let cr: c_int = close(rfd);
-    let cw: c_int = close(wfd);
+    let cr: c_int = yoop_socketpair_close(rfd);
+    let cw: c_int = yoop_socketpair_close(wfd);
     return 0;
 }

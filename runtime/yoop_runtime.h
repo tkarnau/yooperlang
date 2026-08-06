@@ -355,6 +355,47 @@ int yoop_io_would_block(int e);
 
 void yoop_io_shutdown(void);
 
+// Perform any one-time per-process socket-library setup. A no-op with BSD
+// sockets; on Windows it runs WSAStartup, which must precede the first socket
+// call in the process. Idempotent and safe to call from any thread, so every
+// entry point that can be the first to touch a socket just calls it.
+void yoop_net_startup(void);
+
+// Create a connected pair of descriptors: fds[0] is the read end, fds[1] the
+// write end. Returns 0, or -1 with errno set.
+//
+// This is pipe() on POSIX and a loopback TCP socketpair on Windows, because
+// Windows pipe handles cannot be waited on by the multiplexer (WSAPoll accepts
+// sockets only). Anything that needs a descriptor the multiplexer can wait on
+// must come from here rather than from pipe() directly.
+int yoop_socketpair(int fds[2]);
+
+// Close / read / write a descriptor obtained from yoop_socketpair. On POSIX
+// these are close/read/write; on Windows the pair are sockets and need
+// closesocket/recv/send, which are a different namespace from CRT fds.
+int     yoop_socketpair_close(int fd);
+int64_t yoop_socketpair_read(int fd, void* buf, size_t n);
+int64_t yoop_socketpair_write(int fd, const void* buf, size_t n);
+
+// ----- POSIX-shaped socket calls -------------------------------------------
+//
+// These present the BSD-sockets shape - int descriptors, -1 on failure, errno
+// set - on every platform, so std/net/socket_ffi.yoop can stay free of
+// platform conditionals. On POSIX each is a direct passthrough; on Windows
+// each bridges Winsock's SOCKET handles and WSAGetLastError reporting. See
+// the block comment in yoop_net.c for why the yoop layer cannot call libc
+// directly here.
+int     yoop_sock_socket(int domain, int type, int proto);
+int     yoop_sock_bind(int fd, const void* addr, int len);
+int     yoop_sock_listen(int fd, int backlog);
+int     yoop_sock_accept(int fd, void* addr, int* len);
+int     yoop_sock_connect(int fd, const void* addr, int len);
+int64_t yoop_sock_send(int fd, const void* buf, size_t n, int flags);
+int64_t yoop_sock_recv(int fd, void* buf, size_t n, int flags);
+int     yoop_sock_close(int fd);
+uint16_t yoop_sock_htons(uint16_t v);
+uint32_t yoop_sock_inet_addr(const char* s);
+
 // Create a directory with standard 0755 permissions (mode computed from
 // POSIX S_* symbols per platform). Returns mkdir()'s rc.
 int yoop_io_mkdir(const char* path);

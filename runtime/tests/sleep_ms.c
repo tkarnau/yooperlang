@@ -3,12 +3,13 @@
 #include "../yoop_runtime.h"
 
 #include <stdio.h>
-#include <time.h>
 
+// yoop_now_ns is the runtime's own monotonic clock and is exactly the one
+// yoop_sleep_ms measures against, so this reads the same base the code under
+// test does. It also replaces a direct clock_gettime(CLOCK_MONOTONIC) call,
+// which does not exist in the MSVC CRT.
 static double monotonic_ms(void) {
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (double)ts.tv_sec * 1000.0 + (double)ts.tv_nsec / 1e6;
+    return (double)yoop_now_ns() / 1e6;
 }
 
 int main(void) {
