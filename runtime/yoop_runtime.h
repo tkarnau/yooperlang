@@ -361,6 +361,67 @@ void yoop_io_shutdown(void);
 // entry point that can be the first to touch a socket just calls it.
 void yoop_net_startup(void);
 
+// ----- operation-level async I/O -------------------------------------------
+//
+// The readiness API above ("tell me when this fd is readable") is a POSIX
+// idea. Windows drives I/O through completion ports, where you start an
+// operation and are told when it finished - and crucially there is no way to
+// ask whether a socket is WRITABLE, because a completion port has no such
+// question. These entry points are the portable shape: start an operation,
+// suspend, collect the result.
+//
+//   begin: >= 0        finished inline, that many bytes
+//          -2          in flight; suspend the task, then call yoop_iop_end
+//          -1          failed, errno set
+//   end:   >= 0 bytes, or -1 with errno set
+//
+// On POSIX these are "nonblocking syscall, and on EAGAIN arm a readiness
+// interest and retry on resume" - identical behavior to what std/net did by
+// hand. On Windows they are real overlapped WSARecv / WSASend.
+//
+// **The buffer must stay valid from begin() until end() returns.** On Windows
+// the kernel writes through it while the task is suspended. A caller whose
+// buffer dies at the suspend point corrupts memory; pass storage owned by the
+// connection, not a local temporary.
+//
+// Accept is an operation too, and not by choice: the IOCP backend expresses
+// read-readiness with a zero-byte WSARecv, and WSARecv on a LISTENING socket
+// fails with WSAENOTCONN - a listener is not a connection and has nothing to
+// receive. AcceptEx is the only way to await an inbound connection on a
+// completion port. accept_begin yields the new descriptor, not a byte count.
+int64_t yoop_iop_recv_begin(int fd, void* buf, size_t n);
+int64_t yoop_iop_send_begin(int fd, const void* buf, size_t n);
+int64_t yoop_iop_accept_begin(int fd);
+int64_t yoop_iop_end(void);
+
+// Blocking, cancel- and deadline-aware sibling of the above: parks the CALLING
+// THREAD instead of suspending a task, and reports WHY it stopped.
+//
+// `kind` is 1 = recv, 2 = send, 3 = accept (mirroring yoop_op_kind).
+// `*out_code` receives YOOP_WAIT_READY / TIMEDOUT / CANCELLED. Returns the
+// byte count (or accepted descriptor) when READY, else -1; errno is meaningful
+// only when the return is -1 and *out_code is READY.
+//
+// std/net's blocking and cancel-aware helpers need this for the same reason
+// the async ones need begin/end: waiting for readiness and then calling accept
+// cannot work on a completion port, which has no way to report that a
+// LISTENING socket became readable.
+int64_t yoop_iop_wait(int fd, void* buf, size_t n, int kind,
+                      yoop_cancel_t* ct, uint64_t deadline_ns,
+                      int32_t* out_code);
+
+// Accept has no buffer, so it gets its own entry rather than making every call
+// site invent a null one. Yields the accepted descriptor.
+int64_t yoop_iop_accept_wait(int fd, yoop_cancel_t* ct, uint64_t deadline_ns,
+                             int32_t* out_code);
+
+// Announce that `fd` is about to be closed, so the multiplexer can drop any
+// per-socket state it holds. A no-op on the readiness backends; on IOCP it is
+// REQUIRED, because Windows recycles socket handle values and a stale
+// association entry makes the next socket with that value never deliver a
+// completion. Every close inside the runtime already routes through here.
+void yoop_io_closing(int fd);
+
 // Create a connected pair of descriptors: fds[0] is the read end, fds[1] the
 // write end. Returns 0, or -1 with errno set.
 //

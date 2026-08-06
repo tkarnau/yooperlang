@@ -174,6 +174,11 @@ int64_t yoop_sock_recv(int fd, void* buf, size_t n, int flags) {
 }
 
 int yoop_sock_close(int fd) {
+    // Tell the multiplexer first. On IOCP it caches which sockets are bound to
+    // the completion port, and Windows recycles handle VALUES - so a stale
+    // entry makes the next socket with the same value look already-bound, and
+    // its operations then never complete. That is a hang, not a leak.
+    yoop_io_closing(fd);
 #ifdef _WIN32
     if (closesocket((SOCKET)fd) == SOCKET_ERROR) return yoop_sock_fail();
     return 0;

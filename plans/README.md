@@ -86,6 +86,57 @@ Immediate build sequence (from the contracts doc):
 Small, concrete next steps (the running scratch list; `scratch.md` is the
 informal personal version):
 
+- **VERIFY ON MACOS/LINUX: the Windows uplift and the IOCP conversion.** Both
+  landed green on Windows (`npm test` = 923 pass / 0 fail / 5 skipped) but
+  NEITHER has been compiled on a POSIX host. They touched shared code, so this
+  is a real gate, not a formality. Run `npm test` on the Mac first; if it is
+  red, the list below is where to look.
+  - **The poller was split per platform** (Go netpoll style). `runtime/yoop_io.c`
+    is now a platform-neutral core and the engines live in
+    `runtime/yoop_io_kqueue.c` / `yoop_io_epoll.c` / `yoop_io_windows.c` behind
+    `runtime/yoop_io_internal.h`. The kqueue and epoll bodies are the SAME code
+    that was in yoop_io.c, moved - but each engine now owns its own self-pipe
+    and the registration table stayed behind, so the seam is new even though the
+    logic is not. Only one engine compiles per host (each is wrapped in its own
+    `#ifdef`), which is why all three sit unconditionally in `RUNTIME_SOURCES`.
+  - **Readiness is no longer the portable contract; the OPERATION is.** std/net
+    now calls `yoop_iop_recv_begin` / `send_begin` / `accept_begin` +
+    `yoop_iop_end` (task-suspending) and `yoop_iop_wait` / `yoop_iop_accept_wait`
+    (thread-parking, cancel + deadline aware). On POSIX these are still
+    "nonblocking syscall, and on EAGAIN arm a readiness interest and retry on
+    resume" - the retry just moved inside the runtime. The forcing reason is
+    that a completion port cannot answer "is this socket writable" or "is this
+    LISTENING socket readable" at all. `std/net/socket_ffi.yoop` was rewritten
+    against this and no longer imports the readiness API.
+  - **`runtime/yoop_fs.c` is new** - the filesystem/dirent helpers extracted out
+    of yoop_io.c. Both `RUNTIME_SOURCES` in `../src/runtimeBuild.js` and the
+    mirror list in `../runtime/tests/run_tests.sh` were updated; check
+    `sh runtime/tests/run_tests.sh` still passes on POSIX, since that script is
+    never exercised on Windows.
+  - **The runtime C tests were rewritten** to use portable shims
+    (`runtime/tests/test_support.h`): `yoop_thread_spawn`/`join` instead of
+    pthread directly, and `yoop_socketpair` instead of `pipe()`. On POSIX
+    `yoop_socketpair` IS `pipe()`, so coverage there is unchanged.
+  - **Two fixes are cross-platform and matter on the Mac too**, independent of
+    Windows. (1) `llvm.coro.end`'s result must be DISCARDED, not bound to a
+    temp: its signature changed in LLVM 19/20 and newer LLVM auto-upgrades the
+    old spelling, leaving `%tN =` in front of a now-void call and failing
+    verification with "Broken module found". This will bite the Mac on its next
+    LLVM upgrade. (2) Identical string literals are now interned into one
+    global, because `enum<string>` equality lowers to `icmp eq ptr` and was
+    silently relying on the linker's constant merger.
+  - **One Windows-only fix lives in a SHARED header.** `yoop_cv_wait_until_locked`
+    in `runtime/yoop_platform.h` now loops until the monotonic clock actually
+    passes the deadline, because `SleepConditionVariableCS` can report a timeout
+    up to one system tick (15.6ms) early. The kqueue/epoll branches of that
+    function are untouched, but it is the one timed-wait primitive the whole
+    runtime goes through, so it is worth a look during review.
+  - **The test suites now prebuild the C runtime once per process**
+    (`prebuiltRuntimeObjects` in `../src/toolchain.js`) instead of recompiling
+    all 12 translation units per fixture. Measured 4.9x on a fixed 109-test e2e
+    slice. It also moved `-Wall -Wextra -Werror` onto the runtime prebuild,
+    which is where `runtimeC.test.js` used to get it - if a POSIX-only warning
+    exists in the runtime, this is now what will surface it, as a hard error.
 - ~~Bootstrap: create a `Vec` iterator concept (needed to write the layers
   idiomatically without index plumbing).~~ DONE: `vecIter` +
   `VecIter<T> implements Iterable<T>` in `std/core/vec.yoop`, landed alongside

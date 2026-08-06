@@ -72,28 +72,53 @@ extern "C" from "yoop_runtime" {
     function yoop_sock_socket(domain: c_int, sock_type: c_int, proto: c_int): c_int;
     function yoop_sock_bind(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
     function yoop_sock_listen(fd: c_int, backlog: c_int): c_int;
-    function yoop_sock_accept(fd: c_int, addr: unsafe_ptr<SockAddrIn>, addr_len: unsafe_ptr<c_int>): c_int;
     function yoop_sock_connect(fd: c_int, addr: unsafe_ptr<SockAddrIn>, len: c_int): c_int;
-    function yoop_sock_send(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
-    function yoop_sock_recv(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, flags: c_int): c_ssize_t;
     function yoop_sock_close(fd: c_int): c_int;
+    // Note there is no accept / send / recv here. Every transfer in this file
+    // goes through the operation API below instead - see the note on it for
+    // why readiness-then-syscall is not a portable shape. The yoop_sock_*
+    // shims for those still exist in the runtime for C-side callers.
     function yoop_sock_htons(host_short: uint16): uint16;
     function yoop_sock_inet_addr(addr: string): uint32;
 }
 
 extern "C" from "yoop_runtime" {
-    function yoop_io_wait_readable(fd: c_int): c_int;
-    function yoop_io_wait_writable(fd: c_int): c_int;
-    // Deadline- and cancellation-aware readiness waits. `ct` may be a
-    // null RawCancel and `deadlineNs` may be 0; either way the other
-    // still applies, and with both absent these behave exactly like the
-    // two-argument forms above. Return one of the IO_* codes below.
-    function yoop_io_wait_readable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
-    function yoop_io_wait_writable_ex(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64): c_int;
-    // Non-blocking mode + the portable EAGAIN test, both needed by the
-    // async helpers at the bottom of this file.
+    // Note the READINESS API (yoop_io_wait_readable / _writable / _ex, and
+    // yoop_io_would_block) is deliberately not imported here any more. std/net
+    // used to be built on it and no longer is: readiness is a POSIX notion
+    // that a completion port cannot express - it has no way to say a socket is
+    // writable, or that a LISTENING socket is readable. The runtime still
+    // exports those for consumers that genuinely want readiness on a connected
+    // descriptor (examples/pass/concurrent_pipe.yoop), but every transfer in
+    // std/net now goes through the operation API below.
     function yoop_io_set_nonblocking(fd: c_int): c_int;
-    function yoop_io_would_block(e: int32): c_int;
+    // Operation-level async I/O. `begin` returns bytes (>= 0), IOP_PENDING
+    // (-2) meaning "suspend then call end", or -1 with errno set.
+    //
+    // These exist because readiness is not a portable idea: an I/O completion
+    // port has no way to answer "is this socket writable yet", so a send path
+    // built on awaitWritable cannot work on Windows. Starting the operation
+    // and waiting for it to finish is the shape both platforms can express.
+    // The buffer must stay alive across the suspend - see yoop_runtime.h.
+    function yoop_iop_recv_begin(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
+    function yoop_iop_send_begin(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t): c_ssize_t;
+    // Accept is an operation for the same reason: a completion port cannot be
+    // asked whether a LISTENING socket is readable (a zero-byte WSARecv on a
+    // listener fails with WSAENOTCONN), so AcceptEx is the only way to await a
+    // connection there. Yields the new descriptor, not a byte count.
+    function yoop_iop_accept_begin(fd: c_int): c_ssize_t;
+    function yoop_iop_end(): c_ssize_t;
+    // Blocking, cancel- and deadline-aware sibling: parks the calling THREAD
+    // instead of suspending a task, and reports why it stopped through
+    // `outCode` (one of the IO_* values). `kind` mirrors yoop_op_kind:
+    // 1 = recv, 2 = send, 3 = accept.
+    function yoop_iop_wait(fd: c_int, buf: unsafe_ptr<uint8>, n: c_size_t, kind: c_int,
+                           ct: unsafe_ptr, deadlineNs: uint64,
+                           outCode: unsafe_ptr<int32>): c_ssize_t;
+    // Accept has no buffer, so it gets its own entry rather than forcing every
+    // call site to invent a null one. Yields the new descriptor.
+    function yoop_iop_accept_wait(fd: c_int, ct: unsafe_ptr, deadlineNs: uint64,
+                                  outCode: unsafe_ptr<int32>): c_ssize_t;
     // Cross-platform SO_REUSEADDR helper. SOL_SOCKET / SO_REUSEADDR have
     // different numeric values on Linux vs macOS, so we resolve them in
     // C (see runtime/yoop_net.c) rather than hand-mirror them in yoop.
@@ -190,27 +215,28 @@ function ffi_listen(host: string, port: int32, backlog: int32): Result<c_int, st
 // fd with the peer's address. Named so it can ride inside Result.Ok.
 type AcceptedFd { fd: c_int, peer_host: uint32, peer_port: uint16 }
 
-// Park on the listening fd's readability, then yoop_sock_accept(). Returns the
-// new client fd plus the peer's address (parsed back out of the
-// sockaddr_in the kernel filled). On error returns `Err`.
+// Block until the next connection arrives, then take it. Returns the new
+// client fd, or `Err`.
 //
-// Plain `function`, not `task`: yoop_io_wait_readable parks the calling
-// pthread on the multiplexer regardless of task/function context. The
-// caller is expected to spawn a task wrapping this if it wants
-// per-connection concurrency (see std/net/tcp.yoop's higher-level wrapper).
+// Plain `function`, not `task`: this parks the calling thread on the
+// multiplexer regardless of task/function context. The caller is expected to
+// spawn a task wrapping this if it wants per-connection concurrency (see
+// std/net/tcp.yoop's higher-level wrapper).
+//
+// An unbounded yoop_iop_wait (null token, no deadline) rather than "wait for
+// readability, then accept": a completion port has no way to report a
+// LISTENING socket as readable, so the two-step shape does not exist on
+// Windows. See ffiAcceptAsync for the full note, including why the peer
+// address is no longer reported.
 function ffi_accept(fd: c_int): Result<AcceptedFd, string> {
-    let wait_rc: c_int = yoop_io_wait_readable(fd);
-    if (wait_rc != 0) {
-        return Result.Err { error: errno.message(errno.get()) };
-    }
-    let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
-    let len: c_int = 16;
-    let cfd: c_int = yoop_sock_accept(fd, &peer, &len);
+    let code: int32 = IO_READY;
+    let nullCt: RawCancel = { p: null };
+    let cfd: c_ssize_t = yoop_iop_accept_wait(fd, nullCt.p, 0, &code);
     if (cfd < 0) {
         return Result.Err { error: errno.message(errno.get()) };
     }
     return Result.Ok {
-        value: { fd: cfd, peer_host: peer.sin_addr, peer_port: peer.sin_port },
+        value: { fd: c_int(cfd), peer_host: 0, peer_port: 0 },
     };
 }
 
@@ -247,34 +273,32 @@ function ffi_connect(fd: c_int, host: string, port: int32): ConnectOutcome {
     return ConnectOutcome.Ok;
 }
 
-// Park on readability, then yoop_sock_recv() once into `buf`. uint8[] is a fat
-// pointer; passing by value copies the (ptr,len) header but the bytes
-// are still the caller's storage. Returns bytes read in `Ok` (0 = EOF),
-// or `Err` on a syscall failure.
+// Read once into `buf`, blocking until bytes arrive. uint8[] is a fat pointer;
+// passing by value copies the (ptr,len) header but the bytes are still the
+// caller's storage. Returns bytes read in `Ok` (0 = EOF), or `Err`.
 function ffi_recv(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
-    let wait_rc: c_int = yoop_io_wait_readable(fd);
-    if (wait_rc != 0) {
-        return Result.Err { error: errno.message(errno.get()) };
-    }
-    let n: c_ssize_t = yoop_sock_recv(fd, buf.ptr, buf.len, 0);
+    let code: int32 = IO_READY;
+    let nullCt: RawCancel = { p: null };
+    let n: c_ssize_t = yoop_iop_wait(fd, buf.ptr, buf.len, OP_RECV, nullCt.p, 0, &code);
     if (n < 0) {
         return Result.Err { error: errno.message(errno.get()) };
     }
     return Result.Ok { value: n };
 }
 
-// Park on writability, then yoop_sock_send() in a loop until every byte of `buf`
-// has been transmitted or an error occurs. Returns total bytes sent in
-// `Ok` (== buf.len on success).
+// Send until every byte of `buf` has been transmitted or an error occurs.
+// Returns total bytes sent in `Ok` (== buf.len on success).
+//
+// An operation per chunk rather than "wait for writability, then send": a
+// completion port cannot answer the writability question at all, so the send
+// itself is what pends. See ffiSendAllAsync for the full note.
 function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
     let total: usize = 0;
+    let nullCt: RawCancel = { p: null };
     while (total < buf.len) {
-        let wait_rc: c_int = yoop_io_wait_writable(fd);
-        if (wait_rc != 0) {
-            return Result.Err { error: errno.message(errno.get()) };
-        }
         let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
-        let n: c_ssize_t = yoop_sock_send(fd, chunk.ptr, chunk.len, 0);
+        let code: int32 = IO_READY;
+        let n: c_ssize_t = yoop_iop_wait(fd, chunk.ptr, chunk.len, OP_SEND, nullCt.p, 0, &code);
         if (n < 0) {
             return Result.Err { error: errno.message(errno.get()) };
         }
@@ -292,35 +316,22 @@ function ffi_close(fd: c_int): c_int {
 
 // ----- async (suspending) operations ---------------------------------------
 //
-// The blocking helpers above park the calling thread inside the
-// multiplexer. These suspend the calling TASK instead, handing its worker
-// back to the pool, so one worker can carry many in-flight connections.
+// The blocking helpers above park the calling thread inside the multiplexer.
+// These suspend the calling TASK instead, handing its worker back to the pool,
+// so one worker can carry many in-flight connections.
 //
-// The shape is always "try the syscall; if it would block, wait for
-// readiness and retry", which is why the fd has to be non-blocking - a
-// blocking fd would sleep inside recv and never reach the wait.
+// The shape is "start the operation; if it did not finish inline, suspend and
+// collect the result on resume". It used to be "try the syscall, and on
+// EWOULDBLOCK wait for readiness and retry" - the readiness helpers that
+// supported that (awaitReady / wouldBlock) are gone, because readiness is not
+// a portable notion. A completion port cannot answer "is this socket writable"
+// or "is this listener readable" at all, so those questions no longer appear
+// anywhere in this file. The runtime keeps the readiness API for consumers
+// that genuinely want it (see concurrent_pipe.yoop), but std/net does not.
 //
-// `awaitReady` hides the one wrinkle: `conc.awaitReadable` reports 1 when
-// there is no current task (called straight from main rather than from a
-// worker). Suspending there would park a coroutine nothing can resume, so
-// that case falls back to the blocking wait. The upshot is that the same
-// std/net code is correct on a worker and on main; it just suspends in
-// one and blocks in the other.
-function wouldBlock(e: int32): bool {
-    return yoop_io_would_block(e) != 0;
-}
-
-async awaitReady(fd: c_int, wantWrite: bool): c_int {
-    let armed: c_int = 0;
-    if (wantWrite) { armed = await conc.awaitWritable(fd); }
-    else           { armed = await conc.awaitReadable(fd); }
-    if (armed == 1) {
-        // Not on a worker - block this thread instead.
-        if (wantWrite) { return yoop_io_wait_writable(fd); }
-        return yoop_io_wait_readable(fd);
-    }
-    return armed;
-}
+// The fallback that awaitReady used to hide now lives in the runtime: a begin()
+// called off a worker reports EAGAIN, and the operation layer's blocking
+// sibling (yoop_iop_wait) is what the non-task paths call instead.
 
 // Put a socket into non-blocking mode. Every fd that reaches the async
 // helpers must go through this first; std/net does it in `newStream` and
@@ -329,69 +340,81 @@ function ffiSetNonblocking(fd: c_int): c_int {
     return yoop_io_set_nonblocking(fd);
 }
 
-// Suspending accept. Retries around EAGAIN, which on a listening socket
-// means "no pending connection right now".
+// Suspending accept.
+//
+// An operation rather than a readiness loop, and on Windows that is forced:
+// its multiplexer is a completion port, which has no way to report that a
+// LISTENING socket became readable (the zero-byte WSARecv it uses for read
+// readiness fails on a listener with WSAENOTCONN). AcceptEx is the only way to
+// await a connection there. On POSIX this is still accept-then-wait-on-EAGAIN,
+// with the retry moved inside the runtime.
+//
+// The peer address is not reported: AcceptEx delivers it in a packed buffer
+// that would have to be decoded with GetAcceptExSockaddrs, and no caller in
+// std/net or std/http reads these fields today. They stay zero rather than
+// carry a value that is only correct on one platform.
 export async ffiAcceptAsync(fd: c_int): AcceptCtResult {
-    while (true) {
-        let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
-        let len: c_int = 16;
-        let cfd: c_int = yoop_sock_accept(fd, &peer, &len);
-        if (cfd >= 0) {
-            return {
-                code: IO_READY, fd: cfd,
-                peerHost: peer.sin_addr, peerPort: peer.sin_port, error: "",
-            };
-        }
-        let e: int32 = errno.get();
-        if (!wouldBlock(e)) {
-            return {
-                code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
-                error: errno.message(e),
-            };
-        }
-        let rc: c_int = await awaitReady(fd, false);
-        if (rc != 0) {
-            return {
-                code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
-                error: errno.message(errno.get()),
-            };
-        }
+    let cfd: c_ssize_t = yoop_iop_accept_begin(fd);
+    if (cfd == IOP_PENDING) {
+        await conc.suspendNow();
+        cfd = yoop_iop_end();
     }
-    return { code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0, error: "" };
+    if (cfd < 0) {
+        return {
+            code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
+            error: errno.message(errno.get()),
+        };
+    }
+    return {
+        code: IO_READY, fd: c_int(cfd),
+        peerHost: 0, peerPort: 0, error: "",
+    };
 }
 
 // Suspending single read. `n == 0` with code IO_READY is EOF.
+//
+// One operation, not a readiness loop: `begin` either finishes inline or
+// reports IOP_PENDING, in which case the task suspends and `end` collects the
+// byte count. On POSIX that is still "recv, and on EAGAIN wait then retry" -
+// the retry just happens inside the runtime. On Windows it is a real
+// overlapped WSARecv, so the bytes are already in `buf` when we resume.
+//
+// `buf` is the caller's storage and must outlive the suspend, which it does:
+// every caller in std/net passes a buffer owned by the connection.
 export async ffiRecvAsync(fd: c_int, buf: uint8[]): IoResult {
-    while (true) {
-        let n: c_ssize_t = yoop_sock_recv(fd, buf.ptr, buf.len, 0);
-        if (n >= 0) { return { code: IO_READY, n: n, error: "" }; }
-        let e: int32 = errno.get();
-        if (!wouldBlock(e)) { return ioErr(errno.message(e)); }
-        let rc: c_int = await awaitReady(fd, false);
-        if (rc != 0) { return ioErr(errno.message(errno.get())); }
+    let n: c_ssize_t = yoop_iop_recv_begin(fd, buf.ptr, buf.len);
+    if (n == IOP_PENDING) {
+        await conc.suspendNow();
+        n = yoop_iop_end();
     }
-    return ioErr("unreachable");
+    if (n < 0) { return ioErr(errno.message(errno.get())); }
+    return { code: IO_READY, n: n, error: "" };
 }
 
 // Suspending write-everything. Loops until the whole buffer is out,
 // suspending whenever the socket buffer fills.
+// Suspending write-everything. Loops until the whole buffer is out.
+//
+// This is the path that FORCED the operation API. The old shape asked
+// `awaitReady(fd, true)` - "tell me when this socket is writable" - and an I/O
+// completion port cannot answer that: a zero-byte WSASend completes
+// immediately whether or not the send buffer has room, so there is nothing to
+// wait on. Issuing the send as an operation and waiting for it to complete is
+// the only formulation that works on both platforms, and it is what Windows
+// wanted anyway.
 export async ffiSendAllAsync(fd: c_int, buf: uint8[]): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
         let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
-        let n: c_ssize_t = yoop_sock_send(fd, chunk.ptr, chunk.len, 0);
-        if (n >= 0) {
-            total = total + usize(n);
-        } else {
-            let e: int32 = errno.get();
-            if (!wouldBlock(e)) {
-                return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(e) };
-            }
-            let rc: c_int = await awaitReady(fd, true);
-            if (rc != 0) {
-                return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
-            }
+        let n: c_ssize_t = yoop_iop_send_begin(fd, chunk.ptr, chunk.len);
+        if (n == IOP_PENDING) {
+            await conc.suspendNow();
+            n = yoop_iop_end();
         }
+        if (n < 0) {
+            return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
+        }
+        total = total + usize(n);
     }
     return { code: IO_READY, n: c_ssize_t(total), error: "" };
 }
@@ -412,6 +435,16 @@ const IO_READY:     int32 = 0;
 const IO_TIMEDOUT:  int32 = 1;
 const IO_CANCELLED: int32 = 2;
 const IO_ERROR:     int32 = -1;
+
+// Mirrors YOOP_IO_PENDING in runtime/yoop_io_internal.h: the `begin` half of
+// an operation reports this when the work is in flight and the task must
+// suspend before collecting the result with yoop_iop_end.
+const IOP_PENDING:  c_ssize_t = -2;
+
+// Operation kinds, mirroring yoop_op_kind in runtime/yoop_io_internal.h.
+const OP_RECV:   c_int = 1;
+const OP_SEND:   c_int = 2;
+const OP_ACCEPT: c_int = 3;
 
 // A cancel-aware byte-transfer outcome. `code` is one of the IO_*
 // constants; `n` is meaningful only when `code == IO_READY`, and
@@ -438,32 +471,21 @@ function ioStop(code: int32): IoResult {
     return { code: code, n: 0, error: "" };
 }
 
-// Wait for readability under a token + deadline, mapping a -1 return
-// into the errno message. Shared by every read-side helper below.
-function waitReadable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
-    let rc: c_int = yoop_io_wait_readable_ex(fd, ct.p, deadlineNs);
-    if (rc == IO_ERROR) { return ioErr(errno.message(errno.get())); }
-    return ioStop(int32(rc));
-}
-
-function waitWritable(fd: c_int, ct: RawCancel, deadlineNs: uint64): IoResult {
-    let rc: c_int = yoop_io_wait_writable_ex(fd, ct.p, deadlineNs);
-    if (rc == IO_ERROR) { return ioErr(errno.message(errno.get())); }
-    return ioStop(int32(rc));
-}
-
-// Park on the listening fd's readability under `ct`, then yoop_sock_accept().
-// Returns IO_TIMEDOUT / IO_CANCELLED instead of blocking forever when
-// no connection arrives - which is what makes a server loop able to
-// notice a shutdown request.
+// Take the next connection under `ct`, giving up on a deadline or a
+// cancellation instead of blocking forever - which is what makes a server loop
+// able to notice a shutdown request.
+//
+// One bounded operation rather than "wait for readability, then accept". That
+// is not a style choice: on Windows the multiplexer is a completion port,
+// which cannot report that a LISTENING socket became readable at all (see the
+// note on ffiAcceptAsync). The peer address is not reported for the same
+// reason it is not there either.
 function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResult {
-    let w: IoResult = waitReadable(fd, ct, deadlineNs);
-    if (w.code != IO_READY) {
-        return { code: w.code, fd: -1, peerHost: 0, peerPort: 0, error: w.error };
+    let code: int32 = IO_READY;
+    let cfd: c_ssize_t = yoop_iop_accept_wait(fd, ct.p, deadlineNs, &code);
+    if (code != IO_READY) {
+        return { code: code, fd: -1, peerHost: 0, peerPort: 0, error: "" };
     }
-    let peer: SockAddrIn = { sin_family: 0, sin_port: 0, sin_addr: 0, sin_zero: 0 };
-    let len: c_int = 16;
-    let cfd: c_int = yoop_sock_accept(fd, &peer, &len);
     if (cfd < 0) {
         return {
             code: IO_ERROR, fd: -1, peerHost: 0, peerPort: 0,
@@ -471,20 +493,17 @@ function ffiAcceptCt(fd: c_int, ct: RawCancel, deadlineNs: uint64): AcceptCtResu
         };
     }
     return {
-        code:     IO_READY,
-        fd:       cfd,
-        peerHost: peer.sin_addr,
-        peerPort: peer.sin_port,
-        error:    "",
+        code: IO_READY, fd: c_int(cfd),
+        peerHost: 0, peerPort: 0, error: "",
     };
 }
 
-// Park on readability under `ct`, then yoop_sock_recv() once into `buf`.
-// `n == 0` with `code == IO_READY` is EOF, exactly as for ffi_recv.
+// Read once into `buf` under `ct`. `n == 0` with `code == IO_READY` is EOF,
+// exactly as for ffi_recv.
 function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
-    let w: IoResult = waitReadable(fd, ct, deadlineNs);
-    if (w.code != IO_READY) { return w; }
-    let n: c_ssize_t = yoop_sock_recv(fd, buf.ptr, buf.len, 0);
+    let code: int32 = IO_READY;
+    let n: c_ssize_t = yoop_iop_wait(fd, buf.ptr, buf.len, OP_RECV, ct.p, deadlineNs, &code);
+    if (code != IO_READY) { return ioStop(code); }
     if (n < 0) { return ioErr(errno.message(errno.get())); }
     return { code: IO_READY, n: n, error: "" };
 }
@@ -497,12 +516,12 @@ function ffiRecvCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): 
 function ffiSendAllCt(fd: c_int, buf: uint8[], ct: RawCancel, deadlineNs: uint64): IoResult {
     let total: usize = 0;
     while (total < buf.len) {
-        let w: IoResult = waitWritable(fd, ct, deadlineNs);
-        if (w.code != IO_READY) {
-            return { code: w.code, n: c_ssize_t(total), error: w.error };
-        }
         let chunk: uint8[] = intr.array_slice(buf, total, buf.len);
-        let n: c_ssize_t = yoop_sock_send(fd, chunk.ptr, chunk.len, 0);
+        let code: int32 = IO_READY;
+        let n: c_ssize_t = yoop_iop_wait(fd, chunk.ptr, chunk.len, OP_SEND, ct.p, deadlineNs, &code);
+        if (code != IO_READY) {
+            return { code: code, n: c_ssize_t(total), error: "" };
+        }
         if (n < 0) {
             return { code: IO_ERROR, n: c_ssize_t(total), error: errno.message(errno.get()) };
         }

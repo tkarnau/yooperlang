@@ -16,6 +16,7 @@ import {
   EXE_SUFFIX,
   clangEnv,
   lowerLinkFlag,
+  prebuiltRuntimeObjects,
   resolveClang,
   windowsClangArgs,
 } from "./toolchain.js";
@@ -41,7 +42,10 @@ function buildAndRun(name) {
       // -pthread is a POSIX toolchain concept; the MSVC target rejects it and
       // yoop_platform.h uses the Win32 primitives there anyway.
       ...(process.platform === "win32" ? [] : ["-pthread"]),
-      ...RUNTIME_SOURCES,
+      // Prebuilt objects rather than the source list: the runtime is identical
+      // for all 11 of these programs, and recompiling it each time dominated
+      // the suite. See prebuiltRuntimeObjects for why this cannot go stale.
+      ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
       path.join(testsDir, `${name}.c`),
       ...linkFlagArgs,
       "-o",

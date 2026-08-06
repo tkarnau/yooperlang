@@ -20,6 +20,7 @@ import {
   EXE_SUFFIX,
   clangEnv,
   lowerLinkFlag,
+  prebuiltRuntimeObjects,
   resolveClang,
   windowsClangArgs,
 } from "./toolchain.js";
@@ -63,7 +64,7 @@ function runFixture(relPath, opts = {}) {
   fs.writeFileSync(llPath, ir);
   const clangArgs = [
     llPath,
-    ...RUNTIME_SOURCES,
+    ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
     "-o",
     binPath,
     ...runtimeLinkFlags().flatMap(lowerLinkFlag),
@@ -96,7 +97,7 @@ function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
   );
   const clangArgs = [
     llPath,
-    ...RUNTIME_SOURCES,
+    ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
     "-o",
     binPath,
     ...runtimeLinkFlags().flatMap(lowerLinkFlag),
@@ -1142,7 +1143,7 @@ function runFixtureEntry(relPath, opts = {}) {
   // production yoopiler.js invocation so e2e behavior matches what users see.
   const clangArgs = [
     llPath,
-    ...RUNTIME_SOURCES,
+    ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
     "-g",
     "-O0",
     "-o",
@@ -1989,7 +1990,13 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.match(ir, /declare i32 @yoop_sock_socket\(/);
     assert.match(ir, /declare i32 @yoop_sock_bind\(/);
     assert.match(ir, /declare i32 @yoop_sock_listen\(/);
-    assert.match(ir, /declare i32 @yoop_sock_accept\(/);
+    // Accept is NOT among them: it goes through the operation API rather than
+    // a readiness wait plus a bare accept(). A completion port cannot report
+    // that a listening socket became readable (a zero-byte WSARecv on a
+    // listener fails with WSAENOTCONN), so awaiting a connection is AcceptEx
+    // there and accept-then-arm on POSIX - one call either way.
+    assert.match(ir, /declare i64 @yoop_iop_accept_begin\(/);
+    assert.match(ir, /declare i64 @yoop_iop_accept_wait\(/);
   });
 
   // Phase 10.I: `vtable Reader for Readable` round-trips through a

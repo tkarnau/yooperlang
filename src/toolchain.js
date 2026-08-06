@@ -13,6 +13,7 @@
 // clang child only - the user's own environment is never modified.
 
 import fs from "fs";
+import os from "os";
 import path from "path";
 import { execFileSync } from "child_process";
 
@@ -157,6 +158,77 @@ export function lowerLinkFlag(name) {
   }
   if (process.platform === "win32" && WINDOWS_IMPLICIT_LIBS.has(name)) return [];
   return [`-l${name}`];
+}
+
+// ----- prebuilt runtime objects (test-suite speedup) -----------------------
+//
+// The C runtime is ~12 translation units and NONE of them depend on the
+// program being compiled, yet the test suites were handing clang the whole
+// source list for every fixture. With ~200 fixtures that is ~2400 redundant C
+// compilations per run, and it dominated the suite's wall time: measured on
+// this machine, a fixture cost ~4.0s from source versus ~0.5s linking against
+// prebuilt objects, with a one-time ~2.5s to build them.
+//
+// So: compile the runtime ONCE per test process, into a temp directory, and
+// hand the resulting objects to every subsequent link.
+//
+// Correctness notes, since a build cache is an easy place to introduce
+// staleness bugs:
+//   * The cache lives for ONE process and is keyed on nothing. A test run that
+//     edits runtime sources mid-flight cannot go stale against them, because
+//     the next run starts a fresh process and recompiles. (Editing runtime
+//     sources DURING a run was already unsound - e2e recompiles per fixture.)
+//   * Flags are baked in at build time and must match what the link step would
+//     otherwise have used; they are therefore taken from the same helpers the
+//     callers use, not restated here.
+//   * A build failure is not swallowed. It throws, and the caller surfaces it
+//     exactly as a per-fixture compile failure would have.
+//
+// This is deliberately NOT used by the production driver (src/yoopiler.js): a
+// user compiles one program per invocation, so there is no second link to
+// amortize against, and a stale cache in a user's tree would be a real hazard.
+let cachedRuntimeObjects = null;
+export function prebuiltRuntimeObjects(runtimeSources, extraArgs = []) {
+  if (cachedRuntimeObjects) return cachedRuntimeObjects;
+
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_rtobj_"));
+  // Compile each TU to its own object. One clang invocation for the whole set
+  // is faster than N invocations and lets clang parallelize internally.
+  //
+  // -Wall -Wextra -Werror is deliberate and load-bearing. runtimeC.test.js used
+  // to compile the runtime sources with those flags on every test, so the suite
+  // doubled as the runtime's warning gate. Prebuilding without them would have
+  // silently dropped that coverage while looking like a pure speedup - so the
+  // strictness moves here, where it now also covers the e2e suite, which never
+  // had it.
+  execFileSync(
+    resolveClang(),
+    [
+      "-c",
+      "-g",
+      "-O0",
+      "-Wall",
+      "-Wextra",
+      "-Werror",
+      ...runtimeSources,
+      ...windowsClangArgs().filter((a) => a !== "-fuse-ld=link"), // compile-only
+      ...extraArgs,
+    ],
+    { stdio: "pipe", env: clangEnv(), cwd: dir },
+  );
+
+  const objects = fs
+    .readdirSync(dir)
+    .filter((f) => f.endsWith(".o") || f.endsWith(".obj"))
+    .map((f) => path.join(dir, f));
+
+  if (objects.length !== runtimeSources.length) {
+    throw new Error(
+      `prebuiltRuntimeObjects: expected ${runtimeSources.length} objects, got ${objects.length}`,
+    );
+  }
+  cachedRuntimeObjects = objects;
+  return objects;
 }
 
 // Shared "the link step failed" hint. Returns null when there is nothing

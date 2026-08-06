@@ -115,13 +115,33 @@ static inline int yoop_cv_wait_until_locked(yoop_cond_t* c, yoop_mutex_t* m,
         return 0;
     }
 #ifdef _WIN32
-    uint64_t now = yoop_now_ns();
-    DWORD ms = now >= deadline_ns
-        ? 0
-        : (DWORD)((deadline_ns - now + 999999ULL) / 1000000ULL);
-    BOOL ok = SleepConditionVariableCS(&c->cv, &m->cs, ms);
-    if (ok) return 0;
-    return GetLastError() == ERROR_TIMEOUT ? 1 : 0;
+    // Loop until the ABSOLUTE deadline has genuinely passed by the monotonic
+    // clock, rather than trusting a single ERROR_TIMEOUT.
+    //
+    // SleepConditionVariableCS takes a RELATIVE timeout measured against the
+    // system tick, and that tick is 15.6ms by default - so it can report a
+    // timeout up to one tick BEFORE the deadline has elapsed by
+    // QueryPerformanceCounter (what yoop_now_ns reads). Callers treat a 1
+    // return as "the deadline passed" and stop waiting, so a single early
+    // report surfaces as a wait that gave up early.
+    //
+    // Observed as a ~15% flake on the FIRST timed wait in a process, which is
+    // the tell: once anything raises the system timer resolution the tick
+    // shrinks and the early return stops happening. A 50ms wait came back in
+    // 39ms - almost exactly one default tick short.
+    //
+    // Re-checking the clock costs nothing in the common case (the deadline has
+    // passed, and the loop exits on the first test) and makes every timed wait
+    // in the runtime honor its deadline, since this is the one primitive they
+    // all go through.
+    for (;;) {
+        uint64_t now = yoop_now_ns();
+        if (now >= deadline_ns) return 1;
+        DWORD ms = (DWORD)((deadline_ns - now + 999999ULL) / 1000000ULL);
+        if (SleepConditionVariableCS(&c->cv, &m->cs, ms)) return 0;  // signalled
+        if (GetLastError() != ERROR_TIMEOUT) return 0;               // spurious
+        // Reported a timeout: go round and let the clock decide.
+    }
 #elif defined(__linux__)
     // The condvar was created against CLOCK_MONOTONIC, so the absolute
     // deadline can be handed over directly.

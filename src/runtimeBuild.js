@@ -18,7 +18,18 @@ export const RUNTIME_C = path.resolve(runtimeDir, "yoop_runtime.c");
 // helpers (SOL_SOCKET / SO_REUSEADDR constants differ Linux vs macOS).
 export const RUNTIME_SOURCES = [
   RUNTIME_C,
+  // The I/O multiplexer: a platform-neutral core plus one event engine per
+  // platform, in the shape of Go's netpoll_{kqueue,epoll,windows}.go. Only one
+  // engine compiles to anything on a given host - each is wrapped in its own
+  // #ifdef - so all three can sit in the list unconditionally. See
+  // runtime/yoop_io_internal.h for why they are split rather than abstracted.
   path.resolve(runtimeDir, "yoop_io.c"),
+  path.resolve(runtimeDir, "yoop_io_kqueue.c"),
+  path.resolve(runtimeDir, "yoop_io_epoll.c"),
+  path.resolve(runtimeDir, "yoop_io_windows.c"),
+  // Filesystem + directory helpers (mkdir/stat/realpath/dirent). Split out of
+  // yoop_io.c, which was carrying two unrelated concerns.
+  path.resolve(runtimeDir, "yoop_fs.c"),
   path.resolve(runtimeDir, "yoop_net.c"),
   // Phase 10.D: panic/unreachable + log_info/warn/error helpers.
   path.resolve(runtimeDir, "yoop_debug.c"),
