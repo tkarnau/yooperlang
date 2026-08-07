@@ -418,8 +418,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // because the handler form drops that requirement. `summed=60` is the
   // even indices (0+20+40) with the odd ones skipped via `continue`, which
   // proves a non-return terminator satisfies the divergence rule.
-  it("qmark_handler_block: `? e { ... }` handles the Err at the call site", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_handler_block.yoop");
+  it("qmark_handler_block: `? e { ... }` handles the Err at the call site", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/qmark_handler_block.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,

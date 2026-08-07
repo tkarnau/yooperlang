@@ -86,11 +86,29 @@ Immediate build sequence (from the contracts doc):
 Small, concrete next steps (the running scratch list; `scratch.md` is the
 informal personal version):
 
-- **VERIFY ON MACOS/LINUX: the Windows uplift and the IOCP conversion.** Both
-  landed green on Windows (`npm test` = 923 pass / 0 fail / 5 skipped) but
-  NEITHER has been compiled on a POSIX host. They touched shared code, so this
-  is a real gate, not a formality. Run `npm test` on the Mac first; if it is
-  red, the list below is where to look.
+- ~~**VERIFY ON MACOS/LINUX: the Windows uplift and the IOCP conversion.**~~
+  DONE on macOS (arm64, 2026-08-07): `npm test` = **958 pass / 0 fail / 0
+  skipped**, and again at `YOOP_E2E_CONCURRENCY=1` with the same result, so
+  nothing in the new concurrent harness is order-dependent. Every item in the
+  list below was checked individually and none of them needed a fix. The one
+  red test was unrelated to the uplift: `qmark_handler_block` was written
+  against the OLD synchronous harness in the branch this merged with, so it
+  destructured a Promise and read `exitCode` as `undefined`. Fixed by making it
+  `async` + `await` like the other 201 call sites. What was verified, in the
+  order the list gives them:
+  - The three lldb tests **run** on macOS (confirmed not skipped) and pass, so
+    the `{ debug: true }` opt-in is correctly placed. This was the flagged risk
+    - Windows skips them, so a wrong opt-in would have stayed green there.
+  - `sh runtime/tests/run_tests.sh` passes end to end on POSIX.
+  - The runtime compiles clean under `-Wall -Wextra -Werror` on macOS (12
+    objects, zero diagnostics), so the strictness that moved onto the prebuild
+    is not hiding a POSIX-only warning.
+  - The port-0 bind path (`yoop_sock_bound_port`, the `socklen_t` POSIX branch)
+    works: `http_client_loopback` and `async_server_smoke` both pass.
+  - The two cross-platform fixes hold on macOS too - `enum_eq` covers the
+    string-literal interning, and the coroutine fixtures cover the
+    `llvm.coro.end` discard.
+  Kept below for reference, since it is a good map of what the uplift touched.
   - **The poller was split per platform** (Go netpoll style). `runtime/yoop_io.c`
     is now a platform-neutral core and the engines live in
     `runtime/yoop_io_kqueue.c` / `yoop_io_epoll.c` / `yoop_io_windows.c` behind
