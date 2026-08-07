@@ -173,6 +173,30 @@ int64_t yoop_sock_recv(int fd, void* buf, size_t n, int flags) {
 #endif
 }
 
+// The port a socket is actually bound to, in host byte order, or -1 with errno
+// set.
+//
+// Exists so a caller can bind to port 0 and find out what the kernel picked.
+// std/net's TcpListener always had a `bound_port` field for this, but it was
+// filled with the port the CALLER asked for - so binding :0 reported 0 and the
+// ephemeral port was unrecoverable. That made every listening test pick a fixed
+// port by hand, which is a collision waiting to happen as soon as anything runs
+// in parallel.
+int yoop_sock_bound_port(int fd) {
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+#ifdef _WIN32
+    int len = (int)sizeof(addr);
+    if (getsockname((SOCKET)fd, (struct sockaddr*)&addr, &len) == SOCKET_ERROR) {
+        return yoop_sock_fail();
+    }
+#else
+    socklen_t len = sizeof(addr);
+    if (getsockname(fd, (struct sockaddr*)&addr, &len) != 0) return -1;
+#endif
+    return (int)ntohs(addr.sin_port);
+}
+
 int yoop_sock_close(int fd) {
     // Tell the multiplexer first. On IOCP it caches which sockets are bound to
     // the completion port, and Windows recycles handle VALUES - so a stale

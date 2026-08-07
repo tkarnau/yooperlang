@@ -457,6 +457,10 @@ int     yoop_sock_close(int fd);
 uint16_t yoop_sock_htons(uint16_t v);
 uint32_t yoop_sock_inet_addr(const char* s);
 
+// The port a socket is actually bound to (host byte order), or -1. Lets a
+// caller bind to port 0 and discover the ephemeral port the kernel chose.
+int     yoop_sock_bound_port(int fd);
+
 // Create a directory with standard 0755 permissions (mode computed from
 // POSIX S_* symbols per platform). Returns mkdir()'s rc.
 int yoop_io_mkdir(const char* path);

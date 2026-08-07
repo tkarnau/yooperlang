@@ -137,6 +137,37 @@ informal personal version):
     slice. It also moved `-Wall -Wextra -Werror` onto the runtime prebuild,
     which is where `runtimeC.test.js` used to get it - if a POSIX-only warning
     exists in the runtime, this is now what will surface it, as a hard error.
+  - **CHECK THE LLDB TESTS FIRST - Windows structurally cannot catch a break
+    there.** `runFixtureEntry` no longer passes `-g` unconditionally; it is now
+    opt-in via `{ debug: true }`, and the three lldb tests are the only callers
+    that ask for it. On Windows those tests SKIP (debug info is CodeView, not
+    DWARF), so if that opt-in were wrong the Windows suite would stay green and
+    only macOS would fail. They are `dwarf: lldb resolves main...`, `dwarf:
+    lldb reads struct / string / array / variant locals...`, and `dwarf: a
+    function breakpoint stops after the parameter stores`. The change is worth
+    keeping: `-g` cost ~100ms of a ~415ms link and wrote 13.5MB per fixture
+    (8MB .pdb + 4.7MB incremental-link .ilk) that no assertion reads - roughly
+    3.4GB per suite run.
+  - **The e2e harness is async and runs tests concurrently.** `runFixture`,
+    `runFixtureEntry` and `runFixtureWithAsset` are `async` (201 call sites
+    now `await` them) and each describe takes `concurrency: E2E_CONCURRENCY`,
+    defaulting to half the cores capped at 12. Set `YOOP_E2E_CONCURRENCY=1` to
+    get the old sequential order back, which is the first thing to try if a
+    test looks order-dependent on macOS. The two fixtures that LISTEN
+    (`http_client_loopback`, `async_server_smoke`) bind port 0 and read the
+    kernel-assigned port from `TcpListener.bound_port`, so there is no fixed
+    port to collide over.
+  - **`tcp_listen` now reports the port it ACTUALLY bound**, via a new
+    `yoop_sock_bound_port` (getsockname) in `../runtime/yoop_net.c`. It used to
+    echo the port the caller asked for, which made binding :0 useless - the
+    field's own comment documented that gap. Identical behavior for a fixed
+    port; the POSIX branch uses `socklen_t` and is unexercised on Windows.
+  - For reference, the speed work took the suite from ~360s to ~45s on Windows
+    (prebuilt objects, then dropping the unread debug info, then concurrency).
+    Profiling was what found the real constraint: 12 concurrent clang processes
+    sitting at 9% total CPU on a 24-core box meant the suite was I/O-bound, not
+    CPU-bound, and concurrency only started paying once the 3.4GB of debug
+    output went away.
 - ~~Bootstrap: create a `Vec` iterator concept (needed to write the layers
   idiomatically without index plumbing).~~ DONE: `vecIter` +
   `VecIter<T> implements Iterable<T>` in `std/core/vec.yoop`, landed alongside

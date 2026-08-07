@@ -80,6 +80,9 @@ extern "C" from "yoop_runtime" {
     // shims for those still exist in the runtime for C-side callers.
     function yoop_sock_htons(host_short: uint16): uint16;
     function yoop_sock_inet_addr(addr: string): uint32;
+    // The port a socket is ACTUALLY bound to, which is only interesting after
+    // binding to port 0 and letting the kernel choose one.
+    function yoop_sock_bound_port(fd: c_int): c_int;
 }
 
 extern "C" from "yoop_runtime" {
@@ -312,6 +315,12 @@ function ffi_send_all(fd: c_int, buf: uint8[]): Result<c_ssize_t, string> {
 // matters for a server).
 function ffi_close(fd: c_int): c_int {
     return yoop_sock_close(fd);
+}
+
+// The port `fd` is actually bound to, or -1. Only interesting after binding
+// to port 0, where the kernel picks an unused one.
+function ffiBoundPort(fd: c_int): c_int {
+    return yoop_sock_bound_port(fd);
 }
 
 // ----- async (suspending) operations ---------------------------------------
