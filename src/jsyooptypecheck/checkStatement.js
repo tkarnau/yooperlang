@@ -29,7 +29,7 @@ import {
   instantiateTrait,
   resolveTypeInCtx,
 } from "./instantiate.js";
-import { pushError, formatType } from "./errors.js";
+import { pushError, pushWarning, formatType } from "./errors.js";
 import { isNumeric } from "./coerce.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
@@ -68,7 +68,7 @@ function resolveKindByName(name, typeContext) {
 import { TaskType } from "./types.js";
 import { isAssignable } from "./coerce.js";
 import { mangleTraitMethod } from "./mangleTraitMethod.js";
-import { alwaysDiverges } from "./diverge.js";
+import { alwaysDiverges, firstUnreachableIndex } from "./diverge.js";
 
 export function validateMethod(methodDecl, structType, typeContext, errors) {
   const scope = pushScope(null);
@@ -377,6 +377,35 @@ function checkBlock(node, scope, ctx) {
     validateStatement(s, inner, ctx);
   }
   popScope(inner, ctx.errors);
+  reportUnreachable(node, ctx);
+}
+
+// Warn once per block on the dead tail after a diverging statement. Every
+// block in the language funnels through checkBlock - function and method
+// bodies, `if`/loop/switch-arm bodies, and the trailing block of a
+// block-owning kind binding - so this one call site covers all of them.
+//
+// Reported as a WARNING, not an error, and deliberately so: dead code is a
+// smell, not a soundness problem, and hard-erroring is hostile in the middle
+// of editing (comment out a branch, add a temporary early return to bisect
+// something, and the build stops). Rust, Swift, C# and TS all warn here.
+//
+// The statements are still typechecked - the walk above ran over all of
+// them. Unreachable code that also does not compile should say so.
+function reportUnreachable(node, ctx) {
+  const dead = firstUnreachableIndex(node.body);
+  if (dead < 0) return;
+  const start = node.body[dead].startLoc;
+  // Both are parser-stamped; a synthesized block (@derive output, the
+  // generated --test entry) may lack them, and a warning is never worth
+  // risking a crash over.
+  if (!start || typeof node.endPos !== "number") return;
+  pushWarning(
+    ctx.errors,
+    { ...start, length: Math.max(1, node.endPos - start.pos) },
+    "unreachable code - control never reaches here",
+    "unreachable-code",
+  );
 }
 
 // `let x: T = expr;` / `const x: T = expr;`

@@ -195,6 +195,22 @@ function posToRange(text, pos, length) {
   return offsetToRange(text, pos, length);
 }
 
+// LSP DiagnosticTag values (spec 3.16).
+const DiagnosticTag = {
+  unnecessary: 1, // rendered faded out / dimmed rather than underlined
+  deprecated: 2, // rendered struck through
+};
+
+// Which diagnostic codes render as something other than a squiggle. Dead code
+// wants to be DIMMED over its whole extent - a squiggle under the first
+// statement (or worse, one parked on the enclosing function) says "there is a
+// mistake here" about code whose only problem is that it does not run.
+// Editors key that rendering off the tag, not the severity, so the code the
+// typechecker stamps is what selects it.
+const TAGS_BY_CODE = {
+  "unreachable-code": [DiagnosticTag.unnecessary],
+};
+
 
 function publishFor(uri) {
   const doc = documents.get(uri);
@@ -228,12 +244,18 @@ function publishFor(uri) {
       }
     }
 
-    const lspDiagnostics = diags.map((d) => ({
-      severity: d.severity,
-      range: posToRange(text, d.pos, d.length),
-      message: d.message,
-      source: "yoopiler",
-    }));
+    const lspDiagnostics = diags.map((d) => {
+      const diag = {
+        severity: d.severity,
+        range: posToRange(text, d.pos, d.length),
+        message: d.message,
+        source: "yoopiler",
+      };
+      if (d.code) diag.code = d.code;
+      const tags = TAGS_BY_CODE[d.code];
+      if (tags) diag.tags = tags;
+      return diag;
+    });
 
     sendNotification("textDocument/publishDiagnostics", {
       uri: targetUri,

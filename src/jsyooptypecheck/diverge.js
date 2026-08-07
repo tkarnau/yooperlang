@@ -78,6 +78,25 @@ export function alwaysDiverges(stmt) {
   }
 }
 
+// The dual of alwaysDiverges: index of the first statement in `body` that
+// control can never reach, or -1 if every statement is reachable.
+//
+// This is free - `alwaysDiverges` on a BLOCK is already "does any statement
+// diverge", and everything after the first one that does is by definition
+// dead. The only new part is reporting it.
+//
+// Soundness runs the right way for a diagnostic. alwaysDiverges is
+// conservative in the safe direction (it answers `true` only when divergence
+// is CERTAIN), so this never flags live code; it just misses some dead code,
+// which costs nothing.
+export function firstUnreachableIndex(body) {
+  if (!Array.isArray(body)) return -1;
+  for (let i = 0; i < body.length - 1; i++) {
+    if (alwaysDiverges(body[i])) return i + 1;
+  }
+  return -1;
+}
+
 function isLiteralTrue(expr) {
   return expr?.kind === ASTNodeKind.BOOL_LITERAL && expr.value === true;
 }

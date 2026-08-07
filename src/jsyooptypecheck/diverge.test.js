@@ -1,7 +1,7 @@
 import { describe, it } from "node:test";
 import assert from "node:assert/strict";
 import { ASTNodeKind } from "../contracts.js";
-import { alwaysDiverges } from "./diverge.js";
+import { alwaysDiverges, firstUnreachableIndex } from "./diverge.js";
 
 const ret = () => ({ kind: ASTNodeKind.RETURN_STATEMENT });
 const brk = () => ({ kind: ASTNodeKind.BREAK_STATEMENT });
@@ -172,5 +172,42 @@ describe("alwaysDiverges - block-owning kind declarations", () => {
 
   it("does not diverge for a decl with no trailing block", () => {
     assert.equal(alwaysDiverges({ kind: ASTNodeKind.LET_DECL }), false);
+  });
+});
+
+describe("firstUnreachableIndex", () => {
+  it("points at the statement after a diverging one", () => {
+    assert.equal(firstUnreachableIndex([expr(), ret(), expr()]), 2);
+  });
+
+  it("reports the FIRST dead statement, not each one", () => {
+    // The caller spans from here to the end of the block, so a second hit
+    // would only re-report a subset of the same region.
+    assert.equal(firstUnreachableIndex([ret(), expr(), expr(), expr()]), 1);
+  });
+
+  it("finds nothing when a diverging statement is last", () => {
+    assert.equal(firstUnreachableIndex([expr(), ret()]), -1);
+  });
+
+  it("finds nothing in a block that never diverges", () => {
+    assert.equal(firstUnreachableIndex([expr(), expr()]), -1);
+  });
+
+  it("handles empty and missing bodies", () => {
+    assert.equal(firstUnreachableIndex([]), -1);
+    assert.equal(firstUnreachableIndex(undefined), -1);
+  });
+
+  it("sees through a compound diverging statement", () => {
+    // An if/else where both halves return kills the tail just as a bare
+    // `return` does - that is the whole reason this delegates to
+    // alwaysDiverges instead of scanning for terminator kinds.
+    const both = ifStmt(block(ret()), block(ret()));
+    assert.equal(firstUnreachableIndex([both, expr()]), 1);
+  });
+
+  it("leaves the tail alive when only one branch returns", () => {
+    assert.equal(firstUnreachableIndex([ifStmt(block(ret())), expr()]), -1);
   });
 });

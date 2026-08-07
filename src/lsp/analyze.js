@@ -73,7 +73,14 @@ export function analyze(entryAbsPath, overlays = new Map()) {
     };
   }
 
-  for (const err of typecheckResult.errors) {
+  // Warnings are published alongside errors. Unlike the CLI, std/ is NOT
+  // filtered out here: the editor squiggles whatever file you have open, and
+  // if that file is std/core/vec.yoop you want to see its diagnostics.
+  const raised = [
+    ...typecheckResult.errors.map((e) => [e, Severity.error]),
+    ...(typecheckResult.warnings ?? []).map((w) => [w, Severity.warning]),
+  ];
+  for (const [err, severity] of raised) {
     const loc = err.sourceLoc;
     // srcPath first: several source files can share one moduleId under
     // modules-as-directories, and modById keeps only one of them, so a
@@ -89,7 +96,8 @@ export function analyze(entryAbsPath, overlays = new Map()) {
       line: loc?.line ?? 1,
       column: loc?.column ?? 1,
       message: err.message,
-      severity: Severity.error,
+      severity,
+      code: err.code,
     });
   }
 

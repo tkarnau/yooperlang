@@ -19,7 +19,7 @@ import {
 } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst, dumpAstJson } from "./dumpAst.js";
-import { checkInstallRoots } from "./install_root.js";
+import { checkInstallRoots, STD_ROOT } from "./install_root.js";
 import {
   clangEnv,
   librarySearchArgs,
@@ -66,6 +66,15 @@ function runClang(clang, clangArgs) {
   }
 }
 
+// Is this source file part of the shipped standard library? Compared against
+// the resolved STD_ROOT rather than by looking for "std" in the path, so a
+// user directory that happens to be named std is not silenced.
+function isStdPath(absPath) {
+  if (!absPath) return false;
+  const rel = path.relative(STD_ROOT, absPath);
+  return rel !== "" && !rel.startsWith("..") && !path.isAbsolute(rel);
+}
+
 function main() {
   const { values, positionals } = parseArgs({
     args: process.argv.slice(2),
@@ -79,6 +88,7 @@ function main() {
       "list-attributes": { type: "boolean" },
       "track-heap": { type: "boolean" },
       "keep-ir": { type: "boolean" },
+      "warn-std": { type: "boolean" },
       lsp: { type: "boolean" },
       test: { type: "boolean" },
     },
@@ -210,7 +220,7 @@ function main() {
     exportSuiteFunctions(modules, testCtx.testModuleIds);
   }
 
-  const { errors, moduleEnv, programState } = typecheckProgram(modules);
+  const { errors, warnings, moduleEnv, programState } = typecheckProgram(modules);
   // Test mode: the syntactic collection pass took every kind-prefixed function.
   // Now that kinds are resolved, reject any that is not enumerable into the
   // table `--test` asked for.
@@ -276,6 +286,29 @@ function main() {
       console.error("");
     }
     process.exit(1);
+  }
+
+  // Warnings print after a clean typecheck and never change the exit code.
+  // Scoped to the user's own modules: std/ is autoloaded into every graph, so
+  // a warning there would attach itself to every compile in the world and be
+  // unfixable by whoever is reading it. `--warn-std` opts back in for work on
+  // std itself.
+  if (warnings.length > 0) {
+    const reported = values["warn-std"]
+      ? warnings
+      : warnings.filter((w) => !isStdPath(ownerOf(w)?.absPath));
+    for (const warning of reported) {
+      const mod = ownerOf(warning);
+      console.error(
+        formatDiagnostic({
+          filePath: mod?.absPath ?? inputFile,
+          src: mod?.src ?? "",
+          loc: warning.sourceLoc,
+          message: `warning: ${warning.message}${warning.code ? ` [${warning.code}]` : ""}`,
+        }),
+      );
+      console.error("");
+    }
   }
   console.log("typecheck: ok");
 
