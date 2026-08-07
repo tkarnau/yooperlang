@@ -1,0 +1,66 @@
+// Phase 10.E.3: `expr? e { ... }` - handle a failure at the `?` instead of
+// propagating it. `e` names the Err payload for the block's extent, and the
+// block must diverge on every path.
+//
+// The three things this fixture is here to prove:
+//   1. It works in a function that does NOT return a fallible variant, which
+//      bare `?` rejects outright. `handled` returns a plain int32.
+//   2. `continue` counts as diverging, so a handler can skip a loop
+//      iteration rather than leaving the function.
+//   3. The Ok path is untouched - no handler code runs, and the stripped
+//      value flows into the binding as it does for bare `?`.
+
+variant Reading {
+    Ok { value: int32 },
+    Err { error: string },
+}
+
+function readAt(i: int32): Reading {
+    if (i % 2 == 1) {
+        return Reading.Err { error: "odd index" };
+    }
+    return Reading.Ok { value: i * 10 };
+}
+
+// 1. A non-fallible return type. Bare `?` is a typecheck error in this
+// function; the handler form is the whole point.
+function handled(i: int32): int32 {
+    let v: int32 = readAt(i)? e {
+        printf("  handler saw: %s\n", e);
+        return -1;
+    };
+    return v;
+}
+
+// 2. `continue` as the divergence, skipping the failures.
+function summed(): int32 {
+    let total: int32 = 0;
+    for (let i = 0; i < 5; i += 1) {
+        let v: int32 = readAt(i)? e {
+            printf("  skipping %d (%s)\n", i, e);
+            continue;
+        };
+        total = total + v;
+    }
+    return total;
+}
+
+// 3. Divergence proved through an exhaustive switch rather than a bare
+// return, which is what alwaysDiverges has to see through.
+function viaSwitch(i: int32): int32 {
+    let v: int32 = readAt(i)? e {
+        switch (e.len > 0) {
+            case true: { return -2; }
+            case false: { return -3; }
+        }
+    };
+    return v;
+}
+
+function main(): int32 {
+    printf("handled(2)=%d\n", handled(2));
+    printf("handled(3)=%d\n", handled(3));
+    printf("summed=%d\n", summed());
+    printf("viaSwitch(1)=%d\n", viaSwitch(1));
+    return 0;
+}

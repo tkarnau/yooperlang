@@ -1146,6 +1146,39 @@ continue;
 <!-- No `switch` in v2. Pattern-matching on tagged unions is a future addition once the
 error story hardens. (not true any more) -->
 
+### Every path must return
+
+A function whose return type is not `void` must return on **every** path.
+Falling off the end is a compile error:
+
+```js
+function classify(x: int32): int32 {
+    if (x > 0) {
+        return 1;
+    }
+}                                   // error: not every path returns a value
+```
+
+A `void` function is exempt - reaching the end *is* the return.
+
+The rule is **divergence**, not "the last statement is a return", and the same
+analysis decides whether a `? e { ... }` handler block is well-formed:
+
+- `return`, `break` and `continue` all diverge.
+- An `if` diverges only when it has an `else` and both arms diverge. `else if`
+  chains work by recursion, so the final `else` is what matters.
+- A `switch` diverges when it is exhaustive and every arm does, which is why an
+  arm-per-case `switch` needs no trailing `return` after it.
+- `while (true)` with no `break` reaching it diverges. Any other loop does not:
+  its condition may be false on entry, so the body might never run.
+- A block-owning kind's trailing block counts, so a `return` inside
+  `ephemeral allocatorScope(a) { ... }` covers the function.
+
+The analysis is deliberately conservative - it errs toward asking for an
+explicit `return` rather than accepting a path that has none. A `while` loop
+that provably never exits but is not spelled `while (true)` is the case where
+you may need to add an unreachable `return` to satisfy it.
+
 ---
 
 ## 11. Errors as values
@@ -1308,6 +1341,49 @@ still uses `Into<T>` as described above.
 
 A context string on a `?` whose `Err` variant carries no payload is an error -
 there is nothing to attach to.
+
+### Handling instead of propagating - `? e { ... }`
+
+A binding name plus a block after the `?` **handles** the failure at the call
+site rather than propagating it. The name binds the `Err` payload for the
+block's extent:
+
+```js
+const db = sqlite.open(path)? e {
+    return Result.Err { error: httpError(status(500), e) };
+};
+```
+
+This is the answer to an `Err` payload the enclosing function cannot accept -
+notably a `string` payload, which can carry no `Into` / `WithContext` impl
+because a primitive has no `implements` list. The block does the conversion in
+ordinary code, so no impl is involved.
+
+Two rules, and both are the point of the form:
+
+- **The enclosing function's return type does not matter.** Bare `?` requires
+  the enclosing function to itself return a fallible variant; the handler form
+  drops that requirement entirely, because nothing is being propagated. It is
+  legal in `main`, in a method returning a plain value, anywhere.
+- **The block must diverge on every path.** It runs *instead of* the expression
+  producing a value, so falling out the bottom would leave the binding it feeds
+  with nothing in it. `return`, `break` and `continue` all count - the rule is
+  divergence, not "ends in a return", which is what makes this legal:
+
+```js
+for row in rows {
+    const v = step(ref st)? e { continue; };   // skip this row, keep going
+}
+```
+
+A block that can fall through is a compile error reported at the block. The
+same divergence rule decides the missing-return check below, so the two agree
+by construction.
+
+The binding is required, not optional: a bare `?` followed by `{` would be
+ambiguous with a for-in body (`for x in items()? { ... }`), where the brace
+opens the loop. If the `Err` variant carries no payload there is nothing to
+bind, and the form is rejected - use a `switch`.
 
 ### Interaction with concurrency kinds
 

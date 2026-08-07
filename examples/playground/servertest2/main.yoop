@@ -1,7 +1,21 @@
-task createServer(): void {
-  
+import { Result } from "std/core/types.yoop";
+import * as http from "std/http";
+import * as simplehttp from "./simplehttp";
+
+
+
+task createServer(): Result<int32, http.HttpError> {
+  return await simplehttp.run();
 }
 
 function main(): int32 {
-    await createServer();
+    pooled serverRunResult = createServer();
+    switch (wait serverRunResult) {
+    case Result.Ok { value: _n }: { return 0; }
+    case Result.Err { error: e }: {
+      printf(`server failed: ${e}\n`);
+      return 1;
+    }
+  }
+  return 0;
 }

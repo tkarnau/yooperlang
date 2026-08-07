@@ -308,6 +308,43 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
+  // Phase 10.E.3: `expr? e { ... }` handles the failure at the `?` instead of
+  // propagating it. `handled` returns a plain int32 - bare `?` is rejected in
+  // a function with a non-fallible return type, so those two lines only exist
+  // because the handler form drops that requirement. `summed=60` is the
+  // even indices (0+20+40) with the odd ones skipped via `continue`, which
+  // proves a non-return terminator satisfies the divergence rule.
+  it("qmark_handler_block: `? e { ... }` handles the Err at the call site", () => {
+    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_handler_block.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "handled(2)=20\n" +
+        "  handler saw: odd index\n" +
+        "handled(3)=-1\n" +
+        "  skipping 1 (odd index)\n" +
+        "  skipping 3 (odd index)\n" +
+        "summed=60\n" +
+        "viaSwitch(1)=-2\n",
+    );
+  });
+
+  // Phase 10.E.3: a non-void function that can fall off the end is now a
+  // diagnostic. Before this it compiled and trapped at runtime (codegen
+  // emits `unreachable`), so the failure arrived as a bare SIGTRAP with no
+  // source location. All three shapes must be caught, not just the first.
+  it("missing_return: a function that can fall off the end is rejected", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/missing_return.yoop");
+    for (const fn of ["noElse", "oneArm", "loopOnly"]) {
+      assert.ok(
+        errors.some((e) =>
+          new RegExp(`"${fn}".*not every path returns a value`).test(e.message),
+        ),
+        `expected a missing-return error for "${fn}", got: ${errors.map((e) => e.message).join(" | ")}`,
+      );
+    }
+  });
+
   // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` covers Done +
   // Timeout. The fast task completes well inside its 1s deadline; the slow
   // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.

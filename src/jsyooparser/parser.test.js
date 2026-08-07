@@ -533,6 +533,43 @@ describe("parse: phase 2 - postfix '?'", () => {
     assert.equal(t.operand.object.kind, ASTNodeKind.TRY_OP);
   });
 
+  // Phase 10.E.3 - the handler form.
+  it("'f()? e { ... }' attaches the binding name and the block", () => {
+    const stmts = bodyOf("let v: int32 = f()? e { return 0; };");
+    const t = stmts[0].assignment;
+    assert.equal(t.kind, ASTNodeKind.TRY_OP);
+    assert.equal(t.operand.kind, ASTNodeKind.CALL_EXPRESSION);
+    assert.equal(t.handlerBinding, "e");
+    assert.equal(t.handlerBlock.kind, ASTNodeKind.BLOCK);
+    assert.equal(t.handlerBlock.body.length, 1);
+    assert.equal(t.handlerBlock.body[0].kind, ASTNodeKind.RETURN_STATEMENT);
+    // The handler and context forms are mutually exclusive.
+    assert.equal(t.context, null);
+  });
+
+  it("the plain and context forms carry no handler", () => {
+    const plain = exprOf("f()?");
+    assert.equal(plain.handlerBinding, undefined);
+    assert.equal(plain.handlerBlock, undefined);
+
+    const ctx = exprOf('f()? "reading it"');
+    assert.equal(ctx.context.kind, ASTNodeKind.STRING_LITERAL);
+    assert.equal(ctx.handlerBlock, undefined);
+  });
+
+  // A `{` directly after `?` is the for-in body, not a handler - which is
+  // why the binding is required rather than optional.
+  it("'for x in f()? { ... }' keeps the brace as the loop body", () => {
+    const ast = parse(
+      "function f(): int32 { for x in items()? { printf(\"hi\"); } return 0; }",
+    );
+    const loop = ast.body[0].body.body[0];
+    assert.equal(loop.kind, ASTNodeKind.FOR_IN_LOOP);
+    assert.equal(loop.iterExpr.kind, ASTNodeKind.TRY_OP);
+    assert.equal(loop.iterExpr.handlerBlock, undefined);
+    assert.equal(loop.body.kind, ASTNodeKind.BLOCK);
+  });
+
   it("'r? = 5' is rejected - TRY_OP is not a valid lvalue", () => {
     assert.throws(() => bodyOf("r? = 5;"), /invalid assignment target: TRY_OP/);
   });

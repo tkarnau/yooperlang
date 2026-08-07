@@ -68,6 +68,7 @@ function resolveKindByName(name, typeContext) {
 import { TaskType } from "./types.js";
 import { isAssignable } from "./coerce.js";
 import { mangleTraitMethod } from "./mangleTraitMethod.js";
+import { alwaysDiverges } from "./diverge.js";
 
 export function validateMethod(methodDecl, structType, typeContext, errors) {
   const scope = pushScope(null);
@@ -93,7 +94,29 @@ export function validateMethod(methodDecl, structType, typeContext, errors) {
     enclosingType: structType,
   };
   validateStatement(methodDecl.body, scope, ctx);
+  checkAllPathsReturn(methodDecl, methodDecl.body, funcReturnType, ctx);
   popScope(scope, errors);
+}
+
+// Phase 10.E.3: a function with a value to return must actually return on
+// every path. Before this existed, falling off the end compiled and trapped
+// at runtime (codegen emits `unreachable`), so the failure showed up as a
+// SIGTRAP with no source location rather than as a diagnostic.
+//
+// Void functions are exempt - falling off the end IS the return. An
+// already-errored return type is exempt too, so a bad annotation reports
+// once instead of twice.
+function checkAllPathsReturn(declNode, body, returnType, ctx) {
+  if (!body) return;
+  if (returnType.kind === typeKinds.void || returnType.kind === typeKinds.error) {
+    return;
+  }
+  if (alwaysDiverges(body)) return;
+  pushError(
+    ctx.errors,
+    declNode,
+    `function "${ctx.funcName}" returns ${formatType(returnType)} but not every path returns a value - add a return at the end, or make each branch return`,
+  );
 }
 
 export function validateFunction(funcNode, typeContext, errors) {
@@ -225,6 +248,7 @@ export function validateFunction(funcNode, typeContext, errors) {
     inAsyncBody: !!funcNode.isAsync,
   };
   validateStatement(funcNode.body, scope, ctx);
+  checkAllPathsReturn(funcNode, funcNode.body, funcReturnType, ctx);
   // params + the synthetic outer body share `scope`. Block-statement
   // bodies open their own inner scope and pop it themselves; this catches
   // the function-level scope (params and any locals declared at function
@@ -1491,6 +1515,18 @@ function checkSwitch(node, scope, ctx) {
       );
     }
   }
+
+  // Phase 10.E.3: record whether the arms cover every reachable value, so
+  // `alwaysDiverges` (diverge.js) can decide that an arms-all-return switch
+  // leaves no fallthrough path. Every branch above errors on a non-covering
+  // switch, so a stamped-true node that was actually short a case can only
+  // occur in a build that is already failing.
+  node.isExhaustive =
+    Boolean(node.defaultArm) ||
+    sawAnyWildcardCase ||
+    isBool ||
+    isVariant ||
+    isValueEnum;
 }
 
 function checkBreak(node, ctx) {
