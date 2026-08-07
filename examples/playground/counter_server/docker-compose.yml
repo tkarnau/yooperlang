@@ -1,0 +1,41 @@
+# Run from the REPO ROOT:
+#
+#     docker compose -f examples/playground/counter_server/docker-compose.yml up --build
+#
+# The build context is `.` relative to this file's directory resolved
+# against the repo root, which is why `context: ../../..` is here rather
+# than a plain `build: .`.
+
+services:
+  counter:
+    build:
+      context: ../../..
+      dockerfile: examples/playground/counter_server/Dockerfile
+      # `full` rather than the default `slim`: compose is mostly a local
+      # loop, where a shell for `docker exec` and a self-reporting
+      # HEALTHCHECK are worth more than the 24MB. deploy.sh ships slim.
+      target: full
+    ports:
+      - "8080:8080"
+
+    # argv is `<port> [workers]`. Set workers explicitly whenever `cpus` is
+    # capped: the process sees the HOST's core count, not its cgroup share,
+    # so leaving it to the default would spawn one worker per host core and
+    # then contend for a fraction of one.
+    command: ["8080", "2"]
+
+    deploy:
+      resources:
+        limits:
+          cpus: "2"
+          memory: 256M
+
+    # A worker parked on an idle keep-alive connection costs a coroutine
+    # frame, not a thread, so the file descriptor ceiling is what actually
+    # bounds concurrent connections here.
+    ulimits:
+      nofile:
+        soft: 65535
+        hard: 65535
+
+    restart: unless-stopped

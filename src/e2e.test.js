@@ -1206,6 +1206,33 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "ticked: a=1 b=2 c=3 now=3\n");
   });
 
+  it("module_level_mutable_array.yoop: a mutable module-level array literal is writable and unmerged; a module-level intrinsic initializer compiles", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/module_level_mutable_array.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "counters=0,10,20,30\nalsoZeros=0,0,0,0\nscratch=100,101,102,103\nfrozen=7,7\n",
+    );
+  });
+
+  it("runtime_introspect.yoop: std/runtime pool sizing, atomic counters across threads, and process introspection", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/runtime_introspect.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "cpus>0: 1\nsetWorkerCount(2): 1 workers=2\ncounter=5000\n" +
+        "afterSet+Sub=60\ncas first=1 second=0 observed=61\nrss>0: 1\nmonotonic: 1\n",
+    );
+  });
+
+  it("ref_forwarding.yoop: a bare `ref T` binding passed to a `ref T` param forwards the pointer instead of derefing", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/ref_forwarding.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "direct=1 explicit=2 bare=3 field=4 viaTask=14\n");
+  });
+
   it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleep_ms delays the producer", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/concurrent_pipe.yoop");
     assert.equal(exitCode, 0);

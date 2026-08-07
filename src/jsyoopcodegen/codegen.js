@@ -293,6 +293,7 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
       elemLlvm,
       count: len,
       elemInits,
+      mutable: !!opts.mutableBacking,
     });
     return `{ ptr ${backingSym}, i64 ${len} }`;
   }
@@ -1025,6 +1026,23 @@ export function codegen(ast) {
         const yoopType = symbols.get(node.name);
         if (!yoopType) {
           throw new Error(`codegen: unknown identifier "${node.name}"`);
+        }
+        // A `ref T` binding passed BARE to a `ref T` parameter forwards the
+        // pointer it holds - it must NOT auto-deref. The typechecker allows
+        // that spelling on purpose (an FFI handle in `let w: ref Window`
+        // reaches the next call without a redundant `ref w`) and marks the
+        // argument `passRefBinding`, but nothing ever read the flag: codegen
+        // fell through to the deref below and passed the POINTEE by value
+        // into a pointer parameter, so the callee used the struct's first
+        // field as an address. Silent segfault, no diagnostic.
+        //
+        // Checked before autoDeref because the typechecker sets BOTH on
+        // these nodes - it resolves the argument as an ordinary expression
+        // (which stamps autoDeref) before deciding it is a ref pass-through.
+        if (node.passRefBinding) {
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
+          return { val: ptrTmp, yoopType };
         }
         if (node.autoDeref) {
           const innerType = yoopType.inner;
@@ -3218,10 +3236,19 @@ function codegenWithModuleId(
   // outer `{ ptr <backing>, i64 N }` fat-pointer constant can reference
   // it. Reuses the string-global counter for naming since both produce
   // private aggregates in the same flat namespace.
-  function emitRawArrayGlobal({ elemLlvm, count, elemInits }) {
+  //
+  // `mutable` is load-bearing, not a hint. The fat pointer this backs is
+  // reachable from a `let` module-level binding, so `xs[i] = v` writes
+  // straight through it. A `constant` lands the buffer in a read-only
+  // section and that store segfaults; `unnamed_addr` additionally lets the
+  // linker merge two same-valued buffers into one, so two independent
+  // arrays would alias. Both are correct for a `const` and fatal for a
+  // `let`.
+  function emitRawArrayGlobal({ elemLlvm, count, elemInits, mutable }) {
     const name = `@.arr_${moduleId}${fileTag}_${strConstCounter++}`;
+    const storage = mutable ? "global" : "unnamed_addr constant";
     globals.push(
-      `${name} = private unnamed_addr constant [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
+      `${name} = private ${storage} [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
     );
     return name;
   }
@@ -3445,6 +3472,12 @@ function codegenWithModuleId(
         ? comptimeValueAsLlvmInit(d.comptimeValue, d.resolvedType, {
             emitRawStringGlobal,
             emitRawArrayGlobal,
+            // A LET_DECL is mutable, so anything the folded initializer
+            // hangs off a private backing global has to be writable too.
+            // (Strings are exempt - a `string` rebind swaps the pointer
+            // rather than the bytes, and the interning that `enum<string>`
+            // equality depends on needs them merged.)
+            mutableBacking: d.kind === ASTNodeKind.LET_DECL,
           })
         : null;
       if (initLiteral != null) {
@@ -4312,6 +4345,23 @@ function codegenWithModuleId(
         }
         const yoopType = symbols.get(node.name);
         if (!yoopType) throw new Error(`codegen: unknown identifier "${node.name}"`);
+        // A `ref T` binding passed BARE to a `ref T` parameter forwards the
+        // pointer it holds - it must NOT auto-deref. The typechecker allows
+        // that spelling on purpose (an FFI handle in `let w: ref Window`
+        // reaches the next call without a redundant `ref w`) and marks the
+        // argument `passRefBinding`, but nothing ever read the flag: codegen
+        // fell through to the deref below and passed the POINTEE by value
+        // into a pointer parameter, so the callee used the struct's first
+        // field as an address. Silent segfault, no diagnostic.
+        //
+        // Checked before autoDeref because the typechecker sets BOTH on
+        // these nodes - it resolves the argument as an ordinary expression
+        // (which stamps autoDeref) before deciding it is a ref pass-through.
+        if (node.passRefBinding) {
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
+          return { val: ptrTmp, yoopType };
+        }
         if (node.autoDeref) {
           const innerType = yoopType.inner;
           const ptrTmp = freshTemp();

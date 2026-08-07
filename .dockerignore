@@ -1,0 +1,26 @@
+# Build context trimming for docker builds run from the repo root
+# (see examples/playground/counter_server/Dockerfile).
+#
+# The compiler needs exactly src/, std/, runtime/ and package.json. Without
+# this the context is ~270MB of build output and history, nearly all of it
+# uploaded to the daemon and then ignored.
+
+.git
+.github
+node_modules
+dist
+build
+editors
+plans
+docs
+bootstrap
+
+# Compiled example programs and their debug bundles - 50MB of binaries the
+# compiler has no use for.
+**/*.dSYM
+examples/**/main
+examples/**/*.o
+examples/**/*.ll
+
+*.log
+.DS_Store
