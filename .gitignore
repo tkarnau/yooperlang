@@ -16,6 +16,14 @@
 # them otherwise):
 *.exe
 **/*dSYM/
+# The Windows equivalents of *dSYM/: link.exe drops a .pdb (debug symbols)
+# and a .ilk (incremental-link state) beside every binary it produces.
+*.pdb
+*.ilk
+# Object files - the C runtime compiles to these when built out of tree
+# (the test suites prebuild it once per run rather than per fixture).
+*.o
+*.obj
 
 # Local editor / tooling state (not a source file, just has an extension).
 .claude/

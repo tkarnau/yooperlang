@@ -24,10 +24,19 @@ import * as conc from "std/core/concurrency.yoop";
 extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
-extern "C" from "unistd.h" {
-    function pipe(fds: unsafe_ptr<int32>): int32;
-    function read(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
-    function write(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
+// The descriptor pairs come from the runtime rather than libc's pipe().
+//
+// The point of this fixture is that both readers PARK IN THE MULTIPLEXER, and
+// the Windows multiplexer is WSAPoll-based, which can only wait on sockets. A
+// Windows pipe handle would compile and then never wake - the test would hang
+// rather than fail, which is the failure mode this fixture is least able to
+// afford (see the header note about it hanging if suspension stops freeing
+// the worker). yoop_socketpair is pipe() on POSIX and loopback sockets on
+// Windows, so both platforms get something the multiplexer can wait on.
+extern "C" from "yoop_runtime" {
+    function yoop_socketpair(fds: unsafe_ptr<int32>): int32;
+    function yoop_socketpair_read(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
+    function yoop_socketpair_write(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
 }
 // Note the suspend happens TWO frames down from this body: inside
 // conc.awaitReadable, which arms the interest and then awaits
@@ -38,7 +47,7 @@ task reader(fd: int32, id: int32): int32 {
     let rc: c_int = await conc.awaitReadable(fd);
     if (rc != 0) { return -1; }
     let buf: uint8[] = [0];
-    let n: int64 = read(fd, buf.ptr, 1);
+    let n: int64 = yoop_socketpair_read(fd, buf.ptr, 1);
     printf("reader %d woke\n", id);
     return int32(n);
 }
@@ -46,8 +55,8 @@ task reader(fd: int32, id: int32): int32 {
 function main(): int32 {
     let a: int32[] = [0, 0];
     let b: int32[] = [0, 0];
-    if (pipe(a.ptr) != 0) { printf("pipe failed\n"); return 1; }
-    if (pipe(b.ptr) != 0) { printf("pipe failed\n"); return 1; }
+    if (yoop_socketpair(a.ptr) != 0) { printf("pipe failed\n"); return 1; }
+    if (yoop_socketpair(b.ptr) != 0) { printf("pipe failed\n"); return 1; }
 
     pooled r1 = reader(a[0], 1);
     pooled r2 = reader(b[0], 2);
@@ -58,8 +67,8 @@ function main(): int32 {
     printf("both parked\n");
 
     let msg: uint8[] = [88];
-    let w1: int64 = write(a[1], msg.ptr, 1);
-    let w2: int64 = write(b[1], msg.ptr, 1);
+    let w1: int64 = yoop_socketpair_write(a[1], msg.ptr, 1);
+    let w2: int64 = yoop_socketpair_write(b[1], msg.ptr, 1);
 
     // Reader 1 is joined first, but the two wake independently - the
     // ordering of the "woke" lines is up to the scheduler, so only the

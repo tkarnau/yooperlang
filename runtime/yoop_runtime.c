@@ -21,6 +21,13 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+  // _setmode / _fileno / _O_BINARY, for taking the standard streams out of
+  // the CRT's newline-translating text mode (see set_stdio_binary below).
+  #include <fcntl.h>
+  #include <io.h>
+#endif
+
 #define A_LOAD_U8(p)      atomic_load_explicit((_Atomic uint8_t*)(p),  memory_order_acquire)
 #define A_STORE_U8(p, v)  atomic_store_explicit((_Atomic uint8_t*)(p), (v), memory_order_release)
 #define A_LOAD_I32(p)     atomic_load_explicit((_Atomic int32_t*)(p), memory_order_acquire)
@@ -195,9 +202,41 @@ static void join_worker(yoop_thread_t* t) {
 // lifecycle and prevents windows from appearing.
 static int n_workers_target = 0;
 
+// Windows only: take stdout/stderr out of the CRT's text mode.
+//
+// By default the MSVC CRT opens the standard streams in text mode, which
+// rewrites every '\n' the program emits into "\r\n" on its way out. That is
+// wrong for Yooperlang twice over. Semantically, `printf("a\nb")` is defined
+// to write the bytes the program named - a language that can write bytes to
+// stdout cannot have the CRT silently inserting extra ones, which would
+// corrupt any binary payload. Practically, it made a compiled program's
+// output differ from the identical program on macOS/Linux for no reason a
+// user could see, which is exactly the portability seam the language exists
+// to hide. Go and Rust both write their standard streams in binary mode for
+// the same reasons.
+//
+// This does not stop Windows consoles from rendering the output correctly -
+// they treat a bare LF as a newline. It only stops the translation layer.
+static void set_stdio_binary(void) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+#endif
+}
+
 void yoop_runtime_init(void) {
     init_lock();
     if (g_rt.initialized) { init_unlock(); return; }
+
+    // Before anything can print. Cheap and idempotent, and this is the one
+    // function codegen guarantees runs at the top of every program's main.
+    set_stdio_binary();
+
+    // Same reasoning for Winsock: it must be started before the first socket
+    // call in the process, and std/net reaches sockets through paths that do
+    // not otherwise pass through the runtime. Doing it here means a yoop
+    // program never has to think about it. No-op on POSIX.
+    yoop_net_startup();
 
     int n = yoop_cpu_count();
     const char* env = getenv("YOOP_NUM_WORKERS");

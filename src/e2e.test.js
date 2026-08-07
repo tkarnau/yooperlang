@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 
 import { parse } from "./jsyooparser/parser.js";
 import { typecheckSource, typecheckProgram } from "./jsyooptypecheck/typecheck.js";
@@ -15,11 +15,112 @@ import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
 import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
-import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
+import {
+  RUNTIME_C,
+  RUNTIME_SOURCES,
+  glueSourcesForLinkFlags,
+  runtimeLinkFlags,
+} from "./runtimeBuild.js";
+import {
+  EXE_SUFFIX,
+  clangEnv,
+  librarySearchArgs,
+  lowerLinkFlag,
+  prebuiltRuntimeObjects,
+  resolveClang,
+  windowsClangArgs,
+} from "./toolchain.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 
-function runFixture(relPath, opts = {}) {
+// How many e2e tests run at once.
+//
+// node:test runs test FILES in parallel but every test WITHIN a file
+// sequentially, so this one file was serializing ~356 compile-and-run cycles
+// while the other 25 files finished almost immediately. The helpers below are
+// async precisely so this can overlap: a test waiting on clang yields to
+// another instead of blocking the event loop.
+//
+// Safe because the tests share nothing - each mkdtemps its own build dir, and
+// the two fixtures that LISTEN bind port 0 and read the kernel-assigned port
+// back out of TcpListener.bound_port rather than agreeing on a fixed number.
+//
+// Measured, full suite, 24-core Windows box, interleaved to cancel drift:
+//
+//     concurrency 1  : 90s, 89s
+//     concurrency 8  : 48s
+//     concurrency 12 : 59s, 42s
+//
+// Worth recording HOW this number was arrived at, because a first attempt got
+// it backwards. Before the debug-info change below, the same A/B showed no
+// benefit at all (196-246s at every setting) and this defaulted to 1. That
+// measurement was not wrong, it was measuring a different constraint: profiling
+// showed 12 concurrent clang processes holding total CPU at 9% on a 24-core
+// box, i.e. the suite was I/O-bound, and adding parallelism to a saturated
+// disk does nothing. Once runFixtureEntry stopped writing 13.5MB of unread
+// debug info per fixture, the workload became CPU-bound and the same knob
+// started paying. If this ever looks useless again, profile before concluding
+// it is - the answer may be that something else is saturating first.
+const E2E_CONCURRENCY = Number(process.env.YOOP_E2E_CONCURRENCY)
+  || Math.max(2, Math.min(12, Math.floor(os.cpus().length / 2)));
+
+// Why the DWARF-via-lldb tests below cannot run here, or null if they can.
+//
+// Two separate reasons, and keeping them distinct matters because a skip that
+// names the wrong cause is worse than no skip at all. On Windows the probe
+// itself was broken (`which` is a POSIX command; the Windows equivalent is
+// `where`), so those tests reported "lldb not on PATH" even with lldb.exe
+// installed - masking the real reason, which is that clang drives the MSVC
+// target with -gcodeview and therefore emits CodeView rather than DWARF.
+// Getting a debugger working on Windows is deferred; see the porting notes.
+function dwarfSkipReason() {
+  if (process.platform === "win32") {
+    return "debug info on the MSVC target is CodeView, not DWARF";
+  }
+  const probe = spawnSync("which", ["lldb"], { encoding: "utf8" });
+  return probe.status === 0 ? null : "lldb not on PATH";
+}
+
+// Run a child process and resolve with its output - the async twin of
+// spawnSync, and the reason these helpers can overlap at all.
+//
+// A non-zero exit is NOT an error here: plenty of fixtures assert on a failing
+// exit code, so the status is data. Only a spawn failure resolves with a null
+// status, matching what spawnSync reports.
+function runProc(cmd, args, opts = {}) {
+  return new Promise((resolve) => {
+    const child = spawn(cmd, args, {
+      env: opts.env ?? process.env,
+      cwd: opts.cwd,
+      timeout: opts.timeout ?? 30000,
+    });
+    let stdout = "";
+    let stderr = "";
+    child.stdout.on("data", (d) => { stdout += d; });
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", () => resolve({ stdout, stderr, status: null }));
+    child.on("close", (code) => resolve({ stdout, stderr, status: code }));
+  });
+}
+
+// Compile a file with clang, asynchronously. Rejects with clang's stderr
+// attached so a compile failure reads the way execFileSync's throw did.
+function runClangAsync(args) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(resolveClang(), args, { env: clangEnv() });
+    let stderr = "";
+    child.stderr.on("data", (d) => { stderr += d; });
+    child.on("error", reject);
+    child.on("close", (code) => {
+      if (code === 0) return resolve();
+      const err = new Error(`clang exited ${code}\n${stderr}`);
+      err.stderr = stderr;
+      reject(err);
+    });
+  });
+}
+
+async function runFixture(relPath, opts = {}) {
   const src = fs.readFileSync(path.join(repoRoot, relPath), "utf8");
   // Single-file fixtures that import from `std/` (e.g. for intrinsics)
   // need the module-graph resolver - fall back to compileEntry in that
@@ -35,35 +136,37 @@ function runFixture(relPath, opts = {}) {
   }
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
-  const binPath = path.join(tmpDir, "out");
+  const binPath = path.join(tmpDir, "out" + EXE_SUFFIX);
   fs.writeFileSync(llPath, ir);
   const clangArgs = [
     llPath,
-    ...RUNTIME_SOURCES,
+    ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
+    // Same two hooks the real driver applies to a program's own `extern "C"
+    // from library` names, so a fixture that reaches for an external library
+    // can never link here and fail under yoopiler (or the reverse).
+    ...glueSourcesForLinkFlags(extraLinkFlags),
     "-o",
     binPath,
-    ...runtimeLinkFlags().map((f) => `-l${f}`),
-    ...extraLinkFlags.map((f) => `-l${f}`),
+    ...librarySearchArgs(),
+    ...runtimeLinkFlags().flatMap(lowerLinkFlag),
+    ...extraLinkFlags.flatMap(lowerLinkFlag),
+    ...windowsClangArgs(),
   ];
-  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  await runClangAsync(clangArgs);
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
-  const result = spawnSync(binPath, [], {
-    encoding: "utf8",
-    env,
-    timeout: opts.timeoutMs ?? 30000,
-  });
+  const result = await runProc(binPath, [], { env, timeout: opts.timeoutMs ?? 30000 });
   return { stdout: result.stdout, stderr: result.stderr, exitCode: result.status };
 }
 
 // Variant of runFixture that stages an asset file alongside the binary and
 // runs the binary with cwd set to that staging dir, so the yoop program can
 // `fopen` the asset by relative path.
-function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
+async function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
   const src = fs.readFileSync(path.join(repoRoot, yoopRelPath), "utf8");
   const ir = compileSource(src);
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
-  const binPath = path.join(tmpDir, "out");
+  const binPath = path.join(tmpDir, "out" + EXE_SUFFIX);
   fs.writeFileSync(llPath, ir);
   fs.copyFileSync(
     path.join(repoRoot, assetRelPath),
@@ -71,19 +174,20 @@ function runFixtureWithAsset(yoopRelPath, assetRelPath, assetDestName) {
   );
   const clangArgs = [
     llPath,
-    ...RUNTIME_SOURCES,
+    ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
     "-o",
     binPath,
-    ...runtimeLinkFlags().map((f) => `-l${f}`),
+    ...runtimeLinkFlags().flatMap(lowerLinkFlag),
+    ...windowsClangArgs(),
   ];
-  execFileSync("clang", clangArgs, { stdio: "pipe" });
-  const result = spawnSync(binPath, [], { encoding: "utf8", cwd: tmpDir });
+  await runClangAsync(clangArgs);
+  const result = await runProc(binPath, [], { cwd: tmpDir });
   return { stdout: result.stdout, exitCode: result.status };
 }
 
-describe("e2e: pass fixtures compile, run, and produce expected output", () => {
-  it("hello.yoop prints greeting + arithmetic + pow result", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/hello.yoop");
+describe("e2e: pass fixtures compile, run, and produce expected output", { concurrency: E2E_CONCURRENCY }, () => {
+  it("hello.yoop prints greeting + arithmetic + pow result", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/hello.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -91,14 +195,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("type_alias.yoop: transparent `type X = Y` aliases resolve through to the underlying type", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/type_alias.yoop");
+  it("type_alias.yoop: transparent `type X = Y` aliases resolve through to the underlying type", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/type_alias.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=7 b=7 first=7 len=3\nx=3 y=4 n=9\n");
   });
 
-  it("type_inference.yoop: let/const bindings infer their type from the initializer", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/type_inference.yoop");
+  it("type_inference.yoop: let/const bindings infer their type from the initializer", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/type_inference.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -106,8 +210,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("printf_format.yoop: explicit %-directives in a format string are not doubled", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/printf_format.yoop");
+  it("printf_format.yoop: explicit %-directives in a format string are not doubled", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/printf_format.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -115,20 +219,20 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("char_literals.yoop: single-quoted chars pin like untyped ints and match in switch patterns", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/char_literals.yoop");
+  it("char_literals.yoop: single-quoted chars pin like untyped ints and match in switch patterns", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/char_literals.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "slashes: 2\nnewline=10 cp=65\n1230\n");
   });
 
-  it("parens_basic.yoop groups subexpressions and composes with postfix ops", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/parens_basic.yoop");
+  it("parens_basic.yoop groups subexpressions and composes with postfix ops", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/parens_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=20\nb=20\nc=20\ne=99 f=200\n");
   });
 
-  it("generic_call_struct_lit.yoop: struct literals get target type from generic arg position", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_call_struct_lit.yoop");
+  it("generic_call_struct_lit.yoop: struct literals get target type from generic arg position", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_call_struct_lit.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -138,14 +242,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("generic_quicksort.yoop: trait-bounded generic fn dispatches a generic trait method through a type param", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_quicksort.yoop");
+  it("generic_quicksort.yoop: trait-bounded generic fn dispatches a generic trait method through a type param", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_quicksort.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "1 2 3 5 5 7 9 \n");
   });
 
-  it("keyword_field_names.yoop: reserved keywords accepted in name-only positions", () => {
-    const { stdout, exitCode } = runFixture(
+  it("keyword_field_names.yoop: reserved keywords accepted in name-only positions", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/keyword_field_names.yoop",
     );
     assert.equal(exitCode, 0);
@@ -157,8 +261,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("enum_eq.yoop: `==` / `!=` on enums lower to tag comparison", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/enum_eq.yoop");
+  it("enum_eq.yoop: `==` / `!=` on enums lower to tag comparison", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/enum_eq.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -169,8 +273,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/operators_full.yoop");
+  it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/operators_full.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -184,8 +288,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("forin_basic.yoop walks arrays of every supported element type", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/forin_basic.yoop");
+  it("forin_basic.yoop walks arrays of every supported element type", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/forin_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -197,8 +301,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("forin_iterable.yoop walks a user-defined Iterable<T> via for-in", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/forin_iterable.yoop");
+  it("forin_iterable.yoop walks a user-defined Iterable<T> via for-in", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/forin_iterable.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -209,8 +313,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("for_let_counter.yoop declares and scopes its own counter", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/for_let_counter.yoop");
+  it("for_let_counter.yoop declares and scopes its own counter", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/for_let_counter.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -226,8 +330,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("range_basic.yoop walks `a..b` and treats a Range as a value", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/range_basic.yoop");
+  it("range_basic.yoop walks `a..b` and treats a Range as a value", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/range_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -242,8 +346,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("vec_iter.yoop walks a Vec through vecIter without an index", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/vec_iter.yoop");
+  it("vec_iter.yoop walks a Vec through vecIter without an index", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/vec_iter.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -255,8 +359,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("fn_ptr_field: generic KeyOps<K> with function-pointer fields + indirect call", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/fn_ptr_field.yoop");
+  it("fn_ptr_field: generic KeyOps<K> with function-pointer fields + indirect call", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/fn_ptr_field.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "h=42 same=1 diff=0\n");
   });
@@ -265,8 +369,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // conversion fires on the failure branch; the `tag=7` proves the
   // user-written `into` method ran rather than a raw bit-copy of the
   // operand's Err payload.
-  it("qmark_cross_shape_into: `?` calls Into.into to convert between Err payload types", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_cross_shape_into.yoop");
+  it("qmark_cross_shape_into: `?` calls Into.into to convert between Err payload types", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/qmark_cross_shape_into.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "happy sum=7\nsad err code=-7 tag=7\n");
   });
@@ -277,8 +381,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // "(formatting context...)" line proves the context expression is emitted
   // inside the failure branch: it appears only for the sad call, and before
   // that call's own output line.
-  it("qmark_context_string: `?` with a context string prefixes a string Err payload", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_context_string.yoop");
+  it("qmark_context_string: `?` with a context string prefixes a string Err payload", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/qmark_context_string.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -296,8 +400,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // the untouched `line` field, which a blind string concat could not do;
   // cross-shape (IoError -> AppError) shows one impl covering both the
   // conversion and the context, with no separate `Into<AppError>`.
-  it("qmark_context_with_context: `?` context routes through WithContext.withContext", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/qmark_context_with_context.yoop");
+  it("qmark_context_with_context: `?` context routes through WithContext.withContext", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/qmark_context_with_context.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -348,8 +452,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` covers Done +
   // Timeout. The fast task completes well inside its 1s deadline; the slow
   // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.
-  it("wait_until_smoke: wait_until returns Done before the deadline and Timeout after it", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/wait_until_smoke.yoop");
+  it("wait_until_smoke: wait_until returns Done before the deadline and Timeout after it", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/wait_until_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "fast done=49\nlazy timed out\n");
   });
@@ -357,8 +461,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Phase 10.F.2: external cancellation via `cancel(h)`. A second pooled
   // task fires the cancel mid-wait; the main thread's wait_until (with a
   // 1s deadline that's not the path-of-success) observes WaitResult.Cancelled.
-  it("cancel_smoke: cancel(h) makes wait_until return WaitResult.Cancelled", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/cancel_smoke.yoop");
+  it("cancel_smoke: cancel(h) makes wait_until return WaitResult.Cancelled", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/cancel_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "cancelled as expected\n");
   });
@@ -368,8 +472,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // explicit cross-thread cancel waking a parked sleep, parent/child
   // cascade, a child with its own shorter budget, and the null `none()`
   // token being a working no-op.
-  it("cancel_token_smoke: deadlines, explicit cancel, child tokens, and none()", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/cancel_token_smoke.yoop");
+  it("cancel_token_smoke: deadlines, explicit cancel, child tokens, and none()", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/cancel_token_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -382,8 +486,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // multiplexer with no way out; these give up on a deadline instead.
   // The accept-with-no-client and read-from-a-silent-peer cases are the
   // two shapes that used to wedge a thread permanently.
-  it("io_timeout_smoke: accept and read give up on a deadline instead of parking forever", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/io_timeout_smoke.yoop");
+  it("io_timeout_smoke: accept and read give up on a deadline instead of parking forever", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/io_timeout_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -402,8 +506,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // makes that work - testing "has the token fired yet" instead makes a
   // live deadline-less token look absent, which silently routes back to
   // the uninterruptible ffi_recv and hangs this test forever.
-  it("io_cancel_smoke: a cancel token unparks an accept blocked in the multiplexer", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/io_cancel_smoke.yoop");
+  it("io_cancel_smoke: a cancel token unparks an accept blocked in the multiplexer", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/io_cancel_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -416,8 +520,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // coroutines, and a task body is implicitly async. Covers composition
   // (an async fn awaiting another), mixing async and ordinary calls in
   // one body, and a loop whose locals cross the await.
-  it("async_await_smoke: async functions compose and are driven by the task scheduler", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/async_await_smoke.yoop");
+  it("async_await_smoke: async functions compose and are driven by the task scheduler", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/async_await_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "compute=15\nmixed=20\nlooping=20\n");
   });
@@ -429,8 +533,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // body, which is the propagation the coloring rules exist to make safe.
   //
   // The two "woke" lines race, so only their multiset is asserted.
-  it("async_yield_smoke: two tasks park on I/O simultaneously with a single worker thread", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/async_yield_smoke.yoop", {
+  it("async_yield_smoke: two tasks park on I/O simultaneously with a single worker thread", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/async_yield_smoke.yoop", {
       env: { YOOP_NUM_WORKERS: "1" },
     });
     assert.equal(exitCode, 0);
@@ -451,8 +555,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // deadlocks rather than fails: the single worker parks inside the
   // server's accept() and no client ever gets a turn. So a regression
   // here shows up as a timeout, which is the signal we want.
-  it("async_server_smoke: an HTTP server and 3 concurrent clients share a single worker", () => {
-    const { stdout, exitCode } = runFixtureEntry(
+  it("async_server_smoke: an HTTP server and 3 concurrent clients share a single worker", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/async_server_smoke/main.yoop",
       { env: { YOOP_NUM_WORKERS: "1" }, timeoutMs: 30000 },
     );
@@ -460,51 +564,51 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "served=3 ok=3\n");
   });
 
-  it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
+  it("alloca_uniqueness: repeated payload-binding names and shadowing scope-restore", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/alloca_uniqueness.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "total=112 mode=19\n");
   });
 
-  it("arena_context: malloc default + bump arena installed as the current allocator", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_context.yoop");
+  it("arena_context: malloc default + bump arena installed as the current allocator", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/arena_context.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "mallocOk=1 distinct=1 reused=1 used=128 afterReset=0\n");
   });
 
-  it("arena_scope: disposable arenaScope installs+tears down a region; temp allocator resets", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_scope.yoop");
+  it("arena_scope: disposable arenaScope installs+tears down a region; temp allocator resets", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/arena_scope.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "scopeUsed=128 tempReused=1\n");
   });
 
-  it("arena_vec: a Vec created inside an arena scope draws its storage from the arena", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_vec.yoop");
+  it("arena_vec: a Vec created inside an arena scope draws its storage from the arena", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/arena_vec.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "sum=60 len=5\narenaGotData=1\n");
   });
 
-  it("arena_request_loop: per-request arena reset keeps peak memory bounded across requests", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/arena_request_loop.yoop");
+  it("arena_request_loop: per-request arena reset keeps peak memory bounded across requests", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/arena_request_loop.yoop");
     assert.equal(exitCode, 0);
     // 5 requests summed (5*45=225); peak is ONE request's footprint, not 5x.
     assert.equal(stdout, "totalSum=225 peakUsed=96\n");
   });
 
-  it("generic_trait_cross_module: an imported generic trait's method is callable via the qualified form", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_trait_cross_module/main.yoop");
+  it("generic_trait_cross_module: an imported generic trait's method is callable via the qualified form", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/generic_trait_cross_module/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "unwrapped 7\n");
   });
 
-  it("clearance_namespaced_sink: a laundered value flows into a sink called through its namespace", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/clearance_namespaced_sink/main.yoop");
+  it("clearance_namespaced_sink: a laundered value flows into a sink called through its namespace", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/clearance_namespaced_sink/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "ran query\n");
   });
 
-  it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/map_smoke/main.yoop");
+  it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -518,8 +622,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("map_int32_keys: Map<int32, string> via int32_key_ops covers get/remove/contains", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/map_int32_keys.yoop");
+  it("map_int32_keys: Map<int32, string> via int32_key_ops covers get/remove/contains", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_int32_keys.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -531,8 +635,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("set_smoke: Set<string> insert/contains/remove with dup detection", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/set_smoke.yoop");
+  it("set_smoke: Set<string> insert/contains/remove with dup detection", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/set_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -542,8 +646,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("deque_smoke: Deque<int32> push/pop both ends, growth, empty-pop returns None", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/deque_smoke.yoop");
+  it("deque_smoke: Deque<int32> push/pop both ends, growth, empty-pop returns None", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/deque_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -554,14 +658,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("map_iter: for entry in map_iter(ref m) walks occupied slots via Iterable<MapEntry>", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/map_iter.yoop");
+  it("map_iter: for entry in map_iter(ref m) walks occupied slots via Iterable<MapEntry>", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_iter.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "keys_sum=10 vals_sum=1000\n");
   });
 
-  it("display_templates: Display trait wires into template literal interpolations", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/display_templates.yoop");
+  it("display_templates: Display trait wires into template literal interpolations", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/display_templates.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -569,14 +673,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("debug_smoke: assert(true, ...) is a no-op; normal-path codegen unaffected", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/debug_smoke.yoop");
+  it("debug_smoke: assert(true, ...) is a no-op; normal-path codegen unaffected", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/debug_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "assert ok\n");
   });
 
-  it("log_smoke: std/log writes [info]/[warn]/[error] lines to stderr", () => {
-    const { stdout, stderr, exitCode } = runFixtureEntry("examples/pass/log_smoke.yoop");
+  it("log_smoke: std/log writes [info]/[warn]/[error] lines to stderr", async () => {
+    const { stdout, stderr, exitCode } = await runFixtureEntry("examples/pass/log_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "done\n");
     assert.equal(
@@ -585,8 +689,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("format_smoke: std/core/format renders ints, bools, and floats", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/format_smoke.yoop");
+  it("format_smoke: std/core/format renders ints, bools, and floats", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/format_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -594,8 +698,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("template_to_string: interpolated template literals work as plain strings", () => {
-    const { stdout, stderr, exitCode } = runFixtureEntry(
+  it("template_to_string: interpolated template literals work as plain strings", async () => {
+    const { stdout, stderr, exitCode } = await runFixtureEntry(
       "examples/pass/template_to_string.yoop",
     );
     assert.equal(exitCode, 0);
@@ -606,15 +710,15 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "count is 7\n");
   });
 
-  it("panic_smoke: panic(msg) exits 1 after writing 'panic: ...' to stderr", () => {
-    const { stdout, stderr, exitCode } = runFixtureEntry("examples/pass/panic_smoke.yoop");
+  it("panic_smoke: panic(msg) exits 1 after writing 'panic: ...' to stderr", async () => {
+    const { stdout, stderr, exitCode } = await runFixtureEntry("examples/pass/panic_smoke.yoop");
     assert.equal(exitCode, 1);
     assert.equal(stdout, "before panic\n");
     assert.equal(stderr, "panic: intentional\n");
   });
 
-  it("slice_basic.yoop slices arrays in all four forms and shares storage", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/slice_basic.yoop");
+  it("slice_basic.yoop slices arrays in all four forms and shares storage", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/slice_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -626,92 +730,92 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("int_literal.yoop prints decoded hex/bin/dec/negative literals", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/int_literal.yoop");
+  it("int_literal.yoop prints decoded hex/bin/dec/negative literals", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/int_literal.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=255 b=10 c=1000000 d=-7\n");
   });
 
-  it("float_literal.yoop prints decimal/negative/scientific floats", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/float_literal.yoop");
+  it("float_literal.yoop prints decimal/negative/scientific floats", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/float_literal.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "x=3.140000 y=-0.500000 z=100.000000\n");
   });
 
-  it("range_check.yoop sums two int8 values that fit in range", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/range_check.yoop");
+  it("range_check.yoop sums two int8 values that fit in range", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/range_check.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=100, b=27, c=127\n");
   });
 
-  it("struct_basic.yoop creates a Point struct and prints the distance square", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/struct_basic.yoop");
+  it("struct_basic.yoop creates a Point struct and prints the distance square", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/struct_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "distance_sq = 25\n");
   });
 
-  it("struct_field_write.yoop mutates a struct field through a chain of assignments", () => {
-    const { stdout, exitCode } = runFixture(
+  it("struct_field_write.yoop mutates a struct field through a chain of assignments", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/struct_field_write.yoop",
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "c.value = 20\n");
   });
 
-  it("struct_return.yoop returns a struct from a function and reads its fields", () => {
-    const { stdout, exitCode } = runFixture(
+  it("struct_return.yoop returns a struct from a function and reads its fields", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/struct_return.yoop",
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=7 b=11\n");
   });
 
-  it("struct_nested.yoop initializes nested struct literals and chains field access", () => {
-    const { stdout, exitCode } = runFixture(
+  it("struct_nested.yoop initializes nested struct literals and chains field access", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/struct_nested.yoop",
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a.inner.v = 42\n");
   });
 
-  it("refs_basic.yoop passes a ref param and writes through it", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/refs_basic.yoop");
+  it("refs_basic.yoop passes a ref param and writes through it", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/refs_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "x = 42\n");
   });
 
-  it("refs_swap.yoop swaps two values through ref params", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/refs_swap.yoop");
+  it("refs_swap.yoop swaps two values through ref params", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/refs_swap.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "x=10 y=5\n");
   });
 
-  it("arrays_basic.yoop creates an int32[] literal, reads len and elements, writes an element", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/arrays_basic.yoop");
+  it("arrays_basic.yoop creates an int32[] literal, reads len and elements, writes an element", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/arrays_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len=3 first=10 last=30\nxs[1]=99\n");
   });
 
-  it("arrays_loop.yoop iterates an array with a for-loop and sums elements", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/arrays_loop.yoop");
+  it("arrays_loop.yoop iterates an array with a for-loop and sums elements", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/arrays_loop.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "sum = 15\n");
   });
 
-  it("heap_alloc_int.yoop allocates an int32[] on the heap, indexes it, frees it", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/heap_alloc_int.yoop");
+  it("heap_alloc_int.yoop allocates an int32[] on the heap, indexes it, frees it", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/heap_alloc_int.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "buf[0]=0 buf[2]=20 buf[4]=40 len=5\n");
   });
 
-  it("heap_alloc_struct.yoop allocates a heap buffer of structs and round-trips fields", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/heap_alloc_struct.yoop");
+  it("heap_alloc_struct.yoop allocates a heap buffer of structs and round-trips fields", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/heap_alloc_struct.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "p[0]=(1, 2.500000) p[2]=(5, 6.500000)\n");
   });
 
-  it("track_heap_basic.yoop: --track-heap counts alloc/free bytes and dumps net via atexit", () => {
-    const { stdout, stderr, exitCode } = runFixture(
+  it("track_heap_basic.yoop: --track-heap counts alloc/free bytes and dumps net via atexit", async () => {
+    const { stdout, stderr, exitCode } = await runFixture(
       "examples/pass/track_heap_basic.yoop",
       { trackHeap: true },
     );
@@ -725,31 +829,31 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("heap_alloc_int.yoop without --track-heap emits no diag line", () => {
-    const { stderr } = runFixture("examples/pass/heap_alloc_int.yoop");
+  it("heap_alloc_int.yoop without --track-heap emits no diag line", async () => {
+    const { stderr } = await runFixture("examples/pass/heap_alloc_int.yoop");
     assert.equal(stderr ?? "", "");
   });
 
-  it("dynarray_push.yoop pushes through a grow boundary in user-defined DynArray<int32>", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/dynarray_push.yoop");
+  it("dynarray_push.yoop pushes through a grow boundary in user-defined DynArray<int32>", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/dynarray_push.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len=10 cap=16 sum=55\n");
   });
 
-  it("generic_disposable_propagates.yoop: DynArray<T> implements Disposable with propagates auto-injects dispose", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_disposable_propagates.yoop");
+  it("generic_disposable_propagates.yoop: DynArray<T> implements Disposable with propagates auto-injects dispose", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_disposable_propagates.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len=3 arr[2]=30\ndisposing(3)\n");
   });
 
-  it("propagates_manual_dispose.yoop: a plain `let` of a propagating type passes when the user discharges the obligation manually", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/propagates_manual_dispose.yoop");
+  it("propagates_manual_dispose.yoop: a plain `let` of a propagating type passes when the user discharges the obligation manually", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/propagates_manual_dispose.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "using(7)\ndisposed(7)\n");
   });
 
-  it("propagates_dispose_both_branches.yoop: dispose in BOTH arms of an if/else satisfies a plain `let` binding", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/propagates_dispose_both_branches.yoop");
+  it("propagates_dispose_both_branches.yoop: dispose in BOTH arms of an if/else satisfies a plain `let` binding", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/propagates_dispose_both_branches.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposed(7)\n");
   });
@@ -758,8 +862,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // `disposable`-keyword binding inside a `case` arm gets its auto-cleanup
   // injected at the arm-block end. dispose fires before "after", proving the
   // arm body's implicitCleanups were populated and emitted.
-  it("disposable_in_switch_arm.yoop: a `disposable` binding inside a switch arm fires cleanup at arm end", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/disposable_in_switch_arm.yoop");
+  it("disposable_in_switch_arm.yoop: a `disposable` binding inside a switch arm fires cleanup at arm end", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/disposable_in_switch_arm.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "using(1)\ndisposed(1)\nafter\n");
   });
@@ -767,46 +871,46 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Yoopstore-papercut #11: a returned struct/variant literal that moves a
   // propagating binding into a field transfers the obligation - dispose fires
   // exactly once, at the caller.
-  it("propagates_return_struct_literal.yoop: returning a struct literal transfers the inner obligation", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/propagates_return_struct_literal.yoop");
+  it("propagates_return_struct_literal.yoop: returning a struct literal transfers the inner obligation", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/propagates_return_struct_literal.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "using(7)\ndisposed-inner(42)\n");
   });
 
-  it("propagates_return_variant_literal.yoop: returning a variant constructor transfers the inner obligation", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/propagates_return_variant_literal.yoop");
+  it("propagates_return_variant_literal.yoop: returning a variant constructor transfers the inner obligation", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/propagates_return_variant_literal.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "made-box\ndisposed-inner(99)\n");
   });
 
-  it("for_break_continue.yoop: break exits loop early, continue skips even values", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/for_break_continue.yoop");
+  it("for_break_continue.yoop: break exits loop early, continue skips even values", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/for_break_continue.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "sum = 10\nodd = 25\n");
   });
 
-  it("casts.yoop: widening int cast, int-to-float, float-to-float casts", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/casts.yoop");
+  it("casts.yoop: widening int cast, int-to-float, float-to-float casts", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/casts.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "b=100 d=100\nc=100.000000\ne=100.000000\n");
   });
 
   // ---- 7.1 generics ----
 
-  it("generic_box.yoop: monomorphic Box<int32> field access", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_box.yoop");
+  it("generic_box.yoop: monomorphic Box<int32> field access", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_box.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "b=42\n");
   });
 
-  it("generic_identity.yoop: generic function identity<T> inferred from arg", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_identity.yoop");
+  it("generic_identity.yoop: generic function identity<T> inferred from arg", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_identity.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "m=100\n");
   });
 
-  it("generics_overview.yoop exercises generic structs, fns, traits", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generics_overview.yoop");
+  it("generics_overview.yoop exercises generic structs, fns, traits", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generics_overview.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -816,20 +920,20 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
 
   // ---- 7.2 trait bounds ----
 
-  it("generic_bound_basic.yoop: call trait method via bounded T", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_bound_basic.yoop");
+  it("generic_bound_basic.yoop: call trait method via bounded T", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_bound_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "v=42\n");
   });
 
-  it("generic_bound_struct.yoop: bounded type param on a generic struct", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_bound_struct.yoop");
+  it("generic_bound_struct.yoop: bounded type param on a generic struct", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_bound_struct.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "tag\n");
   });
 
-  it("generic_bounds_overview.yoop: full 7.2 showcase (incl. generic-calls-generic)", () => {
-    const { stdout, exitCode } = runFixture(
+  it("generic_bounds_overview.yoop: full 7.2 showcase (incl. generic-calls-generic)", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/generic_bounds_overview.yoop",
     );
     assert.equal(exitCode, 0);
@@ -838,22 +942,22 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
 
   // ---- 9.J trait extends + multi-bound type params ----
 
-  it("trait_extends.yoop: a struct impl of a child trait covers parent methods", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/trait_extends.yoop");
+  it("trait_extends.yoop: a struct impl of a child trait covers parent methods", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/trait_extends.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "greet=5 shout=50 parent_greet=5\n");
   });
 
-  it("trait_extends_generic_bound.yoop: child impl satisfies a parent bound on a generic fn", () => {
-    const { stdout, exitCode } = runFixture(
+  it("trait_extends_generic_bound.yoop: child impl satisfies a parent bound on a generic fn", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/trait_extends_generic_bound.yoop",
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "legs=4\n");
   });
 
-  it("multiple_trait_bounds.yoop: <T implements (A, B)> dispatches both bounds inside the body", () => {
-    const { stdout, exitCode } = runFixture(
+  it("multiple_trait_bounds.yoop: <T implements (A, B)> dispatches both bounds inside the body", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/multiple_trait_bounds.yoop",
     );
     assert.equal(exitCode, 0);
@@ -862,8 +966,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
 
   // ---- 7.5 sum types, unions, switch / pattern matching ----
 
-  it("switch_int.yoop: literal-only switch with multi-pattern arms + default", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/switch_int.yoop");
+  it("switch_int.yoop: literal-only switch with multi-pattern arms + default", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/switch_int.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -871,14 +975,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("switch_bool.yoop: bool exhaustive switch (no default required)", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/switch_bool.yoop");
+  it("switch_bool.yoop: bool exhaustive switch (no default required)", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/switch_bool.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "label(true)=1\nlabel(false)=0\n");
   });
 
-  it("enum_basic.yoop: payload + no-payload variants, switch destructuring", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/enum_basic.yoop");
+  it("enum_basic.yoop: payload + no-payload variants, switch destructuring", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/enum_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a is A\nb.x=42\n");
   });
@@ -890,8 +994,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // struct; `heap_alloc<Struct>(n)` allocated half the bytes LLVM expects
   // and writes corrupted the heap. The fix makes pass C mutate the shell
   // in place. Would fail to run cleanly under the old typechecker.
-  it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/variant_struct_forward_ref.yoop");
+  it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/variant_struct_forward_ref.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "total=110 kids=5\n");
   });
@@ -900,8 +1004,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // interleave method bodies with variant cases, exactly like struct
   // decls. Auto-cleanup at scope end dispatches through the variant's
   // own dispose; cleanup order is LIFO (Empty fires before Buffer).
-  it("variant_implements_trait.yoop: variant implements Disposable + propagates<disposable> with auto-cleanup", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/variant_implements_trait.yoop");
+  it("variant_implements_trait.yoop: variant implements Disposable + propagates<disposable> with auto-cleanup", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/variant_implements_trait.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -910,14 +1014,14 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   });
 
   // Phase 12: value enums - the new `enum` keyword as a nominal primitive alias.
-  it("value_enum_basic.yoop: int32-backed enum with switch + equality", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/value_enum_basic.yoop");
+  it("value_enum_basic.yoop: int32-backed enum with switch + equality", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/value_enum_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "red\ngreen\nblue\neq works\nneq works\n");
   });
 
-  it("value_enum_flags.yoop: bitwise operators on int-backed enum (SDL-style flags)", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/value_enum_flags.yoop");
+  it("value_enum_flags.yoop: bitwise operators on int-backed enum (SDL-style flags)", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/value_enum_flags.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -925,47 +1029,47 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     );
   });
 
-  it("value_enum_explicit_int.yoop: enum<int64> with explicit + auto-incremented cases", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/value_enum_explicit_int.yoop");
+  it("value_enum_explicit_int.yoop: enum<int64> with explicit + auto-incremented cases", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/value_enum_explicit_int.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "z=Zero\nbig > zero\nauto increments to 19\n");
   });
 
-  it("value_enum_string.yoop: enum<string> with named string constants and equality", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/value_enum_string.yoop");
+  it("value_enum_string.yoop: enum<string> with named string constants and equality", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/value_enum_string.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "asc\nnot desc\n");
   });
 
-  it("value_enum_template.yoop: value enums interpolate as their underlying primitive", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/value_enum_template.yoop");
+  it("value_enum_template.yoop: value enums interpolate as their underlying primitive", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/value_enum_template.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "level=warn color=2\nfirst=info count=1\n");
   });
 
-  it("value_enum_to_string.yoop: value enum in a string-producing template literal", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/value_enum_to_string.yoop");
+  it("value_enum_to_string.yoop: value enum in a string-producing template literal", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/value_enum_to_string.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "level=error color=1\nRed Str Val: R\n");
   });
 
-  it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/enum_showcase.yoop");
+  it("enum_showcase.yoop: 4-variant enum, switch with payload destructuring + rename", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/enum_showcase.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "circle r=2\nrect 3x4\nsquare s=5\nempty\n");
   });
 
   // Phase 9.H: `?` propagates over enums with Ok/Err variants.
-  it("fallible_enum_qmark.yoop: '?' on a Result-shaped enum propagates Err and unwraps Ok", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/fallible_enum_qmark.yoop");
+  it("fallible_enum_qmark.yoop: '?' on a Result-shaped enum propagates Err and unwraps Ok", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/fallible_enum_qmark.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "happy sum=7\nsad err=-7\n");
   });
 
   // Phase 10.A: generic enum Result<T, E> instantiates per (T, E) pair, and
   // the Phase 9.H structural `?` recognizer fires on the instantiated shape.
-  it("generic_enum_result.yoop: Result<int32, int32> participates in switch + ? propagation", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_enum_result.yoop");
+  it("generic_enum_result.yoop: Result<int32, int32> participates in switch + ? propagation", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_enum_result.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "happy sum=7\nsad err=-7\n");
   });
@@ -973,8 +1077,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Phase 10.A: generic enum with a no-payload variant. Exercises the
   // FIELD_ACCESS → VARIANT_CONSTRUCTOR pinning path for `Maybe.None` in
   // return position.
-  it("generic_enum_option_like.yoop: Maybe<T> with Some/None over int32", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/generic_enum_option_like.yoop");
+  it("generic_enum_option_like.yoop: Maybe<T> with Some/None over int32", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/generic_enum_option_like.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "m1=Some(3)\nm2=None\n");
   });
@@ -984,8 +1088,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // and a single fan_out function dispatches across the mixed array - the
   // canonical motivating case (would have needed monomorphized generics or
   // unsafe-pointer fields pre-9.G).
-  it("vtable_handlers.yoop: heterogeneous handler list dispatches through a vtable", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/vtable_handlers.yoop");
+  it("vtable_handlers.yoop: heterogeneous handler list dispatches through a vtable", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/vtable_handlers.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "req=10 sum=145\nreq=7  sum=133\nscale-only=33\n");
   });
@@ -994,8 +1098,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // functions (ctx-null + ctx-dropping shim), with no per-predicate struct.
   // Exercises a heterogeneous array mixing fromFn and from(ref struct) values
   // through one vtable type, plus a two-method vtable to pin slot ordering.
-  it("vtable_fromfn.yoop: fromFn builds vtables from named functions", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/vtable_fromfn.yoop");
+  it("vtable_fromfn.yoop: fromFn builds vtables from named functions", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/vtable_fromfn.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "matches=6\nseven-is-digit\nlo=20 hi=11\n");
   });
@@ -1003,8 +1107,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Phase 10.K: a function-pointer parameter is callable directly by name
   // (`pred(ch)`), and a bare top-level function name materializes as the
   // argument - the lightest higher-order form, no vtable/struct/ctx.
-  it("fn_pointer_param.yoop: a function passed as an argument is called indirectly", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/fn_pointer_param.yoop");
+  it("fn_pointer_param.yoop: a function passed as an argument is called indirectly", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/fn_pointer_param.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "digits=3\nuppers=2\nagain=2\n");
   });
@@ -1012,8 +1116,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Phase 10.K: an array of function pointers - element type spelled with a
   // parenthesized function-value type `((p: T) => R)[]`. Names materialize
   // into the slots, the loop variable is called directly. No vtable/struct.
-  it("fn_pointer_array.yoop: an array of function pointers scans via indirect calls", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/fn_pointer_array.yoop");
+  it("fn_pointer_array.yoop: an array of function pointers scans via indirect calls", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/fn_pointer_array.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "aF3: ok end=3\na_3: ok end=3\n_a3: err leading underscore\naFxy: ok end=2\n");
   });
@@ -1022,8 +1126,8 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Pre-9.I, YOOP_NUM_WORKERS=1 plus an inner `wait` deadlocked the lone
   // worker; the suspendable-wait path drains the queue on the calling thread
   // instead of pthread_cond_wait'ing.
-  it("suspendable_wait.yoop: nested task waits complete under YOOP_NUM_WORKERS=1", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/suspendable_wait.yoop", {
+  it("suspendable_wait.yoop: nested task waits complete under YOOP_NUM_WORKERS=1", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/suspendable_wait.yoop", {
       env: { YOOP_NUM_WORKERS: "1" },
       timeoutMs: 10000,
     });
@@ -1031,70 +1135,85 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
     assert.equal(stdout, "chain=18\n");
   });
 
-  it("union_rgba.yoop: untagged union, read via two field aliases, write through one updates the other", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/union_rgba.yoop");
+  it("union_rgba.yoop: untagged union, read via two field aliases, write through one updates the other", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/union_rgba.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "r=221 g=204 b=187 a=170\nafter-write b=187\n");
   });
 
-  it("unsafe_ptr_basic.yoop: address-of, deref read/write, null compare", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_basic.yoop");
+  it("unsafe_ptr_basic.yoop: address-of, deref read/write, null compare", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/unsafe_ptr_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "v=42 x=99\nisnull=0 nb=1\n");
   });
 
-  it("unsafe_ptr_arithmetic.yoop: malloc + GEP + bitcast + ptr<->int round-trip", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_arithmetic.yoop");
+  it("unsafe_ptr_arithmetic.yoop: malloc + GEP + bitcast + ptr<->int round-trip", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/unsafe_ptr_arithmetic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "diff=3\nsame=1\n");
   });
 
   // Yoopstore-papercut #3: bare `unsafe_ptr` (no `<T>`) is the opaque
   // C-pointer handle. fopen/fclose round-trip + implicit decay + cast.
-  it("unsafe_ptr_opaque.yoop: bare unsafe_ptr round-trips through fopen/fclose and casts", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/unsafe_ptr_opaque.yoop");
+  it("unsafe_ptr_opaque.yoop: bare unsafe_ptr round-trips through fopen/fclose and casts", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/unsafe_ptr_opaque.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "opened=0 nz=1 v=7\n");
   });
 
-  it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/clock_gettime.yoop");
+  // Both of these mirror POSIX's `struct timespec` and call clock_gettime,
+  // neither of which exists on Windows: the MSVC CRT has no clock_gettime,
+  // and `struct timespec` is not layout-compatible across the three targets
+  // anyway (tv_nsec is a 4-byte long on Windows and an 8-byte long on
+  // Linux/macOS), so one yoop struct cannot mirror it without conditional
+  // compilation the language does not have.
+  //
+  // The compiler features they cover - `c_*` type aliases in an extern
+  // signature and a C-ABI struct passed by pointer - are still exercised on
+  // Windows through std/net, where SockAddrIn is a `layout { abi "C"; }`
+  // struct handed to yoop_sock_bind/connect (see http_client_loopback).
+  const posixLibc = process.platform === "win32";
+
+  it("clock_gettime.yoop: C aliases in extern signature, struct ptr round-trip via libc", async (t) => {
+    if (posixLibc) { t.skip("clock_gettime is POSIX-only"); return; }
+    const { stdout, exitCode } = await runFixture("examples/pass/clock_gettime.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "plausible=1 nsec_ok=1\n");
   });
 
-  it("clock_gettime_layout.yoop: layout { abi \"C\"; } on a C-mirroring struct compiles + runs", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/clock_gettime_layout.yoop");
+  it("clock_gettime_layout.yoop: layout { abi \"C\"; } on a C-mirroring struct compiles + runs", async (t) => {
+    if (posixLibc) { t.skip("clock_gettime is POSIX-only"); return; }
+    const { stdout, exitCode } = await runFixture("examples/pass/clock_gettime_layout.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "ok=1\n");
   });
 
-  it("buffer_interop.yoop: xs.ptr + unsafe_ptr.toArray round-trip a malloc'd buffer through memcmp", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/buffer_interop.yoop");
+  it("buffer_interop.yoop: xs.ptr + unsafe_ptr.toArray round-trip a malloc'd buffer through memcmp", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/buffer_interop.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "view.len=8 expect.len=8 matched=1\n");
   });
 
-  it("errno_open.yoop: open of a nonexistent path returns -1, errno = ENOENT, message resolves", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/errno_open.yoop");
+  it("errno_open.yoop: open of a nonexistent path returns -1, errno = ENOENT, message resolves", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/errno_open.yoop");
     assert.equal(exitCode, 0);
     assert.match(stdout, /fd=-1 saw_failure=1 code=2 saw_enoent=1 msg=No such file/);
   });
 
-  it("module_counter.yoop: module-level let mutates across tick() calls; const reads as expected", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/module_counter.yoop");
+  it("module_counter.yoop: module-level let mutates across tick() calls; const reads as expected", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/module_counter.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "ticked: a=1 b=2 c=3 now=3\n");
   });
 
-  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleep_ms delays the producer", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/concurrent_pipe.yoop");
+  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleep_ms delays the producer", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/concurrent_pipe.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "got=88\n");
   });
 
-  it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", () => {
-    const { stdout, exitCode } = runFixtureWithAsset(
+  it("language_showcase.yoop reads a file via libc and reports byte/line/word/most-common-letter counts", async () => {
+    const { stdout, exitCode } = await runFixtureWithAsset(
       "examples/pass/language_showcase.yoop",
       "examples/pass/language_showcase.txt",
       "language_showcase.txt",
@@ -1109,16 +1228,16 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
   // Clearance kinds (marker polarity + static two-bound check): a conferred
   // `cleared` capability earned via `launder`, and a restrictive `tainted`
   // hazard that must pass through a transition before reaching a plain slot.
-  it("clearance_marker.yoop launders tainted bytes and feeds a cleared sink", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/clearance_marker.yoop");
+  it("clearance_marker.yoop launders tainted bytes and feeds a cleared sink", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/clearance_marker.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a: safe\nb: safe\n");
   });
 
   // chat-agent-papercut #3: `contains` was a global keyword (kind-clause
   // word) blocking it as an ordinary function name. Now contextual.
-  it("contains_as_function_name.yoop accepts `contains` as an ordinary fn name", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/contains_as_function_name.yoop");
+  it("contains_as_function_name.yoop accepts `contains` as an ordinary fn name", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/contains_as_function_name.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "yes\n");
   });
@@ -1126,34 +1245,48 @@ describe("e2e: pass fixtures compile, run, and produce expected output", () => {
 });
 
 // Multi-file fixture: compile entry path through full module graph pipeline.
-function runFixtureEntry(relPath, opts = {}) {
+async function runFixtureEntry(relPath, opts = {}) {
   const entryAbs = path.join(repoRoot, relPath);
   const { ir, linkFlags } = compileEntry(entryAbs, { trackHeap: !!opts.trackHeap });
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_e2e_"));
   const llPath = path.join(tmpDir, "out.ll");
-  const binPath = path.join(tmpDir, "out");
+  const binPath = path.join(tmpDir, "out" + EXE_SUFFIX);
   fs.writeFileSync(llPath, ir);
   const allLinkFlags = [...linkFlags, ...runtimeLinkFlags()];
-  // -g preserves the DWARF metadata yoopiler emits; -O0 mirrors the
-  // production yoopiler.js invocation so e2e behavior matches what users see.
+  // -g is OPT-IN (opts.debug), not the default, and that is a measured choice.
+  //
+  // It used to be unconditional, to "mirror the production yoopiler.js
+  // invocation". But almost every test here asserts on the program's STDOUT,
+  // which debug info cannot affect, and the tests that check DWARF *shape*
+  // inspect the IR string - which codegen produces before clang ever runs. The
+  // only tests that need a debug-info-bearing BINARY are the lldb ones, and
+  // they ask for it explicitly.
+  //
+  // What it cost to carry it everywhere, measured on Windows: ~100ms of the
+  // ~415ms link (25%), and 13.5MB written per fixture instead of 250KB - the
+  // .pdb is 8MB and the incremental-link .ilk another 4.7MB. Across ~200
+  // fixtures that is roughly 3.4GB of disk traffic per suite run. Profiling
+  // showed this workload is I/O-bound, not CPU-bound (12 concurrent clangs
+  // held total CPU at 9% on a 24-core box), so bytes written is the thing that
+  // actually costs wall time here.
+  //
+  // -O0 stays unconditional: it keeps each statement's line info distinct and
+  // matches what users get.
   const clangArgs = [
     llPath,
-    ...RUNTIME_SOURCES,
-    "-g",
+    ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
+    ...(opts.debug ? ["-g"] : []),
     "-O0",
     "-o",
     binPath,
-    ...allLinkFlags.map((f) => `-l${f}`),
+    ...allLinkFlags.flatMap(lowerLinkFlag),
+    ...windowsClangArgs(),
   ];
-  execFileSync("clang", clangArgs, { stdio: "pipe" });
+  await runClangAsync(clangArgs);
   // `env` mirrors runFixture's option - needed by fixtures that pin
   // YOOP_NUM_WORKERS to prove a scheduling property.
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
-  const result = spawnSync(binPath, [], {
-    encoding: "utf8",
-    env,
-    timeout: opts.timeoutMs ?? 30000,
-  });
+  const result = await runProc(binPath, [], { env, timeout: opts.timeoutMs ?? 30000 });
   return {
     stdout: result.stdout,
     stderr: result.stderr,
@@ -1188,15 +1321,15 @@ function parseFixture(relPath) {
   return parse(src);
 }
 
-describe("e2e: multi-file pass fixtures compile and produce expected output", () => {
-  it("imports_basic: named import + call", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_basic/main.yoop");
+describe("e2e: multi-file pass fixtures compile and produce expected output", { concurrency: E2E_CONCURRENCY }, () => {
+  it("imports_basic: named import + call", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_basic/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "9 = 9\n");
   });
 
-  it("imports_namespace: import * as + dotted call", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_namespace/main.yoop");
+  it("imports_namespace: import * as + dotted call", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_namespace/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "5 = 5\n");
   });
@@ -1206,8 +1339,8 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
   // field). The captured elem type is a pass-A shell with empty
   // implementsTraits/methods; the call-site bound check and the registry
   // boundChecker must re-canonicalize it before checking.
-  it("generic_bound_imported_shell: bound check canonicalizes imported struct shells", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/generic_bound_imported_shell/main.yoop");
+  it("generic_bound_imported_shell: bound check canonicalizes imported struct shells", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/generic_bound_imported_shell/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "(1, 2)\n");
   });
@@ -1217,18 +1350,18 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", ()
 // Display.to_string method from a struct's field annotations. Fixtures run
 // through runFixtureEntry (compileEntry): the expansion needs the driver's
 // module graph with std/core/traits.yoop autoloaded.
-describe("e2e: Phase 13.C @derive(display)", () => {
-  it("derive_display_basic: derived to_string via explicit printf format arg", () => {
+describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, () => {
+  it("derive_display_basic: derived to_string via explicit printf format arg", async () => {
     // Also the regression test for the printf lowering fix: a template
     // literal VALUE arg after an explicit format literal fills the %s
     // instead of contributing a doubled directive.
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_basic.yoop");
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "p=Point { x: 3, y: 4 }\n");
   });
 
-  it("derive_display_nested: derived structs recurse through Display dispatch", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_nested.yoop");
+  it("derive_display_nested: derived structs recurse through Display dispatch", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_nested.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1236,8 +1369,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  it("derive_display_array_vec: array + Vec loops, fn placeholder, empty variants", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_array_vec.yoop");
+  it("derive_display_array_vec: array + Vec loops, fn placeholder, empty variants", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_array_vec.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1245,20 +1378,20 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  it("derive_display_mixed: hand-written Display field + pre-listed implements clause", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_mixed.yoop");
+  it("derive_display_mixed: hand-written Display field + pre-listed implements clause", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_mixed.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "Wrapper { inner: manual(9), tag: 5 } Listed { n: 6 }\n");
   });
 
-  it("derive_display_empty: zero-field type prints Name { }", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_empty.yoop");
+  it("derive_display_empty: zero-field type prints Name { }", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_empty.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "Empty { }\n");
   });
 
-  it("derive_display_cross_module: derived export interpolated from another module", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_cross_module/main.yoop");
+  it("derive_display_cross_module: derived export interpolated from another module", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_cross_module/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "Pt { x: 10, y: 20 }\n");
   });
@@ -1290,8 +1423,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // Phase 13.D: variants derive too. The generated body is an arm-per-case
   // switch; per-case control comes from composition (a payload type declared
   // outside the variant with its own Display impl), not hand-written methods.
-  it("derive_display_variant: arm-per-case switch, payload Display dispatch, collections, bound generic", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/derive_display_variant.yoop");
+  it("derive_display_variant: arm-per-case switch, payload Display dispatch, collections, bound generic", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/derive_display_variant.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1359,53 +1492,53 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  it("imports_renamed: import { x as y }", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_renamed/main.yoop");
+  it("imports_renamed: import { x as y }", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_renamed/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "16 = 16\n");
   });
 
   // Yoopstore-papercut #9: `import * as ns, { Type } from "..."` binds the
   // namespace and a named type from a two-axis module in one line.
-  it("imports_combined: combined namespace + named import on one line", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_combined/main.yoop");
+  it("imports_combined: combined namespace + named import on one line", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_combined/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "area=20\n");
   });
 
-  it("imports_struct: exported struct + cross-module fallible flow", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_struct/main.yoop");
+  it("imports_struct: exported struct + cross-module fallible flow", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_struct/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "len = 43\n");
   });
 
-  it("module_state_cross: imported `let` is readable, `bump()` mutates it across calls", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/module_state_cross/main.yoop");
+  it("module_state_cross: imported `let` is readable, `bump()` mutates it across calls", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/module_state_cross/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "step=5 a=5 b=10 snapshot=10\n");
   });
 
-  it("extern_printf: explicit printf via extern block", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/extern_printf/main.yoop");
+  it("extern_printf: explicit printf via extern block", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/extern_printf/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "hello\n");
   });
 
-  it("extern_library: -lm link flag + cos(0) = 1", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/extern_library/main.yoop");
+  it("extern_library: -lm link flag + cos(0) = 1", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/extern_library/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "cos(0) = 1.000000\n");
   });
 
-  it("imports_diamond: diamond dep loads each module exactly once", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/imports_diamond/main.yoop");
+  it("imports_diamond: diamond dep loads each module exactly once", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/imports_diamond/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=42 b=42\n");
   });
 
   // Phase 9.B: bool[] arrays
-  it("bool_array: bool[] literal/index/heap_alloc/Vec paths all work", () => {
-    const { stdout, exitCode } = runFixtureEntry(
+  it("bool_array: bool[] literal/index/heap_alloc/Vec paths all work", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/bool_array.yoop",
     );
     assert.equal(exitCode, 0);
@@ -1422,135 +1555,135 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   });
 
   // Phase 9.C: std/ import root
-  it("std_root_import: `std/...` paths resolve against the repo std/ dir", () => {
-    const { stdout, exitCode } = runFixtureEntry(
+  it("std_root_import: `std/...` paths resolve against the repo std/ dir", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/std_root_import.yoop",
     );
     assert.equal(exitCode, 0);
     assert.equal(stdout, "total=60\n");
   });
 
-  it("side_effect_import: side-effect-only import succeeds", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/side_effect_import/main.yoop");
+  it("side_effect_import: side-effect-only import succeeds", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/side_effect_import/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "init loaded\n");
   });
 
-  it("export_c: export \"C\" function emits unmangled symbol", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/export_c/main.yoop");
+  it("export_c: export \"C\" function emits unmangled symbol", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/export_c/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "add_one(5) = 6\n");
   });
 
-  it("traits_disposable: impl of a Disposable trait with a dispose method", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_disposable/main.yoop");
+  it("traits_disposable: impl of a Disposable trait with a dispose method", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_disposable/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=7\n");
   });
 
-  it("traits_multi_impl: one type implementing two traits", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_multi_impl/main.yoop");
+  it("traits_multi_impl: one type implementing two traits", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_multi_impl/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "closing fd=7\ndisposing fd=7\nrc=7 is_open=0\n");
   });
 
-  it("traits_two_types_one_trait: two distinct types implementing the same trait", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_two_types_one_trait/main.yoop");
+  it("traits_two_types_one_trait: two distinct types implementing the same trait", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_two_types_one_trait/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "file fd=1\nsocket sock=99\n");
   });
 
-  it("traits_self_field: method body reads multiple fields and returns a value", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_self_field/main.yoop");
+  it("traits_self_field: method body reads multiple fields and returns a value", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_self_field/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "encoded=304\n");
   });
 
-  it("traits_self_call_other_method: method body invokes another method on the same type", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_self_call_other_method/main.yoop");
+  it("traits_self_call_other_method: method body invokes another method on the same type", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_self_call_other_method/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "closing fd=42\ndisposed via close (rc=42)\n");
   });
 
-  it("traits_cross_module: trait declared in one module, implemented in another, called in main", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_module/main.yoop");
+  it("traits_cross_module: trait declared in one module, implemented in another, called in main", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_cross_module/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=13\n");
   });
 
-  it("traits_recursive_method: trait method calls itself recursively", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_recursive_method/main.yoop");
+  it("traits_recursive_method: trait method calls itself recursively", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_recursive_method/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "n=3\nn=2\nn=1\n");
   });
 
   // Phase 7.4: cross-trait same-name impl - one method body, two emitted
   // LLVM symbols, each callable via its respective trait qualifier.
-  it("traits_cross_trait_same_name: one impl satisfies two traits with the same method name", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_cross_trait_same_name/main.yoop");
+  it("traits_cross_trait_same_name: one impl satisfies two traits with the same method name", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_cross_trait_same_name/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "bot=7\nbot=7\n");
   });
 
   // Phase 7.4: trait method name == free function name now coexist cleanly.
-  it("traits_method_name_collides_with_fn: free fn and trait method share a name", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_method_name_collides_with_fn/main.yoop");
+  it("traits_method_name_collides_with_fn: free fn and trait method share a name", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_method_name_collides_with_fn/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "free flush 42\nflushing 3\n");
   });
 
-  it("disposable_basic: two implicit-block bindings fire cleanup in LIFO order at function return", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_basic/main.yoop");
+  it("disposable_basic: two implicit-block bindings fire cleanup in LIFO order at function return", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_basic/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "working\ndisposing fd=2\ndisposing fd=1\n");
   });
 
-  it("disposable_explicit_block: trailing-block binding fires cleanup at its `}`", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_explicit_block/main.yoop");
+  it("disposable_explicit_block: trailing-block binding fires cleanup at its `}`", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_explicit_block/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "inside block\ndisposing fd=7\nafter block\n");
   });
 
-  it("disposable_return: cleanup fires on every explicit return path", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_return/main.yoop");
+  it("disposable_return: cleanup fires on every explicit return path", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_return/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=9\ndisposing fd=9\nr1=1 r2=0\n");
   });
 
-  it("disposable_qmark: cleanup fires before `?`-induced early return on the failure path", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_qmark/main.yoop");
+  it("disposable_qmark: cleanup fires before `?`-induced early return on the failure path", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_qmark/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=5\nok r1=5 err=''\ndisposing fd=5\nfail r2=0 err='boom'\n");
   });
 
-  it("disposable_lifo_three: three implicit-block bindings dispose in reverse declaration order", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_lifo_three/main.yoop");
+  it("disposable_lifo_three: three implicit-block bindings dispose in reverse declaration order", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_lifo_three/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=3\ndisposing fd=2\ndisposing fd=1\n");
   });
 
-  it("disposable_nested_block: implicit and explicit blocks interleave with correct LIFO scoping", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_nested_block/main.yoop");
+  it("disposable_nested_block: implicit and explicit blocks interleave with correct LIFO scoping", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_nested_block/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "inside\ndisposing fd=3\ndisposing fd=2\noutside\ndisposing fd=1\n");
   });
 
-  it("disposable_let_explicit: `let disposable` allows mutation and still fires cleanup", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_let_explicit/main.yoop");
+  it("disposable_let_explicit: `let disposable` allows mutation and still fires cleanup", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_let_explicit/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=99\n");
   });
 
-  it("disposable_multi_requires: kind with two requires resolves a mustCall method from one of them", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/disposable_multi_requires/main.yoop");
+  it("disposable_multi_requires: kind with two requires resolves a mustCall method from one of them", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/disposable_multi_requires/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=11\n");
   });
 
   // region kinds (`appliesTo region`): anonymous block-owning bindings with no
   // visible name, plus type inference on a named block-owning binding.
-  it("region_kind_block: anonymous explicit/implicit region blocks + inferred named binding fire cleanup correctly", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/region_kind_block/main.yoop");
+  it("region_kind_block: anonymous explicit/implicit region blocks + inferred named binding fire cleanup correctly", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/region_kind_block/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1564,38 +1697,38 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   });
 
   // phase 6.2: scoped kind and escape analysis
-  it("scoped_basic: scoped kind with mustNotEscape, kind-prefixed param, dispose fires at scope end", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_basic/main.yoop");
+  it("scoped_basic: scoped kind with mustNotEscape, kind-prefixed param, dispose fires at scope end", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/scoped_basic/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "fd=1\ndisposing fd=1\n");
   });
 
-  it("scoped_param_only: plain let binding may be passed ref to a scoped parameter", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_param_only/main.yoop");
+  it("scoped_param_only: plain let binding may be passed ref to a scoped parameter", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/scoped_param_only/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "fd=7\n");
   });
 
-  it("scoped_lifo_with_disposable: scoped and disposable interleaved dispose in LIFO order", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_lifo_with_disposable/main.yoop");
+  it("scoped_lifo_with_disposable: scoped and disposable interleaved dispose in LIFO order", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/scoped_lifo_with_disposable/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "disposing fd=2\ndisposing fd=1\n");
   });
 
-  it("scoped_field_access_ok: returning a primitive field of a scoped binding is not an escape", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_field_access_ok/main.yoop");
+  it("scoped_field_access_ok: returning a primitive field of a scoped binding is not an escape", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/scoped_field_access_ok/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "fd=9\ndisposing fd=9\n");
   });
 
-  it("scoped_nested_block: trailing-block form of scoped kind fires dispose at inner block end", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/scoped_nested_block/main.yoop");
+  it("scoped_nested_block: trailing-block form of scoped kind fires dispose at inner block end", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/scoped_nested_block/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "inside\ndisposing fd=5\nafter\n");
   });
 
-  it("kind_tracked_parse: mustNotShare acrossScopes parses and does not break mustCall pipeline", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/kind_tracked_parse/main.yoop");
+  it("kind_tracked_parse: mustNotShare acrossScopes parses and does not break mustCall pipeline", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/kind_tracked_parse/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "drop 1\n");
   });
@@ -1607,22 +1740,22 @@ describe("e2e: Phase 13.C @derive(display)", () => {
 
   // ---- 6.3-prelude: C runtime linked + init/shutdown injection ----
 
-  it("runtime_linked: trivial program links the C runtime and exits cleanly via init/shutdown", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/runtime_linked/main.yoop");
+  it("runtime_linked: trivial program links the C runtime and exits cleanly via init/shutdown", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/runtime_linked/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "hello\n");
   });
 
-  it("runtime_qmark_in_main: `?`-induced early return in main flows through yoop_runtime_shutdown", () => {
-    const { stdout } = runFixtureEntry("examples/pass/runtime_qmark_in_main/main.yoop");
+  it("runtime_qmark_in_main: `?`-induced early return in main flows through yoop_runtime_shutdown", async () => {
+    const { stdout } = await runFixtureEntry("examples/pass/runtime_qmark_in_main/main.yoop");
     // First call succeeds (`got 42`); second call fails and propagates via `?`
     // - the unreachable printf never fires. Shutdown is injected at every ret,
     // including the qmark-fail branch.
     assert.equal(stdout, "got 42\n");
   });
 
-  it("runtime_disposable_in_main: dispose() fires before yoop_runtime_shutdown before ret", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/runtime_disposable_in_main/main.yoop");
+  it("runtime_disposable_in_main: dispose() fires before yoop_runtime_shutdown before ret", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/runtime_disposable_in_main/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "work\ndisposing 7\n");
   });
@@ -1671,10 +1804,11 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // is consumable by an actual debugger - not just that the IR text looks
   // right. We use `image lookup` (no process attach) so this works in CI
   // without debugger-attach permissions.
-  it("dwarf: lldb resolves main to its .yoop source file and line", (t) => {
-    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
-    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
-    const { binPath } = runFixtureEntry("examples/pass/runtime_linked/main.yoop");
+  it("dwarf: lldb resolves main to its .yoop source file and line", async (t) => {
+    const skip = dwarfSkipReason();
+    if (skip) { t.skip(skip); return; }
+    // lldb needs real debug info in the binary, so this one opts into -g.
+    const { binPath } = await runFixtureEntry("examples/pass/runtime_linked/main.yoop", { debug: true });
     const out = spawnSync(
       "lldb",
       ["-o", "image lookup -n main -v", "-o", "quit", "--batch", binPath],
@@ -1719,10 +1853,11 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // The IR assertions above prove the metadata is shaped right; this one
   // proves it survives clang and that a debugger can actually READ the values
   // (the whole point - previously `frame variable` showed nothing but prims).
-  it("dwarf: lldb reads struct / string / array / variant locals by value", (t) => {
-    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
-    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
-    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+  it("dwarf: lldb reads struct / string / array / variant locals by value", async (t) => {
+    const skip = dwarfSkipReason();
+    if (skip) { t.skip(skip); return; }
+    // lldb needs real debug info in the binary, so this one opts into -g.
+    const { binPath } = await runFixtureEntry("examples/pass/dwarf_locals/main.yoop", { debug: true });
     const out = spawnSync(
       "lldb",
       [
@@ -1756,10 +1891,11 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // one, a function breakpoint (`b <name>`, what VS Code's function
   // breakpoints use) landed BEFORE the arguments reached their stack slots and
   // the variables pane showed garbage.
-  it("dwarf: a function breakpoint stops after the parameter stores", (t) => {
-    const lldb = spawnSync("which", ["lldb"], { encoding: "utf8" });
-    if (lldb.status !== 0) { t.skip("lldb not on PATH"); return; }
-    const { binPath } = runFixtureEntry("examples/pass/dwarf_locals/main.yoop");
+  it("dwarf: a function breakpoint stops after the parameter stores", async (t) => {
+    const skip = dwarfSkipReason();
+    if (skip) { t.skip(skip); return; }
+    // lldb needs real debug info in the binary, so this one opts into -g.
+    const { binPath } = await runFixtureEntry("examples/pass/dwarf_locals/main.yoop", { debug: true });
     const out = spawnSync(
       "lldb",
       ["-o", "b manhattan", "-o", "run", "-o", "p *p", "-o", "quit", "--batch", binPath],
@@ -1771,16 +1907,16 @@ describe("e2e: Phase 13.C @derive(display)", () => {
 
   // ---- 6.3 sugar: task / joined / pooled / wait ----
 
-  it("task_three_forms: immediate, joined, pooled work end-to-end in the same main", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/task_three_forms/main.yoop");
+  it("task_three_forms: immediate, joined, pooled work end-to-end in the same main", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/task_three_forms/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "a=9\nd=16\nh=25\n");
   });
 
   // ---- 6.4 propagation: cross-module kind import + struct propagates ----
 
-  it("propagates_full: end-to-end propagates<disposable> + propagates<Task> across modules", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/propagates_full/main.yoop");
+  it("propagates_full: end-to-end propagates<disposable> + propagates<Task> across modules", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/propagates_full/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "n=25\nclosed fd=7\n");
   });
@@ -1812,8 +1948,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
 
   // ---- 6.5: layout / composition / parameterized kinds ----
 
-  it("layout_compose: type-level aligned + composed scoped_alt fires dispose at scope exit", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/layout_compose/main.yoop");
+  it("layout_compose: type-level aligned + composed scoped_alt fires dispose at scope exit", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/layout_compose/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "v.x=1.000000 h.x=5.000000\nbye vec4\n");
   });
@@ -1828,8 +1964,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.ok(hMatches.length >= 1, `expected %h alloca with align 32`);
   });
 
-  it("kind_compose_inline: inline `{ ... }` operand contributes mustNotEscape and triggers dispose at scope exit", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/kind_compose_inline/main.yoop");
+  it("kind_compose_inline: inline `{ ... }` operand contributes mustNotEscape and triggers dispose at scope exit", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/kind_compose_inline/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "h.x=1.000000\nbye vec3\n");
   });
@@ -1839,8 +1975,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // intrinsics (array_slice / string_as_bytes / string_from_bytes_unchecked)
   // through their pure-yoop wrappers.
 
-  it("bytes_smoke: bytes_eq + bytes_index_of + bytes_starts_with + bytes_slice", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/bytes_smoke/main.yoop");
+  it("bytes_smoke: bytes_eq + bytes_index_of + bytes_starts_with + bytes_slice", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/bytes_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1848,8 +1984,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  it("strings_smoke: string_eq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/strings_smoke/main.yoop");
+  it("strings_smoke: string_eq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/strings_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1857,8 +1993,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     );
   });
 
-  it("vec_smoke: Vec<int32> push/get/set/clear with disposable auto-cleanup", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/vec_smoke/main.yoop");
+  it("vec_smoke: Vec<int32> push/get/set/clear with disposable auto-cleanup", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/vec_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1867,8 +2003,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   });
 
   // Yoopstore-papercut #4: bulk Vec fill (vec_from_array + vec_extend_from).
-  it("vec_extend_from: vec_from_array copies and vec_extend_from grows once", () => {
-    const { stdout, stderr, exitCode } = runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
+  it("vec_extend_from: vec_from_array copies and vec_extend_from grows once", async () => {
+    const { stdout, stderr, exitCode } = await runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1880,8 +2016,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // Yoopstore-papercut #5: owned Bytes buffer with copy / seal constructors.
   // trackHeap asserts the from_vec seal doesn't double-free or leak the
   // transferred buffer.
-  it("bytes_owned: bytes_from_array + bytes_from_vec seal + transfer-up dispose", () => {
-    const { stdout, stderr, exitCode } = runFixture("examples/pass/bytes_owned.yoop", { trackHeap: true });
+  it("bytes_owned: bytes_from_array + bytes_from_vec seal + transfer-up dispose", async () => {
+    const { stdout, stderr, exitCode } = await runFixture("examples/pass/bytes_owned.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1892,8 +2028,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
 
   // Yoopstore-papercut #2 follow-ups: std/fs exists() / file_size() via a
   // stat runtime helper, plus real errno reasons in failure messages.
-  it("fs_metadata: exists/file_size report state and errno surfaces the real reason", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/fs_metadata.yoop");
+  it("fs_metadata: exists/file_size report state and errno surfaces the real reason", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/fs_metadata.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout.split("\n")[0], "before=0 after=1 size=5 missing=-1 werr.len=0");
     assert.match(stdout, /delete_missing="std\/fs: remove\(.*\) failed: No such file or directory"/);
@@ -1901,14 +2037,14 @@ describe("e2e: Phase 13.C @derive(display)", () => {
 
   // Regression: a non-void function ending in an exhaustive variant switch
   // whose arms all return must not emit an unterminated switch_end block.
-  it("switch_exhaustive_diverge: all-returning exhaustive switch tail terminates cleanly", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/switch_exhaustive_diverge.yoop");
+  it("switch_exhaustive_diverge: all-returning exhaustive switch tail terminates cleanly", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/switch_exhaustive_diverge.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "r=1 g=2 b=3\nred=red blue=other\n");
   });
 
-  it("parse_request_line: pure-yoop HTTP/1.1 request-line parser using only std/core/bytes + std/core/strings", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/parse_request_line/main.yoop");
+  it("parse_request_line: pure-yoop HTTP/1.1 request-line parser using only std/core/bytes + std/core/strings", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/parse_request_line/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1917,8 +2053,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   });
 
   // Library Phase A: foundational traits exported from std/core/traits.yoop.
-  it("traits_readable_writable: in-memory MemBuffer implements (Readable, Writable) - round-trips bytes", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/traits_readable_writable/main.yoop");
+  it("traits_readable_writable: in-memory MemBuffer implements (Readable, Writable) - round-trips bytes", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/traits_readable_writable/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "wrote=2 read=2 bytes=72,73\n");
   });
@@ -1926,8 +2062,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // HTTP/1.1 request-head parser: request line, header block, target split
   // into path + query, and the malformed-request rejections. No sockets;
   // pure parse over a literal buffer.
-  it("http_parse_smoke: parseRequestHead extracts the head and rejects bad ones", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_parse_smoke/main.yoop");
+  it("http_parse_smoke: parseRequestHead extracts the head and rejects bad ones", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -1976,24 +2112,34 @@ describe("e2e: Phase 13.C @derive(display)", () => {
     assert.match(ir, /declare i32 @yoop_io_arm_readable/);
     // And the coroutine trampolines are installed for the scheduler.
     assert.match(ir, /call void @yoop_runtime_set_coro_ops/);
-    // The libc socket-family externs are declared.
-    assert.match(ir, /declare i32 @socket\(/);
-    assert.match(ir, /declare i32 @bind\(/);
-    assert.match(ir, /declare i32 @listen\(/);
-    assert.match(ir, /declare i32 @accept\(/);
+    // The socket-family externs are declared. These name the runtime's
+    // yoop_sock_* shims rather than libc directly: a Windows socket is a
+    // SOCKET handle rather than a file descriptor and reports errors through
+    // WSAGetLastError, so std/net goes through C wrappers that present the
+    // POSIX shape on every platform (see runtime/yoop_net.c).
+    assert.match(ir, /declare i32 @yoop_sock_socket\(/);
+    assert.match(ir, /declare i32 @yoop_sock_bind\(/);
+    assert.match(ir, /declare i32 @yoop_sock_listen\(/);
+    // Accept is NOT among them: it goes through the operation API rather than
+    // a readiness wait plus a bare accept(). A completion port cannot report
+    // that a listening socket became readable (a zero-byte WSARecv on a
+    // listener fails with WSAENOTCONN), so awaiting a connection is AcceptEx
+    // there and accept-then-arm on POSIX - one call either way.
+    assert.match(ir, /declare i64 @yoop_iop_accept_begin\(/);
+    assert.match(ir, /declare i64 @yoop_iop_accept_wait\(/);
   });
 
   // Phase 10.I: `vtable Reader for Readable` round-trips through a
   // type-erased in-memory cursor.
-  it("reader_vtable_smoke: Reader.from(ref MemReader) then Readable.read through the vtable", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/reader_vtable_smoke/main.yoop");
+  it("reader_vtable_smoke: Reader.from(ref MemReader) then Readable.read through the vtable", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/reader_vtable_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "n=3 bytes=72,73,33\n");
   });
 
   // Phase 10.I: pure URL parser - no sockets.
-  it("uri_parse_smoke: parse_uri handles http/https/ipv6 + error cases", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/uri_parse_smoke/main.yoop");
+  it("uri_parse_smoke: parse_uri handles http/https/ipv6 + error cases", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/uri_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2010,8 +2156,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // Pure exercise of std/http/url.yoop plus the router's path matcher: target
   // splitting, percent coding, urlencoded parsing, and pattern matching are
   // all functions over strings, so this runs with no sockets.
-  it("http_url_smoke: target splitting, percent coding, and route patterns", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_url_smoke/main.yoop");
+  it("http_url_smoke: target splitting, percent coding, and route patterns", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_url_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2035,8 +2181,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // payload floor + pad, a vtable had no size case at all (so a Vec of structs
   // holding one overran its buffer), and a module-level const string reached
   // the binary with its escape sequences undecoded.
-  it("variant_layout: nested variant payload, vtable in a Vec, const escapes", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/variant_layout/main.yoop");
+  it("variant_layout: nested variant payload, vtable in a Vec, const escapes", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/variant_layout/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2065,8 +2211,8 @@ describe("e2e: Phase 13.C @derive(display)", () => {
   // Phase 10.I: end-to-end client+server in one process. A background
   // task serves one request; the main thread issues an http_get and
   // prints the response body.
-  it("http_client_loopback: in-process server task + client GET/POST round-trip", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/http_client_loopback/main.yoop");
+  it("http_client_loopback: in-process server task + client GET/POST round-trip", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_client_loopback/main.yoop");
     assert.equal(exitCode, 0);
     // The two task threads can interleave their stdout writes, so these are
     // contains-checks rather than an exact-output comparison.
@@ -2091,9 +2237,9 @@ describe("e2e: Phase 13.C @derive(display)", () => {
 // that pass C had not filled yet - and they failed in four different ways,
 // including a compiler CRASH and (across the files of a directory module) a
 // SILENT MISCOMPILE. See plans/modules-as-directories.md.
-describe("e2e: declaration order independence", () => {
-  it("decl_order_independence: struct field, variant payload, and generic arg all resolve when declared later", () => {
-    const { stdout, exitCode } = runFixture(
+describe("e2e: declaration order independence", { concurrency: E2E_CONCURRENCY }, () => {
+  it("decl_order_independence: struct field, variant payload, and generic arg all resolve when declared later", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/decl_order_independence.yoop",
     );
     assert.strictEqual(exitCode, 0);
@@ -2113,7 +2259,9 @@ describe("e2e: declaration order independence", () => {
         assert.ok(err.isParseError, "expected a parse error");
         // The point of the fix: the failing FILE is stamped on the throw, so the
         // driver stops rendering every parse error against the entry file.
-        assert.match(err.srcPath ?? "", /parse_error_in_import\/lib\.yoop$/);
+        // Either separator: srcPath comes from path.join, so it is
+        // backslash-separated on Windows.
+        assert.match(err.srcPath ?? "", /parse_error_in_import[\\/]lib\.yoop$/);
         assert.match(err.srcText ?? "", /export function ok/);
         return true;
       },
@@ -2124,9 +2272,9 @@ describe("e2e: declaration order independence", () => {
 // modules-as-directories: a module is either one source file (no header) or a
 // DIRECTORY of source files that each declare `module <name>;`. See
 // plans/modules-as-directories.md.
-describe("e2e: directory modules", () => {
-  it("dir_module: two source files form one module and share a namespace", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/dir_module/main.yoop");
+describe("e2e: directory modules", { concurrency: E2E_CONCURRENCY }, () => {
+  it("dir_module: two source files form one module and share a namespace", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/dir_module/main.yoop");
     assert.strictEqual(exitCode, 0);
     // areaOf/doubledArea live in area.yoop; Point and the PRIVATE `doubled`
     // live in point.yoop. area.yoop imports neither - siblings in a module see
@@ -2147,8 +2295,8 @@ describe("e2e: directory modules", () => {
   // with "'self' can only be used inside a trait method body". Pass C is now
   // group-major / stage-minor: every file of a module completes a stage before
   // the next stage starts for any of them.
-  it("dir_module_order: a trait/generic/kind used from an EARLIER-sorting sibling file", () => {
-    const { stdout, exitCode } = runFixture(
+  it("dir_module_order: a trait/generic/kind used from an EARLIER-sorting sibling file", async () => {
+    const { stdout, exitCode } = await runFixture(
       "examples/pass/dir_module_order/main.yoop",
     );
     assert.strictEqual(exitCode, 0);
@@ -2179,7 +2327,7 @@ describe("e2e: directory modules", () => {
   });
 });
 
-describe("e2e: multi-file fail fixtures produce the right errors", () => {
+describe("e2e: multi-file fail fixtures produce the right errors", { concurrency: E2E_CONCURRENCY }, () => {
   // A half-opted-in directory is an error rather than a silently-split module.
   // This is what catches a file added later by someone who did not notice the
   // directory had a `module` header.
@@ -2320,9 +2468,9 @@ describe("e2e: multi-file fail fixtures produce the right errors", () => {
 // codegen emits the literal value as the LLVM @global initial and
 // skips the runtime module_init for that decl. Failures are silent
 // (existing programs unaffected).
-describe("e2e: Phase 11.B opportunistic module-init folding", () => {
-  it("comptime_enum_fold.yoop: enum variant + switch + payload-bindings fold via the comptime interpreter", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/comptime_enum_fold.yoop");
+describe("e2e: Phase 11.B opportunistic module-init folding", { concurrency: E2E_CONCURRENCY }, () => {
+  it("comptime_enum_fold.yoop: enum variant + switch + payload-bindings fold via the comptime interpreter", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/comptime_enum_fold.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2348,8 +2496,8 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
     assert.match(ir, /CLASS_99 = internal global i32 -1,/);
   });
 
-  it("module_init_folded.yoop: int/bool/string/struct/array/ops fold and print expected values", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/module_init_folded.yoop");
+  it("module_init_folded.yoop: int/bool/string/struct/array/ops fold and print expected values", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/module_init_folded.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2452,7 +2600,7 @@ describe("e2e: Phase 11.B opportunistic module-init folding", () => {
 // folds become hard errors when the comptime evaluator can't honor
 // the user's directive, and the block form is reserved for a later
 // sub-phase with a clear "not yet supported" diagnostic.
-describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
+describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", { concurrency: E2E_CONCURRENCY }, () => {
   it("at_unknown_attribute.yoop: unknown `@foo` errors with a Levenshtein 'did you mean' hint", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/at_unknown_attribute.yoop"),
@@ -2464,8 +2612,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_block.yoop: block form executes at comptime and commits writes to module-level @globals", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_block.yoop");
+  it("at_precompile_block.yoop: block form executes at comptime and commits writes to module-level @globals", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_block.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2488,8 +2636,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_printf.yoop: comptime printf writes to stderr with a `[comptime]` prefix and the block's computed values land in the @global", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_printf.yoop");
+  it("at_precompile_printf.yoop: comptime printf writes to stderr with a `[comptime]` prefix and the block's computed values land in the @global", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_printf.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "RESULT=42\n");
     // The comptime printf path runs during compileSource → capture
@@ -2509,7 +2657,7 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_log.yoop: a @precompile block can call std/log; namespace calls resolve and the sinks print at comptime", () => {
+  it("at_precompile_log.yoop: a @precompile block can call std/log; namespace calls resolve and the sinks print at comptime", async () => {
     // The comptime log output is written to the parent process's stderr
     // during compileEntry (inside runFixtureEntry), so capture it around
     // that call. The compiled binary's own stdout/stderr come back
@@ -2519,7 +2667,7 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     process.stderr.write = (chunk) => { captured += String(chunk); return true; };
     let result;
     try {
-      result = runFixtureEntry("examples/pass/at_precompile_log.yoop");
+      result = await runFixtureEntry("examples/pass/at_precompile_log.yoop");
     } finally {
       process.stderr.write = origWrite;
     }
@@ -2573,9 +2721,9 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_dispose.yoop: disposable-kind CLEANUP_CALL dispatches the trait method through the interpreter", () => {
+  it("at_precompile_dispose.yoop: disposable-kind CLEANUP_CALL dispatches the trait method through the interpreter", async () => {
     // Multi-module fixture (imports std/core/kinds for disposable + Disposable).
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/at_precompile_dispose.yoop");
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/at_precompile_dispose.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "R_FIVE=6 R_HUNDRED=100\n");
     const entryAbs = path.join(repoRoot, "examples/pass/at_precompile_dispose.yoop");
@@ -2592,10 +2740,10 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_qmark_into.yoop: cross-shape `?` propagation calls Into.into in the err branch at fold time", () => {
+  it("at_precompile_qmark_into.yoop: cross-shape `?` propagation calls Into.into in the err branch at fold time", async () => {
     // Multi-module fixture (imports std/core/types + std/core/traits)
     // so it must go through the full module-graph compile path.
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/at_precompile_qmark_into.yoop");
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/at_precompile_qmark_into.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "HAPPY=7 SAD=63\n");
     const entryAbs = path.join(repoRoot, "examples/pass/at_precompile_qmark_into.yoop");
@@ -2611,8 +2759,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_vtable.yoop: vtable construct + indirect dispatch fold through the trait method resolver", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_vtable.yoop");
+  it("at_precompile_vtable.yoop: vtable construct + indirect dispatch fold through the trait method resolver", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_vtable.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "DBL=35 ADD=107\n");
     const src = fs.readFileSync(
@@ -2625,8 +2773,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_qmark.yoop: `?` propagation over Result-shaped enums folds Ok-path + Err-path", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_qmark.yoop");
+  it("at_precompile_qmark.yoop: `?` propagation over Result-shaped enums folds Ok-path + Err-path", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_qmark.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "GOOD=13 BAD=0\n");
     const src = fs.readFileSync(
@@ -2645,8 +2793,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
   // "step -1: boom"; TRAIT_SCORE=500 means WithContext.withContext ran with
   // both the receiver (code 5) and an intact context string (strcmp 0);
   // TRAIT_OK=7 means the context never ran on the success path.
-  it("at_precompile_qmark_context.yoop: `?` context strings fold at comptime (concat + WithContext)", () => {
-    const { stdout, exitCode } = runFixtureEntry("examples/pass/at_precompile_qmark_context.yoop");
+  it("at_precompile_qmark_context.yoop: `?` context strings fold at comptime (concat + WithContext)", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/at_precompile_qmark_context.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "CONCAT_CMP=0 TRAIT_SCORE=500 TRAIT_OK=7\n");
     const entryAbs = path.join(repoRoot, "examples/pass/at_precompile_qmark_context.yoop");
@@ -2660,8 +2808,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     );
   });
 
-  it("at_precompile_tasks.yoop: task fns execute synchronously inline at comptime (immediate / joined+wait / pooled+wait)", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_tasks.yoop");
+  it("at_precompile_tasks.yoop: task fns execute synchronously inline at comptime (immediate / joined+wait / pooled+wait)", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_tasks.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "IMM=50 JOIN=66 POOL=84 MULTI=42\n");
     // compileEntry, not compileSource: the concurrency kinds live in
@@ -2677,8 +2825,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_generics.yoop: generic function instantiations fold via the registry's substituted AST + interpreter", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_generics.yoop");
+  it("at_precompile_generics.yoop: generic function instantiations fold via the registry's substituted AST + interpreter", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_generics.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "A=99 C=7 W=10\n");
     const src = fs.readFileSync(
@@ -2692,8 +2840,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_traits.yoop: trait method calls dispatch through the interpreter + cache at fold time", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_traits.yoop");
+  it("at_precompile_traits.yoop: trait method calls dispatch through the interpreter + cache at fold time", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_traits.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2711,8 +2859,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_externs.yoop: whitelisted libc externs (sqrt/pow/floor/strlen/strcmp) fold under @precompile", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_externs.yoop");
+  it("at_precompile_externs.yoop: whitelisted libc externs (sqrt/pow/floor/strlen/strcmp) fold under @precompile", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_externs.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
       stdout,
@@ -2737,8 +2885,8 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
     assert.doesNotMatch(ir, /define internal void @[^ ]*__module_init\(\)/);
   });
 
-  it("at_precompile_basic.yoop: init-form folds run end-to-end with literal globals + no module_init", () => {
-    const { stdout, exitCode } = runFixture("examples/pass/at_precompile_basic.yoop");
+  it("at_precompile_basic.yoop: init-form folds run end-to-end with literal globals + no module_init", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/at_precompile_basic.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "SQR_7=49 FACT_6=720\nTBL=1,4,9,16,25\n");
     const src = fs.readFileSync(
@@ -2756,7 +2904,7 @@ describe("e2e: Phase 11.A `@`-attribute parsing + registry dispatch", () => {
   });
 });
 
-describe("e2e: fail fixtures fail at the right stage with the right message", () => {
+describe("e2e: fail fixtures fail at the right stage with the right message", { concurrency: E2E_CONCURRENCY }, () => {
   it("parse_bad_suffix.yoop throws a parse-time error about a missing semicolon", () => {
     const src = fs.readFileSync(
       path.join(repoRoot, "examples/fail/parse_bad_suffix.yoop"),
@@ -3293,7 +3441,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
     );
   });
 
-  it("wait_in_task_body.yoop rejects wait inside a task fn body, pointing at await", () => {
+  it("wait_in_task_body.yoop rejects wait inside a task fn body, pointing at await", async () => {
     const { errors } = typecheckFixtureEntry("examples/fail/wait_in_task_body.yoop");
     assert.ok(
       errors.some((e) => /wait is not allowed inside a task body/.test(e.message)),
@@ -3718,7 +3866,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", ()
 // subprocess rather than calling compileEntry, because the thing under test IS
 // the driver's --test mode: discovery, the synthetic entry module, the
 // temp-dir executable, and the exit code. See plans/testing-via-kinds.md.
-describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", () => {
+describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { concurrency: E2E_CONCURRENCY }, () => {
   function runTestMode(relDir, extraArgs = []) {
     const result = spawnSync(
       process.execPath,
