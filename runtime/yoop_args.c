@@ -88,17 +88,30 @@ int32_t yoop_argc(void) {
 #endif
 }
 
-// Returns a borrowed pointer to argv[i] as a nul-terminated C string,
-// or "" on out-of-range / unsupported platform. Never returns NULL so
-// the yoop side can `string` it without a null check.
 // Switch stdout to line-buffered mode so progress prints from tools
 // survive a crash even when stdout is redirected to a file or pipe.
 // Default behaviour under libc is line-buffered for TTYs and fully
 // buffered otherwise; this just pins line-buffered always.
+//
+// The MSVC CRT has no line buffering: it accepts _IOLBF and then treats
+// it as _IOFBF, and it rejects a size of 0 outright - so the POSIX
+// spelling below is a silent no-op on Windows, and a program that
+// crashed after printing lost everything it had "printed". Unbuffered is
+// the closest thing the CRT offers, and it satisfies the contract this
+// function actually makes (a completed print is visible). It costs a
+// write syscall per printf, which is the right trade for a call a
+// program makes explicitly to get progress output it can trust.
 void yoop_stdout_linebuf(void) {
+#ifdef _WIN32
+    setvbuf(stdout, NULL, _IONBF, 0);
+#else
     setvbuf(stdout, NULL, _IOLBF, 0);
+#endif
 }
 
+// Returns a borrowed pointer to argv[i] as a nul-terminated C string,
+// or "" on out-of-range / unsupported platform. Never returns NULL so
+// the yoop side can `string` it without a null check.
 const char* yoop_argv(int32_t i) {
 #ifdef __APPLE__
     int* ac = _NSGetArgc();

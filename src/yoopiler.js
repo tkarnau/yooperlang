@@ -14,6 +14,7 @@ import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
 import {
   RUNTIME_C,
   RUNTIME_SOURCES,
+  glueSourcesForLinkFlags,
   runtimeLinkFlags,
 } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
@@ -21,6 +22,7 @@ import { dumpAst, dumpAstJson } from "./dumpAst.js";
 import { checkInstallRoots } from "./install_root.js";
 import {
   clangEnv,
+  librarySearchArgs,
   lowerLinkFlag,
   msvcLinkerDir,
   resolveClang,
@@ -346,10 +348,16 @@ function main() {
   // arg(s). Default: `-lX`. macOS Apple-framework escape hatch: a name
   // of shape `framework:NAME` lowers to `-framework NAME` (two argv
   // entries) so OpenGL / Cocoa / etc. can be linked without a tweak to
-  // every yoop call site. Ignored / passes through as `-lframework:NAME`
-  // on Windows + Linux, which won't link -- the convention is meant for
-  // macOS-targeted demos.
+  // every yoop call site. On Windows only `framework:OpenGL` has an
+  // equivalent (opengl32); the rest drop, as does the whole convention on
+  // Linux -- it is an Apple concept.
   const linkArgs = allLinkFlags.flatMap(lowerLinkFlag);
+  // Where to look for the libraries just named: Homebrew on macOS, vcpkg and
+  // the usual unzipped SDK prefixes on Windows, plus YOOP_LIB_PATH anywhere.
+  const searchArgs = librarySearchArgs();
+  // C glue a named library needs on this platform but not on others (today:
+  // the Windows OpenGL entry-point loader).
+  const glueSources = glueSourcesForLinkFlags(allLinkFlags);
 
   // `-g` keeps the DWARF metadata that codegen emits; `-O0` keeps every
   // statement's DILocation distinct so `lldb` stepping doesn't fold lines.
@@ -360,9 +368,11 @@ function main() {
     const clangArgs = [
       tmpIR,
       ...RUNTIME_SOURCES,
+      ...glueSources,
       "-o",
       `${linkOutput}.exe`,
       ...debugFlags,
+      ...searchArgs,
       ...linkArgs,
       ...windowsClangArgs(),
     ];
@@ -373,24 +383,14 @@ function main() {
     }
     console.log(`compiled: ${outputFileName}`);
   } else {
-    // On macOS, Homebrew installs libraries under /opt/homebrew (Apple Silicon)
-    // or /usr/local (Intel). Add those to clang's search paths if they exist so
-    // `extern "C" from library "SDL2"` and friends link without extra setup.
-    const extraSearchPaths = [];
-    if (process.platform === "darwin") {
-      for (const prefix of ["/opt/homebrew", "/usr/local"]) {
-        if (fs.existsSync(`${prefix}/lib`)) {
-          extraSearchPaths.push(`-L${prefix}/lib`, `-I${prefix}/include`);
-        }
-      }
-    }
     const clangArgs = [
       tmpIR,
       ...RUNTIME_SOURCES,
+      ...glueSources,
       "-o",
       linkOutput,
       ...debugFlags,
-      ...extraSearchPaths,
+      ...searchArgs,
       ...linkArgs,
     ];
     runClang(clang, clangArgs);

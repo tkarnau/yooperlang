@@ -14,7 +14,15 @@ extern "C" from library "SDL2" {
     function SDL_Init(flags: uint32): int32;
     function SDL_Quit(): void;
     function SDL_GetError(): string;
-    function SDL_GetKeyboardState(ref numKeys: int): uint8[];
+    // Returns a borrowed `const Uint8 *` plus a count through `numKeys`.
+    // Declared as a raw pointer, NOT as `uint8[]`: a yoop array is a
+    // 16-byte { data, len } pair, and C is returning a bare pointer. On
+    // SysV that mismatch is invisible (the pointer lands in rax, len is
+    // junk out of rdx, and nothing reads len), but the Win64 ABI returns a
+    // 16-byte struct through a hidden first argument - so SDL would see
+    // our return slot as `numKeys`, write the key count into it, and the
+    // caller would read that count back as the DATA POINTER.
+    function SDL_GetKeyboardState(ref numKeys: int): unsafe_ptr<uint8>;
     function SDL_PumpEvents(): void;
     function SDL_GetTicks(): uint32;
     function SDL_Delay(ms: uint32): void;
@@ -100,8 +108,12 @@ export function pump_events(): void { SDL_PumpEvents(); }
 export function ticks(): uint32 { return SDL_GetTicks(); }
 export function delay(ms: uint32): void { SDL_Delay(ms); }
 
+// Borrow SDL's key-state table as a bounds-carrying array. SDL fills `n`
+// with the entry count as a side effect of the call, so the length is
+// only knowable after it returns - hence the two steps.
 export function keyboard_state(ref n: int): uint8[] {
-    return SDL_GetKeyboardState(ref n);
+    let raw: unsafe_ptr<uint8> = SDL_GetKeyboardState(ref n);
+    return unsafe_ptr.toArray<uint8>(raw, usize(n));
 }
 
 // Wraps SDL_CreateWindow in a Disposable. `flags` accepts a combined

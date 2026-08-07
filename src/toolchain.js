@@ -147,17 +147,96 @@ export const EXE_SUFFIX = process.platform === "win32" ? ".exe" : "";
 //   m       - the math functions are in the MSVC CRT, there is no libm.
 //   pthread - the runtime uses the Win32 primitives (see yoop_platform.h).
 //
-// `framework:X` is an Apple linker concept and is meaningless anywhere else.
+// `framework:X` is an Apple linker concept and is meaningless anywhere else,
+// with one exception: `framework:OpenGL` names the platform's OpenGL, and
+// every platform has one. On Windows that is opengl32.lib (plus the entry
+// point loader in runtime/yoop_gl_win32.c, added by glueSourcesForLinkFlags -
+// opengl32.dll exports only GL 1.1, so the .lib alone links a fraction of the
+// API). Any other framework name still drops, since those really are Apple's.
+//
 // Every other name lowers to `-lNAME`, which clang maps to `NAME.lib` when
 // driving the MSVC linker, so ordinary third-party libraries still work.
 const WINDOWS_IMPLICIT_LIBS = new Set(["m", "pthread"]);
+const WINDOWS_FRAMEWORK_EQUIVALENTS = new Map([["OpenGL", ["-lopengl32"]]]);
 export function lowerLinkFlag(name) {
   if (name.startsWith("framework:")) {
-    if (process.platform !== "darwin") return [];
-    return ["-framework", name.slice("framework:".length)];
+    const framework = name.slice("framework:".length);
+    if (process.platform === "darwin") return ["-framework", framework];
+    if (process.platform === "win32") {
+      return WINDOWS_FRAMEWORK_EQUIVALENTS.get(framework) ?? [];
+    }
+    return [];
   }
   if (process.platform === "win32" && WINDOWS_IMPLICIT_LIBS.has(name)) return [];
   return [`-l${name}`];
+}
+
+// Does this program's set of link-flag names ask for OpenGL?
+//
+// Both spellings count: `framework:OpenGL` is the portable one the demos use,
+// and `opengl32` is what someone writing Windows-first would reach for.
+export function wantsOpenGL(names) {
+  return names.some((n) => n === "framework:OpenGL" || n === "opengl32");
+}
+
+// Extra `-L` / `-I` arguments so a library named by an `extern "C" from
+// library "X"` block is actually findable.
+//
+// Neither macOS nor Windows puts third-party development libraries anywhere
+// the compiler driver looks by default, and requiring every yoop invocation to
+// carry linker flags for a dependency the SOURCE already names would defeat
+// the point of naming it in the source.
+//
+// `YOOP_LIB_PATH` / `YOOP_INCLUDE_PATH` are the explicit escape hatch and take
+// precedence: OS-native path lists (`;`-separated on Windows, `:` elsewhere).
+// Everything after them is a probe of conventional install locations, and each
+// candidate is checked for existence, so a machine without it contributes
+// nothing rather than a bogus search path.
+export function librarySearchArgs() {
+  const args = [];
+  const seenLib = new Set();
+  const seenInclude = new Set();
+  const addLib = (dir) => {
+    if (dir && !seenLib.has(dir) && fs.existsSync(dir)) {
+      seenLib.add(dir);
+      args.push(`-L${dir}`);
+    }
+  };
+  const addInclude = (dir) => {
+    if (dir && !seenInclude.has(dir) && fs.existsSync(dir)) {
+      seenInclude.add(dir);
+      args.push(`-I${dir}`);
+    }
+  };
+  const fromEnv = (name) =>
+    (process.env[name] || "").split(path.delimiter).filter(Boolean).map((p) => path.resolve(p));
+
+  for (const dir of fromEnv("YOOP_LIB_PATH")) addLib(dir);
+  for (const dir of fromEnv("YOOP_INCLUDE_PATH")) addInclude(dir);
+
+  // A conventional install prefix: headers in include/, import libraries in
+  // lib/ or (the layout the SDL2 "VC development" zip ships, and the one MSVC
+  // users expect) lib/<arch>/.
+  const addPrefix = (prefix) => {
+    addLib(path.join(prefix, "lib", process.arch === "arm64" ? "arm64" : "x64"));
+    addLib(path.join(prefix, "lib"));
+    addInclude(path.join(prefix, "include"));
+  };
+
+  if (process.platform === "darwin") {
+    // Homebrew: /opt/homebrew on Apple Silicon, /usr/local on Intel.
+    for (const prefix of ["/opt/homebrew", "/usr/local"]) addPrefix(prefix);
+  } else if (process.platform === "win32") {
+    const vcpkgTriplet = process.arch === "arm64" ? "arm64-windows" : "x64-windows";
+    for (const root of [process.env.VCPKG_ROOT, "C:\\vcpkg", "C:\\dev\\vcpkg"]) {
+      if (root) addPrefix(path.join(root, "installed", vcpkgTriplet));
+    }
+    // Unzipped-in-place SDK drops. There is no registry entry or package
+    // manager to ask, so the convention IS the drive-root directory name.
+    for (const prefix of ["C:\\SDL2", "C:\\SDL3", "C:\\Libraries"]) addPrefix(prefix);
+  }
+
+  return args;
 }
 
 // ----- prebuilt runtime objects (test-suite speedup) -----------------------

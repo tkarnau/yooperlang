@@ -15,10 +15,16 @@ import { compileSource, compileEntry } from "./jsyoopcodegen/codegen.js";
 import { loadModuleGraph } from "./jsyoopdriver/moduleGraph.js";
 import { runAttributePass } from "./jsyoopattributes/pass.js";
 import { runComptimePass } from "./jsyoopinterp/comptimePass.js";
-import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
+import {
+  RUNTIME_C,
+  RUNTIME_SOURCES,
+  glueSourcesForLinkFlags,
+  runtimeLinkFlags,
+} from "./runtimeBuild.js";
 import {
   EXE_SUFFIX,
   clangEnv,
+  librarySearchArgs,
   lowerLinkFlag,
   prebuiltRuntimeObjects,
   resolveClang,
@@ -135,8 +141,13 @@ async function runFixture(relPath, opts = {}) {
   const clangArgs = [
     llPath,
     ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
+    // Same two hooks the real driver applies to a program's own `extern "C"
+    // from library` names, so a fixture that reaches for an external library
+    // can never link here and fail under yoopiler (or the reverse).
+    ...glueSourcesForLinkFlags(extraLinkFlags),
     "-o",
     binPath,
+    ...librarySearchArgs(),
     ...runtimeLinkFlags().flatMap(lowerLinkFlag),
     ...extraLinkFlags.flatMap(lowerLinkFlag),
     ...windowsClangArgs(),

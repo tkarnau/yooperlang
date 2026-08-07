@@ -5,6 +5,7 @@
 import path from "path";
 
 import { RUNTIME_DIR as runtimeDir } from "./install_root.js";
+import { wantsOpenGL } from "./toolchain.js";
 
 // Primary runtime translation unit. Kept as a single string for backwards
 // compatibility with call sites that don't know about extra runtime files
@@ -48,4 +49,23 @@ export const RUNTIME_SOURCES = [
 
 export function runtimeLinkFlags() {
   return process.platform === "win32" ? [] : ["pthread"];
+}
+
+// Extra C translation units a program needs because of the libraries IT names
+// - as opposed to RUNTIME_SOURCES, which every program gets.
+//
+// Today there is exactly one: on Windows, OpenGL past version 1.1 is not
+// exported by opengl32.dll and has to be resolved at run time against the
+// current context. runtime/yoop_gl_win32.c is the forwarding shim that does
+// that (read its header comment for why linking GLEW/glad instead does not
+// work here). Compiling it into every program would be wasted objects and
+// would collide with a user who links their own loader, so it rides on the
+// program's own `framework:OpenGL` / `opengl32` declaration.
+//
+// `linkFlagNames` is the raw set codegen collected from `extern "C" from
+// library "X"` blocks, before lowerLinkFlag turns them into clang arguments.
+export function glueSourcesForLinkFlags(linkFlagNames) {
+  if (process.platform !== "win32") return [];
+  if (!wantsOpenGL(linkFlagNames)) return [];
+  return [path.resolve(runtimeDir, "yoop_gl_win32.c")];
 }
