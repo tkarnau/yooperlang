@@ -1,0 +1,498 @@
+// yoopdist - build a distributable copy of a module.
+//
+//     yoopdist <module-dir> <out-dir>
+//
+// A module ships as its DIRECTORY: the .yoop files that declare it, its tests,
+// and its MODULE file. What must NOT ship is the module's own `modules/`
+// folder. Those are the dependencies it was DEVELOPED against; in a consuming
+// program they live flat beside the module rather than inside it, and a module
+// carrying its own copy is a hard error at import time. See
+// plans/modules-folder.md.
+//
+// The output of this tool is exactly the thing a user drops into their own
+// modules/ folder.
+//
+// It also regenerates the `requires` block of the copied MODULE from the
+// imports actually found in the source, resolving each dependency's version
+// from the modules root the module develops against. The split is deliberate:
+// the AUTHOR owns `name` and `version` and this tool never invents or bumps
+// them; the TOOL owns the dependency snapshot and nothing else. Everything
+// else in MODULE (comments included) is carried across untouched.
+//
+// Nothing here is enforced by the compiler. MODULE records what a module was
+// built and tested against, for a human to read when a bug smells like a
+// version problem.
+
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import * as env from "std/env.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const MODULE_FILE: string = "MODULE";
+const MODULES_DIR: string = "modules";
+
+// ----- small string helpers ----------------------------------------------
+
+// std's slice returns a Result; every use here has already bounds-checked, so
+// an Err means a bug in this file rather than bad input. Collapse it.
+function sliceOr(s: string, start: usize, end: usize): string {
+    switch (str.string_slice(s, start, end)) {
+        case Result.Ok { value: v }: { return v; }
+        case Result.Err { error: _ }: { return ""; }
+    }
+}
+
+// Strip one trailing CR so a MODULE file written on Windows parses the same.
+function dropCarriageReturn(line: string): string {
+    if (line.len == 0) { return line; }
+    const tail = sliceOr(line, line.len - 1, line.len);
+    if (str.string_eq(tail, "\r")) {
+        return sliceOr(line, 0, line.len - 1);
+    }
+    return line;
+}
+
+// The value following `key` on a `<key> <value>` line, or "" if the line is
+// not that key. Leading spaces after the key are skipped.
+function valueAfterKey(line: string, key: string): string {
+    if (!str.string_starts_with(line, key)) { return ""; }
+    let rest: string = str.sliceFrom(line, key.len);
+    while (rest.len > 0 && str.string_starts_with(rest, " ")) {
+        rest = str.sliceFrom(rest, 1);
+    }
+    return rest;
+}
+
+// Read a whole file as text, or "" if unreadable. Callers here treat a missing
+// file as "no information" rather than as a failure.
+//
+// The concat is a COPY: the bytes belong to the Vec, which the disposable
+// binding frees at the closing brace. Same reason std/fs's DirIter copies the
+// name out of its dirent buffer.
+function readText(path: string): string {
+    disposable r = fs.read_file(path);
+    if (r.error.len > 0) { return ""; }
+    const bytes: uint8[] = vec.vec_as_array(ref r.data);
+    switch (str.string_from_bytes(bytes)) {
+        case Result.Ok { value: v }: { return str.string_concat(v, ""); }
+        case Result.Err { error: _ }: { return ""; }
+    }
+}
+
+function splitLines(ref out: Vec<string>, text: string): void {
+    const _e: string = str.split(ref out, text, "\n", true);
+}
+
+// ----- reading a module directory ----------------------------------------
+
+function isTestFile(name: string): bool {
+    const suffix = ".test.yoop";
+    if (name.len < suffix.len) { return false; }
+    return str.string_eq(sliceOr(name, name.len - suffix.len, name.len), suffix);
+}
+
+function isYoopFile(name: string): bool {
+    const suffix = ".yoop";
+    if (name.len < suffix.len) { return false; }
+    return str.string_eq(sliceOr(name, name.len - suffix.len, name.len), suffix);
+}
+
+// The name from a `module <name>;` header, or "" if the file has none.
+//
+// Scans lines rather than the raw text so a `module` mentioned inside a
+// comment further down cannot be mistaken for the header. The header is
+// required to be the first item of a file and is written at column 0 by
+// convention, which is what the VS Code grammar keys on too.
+function moduleHeaderName(src: string): string {
+    disposable lines: Vec<string> = vec.vec_new(64);
+    splitLines(ref lines, src);
+    const arr: string[] = vec.vec_as_array(ref lines);
+    for raw in arr {
+        const line = dropCarriageReturn(raw);
+        if (str.string_starts_with(line, "module ")) {
+            const rest = str.sliceFrom(line, 7);
+            const semi = str.string_index_of(rest, ";");
+            if (semi < rest.len) {
+                return str.string_concat(sliceOr(rest, 0, semi), "");
+            }
+        }
+    }
+    return "";
+}
+
+// The dependency named by a `modules/<dep>` import on this line, or "".
+//
+// Deliberately textual. Resolving imports properly means running the module
+// graph, and this tool must be able to report on a module whose dependencies
+// are not installed - which is exactly when a `requires` snapshot is most
+// worth having.
+function moduleDepOnLine(line: string): string {
+    const marker = "\"modules/";
+    const at = str.string_index_of(line, marker);
+    if (at >= line.len) { return ""; }
+    const rest = str.sliceFrom(line, at + marker.len);
+    // The name runs to whichever comes first: a path separator (a module under
+    // a grouping directory, or a source file inside one) or the closing quote.
+    let end = str.string_index_of(rest, "/");
+    const quote = str.string_index_of(rest, "\"");
+    if (quote < end) { end = quote; }
+    if (end >= rest.len || end == 0) { return ""; }
+    return str.string_concat(sliceOr(rest, 0, end), "");
+}
+
+function containsName(ref v: Vec<string>, name: string): bool {
+    const arr: string[] = vec.vec_as_array(ref v);
+    for existing in arr {
+        if (str.string_eq(existing, name)) { return true; }
+    }
+    return false;
+}
+
+// ----- the modules root a module develops against ------------------------
+
+// Nearest ancestor `modules` directory, or "". Mirrors the compiler's own walk
+// (src/jsyoopdriver/moduleGraph.js), and for the same reason: a module's
+// dependencies resolve relative to where the module SITS, whether that is an
+// author's repo or a consumer's program.
+function findModulesRoot(startDir: string): string {
+    let dir = startDir;
+    while (dir.len > 0) {
+        const candidate = fs.path_join([dir, MODULES_DIR]);
+        const meta = fs.statPath(candidate);
+        if (meta.ok && meta.isDir) { return candidate; }
+        const parent = fs.dirName(dir);
+        if (str.string_eq(parent, dir)) { return ""; }
+        dir = parent;
+    }
+    return "";
+}
+
+// The `version` recorded by the module installed at `moduleDir`, or "unknown".
+// A dependency with no MODULE file produces no version claim rather than a
+// guess - silence when there is no data.
+function recordedVersion(moduleDir: string): string {
+    const text = readText(fs.path_join([moduleDir, MODULE_FILE]));
+    if (text.len == 0) { return "unknown"; }
+    disposable lines: Vec<string> = vec.vec_new(32);
+    splitLines(ref lines, text);
+    const arr: string[] = vec.vec_as_array(ref lines);
+    for raw in arr {
+        const value = valueAfterKey(dropCarriageReturn(raw), "version");
+        if (value.len > 0) { return str.string_concat(value, ""); }
+    }
+    return "unknown";
+}
+
+// The version a previous `requires <dep> <version>` line already recorded, or
+// "".
+//
+// This is the fallback when a dependency is not installed next to the module
+// being dist'd. The rule is that the tool REFINES a snapshot it can verify and
+// PRESERVES one it cannot: re-running it somewhere with fewer dependencies
+// present must never downgrade a real recorded version to "unknown", which is
+// exactly what disting an already-dist'd module used to do.
+function priorRequireVersion(sourceText: string, dep: string): string {
+    if (sourceText.len == 0) { return ""; }
+    disposable lines: Vec<string> = vec.vec_new(64);
+    splitLines(ref lines, sourceText);
+    const arr: string[] = vec.vec_as_array(ref lines);
+    for raw in arr {
+        const rest = valueAfterKey(dropCarriageReturn(raw), "requires");
+        if (rest.len == 0) { continue; }
+        const space = str.string_index_of(rest, " ");
+        if (space >= rest.len) { continue; }
+        if (!str.string_eq(sliceOr(rest, 0, space), dep)) { continue; }
+        let version: string = str.sliceFrom(rest, space);
+        while (version.len > 0 && str.string_starts_with(version, " ")) {
+            version = str.sliceFrom(version, 1);
+        }
+        if (version.len > 0) { return str.string_concat(version, ""); }
+    }
+    return "";
+}
+
+// ----- MODULE regeneration -----------------------------------------------
+
+// Carry every line of the source MODULE across except its `requires` block,
+// then append a freshly resolved one. Preserving the rest is what keeps the
+// author's `name`, `version` and comments authoritative.
+function rebuildModuleFile(
+    sourceText: string,
+    moduleName: string,
+    ref deps: Vec<string>,
+    ref versions: Vec<string>,
+): string {
+    disposable out: Vec<string> = vec.vec_new(64);
+
+    if (sourceText.len == 0) {
+        // No MODULE to carry forward. Emit a skeleton with the version left
+        // unmistakably unset - inventing one would be the tool claiming
+        // authority it does not have.
+        vec.vec_push(ref out, `name     ${moduleName}\n`);
+        vec.vec_push(ref out, "version  0.0.0\n");
+        vec.vec_push(ref out, "\n");
+        vec.vec_push(ref out, "# Generated by yoopdist because the source module had no MODULE file.\n");
+        vec.vec_push(ref out, "# Set `version` by hand - yoopdist never invents or bumps it.\n");
+    } else {
+        disposable lines: Vec<string> = vec.vec_new(64);
+        splitLines(ref lines, sourceText);
+        const arr: string[] = vec.vec_as_array(ref lines);
+        // Blank lines are held back and only emitted once a non-blank line
+        // follows. That preserves interior spacing exactly while dropping every
+        // trailing blank - including the "" that split() yields for a text
+        // ending in a newline, and the separator left behind by the dropped
+        // `requires` block. Emitting them eagerly grew the file by a blank line
+        // on each successive dist.
+        let pendingBlanks: usize = 0;
+        for raw in arr {
+            const line = dropCarriageReturn(raw);
+            // Drop the old snapshot; it is about to be replaced.
+            if (str.string_starts_with(line, "requires")) { continue; }
+            if (line.len == 0) {
+                pendingBlanks = pendingBlanks + 1;
+                continue;
+            }
+            while (pendingBlanks > 0) {
+                vec.vec_push(ref out, "\n");
+                pendingBlanks = pendingBlanks - 1;
+            }
+            vec.vec_push(ref out, `${line}\n`);
+        }
+    }
+
+    const depArr: string[] = vec.vec_as_array(ref deps);
+    const verArr: string[] = vec.vec_as_array(ref versions);
+    if (depArr.len > 0) {
+        vec.vec_push(ref out, "\n");
+        // Only explain `requires` in a file we authored. Carrying an existing
+        // MODULE forward means the author already said whatever they wanted to
+        // say about it, and a second boilerplate header every dist would just
+        // accumulate.
+        if (sourceText.len == 0) {
+            vec.vec_push(ref out, "# Dependency versions recorded when this was shipped. Informational: the\n");
+            vec.vec_push(ref out, "# compiler does not resolve, choose, or enforce anything from this file.\n");
+        }
+        let i: usize = 0;
+        while (i < depArr.len) {
+            vec.vec_push(ref out, `requires ${depArr[i]} ${verArr[i]}\n`);
+            i = i + 1;
+        }
+    }
+
+    const parts: string[] = vec.vec_as_array(ref out);
+    return str.string_concat_all(parts);
+}
+
+// ----- copying ------------------------------------------------------------
+
+function copyFileBytes(src: string, dst: string): string {
+    disposable r = fs.read_file(src);
+    if (r.error.len > 0) { return r.error; }
+    const bytes: uint8[] = vec.vec_as_array(ref r.data);
+    return fs.write_file(dst, bytes);
+}
+
+function writeText(path: string, body: string): string {
+    disposable buf: Vec<uint8> = vec.vec_new(body.len + 1);
+    const bytes: uint8[] = intr.string_as_bytes(body);
+    for b in bytes {
+        vec.vec_push(ref buf, b);
+    }
+    const arr: uint8[] = vec.vec_as_array(ref buf);
+    return fs.write_file(path, arr);
+}
+
+// ----- main ---------------------------------------------------------------
+
+function main(): int32 {
+    if (env.argCount() < 3) {
+        printf("usage: yoopdist <module-dir> <out-dir>\n");
+        printf("\n");
+        printf("Writes <out-dir>/<name>/ - the directory a consumer drops into\n");
+        printf("their own modules/ folder. The module's own modules/ directory is\n");
+        printf("its development dependencies and is never copied.\n");
+        return 2;
+    }
+
+    const moduleDir = fs.normalizePath(env.argAt(1));
+    const outRoot = env.argAt(2);
+
+    if (moduleDir.len == 0) {
+        printf("yoopdist: cannot resolve module directory \"%s\"\n", env.argAt(1));
+        return 1;
+    }
+    const dirMeta = fs.statPath(moduleDir);
+    if (!dirMeta.ok || !dirMeta.isDir) {
+        printf("yoopdist: \"%s\" is not a directory\n", moduleDir);
+        return 1;
+    }
+
+    // ----- read the directory -----
+    disposable yoopFiles: Vec<string> = vec.vec_new(32);
+    disposable skippedDirs: Vec<string> = vec.vec_new(8);
+    let hasModuleFile: bool = false;
+    let sawOwnModulesDir: bool = false;
+
+    disposable dir = fs.openDir(moduleDir);
+    for name in dir {
+        const full = fs.path_join([moduleDir, name]);
+        const meta = fs.statPath(full);
+        if (meta.ok && meta.isDir) {
+            if (str.string_eq(name, MODULES_DIR)) {
+                sawOwnModulesDir = true;
+            } else {
+                vec.vec_push(ref skippedDirs, str.string_concat(name, ""));
+            }
+            continue;
+        }
+        if (str.string_eq(name, MODULE_FILE)) {
+            hasModuleFile = true;
+            continue;
+        }
+        if (isYoopFile(name)) {
+            vec.vec_push(ref yoopFiles, str.string_concat(name, ""));
+        }
+    }
+
+    const fileArr: string[] = vec.vec_as_array(ref yoopFiles);
+    if (fileArr.len == 0) {
+        printf("yoopdist: \"%s\" holds no .yoop source files\n", moduleDir);
+        return 1;
+    }
+
+    // ----- validate the module header, and collect dependencies -----
+    //
+    // Only non-test files define the module and its `requires`. A test file
+    // ships with the module but is NOT part of it (*.test.yoop is excluded
+    // from a directory module's source list), so it neither supplies the name
+    // nor contributes a dependency to the snapshot.
+    let moduleName: string = "";
+    disposable deps: Vec<string> = vec.vec_new(8);
+
+    for fileName in fileArr {
+        if (isTestFile(fileName)) { continue; }
+        const src = readText(fs.path_join([moduleDir, fileName]));
+        const declared = moduleHeaderName(src);
+        if (declared.len == 0) {
+            printf("yoopdist: %s has no `module <name>;` header\n", fileName);
+            printf("  a module that ships must be a DIRECTORY module - every non-test\n");
+            printf("  .yoop file in it declares the same module name\n");
+            return 1;
+        }
+        if (moduleName.len == 0) {
+            moduleName = declared;
+        } else {
+            if (!str.string_eq(declared, moduleName)) {
+                printf("yoopdist: %s declares `module %s;` but this directory is module \"%s\"\n",
+                       fileName, declared, moduleName);
+                return 1;
+            }
+        }
+
+        disposable lines: Vec<string> = vec.vec_new(64);
+        splitLines(ref lines, src);
+        const lineArr: string[] = vec.vec_as_array(ref lines);
+        for raw in lineArr {
+            const line = dropCarriageReturn(raw);
+            if (!str.string_starts_with(line, "import")) { continue; }
+            const dep = moduleDepOnLine(line);
+            if (dep.len == 0) { continue; }
+            // A module importing itself by name would be a compiler error, but
+            // guard anyway rather than emit a self-referential requires line.
+            if (str.string_eq(dep, moduleName)) { continue; }
+            if (!containsName(ref deps, dep)) {
+                vec.vec_push(ref deps, dep);
+            }
+        }
+    }
+
+    // The source MODULE is read up front: it is both carried forward into the
+    // dist and consulted as the fallback for a dependency that is not
+    // installed here.
+    let sourceModule: string = "";
+    if (hasModuleFile) {
+        sourceModule = readText(fs.path_join([moduleDir, MODULE_FILE]));
+    }
+
+    // ----- resolve each dependency's recorded version -----
+    const modulesRoot = findModulesRoot(moduleDir);
+    disposable versions: Vec<string> = vec.vec_new(8);
+    const depArr: string[] = vec.vec_as_array(ref deps);
+    for dep in depArr {
+        let version: string = "unknown";
+        if (modulesRoot.len > 0) {
+            version = recordedVersion(fs.path_join([modulesRoot, dep]));
+        }
+        if (str.string_eq(version, "unknown")) {
+            const prior = priorRequireVersion(sourceModule, dep);
+            if (prior.len > 0) { version = prior; }
+        }
+        vec.vec_push(ref versions, version);
+    }
+
+    // ----- write the dist -----
+    const outDir = fs.path_join([outRoot, moduleName]);
+    const mkErr = fs.mkdir_p(fs.path_join([outDir, "x"]));
+    if (mkErr.len > 0) {
+        printf("yoopdist: %s\n", mkErr);
+        return 1;
+    }
+
+    let copied: int32 = 0;
+    for fileName in fileArr {
+        const err = copyFileBytes(
+            fs.path_join([moduleDir, fileName]),
+            fs.path_join([outDir, fileName]),
+        );
+        if (err.len > 0) {
+            printf("yoopdist: %s\n", err);
+            return 1;
+        }
+        copied = copied + 1;
+    }
+
+    const rebuilt = rebuildModuleFile(sourceModule, moduleName, ref deps, ref versions);
+    const werr = writeText(fs.path_join([outDir, MODULE_FILE]), rebuilt);
+    if (werr.len > 0) {
+        printf("yoopdist: %s\n", werr);
+        return 1;
+    }
+
+    // ----- report -----
+    printf("module %s -> %s\n", moduleName, outDir);
+    printf("  %d source file(s)\n", copied);
+    if (!hasModuleFile) {
+        printf("  no MODULE in the source; wrote a skeleton with version 0.0.0\n");
+    }
+    const verArr: string[] = vec.vec_as_array(ref versions);
+    if (depArr.len == 0) {
+        printf("  no modules/ dependencies\n");
+    } else {
+        if (modulesRoot.len == 0) {
+            printf("  no modules root above the source; versions unresolved\n");
+        } else {
+            printf("  versions read from %s\n", modulesRoot);
+        }
+        let i: usize = 0;
+        while (i < depArr.len) {
+            printf("  requires %s %s\n", depArr[i], verArr[i]);
+            i = i + 1;
+        }
+        printf("  install those alongside \"%s\" in the consuming program\n", moduleName);
+    }
+    if (sawOwnModulesDir) {
+        printf("  skipped modules/ (development dependencies never ship)\n");
+    }
+    const skipped: string[] = vec.vec_as_array(ref skippedDirs);
+    for d in skipped {
+        printf("  skipped subdirectory %s/ (dist one module at a time)\n", d);
+    }
+    return 0;
+}

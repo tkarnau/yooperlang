@@ -6,19 +6,17 @@
 //   3. burst: 200 park/unpark pairs from concurrent threads.
 
 #include "../yoop_runtime.h"
+#include "test_support.h"
 
 #include <assert.h>
-#include <pthread.h>
 #include <stdint.h>
 #include <stdio.h>
-#include <unistd.h>
 
 // Case 2 + 3 worker: sleep briefly, then unpark.
-static void* unpark_after_delay(void* arg) {
+static void unpark_after_delay(void* arg) {
     yoop_park_token_t* t = (yoop_park_token_t*)arg;
-    usleep(2000); // 2ms
+    test_sleep_ms(2);
     yoop_unpark(t);
-    return NULL;
 }
 
 int main(void) {
@@ -38,10 +36,10 @@ int main(void) {
     {
         yoop_park_token_t t;
         yoop_park_token_init(&t);
-        pthread_t th;
-        pthread_create(&th, NULL, unpark_after_delay, &t);
+        test_thread_t th;
+        test_thread_spawn(&th, unpark_after_delay, &t);
         yoop_park(&t);
-        pthread_join(th, NULL);
+        test_thread_join(&th);
         yoop_park_token_destroy(&t);
     }
 
@@ -51,10 +49,10 @@ int main(void) {
         for (int i = 0; i < 200; i++) {
             yoop_park_token_t t;
             yoop_park_token_init(&t);
-            pthread_t th;
-            pthread_create(&th, NULL, unpark_after_delay, &t);
+            test_thread_t th;
+            test_thread_spawn(&th, unpark_after_delay, &t);
             yoop_park(&t);
-            pthread_join(th, NULL);
+            test_thread_join(&th);
             yoop_park_token_destroy(&t);
         }
     }

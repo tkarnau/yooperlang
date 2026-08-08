@@ -26,7 +26,14 @@ export function formatDiagnostic({ filePath, src, loc, message }) {
     const gutter = String(loc.line);
     const pad = " ".repeat(gutter.length);
     const caretCol = Math.max(0, loc.column - 1);
-    const caretLen = Math.max(1, loc.length ?? 1);
+    // The frame shows ONE line, so a span that runs past its end has to be
+    // clipped or the carets run off into empty space. Multi-line spans are
+    // real (the unreachable-code warning covers a whole dead tail), and
+    // before this a `length` of 200 drew 200 carets under a 30-column line.
+    const caretLen = Math.max(
+        1,
+        Math.min(loc.length ?? 1, Math.max(1, lineText.length - caretCol)),
+    );
     const caret = " ".repeat(caretCol) + "^".repeat(caretLen);
     return [
         head,

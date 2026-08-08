@@ -111,23 +111,26 @@ export function bytes_index_of(buf: uint8[], needle: uint8): usize {
 export function lastIndexOfSeq(buf: uint8[], needle: uint8[]): usize {
   if (needle.len == 0) { return 0; }
   if (needle.len > buf.len ) { return buf.len; }
-  let max: usize = buf.len - needle.len + 1;
 
-  // start at the last character that has at least the needle length remaining
-  // in the buffer
-  let i: usize = buf.len - needle.len;
-  while (i > max) {
+  // Walk DOWN from the highest start offset that still leaves room for the
+  // needle. `i` is one PAST the candidate start rather than the start itself:
+  // usize is unsigned, so a loop that decremented a start offset of 0 would
+  // wrap to a huge number instead of terminating. Counting down to 1 and
+  // deriving `start = i - 1` keeps offset 0 reachable and the loop finite.
+  let i: usize = buf.len - needle.len + 1;
+  while (i > 0) {
+    const start: usize = i - 1;
     let matched = true;
     let j: usize = 0;
     while (j < needle.len) {
-      if (buf[i + j] != needle[j]) {
+      if (buf[start + j] != needle[j]) {
         matched = false;
         break;
       }
       j += 1;
     }
-    if (matched) { return i; }
-    i -= 1; // decrement i - searching backwards from end
+    if (matched) { return start; }
+    i -= 1;
   }
 
   return buf.len; // fail case

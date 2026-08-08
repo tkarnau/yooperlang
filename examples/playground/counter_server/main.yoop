@@ -1,0 +1,363 @@
+// counter_server - a small HTTP API built to be stress tested.
+//
+// One endpoint does the work:
+//
+//     GET /count   ->  {"count":N,"rps":X.XX,...}
+//
+// `count` is a monotonic hit counter. `rps` is the average requests per
+// second over the last minute, rounded to hundredths. Two more that do NOT
+// touch the counter, so a load generator's numbers stay clean:
+//
+//     GET /stats   ->  the same JSON plus process introspection
+//     GET /healthz ->  {"status":"ok"}
+//
+// Shape notes, both of which differ from the obvious thing:
+//
+//   * **A task per connection.** `http.serve` awaits each connection to
+//     completion before accepting the next, so one idle keep-alive client
+//     stalls the whole server - and every load generator opens N keep-alive
+//     connections. `acceptLoop` below spawns a task per connection instead,
+//     so they progress independently.
+//   * **The counters are atomic.** Worker threads share one address space
+//     (this is not Node's `cluster` of separate processes), so a plain
+//     `+= 1` from two workers loses updates. `std/runtime.yoop`'s `Counter`
+//     is the fix, and `WORKERS` below is what decides how many workers
+//     there are.
+//
+// Build: node ./src/yoopiler.js examples/playground/counter_server/main.yoop -o counter_server
+// Run:   ./counter_server              (0.0.0.0:8080, one worker per core)
+//        ./counter_server 9000         (port)
+//        ./counter_server 9000 4       (port, worker count)
+
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as tcp, { ListenResult, TcpListener, TcpStream, AcceptOutcome } from "std/net";
+import * as http, {
+    Handler, HandleOutcome, Dispatcher, ServerConfig,
+} from "std/http";
+import * as types, { Request, Response, HttpError } from "std/http";
+import * as router, { Router } from "std/http";
+import * as rt, { Counter } from "std/runtime.yoop";
+import * as fmt from "std/core/format.yoop";
+import * as strings from "std/core/strings.yoop";
+import * as numbers from "std/core/numbers.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as env from "std/env.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const DEFAULT_PORT: int32 = 8080;
+const BIND_HOST: string = "0.0.0.0";   // not 127.0.0.1 - a container has to
+                                       // be reachable from outside its netns.
+const BACKLOG: int32 = 1024;
+
+// Seconds of history the rate is averaged over.
+const WINDOW: usize = 60;
+
+const COUNT_PATH: string = "/count";
+
+// ----- metrics ------------------------------------------------------------
+//
+// The rate window is a 60-slot ring, one slot per second, indexed by
+// `second % 60`. Each slot remembers WHICH second it is holding, so a slot
+// whose second has rolled over is reset on first touch rather than swept by
+// a background timer. The whole metric costs one modulo and two atomic adds
+// per request, with no lock and no second thread.
+//
+// Exactness, precisely: `hits` is a single atomic add, so the reported
+// `count` is EXACT no matter how many workers are running. The per-second
+// slots are deliberately not - two workers crossing a second boundary
+// together can both reset a slot and drop one sample. That is bounded by
+// one sample per boundary, i.e. at most ~60 out of however many requests a
+// minute holds, and it only ever perturbs `rps`. Making it exact would cost
+// a CAS on the hot path of a number that is an estimate by construction.
+type Metrics implements Handler {
+    hits: Counter,             // exact, monotonic, never reset
+    connectionsOpen: Counter,  // in flight right now
+    connectionsTotal: Counter, // accepted since boot
+    slotSecond: Counter[],     // which second each slot holds
+    slotCount: Counter[],      // hits recorded during that second
+    startSecond: uint64,
+    workers: int32,
+    cpus: int32,
+
+    // Registered on BOTH /count and /stats: /count records the hit, /stats
+    // only reports. One handler because both need the same state, and a
+    // handler is reached through a pointer that must outlive the route
+    // table - two handlers would need a third object to share.
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        if (strings.string_eq(req.path, COUNT_PATH)) {
+            bump(ref self);
+        }
+        types.respondJson(ref resp, types.ok(), statsJson(ref self));
+        return HandleOutcome.Ok;
+    }
+}
+
+// `monotonicNs` is MONOTONIC, so this is a second counter rather than a
+// wall clock reading. Only differences are ever used, which is what a rate
+// wants - an NTP step must not move the window.
+function nowSecond(): uint64 {
+    return rt.monotonicNs() / 1000000000;
+}
+
+// heap_alloc does not zero, and a Counter[] is raw memory until written.
+function initMetrics(ref m: Metrics): void {
+    for (let i: usize = 0; i < WINDOW; i += 1) {
+        m.slotSecond[i] = { value: 0 };
+        m.slotCount[i] = { value: 0 };
+    }
+    rt.counterSet(ref m.hits, 0);
+    rt.counterSet(ref m.connectionsOpen, 0);
+    rt.counterSet(ref m.connectionsTotal, 0);
+    m.startSecond = nowSecond();
+}
+
+// Record one hit.
+function bump(ref m: Metrics): void {
+    let _total: uint64 = rt.counterInc(ref m.hits);
+    let s: uint64 = nowSecond();
+    let i: usize = usize(s % uint64(WINDOW));
+    if (rt.counterGet(ref m.slotSecond[i]) != s) {
+        rt.counterSet(ref m.slotSecond[i], s);
+        rt.counterSet(ref m.slotCount[i], 0);
+    }
+    let _n: uint64 = rt.counterInc(ref m.slotCount[i]);
+}
+
+// Seconds the server has been up.
+function uptimeSeconds(ref m: Metrics): uint64 {
+    return nowSecond() - m.startSecond;
+}
+
+// How many seconds of history the average is actually drawn from. Before
+// the server has been up a full minute, dividing by a flat 60 would report
+// a rate several times lower than the real one - the opposite of useful
+// when you are watching a load test ramp.
+function windowSeconds(ref m: Metrics): uint64 {
+    let elapsed: uint64 = uptimeSeconds(ref m) + 1;
+    if (elapsed > uint64(WINDOW)) { return uint64(WINDOW); }
+    return elapsed;
+}
+
+// Hits in the last WINDOW seconds. A slot whose second is older than the
+// window is skipped - its count is stale.
+function windowHits(ref m: Metrics): uint64 {
+    let s: uint64 = nowSecond();
+    let sum: uint64 = 0;
+    for (let i: usize = 0; i < WINDOW; i += 1) {
+        let held: uint64 = rt.counterGet(ref m.slotSecond[i]);
+        if (held <= s && s - held < uint64(WINDOW)) {
+            sum = sum + rt.counterGet(ref m.slotCount[i]);
+        }
+    }
+    return sum;
+}
+
+// Fixed two decimal places. `float_to_string` is %g-style (it drops
+// trailing zeros, so 5.0 prints as "5") and the ask was hundredths - so
+// round in integer space and place the point by hand.
+function twoDecimals(x: float64): string {
+    let scaled: uint64 = uint64(x * 100.0 + 0.5);
+    let whole: uint64 = scaled / 100;
+    let frac: uint64 = scaled % 100;
+    let f: string = fmt.uint_to_string(frac);
+    if (frac < 10) {
+        f = strings.string_concat("0", f);
+    }
+    return `${fmt.uint_to_string(whole)}.${f}`;
+}
+
+function rateString(ref m: Metrics): string {
+    let span: uint64 = windowSeconds(ref m);
+    if (span == 0) { return "0.00"; }
+    return twoDecimals(float64(windowHits(ref m)) / float64(span));
+}
+
+// The introspection payload. Enough to answer "is it alive, is it keeping
+// up, and is it leaking" without attaching anything to the process.
+function statsJson(ref m: Metrics): string {
+    let u: string = fmt.uint_to_string(uptimeSeconds(ref m));
+    let w: string = fmt.uint_to_string(windowSeconds(ref m));
+    let c: string = fmt.uint_to_string(rt.counterGet(ref m.hits));
+    let open: string = fmt.uint_to_string(rt.counterGet(ref m.connectionsOpen));
+    let tot: string = fmt.uint_to_string(rt.counterGet(ref m.connectionsTotal));
+    let rss: string = fmt.uint_to_string(rt.rssBytes());
+    return `{"count":${c},"rps":${rateString(ref m)},"windowSeconds":${w},"uptimeSeconds":${u},"connectionsOpen":${open},"connectionsTotal":${tot},"workers":${m.workers},"cpus":${m.cpus},"rssBytes":${rss}}
+`;
+}
+
+// ----- the other two routes -----------------------------------------------
+
+type HealthHandler implements Handler {
+    body: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        types.respondJson(ref resp, types.ok(), self.body);
+        return HandleOutcome.Ok;
+    }
+}
+
+type MissHandler implements Handler {
+    note: string,
+    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        types.respondText(ref resp, types.notFound(), `${self.note}: ${req.path}\n`);
+        return HandleOutcome.Ok;
+    }
+}
+
+// ----- config -------------------------------------------------------------
+
+// The std defaults are tuned for a public server. A load generator is not a
+// hostile client, and its whole point is to hold a connection open and
+// hammer it.
+function loadConfig(): ServerConfig {
+    let cfg: ServerConfig = http.defaultConfig();
+    cfg.maxRequestsPerConnection = 1000000;  // effectively "keep-alive forever"
+    cfg.maxBodyBytes = 4096;                 // nothing here reads a body
+    cfg.logRequests = false;                 // per-request printf would BE the benchmark
+    return cfg;
+}
+
+// ----- the accept loop ----------------------------------------------------
+
+// One connection, start to finish, on its own task. Everything it does -
+// the head read, the handler, the response write - suspends rather than
+// parking its worker, so a worker interleaves many of these.
+//
+// `st` arrives by value and is rebound as `disposable`, which is what
+// closes the socket on every exit path including an error return.
+task connectionTask(
+    st: TcpStream,
+    d: Dispatcher,
+    cfg: ServerConfig,
+    m: ref Metrics,
+): int32 {
+    disposable conn: TcpStream = st;
+    let served: int32 = await http.serveConnection(ref conn, ref d, cfg, 0);
+    let _open: uint64 = rt.counterDec(ref m.connectionsOpen);
+    return served;
+}
+
+// Accept forever, handing each connection to its own task. Only a listener
+// failure ends this - anything one connection does to itself costs that
+// connection and nothing else.
+async acceptLoop(
+    ref l: TcpListener,
+    d: Dispatcher,
+    cfg: ServerConfig,
+    ref m: Metrics,
+): Result<int32, HttpError> {
+    while (true) {
+        switch (await tcp.tcpAcceptAsync(ref l)) {
+            case AcceptOutcome.Accepted { stream: st, peerHost: _h, peerPort: _p }: {
+                let _open: uint64 = rt.counterInc(ref m.connectionsOpen);
+                let _tot: uint64 = rt.counterInc(ref m.connectionsTotal);
+                // Fire and forget. A task handle starts at refcount 2
+                // (caller + worker), so releasing the caller's half here
+                // leaves the worker's - the task runs to completion and
+                // frees itself. Nothing waits on it; the response goes to
+                // the socket, not back to us.
+                pooled _conn = connectionTask(st, d, cfg, ref m);
+            }
+            case AcceptOutcome.TimedOut: {
+                // No deadline is set on the listener, so unreachable today.
+                // Treated as "keep waiting" rather than an error.
+            }
+            case AcceptOutcome.Cancelled: {
+                return Result.Ok { value: 0 };
+            }
+            case AcceptOutcome.Err { error: e }: {
+                return Result.Err { error: types.errIo(e) };
+            }
+        }
+    }
+}
+
+// ----- argv ---------------------------------------------------------------
+
+// `argv[n]` as a positive int, or `fallback`. A bad value warns and falls
+// back rather than aborting the container on boot.
+function intArg(n: int32, fallback: int32, label: string): int32 {
+    if (env.argCount() <= n) { return fallback; }
+    let raw: string = env.argAt(n);
+    switch (numbers.parseBytesToInt32(intr.string_as_bytes(raw), 10)) {
+        case Result.Ok { value: v }: {
+            if (v > 0) { return v; }
+            printf(`${label} "${raw}" must be positive, using ${fallback}\n`);
+            return fallback;
+        }
+        case Result.Err { error: e }: {
+            printf(`bad ${label} "${raw}" (${e}), using ${fallback}\n`);
+            return fallback;
+        }
+    }
+}
+
+// ----- the server ---------------------------------------------------------
+
+async run(port: int32, workers: int32): Result<int32, HttpError> {
+    let disposable lr: ListenResult = tcp.tcp_listen(BIND_HOST, port, BACKLOG);
+    if (lr.error.len > 0) {
+        return Result.Err { error: types.errIo(lr.error) };
+    }
+
+    let secs: Counter[] = intr.heap_alloc(WINDOW);
+    let hits: Counter[] = intr.heap_alloc(WINDOW);
+    let metrics: Metrics = {
+        hits: { value: 0 },
+        connectionsOpen: { value: 0 },
+        connectionsTotal: { value: 0 },
+        slotSecond: secs,
+        slotCount: hits,
+        startSecond: 0,
+        workers: workers,
+        cpus: rt.cpuCount(),
+    };
+    initMetrics(ref metrics);
+
+    let health: HealthHandler = { body: "{\"status\":\"ok\"}\n" };
+    let miss: MissHandler     = { note: "no route" };
+
+    let disposable r: Router = router.routerNew();
+    router.routerGet(ref r, COUNT_PATH, Dispatcher.from(ref metrics));
+    router.routerGet(ref r, "/stats", Dispatcher.from(ref metrics));
+    router.routerGet(ref r, "/healthz", Dispatcher.from(ref health));
+    router.routerFallback(ref r, Dispatcher.from(ref miss));
+
+    printf(`counter_server listening on ${BIND_HOST}:${port} (workers=${workers}, cpus=${rt.cpuCount()})\n`);
+
+    let d: Dispatcher = Dispatcher.from(ref r);
+    return await acceptLoop(ref lr.listener, d, loadConfig(), ref metrics);
+}
+
+// main is the sync/async boundary: spawn the loop as a task, then join it.
+task serveTask(port: int32, workers: int32): Result<int32, HttpError> {
+    return await run(port, workers);
+}
+
+function main(): int32 {
+    // stdout is a PIPE under `docker logs`, so without this the startup
+    // banner sits in a 4KB buffer and the container looks hung.
+    rt.lineBufferStdout();
+
+    let port: int32 = intArg(1, DEFAULT_PORT, "port");
+
+    // Pool sizing happens BEFORE the first task spawns - workers are
+    // created lazily on the first submit, so `serveTask` below would fix
+    // the count if this ran after it.
+    let workers: int32 = intArg(2, rt.cpuCount(), "worker count");
+    if (!rt.setWorkerCount(workers)) {
+        printf(`could not set worker count, running with ${rt.workerCount()}\n`);
+    }
+
+    pooled h = serveTask(port, rt.workerCount());
+    switch (wait h) {
+        case Result.Ok { value: _n }: { return 0; }
+        case Result.Err { error: e }: {
+            printf(`server failed: ${e}\n`);
+            return 1;
+        }
+    }
+}

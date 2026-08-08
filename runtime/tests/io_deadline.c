@@ -2,20 +2,19 @@
 // to give up: a pipe that never gets written parked the thread forever.
 
 #include "../yoop_runtime.h"
+#include "test_support.h"
 
 #include <assert.h>
 #include <errno.h>
-#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
-#include <unistd.h>
 
 #define MS 1000000ULL
 
 // A pipe nobody writes to. The wait must come back on its deadline.
 static void test_timeout(void) {
     int fds[2];
-    assert(pipe(fds) == 0);
+    assert(test_pair(fds) == 0);
 
     uint64_t start = yoop_now_ns();
     int rc = yoop_io_wait_readable_ex(fds[0], NULL, yoop_now_ns() + 50 * MS);
@@ -25,8 +24,8 @@ static void test_timeout(void) {
     assert(elapsed >= 45 * MS);
     assert(elapsed <  2000 * MS);
 
-    close(fds[0]);
-    close(fds[1]);
+    test_pair_close(fds[0]);
+    test_pair_close(fds[1]);
     printf("  timeout ok (%llums)\n", (unsigned long long)(elapsed / MS));
 }
 
@@ -35,48 +34,47 @@ static void test_timeout(void) {
 // entry behind, this would fail with EAGAIN.
 static void test_reuse_after_timeout(void) {
     int fds[2];
-    assert(pipe(fds) == 0);
+    assert(test_pair(fds) == 0);
 
     int rc = yoop_io_wait_readable_ex(fds[0], NULL, yoop_now_ns() + 30 * MS);
     assert(rc == YOOP_WAIT_TIMEDOUT);
 
-    assert(write(fds[1], "x", 1) == 1);
+    assert(test_pair_write(fds[1], "x", 1) == 1);
     rc = yoop_io_wait_readable_ex(fds[0], NULL, yoop_now_ns() + 1000 * MS);
     assert(rc == YOOP_WAIT_READY);
 
-    close(fds[0]);
-    close(fds[1]);
+    test_pair_close(fds[0]);
+    test_pair_close(fds[1]);
     printf("  reuse-after-timeout ok\n");
 }
 
 struct writer_args { int fd; uint64_t delay_ms; };
 
-static void* writer(void* p) {
+static void writer(void* p) {
     struct writer_args* a = (struct writer_args*)p;
     yoop_sleep_ms(a->delay_ms);
-    ssize_t n = write(a->fd, "x", 1);
+    int64_t n = test_pair_write(a->fd, "x", 1);
     (void)n;
-    return NULL;
 }
 
 // Data arrives comfortably inside the deadline: READY, not TIMEDOUT.
 static void test_ready_before_deadline(void) {
     int fds[2];
-    assert(pipe(fds) == 0);
+    assert(test_pair(fds) == 0);
 
     struct writer_args a = { fds[1], 20 };
-    pthread_t th;
-    pthread_create(&th, NULL, writer, &a);
+    test_thread_t th;
+    test_thread_spawn(&th, writer, &a);
 
     int rc = yoop_io_wait_readable_ex(fds[0], NULL, yoop_now_ns() + 3000 * MS);
-    pthread_join(th, NULL);
+    test_thread_join(&th);
     assert(rc == YOOP_WAIT_READY);
 
     char buf[2];
-    assert(read(fds[0], buf, 1) == 1);
+    assert(test_pair_read(fds[0], buf, 1) == 1);
 
-    close(fds[0]);
-    close(fds[1]);
+    test_pair_close(fds[0]);
+    test_pair_close(fds[1]);
     printf("  ready-before-deadline ok\n");
 }
 
@@ -84,11 +82,11 @@ static void test_ready_before_deadline(void) {
 // kernel at all.
 static void test_past_deadline(void) {
     int fds[2];
-    assert(pipe(fds) == 0);
+    assert(test_pair(fds) == 0);
     int rc = yoop_io_wait_readable_ex(fds[0], NULL, 1);
     assert(rc == YOOP_WAIT_TIMEDOUT);
-    close(fds[0]);
-    close(fds[1]);
+    test_pair_close(fds[0]);
+    test_pair_close(fds[1]);
     printf("  past-deadline ok\n");
 }
 
@@ -96,11 +94,11 @@ static void test_past_deadline(void) {
 // with no deadline pressure - the writable path is otherwise identical.
 static void test_writable(void) {
     int fds[2];
-    assert(pipe(fds) == 0);
+    assert(test_pair(fds) == 0);
     int rc = yoop_io_wait_writable_ex(fds[1], NULL, yoop_now_ns() + 1000 * MS);
     assert(rc == YOOP_WAIT_READY);
-    close(fds[0]);
-    close(fds[1]);
+    test_pair_close(fds[0]);
+    test_pair_close(fds[1]);
     printf("  writable ok\n");
 }
 

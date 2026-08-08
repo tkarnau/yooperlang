@@ -303,7 +303,14 @@ function newMeta(): ExchangeMeta {
 // number of requests answered. Connection-level failures end the connection,
 // not the server, so this swallows its error after reporting it as a
 // response where that is still possible.
-async serveConnection(
+//
+// Exported because `serve` below runs connections ONE AT A TIME - it awaits
+// each to completion before accepting the next, so a single keep-alive
+// client that goes idle stalls every other client. That is fine for the
+// bounded fixtures `serve` was written for and wrong for a real server, so
+// a caller that needs concurrency writes its own accept loop and spawns a
+// task per connection around this. See examples/playground/counter_server.
+export async serveConnection(
     ref stream: TcpStream,
     ref d: Dispatcher,
     cfg: ServerConfig,

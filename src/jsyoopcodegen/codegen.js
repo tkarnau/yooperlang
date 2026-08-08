@@ -293,6 +293,7 @@ function comptimeValueAsLlvmInit(wrapped, ty, opts = {}) {
       elemLlvm,
       count: len,
       elemInits,
+      mutable: !!opts.mutableBacking,
     });
     return `{ ptr ${backingSym}, i64 ${len} }`;
   }
@@ -777,6 +778,15 @@ export function codegen(ast) {
   // The Phase 2 fallible-struct shape was retired in Phase 10.X; only the
   // enum form remains.
   function emitTryOpToSlot(node, fnLines) {
+    // Phase 10.E.3: the handler form is multi-module only, like template
+    // literals and range lowering. The legacy single-module path exists for
+    // the old tests; failing loudly here beats emitting a fail branch that
+    // silently drops the user's block.
+    if (node.tryHandler) {
+      throw new Error(
+        "codegen: '? e { ... }' is not supported on the legacy single-module path",
+      );
+    }
     const operandEnum = node.operand.resolvedType;
     const r = emitExpr(node.operand, fnLines);
     const enumLlvm = llvmType(operandEnum);
@@ -1016,6 +1026,23 @@ export function codegen(ast) {
         const yoopType = symbols.get(node.name);
         if (!yoopType) {
           throw new Error(`codegen: unknown identifier "${node.name}"`);
+        }
+        // A `ref T` binding passed BARE to a `ref T` parameter forwards the
+        // pointer it holds - it must NOT auto-deref. The typechecker allows
+        // that spelling on purpose (an FFI handle in `let w: ref Window`
+        // reaches the next call without a redundant `ref w`) and marks the
+        // argument `passRefBinding`, but nothing ever read the flag: codegen
+        // fell through to the deref below and passed the POINTEE by value
+        // into a pointer parameter, so the callee used the struct's first
+        // field as an address. Silent segfault, no diagnostic.
+        //
+        // Checked before autoDeref because the typechecker sets BOTH on
+        // these nodes - it resolves the argument as an ordinary expression
+        // (which stamps autoDeref) before deciding it is a ref pass-through.
+        if (node.passRefBinding) {
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
+          return { val: ptrTmp, yoopType };
         }
         if (node.autoDeref) {
           const innerType = yoopType.inner;
@@ -3174,11 +3201,30 @@ function codegenWithModuleId(
     return false;
   }
 
+  // Identical string literals share ONE global.
+  //
+  // This is not only a size optimization - `enum<string>` equality is the one
+  // place the language compares strings, and it lowers to `icmp eq ptr`
+  // (INT_OP_MAP), so `dir == SortDir.Asc` is only correct if both sides name
+  // the same global. Emitting a fresh global per occurrence left that to the
+  // linker's constant merger, which dedupes identical `unnamed_addr`
+  // constants on Mach-O/ELF but not for MSVC at -O0 - so the comparison
+  // silently evaluated false on Windows while passing everywhere else.
+  //
+  // Interning here makes the guarantee explicit instead of accidental. It is
+  // keyed on the ENCODED bytes so two literals that differ only in source
+  // spelling (an escape vs. the raw character) still land on one global, and
+  // it is per emission unit, which is all the pointer comparison needs.
+  const strGlobalPool = new Map(); // encoded content -> { name, byteLen }
   function emitRawStringGlobal(inner) {
-    const name = freshStrGlobal();
     const { llvmStr, byteLen } = encodeStringBytes(inner);
+    const cached = strGlobalPool.get(llvmStr);
+    if (cached) return cached;
+    const name = freshStrGlobal();
     globals.push(`${name} = private unnamed_addr constant [${byteLen} x i8] c"${llvmStr}", align 1`);
-    return { name, byteLen };
+    const entry = { name, byteLen };
+    strGlobalPool.set(llvmStr, entry);
+    return entry;
   }
 
   function emitQuotedStringGlobal(quotedValue) {
@@ -3190,10 +3236,19 @@ function codegenWithModuleId(
   // outer `{ ptr <backing>, i64 N }` fat-pointer constant can reference
   // it. Reuses the string-global counter for naming since both produce
   // private aggregates in the same flat namespace.
-  function emitRawArrayGlobal({ elemLlvm, count, elemInits }) {
+  //
+  // `mutable` is load-bearing, not a hint. The fat pointer this backs is
+  // reachable from a `let` module-level binding, so `xs[i] = v` writes
+  // straight through it. A `constant` lands the buffer in a read-only
+  // section and that store segfaults; `unnamed_addr` additionally lets the
+  // linker merge two same-valued buffers into one, so two independent
+  // arrays would alias. Both are correct for a `const` and fatal for a
+  // `let`.
+  function emitRawArrayGlobal({ elemLlvm, count, elemInits, mutable }) {
     const name = `@.arr_${moduleId}${fileTag}_${strConstCounter++}`;
+    const storage = mutable ? "global" : "unnamed_addr constant";
     globals.push(
-      `${name} = private unnamed_addr constant [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
+      `${name} = private ${storage} [${count} x ${elemLlvm}] [${elemInits.join(", ")}], align 8`,
     );
     return name;
   }
@@ -3204,6 +3259,12 @@ function codegenWithModuleId(
   // trailer labels every `return` and every `await` branches to, so the
   // suspend/cleanup blocks exist exactly once per coroutine.
   let currentCoro = null;
+  // Phase 10.E.3: the statement ctx (break/continue labels, subprogram) in
+  // force at the statement currently being emitted. A `?`-handler block holds
+  // STATEMENTS inside an EXPRESSION, and emitExpr takes no ctx, so the handler
+  // reaches the enclosing statement's ctx through here to lower `break` and
+  // `continue`. Same ambient-state shape as currentCoro/currentReturnType.
+  let currentStmtCtx = null;
 
   // For now, emit struct defs using mangled names. Phase 7.1: generic type
   // decls (with typeParams) have no resolvedType - their instantiations are
@@ -3411,6 +3472,12 @@ function codegenWithModuleId(
         ? comptimeValueAsLlvmInit(d.comptimeValue, d.resolvedType, {
             emitRawStringGlobal,
             emitRawArrayGlobal,
+            // A LET_DECL is mutable, so anything the folded initializer
+            // hangs off a private backing global has to be writable too.
+            // (Strings are exempt - a `string` rebind swaps the pointer
+            // rather than the bytes, and the interning that `enum<string>`
+            // equality depends on needs them merged.)
+            mutableBacking: d.kind === ASTNodeKind.LET_DECL,
           })
         : null;
       if (initLiteral != null) {
@@ -3873,10 +3940,20 @@ function codegenWithModuleId(
     );
     fnLines.push(`  call void @free(ptr ${mem})`);
     fnLines.push(`  br label %${coro.suspendLabel}`);
-    const unused = freshTemp();
     fnLines.push(`${coro.suspendLabel}:`);
+    // The result is deliberately DISCARDED rather than bound to a temp.
+    //
+    // llvm.coro.end changed shape in LLVM 19/20: it used to be
+    // `i1 (ptr, i1)` and is now `void (ptr, i1, token)`. Newer LLVM
+    // auto-upgrades the old spelling on read, which is fine on its own - but
+    // if the call's result is bound to a name, the upgrade rewrites the call
+    // to `void` and leaves `%tN =` in front of it, and the module fails
+    // verification with "Broken module found". Discarding the result is legal
+    // in both worlds (an unused non-void result needs no name), so this one
+    // line is correct against every LLVM the project supports without having
+    // to detect a version.
     fnLines.push(
-      `  ${unused} = call i1 @llvm.coro.end(ptr ${coro.hdl}, i1 false)`,
+      `  call i1 @llvm.coro.end(ptr ${coro.hdl}, i1 false)`,
     );
     fnLines.push(`  ret ptr ${coro.hdl}`);
   }
@@ -4268,6 +4345,23 @@ function codegenWithModuleId(
         }
         const yoopType = symbols.get(node.name);
         if (!yoopType) throw new Error(`codegen: unknown identifier "${node.name}"`);
+        // A `ref T` binding passed BARE to a `ref T` parameter forwards the
+        // pointer it holds - it must NOT auto-deref. The typechecker allows
+        // that spelling on purpose (an FFI handle in `let w: ref Window`
+        // reaches the next call without a redundant `ref w`) and marks the
+        // argument `passRefBinding`, but nothing ever read the flag: codegen
+        // fell through to the deref below and passed the POINTEE by value
+        // into a pointer parameter, so the callee used the struct's first
+        // field as an address. Silent segfault, no diagnostic.
+        //
+        // Checked before autoDeref because the typechecker sets BOTH on
+        // these nodes - it resolves the argument as an ordinary expression
+        // (which stamps autoDeref) before deciding it is a ref pass-through.
+        if (node.passRefBinding) {
+          const ptrTmp = freshTemp();
+          fnLines.push(`  ${ptrTmp} = load ptr, ptr ${symbols.slotFor(node.name)}`);
+          return { val: ptrTmp, yoopType };
+        }
         if (node.autoDeref) {
           const innerType = yoopType.inner;
           const ptrTmp = freshTemp();
@@ -5968,13 +6062,75 @@ function codegenWithModuleId(
     fnLines.push(`  br i1 ${failed}, label %${failLabel}, label %${okLabel}`);
 
     fnLines.push(`${failLabel}:`);
-    // Phase 6.1: fire any pending cleanups in the failure branch before the
-    // early `ret` produced by emitFailEnumRet.
-    emitPendingCleanups(node, fnLines);
-    emitFailEnumRet(node, operandEnum, slot, currentReturnType, fnLines);
+    if (node.tryHandler) {
+      // Phase 10.E.3: `expr? e { ... }` - run the user's block here instead
+      // of returning. Pending cleanups are deliberately NOT fired: the block
+      // is required to diverge, and whichever terminator it uses (`return`,
+      // `break`, `continue`) fires the cleanups appropriate to ITS exit.
+      emitTryHandlerBlock(node, operandEnum, slot, fnLines);
+    } else {
+      // Phase 6.1: fire any pending cleanups in the failure branch before the
+      // early `ret` produced by emitFailEnumRet.
+      emitPendingCleanups(node, fnLines);
+      emitFailEnumRet(node, operandEnum, slot, currentReturnType, fnLines);
+    }
 
     fnLines.push(`${okLabel}:`);
     return { ptr: slot, type: operandEnum };
+  }
+
+  // Phase 10.E.3 - the failure block of `expr? e { ... }`.
+  //
+  // Binds the Err payload to `e` as an ordinary local (same materialization a
+  // switch arm's variant pattern gets) and emits the block. The typechecker
+  // has already proved the block diverges, so control never reaches the end.
+  function emitTryHandlerBlock(node, operandEnum, operandSlot, fnLines) {
+    symbols.enterScope();
+
+    const errVariant = operandEnum.variants.get("Err");
+    const hasPayload =
+      errVariant.fields !== null && errVariant.fields.length > 0;
+    if (node.handlerBinding && hasPayload) {
+      const enumId = operandEnum.moduleId
+        ? `${operandEnum.moduleId}__${operandEnum.name}`
+        : operandEnum.name;
+      const payloadLlvm = `%variantc.${enumId}__Err`;
+      const fieldType = errVariant.fields[0].type;
+      const fieldLlvm = llvmType(fieldType);
+
+      const payloadPtr = freshTemp();
+      fnLines.push(
+        `  ${payloadPtr} = getelementptr inbounds ${llvmType(operandEnum)}, ptr ${operandSlot}, i32 0, i32 1`,
+      );
+      const fieldPtr = freshTemp();
+      fnLines.push(
+        `  ${fieldPtr} = getelementptr inbounds ${payloadLlvm}, ptr ${payloadPtr}, i32 0, i32 0`,
+      );
+      const valTmp = freshTemp();
+      fnLines.push(`  ${valTmp} = load ${fieldLlvm}, ptr ${fieldPtr}`);
+
+      const bindingSlot = symbols.declare(node.handlerBinding, fieldType);
+      fnLines.push(
+        `  ${bindingSlot} = alloca ${fieldLlvm}, align ${sizeOfAlign(fieldType)}`,
+      );
+      fnLines.push(`  store ${fieldLlvm} ${valTmp}, ptr ${bindingSlot}`);
+      emitDbgDeclare(fnLines, {
+        name: node.handlerBinding,
+        slotPtr: bindingSlot,
+        yoopType: fieldType,
+        sourceLoc: node.sourceLoc,
+      });
+    }
+
+    emitBlockStmt(node.handlerBlock, fnLines, currentStmtCtx ?? {});
+
+    // Unreachable in a well-formed program, but LLVM requires every basic
+    // block to carry a terminator and the block's own exit may have been
+    // emitted into a nested label rather than as the last line here.
+    if (!blockIsTerminated(fnLines)) {
+      fnLines.push(`  unreachable`);
+    }
+    symbols.leaveScope();
   }
 
   // Phase 9.H + 10.E - multi-module sibling of emitFailEnumReturn.
@@ -6272,7 +6428,17 @@ function codegenWithModuleId(
     // (if/while/for/block) attach their own !dbg first, so this outer pass
     // is a no-op on their lines (annotateLinesWithDbg skips them).
     const startIdx = fnLines.length;
-    emitStmtImpl(node, fnLines, ctx);
+    // Publish this statement's ctx for the duration of its emission, so a
+    // `?`-handler block nested inside one of its expressions can reach the
+    // break/continue labels. Saved and restored rather than assigned, since
+    // statements nest.
+    const prevStmtCtx = currentStmtCtx;
+    currentStmtCtx = ctx;
+    try {
+      emitStmtImpl(node, fnLines, ctx);
+    } finally {
+      currentStmtCtx = prevStmtCtx;
+    }
     if (debugInfo && ctx?.subprogram) {
       const loc = dbgLocFor(node, ctx);
       if (loc) annotateLinesWithDbg(fnLines, startIdx, loc);

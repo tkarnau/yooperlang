@@ -13,18 +13,30 @@ import { spawn } from "node:child_process";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const SERVER = path.resolve(import.meta.dirname, "server.js");
 
 // LspClient: a thin DAP/LSP-style framing harness over stdio. Tracks
-// pending request IDs and resolves their responses; notifications get
-// dropped on the floor (we don't need them for these tests beyond
-// observing the server is alive).
+// pending request IDs and resolves their responses. Notifications are
+// buffered so a test can await one - diagnostics arrive that way, unsolicited
+// and asynchronously after didOpen, so there is no request to hang them off.
 function startClient() {
   const proc = spawn(process.execPath, [SERVER], { stdio: ["pipe", "pipe", "pipe"] });
   let buf = Buffer.alloc(0);
   let seq = 1;
   const pending = new Map();
+  const notifications = [];
+  const notifyWaiters = [];
+
+  // A notification sent just before close() can still be in flight when the
+  // child dies, and writing to a dead child's stdin raises EPIPE. Windows
+  // surfaces this where POSIX does not: proc.kill() is TerminateProcess and
+  // takes effect immediately, whereas on POSIX the queued write has already
+  // drained by the time SIGTERM is handled. With no listener the stream's
+  // 'error' event is unhandled and fails whichever test happens to be running.
+  // Losing writes to a child we are killing on purpose is fine.
+  proc.stdin.on("error", () => {});
 
   proc.stdout.on("data", (chunk) => {
     buf = Buffer.concat([buf, chunk]);
@@ -43,6 +55,11 @@ function startClient() {
         const { resolve } = pending.get(msg.id);
         pending.delete(msg.id);
         resolve(msg);
+      } else if (msg.id == null && msg.method) {
+        notifications.push(msg);
+        for (let i = notifyWaiters.length - 1; i >= 0; i--) {
+          if (notifyWaiters[i].match(msg)) notifyWaiters.splice(i, 1)[0].resolve(msg);
+        }
       }
     }
   });
@@ -62,10 +79,25 @@ function startClient() {
   function notify(method, params) {
     send({ jsonrpc: "2.0", method, params });
   }
+  // Resolve with the first notification matching `match`, checking already
+  // buffered ones first - a fast server can publish before the test asks.
+  function awaitNotification(match, timeoutMs = 15000) {
+    const hit = notifications.find(match);
+    if (hit) return Promise.resolve(hit);
+    return new Promise((resolve, reject) => {
+      const waiter = { match, resolve };
+      notifyWaiters.push(waiter);
+      setTimeout(() => {
+        const i = notifyWaiters.indexOf(waiter);
+        if (i >= 0) notifyWaiters.splice(i, 1);
+        reject(new Error("timed out waiting for notification"));
+      }, timeoutMs).unref?.();
+    });
+  }
   function close() {
     proc.kill();
   }
-  return { request, notify, close };
+  return { request, notify, awaitNotification, close };
 }
 
 async function withClient(fn) {
@@ -83,9 +115,15 @@ function writeFixture(src, filename = "main.yoop") {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_"));
   const file = path.join(dir, filename);
   fs.writeFileSync(file, src);
+  const absPath = fs.realpathSync(file);
   return {
-    absPath: fs.realpathSync(file),
-    uri: "file://" + fs.realpathSync(file),
+    absPath,
+    // Must go through pathToFileURL rather than "file://" + absPath: on
+    // Windows the latter yields "file://C:\dir\main.yoop", which is neither
+    // what the server emits nor a valid file URI (a drive path needs the
+    // third slash, and separators have to be forward slashes). The server
+    // was always right here; only the test's hand-rolled URI was wrong.
+    uri: pathToFileURL(absPath).href,
     src,
   };
 }
@@ -295,6 +333,62 @@ function main(): int32 {
       // Quintuple-encoded - length must be a multiple of 5.
       assert.equal(resp.result.data.length % 5, 0);
       assert.ok(resp.result.data.length >= 5, "expected at least one token");
+    });
+  });
+
+  it("publishes unreachable code as a dimmed warning over the whole dead run", async () => {
+    const src = `function f(): int32 {
+    return 1;
+    let x: int32 = 2;
+    return x;
+}
+
+function main(): int32 {
+    return f();
+}
+`;
+    const { uri } = writeFixture(src);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const note = await client.awaitNotification(
+        (m) => m.method === "textDocument/publishDiagnostics" && m.params.uri === uri,
+      );
+      const diags = note.params.diagnostics;
+      const dead = diags.find((d) => d.code === "unreachable-code");
+      assert.ok(dead, `expected an unreachable-code diagnostic in ${JSON.stringify(diags)}`);
+      assert.equal(dead.severity, 2, "warning, so it never blocks a build");
+      // DiagnosticTag.Unnecessary. This is the whole point: without the tag
+      // the editor underlines dead code in yellow like a mistake instead of
+      // fading it out.
+      assert.deepEqual(dead.tags, [1]);
+      // The range must cover BOTH dead statements, not just the first - a
+      // one-statement range would leave the rest of the run undimmed.
+      assert.equal(dead.range.start.line, 2);
+      assert.equal(dead.range.start.character, 4);
+      assert.ok(dead.range.end.line >= 3, `range ended too early: ${JSON.stringify(dead.range)}`);
+    });
+  });
+
+  it("clears to no diagnostics for a file with no dead code", async () => {
+    const src = `function f(): int32 {
+    return 1;
+}
+
+function main(): int32 {
+    return f();
+}
+`;
+    const { uri } = writeFixture(src);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const note = await client.awaitNotification(
+        (m) => m.method === "textDocument/publishDiagnostics" && m.params.uri === uri,
+      );
+      assert.deepEqual(note.params.diagnostics, []);
     });
   });
 });

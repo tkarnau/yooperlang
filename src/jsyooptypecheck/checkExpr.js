@@ -43,7 +43,14 @@ import {
   typesEqual,
 } from "./types.js";
 import { pushError, formatType } from "./errors.js";
-import { lookupInScope } from "./scope.js";
+import { lookupInScope, pushScope, declareInScope, popScope } from "./scope.js";
+// Phase 10.E.3: the handler form of `?` puts STATEMENTS inside an
+// expression, so this file needs the statement checker. The resulting cycle
+// (checkStatement already imports this module) is the same shape as the
+// existing checkExpr <-> typecheck.js one and is safe for the same reason:
+// neither binding is touched during module evaluation, only at call time.
+import { validateStatement } from "./checkStatement.js";
+import { alwaysDiverges } from "./diverge.js";
 import {
   isFallibleVariant,
   strippedVariantOkType,
@@ -1794,12 +1801,22 @@ function resolveTryOp(node, scope, ctx) {
     return setType(node, ErrorType());
   }
 
+  // Phase 10.E.3: `expr? e { ... }` handles the failure right here, so none
+  // of the propagation machinery below applies - no Err-payload compatibility
+  // to establish, and in particular NO requirement that the enclosing
+  // function return a fallible variant. That last part is the point: the
+  // handler form works in `main`, in a `Handler.handle` returning a plain
+  // value, or anywhere else bare `?` is rejected.
+  if (node.handlerBlock) {
+    return resolveTryHandler(node, operandType, scope, ctx);
+  }
+
   const retType = ctx.funcReturnType;
   if (!isFallibleVariant(retType)) {
     pushError(
       ctx.errors,
       node,
-      `'?' is only legal inside a function that returns a fallible enum (Ok/Err); '${ctx.funcName}' returns ${formatType(retType)}`,
+      `'?' is only legal inside a function that returns a fallible enum (Ok/Err); '${ctx.funcName}' returns ${formatType(retType)} - either return a fallible variant, or handle the failure here with '? e { ... }'`,
     );
     return setType(node, ErrorType());
   }
@@ -1832,6 +1849,59 @@ function resolveTryOp(node, scope, ctx) {
   }
 
   node.fallibleEnum = true;
+  return setType(node, strippedVariantOkType(operandType));
+}
+
+// Phase 10.E.3 - `expr? e { ... }`, the handling counterpart to propagation.
+//
+// The block runs on the Err path INSTEAD of the expression producing a value,
+// so it has to leave: fall out the bottom and the binding the `?` feeds would
+// be uninitialized and codegen would have nothing to hand it. That is the one
+// rule the form enforces, and `alwaysDiverges` is what decides it.
+//
+// `e` is bound to the Err payload for the block's extent only, as a `const` -
+// it names a value the operand is about to be discarded with, and there is
+// nothing coherent to assign back into.
+function resolveTryHandler(node, operandType, scope, ctx) {
+  const operandErr = variantErrPayloadType(operandType);
+
+  const handlerScope = pushScope(scope);
+  if (operandErr.kind === typeKinds.void) {
+    // Nothing to name. Report it against the binding rather than silently
+    // leaving `e` undeclared, which would surface as a confusing
+    // "undefined variable" at the first use inside the block.
+    pushError(
+      ctx.errors,
+      node,
+      `'?' handler binds "${node.handlerBinding}", but the Err case of ${formatType(operandType)} carries no payload - there is nothing to bind`,
+    );
+  } else {
+    declareInScope(
+      handlerScope,
+      node.handlerBinding,
+      operandErr,
+      "const",
+      node,
+      ctx.errors,
+    );
+  }
+
+  // Checked with the enclosing ctx untouched, so `return` inside the block
+  // checks against the enclosing function's return type and `break` /
+  // `continue` stay legal exactly when the `?` sits inside a loop.
+  validateStatement(node.handlerBlock, handlerScope, ctx);
+  popScope(handlerScope, ctx.errors);
+
+  if (!alwaysDiverges(node.handlerBlock)) {
+    pushError(
+      ctx.errors,
+      node.handlerBlock,
+      `'?' handler block must not fall through - every path has to leave via return, break, or continue (it runs instead of producing a value, so there is nothing for execution to carry forward)`,
+    );
+  }
+
+  node.fallibleEnum = true;
+  node.tryHandler = true;
   return setType(node, strippedVariantOkType(operandType));
 }
 

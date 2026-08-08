@@ -21,6 +21,20 @@
 #include <string.h>
 #include <time.h>
 
+#ifdef _WIN32
+  // _setmode / _fileno / _O_BINARY, for taking the standard streams out of
+  // the CRT's newline-translating text mode (see set_stdio_binary below).
+  #include <fcntl.h>
+  #include <io.h>
+#elif defined(__APPLE__)
+  // task_info / mach_task_self, for yoop_runtime_rss_bytes.
+  #include <mach/mach.h>
+  #include <unistd.h>
+#else
+  // sysconf(_SC_PAGESIZE), for turning /proc/self/statm pages into bytes.
+  #include <unistd.h>
+#endif
+
 #define A_LOAD_U8(p)      atomic_load_explicit((_Atomic uint8_t*)(p),  memory_order_acquire)
 #define A_STORE_U8(p, v)  atomic_store_explicit((_Atomic uint8_t*)(p), (v), memory_order_release)
 #define A_LOAD_I32(p)     atomic_load_explicit((_Atomic int32_t*)(p), memory_order_acquire)
@@ -195,9 +209,41 @@ static void join_worker(yoop_thread_t* t) {
 // lifecycle and prevents windows from appearing.
 static int n_workers_target = 0;
 
+// Windows only: take stdout/stderr out of the CRT's text mode.
+//
+// By default the MSVC CRT opens the standard streams in text mode, which
+// rewrites every '\n' the program emits into "\r\n" on its way out. That is
+// wrong for Yooperlang twice over. Semantically, `printf("a\nb")` is defined
+// to write the bytes the program named - a language that can write bytes to
+// stdout cannot have the CRT silently inserting extra ones, which would
+// corrupt any binary payload. Practically, it made a compiled program's
+// output differ from the identical program on macOS/Linux for no reason a
+// user could see, which is exactly the portability seam the language exists
+// to hide. Go and Rust both write their standard streams in binary mode for
+// the same reasons.
+//
+// This does not stop Windows consoles from rendering the output correctly -
+// they treat a bare LF as a newline. It only stops the translation layer.
+static void set_stdio_binary(void) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+#endif
+}
+
 void yoop_runtime_init(void) {
     init_lock();
     if (g_rt.initialized) { init_unlock(); return; }
+
+    // Before anything can print. Cheap and idempotent, and this is the one
+    // function codegen guarantees runs at the top of every program's main.
+    set_stdio_binary();
+
+    // Same reasoning for Winsock: it must be started before the first socket
+    // call in the process, and std/net reaches sockets through paths that do
+    // not otherwise pass through the runtime. Doing it here means a yoop
+    // program never has to think about it. No-op on POSIX.
+    yoop_net_startup();
 
     int n = yoop_cpu_count();
     const char* env = getenv("YOOP_NUM_WORKERS");
@@ -739,5 +785,112 @@ uint64_t yoop_wall_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+// ---- process + pool introspection ----------------------------------------
+//
+// The surface behind std/runtime.yoop. Two jobs: let a program size the
+// worker pool from source instead of only from YOOP_NUM_WORKERS, and give
+// it the handful of numbers a service is expected to be able to report
+// about itself.
+
+// `yoop_cpu_count` is a `static inline` in yoop_platform.h, so it is not a
+// linkable symbol. This is the exported view of it.
+int yoop_runtime_cpu_count(void) {
+    return yoop_cpu_count();
+}
+
+// Once the pool is spawned `n_workers` is the truth; before that, the
+// target is what the pool WILL be.
+int yoop_runtime_worker_count(void) {
+    int n = g_rt.n_workers;
+    return n > 0 ? n : n_workers_target;
+}
+
+// Resize the pool target. Workers are spawned lazily on the first task
+// submit, so this only takes effect while none exist yet - which is the
+// honest contract, since shrinking a live pool would mean stopping threads
+// that may be mid-task. Returns 1 if the new target was accepted, 0 if the
+// pool is already running (or `n` is nonsense).
+int yoop_runtime_set_worker_count(int n) {
+    if (n < 1) return 0;
+    int ok = 0;
+    yoop_mutex_lock(&g_rt.queue_mu);
+    if (!g_rt.workers) {
+        n_workers_target = n;
+        ok = 1;
+    }
+    yoop_mutex_unlock(&g_rt.queue_mu);
+    return ok;
+}
+
+// ---- shared 64-bit counters ----------------------------------------------
+//
+// Worker threads share one address space, so a counter touched from more
+// than one of them needs a read-modify-write that cannot lose an update.
+// These take an ordinary `ref uint64` from yoop (which lowers to a plain
+// pointer) rather than introducing an opaque handle type, so the storage
+// stays an ordinary field the owner can lay out as it likes.
+//
+// acq_rel on the RMWs: a counter is frequently published alongside other
+// state ("bump the total, then read the slot"), and relaxed would let
+// those reorder across it.
+
+uint64_t yoop_atomic_add_u64(uint64_t* p, uint64_t delta) {
+    return atomic_fetch_add_explicit((_Atomic uint64_t*)p, delta, memory_order_acq_rel) + delta;
+}
+
+uint64_t yoop_atomic_sub_u64(uint64_t* p, uint64_t delta) {
+    return atomic_fetch_sub_explicit((_Atomic uint64_t*)p, delta, memory_order_acq_rel) - delta;
+}
+
+uint64_t yoop_atomic_load_u64(uint64_t* p) {
+    return atomic_load_explicit((_Atomic uint64_t*)p, memory_order_acquire);
+}
+
+void yoop_atomic_store_u64(uint64_t* p, uint64_t v) {
+    atomic_store_explicit((_Atomic uint64_t*)p, v, memory_order_release);
+}
+
+// Compare-and-swap. Returns 1 on success; on failure writes the observed
+// value back through `expected` so a retry loop needs no second load.
+int yoop_atomic_cas_u64(uint64_t* p, uint64_t* expected, uint64_t desired) {
+    return atomic_compare_exchange_strong_explicit(
+        (_Atomic uint64_t*)p, expected, desired,
+        memory_order_acq_rel, memory_order_acquire) ? 1 : 0;
+}
+
+// ---- resident set size ---------------------------------------------------
+//
+// Bytes of physical memory the process currently occupies - the number a
+// container's memory limit is enforced against, and the one worth graphing
+// during a load test. Returns 0 where it cannot be determined rather than
+// guessing.
+uint64_t yoop_runtime_rss_bytes(void) {
+#if defined(_WIN32)
+    // Would need PSAPI (GetProcessMemoryInfo) and the psapi link flag.
+    // Not wired up; callers get 0 and should treat it as "unavailable".
+    return 0;
+#elif defined(__APPLE__)
+    // mach_task_basic_info reports resident_size directly.
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return (uint64_t)info.resident_size;
+#else
+    // /proc/self/statm field 2 is the resident set in PAGES.
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long total_pages = 0, rss_pages = 0;
+    int got = fscanf(f, "%lu %lu", &total_pages, &rss_pages);
+    fclose(f);
+    if (got != 2) return 0;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return 0;
+    return (uint64_t)rss_pages * (uint64_t)page;
 #endif
 }

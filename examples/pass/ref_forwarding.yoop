@@ -1,0 +1,72 @@
+// Regression: a `ref T` binding passed BARE to a `ref T` parameter must
+// forward the pointer it holds, not the pointee.
+//
+// The typechecker allows the bare spelling deliberately - an FFI handle held
+// in `let w: ref Window` reaches the next call without a redundant `ref w` -
+// and marks the argument `passRefBinding`. Nothing in codegen read that flag,
+// so the IDENT fell through to the ordinary auto-deref path and the POINTEE
+// went by value into a pointer parameter. The callee then used the struct's
+// first field as an address: a silent segfault with no diagnostic.
+//
+// Covered here: the explicit `ref x` spelling (which always worked), the bare
+// spelling through a plain function, through a struct field, and across a
+// task boundary (where it was first noticed).
+
+import * as rt, { Counter } from "std/runtime.yoop";
+import * as fmt from "std/core/format.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Holder { c: ref Counter }
+
+// bare: `c` is already `ref Counter`, forwarded without re-taking its address
+function bumpBare(c: ref Counter): void {
+    let _x: uint64 = rt.counterInc(c);
+}
+
+// explicit: the spelling that always worked
+function bumpExplicit(c: ref Counter): void {
+    let _x: uint64 = rt.counterInc(ref c);
+}
+
+// through a struct field holding a ref
+function bumpViaField(ref h: Holder): void {
+    let _x: uint64 = rt.counterInc(h.c);
+}
+
+// and across a task, which is where the miscompile first showed up
+task bumpTenTimes(c: ref Counter): int32 {
+    for (let i: int32 = 0; i < 10; i += 1) {
+        let _x: uint64 = rt.counterInc(c);
+    }
+    return 10;
+}
+
+function main(): int32 {
+    let c: Counter = rt.counterNew();
+
+    let _a: uint64 = rt.counterInc(ref c);
+    let direct: uint64 = rt.counterGet(ref c);
+
+    bumpExplicit(ref c);
+    let explicitN: uint64 = rt.counterGet(ref c);
+
+    bumpBare(ref c);
+    let bare: uint64 = rt.counterGet(ref c);
+
+    let h: Holder = { c: ref c };
+    bumpViaField(ref h);
+    let fieldN: uint64 = rt.counterGet(ref c);
+
+    pooled t = bumpTenTimes(ref c);
+    let _n: int32 = wait t;
+    let viaTask: uint64 = rt.counterGet(ref c);
+
+    printf(`direct=${fmt.uint_to_string(direct)} explicit=${fmt.uint_to_string(explicitN)} bare=${fmt.uint_to_string(bare)} field=${fmt.uint_to_string(fieldN)} viaTask=${fmt.uint_to_string(viaTask)}\n`);
+    return 0;
+}
+
+// expected output:
+// direct=1 explicit=2 bare=3 field=4 viaTask=14

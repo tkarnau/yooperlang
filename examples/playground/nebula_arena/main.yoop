@@ -14,9 +14,18 @@
 // transfers. The big difference is everything renders in one or two
 // draw calls per frame instead of one per sprite.
 //
-// macOS-only today (uses `framework:OpenGL`). Linux would need a GL
-// function loader for the 3.2+ core entry points; the rest of the
-// program is portable.
+// Runs on macOS and Windows. `framework:OpenGL` names the platform's
+// OpenGL: on macOS it is the Apple framework, on Windows the driver
+// lowers it to opengl32 plus the entry-point loader in
+// runtime/yoop_gl_win32.c (opengl32.dll exports only GL 1.1, so every
+// shader/VAO/VBO call has to be resolved against the live context).
+// Linux still needs that same loader written against glX/EGL; nothing
+// else in the program is platform-specific.
+//
+// Windows setup: SDL2's "VC development" package unzipped to C:\SDL2 is
+// found automatically (so is vcpkg, or anything named by YOOP_LIB_PATH).
+// SDL2.dll additionally has to be findable at RUN time - put
+// C:\SDL2\lib\x64 on PATH, or copy the DLL next to the built .exe.
 
 import.unsafe;
 
@@ -203,7 +212,8 @@ function run_scene(): void {
     while (sdl.ticks() > 0) {
         let frame_start: uint32 = sdl.ticks();
         sdl.pump_events();
-        let kb_n: int = 0;
+
+        let kb_n: int32 = 0;
         let keys: uint8[] = sdl.keyboard_state(ref kb_n);
 
         let dt: float32 = float32(frame_start - last_ticks);

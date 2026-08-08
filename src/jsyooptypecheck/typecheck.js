@@ -53,7 +53,7 @@ import {
   makeInstantiator,
 } from "./instantiate.js";
 import { setGlobalInstantiator } from "./types.js";
-import { formatType, pushError } from "./errors.js";
+import { formatType, pushError, Severity } from "./errors.js";
 import { coerceLiteralToType, isAssignable, unifyArith } from "./coerce.js";
 import { detectRecursiveField } from "./recursiveStruct.js";
 import { evalEnumValueExpr, autoIncrementValue } from "./constEvalEnum.js";
@@ -3891,7 +3891,18 @@ export function typecheckProgram(modules) {
     stampErrorOrigin(errors, errStart, mod);
   }
 
-  return { modules, errors, moduleEnv, programState };
+  // Split the one accumulating array into the two the callers want. Warnings
+  // rode along with the errors so that `ctx.errors` stayed a single channel
+  // and stampErrorOrigin covered both, but a warning must never fail a build
+  // - so `errors` here means HARD errors only, and every existing
+  // `errors.length === 0` gate keeps the meaning it had.
+  return {
+    modules,
+    errors: errors.filter((e) => e.severity !== Severity.warning),
+    warnings: errors.filter((e) => e.severity === Severity.warning),
+    moduleEnv,
+    programState,
+  };
 }
 
 // testing-via-kinds: validate `<kind> function foo(...)`.
@@ -4148,7 +4159,11 @@ export function typecheck(ast) {
     }
   }
 
-  return { ast, errors };
+  // Same split as typecheckProgram. This legacy single-module path has no
+  // caller that surfaces warnings, and it reports whatever is in `errors` as
+  // a hard failure - so drop them rather than turn dead code into an error
+  // here alone.
+  return { ast, errors: errors.filter((e) => e.severity !== Severity.warning) };
 }
 
 // convenience for tests: parse + typecheck in one call.

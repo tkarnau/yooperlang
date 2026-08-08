@@ -29,7 +29,7 @@ import {
   instantiateTrait,
   resolveTypeInCtx,
 } from "./instantiate.js";
-import { pushError, formatType } from "./errors.js";
+import { pushError, pushWarning, formatType } from "./errors.js";
 import { isNumeric } from "./coerce.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
@@ -68,6 +68,7 @@ function resolveKindByName(name, typeContext) {
 import { TaskType } from "./types.js";
 import { isAssignable } from "./coerce.js";
 import { mangleTraitMethod } from "./mangleTraitMethod.js";
+import { alwaysDiverges, firstUnreachableIndex } from "./diverge.js";
 
 export function validateMethod(methodDecl, structType, typeContext, errors) {
   const scope = pushScope(null);
@@ -93,7 +94,29 @@ export function validateMethod(methodDecl, structType, typeContext, errors) {
     enclosingType: structType,
   };
   validateStatement(methodDecl.body, scope, ctx);
+  checkAllPathsReturn(methodDecl, methodDecl.body, funcReturnType, ctx);
   popScope(scope, errors);
+}
+
+// Phase 10.E.3: a function with a value to return must actually return on
+// every path. Before this existed, falling off the end compiled and trapped
+// at runtime (codegen emits `unreachable`), so the failure showed up as a
+// SIGTRAP with no source location rather than as a diagnostic.
+//
+// Void functions are exempt - falling off the end IS the return. An
+// already-errored return type is exempt too, so a bad annotation reports
+// once instead of twice.
+function checkAllPathsReturn(declNode, body, returnType, ctx) {
+  if (!body) return;
+  if (returnType.kind === typeKinds.void || returnType.kind === typeKinds.error) {
+    return;
+  }
+  if (alwaysDiverges(body)) return;
+  pushError(
+    ctx.errors,
+    declNode,
+    `function "${ctx.funcName}" returns ${formatType(returnType)} but not every path returns a value - add a return at the end, or make each branch return`,
+  );
 }
 
 export function validateFunction(funcNode, typeContext, errors) {
@@ -225,6 +248,7 @@ export function validateFunction(funcNode, typeContext, errors) {
     inAsyncBody: !!funcNode.isAsync,
   };
   validateStatement(funcNode.body, scope, ctx);
+  checkAllPathsReturn(funcNode, funcNode.body, funcReturnType, ctx);
   // params + the synthetic outer body share `scope`. Block-statement
   // bodies open their own inner scope and pop it themselves; this catches
   // the function-level scope (params and any locals declared at function
@@ -353,6 +377,35 @@ function checkBlock(node, scope, ctx) {
     validateStatement(s, inner, ctx);
   }
   popScope(inner, ctx.errors);
+  reportUnreachable(node, ctx);
+}
+
+// Warn once per block on the dead tail after a diverging statement. Every
+// block in the language funnels through checkBlock - function and method
+// bodies, `if`/loop/switch-arm bodies, and the trailing block of a
+// block-owning kind binding - so this one call site covers all of them.
+//
+// Reported as a WARNING, not an error, and deliberately so: dead code is a
+// smell, not a soundness problem, and hard-erroring is hostile in the middle
+// of editing (comment out a branch, add a temporary early return to bisect
+// something, and the build stops). Rust, Swift, C# and TS all warn here.
+//
+// The statements are still typechecked - the walk above ran over all of
+// them. Unreachable code that also does not compile should say so.
+function reportUnreachable(node, ctx) {
+  const dead = firstUnreachableIndex(node.body);
+  if (dead < 0) return;
+  const start = node.body[dead].startLoc;
+  // Both are parser-stamped; a synthesized block (@derive output, the
+  // generated --test entry) may lack them, and a warning is never worth
+  // risking a crash over.
+  if (!start || typeof node.endPos !== "number") return;
+  pushWarning(
+    ctx.errors,
+    { ...start, length: Math.max(1, node.endPos - start.pos) },
+    "unreachable code - control never reaches here",
+    "unreachable-code",
+  );
 }
 
 // `let x: T = expr;` / `const x: T = expr;`
@@ -1491,6 +1544,18 @@ function checkSwitch(node, scope, ctx) {
       );
     }
   }
+
+  // Phase 10.E.3: record whether the arms cover every reachable value, so
+  // `alwaysDiverges` (diverge.js) can decide that an arms-all-return switch
+  // leaves no fallthrough path. Every branch above errors on a non-covering
+  // switch, so a stamped-true node that was actually short a case can only
+  // occur in a build that is already failing.
+  node.isExhaustive =
+    Boolean(node.defaultArm) ||
+    sawAnyWildcardCase ||
+    isBool ||
+    isVariant ||
+    isValueEnum;
 }
 
 function checkBreak(node, ctx) {

@@ -1,0 +1,50 @@
+// Tests for the `math` module, living inside the module directory.
+//
+// `*.test.yoop` is excluded from a directory module's source file list, so this
+// file is NOT part of `math`. It is its own single-file test module, which is
+// what lets it import `math` by the SAME path a consumer writes. That is the
+// point: the module gets exercised through its published surface, and the
+// import line below is character-for-character the one in ../../main.yoop.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as math from "modules/math";
+import { Vec2 } from "modules/math";
+
+suite function meanRoundsRatherThanTruncating(): void {
+    let test theory: Case = t.asserts("mean of 1 and 2 rounds up to 2") {
+        const xs: int32[] = [1, 2];
+        const got = math.mean(xs);
+        theory.isSuccessful = got == 2;
+        theory.detail = `mean([1, 2]) gave ${got}, wanted 2 (truncating would give 1)`;
+    }
+    let test theory: Case = t.asserts("mean of an empty list is 0, not a trap") {
+        const xs: int32[] = [];
+        const got = math.mean(xs);
+        theory.isSuccessful = got == 0;
+        theory.detail = `mean([]) gave ${got}, wanted 0`;
+    }
+}
+
+suite function gcdAndLcmHandleNegatives(): void {
+    let test theory: Case = t.asserts("gcd ignores sign") {
+        const got = math.gcd(0 - 12, 18);
+        theory.isSuccessful = got == 6;
+        theory.detail = `gcd(-12, 18) gave ${got}, wanted 6`;
+    }
+    let test theory: Case = t.asserts("lcm of 4 and 6 is 12") {
+        const got = math.lcm(4, 6);
+        theory.isSuccessful = got == 12;
+        theory.detail = `lcm(4, 6) gave ${got}, wanted 12`;
+    }
+}
+
+suite function vectorsSnapToAGrid(): void {
+    let test theory: Case = t.asserts("snapping rounds each component to the nearest 10") {
+        const v: Vec2 = { x: 13, y: 27 };
+        const snapped = math.vec2Snap(v, 10);
+        theory.isSuccessful = snapped.x == 10 && snapped.y == 30;
+        theory.detail = `snap({13, 27}, 10) gave {${snapped.x}, ${snapped.y}}, wanted {10, 30}`;
+    }
+}

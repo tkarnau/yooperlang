@@ -11,11 +11,23 @@
 
 # Extensionless files we DO want to keep tracked:
 !LICENSE
+# A module's advisory version file (plans/modules-folder.md). Extensionless on
+# purpose - it reads as informational next to LICENSE and README - which means
+# the "*" rule above would drop it from every module that ships one.
+!MODULE
 
 # Re-ignore artifacts that DO have an extension (the rules above would keep
 # them otherwise):
 *.exe
 **/*dSYM/
+# The Windows equivalents of *dSYM/: link.exe drops a .pdb (debug symbols)
+# and a .ilk (incremental-link state) beside every binary it produces.
+*.pdb
+*.ilk
+# Object files - the C runtime compiles to these when built out of tree
+# (the test suites prebuild it once per run rather than per fixture).
+*.o
+*.obj
 
 # Local editor / tooling state (not a source file, just has an extension).
 .claude/

@@ -18,7 +18,9 @@ case "$(uname -s)" in
 esac
 
 # Keep in sync with RUNTIME_SOURCES in src/runtimeBuild.js.
-RUNTIME_SRCS="$RT/yoop_runtime.c $RT/yoop_io.c $RT/yoop_cancel.c $RT/yoop_net.c \
+RUNTIME_SRCS="$RT/yoop_runtime.c $RT/yoop_io.c \
+$RT/yoop_io_kqueue.c $RT/yoop_io_epoll.c $RT/yoop_io_windows.c \
+$RT/yoop_fs.c $RT/yoop_cancel.c $RT/yoop_net.c \
 $RT/yoop_debug.c $RT/yoop_format.c $RT/yoop_args.c $RT/yoop_alloc.c"
 
 TESTS="smoke submit_one submit_many refcount park_unpark sleep_ms io_pipe \

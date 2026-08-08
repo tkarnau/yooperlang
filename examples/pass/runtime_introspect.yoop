@@ -1,0 +1,73 @@
+// std/runtime.yoop: pool sizing from source, atomic counters, and process
+// introspection.
+//
+// Output is written to be machine-checkable on any host: the CPU count and
+// the RSS reading vary per machine, so this asserts relationships (positive,
+// took effect, exact after N adds) rather than raw numbers.
+
+import * as rt, { Counter } from "std/runtime.yoop";
+import * as fmt from "std/core/format.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const ADDS: int32 = 5000;
+
+// Counters are exact across worker threads, so a task doing half the adds
+// and main doing the other half must land on exactly ADDS.
+task halfTheAdds(c: ref Counter): int32 {
+    for (let i: int32 = 0; i < ADDS / 2; i += 1) {
+        let _n: uint64 = rt.counterInc(c);
+    }
+    return 0;
+}
+
+function main(): int32 {
+    printf(`cpus>0: ${rt.cpuCount() > 0}\n`);
+
+    // Workers spawn lazily on the first task submit, so this is early enough
+    // to take effect. Asking for 2 keeps the assertion host-independent.
+    let accepted: bool = rt.setWorkerCount(2);
+    printf(`setWorkerCount(2): ${accepted} workers=${rt.workerCount()}\n`);
+
+    let c: Counter = rt.counterNew();
+    pooled t = halfTheAdds(ref c);
+    for (let i: int32 = 0; i < ADDS / 2; i += 1) {
+        let _n: uint64 = rt.counterInc(ref c);
+    }
+    let _done: int32 = wait t;
+    printf(`counter=${fmt.uint_to_string(rt.counterGet(ref c))}\n`);
+
+    rt.counterSet(ref c, 100);
+    let _s: uint64 = rt.counterSub(ref c, 40);
+    printf(`afterSet+Sub=${fmt.uint_to_string(rt.counterGet(ref c))}\n`);
+
+    // CAS: the first swap sees the value it expects, the second does not and
+    // reports back what it actually observed.
+    let seen: uint64 = 60;
+    let first: bool = rt.counterCas(ref c, ref seen, 61);
+    let stale: uint64 = 60;
+    let second: bool = rt.counterCas(ref c, ref stale, 62);
+    printf(`cas first=${first} second=${second} observed=${fmt.uint_to_string(stale)}\n`);
+
+    printf(`rss>0: ${rt.rssBytes() > 0}\n`);
+
+    // Monotonic: a later reading is never smaller than an earlier one.
+    // (Named `earlyNs`/`lateNs` rather than `t0`/`t1` deliberately - codegen
+    // names its temporaries `%tN`, and a local called `t0` collides with
+    // them: "multiple definition of local value named 't0'".)
+    let earlyNs: uint64 = rt.monotonicNs();
+    let lateNs: uint64 = rt.monotonicNs();
+    printf(`monotonic: ${lateNs >= earlyNs}\n`);
+    return 0;
+}
+
+// expected output:
+// cpus>0: 1
+// setWorkerCount(2): 1 workers=2
+// counter=5000
+// afterSet+Sub=60
+// cas first=1 second=0 observed=61
+// rss>0: 1
+// monotonic: 1

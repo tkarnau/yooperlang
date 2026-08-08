@@ -146,6 +146,16 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
       fnCache.set(inst, null);
       return null;
     }
+    // A compiler intrinsic (`heap_alloc<T>`, `string_as_bytes`, ...) is a
+    // registry instance with no yoop body - its implementation IS codegen.
+    // There is nothing to lower, so the fold declines and the decl falls
+    // back to the runtime-init path. Without this the null AST reached
+    // `lowerFunction` and crashed the whole compile on a module-level
+    // `let xs: T[] = intr.heap_alloc(n);`.
+    if (!inst.ast) {
+      fnCache.set(inst, null);
+      return null;
+    }
     // Build the substitution: declId → { paramName → argType }.
     const sub = new Map();
     const inner = new Map();
@@ -158,6 +168,10 @@ function makeResolvers(modules, currentMod, fnCache, programState) {
     try {
       cloned = cloneAstWithSubstitution(inst.ast, sub, programState?.registry ?? null);
     } catch (err) {
+      fnCache.set(inst, null);
+      return null;
+    }
+    if (!cloned) {
       fnCache.set(inst, null);
       return null;
     }

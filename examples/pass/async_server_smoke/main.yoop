@@ -22,6 +22,8 @@ import * as http, {
     Handler, HandleOutcome, Dispatcher,
 } from "std/http";
 import * as client, { Client, ClientResponse } from "std/http";
+import * as strings from "std/core/strings.yoop";
+import * as fmt from "std/core/format.yoop";
 import * as types, {
     Request, Response, HttpError,
 } from "std/http";
@@ -30,7 +32,11 @@ extern "C" from "stdio.h" {
     function printf(fmt: string, ...): int32;
 }
 
-const PORT: int32 = 18099;
+// Bound at runtime rather than hard-coded: the listener asks for port 0 and
+// the kernel picks a free one, which serverTask publishes here for the
+// clients. That is what makes this fixture safe to run concurrently with
+// anything else that listens - no fixed port to collide over.
+let boundPort: int32 = 0;
 const CLIENTS: int32 = 3;
 
 // Synchronous, deliberately: a handler is pure request-in / response-out.
@@ -46,11 +52,12 @@ type EchoHandler implements Handler {
 // here - the accept, the head read, the body read, the response write -
 // is a suspend.
 task serverTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", PORT, 32);
+    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`server bind failed: ${lr.error}\n`);
         return -1;
     }
+    boundPort = lr.listener.bound_port;
     let h: EchoHandler = { greeting: "pong\n" };
     let d: Dispatcher = Dispatcher.from(ref h);
     switch (await http.serveDefault(ref lr.listener, ref d, CLIENTS)) {
@@ -66,7 +73,9 @@ task serverTask(): int32 {
 // One client request. Returns 1 on a 200 with the expected body.
 task clientTask(): int32 {
     let c: Client = client.clientNew();
-    switch (await client.get(ref c, "http://127.0.0.1:18099/")) {
+    let url: string = strings.string_concat(
+        strings.string_concat("http://127.0.0.1:", fmt.int_to_string(int64(boundPort))), "/");
+    switch (await client.get(ref c, url)) {
         case Result.Ok { value: r }: {
             disposable resp: ClientResponse = r;
             if (resp.status.code == 200) { return 1; }
