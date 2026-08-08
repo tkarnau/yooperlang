@@ -66,9 +66,9 @@ Or with compose, which sets the CPU limit and worker count together:
 docker compose -f examples/playground/counter_server/docker-compose.yml up --build
 ```
 
-## Deploying to Hetzner
+## Deploying to a cloud box
 
-Nothing here is Hetzner-specific; it is an ordinary Linux container. Two
+Nothing here is provider-specific; it is an ordinary Linux container. Two
 images come out of the same Dockerfile:
 
 - default (`slim`): distroless, 8.1MB over the wire, no shell, no
@@ -85,9 +85,12 @@ accepts it without complaint and the container then dies with
 
 - Hetzner **CX / CPX / CCX** (Intel/AMD) -> `--platform linux/amd64`
 - Hetzner **CAX** (Ampere ARM) -> `--platform linux/arm64`
+- AWS **t4g / m6g / c6g / c7g** (Graviton) -> `--platform linux/arm64`
+- AWS **t3 / m5 / c5** (Intel/AMD) -> `--platform linux/amd64`
 
 Docker Desktop runs the x86 build under Rosetta, so cross-building costs
-seconds rather than the minutes QEMU would.
+seconds rather than the minutes QEMU would. Graviton is arm64, so from an
+Apple Silicon Mac that one is native.
 
 ### One command
 
@@ -95,7 +98,7 @@ seconds rather than the minutes QEMU would.
 cd examples/playground/counter_server
 
 ./deploy.sh root@YOUR_IP                # x86 box, 2 workers, port 8080
-./deploy.sh root@YOUR_IP arm64 4        # CAX box, 4 workers
+./deploy.sh root@YOUR_IP arm64 4        # ARM box, 4 workers
 ./deploy.sh root@YOUR_IP amd64 2 80     # publish on port 80
 ```
 
@@ -106,6 +109,71 @@ prints `/stats`. The server needs Docker and nothing else:
 ```sh
 ssh root@YOUR_IP 'curl -fsSL https://get.docker.com | sh'
 ```
+
+Three environment overrides exist for hosts that are not root-over-plain-ssh:
+
+- `SSH_OPTS` - extra ssh flags, e.g. `-i ~/.ssh/key.pem`
+- `DOCKER_SUDO=sudo` - when the remote user is not in the `docker` group
+- `PUBLIC_HOST` - the address to poll, when the ssh target is a config alias
+
+### AWS EC2 (t4g and friends)
+
+Graviton is arm64, so from an Apple Silicon Mac the build is native.
+
+```sh
+# Amazon Linux 2023
+ssh -i key.pem ec2-user@YOUR_IP \
+    'sudo dnf install -y docker && sudo systemctl enable --now docker'
+
+# Ubuntu
+ssh -i key.pem ubuntu@YOUR_IP 'curl -fsSL https://get.docker.com | sudo sh'
+
+cd examples/playground/counter_server
+SSH_OPTS="-i key.pem" DOCKER_SUDO=sudo \
+    ./deploy.sh ec2-user@YOUR_IP arm64 2 80
+```
+
+Drop `DOCKER_SUDO` once you have run `sudo usermod -aG docker $USER` **and
+reconnected** - group membership does not apply to the session that granted
+it, which is the usual reason the second deploy still needs sudo.
+
+Then add an inbound rule for your port to the instance's **security group**.
+That is the AWS equivalent of Hetzner's Cloud Firewall and it denies inbound
+by default.
+
+### t4g is burstable, which will distort a stress test
+
+This is worth understanding before you read any number off a `t4g.small`.
+T-series instances are not "2 vCPUs you can use". They earn CPU credits at a
+fixed rate and spend them when they exceed a **baseline** (20% per vCPU for
+`t4g.small`). A sustained load test spends credits far faster than it earns
+them, and then one of two things happens:
+
+- **standard mode** - you get throttled to baseline. Throughput falls off a
+  cliff mid-run, which looks exactly like a server problem and is not one.
+- **unlimited mode** - you are billed for surplus credits instead of being
+  throttled. T4g **defaults to unlimited**, so a long run can quietly cost
+  money rather than visibly slowing down.
+
+Neither is what you want when the question is "how fast is the server". So:
+
+- Keep runs **short** (30 to 60 seconds) and watch for the cliff. If
+  throughput is flat for the whole run, you stayed inside your credit
+  balance and the number is real.
+- Watch `CPUCreditBalance` in CloudWatch alongside the run.
+- Decide the mode deliberately rather than inheriting it. Standard mode caps
+  the bill; unlimited mode caps the surprise.
+- When you want a number you can quote, use a **non-burstable** instance -
+  `c7g.medium` is the same Graviton family with no credit system. Not free
+  tier, but it is cents per hour and you can terminate it afterwards.
+
+On free tier eligibility: AWS restructured its free tier during 2025 and the
+`t4g.small` free-trial promotion has been extended more than once. Check the
+Billing console for what your account actually has rather than trusting any
+write-up, this one included.
+
+`t4g.small`'s 2 GiB of RAM is not a concern either way - the server sits
+around 25MB resident under load.
 
 ### The same thing by hand
 

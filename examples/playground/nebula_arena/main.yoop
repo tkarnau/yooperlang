@@ -212,7 +212,8 @@ function run_scene(): void {
     while (sdl.ticks() > 0) {
         let frame_start: uint32 = sdl.ticks();
         sdl.pump_events();
-        let kb_n: int = 0;
+
+        let kb_n: int32 = 0;
         let keys: uint8[] = sdl.keyboard_state(ref kb_n);
 
         let dt: float32 = float32(frame_start - last_ticks);
