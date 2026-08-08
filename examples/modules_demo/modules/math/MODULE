@@ -1,0 +1,11 @@
+name     math
+version  0.2.0
+
+# Informational only. The compiler does not read, resolve, choose, or enforce
+# anything from this file.
+#
+# `requires` records the dependency versions math was BUILT AND TESTED against.
+# It is not a constraint and not a range: nothing here will pick a version or
+# fail a build. If a bug smells like a version problem, compare these lines to
+# what is actually installed in the program's modules/ folder and use judgment.
+requires rounding 1.0.0

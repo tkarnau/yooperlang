@@ -140,6 +140,15 @@ Rewritten in the std/http rework ([plans/completed/std-http-rework.md](plans/com
 
 Consumers: [examples/pass/hello_server](examples/pass/hello_server), [http_router](examples/pass/http_router), [http_client_loopback](examples/pass/http_client_loopback), [http_parse_smoke](examples/pass/http_parse_smoke), [http_url_smoke](examples/pass/http_url_smoke), and the CRUD demo at [examples/playground/todo_api](examples/playground/todo_api).
 
+### [modules/](modules/) and [tools/yoopdist/](tools/yoopdist/) - modules outside std
+
+- **[modules/](modules/) is a program-owned import root, and the repo root is one.** `modules/<name>` resolves by walking up from the IMPORTING file to the nearest `modules` directory, then through the same tail the `std/` branch runs (so a directory module, a module under a grouping directory, and a single `.yoop` file all work with no code of their own). Anchoring on the importing file rather than the entry point is what lets one import line resolve against a sibling `modules/` while a module is being developed and against the consumer's flat `modules/` once installed, with **no rewriting**. Design + as-built: [plans/modules-folder.md](plans/modules-folder.md).
+- **Dependencies are FLAT and that is enforced.** A module directory carrying its own `modules/` directory is a hard error. Two copies of one module would LINK fine (`moduleId` hashes the path, so the symbols differ) and then fail as two distinct nominal types - `Value` is not assignable to `Value`. The error names both directories rather than leaving that to be discovered.
+- **This root is program-relative and must never become a candidate prefix in [install_root.js](src/install_root.js)** - `std/` and `runtime/` ship with the compiler, `modules/` belongs to whoever is being compiled.
+- **A module's tests ship inside its directory.** `*.test.yoop` is excluded from a directory module's source list, so the test file is its own module and imports the module under test by the same `modules/<name>` path a consumer writes. Worked example: [examples/modules_demo/](examples/modules_demo/).
+- **[tools/yoopdist/](tools/yoopdist/) is written in Yoop** and builds the directory a user installs: copies sources + tests, skips `modules/`, regenerates the `requires` block of the advisory `MODULE` file. The author owns `name`/`version`; the tool owns the dependency snapshot and **preserves a version it cannot verify** rather than downgrading it to `unknown`. Nothing in the compiler reads `MODULE`.
+- `MODULE` is extensionless, so [.gitignore](.gitignore) needs an explicit `!MODULE` (same as `!LICENSE`) or the blanket `*` rule drops it.
+
 ## Shared contracts
 
 - [src/contracts.js](src/contracts.js) - `ASTNodeKind` enum (40+ kinds) and `ASTNode` constructor. Every AST consumer depends on these names; renaming a kind is a whole-pipeline change.

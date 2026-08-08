@@ -13,6 +13,122 @@ import { STD_ROOT } from "../install_root.js";
 // point at a stub std/ directory use.
 const DEFAULT_STD_ROOT = STD_ROOT;
 
+// modules-folder: the program-owned import root. `modules/<name>` resolves
+// against the nearest `modules` directory at or above the IMPORTING file.
+//
+// This root is PROGRAM-relative and never install-relative, which is why it is
+// not a fourth candidate prefix in install_root.js: std/ and runtime/ ship with
+// the compiler, modules/ belongs to whoever is being compiled.
+//
+// Anchoring on the importing file rather than on the entry point is what lets
+// one import line work in two places without rewriting. A module authored at
+// `json-repo/json/` with its dev dependencies at `json-repo/modules/` writes
+// `import ... from "modules/http"`; the same file, copied into a consumer at
+// `app/modules/json/`, resolves the same line against `app/modules/`. See
+// plans/modules-folder.md.
+const MODULES_DIR = "modules";
+const MODULES_PREFIX = `${MODULES_DIR}/`;
+
+// The nearest ancestor `modules` directory, or null. Starts at `startDir`
+// itself, so a program with `modules/` beside its entry file works.
+//
+// The FIRST hit wins, whether or not it holds the requested name. Continuing
+// the walk past it would let a stray `modules/` in a home directory answer for
+// a program's own, turning a typo into a resolution from somewhere the reader
+// never looks. A miss inside the found root is a better error than a hit
+// outside it, and `notFoundMessage` below makes that miss say which root it
+// searched.
+function findModulesRoot(startDir) {
+  let dir = startDir;
+  for (;;) {
+    const candidate = path.join(dir, MODULES_DIR);
+    try {
+      if (fs.statSync(candidate).isDirectory()) return candidate;
+    } catch {
+      // Not there - keep walking.
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) return null; // filesystem root
+    dir = parent;
+  }
+}
+
+// One copy of a name per program is the policy, so a module living under a
+// modules root must not carry a modules root of its own.
+//
+// This is enforced rather than left to convention because the failure mode is
+// otherwise invisible until it is baffling: `moduleId` hashes the resolved
+// path, so two copies of one module at two paths get distinct mangled symbols
+// and LINK FINE. They are, however, two distinct nominal types, so the first
+// value passed between them fails with `Value` is not assignable to `Value`.
+//
+// Walks top-down from the root so the loop is naturally bounded by the target's
+// own depth, and stops at the first non-directory (a `modules/x.yoop` target).
+function checkNoNestedModulesRoot(resolvedPath, modulesRoot, sourcePath, fromAbsPath) {
+  const rel = path.relative(modulesRoot, resolvedPath);
+  if (rel === "" || rel.startsWith("..")) return;
+  let dir = modulesRoot;
+  for (const segment of rel.split(path.sep)) {
+    dir = path.join(dir, segment);
+    let isDir = false;
+    try {
+      isDir = fs.statSync(dir).isDirectory();
+    } catch {
+      return; // does not exist; the caller's realpath reports it properly
+    }
+    if (!isDir) return; // reached the .yoop file
+    const nested = path.join(dir, MODULES_DIR);
+    let nestedIsDir = false;
+    try {
+      nestedIsDir = fs.statSync(nested).isDirectory();
+    } catch {
+      continue;
+    }
+    if (nestedIsDir) {
+      throw new Error(
+        `import "${sourcePath}" from ${fromAbsPath} reaches through "${dir}", ` +
+          `which carries its own "${MODULES_DIR}" directory (${nested}).\n` +
+          `  A program holds ONE copy of each module, so dependencies are flat: ` +
+          `move the contents of ${nested} up into ${modulesRoot}.\n` +
+          `  A module's own "${MODULES_DIR}" directory is for developing it and does ` +
+          `not ship - publish the module directory, not the repository around it.`,
+      );
+    }
+  }
+}
+
+// "not found" for a modules import should name the root that answered, since
+// there may be several on the path and only one was consulted.
+//
+// When the import came from INSIDE that root, it is a module asking for its own
+// dependency, which with no manifest is the consumer's job to install. Nothing
+// announced that requirement, so the diagnostic has to: name the dependent and
+// say the missing directory belongs beside it.
+function notFoundMessage(sourcePath, fromAbsPath, modulesRoot) {
+  const head = `cannot resolve import "${sourcePath}" from ${fromAbsPath}: not found`;
+  if (modulesRoot === null) return head;
+  const lines = [head, `  searched the modules root ${modulesRoot}`];
+  let entries = [];
+  try {
+    entries = fs
+      .readdirSync(modulesRoot, { withFileTypes: true })
+      .filter((e) => e.isDirectory() || e.name.endsWith(".yoop"))
+      .map((e) => e.name)
+      .sort();
+  } catch {
+    // Unreadable root; the lines above already say enough.
+  }
+  lines.push(`  it holds: ${entries.length > 0 ? entries.join(", ") : "(nothing)"}`);
+  const fromRel = path.relative(modulesRoot, fromAbsPath);
+  if (fromRel !== "" && !fromRel.startsWith("..")) {
+    const dependent = fromRel.split(path.sep)[0];
+    lines.push(
+      `  "${dependent}" is what needs it, so install the missing module alongside it there`,
+    );
+  }
+  return lines.join("\n");
+}
+
 // Loads the full module graph starting at entryAbsPath.
 // Returns { entry: Module, modules: [Module] } where modules is topo-sorted
 // leaves-first (so each module's dependencies appear before it).
@@ -287,20 +403,30 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
   }
 
   // Phase 9.C: `std/...` paths resolve against the std root, not relative
-  // to the importing file. Everything else must be `./...`, `../...`, or
-  // absolute - preserves the SPEC §1 relative-only contract for non-std
-  // imports. A path may name a `.yoop` source file or, for a directory
-  // module, the directory.
+  // to the importing file. modules-folder: `modules/...` resolves against the
+  // nearest `modules` directory at or above the importing file. Everything else
+  // must be `./...`, `../...`, or absolute - preserves the SPEC §1 relative-only
+  // contract for non-std imports. A path may name a `.yoop` source file or, for
+  // a directory module, the directory.
+  //
+  // All three forms PICK A ROOT and then run the same tail, which is the whole
+  // reason the modules root was cheap to add: `modules/math` (a directory
+  // module), `modules/web/router` (a directory module under a plain grouping
+  // directory) and `modules/helper.yoop` (a single-file module) all work with
+  // no code of their own, and they inherit the directory-module diagnostics
+  // (mixed directory, "you named one source file of a module") for free.
   function resolveImportTarget(sourcePath, fromAbsPath) {
     const isStdImport = sourcePath.startsWith("std/");
+    const isModulesImport = sourcePath.startsWith(MODULES_PREFIX);
     if (
       !isStdImport &&
+      !isModulesImport &&
       !sourcePath.startsWith("./") &&
       !sourcePath.startsWith("../") &&
       !path.isAbsolute(sourcePath)
     ) {
       throw new Error(
-        `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`,
+        `import path "${sourcePath}" must be relative (./...), absolute, or start with std/ or modules/`,
       );
     }
     // A path carrying a non-.yoop file extension can never name a module
@@ -316,17 +442,29 @@ export function loadModuleGraph(entryAbsPath, options = {}) {
       throw new Error(`import path "${sourcePath}" must end in .yoop`);
     }
 
-    const resolved = isStdImport
-      ? path.resolve(stdRoot, sourcePath.slice("std/".length))
-      : path.resolve(path.dirname(fromAbsPath), sourcePath);
+    let modulesRoot = null;
+    let resolved;
+    if (isStdImport) {
+      resolved = path.resolve(stdRoot, sourcePath.slice("std/".length));
+    } else if (isModulesImport) {
+      modulesRoot = findModulesRoot(path.dirname(fromAbsPath));
+      if (modulesRoot === null) {
+        throw new Error(
+          `cannot resolve import "${sourcePath}" from ${fromAbsPath}: no "${MODULES_DIR}" ` +
+            `directory found in ${path.dirname(fromAbsPath)} or any parent directory`,
+        );
+      }
+      resolved = path.resolve(modulesRoot, sourcePath.slice(MODULES_PREFIX.length));
+      checkNoNestedModulesRoot(resolved, modulesRoot, sourcePath, fromAbsPath);
+    } else {
+      resolved = path.resolve(path.dirname(fromAbsPath), sourcePath);
+    }
 
     let abs;
     try {
       abs = fs.realpathSync(resolved);
     } catch {
-      throw new Error(
-        `cannot resolve import "${sourcePath}" from ${fromAbsPath}: not found`,
-      );
+      throw new Error(notFoundMessage(sourcePath, fromAbsPath, modulesRoot));
     }
     const isDir = fs.statSync(abs).isDirectory();
     if (!isDir && !sourcePath.endsWith(".yoop")) {

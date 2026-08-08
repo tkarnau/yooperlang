@@ -1,0 +1,37 @@
+module math;
+
+// Sibling source files of one module share DECLARATIONS but not IMPORTS.
+//
+// `absInt` below comes from ints.yoop with no import at all, because both files
+// declare `module math;` and are therefore one module. `rounding` still needs
+// its own import line here even though ints.yoop already imports it - imports
+// stay per source file, which is what keeps a file's dependencies readable from
+// the top of the file. Deleting this line is an error, not a no-op.
+import * as rounding from "modules/rounding";
+
+export type Vec2 {
+    x: int32,
+    y: int32,
+}
+
+export function vec2Add(a: Vec2, b: Vec2): Vec2 {
+    return { x: a.x + b.x, y: a.y + b.y };
+}
+
+export function vec2Dot(a: Vec2, b: Vec2): int32 {
+    return a.x * b.x + a.y * b.y;
+}
+
+// Manhattan distance. Reaches straight into the sibling file for absInt.
+export function vec2Manhattan(a: Vec2, b: Vec2): int32 {
+    return absInt(a.x - b.x) + absInt(a.y - b.y);
+}
+
+// Snap both components onto a grid. This is the call that earns this file's own
+// `rounding` import.
+export function vec2Snap(v: Vec2, step: int32): Vec2 {
+    return {
+        x: rounding.roundToMultiple(v.x, step),
+        y: rounding.roundToMultiple(v.y, step),
+    };
+}

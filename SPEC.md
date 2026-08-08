@@ -38,13 +38,16 @@ binding site (`scoped`, `pooled`) decide when the compiler forces the `wait`.
 ## 1. Files, modules, imports, and exports
 
 Every `.yoop` file is a module. Imports use **relative paths** by default; the
-`std/` prefix resolves against the bundled standard library.
+`std/` prefix resolves against the bundled standard library, and the `modules/`
+prefix against the program's own module folder (see below).
 
 ```js
 import { parse, lex } from "./lexer.yoop";
 import * as lex        from "./lexer.yoop";
 import { parse as p }  from "./ast.yoop";
 import "./init.yoop";                    // side-effect only
+
+import * as math from "modules/math";     // a module the program installed
 
 import { Vec } from "std/core/vec.yoop";  // type imports stay named
 import * as vec from "std/core/vec.yoop"; // value imports require namespace
@@ -67,6 +70,40 @@ export { parse, lex, Token };            // grouped at bottom of file
 ```
 
 No `default` exports. Explicit names only.
+
+### The `modules/` root
+
+A program may install modules it did not write. `modules/<name>` resolves against
+the nearest `modules` directory at or above the **importing file**:
+
+```text
+app/
+  src/main.yoop        import * as math from "modules/math";
+  modules/
+    math/              a directory module
+    rounding/          math's own dependency, flat beside it
+```
+
+Resolution then proceeds exactly as for `std/`: the path may name a directory
+module, a directory module nested under plain grouping directories
+(`modules/web/router`), or a single `.yoop` file (`modules/helper.yoop`).
+
+Three rules follow from anchoring on the importing file rather than the entry
+point:
+
+- **A module reaches its own dependencies through the same root.** `math` above
+  writes `import * as r from "modules/rounding"` and gets the program's copy. It
+  cannot tell, and does not care, that it was installed by someone else.
+- **Dependencies are flat: one copy of a name per program.** A module directory
+  carrying its own `modules/` directory is an error. Two copies would link (module
+  identity is the path) and then fail as two distinct nominal types.
+- **A module under development uses the same import line it will ship with.** The
+  module directory is the unit that ships; its own `modules/` folder is a sibling
+  used for development and is not published.
+
+There is no manifest, no fetch, and no version resolution: the directories are put
+there by hand. A module may carry an advisory `MODULE` file recording its version
+and what it was built against, which nothing in the compiler reads.
 
 ### Std imports must use the namespace form for values
 
@@ -1829,7 +1866,9 @@ What this example demonstrates:
 - **Per-strategy loop keywords.** One `for … in` slot; the strategy is a trait method call (`xs.batched(4)`, `xs.parallel()`).
 - **Multiple-return-value ABI.** Destructuring is compile-time sugar over a returned struct.
 - **Generic user types.** Revisit after traits and kinds are stable.
-- **A package manager.** Relative-path imports only.
+- **A package manager.** No manifest, fetch, registry, or version resolution.
+  Relative paths, the `std/` root, and the program-owned `modules/` root cover
+  using third-party code; populating `modules/` is the developer's job.
 
 ---
 

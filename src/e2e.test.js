@@ -4007,4 +4007,56 @@ describe("e2e: --test mode runs *.test.yoop suites through std/test.yoop", { con
     assert.equal(result.status, 1);
     assert.match(result.stderr, /cannot prefix a function declaration/);
   });
+
+  // modules-folder: a module's tests ship inside the module directory.
+  // `*.test.yoop` is excluded from a directory module's source files, so the
+  // test file is its own module and imports the module under test by the same
+  // "modules/math" path a consumer writes.
+  it("runs a module's own tests from inside its modules/ directory", () => {
+    const { stdout, exitCode } = runTestMode("examples/modules_demo");
+    assert.equal(exitCode, 0, `expected exit 0, got ${exitCode}\n${stdout}`);
+    assert.match(stdout, /^ok 1 - mean of 1 and 2 rounds up to 2$/m);
+    assert.match(stdout, /^ok 5 - snapping rounds each component to the nearest 10$/m);
+    assert.match(stdout, /# 5 passed, 0 failed/);
+  });
+});
+
+// modules-folder: the program-owned `modules/` import root, end to end.
+// Unit coverage for the resolution rules themselves is in
+// src/jsyoopdriver/moduleGraph.test.js; this is the "does a real program built
+// this way compile, link and run" check. See plans/modules-folder.md.
+describe("e2e: std/core/bytes lastIndexOfSeq", { concurrency: E2E_CONCURRENCY }, () => {
+  // The loop condition was inverted, so the body never ran and every call
+  // reported "not found". It failed SILENTLY - fs.dirName returned its own
+  // input, i.e. a wrong answer with no error attached and a parent-walk that
+  // never terminates.
+  it("strings_last_index_of: finds the LAST match, incl. offset 0 and the tail", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/strings_last_index_of.yoop");
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /^last=5 first=0$/m);
+    assert.match(stdout, /^atZero=0$/m);
+    assert.match(stdout, /^multi=5 tail=5$/m);
+    assert.match(stdout, /^absent=9 tooLong=2$/m);
+    assert.match(stdout, /^dir=\/a\/bb parent=\/a$/m);
+    // Documented, not desired: no separator means dirName returns its input.
+    assert.match(stdout, /^noParent=\[plain\]$/m);
+  });
+});
+
+describe("e2e: modules/ import root", { concurrency: E2E_CONCURRENCY }, () => {
+  it("modules_demo: program uses modules/math, which uses modules/rounding", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/modules_demo/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.match(stdout, /^add:       \(13, 24\)$/m);
+    assert.match(stdout, /^dot:       110$/m);
+    assert.match(stdout, /^manhattan: 23$/m);
+    // The subdependency doing real work: math delegates to rounding, so 13 and
+    // 27 snap to 10 and 30 rather than truncating to 10 and 20.
+    assert.match(stdout, /^snap:      \(10, 30\)$/m);
+    assert.match(stdout, /^gcd:       6$/m);
+    assert.match(stdout, /^lcm:       12$/m);
+    assert.match(stdout, /^clamp:     10$/m);
+    // Same story: mean([1, 2]) rounds to 2 instead of truncating to 1.
+    assert.match(stdout, /^mean:      2$/m);
+  });
 });

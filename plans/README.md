@@ -229,6 +229,26 @@ informal personal version):
   `const` string that kept its escapes undecoded, and a `switch` payload
   binding that could carry an unpopulated struct shell. Worth reading as a list
   of the shapes that go wrong when a layout or a pass-order assumption drifts.
+- A program-owned `modules/` import root
+  ([modules-folder.md](modules-folder.md)) - **resolution has LANDED**. The
+  module rework had already made a third-party package a solved shape
+  (`std/http` IS one structurally), so all that was left was one more import
+  root: `modules/<name>`, resolved by walking up from the importing file to the
+  nearest `modules` directory, then through the exact tail the `std/` branch
+  already runs. Flat by policy - one copy of a name per program, so there is no
+  version conflict to reconcile - and nesting is an explicit error rather than
+  silence, because two copies of a type would link fine and then mismatch as
+  `Value` versus `Value`. Working example at
+  [examples/modules_demo/](../examples/modules_demo/), including a module with a
+  dependency of its own and tests that ship inside the module directory.
+  Deliberately NOT a package manager. Also landed: [tools/yoopdist](../tools/yoopdist)
+  (**written in Yoop**) builds the directory a user installs, and
+  [modules/](../modules/) at the repo root is the home for officially supported
+  non-std modules - clients, and C bindings that declare a library without
+  vendoring its sources. Writing the tool in Yoop immediately found a silent std
+  bug: `lastIndexOfSeq` had an inverted loop condition, so it never matched and
+  `fs.dirName` returned its own input. Still to build: the consumer-side
+  recorded-versus-installed view (`yoopiler modules`).
 
 ---
 
@@ -331,8 +351,12 @@ scope") and the individual archived plans:
 
 - Classes/inheritance, garbage collection, capturing closures, `match` as an
   expression - permanently no, or covered by an existing workaround.
-- A package manager ([archive/package-system.md](archive/package-system.md)) -
-  relative-path imports plus the `std/` root cover the design space.
+- A package MANAGER ([archive/package-system.md](archive/package-system.md)) -
+  manifest, fetch command, URLs, hashes, versions. Only worth building when
+  there is somewhere to fetch from. Note this is now narrower than it was: the
+  program-owned `modules/` root ([modules-folder.md](modules-folder.md)) covers
+  using third-party code, and a manifest would only decide what populates the
+  folder.
 - Comptime/bytecode beyond the shipped `@precompile`
   ([archive/phase-11-comptime.md](archive/phase-11-comptime.md)), variant
   ergonomics ([archive/phase-13-variant-ergonomics.md](archive/phase-13-variant-ergonomics.md)),
