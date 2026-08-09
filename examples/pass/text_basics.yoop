@@ -1,0 +1,98 @@
+// std/core/text.yoop - the owned growable string type.
+//
+// Covers the three things `string` alone cannot do: own its storage, grow,
+// and be indexed by codepoint rather than by byte. Run under --track-heap;
+// every Text here is reclaimed, which a raw `string` never is.
+
+import * as text from "std/core/text.yoop";
+import { Text } from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+
+function main(): int32 {
+    // Build and borrow. `view` is a borrow, not a copy - no allocation.
+    disposable greeting: Text = text.fromString("hello");
+    text.push(ref greeting, ", world");
+    printf("build [%s] len=%zu\n", text.view(ref greeting), greeting.len);
+
+    // Growth across several reallocations. cap is always len + 1 or more.
+    disposable big: Text = text.make(0);
+    let i: int32 = 0;
+    while (i < 500) {
+        text.push(ref big, "ab");
+        i = i + 1;
+    }
+    printf("grow len=%zu viewLen=%zu\n", big.len, text.view(ref big).len);
+
+    // All four UTF-8 widths: A, e-acute, euro sign, grinning face.
+    disposable mixed: Text = text.make(0);
+    text.pushChar(ref mixed, 65);
+    text.pushChar(ref mixed, 233);
+    text.pushChar(ref mixed, 8364);
+    text.pushChar(ref mixed, 128512);
+    const m: string = text.view(ref mixed);
+    printf("utf8 bytes=%zu chars=%zu\n", m.len, text.charCount(m));
+
+    // Decode back out through the Iterable impl.
+    printf("chars");
+    for c in text.chars(m) {
+        printf(" %u", c);
+    }
+    printf("\n");
+
+    // Byte offsets and codepoint offsets are different coordinate systems.
+    printf("charAt1=%u offsetOfChar3=%zu\n",
+        text.charAt(m, 1), text.byteOffsetOfChar(m, 3));
+
+    // Replacing codepoint 2 of a multi-byte string: a rebuild, not a poke.
+    disposable rep: Text = text.replaceChar(m, 2, "*");
+    printf("replaceChar bytes=%zu chars=%zu\n",
+        rep.len, text.charCount(text.view(ref rep)));
+
+    // subChars lands on boundaries by construction.
+    disposable sub: Text = text.subChars(m, 1, 3);
+    printf("subChars bytes=%zu chars=%zu\n",
+        sub.len, text.charCount(text.view(ref sub)));
+
+    // subBytes refuses rather than emitting invalid UTF-8.
+    switch (text.subBytes(m, 0, 2)) {
+        case Result.Ok { value: v }: { printf("subBytes UNEXPECTED\n"); }
+        case Result.Err { error: e }: { printf("subBytes rejected\n"); }
+    }
+
+    // Queries take borrowed strings and allocate nothing.
+    printf("query %d %d %d %d %zu\n",
+        text.startsWith("hello world", "hello"),
+        text.endsWith("hello world", "world"),
+        text.contains("hello world", "lo wo"),
+        text.equals("abc", "abc"),
+        text.indexOf("hello world", "o w"));
+
+    // Transforms each return a fresh owned Text.
+    disposable r: Text = text.replaceAll("a-b-c-d", "-", "==");
+    printf("replaceAll [%s]\n", text.view(ref r));
+    disposable up: Text = text.toUpperAscii("mixed Case");
+    printf("upper [%s]\n", text.view(ref up));
+    disposable tr: Text = text.trim("   padded   ");
+    printf("trim [%s]\n", text.view(ref tr));
+    let parts: string[] = ["one", "two", "three"];
+    disposable j: Text = text.join(parts, ", ");
+    printf("join [%s]\n", text.view(ref j));
+    disposable ps: Text = text.padStart("7", 4, "0");
+    printf("padStart [%s]\n", text.view(ref ps));
+
+    // clear keeps the buffer, so a reused Text stops allocating.
+    text.clear(ref r);
+    text.push(ref r, "reused");
+    printf("reuse [%s] len=%zu\n", text.view(ref r), r.len);
+
+    switch (text.parseInt("-1234")) {
+        case Result.Ok { value: v }: { printf("parseInt %lld\n", v); }
+        case Result.Err { error: e }: { printf("parseInt err %s\n", e); }
+    }
+    switch (text.parseInt("12x4")) {
+        case Result.Ok { value: v }: { printf("parseInt UNEXPECTED\n"); }
+        case Result.Err { error: e }: { printf("parseInt rejected\n"); }
+    }
+    return 0;
+}

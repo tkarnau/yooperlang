@@ -5374,6 +5374,26 @@ function codegenWithModuleId(
       fnLines.push(`  store i8 0, ptr ${nulPtr}`);
       return { val: raw, yoopType: PrimType("string") };
     }
+    if (inst.declId === "$builtin__bytes_as_string_unchecked") {
+      // Borrowing inverse of string_as_bytes: project field 0 (the data
+      // pointer) out of the fat pointer and call it a string. No malloc, no
+      // memcpy, no strlen - the caller guarantees the nul terminator, which
+      // is why this is `_unchecked`. `buf.len` is deliberately discarded: a
+      // string's length is whatever strlen finds, so the fat pointer's len
+      // has no representation in the result.
+      const arrayType = ArrayType(PrimType("uint8"));
+      ensureArrayTypeDef(PrimType("uint8"));
+      const arrayLlvmTy = llvmType(arrayType);
+      const bufArg = emitExpr(node.args[0], fnLines);
+      const bufSlot = freshTemp();
+      fnLines.push(`  ${bufSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${bufArg.val}, ptr ${bufSlot}`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${bufSlot}, i32 0, i32 0`);
+      const dataPtr = freshTemp();
+      fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      return { val: dataPtr, yoopType: PrimType("string") };
+    }
     if (inst.declId === "$builtin__array_slice") {
       // Phase 8.H: array_slice<T>(xs, start, end) - borrowing view, no copy.
       // Build {xs.ptr + start * sizeof(T), end - start} as a fresh fat pointer.

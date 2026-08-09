@@ -2053,6 +2053,51 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.match(stderr, /net 0 bytes/);
   });
 
+  // std/core/text.yoop: the owned growable string. Three things a bare
+  // `string` cannot do - own its storage, grow, and be indexed by codepoint.
+  // trackHeap is the point of the fixture as much as stdout is: every Text
+  // here is reclaimed by the injected `disposable` cleanup, where a raw
+  // string built by string_concat is both leaked AND invisible to the
+  // counter (it mallocs directly rather than through ctx_alloc).
+  it("text_basics: Text builds, grows, borrows, and walks codepoints", async () => {
+    const { stdout, stderr, exitCode } = await runFixture("examples/pass/text_basics.yoop", { trackHeap: true });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "build [hello, world] len=12\n" +
+        "grow len=1000 viewLen=1000\n" +
+        "utf8 bytes=10 chars=4\n" +
+        "chars 65 233 8364 128512\n" +
+        "charAt1=233 offsetOfChar3=6\n" +
+        "replaceChar bytes=8 chars=4\n" +
+        "subChars bytes=5 chars=2\n" +
+        "subBytes rejected\n" +
+        "query 1 1 1 1 4\n" +
+        "replaceAll [a==b==c==d]\n" +
+        "upper [MIXED CASE]\n" +
+        "trim [padded]\n" +
+        "join [one, two, three]\n" +
+        "padStart [0007]\n" +
+        "reuse [reused] len=6\n" +
+        "parseInt -1234\n" +
+        "parseInt rejected\n",
+    );
+    assert.match(stderr, /net 0 bytes/);
+  });
+
+  // `Text` is container-owned like `Vec`: it captures the allocator current
+  // at construction and frees back into it. A Text built inside an arena
+  // scope therefore comes OUT of the arena and needs no per-value dispose,
+  // which is the shape a per-request reset depends on.
+  it("text_arena: a Text built in an arena scope draws from the arena", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/text_arena.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "before 0\n[arena-backed text, grown past its initial capacity]\nafter nonzero\n",
+    );
+  });
+
   // Yoopstore-papercut #2 follow-ups: std/fs exists() / file_size() via a
   // stat runtime helper, plus real errno reasons in failure messages.
   it("fs_metadata: exists/file_size report state and errno surfaces the real reason", async () => {

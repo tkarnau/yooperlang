@@ -1853,6 +1853,9 @@ export const INTRINSIC_DECL_IDS = new Map([
   ["ctx_free", "$builtin__ctx_free"],
   ["string_as_bytes", "$builtin__string_as_bytes"],
   ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
+  // The borrowing inverse of string_as_bytes. `_as_` per the intrinsics-index
+  // naming convention: a view, no allocation.
+  ["bytes_as_string_unchecked", "$builtin__bytes_as_string_unchecked"],
   ["array_slice", "$builtin__array_slice"],
   ["wait_until", "$builtin__wait_until"],
   ["cancel", "$builtin__cancel"],
@@ -1943,6 +1946,34 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
+  // bytes_as_string_unchecked(buf: uint8[]): string
+  // The borrowing inverse of string_as_bytes: hands back buf's DATA POINTER
+  // typed as a string, with no allocation and no copy. Two caller
+  // obligations, neither of which the compiler can check:
+  //   1. `buf.data[buf.len]` must be a nul byte. A `string` is nul
+  //      terminated and its length is recovered by strlen, not from the fat
+  //      pointer, so a buffer without one reads off the end.
+  //   2. The bytes must be valid UTF-8 (same contract as
+  //      string_from_bytes_unchecked).
+  // The result borrows buf's storage, so it must not outlive it, and it is
+  // invalidated by anything that reallocates buf. std/core/text.yoop's
+  // `Text` is the intended caller: it maintains both invariants by
+  // construction, which is what makes `view()` free.
+  const asStringDeclId = "$builtin__bytes_as_string_unchecked";
+  const bytesAsStringUnchecked = {
+    id: asStringDeclId,
+    name: "bytes_as_string_unchecked",
+    moduleId: "$builtin",
+    paramNames: [],
+    paramScope: new Map(),
+    genericSig: FuncType(
+      [{ name: "buf", type: ArrayType(PrimType("uint8")), isRef: false }],
+      PrimType("string"),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
   // Phase 8.H: array_slice<T>(xs: T[], start: usize, end: usize): T[]
   // Returns a borrowing fat-pointer view {xs.ptr + start, end - start}.
   // No allocation. Caller is responsible for keeping the parent alive.
@@ -2003,7 +2034,16 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked, ctxAlloc, ctxFree];
+  return [
+    heapAlloc,
+    heapFree,
+    arraySlice,
+    stringAsBytes,
+    stringFromBytesUnchecked,
+    bytesAsStringUnchecked,
+    ctxAlloc,
+    ctxFree,
+  ];
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
