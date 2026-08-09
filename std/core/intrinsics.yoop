@@ -10,6 +10,8 @@
 //     let buf: int32[] = intr.heap_alloc(8);
 //     intr.heap_free(buf);
 
+import { owned } from "./kinds.yoop";
+
 extern "intrinsic" from "compiler" {
     function heap_alloc<T>(n: usize): T[];
     function heap_free<T>(a: T[]): void;
@@ -19,6 +21,18 @@ extern "intrinsic" from "compiler" {
     function ctx_alloc<T>(n: usize): T[];
     function ctx_free<T>(a: T[]): void;
     function string_as_bytes(s: string): uint8[];
-    function string_from_bytes_unchecked(buf: uint8[]): string;
+    // Returns `owned string` because this is where a string's storage comes
+    // from: it mallocs buf.len + 1 and copies. That annotation is the ONLY
+    // source of the `owned` marker in the language - a bodyless extern is
+    // never subject to the decl-authority check, so the allocating intrinsic
+    // is the authority, and everything else reaches `owned` by passthrough.
+    function string_from_bytes_unchecked(buf: uint8[]): owned string;
+    // The borrowing inverse of string_as_bytes: no copy, no allocation. The
+    // caller guarantees `buf` holds valid UTF-8 AND that a nul byte sits at
+    // buf.data[buf.len] - a string's length comes from strlen, not from the
+    // fat pointer. The result borrows buf's storage and is invalidated by
+    // anything that reallocates it. std/core/text.yoop's `Text` maintains
+    // both invariants by construction; prefer `Text.view` to calling this.
+    function bytes_as_string_unchecked(buf: uint8[]): string;
     function array_slice<T>(xs: T[], start: usize, end: usize): T[];
 }

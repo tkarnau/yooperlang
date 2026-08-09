@@ -1853,6 +1853,9 @@ export const INTRINSIC_DECL_IDS = new Map([
   ["ctx_free", "$builtin__ctx_free"],
   ["string_as_bytes", "$builtin__string_as_bytes"],
   ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
+  // The borrowing inverse of string_as_bytes. `_as_` per the intrinsics-index
+  // naming convention: a view, no allocation.
+  ["bytes_as_string_unchecked", "$builtin__bytes_as_string_unchecked"],
   ["array_slice", "$builtin__array_slice"],
   ["wait_until", "$builtin__wait_until"],
   ["cancel", "$builtin__cancel"],
@@ -1943,6 +1946,34 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
+  // bytes_as_string_unchecked(buf: uint8[]): string
+  // The borrowing inverse of string_as_bytes: hands back buf's DATA POINTER
+  // typed as a string, with no allocation and no copy. Two caller
+  // obligations, neither of which the compiler can check:
+  //   1. `buf.data[buf.len]` must be a nul byte. A `string` is nul
+  //      terminated and its length is recovered by strlen, not from the fat
+  //      pointer, so a buffer without one reads off the end.
+  //   2. The bytes must be valid UTF-8 (same contract as
+  //      string_from_bytes_unchecked).
+  // The result borrows buf's storage, so it must not outlive it, and it is
+  // invalidated by anything that reallocates buf. std/core/text.yoop's
+  // `Text` is the intended caller: it maintains both invariants by
+  // construction, which is what makes `view()` free.
+  const asStringDeclId = "$builtin__bytes_as_string_unchecked";
+  const bytesAsStringUnchecked = {
+    id: asStringDeclId,
+    name: "bytes_as_string_unchecked",
+    moduleId: "$builtin",
+    paramNames: [],
+    paramScope: new Map(),
+    genericSig: FuncType(
+      [{ name: "buf", type: ArrayType(PrimType("uint8")), isRef: false }],
+      PrimType("string"),
+    ),
+    ast: null,
+    isBuiltin: true,
+  };
+
   // Phase 8.H: array_slice<T>(xs: T[], start: usize, end: usize): T[]
   // Returns a borrowing fat-pointer view {xs.ptr + start, end - start}.
   // No allocation. Caller is responsible for keeping the parent alive.
@@ -2003,7 +2034,16 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  return [heapAlloc, heapFree, arraySlice, stringAsBytes, stringFromBytesUnchecked, ctxAlloc, ctxFree];
+  return [
+    heapAlloc,
+    heapFree,
+    arraySlice,
+    stringAsBytes,
+    stringFromBytesUnchecked,
+    bytesAsStringUnchecked,
+    ctxAlloc,
+    ctxFree,
+  ];
 }
 
 // ─── multi-module entry point ─────────────────────────────────────────────────
@@ -3705,6 +3745,21 @@ export function typecheckProgram(modules) {
   const funcDeclsByModule = new Map();
   for (const m of modules) {
     const t = new Map();
+    // Extern declarations go in FIRST so an ordinary function of the same
+    // name wins. They belong in here because a marker kind's only
+    // unimpeachable source is a bodyless decl: `runKindFlow` returns early on
+    // anything with no body, so the decl-authority check never runs on an
+    // extern, which is exactly what makes the allocating intrinsic the
+    // authority for `owned` (see plans/strings-ownership-and-ergonomics.md).
+    // Without this the marker on `string_from_bytes_unchecked` would be
+    // silently dropped at every call site.
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
+      for (const ext of d.decls ?? []) {
+        if (ext.kind === ASTNodeKind.EXTERN_FUNCTION_DECL) t.set(ext.name, ext);
+      }
+    }
     for (const decl of m.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) t.set(d.name, d);
@@ -3718,6 +3773,25 @@ export function typecheckProgram(modules) {
     if (!kindTable) return null;
     return { decl, kindTable };
   };
+
+  // Variant DECLS by (module, name), for kindFlow's payload-destructuring
+  // rule. A variant TYPE keeps only resolved field types, so a concrete
+  // payload annotation (`Case { f: owned string }`) is only readable from the
+  // AST. Generic payloads go the other way, through the registry - see
+  // `payloadArgIndex` in kindFlow.js.
+  const variantDeclsByModule = new Map();
+  for (const m of modules) {
+    const t = variantDeclsByModule.get(m.id) ?? new Map();
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.VARIANT_DECL && d.name) t.set(d.name, d);
+    }
+    // Directory modules share one id across several files, so merge rather
+    // than overwrite - a sibling file's variants belong to the same module.
+    variantDeclsByModule.set(m.id, t);
+  }
+  const resolveVariantDecl = (moduleId, name) =>
+    variantDeclsByModule.get(moduleId)?.get(name) ?? null;
 
   // The required-core assertion. Clauses are populated in pass C.2, so this
   // runs after every module has been through it.
@@ -3873,18 +3947,18 @@ export function typecheckProgram(modules) {
           validateFunctionKindPrefix(d, mod, moduleEnv, flowKindTable, errors);
         }
         runKindCheck(d, errors, funcDeclTable, programState.registry);
-        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee);
+        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
         // Phase 13.B: variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
         }
       }
     }

@@ -21,6 +21,7 @@ import {
 import * as vec, { Vec } from "./vec.yoop";
 import { Result } from "./types.yoop";
 import * as intr from "./intrinsics.yoop";
+import { owned } from "./kinds.yoop";
 
 // Fresh-string construction from a UTF-8 byte buffer. Validates the bytes
 // are well-formed UTF-8 (per RFC 3629, with the 4-byte-max cap). On invalid
@@ -88,7 +89,7 @@ export function lastIndexOf(s: string, needle: string): usize {
 // or `end` would split a multi-byte UTF-8 codepoint (verified by checking
 // that neither lands on a continuation byte 0x80-0xBF, except at the
 // boundaries where there's nothing to split).
-export function string_slice(s: string, start: usize, end: usize): Result<string, string> {
+export function string_slice(s: string, start: usize, end: usize): Result<owned string, string> {
     let bytes: uint8[] = intr.string_as_bytes(s);
     if (end > bytes.len) {
         return Result.Err { error: "string_slice: end > s.len" };
@@ -129,7 +130,7 @@ export function string_hash(s: string): uint64 {
 }
 
 // Concat two strings into one fresh heap-allocated string.
-export function string_concat(a: string, b: string): string {
+export function string_concat(a: string, b: string): owned string {
     let a_bytes: uint8[] = intr.string_as_bytes(a);
     let b_bytes: uint8[] = intr.string_as_bytes(b);
     let total: usize = a_bytes.len + b_bytes.len;
@@ -144,7 +145,7 @@ export function string_concat(a: string, b: string): string {
         buf[a_bytes.len + j] = b_bytes[j];
         j = j + 1;
     }
-    let result: string = intr.string_from_bytes_unchecked(buf);
+    let result: owned string = intr.string_from_bytes_unchecked(buf);
     intr.heap_free(buf);
     return result;
 }
@@ -152,7 +153,7 @@ export function string_concat(a: string, b: string): string {
 // Concat N strings into one fresh heap-allocated string. One allocation
 // total (sum the lengths, then alloc + copy). Takes an ordinary string[];
 // real `...string` variadic parameters are a future ergonomic upgrade.
-export function string_concat_all(parts: string[]): string {
+export function string_concat_all(parts: string[]): owned string {
     let total: usize = 0;
     let i: usize = 0;
     while (i < parts.len) {
@@ -172,38 +173,104 @@ export function string_concat_all(parts: string[]): string {
         pos = pos + part_bytes.len;
         k = k + 1;
     }
-    let result: string = intr.string_from_bytes_unchecked(buf);
+    let result: owned string = intr.string_from_bytes_unchecked(buf);
     intr.heap_free(buf);
     return result;
 }
 
+// Number of whole `fill` repetitions needed to bring `have` up to `width`.
+// Padding repeats `fill` whole, so a multi-byte fill can overshoot - that is
+// the long-standing behavior and is preserved here.
+function padReps(have: usize, width: usize, fillLen: usize): usize {
+    if (fillLen == 0) { return 0; }
+    let reps: usize = 0;
+    while (have + reps * fillLen < width) { reps = reps + 1; }
+    return reps;
+}
+
 // Pad `s` with `fill` until it is at least `width` BYTES long. Byte length,
 // not display width - fine for the ASCII columns of a table, wrong for text
-// that may hold multi-byte codepoints. A longer `s` is returned untouched,
-// and an empty `fill` is a no-op rather than a hang.
-export function padStart(s: string, width: usize, fill: string): string {
-    if (fill.len == 0) { return s; }
-    let out: string = s;
-    while (out.len < width) {
-        out = string_concat(fill, out);
+// that may hold multi-byte codepoints. An empty `fill` is a no-op rather
+// than a hang.
+//
+// The result is ALWAYS fresh storage, including when `s` is already wide
+// enough. That is a change: this used to return `s` itself in that case, so
+// the result was borrowed on one path and owned on the other, and a caller
+// that freed it was right half the time. `owned` is what makes that shape
+// impossible to write by accident.
+//
+// It also used to concat in a loop, allocating and abandoning one string per
+// repetition. Now it sizes the result up front and allocates once.
+//
+// Prefer `text.padStart` in std/core/text.yoop, which returns a `Text` that
+// cleans itself up.
+export function padStart(s: string, width: usize, fill: string): owned string {
+    let sb: uint8[] = intr.string_as_bytes(s);
+    let fb: uint8[] = intr.string_as_bytes(fill);
+    let reps: usize = padReps(sb.len, width, fb.len);
+    let buf: uint8[] = intr.heap_alloc(reps * fb.len + sb.len);
+    let w: usize = 0;
+    let r: usize = 0;
+    while (r < reps) {
+        let i: usize = 0;
+        while (i < fb.len) { buf[w] = fb[i]; w = w + 1; i = i + 1; }
+        r = r + 1;
     }
-    return out;
+    let j: usize = 0;
+    while (j < sb.len) { buf[w] = sb[j]; w = w + 1; j = j + 1; }
+    let result: owned string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
+    return result;
 }
 
-export function padEnd(s: string, width: usize, fill: string): string {
-    if (fill.len == 0) { return s; }
-    let out: string = s;
-    while (out.len < width) {
-        out = string_concat(out, fill);
+export function padEnd(s: string, width: usize, fill: string): owned string {
+    let sb: uint8[] = intr.string_as_bytes(s);
+    let fb: uint8[] = intr.string_as_bytes(fill);
+    let reps: usize = padReps(sb.len, width, fb.len);
+    let buf: uint8[] = intr.heap_alloc(sb.len + reps * fb.len);
+    let w: usize = 0;
+    let j: usize = 0;
+    while (j < sb.len) { buf[w] = sb[j]; w = w + 1; j = j + 1; }
+    let r: usize = 0;
+    while (r < reps) {
+        let i: usize = 0;
+        while (i < fb.len) { buf[w] = fb[i]; w = w + 1; i = i + 1; }
+        r = r + 1;
     }
-    return out;
+    let result: owned string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
+    return result;
 }
 
-export function sliceFrom(s: string, start: usize): string {
+// Sub-string from `start` to the end, in BYTE offsets. Freshly allocated on
+// BOTH paths - the failure path used to hand back the literal "", so whether
+// the result could be freed depended on the data, and a caller that freed it
+// aborted whenever the slice happened to fail.
+//
+// Both paths reach `owned` by passthrough: the Ok arm's `v` inherits it from
+// `Result<owned string, string>`'s first type argument, and the Err arm
+// allocates. Neither mints it, so no transition authority is involved.
+export function sliceFrom(s: string, start: usize): owned string {
   switch(string_slice(s, start, s.len)) {
     case Result.Ok { value: v }: { return v; }
-    case Result.Err { error: _ }: { return ""; }
+    case Result.Err { error: _ }: { return string_concat("", ""); }
   }
+}
+
+// Release a string's storage. The `owned` parameter is the whole point: a
+// string literal lives in read-only memory and freeing one is a SIGABRT, not
+// a diagnostic, so this refuses anything that cannot prove it was allocated.
+//
+//     strFree(string_concat("a", "b"));   // ok
+//     strFree("a literal");               // compile error
+//
+// This does NOT make freeing safe in general - it is provenance, not
+// ownership. Nothing here prevents a double free or a use after free, and
+// the storage is released through raw `free` regardless of which allocator
+// produced it. For storage you intend to release, reach for `Text` in
+// std/core/text.yoop, which carries its allocator and disposes itself.
+export function strFree(s: owned string): void {
+    intr.heap_free(intr.string_as_bytes(s));
 }
 
 export function split(

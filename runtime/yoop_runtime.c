@@ -8,10 +8,12 @@
 //   offset 16: yoop_mutex_t*   per-handle mutex (heap-allocated)
 //   offset 24: yoop_cond_t*    per-handle cond  (heap-allocated)
 //   offset 32: void*           coroutine handle (async task body)
-//   offset 40+: compiler-owned (result slot + args blob)
+//   offset 40: void*           allocator context (runtime-owned, may be NULL)
+//   offset 48+: compiler-owned (result slot + args blob)
 
 #include "yoop_runtime.h"
 #include "yoop_platform.h"
+#include "yoop_alloc.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -57,6 +59,10 @@ static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; 
 // offset 32, immediately after the cond pointer, so every offset the
 // prefix accessors above hard-code is unchanged.
 static inline void**         handle_coro_slot (void* h) { return (void**)((char*)h + 32); }
+// The task's allocator context, swapped in and out by run_task_step. Owned by
+// yoop_alloc.c, which is why this is the only place the runtime touches it as
+// anything other than an opaque slot pointer.
+static inline void**         handle_ctx_slot  (void* h) { return (void**)((char*)h + 40); }
 
 // ---- queue ----------------------------------------------------------------
 
@@ -146,9 +152,27 @@ void yoop_runtime_set_coro_ops(yoop_coro_fn resume,
 // of an already-started coroutine. The step ends at the task's next
 // suspend point or at its completion; either way the worker is free
 // afterwards, which is the entire point of the async runtime.
+//
+// This is also where the ALLOCATOR context is swapped, for the same reason
+// tls_current_task is set here: it is the one place a task starts, resumes,
+// or hands its thread back. The ambient allocator is per-thread, but it
+// belongs to the task, and the three ways that went wrong before the swap
+// existed were (1) a parked task leaving its arena installed for whatever
+// the worker picked up next, (2) a resumed task finding a different worker's
+// allocator and silently allocating outside its own region, and (3) its
+// eventual popAllocator writing one worker's context onto another's.
+//
+// Note this covers the synchronous case too: yoop_task_wait drains the queue
+// re-entrantly on the calling thread, so a plain function holding an arena
+// would otherwise run an unrelated task inside it.
 static void run_task_step(void* handle, void (*thunk)(void*)) {
     void* prev = tls_current_task;
     tls_current_task = handle;
+
+    YoopCtxSave outer;
+    yoop_ctx_save(&outer);
+    yoop_ctx_load_task(handle_ctx_slot(handle));
+
     if (thunk) {
         // Start: the thunk calls the body, stashes the coroutine handle,
         // and calls yoop_task_settle itself.
@@ -160,6 +184,18 @@ static void run_task_step(void* handle, void (*thunk)(void*)) {
             yoop_task_settle(handle);
         }
     }
+
+    // Whatever is installed now belongs to the TASK, not to this worker.
+    // Reading `state` rather than hooking yoop_task_settle covers both paths
+    // uniformly: the thunk settles itself on the start path, and the resume
+    // path settles just above.
+    if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
+        yoop_ctx_discard_task(handle_ctx_slot(handle));
+    } else {
+        yoop_ctx_store_task(handle_ctx_slot(handle));
+    }
+    yoop_ctx_restore(&outer);
+
     tls_current_task = prev;
 }
 
@@ -582,6 +618,10 @@ void yoop_task_release(void* handle) {
     int32_t prev = A_DEC_I32(handle_rc_ptr(handle));
     if (prev == 1) {
         yoop_task_free_sync_pair(handle);
+        // Normally already gone - run_task_step discards it the moment the
+        // task finishes. This catches a task that suspended with a context
+        // installed and was then abandoned rather than resumed.
+        yoop_ctx_discard_task(handle_ctx_slot(handle));
         free(handle);
     }
 }

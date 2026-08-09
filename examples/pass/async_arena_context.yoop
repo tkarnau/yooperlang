@@ -1,0 +1,96 @@
+// The ambient allocator follows a TASK, not a worker thread.
+//
+// Two ways this used to break, both completely silent:
+//
+//   1. A task that suspended inside an arena scope left its arena installed
+//      on the worker it handed back, so the next unrelated task that worker
+//      picked up allocated out of a region it knows nothing about - a region
+//      that is then destroyed by whoever owns the scope.
+//   2. A task that resumed on a DIFFERENT worker found that worker's
+//      allocator rather than its own, so everything it allocated after the
+//      await escaped its region into malloc. Arena-shaped code never frees,
+//      so that is a leak.
+//
+// The "resumed" line catches (2) at any worker count. The "neighbor" line
+// catches (1) only when a WORKER picks the neighbor up rather than main
+// dispatching it re-entrantly from `wait`, which is scheduling-dependent -
+// hence the e2e cases pinning YOOP_NUM_WORKERS to both 1 and 4.
+//
+// The fix is one slot swapped at one funnel: run_task_step saves the
+// thread's allocator context and installs the task's around every step,
+// exactly as it already did for the current-task pointer. See
+// plans/async-allocator-context.md.
+
+import.unsafe;
+import * as mem from "std/core/alloc.yoop";
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Descriptor pairs come from the runtime, not libc's pipe(): the Windows
+// multiplexer can only wait on sockets. Same reasoning as async_yield_smoke.
+extern "C" from "yoop_runtime" {
+    function yoop_socketpair(fds: unsafe_ptr<int32>): int32;
+    function yoop_socketpair_read(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
+    function yoop_socketpair_write(fd: int32, buf: unsafe_ptr<uint8>, n: usize): int64;
+}
+
+// Installs an arena as the ambient allocator, then suspends while holding it.
+task parked(fd: int32, ar: mem.Arena): int32 {
+    let prev: mem.Allocator = mem.pushAllocator(mem.arenaAllocator(ar));
+    let rc: c_int = await conc.awaitReadable(fd);
+    if (rc != 0) { return -1; }
+    let buf: uint8[] = [0];
+    let n: int64 = yoop_socketpair_read(fd, buf.ptr, 1);
+    // This belongs in the arena this task installed BEFORE it suspended,
+    // not in whatever the resuming worker happened to be holding.
+    let p: unsafe_ptr<void> = mem.allocBytes(64, 8);
+    if (p == null) { return -1; }
+    printf("resumed: arena used=%d\n", mem.arenaUsed(ar));
+    mem.popAllocator(prev);
+    return int32(n);
+}
+
+// Never touches the arena. Runs while `parked` is suspended, so a worker
+// still holding the parked task's arena would hand it this allocation.
+task neighbor(ar: mem.Arena): int32 {
+    let p: unsafe_ptr<void> = mem.allocBytes(1024, 8);
+    if (p == null) { return -1; }
+    printf("neighbor: arena used=%d\n", mem.arenaUsed(ar));
+    mem.freeBytes(p);
+    return 0;
+}
+
+function main(): int32 {
+    let fds: int32[] = [0, 0];
+    if (yoop_socketpair(fds.ptr) != 0) { printf("socketpair failed\n"); return 1; }
+
+    let ar: mem.Arena = mem.arenaNew(65536);
+
+    pooled a = parked(fds[0], ar);
+    conc.sleep_ms(120);                 // let `a` reach its suspend point
+    printf("parked\n");
+
+    // `neighbor` is guaranteed to run while `a` is suspended: nothing writes
+    // to the pipe until after this wait returns, so the ordering is a data
+    // dependency rather than a timing assumption.
+    pooled b = neighbor(ar);
+    let brc: int32 = wait b;
+
+    let msg: uint8[] = [88];
+    let w: int64 = yoop_socketpair_write(fds[1], msg.ptr, 1);
+    if (w != 1) { printf("write failed\n"); return 1; }
+    let arc: int32 = wait a;
+
+    printf("a=%d b=%d\n", arc, brc);
+    mem.arenaDestroy(ar);
+    return 0;
+}
+
+// expected output:
+// parked
+// neighbor: arena used=0
+// resumed: arena used=64
+// a=1 b=0

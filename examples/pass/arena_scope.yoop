@@ -6,7 +6,8 @@
 // end. So everything allocated inside the block comes from the arena, and the
 // whole region reclaims at the brace. No manual push/pop, no per-object free.
 //
-// `tempAllocator()` / `resetTemp()` is the per-thread scratch arena: allocate
+// `tempAllocator()` / `resetTemp()` is the scratch arena (per-task inside a
+// task, per-thread otherwise - see task_temp_isolation.yoop): allocate
 // freely, reset once at a boundary.
 
 import.unsafe;

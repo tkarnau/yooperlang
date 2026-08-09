@@ -33,11 +33,26 @@
 import { ASTNodeKind } from "../contracts.js";
 import { pushError } from "./errors.js";
 
+// A marker set is a TREE, not a flat pair of sets: `args` mirrors the
+// annotation's type arguments, so `Result<owned string, string>` carries
+// nothing at the top level and `owned` at args[0]. That is what lets a marker
+// survive a fallible constructor - the value only becomes reachable after a
+// `switch` destructures the payload back out, and the payload's markers have
+// to have been kept somewhere in between.
 function emptyMarkers() {
-  return { conferred: new Set(), restrictive: new Set() };
+  return { conferred: new Set(), restrictive: new Set(), args: [] };
 }
 
-export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, containingType, crossModuleCallee) {
+export function runKindFlow(
+  fnOrMethodDecl,
+  errors,
+  funcDeclTable,
+  kindTable,
+  containingType,
+  crossModuleCallee,
+  registry,
+  variantDeclLookup,
+) {
   if (!fnOrMethodDecl?.body || !kindTable) return;
 
   // Resolve kind-prefix names to a marker set, dropping non-marker kinds. No
@@ -56,11 +71,24 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
     return out;
   }
 
+  // Same, but reading a whole annotation TREE rather than only its top-level
+  // prefixes, so type arguments keep their markers.
+  function markersFromAnnot(annot, table = kindTable) {
+    if (!annot || typeof annot !== "object") return emptyMarkers();
+    const out = markersFromNames(annot.kindPrefixes, table);
+    out.args = (annot.typeArgs ?? []).map((a) => markersFromAnnot(a, table));
+    return out;
+  }
+
   // Validate the kind prefixes on one of THIS function's own annotations:
   // each must name a known marker kind whose appliesTo includes `site`.
+  // Recurses into type arguments, which are validated at the SAME site - an
+  // `owned` inside a return's type argument is still part of the return.
   function validateAnnot(annot, site, atNode) {
-    if (!annot?.kindPrefixes) return emptyMarkers();
+    if (!annot || typeof annot !== "object") return emptyMarkers();
     const out = emptyMarkers();
+    out.args = (annot.typeArgs ?? []).map((a) => validateAnnot(a, site, atNode));
+    if (!annot.kindPrefixes) return out;
     for (const name of annot.kindPrefixes) {
       const kt = kindTable.get(name);
       if (!kt) {
@@ -106,15 +134,39 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
     }
   }
 
+  // Both bounds, applied at the top level and then positionally down the type
+  // arguments. `Result<tainted X, E>` flowing into a plain `Result<X, E>` slot
+  // is the same hazard as the bare case and is caught the same way.
   function checkBound(value, slot, atNode, role) {
     checkConferred(value, slot, atNode, role);
     checkRestrictive(value, slot, atNode, role);
+    const n = Math.min(value.args?.length ?? 0, slot.args?.length ?? 0);
+    for (let i = 0; i < n; i++) {
+      checkBound(value.args[i], slot.args[i], atNode, `${role} (type argument ${i + 1})`);
+    }
+  }
+
+  // The return site enforces only the restrictive direction (the signature is
+  // the conferring authority), and that stays true down the type arguments.
+  function checkRestrictiveDeep(value, slot, atNode, role) {
+    checkRestrictive(value, slot, atNode, role);
+    const n = Math.min(value.args?.length ?? 0, slot.args?.length ?? 0);
+    for (let i = 0; i < n; i++) {
+      checkRestrictiveDeep(value.args[i], slot.args[i], atNode, `${role} (type argument ${i + 1})`);
+    }
   }
 
   // name -> declared-type markers, for IDENT lookups. Populated from params
   // and let/const declarations as the walk encounters them. Bindings cannot
   // change their kind set (it is part of their type), so a flat map suffices.
   const bindingMarkers = new Map();
+
+  // Every `return`'s value expression, collected during the walk and read
+  // afterwards by the conferred-passthrough check. It has to be afterwards:
+  // `bindingMarkers` only holds the parameters until the walk populates the
+  // locals, so `return s;` where `s` is a local would look unmarked if the
+  // check ran up front.
+  const returnValueNodes = [];
 
   // Resolve a call node to the callee's decl plus the kind table its
   // annotations are written against. Three shapes:
@@ -181,10 +233,51 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
       // passthroughs the signature declares.
       const info = calleeInfo(e);
       if (info) {
-        return markersFromNames(info.decl.returnTypeAnnotation?.kindPrefixes, info.table);
+        return markersFromAnnot(info.decl.returnTypeAnnotation, info.table);
       }
     }
     return emptyMarkers();
+  }
+
+  // Which type-argument position a variant payload field occupies, or -1 when
+  // the field's type is not one of the decl's type parameters (a concrete
+  // field type, which carries its markers on its own annotation instead).
+  //
+  //   variant Result<T, E> { Ok { value: T }, Err { error: E } }
+  //   payloadArgIndex(Result<..>, "Ok", "value") === 0
+  //
+  // Reads the GENERIC decl rather than the instantiated type: instantiation
+  // has already substituted `T` away, so the concrete variant only knows the
+  // field is a `string` and not which parameter it came from.
+  function payloadArgIndex(variantType, variantName, fieldName) {
+    const declId = variantType?.genericInstance?.declId;
+    if (!declId || !registry?.genericDeclById) return -1;
+    const genericDecl = registry.genericDeclById.get(declId);
+    if (!genericDecl) return -1;
+    const vcase = genericDecl.genericVariants?.get(variantName);
+    const field = vcase?.fields?.find((f) => f.name === fieldName);
+    // An open field type is a TypeParamType; its name indexes paramNames.
+    const paramName = field?.type?.name;
+    if (!paramName) return -1;
+    const idx = genericDecl.paramNames?.indexOf(paramName) ?? -1;
+    return idx;
+  }
+
+  // Markers for one destructured payload field, from either direction:
+  //   - generic payload (`Ok { value: T }`) -> the scrutinee's type argument
+  //   - concrete payload (`Case { f: owned string }`) -> the field's own
+  //     annotation on the variant declaration
+  // The second needs the decl's AST, since an instantiated or plain variant
+  // TYPE keeps only resolved field types and no annotations.
+  function payloadFieldMarkers(variantType, variantName, fieldName, scrutMarkers) {
+    const idx = payloadArgIndex(variantType, variantName, fieldName);
+    if (idx >= 0) return scrutMarkers.args?.[idx] ?? emptyMarkers();
+    // A VARIANT_DECL's case list is `variants` (`cases` belongs to ENUM_DECL).
+    const decl = variantDeclLookup?.(variantType?.moduleId, variantType?.name);
+    const vcase = decl?.variants?.find((c) => c.name === variantName);
+    const field = vcase?.fields?.find((f) => f.name === fieldName);
+    if (!field) return emptyMarkers();
+    return markersFromAnnot(field.typeAnnotation);
   }
 
   // Sink check: every argument vs the callee's parameter markers (resolved in
@@ -199,7 +292,7 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
       if (!param) continue;
       // A plain slot is an upper bound of the empty set, so it still rejects a
       // restrictive argument - run the check even when the slot is unmarked.
-      const slot = markersFromNames(param.typeAnnotation?.kindPrefixes, info.table);
+      const slot = markersFromAnnot(param.typeAnnotation, info.table);
       const value = exprMarkers(args[i]);
       checkBound(value, slot, args[i] ?? callNode,
         `parameter '${param.name ?? `#${i}`}' of '${info.name}'`);
@@ -314,9 +407,74 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
         if (!res.ok) pushError(errors, fnOrMethodDecl, explain("clearedBy", k, res.reason));
       }
     }
-    for (const k of returnMarkers.conferred) {
-      const res = authorizedAs("appliedBy", k);
-      if (!res.ok) pushError(errors, fnOrMethodDecl, explain("appliedBy", k, res.reason));
+  }
+
+  // Conferred passthrough: a function is only CONFERRING K if it produces a
+  // value carrying K out of one that did not. When every `return` in the body
+  // already yields a K-carrying value, the kind is travelling with the value
+  // and no authority is required - the same reasoning the restrictive
+  // direction has always applied to a parameter that carries K.
+  //
+  // Without this a pure forwarder (`function f(s: owned string): owned string
+  // { return s; }`) is rejected as an unauthorized conferral, which made
+  // wrapping any conferring API impossible.
+  //
+  // "Every" is load-bearing, not "any": a body that returns a laundered value
+  // on one path and a forged one on another is still forging, and still has
+  // to answer to the kind decl. An empty list is not vacuous passthrough
+  // either - with no returns to inspect there is nothing establishing that
+  // the kind came from anywhere.
+  function isConferredPassthrough(k) {
+    if (returnValueNodes.length === 0) return false;
+    for (const v of returnValueNodes) {
+      if (!exprMarkers(v).conferred.has(k)) return false;
+    }
+    return true;
+  }
+
+  // `return Result.Ok { value: X }` against a declared
+  // `Result<owned string, string>`: the constructor field is a SLOT, and the
+  // return annotation's matching type argument is what it must satisfy.
+  //
+  // Without this the nested position would be forgeable. The decl-authority
+  // check is top-level only (it asks what the function hands back, and a
+  // `Result` is not itself owned), so nothing else would stop a body from
+  // building `Ok { value: "a literal" }` and handing it out as owned - the
+  // caller would then destructure it and free read-only memory.
+  function checkReturnedConstructor(value) {
+    if (value?.kind !== ASTNodeKind.VARIANT_CONSTRUCTOR) return;
+    const vtype = value.resolvedEnumType ?? value.resolvedVariantType;
+    for (const f of value.fields ?? []) {
+      const name = f.name ?? f.fieldName;
+      const expr = f.value ?? f.expr;
+      if (!name || !expr) continue;
+      const idx = payloadArgIndex(vtype, value.variantName, name);
+      const slot =
+        idx >= 0
+          ? (returnMarkers.args?.[idx] ?? emptyMarkers())
+          : payloadFieldMarkers(vtype, value.variantName, name, returnMarkers);
+      checkBound(exprMarkers(expr), slot, expr, `payload field '${name}'`);
+    }
+  }
+
+  // Give every payload binding in one arm the markers of the position it was
+  // destructured out of, so `case Result.Ok { value: v }` over a
+  // `Result<owned string, string>` scrutinee makes `v` an owned string.
+  function bindPayloadMarkers(arm, scrutMarkers) {
+    for (const pat of arm.patterns ?? []) {
+      if (pat.kind !== ASTNodeKind.VARIANT_PATTERN || pat.isWildcard) continue;
+      for (const fb of pat.fieldBindings ?? []) {
+        if (fb.isWildcard || !fb.bindingName) continue;
+        bindingMarkers.set(
+          fb.bindingName,
+          payloadFieldMarkers(
+            pat.resolvedVariantType,
+            pat.variantName,
+            fb.fieldName,
+            scrutMarkers,
+          ),
+        );
+      }
     }
   }
 
@@ -346,12 +504,14 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
       case ASTNodeKind.RETURN_STATEMENT:
         if (stmt.value) {
           walkExpr(stmt.value);
+          returnValueNodes.push(stmt.value);
           // The function's signature is the authority to CONFER its declared
           // conferred kinds (the launder / transition boundary - the body is
           // trusted to actually produce the cleared form), so only the
           // restrictive direction is enforced here: a hazard may not leak out
           // unless the return type declares it.
-          checkRestrictive(exprMarkers(stmt.value), returnMarkers, stmt, "return");
+          checkRestrictiveDeep(exprMarkers(stmt.value), returnMarkers, stmt, "return");
+          checkReturnedConstructor(stmt.value);
         }
         return;
       case ASTNodeKind.IF_STATEMENT:
@@ -369,11 +529,21 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
         if (stmt.iterExpr) walkExpr(stmt.iterExpr);
         walkBranch(stmt.body);
         return;
-      case ASTNodeKind.SWITCH_STATEMENT:
-        if (stmt.value) walkExpr(stmt.value);
-        for (const c of stmt.cases ?? []) walkBranch(c.body);
-        if (stmt.defaultCase) walkBranch(stmt.defaultCase.body ?? stmt.defaultCase);
+      case ASTNodeKind.SWITCH_STATEMENT: {
+        // The node's slots are `scrutinee` / `arms` / `defaultArm`. This used
+        // to read `stmt.value` / `stmt.cases`, which do not exist on it, so
+        // NOTHING inside a switch was ever checked - a sink violation in an
+        // arm body was silently accepted while the identical call one line
+        // outside was rejected.
+        walkExpr(stmt.scrutinee);
+        const scrutMarkers = exprMarkers(stmt.scrutinee);
+        for (const arm of stmt.arms ?? []) {
+          bindPayloadMarkers(arm, scrutMarkers);
+          walkBranch(arm.body);
+        }
+        if (stmt.defaultArm) walkBranch(stmt.defaultArm.body ?? stmt.defaultArm);
         return;
+      }
       case ASTNodeKind.BLOCK:
         walkBlock(stmt);
         return;
@@ -398,4 +568,14 @@ export function runKindFlow(fnOrMethodDecl, errors, funcDeclTable, kindTable, co
   }
 
   walkBlock(fnOrMethodDecl.body);
+
+  // Runs after the walk so `returnValueNodes` and the local half of
+  // `bindingMarkers` are populated. See isConferredPassthrough above.
+  if (fnName) {
+    for (const k of returnMarkers.conferred) {
+      if (isConferredPassthrough(k)) continue;
+      const res = authorizedAs("appliedBy", k);
+      if (!res.ok) pushError(errors, fnOrMethodDecl, explain("appliedBy", k, res.reason));
+    }
+  }
 }

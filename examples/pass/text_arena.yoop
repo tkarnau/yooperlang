@@ -1,0 +1,34 @@
+// `Text` is container-owned, the same way `Vec` is: it captures whatever
+// allocator was current when it was built and routes every later grow and the
+// final free back through that one. So a Text built inside an arena scope
+// comes OUT of the arena and is reclaimed in bulk when the region goes away,
+// with no per-value dispose.
+//
+// That is the shape a per-request reset depends on: build freely inside the
+// region, reset once at the boundary.
+
+import * as text from "std/core/text.yoop";
+import { Text } from "std/core/text.yoop";
+import { ephemeral } from "std/core/kinds.yoop";
+import * as mem from "std/core/alloc.yoop";
+
+function main(): int32 {
+    let ar: mem.Arena = mem.arenaNew(64 * 1024);
+    printf("before %zu\n", mem.arenaUsed(ar));
+
+    ephemeral mem.allocatorScope(ar) {
+        let t: Text = text.fromString("arena-backed text");
+        // Push past the initial capacity so at least one grow also lands in
+        // the arena rather than falling back to malloc.
+        text.push(ref t, ", grown past its initial capacity");
+        printf("[%s]\n", text.view(ref t));
+    }
+
+    if (mem.arenaUsed(ar) > 0) {
+        printf("after nonzero\n");
+    } else {
+        printf("after zero (UNEXPECTED)\n");
+    }
+    mem.arenaDestroy(ar);
+    return 0;
+}

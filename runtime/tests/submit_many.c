@@ -1,6 +1,7 @@
 // Submit N tasks; wait each; exercise queue contention.
 #include "../yoop_runtime.h"
 #include <assert.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -8,15 +9,20 @@
 
 #define N 1000
 
+// Mirrors the handle prefix laid out by codegen - including the two
+// runtime-owned slots this test never reads (see submit_one.c: the scheduler
+// writes through both on every step, so leaving them out corrupts the stack).
 struct fake_handle {
-    void (*thunk)(void*);
-    uint8_t state;
+    void (*thunk)(void*);   // offset 0
+    uint8_t state;          // offset 8
     char _pad[3];
-    int32_t refcount;
-    void* mutex;
-    void* cond;
-    int32_t id;
-    int32_t result;
+    int32_t refcount;       // offset 12
+    void* mutex;            // offset 16
+    void* cond;             // offset 24
+    void* coro;             // offset 32
+    void* alloc_ctx;        // offset 40
+    int32_t result;         // offset 48 (compiler-owned: result, then args)
+    int32_t id;             // offset 52
 };
 
 static void thunk(void* h) {
@@ -26,6 +32,10 @@ static void thunk(void* h) {
 }
 
 int main(void) {
+    _Static_assert(offsetof(struct fake_handle, coro)      == 32, "coro@32");
+    _Static_assert(offsetof(struct fake_handle, alloc_ctx) == 40, "alloc_ctx@40");
+    _Static_assert(offsetof(struct fake_handle, result)    == 48, "result@48");
+
     yoop_runtime_init();
 
     struct fake_handle* handles = (struct fake_handle*)calloc(N, sizeof(*handles));

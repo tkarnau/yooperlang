@@ -3417,7 +3417,20 @@ function codegenWithModuleId(
         // Added AFTER cond_ptr on purpose - every offset the C runtime
         // hard-codes (0/8/9/12/16/24) is below 32 and stays valid.
         "ptr",                  // 32: coro handle
-        llvmType(resultType),   // 40: result slot
+        // 40: allocator context. The ambient allocator is per-THREAD, but
+        // the thing that owns it is the TASK - a task that suspends inside
+        // an arena scope resumes on a different worker, and a worker that
+        // picks up an unrelated task while one is parked would otherwise
+        // hand it the parked task's arena. run_task_step swaps this in and
+        // out around every step; see plans/async-allocator-context.md.
+        //
+        // Added after the coro handle for the same reason that one was
+        // added after cond_ptr: every offset the C runtime hard-codes
+        // (0/8/9/12/16/24/32) is below 40 and stays valid. A NULL slot
+        // means "this task never installed an allocator", which is the
+        // common case and costs nothing.
+        "ptr",                  // 40: allocator context (runtime-owned)
+        llvmType(resultType),   // 48: result slot
         ...args.map((a) => llvmType(a)),
       ];
       structDefs.push(`${structName} = type { ${fields.join(", ")} }`);
@@ -4098,7 +4111,7 @@ function codegenWithModuleId(
   }
 
   // Phase 6.3: per-task-function thunk. Layout-aware: GEP into the handle's
-  // result slot (field 6) and arg fields (7..) by struct index. The body
+  // result slot (field 8) and arg fields (9..) by struct index. The body
   // itself is emitted via emitFn as a regular function returning T.
   function emitTaskThunk(taskDecl) {
     const meta = taskFnTable.get(taskDecl.name);
@@ -4109,14 +4122,14 @@ function codegenWithModuleId(
     const thunkSym = `${mangle(moduleId, taskDecl.name)}__thunk`;
     fnLines.push(`define void @${thunkSym}(ptr %ts) {`);
     fnLines.push("entry:");
-    // Load each arg from its corresponding struct field (8 + i).
+    // Load each arg from its corresponding struct field (9 + i).
     const argVals = [];
     for (let i = 0; i < meta.args.length; i++) {
       const argType = meta.args[i];
       const llvmArgTy = llvmType(argType);
       const gep = tcount(tn++);
       fnLines.push(
-        `  ${gep} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 ${8 + i}`,
+        `  ${gep} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 ${9 + i}`,
       );
       const val = tcount(tn++);
       fnLines.push(`  ${val} = load ${llvmArgTy}, ptr ${gep}`);
@@ -4129,12 +4142,12 @@ function codegenWithModuleId(
     // decides whether the task finished or suspended - see
     // yoop_task_step in runtime/yoop_runtime.c.
     //
-    // The result slot is field 7 of the task struct; passing it directly
+    // The result slot is field 8 of the task struct; passing it directly
     // means a completed coroutine has already written its result where
     // `wait` expects to find it, with no copy.
     const resPtr = tcount(tn++);
     fnLines.push(
-      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 7`,
+      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr %ts, i32 0, i32 8`,
     );
     const startArgs = argVals.map((a) => `${a.ty} ${a.val}`);
     startArgs.push(`ptr ${resPtr}`);
@@ -4194,13 +4207,13 @@ function codegenWithModuleId(
       `  ${cPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 5`,
     );
     fnLines.push(`  store ptr null, ptr ${cPtr}`);
-    // args at fields 7..
+    // args at fields 9..
     for (let i = 0; i < argNodes.length; i++) {
       const arg = emitExpr(argNodes[i], fnLines);
       const llvmArgTy = llvmType(meta.args[i]);
       const slotPtr = freshTemp();
       fnLines.push(
-        `  ${slotPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 ${8 + i}`,
+        `  ${slotPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 ${9 + i}`,
       );
       fnLines.push(`  store ${llvmArgTy} ${arg.val}, ptr ${slotPtr}`);
     }
@@ -5065,7 +5078,7 @@ function codegenWithModuleId(
       const resultLlvm = llvmType(meta.resultType);
       const resPtr = freshTemp();
       fnLines.push(
-        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 7`,
+        `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handlePtr}, i32 0, i32 8`,
       );
       const resVal = freshTemp();
       fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
@@ -5073,13 +5086,13 @@ function codegenWithModuleId(
     }
 
     // Anonymous source (e.g. `pooled h` parameter). The result type comes
-    // from the operand's TaskType; the result slot lives at byte offset 40
+    // from the operand's TaskType; the result slot lives at byte offset 48
     // of every task struct (prefix layout is universal - see runtime-design.md).
     const operandType = symbols.get(operand.name);
     const resultType = operandType.resultType;
     const resultLlvm = llvmType(resultType);
     const resPtr = freshTemp();
-    fnLines.push(`  ${resPtr} = getelementptr inbounds i8, ptr ${handlePtr}, i64 40`);
+    fnLines.push(`  ${resPtr} = getelementptr inbounds i8, ptr ${handlePtr}, i64 48`);
     const resVal = freshTemp();
     fnLines.push(`  ${resVal} = load ${resultLlvm}, ptr ${resPtr}`);
     return { val: resVal, yoopType: resultType };
@@ -5140,11 +5153,11 @@ function codegenWithModuleId(
       );
       fnLines.push(`  store i32 ${doneVariant.ordinal}, ptr ${tagPtr}`);
 
-      // Copy the task's result (handle byte offset 40) into the Done variant's
+      // Copy the task's result (handle byte offset 48) into the Done variant's
       // single payload field `value`.
       const resPtr = freshTemp();
       fnLines.push(
-        `  ${resPtr} = getelementptr inbounds i8, ptr ${handleVal.val}, i64 40`,
+        `  ${resPtr} = getelementptr inbounds i8, ptr ${handleVal.val}, i64 48`,
       );
       const resultLlvm = llvmType(resultT);
       const resVal = freshTemp();
@@ -5373,6 +5386,26 @@ function codegenWithModuleId(
       fnLines.push(`  ${nulPtr} = getelementptr inbounds i8, ptr ${raw}, i64 ${bufLenVal}`);
       fnLines.push(`  store i8 0, ptr ${nulPtr}`);
       return { val: raw, yoopType: PrimType("string") };
+    }
+    if (inst.declId === "$builtin__bytes_as_string_unchecked") {
+      // Borrowing inverse of string_as_bytes: project field 0 (the data
+      // pointer) out of the fat pointer and call it a string. No malloc, no
+      // memcpy, no strlen - the caller guarantees the nul terminator, which
+      // is why this is `_unchecked`. `buf.len` is deliberately discarded: a
+      // string's length is whatever strlen finds, so the fat pointer's len
+      // has no representation in the result.
+      const arrayType = ArrayType(PrimType("uint8"));
+      ensureArrayTypeDef(PrimType("uint8"));
+      const arrayLlvmTy = llvmType(arrayType);
+      const bufArg = emitExpr(node.args[0], fnLines);
+      const bufSlot = freshTemp();
+      fnLines.push(`  ${bufSlot} = alloca ${arrayLlvmTy}, align 8`);
+      fnLines.push(`  store ${arrayLlvmTy} ${bufArg.val}, ptr ${bufSlot}`);
+      const dataField = freshTemp();
+      fnLines.push(`  ${dataField} = getelementptr inbounds ${arrayLlvmTy}, ptr ${bufSlot}, i32 0, i32 0`);
+      const dataPtr = freshTemp();
+      fnLines.push(`  ${dataPtr} = load ptr, ptr ${dataField}`);
+      return { val: dataPtr, yoopType: PrimType("string") };
     }
     if (inst.declId === "$builtin__array_slice") {
       // Phase 8.H: array_slice<T>(xs, start, end) - borrowing view, no copy.
@@ -6399,7 +6432,7 @@ function codegenWithModuleId(
     });
     const resPtr = freshTemp();
     fnLines.push(
-      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 7`,
+      `  ${resPtr} = getelementptr inbounds ${meta.structName}, ptr ${handleSlot}, i32 0, i32 8`,
     );
     const resVal = freshTemp();
     fnLines.push(`  ${resVal} = load ${llvmTy}, ptr ${resPtr}`);

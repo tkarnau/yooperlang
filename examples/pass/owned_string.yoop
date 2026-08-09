@@ -1,0 +1,71 @@
+// The `owned` marker kind: provenance for bare strings.
+//
+// A `string` is one pointer, so a literal and a freshly built string have
+// exactly the same type. Freeing the wrong one is a SIGABRT rather than a
+// diagnostic. `owned` is how a signature says which is which.
+//
+// It is CONFERRED, so it reads in the useful direction: a sink that names it
+// requires it, while every plain `string` slot still accepts an owned value.
+// See examples/fail/owned_free_literal.yoop for the half that gets rejected.
+
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { owned } from "std/core/kinds.yoop";
+
+// PASSTHROUGH. Nothing is minted here - the value arrives carrying `owned`
+// and leaves carrying it, so no transition authority is required. Before the
+// passthrough rule this was rejected outright, which made it impossible to
+// wrap any owned-returning API.
+function forward(s: owned string): owned string {
+    return s;
+}
+
+// Passthrough through a local, which has to carry the marker in its own
+// annotation. A plain `let x: string` would DROP it, and the return would
+// then read as forgery.
+function buildGreeting(who: string): owned string {
+    let out: owned string = str.string_concat("hello, ", who);
+    return out;
+}
+
+// A sink that only accepts storage it is allowed to release.
+function release(s: owned string): void {
+    str.strFree(s);
+}
+
+function main(): int32 {
+    const built: owned string = buildGreeting("world");
+    printf("built [%s]\n", built);
+
+    const same: owned string = forward(built);
+    printf("forwarded [%s]\n", same);
+
+    // An owned string flows into every plain `string` slot unchanged: the
+    // marker constrains sinks that NAME it, nothing else. Both of these read
+    // the same storage `built` points at.
+    const borrowed: string = same;
+    printf("borrowed [%s] eq=%d\n", borrowed, str.string_eq(borrowed, "hello, world"));
+
+    release(built);
+
+    // padStart / padEnd now allocate on every path, including when the input
+    // is already wide enough. They used to hand back the input itself in that
+    // case, which made the result freeable only some of the time.
+    const padded: owned string = str.padStart("7", 4, "0");
+    const wide: owned string = str.padStart("longer", 3, "0");
+    printf("pad [%s] [%s]\n", padded, wide);
+    str.strFree(padded);
+    str.strFree(wide);
+
+    // The intrinsic is the one true mint site: it is the thing that calls the
+    // allocator, and being a bodyless extern it is never subject to the
+    // decl-authority check.
+    let buf: uint8[] = intr.heap_alloc(2);
+    buf[0] = 'h'; buf[1] = 'i';
+    const raw: owned string = intr.string_from_bytes_unchecked(buf);
+    intr.heap_free(buf);
+    printf("raw [%s]\n", raw);
+    str.strFree(raw);
+
+    return 0;
+}
