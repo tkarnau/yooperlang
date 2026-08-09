@@ -13,6 +13,7 @@
     "Debuggers"
   ],
   "activationEvents": [
+    "onLanguage:yoop",
     "onCommand:yoopiler.debugCurrentFile"
   ],
   "contributes": {

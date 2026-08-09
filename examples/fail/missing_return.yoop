@@ -1,0 +1,32 @@
+// Phase 10.E.3: a function with a value to return must return on every path.
+// Before this check existed all three of these compiled and trapped at
+// runtime with a bare SIGTRAP and no source location.
+
+// 1. An `if` with no `else` leaves a path with no return.
+function noElse(x: int32): int32 {
+    if (x > 0) {
+        return 1;
+    }
+}
+
+// 2. Only one arm of the `if` returns.
+function oneArm(x: int32): int32 {
+    if (x > 0) {
+        return 1;
+    } else {
+        printf("negative\n");
+    }
+}
+
+// 3. A conditional loop may not run at all, so a return inside it does not
+// cover the fallthrough path.
+function loopOnly(n: int32): int32 {
+    let i: int32 = 0;
+    while (i < n) {
+        return i;
+    }
+}
+
+function main(): int32 {
+    return noElse(1) + oneArm(1) + loopOnly(1);
+}

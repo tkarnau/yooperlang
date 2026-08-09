@@ -38,13 +38,16 @@ binding site (`scoped`, `pooled`) decide when the compiler forces the `wait`.
 ## 1. Files, modules, imports, and exports
 
 Every `.yoop` file is a module. Imports use **relative paths** by default; the
-`std/` prefix resolves against the bundled standard library.
+`std/` prefix resolves against the bundled standard library, and the `modules/`
+prefix against the program's own module folder (see below).
 
 ```js
 import { parse, lex } from "./lexer.yoop";
 import * as lex        from "./lexer.yoop";
 import { parse as p }  from "./ast.yoop";
 import "./init.yoop";                    // side-effect only
+
+import * as math from "modules/math";     // a module the program installed
 
 import { Vec } from "std/core/vec.yoop";  // type imports stay named
 import * as vec from "std/core/vec.yoop"; // value imports require namespace
@@ -67,6 +70,40 @@ export { parse, lex, Token };            // grouped at bottom of file
 ```
 
 No `default` exports. Explicit names only.
+
+### The `modules/` root
+
+A program may install modules it did not write. `modules/<name>` resolves against
+the nearest `modules` directory at or above the **importing file**:
+
+```text
+app/
+  src/main.yoop        import * as math from "modules/math";
+  modules/
+    math/              a directory module
+    rounding/          math's own dependency, flat beside it
+```
+
+Resolution then proceeds exactly as for `std/`: the path may name a directory
+module, a directory module nested under plain grouping directories
+(`modules/web/router`), or a single `.yoop` file (`modules/helper.yoop`).
+
+Three rules follow from anchoring on the importing file rather than the entry
+point:
+
+- **A module reaches its own dependencies through the same root.** `math` above
+  writes `import * as r from "modules/rounding"` and gets the program's copy. It
+  cannot tell, and does not care, that it was installed by someone else.
+- **Dependencies are flat: one copy of a name per program.** A module directory
+  carrying its own `modules/` directory is an error. Two copies would link (module
+  identity is the path) and then fail as two distinct nominal types.
+- **A module under development uses the same import line it will ship with.** The
+  module directory is the unit that ships; its own `modules/` folder is a sibling
+  used for development and is not published.
+
+There is no manifest, no fetch, and no version resolution: the directories are put
+there by hand. A module may carry an advisory `MODULE` file recording its version
+and what it was built against, which nothing in the compiler reads.
 
 ### Std imports must use the namespace form for values
 
@@ -1146,6 +1183,39 @@ continue;
 <!-- No `switch` in v2. Pattern-matching on tagged unions is a future addition once the
 error story hardens. (not true any more) -->
 
+### Every path must return
+
+A function whose return type is not `void` must return on **every** path.
+Falling off the end is a compile error:
+
+```js
+function classify(x: int32): int32 {
+    if (x > 0) {
+        return 1;
+    }
+}                                   // error: not every path returns a value
+```
+
+A `void` function is exempt - reaching the end *is* the return.
+
+The rule is **divergence**, not "the last statement is a return", and the same
+analysis decides whether a `? e { ... }` handler block is well-formed:
+
+- `return`, `break` and `continue` all diverge.
+- An `if` diverges only when it has an `else` and both arms diverge. `else if`
+  chains work by recursion, so the final `else` is what matters.
+- A `switch` diverges when it is exhaustive and every arm does, which is why an
+  arm-per-case `switch` needs no trailing `return` after it.
+- `while (true)` with no `break` reaching it diverges. Any other loop does not:
+  its condition may be false on entry, so the body might never run.
+- A block-owning kind's trailing block counts, so a `return` inside
+  `ephemeral allocatorScope(a) { ... }` covers the function.
+
+The analysis is deliberately conservative - it errs toward asking for an
+explicit `return` rather than accepting a path that has none. A `while` loop
+that provably never exits but is not spelled `while (true)` is the case where
+you may need to add an unreachable `return` to satisfy it.
+
 ---
 
 ## 11. Errors as values
@@ -1308,6 +1378,49 @@ still uses `Into<T>` as described above.
 
 A context string on a `?` whose `Err` variant carries no payload is an error -
 there is nothing to attach to.
+
+### Handling instead of propagating - `? e { ... }`
+
+A binding name plus a block after the `?` **handles** the failure at the call
+site rather than propagating it. The name binds the `Err` payload for the
+block's extent:
+
+```js
+const db = sqlite.open(path)? e {
+    return Result.Err { error: httpError(status(500), e) };
+};
+```
+
+This is the answer to an `Err` payload the enclosing function cannot accept -
+notably a `string` payload, which can carry no `Into` / `WithContext` impl
+because a primitive has no `implements` list. The block does the conversion in
+ordinary code, so no impl is involved.
+
+Two rules, and both are the point of the form:
+
+- **The enclosing function's return type does not matter.** Bare `?` requires
+  the enclosing function to itself return a fallible variant; the handler form
+  drops that requirement entirely, because nothing is being propagated. It is
+  legal in `main`, in a method returning a plain value, anywhere.
+- **The block must diverge on every path.** It runs *instead of* the expression
+  producing a value, so falling out the bottom would leave the binding it feeds
+  with nothing in it. `return`, `break` and `continue` all count - the rule is
+  divergence, not "ends in a return", which is what makes this legal:
+
+```js
+for row in rows {
+    const v = step(ref st)? e { continue; };   // skip this row, keep going
+}
+```
+
+A block that can fall through is a compile error reported at the block. The
+same divergence rule decides the missing-return check below, so the two agree
+by construction.
+
+The binding is required, not optional: a bare `?` followed by `{` would be
+ambiguous with a for-in body (`for x in items()? { ... }`), where the brace
+opens the loop. If the `Err` variant carries no payload there is nothing to
+bind, and the form is rejected - use a `switch`.
 
 ### Interaction with concurrency kinds
 
@@ -1753,7 +1866,9 @@ What this example demonstrates:
 - **Per-strategy loop keywords.** One `for … in` slot; the strategy is a trait method call (`xs.batched(4)`, `xs.parallel()`).
 - **Multiple-return-value ABI.** Destructuring is compile-time sugar over a returned struct.
 - **Generic user types.** Revisit after traits and kinds are stable.
-- **A package manager.** Relative-path imports only.
+- **A package manager.** No manifest, fetch, registry, or version resolution.
+  Relative paths, the `std/` root, and the program-owned `modules/` root cover
+  using third-party code; populating `modules/` is the developer's job.
 
 ---
 

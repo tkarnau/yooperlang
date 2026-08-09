@@ -783,3 +783,89 @@ describe("typecheck: async/await coloring", () => {
     assert.deepEqual(errors, []);
   });
 });
+
+// Dead-code detection. The analysis is unit-tested in diverge.test.js; these
+// cover the wiring - that it reaches the right blocks, spans the right text,
+// and lands in `warnings` rather than `errors`.
+describe("unreachable code is reported as a warning", () => {
+  const SRC = (body) => `function f(): int32 {\n${body}\n}\n`;
+
+  function warnOn(src) {
+    const { errors, warnings } = typecheckProgram(singleModule(src));
+    assert.deepEqual(errors, [], "expected a clean typecheck");
+    return { warnings };
+  }
+
+  it("flags the tail after a return, without failing the build", () => {
+    const { warnings } = warnOn(SRC("  return 1;\n  return 2;"));
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].severity, "warning");
+    assert.equal(warnings[0].code, "unreachable-code");
+    assert.match(warnings[0].message, /unreachable code/);
+  });
+
+  it("spans from the first dead statement to the end of the block", () => {
+    const src = SRC('  return 1;\n  printf("a\\n");\n  return 2;');
+    const { warnings } = warnOn(src);
+    const { pos, length } = warnings[0].sourceLoc;
+    // The exact text is what the editor dims, so assert on it rather than on
+    // offsets - an off-by-one here is a visibly wrong highlight.
+    assert.equal(src.slice(pos, pos + length).trim(), 'printf("a\\n");\n  return 2;');
+  });
+
+  it("anchors at the dead statement's first token, not its interior", () => {
+    // buildSourcedNode stamps a position PAST the first token, so a warning
+    // built from `sourceLoc` would start mid-statement. parseBlock's
+    // `startLoc` is what makes the span begin at the real start.
+    const src = SRC("  return 1;\n  let x: int32 = 2;");
+    const { warnings } = warnOn(src);
+    assert.equal(src.slice(warnings[0].sourceLoc.pos).startsWith("let x"), true);
+  });
+
+  it("says nothing about a block whose last statement is the diverging one", () => {
+    const { warnings } = warnOn(SRC("  return 1;"));
+    assert.deepEqual(warnings, []);
+  });
+
+  it("says nothing when only one branch of an if returns", () => {
+    const { warnings } = warnOn(
+      SRC("  if (1 > 0) {\n    return 1;\n  }\n  return 2;"),
+    );
+    assert.deepEqual(warnings, []);
+  });
+
+  it("reaches nested blocks, not just function bodies", () => {
+    const { warnings } = warnOn(
+      SRC("  if (1 > 0) {\n    return 1;\n    return 9;\n  }\n  return 2;"),
+    );
+    assert.equal(warnings.length, 1);
+  });
+
+  it("flags the tail after an exhaustive switch whose arms all return", () => {
+    // The idiom this exists to find: a defensive trailing `return` that the
+    // exhaustiveness check already made dead.
+    const { warnings } = warnOn(
+      "function f(b: bool): int32 {\n" +
+        "  switch (b) {\n" +
+        "    case true: { return 1; }\n" +
+        "    case false: { return 0; }\n" +
+        "  }\n" +
+        "  return -1;\n" +
+        "}\n",
+    );
+    assert.equal(warnings.length, 1);
+    assert.equal(warnings[0].code, "unreachable-code");
+  });
+
+  it("flags the tail after a `while (true)` with no break", () => {
+    const { warnings } = warnOn(
+      SRC('  while (true) {\n    printf("x\\n");\n  }\n  return 0;'),
+    );
+    assert.equal(warnings.length, 1);
+  });
+
+  it("stamps srcPath/moduleId so the LSP can attribute it to a file", () => {
+    const { warnings } = warnOn(SRC("  return 1;\n  return 2;"));
+    assert.equal(warnings[0].moduleId, "test");
+  });
+});

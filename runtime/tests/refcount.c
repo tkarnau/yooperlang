@@ -2,17 +2,23 @@
 #include "../yoop_runtime.h"
 #include <assert.h>
 #include <stdatomic.h>
+#include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
 
+// Mirrors the handle prefix laid out by codegen - including the two
+// runtime-owned slots this test never reads (see submit_one.c: the scheduler
+// writes through both on every step, so leaving them out corrupts the heap).
 struct fake_handle {
-    void (*thunk)(void*);
-    uint8_t state;
+    void (*thunk)(void*);   // offset 0
+    uint8_t state;          // offset 8
     char _pad[3];
-    int32_t refcount;
-    void* mutex;
-    void* cond;
-    int32_t result;
+    int32_t refcount;       // offset 12
+    void* mutex;            // offset 16
+    void* cond;             // offset 24
+    void* coro;             // offset 32
+    void* alloc_ctx;        // offset 40
+    int32_t result;         // offset 48 (compiler-owned slot)
 };
 
 static void thunk(void* h) {
@@ -22,6 +28,10 @@ static void thunk(void* h) {
 }
 
 int main(void) {
+    _Static_assert(offsetof(struct fake_handle, coro)      == 32, "coro@32");
+    _Static_assert(offsetof(struct fake_handle, alloc_ctx) == 40, "alloc_ctx@40");
+    _Static_assert(offsetof(struct fake_handle, result)    == 48, "result@48");
+
     yoop_runtime_init();
 
     // Pure refcount mechanics without a submit. yoop_task_alloc seeds rc=2.

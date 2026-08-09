@@ -1,0 +1,22 @@
+// The whole point of `owned`: a string literal lives in read-only memory, so
+// freeing one is a SIGABRT at runtime rather than a diagnostic. The conferred
+// marker turns it into a compile error instead.
+//
+// Also covers the subtler case: an owned value assigned into a PLAIN `string`
+// binding drops the marker, so it can no longer be freed. That is correct -
+// the binding's declared type is the authority, and a plain `string` is the
+// borrowed form.
+
+import * as str from "std/core/strings.yoop";
+
+function main(): int32 {
+    // A literal was never allocated. Rejected.
+    str.strFree("a literal");
+
+    // Allocated, but the binding declares the borrowed form, which drops the
+    // marker. Rejected too - annotate it `owned string` to keep it.
+    const dropped: string = str.string_concat("a", "b");
+    str.strFree(dropped);
+
+    return 0;
+}

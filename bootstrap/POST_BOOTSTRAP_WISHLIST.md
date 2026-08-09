@@ -8,6 +8,6 @@ We no longer want to make significant changes to the compiler while we're bootst
 
 Better inference for kinds and traits without needing to import as often
 
-### return on all paths analysis
+### return on all paths analysis - DONE PRE BOOTSTRAP
 
-Right now any function that has a return anywhere is a valid returning function, even if it is inside an if-statement and not a void function. Need to do some codepath analysis here.
+~~Right now any function that has a return anywhere is a valid returning function, even if it is inside an if-statement and not a void function. Need to do some codepath analysis here.~~

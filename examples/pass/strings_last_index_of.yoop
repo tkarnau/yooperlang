@@ -1,0 +1,52 @@
+// Regression fixture for std/core/bytes.yoop's `lastIndexOfSeq`.
+//
+// The loop started at `buf.len - needle.len` and ran `while (i > max)` where
+// `max` was that same value plus one, so the body never executed once and every
+// call reported "not found" (buf.len). Nothing failed loudly: `fs.dirName`
+// silently returned its own input, which is a path-walk that never terminates
+// and a wrong answer with no error attached. Found while walking parent
+// directories in tools/yoopdist.
+
+import * as str from "std/core/strings.yoop";
+import * as fs from "std/fs.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    const path = "/a/bb/ccc";
+
+    // The last separator, not the first - that distinction is the whole point.
+    printf("last=%zu first=%zu\n",
+           str.lastIndexOf(path, "/"),
+           str.string_index_of(path, "/"));
+
+    // Offset 0 has to stay reachable. `i` is usize, so a loop that decremented
+    // a start offset of zero would wrap instead of terminating.
+    printf("atZero=%zu\n", str.lastIndexOf("xy", "x"));
+
+    // Multi-byte needle, and one that runs to the very end of the haystack.
+    printf("multi=%zu tail=%zu\n",
+           str.lastIndexOf("abcXYabcXY", "abc"),
+           str.lastIndexOf("hello.yoop", ".yoop"));
+
+    // Absent needle reports the length, and a needle longer than the haystack
+    // takes the early exit rather than underflowing the start offset.
+    printf("absent=%zu tooLong=%zu\n",
+           str.lastIndexOf(path, "?"),
+           str.lastIndexOf("ab", "abcd"));
+
+    // The consumer that surfaced the bug: dirName must actually go up.
+    printf("dir=%s parent=%s\n", fs.dirName(path), fs.dirName(fs.dirName(path)));
+
+    // A path with NO separator returns itself rather than "" - lastIndexOf
+    // reports not-found as `len`, and slicing to `len` is the whole string.
+    // Pinned here because it is a live footgun: a parent-walk that trusts
+    // dirName to always shorten never terminates. Callers must compare the
+    // result to the input and stop when it does not change (which is what
+    // tools/yoopdist does).
+    printf("noParent=[%s]\n", fs.dirName("plain"));
+
+    return 0;
+}

@@ -1,0 +1,7 @@
+name     rounding
+version  1.0.0
+
+# Informational only. The compiler does not read, resolve, choose, or enforce
+# anything from this file - it is here so a consumer can see what they have.
+#
+# rounding has no dependencies of its own, so there is no `requires` block.

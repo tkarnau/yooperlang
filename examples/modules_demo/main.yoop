@@ -1,0 +1,59 @@
+// A program that uses a module out of its own `modules/` folder.
+//
+// The layout, and the whole idea:
+//
+//     examples/modules_demo/
+//       main.yoop            <- you are here
+//       modules/
+//         math/              <- installed module (a directory module)
+//           MODULE           <- advisory version info, read by humans only
+//           ints.yoop
+//           vec2.yoop
+//           math.test.yoop   <- tests, shipped with the module
+//         rounding/          <- math's own dependency, FLAT beside it
+//           MODULE
+//           rounding.yoop
+//
+// `modules/math` resolves by walking up from THIS file to the nearest `modules`
+// directory. Nothing was fetched and there is no manifest driving resolution -
+// the directories were simply put there.
+//
+// Dependencies are flat: `rounding` sits beside `math` rather than inside it,
+// so the program holds exactly one copy of each module. `math` reaches it
+// through the same root, with no idea it was installed by someone else.
+//
+// Run the tests that ship with the module:
+//     node src/yoopiler.js --test examples/modules_demo
+
+import { Vec2, vec2Add, vec2Dot, vec2Manhattan, vec2Snap } from "modules/math";
+import { clamp, gcd, lcm, mean } from "modules/math";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    const a: Vec2 = { x: 3, y: 4 };
+    const b: Vec2 = { x: 10, y: 20 };
+
+    const sum: Vec2 = vec2Add(a, b);
+    printf("add:       (%d, %d)\n", sum.x, sum.y);
+    printf("dot:       %d\n", vec2Dot(a, b));
+    printf("manhattan: %d\n", vec2Manhattan(a, b));
+
+    // vec2Snap is where the subdependency shows up: `math` calls
+    // `rounding.roundToMultiple`, which the program never names.
+    const grid: Vec2 = { x: 13, y: 27 };
+    const snapped: Vec2 = vec2Snap(grid, 10);
+    printf("snap:      (%d, %d)\n", snapped.x, snapped.y);
+
+    printf("gcd:       %d\n", gcd(0 - 12, 18));
+    printf("lcm:       %d\n", lcm(4, 6));
+    printf("clamp:     %d\n", clamp(42, 0, 10));
+
+    // Rounds rather than truncates, because `math` delegates to `rounding`.
+    const xs: int32[] = [1, 2];
+    printf("mean:      %d\n", mean(xs));
+
+    return 0;
+}

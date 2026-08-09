@@ -12,16 +12,26 @@ import path from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 
 import { RUNTIME_C, RUNTIME_SOURCES, runtimeLinkFlags } from "./runtimeBuild.js";
+import {
+  EXE_SUFFIX,
+  clangEnv,
+  lowerLinkFlag,
+  prebuiltRuntimeObjects,
+  resolveClang,
+  windowsClangArgs,
+} from "./toolchain.js";
 
 const repoRoot = path.resolve(import.meta.dirname, "..");
 const testsDir = path.join(repoRoot, "runtime", "tests");
 
 function buildAndRun(name) {
   const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_rt_"));
-  const bin = path.join(tmpDir, name);
-  const linkFlagArgs = runtimeLinkFlags().map((f) => `-l${f}`);
+  // Windows will not CreateProcess an extensionless file, so the binary has
+  // to be named with .exe up front rather than after the fact.
+  const bin = path.join(tmpDir, name + EXE_SUFFIX);
+  const linkFlagArgs = runtimeLinkFlags().flatMap(lowerLinkFlag);
   execFileSync(
-    "clang",
+    resolveClang(),
     [
       "-std=c11",
       "-O0",
@@ -29,14 +39,20 @@ function buildAndRun(name) {
       "-Wall",
       "-Wextra",
       "-Werror",
-      "-pthread",
-      ...RUNTIME_SOURCES,
+      // -pthread is a POSIX toolchain concept; the MSVC target rejects it and
+      // yoop_platform.h uses the Win32 primitives there anyway.
+      ...(process.platform === "win32" ? [] : ["-pthread"]),
+      // Prebuilt objects rather than the source list: the runtime is identical
+      // for all 11 of these programs, and recompiling it each time dominated
+      // the suite. See prebuiltRuntimeObjects for why this cannot go stale.
+      ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
       path.join(testsDir, `${name}.c`),
       ...linkFlagArgs,
       "-o",
       bin,
+      ...windowsClangArgs(),
     ],
-    { stdio: "pipe" },
+    { stdio: "pipe", env: clangEnv() },
   );
   const result = spawnSync(bin, [], { encoding: "utf8" });
   fs.rmSync(tmpDir, { recursive: true, force: true });

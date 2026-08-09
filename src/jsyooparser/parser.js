@@ -2581,6 +2581,26 @@ export function parse(src) {
         // ambiguous with subtraction, and a string can never continue an
         // expression, so this stays a zero-lookahead decision.
         tryOpNode.context = parseTryContext();
+        // Phase 10.E.3: `expr? e { ... }` - HANDLE the failure here instead
+        // of propagating it. `e` names the Err payload inside the block,
+        // which must diverge on every path (see diverge.js).
+        //
+        //   let db = sqlite.open(path)? e { return Result.Err { ... }; };
+        //
+        // The two-token shape `IDENT {` is what distinguishes this from the
+        // context form (a string literal) - an ordinary expression can never
+        // continue with a bare identifier, so this stays unambiguous. The
+        // binding is REQUIRED: a bare `? { ... }` would collide with a
+        // for-in body (`for x in items()? { ... }`), which is the same
+        // hazard `inForInIterExpr` exists for.
+        if (
+          tryOpNode.context === null &&
+          peek().tag === TokenTags.ident &&
+          peekAhead(1).tag === TokenTags.lcurly
+        ) {
+          tryOpNode.handlerBinding = parseIdentAsName();
+          tryOpNode.handlerBlock = parseBlock();
+        }
         node = tryOpNode;
         continue;
       }
@@ -4111,10 +4131,24 @@ export function parse(src) {
 
     // parse rest of statements
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
-      // just eat them for now...
-      node.body.push(parseStatement());
+      // `startLoc` is the statement's FIRST token, which `sourceLoc` is not:
+      // buildSourcedNode stamps `pos`, and `pos` is the offset PAST the
+      // lookahead token, so a statement built after consuming a token or two
+      // (`return 1;` -> the `;`, `let x: T` -> the `:`) points into its own
+      // middle. Good enough to name a line, useless as the start of a span.
+      // The unreachable-code warning needs a real one, so capture it here
+      // where the token is still in hand. Only blocks get this - it is the
+      // one place a statement list has a span to describe.
+      const startTok = peek();
+      const stmt = parseStatement();
+      stmt.startLoc = posToSourceLocation(src, startTok.start);
+      node.body.push(stmt);
     }
 
+    // Offset of the closing `}`, so a span can be measured to the end of the
+    // block rather than to the end of some statement (statements record no
+    // end position at all).
+    node.endPos = peek().start;
     expect(TokenTags.rcurly);
 
     return node;

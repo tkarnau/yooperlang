@@ -131,3 +131,44 @@ export kind pooled {
     requires Shared;
     refcounted retain release;
 }
+
+// ----- provenance --------------------------------------------------------
+
+// `owned` marks a value whose storage came from an allocator, as opposed to
+// one that borrows storage somebody else owns. It exists because a `string`
+// is a single pointer with nowhere to record where it came from: a literal
+// and a freshly built string have exactly the same type, and freeing the
+// wrong one is an abort rather than a diagnostic.
+//
+//     function strFree(s: owned string): void { ... }
+//
+//     strFree(str.string_concat("a", "b"));   // ok, the result is owned
+//     strFree("a literal");                   // compile error
+//
+// It is CONFERRED, so it reads in the useful direction: a sink that names it
+// requires it, and a plain `string` slot accepts an owned value happily. So
+// an owned string still passes to printf, to a comparison, to anything that
+// only reads. The marker only gets in the way at the one place it should -
+// a function claiming the right to release the storage.
+//
+// There is deliberately no `requires` / `appliedBy` pair. Those name a trait
+// impl as the authority for a transition, and no trait impl can be the
+// authority here: the only thing that genuinely mints owned storage is the
+// allocating intrinsic itself, which is a bodyless `extern "intrinsic"` decl
+// and therefore never subject to the decl-authority check. Ordinary code
+// reaches `owned` by passthrough (returning a value that already carries
+// it). Anything else - a function that returns a literal, or that launders
+// on one path and forges on another - fails with "declares no 'appliedBy'
+// clause", which is the correct answer.
+//
+// What `owned` does NOT do, so nobody expects it later: it is provenance
+// only. It does not force you to free, does not prevent a double free or a
+// use after free, and does not know WHICH allocator produced the value. For
+// storage you intend to release, `Text` in std/core/text.yoop carries its
+// allocator and is the sound vehicle; `owned` is how the older bare-string
+// API tells the truth about itself. See
+// plans/strings-ownership-and-ergonomics.md.
+export kind owned {
+    appliesTo binding parameter field return;
+    conferred;
+}

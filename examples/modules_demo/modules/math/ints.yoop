@@ -1,0 +1,55 @@
+module math;
+
+// The subdependency. `math` is itself installed in the program's modules/
+// folder, and it reaches its own dependency through that SAME root - the walk
+// from this file finds ../../modules, not anything math carries.
+import * as rounding from "modules/rounding";
+
+export function absInt(v: int32): int32 {
+    if (v < 0) {
+        return 0 - v;
+    }
+    return v;
+}
+
+export function clamp(v: int32, lo: int32, hi: int32): int32 {
+    if (v < lo) {
+        return lo;
+    }
+    if (v > hi) {
+        return hi;
+    }
+    return v;
+}
+
+export function gcd(a: int32, b: int32): int32 {
+    let x: int32 = absInt(a);
+    let y: int32 = absInt(b);
+    while (y != 0) {
+        const t: int32 = y;
+        y = x % y;
+        x = t;
+    }
+    return x;
+}
+
+export function lcm(a: int32, b: int32): int32 {
+    const g: int32 = gcd(a, b);
+    if (g == 0) {
+        return 0;
+    }
+    return absInt(a / g * b);
+}
+
+// The subdependency actually doing something: averaging ROUNDS rather than
+// truncating, so mean([1, 2]) is 2 and not 1. An empty input divides by zero,
+// which divNearest answers with 0.
+export function mean(xs: int32[]): int32 {
+    let sum: int32 = 0;
+    let n: int32 = 0;
+    for v in xs {
+        sum = sum + v;
+        n = n + 1;
+    }
+    return rounding.divNearest(sum, n);
+}

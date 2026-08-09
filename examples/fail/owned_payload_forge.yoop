@@ -1,0 +1,44 @@
+// The negative half of examples/pass/owned_payload.yoop. Every route into a
+// payload position is checked, in both directions.
+
+import * as str from "std/core/strings.yoop";
+import { Result } from "std/core/types.yoop";
+import { owned } from "std/core/kinds.yoop";
+
+variant Slot {
+    Held { text: owned string },
+    Empty,
+}
+
+// Forging into a GENERIC type argument. The decl-authority check is
+// top-level only (a `Result` is not itself owned), so the constructor field
+// is what has to be checked, or a caller would destructure this and free
+// read-only memory.
+function forgeGeneric(): Result<owned string, string> {
+    return Result.Ok { value: "a literal" };
+}
+
+// Forging into a CONCRETE payload field, where the marker comes from the
+// field's own annotation rather than a type argument.
+function forgeConcrete(): Slot {
+    return Slot.Held { text: "a literal" };
+}
+
+function main(): int32 {
+    switch (str.string_slice("hello", 0, 3)) {
+        case Result.Ok { value: v }: { str.strFree(v); }
+        // The Err payload is argument 1, a plain string. Not freeable.
+        case Result.Err { error: e }: { str.strFree(e); }
+    }
+
+    // A violation inside a switch arm. kindFlow read `stmt.value` /
+    // `stmt.cases`, which a SWITCH_STATEMENT does not have, so arms were
+    // never walked and this whole class of error was silently accepted.
+    let n: int32 = 1;
+    switch (n) {
+        case 1: { str.strFree("a literal in an arm"); }
+        default: { }
+    }
+
+    return 0;
+}

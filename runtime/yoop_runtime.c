@@ -8,10 +8,12 @@
 //   offset 16: yoop_mutex_t*   per-handle mutex (heap-allocated)
 //   offset 24: yoop_cond_t*    per-handle cond  (heap-allocated)
 //   offset 32: void*           coroutine handle (async task body)
-//   offset 40+: compiler-owned (result slot + args blob)
+//   offset 40: void*           allocator context (runtime-owned, may be NULL)
+//   offset 48+: compiler-owned (result slot + args blob)
 
 #include "yoop_runtime.h"
 #include "yoop_platform.h"
+#include "yoop_alloc.h"
 
 #include <errno.h>
 #include <stdatomic.h>
@@ -20,6 +22,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+
+#ifdef _WIN32
+  // _setmode / _fileno / _O_BINARY, for taking the standard streams out of
+  // the CRT's newline-translating text mode (see set_stdio_binary below).
+  #include <fcntl.h>
+  #include <io.h>
+#elif defined(__APPLE__)
+  // task_info / mach_task_self, for yoop_runtime_rss_bytes.
+  #include <mach/mach.h>
+  #include <unistd.h>
+#else
+  // sysconf(_SC_PAGESIZE), for turning /proc/self/statm pages into bytes.
+  #include <unistd.h>
+#endif
 
 #define A_LOAD_U8(p)      atomic_load_explicit((_Atomic uint8_t*)(p),  memory_order_acquire)
 #define A_STORE_U8(p, v)  atomic_store_explicit((_Atomic uint8_t*)(p), (v), memory_order_release)
@@ -43,6 +59,10 @@ static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; 
 // offset 32, immediately after the cond pointer, so every offset the
 // prefix accessors above hard-code is unchanged.
 static inline void**         handle_coro_slot (void* h) { return (void**)((char*)h + 32); }
+// The task's allocator context, swapped in and out by run_task_step. Owned by
+// yoop_alloc.c, which is why this is the only place the runtime touches it as
+// anything other than an opaque slot pointer.
+static inline void**         handle_ctx_slot  (void* h) { return (void**)((char*)h + 40); }
 
 // ---- queue ----------------------------------------------------------------
 
@@ -132,9 +152,27 @@ void yoop_runtime_set_coro_ops(yoop_coro_fn resume,
 // of an already-started coroutine. The step ends at the task's next
 // suspend point or at its completion; either way the worker is free
 // afterwards, which is the entire point of the async runtime.
+//
+// This is also where the ALLOCATOR context is swapped, for the same reason
+// tls_current_task is set here: it is the one place a task starts, resumes,
+// or hands its thread back. The ambient allocator is per-thread, but it
+// belongs to the task, and the three ways that went wrong before the swap
+// existed were (1) a parked task leaving its arena installed for whatever
+// the worker picked up next, (2) a resumed task finding a different worker's
+// allocator and silently allocating outside its own region, and (3) its
+// eventual popAllocator writing one worker's context onto another's.
+//
+// Note this covers the synchronous case too: yoop_task_wait drains the queue
+// re-entrantly on the calling thread, so a plain function holding an arena
+// would otherwise run an unrelated task inside it.
 static void run_task_step(void* handle, void (*thunk)(void*)) {
     void* prev = tls_current_task;
     tls_current_task = handle;
+
+    YoopCtxSave outer;
+    yoop_ctx_save(&outer);
+    yoop_ctx_load_task(handle_ctx_slot(handle));
+
     if (thunk) {
         // Start: the thunk calls the body, stashes the coroutine handle,
         // and calls yoop_task_settle itself.
@@ -146,6 +184,18 @@ static void run_task_step(void* handle, void (*thunk)(void*)) {
             yoop_task_settle(handle);
         }
     }
+
+    // Whatever is installed now belongs to the TASK, not to this worker.
+    // Reading `state` rather than hooking yoop_task_settle covers both paths
+    // uniformly: the thunk settles itself on the start path, and the resume
+    // path settles just above.
+    if (A_LOAD_U8(handle_state_ptr(handle)) != 0) {
+        yoop_ctx_discard_task(handle_ctx_slot(handle));
+    } else {
+        yoop_ctx_store_task(handle_ctx_slot(handle));
+    }
+    yoop_ctx_restore(&outer);
+
     tls_current_task = prev;
 }
 
@@ -195,9 +245,41 @@ static void join_worker(yoop_thread_t* t) {
 // lifecycle and prevents windows from appearing.
 static int n_workers_target = 0;
 
+// Windows only: take stdout/stderr out of the CRT's text mode.
+//
+// By default the MSVC CRT opens the standard streams in text mode, which
+// rewrites every '\n' the program emits into "\r\n" on its way out. That is
+// wrong for Yooperlang twice over. Semantically, `printf("a\nb")` is defined
+// to write the bytes the program named - a language that can write bytes to
+// stdout cannot have the CRT silently inserting extra ones, which would
+// corrupt any binary payload. Practically, it made a compiled program's
+// output differ from the identical program on macOS/Linux for no reason a
+// user could see, which is exactly the portability seam the language exists
+// to hide. Go and Rust both write their standard streams in binary mode for
+// the same reasons.
+//
+// This does not stop Windows consoles from rendering the output correctly -
+// they treat a bare LF as a newline. It only stops the translation layer.
+static void set_stdio_binary(void) {
+#ifdef _WIN32
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+#endif
+}
+
 void yoop_runtime_init(void) {
     init_lock();
     if (g_rt.initialized) { init_unlock(); return; }
+
+    // Before anything can print. Cheap and idempotent, and this is the one
+    // function codegen guarantees runs at the top of every program's main.
+    set_stdio_binary();
+
+    // Same reasoning for Winsock: it must be started before the first socket
+    // call in the process, and std/net reaches sockets through paths that do
+    // not otherwise pass through the runtime. Doing it here means a yoop
+    // program never has to think about it. No-op on POSIX.
+    yoop_net_startup();
 
     int n = yoop_cpu_count();
     const char* env = getenv("YOOP_NUM_WORKERS");
@@ -536,6 +618,10 @@ void yoop_task_release(void* handle) {
     int32_t prev = A_DEC_I32(handle_rc_ptr(handle));
     if (prev == 1) {
         yoop_task_free_sync_pair(handle);
+        // Normally already gone - run_task_step discards it the moment the
+        // task finishes. This catches a task that suspended with a context
+        // installed and was then abandoned rather than resumed.
+        yoop_ctx_discard_task(handle_ctx_slot(handle));
         free(handle);
     }
 }
@@ -739,5 +825,112 @@ uint64_t yoop_wall_ns(void) {
     struct timespec ts;
     clock_gettime(CLOCK_REALTIME, &ts);
     return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+#endif
+}
+
+// ---- process + pool introspection ----------------------------------------
+//
+// The surface behind std/runtime.yoop. Two jobs: let a program size the
+// worker pool from source instead of only from YOOP_NUM_WORKERS, and give
+// it the handful of numbers a service is expected to be able to report
+// about itself.
+
+// `yoop_cpu_count` is a `static inline` in yoop_platform.h, so it is not a
+// linkable symbol. This is the exported view of it.
+int yoop_runtime_cpu_count(void) {
+    return yoop_cpu_count();
+}
+
+// Once the pool is spawned `n_workers` is the truth; before that, the
+// target is what the pool WILL be.
+int yoop_runtime_worker_count(void) {
+    int n = g_rt.n_workers;
+    return n > 0 ? n : n_workers_target;
+}
+
+// Resize the pool target. Workers are spawned lazily on the first task
+// submit, so this only takes effect while none exist yet - which is the
+// honest contract, since shrinking a live pool would mean stopping threads
+// that may be mid-task. Returns 1 if the new target was accepted, 0 if the
+// pool is already running (or `n` is nonsense).
+int yoop_runtime_set_worker_count(int n) {
+    if (n < 1) return 0;
+    int ok = 0;
+    yoop_mutex_lock(&g_rt.queue_mu);
+    if (!g_rt.workers) {
+        n_workers_target = n;
+        ok = 1;
+    }
+    yoop_mutex_unlock(&g_rt.queue_mu);
+    return ok;
+}
+
+// ---- shared 64-bit counters ----------------------------------------------
+//
+// Worker threads share one address space, so a counter touched from more
+// than one of them needs a read-modify-write that cannot lose an update.
+// These take an ordinary `ref uint64` from yoop (which lowers to a plain
+// pointer) rather than introducing an opaque handle type, so the storage
+// stays an ordinary field the owner can lay out as it likes.
+//
+// acq_rel on the RMWs: a counter is frequently published alongside other
+// state ("bump the total, then read the slot"), and relaxed would let
+// those reorder across it.
+
+uint64_t yoop_atomic_add_u64(uint64_t* p, uint64_t delta) {
+    return atomic_fetch_add_explicit((_Atomic uint64_t*)p, delta, memory_order_acq_rel) + delta;
+}
+
+uint64_t yoop_atomic_sub_u64(uint64_t* p, uint64_t delta) {
+    return atomic_fetch_sub_explicit((_Atomic uint64_t*)p, delta, memory_order_acq_rel) - delta;
+}
+
+uint64_t yoop_atomic_load_u64(uint64_t* p) {
+    return atomic_load_explicit((_Atomic uint64_t*)p, memory_order_acquire);
+}
+
+void yoop_atomic_store_u64(uint64_t* p, uint64_t v) {
+    atomic_store_explicit((_Atomic uint64_t*)p, v, memory_order_release);
+}
+
+// Compare-and-swap. Returns 1 on success; on failure writes the observed
+// value back through `expected` so a retry loop needs no second load.
+int yoop_atomic_cas_u64(uint64_t* p, uint64_t* expected, uint64_t desired) {
+    return atomic_compare_exchange_strong_explicit(
+        (_Atomic uint64_t*)p, expected, desired,
+        memory_order_acq_rel, memory_order_acquire) ? 1 : 0;
+}
+
+// ---- resident set size ---------------------------------------------------
+//
+// Bytes of physical memory the process currently occupies - the number a
+// container's memory limit is enforced against, and the one worth graphing
+// during a load test. Returns 0 where it cannot be determined rather than
+// guessing.
+uint64_t yoop_runtime_rss_bytes(void) {
+#if defined(_WIN32)
+    // Would need PSAPI (GetProcessMemoryInfo) and the psapi link flag.
+    // Not wired up; callers get 0 and should treat it as "unavailable".
+    return 0;
+#elif defined(__APPLE__)
+    // mach_task_basic_info reports resident_size directly.
+    mach_task_basic_info_data_t info;
+    mach_msg_type_number_t count = MACH_TASK_BASIC_INFO_COUNT;
+    if (task_info(mach_task_self(), MACH_TASK_BASIC_INFO,
+                  (task_info_t)&info, &count) != KERN_SUCCESS) {
+        return 0;
+    }
+    return (uint64_t)info.resident_size;
+#else
+    // /proc/self/statm field 2 is the resident set in PAGES.
+    FILE* f = fopen("/proc/self/statm", "r");
+    if (!f) return 0;
+    unsigned long total_pages = 0, rss_pages = 0;
+    int got = fscanf(f, "%lu %lu", &total_pages, &rss_pages);
+    fclose(f);
+    if (got != 2) return 0;
+    long page = sysconf(_SC_PAGESIZE);
+    if (page <= 0) return 0;
+    return (uint64_t)rss_pages * (uint64_t)page;
 #endif
 }

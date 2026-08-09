@@ -1,0 +1,37 @@
+module rounding;
+
+// rounding - integer division that rounds instead of truncating.
+//
+// A deliberately tiny module. It exists so that `math` has a dependency of its
+// own, which is what makes this example show a SUBDEPENDENCY rather than one
+// flat import: main.yoop imports `modules/math`, and `math` imports
+// `modules/rounding` through the same program-owned root.
+
+// Integer division rounded to nearest, halves away from zero.
+//
+// Returns 0 for a zero divisor rather than trapping. Callers here are averaging
+// small counts, and a divide-by-zero in an example program is noise rather than
+// a lesson.
+export function divNearest(a: int32, b: int32): int32 {
+    if (b == 0) {
+        return 0;
+    }
+    // Peel the signs off recursively so the rounding step below only ever sees
+    // two non-negative operands. Doing it with a sign flag instead needs
+    // boolean juggling that obscures the one line that matters.
+    if (a < 0) {
+        return 0 - divNearest(0 - a, b);
+    }
+    if (b < 0) {
+        return 0 - divNearest(a, 0 - b);
+    }
+    return (a + b / 2) / b;
+}
+
+// Round `v` to the nearest multiple of `step`.
+export function roundToMultiple(v: int32, step: int32): int32 {
+    if (step == 0) {
+        return v;
+    }
+    return divNearest(v, step) * step;
+}

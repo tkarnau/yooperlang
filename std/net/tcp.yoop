@@ -62,9 +62,11 @@ function toIoOutcome(r: IoResult): IoOutcome {
 
 export type TcpListener implements Disposable propagates<disposable> {
     socket: Socket,
-    bound_port: int32,    // remembered for diagnostics; the kernel may have
-                          // assigned this if port=0 was passed in (not yet
-                          // surfaced - we use the value the caller passed)
+    // The port the socket is ACTUALLY bound to, read back from the kernel
+    // rather than echoing what the caller asked for. That distinction only
+    // matters when the caller passes port 0 to mean "any free port" - then
+    // this is the one the kernel picked, and it is the only way to find out.
+    bound_port: int32,
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
     }
@@ -82,6 +84,11 @@ export type ListenResult implements Disposable propagates<disposable> {
 // state. backlog is the maximum pending-connection queue length passed
 // to listen(). The returned listener owns the socket; the error path
 // leaves a TcpListener with fd=-1 (disposes are no-ops).
+//
+// Pass port 0 to let the kernel choose any free port, then read
+// `result.listener.bound_port` to find out which one it picked. That is the
+// collision-free way to listen when several programs (or several tests) run at
+// once - nobody has to agree a fixed port up front.
 export function tcp_listen(host: string, port: int32, backlog: int32): ListenResult propagates<disposable> {
     let r: Result<c_int, string> = ffi_listen(host, port, backlog);
     let fd: c_int = -1;
@@ -90,8 +97,14 @@ export function tcp_listen(host: string, port: int32, backlog: int32): ListenRes
         case Result.Ok { value: ok_fd }: { fd = ok_fd; }
         case Result.Err { error: e }: { err_msg = e; }
     }
-    let bound: int32 = port;
-    if (fd < 0) { bound = 0; }
+    // Ask the kernel what it actually bound, rather than echoing the request.
+    // Identical to `port` for a fixed port, and the whole point for port 0.
+    let bound: int32 = 0;
+    if (fd >= 0) {
+        let actual: c_int = ffiBoundPort(fd);
+        if (actual >= 0) { bound = int32(actual); }
+        else { bound = port; }
+    }
     return {
         listener: { socket: { fd: fd }, bound_port: bound },
         error: err_msg,

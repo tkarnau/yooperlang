@@ -1,0 +1,81 @@
+module simplehttp;
+
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Into, WithContext } from "std/core/traits.yoop";
+import * as http, { Handler, HandleOutcome, HttpError, Dispatcher, StatusCode } from "std/http";
+import * as tcp from "std/net";
+import * as sqlite from "std/db/sqlite";
+
+const DB_PATH: string = "names.db";
+
+type FetchHandler implements Handler {
+  greeting: string,
+  function handle(ref self, ref req: http.Request, ref resp: http.Response): HandleOutcome {
+    // One call sets the status, the Content-Type, and the body.
+    http.respondText(ref resp, http.ok(), self.greeting);
+    return HandleOutcome.Ok;
+  }
+}
+
+type SaveHandler implements Handler {
+  name: string,
+  description: string,
+  function handle(ref self, ref req: http.Request, ref resp: http.Response): HandleOutcome {
+    // save 
+    return HandleOutcome.Ok;
+  }
+}
+
+type SqlHttpServerError implements (Into<HttpError> WithContext<HttpError>) {
+  message: string,
+  function withContext(ref self, context: string): HttpError {
+    return { status: http.status(500), message: `${context}: ${self.message}` };
+  }
+  function into(ref self): HttpError {
+    return { status: http.status(500), message: `${self.message}` };
+  }
+}
+
+export async run(): Result<int32, HttpError> {
+
+  // set up sqlite
+  disposable db = sqlite.open(DB_PATH) ? e {
+    return Result.Err { error: { status: http.status(500), message: e }};
+  };
+  
+
+  // host, port, backlog
+  // backlog is the maximum pending-connection queue length
+  // backlog is passed directly to C function -> "listen" call in sys/socket.h
+  let disposable lr: tcp.ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128) {
+    // there is no try/catch in this language.
+    // explicitly inspect the `error` field on the disposable result.
+    if (lr.error.len > 0) {
+      return Result.Err { error: http.errIo(lr.error) };
+    }
+    let handler: FetchHandler = { greeting: "Hello, World!\n" };
+    disposable r: http.Router = http.routerNew();
+    // Dispatcher.from(ref handler) is a function pointer with a defined life
+    // tied to the handler itself
+    // it is like a dynamic shaped callback, and there are no closures.
+    http.routerGet(ref r, "/hello", Dispatcher.from(ref handler));
+    
+    printf(`router listening on 127.0.0.1:18080\n`);
+    let d: Dispatcher = Dispatcher.from(ref r);
+
+    // n=0: serve forever. Switch to a positive N to exit after N requests
+    switch (await http.serveDefault(ref lr.listener, ref d, 0)) {
+      case Result.Ok { value: n }: {
+        printf(`served=${n}\n`);
+        return Result.Ok { value: n };
+      }
+      case Result.Err { error: e }: {
+        printf(`server stopped: ${e}\n`);
+        return Result.Err { error: e };
+      }
+    }
+  }
+
+  return Result.Ok { value: 0 };
+}

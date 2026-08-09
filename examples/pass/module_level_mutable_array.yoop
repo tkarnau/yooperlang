@@ -1,0 +1,46 @@
+// Regression: two ways a module-level array binding used to go wrong.
+//
+// 1. A mutable module-level array LITERAL had its backing buffer emitted as
+//    `private unnamed_addr constant`, which lands in a read-only section.
+//    The first `counters[i] = v` segfaulted with no diagnostic. It also made
+//    two same-valued mutable arrays eligible for linker merging, so writing
+//    one would have shown up in the other.
+// 2. A module-level binding initialized by a generic INTRINSIC call
+//    (`intr.heap_alloc(n)`) crashed the compiler outright: the intrinsic has
+//    no yoop body, so the comptime folder reached `lowerFunction` with a null
+//    AST and threw a TypeError before codegen ever ran.
+//
+// A `const` array must still get the read-only, mergeable form - that is
+// correct for it, and `enum<string>` equality depends on the same interning.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+let counters: int32[] = [0, 0, 0, 0];
+let alsoZeros: int32[] = [0, 0, 0, 0];   // same initial bytes: must NOT alias
+let scratch: int32[] = intr.heap_alloc(4);
+const frozen: int32[] = [7, 7, 7, 7];
+
+function main(): int32 {
+    for (let i: usize = 0; i < 4; i += 1) {
+        counters[i] = int32(i) * 10;
+        scratch[i] = int32(i) + 100;
+    }
+    printf("counters=%d,%d,%d,%d\n",
+        counters[0], counters[1], counters[2], counters[3]);
+    printf("alsoZeros=%d,%d,%d,%d\n",
+        alsoZeros[0], alsoZeros[1], alsoZeros[2], alsoZeros[3]);
+    printf("scratch=%d,%d,%d,%d\n",
+        scratch[0], scratch[1], scratch[2], scratch[3]);
+    printf("frozen=%d,%d\n", frozen[0], frozen[3]);
+    return 0;
+}
+
+// expected output:
+// counters=0,10,20,30
+// alsoZeros=0,0,0,0
+// scratch=100,101,102,103
+// frozen=7,7

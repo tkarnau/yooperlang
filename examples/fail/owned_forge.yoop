@@ -1,0 +1,27 @@
+// `owned` cannot be forged. The passthrough rule lets a function DECLARE a
+// conferred kind when the value it returns already carries one; it does not
+// let a function mint one out of nothing.
+//
+// `owned` names no `requires` / `appliedBy` pair, deliberately - no trait
+// impl is the authority for it, because the only thing that genuinely mints
+// owned storage is the allocating intrinsic. So every route below fails at
+// the decl-authority check.
+
+import { owned } from "std/core/kinds.yoop";
+
+// Forgery: a literal was never allocated, so this claims a capability the
+// value does not have.
+function fake(): owned string {
+    return "x";
+}
+
+// Mixed paths: laundered on one, forged on the other. Passthrough requires
+// EVERY return to carry the kind, precisely so this cannot slip through.
+function sneaky(s: owned string, flag: bool): owned string {
+    if (flag) { return s; }
+    return "forged";
+}
+
+function main(): int32 {
+    return 0;
+}
