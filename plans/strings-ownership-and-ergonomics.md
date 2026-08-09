@@ -19,8 +19,19 @@ leaks into a class of silent use-after-free, so it lands last.
   [text_basics.yoop](../examples/pass/text_basics.yoop) and
   [text_arena.yoop](../examples/pass/text_arena.yoop). As-built notes are in
   the S3 section below.
-- **S1 (conferred passthrough): not started.** Prerequisite for S2.
-- **S2 (`owned` marker kind): not started.**
+- **S1 (conferred passthrough): LANDED.**
+  [kindFlow.js](../src/jsyooptypecheck/kindFlow.js). Fixes an asymmetry that
+  bit `cleared` too, not just `owned`.
+- **S2 (`owned` marker kind) + S2.1 (markers through type arguments and
+  payload bindings): LANDED.** Kind in
+  [kinds.yoop](../std/core/kinds.yoop), mint site in
+  [intrinsics.yoop](../std/core/intrinsics.yoop), `strFree` plus annotated
+  returns in [strings.yoop](../std/core/strings.yoop). Fixtures
+  [owned_string.yoop](../examples/pass/owned_string.yoop),
+  [owned_free_literal.yoop](../examples/fail/owned_free_literal.yoop),
+  [owned_forge.yoop](../examples/fail/owned_forge.yoop),
+  [owned_payload.yoop](../examples/pass/owned_payload.yoop),
+  [owned_payload_forge.yoop](../examples/fail/owned_payload_forge.yoop).
 - **S4 (`ctx_alloc` routing): not started.** `Text` already allocates through
   the context, so the arena and temp-reset payoff is available today for
   anything built on `Text`. What S4 adds is the same for bare `string`.
@@ -88,7 +99,7 @@ So: `owned string` is the cheap incremental win over the existing API, and a
 new `Text` type is the deep fix. They are complementary, not competing, and
 the plan does both.
 
-## Phase S1: give conferred kinds a passthrough rule
+## Phase S1: give conferred kinds a passthrough rule (LANDED)
 
 A prerequisite, and a fix to an existing asymmetry rather than new surface.
 
@@ -117,18 +128,36 @@ existing `authorizedAs` check otherwise. That keeps the anti-forgery property
 intact (you still cannot mint K from a literal or a fresh struct) while
 letting a wrapper forward one.
 
-**Acceptance**: `forward` above compiles; a `function fake(): owned string
-{ return "x"; }` still errors; the existing `clearance_marker` fixture is
-unchanged; a new fixture covers the forwarding case.
+### As built: where the check runs
 
-**Risk**: the check becomes body sensitive where it was signature only. Keep
-it to `RETURN_STATEMENT` values so it stays a syntactic walk, not an
-analysis.
+`isConferredPassthrough(k)` in
+[kindFlow.js](../src/jsyooptypecheck/kindFlow.js), with two details that were
+not obvious from the sketch:
 
-## Phase S2: the `owned` marker kind
+- **The conferred half of the authority check had to move AFTER the body
+  walk.** `bindingMarkers` holds only the parameters until `walkStmt`
+  populates the locals, so a check running up front sees `return out;` as
+  unmarked whenever `out` is a local. Return values are collected into
+  `returnValueNodes` during the walk and inspected afterwards. The
+  restrictive half stayed where it was, since it reads only the signature and
+  moving it would have reshuffled diagnostic ordering for no gain.
+- **An empty return list is not vacuous passthrough.** With no returns to
+  inspect there is nothing establishing that the kind came from anywhere, so
+  `returnValueNodes.length === 0` answers false rather than true.
+
+"Every return", not "any return", is what stops the mixed-path forgery in
+[owned_forge.yoop](../examples/fail/owned_forge.yoop): laundered on one
+branch and forged on the other is still forging.
+
+Verified: `forward` compiles; forging from a literal still errors; the
+mixed-path case still errors; all ten pre-existing clearance fixtures pass
+unchanged, including `clearance_fake_confer` (the free-function conferrer),
+which is the anti-forgery property this rule had to preserve.
+
+## Phase S2: the `owned` marker kind (LANDED)
 
 With S1 in place this is almost entirely declaration work. The sink half
-already works today with no compiler change at all. Verified:
+already worked with no compiler change at all. Verified:
 
 ```text
 parameter 's' of 'strFree' requires kind 'owned' but the value does not
@@ -152,37 +181,131 @@ intrinsics that literally call the allocator, plus passthrough from S1. A
 function that tries to fabricate it gets the "declares no 'appliedBy'
 clause" error, which is the correct answer.
 
-**The mint site**: annotate `string_from_bytes_unchecked` in
-[std/core/intrinsics.yoop](../std/core/intrinsics.yoop) as returning
+**The mint site**: `string_from_bytes_unchecked` in
+[std/core/intrinsics.yoop](../std/core/intrinsics.yoop) is annotated
 `owned string`. Extern blocks have no body, so `runKindFlow` returns early
-and the authority check never runs on them. Confirm that `calleeInfo`
-resolves a namespaced extern call (`intr.string_from_bytes_unchecked(...)`)
-to its decl; if it does not, that is the one real code change in this phase.
+and the authority check never runs on them.
 
-**The free site**: add `strFree(s: owned string): void` to
-[std/core/strings.yoop](../std/core/strings.yoop). This is the first
-sanctioned way to release a string.
+**The one real code change**, which the plan flagged as a maybe and which
+turned out to be needed: `funcDeclsByModule` in
+[typecheck.js](../src/jsyooptypecheck/typecheck.js) only collected
+`FUNCTION_DECL`, so `calleeInfo` resolved a namespaced intrinsic call to
+null and the marker was silently dropped at every call site. It now collects
+`EXTERN_FUNCTION_DECL` from extern blocks first, letting an ordinary
+function of the same name win.
 
-**Annotating std**: mark the returns that allocate. `string_concat`,
-`string_concat_all`, `string_slice`'s Ok payload, `padStart` / `padEnd`.
-Leave borrowed returns plain: `env.argAt`, header lookups, anything that
-hands back a slice of a buffer someone else owns.
+**The free site**: `strFree(s: owned string): void` in
+[strings.yoop](../std/core/strings.yoop), the first sanctioned way to
+release a string.
 
-Two things will fall out of this immediately, and both are the point:
+### What annotating std actually surfaced
 
-- `sliceFrom` will not compile. It returns owned on one path and a literal
-  on the other. It has to pick: either return `Result` and stop swallowing
-  the error, or return `string_concat("", "")` on the failure path so both
-  paths allocate. That is a real latent bug the annotation surfaces.
-- `padStart` / `padEnd` return their input unchanged when it is already wide
-  enough, so they are mixed provenance too, and they leak every intermediate
-  in the loop besides.
+- **`padStart` / `padEnd` were both mixed-provenance AND leaky**, exactly as
+  predicted. They returned the input itself when it was already wide enough,
+  and concatenated in a loop, abandoning one heap string per repetition.
+  Both are rewritten to size the result up front and allocate once, and to
+  return fresh storage on every path. Whole-`fill` repetition (so a
+  multi-byte fill can overshoot `width`) is preserved.
+- **`sliceFrom` returned a malloc'd string on the Ok path and the literal
+  `""` on the Err path.** The Err path now allocates too, so freeing the
+  result is no longer a coin flip. It could NOT be annotated `owned` though,
+  for the reason in the next section.
+- **A plain `string` binding drops the marker, and that is correct but
+  needs saying.** Inside `string_concat` the local had to become
+  `let result: owned string = ...` or the return read as forgery. Callers
+  hit the same thing: `const a: string = str.padStart(...)` then
+  `str.strFree(a)` is rejected. The binding's declared type is the
+  authority, and plain `string` is the borrowed form.
+
+### Known gaps
+
+- **Writing `owned string` costs an import.** The kind has to be in scope,
+  so user code needs `import { owned } from "std/core/kinds.yoop";`. Not
+  wrong, but it is friction on the annotation we most want people to write.
+
+The generic-type-argument and payload-binding gaps that were listed here are
+closed; see S2.1 below.
+
+## Phase S2.1: markers through type arguments and payload bindings (LANDED)
+
+The gap S2 left: a marker could not survive a fallible constructor. The owned
+value goes out inside a `Result` and only becomes reachable again after a
+`switch` destructures it, and neither half of that round trip carried
+markers. `string_slice` and `sliceFrom` were the two functions it blocked.
+
+### A marker set became a tree
+
+`emptyMarkers()` now carries `args`, mirroring the annotation's `typeArgs`.
+`Result<owned string, string>` holds nothing at the top level and `owned` at
+`args[0]`, and `checkBound` recurses positionally, so
+`Result<tainted X, E>` flowing into a plain `Result<X, E>` slot is caught the
+same way the bare case always was.
+
+### Destructuring resolves from either direction
+
+`payloadFieldMarkers` handles both, because the two payload shapes keep their
+markers in different places:
+
+- **Generic payload** (`Ok { value: T }`): map field -> type param -> type
+  argument index through `registry.genericDeclById`. It has to be the GENERIC
+  decl - instantiation has already substituted `T` away, so the concrete
+  variant type only knows the field is a `string`, not which parameter it
+  came from.
+- **Concrete payload** (`Case { f: owned string }`): read the field's
+  annotation off the VARIANT_DECL AST, reached through a `resolveVariantDecl`
+  lookup built in pass D alongside `funcDeclsByModule`. A variant TYPE keeps
+  only resolved field types, with no annotations to read.
+
+(A VARIANT_DECL's case list is `variants`. `cases` belongs to ENUM_DECL, and
+getting that wrong silently returns no markers rather than failing.)
+
+### The forgeable hole this opened, and the fix
+
+The decl-authority check is deliberately TOP-LEVEL: it asks what the function
+hands back, and a `Result` is not itself owned. So annotating a return
+`Result<owned string, string>` triggers no authority check at all, and
+nothing would have stopped a body from building `Ok { value: "a literal" }`
+and handing it out as owned - the caller destructures it and frees read-only
+memory.
+
+`checkReturnedConstructor` closes that: at a `return Variant.Case { f: X }`
+the constructor field is a slot, and the return annotation's matching type
+argument (or the field's own annotation, for a concrete payload) is what it
+must satisfy. Still open: the same check at slots other than a `return` - a
+binding initializer or call argument taking a variant literal.
+
+### Companion bug: switch statements were never walked
+
+`runKindFlow` read `stmt.value` and `stmt.cases`. A `SWITCH_STATEMENT`
+carries `scrutinee`, `arms` and `defaultArm` (arms hold `patterns` + `body`).
+The keys never matched, so **no marker check has ever run inside a switch
+arm**. Verified before the fix: `strFree("a literal")` inside an arm compiled
+clean while the identical call one line outside was rejected. Found by
+probing the real AST shapes rather than by reading the walk, which looks
+correct until you check the node it is walking.
+
+Fixing it surfaced no violations anywhere in the tree, which is expected
+rather than reassuring: nothing outside these new annotations uses markers
+yet.
+
+### Verified: S2.1
+
+- `Result<owned string, string>`'s Ok payload arrives owned and is freeable;
+  the Err payload is a plain string and is not.
+- `sliceFrom` now declares `owned string`, reaching it by passthrough on both
+  arms - one from the payload, one by allocating.
+- A concrete `variant Slot { Held { text: owned string } }` payload binding
+  is freeable, and forging a literal into it is rejected.
+- All four forgery routes rejected in
+  [owned_payload_forge.yoop](../examples/fail/owned_payload_forge.yoop).
+- Full suite green (999 tests).
 
 **What `owned` does NOT do.** Worth writing down so nobody expects it later:
 it is provenance only. It does not force you to free, does not prevent a
 double free, does not prevent use after free, and does not know which
-allocator produced the value. It makes `strFree` safe to call on the right
-things. That is all, and it is still worth having.
+allocator produced the value (`strFree` releases through raw `free`
+regardless). It makes `strFree` safe to call on the right things. That is
+all, and it is still worth having.
 
 ## Phase S3: `Text`, and the ergonomics (LANDED)
 
@@ -199,7 +322,7 @@ everything else follows from it:
 That is `&str` and `String`, and it is the only split where the allocator
 travels with the value.
 
-### As built
+### As built: the type
 
 ```yoop
 export type Text implements Disposable propagates<disposable> {
@@ -281,7 +404,7 @@ them say it, which is the papercut that started this.
 pretending to be Unicode case folding, which is locale dependent and can
 change a string's length.
 
-### Verified
+### Verified: S3
 
 - All four UTF-8 widths encode and decode: `pushChar` of U+0041, U+00E9,
   U+20AC, U+1F600 gives 10 bytes / 4 chars, and `Chars` yields exactly

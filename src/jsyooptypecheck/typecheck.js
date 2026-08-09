@@ -3745,6 +3745,21 @@ export function typecheckProgram(modules) {
   const funcDeclsByModule = new Map();
   for (const m of modules) {
     const t = new Map();
+    // Extern declarations go in FIRST so an ordinary function of the same
+    // name wins. They belong in here because a marker kind's only
+    // unimpeachable source is a bodyless decl: `runKindFlow` returns early on
+    // anything with no body, so the decl-authority check never runs on an
+    // extern, which is exactly what makes the allocating intrinsic the
+    // authority for `owned` (see plans/strings-ownership-and-ergonomics.md).
+    // Without this the marker on `string_from_bytes_unchecked` would be
+    // silently dropped at every call site.
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
+      for (const ext of d.decls ?? []) {
+        if (ext.kind === ASTNodeKind.EXTERN_FUNCTION_DECL) t.set(ext.name, ext);
+      }
+    }
     for (const decl of m.ast.body) {
       const d = innerDecl(decl);
       if (d.kind === ASTNodeKind.FUNCTION_DECL) t.set(d.name, d);
@@ -3758,6 +3773,25 @@ export function typecheckProgram(modules) {
     if (!kindTable) return null;
     return { decl, kindTable };
   };
+
+  // Variant DECLS by (module, name), for kindFlow's payload-destructuring
+  // rule. A variant TYPE keeps only resolved field types, so a concrete
+  // payload annotation (`Case { f: owned string }`) is only readable from the
+  // AST. Generic payloads go the other way, through the registry - see
+  // `payloadArgIndex` in kindFlow.js.
+  const variantDeclsByModule = new Map();
+  for (const m of modules) {
+    const t = variantDeclsByModule.get(m.id) ?? new Map();
+    for (const decl of m.ast.body) {
+      const d = innerDecl(decl);
+      if (d.kind === ASTNodeKind.VARIANT_DECL && d.name) t.set(d.name, d);
+    }
+    // Directory modules share one id across several files, so merge rather
+    // than overwrite - a sibling file's variants belong to the same module.
+    variantDeclsByModule.set(m.id, t);
+  }
+  const resolveVariantDecl = (moduleId, name) =>
+    variantDeclsByModule.get(moduleId)?.get(name) ?? null;
 
   // The required-core assertion. Clauses are populated in pass C.2, so this
   // runs after every module has been through it.
@@ -3913,18 +3947,18 @@ export function typecheckProgram(modules) {
           validateFunctionKindPrefix(d, mod, moduleEnv, flowKindTable, errors);
         }
         runKindCheck(d, errors, funcDeclTable, programState.registry);
-        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee);
+        runKindFlow(d, errors, funcDeclTable, flowKindTable, null, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
       } else if (d.kind === ASTNodeKind.TYPE_DECL && d.methods?.length > 0 && !d.genericDecl) {
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
         }
       } else if (d.kind === ASTNodeKind.VARIANT_DECL && d.methods?.length > 0) {
         // Phase 13.B: variant methods participate in kind-check like
         // struct methods.
         for (const method of d.methods) {
           runKindCheck(method, errors, funcDeclTable, programState.registry);
-          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee);
+          runKindFlow(method, errors, funcDeclTable, flowKindTable, d, resolveCrossModuleCallee, programState.registry, resolveVariantDecl);
         }
       }
     }

@@ -86,6 +86,10 @@ function main(): int32 {
     text.push(ref r, "reused");
     printf("reuse [%s] len=%zu\n", text.view(ref r), r.len);
 
+    // Text implements Display, so it interpolates directly rather than
+    // needing an explicit view() at every use site.
+    printf(`display [${r}]\n`);
+
     switch (text.parseInt("-1234")) {
         case Result.Ok { value: v }: { printf("parseInt %lld\n", v); }
         case Result.Err { error: e }: { printf("parseInt err %s\n", e); }

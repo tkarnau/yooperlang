@@ -547,6 +547,61 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(lines[3], "total bytes=2");
   });
 
+  // The ambient allocator belongs to the TASK, not to the worker thread that
+  // happens to be running it. Run at two worker counts on purpose: the
+  // "resumed" line catches a task resuming into another worker's allocator at
+  // any count, while the "neighbor" line only exercises the leak-into-a-
+  // neighbor path when a worker (rather than main's re-entrant `wait`
+  // dispatch) picks the neighbor up. See plans/async-allocator-context.md.
+  const asyncArenaExpected =
+    "parked\nneighbor: arena used=0\nresumed: arena used=64\na=1 b=0\n";
+
+  for (const workers of ["1", "4"]) {
+    it(`async_arena_context: the allocator context follows a task across a suspend (${workers} worker(s))`, async () => {
+      const { stdout, exitCode } = await runFixtureEntry(
+        "examples/pass/async_arena_context.yoop",
+        { env: { YOOP_NUM_WORKERS: workers } },
+      );
+      assert.equal(exitCode, 0);
+      assert.equal(stdout, asyncArenaExpected);
+    });
+  }
+
+  // The same context bug with no async code in user source: `wait` drains the
+  // run queue on the CALLING thread, so a plain function holding an arena used
+  // to run an unrelated task inside its own region. Pinned to one worker with
+  // that worker parked in a blocking sleep, so main is guaranteed to be the
+  // thread that dispatches the task.
+  it("arena_sync_wait: a task dispatched re-entrantly by `wait` does not inherit the waiter's arena", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
+      "examples/pass/arena_sync_wait.yoop",
+      { env: { YOOP_NUM_WORKERS: "1" } },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "main: after own alloc used=128\ntask: arena used=128\n" +
+        "main: after task used=128 rc=0\nhog rc=0\n",
+    );
+  });
+
+  // Stage 4: temp storage rides the same per-task record. Same one-worker +
+  // blocking-hog setup as arena_sync_wait, so main is guaranteed to dispatch
+  // the task itself - held per-thread the task would see main's arena with 64
+  // bytes already spent (576) and its resetTemp would leave main reading 0.
+  it("task_temp_isolation: a task's temp arena is its own, and its resetTemp spares the caller's", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
+      "examples/pass/task_temp_isolation.yoop",
+      { env: { YOOP_NUM_WORKERS: "1" } },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "main: temp used=64\ntask: temp used=512\n" +
+        "main: after task used=64 rc=0\nhog rc=0\n",
+    );
+  });
+
   // The end of the async story: std/net and std/http are async top to
   // bottom, so an HTTP server plus three concurrent clients - four tasks
   // all doing socket I/O - multiplex onto ONE worker thread.
@@ -2079,6 +2134,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
         "join [one, two, three]\n" +
         "padStart [0007]\n" +
         "reuse [reused] len=6\n" +
+        "display [reused]\n" +
         "parseInt -1234\n" +
         "parseInt rejected\n",
     );
@@ -3923,6 +3979,83 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
       errors.some((e) => /would confer kind 'cleared'.*only an impl method of trait 'Cleansable'.*a free function is not authorized/.test(e.message)),
       `expected fake-confer error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
+  });
+
+  // S1 + S2 (plans/strings-ownership-and-ergonomics.md): the `owned` marker
+  // kind, and the conferred-passthrough rule that makes it usable.
+  //
+  // No trackHeap assertion here on purpose: a string's storage comes from a
+  // direct @malloc rather than through ctx_alloc, so the counter sees the
+  // frees and not the allocations. Routing that through the context is S4.
+  it("owned_string.yoop: passthrough, plain-slot flow, and strFree", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/owned_string.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "built [hello, world]\n" +
+        "forwarded [hello, world]\n" +
+        "borrowed [hello, world] eq=1\n" +
+        "pad [0007] [longer]\n" +
+        "raw [hi]\n",
+    );
+  });
+
+  it("owned_free_literal.yoop rejects freeing a literal and a marker-dropping binding", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/owned_free_literal.yoop");
+    const hits = errors.filter((e) =>
+      /parameter 's' of 'str.strFree' requires kind 'owned'/.test(e.message),
+    );
+    assert.equal(
+      hits.length,
+      2,
+      `expected both strFree calls rejected, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  it("owned_forge.yoop rejects minting `owned` from a literal, incl. one forged path", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/owned_forge.yoop");
+    assert.ok(
+      errors.some((e) => /function 'fake' would confer conferred kind 'owned'/.test(e.message)),
+      `expected fake-forge error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+    // The mixed-path case is the one passthrough must NOT let through:
+    // laundered on one branch, forged on the other.
+    assert.ok(
+      errors.some((e) => /function 'sneaky' would confer conferred kind 'owned'/.test(e.message)),
+      `expected mixed-path forge error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // Markers traversing generic type arguments and switch-case payload
+  // bindings. A fallible constructor hands its owned value back inside a
+  // `Result`, so the marker has to be kept per-POSITION and then handed to
+  // the right payload binding when a `switch` destructures it.
+  it("owned_payload.yoop: markers survive Result<owned T, E> and its destructuring", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/owned_payload.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "slice [hello]\ntail [world]\nheld [held!]\n");
+  });
+
+  it("owned_payload_forge.yoop rejects every route into a payload position", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/owned_payload_forge.yoop");
+    const msgs = errors.map((e) => e.message).join(" | ");
+    // Forged into a generic type argument, and into a concrete payload field.
+    assert.ok(
+      errors.some((e) => /payload field 'value' requires kind 'owned'/.test(e.message)),
+      `expected generic type-argument forge rejected, got: ${msgs}`,
+    );
+    assert.ok(
+      errors.some((e) => /payload field 'text' requires kind 'owned'/.test(e.message)),
+      `expected concrete payload-field forge rejected, got: ${msgs}`,
+    );
+    // The Err payload is a plain string, so freeing it is not allowed, and a
+    // violation inside a switch ARM is caught at all - kindFlow read
+    // `stmt.value`/`stmt.cases`, which a SWITCH_STATEMENT does not have, so
+    // arm bodies used to go unwalked entirely.
+    const sinkHits = errors.filter((e) =>
+      /parameter 's' of 'str.strFree' requires kind 'owned'/.test(e.message),
+    );
+    assert.equal(sinkHits.length, 2, `expected both in-arm sinks rejected, got: ${msgs}`);
   });
 
   it("clearance_clearedby_on_conferred.yoop rejects clearedBy on a non-restrictive kind", () => {

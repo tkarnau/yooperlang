@@ -31,7 +31,7 @@
 // std/core/strings.yoop API is all byte offsets and none of them say so.
 
 import { Disposable, disposable } from "./kinds.yoop";
-import { Iterable, IterStep } from "./traits.yoop";
+import { Display, Iterable, IterStep } from "./traits.yoop";
 import { Result } from "./types.yoop";
 import * as intr from "./intrinsics.yoop";
 import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./alloc.yoop";
@@ -41,11 +41,21 @@ import { Allocator, currentAllocator, pushAllocator, popAllocator } from "./allo
 // free back through that same one, whatever is ambient at the time. A Text
 // built inside an arena scope frees into the arena; a malloc-backed one stays
 // malloc-backed even if it grows while an arena is installed.
-export type Text implements Disposable propagates<disposable> {
+export type Text implements (Disposable, Display) propagates<disposable> {
     data: uint8[],
     len: usize,
     cap: usize,
     alloc: Allocator,
+
+    // Display, so a Text interpolates directly: `${greeting}` rather than
+    // `${text.view(ref greeting)}`. This hands back a BORROW rather than a
+    // fresh string, which is sound here because template lowering copies the
+    // bytes into the concatenated result while the Text is still alive - and
+    // it means interpolating a Text costs nothing beyond that copy.
+    function to_string(ref self): string {
+        return view(ref self);
+    }
+
     function dispose(ref self): void {
         if (self.cap > 0) {
             let prev: Allocator = pushAllocator(self.alloc);
@@ -143,25 +153,45 @@ export function pushByte(t: ref Text, b: uint8): void {
 
 // Append one Unicode codepoint, UTF-8 encoded. Surrogates and out-of-range
 // scalars are replaced with U+FFFD rather than producing invalid UTF-8.
+// UTF-8 encoding, per byte-count case:
+//   1 byte:  0xxxxxxx
+//   2 bytes: 110xxxxx 10xxxxxx
+//   3 bytes: 1110xxxx 10xxxxxx 10xxxxxx
+//   4 bytes: 11110xxx 10xxxxxx 10xxxxxx 10xxxxxx
+// Each 10xxxxxx byte carries the next 6 bits, most significant first.
+
+const TAG_2BYTE:  uint32 = 0b1100_0000;
+const TAG_3BYTE:  uint32 = 0b1110_0000;
+const TAG_4BYTE:  uint32 = 0b1111_0000;
+const TAG_CONT:   uint32 = 0b1000_0000;  // continuation byte marker
+const CONT_BITS:  uint32 = 0b0011_1111;  // low 6 bits, the payload of one continuation byte
+
+const MAX_CODEPOINT:   uint32 = 0b0001_0000_1111_1111_1111_1111;  // 0x10FFFF
+const SURROGATE_START: uint32 = 0b1101_1000_0000_0000;            // 0xD800
+const SURROGATE_END:   uint32 = 0b1110_0000_0000_0000;            // 0xE000, exclusive
+const REPLACEMENT:     uint32 = 0b1111_1111_1111_1101;            // 0xFFFD
+
 export function pushChar(t: ref Text, cp: uint32): void {
     let c: uint32 = cp;
-    if (c > 1114111) { c = 65533; }
-    if (c >= 55296 && c < 57344) { c = 65533; }
 
-    if (c < 128) {
+    // Anything outside Unicode, or a lone surrogate, becomes U+FFFD.
+    if (c > MAX_CODEPOINT) { c = REPLACEMENT; }
+    if (c >= SURROGATE_START && c < SURROGATE_END) { c = REPLACEMENT; }
+
+    if (c < 0b1000_0000) {              // fits in 7 bits
         pushByte(ref t, uint8(c));
-    } else if (c < 2048) {
-        pushByte(ref t, uint8(192 + (c / 64)));
-        pushByte(ref t, uint8(128 + (c % 64)));
-    } else if (c < 65536) {
-        pushByte(ref t, uint8(224 + (c / 4096)));
-        pushByte(ref t, uint8(128 + ((c / 64) % 64)));
-        pushByte(ref t, uint8(128 + (c % 64)));
-    } else {
-        pushByte(ref t, uint8(240 + (c / 262144)));
-        pushByte(ref t, uint8(128 + ((c / 4096) % 64)));
-        pushByte(ref t, uint8(128 + ((c / 64) % 64)));
-        pushByte(ref t, uint8(128 + (c % 64)));
+    } else if (c < 0b1000_0000_0000) {  // fits in 11 bits = 5 + 6
+        pushByte(ref t, uint8(TAG_2BYTE | (c >> 6)));
+        pushByte(ref t, uint8(TAG_CONT  | (c & CONT_BITS)));
+    } else if (c < 0b0001_0000_0000_0000_0000) {  // fits in 16 bits = 4 + 6 + 6
+        pushByte(ref t, uint8(TAG_3BYTE | (c >> 12)));
+        pushByte(ref t, uint8(TAG_CONT  | ((c >> 6) & CONT_BITS)));
+        pushByte(ref t, uint8(TAG_CONT  | (c & CONT_BITS)));
+    } else {                                       // up to 21 bits = 3 + 6 + 6 + 6
+        pushByte(ref t, uint8(TAG_4BYTE | (c >> 18)));
+        pushByte(ref t, uint8(TAG_CONT  | ((c >> 12) & CONT_BITS)));
+        pushByte(ref t, uint8(TAG_CONT  | ((c >> 6) & CONT_BITS)));
+        pushByte(ref t, uint8(TAG_CONT  | (c & CONT_BITS)));
     }
 }
 
@@ -208,15 +238,26 @@ export function isEmpty(t: ref Text): bool {
 
 // ----- codepoints ----------------------------------------------------------
 
+// Lowest legal start byte for each sequence length.
+// Two of these are just the tag from pushChar; two are not, and that's the point.
+const MAX_ASCII:       uint8 = 0b0111_1111;  // 0x7F
+const FIRST_2BYTE:     uint8 = 0b1100_0010;  // 0xC2, not 0xC0: 0xC0/0xC1 are overlong
+const FIRST_3BYTE:     uint8 = 0b1110_0000;  // 0xE0 == TAG_3BYTE
+const FIRST_4BYTE:     uint8 = 0b1111_0000;  // 0xF0 == TAG_4BYTE
+const PAST_LAST_START: uint8 = 0b1111_0101;  // 0xF5 and up would encode past U+10FFFF
+
 // Byte length of the UTF-8 sequence starting with `first`, or 0 if `first` is
 // not a legal start byte. The same table string_from_bytes validates against,
 // exported because every caller doing manual UTF-8 work needs it.
+//
+// A nonzero result does NOT mean the sequence is valid — overlong 3- and 4-byte
+// forms and surrogates are only detectable once the continuation bytes are known.
 export function seqLen(first: uint8): usize {
-    if (first < 128) { return 1; }
-    if (first < 194) { return 0; }
-    if (first < 224) { return 2; }
-    if (first < 240) { return 3; }
-    if (first < 245) { return 4; }
+    if (first <= MAX_ASCII)       { return 1; }  // 0xxxxxxx
+    if (first < FIRST_2BYTE)      { return 0; }  // continuation byte, or overlong 2-byte
+    if (first < FIRST_3BYTE)      { return 2; }  // 110xxxxx
+    if (first < FIRST_4BYTE)      { return 3; }  // 1110xxxx
+    if (first < PAST_LAST_START)  { return 4; }  // 11110xxx, truncated at U+10FFFF
     return 0;
 }
 
@@ -252,26 +293,41 @@ export function byteOffsetOfChar(s: string, n: usize): usize {
     return buf.len;
 }
 
+// Payload bits carried by the lead byte, per sequence length.
+const LEAD_2BYTE_BITS: uint32 = 0b0001_1111;  // 110xxxxx
+const LEAD_3BYTE_BITS: uint32 = 0b0000_1111;  // 1110xxxx
+const LEAD_4BYTE_BITS: uint32 = 0b0000_0111;  // 11110xxx
+
+// Shared decode. Assumes `w` came from seqLen(buf[at]) and that at + w <= buf.len;
+// callers do the bounds check. Does not validate continuation bytes.
+function decodeAt(buf: uint8[], at: usize, w: usize): uint32 {
+    // Lead byte contributes its low bits; each continuation byte adds 6 more.
+    if (w == 1) { return uint32(buf[at]); }
+    if (w == 2) {
+        return ((uint32(buf[at]) & LEAD_2BYTE_BITS) << 6)
+             |  (uint32(buf[at + 1]) & CONT_BITS);
+    }
+    if (w == 3) {
+        return ((uint32(buf[at])     & LEAD_3BYTE_BITS) << 12)
+             | ((uint32(buf[at + 1]) & CONT_BITS)       << 6)
+             |  (uint32(buf[at + 2]) & CONT_BITS);
+    }
+    return ((uint32(buf[at])     & LEAD_4BYTE_BITS) << 18)
+         | ((uint32(buf[at + 1]) & CONT_BITS)       << 12)
+         | ((uint32(buf[at + 2]) & CONT_BITS)       << 6)
+         |  (uint32(buf[at + 3]) & CONT_BITS);
+}
+
 // Decode the codepoint starting at BYTE offset `at`. Returns U+FFFD for a
 // malformed or truncated sequence, so it always makes progress.
 export function charAtByte(s: string, at: usize): uint32 {
     let buf: uint8[] = intr.string_as_bytes(s);
     if (at >= buf.len) { return 0; }
+
     let w: usize = seqLen(buf[at]);
-    if (w == 0 || at + w > buf.len) { return 65533; }
-    if (w == 1) { return uint32(buf[at]); }
-    if (w == 2) {
-        return (uint32(buf[at]) - 192) * 64 + (uint32(buf[at + 1]) - 128);
-    }
-    if (w == 3) {
-        return (uint32(buf[at]) - 224) * 4096
-             + (uint32(buf[at + 1]) - 128) * 64
-             + (uint32(buf[at + 2]) - 128);
-    }
-    return (uint32(buf[at]) - 240) * 262144
-         + (uint32(buf[at + 1]) - 128) * 4096
-         + (uint32(buf[at + 2]) - 128) * 64
-         + (uint32(buf[at + 3]) - 128);
+    if (w == 0 || at + w > buf.len) { return REPLACEMENT; }
+
+    return decodeAt(buf, at, w);
 }
 
 // Codepoint number `n`, or 0 past the end. O(n); prefer `chars` for a walk.
@@ -298,24 +354,6 @@ export type Chars implements Iterable<uint32> {
         self.i = self.i + w;
         return IterStep.Yield { value: cp };
     }
-}
-
-// Shared decode used by Chars. charAtByte re-derives the byte view from a
-// string; this one already has it.
-function decodeAt(buf: uint8[], at: usize, w: usize): uint32 {
-    if (w == 1) { return uint32(buf[at]); }
-    if (w == 2) {
-        return (uint32(buf[at]) - 192) * 64 + (uint32(buf[at + 1]) - 128);
-    }
-    if (w == 3) {
-        return (uint32(buf[at]) - 224) * 4096
-             + (uint32(buf[at + 1]) - 128) * 64
-             + (uint32(buf[at + 2]) - 128);
-    }
-    return (uint32(buf[at]) - 240) * 262144
-         + (uint32(buf[at + 1]) - 128) * 4096
-         + (uint32(buf[at + 2]) - 128) * 64
-         + (uint32(buf[at + 3]) - 128);
 }
 
 export function chars(s: string): Chars {

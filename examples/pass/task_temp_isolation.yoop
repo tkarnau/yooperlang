@@ -1,0 +1,74 @@
+// Temp storage belongs to the TASK, not to the thread running it.
+//
+// The temp arena is scratch you never free individually: allocate inside a
+// frame or request, then `resetTemp()` once at the boundary. Held per-thread,
+// that is wrong in both directions the moment tasks exist - one task's reset
+// wipes another's scratch, and two tasks sharing a worker hand each other
+// half-used regions.
+//
+// The setup makes the collision deterministic rather than lucky: ONE worker,
+// occupied by a blocking sleep, so main is guaranteed to be the thread that
+// dispatches `scratch` re-entrantly from `wait`. Held per-thread, that task
+// would see main's arena (already carrying 64 bytes, so it would report 576)
+// and its `resetTemp()` would leave main reading 0.
+//
+// Stage 4 of plans/async-allocator-context.md - it rides the same per-task
+// record the ambient allocator got in stage 1.
+
+import.unsafe;
+import * as mem from "std/core/alloc.yoop";
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// Occupies the single worker with a BLOCKING sleep, so no worker is free to
+// pick up `scratch` and main has to run it itself.
+task hog(): int32 {
+    conc.sleep_ms(250);
+    return 0;
+}
+
+// Uses temp storage and then resets it, the ordinary frame-boundary idiom.
+// Both acts have to stay inside this task.
+task scratch(): int32 {
+    let ta: mem.Allocator = mem.tempAllocator();
+    let ar: mem.Arena = { handle: ta.data };
+    let p: unsafe_ptr<void> = ta.alloc(ta.data, 512, 8);
+    if (p == null) { return -1; }
+    // 512, not 576: this is the task's own arena, not main's with 64 already
+    // spent in it.
+    printf("task: temp used=%d\n", mem.arenaUsed(ar));
+    mem.resetTemp();
+    return 0;
+}
+
+function main(): int32 {
+    pooled h = hog();
+    conc.sleep_ms(60);              // make sure the worker is inside the sleep
+
+    let ta: mem.Allocator = mem.tempAllocator();
+    let ar: mem.Arena = { handle: ta.data };
+    mem.resetTemp();                // start from a known offset
+    let mine: unsafe_ptr<void> = ta.alloc(ta.data, 64, 8);
+    if (mine == null) { printf("temp alloc failed\n"); return 1; }
+    printf("main: temp used=%d\n", mem.arenaUsed(ar));
+
+    pooled t = scratch();
+    let trc: int32 = wait t;
+
+    // Still 64. The task allocated 512 and then reset, and neither act
+    // reached main's scratch.
+    printf("main: after task used=%d rc=%d\n", mem.arenaUsed(ar), trc);
+
+    let hrc: int32 = wait h;
+    printf("hog rc=%d\n", hrc);
+    return 0;
+}
+
+// expected output:
+// main: temp used=64
+// task: temp used=512
+// main: after task used=64 rc=0
+// hog rc=0

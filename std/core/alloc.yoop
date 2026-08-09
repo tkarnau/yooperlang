@@ -158,9 +158,16 @@ export function arenaUsed(a: Arena): usize {
 }
 
 // ----- temporary storage ---------------------------------------------------
-// A per-thread scratch arena for short-lived allocations you never free
-// individually. Allocate from it inside a frame/request, then `resetTemp()`
-// once at the boundary - the reason "most allocations never need a free".
+// A scratch arena for short-lived allocations you never free individually.
+// Allocate from it inside a frame/request, then `resetTemp()` once at the
+// boundary - the reason "most allocations never need a free".
+//
+// The arena belongs to the TASK when you are inside one, and to the thread
+// otherwise. That means a task's scratch survives its own suspends and is
+// invisible to every other task, and `resetTemp()` in a task can never clear
+// storage belonging to whoever spawned or dispatched it. A task's arena is
+// created on first use and destroyed when the task finishes, so a task that
+// never touches temp storage pays nothing for it.
 
 export function tempAllocator(): Allocator {
     return { alloc: arenaAllocFn, realloc: arenaReallocFn, free: arenaFreeFn, data: yoop_temp_handle() };

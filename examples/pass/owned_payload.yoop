@@ -1,0 +1,55 @@
+// Markers traversing generic type arguments and switch-case payload bindings.
+//
+// A fallible constructor hands its result back inside a `Result`, so the
+// owned value is only reachable after a `switch` destructures it. For the
+// marker to survive that round trip it has to be kept per-POSITION
+// (`Result<owned string, string>` carries nothing at the top level and
+// `owned` at argument 0) and then handed to the right payload binding.
+
+import * as str from "std/core/strings.yoop";
+import { Result } from "std/core/types.yoop";
+import { owned } from "std/core/kinds.yoop";
+
+// A concrete payload annotation, the non-generic half of the same rule: the
+// marker lives on the field's own declaration rather than on a type argument.
+variant Slot {
+    Held { text: owned string },
+    Empty,
+}
+
+function hold(s: string): Slot {
+    return Slot.Held { text: str.string_concat(s, "!") };
+}
+
+function main(): int32 {
+    // Generic: `v` inherits argument 0 of Result<owned string, string>, so it
+    // can be freed. The Err payload is a plain string and cannot be.
+    switch (str.string_slice("hello world", 0, 5)) {
+        case Result.Ok { value: v }: {
+            printf("slice [%s]\n", v);
+            str.strFree(v);
+        }
+        case Result.Err { error: e }: {
+            printf("slice err %s\n", e);
+        }
+    }
+
+    // sliceFrom can finally declare what it always did: both arms reach
+    // `owned` by passthrough, one from the payload and one by allocating.
+    const tail: owned string = str.sliceFrom("hello world", 6);
+    printf("tail [%s]\n", tail);
+    str.strFree(tail);
+
+    // Concrete payload: the field annotation is the source of the marker.
+    switch (hold("held")) {
+        case Slot.Held { text: t }: {
+            printf("held [%s]\n", t);
+            str.strFree(t);
+        }
+        case Slot.Empty: {
+            printf("empty\n");
+        }
+    }
+
+    return 0;
+}
