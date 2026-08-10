@@ -1,0 +1,14 @@
+module gate;
+
+// The kind, the launder trait, and the marked type. The SINK is deliberately
+// in a sibling file - see impl.yoop.
+export trait Cleansable<T> { function cleanse(ref self): T; }
+
+export kind cleared {
+    appliesTo binding parameter field return;
+    conferred;
+    requires Cleansable;
+    appliedBy cleanse;
+}
+
+export type Proof { ok: bool }

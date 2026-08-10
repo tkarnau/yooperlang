@@ -1,0 +1,15 @@
+module plat;
+
+// The extern block and the `export "C"` function both live HERE. Calls from
+// this same file always emitted the correct unmangled symbol.
+extern "C" from "stdio.h" {
+    function puts(s: string): int32;
+}
+
+export "C" function plat_note(): void {
+    _ = puts("from a C-exported function");
+}
+
+export function sayHere(): int32 {
+    return puts("from the declaring file");
+}

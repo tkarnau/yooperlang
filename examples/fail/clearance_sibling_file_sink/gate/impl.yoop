@@ -1,0 +1,14 @@
+module gate;
+
+// The implementing type and the sink, one file over from the `kind` block.
+// kindFlow's cross-module function index was rebuilt per SOURCE FILE and keyed
+// by MODULE id, so the last file emitted for a directory module overwrote its
+// siblings' entries. `sink` vanished from the index, `crossModuleCallee`
+// returned null, the argument check bailed - and the conferred kind stopped
+// being enforced with no error and no warning.
+export type Doc implements Cleansable<Proof> {
+    body: string,
+    function cleanse(ref self): Proof { return { ok: true }; }
+}
+
+export function sink(v: cleared Proof): void {}

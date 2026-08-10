@@ -238,6 +238,15 @@ function arrayElemLlvmName(elemType) {
   if (elemType.kind === typeKinds.functionPointer) {
     return "fnptr";
   }
+  // Phase 12: a value enum IS its underlying primitive at the LLVM layer
+  // (llvmType routes straight through), so an array of one has exactly the
+  // layout of an array of that primitive and can share its fat-pointer type.
+  // Without this a bare `K[]` - and every `Vec<K>` built on top of it - died
+  // in codegen even though enums work as locals, params, fields and switch
+  // scrutinees.
+  if (elemType.kind === typeKinds.valueEnum) {
+    return arrayElemLlvmName(elemType.underlying);
+  }
   throw new Error(`arrayElemLlvmName: unsupported elem type "${elemType.kind}"`);
 }
 
@@ -505,6 +514,45 @@ function hoistAllocasToEntry(fnLines) {
   fnLines.splice(entryTerm, 0, ...hoisted);
 }
 
+// LLVM puts local values and basic-block labels in ONE namespace, so every
+// name the emitter generates for itself is a name a user binding can collide
+// with - and the collision surfaces a hundred lines away as an LLVM verifier
+// error ("multiple definition of local value named 't0'") rather than as a
+// diagnostic. `entry` is handled by seeding usedSlots below; the rest are
+// generated with a counter, so they have to be matched as patterns:
+//
+//   %t<N>              freshTemp
+//   <hint>_<N>         freshLabel, for every hint spellable as an identifier
+//   __ret              the async ABI's caller-owned result slot
+//
+// Names the emitter builds with a `.` (`%p.arg`, `coro.body`, `await.done`)
+// need no entry - a `.` is not legal in a yoop identifier, so no user binding
+// can ever be spelled that way.
+//
+// `t0`/`t1` are the ones that actually bite: they are the natural names for
+// timing code. Reserving the pattern makes `let t0` emit `%t0.1` instead.
+const EMITTER_LABEL_HINTS = new Set([
+  "else", "merge", "then",
+  "for_after", "for_body", "for_cond", "for_step",
+  "forin_after", "forin_body", "forin_cond", "forin_step",
+  "forin_iter_after", "forin_iter_body", "forin_iter_step", "forin_iter_top",
+  "switch_arm", "switch_default", "switch_end",
+  "try_fail", "try_ok",
+  "while_after", "while_body", "while_cond",
+  "wu_cancelled", "wu_done", "wu_join", "wu_timeout",
+]);
+
+function isEmitterReservedSlot(name) {
+  if (name === "__ret") return true;
+  if (/^t\d+$/.test(name)) return true;
+  // Split at the LAST underscore, not with a greedy regex: `while_body_10`
+  // would otherwise hand the hint back as `while_body_1`.
+  const cut = name.lastIndexOf("_");
+  if (cut <= 0) return false;
+  if (!/^\d+$/.test(name.slice(cut + 1))) return false;
+  return EMITTER_LABEL_HINTS.has(name.slice(0, cut));
+}
+
 // Phase 10.H: per-function local-symbol container with LLVM-slot
 // uniquification + lexical scope stacking.
 //
@@ -543,7 +591,7 @@ function createLocalSymbols() {
   function declare(name, type) {
     types.set(name, type);
     let candidate = name;
-    if (usedSlots.has(candidate)) {
+    if (usedSlots.has(candidate) || isEmitterReservedSlot(candidate)) {
       let n = 1;
       while (usedSlots.has(`${name}.${n}`)) n++;
       candidate = `${name}.${n}`;
@@ -2746,6 +2794,32 @@ export function codegenProgram(modules, _moduleEnv, programState) {
     const counts = new Map();
     for (const mod of modules) counts.set(mod.id, (counts.get(mod.id) ?? 0) + 1);
     programState.moduleSourceFileCount = counts;
+    // modules-as-directories: an `extern "C"` decl (and an `export "C"` fn) is
+    // a DECLARATION, so every source file of the module can call it - but the
+    // set that decides "unmangled symbol or `<moduleId>__` mangled one" was
+    // built from the file being emitted. A sibling's call therefore mangled a
+    // symbol nothing defines, and because both typecheck and IR generation
+    // are happy with it the failure only shows up when clang reads the IR:
+    //   use of undefined value '@plat_<hash>__puts'
+    // Collect the names MODULE-wide up front so every file agrees. The
+    // `declare` lines stay per-file (they dedupe in the final IR).
+    const externsByModule = new Map();
+    const cExportsByModule = new Map();
+    for (const mod of modules) {
+      let ext = externsByModule.get(mod.id);
+      if (!ext) externsByModule.set(mod.id, (ext = new Set()));
+      let cex = cExportsByModule.get(mod.id);
+      if (!cex) cExportsByModule.set(mod.id, (cex = new Set()));
+      for (const decl of mod.ast.body) {
+        if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) cex.add(decl.fn.name);
+        if (decl.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
+        for (const e of decl.decls) {
+          if (e.kind === ASTNodeKind.EXTERN_FUNCTION_DECL) ext.add(e.name);
+        }
+      }
+    }
+    programState.moduleExternFnNames = externsByModule;
+    programState.moduleCExportNames = cExportsByModule;
   }
 
   const moduleIRs = [];
@@ -3353,16 +3427,24 @@ function codegenWithModuleId(
     }
   }
 
-  // Collect C-exported function names - these are defined with unmangled symbols.
-  const cExportNames = new Set();
+  // Collect C-exported function names - these are defined with unmangled
+  // symbols. Seeded from the MODULE-wide set (see codegenProgram) so a
+  // sibling source file of a directory module resolves the same way the
+  // declaring file does.
+  const cExportNames = new Set(
+    programState?.moduleCExportNames?.get(moduleId) ?? [],
+  );
   for (const decl of ast.body) {
     if (decl.kind === ASTNodeKind.EXPORT_C_FUNCTION_DECL) cExportNames.add(decl.fn.name);
   }
 
   // Collect extern function names and emit declares. `extern "intrinsic"`
   // blocks are compiler-recognized - see the note in the legacy path above
-  // - so we skip emitting LLVM declares for them.
-  const externFnNames = new Set();
+  // - so we skip emitting LLVM declares for them. Same module-wide seeding
+  // as cExportNames: the DECLARE stays per-file, the NAME SET is shared.
+  const externFnNames = new Set(
+    programState?.moduleExternFnNames?.get(moduleId) ?? [],
+  );
   for (const decl of ast.body) {
     if (decl.kind !== ASTNodeKind.EXTERN_BLOCK) continue;
     const isIntrinsic = decl.abi === "intrinsic";
@@ -5994,7 +6076,18 @@ function codegenWithModuleId(
           const sym = mangle(node.namespaceLookup.moduleId, node.namespaceLookup.exportName);
           return { ptr: `@${sym}`, type: node.resolvedType };
         }
-        const base = emitLval(node.object, fnLines);
+        let base = emitLval(node.object, fnLines);
+        // A receiver whose own type is `ref T` is a POINTER SLOT, so the
+        // struct's address is what the slot holds, not the slot itself. The
+        // IDENT branch above already does this load for a `ref` binding;
+        // reaching a ref through a FIELD (`holder.renderer.id`) or an array
+        // element lands here instead, and without the load the GEP would
+        // walk the pointer variable as if it were the struct.
+        if (base.type.kind === typeKinds.ref) {
+          const derefTmp = freshTemp();
+          fnLines.push(`  ${derefTmp} = load ptr, ptr ${base.ptr}`);
+          base = { ptr: derefTmp, type: base.type.inner };
+        }
         // Phase 7.5: union field access - every field overlaps at offset 0;
         // the union's pointer is already the field's pointer (just retyped).
         if (base.type.kind === typeKinds.union) {

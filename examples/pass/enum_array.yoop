@@ -1,0 +1,56 @@
+// An array of a value enum. Codegen used to throw `arrayElemLlvmName:
+// unsupported elem type "valueEnum"` for a bare `K[]` and for every `Vec<K>`
+// built on top of one, even though enums work fine as locals, parameters,
+// struct fields and switch scrutinees. A value enum IS its underlying
+// primitive at the LLVM layer, so an array of one shares that primitive's
+// fat-pointer type.
+//
+// The second half of the fix is not visible in the error it produced: the
+// generic-instantiation cache key had no case for a value enum, so EVERY value
+// enum mangled to the same `unk_valueEnum`. Two of them in one program shared
+// one cached instantiation, and the second reported the baffling "cannot
+// assign enum K[] to enum Name[]". Unions, vtables, function pointers and
+// unsafe_ptr were all latent for the same reason.
+
+import * as intr from "std/core/intrinsics.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+enum K<uint8> { A 0, B 1, C 2 }
+enum Name<string> { Alpha "alpha", Beta "beta" }
+
+function main(): int32 propagates<disposable> {
+    let arr: K[] = intr.heap_alloc(3);
+    arr[0] = K.A;
+    arr[1] = K.C;
+    arr[2] = K.B;
+
+    let total: int32 = 0;
+    for k in arr { total = total + int32(uint8(k)); }
+    printf(`total=${total} first=${uint8(arr[0])}\n`);
+
+    // a switch whose scrutinee is an element
+    switch (arr[1]) {
+        case K.C: { printf(`elem1=C\n`); }
+        default: { printf(`elem1=unexpected\n`); return 1; }
+    }
+
+    // the same element type through a generic container
+    disposable v: Vec<K> = vec.vec_new(4);
+    vec.vec_push(ref v, K.B);
+    vec.vec_push(ref v, K.C);
+    printf(`veclen=${v.len} v0=${uint8(vec.vec_get(ref v, 0))}\n`);
+
+    // a SECOND value enum in the same program - the cache-key collision
+    let names: Name[] = intr.heap_alloc(2);
+    names[0] = Name.Alpha;
+    names[1] = Name.Beta;
+    let same: bool = names[0] == Name.Alpha;
+    printf(`n0=${names[0]} same=${same}\n`);
+
+    return total - 3;
+}
