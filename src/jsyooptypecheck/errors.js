@@ -67,7 +67,11 @@ export function formatType(t) {
     case typeKinds.array:
       return `${formatType(t.elem)}[]`;
     case typeKinds.func:
-      return `(${t.params.map((p) => `${p.isRef ? "ref " : ""}${formatType(p.type)}`).join(", ")}) -> ${formatType(t.returnType)}`;
+      // A `ref` param's own type IS the RefType (`isRef` is a redundant
+      // marker kept for the decl-site checks), so prefixing "ref " here
+      // rendered `ref m: Box` as `ref ref struct Box` and made a plain
+      // signature mismatch read like a double-reference bug.
+      return `(${t.params.map((p) => formatType(p.type)).join(", ")}) -> ${formatType(t.returnType)}`;
     case typeKinds.void:
       return "void";
     case typeKinds.untypedInt:

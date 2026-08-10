@@ -2359,6 +2359,71 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   });
 });
 
+// A batch of papercuts found porting DOOM (the yooperdoom spikes). Each was a
+// VALID program the compiler wrongly rejected, and each failed somewhere other
+// than the line the user wrote - an LLVM verifier error, a codegen throw, or a
+// diagnostic naming the wrong thing - so all of them cost far more than the
+// one-line fix suggests. The extern-from-a-sibling-file case is with the other
+// directory-module tests below; the conferred-kind one, which failed OPEN and
+// is the serious member of the set, is in the fail-fixture block.
+describe("e2e: porting papercuts", { concurrency: E2E_CONCURRENCY }, () => {
+  it("codegen_name_and_literal_papercuts: untyped-literal interpolation + emitter-reserved local names", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/codegen_name_and_literal_papercuts.yoop",
+    );
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /intdiv=-3/); // was: llvmType: unhandled kind "untypedInt"
+    assert.match(stdout, /nested=-9/); // unary over binary, both still untyped
+    assert.match(stdout, /shifted=16/);
+    assert.match(stdout, /fdiv=3\.5/);
+    assert.match(stdout, /bare=7/);
+    assert.match(stdout, /cmp=1 fcmp=1/); // comparison of two untyped operands
+    // was: "multiple definition of local value named 't0'"
+    assert.match(stdout, /names=42 1 2 3 4 3/);
+  });
+
+  it("fnptr_ref_param: a named fn with a `ref` param materializes as a function value", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/fnptr_ref_param.yoop");
+    assert.strictEqual(exitCode, 0);
+    // 1 + 10 + 1 + 1 + 10 + 1 across local, field, two array slots and a vtable
+    assert.match(stdout, /v=24/);
+  });
+
+  it("elem_field_assign: `arr[i].field = v` works, plain and compound", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/elem_field_assign.yoop");
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /f0=6 f1=7 c1=9/);
+  });
+
+  it("ref_in_struct_field: a `ref T` binding stores into a `ref T` field, and the field traverses", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/ref_in_struct_field.yoop");
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /v=8 id=3 ownerv=8/);
+    assert.match(stdout, /after=42/); // write through the ref field reaches the original
+  });
+
+  it("enum_array: an array of a value enum compiles, and two value enums stay distinct", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/enum_array.yoop");
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /total=3 first=0/); // was: arrayElemLlvmName: unsupported elem type
+    assert.match(stdout, /elem1=C/);
+    assert.match(stdout, /veclen=2 v0=1/); // the same elem type through Vec<K>
+    // The second value enum in one program - the instantiation-key collision.
+    assert.match(stdout, /n0=alpha same=1/);
+  });
+
+  // A direct field write on a const binding is still rejected - only a chain
+  // that passes THROUGH an index escapes the root binding's mutability, the
+  // same way plain `arr[i] = v` always has.
+  it("const_field_assign: a direct field write on a const binding is still an error", () => {
+    const { errors } = typecheckFixtureProgram("examples/fail/const_field_assign.yoop");
+    assert.ok(
+      errors.some((e) => /cannot assign to field of const "p"/.test(e.message)),
+      `expected a const-field error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+});
+
 // Declaration order must not decide whether a program compiles or what it does.
 // Every type in the fixture is USED above the line that declares it. All four
 // shapes shared one root cause - a reference resolving against a pass-A shell
@@ -2452,6 +2517,32 @@ describe("e2e: directory modules", { concurrency: E2E_CONCURRENCY }, () => {
       .filter((s) => s.startsWith("shapes_"));
     assert.strictEqual(inits.length, 2, `expected 2 shapes module inits, got ${inits.join(", ")}`);
     assert.strictEqual(new Set(inits).size, 2, "the two inits must have distinct symbols");
+  });
+
+  // An `extern "C"` decl (and an `export "C"` fn) is a DECLARATION, so every
+  // file of a directory module may call it - but codegen decided "unmangled C
+  // symbol or `<moduleId>__` mangled one" from the file it was emitting, so a
+  // sibling's call named a symbol nothing defines. Passed typecheck AND IR
+  // generation; only clang caught it.
+  it("extern_sibling_call: an extern C symbol called from a sibling file keeps its unmangled name", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/extern_sibling_call/main.yoop",
+    );
+    assert.strictEqual(exitCode, 0);
+    assert.match(stdout, /from the declaring file/);
+    assert.match(stdout, /from a sibling file/);
+    assert.match(stdout, /from a C-exported function/);
+  });
+
+  it("extern_sibling_call: the sibling's call site emits @puts, not a mangled symbol", () => {
+    const { ir } = compileEntry(
+      path.join(repoRoot, "examples/pass/extern_sibling_call/main.yoop"),
+    );
+    assert.ok(/call i32 @puts\(/.test(ir), "expected an unmangled @puts call");
+    assert.ok(
+      !/@plat_[0-9a-f]+__puts/.test(ir),
+      "an extern must never be mangled under the module id",
+    );
   });
 });
 
@@ -3946,6 +4037,21 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
     assert.ok(
       errors.some((e) => /parameter 'sql' of 'db\.runQuery' requires kind 'cleared'/.test(e.message)),
       `expected cross-module namespaced-sink conferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
+    );
+  });
+
+  // The serious one from the DOOM port: a conferred kind failing OPEN. The
+  // sink lives in a SIBLING FILE of a directory module, and kindFlow's
+  // cross-module function index was rebuilt per source file while keyed by
+  // MODULE id - so the last file emitted for a module erased its siblings'
+  // entries, `crossModuleCallee` returned null, and the argument check just
+  // stopped running. No error, no warning; an untested gate and a working
+  // gate were indistinguishable.
+  it("clearance_sibling_file_sink rejects a forged capability when the sink is in a sibling file", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/clearance_sibling_file_sink/main.yoop");
+    assert.ok(
+      errors.some((e) => /parameter 'v' of 'sink' requires kind 'cleared'/.test(e.message)),
+      `expected sibling-file conferred error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
 

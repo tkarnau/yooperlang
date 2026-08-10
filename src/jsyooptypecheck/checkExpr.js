@@ -59,6 +59,7 @@ import {
 import {
   coerceUntypedLiteralToTyped,
   isAssignable,
+  isBool,
   isNumeric,
   unifyArith,
 } from "./coerce.js";
@@ -272,6 +273,27 @@ function resolveBinary(node, scope, ctx) {
   if (resultType.kind === typeKinds.prim) {
     coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
     coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
+  }
+  // A comparison of two UNTYPED operands (`2 % 1 > 0`, `if (1 + 1 == 2)`) is
+  // the end of the line for pinning: the result is `bool`, so the coercion
+  // above cannot push a numeric type down, and no enclosing context ever
+  // will. Codegen then reads `untypedInt` off the operand it picks for the
+  // instruction's type and throws. Default them the way every other
+  // context-free untyped literal defaults. A comparison with ONE typed side
+  // is unaffected - codegen takes the type from that side.
+  const bothUntyped =
+    (leftType.kind === typeKinds.untypedInt ||
+      leftType.kind === typeKinds.untypedFloat) &&
+    (rightType.kind === typeKinds.untypedInt ||
+      rightType.kind === typeKinds.untypedFloat);
+  if (bothUntyped && resultType.kind === typeKinds.prim && isBool(resultType)) {
+    const pinned =
+      leftType.kind === typeKinds.untypedFloat ||
+      rightType.kind === typeKinds.untypedFloat
+        ? PrimType(primAnnotations.float64)
+        : PrimType(primAnnotations.int32);
+    coerceUntypedLiteralToTyped(node.left, leftType, pinned, ctx.errors);
+    coerceUntypedLiteralToTyped(node.right, rightType, pinned, ctx.errors);
   }
   return setType(node, resultType);
 }
@@ -832,8 +854,26 @@ function resolveTemplateLiteral(node, scope, ctx) {
   for (const part of node.parts) {
     if (part.kind === "STRING_PART") continue;
     if (part.kind === "EXPR_PART") {
-      const exprType = resolveExprType(part.expr, scope, ctx);
-      if (isPrintableInTemplate(exprType) && 
+      let exprType = resolveExprType(part.expr, scope, ctx);
+      // An interpolation is a value context with no target type, so an
+      // untyped-literal *expression* (`${-7 / 2}`) has nothing to pin it and
+      // would reach codegen as `untypedInt`. Default it exactly the way an
+      // un-annotated `let` does (int32 / float64) and push that down through
+      // the operands, otherwise llvmType throws on the intermediate node.
+      // A bare literal survives today only because codegen defends against
+      // it at INT_LITERAL/FLOAT_LITERAL; nothing defends the compound case.
+      if (
+        exprType?.kind === typeKinds.untypedInt ||
+        exprType?.kind === typeKinds.untypedFloat
+      ) {
+        const pinned =
+          exprType.kind === typeKinds.untypedInt
+            ? PrimType(primAnnotations.int32)
+            : PrimType(primAnnotations.float64);
+        coerceUntypedLiteralToTyped(part.expr, exprType, pinned, ctx.errors);
+        exprType = part.expr.resolvedType ?? pinned;
+      }
+      if (isPrintableInTemplate(exprType) &&
         (exprType.implementsTraits ?? []).every(t => t.name !== "Display")) {
         continue;
       }
@@ -1170,8 +1210,8 @@ function resolveAssignmentToField(node, scope, ctx) {
   if (targetType.kind === typeKinds.error) {
     return setType(node, ErrorType());
   }
-  const rootIdent = rootIdentOf(node.target);
-  if (!rootIdent) {
+  const root = rootIdentOf(node.target);
+  if (!root) {
     pushError(
       ctx.errors,
       node,
@@ -1179,8 +1219,9 @@ function resolveAssignmentToField(node, scope, ctx) {
     );
     return setType(node, ErrorType());
   }
+  const { ident: rootIdent, throughIndirection } = root;
   const rootBinding = lookupInScope(scope, rootIdent.name);
-  if (rootBinding && rootBinding.kind === "const") {
+  if (!throughIndirection && rootBinding && rootBinding.kind === "const") {
     pushError(
       ctx.errors,
       node,
@@ -1315,9 +1356,17 @@ function resolveFieldAccess(node, scope, ctx) {
     }
   }
 
-  const objType = resolveExprType(node.object, scope, ctx);
+  let objType = resolveExprType(node.object, scope, ctx);
   if (objType.kind === typeKinds.error) {
     return setType(node, ErrorType());
+  }
+  // A receiver whose type is `ref T` transparently exposes T's fields, the
+  // same way an IDENT bound to `ref T` does (resolveIdent's autoDeref). This
+  // is the chained-handle case - `holder.renderer.id`, where `renderer` is a
+  // `ref Renderer` FIELD, so the auto-deref at the binding never applied.
+  // Codegen mirrors it by loading through the pointer slot in emitLval.
+  if (objType.kind === typeKinds.ref) {
+    objType = objType.inner;
   }
 
   // For "no such field"-style diagnostics, prefer the field identifier's
@@ -2163,11 +2212,42 @@ function resolveOrphanStructLiteral(node, scope, ctx) {
   return setType(node, ErrorType());
 }
 
+// Walk an lvalue chain down to the binding it is rooted at.
+//
+// Returns `{ ident, throughIndirection }`. `throughIndirection` is true when
+// the walk passed an INDEX_EXPRESSION or an explicit deref - i.e. the storage
+// being written is reached through a pointer, so the ROOT BINDING's
+// mutability no longer governs the write. That mirrors what plain
+// `arr[i] = v` already does (resolveAssignmentToIndex checks no constness at
+// all): `const xs: T[]` freezes the name `xs`, not the buffer behind it.
+//
+// Returns null when the chain is not rooted at a name (e.g. `f().x = 1`).
 function rootIdentOf(node) {
-  while (node.kind === ASTNodeKind.FIELD_ACCESS) {
-    node = node.object;
+  let throughIndirection = false;
+  for (;;) {
+    if (node.kind === ASTNodeKind.FIELD_ACCESS) {
+      node = node.object;
+      continue;
+    }
+    // `arr[i].field = v` / `grid[y][x].field = v`. Without this the chain
+    // stopped at the INDEX_EXPRESSION and every element-field write was
+    // rejected as "root of field chain is not an identifier".
+    if (node.kind === ASTNodeKind.INDEX_EXPRESSION) {
+      node = node.object;
+      if (!node) return null;
+      throughIndirection = true;
+      continue;
+    }
+    if (node.kind === ASTNodeKind.DEREF_EXPRESSION) {
+      node = node.operand;
+      throughIndirection = true;
+      continue;
+    }
+    break;
   }
-  return node.kind === ASTNodeKind.IDENT ? node : null;
+  return node.kind === ASTNodeKind.IDENT
+    ? { ident: node, throughIndirection }
+    : null;
 }
 
 // Phase 7.5: look up an enum type by name. Checks the local variantTable then
@@ -2559,6 +2639,30 @@ export function checkInitializer(
     }
   }
   const valueType = resolveExprType(valueNode, scope, ctx);
+  // A `ref T` SLOT accepts a bare identifier that is itself bound to `ref T`,
+  // forwarding the pointer - the same spelling a `ref T` PARAMETER has always
+  // accepted (see the passRefBinding path in resolveCallType). resolveIdent
+  // auto-derefs every ref binding, so without this the POINTEE arrives where
+  // the pointer belongs and a `ref Thing` field reports
+  //   cannot assign struct Thing to field "p" of type ref struct Thing
+  // which made chained opaque handles (window -> renderer -> texture)
+  // unstorable in a struct.
+  if (
+    expectedType?.kind === typeKinds.ref &&
+    valueNode.kind === ASTNodeKind.IDENT &&
+    valueNode.autoDeref
+  ) {
+    const binding = lookupInScope(scope, valueNode.name);
+    if (
+      binding?.type?.kind === typeKinds.ref &&
+      typesEqual(binding.type.inner, expectedType.inner)
+    ) {
+      valueNode.autoDeref = false;
+      valueNode.passRefBinding = true;
+      valueNode.resolvedType = expectedType;
+      return expectedType;
+    }
+  }
   if (!isAssignable(expectedType, valueType)) {
     pushError(ctx.errors, valueNode, mismatchMessage(valueType));
   }

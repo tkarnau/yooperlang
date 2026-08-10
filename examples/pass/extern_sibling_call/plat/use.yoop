@@ -1,0 +1,15 @@
+module plat;
+
+// A sibling file calling the extern its sibling declared. Declarations are
+// shared across the files of a directory module, so this needs no import - and
+// the emitted call has to use the same unmangled `@puts` the declaring file
+// does.
+export function sayThere(): int32 {
+    return puts("from a sibling file");
+}
+
+// `export "C"` functions are defined with an unmangled symbol too, and had the
+// same per-file blind spot.
+export function viaCExport(): void {
+    plat_note();
+}

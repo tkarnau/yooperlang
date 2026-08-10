@@ -1,0 +1,19 @@
+// An `extern "C"` symbol called from a SIBLING file of the same directory
+// module. The extern is a DECLARATION, so every file of the module can call it
+// - but the set codegen consulted to decide "unmangled C symbol or
+// `<moduleId>__` mangled one" was built from the file being emitted. A
+// sibling's call therefore mangled a symbol nothing defines, and since both
+// typecheck and IR generation were happy with it the failure only showed up
+// when clang read the IR: `use of undefined value '@plat_<hash>__puts'`.
+//
+// The workaround it forced was routing every call through a wrapper in the
+// declaring file, which is a real constraint on how a platform module is
+// written.
+import { sayHere, sayThere, viaCExport } from "./plat";
+
+function main(): int32 {
+    _ = sayHere();
+    _ = sayThere();
+    viaCExport();
+    return 0;
+}

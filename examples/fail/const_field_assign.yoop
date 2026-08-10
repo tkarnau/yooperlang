@@ -1,0 +1,12 @@
+// `const` freezes the binding, so a direct field write on it is an error. The
+// companion to examples/pass/elem_field_assign.yoop: allowing `arr[i].f = v`
+// must not have relaxed this one, only the case where the chain reaches its
+// storage THROUGH an index (where `const xs: T[]` freezes the name `xs`, not
+// the buffer behind it).
+type Point { x: int32 }
+
+function main(): int32 {
+    const p: Point = { x: 1 };
+    p.x = 2;
+    return 0;
+}
