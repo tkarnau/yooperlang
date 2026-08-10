@@ -3744,7 +3744,14 @@ export function typecheckProgram(modules) {
   // export name.
   const funcDeclsByModule = new Map();
   for (const m of modules) {
-    const t = new Map();
+    // Directory modules share one id across several source files, so MERGE
+    // rather than overwrite (same rule variantDeclsByModule follows below).
+    // A fresh map per file meant the last file emitted for a module won and
+    // every sibling's functions vanished from the index - `crossModuleCallee`
+    // then returned null for them, `checkCallArgs` bailed, and a `cleared T`
+    // parameter declared in a sibling file silently stopped being enforced.
+    // A conferred kind failing open is the worst failure this pass has.
+    const t = funcDeclsByModule.get(m.id) ?? new Map();
     // Extern declarations go in FIRST so an ordinary function of the same
     // name wins. They belong in here because a marker kind's only
     // unimpeachable source is a bodyless decl: `runKindFlow` returns early on

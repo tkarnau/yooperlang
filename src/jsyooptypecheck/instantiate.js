@@ -52,6 +52,24 @@ export function mangleType(t) {
       return "void";
     case typeKinds.typeParam:
       return `tp_${t.originDecl}_${t.name}`;
+    // Everything below used to fall through to `unk_<kind>`, which is not a
+    // key - it is the SAME key for every type of that kind. Two distinct
+    // value enums both mangled to `unk_valueEnum`, so `Vec<K>` / `K[]` and
+    // `Vec<Name>` / `Name[]` shared one cached instantiation and the second
+    // one reported "cannot assign enum K[] to enum Name[]". The same
+    // collision was latent for unions, vtables, function pointers and
+    // unsafe_ptr. Kept distinct from the struct/variant spelling above so
+    // existing mangled symbols are unchanged.
+    case typeKinds.valueEnum:
+      return t.moduleId ? `ve_${t.moduleId}__${t.name}` : `ve_${t.name}`;
+    case typeKinds.union:
+      return t.moduleId ? `un_${t.moduleId}__${t.name}` : `un_${t.name}`;
+    case typeKinds.vtable:
+      return t.moduleId ? `vt_${t.moduleId}__${t.name}` : `vt_${t.name}`;
+    case typeKinds.unsafePtr:
+      return t.pointee ? `ptr_${mangleType(t.pointee)}` : "ptr_opaque";
+    case typeKinds.functionPointer:
+      return `fn_${(t.params ?? []).map(mangleType).join("_")}_to_${mangleType(t.returnType)}`;
     default:
       return `unk_${t.kind}`;
   }

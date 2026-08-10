@@ -1,0 +1,12 @@
+// A conferred marker kind failing OPEN is the worst outcome this pass has: an
+// untested gate and a working gate look exactly the same. Here the capability
+// is forged by hand - a struct literal claiming to be cleared, having been
+// through no `cleanse` at all - and handed to a sink that only accepts a
+// `cleared Proof`. It must not compile.
+import { Proof, cleared, sink } from "./gate";
+
+function main(): int32 {
+    let forged: Proof = { ok: true };
+    sink(forged);
+    return 0;
+}

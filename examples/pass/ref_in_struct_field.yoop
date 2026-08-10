@@ -1,0 +1,52 @@
+// A `ref T` binding can be stored into a `ref T` struct field, and a `ref T`
+// FIELD can be traversed. Neither worked before, which made the shape every
+// windowing/FFI wrapper has - the window builds the renderer, the renderer
+// builds the texture - impossible to hold in a struct.
+//
+// Two halves, both about auto-deref firing in the wrong place:
+//
+//   - `{ p: t }` where `t: ref Thing` stored the POINTEE where the pointer
+//     belongs, reported as "cannot assign struct Thing to field "p" of type
+//     ref struct Thing". A `ref T` SLOT now accepts a bare identifier bound to
+//     `ref T` and forwards the pointer, the same spelling a `ref T` PARAMETER
+//     has always accepted.
+//   - `h.p.v` failed with "field access on non-struct type ref struct Thing".
+//     An IDENT bound to `ref T` auto-derefs; reaching a ref through a FIELD
+//     never did, so the deref had nowhere to happen.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Thing { v: int32 }
+type Renderer { owner: ref Thing, id: int32 }
+type Holder { p: ref Thing, r: ref Renderer }
+
+function bumpVia(h: Holder): void { h.p.v = h.p.v + 1; }
+
+function main(): int32 {
+    let things: Thing[] = intr.heap_alloc(1);
+    things[0] = { v: 7 };
+    let t: ref Thing = ref things[0];
+
+    let renderers: Renderer[] = intr.heap_alloc(1);
+    renderers[0] = { owner: t, id: 3 };   // ref binding into a ref field
+    let r: ref Renderer = ref renderers[0];
+
+    let h: Holder = { p: t, r: r };       // two of them, in one literal
+    bumpVia(h);
+
+    // assignment after the fact, not only at the literal
+    let alias: ref Thing = h.p;
+    h.p = alias;
+
+    // read through a ref field, and two levels deep
+    printf(`v=${h.p.v} id=${h.r.id} ownerv=${h.r.owner.v}\n`);
+
+    // write through one too
+    h.r.owner.v = 42;
+    printf(`after=${things[0].v}\n`);
+    return things[0].v - 42;
+}

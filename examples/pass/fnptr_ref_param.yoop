@@ -1,0 +1,62 @@
+// A named function whose parameter is `ref T` can be materialized as a
+// function VALUE. It could not before: `isAssignable` bailed on any FuncType
+// param carrying `isRef`, so every `(ref m: Box) => void` slot rejected the
+// only functions that could fill it, in every position - local binding, struct
+// field, array element, and `VTableName.fromFn(...)`.
+//
+// The `ref` lives in the param TYPE on both sides (FuncType stores
+// `RefType(T)` with a redundant `isRef: true`; the annotation `(ref m: T) => R`
+// resolves its param to `RefType(T)` too), so comparing types is the whole
+// check. The diagnostic also used to print the `ref` twice - "(ref ref struct
+// Box) -> void" - which read like a double-reference bug rather than a
+// signature mismatch.
+//
+// This is what unblocks a C-style action table; the vtable workaround (still
+// exercised below) is no longer the only shape that works.
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Box { v: int32 }
+
+// Both spellings of a ref parameter must behave identically.
+function bump(ref m: Box): void { m.v = m.v + 1; }
+function bumpTen(m: ref Box): void { m.v = m.v + 10; }
+
+type Table { act: (ref m: Box) => void }
+
+trait Bumper { function apply(ref self, ref m: Box): void; }
+vtable BumpVT for Bumper { apply: (ref m: Box) => void, }
+
+function main(): int32 {
+    let b: Box = { v: 0 };
+
+    // local binding
+    let f: (ref m: Box) => void = bump;
+    f(ref b);
+    let g: (ref m: Box) => void = bumpTen;
+    g(ref b);
+
+    // struct field
+    let t: Table = { act: bump };
+    t.act(ref b);
+
+    // array element
+    let acts: ((ref m: Box) => void)[] = intr.heap_alloc(2);
+    acts[0] = bump;
+    acts[1] = bumpTen;
+    let a0: (ref m: Box) => void = acts[0];
+    a0(ref b);
+    let a1: (ref m: Box) => void = acts[1];
+    a1(ref b);
+
+    // vtable built straight from a named function
+    let vt: BumpVT = BumpVT.fromFn(bump);
+    BumpVT.apply(ref vt, ref b);
+
+    printf(`v=${b.v}\n`);
+    return b.v - 24;
+}

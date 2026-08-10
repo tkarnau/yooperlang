@@ -1,0 +1,51 @@
+// Two papercuts found porting DOOM, both of which failed a hundred lines away
+// from the source line that caused them.
+//
+// 1. An untyped-literal EXPRESSION in a template interpolation (`${-7 / 2}`)
+//    reached codegen with its type still unpinned and threw
+//    `llvmType: unhandled yooper type kind "untypedInt"`. A BARE literal
+//    (`${7}`) always worked, because codegen defends itself at INT_LITERAL /
+//    FLOAT_LITERAL - nothing defended the compound node above them. The
+//    interpolation is a value context with no target type, so it now defaults
+//    the same way an un-annotated `let` does (int32 / float64).
+//
+// 2. LLVM puts local values and basic-block labels in ONE namespace, so a user
+//    binding named like one of the emitter's own generated names collided and
+//    failed LLVM verification ("multiple definition of local value named
+//    't0'"). `t0`/`t1` are the ones that actually bite - they are the natural
+//    names for timing code.
+
+function twice(v: int32): int32 { return v * 2; }
+
+function main(): int32 {
+    // 1: compound untyped-literal expressions, int and float.
+    printf(`intdiv=${-7 / 2}\n`);          // C99 truncation toward zero
+    printf(`nested=${-(1 + 2) * 3}\n`);    // unary over a binary, both untyped
+    printf(`shifted=${1 << 4}\n`);
+    printf(`fdiv=${7.0 / 2.0}\n`);
+    printf(`bare=${7}\n`);                 // the case that always worked
+
+    // Same defect, different terminal context: a COMPARISON of two untyped
+    // operands. The result is `bool`, so nothing can push a numeric type back
+    // down into the operands, and no enclosing context ever will.
+    if (2 % 1 > 0) {
+        printf(`cmp=unexpected\n`);
+        return 1;
+    }
+    let cmp: bool = 1 + 1 == 2;
+    printf(`cmp=${cmp} fcmp=${1.5 < 2.5}\n`);
+
+    // 2: names the emitter generates for itself.
+    let t0: int32 = twice(21);
+    let t1: int32 = 1;
+    let __ret: int32 = 2;                  // the async ABI's result slot
+    let while_body_0: int32 = 3;           // a freshLabel hint + counter
+    let entry: int32 = 4;                  // the entry block (already handled)
+    let i: int32 = 0;
+    while (i < 2) {
+        let t2: int32 = i;                 // shadowing a temp name in a nested scope
+        i = i + t2 + 1;
+    }
+    printf(`names=${t0} ${t1} ${__ret} ${while_body_0} ${entry} ${i}\n`);
+    return 0;
+}

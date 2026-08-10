@@ -1,0 +1,46 @@
+// `arr[i].field = v` used to be rejected everywhere with "invalid assignment
+// target - root of field chain is not an identifier": the walk that finds the
+// binding a field chain is rooted at only stepped through FIELD_ACCESS, so any
+// INDEX_EXPRESSION in the middle ended it. Reading the same chain was always
+// fine, and so was whole-element assignment, which made it read like a rule
+// rather than an oversight.
+//
+// The root binding's CONSTNESS stops applying once the chain passes through an
+// index, matching what plain `arr[i] = v` already did - `const xs: T[]` freezes
+// the name `xs`, not the buffer behind it. A direct field write on a const
+// binding is still rejected (examples/fail covers that).
+
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Sector { floorHeight: int32, ceiling: int32 }
+type World { sectors: Sector[] }
+
+// Through a struct field, through a `ref` parameter, plain and compound.
+function raise(ref w: World, i: usize, amount: int32): void {
+    w.sectors[i].floorHeight = w.sectors[i].floorHeight + amount;
+    w.sectors[i].ceiling += 2;
+}
+
+function main(): int32 {
+    let sectors: Sector[] = intr.heap_alloc(2);
+    sectors[0] = { floorHeight: 0, ceiling: 0 };
+    sectors[1] = { floorHeight: 0, ceiling: 0 };
+
+    // directly on a local array
+    sectors[0].floorHeight = 5;
+    sectors[0].floorHeight += 1;
+
+    let w: World = { sectors: sectors };
+    raise(ref w, 1, 7);
+
+    // a const binding still writes through the index
+    const cw: World = w;
+    cw.sectors[1].ceiling = 9;
+
+    printf(`f0=${sectors[0].floorHeight} f1=${sectors[1].floorHeight} c1=${sectors[1].ceiling}\n`);
+    return 0;
+}

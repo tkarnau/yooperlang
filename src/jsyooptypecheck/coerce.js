@@ -96,6 +96,22 @@ export function coerceUntypedLiteralToTyped(
       errors,
     );
   }
+  // Same reasoning one level down for `-(a + b)` / `~(1 << 3)`: the unary's
+  // own node would be retyped below while its still-untyped operand reached
+  // codegen unpinned.
+  if (
+    valueNode.kind === ASTNodeKind.UNARY_EXPRESSION &&
+    valueNode.operand?.resolvedType &&
+    (valueNode.operand.resolvedType.kind === typeKinds.untypedInt ||
+      valueNode.operand.resolvedType.kind === typeKinds.untypedFloat)
+  ) {
+    coerceUntypedLiteralToTyped(
+      valueNode.operand,
+      valueNode.operand.resolvedType,
+      targetType,
+      errors,
+    );
+  }
   valueNode.resolvedType = targetType;
 }
 
@@ -191,8 +207,12 @@ export function isAssignable(dest, src) {
     const sParams = src.params ?? [];
     if (dParams.length !== sParams.length) return false;
     for (let i = 0; i < dParams.length; i++) {
-      // FPT doesn't carry `ref`-marked params today; require non-ref on src.
-      if (sParams[i].isRef) return false;
+      // A `ref` param carries its reference in the param TYPE on both sides -
+      // FuncType stores `RefType(T)` with a redundant `isRef: true`, and the
+      // FPT annotation `(ref m: T) => R` resolves its param to `RefType(T)`
+      // too (parser, parseFunctionTypeAnnotation). So comparing the types is
+      // the whole check; `isRef` adds nothing and bailing on it rejected
+      // every `ref`-taking function as a function value.
       if (!typesEqual(dParams[i], sParams[i].type)) return false;
     }
     return typesEqual(dest.returnType, src.returnType);
