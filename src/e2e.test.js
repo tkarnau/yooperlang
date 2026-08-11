@@ -273,6 +273,32 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
+  it("http_chunked: decodes chunked bodies in both directions, and rejects bad framing", async () => {
+    // The peer here is a RAW socket writing canned bytes, because a real HTTP
+    // server cannot produce the cases that matter - a bad hex size, a missing
+    // CRLF after the data, both framings at once. The client and server halves
+    // are the real std/http ones.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_chunked/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      'simple  ok  "hello world"\n' +
+        // Uppercase hex size, chunk extensions, and a trailer field.
+        'extras  ok  "abcdefghijklmnopqrstuvwxyz"\n' +
+        // 40 chunks of 4 bytes across many reads: the incremental path, where
+        // the decoder resumes mid-body without re-walking or double-copying.
+        "many    ok  len=160\n" +
+        "badsize err 400 chunk size is not hexadecimal\n" +
+        "nocrlf  err 400 chunk data is not followed by CRLF\n" +
+        // RFC 9112: the request-smuggling ambiguity, rejected.
+        "both    err 400 message has both Transfer-Encoding and Content-Length\n" +
+        // The receiving direction: our server decoding a chunked request body
+        // that arrived across two writes.
+        'request ok  "got:chunked-body!"\n' +
+        "done\n",
+    );
+  });
+
   it("time_calendar.yoop: wall clock + calendar, checked against fixed epochs", async () => {
     // Reproducible with `new Date(epoch * 1000).toISOString()`. Assertions are
     // UTC-only on purpose: local rendering depends on the machine's timezone.
@@ -2412,7 +2438,11 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
       "bad-method : 501 unsupported method \"BREW\"\n" +
       "bad-version: 505 unsupported HTTP version \"HTTP/9.9\"\n" +
       "bad-length : 400 Content-Length is not a number\n" +
-      "chunked    : 501 chunked transfer encoding is not supported\n" +
+      // A chunked head parses now; the framing is the read loop's job, and
+      // examples/pass/http_chunked covers the decoding itself.
+      "chunked    : accepted chunked=1\n" +
+      // Both framings at once is the request-smuggling shape, still refused.
+      "both-framings: 400 message has both Transfer-Encoding and Content-Length\n" +
       "encoded-sep: 400 decoding request path \"/a%2Fb\": encoded path separator is not allowed\n",
     );
   });

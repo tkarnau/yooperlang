@@ -38,6 +38,17 @@ function rejects(what: string, raw: string): void {
     }
 }
 
+// The mirror of `rejects`, for a head that must get THROUGH the parser.
+function accepts(what: string, raw: string): void {
+    switch (parser.parseRequestHead(intr.string_as_bytes(raw))) {
+        case Result.Ok { value: p }: {
+            disposable parsed: ParsedRequest = p;
+            printf(`${what}: accepted chunked=${parsed.info.chunked}\n`);
+        }
+        case Result.Err { error: e }: { printf(`${what}: UNEXPECTEDLY REJECTED ${e}\n`); }
+    }
+}
+
 function main(): int32 {
     switch (run()) {
         case Result.Ok { value: _n }: { }
@@ -46,7 +57,13 @@ function main(): int32 {
     rejects("bad-method ", "BREW /x HTTP/1.1\r\nHost: h\r\n\r\n");
     rejects("bad-version", "GET /x HTTP/9.9\r\nHost: h\r\n\r\n");
     rejects("bad-length ", "GET /x HTTP/1.1\r\nContent-Length: eight\r\n\r\n");
-    rejects("chunked    ", "GET /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+    // A chunked head PARSES now - the body framing is the read loop's problem,
+    // not the head parser's. See examples/pass/http_chunked for the decoding.
+    accepts("chunked    ", "GET /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\n\r\n");
+    // ...but both framings at once is still refused. RFC 9112 section 6.1:
+    // one intermediary frames the message by the length and the next by the
+    // chunks, and a request appears out of nowhere between them.
+    rejects("both-framings", "GET /x HTTP/1.1\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n");
     rejects("encoded-sep", "GET /a%2Fb HTTP/1.1\r\nHost: h\r\n\r\n");
     return 0;
 }

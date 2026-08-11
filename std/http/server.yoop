@@ -94,7 +94,11 @@ export vtable Dispatcher for Handler {
 // Every one of them has a defensible default and none of them is unlimited.
 export type ServerConfig {
     maxHeadBytes:              usize,   // request line + headers
-    maxBodyBytes:              usize,   // Content-Length ceiling
+    // Body ceiling. Under Content-Length it is checked against the declared
+    // length before a byte is read; under chunked it bounds the DECODED total
+    // as the chunks arrive, which is the number that matters - a sender can
+    // inflate the raw byte count with tiny chunks and extensions.
+    maxBodyBytes:              usize,
     readChunk:                 usize,   // per-recv scratch size
     maxRequestsPerConnection:  int32,   // keep-alive ceiling, <= 0 for one
     logRequests:               bool,
@@ -177,6 +181,39 @@ async readBody(
         vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
     }
     return Result.Ok { value: need };
+}
+
+// Read a chunked body, decoding as it arrives.
+//
+// Returns the number of RAW bytes the body occupied, which is what the caller
+// needs to find the start of the next pipelined request - not the decoded
+// length, which is `out.len`.
+//
+// The decoder is incremental (see chunkedFeed in wire.yoop), so each read
+// examines only the bytes it added rather than re-walking the whole buffer.
+async readChunkedBody(
+    ref stream: TcpStream,
+    ref buf: Vec<uint8>,
+    ref scratch: Bytes,
+    bodyStart: usize,
+    ref out: Vec<uint8>,
+    maxBody: usize,
+): Result<usize, HttpError> {
+    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let reader: ChunkedReader = chunkedReaderNew(bodyStart);
+
+    while (true) {
+        // Re-take the view every pass: the read below may have grown and
+        // therefore MOVED the Vec's buffer.
+        let done: bool = chunkedFeed(vec.vec_as_array(ref buf), ref reader, ref out, maxBody)?;
+        if (done) { return Result.Ok { value: reader.end }; }
+
+        let n: usize = await readRequestBytes(ref stream, ref window)? "reading the chunked request body";
+        if (n == 0) {
+            return Result.Err { error: errBadRequest("connection closed mid-chunk") };
+        }
+        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+    }
 }
 
 // Drop the first `n` bytes of `buf`, keeping whatever followed at the front.
@@ -263,6 +300,7 @@ async exchange(
     ref stream: TcpStream,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
+    ref decoded: Vec<uint8>,
     ref d: Dispatcher,
     cfg: ServerConfig,
     ref resp: Response,
@@ -270,20 +308,33 @@ async exchange(
 ): Result<usize, HttpError> {
     let disposable pr: ParsedRequest = parseRequestHead(vec.vec_as_array(ref buf))?;
 
-    let need: usize = expectedBodyLen(ref pr);
-    if (need > cfg.maxBodyBytes) {
-        return Result.Err {
-            error: httpError(payloadTooLarge(), `body of ${need} bytes exceeds the ${cfg.maxBodyBytes} byte limit`),
-        };
+    if (pr.info.chunked) {
+        // A chunked body is decoded into `decoded`, which is connection-owned
+        // and lives past this call - so the view handed to the handler stays
+        // valid for as long as the Content-Length path's view into `buf` does.
+        vec.vec_clear(ref decoded);
+        let raw: usize = await readChunkedBody(
+            ref stream, ref buf, ref scratch, pr.bodyStart, ref decoded, cfg.maxBodyBytes)?;
+        pr.request.body = vec.vec_as_array(ref decoded);
+        // RAW bytes, not decoded: this is where the next pipelined request
+        // begins, and the chunk framing was part of the message.
+        meta.consumed = raw;
+    } else {
+        let need: usize = expectedBodyLen(ref pr);
+        if (need > cfg.maxBodyBytes) {
+            return Result.Err {
+                error: httpError(payloadTooLarge(), `body of ${need} bytes exceeds the ${cfg.maxBodyBytes} byte limit`),
+            };
+        }
+        let _got: usize = await readBody(ref stream, ref buf, ref scratch, pr.bodyStart, need)?;
+
+        // The read above may have grown (and moved) the buffer, so the body
+        // view has to be taken after it, not before.
+        let view: uint8[] = vec.vec_as_array(ref buf);
+        pr.request.body = intr.array_slice(view, pr.bodyStart, pr.bodyStart + need);
+        meta.consumed = pr.bodyStart + need;
     }
-    let _got: usize = await readBody(ref stream, ref buf, ref scratch, pr.bodyStart, need)?;
 
-    // The read above may have grown (and moved) the buffer, so the body view
-    // has to be taken after it, not before.
-    let view: uint8[] = vec.vec_as_array(ref buf);
-    pr.request.body = intr.array_slice(view, pr.bodyStart, pr.bodyStart + need);
-
-    meta.consumed = pr.bodyStart + need;
     meta.headOnly = methodEq(pr.request.method, HttpMethod.Head);
     // HTTP/1.0 defaults to close; 1.1 defaults to keep-alive.
     meta.clientWantsClose = pr.info.connectionClose
@@ -337,6 +388,12 @@ export async serveConnection(
 
     disposable buf: Vec<uint8> = vec.vec_new(cfg.readChunk);
     disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(cfg.readChunk), cfg.readChunk);
+    // Decoded chunked bodies land here. Connection-owned rather than
+    // per-request so the handler's view outlives `exchange`, and started small
+    // rather than at readChunk because a connection that never sends a chunked
+    // body should not pay for one - it grows on first use and is then reused
+    // for the rest of the connection.
+    disposable decoded: Vec<uint8> = vec.vec_new(64);
 
     while (served < limit) {
         // Head first: a clean close here is how a keep-alive connection ends.
@@ -356,7 +413,7 @@ export async serveConnection(
         disposable resp: Response = responseNew();
         let meta: ExchangeMeta = newMeta();
         let failed: bool = false;
-        switch (await exchange(ref stream, ref buf, ref scratch, ref d, cfg, ref resp, ref meta)) {
+        switch (await exchange(ref stream, ref buf, ref scratch, ref decoded, ref d, cfg, ref resp, ref meta)) {
             case Result.Ok { value: _n }: { }
             case Result.Err { error: e }: {
                 respondError(ref resp, ref e);

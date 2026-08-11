@@ -14,9 +14,10 @@ module http;
 // Limitations, all deliberate and all deferred:
 //   * No TLS. `https://` URLs parse, but the connection is plain TCP and the
 //     peer will drop it at the handshake.
-//   * No chunked responses. A `Transfer-Encoding: chunked` reply is rejected
-//     by the shared header reader with a 501-shaped error rather than being
-//     mis-read as a body with chunk headers in it.
+//   * No response streaming. A chunked reply IS decoded (Go's HTTP server
+//     chunks anything it cannot size up front, so this is the common case for
+//     a local model runner), but the body is buffered whole before `send`
+//     returns - so server-sent events arrive all at once, at the end.
 //   * No redirect following and no connection pooling. A 3xx comes back as
 //     it arrived; the `Location` header is the caller's to act on.
 
@@ -253,12 +254,11 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
         headersAdd(ref resp.headers, e.name, e.value);
     }
 
-    let seen: uint8[] = vec.vec_as_array(ref buf);
-    if (seen.len > head.bodyStart) {
-        vec.vec_extend_from(ref resp.body, intr.array_slice(seen, head.bodyStart, seen.len));
-    }
-
-    switch (await readRest(ref cr.stream, ref scratch, ref c, ref head, ref resp.body)) {
+    // Whatever arrived alongside the head is the first of the body. Seeding it
+    // is `readRest`'s job rather than this one's, because what those bytes
+    // MEAN depends on the framing: under Content-Length they are body, under
+    // chunked they are chunk headers that still have to be decoded.
+    switch (await readRest(ref cr.stream, ref buf, ref scratch, ref c, ref head, ref resp.body)) {
         case Result.Ok { value: _n }: { return Result.Ok { value: resp }; }
         case Result.Err { error: e }: {
             Disposable.dispose(ref resp);
@@ -271,12 +271,28 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
 // give the half-built response back.
 async readRest(
     ref stream: TcpStream,
+    ref buf: Vec<uint8>,
     ref scratch: Bytes,
     ref c: Client,
     ref head: ParsedResponse,
     ref body: Vec<uint8>,
 ): Result<usize, HttpError> {
+    // A chunked reply is framed by its chunk headers rather than by a length,
+    // so it takes the decoder instead of the read-to-length loop below. Go's
+    // HTTP server chunks anything it cannot size up front, which is most local
+    // model runners, so this is the common case rather than the exotic one.
+    if (head.info.chunked) {
+        return await readChunkedRest(ref stream, ref buf, ref scratch, ref c, ref head, ref body);
+    }
+
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
+
+    // Under Content-Length the bytes that came in with the head ARE body.
+    let seen: uint8[] = vec.vec_as_array(ref buf);
+    if (seen.len > head.bodyStart) {
+        vec.vec_extend_from(ref body, intr.array_slice(seen, head.bodyStart, seen.len));
+    }
+
     let want: usize = 0;
     let bounded: bool = false;
     switch (head.info.contentLength) {
@@ -314,6 +330,53 @@ async readRest(
     // A bounded read can overshoot into the next message only on a connection
     // we reuse, and this client never reuses one - so trim and move on.
     return Result.Ok { value: body.len };
+}
+
+// The chunked half of `readRest`: decode into `body` as the raw bytes arrive.
+//
+// Unlike the Content-Length path, the head's leftover bytes are NOT copied
+// into `body` first - they are chunk framing, and the decoder reads them out
+// of `buf` where they already are.
+//
+// Two ceilings, and they are different numbers. `maxResponseBytes` bounds the
+// DECODED body, which is what the caller asked for. The raw bound below exists
+// because chunk framing is not free: a sender can spend six raw bytes per
+// decoded byte with single-byte chunks, and a peer that never sends its
+// terminal chunk would otherwise grow `buf` until the process dies.
+async readChunkedRest(
+    ref stream: TcpStream,
+    ref buf: Vec<uint8>,
+    ref scratch: Bytes,
+    ref c: Client,
+    ref head: ParsedResponse,
+    ref body: Vec<uint8>,
+): Result<usize, HttpError> {
+    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let reader: ChunkedReader = chunkedReaderNew(head.bodyStart);
+    let rawLimit: usize = c.maxHeadBytes + c.maxResponseBytes * 8;
+
+    while (true) {
+        // Re-take the view each pass: the read below can grow and therefore
+        // MOVE the Vec's buffer.
+        let done: bool = chunkedFeed(
+            vec.vec_as_array(ref buf), ref reader, ref body, c.maxResponseBytes)?;
+        if (done) { return Result.Ok { value: body.len }; }
+
+        if (buf.len > rawLimit) {
+            return Result.Err {
+                error: httpError(payloadTooLarge(),
+                    `chunked response framing exceeded ${rawLimit} raw bytes`),
+            };
+        }
+
+        let n: usize = await readResponseBytes(ref stream, ref window)? "reading the chunked response body";
+        if (n == 0) {
+            return Result.Err {
+                error: errIo("peer closed before the chunked body was complete"),
+            };
+        }
+        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+    }
 }
 
 // ----- convenience --------------------------------------------------------

@@ -84,9 +84,9 @@ function findHeadEnd(buf: uint8[]): usize {
 
 // What the header block told us about the body that follows it.
 //
-// `chunked` is tracked rather than ignored: without it, a chunked body reads
-// as a body with chunk-size lines embedded in it, which is worse than an
-// honest 501.
+// `chunked` selects the framing: a chunked body is delimited by its chunk
+// headers rather than by a length, so the two are read by different loops.
+// Both are mutually exclusive by RFC 9112 and rejected together below.
 type HeadInfo {
     contentLength:   Option<usize>,
     chunked:         bool,
@@ -188,12 +188,233 @@ function readHeaderLines(
         pos = pos + lineLen + 2;
     }
 
-    if (info.chunked) {
-        return Result.Err {
-            error: httpError(notImplemented(), "chunked transfer encoding is not supported"),
-        };
+    // RFC 9112 section 6.1: a message with both a Transfer-Encoding and a
+    // Content-Length is exactly the ambiguity request smuggling is built on -
+    // one intermediary frames it by the length and the next by the chunks, and
+    // a request appears out of nowhere between them. The spec says a server
+    // MUST reject it; so does this, in both directions.
+    switch (info.contentLength) {
+        case Option.Some { value: _n }: {
+            if (info.chunked) {
+                return Result.Err {
+                    error: errBadRequest("message has both Transfer-Encoding and Content-Length"),
+                };
+            }
+        }
+        case Option.None: { }
     }
     return Result.Ok { value: info };
+}
+
+// ----- chunked transfer decoding (RFC 9112 section 7.1) --------------------
+//
+// The wire format:
+//
+//     <hex-size> [;ext] CRLF
+//     <size bytes of data> CRLF
+//     ...
+//     0 [;ext] CRLF
+//     [trailer-field CRLF]...
+//     CRLF
+//
+// Go's HTTP server chunks anything it cannot size up front, which means ollama
+// and most local model runners, which means this is not an exotic corner: it
+// is what a reply from the thing you most want to talk to looks like. Before
+// this, `readHeaderLines` returned an honest 501 and small replies arrived
+// while the first full-size one did not.
+//
+// INCREMENTAL, because a body arrives across many reads and re-decoding the
+// whole buffer after each one is quadratic. `ChunkedReader` holds a cursor that
+// only ever advances past a COMPLETE chunk, so every byte is examined once and
+// every data byte is copied once. The caller loops: feed what it has, read
+// more if not done.
+//
+// Socket-free like everything else in this file, which is what lets the
+// decoder be tested against a byte literal rather than against a server.
+
+// A chunk size is a hex number. 16 digits is the widest a 64-bit value can be,
+// and anything longer is malformed rather than large - bounding it here is
+// what stops `0000...0005` from being an unbounded parse.
+const MAX_CHUNK_SIZE_DIGITS: usize = 16;
+
+// Bound on the trailer section, which is otherwise an unbounded header block
+// arriving after the caller's body limit has already been checked.
+const MAX_TRAILER_BYTES: usize = 8192;
+
+type ChunkedReader {
+    // Next byte not yet accounted for. Only ever advanced past a chunk that
+    // was present in full, so a partial read is simply re-examined next time.
+    cursor:     usize,
+    // Decoded bytes handed to `out` so far, for the size limit.
+    decoded:    usize,
+    // Past the terminal zero-size chunk, reading trailer fields.
+    inTrailers: bool,
+    trailerAt:  usize,
+    done:       bool,
+    // Raw bytes of the message this body occupied, valid once done. The server
+    // needs it to find where the next pipelined request starts.
+    end:        usize,
+}
+
+function chunkedReaderNew(bodyStart: usize): ChunkedReader {
+    return {
+        cursor: bodyStart,
+        decoded: 0,
+        inTrailers: false,
+        trailerAt: 0,
+        done: false,
+        end: 0,
+    };
+}
+
+// Index of the CR of the next CRLF at or after `pos`, or `buf.len` when there
+// is not a complete line yet.
+//
+// A bare CR or a bare LF is NOT a line ending here. RFC 9112 allows a lone LF
+// as a terminator for robustness, but a decoder that accepts both gives two
+// intermediaries two different framings of the same bytes - the smuggling
+// shape again - so this requires CRLF and rejects the rest.
+function findCrlf(buf: uint8[], pos: usize): usize {
+    let i: usize = pos;
+    while (i + 1 < buf.len) {
+        if (buf[i] == '\r' && buf[i + 1] == '\n') { return i; }
+        i = i + 1;
+    }
+    return buf.len;
+}
+
+// The hex value of a chunk-size line, which runs to a `;` (chunk extensions,
+// which are legal and ignored) or to the CRLF.
+function parseChunkSize(line: uint8[]): Result<usize, HttpError> {
+    let end: usize = bytes.bytes_index_of(line, ';');
+    let digits: uint8[] = bytes.bytes_slice(line, 0, end);
+
+    // Trailing whitespace before the `;` or CRLF is tolerated; leading is not,
+    // since that would make the size line indistinguishable from a folded
+    // continuation.
+    let n: usize = digits.len;
+    while (n > 0 && (digits[n - 1] == ' ' || digits[n - 1] == '\t')) { n = n - 1; }
+    digits = bytes.bytes_slice(digits, 0, n);
+
+    if (digits.len == 0) {
+        return Result.Err { error: errBadRequest("chunk size line has no size") };
+    }
+    if (digits.len > MAX_CHUNK_SIZE_DIGITS) {
+        return Result.Err { error: errBadRequest("chunk size is too long to be valid") };
+    }
+
+    let value: usize = 0;
+    for d in digits {
+        let v: int32 = hexDigit(d);
+        if (v < 0) {
+            return Result.Err { error: errBadRequest("chunk size is not hexadecimal") };
+        }
+        value = value * 16 + usize(v);
+    }
+    return Result.Ok { value: value };
+}
+
+function hexDigit(c: uint8): int32 {
+    if (c >= '0' && c <= '9') { return int32(c) - int32('0'); }
+    if (c >= 'a' && c <= 'f') { return int32(c) - int32('a') + 10; }
+    if (c >= 'A' && c <= 'F') { return int32(c) - int32('A') + 10; }
+    return -1;
+}
+
+// Consume as much of `buf` as is structurally complete, appending decoded data
+// to `out`. Returns true once the whole body (terminal chunk plus trailers)
+// has been seen; false means "read more and call again".
+//
+// `maxDecoded` bounds the DECODED size, which is the number that matters - a
+// sender can inflate the raw byte count with chunk extensions and tiny chunks,
+// so limiting raw bytes would be the wrong ceiling.
+//
+// Trailers are consumed and DISCARDED. RFC 9112 permits a recipient to drop
+// them, and merging them into the header map after the handler has already
+// been given its headers is how a trailer becomes a way to smuggle a header
+// past whatever inspected the head.
+function chunkedFeed(
+    buf: uint8[],
+    ref r: ChunkedReader,
+    ref out: Vec<uint8>,
+    maxDecoded: usize,
+): Result<bool, HttpError> {
+    while (!r.done) {
+        if (r.inTrailers) {
+            let lineAt: usize = findCrlf(buf, r.cursor);
+            if (lineAt == buf.len) {
+                if (buf.len - r.trailerAt > MAX_TRAILER_BYTES) {
+                    return Result.Err { error: errBadRequest("chunked trailer section is too large") };
+                }
+                return Result.Ok { value: false };
+            }
+            // An empty line ends the trailers and the message.
+            if (lineAt == r.cursor) {
+                r.end = r.cursor + 2;
+                r.done = true;
+                return Result.Ok { value: true };
+            }
+            // A non-empty trailer line: skipped, but its shape is still
+            // checked, because a line with no colon here means the framing is
+            // wrong rather than that a field is uninteresting.
+            let line: uint8[] = bytes.bytes_slice(buf, r.cursor, lineAt);
+            if (line[0] == ' ' || line[0] == '\t') {
+                return Result.Err { error: errBadRequest("obsolete line folding in chunked trailer") };
+            }
+            if (bytes.bytes_index_of(line, ':') == line.len) {
+                return Result.Err { error: errBadRequest("chunked trailer line has no \":\"") };
+            }
+            r.cursor = lineAt + 2;
+            if (r.cursor - r.trailerAt > MAX_TRAILER_BYTES) {
+                return Result.Err { error: errBadRequest("chunked trailer section is too large") };
+            }
+            continue;
+        }
+
+        // A chunk-size line.
+        let sizeEnd: usize = findCrlf(buf, r.cursor);
+        if (sizeEnd == buf.len) {
+            // Guard the size line itself: without this a sender can stream
+            // digits forever and never complete a line.
+            if (buf.len - r.cursor > MAX_CHUNK_SIZE_DIGITS + 256) {
+                return Result.Err { error: errBadRequest("chunk size line is too long") };
+            }
+            return Result.Ok { value: false };
+        }
+        let size: usize = parseChunkSize(bytes.bytes_slice(buf, r.cursor, sizeEnd))?;
+        let dataAt: usize = sizeEnd + 2;
+
+        if (size == 0) {
+            // The terminal chunk. What follows is the trailer section, which
+            // may be empty (the common `0\r\n\r\n`).
+            r.cursor = dataAt;
+            r.trailerAt = dataAt;
+            r.inTrailers = true;
+            continue;
+        }
+
+        if (r.decoded + size > maxDecoded) {
+            return Result.Err {
+                error: httpError(payloadTooLarge(),
+                    `chunked body exceeds the ${maxDecoded} byte limit`),
+            };
+        }
+
+        // The chunk is only complete once its data AND its trailing CRLF have
+        // arrived. Leaving the cursor put means a short read costs nothing but
+        // one re-examination of this size line.
+        if (dataAt + size + 2 > buf.len) {
+            return Result.Ok { value: false };
+        }
+        if (buf[dataAt + size] != '\r' || buf[dataAt + size + 1] != '\n') {
+            return Result.Err { error: errBadRequest("chunk data is not followed by CRLF") };
+        }
+
+        vec.vec_extend_from(ref out, bytes.bytes_slice(buf, dataAt, dataAt + size));
+        r.decoded = r.decoded + size;
+        r.cursor = dataAt + size + 2;
+    }
+    return Result.Ok { value: true };
 }
 
 // One Content-Length value. A non-numeric value, a negative one, or a second

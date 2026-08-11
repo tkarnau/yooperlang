@@ -446,25 +446,46 @@ The takeaways are right that the server is real and the client and proxy story
 is not. Ordered by value per unit of work, which is not the order they are
 listed in over there.
 
-### 3.1 Chunked transfer decoding (do this first)
+### 3.1 Chunked transfer decoding - DONE (2026-08-11)
 
-`std/http/wire.yoop` tracks `chunked` deliberately and returns an honest 501
-(lines 87 to 193). Go's HTTP server chunks anything it cannot size up front,
-which means ollama and most local model runners, which means the first
-full-size reply from a local model does not arrive. That is a hard stop for the
-exact class of program this experiment was writing.
+Go's HTTP server chunks anything it cannot size up front, which means ollama
+and most local model runners, which meant the first full-size reply from a
+local model never arrived. `readHeaderLines` returned an honest 501 and that
+was that. The HTTP/1.0 stopgap that yooperdoom shipped (1.0 has no chunked
+encoding at all, so the server answers 1.0, sets `Connection: close`, and the
+body is delimited by the socket closing) is no longer needed.
 
-Decoding chunked is a contained, well-specified piece of work in one file that
-already has the right hook. It has no dependency on TLS. **Do it first, and
-alone.** Include the trailer-header case and a size cap consistent with
-`maxResponseBytes`.
+**Both directions.** The client decodes a chunked response; the server decodes
+a chunked request body.
 
-While it is missing, the yooperdoom workaround is worth writing into the client
-doc comment: ask in HTTP/1.0, which has no chunked encoding, so the server
-answers 1.0, sets `Connection: close`, and delimits the body by closing the
-socket. Reading to EOF is then the whole implementation. Twelve lines instead
-of a hundred. That is a legitimate stopgap and it should be documented rather
-than rediscovered.
+The decoder is INCREMENTAL, and that is the design decision worth recording. A
+body arrives across many reads, and re-decoding the whole buffer after each one
+is quadratic. `ChunkedReader` in `wire.yoop` holds a cursor that only ever
+advances past a COMPLETE chunk, so every byte is examined once and every data
+byte is copied once; a short read costs one re-examination of a size line and
+nothing else. It lives in `wire.yoop` because that file is socket-free, which
+is what lets the decoder be exercised against a byte literal.
+
+What it handles, all covered by fixtures: chunk extensions (`1a;name=value`),
+uppercase hex sizes, trailer fields, and bodies split arbitrarily across reads.
+What it rejects: a non-hex size, data not followed by CRLF, an over-long size
+line, an over-large trailer section, and a body over the caller's limit. Both
+size ceilings are on the DECODED total rather than the raw bytes, because a
+sender can inflate the raw count with tiny chunks and extensions.
+
+Trailers are consumed and DISCARDED. RFC 9112 permits it, and merging them into
+the header map after the handler already has its headers is how a trailer
+becomes a way to smuggle a header past whatever inspected the head.
+
+**Found while doing it:** a message carrying BOTH `Transfer-Encoding` and
+`Content-Length` was previously accepted (the 501 fired first, so it never
+mattered). That is the exact ambiguity request smuggling is built on - one
+intermediary frames by the length, the next by the chunks - and RFC 9112
+section 6.1 says reject. Now rejected in both directions.
+
+Fixture: `examples/pass/http_chunked/`. Its peer is a RAW socket writing canned
+bytes, because a real HTTP server cannot produce a bad hex size or a missing
+CRLF; the client and server halves under test are the real ones.
 
 ### 3.2 An awaitable `Handler.handle`, and task-per-connection in `serve`
 
@@ -790,7 +811,7 @@ Closed without code: whether a bare `{ ... }` block should be a statement
 
 **Then - HTTP, in this order and not in parallel:**
 
-1. Chunked decoding, alone (3.1)
+1. ~~Chunked decoding, alone (3.1)~~ **DONE (2026-08-11)**, both directions.
 2. Async `Handler.handle` plus a bounded task-per-connection loop, with a
    reverse proxy in `examples/pass/` as the proof (3.2)
 3. TLS, with its own plan doc first (3.3)
