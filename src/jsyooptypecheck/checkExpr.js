@@ -274,19 +274,47 @@ function resolveBinary(node, scope, ctx) {
     coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
     coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
   }
-  // A comparison of two UNTYPED operands (`2 % 1 > 0`, `if (1 + 1 == 2)`) is
-  // the end of the line for pinning: the result is `bool`, so the coercion
-  // above cannot push a numeric type down, and no enclosing context ever
-  // will. Codegen then reads `untypedInt` off the operand it picks for the
-  // instruction's type and throws. Default them the way every other
-  // context-free untyped literal defaults. A comparison with ONE typed side
-  // is unaffected - codegen takes the type from that side.
-  const bothUntyped =
-    (leftType.kind === typeKinds.untypedInt ||
-      leftType.kind === typeKinds.untypedFloat) &&
-    (rightType.kind === typeKinds.untypedInt ||
-      rightType.kind === typeKinds.untypedFloat);
-  if (bothUntyped && resultType.kind === typeKinds.prim && isBool(resultType)) {
+  // A COMPARISON is the end of the line for pinning: its result is `bool`, so
+  // the coercion above cannot push a numeric type down (bool is neither an int
+  // nor a float prim, so coerceUntypedLiteralToTyped returns early), and no
+  // enclosing context ever will. Anything still untyped here reaches codegen
+  // unpinned, and `llvmType` throws on it. Two shapes, and each needs its own
+  // answer.
+  const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(node.op);
+  const leftUntyped =
+    leftType.kind === typeKinds.untypedInt ||
+    leftType.kind === typeKinds.untypedFloat;
+  const rightUntyped =
+    rightType.kind === typeKinds.untypedInt ||
+    rightType.kind === typeKinds.untypedFloat;
+
+  if (isCmp && leftUntyped !== rightUntyped) {
+    // ONE untyped side (`x == -24 + 176` where x is int32). Pin it to the
+    // TYPED SIDE'S type, not to the bool result. Codegen takes the comparison
+    // instruction's type from the left operand and so survives a bare literal
+    // here, but it still RECURSES into the untyped operand to emit it - and a
+    // compound expression like `-24 + 176` has its own untypedInt resolvedType
+    // waiting there. That is the crash yooperdoom hit (takeaways 1.2), and the
+    // reason the old comment's "unaffected, codegen takes the type from that
+    // side" was true of the instruction but not of the operand.
+    //
+    // Pinning to the typed side rather than to the int32 default is also what
+    // reaches the range check: `b == 300` where b is uint8 is a diagnostic
+    // rather than a silently truncated comparison. Note the limit - only the
+    // LEAVES are checked, since coerceUntypedLiteralToTyped range-checks bare
+    // INT_LITERAL/FLOAT_LITERAL nodes and merely retypes the compound ones.
+    // `b == 200 + 100` passes: 200 and 100 each fit in a uint8 and nothing
+    // folds the sum at typecheck. Catching that wants constant folding, which
+    // is a separate job.
+    const typedSide = leftUntyped ? rightType : leftType;
+    if (typedSide.kind === typeKinds.prim) {
+      coerceUntypedLiteralToTyped(node.left, leftType, typedSide, ctx.errors);
+      coerceUntypedLiteralToTyped(node.right, rightType, typedSide, ctx.errors);
+    }
+  } else if (isCmp && leftUntyped && rightUntyped) {
+    // BOTH untyped (`2 % 1 > 0`, `if (1 + 1 == 2)`). There is no typed side to
+    // borrow from, so default them the way every other context-free untyped
+    // literal defaults.
     const pinned =
       leftType.kind === typeKinds.untypedFloat ||
       rightType.kind === typeKinds.untypedFloat
@@ -331,6 +359,38 @@ function calleeDisplayName(callee) {
     return `${callee.object.name}.${callee.field}`;
   }
   return "call";
+}
+
+// `printf(`...`, x)` - a template literal used as a format string, with value
+// arguments after it. Rejected, because it silently prints the wrong thing.
+//
+// The two printf emitters treat a DOUBLE-QUOTED format literal as C printf
+// (its `%` directives are authoritative and trailing args fill them) but a
+// TEMPLATE literal as a literal-percent context: its `%` is escaped to `%%` on
+// the way out, and each bare value arg then gets a specifier APPENDED. So
+//
+//     printf(`%s`, name)    prints  %sbob        <- not a substitution
+//     printf(`n=%d`, n)     prints  n=%d7
+//
+// which is internally consistent and useless: there is no way to spell a
+// directive inside a template, so a trailing value arg can never be the thing
+// the author meant. Both correct spellings are one edit away, and the error
+// names them. See plans/yooperdoom-takeaways.md 2.3.
+function checkPrintfTemplateFormat(node, ctx) {
+  const fmt = node.args?.[0];
+  if (fmt?.kind !== ASTNodeKind.TEMPLATE_LITERAL) return;
+  const extra = node.args.length - 1;
+  if (extra < 1) return;
+  pushError(
+    ctx.errors,
+    node.args[1],
+    `a template literal is not a printf format string, so the ` +
+      `${extra === 1 ? "argument after it" : `${extra} arguments after it`} ` +
+      `cannot be substituted - a template's "%" is printed literally and the ` +
+      `${extra === 1 ? "value is" : "values are"} appended instead. ` +
+      `Interpolate into the template (\`... \${x}\`), or pass a ` +
+      `double-quoted format literal ("...%s", x).`,
+  );
 }
 
 // `f(a, b, c)` or `ns.f(a, b, c)` - looks up the function (local, imported
@@ -438,6 +498,24 @@ function resolveCall(node, scope, ctx) {
           callee.object.resolvedType = nsType;
           return resolveCancelCall(node, scope, ctx);
         }
+        if (callee.field === "armComplete") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveArmCompleteCall(node, scope, ctx);
+        }
+        if (callee.field === "isDone") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveIsDoneCall(node, scope, ctx);
+        }
       }
       const remoteGeneric = srcEnv?.genericFuncTable?.get(callee.field);
       if (remoteGeneric) {
@@ -491,6 +569,12 @@ function resolveCall(node, scope, ctx) {
   if (callee === "cancel" && builtinIntrinsicNames?.has("cancel")) {
     return resolveCancelCall(node, scope, ctx);
   }
+  if (callee === "armComplete" && builtinIntrinsicNames?.has("armComplete")) {
+    return resolveArmCompleteCall(node, scope, ctx);
+  }
+  if (callee === "isDone" && builtinIntrinsicNames?.has("isDone")) {
+    return resolveIsDoneCall(node, scope, ctx);
+  }
   if (callee === "suspendNow" && builtinIntrinsicNames?.has("suspendNow")) {
     return resolveSuspendNowCall(node, scope, ctx);
   }
@@ -499,6 +583,7 @@ function resolveCall(node, scope, ctx) {
   // Stays a magic builtin: the name doesn't compete with user identifiers
   // and is used pervasively; gating it on import would multiply churn.
   if (callee === "printf") {
+    checkPrintfTemplateFormat(node, ctx);
     const sig = ctx.typeContext.moduleSymbols.get("printf");
     if (sig) {
       // Declared via extern block - use variadic path
@@ -2131,6 +2216,63 @@ function resolveCancelCall(node, scope, ctx) {
   }
   node.builtinCancel = true;
   return setType(node, VoidType());
+}
+
+// `armComplete(h): c_int` - register the calling task to be woken when `h`
+// completes. Same shape as resolveCancelCall (one Task<T> argument, no type
+// inference to do), differing only in the result type: the runtime's arm
+// contract is an int - 0 armed, 1 no current task, 2 already done, -1 failed.
+function resolveArmCompleteCall(node, scope, ctx) {
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `armComplete(h) takes exactly 1 argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `armComplete's argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  node.builtinArmComplete = true;
+  return setType(node, PrimType(primAnnotations.int32));
+}
+
+// `isDone(h): c_int` - 1 when the handle has finished, 0 otherwise.
+function resolveIsDoneCall(node, scope, ctx) {
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `isDone(h) takes exactly 1 argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `isDone's argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  node.builtinIsDone = true;
+  return setType(node, PrimType(primAnnotations.int32));
 }
 
 // `suspendNow()` - the suspend primitive. Takes no arguments and yields

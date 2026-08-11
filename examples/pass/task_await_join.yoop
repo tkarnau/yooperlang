@@ -1,0 +1,84 @@
+// Joining one task from another WITHOUT holding a worker thread.
+//
+// `wait h` is the blocking join: it parks the calling thread (draining the run
+// queue meanwhile, so a nested wait chain cannot deadlock the pool). That is
+// right in `main` and wrong inside a task - which is why the language rejects
+// `wait` in a task body outright.
+//
+// `conc.awaitTask(h)` is the async join. It registers a completion interest
+// with the runtime, suspends the coroutine, and comes back when the handle is
+// done. The worker goes back to the pool in between, so a task waiting on
+// another task costs nothing but its frame.
+//
+// The e2e case pins YOOP_NUM_WORKERS=1. That is the whole point: `joiner`
+// below is itself a task, and it waits on two more. Under a blocking join the
+// single worker would be held by `joiner` while the tasks it is waiting for
+// sat unstarted in the queue - a deadlock, not a slowdown.
+//
+// See plans/task-combinators.md.
+
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+task doubler(n: int32): int32 {
+    return n * 2;
+}
+
+// Takes a known amount of time, so "the joiner really waited" is observable
+// rather than a scheduling coincidence.
+task afterMs(value: int32, ms: uint64): int32 {
+    conc.sleep_ms(ms);
+    return value;
+}
+
+// One task joining another. `await`, not `wait` - the task body suspends and
+// releases its worker.
+task joiner(): int32 {
+    pooled a = doubler(20);
+    pooled b = doubler(1);
+    let x: int32 = await conc.awaitTask(a);
+    let y: int32 = await conc.awaitTask(b);
+    return x + y;
+}
+
+// "All of them" is an ordinary loop over awaitTask - each iteration suspends,
+// so the joiner holds no worker across any of them. Awaiting in sequence is
+// fine here: completion order does not change a sum.
+task fanOut(): int32 {
+    pooled a = afterMs(1, 60);
+    pooled b = afterMs(2, 30);
+    pooled c = afterMs(3, 10);
+    let total: int32 = 0;
+    total = total + await conc.awaitTask(a);
+    total = total + await conc.awaitTask(b);
+    total = total + await conc.awaitTask(c);
+    return total;
+}
+
+// Joining a handle that has ALREADY finished takes the fast path: armComplete
+// reports "already done" and nothing suspends at all.
+task joinFinished(): int32 {
+    pooled a = doubler(50);
+    conc.sleep_ms(80);                  // let it finish first
+    return await conc.awaitTask(a);
+}
+
+function main(): int32 {
+    pooled j = joiner();
+    printf("joiner=%d\n", wait j);
+
+    pooled f = fanOut();
+    printf("fanOut=%d\n", wait f);
+
+    pooled d = joinFinished();
+    printf("alreadyDone=%d\n", wait d);
+    return 0;
+}
+
+// expected output:
+// joiner=42
+// fanOut=6
+// alreadyDone=100

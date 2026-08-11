@@ -26,12 +26,24 @@ module http;
 //      request asking for `Connection: close`, a 1.0 request, or hitting
 //      `maxRequestsPerConnection` ends the connection cleanly.
 //
-// Known limitation, stated plainly: one connection is served at a time. The
-// accept loop does not spawn a task per connection yet, so a slow client
-// blocks the next one. Also, strings built while parsing a request are never
-// freed (Yoop has no string free), so a long-lived server's memory grows with
-// distinct header values seen; a per-request arena does not help, because
-// string allocation goes straight to malloc.
+// Two known limitations, stated plainly.
+//
+// One connection is served at a time. The accept loop does not spawn a task
+// per connection yet, so a slow client blocks the next one. `serveConnection`
+// is exported for exactly this reason: a program that needs real concurrency
+// today writes its own accept loop and spawns a task per connection over it.
+//
+// Strings built while parsing a request are never freed, so a long-lived
+// server's memory grows with the distinct header values it has seen. Note
+// what this is NOT: `string_from_bytes_unchecked` mallocs and copies (see
+// its codegen, and the `_from_` naming convention in std/core/strings.yoop),
+// and it returns `owned string`, so `strings.strFree` accepts these and the
+// storage is releasable. What is missing is the bookkeeping - Request and
+// Headers do not track which of their strings they own, so there is nothing
+// safe to hand to strFree at the end of an exchange. A per-request arena is
+// the other candidate fix and does not work as things stand, because this
+// allocation goes to malloc directly rather than through the ambient
+// allocator.
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result, Option } from "../core/types.yoop";

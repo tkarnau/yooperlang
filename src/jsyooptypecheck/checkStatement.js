@@ -30,7 +30,7 @@ import {
   resolveTypeInCtx,
 } from "./instantiate.js";
 import { pushError, pushWarning, formatType } from "./errors.js";
-import { isNumeric } from "./coerce.js";
+import { coerceUntypedLiteralToTyped, isNumeric } from "./coerce.js";
 import { pushScope, popScope, declareInScope, lookupInScope } from "./scope.js";
 import {
   checkInitializer,
@@ -921,12 +921,35 @@ function checkDestructureDecl(node, scope, ctx) {
   }
 }
 
+// Statement position is a value context with NO target type, so an
+// untyped-literal *expression* (`_ = 1 + 2;`, or a bare `1 + 2;`) has nothing
+// to pin it and reaches codegen with `resolvedType` still untypedInt, where
+// `llvmType` throws. Same hole, same fix, as the template-interpolation case
+// in resolveTemplateLiteral: default it the way an un-annotated `let` does
+// (int32 / float64) and push that down through the operands.
+//
+// A BARE literal (`_ = 1;`) survives without this because codegen defends
+// itself at INT_LITERAL/FLOAT_LITERAL - it is only the compound case that has
+// no defence. Found by untypedGuard.js, which is exactly what it is for.
+function pinContextFreeExpr(valueNode, valueType, ctx) {
+  const isUntypedInt = valueType?.kind === typeKinds.untypedInt;
+  const isUntypedFloat = valueType?.kind === typeKinds.untypedFloat;
+  if (!isUntypedInt && !isUntypedFloat) return valueType;
+  const pinned = isUntypedInt
+    ? PrimType(primAnnotations.int32)
+    : PrimType(primAnnotations.float64);
+  coerceUntypedLiteralToTyped(valueNode, valueType, pinned, ctx.errors);
+  return valueNode.resolvedType ?? pinned;
+}
+
 function checkDiscardStatement(node, scope, ctx) {
-  resolveExprType(node.value, scope, ctx);
+  const t = resolveExprType(node.value, scope, ctx);
+  pinContextFreeExpr(node.value, t, ctx);
 }
 
 function checkExpressionStatement(node, scope, ctx) {
-  return resolveExprType(node.value, scope, ctx);
+  const t = resolveExprType(node.value, scope, ctx);
+  return pinContextFreeExpr(node.value, t, ctx);
 }
 
 function checkReturn(node, scope, ctx) {

@@ -357,6 +357,20 @@ pooled h         = fetch(url);                     // implicitly const
 let disposable input = open_input(path) { ... }    // explicit let for mutability
 ```
 
+The default is const rather than mutable for a specific reason, not for symmetry:
+an auto-cleanup fires once, at scope end, on whatever the binding holds *then*. So
+rebinding a `disposable` silently drops the outgoing value without disposing it, and
+the compiler cannot see the leak - from its side the obligation was discharged. The
+explicit `let` is the opt-in, and it comes with the obligation to dispose the old
+value before overwriting it:
+
+```js
+let disposable s: Text = text_from("a");
+let next: Text = replace(ref s, "a", "b");
+Disposable.dispose(ref s);      // the outgoing value, by hand
+s = next;
+```
+
 ### Block-owning kinds
 
 A kind can declare `ownsBlock` in its definition (see §6). Such a binding's scope is

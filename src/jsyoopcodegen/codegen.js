@@ -88,6 +88,8 @@ const RUNTIME_DECLARES = [
   "declare i64 @yoop_now_ns()",
   // Phase 10.F.2: external cancellation primitive.
   "declare void @yoop_task_cancel(ptr)",
+  "declare i32 @yoop_task_arm_complete(ptr)",
+  "declare i32 @yoop_task_is_done(ptr)",
   "declare ptr @yoop_task_alloc(i64)",
   "declare void @yoop_task_retain(ptr)",
   "declare void @yoop_task_release(ptr)",
@@ -246,6 +248,15 @@ function arrayElemLlvmName(elemType) {
   // scrutinees.
   if (elemType.kind === typeKinds.valueEnum) {
     return arrayElemLlvmName(elemType.underlying);
+  }
+  // A `Task<T>` value is the task HANDLE, which is a bare `ptr` at the storage
+  // layer (the result type lives in the yoop type and is recovered at the
+  // wait site), so every task array shares one key regardless of T. Without
+  // this `Task<int32>[]` - and every `Vec<Task<T>>` built on it - typechecked
+  // cleanly and then died in codegen, which is what blocked any collection of
+  // tasks and therefore any join-many combinator.
+  if (elemType.kind === typeKinds.task) {
+    return `task_${arrayElemLlvmName(elemType.resultType)}`;
   }
   throw new Error(`arrayElemLlvmName: unsupported elem type "${elemType.kind}"`);
 }
@@ -3039,6 +3050,12 @@ function structContainsTypeParam(structType) {
     if (t.kind === typeKinds.typeParam) return true;
     if (t.kind === typeKinds.ref) return hasParam(t.inner);
     if (t.kind === typeKinds.array) return hasParam(t.elem);
+    // A `Task<T>` field keeps the parameter in its RESULT type. Every task
+    // handle is a bare `ptr`, so nothing about the emitted layout gives the
+    // parameter away - which is exactly why it has to be checked here. A
+    // struct holding `Task<T>[]` would otherwise look closed and get emitted
+    // as an open shell referencing an array type that is never defined.
+    if (t.kind === typeKinds.task) return hasParam(t.resultType);
     if (t.kind === typeKinds.struct) {
       const key = (t.moduleId ? `${t.moduleId}__` : "") + t.name;
       if (seen.has(key)) return false;
@@ -5292,6 +5309,27 @@ function codegenWithModuleId(
     return { val: "void", yoopType: VoidType() };
   }
 
+  // `armComplete(h): int32` - thin wrapper over @yoop_task_arm_complete,
+  // stamped by the typechecker's resolveArmCompleteCall. Same shape as
+  // emitCancelCall: the arg is a Task<T> value, which lowers to the handle
+  // ptr directly.
+  function emitArmCompleteCall(node, fnLines) {
+    const handleVal = emitExpr(node.args[0], fnLines);
+    const out = freshTemp();
+    fnLines.push(
+      `  ${out} = call i32 @yoop_task_arm_complete(ptr ${handleVal.val})`,
+    );
+    return { val: out, yoopType: PrimType("int32") };
+  }
+
+  // `isDone(h): int32` - thin wrapper over @yoop_task_is_done.
+  function emitIsDoneCall(node, fnLines) {
+    const handleVal = emitExpr(node.args[0], fnLines);
+    const out = freshTemp();
+    fnLines.push(`  ${out} = call i32 @yoop_task_is_done(ptr ${handleVal.val})`);
+    return { val: out, yoopType: PrimType("int32") };
+  }
+
   // Inline emission for builtin generic functions: heap_alloc / heap_free
   // (Phase 7+) and array_slice (Phase 8.H). These have `declId` starting with
   // `$builtin` and no AST body; codegen lowers each call directly.
@@ -5663,6 +5701,12 @@ function codegenWithModuleId(
     // Phase 10.F.2: builtin cancel lowering.
     if (node.builtinCancel) {
       return emitCancelCall(node, fnLines);
+    }
+    if (node.builtinArmComplete) {
+      return emitArmCompleteCall(node, fnLines);
+    }
+    if (node.builtinIsDone) {
+      return emitIsDoneCall(node, fnLines);
     }
     if (node.genericInstantiation?.declId?.startsWith("$builtin")) {
       return emitBuiltinGenericCall(node, fnLines);

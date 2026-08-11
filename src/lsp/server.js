@@ -19,6 +19,7 @@ import fs from "node:fs";
 import { analyze } from "./analyze.js";
 import {
   collectDocumentSymbols,
+  docCommentAt,
   findDefinition,
   findNodeAt,
   getHoverInfo,
@@ -189,6 +190,46 @@ function resolveAt(uri, position) {
   return { node, module: mod, ancestry, offset, src, analysis };
 }
 
+// The doc comment for whatever the cursor is on, or null.
+//
+// Goes through findDefinition rather than reading the node under the cursor,
+// because the useful case is a USE site: hovering `padStart` in your own file
+// has to reach the comment written above it in std/core/strings.yoop. That
+// returns { absPath, pos } pointing at the declaration's NAME, which is
+// exactly the anchor docCommentAt wants.
+//
+// Prefers the open buffer's text over the module's parsed copy so an unsaved
+// edit to a comment shows immediately, matching how diagnostics already work.
+function docForHover(at) {
+  const tok = identTokenAt(at.src, at.offset);
+  let def = null;
+  try {
+    def = findDefinition(at.node, {
+      module: at.module,
+      modById: at.analysis.modById,
+      moduleEnv: at.analysis.moduleEnv,
+      tokenText: tok?.text,
+      tokenStart: tok?.start,
+      cursorOffset: at.offset,
+    });
+  } catch {
+    // Hover is best-effort decoration; a resolution failure must never cost
+    // the type line that was already computed.
+    return null;
+  }
+  if (!def?.absPath || typeof def.pos !== "number") return null;
+  const src = sourceForPath(at.analysis, def.absPath);
+  if (!src) return null;
+  return docCommentAt(src, def.pos);
+}
+
+function sourceForPath(analysis, absPath) {
+  for (const doc of documents.values()) {
+    if (doc.absPath === absPath) return doc.text;
+  }
+  return analysis.modules.find((m) => m.absPath === absPath)?.src ?? null;
+}
+
 // ---------- diagnostics ------------------------------------------------------
 
 function posToRange(text, pos, length) {
@@ -357,9 +398,15 @@ function handleMessage(msg) {
       }
     }
     if (!text) { sendResponse(msg.id, null); return; }
-    sendResponse(msg.id, {
-      contents: { kind: "markdown", value: "```yoop\n" + text + "\n```" },
-    });
+    // Append the declaration's own comment block, if it has one. Resolved
+    // through findDefinition so it works at a CALL SITE and across files -
+    // hovering `padStart` in your code shows the header written above it in
+    // std/core/strings.yoop. See docCommentAt in nav.js for why.
+    const doc = docForHover(at);
+    const value = doc
+      ? "```yoop\n" + text + "\n```\n\n---\n\n" + doc
+      : "```yoop\n" + text + "\n```";
+    sendResponse(msg.id, { contents: { kind: "markdown", value } });
     return;
   }
 

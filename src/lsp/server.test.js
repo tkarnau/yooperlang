@@ -168,6 +168,76 @@ describe("lsp server: end-to-end", () => {
     });
   });
 
+  // yooperdoom-takeaways 4.1: the comment above a declaration is
+  // documentation, and hover shows it. Same file first, then the case that
+  // actually motivates the feature - a call site in another file.
+  it("hover appends the doc comment written above the declaration", async () => {
+    const { uri, src } = writeFixture(`// Adds two numbers, the boring way.
+// Second line of the doc.
+function add(a: int32, b: int32): int32 {
+    return a + b;
+}
+function main(): int32 {
+    return add(1, 2);
+}
+`);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const lines = src.split("\n");
+      const callLine = lines.findIndex((l) => l.includes("return add(1, 2)"));
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: callLine, character: lines[callLine].indexOf("add") },
+      });
+      const value = resp.result?.contents?.value ?? "";
+      assert.match(value, /Adds two numbers, the boring way\./);
+      assert.match(value, /Second line of the doc\./);
+      // The type line still comes first, in its own fence.
+      assert.match(value, /^```yoop\n/);
+    });
+  });
+
+  it("hover reads the doc from the file the declaration lives in", async () => {
+    // The whole point of 4.1: the reader is at a CALL SITE in their own file
+    // and the documentation lives in the library. A 15,000 line project
+    // hand-rolled digit loops in four files because it never found what
+    // std/core/format.yoop already exported.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_doc_"));
+    const libPath = path.join(dir, "lib.yoop");
+    const mainPath = path.join(dir, "main.yoop");
+    fs.writeFileSync(
+      libPath,
+      `// Pads a number on the left, which is the thing you keep rewriting.
+export function padded(n: int32): int32 {
+    return n;
+}
+`,
+    );
+    const mainSrc = `import * as lib from "./lib.yoop";
+function main(): int32 {
+    return lib.padded(7);
+}
+`;
+    fs.writeFileSync(mainPath, mainSrc);
+    const uri = pathToFileURL(fs.realpathSync(mainPath)).href;
+
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: mainSrc },
+      });
+      const lines = mainSrc.split("\n");
+      const callLine = lines.findIndex((l) => l.includes("lib.padded"));
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: callLine, character: lines[callLine].indexOf("padded") },
+      });
+      const value = resp.result?.contents?.value ?? "";
+      assert.match(value, /Pads a number on the left/);
+    });
+  });
+
   it("definition jumps from a call to its function decl", async () => {
     const { uri, src } = writeFixture(`function add(a: int32, b: int32): int32 {
     return a + b;

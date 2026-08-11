@@ -54,6 +54,19 @@ static inline void*          handle_state_ptr (void* h) { return (char*)h + 8;  
 // index 2 between `state` and `refcount`). No ABI change vs. pre-10.F.2
 // - the byte just stops being padding.
 static inline void*          handle_cancel_ptr(void* h) { return (char*)h + 9;  }
+// The park byte, offset 10 - the SECOND of the three pad bytes the cancel
+// flag started eating into. Byte 11 is still spare. Guarded by queue_mu
+// rather than atomics: every transition already happens at a point that
+// takes that lock (a queue push, or the end of a step), so an atomic would
+// be a second synchronisation layer over the same critical sections.
+//
+//   YOOP_PARK_RUNNING - executing a step, or sitting on the run queue
+//   YOOP_PARK_WAKE    - a wake arrived mid-step; re-queue when the step ends
+//   YOOP_PARK_PARKED  - suspended and off the queue; a wake may queue it
+static inline void*          handle_park_ptr  (void* h) { return (char*)h + 10; }
+#define YOOP_PARK_RUNNING 0
+#define YOOP_PARK_WAKE    1
+#define YOOP_PARK_PARKED  2
 static inline void*          handle_rc_ptr    (void* h) { return (char*)h + 12; }
 // Async: the task body's coroutine handle, stored by the thunk. Sits at
 // offset 32, immediately after the cond pointer, so every offset the
@@ -108,6 +121,11 @@ static struct {
 // Defined below, next to the other queue operations; declared here
 // because yoop_task_submit (further up) is its first caller.
 static void queue_push(void* handle, void (*thunk)(void*));
+static void queue_push_locked(void* handle, void (*thunk)(void*));
+// The park-byte transitions, both of which run under queue_mu. run_task_step
+// (just below) is the first caller of each.
+static void make_runnable_locked(void* handle);
+static void park_or_requeue_locked(void* handle);
 
 // Phase 9.I: pop one task from the front of the queue and return it. Caller
 // must hold queue_mu and is responsible for free()-ing the returned node.
@@ -169,6 +187,14 @@ static void run_task_step(void* handle, void (*thunk)(void*)) {
     void* prev = tls_current_task;
     tls_current_task = handle;
 
+    // Running: a wake arriving from here on has to be recorded rather than
+    // queued, or a second worker would resume this coroutine underneath us.
+    // Clearing a wake recorded before the step is correct - it asked for this
+    // task to run, and it is running.
+    yoop_mutex_lock(&g_rt.queue_mu);
+    *(unsigned char*)handle_park_ptr(handle) = YOOP_PARK_RUNNING;
+    yoop_mutex_unlock(&g_rt.queue_mu);
+
     YoopCtxSave outer;
     yoop_ctx_save(&outer);
     yoop_ctx_load_task(handle_ctx_slot(handle));
@@ -193,6 +219,11 @@ static void run_task_step(void* handle, void (*thunk)(void*)) {
         yoop_ctx_discard_task(handle_ctx_slot(handle));
     } else {
         yoop_ctx_store_task(handle_ctx_slot(handle));
+        // Suspended. Park it, unless a wake landed mid-step - in which case
+        // it goes straight back on the queue and never parks at all.
+        yoop_mutex_lock(&g_rt.queue_mu);
+        park_or_requeue_locked(handle);
+        yoop_mutex_unlock(&g_rt.queue_mu);
     }
     yoop_ctx_restore(&outer);
 
@@ -533,29 +564,164 @@ void yoop_task_cancel(void* handle) {
     yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
-// Push a node onto the run queue. Caller must NOT hold queue_mu.
-static void queue_push(void* handle, void (*thunk)(void*)) {
+// Push a node onto the run queue. Caller MUST hold queue_mu.
+static void queue_push_locked(void* handle, void (*thunk)(void*)) {
     task_node* node = (task_node*)malloc(sizeof(task_node));
     if (!node) return;
     node->handle = handle;
     node->thunk  = thunk;
     node->next   = NULL;
 
-    yoop_mutex_lock(&g_rt.queue_mu);
     ensure_workers_spawned_locked();
     if (g_rt.queue_tail) g_rt.queue_tail->next = node;
     else                 g_rt.queue_head = node;
     g_rt.queue_tail = node;
     yoop_cond_signal(&g_rt.queue_cv);
+}
+
+// Push a node onto the run queue. Caller must NOT hold queue_mu.
+static void queue_push(void* handle, void (*thunk)(void*)) {
+    yoop_mutex_lock(&g_rt.queue_mu);
+    queue_push_locked(handle, thunk);
     yoop_mutex_unlock(&g_rt.queue_mu);
 }
 
 // A suspended task became runnable again. thunk == NULL marks a resume
 // rather than a start, so run_task_step drives the stored coroutine
 // handle instead of re-running the body from the top.
+//
+// This CANNOT simply queue the handle, and the reason is the whole point of
+// the park byte. A wake is armed from INSIDE a running task - `awaitReadable`
+// registers its interest and only suspends several frames later, and
+// `awaitTask` likewise - so the event can fire while the task is still
+// executing on its worker. Queuing it there lets a second worker pop it and
+// call coro.resume on a coroutine that is mid-execution on the first, which
+// is a data race on the coroutine frame rather than a lost wakeup.
+//
+// So the wake is recorded instead: PARKED means the task really is suspended
+// and can be queued, RUNNING means "remember this and let run_task_step
+// re-queue it the moment the step ends". Same three-state shape as the thread
+// park token further down (yoop_park / yoop_unpark), for the same reason.
+static void make_runnable_locked(void* handle) {
+    unsigned char* park = (unsigned char*)handle_park_ptr(handle);
+    if (*park == YOOP_PARK_PARKED) {
+        *park = YOOP_PARK_RUNNING;
+        queue_push_locked(handle, NULL);
+    } else {
+        // RUNNING (mid-step, or already queued): record the wake. The step's
+        // tail re-queues it; an already-queued task is about to run anyway,
+        // and run_task_step resets the byte before the step, so the recorded
+        // wake is dropped exactly when it has already been satisfied.
+        *park = YOOP_PARK_WAKE;
+    }
+}
+
+// End of a step that left the task suspended. A wake that arrived mid-step is
+// consumed here rather than lost, which is the half of the protocol that
+// makes arming-then-suspending safe.
+static void park_or_requeue_locked(void* handle) {
+    unsigned char* park = (unsigned char*)handle_park_ptr(handle);
+    if (*park == YOOP_PARK_WAKE) {
+        *park = YOOP_PARK_RUNNING;
+        queue_push_locked(handle, NULL);
+    } else {
+        *park = YOOP_PARK_PARKED;
+    }
+}
+
 void yoop_task_make_runnable(void* handle) {
     if (!handle) return;
-    queue_push(handle, NULL);
+    yoop_mutex_lock(&g_rt.queue_mu);
+    make_runnable_locked(handle);
+    yoop_mutex_unlock(&g_rt.queue_mu);
+}
+
+// ---- completion waiters ---------------------------------------------------
+//
+// "Make the CURRENT task runnable when `target` completes." This is what lets
+// one task join another without blocking a worker - the joiner suspends, and
+// the target's own completion path hands it back to the queue.
+//
+// A flat list under queue_mu: the counts here are the number of tasks blocked
+// on other tasks at one instant, which is small, and every operation already
+// needs that lock. A per-handle waiter list would save the scan at the cost of
+// another field in the handle prefix and another thing to keep in sync.
+typedef struct task_waiter {
+    void* target;               // the handle being awaited
+    void* waiter;               // the task to wake when it completes
+    struct task_waiter* next;
+} task_waiter;
+
+static task_waiter* g_waiters = NULL;   // guarded by queue_mu
+
+// Drop every registration belonging to `waiter`. Caller holds queue_mu.
+// One wake is all a task needs, so a task armed on N targets (race) is fully
+// disarmed by the first of them to fire - otherwise the survivors would keep
+// queuing a task that has already moved on.
+static void disarm_waiter_locked(void* waiter) {
+    task_waiter** pp = &g_waiters;
+    while (*pp) {
+        task_waiter* w = *pp;
+        if (w->waiter == waiter) { *pp = w->next; free(w); }
+        else                     { pp = &w->next; }
+    }
+}
+
+int yoop_task_is_done(void* handle) {
+    if (!handle) return 1;
+    return A_LOAD_U8(handle_state_ptr(handle)) != 0 ? 1 : 0;
+}
+
+int yoop_task_arm_complete(void* target) {
+    void* cur = tls_current_task;
+    // Not running on a worker (main, say). There would be nothing to make
+    // runnable, so refuse and let the caller fall back to a blocking wait -
+    // same contract, and same return value, as yoop_io_arm_readable.
+    if (!cur) return 1;
+    if (!target) return 2;
+
+    yoop_mutex_lock(&g_rt.queue_mu);
+    // Checked under the lock that signal_done's wake also takes, so a target
+    // completing right now either is visible here or will find our
+    // registration. It cannot slip between the two.
+    if (A_LOAD_U8(handle_state_ptr(target)) != 0) {
+        yoop_mutex_unlock(&g_rt.queue_mu);
+        return 2;   // already done - nothing to wait for
+    }
+    task_waiter* w = (task_waiter*)malloc(sizeof(task_waiter));
+    if (!w) {
+        yoop_mutex_unlock(&g_rt.queue_mu);
+        return -1;
+    }
+    w->target = target;
+    w->waiter = cur;
+    w->next   = g_waiters;
+    g_waiters = w;
+    yoop_mutex_unlock(&g_rt.queue_mu);
+    return 0;
+}
+
+void yoop_task_disarm_complete(void) {
+    void* cur = tls_current_task;
+    if (!cur) return;
+    yoop_mutex_lock(&g_rt.queue_mu);
+    disarm_waiter_locked(cur);
+    yoop_mutex_unlock(&g_rt.queue_mu);
+}
+
+// Wake everything registered against `handle`. Caller holds queue_mu.
+static void fire_waiters_locked(void* handle) {
+    task_waiter* w = g_waiters;
+    while (w) {
+        task_waiter* next = w->next;
+        if (w->target == handle) {
+            void* waiter = w->waiter;
+            disarm_waiter_locked(waiter);   // frees w, and any siblings
+            make_runnable_locked(waiter);
+            next = g_waiters;               // list was rewritten; restart
+        }
+        w = next;
+    }
 }
 
 // End of one task step. Either the coroutine reached its final suspend -
@@ -595,6 +761,10 @@ void yoop_handle_signal_done(void* handle) {
     // the next YOOP_WAIT_POLL_MS timer tick.
     yoop_mutex_lock(&g_rt.queue_mu);
     yoop_cond_broadcast(&g_rt.queue_cv);
+    // And hand any task that suspended waiting on THIS one back to the queue.
+    // Under the same lock arm_complete takes, so a joiner arming right now
+    // either sees state != 0 and skips suspending, or is registered here.
+    fire_waiters_locked(handle);
     yoop_mutex_unlock(&g_rt.queue_mu);
 
     int32_t rc = A_LOAD_I32(handle_rc_ptr(handle));

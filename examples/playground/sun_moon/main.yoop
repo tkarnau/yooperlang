@@ -252,7 +252,7 @@ function fetch_temperature_inner(): Result<TempParse, HttpError> {
     let parsed: TempParse = parse_wttr_temp(body);
     if (!parsed.ok) {
         let body_str: string = intr.string_from_bytes_unchecked(body);
-        printf(`weather parse failed for body: %s\n`, body_str);
+        printf(`weather parse failed for body: ${body_str}\n`);
     }
     return Result.Ok { value: parsed };
 }

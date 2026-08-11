@@ -183,7 +183,7 @@
         },
         {
           "name": "keyword.declaration.yoop",
-          "match": "\\b(let|const|function|type|trait|kind|library|enum|variant|union|vtable)\\b"
+          "match": "\\b(let|const|function|type|trait|enum|variant|union|vtable)\\b"
         },
         {
           "name": "keyword.modifier.yoop",
@@ -205,8 +205,33 @@
           }
         },
         {
+          "comment": "The `kind <Name> { ... }` declaration. CONTEXTUAL, like the `module` rule above and for the same reason: `kind` stopped being a reserved word (yooperdoom-takeaways 2.2) because it was legal as a struct FIELD and illegal as a local or parameter. A bare \\b(kind)\\b here would colour every `kind: uint8` field as a keyword. Mirrors the parser's structural check - a name, then `{`, `(`, or `=`.",
+          "match": "^\\s*(?:(export)\\s+)?(kind)\\s+([A-Za-z_][A-Za-z0-9_]*)\\s*(?=[{(=])",
+          "captures": {
+            "1": {
+              "name": "keyword.modifier.yoop"
+            },
+            "2": {
+              "name": "keyword.declaration.kind.yoop"
+            },
+            "3": {
+              "name": "entity.name.type.yoop"
+            }
+          }
+        },
+        {
+          "comment": "`extern \"C\" from library \"m\"` - `library` is contextual (it only means anything right after `from`), so it is matched in that position rather than everywhere.",
+          "match": "(?<=\\bfrom\\s)(library)\\b",
+          "captures": {
+            "1": {
+              "name": "keyword.declaration.yoop"
+            }
+          }
+        },
+        {
           "name": "keyword.other.kindclause.yoop",
-          "match": "\\b(appliesTo|requires|mustCall|ownsBlock|beforeScopeEnd|binding|mustNotEscape|mustNotShare|forbids|scope|acrossScopes|parameter|field|region|io|globalState|propagates|contains|layout|align|provides|pausable|refcounted|signature|enumerable|conferred|restrictive|clearedBy|appliedBy)\\b"
+          "comment": "Kind-clause keywords. Anchored to the start of a line and barred from being followed by `:` / `,` / `)`, because most of these are ordinary identifiers everywhere else - `requires`, `binding`, `parameter`, `field`, `scope`, `io`, `layout`, `align`, `propagates` and `contains` are all contextual idents in the lexer, and `field: int32` in a struct or `specialFor(scope: int32)` in a signature must not colour as a keyword. Inside a `kind { }` body every clause starts its own line, which is what makes the anchor safe.",
+          "match": "^\\s*(appliesTo|requires|mustCall|ownsBlock|beforeScopeEnd|binding|mustNotEscape|mustNotShare|forbids|scope|acrossScopes|parameter|field|region|io|globalState|propagates|contains|layout|align|provides|pausable|refcounted|signature|enumerable|conferred|restrictive|clearedBy|appliedBy)\\b(?![:,)])"
         },
         {
           "name": "keyword.other.concurrency.yoop",

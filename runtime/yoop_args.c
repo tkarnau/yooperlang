@@ -1,4 +1,4 @@
-// Yooperlang runtime - argv access.
+// Yooperlang runtime - argv and environment access.
 //
 // Yoop user `main` is the C entry point, so the user's `function main():
 // int32` is the literal `int main(void)` — argc/argv never reach yoop.
@@ -134,4 +134,31 @@ const char* yoop_argv(int32_t i) {
     (void)i;
     return "";
 #endif
+}
+
+// ---- environment ----------------------------------------------------------
+//
+// Same contract as yoop_argv: a borrowed, never-NULL, nul-terminated C string.
+// `getenv` returns NULL for an unset variable, and a yoop `string` is a bare
+// `char*`, so handing that NULL through would make `.len` a null deref at the
+// first use. Collapsing it to "" here is what keeps the yoop side free of
+// null checks - and `yoop_env_has` is how a caller tells "unset" apart from
+// "set to the empty string", which "" alone cannot express.
+//
+// Lifetime: POSIX `getenv` returns a pointer into `environ`, which stays valid
+// until something calls setenv/putenv. Yoop exposes no way to do that, so
+// "borrowed for the process lifetime" is accurate today. If a setenv ever
+// lands, this comment is the thing that has to change first.
+
+const char* yoop_getenv(const char* name) {
+    if (!name) return "";
+    const char* v = getenv(name);
+    return v ? v : "";
+}
+
+// 1 when `name` is present in the environment at all, including when its value
+// is the empty string. 0 otherwise.
+int32_t yoop_env_has(const char* name) {
+    if (!name) return 0;
+    return getenv(name) ? 1 : 0;
 }

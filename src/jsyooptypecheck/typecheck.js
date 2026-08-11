@@ -68,6 +68,7 @@ import { checkImportLocality } from "./importLocality.js";
 import { runKindCheck } from "./kindCheck.js";
 import { runKindFlow } from "./kindFlow.js";
 import { lookupCoreKind, setCoreKinds } from "./coreKinds.js";
+import { checkNoUntypedSurvivors } from "./untypedGuard.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
@@ -1859,6 +1860,17 @@ export const INTRINSIC_DECL_IDS = new Map([
   ["array_slice", "$builtin__array_slice"],
   ["wait_until", "$builtin__wait_until"],
   ["cancel", "$builtin__cancel"],
+  // Arm a completion interest against the CURRENT task, so it can suspend
+  // until `h` finishes instead of blocking a worker in `wait`. An intrinsic
+  // for the same reason wait_until/cancel are: it takes a Task<T>, and a
+  // plain extern would need the handle as a raw pointer.
+  ["armComplete", "$builtin__armComplete"],
+  // Non-blocking "has it finished?". Expressible as `wait_until(h, now_ns())`,
+  // but not from inside a GENERIC function: wait_until's stamped
+  // `WaitResult<T>` result survives monomorphization as a TypeParamType and
+  // trips codegen's llvmType. An intrinsic sidesteps that, and the runtime
+  // predicate it lowers to is a single atomic load.
+  ["isDone", "$builtin__isDone"],
   // The async suspend primitive. Non-generic, and lowered inline by
   // codegen (a bare coro.suspend) rather than to any call, so unlike the
   // entries above it needs no makeBuiltinGenericFuncs counterpart.
@@ -3970,6 +3982,19 @@ export function typecheckProgram(modules) {
       }
     }
     stampErrorOrigin(errors, errStart, mod);
+  }
+
+  // Backstop: nothing may reach codegen still carrying an untyped literal
+  // placeholder. Gated on the program being otherwise clean, because an
+  // unpinned node downstream of a real type error is a consequence of that
+  // error, not a separate bug worth a second (and confusing) diagnostic.
+  // See untypedGuard.js for why this exists at all.
+  if (!errors.some((e) => e.severity !== Severity.warning)) {
+    for (const mod of modules) {
+      const errStart = errors.length;
+      checkNoUntypedSurvivors(mod.ast, errors);
+      stampErrorOrigin(errors, errStart, mod);
+    }
   }
 
   // Split the one accumulating array into the two the callers want. Warnings

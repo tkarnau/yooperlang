@@ -273,6 +273,100 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
+  it("contextual_keywords.yoop: demoted keywords work as fields, params, and locals", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/contextual_keywords.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "fields: 1 2 3 4 5 6\n" +
+        "more:   7 8 9 10 11 12\n" +
+        "sum=78\n" +
+        "locals: 42 43\n",
+    );
+  });
+
+  it("disposable_rebind.yoop: `let disposable` rebinds, and nothing leaks doing it", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/disposable_rebind.yoop",
+    );
+    assert.equal(exitCode, 0);
+    // The `live=0` lines are the assertion that matters: every value handed
+    // over in the rebinding loop was disposed, not just the last one.
+    assert.equal(
+      stdout,
+      "const form: id=1 live=1\n" +
+        "after const scope: live=0\n" +
+        "let form: id=99 live=1\n" +
+        "after let scope: live=0\n",
+    );
+  });
+
+  it("arena_exhausted.yoop: an exhausted allocator names itself instead of segfaulting", async () => {
+    const { stdout, stderr, exitCode } = await runFixture(
+      "examples/pass/arena_exhausted.yoop",
+    );
+    assert.equal(exitCode, 1);
+    // The whole point: buffered stdout is flushed before the process dies, so
+    // everything printed up to the failing allocation survives to locate it.
+    // This used to come back as `output: [null, null, null]` with SIGSEGV.
+    assert.equal(stdout, "this line must survive the abort\n");
+    assert.match(stderr, /^yoop: allocation failed: wanted 4096 bytes \(align 8\)/);
+    assert.match(stderr, /arena exhausted: capacity 1024, 0 used, 1024 free/);
+  });
+
+  it("untyped_literal_pinning.yoop: compound literal expressions never reach codegen unpinned", async () => {
+    const { stdout, exitCode } = await runFixture(
+      "examples/pass/untyped_literal_pinning.yoop",
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "int32 rhs\n" +
+        "int32 lhs\n" +
+        "uint8 ok\n" +
+        "int64 ok\n" +
+        "float32 ok\n" +
+        "both untyped int\n" +
+        "both untyped float\n" +
+        "done\n",
+    );
+  });
+
+  it("env_vars.yoop: get / has / getOr, and unset vs explicitly-empty", async () => {
+    // YOOP_E2E_UNSET_VAR is deliberately absent: runFixture merges opts.env
+    // over process.env, so a variable can be added but not removed here.
+    const { stdout, exitCode } = await runFixture("examples/pass/env_vars.yoop", {
+      env: { YOOP_E2E_SET: "hello", YOOP_E2E_EMPTY: "" },
+    });
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "set=[hello] has=yes\n" +
+        "empty=[] has=yes\n" +
+        "missing=[] has=no len=0\n" +
+        "orSet=[hello]\n" +
+        "orEmpty=[]\n" +
+        "orMissing=[fallback]\n",
+    );
+  });
+
+  it("bool_eq.yoop: `==` / `!=` work on two bools", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/bool_eq.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "t!=f\n" +
+        "t==t\n" +
+        "f==f\n" +
+        "t==true\n" +
+        "!(t==f)\n" +
+        "agree(f,f)\n" +
+        "same=1 diff=0\n",
+    );
+  });
+
   it("operators_full.yoop covers bitwise + shift + ~ + compound-assign", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/operators_full.yoop");
     assert.equal(exitCode, 0);
@@ -600,6 +694,20 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
       "main: temp used=64\ntask: temp used=512\n" +
         "main: after task used=64 rc=0\nhog rc=0\n",
     );
+  });
+
+  // A task joining other tasks without holding a worker. Pinned to ONE
+  // worker on purpose: `joiner` is itself a task waiting on two more, so a
+  // blocking join would hold the single worker while the tasks it waits for
+  // sit unstarted in the queue. That is a deadlock, so a regression here
+  // shows up as a timeout rather than a wrong answer.
+  it("task_await_join: awaitTask suspends the joiner instead of blocking its worker", async () => {
+    const { stdout, exitCode } = await runFixtureEntry(
+      "examples/pass/task_await_join.yoop",
+      { env: { YOOP_NUM_WORKERS: "1" } },
+    );
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "joiner=42\nfanOut=6\nalreadyDone=100\n");
   });
 
   // The end of the async story: std/net and std/http are async top to
@@ -4162,6 +4270,19 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
       /parameter 's' of 'str.strFree' requires kind 'owned'/.test(e.message),
     );
     assert.equal(sinkHits.length, 2, `expected both in-arm sinks rejected, got: ${msgs}`);
+  });
+
+  it("disposable_const_assign.yoop rejects both rebinding and field assignment on a bare `disposable`", () => {
+    const { errors } = typecheckFixtureEntry("examples/fail/disposable_const_assign.yoop");
+    const msgs = errors.map((e) => e.message).join(" | ");
+    assert.ok(
+      errors.some((e) => /cannot assign to field of const "b"/.test(e.message)),
+      `expected field-assign rejection, got: ${msgs}`,
+    );
+    assert.ok(
+      errors.some((e) => /cannot assign to const "b"/.test(e.message)),
+      `expected rebind rejection, got: ${msgs}`,
+    );
   });
 
   it("clearance_clearedby_on_conferred.yoop rejects clearedBy on a non-restrictive kind", () => {

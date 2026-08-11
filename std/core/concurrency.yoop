@@ -40,6 +40,24 @@ extern "intrinsic" from "compiler" {
     // Library code is the intended caller - see armReadable/armWritable
     // in std/net/socket_ffi.yoop for the shape.
     async function suspendNow(): void;
+    // Register the CURRENT task to be made runnable when `h` completes, then
+    // return immediately - the caller suspends itself, exactly as it would
+    // after arming an I/O interest. This is what lets a task join another
+    // task without holding a worker thread for the duration.
+    //
+    //   0  armed; suspend now and something will resume you
+    //   1  no current task (called off a worker) - block with `wait` instead
+    //   2  `h` has already finished; there is nothing to wait for
+    //  -1  the registration itself failed
+    //
+    // A task may arm on several handles at once: the first to complete wakes
+    // it and drops all of its registrations, which is what `race` is built on.
+    function armComplete<T>(h: Task<T>): c_int;
+    // Non-blocking "has it finished?" - 1 yes, 0 no. Reads the handle's state
+    // byte and returns; it never parks. Equivalent to `wait_until(h, now())`
+    // except that it also works inside a generic function, where wait_until's
+    // `WaitResult<T>` result does not survive monomorphization.
+    function isDone<T>(h: Task<T>): c_int;
 }
 
 extern "C" from "yoop_runtime" {
@@ -52,6 +70,17 @@ extern "C" from "yoop_runtime" {
     // resume it), -1 on error.
     function yoop_io_arm_readable(fd: c_int): c_int;
     function yoop_io_arm_writable(fd: c_int): c_int;
+    // Drop every completion interest the current task holds. Takes no
+    // handle - a task's registrations are dropped as a set, because one
+    // wake is all it needs. Arming is the `armComplete` intrinsic above:
+    // that one needs a Task<T>, which an extern signature cannot name.
+    function yoop_task_disarm_complete(): void;
+}
+
+// Drop every completion interest this task holds. Called by `awaitRace` once
+// a winner is found, so the losers' registrations cannot queue it again.
+function disarm(): void {
+    yoop_task_disarm_complete();
 }
 
 // ----- async readiness -----------------------------------------------------
@@ -104,3 +133,65 @@ export function now_ns(): uint64 {
 export function sleep_ms(ms: uint64): int32 {
     return yoop_sleep_ms(ms);
 }
+
+// ----- joining tasks without holding a worker -------------------------------
+//
+// `wait h` is the blocking join: it parks the calling THREAD until `h`
+// finishes (draining the run queue meanwhile so a nested wait chain cannot
+// deadlock the pool). That is the right thing in `main`, and the wrong thing
+// inside a task - a task that blocks is holding a worker, which is exactly
+// what the coroutine machinery exists to avoid.
+//
+// `awaitTask` is the async join. It arms a completion interest, suspends, and
+// comes back when the handle is done, so N tasks joining N other tasks cost
+// no workers at all while they wait.
+//
+//     task worker(n: int32): int32 { ... }
+//
+//     task driver(): int32 {
+//         pooled a = worker(1);
+//         pooled b = worker(2);
+//         return await conc.awaitTask(a) + await conc.awaitTask(b);
+//     }
+//
+// Off a worker (from `main`, say) there is nothing to resume a suspended
+// coroutine, so this falls back to the blocking `wait` rather than parking
+// forever - the same 1-means-no-current-task contract awaitReadable has.
+// `h` is BORROWED, not `pooled`: the caller owns the handle and outlives the
+// join, so the joiner must not participate in its refcount. (A `pooled`
+// parameter would also trip a live compiler bug - the call site does not
+// retain while the callee releases at scope exit, which double-frees the
+// handle. See plans/task-combinators.md.)
+export async awaitTask<T>(h: Task<T>): T {
+    // A loop, not a single suspend: a wake only proves that SOMETHING made
+    // this task runnable. Re-checking is what makes a spurious wake harmless.
+    while (isDone(h) == 0) {
+        let rc: c_int = armComplete(h);
+        if (rc != 0) { break; }   // 1 = off a worker, 2 = already done, -1 = failed
+        await suspendNow();
+    }
+    // Done (or falling back): this returns immediately in the common case.
+    return wait h;
+}
+
+// ----- joining many ----------------------------------------------------------
+//
+// With `awaitTask` in hand, "wait for all of them" is an ordinary loop, and it
+// already costs no workers - each iteration suspends rather than blocking:
+//
+//     task fanOut(): int32 {
+//         pooled a = work(1);
+//         pooled b = work(2);
+//         return await conc.awaitTask(a) + await conc.awaitTask(b);
+//     }
+//
+// Results arrive in the order you await them, which is what you want for
+// "all": completion order does not change the answer.
+//
+// A `TaskGroup<T>` holding `Task<T>[]`, with `awaitAll` / `awaitRace` over it,
+// is DEFERRED - not for want of a design (the runtime side is built and the
+// first-of-N wake works) but because a generic struct with a `Task<T>` field
+// does not survive codegen: emitting one reaches arrayElemLlvmName with an
+// unsubstituted type parameter. `race` is the combinator that genuinely needs
+// the group, since it has to arm on several handles and then report which won.
+// See plans/task-combinators.md for the diagnosis and what is left to fix.

@@ -236,6 +236,69 @@ function isIdentStart(code) {
   );
 }
 
+// The comment block immediately above a declaration, as documentation.
+//
+// yooperdoom-takeaways 4.1 is the reason this exists. A 15,000 line project
+// imported std/core/format.yoop in three files and hand-rolled a digit loop in
+// four others; `history.yoop` zero-padded a number by hand, which is exactly
+// `padStart(int_to_string(n), 4, "0")`. Nothing was missing from the library -
+// the project just never found the parts of it that existed. An index helps
+// once; showing a function's own header at the call site helps every time, and
+// it needs no new convention, because std already writes these comments.
+//
+// `offset` should point at the declaration's NAME (which is what locOfDecl
+// computes, and what goto-definition already jumps to). The scan walks UP from
+// the start of that line and takes the contiguous run of comment lines,
+// stopping at the first line that is not one. A blank line stops it too, which
+// is what keeps a file's module header from attaching itself to whatever
+// declaration happens to come first.
+//
+// Comments never reach the token stream (charEaters.js eats them), so this
+// works on raw source rather than on tokens.
+const MAX_DOC_LINES = 30;
+
+export function docCommentAt(src, offset) {
+  if (typeof src !== "string" || typeof offset !== "number") return null;
+  if (offset < 0 || offset > src.length) return null;
+
+  // Start of the line the declaration is on.
+  let lineStart = src.lastIndexOf("\n", Math.max(0, offset - 1)) + 1;
+
+  const lines = [];
+  while (lineStart > 0 && lines.length < MAX_DOC_LINES) {
+    const prevEnd = lineStart - 1;                       // the \n above us
+    const prevStart = src.lastIndexOf("\n", prevEnd - 1) + 1;
+    const raw = src.slice(prevStart, prevEnd);
+    const trimmed = raw.trim();
+
+    if (trimmed.startsWith("//")) {
+      // Strip the marker and ONE following space, so `// text` gives `text`
+      // while `//   indented` keeps its relative indent. A `///` or a divider
+      // line of slashes collapses to empty, which is fine - it renders as a
+      // blank line rather than as noise.
+      lines.unshift(trimmed.replace(/^\/+ ?/, ""));
+      lineStart = prevStart;
+      continue;
+    }
+
+    // A one-line block comment. Multi-line `/* ... */` blocks are not walked:
+    // they would need the scan to run character-wise rather than line-wise,
+    // and nothing in this tree documents a declaration that way.
+    if (trimmed.startsWith("/*") && trimmed.endsWith("*/")) {
+      lines.unshift(trimmed.slice(2, -2).trim());
+      lineStart = prevStart;
+      continue;
+    }
+
+    break;
+  }
+
+  while (lines.length > 0 && lines[0] === "") lines.shift();
+  while (lines.length > 0 && lines[lines.length - 1] === "") lines.pop();
+  if (lines.length === 0) return null;
+  return lines.join("\n");
+}
+
 // Human-readable hover text for a node. Returns null when there's nothing
 // useful to show (e.g. punctuation token, keyword, decl with no resolved
 // type). The result is plain text - the server wraps it in a markdown

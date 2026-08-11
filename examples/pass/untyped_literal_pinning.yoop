@@ -1,0 +1,56 @@
+// plans/yooperdoom-takeaways.md 1.2: every untyped literal EXPRESSION gets
+// pinned before codegen sees it.
+//
+// `untypedInt` / `untypedFloat` are placeholders the typechecker is supposed
+// to replace with a real type at whatever context consumes the value. Three
+// contexts had no rule and so leaked the placeholder into codegen, where
+// `llvmType` threw with no source location at all:
+//
+//     if (x == -24 + 176)   comparison with ONE typed side
+//     _ = 1 + 2;            discard statement
+//     1 + 2;                bare expression statement
+//
+// A BARE literal (`_ = 1;`) always worked - codegen defends itself at
+// INT_LITERAL/FLOAT_LITERAL. It is only a COMPOUND expression, which has its
+// own resolvedType sitting on the intermediate node, that had no defence.
+//
+// The comparison case pins to the TYPED SIDE's type rather than to the int32
+// default, which is what makes the `uint8` and `int64` cases below come out
+// right instead of being silently truncated to 32 bits.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    // One typed side, in both operand orders.
+    let x: int32 = 152;
+    if (x == -24 + 176) { printf("int32 rhs\n"); }
+    if (-24 + 176 == x) { printf("int32 lhs\n"); }
+
+    // Pinned to the typed side, not to int32: these need uint8 and int64
+    // respectively, and would be wrong under a blanket default.
+    let small: uint8 = 200;
+    if (small > 100 + 50) { printf("uint8 ok\n"); }
+
+    let big: int64 = 5000000000;
+    if (big > 4000000000 + 1) { printf("int64 ok\n"); }
+
+    // Float side pins the untyped float expression to float32.
+    let f: float32 = 1.5;
+    if (f < 1.0 + 1.0) { printf("float32 ok\n"); }
+
+    // Both sides untyped - no typed side to borrow from, so these take the
+    // ordinary int32 / float64 default.
+    if (1 + 1 == 2) { printf("both untyped int\n"); }
+    if (2 % 1 > 0) { printf("UNREACHABLE mod\n"); }
+    if (0.5 + 0.5 == 1.0) { printf("both untyped float\n"); }
+
+    // Statement position, which has no target type at all.
+    _ = 1 + 2;
+    3 * 4;
+    _ = 1.5 + 2.5;
+
+    printf("done\n");
+    return 0;
+}

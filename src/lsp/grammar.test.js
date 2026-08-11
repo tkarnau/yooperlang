@@ -97,4 +97,79 @@ describe("vscode grammar", () => {
       });
     }
   });
+
+  // yooperdoom-takeaways 2.2 demoted a batch of reserved words to contextual
+  // keywords so they could be ordinary names. The grammar has to follow: a
+  // bare \b(kind)\b rule would colour every `kind: uint8` field as a keyword,
+  // which is exactly the silent failure the `module` rule above exists to
+  // prevent. Same shape of guard, same reason.
+  function ruleMatching(fragment) {
+    const g = loadGrammar();
+    const rule = g.repository.keywords.patterns.find(
+      (p) => typeof p.match === "string" && p.match.includes(fragment),
+    );
+    assert.ok(rule, `expected a keyword pattern containing ${fragment}`);
+    return rule;
+  }
+
+  describe("the `kind <Name>` declaration rule", () => {
+    const cases = [
+      ["kind disposable {", true, "a kind decl"],
+      ["export kind cleared {", true, "an exported kind decl"],
+      ["kind isolatedTest = test & ephemeral;", true, "a composition"],
+      ["kind throughputCapped(n: usize) {", true, "a parameterized kind"],
+      ["    kind: uint8,", false, "a struct FIELD named kind"],
+      ["    let kind: int32 = 1;", false, "a local named kind"],
+      ["function specialFor(kind: uint8): int32 {", false, "a PARAMETER named kind"],
+      ["    return r.kind;", false, "a field access"],
+      ["kindOfThing x = 1;", false, "a longer identifier starting with kind"],
+    ];
+    for (const [line, shouldMatch, why] of cases) {
+      it(`${shouldMatch ? "matches" : "does not match"}: ${why}`, () => {
+        const re = new RegExp(ruleMatching("(kind)").match);
+        assert.equal(
+          re.test(line),
+          shouldMatch,
+          `${JSON.stringify(line)} should ${shouldMatch ? "" : "not "}match`,
+        );
+      });
+    }
+  });
+
+  describe("the kind-clause keyword rule", () => {
+    const cases = [
+      ["    appliesTo binding parameter field;", true, "an appliesTo clause"],
+      ["    requires Disposable;", true, "a requires clause"],
+      ["    mustCall dispose beforeScopeEnd;", true, "a mustCall clause"],
+      ["    layout { abi \"C\"; }", true, "a layout clause"],
+      ["    requires: int32,", false, "a struct FIELD named requires"],
+      ["    field: int32,", false, "a struct FIELD named field"],
+      ["    scope: int32,", false, "a struct FIELD named scope"],
+      ["    io: int32,", false, "a struct FIELD named io"],
+      ["function f(scope: int32, io: int32): void {", false, "PARAMETERS named scope and io"],
+      ["    return self.requires;", false, "a field access"],
+    ];
+    for (const [line, shouldMatch, why] of cases) {
+      it(`${shouldMatch ? "matches" : "does not match"}: ${why}`, () => {
+        const re = new RegExp(ruleMatching("appliesTo|requires").match);
+        assert.equal(
+          re.test(line),
+          shouldMatch,
+          `${JSON.stringify(line)} should ${shouldMatch ? "" : "not "}match`,
+        );
+      });
+    }
+  });
+
+  it("no longer colours `kind` or `library` via the bare declaration-keyword rule", () => {
+    const g = loadGrammar();
+    const decl = g.repository.keywords.patterns.find(
+      (p) => typeof p.match === "string" && p.match.includes("let|const|function"),
+    );
+    assert.ok(decl, "expected the declaration-keyword rule");
+    const re = new RegExp(decl.match);
+    assert.ok(re.test("let x = 1;"), "still matches let");
+    assert.ok(!re.test("    kind: uint8,"), "must not match a field named kind");
+    assert.ok(!re.test("    library: int32,"), "must not match a field named library");
+  });
 });

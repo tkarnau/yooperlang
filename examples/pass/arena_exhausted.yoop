@@ -1,0 +1,42 @@
+// plans/yooperdoom-takeaways.md 1.2: an allocator that fails says so.
+//
+// `ctx_alloc` used to hand a null straight back. Nothing on the yoop side
+// checked it - not vec_new, not vec_push, not vec_extend_from - so the first
+// write through it was a null deref several frames later. What a user saw was
+// `signal: 'SIGSEGV'` and NOTHING ELSE: the dying process's stdout was still
+// buffered, so even the program's own progress output went with it, and the
+// last line on screen came from whatever had run before the failing code.
+//
+// Now it prints what it wanted and what the region had, and - the part that
+// actually locates the bug - flushes stdout first, so everything printed up
+// to the failing allocation survives. This fixture asserts both halves: the
+// "before" line has to appear on stdout, and the diagnostic on stderr.
+//
+// Exits 1. `allocBytes` is deliberately NOT used here - that is the raw path
+// and still returns null for callers that want to handle exhaustion
+// themselves (yoop_ctx_alloc_try underneath). `ctx_alloc` is the aborting one.
+
+import.unsafe;
+
+import * as mem from "std/core/alloc.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { ephemeral } from "std/core/kinds.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function main(): int32 {
+    // Must survive the abort. Before the flush fix, this line was lost.
+    printf("this line must survive the abort\n");
+
+    ephemeral mem.arenaScope(1024) {
+        // 4096 bytes out of a 1024-byte region. Nothing here can succeed.
+        let big: uint8[] = intr.ctx_alloc(4096);
+        big[0] = 1;
+        printf("UNREACHABLE\n");
+    }
+
+    printf("UNREACHABLE after scope\n");
+    return 0;
+}

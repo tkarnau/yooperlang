@@ -60,6 +60,29 @@ uint64_t yoop_now_ns(void);
 // a deadline base - it can step backwards. Use yoop_now_ns for that.
 uint64_t yoop_wall_ns(void);
 
+// ----- completion waiters --------------------------------------------------
+//
+// Join one task from inside another WITHOUT holding a worker. `arm` registers
+// the calling task to be made runnable when `target` completes; the caller
+// then suspends its coroutine, exactly as it would after yoop_io_arm_readable.
+//
+// Returns 0 armed, 1 when there is no current task (called off a worker - the
+// caller must fall back to the blocking yoop_task_wait rather than suspend
+// into a hole nothing can resume it from), 2 when `target` has already
+// finished (so there is nothing to wait for), -1 on allocation failure.
+//
+// A task may arm on several targets at once; the first to complete wakes it
+// and cancels every other registration it holds, which is what makes a
+// first-of-N join work. `disarm` drops the calling task's registrations
+// explicitly, for a joiner that stops caring before any target fires.
+int  yoop_task_arm_complete(void* target);
+void yoop_task_disarm_complete(void);
+
+// Has this handle finished? The wake from `arm` says only that SOMETHING
+// completed, so a first-of-N joiner needs this to find out which - and a
+// single-target joiner needs it to tell a real wake from a spurious one.
+int  yoop_task_is_done(void* handle);
+
 // pooled lifecycle
 void* yoop_task_alloc(size_t size);
 void  yoop_task_retain(void* handle);
