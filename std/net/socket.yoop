@@ -1,3 +1,6 @@
+// std/net - TCP sockets: listeners, streams, addresses, and URI parsing,
+// over a runtime shim that presents the POSIX shape on every platform.
+// One module across five files; import the DIRECTORY.
 module net;
 
 // std/net/socket.yoop - safe envelope around a TCP socket fd.

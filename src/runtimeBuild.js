@@ -45,6 +45,10 @@ export const RUNTIME_SOURCES = [
   // Cancellation tokens backing std/core/cancel.yoop: the cancelled
   // flag, the deadline, and the waiter list the multiplexer parks on.
   path.resolve(runtimeDir, "yoop_cancel.c"),
+  // yoop_time_parts - the calendar breakdown backing std/time.yoop. The wall
+  // clock itself lives in yoop_runtime.c, next to the monotonic clock it must
+  // not be confused with.
+  path.resolve(runtimeDir, "yoop_time.c"),
 ];
 
 export function runtimeLinkFlags() {

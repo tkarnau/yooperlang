@@ -1,6 +1,9 @@
+// std/db/sqlite - SQLite bindings: connections, prepared statements, and a
+// `transaction` kind that commits or rolls back at the end of its block.
+// One module across two files; import the DIRECTORY.
 module sqlite;
 
-// std/db/sqlite.yoop - safe SQLite bindings.
+// std/db/sqlite/db.yoop - safe SQLite bindings.
 //
 // The public face of std/db. Compiles without `import.unsafe;` and never names
 // a pointer type: every handle rides inside the `RawDb` / `RawStmt` envelopes

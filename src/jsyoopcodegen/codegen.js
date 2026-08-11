@@ -542,7 +542,62 @@ function hoistAllocasToEntry(fnLines) {
 //
 // `t0`/`t1` are the ones that actually bite: they are the natural names for
 // timing code. Reserving the pattern makes `let t0` emit `%t0.1` instead.
+// `a && b` / `a || b` evaluate the RIGHT side only when the left does not
+// already decide the answer.
+//
+// They used to lower through INT_OP_MAP, which maps `andand` onto the bitwise
+// `and` and `oror` onto `or` - so BOTH sides always ran. That is wrong in the
+// one way that matters: every guard idiom in every language is written on the
+// assumption that it is not.
+//
+//     if (p != null && p.field > 0)         // deref of null
+//     if (i < xs.len && xs[i] == want)      // read past the end
+//     if (ok && expensive())                // silently pays for it
+//
+// It is invisible until the right side is unsafe, and then it is a segfault
+// several frames from the source. Found by `tools/stdindex`, whose insertion
+// sort is the textbook shape - `while (j > 0 && less(cur, xs[j - 1]))`, where
+// `j - 1` underflows a usize the moment `j` reaches 0.
+//
+// Lowered through a stack slot rather than a phi, because a phi needs the
+// predecessor BLOCK labels and the right side may itself contain branches
+// (a nested `&&`, a `?`, an `await`), which would leave the recorded
+// predecessor stale. `hoistAllocasToEntry` lifts the slot to the entry block,
+// so this costs nothing a phi would not.
+//
+// Shared by both emitters on purpose. The single-module and multi-module
+// binary-expression paths are near-duplicates, and CLAUDE.md records two bugs
+// (printf, the for-loop counter) that came from editing one and not the other.
+function emitShortCircuitLogical(node, fnLines, emit) {
+  const isAnd = node.op === "andand";
+  const slot = emit.freshTemp();
+  const rhsLabel = emit.freshLabel(isAnd ? "and_rhs" : "or_rhs");
+  const doneLabel = emit.freshLabel(isAnd ? "and_done" : "or_done");
+
+  fnLines.push(`  ${slot} = alloca i1, align 1`);
+  const left = emit.emitExpr(node.left, fnLines);
+  // Seed with the left value: it IS the answer on the short-circuit path
+  // (false for `&&`, true for `||`).
+  fnLines.push(`  store i1 ${left.val}, ptr ${slot}, align 1`);
+  fnLines.push(
+    isAnd
+      ? `  br i1 ${left.val}, label %${rhsLabel}, label %${doneLabel}`
+      : `  br i1 ${left.val}, label %${doneLabel}, label %${rhsLabel}`,
+  );
+
+  fnLines.push(`${rhsLabel}:`);
+  const right = emit.emitExpr(node.right, fnLines);
+  fnLines.push(`  store i1 ${right.val}, ptr ${slot}, align 1`);
+  fnLines.push(`  br label %${doneLabel}`);
+
+  fnLines.push(`${doneLabel}:`);
+  const out = emit.freshTemp();
+  fnLines.push(`  ${out} = load i1, ptr ${slot}, align 1`);
+  return { val: out, yoopType: PrimType("bool") };
+}
+
 const EMITTER_LABEL_HINTS = new Set([
+  "and_done", "and_rhs", "or_done", "or_rhs",
   "else", "merge", "then",
   "for_after", "for_body", "for_cond", "for_step",
   "forin_after", "forin_body", "forin_cond", "forin_step",
@@ -1138,6 +1193,14 @@ export function codegen(ast) {
       }
 
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // `&&` / `||` short-circuit, so they cannot go through the arithmetic
+        // path below (which would evaluate both sides). See
+        // emitShortCircuitLogical.
+        if (node.op === "andand" || node.op === "oror") {
+          return emitShortCircuitLogical(node, fnLines, {
+            emitExpr, freshTemp, freshLabel,
+          });
+        }
         // Phase 8.A: pointer arithmetic and pointer/null comparisons branch
         // off the integer/float path. Detect via operand resolvedType.
         const leftTy = node.left.resolvedType;
@@ -4504,6 +4567,13 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.CALL_EXPRESSION: return emitCallExpr(node, fnLines);
       case ASTNodeKind.BINARY_EXPRESSION: {
+        // `&&` / `||` short-circuit - same helper the single-module path
+        // uses, deliberately shared so the two cannot drift.
+        if (node.op === "andand" || node.op === "oror") {
+          return emitShortCircuitLogical(node, fnLines, {
+            emitExpr, freshTemp, freshLabel,
+          });
+        }
         // Phase 8.A: route pointer arithmetic / pointer-null comparison
         // through emitPointerBinaryMM. Same logic as single-module path.
         const leftTy = node.left.resolvedType;

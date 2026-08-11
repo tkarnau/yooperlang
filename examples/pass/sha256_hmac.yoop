@@ -1,0 +1,106 @@
+// std/crypto against the published vectors: FIPS 180-4 for SHA-256 and
+// RFC 4231 for HMAC-SHA-256.
+//
+// plans/yooperdoom-takeaways.md 4.2 - "request signing is table stakes for
+// cloud APIs". Every expected value here is checkable against
+// `openssl dgst -sha256` or Node's crypto in one line, which is the point: a
+// hash implementation that is only tested against itself is not tested.
+//
+// The cases chosen are the ones that catch real implementation bugs:
+//
+//   ""              the empty message, which is all padding
+//   "abc"           one short block
+//   the 56-char     forces the extra padding block (>= 56 bytes leaves no
+//                   room for the 8-byte length in the same block)
+//   1000 x "a"      many blocks, and exercises the streaming path
+//   a 131-byte key  longer than the 64-byte BLOCK size, so HMAC must hash it
+//                   first - the boundary people get wrong by using the 32-byte
+//                   digest size instead
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as crypto from "std/crypto";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function hexOf(data: uint8[]): string {
+    disposable h: Vec<uint8> = vec.vec_new(80);
+    crypto.toHex(ref h, data);
+    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref h));
+}
+
+function showHash(label: string, data: uint8[]): void {
+    disposable d: Vec<uint8> = vec.vec_new(32);
+    crypto.sha256(ref d, data);
+    printf(`${label} ${hexOf(vec.vec_as_array(ref d))}\n`);
+}
+
+function showMac(label: string, key: uint8[], msg: uint8[]): void {
+    disposable d: Vec<uint8> = vec.vec_new(32);
+    crypto.hmacSha256(ref d, key, msg);
+    printf(`${label} ${hexOf(vec.vec_as_array(ref d))}\n`);
+}
+
+function main(): int32 {
+    showHash("empty ", intr.string_as_bytes(""));
+    showHash("abc   ", intr.string_as_bytes("abc"));
+    showHash("len56 ", intr.string_as_bytes(
+        "abcdbcdecdefdefgefghfghighijhijkijkljklmklmnlmnomnopnopq"));
+
+    // Many blocks, fed in one call.
+    disposable thousand: Vec<uint8> = vec.vec_new(1000);
+    for (let i: usize = 0; i < 1000; i += 1) {
+        vec.vec_push(ref thousand, 97);   // 'a'
+    }
+    showHash("1000a ", vec.vec_as_array(ref thousand));
+
+    // The same message through the STREAMING api, one byte at a time. Must
+    // match the one-shot above, which is what proves the partial-block
+    // bookkeeping in `update` is right.
+    let s: crypto.Sha256 = crypto.sha256New();
+    disposable one: Vec<uint8> = vec.vec_new(1);
+    vec.vec_push(ref one, 97);
+    for (let i: usize = 0; i < 1000; i += 1) {
+        crypto.update(ref s, vec.vec_as_array(ref one));
+    }
+    disposable streamed: Vec<uint8> = vec.vec_new(32);
+    crypto.digest(ref s, ref streamed);
+    crypto.sha256Free(ref s);
+    printf(`stream ${hexOf(vec.vec_as_array(ref streamed))}\n`);
+
+    // HMAC: the well-known "quick brown fox" vector, then RFC 4231 cases 1
+    // and 2, then the long-key boundary.
+    showMac("hmacfox",
+        intr.string_as_bytes("key"),
+        intr.string_as_bytes("The quick brown fox jumps over the lazy dog"));
+
+    disposable k20: Vec<uint8> = vec.vec_new(20);
+    for (let i: usize = 0; i < 20; i += 1) { vec.vec_push(ref k20, 0x0b); }
+    showMac("rfc1   ", vec.vec_as_array(ref k20), intr.string_as_bytes("Hi There"));
+
+    showMac("rfc2   ",
+        intr.string_as_bytes("Jefe"),
+        intr.string_as_bytes("what do ya want for nothing?"));
+
+    // 131 bytes: longer than the 64-byte block, so the key is hashed first.
+    disposable k131: Vec<uint8> = vec.vec_new(131);
+    for (let i: usize = 0; i < 131; i += 1) { vec.vec_push(ref k131, 0xaa); }
+    showMac("longkey", vec.vec_as_array(ref k131), intr.string_as_bytes(
+        "Test Using Larger Than Block-Size Key - Hash Key First"));
+
+    // The comparison a MAC check must use.
+    disposable a: Vec<uint8> = vec.vec_new(32);
+    disposable b: Vec<uint8> = vec.vec_new(32);
+    crypto.sha256(ref a, intr.string_as_bytes("abc"));
+    crypto.sha256(ref b, intr.string_as_bytes("abc"));
+    printf(`ct same=${crypto.equalConstantTime(vec.vec_as_array(ref a), vec.vec_as_array(ref b))}\n`);
+
+    disposable c: Vec<uint8> = vec.vec_new(32);
+    crypto.sha256(ref c, intr.string_as_bytes("abd"));
+    printf(`ct diff=${crypto.equalConstantTime(vec.vec_as_array(ref a), vec.vec_as_array(ref c))}\n`);
+
+    return 0;
+}

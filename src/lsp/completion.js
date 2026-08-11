@@ -20,7 +20,12 @@
 
 import { ASTNodeKind } from "../contracts.js";
 import { formatType } from "../jsyooptypecheck/errors.js";
-import { findInModule, posToOffset } from "./nav.js";
+import {
+  docForDecl,
+  findInModule,
+  moduleHeaderComment,
+  posToOffset,
+} from "./nav.js";
 
 // LSP CompletionItemKind constants. Full enum is in the LSP spec; only
 // the values we emit are listed.
@@ -71,11 +76,17 @@ export function collectCompletions(module, src, position, ctx = {}) {
   const items = [];
   const seen = new Set();
 
-  const push = (label, kind, detail) => {
+  // `doc` is the comment block written above the declaration. It rides the
+  // LSP `documentation` field, which VS Code shows in the expanded panel next
+  // to the completion list - so the answer to "what does this do" arrives
+  // while you are picking the name, not after. Same scanner as hover; see
+  // docCommentAt in nav.js for why this exists (yooperdoom-takeaways 4.1).
+  const push = (label, kind, detail, doc) => {
     if (!label || seen.has(label)) return;
     seen.add(label);
     const item = { label, kind };
     if (detail) item.detail = detail;
+    if (doc) item.documentation = { kind: "markdown", value: doc };
     items.push(item);
   };
 
@@ -99,7 +110,7 @@ export function collectCompletions(module, src, position, ctx = {}) {
       : decl;
     if (!inner || !inner.name) continue;
     const { kind, detail } = completionForDecl(inner);
-    if (kind) push(inner.name, kind, detail);
+    if (kind) push(inner.name, kind, detail, docForDecl(inner, module));
   }
 
   // 3. Imported names - look up the module env to find imported symbols.
@@ -109,11 +120,32 @@ export function collectCompletions(module, src, position, ctx = {}) {
       // Look up the imported decl in the source module to render a
       // useful detail line.
       const targetMod = ctx.modById?.get(imp.fromModuleId);
+
+      // A namespace import (`import * as str from "std/core/strings.yoop"`)
+      // names a MODULE, not a decl, so there is nothing to look up - and the
+      // documentation a reader wants for `str` is what that file says about
+      // itself. This is the same answer a std index would give, delivered at
+      // the point of use.
+      if (imp.kind === "namespace") {
+        push(
+          name,
+          CompletionItemKind.Module,
+          targetMod ? `namespace ${name}` : "namespace",
+          targetMod ? moduleHeaderComment(targetMod.src) : null,
+        );
+        continue;
+      }
+
       const sourceDecl = targetMod
         ? findInModule(targetMod, imp.exportName ?? name)?.decl
         : null;
       const fallback = sourceDecl ? completionForDecl(sourceDecl) : { kind: CompletionItemKind.Variable };
-      push(name, fallback.kind ?? CompletionItemKind.Variable, fallback.detail);
+      push(
+        name,
+        fallback.kind ?? CompletionItemKind.Variable,
+        fallback.detail,
+        sourceDecl ? docForDecl(sourceDecl, targetMod) : null,
+      );
     }
   }
 

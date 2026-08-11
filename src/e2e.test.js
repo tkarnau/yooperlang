@@ -273,6 +273,110 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
+  it("time_calendar.yoop: wall clock + calendar, checked against fixed epochs", async () => {
+    // Reproducible with `new Date(epoch * 1000).toISOString()`. Assertions are
+    // UTC-only on purpose: local rendering depends on the machine's timezone.
+    const { stdout, exitCode } = await runFixture("examples/pass/time_calendar.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "epoch  1970-01-01T00:00:00Z\n" +
+        "before 1969-12-31T23:59:59Z\n" +
+        "recent 2025-08-12T12:00:00Z\n" +
+        "leapday 2024-02-29T00:00:00Z\n" +
+        "nyeve   2024-12-31T23:59:59Z\n" +
+        "nyday   2025-01-01T00:00:00Z\n" +
+        "date  2025-08-12\n" +
+        "time  12:00:00\n" +
+        "stamp 20250812-120000\n" +
+        "names Tue Aug\n" +
+        "parts 2025 8 12 12 0 0\n" +
+        "wday 2 yday 223 offset 0\n" +
+        "display 2025-08-12T12:00:00Z\n" +
+        "local ok=1\n" +
+        "now ahead=1\n" +
+        "ms consistent=1\n",
+    );
+  });
+
+  it("sha256_hmac.yoop matches the FIPS 180-4 / RFC 4231 vectors", async () => {
+    // Every expected value below is reproducible with one line of Node:
+    //   crypto.createHash("sha256").update(x).digest("hex")
+    //   crypto.createHmac("sha256", k).update(m).digest("hex")
+    // A hash tested only against itself is not tested.
+    const { stdout, exitCode } = await runFixture("examples/pass/sha256_hmac.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "empty  e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855\n" +
+        "abc    ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad\n" +
+        "len56  248d6a61d20638b8e5c026930c3e6039a33ce45964ff2167f6ecedd419db06c1\n" +
+        "1000a  41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3\n" +
+        // The streaming path, fed one byte at a time, must agree with the
+        // one-shot above - that is what checks the partial-block bookkeeping.
+        "stream 41edece42d63e8d9bf515a9ba6932e1c20cbc9f5a5d134645adb5db1b9737ea3\n" +
+        "hmacfox f7bc83f430538424b13298e6aa6fb143ef4d59a14946175997479dbc2d1a3cd8\n" +
+        "rfc1    b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7\n" +
+        "rfc2    5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843\n" +
+        // 131-byte key: longer than the 64-byte BLOCK, so HMAC hashes it
+        // first. Using the 32-byte digest size here instead is the classic
+        // bug, and it produces a stable MAC that disagrees with everyone.
+        "longkey 60e431591ee0b67f0d8a26aacbf5b77f8e0bc6213728c5140546040f0ee37f54\n" +
+        "ct same=1\n" +
+        "ct diff=0\n",
+    );
+  });
+
+  it("base64_roundtrip.yoop: RFC 4648 vectors, both alphabets, binary round-trip", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/base64_roundtrip.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "enc  -> \n" +
+        "enc f -> Zg==\n" +
+        "enc fo -> Zm8=\n" +
+        "enc foo -> Zm9v\n" +
+        "enc foob -> Zm9vYg==\n" +
+        "enc fooba -> Zm9vYmE=\n" +
+        "enc foobar -> Zm9vYmFy\n" +
+        "dec Zg== -> f (1)\n" +
+        "dec Zm9vYmE= -> fooba (5)\n" +
+        "dec Zm9vYmFy -> foobar (6)\n" +
+        "dec Zm9vYmE -> fooba (5)\n" +
+        "dec Zm9v\nYmFy -> foobar (6)\n" +
+        "url ->>>??? -> Pj4-Pz8_\n" +
+        "std ->>>??? -> Pj4+Pz8/\n" +
+        "dec Pj4-Pz8_ -> >>>??? (6)\n" +
+        "dec Pj4+Pz8/ -> >>>??? (6)\n" +
+        "dec !!!! -> ERR base64: invalid character\n" +
+        "dec Z -> ERR base64: truncated input\n" +
+        "dec Zg==Zg== -> ERR base64: data after padding\n" +
+        "binary encoded len=344 predicted=344\n" +
+        "binary roundtrip 1 (256 bytes)\n",
+    );
+  });
+
+  it("short_circuit.yoop: `&&` / `||` do not evaluate the right side needlessly", async () => {
+    const { stdout, exitCode } = await runFixture("examples/pass/short_circuit.yoop");
+    assert.equal(exitCode, 0);
+    // The "ran N side(s)" lines are the assertion that matters. A bitwise
+    // lowering produces the same VALUES and would pass a value-only test.
+    assert.equal(
+      stdout,
+      "false && _ ran 1 side(s)\n" +
+        "true || _ taken\n" +
+        "true || _ ran 1 side(s)\n" +
+        "true && true taken\n" +
+        "true && _ ran 2 side(s)\n" +
+        "null guard ok\n" +
+        "bounds guard ok\n" +
+        "underflow guard ok\n" +
+        "or guard ok\n" +
+        "nested=1\n" +
+        "loop guard ok, steps=1\n",
+    );
+  });
+
   it("contextual_keywords.yoop: demoted keywords work as fields, params, and locals", async () => {
     const { stdout, exitCode } = await runFixture(
       "examples/pass/contextual_keywords.yoop",

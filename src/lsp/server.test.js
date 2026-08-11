@@ -385,6 +385,62 @@ function main(): int32 {
     });
   });
 
+  // yooperdoom-takeaways 4.1: the doc arrives while you are picking the name,
+  // not after. Same scanner as hover, on the LSP `documentation` field.
+  it("completion carries the doc comment, including for a namespace import", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_comp_"));
+    fs.writeFileSync(
+      path.join(dir, "lib.yoop"),
+      `// lib.yoop - the module header, which says what the MODULE is for.
+
+// Pads a number on the left, which is the thing you keep rewriting.
+export function padded(n: int32): int32 {
+    return n;
+}
+`,
+    );
+    const mainSrc = `import * as lib from "./lib.yoop";
+// Doubles its argument, and says so.
+function twice(n: int32): int32 {
+    return n + n;
+}
+function main(): int32 {
+    return 0;
+}
+`;
+    const mainPath = path.join(dir, "main.yoop");
+    fs.writeFileSync(mainPath, mainSrc);
+    const uri = pathToFileURL(fs.realpathSync(mainPath)).href;
+
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: mainSrc },
+      });
+      const resp = await client.request("textDocument/completion", {
+        textDocument: { uri },
+        position: { line: 6, character: 4 },
+      });
+      const items = resp.result.items ?? [];
+      const byLabel = (l) => items.find((i) => i.label === l);
+
+      // A decl in the file under the cursor.
+      assert.match(
+        byLabel("twice")?.documentation?.value ?? "",
+        /Doubles its argument, and says so\./,
+      );
+      // A namespace import documents itself with the imported file's HEADER -
+      // there is no decl to look up, and the header is the answer a reader
+      // wants for `lib` anyway.
+      assert.match(
+        byLabel("lib")?.documentation?.value ?? "",
+        /the module header, which says what the MODULE is for/,
+      );
+      // The header must NOT have leaked onto the first decl in that file:
+      // docCommentAt stops at the blank line between them.
+      assert.equal(byLabel("padded"), undefined, "padded is not imported by name");
+    });
+  });
+
   it("semanticTokens/full returns an encoded token stream", async () => {
     const { uri, src } = writeFixture(`function f(): int32 {
     let x: int32 = 7;

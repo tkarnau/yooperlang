@@ -125,6 +125,46 @@ rather than by repeated concatenation - is good advice and unaffected.
 
 ---
 
+## 0.4 Found while doing this work: `&&` and `||` did not short-circuit
+
+Not in the takeaways, and worse than anything that is. FIXED.
+
+Both operands of `&&` and `||` were always evaluated: `INT_OP_MAP` in codegen
+mapped `andand` onto the bitwise `and` and `oror` onto `or`, so the lowering
+had no branch in it at all. Every guard idiom in every language is written on
+the assumption that this is not so:
+
+```js
+if (p != null && (*p).v > 0)          // dereferenced null
+if (i < xs.len && xs[i] == want)      // read past the end
+if (j > 0 && xs[j - 1] > xs[j])       // usize underflow at j == 0
+if (ok && expensive())                // paid for silently
+```
+
+It is invisible until the right-hand side is unsafe, and then it is a SIGSEGV
+several frames from the source with nothing pointing at the operator. Confirmed
+present at `18843a0`.
+
+**How it surfaced is the part worth keeping.** It was not found by reading the
+compiler. It was found by writing an ordinary program in Yoop -
+`tools/stdindex`, the std index generator below - whose insertion sort is the
+textbook shape `while (j > 0 && less(cur, xs[j - 1]))`. That crashed on a
+three-entry directory and not on a five-entry one, because the inner loop only
+reaches `j == 0` when the input is actually out of order. This is exactly what
+`plans/README.md` priority 2 is for, and it is an argument for writing more of
+the tooling in Yoop rather than in JS.
+
+Fix: `emitShortCircuitLogical` in codegen lowers both operators to a branch
+plus a stack slot (not a phi - the right side may contain its own branches, so
+the phi's recorded predecessor would go stale). Shared by the single-module and
+multi-module emitters deliberately, since CLAUDE.md already records two bugs
+that came from editing one of that pair and not the other. Fixture:
+`examples/pass/short_circuit.yoop`, which asserts on the NUMBER OF SIDES
+EVALUATED rather than on the resulting values - a bitwise lowering produces the
+same values and would pass a value-only test.
+
+---
+
 ## 1. Tier 1: the compiler must never fail without a span or a sentence
 
 This is the rule TAKEAWAYS 1.2 proposes, and it is the right one. Two live
@@ -357,19 +397,24 @@ function main(): int32 {
 the error talks about a missing colon and points at the first binding's name.
 Confirmed pre-existing at `18843a0`.
 
-Two things worth separating:
+Two things were separable here, and both are now settled.
 
-- **The diagnostic is actively misleading** and that part should be fixed
-  regardless. A `{` in statement position that is not a struct literal should
-  say "a bare block is not a statement" rather than describing a struct literal
-  the user was not writing. Cheap, same shape as the other reserved-word and
-  nested-function diagnostics in this section.
-- **Whether to SUPPORT it is a design question.** A bare block is the natural
-  way to scope a `disposable` tightly (dispose here, not at function end), and
-  with cleanup injection that is a real expressive want rather than a style
-  preference. The counter-argument is that Yoop already has `ephemeral EXPR
-  { ... }` for scoped regions and a named function for everything else. Decide
-  deliberately; do not let it land as a side effect of fixing the diagnostic.
+- **The diagnostic was actively misleading**, and that is fixed. A `{` at
+  statement start now says a bare block is not a statement and lists what a
+  block can belong to, rather than describing a struct literal the user was not
+  writing.
+- **Supporting it: DECIDED, no.** The argument for was that a bare block is the
+  only way to bound a `disposable`'s lifetime without inventing a function or
+  reaching for a region kind that owns an allocator. The argument against won:
+  `ephemeral EXPR { ... }` already covers a scoped region, a named function
+  covers the rest, and a second block form is one more thing to specify and
+  test for a want that has come up once. The diagnostic naming both existing
+  options is the answer.
+
+  Revisit only if the "bound this one disposable" shape shows up repeatedly in
+  real programs and neither existing form fits - and if it ever does, note that
+  `ephemeral` with a no-op guard is close enough that a std helper might be the
+  cheaper fix than new grammar.
 
 Fixture note: `examples/pass/disposable_rebind.yoop` uses functions rather than
 bare blocks for its two scopes, and says so, so it does not silently depend on
@@ -704,14 +749,44 @@ from 1020.
 - Doc comments in the LSP (4.1) - `docCommentAt` in `nav.js`, wired into hover
   through `findDefinition` so it works at a call site and across files.
 
-**Still open, in order:**
+**ALSO DONE (2026-08-11), second pass.** The discoverability work and the
+first three std modules. Suite at 1079 tests.
 
-1. Uniform one-line module headers, and a generated `std/INDEX.md` (4.1)
-2. base64, then sha256/hmac, then wall clock (4.2)
-3. Decide whether a bare `{ ... }` block should be a statement (2.4b) - the
-   diagnostic is fixed; the feature question is not answered
-4. Doc comments in COMPLETION detail as well as hover (4.1) - the scanner is
-   shared, so this is small
+- Doc comments in COMPLETION as well as hover (4.1). A namespace import
+  documents itself with the imported file's HEADER, which is the module index
+  delivered at the point of use.
+- Module headers (4.1) - the survey found this much smaller than assumed: one
+  file had no header (`std/core/numbers.yoop`) and two carried stale paths from
+  the directory-module move. What was actually missing was a way to document a
+  MODULE as opposed to a FILE, since every file of `std/http` describes itself
+  and taking one at random made the module read as "a minimal HTTP/1.1 client".
+  New convention, needing no new syntax: **a comment ABOVE `module <name>;`
+  documents the module, one below it documents the file.** Both the index
+  generator and the LSP follow it.
+- `std/INDEX.md` (4.1) - generated by `tools/stdindex`, WRITTEN IN YOOP per the
+  `tools/yoopdist` precedent, wired to `npm run gen:index`. A generated file
+  that is checked in rots, so `src/std_index.test.js` guards coverage in both
+  directions (nothing on disk missing from the index, nothing in the index
+  missing from disk) without needing clang.
+- `std/encoding/base64.yoop` (4.2) - both alphabets, permissive decode
+  (padding optional, whitespace skipped, both alphabets accepted) and strict
+  errors. RFC 4648 vectors plus a 256-byte binary round-trip.
+- `std/crypto` (4.2) - SHA-256 + HMAC-SHA-256, pure yoop, incremental and
+  one-shot, with `equalConstantTime` because comparing MACs with a normal loop
+  leaks the answer a byte at a time. Every fixture value cross-checked against
+  Node's crypto: FIPS 180-4, RFC 4231, and the 131-byte key that forces the
+  hash-the-key-first branch.
+- `std/time.yoop` (4.2) - the wall clock and the calendar, over a new
+  `runtime/yoop_time.c`. Kept deliberately distinct from the monotonic clock,
+  which is what the header says first. `DateTime` implements `Display` and
+  renders ISO-8601. Its `pad2` helper is `padStart(int_to_string(n), 2, "0")`,
+  which is the exact pairing 4.1 found four hand-rolled copies of.
+
+Nothing left open in this group; what remains of 4.2 (process spawn,
+inflate/gzip) is in the deferred list below, where it always belonged.
+
+Closed without code: whether a bare `{ ... }` block should be a statement
+(2.4b) - decided no, see that section.
 
 **Then - HTTP, in this order and not in parallel:**
 

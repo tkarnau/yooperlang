@@ -1,0 +1,83 @@
+// `&&` and `||` evaluate the right side only when the left has not already
+// decided the answer.
+//
+// They used to lower through INT_OP_MAP - `andand` onto the bitwise `and`,
+// `oror` onto `or` - so BOTH sides always ran. That is wrong in the one way
+// that matters: every guard idiom in every language is written on the
+// assumption that it is not. The failure is invisible until the right side is
+// unsafe, and then it is a segfault several frames from the source.
+//
+// Found by `tools/stdindex`, whose insertion sort is the textbook shape:
+// `while (j > 0 && less(cur, xs[j - 1]))`, where `j - 1` underflows a usize
+// the moment `j` reaches 0. Three of the four guards below are that same
+// pattern - a cheap test protecting an operation that would crash.
+
+import.unsafe;
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+type Node { v: int32 }
+
+// Records that it ran, so the fixture proves EVALUATION order rather than just
+// the resulting value. A bitwise lowering passes a value-only test.
+let CALLS: int32 = 0;
+
+function loud(v: bool): bool {
+    CALLS = CALLS + 1;
+    return v;
+}
+
+function main(): int32 {
+    // Evaluation: the right side must not run at all.
+    CALLS = 0;
+    if (loud(false) && loud(true)) { printf("UNREACHABLE and\n"); }
+    printf(`false && _ ran ${CALLS} side(s)\n`);
+
+    CALLS = 0;
+    if (loud(true) || loud(true)) { printf("true || _ taken\n"); }
+    printf(`true || _ ran ${CALLS} side(s)\n`);
+
+    // ...and the right side DOES run when the left does not decide it.
+    CALLS = 0;
+    if (loud(true) && loud(true)) { printf("true && true taken\n"); }
+    printf(`true && _ ran ${CALLS} side(s)\n`);
+
+    // The null guard: a deref that must never happen.
+    let p: unsafe_ptr<Node> = null;
+    if (p != null && (*p).v > 0) { printf("UNREACHABLE deref\n"); }
+    printf("null guard ok\n");
+
+    // The bounds guard: an index past the end.
+    let xs: int32[] = [10, 20, 30];
+    let i: usize = 3;
+    if (i < xs.len && xs[i] == 99) { printf("UNREACHABLE index\n"); }
+    printf("bounds guard ok\n");
+
+    // The underflow guard: `j - 1` on a usize at zero.
+    let j: usize = 0;
+    if (j > 0 && xs[j - 1] == 1) { printf("UNREACHABLE underflow\n"); }
+    printf("underflow guard ok\n");
+
+    // `||` guards the same way, with the polarity flipped.
+    if (i >= xs.len || xs[i] == 99) { printf("or guard ok\n"); }
+
+    // Nested, and in value position rather than as a condition.
+    let a: bool = true;
+    let b: bool = false;
+    let r: bool = a && (b || (j == 0 && i == 3));
+    printf(`nested=${r}\n`);
+
+    // Inside a loop condition, which is where stdindex hit it.
+    let sorted: int32[] = [30, 10, 20];
+    let k: usize = 1;
+    let steps: int32 = 0;
+    while (k > 0 && sorted[k - 1] > sorted[k]) {
+        steps = steps + 1;
+        k = k - 1;
+    }
+    printf(`loop guard ok, steps=${steps}\n`);
+
+    return 0;
+}

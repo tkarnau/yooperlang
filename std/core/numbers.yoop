@@ -1,6 +1,14 @@
-/*
-  Author: Tom Karnau
-*/
+// std/core/numbers.yoop - numeric parsing and small integer helpers.
+//
+// The parsing direction only, and only from BYTES: `parseBytesToInt32` reads a
+// signed integer in any radix from 2 to 36 and returns a `Result` rather than
+// a sentinel, so a bad digit is a value you have to handle. The rendering
+// direction lives in std/core/format.yoop (`int_to_string` / `uint_to_string`).
+//
+// `nextPow2Floor8` is the growth-policy helper the containers share.
+//
+//     import * as num from "std/core/numbers.yoop";
+//     switch (num.parseBytesToInt32(intr.string_as_bytes("ff"), 16)) { ... }
 
 import * as intr from "./intrinsics.yoop";
 import { Result } from "./types.yoop";
