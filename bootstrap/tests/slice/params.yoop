@@ -1,0 +1,17 @@
+// Function parameters: read in arithmetic, passed to other functions, and
+// mixed with locals. Each param is spilled to a stack slot on entry so the
+// body has one uniform rule for reading a name.
+function add(a: int, b: int): int {
+  return a + b;
+}
+
+function scaled(x: int, factor: int): int {
+  const doubled = x * 2;
+  return doubled * factor;
+}
+
+function main(): int {
+  printf("add(3, 4) = %d\n", add(3, 4));
+  printf("scaled(5, 10) = %d\n", scaled(5, 10));
+  return add(20, 2);
+}

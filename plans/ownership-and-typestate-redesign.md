@@ -335,6 +335,30 @@ advisory). No mass rewrite is forced, unlike the affine route.
   the call site after all. (The chosen Q1 answer was "silent by default," which
   this doc reads as "no build diagnostics; advisory lives in tooling.") 
     - Answer: This is the intent for now, I want to see how this feels after a few thousand more lines of working with the language to see if we want something clearer.
+    - **Revisited 2026-08-12, after the bootstrap crossed a few thousand lines.**
+      Built the soft warning (`unhandled-disposable`, via the existing
+      `pushWarning` channel). It found a real leak immediately - the bootstrap
+      driver held a `Program`, which owns the type and symbol arenas, in a plain
+      `let`. Volume is low: 9 warnings across 169 `examples/pass` files.
+      Two false-positive classes decided the outcome, and neither is fixable
+      without machinery this design deliberately rejected:
+        1. a value inside `ephemeral mem.allocatorScope(...)`, where not
+           disposing is correct. The compiler cannot know it is in an arena -
+           `yoop_cur_alloc` is thread-local and already unsound across an
+           `await` (see risk 2 in strings-ownership-and-ergonomics.md), so a
+           static claim would be false exactly where arenas matter most;
+        2. a copy read back out of a container (`vecGet` into a local), where
+           disposing double-frees. Telling these from a leak needs move
+           analysis.
+      So it ships as `--warn-disposable` (opt-in in a build) and stays ON in the
+      LSP, which is what "the advisory lives in tooling" meant. Two refinements
+      were worth keeping regardless: `@derive`-generated code is exempt (it
+      stamps `isDeriveGenerated`), and a by-value use counts as handing the
+      value on while `ref x` does not.
+      If this is ever revisited, the promising direction is a WITNESS VALUE
+      (`f(w: ArenaWitness, ...)`, conferred by the scope, `mustNotEscape scope`)
+      rather than an ambient context - it survives reusable functions and does
+      not lie across a suspend.
 - Name for the acknowledgment / explicitly-manual marker: `unmanaged` / `given`
   / `manual` / `raw` / other.
     - Answer: let's not even add the new keyword for now.

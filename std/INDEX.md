@@ -303,6 +303,8 @@ Exports:
 - `pushBytes` - function
 - `push` - function
 - `pushByte` - function
+- `pushUint` - function
+- `pushInt` - function
 - `pushChar` - function
 - `pushText` - function
 - `clear` - function

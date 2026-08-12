@@ -15,6 +15,7 @@ import.unsafe;
 
 import * as fs from "std/fs.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 
 extern "C" from "stdlib.h" {
   function system(cmd: string): c_int;
@@ -22,8 +23,8 @@ extern "C" from "stdlib.h" {
 
 // Writes `ir` to `irPath`, then links it to `exePath`. Returns "" on success or
 // a human-readable error.
-export function linkExecutable(ir: string, irPath: string, exePath: string): string {
-  const writeErr = fs.writeFile(irPath, intr.stringAsBytes(ir));
+export function linkExecutable(ref ir: Text, irPath: string, exePath: string): string {
+  const writeErr = fs.writeFile(irPath, text.bytes(ref ir));
   if (writeErr.len > 0) {
     return `writing ${irPath}: ${writeErr}`;
   }

@@ -1,0 +1,90 @@
+module codegen;
+
+// Statements: emit the instructions one statement implies.
+//
+// Same convention as expr.yoop - "" on success, an internal-error message
+// otherwise, and no text assembly in this file.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+
+// Walks a BLOCK's statement list. Returns whether the block definitely
+// returned, which is what tells the caller if a terminator is still owed.
+export function emitBlock(ref cx: Cx, blockId: NodeId, retTy: string, ref err: string): bool {
+  let sawReturn = false;
+  const block = nodeAt(cx.ast, blockId);
+  if (block.childA == 0) {
+    return false;
+  }
+  const list = nodeAt(cx.ast, block.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const stmtId = childAt(cx.ast, list, i);
+    err = emitStatement(ref cx, stmtId, retTy);
+    if (err.len > 0) {
+      return sawReturn;
+    }
+    if (nodeAt(cx.ast, stmtId).kind == ASTNodeKind.RETURN_STATEMENT) {
+      sawReturn = true;
+    }
+    i += 1;
+  }
+  return sawReturn;
+}
+
+export function emitStatement(ref cx: Cx, stmtId: NodeId, retTy: string): string {
+  const stmt = nodeAt(cx.ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.RETURN_STATEMENT: {
+      return emitReturn(ref cx, stmt, retTy);
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT: {
+      // The value is discarded; the instructions still have to run.
+      let ignored: Operand = Operand.None;
+      return emitExpr(ref cx, stmt.childA, ref ignored);
+    }
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      return emitVarDecl(ref cx, stmt, stmtId);
+    }
+    default: {
+      return internalError("codegen cannot emit statement", kindName(stmt.kind));
+    }
+  }
+}
+
+function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+  if (stmt.childA == 0) {
+    emitRetVoid(ref cx);
+    return "";
+  }
+  let value: Operand = Operand.None;
+  const err = emitExpr(ref cx, stmt.childA, ref value);
+  if (err.len > 0) {
+    return err;
+  }
+  emitRet(ref cx, retTy, value);
+  return "";
+}
+
+// `let x: T = expr;` is a stack slot plus a store. Without an initializer it is
+// just the slot - reading it before assignment is typecheck's problem.
+function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): string {
+  const ty = typeOf(ref cx, stmtId);
+  const hasInit = stmt.childB != 0;
+
+  let value: Operand = Operand.None;
+  if (hasInit) {
+    // Lowered BEFORE the slot is recorded, so `let x = x;` cannot see itself.
+    const err = emitExpr(ref cx, stmt.childB, ref value);
+    if (err.len > 0) {
+      return err;
+    }
+  }
+
+  declareLocal(ref cx, stmt.name, ty);
+  if (hasInit) {
+    emitStore(ref cx, ty, value, stmt.name);
+  }
+  return "";
+}

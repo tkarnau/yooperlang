@@ -33,7 +33,7 @@ a shared header file.
       parse/           layer 2: recursive descent, one file per construct
       source_graph/    layer 0: Module / ModuleGraph, loading, import resolution
       typecheck/       layer 3: ids, Type, Symbol, Program, the passes
-      codegen/         layer 5: typed AST -> LLVM IR text
+      codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
       link/            layer 6: IR -> executable, by shelling out to clang
       utils/           sort and iteration helpers with no home in std yet
     tools/             small entry points (dump_tokens)
@@ -73,12 +73,16 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
 
   * top-level `function` decls, called from each other
   * `type` decls with fields (registered and resolved, no values yet)
+  * `let` / `const` locals, with an annotation or inferred from the initializer
+  * function PARAMETERS, readable in the body and passed at call sites
   * `return`, with or without a value
   * int literals, string literals, `+ - * / %`
   * calls, including the `printf` builtin
 
-Not yet: imports, locals (`let` / `const`), control flow, structs as values,
-traits, kinds, generics. Each is the next slice outward.
+Not yet: imports, assignment, control flow (`if` / `while` / `switch`), structs
+as values, traits, kinds, generics. Each is the next slice outward, and control
+flow is the one that forces real work - it is where the flat single-block
+emitter has to grow labels and branches.
 
 A program in this subset needs no yoop runtime - only libc - which is what keeps
 the link step a single clang invocation. Linking the runtime arrives with the
@@ -114,6 +118,75 @@ annotation object. A parse dump has to normalize both into one tree before it
 can be diffed - that is the next piece of parity work, and it should be designed
 before the parser grows much further.
 
+
+## Codegen readability rules
+
+Bootstrap-specific, not general Yoop style. Codegen is the layer that turns
+into unreadable string-append soup fastest, and it is the layer whose bugs are
+hardest to spot by reading, so it gets rules of its own.
+
+**Keep files in `codegen/` small and single-purpose** - roughly 150 lines. If a
+file is doing two jobs, split it.
+
+**Separate DECIDING from EMITTING.** Three layers, and a function belongs to
+exactly one:
+
+    expr.yoop / stmt.yoop   walk the AST, decide what should happen
+    instr.yoop              emit one LLVM instruction
+    context.yoop            the raw text appenders (only instr.yoop calls these)
+
+The walking code should read as "load the local, then multiply" - if you can see
+a quotation mark in `expr.yoop`, something is in the wrong file.
+
+**Every IR-emitting function carries a sample of its output**, and is named for
+the IR it produces rather than the AST it came from:
+
+```yoop
+//   %t4 = load i32, ptr %count.addr
+export function emitLoad(ref cx: Cx, dest: usize, ty: string, slotName: string): void {
+```
+
+`emitLoad`, not `emitIdentExpr`. That sample IS the documentation - change the
+format, change the sample.
+
+**An instruction emitter takes decisions already made.** Operands and types come
+in as arguments; it does no lookups, touches no AST, and makes no choices. That
+is what keeps it readable at a glance and testable in isolation.
+
+**Pass the `Cx`, not five arguments.** `context.yoop` bundles the emitter,
+program, typed module, AST, and locals behind `ref` fields, so signatures stay
+short and the one argument that actually varies is visible.
+
+**No template literals on an emit path** - one malloc per instruction that
+nothing frees. See section 3.1 of [../docs/writing_yoop.md](../docs/writing_yoop.md).
+
+## What codegen reads from typecheck
+
+The whole handoff is three things, and `context.yoop` is the only place that
+touches it:
+
+- **the AST** - the shape to walk
+- **`typeOf(ref cx, nodeId)`** - the LLVM type pass D resolved for that node
+- **`returnTypeOf(ref cx, name)`** - a callee's declared return type
+
+Everything else on `Program` / `TypedModule` is typecheck's business. Codegen
+does ZERO type-checking and is total on well-formed input: an internal-error
+return means pass D let something through, never that the user made a mistake.
+
+## Tests
+
+Three levels, and the rule in ../CLAUDE.md says every change adds to whichever
+fits. The point is that they survive the JS compiler being retired.
+
+    node ../src/yoopiler.js --test src/lex        # yoop unit tests
+    node ../src/yoopiler.js --test src/typecheck
+    npm run test:slice                            # end-to-end executables
+    npm run test:parity                           # layer dumps vs the JS side
+
+A slice fixture is a program plus a hand-written `.expected` holding its stdout
+and an `exit=N` line. The `.expected` is the source of truth: it is asserted
+against the BOOTSTRAP first, and the JS reference is checked against the same
+file as a bonus. Never capture one from compiler output.
 
 ## Layer 6 parity
 

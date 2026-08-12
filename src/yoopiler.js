@@ -91,6 +91,7 @@ function main() {
       "track-heap": { type: "boolean" },
       "keep-ir": { type: "boolean" },
       "warn-std": { type: "boolean" },
+      "warn-disposable": { type: "boolean" },
       lsp: { type: "boolean" },
       test: { type: "boolean" },
     },
@@ -303,9 +304,20 @@ function main() {
   // unfixable by whoever is reading it. `--warn-std` opts back in for work on
   // std itself.
   if (warnings.length > 0) {
-    const reported = values["warn-std"]
+    let reported = values["warn-std"]
       ? warnings
       : warnings.filter((w) => !isStdPath(ownerOf(w)?.absPath));
+    // `unhandled-disposable` is OPT-IN on the command line. The ownership model
+    // is advisory by design (plans/ownership-and-typestate-redesign.md), and the
+    // warning has two known false-positive classes it cannot yet tell apart
+    // from a real leak: a value living in an arena scope, where NOT disposing is
+    // the point, and a copy read back out of a container, where disposing would
+    // double-free. It stays on in the LSP, which is where that doc says the
+    // advisory belongs; `--warn-disposable` surfaces it in a build when you
+    // want to audit for leaks.
+    if (!values["warn-disposable"]) {
+      reported = reported.filter((w) => w.code !== "unhandled-disposable");
+    }
     for (const warning of reported) {
       const mod = ownerOf(warning);
       console.error(

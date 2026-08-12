@@ -82,8 +82,11 @@ types file.
   stable so this stays an absorbable, contained change. Deferred until a pass or
   optimization actually wants it.
 - **Layer 5 - codegen**: IN PROGRESS. `codegen/` emits LLVM IR text for the
-  slice subset (functions, return, int/string literals, arithmetic, calls,
-  printf).
+  slice subset (functions with parameters, return, int/string literals,
+  arithmetic, calls, printf, and locals/params as alloca + store/load). Split
+  into deciding (`expr`/`stmt`), emitting (`instr`, one function per LLVM
+  instruction with a sample of its output) and appending (`context`); the rules
+  are in bootstrap/README.md and are bootstrap-specific.
 - **Layer 6 - link**: WORKING. `link/` shells out to clang via libc `system`.
 
 **A vertical slice runs end to end as of 2026-08-12.** The bootstrap compiles

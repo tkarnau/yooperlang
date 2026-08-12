@@ -8,22 +8,22 @@ module codegen;
 // joining them at the end is the whole trick.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable, owned } from "std/core/kinds.yoop";
-import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import { Type, TypeId, PrimKind, Program, typeAt, TYPE_VOID_ID } from "../typecheck";
 
 export type Emitter propagates<disposable> {
-  globals: Vec<string>,   // constants and declares, emitted first
-  body: Vec<string>,      // function definitions
-  nextTemp: usize,        // the %N SSA counter, reset per function
-  nextStr: usize,         // the @.str.N counter, module-wide
+  globals: Text,        // constants and declares, emitted first
+  body: Text,           // function definitions
+  nextTemp: usize,      // the %N SSA counter, reset per function
+  nextStr: usize,       // the @.str.N counter, module-wide
   usesPrintf: bool,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
   return {
-    globals: vec.vecNew(16),
-    body: vec.vecNew(64),
+    globals: text.make(1024),
+    body: text.make(8192),
     nextTemp: 0,
     nextStr: 0,
     usesPrintf: false,
@@ -31,36 +31,48 @@ export function emitterNew(): Emitter propagates<disposable> {
 }
 
 export function emitLine(ref e: Emitter, line: string): void {
-  vec.vecPush(ref e.body, `${line}\n`);
+  text.push(ref e.body, line);
+  text.pushByte(ref e.body, 10);
 }
 
 export function emitGlobal(ref e: Emitter, line: string): void {
-  vec.vecPush(ref e.globals, `${line}\n`);
+  text.push(ref e.globals, line);
+  text.pushByte(ref e.globals, 10);
 }
 
-// A fresh SSA temp name. LLVM requires unnamed values to be numbered in strict
-// order within a function, which is why this is a counter and not a hash.
-export function freshTemp(ref e: Emitter): string {
+// The whole point of Text: an instruction is appended piece by piece with no
+// intermediate string, so emitting IR allocates only when a buffer grows.
+export function emitPart(ref e: Emitter, part: string): void {
+  text.push(ref e.body, part);
+}
+
+export function emitUint(ref e: Emitter, v: usize): void {
+  text.pushUint(ref e.body, uint64(v));
+}
+
+export function endLine(ref e: Emitter): void {
+  text.pushByte(ref e.body, 10);
+}
+
+// A fresh SSA temp NUMBER. LLVM requires unnamed values to be numbered in
+// strict order within a function, which is why this is a counter.
+//
+// It hands back a usize rather than a built `%t12` string on purpose: a name is
+// appended into two or three instructions, and building it as a string would be
+// one malloc per use. `Operand.Temp` carries the number and emitOperand writes
+// the text.
+export function freshTemp(ref e: Emitter): usize {
   e.nextTemp += 1;
-  return `%t${e.nextTemp}`;
+  return e.nextTemp;
 }
 
-export function finish(ref e: Emitter): owned string {
-  disposable all: Vec<string> = vec.vecNew(e.globals.len + e.body.len + 1);
-  let i: usize = 0;
-  while (i < e.globals.len) {
-    vec.vecPush(ref all, vec.vecGet(ref e.globals, i));
-    i += 1;
-  }
-  vec.vecPush(ref all, "\n");
-  let j: usize = 0;
-  while (j < e.body.len) {
-    vec.vecPush(ref all, vec.vecGet(ref e.body, j));
-    j += 1;
-  }
-  return str.stringConcatAll(vec.vecAsArray(ref all));
+export function finish(ref e: Emitter): Text propagates<disposable> {
+  let all: Text = text.make(e.globals.len + e.body.len + 2);
+  text.pushText(ref all, ref e.globals);
+  text.pushByte(ref all, 10);
+  text.pushText(ref all, ref e.body);
+  return all;
 }
-
 // A yoop type as LLVM spells it. Everything pointer-shaped is `ptr` - LLVM has
 // been fully opaque-pointer since 15, so there is nothing to point AT here.
 export function llvmType(ref prog: Program, id: TypeId): string {

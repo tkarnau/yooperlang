@@ -1,0 +1,221 @@
+module codegen;
+
+// One function per LLVM instruction this compiler emits.
+//
+// Read this file to learn what IR the bootstrap produces; read expr.yoop and
+// stmt.yoop to learn WHEN. That split is deliberate - the walking code should
+// read as "load the local, then multiply", not as a pile of string appends.
+//
+// House rules for everything in here:
+//   * Named after the IR it emits (`emitLoad`), never after the AST it came
+//     from (`emitIdentExpr`).
+//   * A comment showing the exact line it produces. That sample is the
+//     documentation - if you change the format, change the sample.
+//   * Takes operands and types already decided by the caller. No lookups, no
+//     AST, no decisions.
+//   * Appends piece by piece. A template literal here would be one malloc per
+//     instruction (docs/writing_yoop.md 3.1).
+
+import { Text }, * as text from "std/core/text.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { TokenTags } from "../lex";
+
+// ----- terminators ---------------------------------------------------------
+
+//   ret i32 %t3
+export function emitRet(ref cx: Cx, ty: string, value: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "ret ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  endInstr(ref cx);
+}
+
+//   ret void
+export function emitRetVoid(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "ret void");
+  endInstr(ref cx);
+}
+
+// ----- memory --------------------------------------------------------------
+
+//   %count.addr = alloca i32
+export function emitAlloca(ref cx: Cx, slotName: string, ty: string): void {
+  startInstr(ref cx);
+  slot(ref cx, slotName);
+  part(ref cx, " = alloca ");
+  part(ref cx, ty);
+  endInstr(ref cx);
+}
+
+//   store i32 42, ptr %count.addr
+export function emitStore(ref cx: Cx, ty: string, value: Operand, slotName: string): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ptr ");
+  slot(ref cx, slotName);
+  endInstr(ref cx);
+}
+
+//   %t4 = load i32, ptr %count.addr
+export function emitLoad(ref cx: Cx, dest: usize, ty: string, slotName: string): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = load ");
+  part(ref cx, ty);
+  part(ref cx, ", ptr ");
+  slot(ref cx, slotName);
+  endInstr(ref cx);
+}
+
+//   store i32 %a.arg, ptr %a.addr
+//
+// The parameter spill. Separate from emitStore because the source is an incoming
+// argument register, not an Operand any expression produced.
+export function emitStoreArg(ref cx: Cx, ty: string, name: string): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " %");
+  part(ref cx, name);
+  part(ref cx, ".arg, ptr ");
+  slot(ref cx, name);
+  endInstr(ref cx);
+}
+
+// ----- arithmetic ----------------------------------------------------------
+
+//   %t5 = mul i32 %t4, 2
+export function emitBinOp(
+  ref cx: Cx,
+  dest: usize,
+  op: string,
+  ty: string,
+  lhs: Operand,
+  rhs: Operand
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = ");
+  part(ref cx, op);
+  part(ref cx, " ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, lhs);
+  part(ref cx, ", ");
+  operand(ref cx, rhs);
+  endInstr(ref cx);
+}
+
+// ----- functions -----------------------------------------------------------
+
+//   define i32 @add(i32 %a.arg, i32 %b.arg) {
+//   entry:
+export function emitFunctionOpen(
+  ref cx: Cx,
+  name: string,
+  retTy: string,
+  ref params: Vec<ParamInfo>
+): void {
+  part(ref cx, "define ");
+  part(ref cx, retTy);
+  part(ref cx, " @");
+  part(ref cx, name);
+  part(ref cx, "(");
+  let i: usize = 0;
+  while (i < params.len) {
+    const p = vec.vecGet(ref params, i);
+    if (i > 0) {
+      part(ref cx, ", ");
+    }
+    part(ref cx, p.ty);
+    part(ref cx, " %");
+    part(ref cx, p.name);
+    part(ref cx, ".arg");
+    i += 1;
+  }
+  part(ref cx, ") {");
+  endInstr(ref cx);
+  part(ref cx, "entry:");
+  endInstr(ref cx);
+}
+
+//   }
+export function emitFunctionClose(ref cx: Cx): void {
+  part(ref cx, "}");
+  endInstr(ref cx);
+}
+
+//   %t7 = call i32 @answer()
+//   %t8 = call i32 (ptr, ...) @printf(ptr @.str.0, i32 %t7)
+//   call void @doThing()
+//
+// `dest` is ignored when `retTy` is void. A variadic callee needs its FULL
+// function type at the call site, not just the return type, which is the only
+// reason `isVariadic` exists.
+export function emitCall(
+  ref cx: Cx,
+  dest: usize,
+  retTy: string,
+  calleeName: string,
+  isVariadic: bool,
+  ref args: Vec<CallArg>
+): void {
+  startInstr(ref cx);
+  const isVoid = text.equals(retTy, "void");
+  if (!isVoid) {
+    temp(ref cx, dest);
+    part(ref cx, " = ");
+  }
+  part(ref cx, "call ");
+  if (isVariadic) {
+    part(ref cx, PRINTF_SIGNATURE);
+  } else {
+    part(ref cx, retTy);
+  }
+  part(ref cx, " @");
+  part(ref cx, calleeName);
+  part(ref cx, "(");
+  let i: usize = 0;
+  while (i < args.len) {
+    const a = vec.vecGet(ref args, i);
+    if (i > 0) {
+      part(ref cx, ", ");
+    }
+    part(ref cx, a.ty);
+    part(ref cx, " ");
+    operand(ref cx, a.value);
+    i += 1;
+  }
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+// ----- IR vocabulary -------------------------------------------------------
+
+// printf is the only variadic callee the bootstrap knows about, so its type is
+// spelled once here rather than at the call site.
+const PRINTF_SIGNATURE: string = "i32 (ptr, ...)";
+
+export function printfReturnType(): string {
+  return "i32";
+}
+
+// The signed-integer opcode for a binary operator, or "" when there is no
+// lowering yet. Unsigned and float variants arrive with the types that need
+// them.
+export function llvmIntOp(tag: TokenTags): string {
+  switch (tag) {
+    case TokenTags.PLUS: { return "add"; }
+    case TokenTags.MINUS: { return "sub"; }
+    case TokenTags.MULT: { return "mul"; }
+    case TokenTags.DIVIDE: { return "sdiv"; }
+    case TokenTags.MODULUS: { return "srem"; }
+    default: { return ""; }
+  }
+}

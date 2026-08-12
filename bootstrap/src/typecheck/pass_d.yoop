@@ -15,6 +15,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
 import { Module } from "../source_graph";
 import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
 
 export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Module): void {
   // One decoration slot per arena node, so a NodeId indexes straight in.
@@ -49,10 +50,14 @@ function checkFunctionBody(
     return;
   }
   let retType: TypeId = TYPE_VOID_ID;
+  let paramTypes: Vec<TypeId> = vec.vecNew(0);
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Func { typeId: t }: {
       switch (typeAt(ref prog, t)) {
-        case Type.Func { params: p, ret: r, variadic: v }: { retType = r; }
+        case Type.Func { params: p, ret: r, variadic: v }: {
+          retType = r;
+          paramTypes = p;
+        }
         default: { return; }
       }
     }
@@ -60,7 +65,40 @@ function checkFunctionBody(
   }
 
   if (declNode.childD != 0) {
-    checkBlock(ref prog, ref tm, ref ast, declNode.childD, retType);
+    disposable scope: LocalScope = scopeNew();
+    bindParams(ref prog, ref tm, ref ast, declNode, ref paramTypes, ref scope);
+    checkBlock(ref prog, ref tm, ref ast, declNode.childD, retType, ref scope);
+  }
+}
+
+// Parameters are locals the caller filled in. Their types come from the Func
+// type pass C built, not from re-resolving the annotations, so the signature
+// stays the single source of truth.
+function bindParams(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref paramTypes: Vec<TypeId>,
+  ref scope: LocalScope
+): void {
+  if (declNode.childB == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, declNode.childB);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const paramId = childAt(ref ast, list, i);
+    const paramNode = nodeAt(ref ast, paramId);
+    let t: TypeId = TYPE_ERROR_ID;
+    if (i < paramTypes.len) {
+      t = vec.vecGet(ref paramTypes, i);
+    }
+    if (!scopeDeclare(ref scope, paramNode.name, t)) {
+      reportError(ref prog, `parameter "${paramNode.name}" is declared more than once`, paramNode.sourceLoc);
+    }
+    vec.vecSet(ref tm.resolvedTypes, paramId, t);
+    i += 1;
   }
 }
 
@@ -69,7 +107,8 @@ function checkBlock(
   ref tm: TypedModule,
   ref ast: AST,
   blockId: NodeId,
-  retType: TypeId
+  retType: TypeId,
+  ref scope: LocalScope
 ): void {
   const block = nodeAt(ref ast, blockId);
   if (block.childA == 0) {
@@ -78,7 +117,7 @@ function checkBlock(
   const list = nodeAt(ref ast, block.childA);
   let i: usize = 0;
   while (i < list.childCount) {
-    checkStatement(ref prog, ref tm, ref ast, childAt(ref ast, list, i), retType);
+    checkStatement(ref prog, ref tm, ref ast, childAt(ref ast, list, i), retType, ref scope);
     i += 1;
   }
 }
@@ -88,7 +127,8 @@ function checkStatement(
   ref tm: TypedModule,
   ref ast: AST,
   stmtId: NodeId,
-  retType: TypeId
+  retType: TypeId,
+  ref scope: LocalScope
 ): void {
   const stmt = nodeAt(ref ast, stmtId);
   switch (stmt.kind) {
@@ -97,13 +137,16 @@ function checkStatement(
         return;   // bare `return;`
       }
       // The return type is what an untyped literal in the expression pins to.
-      const got = checkExpr(ref prog, ref tm, ref ast, stmt.childA, retType);
+      const got = checkExpr(ref prog, ref tm, ref ast, stmt.childA, retType, ref scope);
       if (got != TYPE_ERROR_ID && retType != TYPE_ERROR_ID && got != retType) {
         reportError(ref prog, "returned expression does not match the declared return type", stmt.sourceLoc);
       }
     }
     case ASTNodeKind.EXPRESSION_STATEMENT: {
-      checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID);
+      checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
+    }
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      checkVarDecl(ref prog, ref tm, ref ast, stmt, stmtId, ref scope);
     }
     default: {
       reportError(ref prog, `pass D does not handle ${kindName(stmt.kind)} yet`, stmt.sourceLoc);
@@ -118,27 +161,40 @@ function checkExpr(
   ref tm: TypedModule,
   ref ast: AST,
   exprId: NodeId,
-  expected: TypeId
+  expected: TypeId,
+  ref scope: LocalScope
 ): TypeId {
   const expr = nodeAt(ref ast, exprId);
   let resolved: TypeId = TYPE_ERROR_ID;
 
   switch (expr.kind) {
     case ASTNodeKind.INT_LITERAL: {
-      // An int literal is untyped until context pins it; with no expectation it
-      // defaults to int32, matching the JS reference.
-      if (expected != TYPE_ERROR_ID) {
+      // An int literal is untyped until context pins it, and it may only pin to
+      // an INTEGER type - the JS reference rejects untyped-int-to-float too.
+      // With no expectation, or an expectation it cannot satisfy, it falls back
+      // to int32 and the caller's own check reports the mismatch.
+      if (expected != TYPE_ERROR_ID && isIntPrimType(ref prog, expected)) {
         resolved = expected;
       } else {
-        resolved = primTypeId(PrimKind.INT32);
+        if (expected == TYPE_ERROR_ID) {
+          resolved = primTypeId(PrimKind.INT32);
+        } else {
+          reportError(
+            ref prog,
+            `cannot assign untyped int to ${formatType(ref prog, expected)}`,
+            expr.sourceLoc
+          );
+          // Stay TYPE_ERROR_ID so the caller's own mismatch check stays quiet:
+          // one problem should produce one diagnostic.
+        }
       }
     }
     case ASTNodeKind.STRING_LITERAL: {
       resolved = primTypeId(PrimKind.STRING);
     }
     case ASTNodeKind.BINARY_EXPRESSION: {
-      const left = checkExpr(ref prog, ref tm, ref ast, expr.childA, expected);
-      const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, left);
+      const left = checkExpr(ref prog, ref tm, ref ast, expr.childA, expected, ref scope);
+      const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, left, ref scope);
       if (left != right) {
         reportError(ref prog, "binary operands have different types", expr.sourceLoc);
       } else {
@@ -146,7 +202,15 @@ function checkExpr(
       }
     }
     case ASTNodeKind.CALL_EXPRESSION: {
-      resolved = checkCall(ref prog, ref tm, ref ast, expr);
+      resolved = checkCall(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.IDENT: {
+      switch (scopeLookup(ref scope, expr.name)) {
+        case Option.Some { value: t }: { resolved = t; }
+        case Option.None: {
+          reportError(ref prog, `unknown name "${expr.name}"`, expr.sourceLoc);
+        }
+      }
     }
     default: {
       reportError(ref prog, `pass D does not handle ${kindName(expr.kind)} yet`, expr.sourceLoc);
@@ -157,14 +221,20 @@ function checkExpr(
   return resolved;
 }
 
-function checkCall(ref prog: Program, ref tm: TypedModule, ref ast: AST, expr: ASTNode): TypeId {
+function checkCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
   // Every argument is checked with no expectation; printf is variadic and user
   // functions do not have their params matched yet.
   if (expr.childA != 0) {
     const args = nodeAt(ref ast, expr.childA);
     let a: usize = 0;
     while (a < args.childCount) {
-      checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID);
+      checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID, ref scope);
       a += 1;
     }
   }
@@ -198,4 +268,52 @@ function checkCall(ref prog: Program, ref tm: TypedModule, ref ast: AST, expr: A
 // to declare - see the same carve-out in src/jsyooptypecheck/typecheck.js.
 function isPrintfName(name: string): bool {
   return str.stringEq(name, "printf");
+}
+
+// `let x: T = expr;` / `const x = expr;`
+//
+// The annotation, when present, is what an untyped literal initializer pins to.
+// Without one the initializer's own type is taken, which is how `const n = 42;`
+// lands on int32.
+function checkVarDecl(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  ref scope: LocalScope
+): void {
+  let declared: TypeId = TYPE_ERROR_ID;
+  if (stmt.childA != 0) {
+    declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, stmt.childA);
+  }
+
+  if (stmt.childB == 0) {
+    // `let x: T;` with no initializer. Legal only with an annotation - there is
+    // nothing to infer from otherwise.
+    if (declared == TYPE_ERROR_ID) {
+      reportError(ref prog, `"${stmt.name}" needs either a type annotation or an initializer`, stmt.sourceLoc);
+    }
+    bindLocal(ref prog, ref scope, stmt, declared);
+    vec.vecSet(ref tm.resolvedTypes, stmtId, declared);
+    return;
+  }
+
+  const initType = checkExpr(ref prog, ref tm, ref ast, stmt.childB, declared, ref scope);
+  let finalType = initType;
+  if (declared != TYPE_ERROR_ID) {
+    finalType = declared;
+    if (initType != TYPE_ERROR_ID && initType != declared) {
+      reportError(ref prog, `initializer does not match the declared type of "${stmt.name}"`, stmt.sourceLoc);
+    }
+  }
+
+  bindLocal(ref prog, ref scope, stmt, finalType);
+  vec.vecSet(ref tm.resolvedTypes, stmtId, finalType);
+}
+
+function bindLocal(ref prog: Program, ref scope: LocalScope, stmt: ASTNode, typeId: TypeId): void {
+  if (!scopeDeclare(ref scope, stmt.name, typeId)) {
+    reportError(ref prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+  }
 }

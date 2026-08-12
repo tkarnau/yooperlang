@@ -153,6 +153,67 @@ malloc, is not reclaimed when the arena dies, and leaks unless you `strFree` it.
 `Text` does route through the context. If you are working inside an arena, use
 `Text`.
 
+**A `string` you BUILD leaks. Build with `Text` instead.** This is the single
+easiest way to write a leak in this language, because nothing warns you:
+
+- Every template literal (`` `${a}: ${b}` ``) is a fresh malloc.
+- So is every `str.stringConcat` / `stringConcatAll` / `padStart` / `sliceFrom`,
+  and every `format.intToString` / `uintToString`.
+- `disposable` on a `Vec<string>` frees the VECTOR, never the strings in it.
+- `--track-heap` cannot see any of it - it only counts `heapAlloc`, and a string
+  is a direct `malloc` inside `stringFromBytesUnchecked`. Use `leaks --atExit --
+  ./prog` on macOS to see the truth.
+
+The rule that follows: **anything that accumulates text in a loop uses a
+`Text`**, not a `Vec<string>` plus a join, and not repeated concatenation. Use
+`text.push`, `text.pushByte`, `text.pushUint` / `text.pushInt` (which format
+digits straight into the buffer, so a number costs no allocation at all), and
+`text.view` to borrow the result back out.
+
+```yoop
+// leaks one string per line, plus one per interpolated number
+disposable lines: Vec<string> = vec.vecNew(64);
+vec.vecPush(ref lines, `  ret i32 ${value}\n`);
+return str.stringConcatAll(vec.vecAsArray(ref lines));
+
+// leaks nothing, and is reclaimed by an enclosing arena
+disposable out: Text = text.make(1024);
+text.push(ref out, "  ret i32 ");
+text.pushUint(ref out, value);
+text.pushByte(ref out, '\n');
+return text.view(ref out);   // a borrow; the Text owns the bytes
+```
+
+**Arguments are eager, so an assert or log message ALLOCATES even when nothing
+is wrong.** This is the sneakiest version of the rule, because the line looks
+free:
+
+```yoop
+// formats and mallocs on EVERY call, passing or not
+debug.assert(pos <= src.len, `pos ${pos} is outside src length ${src.len}`);
+
+// builds the message only when it is actually needed
+if (pos > src.len) {
+  debug.assert(false, `pos ${pos} is outside src length ${src.len}`);
+}
+```
+
+One such line in the bootstrap's `posToSourceLocation`, which runs once per AST
+node, was 814 of the 1855 leaks in a single compile. The same applies to
+`log.info(...)` on a hot path.
+
+Measured, so it is not theoretical: the bootstrap compiler built its IR emitter
+the first way and leaked roughly 1KB per line of input - 3266 leaks and 244KB to
+compile a 203-line program. Moving codegen and the token dump to `Text`, plus
+guarding that one assert, took it to 632 leaks and 131KB with no behaviour
+change. Nothing in `std/`, `examples/` or `bootstrap/` frees a string today.
+
+A single short-lived string (one diagnostic message, one name) is not worth the
+ceremony - a process that exits reclaims it. The rule is about LOOPS and
+accumulation. `plans/strings-ownership-and-ergonomics.md` S4 would make bare
+`string` respect the allocator context and retire most of this; until then,
+`Text` is the answer and is the right choice regardless.
+
 `string == string` does not compile (it is a typecheck error). Use
 `text.equals(a, b)` or `str.stringEq(a, b)`. The only string comparison the
 language does natively is between `enum<string>` cases, which lowers to a
@@ -239,6 +300,31 @@ before writing a kind.
 
 Avoiding a double free is the `dispose` implementer's job: make `dispose`
 idempotent (free, then null the field; guard on null).
+
+### 4.1a The `unhandled-disposable` warning, and why it is opt-in
+
+`--warn-disposable` turns on a warning for a binding that carries a cleanup
+obligation nobody handles: no kind keyword, no manual dispose, not returned, not
+passed on by value. It is **off by default in a build** and **on in the LSP**,
+which is where this doc's companion plan says an advisory belongs.
+
+It is worth running when you suspect a leak - it found one in the bootstrap
+driver (`let prog = typecheckProgram(...)`, which owns the type and symbol
+arenas) that had been invisible. Two things it cannot yet tell apart from a real
+leak, which is why it is not on by default:
+
+- **An arena scope.** Inside `ephemeral mem.allocatorScope(ar) { ... }` NOT
+  disposing is the whole point - the arena reclaims it. The compiler has no way
+  to know it is in an arena: `yoop_cur_alloc` is thread-local runtime state, and
+  it is already unsound across an `await` (a task can resume on another worker),
+  so a static "you are in an arena" claim would be a lie in the async path.
+- **A copy read out of a container.** `let x = vec.vecGet(ref v, i)` copies a
+  value the Vec still owns; disposing it would double-free. Distinguishing this
+  from a real leak needs move analysis, which the advisory ownership model
+  deliberately does not have.
+
+`ref x` is a borrow and never counts as handling the obligation; passing `x` by
+value does, because the callee may have taken it.
 
 ### 4.1b Never RETURN a `disposable` binding
 

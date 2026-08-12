@@ -1,0 +1,9 @@
+// Locals: `let` and `const`, with and without a type annotation, read back in
+// arithmetic and passed to printf.
+function main(): int {
+  const greeting = "locals work";
+  let count: int = 3;
+  const doubled = count * 2;
+  printf("%s: %d\n", greeting, doubled);
+  return 0;
+}

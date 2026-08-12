@@ -10,6 +10,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as fs from "std/fs.yoop";
 import { Result } from "std/core/types.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 import { dumpTokens } from "../src/lex";
 
 function main(): int {
@@ -32,9 +33,10 @@ function main(): int {
       return 1;
     }
     case Result.Ok { value: dump }: {
+      disposable out: Text = dump;
       // Straight to stdout with no logger prefix - the harness diffs this
       // byte for byte.
-      printf("%s", dump);
+      printf("%s", text.view(ref out));
       return 0;
     }
   }

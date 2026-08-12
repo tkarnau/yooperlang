@@ -30,6 +30,13 @@ below, and you usually need exactly one of them.
   [docs/compiler_internals.md](docs/compiler_internals.md). Subsystem map, pass
   ordering, codegen and runtime invariants, packaging, the `--test` driver flow.
 - **Language reference**: [SPEC.md](SPEC.md). Grammar and semantics.
+- **Working on the bootstrap compiler** (`bootstrap/`):
+  [bootstrap/README.md](bootstrap/README.md). Module map, the language subset it
+  compiles today, and how to run it. **Every bootstrap change ships tests** - see
+  the rule below. It also carries **codegen-specific readability rules** (small
+  single-purpose files; walk/emit/append kept in separate layers; every
+  IR-emitting function named for its instruction and carrying a sample of its
+  output) - read those before touching `bootstrap/src/codegen/`.
 - **What is being worked on now**: [plans/README.md](plans/README.md).
 
 Std API index: [std/INDEX.md](std/INDEX.md) (generated; regenerate with
@@ -44,6 +51,14 @@ characters that are awkward to type on an American keyboard** (no arrows, no
 curly quotes), **no fancy markdown tables**.
 
 **Code style**: 2-space indentation in all new code.
+
+**Building a string? Use `Text`, not template literals or `stringConcat`.**
+Every built `string` is a raw malloc that ignores the allocator context, that
+nothing frees, and that `--track-heap` cannot even see. `disposable` on a
+`Vec<string>` frees the vector, not the strings. Anything accumulating text in a
+loop takes a `Text` (`text.push`, `text.pushUint`, `text.view`). Full version,
+with the measurements, in
+[docs/writing_yoop.md](docs/writing_yoop.md) section 3.1.
 
 **Naming** (full version, including the carve-outs, in
 [docs/writing_yoop.md](docs/writing_yoop.md)):
@@ -60,6 +75,28 @@ curly quotes), **no fancy markdown tables**.
 - The JS reference impl uses ordinary JS conventions; only the file/directory
   rule applies to it.
 
+**The bootstrap carries its own regression tests, and every change adds to
+them.** The JS compiler is going to be retired, and when it is, the bootstrap's
+tests are the only thing left standing between a change and a silent regression.
+So they must never be *derived from* the JS compiler - it is only the thing that
+currently RUNS them. Three levels, and a change picks whichever fits:
+
+- **Yoop unit tests** - `*.test.yoop` beside the module, run with
+  `node src/yoopiler.js --test bootstrap/src/<module>`. For anything checkable
+  without producing a binary (token values, pass A bindings, diagnostics).
+- **Slice fixtures** - a program in [bootstrap/tests/slice/](bootstrap/tests/slice/)
+  plus a `.expected` file, run by `npm run test:slice`. For anything that has to
+  reach an executable. The `.expected` is the source of truth and is asserted
+  against the BOOTSTRAP; the JS compiler is checked against the same file as a
+  parity bonus, so retiring it deletes an assertion rather than the test.
+- **Parity corpus** - [bootstrap/tests/parity/](bootstrap/tests/parity/), run by
+  `npm run test:parity`. Layer-boundary dumps diffed against the JS reference.
+  This one DOES retire with the JS side, by design.
+
+Yes, it is odd to lean on the compiler under test. That is why the levels are
+split: a slice fixture's `.expected` is written by hand from what the program
+should do, never captured from whatever the compiler currently emits.
+
 **[examples/playground/](examples/playground/) is not a test surface** and does
 not have to be kept compiling. Nothing under it is covered by e2e (only
 [examples/pass/](examples/pass/) and [examples/testing/](examples/testing/) are).
@@ -71,7 +108,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - all tests (unit + e2e). Currently 1085 tests, ~35s.
+- `npm test` - all tests (unit + e2e). Currently 1097 tests, ~40s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
 - Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
@@ -80,6 +117,13 @@ check on a change, and say so when you do.
   pulls in everything else via its imports.
 - `yoopiler --test <dir>` runs the Yoop-level test harness (filters ride as extra
   positionals).
+- `--warn-disposable` opts a BUILD into the `unhandled-disposable` warning
+  (silent otherwise; the LSP shows it either way). It finds real leaks but has
+  two known false positives - see
+  [docs/writing_yoop.md](docs/writing_yoop.md) section 4.
+- Bootstrap: `npm run test:slice` (end-to-end executables),
+  `npm run test:parity` (layer dumps vs the JS reference), and
+  `node src/yoopiler.js --test bootstrap/src/<module>` per module.
 - `yoopiler --lsp` runs the language server over stdio instead of compiling. The
   import of [src/lsp/server.js](src/lsp/server.js) is **dynamic on purpose** -
   that module attaches `process.stdin` handlers at module scope, so a static

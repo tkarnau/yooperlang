@@ -1,0 +1,29 @@
+module typecheck;
+
+// Names visible inside one function body.
+//
+// Flat for now: one map per function, no block nesting, because the parser has
+// no construct that opens an inner scope yet. When `if` and `while` land this
+// grows a parent pointer or a shadow stack, and every caller already threads it.
+
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+
+export type LocalScope propagates<disposable> {
+  names: Map<string, TypeId>,
+}
+
+export function scopeNew(): LocalScope propagates<disposable> {
+  return { names: map.mapNew(0, map.stringKeyOps()) };
+}
+
+// False when the name was already bound - the caller turns that into the
+// redeclaration diagnostic, since only it has the source location.
+export function scopeDeclare(ref s: LocalScope, name: string, typeId: TypeId): bool {
+  return !map.mapInsert(ref s.names, name, typeId);
+}
+
+export function scopeLookup(ref s: LocalScope, name: string): Option<TypeId> {
+  return map.mapGet(ref s.names, name);
+}

@@ -1,0 +1,127 @@
+module codegen;
+
+// Expressions: AST node -> an Operand the caller can hand to an instruction.
+//
+// Every function here answers "what value does this expression produce", emits
+// whatever instructions are needed to get there, and writes the result into
+// `out`. The IR text itself is instr.yoop's job - nothing in this file appends
+// characters.
+//
+// Return convention: "" on success, otherwise an internal-error message.
+// Reaching one means typecheck let something through, not that the user did
+// something wrong.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+import { TokenTags, tagName } from "../lex";
+
+export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
+  const expr = nodeAt(cx.ast, exprId);
+  switch (expr.kind) {
+    case ASTNodeKind.INT_LITERAL: {
+      // An immediate: no instruction, the value IS the operand.
+      out = Operand.Imm { value: expr.intVal };
+      return "";
+    }
+    case ASTNodeKind.STRING_LITERAL: {
+      // A module-level constant, referenced by name.
+      out = Operand.StrRef {
+        id: internStringConstant(cx.e, vec.vecGet(ref cx.ast.strings, expr.strId))
+      };
+      return "";
+    }
+    case ASTNodeKind.IDENT: {
+      return emitLocalRead(ref cx, expr, ref out);
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return emitBinaryExpr(ref cx, expr, exprId, ref out);
+    }
+    case ASTNodeKind.CALL_EXPRESSION: {
+      return emitCallExpr(ref cx, expr, exprId, ref out);
+    }
+    default: {
+      return internalError("codegen cannot emit expression", kindName(expr.kind));
+    }
+  }
+}
+
+// Reading a local or parameter means loading from its stack slot.
+function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  switch (lookupLocal(cx.locals, expr.name)) {
+    case Option.None: {
+      return internalError("no stack slot for", expr.name);
+    }
+    case Option.Some { value: slotInfo }: {
+      const dest = freshTemp(cx.e);
+      emitLoad(ref cx, dest, slotInfo.ty, expr.name);
+      out = Operand.Temp { id: dest };
+      return "";
+    }
+  }
+}
+
+// Both sides first, then one arithmetic instruction over the results.
+function emitBinaryExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let lhs: Operand = Operand.None;
+  const lerr = emitExpr(ref cx, expr.childA, ref lhs);
+  if (lerr.len > 0) { return lerr; }
+
+  let rhs: Operand = Operand.None;
+  const rerr = emitExpr(ref cx, expr.childB, ref rhs);
+  if (rerr.len > 0) { return rerr; }
+
+  const op = llvmIntOp(expr.operator);
+  if (op.len == 0) {
+    return internalError("codegen cannot emit operator", tagName(expr.operator));
+  }
+
+  const dest = freshTemp(cx.e);
+  emitBinOp(ref cx, dest, op, typeOf(ref cx, exprId), lhs, rhs);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// Arguments are lowered FIRST - each may emit its own instructions, and those
+// have to land before the call. Their operands are held as values, so nothing
+// is formatted until emitCall runs.
+function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  disposable args: Vec<CallArg> = vec.vecNew(4);
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const argId = childAt(cx.ast, list, i);
+      let value: Operand = Operand.None;
+      const err = emitExpr(ref cx, argId, ref value);
+      if (err.len > 0) { return err; }
+      vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+      i += 1;
+    }
+  }
+
+  // printf is the one variadic callee we know about; emitCall owns what a
+  // variadic call site has to spell out.
+  const isPrintf = text.equals(expr.name, "printf");
+  let retTy = typeOf(ref cx, exprId);
+  if (isPrintf) {
+    cx.e.usesPrintf = true;
+    retTy = printfReturnType();
+  }
+
+  const isVoid = text.equals(retTy, "void");
+  let dest: usize = 0;
+  if (!isVoid) {
+    dest = freshTemp(cx.e);
+  }
+  emitCall(ref cx, dest, retTy, expr.name, isPrintf, ref args);
+
+  if (isVoid) {
+    out = Operand.None;
+  } else {
+    out = Operand.Temp { id: dest };
+  }
+  return "";
+}

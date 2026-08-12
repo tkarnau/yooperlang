@@ -106,6 +106,11 @@ export function expandDerives(modules, errors) {
 function expandOne(typeDecl, mod, traitsModuleId, isVariant) {
   const { method, labels } = buildToStringMethod(typeDecl, isVariant);
   annotateDerived(method, typeDecl.sourceLoc, typeDecl.name, labels);
+  // Generated code is not the user's to annotate, so advisory diagnostics have
+  // to skip it. Without this the unhandled-disposable warning fires on the
+  // `_deriveVecN` locals the array walker emits, pointing at a `@derive`d type
+  // decl with no actionable fix.
+  method.isDeriveGenerated = true;
 
   typeDecl.methods = typeDecl.methods ?? [];
   typeDecl.methods.push(method);

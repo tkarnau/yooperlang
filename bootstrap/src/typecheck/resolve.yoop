@@ -108,3 +108,55 @@ function primKindOfName(name: string): Option<PrimKind> {
 export function isVoidName(name: string): bool {
   return str.stringEq(name, "void");
 }
+
+// True when `id` names an integer primitive. This is what an untyped int
+// literal is allowed to pin to - notably NOT float, which the JS reference also
+// rejects ("cannot assign untyped int to float32").
+export function isIntPrimType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.INT8, PrimKind.INT16, PrimKind.INT32, PrimKind.INT64, PrimKind.ISIZE,
+             PrimKind.UINT8, PrimKind.UINT16, PrimKind.UINT32, PrimKind.UINT64, PrimKind.USIZE: {
+          return true;
+        }
+        default: { return false; }
+      }
+    }
+    default: { return false; }
+  }
+}
+
+// How a type reads in a diagnostic.
+export function formatType(ref prog: Program, id: TypeId): string {
+  switch (typeAt(ref prog, id)) {
+    case Type.Void: { return "void"; }
+    case Type.Prim { prim: p }: { return primName(p); }
+    case Type.Ref { inner: i }: { return `ref ${formatType(ref prog, i)}`; }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.ErrorT: { return "<error>"; }
+    default: { return "<type>"; }
+  }
+}
+
+function primName(p: PrimKind): string {
+  switch (p) {
+    case PrimKind.INT8: { return "int8"; }
+    case PrimKind.INT16: { return "int16"; }
+    case PrimKind.INT32: { return "int32"; }
+    case PrimKind.INT64: { return "int64"; }
+    case PrimKind.ISIZE: { return "isize"; }
+    case PrimKind.UINT8: { return "uint8"; }
+    case PrimKind.UINT16: { return "uint16"; }
+    case PrimKind.UINT32: { return "uint32"; }
+    case PrimKind.UINT64: { return "uint64"; }
+    case PrimKind.USIZE: { return "usize"; }
+    case PrimKind.FLOAT32: { return "float32"; }
+    case PrimKind.FLOAT64: { return "float64"; }
+    case PrimKind.BOOL: { return "bool"; }
+    case PrimKind.STRING: { return "string"; }
+    default: { return "<prim>"; }
+  }
+}

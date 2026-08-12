@@ -16,6 +16,7 @@ import * as env from "std/env.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 
 import { loadModuleGraph, LoadGraphResult } from "./source_graph";
 import { typecheckProgram, Program } from "./typecheck";
@@ -40,7 +41,9 @@ function main(): int {
       return 1;
     }
     case LoadGraphResult.Ok { value: moduleGraph }: {
-      let prog = typecheckProgram(ref moduleGraph);
+      // `disposable` here because the unhandled-disposable warning caught it:
+      // Program owns the type/symbol arenas and every TypedModule's maps.
+      disposable prog: Program = typecheckProgram(ref moduleGraph);
       if (reportDiagnostics(ref prog) > 0) {
         return 1;
       }
@@ -53,7 +56,10 @@ function main(): int {
         }
         case Result.Ok { value: ir }: {
           log.info("llvm IR: ok");
-          const linkErr = linkExecutable(ir, `${outPath}.ll`, outPath);
+          disposable irText: Text = ir;
+          disposable irPath: Text = text.fromString(outPath);
+          text.push(ref irPath, ".ll");
+          const linkErr = linkExecutable(ref irText, text.view(ref irPath), outPath);
           if (linkErr.len > 0) {
             log.error(linkErr);
             return 1;

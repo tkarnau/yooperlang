@@ -285,7 +285,13 @@ export function digitValue(ch: uint8): int {
 }
 
 export function posToSourceLocation(ref src: uint8[], pos: usize, length: usize): SourceLocation {
-  debug.assert(pos <= src.len, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
+  // The message is built INSIDE the failure branch on purpose. Arguments are
+  // eager, so `debug.assert(ok, `... ${pos} ...`)` formats and allocates the
+  // message on every call, passing or not - and this runs once per AST node.
+  // That one line was 814 of 1855 leaks compiling a 203-line file.
+  if (pos > src.len) {
+    debug.assert(false, `posToSourceLocation failed, pos ${pos} cannot be outside src length ${src.len}`);
+  }
 
   let i: usize = 0;
   let line: usize = 0;

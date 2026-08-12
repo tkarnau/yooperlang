@@ -1,0 +1,38 @@
+module codegen;
+
+// Where a local lives in the emitted function.
+//
+// Every local gets an `alloca` and is read back with a `load`. That is the
+// unoptimized-but-always-correct lowering: no SSA construction, no phi nodes,
+// and it stays correct once branches exist. LLVM's mem2reg pass promotes these
+// to registers anyway, so the cost is IR size, not runtime.
+
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+
+export type LocalSlot {
+  ty: string,    // the LLVM type stored there
+}
+
+// A local's alloca is always named `%<yoopName>.addr`, so there is nothing to
+// store: emitters write the two pieces directly and skip a per-use malloc.
+
+export type FnLocals propagates<disposable> {
+  slots: Map<string, LocalSlot>,
+}
+
+export function localsNew(): FnLocals propagates<disposable> {
+  return { slots: map.mapNew(0, map.stringKeyOps()) };
+}
+
+// Emits the alloca and records the slot type. `.addr` keeps the name out of
+// the `%tN` temp namespace.
+export function declareLocal(ref cx: Cx, name: string, ty: string): void {
+  emitAlloca(ref cx, name, ty);
+  map.mapInsert(ref cx.locals.slots, name, { ty: ty });
+}
+
+export function lookupLocal(ref l: FnLocals, name: string): Option<LocalSlot> {
+  return map.mapGet(ref l.slots, name);
+}

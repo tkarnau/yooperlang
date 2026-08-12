@@ -28,15 +28,24 @@ suite function passARegistersATopLevelFunction(): void {
   }
 }
 
-// The subset is small on purpose. What matters is that stepping outside it is
-// REFUSED rather than silently mis-compiled - reading a parameter needs codegen
-// support that does not exist, so pass D has to stop it here.
-suite function outOfSubsetConstructsAreRefused(): void {
+suite function parametersBindAsLocals(): void {
   let prog = checkSource("function add(a: int, b: int): int { return a + b; }");
 
-  let test theory: Case = t.asserts("reading a parameter is refused, not silently accepted") {
-    theory.isSuccessful = prog.diagnostics.len > 0;
-    theory.detail = `reading a parameter produced no diagnostic; codegen would emit a zero-arg function and lose the arguments`;
+  let test theory: Case = t.asserts("a parameter is readable in the body") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `reading a parameter reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  let dup = checkSource("function bad(a: int, a: int): int { return a; }");
+  let test theory: Case = t.asserts("two parameters with the same name is a diagnostic") {
+    theory.isSuccessful = dup.diagnostics.len > 0;
+    theory.detail = "duplicate parameter name produced no diagnostic";
+  }
+
+  let shadow = checkSource("function f(a: int): int { const a = 1; return a; }");
+  let test theory: Case = t.asserts("a local may not shadow a parameter") {
+    theory.isSuccessful = shadow.diagnostics.len > 0;
+    theory.detail = "a local redeclaring a parameter produced no diagnostic";
   }
 }
 
@@ -97,4 +106,49 @@ function hasName(ref prog: Program, name: string): bool {
   }
   let tm = vec.vecGet(ref prog.modules, 0);
   return map.mapContainsKey(ref tm.names, name);
+}
+
+// Locals: the parts that never reach an executable, so a slice fixture cannot
+// cover them.
+suite function localsInferAndBind(): void {
+  let prog = checkSource("function main(): int { const n = 7; return n; }");
+
+  let test theory: Case = t.asserts("a const with no annotation infers from its initializer") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `inferring const n = 7 reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+suite function localsRejectBadPrograms(): void {
+  let dup = checkSource("function main(): int { const n = 1; const n = 2; return n; }");
+  let test theory: Case = t.asserts("declaring the same local twice is a diagnostic") {
+    theory.isSuccessful = dup.diagnostics.len > 0;
+    theory.detail = "redeclaring n produced no diagnostic";
+  }
+
+  let unknown = checkSource("function main(): int { return nope; }");
+  let test theory: Case = t.asserts("reading an undeclared name is a diagnostic") {
+    theory.isSuccessful = unknown.diagnostics.len > 0;
+    theory.detail = "reading undeclared nope produced no diagnostic";
+  }
+
+  let mismatch = checkSource("function main(): int { const s: string = 1; return 0; }");
+  let test theory: Case = t.asserts("an initializer that fights its annotation is a diagnostic") {
+    theory.isSuccessful = mismatch.diagnostics.len > 0;
+    theory.detail = "binding an int literal to a string-annotated local produced no diagnostic";
+  }
+
+  let bare = checkSource("function main(): int { let x; return 0; }");
+  let test theory: Case = t.asserts("a local with neither annotation nor initializer is a diagnostic") {
+    theory.isSuccessful = bare.diagnostics.len > 0;
+    theory.detail = "let x; with nothing to infer from produced no diagnostic";
+  }
+}
+
+// The first diagnostic message, for failure detail. "" when there are none.
+function firstDiagnostic(ref prog: Program): string {
+  if (prog.diagnostics.len == 0) {
+    return "";
+  }
+  return vec.vecGet(ref prog.diagnostics, 0).message;
 }

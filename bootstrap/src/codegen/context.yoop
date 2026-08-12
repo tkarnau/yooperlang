@@ -1,0 +1,112 @@
+module codegen;
+
+// What every codegen function needs, in one value.
+//
+// These five things travel together through the whole walk, so passing them
+// separately meant seven-parameter signatures that buried the one argument that
+// actually varied. `ref` fields make the bundle a view, not a copy - mutations
+// to the emitter and the locals map land on the originals.
+//
+// It also puts the typecheck -> codegen handoff in one place. Codegen reads
+// exactly three things from that boundary and nothing else:
+//   * the AST     (shape: what to emit)
+//   * resolvedTypes via `typeOf` (what type each node ended up)
+//   * the symbol table via `returnTypeOf` (a callee's return type)
+// Everything else on Program/TypedModule is typecheck's business.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Option } from "std/core/types.yoop";
+import { AST, NodeId } from "../ast";
+import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID } from "../typecheck";
+
+export type Cx {
+  e: ref Emitter,
+  prog: ref Program,
+  tm: ref TypedModule,
+  ast: ref AST,
+  locals: ref FnLocals,
+}
+
+// One parameter of the function being emitted.
+export type ParamInfo {
+  name: string,
+  ty: string,
+}
+
+// One argument at a call site, already lowered.
+export type CallArg {
+  ty: string,
+  value: Operand,
+}
+
+// ----- the typecheck boundary ----------------------------------------------
+
+// The LLVM type of whatever pass D resolved for this node. Codegen is entitled
+// to assume every node it visits has one (see the layer contract in
+// plans/bootstrap-pipeline-contracts.md), so there is no error path here.
+export function typeOf(ref cx: Cx, nodeId: NodeId): string {
+  return llvmType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+}
+
+// The declared return type of a top-level function, as LLVM spells it.
+export function returnTypeOf(ref cx: Cx, name: string): string {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return "void"; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: {
+          switch (typeAt(cx.prog, t)) {
+            case Type.Func { params: p, ret: r, variadic: v }: {
+              return llvmType(cx.prog, r);
+            }
+            default: { return "void"; }
+          }
+        }
+        default: { return "void"; }
+      }
+    }
+  }
+}
+
+// ----- raw appenders, used only by instr.yoop -----------------------------
+//
+// Kept short and unexported-in-spirit: everything outside instr.yoop should be
+// calling an emitX function, not assembling text by hand.
+
+export function part(ref cx: Cx, s: string): void {
+  text.push(ref cx.e.body, s);
+}
+
+export function startInstr(ref cx: Cx): void {
+  text.push(ref cx.e.body, "  ");
+}
+
+export function endInstr(ref cx: Cx): void {
+  text.pushByte(ref cx.e.body, 10);
+}
+
+// `%t7`
+export function temp(ref cx: Cx, id: usize): void {
+  text.push(ref cx.e.body, "%t");
+  text.pushUint(ref cx.e.body, uint64(id));
+}
+
+// `%count.addr` - a local's stack slot.
+export function slot(ref cx: Cx, name: string): void {
+  text.pushByte(ref cx.e.body, '%');
+  text.push(ref cx.e.body, name);
+  text.push(ref cx.e.body, ".addr");
+}
+
+export function operand(ref cx: Cx, op: Operand): void {
+  emitOperand(cx.e, op);
+}
+
+// The message for a codegen invariant that did not hold. One allocation on a
+// path that is aborting the compile anyway, which is why a template literal is
+// fine here - it is not in a loop.
+export function internalError(what: string, detail: string): string {
+  return `internal error: ${what} "${detail}"`;
+}

@@ -4,59 +4,51 @@ module codegen;
 //
 // LLVM's `c"..."` form takes raw bytes with `\XX` hex escapes, and the constant
 // has to be NUL-terminated for anything that hands it to C (printf, here).
+//
+// Everything here appends into the globals Text byte by byte. The first version
+// built a string per BYTE and joined them, which is how a 34-character literal
+// turned into 35 mallocs.
 
-import { Vec }, * as vec from "std/core/vec.yoop";
-import { disposable, owned } from "std/core/kinds.yoop";
-import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-import { Result } from "std/core/types.yoop";
 
 // Emits `@.str.N = private unnamed_addr constant [L x i8] c"..."` and returns
-// the symbol so a caller can reference it.
-export function internStringConstant(ref e: Emitter, text: string): string {
-  const name = `@.str.${e.nextStr}`;
+// N, so a caller can reference it as `Operand.StrRef { id: N }`.
+export function internStringConstant(ref e: Emitter, s: string): usize {
+  const id = e.nextStr;
   e.nextStr += 1;
 
-  const bytes = intr.stringAsBytes(text);
-  emitGlobal(
-    ref e,
-    `${name} = private unnamed_addr constant [${bytes.len + 1} x i8] c"${llvmEscape(bytes)}\\00", align 1`
-  );
-  return name;
+  const raw = intr.stringAsBytes(s);
+  text.push(ref e.globals, "@.str.");
+  text.pushUint(ref e.globals, uint64(id));
+  text.push(ref e.globals, " = private unnamed_addr constant [");
+  text.pushUint(ref e.globals, uint64(raw.len + 1));
+  text.push(ref e.globals, " x i8] c\"");
+  pushLlvmEscaped(ref e.globals, raw);
+  text.push(ref e.globals, "\\00\", align 1\n");
+  return id;
 }
 
 // LLVM accepts printable ASCII literally; everything else, plus `"` and `\`,
 // must be a two-digit hex escape.
-function llvmEscape(bytes: uint8[]): owned string {
-  disposable pieces: Vec<string> = vec.vecNew(bytes.len);
+function pushLlvmEscaped(t: ref Text, raw: uint8[]): void {
   let i: usize = 0;
-  while (i < bytes.len) {
-    const b = bytes[i];
+  while (i < raw.len) {
+    const b = raw[i];
     if (b >= 32 && b < 127 && b != '"' && b != '\\') {
-      vec.vecPush(ref pieces, oneChar(b));
+      text.pushByte(ref t, b);
     } else {
-      vec.vecPush(ref pieces, `\\${hexByte(b)}`);
+      text.pushByte(ref t, '\\');
+      text.pushByte(ref t, hexDigit(b / 16));
+      text.pushByte(ref t, hexDigit(b % 16));
     }
     i += 1;
   }
-  return str.stringConcatAll(vec.vecAsArray(ref pieces));
 }
 
-function oneChar(b: uint8): string {
-  let one: uint8[] = [b];
-  switch (str.stringFromBytes(one)) {
-    case Result.Err { error: e }: { return "?"; }
-    case Result.Ok { value: s }: { return s; }
+function hexDigit(nibble: uint8): uint8 {
+  if (nibble < 10) {
+    return 48 + nibble;        // '0'
   }
-}
-
-const HEX_DIGITS: string = "0123456789ABCDEF";
-
-function hexByte(b: uint8): string {
-  const digits = intr.stringAsBytes(HEX_DIGITS);
-  let out: uint8[] = [digits[usize(b) / 16], digits[usize(b) % 16]];
-  switch (str.stringFromBytes(out)) {
-    case Result.Err { error: e }: { return "00"; }
-    case Result.Ok { value: s }: { return s; }
-  }
+  return 55 + nibble;          // 'A' - 10
 }

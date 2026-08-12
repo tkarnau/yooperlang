@@ -151,6 +151,48 @@ export function pushByte(t: ref Text, b: uint8): void {
     t.data[t.len] = 0;
 }
 
+// Append a base-10 unsigned integer.
+//
+// Formats straight into the buffer rather than going through
+// `format.uintToString`, whose result is a malloc'd `string` that ignores the
+// allocator context and that nothing frees. Anything appending numbers in a
+// loop (an IR emitter, a token dump) wants this instead.
+export function pushUint(t: ref Text, v: uint64): void {
+    if (v == 0) {
+        pushByte(ref t, '0');
+        return;
+    }
+    // Two passes so there is no scratch buffer at all: count the digits,
+    // reserve exactly that, then fill the run backwards in place.
+    let n: usize = 0;
+    let probe: uint64 = v;
+    while (probe > 0) {
+        n = n + 1;
+        probe = probe / 10;
+    }
+    reserve(ref t, t.len + n);
+    let rest: uint64 = v;
+    let i: usize = n;
+    while (i > 0) {
+        i = i - 1;
+        t.data[t.len + i] = uint8(48 + (rest % 10));
+        rest = rest / 10;
+    }
+    t.len = t.len + n;
+    t.data[t.len] = 0;
+}
+
+// Append a base-10 signed integer.
+export function pushInt(t: ref Text, v: int64): void {
+    if (v < 0) {
+        pushByte(ref t, '-');
+        // Negate in uint64 so int64 min does not overflow on the way.
+        pushUint(ref t, uint64(0) - uint64(v));
+        return;
+    }
+    pushUint(ref t, uint64(v));
+}
+
 // Append one Unicode codepoint, UTF-8 encoded. Surrogates and out-of-range
 // scalars are replaced with U+FFFD rather than producing invalid UTF-8.
 // UTF-8 encoding, per byte-count case:
