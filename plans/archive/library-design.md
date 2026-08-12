@@ -1,7 +1,7 @@
 # Library design - patterns and the networking story
 
 > Design contract for "batteries-included" Yooperlang libraries. Parallel
-> to [runtime-design.md](runtime-design.md), but for the *library* layer
+> to [runtime-design.md](../runtime-design.md), but for the *library* layer
 > that sits on top of the runtime: foundational traits and kinds, then
 > the network + HTTP modules built on them.
 
@@ -93,7 +93,7 @@ it easy for users to grep their dependencies - "do I depend on any
 ### 2.2 Fallible returns use `Result<T, E>` + `?`
 
 Every library function that can fail returns a `Result<T, E>` enum (from
-[std/core/types.yoop](../std/core/types.yoop)). The caller propagates with
+[std/core/types.yoop](../../std/core/types.yoop)). The caller propagates with
 `?` or branches with `switch`.
 
 ```yoop
@@ -278,7 +278,7 @@ writer needs it; for an unbuffered TcpStream it's a no-op.
 
 ```yoop
 trait Display {
-    function to_string(ref self): string;
+    function toString(ref self): string;
 }
 ```
 
@@ -419,7 +419,7 @@ export type SocketResult implements Disposable propagates<disposable> {
     error:  string,
     function dispose(ref self): void { Disposable.dispose(ref self.socket); }
 }
-export function open_tcp_socket(): SocketResult propagates<disposable> { ... }
+export function openTcpSocket(): SocketResult propagates<disposable> { ... }
 ```
 
 A raw fd in a `Disposable` envelope. Users don't usually touch this
@@ -453,8 +453,8 @@ every intermediate fd is closed and `error` describes which call failed.
 ```yoop
 export type AcceptResult implements Disposable propagates<disposable> {
     stream:    TcpStream,
-    peer_host: uint32,
-    peer_port: uint16,
+    peerHost: uint32,
+    peerPort: uint16,
     error:     string,
     function dispose(ref self): void { Disposable.dispose(ref self.stream); }
 }
@@ -646,7 +646,7 @@ function main(): int32 {
 
 ### 7.4 Wire parsing
 
-[http/parser.yoop](http/parser.yoop) (internal) is the HTTP/1.1 parser.
+[http/parser.yoop](../../std/http/parser.yoop) (internal) is the HTTP/1.1 parser.
 A first-cut implementation:
 
 - Read until `\r\n` for the request line.
@@ -800,9 +800,9 @@ work around or wait on:
 
 5. **String formatting beyond printf templates.** A `Display` trait
    exists at the syntax level but templates don't yet consult it. The
-   library can implement `to_string()` methods today; users call them
+   library can implement `toString()` methods today; users call them
    manually and embed the result. Lifting Display into templates is a
-   small typechecker change (look up `Display.to_string` when an arg
+   small typechecker change (look up `Display.toString` when an arg
    isn't an int/float/bool/string).
 
 6. **`std/` import root.** Today, importing the library means
@@ -862,7 +862,7 @@ A realistic order, each its own phase doc:
 - **Library Phase D**: `std/http/server` (Server, Handler). Demo:
   Hello-World server that handles N requests in sequence.
 - **Library Phase E**: routing, a client, and URL parsing landed as
-  Phase 10.I ([plans/completed/phase-10-i-networking-polish.md](completed/phase-10-i-networking-polish.md)).
+  Phase 10.I ([plans/completed/phase-10-i-networking-polish.md](../completed/phase-10-i-networking-polish.md)).
   `std/http/router.yoop` carries the `Router` + `Dispatcher` vtable;
   `std/http/client.yoop` ships `client_send` + `http_get`;
   `std/net/uri.yoop` does the URL parsing. Streaming bodies (Reader-

@@ -323,7 +323,7 @@ stdlib gaps are closed, and one papercut is recorded but not fixed.
    linker merge two same-valued buffers, so two independent mutable arrays
    would have aliased.)
 2. A module-level binding initialized by a generic intrinsic call crashed
-   the compiler. `let xs: T[] = intr.heap_alloc(n);` at module scope reached
+   the compiler. `let xs: T[] = intr.heapAlloc(n);` at module scope reached
    `lowerFunction` with a null AST and took down the whole compile with a
    `TypeError`. A compiler intrinsic has no yoop body to fold, so
    `genericInstanceResolver` now declines and the decl falls back to the

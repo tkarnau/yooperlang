@@ -46,8 +46,8 @@ import * as intr from "../core/intrinsics.yoop";
 // Both sides are walked as raw bytes, segment by segment, with no allocation
 // per attempt - a router with twenty routes does twenty of these per request.
 export function matchPath(pattern: string, path: string, ref out: Params): bool {
-    let p: uint8[] = intr.string_as_bytes(pattern);
-    let s: uint8[] = intr.string_as_bytes(path);
+    let p: uint8[] = intr.stringAsBytes(pattern);
+    let s: uint8[] = intr.stringAsBytes(path);
     let pi: usize = 0;
     let si: usize = 0;
 
@@ -64,28 +64,28 @@ export function matchPath(pattern: string, path: string, ref out: Params): bool 
 
         let pEnd: usize = pi;
         while (pEnd < p.len && p[pEnd] != '/') { pEnd = pEnd + 1; }
-        let pseg: uint8[] = bytes.bytes_slice(p, pi, pEnd);
+        let pseg: uint8[] = bytes.bytesSlice(p, pi, pEnd);
 
         // `*` swallows the rest, including nothing at all.
         if (pseg[0] == '*') {
-            paramsAdd(ref out, "rest", intr.string_from_bytes_unchecked(
-                bytes.bytes_slice(s, si, s.len)));
+            paramsAdd(ref out, "rest", intr.stringFromBytesUnchecked(
+                bytes.bytesSlice(s, si, s.len)));
             return true;
         }
 
         if (si >= s.len) { return false; }
         let sEnd: usize = si;
         while (sEnd < s.len && s[sEnd] != '/') { sEnd = sEnd + 1; }
-        let sseg: uint8[] = bytes.bytes_slice(s, si, sEnd);
+        let sseg: uint8[] = bytes.bytesSlice(s, si, sEnd);
 
         if (pseg[0] == ':') {
             // An empty capture would let "/todos/" match "/todos/:id" with an
             // empty id, which is never what the handler wants.
             if (sseg.len == 0) { return false; }
             paramsAdd(ref out,
-                intr.string_from_bytes_unchecked(bytes.bytes_slice(pseg, 1, pseg.len)),
-                intr.string_from_bytes_unchecked(sseg));
-        } else if (!bytes.bytes_eq(pseg, sseg)) {
+                intr.stringFromBytesUnchecked(bytes.bytesSlice(pseg, 1, pseg.len)),
+                intr.stringFromBytesUnchecked(sseg));
+        } else if (!bytes.bytesEq(pseg, sseg)) {
             return false;
         }
 
@@ -112,7 +112,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
     }
 
     async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        let entries: Route[] = vec.vec_as_array(ref self.routes);
+        let entries: Route[] = vec.vecAsArray(ref self.routes);
 
         for (let i = 0; i < entries.len; i += 1) {
             paramsClear(ref req.params);
@@ -161,7 +161,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
 // path matches nothing at all. This is the difference between a 405 and a
 // 404, and it is also the body of the `Allow` header the 405 owes the client.
 function allowedMethods(ref r: Router, ref req: Request): string {
-    let entries: Route[] = vec.vec_as_array(ref r.routes);
+    let entries: Route[] = vec.vecAsArray(ref r.routes);
     let allow: string = "";
     disposable scratch: Params = paramsNew(4);
     for (let i = 0; i < entries.len; i += 1) {
@@ -182,7 +182,7 @@ function allowedMethods(ref r: Router, ref req: Request): string {
 export function routerNew(): Router propagates<disposable> {
     let placeholder: NoRoute = { unused: 0 };
     return {
-        routes:      vec.vec_new(8),
+        routes:      vec.vecNew(8),
         fallback:    Dispatcher.from(ref placeholder),
         hasFallback: false,
     };
@@ -201,7 +201,7 @@ type NoRoute implements Handler {
 
 export function routerAdd(ref r: Router, method: HttpMethod, pattern: string, d: Dispatcher): void {
     let entry: Route = { method: method, pattern: pattern, dispatcher: d };
-    vec.vec_push(ref r.routes, entry);
+    vec.vecPush(ref r.routes, entry);
 }
 
 export function routerGet(ref r: Router, pattern: string, d: Dispatcher): void {

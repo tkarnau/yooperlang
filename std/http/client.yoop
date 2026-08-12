@@ -64,7 +64,7 @@ export function setBody(ref req: ClientRequest, mediaType: string, body: uint8[]
 }
 
 export function setTextBody(ref req: ClientRequest, mediaType: string, body: string): void {
-    setBody(ref req, mediaType, intr.string_as_bytes(body));
+    setBody(ref req, mediaType, intr.stringAsBytes(body));
 }
 
 // ----- response -----------------------------------------------------------
@@ -80,13 +80,13 @@ export type ClientResponse implements Disposable propagates<disposable> {
 }
 
 export function responseBytes(ref r: ClientResponse): uint8[] {
-    return vec.vec_as_array(ref r.body);
+    return vec.vecAsArray(ref r.body);
 }
 
 // The body as text. Not UTF-8 validated, for the same reason the server side
 // is not: the bytes are whatever the peer sent.
 export function responseText(ref r: ClientResponse): string {
-    return intr.string_from_bytes_unchecked(responseBytes(ref r));
+    return intr.stringFromBytesUnchecked(responseBytes(ref r));
 }
 
 export function responseHeader(ref r: ClientResponse, name: string): Option<string> {
@@ -153,7 +153,7 @@ function isClientFramingHeader(name: string): bool {
 }
 
 function strEq(a: string, b: string): bool {
-    return bytes.bytes_eq_ignore_ascii_case(intr.string_as_bytes(a), intr.string_as_bytes(b));
+    return bytes.bytesEqIgnoreAsciiCase(intr.stringAsBytes(a), intr.stringAsBytes(b));
 }
 
 // A header a caller set must not be able to inject a second request into the
@@ -190,14 +190,14 @@ async readResponseHead(
     ref scratch: Bytes,
     ref c: Client,
 ): Result<usize, HttpError> {
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     while (true) {
         let n: usize = await readResponseBytes(ref r, ref window)? "reading the response head";
         if (n == 0) {
             return Result.Err { error: errIo("peer closed before the response head was complete") };
         }
-        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
-        let at: usize = findHeadEnd(vec.vec_as_array(ref buf));
+        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
+        let at: usize = findHeadEnd(vec.vecAsArray(ref buf));
         if (at != buf.len) { return Result.Ok { value: at }; }
         if (buf.len > c.maxHeadBytes) {
             return Result.Err {
@@ -219,7 +219,7 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
     // std/tls to `sendOn` below, and plans/tls.md D4 for why the dependency
     // runs that way: link flags are program-wide, so an OpenSSL import here
     // would make every program that speaks HTTP link OpenSSL.
-    disposable cr: ConnectResult = tcp.tcp_connect(u.host, u.port);
+    disposable cr: ConnectResult = tcp.tcpConnect(u.host, u.port);
     if (cr.error.len > 0) {
         return Result.Err { error: errIo(`${cr.error} (connecting to ${u.host}:${u.port})`) };
     }
@@ -233,7 +233,7 @@ export async send(ref c: Client, ref req: ClientRequest): Result<ClientResponse,
 
 // The URL, parsed, with a request-shaped error on failure.
 export function parseTarget(ref req: ClientRequest): Result<Uri, HttpError> {
-    switch (uri.parse_uri(req.url)) {
+    switch (uri.parseUri(req.url)) {
         case Result.Ok { value: parsed }: { return Result.Ok { value: parsed }; }
         case Result.Err { error: e }: {
             return Result.Err { error: errBadRequest(`${e} (url "${req.url}")`) };
@@ -244,7 +244,7 @@ export function parseTarget(ref req: ClientRequest): Result<Uri, HttpError> {
 // Run one HTTP exchange over a connection the CALLER owns.
 //
 // This is the whole client minus the socket. `send` above is this plus
-// `tcp_connect`; `std/https` is this plus `tlsConnect`. Anything that can
+// `tcpConnect`; `std/https` is this plus `tlsConnect`. Anything that can
 // present a `Reader` and a `Writer` works - a TLS session, a unix socket, a
 // tunnel through a proxy, or a pair of in-memory buffers in a test.
 //
@@ -264,20 +264,20 @@ export async sendOn(
     let _checked: usize = checkRequestHeaders(ref req)?;
 
     // -- write the request --
-    disposable out: Vec<uint8> = vec.vec_new(512 + req.body.len);
+    disposable out: Vec<uint8> = vec.vecNew(512 + req.body.len);
     serializeRequest(ref req, ref u, ref c, ref out);
-    let outView: uint8[] = vec.vec_as_array(ref out);
+    let outView: uint8[] = vec.vecAsArray(ref out);
     switch (await Writer.write(ref w, ref outView)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
 
     // -- read the head --
-    disposable buf: Vec<uint8> = vec.vec_new(c.readChunk);
-    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(c.readChunk), c.readChunk);
+    disposable buf: Vec<uint8> = vec.vecNew(c.readChunk);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(c.readChunk), c.readChunk);
     let _headEnd: usize = await readResponseHead(ref r, ref buf, ref scratch, ref c)?;
 
-    let disposable head: ParsedResponse = parseResponseHead(vec.vec_as_array(ref buf))?;
+    let disposable head: ParsedResponse = parseResponseHead(vec.vecAsArray(ref buf))?;
 
     // -- read the body --
     // Whatever came in with the head is already body; the rest is read either
@@ -285,7 +285,7 @@ export async sendOn(
     let resp: ClientResponse = {
         status:  head.status,
         headers: headersNew(8),
-        body:    vec.vec_new(c.readChunk),
+        body:    vec.vecNew(c.readChunk),
     };
     for e in headersView(ref head.headers) {
         headersAdd(ref resp.headers, e.name, e.value);
@@ -322,12 +322,12 @@ async readRest(
         return await readChunkedRest(ref r, ref buf, ref scratch, ref c, ref head, ref body);
     }
 
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
 
     // Under Content-Length the bytes that came in with the head ARE body.
-    let seen: uint8[] = vec.vec_as_array(ref buf);
+    let seen: uint8[] = vec.vecAsArray(ref buf);
     if (seen.len > head.bodyStart) {
-        vec.vec_extend_from(ref body, intr.array_slice(seen, head.bodyStart, seen.len));
+        vec.vecExtendFrom(ref body, intr.arraySlice(seen, head.bodyStart, seen.len));
     }
 
     let want: usize = 0;
@@ -356,7 +356,7 @@ async readRest(
             }
             break;
         }
-        vec.vec_extend_from(ref body, intr.array_slice(window, 0, n));
+        vec.vecExtendFrom(ref body, intr.arraySlice(window, 0, n));
         if (body.len > c.maxResponseBytes) {
             return Result.Err {
                 error: httpError(payloadTooLarge(),
@@ -388,7 +388,7 @@ async readChunkedRest(
     ref head: ParsedResponse,
     ref body: Vec<uint8>,
 ): Result<usize, HttpError> {
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     let reader: ChunkedReader = chunkedReaderNew(head.bodyStart);
     let rawLimit: usize = c.maxHeadBytes + c.maxResponseBytes * 8;
 
@@ -396,7 +396,7 @@ async readChunkedRest(
         // Re-take the view each pass: the read below can grow and therefore
         // MOVE the Vec's buffer.
         let done: bool = chunkedFeed(
-            vec.vec_as_array(ref buf), ref reader, ref body, c.maxResponseBytes)?;
+            vec.vecAsArray(ref buf), ref reader, ref body, c.maxResponseBytes)?;
         if (done) { return Result.Ok { value: body.len }; }
 
         if (buf.len > rawLimit) {
@@ -412,7 +412,7 @@ async readChunkedRest(
                 error: errIo("peer closed before the chunked body was complete"),
             };
         }
-        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
     }
 }
 

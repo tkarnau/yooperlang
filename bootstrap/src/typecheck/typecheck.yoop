@@ -64,39 +64,39 @@ const TYPE_UNTYPEDINT_ID: TypeId = 2;
 
 
 function initProgram(): Program {
-  let types: Vec<Type>  = vec.vec_new(0);
+  let types: Vec<Type>  = vec.vecNew(0);
 
   // add more types to this array as-needed...
   // insert in order
-  vec.vec_push(ref types, Type.ErrorT);
-  vec.vec_push(ref types, Type.Void);
-  vec.vec_push(ref types, Type.UntypedInt);
+  vec.vecPush(ref types, Type.ErrorT);
+  vec.vecPush(ref types, Type.Void);
+  vec.vecPush(ref types, Type.UntypedInt);
 
   return {
     types: types,
-    symbols: vec.vec_new(0),
-    modules: vec.vec_new(0),
-    diagnostics: vec.vec_new(0),
+    symbols: vec.vecNew(0),
+    modules: vec.vecNew(0),
+    diagnostics: vec.vecNew(0),
   };
 }
 
 function initTypedModule(): TypedModule {
   return {
     moduleId: "none",
-    names: map.map_new(0, map.string_key_ops()),
-    exports: map.map_new(0, map.string_key_ops()),
-    resolvedTypes: vec.vec_new(0),
+    names: map.mapNew(0, map.stringKeyOps()),
+    exports: map.mapNew(0, map.stringKeyOps()),
+    resolvedTypes: vec.vecNew(0),
     allowsUnsafe: false
   };
 }
 
 function passA_registerShells(prog: Program, m: Module, tmIndex: usize): void {
-  const programNode = vec.vec_get(ref m.ast.nodes, m.ast.root);
-  const typedModule = vec.vec_get(ref prog.modules, tmIndex);
+  const programNode = vec.vecGet(ref m.ast.nodes, m.ast.root);
+  const typedModule = vec.vecGet(ref prog.modules, tmIndex);
   let i: usize = 0;
   while (i < programNode.childCount) {
     const declId = childAt(ref m.ast, programNode, i);
-    const declNode = vec.vec_get(ref m.ast.nodes, declId);
+    const declNode = vec.vecGet(ref m.ast.nodes, declId);
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
         log.info(`typechecking function decl shell ${kindName(declNode.kind)}: ${declNode.name}`);
@@ -106,12 +106,12 @@ function passA_registerShells(prog: Program, m: Module, tmIndex: usize): void {
         const shellFn = internType(
           ref prog,
           Type.Func {
-            params: vec.vec_new(0),
+            params: vec.vecNew(0),
             ret: TYPE_NONE_ID, variadic: false
           }
         );
         const symbolId = internSymbol(ref prog, Symbol.Func { typeId: shellFn });
-        map.map_insert(ref typedModule.names, declNode.name, symbolId);
+        map.mapInsert(ref typedModule.names, declNode.name, symbolId);
       }
       default: {
         // skipping for now.. output a log
@@ -132,12 +132,12 @@ function passA_registerShells(prog: Program, m: Module, tmIndex: usize): void {
 
 // program interning
 function internType(ref prog: Program, t: Type): TypeId {
-  vec.vec_push(ref prog.types, t);
+  vec.vecPush(ref prog.types, t);
   return prog.types.len - 1;
 }
 
 function internSymbol(ref prog: Program, s: Symbol): SymbolId {
-  vec.vec_push(ref prog.symbols, s);
+  vec.vecPush(ref prog.symbols, s);
   return prog.symbols.len - 1;
 }
 
@@ -151,7 +151,7 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
   // push an empty typed module for each module in the graph
   for m in vecIter(ref graph.modules) {
     let tm = initTypedModule();
-    vec.vec_push(ref program.modules, tm);
+    vec.vecPush(ref program.modules, tm);
     let tmIndex = program.modules.len - 1;
     passA_registerShells(program, m, tmIndex);
   }

@@ -96,18 +96,18 @@ const OPTIONS_TOKEN: uint8[] = ['O', 'P', 'T', 'I', 'O', 'N', 'S'];
 // so this compares exactly; anything unrecognized is `None` and the caller
 // decides between 400 and 501.
 export function methodFromBytes(token: uint8[]): Option<HttpMethod> {
-    if (bytes.bytes_eq(token, GET_TOKEN))     { return Option.Some { value: HttpMethod.Get     }; }
-    if (bytes.bytes_eq(token, POST_TOKEN))    { return Option.Some { value: HttpMethod.Post    }; }
-    if (bytes.bytes_eq(token, PUT_TOKEN))     { return Option.Some { value: HttpMethod.Put     }; }
-    if (bytes.bytes_eq(token, DELETE_TOKEN))  { return Option.Some { value: HttpMethod.Delete  }; }
-    if (bytes.bytes_eq(token, HEAD_TOKEN))    { return Option.Some { value: HttpMethod.Head    }; }
-    if (bytes.bytes_eq(token, PATCH_TOKEN))   { return Option.Some { value: HttpMethod.Patch   }; }
-    if (bytes.bytes_eq(token, OPTIONS_TOKEN)) { return Option.Some { value: HttpMethod.Options }; }
+    if (bytes.bytesEq(token, GET_TOKEN))     { return Option.Some { value: HttpMethod.Get     }; }
+    if (bytes.bytesEq(token, POST_TOKEN))    { return Option.Some { value: HttpMethod.Post    }; }
+    if (bytes.bytesEq(token, PUT_TOKEN))     { return Option.Some { value: HttpMethod.Put     }; }
+    if (bytes.bytesEq(token, DELETE_TOKEN))  { return Option.Some { value: HttpMethod.Delete  }; }
+    if (bytes.bytesEq(token, HEAD_TOKEN))    { return Option.Some { value: HttpMethod.Head    }; }
+    if (bytes.bytesEq(token, PATCH_TOKEN))   { return Option.Some { value: HttpMethod.Patch   }; }
+    if (bytes.bytesEq(token, OPTIONS_TOKEN)) { return Option.Some { value: HttpMethod.Options }; }
     return Option.None;
 }
 
 export function methodFromString(token: string): Option<HttpMethod> {
-    return methodFromBytes(intr.string_as_bytes(token));
+    return methodFromBytes(intr.stringAsBytes(token));
 }
 
 // ----- StatusCode ---------------------------------------------------------
@@ -127,7 +127,7 @@ export type StatusCode implements Display {
     code:  int32,
     class: StatusClass,
 
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return `${self.code} ${reasonPhrase(self.code)}`;
     }
 }
@@ -225,7 +225,7 @@ export type HttpError implements (Display, WithContext<HttpError>) {
     status:  StatusCode,
     message: string,
 
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return `${self.status.code} ${self.message}`;
     }
 
@@ -261,23 +261,23 @@ export type Headers implements Disposable propagates<disposable> {
 }
 
 export function headersNew(cap: usize): Headers propagates<disposable> {
-    return { entries: vec.vec_new(cap) };
+    return { entries: vec.vecNew(cap) };
 }
 
 // Append. Duplicates are preserved; use `headersSet` to replace.
 export function headersAdd(ref h: Headers, name: string, value: string): void {
     let e: HeaderEntry = { name: name, value: value };
-    vec.vec_push(ref h.entries, e);
+    vec.vecPush(ref h.entries, e);
 }
 
 // Replace the first match in place and drop nothing else, or append when the
 // name is absent. Field names are compared case insensitively, per RFC 9110.
 export function headersSet(ref h: Headers, name: string, value: string): void {
-    let view: HeaderEntry[] = vec.vec_as_array(ref h.entries);
+    let view: HeaderEntry[] = vec.vecAsArray(ref h.entries);
     for (let i = 0; i < view.len; i += 1) {
-        if (str.string_eq_ignore_ascii_case(view[i].name, name)) {
+        if (str.stringEqIgnoreAsciiCase(view[i].name, name)) {
             let replaced: HeaderEntry = { name: view[i].name, value: value };
-            vec.vec_set(ref h.entries, i, replaced);
+            vec.vecSet(ref h.entries, i, replaced);
             return;
         }
     }
@@ -287,9 +287,9 @@ export function headersSet(ref h: Headers, name: string, value: string): void {
 // First value for `name`, or `None`. A present-but-empty header returns
 // `Some { value: "" }`, which is why this is an Option and not a "" sentinel.
 export function headersGet(ref h: Headers, name: string): Option<string> {
-    let view: HeaderEntry[] = vec.vec_as_array(ref h.entries);
+    let view: HeaderEntry[] = vec.vecAsArray(ref h.entries);
     for e in view {
-        if (str.string_eq_ignore_ascii_case(e.name, name)) {
+        if (str.stringEqIgnoreAsciiCase(e.name, name)) {
             return Option.Some { value: e.value };
         }
     }
@@ -317,7 +317,7 @@ export function headersLen(ref h: Headers): usize {
 }
 
 export function headersView(ref h: Headers): HeaderEntry[] {
-    return vec.vec_as_array(ref h.entries);
+    return vec.vecAsArray(ref h.entries);
 }
 
 // ----- Params -------------------------------------------------------------
@@ -337,22 +337,22 @@ export type Params implements Disposable propagates<disposable> {
 }
 
 export function paramsNew(cap: usize): Params propagates<disposable> {
-    return { entries: vec.vec_new(cap) };
+    return { entries: vec.vecNew(cap) };
 }
 
 export function paramsAdd(ref p: Params, name: string, value: string): void {
     let e: Param = { name: name, value: value };
-    vec.vec_push(ref p.entries, e);
+    vec.vecPush(ref p.entries, e);
 }
 
 export function paramsClear(ref p: Params): void {
-    vec.vec_clear(ref p.entries);
+    vec.vecClear(ref p.entries);
 }
 
 export function paramsGet(ref p: Params, name: string): Option<string> {
-    let view: Param[] = vec.vec_as_array(ref p.entries);
+    let view: Param[] = vec.vecAsArray(ref p.entries);
     for e in view {
-        if (str.string_eq(e.name, name)) {
+        if (str.stringEq(e.name, name)) {
             return Option.Some { value: e.value };
         }
     }
@@ -380,7 +380,7 @@ export function paramsLen(ref p: Params): usize {
 }
 
 export function paramsView(ref p: Params): Param[] {
-    return vec.vec_as_array(ref p.entries);
+    return vec.vecAsArray(ref p.entries);
 }
 
 // ----- Request ------------------------------------------------------------
@@ -453,9 +453,9 @@ export function headerOr(ref req: Request, name: string, fallback: string): stri
 // comparison rather than by a copy. "" when the header is absent.
 export function contentType(ref req: Request): string {
     let raw: string = headerOr(ref req, "Content-Type", "");
-    let semi: usize = str.string_index_of(raw, ";");
+    let semi: usize = str.stringIndexOf(raw, ";");
     if (semi == raw.len) { return raw; }
-    switch (str.string_slice(raw, 0, semi)) {
+    switch (str.stringSlice(raw, 0, semi)) {
         case Result.Ok { value: head }: { return head; }
         case Result.Err { error: _e }: { return raw; }
     }
@@ -465,7 +465,7 @@ export function contentType(ref req: Request): string {
 // The body as text. The bytes are not validated as UTF-8 - HTTP bodies are
 // arbitrary octets and the caller is the one who knows what it asked for.
 export function bodyText(ref req: Request): string {
-    return intr.string_from_bytes_unchecked(req.body);
+    return intr.stringFromBytesUnchecked(req.body);
 }
 
 // ----- Response -----------------------------------------------------------
@@ -521,7 +521,7 @@ export function setBodyStatic(ref resp: Response, text: string): void {
 }
 
 // Hand the body owned bytes; the response frees them. Build the argument
-// inline (`setBodyBytes(ref resp, bytes.bytes_from_vec(ref buf))`) so no
+// inline (`setBodyBytes(ref resp, bytes.bytesFromVec(ref buf))`) so no
 // binding is left holding a value the response now owns.
 export function setBodyBytes(ref resp: Response, take: Bytes): void {
     Disposable.dispose(ref resp.body);
@@ -572,7 +572,7 @@ export function respondError(ref resp: Response, ref e: HttpError): void {
 // response (or its body) is disposed or reassigned.
 export function responseBodyBytes(ref resp: Response): uint8[] {
     switch (resp.body) {
-        case ResponseBody.Static { text: t }:  { return intr.string_as_bytes(t); }
-        case ResponseBody.Owned  { bytes: b }: { return bytes.bytes_to_array(ref b); }
+        case ResponseBody.Static { text: t }:  { return intr.stringAsBytes(t); }
+        case ResponseBody.Owned  { bytes: b }: { return bytes.bytesToArray(ref b); }
     }
 }

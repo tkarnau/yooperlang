@@ -231,7 +231,7 @@ function main() {
   }
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
   // --track-heap: instruct codegen to emit yoop_diag_record_alloc /
-  // yoop_diag_record_free calls around the heap_alloc / heap_free
+  // yoop_diag_record_free calls around the heapAlloc / heapFree
   // intrinsics, and to install an atexit dump in main. See
   // runtime/yoop_runtime.c and the emitBuiltinGenericCall branches in
   // jsyoopcodegen/codegen.js.

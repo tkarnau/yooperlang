@@ -41,7 +41,7 @@ import {
 // True if `callExpr` is `ns.method(...)` where `ns` resolves to a namespace
 // import and the source module has a generic function by that name. Lets
 // checkLetOrConst route the call through checkInitializer so the LHS type
-// drives return-position type-param inference (e.g. `intr.heap_alloc(8)`).
+// drives return-position type-param inference (e.g. `intr.heapAlloc(8)`).
 function isNamespaceGenericCall(callExpr, ctx) {
   const callee = callExpr.callee;
   if (!callee || typeof callee !== "object") return false;
@@ -576,7 +576,7 @@ function checkLetOrConst(node, scope, ctx) {
 
   if (node.assignment && !inferred) {
     // Generic function calls need to flow through checkInitializer so the
-    // declared LHS type can drive return-type inference (e.g. heap_alloc).
+    // declared LHS type can drive return-type inference (e.g. heapAlloc).
     // The eager resolveExprType inside isTaskCallReturningType would otherwise
     // error out before bidirectional inference gets a chance.
     const isGenericCall =

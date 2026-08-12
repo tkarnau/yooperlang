@@ -97,22 +97,22 @@ The table is a record of what the project paid, not a to-do list:
 **In this repo.** `std/http/server.yoop:32` said "Yoop has no string free".
 `std/core/strings.yoop:272` exports `strFree(s: owned string)`. Corrected, and
 the surrounding claim re-read while there: the parsed strings really are
-unfreed, but not for the stated reason. `string_from_bytes_unchecked` mallocs
+unfreed, but not for the stated reason. `stringFromBytesUnchecked` mallocs
 and copies and returns `owned string`, so `strFree` accepts them; what is
 missing is the bookkeeping, because `Request` and `Headers` do not track which
 of their strings they own. The header now says that instead.
 
 **In yooperdoom.** `spikes/RESULTS.md:606`, in the house rules:
 
-> `string_from_bytes_unchecked` is the exception: it returns a VIEW, valid only
+> `stringFromBytesUnchecked` is the exception: it returns a VIEW, valid only
 > while the buffer behind it is.
 
 That is backwards, and it is the drift worth reporting first, because it is
-advice a reader will act on. `string_from_bytes_unchecked` **allocates and
+advice a reader will act on. `stringFromBytesUnchecked` **allocates and
 copies** - `malloc(buf.len + 1)` then `memcpy`, at
 [codegen.js:5477](../src/jsyoopcodegen/codegen.js#L5477) - and returns
 `owned string`. The intrinsic that returns a borrowing view is the other one,
-`bytes_as_string_unchecked` ([codegen.js:5510](../src/jsyoopcodegen/codegen.js#L5510):
+`bytesAsStringUnchecked` ([codegen.js:5510](../src/jsyoopcodegen/codegen.js#L5510):
 "no malloc, no memcpy, no strlen"). The naming convention in
 `std/core/strings.yoop` states the rule the two follow: `_as_*` is a view,
 `_from_*` / `_slice` / `_concat` allocate.
@@ -225,8 +225,8 @@ whatever the installed allocator returns. The bump arena returns null when
 exhausted. Nothing between there and the first store checks it, so the symptom
 is `signal: 'SIGSEGV'` with the crashed process's buffered stdout lost.
 
-Confirmed unchecked call sites in `std/core/vec.yoop`: `vec_new` (line 50),
-the grow path (62), `vec_extend_from` (113), and the copy path (141). Same for
+Confirmed unchecked call sites in `std/core/vec.yoop`: `vecNew` (line 50),
+the grow path (62), `vecExtendFrom` (113), and the copy path (141). Same for
 `std/test.yoop`'s 1 MiB `SUITE_ARENA_BYTES` (line 46), which is where
 yooperdoom hit it.
 
@@ -241,7 +241,7 @@ yooperdoom hit it.
    remaining capacity, which `yoop_arena_used` almost gets there already.
 2. **Give it an escape hatch.** Some programs legitimately want to handle
    exhaustion. A `tryAlloc`-shaped path (returns null, does not abort) that
-   `ctx_alloc` is the aborting wrapper over. Do not make the default the
+   `ctxAlloc` is the aborting wrapper over. Do not make the default the
    quiet one; abort-by-default is the behaviour that turns a ten minute bisect
    into a line of output.
 3. **std/test says which suite.** `runAll` knows the suite name; a suite that
@@ -650,7 +650,7 @@ TAKEAWAYS 3.4 calls this "the uncomfortable finding" and it is the most
 actionable item in section 3. A 15,000 line project imported `std/core/format.yoop`
 in three files and hand-rolled a `48 + n % 10` digit loop in four others.
 `history.yoop` zero-pads a slot number by hand, which is exactly
-`padStart(int_to_string(n), 4, "0")`.
+`padStart(intToString(n), 4, "0")`.
 
 That is not a missing feature and adding modules will not help it. **Do this
 before adding any module in 4.2**, or the new ones will be undiscovered too.
@@ -738,7 +738,7 @@ want is format-neutral. One reflection feature serves JSON, CBOR, MessagePack,
 protobuf, and whatever is next, and none of them gets to be privileged.
 
 **This repo already has a field-reflection mechanism.** `src/jsyoopderive/`
-walks a struct's fields by name and type, generates a `Display.to_string`
+walks a struct's fields by name and type, generates a `Display.toString`
 method as source text, reparses it with the ordinary parser, and grafts it onto
 the decl. That is exactly the machine the JSON question needs; it is just
 hard-wired to one trait and one output shape. That is the good news and it is
@@ -880,7 +880,7 @@ first three std modules. Suite at 1079 tests.
 - `std/time.yoop` (4.2) - the wall clock and the calendar, over a new
   `runtime/yoop_time.c`. Kept deliberately distinct from the monotonic clock,
   which is what the header says first. `DateTime` implements `Display` and
-  renders ISO-8601. Its `pad2` helper is `padStart(int_to_string(n), 2, "0")`,
+  renders ISO-8601. Its `pad2` helper is `padStart(intToString(n), 2, "0")`,
   which is the exact pairing 4.1 found four hand-rolled copies of.
 
 Nothing left open in this group; what remains of 4.2 (process spawn,

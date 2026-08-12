@@ -2,8 +2,8 @@
 
 ## Context
 
-Plan: [plans/phase-9.md §9.G](../phase-9.md#phase-9g--vtable-t-for-trait-runtime-polymorphism--function-value-types).
-Library rationale: [library-design.md §8 questions 1–3](../library-design.md#8-open-language-questions-the-library-exposes).
+Plan: [plans/phase-9.md §9.G](phase-9.md#phase-9g--vtable-t-for-trait-runtime-polymorphism--function-value-types).
+Library rationale: [library-design.md §8 questions 1–3](../archive/library-design.md#8-open-language-questions-the-library-exposes).
 
 Before 9.G, the only polymorphism yoop had was generics + trait bounds
 (Phase 7.1/7.2) - every trait-dispatching function monomorphized per
@@ -150,7 +150,7 @@ reserved everywhere else.
   workaround remains the official answer; synthesizing capture
   structs requires its own multi-phase plan (capture-by-ref vs
   by-value, allocation strategy). See
-  [library-design.md §8 q3](../library-design.md#8-open-language-questions-the-library-exposes).
+  [library-design.md §8 q3](../archive/library-design.md#8-open-language-questions-the-library-exposes).
 - **Generic-trait vtables** (`vtable Reader<T> for Readable<T>`).
   Requires threading the type-param scope through vtable decls and
   validating field FPTs against substituted trait methods. The

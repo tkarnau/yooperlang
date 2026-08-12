@@ -16,17 +16,17 @@ type Pair { a: int32, b: int32 }
 // to infer T from a non-literal sibling arg. Here `tag` is a plain
 // untyped int so T = Pair is inferred from `v: Vec<T>` (the ref arg).
 function record<T>(ref bucket: Vec<T>, item: T, tag: int32): void {
-    vec.vec_push(ref bucket, item);
+    vec.vecPush(ref bucket, item);
 }
 
 function main(): int32 {
-    let disposable v: Vec<Pair> = vec.vec_new(4);
+    let disposable v: Vec<Pair> = vec.vecNew(4);
     // Used to fail with "struct literal has no target type".
-    vec.vec_push(ref v, { a: 1, b: 2 });
-    vec.vec_push(ref v, { a: 3, b: 4 });
+    vec.vecPush(ref v, { a: 1, b: 2 });
+    vec.vecPush(ref v, { a: 3, b: 4 });
     record(ref v, { a: 5, b: 6 }, 100);
 
-    let view: Pair[] = vec.vec_as_array(ref v);
+    let view: Pair[] = vec.vecAsArray(ref v);
     let i: usize = 0;
     while (i < view.len) {
         printf(`v[${int64(i)}]=(${view[i].a},${view[i].b})\n`);

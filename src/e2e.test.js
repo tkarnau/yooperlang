@@ -43,7 +43,7 @@ const repoRoot = path.resolve(import.meta.dirname, "..");
 //
 // Safe because the tests share nothing - each mkdtemps its own build dir, and
 // the two fixtures that LISTEN bind port 0 and read the kernel-assigned port
-// back out of TcpListener.bound_port rather than agreeing on a fixed number.
+// back out of TcpListener.boundPort rather than agreeing on a fixed number.
 //
 // Measured, full suite, 24-core Windows box, interleaved to cancel drift:
 //
@@ -824,19 +824,19 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     }
   });
 
-  // Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` covers Done +
+  // Phase 10.F: `waitUntil(h, deadline_ns): WaitResult<T>` covers Done +
   // Timeout. The fast task completes well inside its 1s deadline; the slow
   // task sleeps 200ms past its 50ms deadline so Timeout fires deterministically.
-  it("wait_until_smoke: wait_until returns Done before the deadline and Timeout after it", async () => {
+  it("wait_until_smoke: waitUntil returns Done before the deadline and Timeout after it", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/wait_until_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "fast done=49\nlazy timed out\n");
   });
 
   // Phase 10.F.2: external cancellation via `cancel(h)`. A second pooled
-  // task fires the cancel mid-wait; the main thread's wait_until (with a
+  // task fires the cancel mid-wait; the main thread's waitUntil (with a
   // 1s deadline that's not the path-of-success) observes WaitResult.Cancelled.
-  it("cancel_smoke: cancel(h) makes wait_until return WaitResult.Cancelled", async () => {
+  it("cancel_smoke: cancel(h) makes waitUntil return WaitResult.Cancelled", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/cancel_smoke.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "cancelled as expected\n");
@@ -880,7 +880,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // `Readable.read`. A structural is-this-the-none-token check is what
   // makes that work - testing "has the token fired yet" instead makes a
   // live deadline-less token look absent, which silently routes back to
-  // the uninterruptible ffi_recv and hangs this test forever.
+  // the uninterruptible ffiRecv and hangs this test forever.
   it("io_cancel_smoke: a cancel token unparks an accept blocked in the multiplexer", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/io_cancel_smoke.yoop");
     assert.equal(exitCode, 0);
@@ -1051,7 +1051,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "ran query\n");
   });
 
-  it("map_smoke: Map<string, int32> via string_key_ops covers insert/get/remove/grow", async () => {
+  it("map_smoke: Map<string, int32> via stringKeyOps covers insert/get/remove/grow", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -1066,7 +1066,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  it("map_int32_keys: Map<int32, string> via int32_key_ops covers get/remove/contains", async () => {
+  it("map_int32_keys: Map<int32, string> via int32KeyOps covers get/remove/contains", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_int32_keys.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -1102,7 +1102,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
-  it("map_iter: for entry in map_iter(ref m) walks occupied slots via Iterable<MapEntry>", async () => {
+  it("mapIter: for entry in mapIter(ref m) walks occupied slots via Iterable<MapEntry>", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/map_iter.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "keys_sum=10 vals_sum=1000\n");
@@ -1435,7 +1435,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
   // through `Variant.Inner { kids: Struct[] }` used to capture the
   // empty-variants shell when the typechecker resolved its field types.
   // `sizeOfType(Struct)` then ran on the stale shell and undersized the
-  // struct; `heap_alloc<Struct>(n)` allocated half the bytes LLVM expects
+  // struct; `heapAlloc<Struct>(n)` allocated half the bytes LLVM expects
   // and writes corrupted the heap. The fix makes pass C mutate the shell
   // in place. Would fail to run cleanly under the old typechecker.
   it("variant_struct_forward_ref.yoop: struct captures variant shell before its variants populate", async () => {
@@ -1677,7 +1677,7 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     assert.equal(stdout, "direct=1 explicit=2 bare=3 field=4 viaTask=14\n");
   });
 
-  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleep_ms delays the producer", async () => {
+  it("concurrent_pipe.yoop: a task parks inside the multiplexer, wakes when bytes arrive, sleepMs delays the producer", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/concurrent_pipe.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout, "got=88\n");
@@ -1879,11 +1879,11 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", { 
 });
 
 // Phase 13.C: @derive(display) - pre-typecheck expansion generates the
-// Display.to_string method from a struct's field annotations. Fixtures run
+// Display.toString method from a struct's field annotations. Fixtures run
 // through runFixtureEntry (compileEntry): the expansion needs the driver's
 // module graph with std/core/traits.yoop autoloaded.
 describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, () => {
-  it("derive_display_basic: derived to_string via explicit printf format arg", async () => {
+  it("derive_display_basic: derived toString via explicit printf format arg", async () => {
     // Also the regression test for the printf lowering fix: a template
     // literal VALUE arg after an explicit format literal fills the %s
     // instead of contributing a doubled directive.
@@ -1928,10 +1928,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     assert.equal(stdout, "Pt { x: 10, y: 20 }\n");
   });
 
-  it("derive_manual_to_string: deriving over a manual to_string is an error", () => {
+  it("derive_manual_to_string: deriving over a manual toString is an error", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/derive_manual_to_string.yoop");
     assert.ok(
-      errors.some((e) => /already defines "to_string"/.test(e.message)),
+      errors.some((e) => /already defines "toString"/.test(e.message)),
       `expected the derive clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -1968,10 +1968,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  it("derive_variant_manual_to_string: deriving over a manual variant to_string is an error", () => {
+  it("derive_variant_manual_to_string: deriving over a manual variant toString is an error", () => {
     const { errors } = typecheckFixtureEntry("examples/fail/derive_variant_manual_to_string.yoop");
     assert.ok(
-      errors.some((e) => /variant "Shape" already defines "to_string"/.test(e.message)),
+      errors.some((e) => /variant "Shape" already defines "toString"/.test(e.message)),
       `expected the variant clash error, got: ${errors.map((e) => e.message).join(" | ")}`,
     );
   });
@@ -2069,7 +2069,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   });
 
   // Phase 9.B: bool[] arrays
-  it("bool_array: bool[] literal/index/heap_alloc/Vec paths all work", async () => {
+  it("bool_array: bool[] literal/index/heapAlloc/Vec paths all work", async () => {
     const { stdout, exitCode } = await runFixtureEntry(
       "examples/pass/bool_array.yoop",
     );
@@ -2504,10 +2504,10 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
 
   // Phase 8.H: byte / string / Vec primitives and the parse_request_line
   // smoke test. Each fixture imports from std/core/* and exercises the new
-  // intrinsics (array_slice / string_as_bytes / string_from_bytes_unchecked)
+  // intrinsics (arraySlice / stringAsBytes / stringFromBytesUnchecked)
   // through their pure-yoop wrappers.
 
-  it("bytes_smoke: bytes_eq + bytes_index_of + bytes_starts_with + bytes_slice", async () => {
+  it("bytes_smoke: bytesEq + bytesIndexOf + bytesStartsWith + bytesSlice", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/bytes_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2516,7 +2516,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  it("strings_smoke: string_eq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", async () => {
+  it("strings_smoke: stringEq + starts_with + index_of + slice + concat + concat_all + from_bytes round-trip", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/strings_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2534,8 +2534,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Yoopstore-papercut #4: bulk Vec fill (vec_from_array + vec_extend_from).
-  it("vec_extend_from: vec_from_array copies and vec_extend_from grows once", async () => {
+  // Yoopstore-papercut #4: bulk Vec fill (vecFromArray + vecExtendFrom).
+  it("vecExtendFrom: vecFromArray copies and vecExtendFrom grows once", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/vec_extend_from.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2548,7 +2548,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   // Yoopstore-papercut #5: owned Bytes buffer with copy / seal constructors.
   // trackHeap asserts the from_vec seal doesn't double-free or leak the
   // transferred buffer.
-  it("bytes_owned: bytes_from_array + bytes_from_vec seal + transfer-up dispose", async () => {
+  it("bytes_owned: bytesFromArray + bytesFromVec seal + transfer-up dispose", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/bytes_owned.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2562,8 +2562,8 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   // `string` cannot do - own its storage, grow, and be indexed by codepoint.
   // trackHeap is the point of the fixture as much as stdout is: every Text
   // here is reclaimed by the injected `disposable` cleanup, where a raw
-  // string built by string_concat is both leaked AND invisible to the
-  // counter (it mallocs directly rather than through ctx_alloc).
+  // string built by stringConcat is both leaked AND invisible to the
+  // counter (it mallocs directly rather than through ctxAlloc).
   it("text_basics: Text builds, grows, borrows, and walks codepoints", async () => {
     const { stdout, stderr, exitCode } = await runFixture("examples/pass/text_basics.yoop", { trackHeap: true });
     assert.equal(exitCode, 0);
@@ -2604,9 +2604,9 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     );
   });
 
-  // Yoopstore-papercut #2 follow-ups: std/fs exists() / file_size() via a
+  // Yoopstore-papercut #2 follow-ups: std/fs exists() / fileSize() via a
   // stat runtime helper, plus real errno reasons in failure messages.
-  it("fs_metadata: exists/file_size report state and errno surfaces the real reason", async () => {
+  it("fs_metadata: exists/fileSize report state and errno surfaces the real reason", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/fs_metadata.yoop");
     assert.equal(exitCode, 0);
     assert.equal(stdout.split("\n")[0], "before=0 after=1 size=5 missing=-1 werr.len=0");
@@ -2725,7 +2725,7 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
   });
 
   // Phase 10.I: pure URL parser - no sockets.
-  it("uri_parse_smoke: parse_uri handles http/https/ipv6 + error cases", async () => {
+  it("uri_parse_smoke: parseUri handles http/https/ipv6 + error cases", async () => {
     const { stdout, exitCode } = await runFixtureEntry("examples/pass/uri_parse_smoke/main.yoop");
     assert.equal(exitCode, 0);
     assert.equal(
@@ -2734,9 +2734,9 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
       "with-port scheme=http host=example.com port=8080 target=/foo\n" +
       "https     scheme=https host=api.example.com port=443 target=/v1?x=1\n" +
       "ipv6      scheme=http host=::1 port=18080 target=/\n" +
-      "no-host   err=parse_uri: empty authority\n" +
-      "no-scheme err=parse_uri: missing \"://\"\n" +
-      "bad-port  err=parse_uri: trailing garbage in port\n",
+      "no-host   err=parseUri: empty authority\n" +
+      "no-scheme err=parseUri: missing \"://\"\n" +
+      "bad-port  err=parseUri: trailing garbage in port\n",
     );
   });
 
@@ -4550,7 +4550,7 @@ describe("e2e: fail fixtures fail at the right stage with the right message", { 
   // kind, and the conferred-passthrough rule that makes it usable.
   //
   // No trackHeap assertion here on purpose: a string's storage comes from a
-  // direct @malloc rather than through ctx_alloc, so the counter sees the
+  // direct @malloc rather than through ctxAlloc, so the counter sees the
   // frees and not the allocations. Routing that through the context is S4.
   it("owned_string.yoop: passthrough, plain-slot flow, and strFree", async () => {
     const { stdout, exitCode } = await runFixture("examples/pass/owned_string.yoop");

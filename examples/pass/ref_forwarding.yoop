@@ -64,7 +64,7 @@ function main(): int32 {
     let _n: int32 = wait t;
     let viaTask: uint64 = rt.counterGet(ref c);
 
-    printf(`direct=${fmt.uint_to_string(direct)} explicit=${fmt.uint_to_string(explicitN)} bare=${fmt.uint_to_string(bare)} field=${fmt.uint_to_string(fieldN)} viaTask=${fmt.uint_to_string(viaTask)}\n`);
+    printf(`direct=${fmt.uintToString(direct)} explicit=${fmt.uintToString(explicitN)} bare=${fmt.uintToString(bare)} field=${fmt.uintToString(fieldN)} viaTask=${fmt.uintToString(viaTask)}\n`);
     return 0;
 }
 

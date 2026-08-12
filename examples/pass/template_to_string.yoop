@@ -1,7 +1,7 @@
 // Phase 10.D.1: template literals with `${...}` interpolation can be
 // used anywhere a `string` is expected - not just inside printf.
-// Lowering runs `${x}` through the matching `to_string` shim in
-// std/core/format.yoop and concats the parts via `string_concat_all`.
+// Lowering runs `${x}` through the matching `toString` shim in
+// std/core/format.yoop and concats the parts via `stringConcatAll`.
 
 import * as log from "std/log.yoop";
 
@@ -23,7 +23,7 @@ function main(): int32 {
 
     // Bind a template literal to a string variable, then interpolate
     // that variable into another template - confirms the result of
-    // string_concat_all behaves like any other string.
+    // stringConcatAll behaves like any other string.
     let msg: string = `count is ${count}`;
     printf(`${msg}\n`);
     return 0;

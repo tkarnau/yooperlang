@@ -3,8 +3,8 @@
 // `import.unsafe;`. This is the smoke test for "the library prereqs are
 // done" per plans/phase-8-h-string-bytes-vec.md.
 
-import { bytes_index_of, bytes_slice } from "../../../std/core/bytes.yoop";
-import { string_from_bytes } from "../../../std/core/strings.yoop";
+import { bytesIndexOf, bytesSlice } from "../../../std/core/bytes.yoop";
+import { stringFromBytes } from "../../../std/core/strings.yoop";
 import { Result } from "../../../std/core/types.yoop";
 
 extern "C" from "stdio.h" {
@@ -24,42 +24,42 @@ function empty_request_line(msg: string): RequestLine {
 
 function parse_request_line(buf: uint8[]): RequestLine {
     // Find the trailing CRLF.
-    let cr: usize = bytes_index_of(buf, 13);
+    let cr: usize = bytesIndexOf(buf, 13);
     if (cr == buf.len) {
         return empty_request_line("parse_request_line: missing CR");
     }
     // First space.
-    let s1: usize = bytes_index_of(buf, 32);
+    let s1: usize = bytesIndexOf(buf, 32);
     if (s1 == buf.len || s1 >= cr) {
         return empty_request_line("parse_request_line: missing method separator");
     }
     // Search for the second space after s1.
-    let after_first: uint8[] = bytes_slice(buf, s1 + 1, cr);
-    let s2_rel: usize = bytes_index_of(after_first, 32);
+    let after_first: uint8[] = bytesSlice(buf, s1 + 1, cr);
+    let s2_rel: usize = bytesIndexOf(after_first, 32);
     if (s2_rel == after_first.len) {
         return empty_request_line("parse_request_line: missing path/version separator");
     }
     let s2: usize = s1 + 1 + s2_rel;
     // Slice + convert.
-    let method_bytes: uint8[] = bytes_slice(buf, 0, s1);
-    let path_bytes: uint8[] = bytes_slice(buf, s1 + 1, s2);
-    let version_bytes: uint8[] = bytes_slice(buf, s2 + 1, cr);
+    let method_bytes: uint8[] = bytesSlice(buf, 0, s1);
+    let path_bytes: uint8[] = bytesSlice(buf, s1 + 1, s2);
+    let version_bytes: uint8[] = bytesSlice(buf, s2 + 1, cr);
 
-    let method_r: Result<string, string> = string_from_bytes(method_bytes);
+    let method_r: Result<string, string> = stringFromBytes(method_bytes);
     let method_val: string = "";
     switch (method_r) {
         case Result.Ok { value: mv }: { method_val = mv; }
         case Result.Err { error: me }: { return empty_request_line(me); }
     }
 
-    let path_r: Result<string, string> = string_from_bytes(path_bytes);
+    let path_r: Result<string, string> = stringFromBytes(path_bytes);
     let path_val: string = "";
     switch (path_r) {
         case Result.Ok { value: pv }: { path_val = pv; }
         case Result.Err { error: pe }: { return empty_request_line(pe); }
     }
 
-    let version_r: Result<string, string> = string_from_bytes(version_bytes);
+    let version_r: Result<string, string> = stringFromBytes(version_bytes);
     let version_val: string = "";
     switch (version_r) {
         case Result.Ok { value: vv }: { version_val = vv; }

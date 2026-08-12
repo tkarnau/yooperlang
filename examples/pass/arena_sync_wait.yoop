@@ -26,7 +26,7 @@ extern "C" from "stdio.h" {
 // Occupies the single worker with a BLOCKING sleep. Deliberately not an
 // await, which would hand the worker straight back and defeat the setup.
 task hog(): int32 {
-    conc.sleep_ms(250);
+    conc.sleepMs(250);
     return 0;
 }
 
@@ -44,7 +44,7 @@ function main(): int32 {
     let ar: mem.Arena = mem.arenaNew(65536);
 
     pooled h = hog();
-    conc.sleep_ms(60);              // make sure the worker is inside the sleep
+    conc.sleepMs(60);              // make sure the worker is inside the sleep
 
     ephemeral mem.allocatorScope(ar) {
         // Main's own allocation DOES come from the arena - that is the half

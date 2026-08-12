@@ -2,9 +2,9 @@
 
 Status: PARTLY IMPLEMENTED. Gap 1 (the module flag, the `suite` function kind,
 the synthetic entry, the temp-dir executable) and the harness in
-[../std/test.yoop](../std/test.yoop) have landed; gaps 2 and 3 have not. Gap 4
+[../std/test.yoop](../../std/test.yoop) have landed; gaps 2 and 3 have not. Gap 4
 turned out to need nothing. Supersedes
-[archive/testing-design.md](archive/testing-design.md), which argued for an
+[archive/testing-design.md](testing-design.md), which argued for an
 attribute-driven `@test` / `@expect` framework baked into the compiler.
 
 What works today:
@@ -15,9 +15,9 @@ yoopiler --test [path] <filter>  # only suites whose name contains <filter>
 yoopiler foo.test.yoop           # just that file, via its `import.test;` flag
 ```
 
-Fixtures: [../examples/testing/pass/](../examples/testing/pass/) and
-[../examples/testing/fail/](../examples/testing/fail/). Coverage lives in the
-`--test mode` describe block in [../src/e2e.test.js](../src/e2e.test.js).
+Fixtures: [../examples/testing/pass/](../../examples/testing/pass) and
+[../examples/testing/fail/](../../examples/testing/fail). Coverage lives in the
+`--test mode` describe block in [../src/e2e.test.js](../../src/e2e.test.js).
 Deviations from the design as first written are marked **AS BUILT** below.
 
 Style: ASCII only. No em-dashes, no curly quotes, no fancy markdown tables.
@@ -28,7 +28,7 @@ Style: ASCII only. No em-dashes, no curly quotes, no fancy markdown tables.
 
 A working test DSL already exists, written entirely in userland Yoop, using no
 feature that was designed for testing. It lives at
-[../examples/playground/yooptest/main.yoop](../examples/playground/yooptest/main.yoop):
+[../examples/playground/yooptest/main.yoop](../../examples/playground/yooptest/main.yoop):
 
 ```js
 suite describeSuite("strangeAdd tests", sink) {
@@ -163,7 +163,7 @@ directory the compiler already creates.
 2. Build the synthetic entry module shown above, in memory. This needs no new
    loader plumbing: `loadModuleGraph` already accepts a
    `readFile(absPath) -> string | null` override
-   ([../src/jsyoopdriver/moduleGraph.js](../src/jsyoopdriver/moduleGraph.js)),
+   ([../src/jsyoopdriver/moduleGraph.js](../../src/jsyoopdriver/moduleGraph.js)),
    added for the LSP's unsaved buffers. Hand it a synthetic path plus a
    `readFile` that returns the generated source for exactly that path;
    `moduleIdFor` derives a stable id from it like any other module.
@@ -172,7 +172,7 @@ directory the compiler already creates.
 4. Point clang's `-o` into `tmpDir` instead of the user's tree. The driver
    already makes a per-invocation `mkdtempSync` dir and removes it via an exit
    hook unless `--keep-ir`
-   ([../src/yoopiler.js:265](../src/yoopiler.js#L265)), so the binary inherits
+   ([../src/yoopiler.js:265](../../src/yoopiler.js#L265)), so the binary inherits
    that lifecycle for free. Extend `--keep-ir` (or add `--keep-exe`) to keep it
    for debugging under lldb.
 5. Spawn it, forward stdout, propagate the exit code.
@@ -206,21 +206,21 @@ Both halves of the suite-level lifecycle are already expressible.
 
 **Region kinds give you a block with a hook at the end.** `appliesTo region` plus
 `ownsBlock` is the anonymous form; `appliesTo binding` plus `ownsBlock` is the
-named form. See `ephemeral` in [../std/core/kinds.yoop](../std/core/kinds.yoop).
+named form. See `ephemeral` in [../std/core/kinds.yoop](../../std/core/kinds.yoop).
 
 **Teardown survives early exit for free.** Codegen fires a scope's pending
 cleanups before every `ret`
-([../src/jsyoopcodegen/codegen.js:5720](../src/jsyoopcodegen/codegen.js#L5720)),
+([../src/jsyoopcodegen/codegen.js:5720](../../src/jsyoopcodegen/codegen.js#L5720)),
 and `kindCheck` intersects the satisfied-state across `if` and `switch` arms. Any
 hook mechanism built on the same slots inherits that.
 
 **Arrays of function values work.** `((p: T) => R)[]` is spellable and callable -
-see [../examples/pass/fn_pointer_array.yoop](../examples/pass/fn_pointer_array.yoop).
+see [../examples/pass/fn_pointer_array.yoop](../../examples/pass/fn_pointer_array.yoop).
 A top-level function's name in expression position lowers to its mangled symbol
 address (Phase 10.X.2). This is what makes the generated suite table possible
 without any new codegen.
 
-**argv is available to std.** [../std/env.yoop](../std/env.yoop) exposes
+**argv is available to std.** [../std/env.yoop](../../std/env.yoop) exposes
 `argCount()` / `argAt(i)` over a runtime shim, so suite selection, filtering, and
 a `--isolate` re-exec are all expressible in std today.
 
@@ -247,7 +247,7 @@ The pragma slot is built and gated. `parseImportDecl`'s caller handles
 `import` `.` ident `;`, sets a flag on the PROGRAM node, and rejects anything
 else with `unknown import attribute 'import.<x>' - only 'import.unsafe' is
 supported`
-([../src/jsyooparser/parser.js:755](../src/jsyooparser/parser.js#L755)). So
+([../src/jsyooparser/parser.js:755](../../src/jsyooparser/parser.js#L755)). So
 `import.test;` setting `node.isTestModule = true` alongside `node.allowsUnsafe`
 is a handful of lines.
 
@@ -270,7 +270,7 @@ user-declared `appliesTo function` kinds are deferred (phase 7+);
 the built-in task kind covers the only current use case
 ```
 
-([../src/jsyooparser/parser.js:1238](../src/jsyooparser/parser.js#L1238))
+([../src/jsyooparser/parser.js:1238](../../src/jsyooparser/parser.js#L1238))
 
 This is the reserved slot for exactly this. The declaration in std:
 
@@ -350,10 +350,10 @@ restricted to `signature` plus `enumerable` makes this a much smaller lift than
 
 A kind may declare exactly one `mustCall`. Two is
 `duplicate mustCall clause in kind 'test'`
-([../src/jsyooptypecheck/typecheck.js:1136](../src/jsyooptypecheck/typecheck.js#L1136)),
+([../src/jsyooptypecheck/typecheck.js:1136](../../src/jsyooptypecheck/typecheck.js#L1136)),
 and composing two kinds that each have one is
 `composition contradiction in kind 'isolatedTest': mustCall recordResults vs mustCall dispose`
-([../src/jsyooptypecheck/typecheck.js:1487](../src/jsyooptypecheck/typecheck.js#L1487)).
+([../src/jsyooptypecheck/typecheck.js:1487](../../src/jsyooptypecheck/typecheck.js#L1487)).
 
 So this does not compile:
 
@@ -370,7 +370,7 @@ The fix is to treat `mustCall` as a list rather than a slot: fire in declaration
 order for a single kind, and in operand order for a composition, with duplicate
 `(method, timing)` pairs deduped. Downstream is already close to ready -
 `kt.mustCall` is read as an array in several places, and `projectCleanups`
-([../src/jsyooptypecheck/kindCheck.js:342](../src/jsyooptypecheck/kindCheck.js#L342))
+([../src/jsyooptypecheck/kindCheck.js:342](../../src/jsyooptypecheck/kindCheck.js#L342))
 maps a list of obligations to a list of cleanup nodes with no arity assumption.
 The single-slot assumption is concentrated in `populateKindFromClauses` and the
 composition merge.
@@ -388,7 +388,7 @@ region to learn that a `test` binding opened inside it. So `beforeEach` and
 `afterEach` have no expression today, at any level of contortion.
 
 The `mustCall` timing slot was built to grow. `parseMustCallClause`
-([../src/jsyooparser/parser.js:1489](../src/jsyooparser/parser.js#L1489)) accepts
+([../src/jsyooparser/parser.js:1489](../../src/jsyooparser/parser.js#L1489)) accepts
 exactly `beforeScopeEnd` and emits a deferred-feature message for `beforeAny` /
 `afterAny`, which lex as plain idents. Widening that slot is the intended
 extension point.
@@ -453,14 +453,14 @@ a test body from triggering the hooks.
 ### Implementation sketch
 
 Small, and it reuses existing plumbing. `kindCheck`'s `walkStatement`
-([../src/jsyooptypecheck/kindCheck.js:419](../src/jsyooptypecheck/kindCheck.js#L419))
+([../src/jsyooptypecheck/kindCheck.js:419](../../src/jsyooptypecheck/kindCheck.js#L419))
 already sees every kind-prefixed statement and already tracks the scope chain.
 `afterEach` nodes append to the child block's existing `implicitCleanups` tail,
 after the child's own cleanup, so early-return and arm-intersection handling come
 along unchanged. `beforeEach` is the only new slot: a `preHooks` list on the
 statement, emitted by a near-copy of `emitPendingCleanups`. Hook nodes are the
 same synthetic `CLEANUP_CALL` shape `makeCleanupCall` already builds
-([../src/jsyooptypecheck/kindCheck.js:89](../src/jsyooptypecheck/kindCheck.js#L89)).
+([../src/jsyooptypecheck/kindCheck.js:89](../../src/jsyooptypecheck/kindCheck.js#L89)).
 
 ### Alternative spellings considered
 
@@ -468,7 +468,7 @@ same synthetic `CLEANUP_CALL` shape `makeCleanupCall` already builds
   hooks per observed child kind, at the cost of a second level of kind-body
   grammar.
 - `observes test via ObservesCases;`, naming a trait whose methods are the hooks.
-  Follows the clearance-kind precedent ([clearance-kinds.md](clearance-kinds.md)),
+  Follows the clearance-kind precedent ([clearance-kinds.md](../clearance-kinds.md)),
   but splits the lifecycle across two declarations for no gain, since `requires`
   already names the trait.
 
@@ -516,7 +516,7 @@ mis-frames a check, and that gap 4 needs nothing from the compiler at all.
 Generic trait methods (`function equals<T implements Display>(...)`) do not parse
 today and would be needed for a comparison-shaped API. That is now a separate
 want, not a testing blocker, and it is recorded as such in
-[archive/phase-10.md](archive/phase-10.md) territory rather than here.
+[archive/phase-10.md](phase-10.md) territory rather than here.
 
 ### The structural cost: assertions cannot fail fast
 
@@ -524,7 +524,7 @@ Worth stating plainly, because it is the main thing the kinds-first design gives
 up versus `@test function` plus `@expect`. A test body is a **region block**, not
 a function body. There is no exception to throw, no `return` that means "abandon
 this case and continue the run", and no closure to bail out of (capturing
-closures are permanently out of scope per [README.md](README.md)). So a failed
+closures are permanently out of scope per [README.md](../README.md)). So a failed
 assertion can only *record*, and the rest of the block runs with bad state.
 
 Consequences to design around, not fix:
@@ -571,7 +571,7 @@ export function runAll(suites: (() => void)[], names: string[]): int {
 }
 ```
 
-`arenaScope` (from [../std/core/alloc.yoop](../std/core/alloc.yoop)) returns a
+`arenaScope` (from [../std/core/alloc.yoop](../../std/core/alloc.yoop)) returns a
 `Disposable` guard. On construction it installs a fresh arena as the ambient
 allocator; on dispose it pops the allocator and reclaims the arena in bulk. So
 every allocation a suite made is gone before the next one starts, and a leaking
@@ -588,7 +588,7 @@ Three levels, and what each costs:
 
 The decision that matters for the design now: **the generated `main` honors an
 argv suite selector from day one.** `t.runAll` consults
-[../std/env.yoop](../std/env.yoop) to filter by name, which serves ordinary
+[../std/env.yoop](../../std/env.yoop) to filter by name, which serves ordinary
 filtering (`yoopiler --test -k "empty path"`, forwarded as argv) and *also* means
 a future `--isolate=process` needs no compiler change at all. The runner re-execs
 itself once per suite via `argAt(0)`, and the parent stitches the output back
@@ -604,7 +604,7 @@ model, CLI surface, filtering, and TAP output. Under this design most of that is
 Yoop code in `std/test.yoop`.
 
 - **Ordering and iteration.** The `while` loop above.
-- **Reporting.** The results type owns it; TAP output is a `to_string`, and the
+- **Reporting.** The results type owns it; TAP output is a `toString`, and the
   process exit code is whatever `finish` returns. The archived draft's TAP shape
   is still the right format, it just is not the compiler's job.
 - **Filtering.** argv, in `selected`.
@@ -665,7 +665,7 @@ Neither now blocks the harness, but both are still wrong.
 - **A namespaced function reference in value position crashes codegen.**
   `import * as m from "./x.yoop";` then `const f: (() => void) = m.someFn;`
   typechecks and then dies in `llvmType: unhandled yooper type kind "func"`
-  ([../src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js), the
+  ([../src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js), the
   `emitExpr` FIELD_ACCESS path). The Phase 10.X.2 fn-as-value lift handled bare
   names; the namespaced member path never learned to lower a `func` type to a
   function pointer. Workaround in use: `import { someFn as f }`.
@@ -675,9 +675,9 @@ Neither now blocks the harness, but both are still wrong.
   `vtable "Recorder" has no slot for trait method "report"`; rebinding to a local
   first (`let sink: Recorder = self.sink;`) works. Struct field types resolve
   before `validateVTableDecl` fills `methodOrder` from `trait.methods`
-  ([../src/jsyooptypecheck/typecheck.js:735](../src/jsyooptypecheck/typecheck.js#L735)).
+  ([../src/jsyooptypecheck/typecheck.js:735](../../src/jsyooptypecheck/typecheck.js#L735)).
   Same shape as the `canonicalizeStruct` shell problem noted in
-  [../CLAUDE.md](../CLAUDE.md).
+  [../CLAUDE.md](../../CLAUDE.md).
 - **A module-level `let` passed as `ref` emits invalid IR.** Typecheck passes,
   then clang rejects `use of undefined value '%RESULTS'`. This kills the simplest
   possible shared collector (a module-level `Vec`), which is the obvious thing to
@@ -749,7 +749,7 @@ simply absent on a crash, which is exactly the TAP signal for "the run died."
 ## What changed from the archived draft
 
 For the reasoning trail. The full pros-and-cons treatment of the attribute
-approach is preserved in [archive/testing-design.md](archive/testing-design.md).
+approach is preserved in [archive/testing-design.md](testing-design.md).
 
 - **Decision 1 (how a test is marked).** Reversed. The draft's Option D, "a
   `test` kind", was rejected as *"semantic mismatch. Kinds are usage/lifecycle/
@@ -772,7 +772,7 @@ approach is preserved in [archive/testing-design.md](archive/testing-design.md).
   "the one genuinely new codegen piece"; here `main` is *generated Yoop source*
   in a synthetic entry module and goes through the ordinary pipeline, the way
   `@derive` already generates and reparses source
-  ([../src/jsyoopderive/](../src/jsyoopderive/)). No new codegen at all.
+  ([../src/jsyoopderive/](../../src/jsyoopderive)). No new codegen at all.
 - **Decision 5 (CLI).** Same conclusion (`--test` flag), plus the draft's step 2
   ("run the attribute pass to gather every `@test` node") and step 3 ("synthesize
   a runner main") collapse into a glob and a template.

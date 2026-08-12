@@ -241,7 +241,7 @@ function isIdentStart(code) {
 // yooperdoom-takeaways 4.1 is the reason this exists. A 15,000 line project
 // imported std/core/format.yoop in three files and hand-rolled a digit loop in
 // four others; `history.yoop` zero-padded a number by hand, which is exactly
-// `padStart(int_to_string(n), 4, "0")`. Nothing was missing from the library -
+// `padStart(intToString(n), 4, "0")`. Nothing was missing from the library -
 // the project just never found the parts of it that existed. An index helps
 // once; showing a function's own header at the call site helps every time, and
 // it needs no new convention, because std already writes these comments.

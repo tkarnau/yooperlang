@@ -45,7 +45,7 @@ function main(): int32 {
     t.act(ref b);
 
     // array element
-    let acts: ((ref m: Box) => void)[] = intr.heap_alloc(2);
+    let acts: ((ref m: Box) => void)[] = intr.heapAlloc(2);
     acts[0] = bump;
     acts[1] = bumpTen;
     let a0: (ref m: Box) => void = acts[0];

@@ -266,7 +266,7 @@ function next_rand(ref state: int32, range: int32): int32 {
 // statement and the refcount goes to 1 (the worker's own ref). The
 // worker prints, returns, and releases. Total task lifetime ≈ 20 ms.
 task announce_kill(score: int32): int32 {
-    conc.sleep_ms(20);
+    conc.sleepMs(20);
     printf("kill #%d!\n", score);
     return 0;
 }
@@ -454,11 +454,11 @@ function main(): int32 {
             let next_walk_advance_ns: uint64 = 0;
 
             // Bullet pool as parallel arrays. Direction is a unit (dx, dy).
-            let bullet_x: float32[] = intr.heap_alloc(usize(BULLET_POOL));
-            let bullet_y: float32[] = intr.heap_alloc(usize(BULLET_POOL));
-            let bullet_dx: float32[] = intr.heap_alloc(usize(BULLET_POOL));
-            let bullet_dy: float32[] = intr.heap_alloc(usize(BULLET_POOL));
-            let bullet_active: bool[] = intr.heap_alloc(usize(BULLET_POOL));
+            let bullet_x: float32[] = intr.heapAlloc(usize(BULLET_POOL));
+            let bullet_y: float32[] = intr.heapAlloc(usize(BULLET_POOL));
+            let bullet_dx: float32[] = intr.heapAlloc(usize(BULLET_POOL));
+            let bullet_dy: float32[] = intr.heapAlloc(usize(BULLET_POOL));
+            let bullet_active: bool[] = intr.heapAlloc(usize(BULLET_POOL));
             let bi_init: int32 = 0;
             while (bi_init < BULLET_POOL) {
                 bullet_active[bi_init] = false;
@@ -469,9 +469,9 @@ function main(): int32 {
             // the matching slot in `enemy_ready_at_ns[i]` gets set to
             // the absolute nanosecond timestamp at which the enemy
             // may respawn.
-            let enemies: Enemy[] = intr.heap_alloc(usize(N_ENEMIES));
-            let enemy_alive: bool[] = intr.heap_alloc(usize(N_ENEMIES));
-            let enemy_ready_at_ns: uint64[] = intr.heap_alloc(usize(N_ENEMIES));
+            let enemies: Enemy[] = intr.heapAlloc(usize(N_ENEMIES));
+            let enemy_alive: bool[] = intr.heapAlloc(usize(N_ENEMIES));
+            let enemy_ready_at_ns: uint64[] = intr.heapAlloc(usize(N_ENEMIES));
             let ei_init: int32 = 0;
             while (ei_init < N_ENEMIES) {
                 spawn_enemy(ref enemies[ei_init], ref rng_state, WIN_W, WIN_H);
@@ -498,7 +498,7 @@ function main(): int32 {
             let running: bool = true;
             while (running) {
                 const frame_start: uint32 = SDL_GetTicks();
-                const t_ns: uint64 = conc.now_ns();
+                const t_ns: uint64 = conc.nowNs();
 
                 let kbRef: int = 0;
                 const keys: uint8[] = SDL_GetKeyboardState(ref kbRef);
@@ -726,14 +726,14 @@ function main(): int32 {
             // Shutdown. `disposable` bindings teardown LIFO:
             //   player_tex → ren → win. Each `dispose` is a single
             //   SDL_Destroy* call.
-            intr.heap_free(bullet_x);
-            intr.heap_free(bullet_y);
-            intr.heap_free(bullet_dx);
-            intr.heap_free(bullet_dy);
-            intr.heap_free(bullet_active);
-            intr.heap_free(enemies);
-            intr.heap_free(enemy_alive);
-            intr.heap_free(enemy_ready_at_ns);
+            intr.heapFree(bullet_x);
+            intr.heapFree(bullet_y);
+            intr.heapFree(bullet_dx);
+            intr.heapFree(bullet_dy);
+            intr.heapFree(bullet_active);
+            intr.heapFree(enemies);
+            intr.heapFree(enemy_alive);
+            intr.heapFree(enemy_ready_at_ns);
         }
     }
 

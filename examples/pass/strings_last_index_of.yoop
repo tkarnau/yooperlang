@@ -20,7 +20,7 @@ function main(): int32 {
     // The last separator, not the first - that distinction is the whole point.
     printf("last=%zu first=%zu\n",
            str.lastIndexOf(path, "/"),
-           str.string_index_of(path, "/"));
+           str.stringIndexOf(path, "/"));
 
     // Offset 0 has to stay reachable. `i` is usize, so a loop that decremented
     // a start offset of zero would wrap instead of terminating.

@@ -591,7 +591,7 @@ export enum ASTNodeKind implements Display {
   // type annotation kinds
   TYPE_ANNOTATION_REF_TYPE,
   TYPE_ANNOTATION_TYPE_NAME,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     return kindName(self);
   }
 }
@@ -790,7 +790,7 @@ export type SourceLocation implements Display {
   line: usize,
   column: usize,
   length: usize,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     return `pos: ${self.pos}, line: ${self.line}, column: ${self.column}, length: ${self.length}`;
   }
 }
@@ -837,7 +837,7 @@ export type ASTNode {
   intVal: uint64,
   flagA: bool, // per-kind flags
   // ...the result of the fat-node scalar/NodeId slots
-  // function to_string(ref self): string {
+  // function toString(ref self): string {
   //   let nameStr = self.name;
   //   if (self.name.len == 0) {
   //     nameStr = "none";
@@ -868,43 +868,43 @@ export type AST /* implements Display */ propagates<disposable> {
   childIds: Vec<NodeId>,
   strings: Vec<string>, // string pool: decoded string-literal text
   root: NodeId,
-  // function to_string(ref self): string {
+  // function toString(ref self): string {
   //   // Debug dump of the whole arena. We collect each line as its own string
-  //   // piece and concat once at the end (the path_join pattern in std/fs) -
+  //   // piece and concat once at the end (the pathJoin pattern in std/fs) -
   //   // far cheaper than re-allocating a growing accumulator per node.
-  //   disposable pieces: Vec<string> = vec.vec_new(self.nodes.len + self.strings.len + self.childIds.len + 4);
+  //   disposable pieces: Vec<string> = vec.vecNew(self.nodes.len + self.strings.len + self.childIds.len + 4);
 
-  //   vec.vec_push(ref pieces,
+  //   vec.vecPush(ref pieces,
   //     `AST { root: ${self.root}, nodes: ${self.nodes.len}, childIds: ${self.childIds.len}, strings: ${self.strings.len} }\n`);
 
   //   // Node arena. Index 0 is the reserved "none" sentinel, so real nodes
   //   // begin at 1. ASTNode implements Display, so `${n}` dispatches to its
-  //   // own to_string (Phase 9.F template interpolation).
+  //   // own toString (Phase 9.F template interpolation).
   //   let i: usize = 1;
   //   while (i < self.nodes.len) {
-  //     let n: ASTNode = vec.vec_get(ref self.nodes, i);
-  //     vec.vec_push(ref pieces, `  node[${i}]: {${n}\n  }\n`);
+  //     let n: ASTNode = vec.vecGet(ref self.nodes, i);
+  //     vec.vecPush(ref pieces, `  node[${i}]: {${n}\n  }\n`);
   //     i = i + 1;
   //   }
 
   //   // Flat child-id pool (nodes index into this via childStart/childCount).
-  //   vec.vec_push(ref pieces, "  childIds: [ ");
+  //   vec.vecPush(ref pieces, "  childIds: [ ");
   //   let c: usize = 0;
   //   while (c < self.childIds.len) {
-  //     vec.vec_push(ref pieces, `${vec.vec_get(ref self.childIds, c)} `);
+  //     vec.vecPush(ref pieces, `${vec.vecGet(ref self.childIds, c)} `);
   //     c = c + 1;
   //   }
-  //   vec.vec_push(ref pieces, "]\n");
+  //   vec.vecPush(ref pieces, "]\n");
 
   //   // String pool.
   //   let s: usize = 0;
   //   while (s < self.strings.len) {
-  //     vec.vec_push(ref pieces, `  str[${s}]: "${vec.vec_get(ref self.strings, s)}"\n`);
+  //     vec.vecPush(ref pieces, `  str[${s}]: "${vec.vecGet(ref self.strings, s)}"\n`);
   //     s = s + 1;
   //   }
 
-  //   let arr: string[] = vec.vec_as_array(ref pieces);
-  //   return str.string_concat_all(arr);
+  //   let arr: string[] = vec.vecAsArray(ref pieces);
+  //   return str.stringConcatAll(arr);
   // }
 }
 
@@ -934,7 +934,7 @@ export type ParsingError implements Display {
   rawMessage: string,
   src: ref uint8[],
   err: string,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     let lowerBound: usize;
     let upperBound: usize;
     let relativePos: usize = 4;
@@ -957,7 +957,7 @@ export type ParsingError implements Display {
     }
 
     let codestr: string = "";
-    const codestrRes = str.string_from_bytes(bytes.bytes_slice(srcRef, lowerBound, upperBound));
+    const codestrRes = str.stringFromBytes(bytes.bytesSlice(srcRef, lowerBound, upperBound));
     switch (codestrRes) {
       case Result.Err { error: e }: {
         codestr = e;

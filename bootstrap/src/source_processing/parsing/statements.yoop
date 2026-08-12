@@ -40,10 +40,10 @@ export function parseBlock(ref ps: ParserState): ParsingResult {
   let node = sl.buildSourcedNode(ref ps, ASTNodeKind.BLOCK);
 
   // parse rest of statements
-  disposable ids: Vec<NodeId> = vec.vec_new(4);
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (sl.peek(ref ps).tag != TokenTags.RCURLY && sl.peek(ref ps).tag != TokenTags.EOF) {
     // eat statements and add to body...
-    vec.vec_push(ref ids, parseStatement(ref ps)?);
+    vec.vecPush(ref ids, parseStatement(ref ps)?);
   }
   // child start nodeId...
   // child count

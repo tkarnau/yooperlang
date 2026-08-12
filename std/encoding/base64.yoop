@@ -6,10 +6,10 @@
 //
 //     import * as b64 from "std/encoding/base64.yoop";
 //
-//     disposable enc: Vec<uint8> = vec.vec_new(64);
-//     b64.encode(ref enc, intr.string_as_bytes("hello"));   // aGVsbG8=
+//     disposable enc: Vec<uint8> = vec.vecNew(64);
+//     b64.encode(ref enc, intr.stringAsBytes("hello"));   // aGVsbG8=
 //
-//     disposable dec: Vec<uint8> = vec.vec_new(64);
+//     disposable dec: Vec<uint8> = vec.vecNew(64);
 //     switch (b64.decode(ref dec, "aGVsbG8=")) { ... }
 //
 // The encoders APPEND to a caller-owned `Vec<uint8>` rather than returning a
@@ -57,17 +57,17 @@ export function encodeWith(
     alphabet: string,
     pad: bool,
 ): void {
-    let tbl: uint8[] = intr.string_as_bytes(alphabet);
+    let tbl: uint8[] = intr.stringAsBytes(alphabet);
     if (tbl.len < 64) { return; }
 
     // Whole 3-byte groups: 24 bits in, four 6-bit indices out.
     let i: usize = 0;
     while (i + 3 <= src.len) {
         let n: uint32 = (uint32(src[i]) << 16) | (uint32(src[i + 1]) << 8) | uint32(src[i + 2]);
-        vec.vec_push(ref out, tbl[usize((n >> 18) & 63)]);
-        vec.vec_push(ref out, tbl[usize((n >> 12) & 63)]);
-        vec.vec_push(ref out, tbl[usize((n >> 6) & 63)]);
-        vec.vec_push(ref out, tbl[usize(n & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 18) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 12) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 6) & 63)]);
+        vec.vecPush(ref out, tbl[usize(n & 63)]);
         i = i + 3;
     }
 
@@ -76,23 +76,23 @@ export function encodeWith(
     let left: usize = src.len - i;
     if (left == 1) {
         let n: uint32 = uint32(src[i]) << 16;
-        vec.vec_push(ref out, tbl[usize((n >> 18) & 63)]);
-        vec.vec_push(ref out, tbl[usize((n >> 12) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 18) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 12) & 63)]);
         if (pad) {
-            vec.vec_push(ref out, PAD);
-            vec.vec_push(ref out, PAD);
+            vec.vecPush(ref out, PAD);
+            vec.vecPush(ref out, PAD);
         }
     } else if (left == 2) {
         let n: uint32 = (uint32(src[i]) << 16) | (uint32(src[i + 1]) << 8);
-        vec.vec_push(ref out, tbl[usize((n >> 18) & 63)]);
-        vec.vec_push(ref out, tbl[usize((n >> 12) & 63)]);
-        vec.vec_push(ref out, tbl[usize((n >> 6) & 63)]);
-        if (pad) { vec.vec_push(ref out, PAD); }
+        vec.vecPush(ref out, tbl[usize((n >> 18) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 12) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 6) & 63)]);
+        if (pad) { vec.vecPush(ref out, PAD); }
     }
 }
 
 // Bytes an encode of `n` input bytes will append, for sizing a Vec up front.
-// Exact, so `vec_new(encodedLen(n))` never grows.
+// Exact, so `vecNew(encodedLen(n))` never grows.
 export function encodedLen(srcLen: usize, pad: bool): usize {
     if (pad) { return ((srcLen + 2) / 3) * 4; }
     let whole: usize = (srcLen / 3) * 4;
@@ -119,7 +119,7 @@ export function encodedLen(srcLen: usize, pad: bool): usize {
 // On Err, `out` may hold a partial decode. Callers that care should decode
 // into a fresh Vec, or clear it on the error path.
 export function decode(ref out: Vec<uint8>, src: string): Result<usize, string> {
-    return decodeBytes(ref out, intr.string_as_bytes(src));
+    return decodeBytes(ref out, intr.stringAsBytes(src));
 }
 
 export function decodeBytes(ref out: Vec<uint8>, src: uint8[]): Result<usize, string> {
@@ -150,9 +150,9 @@ export function decodeBytes(ref out: Vec<uint8>, src: uint8[]): Result<usize, st
         have = have + 1;
 
         if (have == 4) {
-            vec.vec_push(ref out, uint8((acc >> 16) & 255));
-            vec.vec_push(ref out, uint8((acc >> 8) & 255));
-            vec.vec_push(ref out, uint8(acc & 255));
+            vec.vecPush(ref out, uint8((acc >> 16) & 255));
+            vec.vecPush(ref out, uint8((acc >> 8) & 255));
+            vec.vecPush(ref out, uint8(acc & 255));
             written = written + 3;
             acc = 0;
             have = 0;
@@ -165,11 +165,11 @@ export function decodeBytes(ref out: Vec<uint8>, src: uint8[]): Result<usize, st
         return Result.Err { error: "base64: truncated input" };
     }
     if (have == 2) {
-        vec.vec_push(ref out, uint8((acc >> 4) & 255));
+        vec.vecPush(ref out, uint8((acc >> 4) & 255));
         written = written + 1;
     } else if (have == 3) {
-        vec.vec_push(ref out, uint8((acc >> 10) & 255));
-        vec.vec_push(ref out, uint8((acc >> 2) & 255));
+        vec.vecPush(ref out, uint8((acc >> 10) & 255));
+        vec.vecPush(ref out, uint8((acc >> 2) & 255));
         written = written + 2;
     }
 

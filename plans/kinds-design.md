@@ -60,7 +60,7 @@ guarantee that a kind would carry instead:
 
 - `validated` (or `safe_path`) on strings returned by
   `safepath.sanitize` in the yoopstore playground. Today the function
-  returns `Result<string, string>` and storage.write_file takes a bare
+  returns `Result<string, string>` and storage.writeFile takes a bare
   `string` - nothing stops a caller from feeding the original
   unsanitized `req.path` in. A kind would refuse.
 - `authenticated` on a `Request` after an auth-middleware Handler has

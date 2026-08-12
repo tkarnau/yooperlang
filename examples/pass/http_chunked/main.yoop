@@ -77,16 +77,16 @@ const REPLY_BOTH: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nCon
 // care what was asked for; it only has to consume the request so the client's
 // write completes.
 async drainRequest(ref s: TcpStream): void {
-    disposable buf: Vec<uint8> = vec.vec_new(1024);
-    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(1024), 1024);
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    disposable buf: Vec<uint8> = vec.vecNew(1024);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(1024), 1024);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     while (true) {
         switch (await Readable.read(ref s, ref window)) {
             case Result.Ok { value: n }: {
                 if (n <= 0) { return; }
-                vec.vec_extend_from(ref buf, intr.array_slice(window, 0, usize(n)));
-                let view: uint8[] = vec.vec_as_array(ref buf);
-                if (bytes.bytes_index_of_seq(view, ['\r', '\n', '\r', '\n']) != view.len) {
+                vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, usize(n)));
+                let view: uint8[] = vec.vecAsArray(ref buf);
+                if (bytes.bytesIndexOfSeq(view, ['\r', '\n', '\r', '\n']) != view.len) {
                     return;
                 }
             }
@@ -96,7 +96,7 @@ async drainRequest(ref s: TcpStream): void {
 }
 
 async writeStr(ref s: TcpStream, text: string): void {
-    let out: uint8[] = intr.string_as_bytes(text);
+    let out: uint8[] = intr.stringAsBytes(text);
     switch (await Writable.write(ref s, ref out)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: _e }: { }
@@ -105,7 +105,7 @@ async writeStr(ref s: TcpStream, text: string): void {
 
 // Serve one connection with a canned reply written in ONE write.
 //
-// `tcpAcceptAsync`, not `tcp_accept`: the blocking accept HOLDS A WORKER while
+// `tcpAcceptAsync`, not `tcpAccept`: the blocking accept HOLDS A WORKER while
 // it waits, and this fixture runs three tasks against a pool that may have
 // fewer threads than that. With the blocking form the raw peer and the real
 // server sit on two workers doing nothing and the client never gets one - the
@@ -146,12 +146,12 @@ async serveMany(ref l: tcp.TcpListener, count: int32): void {
 }
 
 task serverTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`server bind err: ${lr.error}\n`);
         return 1;
     }
-    boundPort = lr.listener.bound_port;
+    boundPort = lr.listener.boundPort;
 
     await serveCanned(ref lr.listener, REPLY_SIMPLE);
     await serveCanned(ref lr.listener, REPLY_EXTRAS);
@@ -171,12 +171,12 @@ type EchoHandler implements Handler {
 }
 
 task httpServerTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`http server bind err: ${lr.error}\n`);
         return 1;
     }
-    serverPort = lr.listener.bound_port;
+    serverPort = lr.listener.boundPort;
     let h: EchoHandler = { };
     let d: Dispatcher = Dispatcher.from(ref h);
     switch (await http.serveDefault(ref lr.listener, ref d, 1)) {
@@ -190,7 +190,7 @@ task httpServerTask(): int32 {
 // The head and the body go out in separate writes so the server has to resume
 // a partially-arrived body rather than seeing the whole thing at once.
 async postChunked(): void {
-    disposable cr: tcp.ConnectResult = tcp.tcp_connect("127.0.0.1", serverPort);
+    disposable cr: tcp.ConnectResult = tcp.tcpConnect("127.0.0.1", serverPort);
     if (cr.error.len > 0) {
         printf(`server-side connect err: ${cr.error}\n`);
         return;
@@ -199,9 +199,9 @@ async postChunked(): void {
     let _s: int32 = yoop_sleep_ms(5);
     await writeStr(ref cr.stream, CHUNKED_POST_BODY);
 
-    disposable buf: Vec<uint8> = vec.vec_new(1024);
-    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(1024), 1024);
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    disposable buf: Vec<uint8> = vec.vecNew(1024);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(1024), 1024);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     // A `break` inside a switch ARM targets the switch's end, not the loop's
     // (CLAUDE.md records this under alwaysDiverges/hasEscapingBreak), so the
     // exit condition rides a flag. Written with `break` this loop spins
@@ -213,14 +213,14 @@ async postChunked(): void {
                 if (n <= 0) {
                     reading = false;
                 } else {
-                    vec.vec_extend_from(ref buf, intr.array_slice(window, 0, usize(n)));
+                    vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, usize(n)));
                 }
             }
             case Result.Err { error: _e }: { reading = false; }
         }
     }
-    let text: string = intr.string_from_bytes_unchecked(vec.vec_as_array(ref buf));
-    let at: usize = str.string_index_of(text, "got:");
+    let text: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+    let at: usize = str.stringIndexOf(text, "got:");
     if (at < text.len) {
         printf(`request ok  "${str.sliceFrom(text, at)}"\n`);
     } else {

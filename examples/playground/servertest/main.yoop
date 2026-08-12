@@ -57,7 +57,7 @@ async run(): Result<int32, HttpError> {
   // host, port, backlog
   // backlog is the maximum pending-connection queue length
   // backlog is passed directly to C function -> "listen" call in sys/socket.h
-  let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128) {
+  let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 18080, 128) {
     // there is no try/catch in this language.
     // explicitly inspect the `error` field on the disposable result.
     if (lr.error.len > 0) {

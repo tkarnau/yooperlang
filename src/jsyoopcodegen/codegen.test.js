@@ -85,10 +85,10 @@ describe("compileSource: smoke", () => {
     //
     // We exercise two lowering paths:
     //  - printf(`...`)   - fuses all parts into one format-string global
-    //  - return `...`    - calls string_concat_all over per-part globals
+    //  - return `...`    - calls stringConcatAll over per-part globals
     // The compileSource harness is single-module and doesn't autoload
     // std/core/format.yoop, so we can't exercise the `return \`...\``
-    // path here (it lowers to string_concat_all). The printf lowering
+    // path here (it lowers to stringConcatAll). The printf lowering
     // shares the same `encodeStringBytes` -> `emitRawStringGlobal`
     // path for STRING_PARTs, so this is a sufficient regression for
     // the underlying bug. End-to-end coverage of the return path

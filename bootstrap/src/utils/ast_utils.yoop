@@ -27,11 +27,11 @@ export function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocatio
 // and real nodes begin at index 1. `root` is set by the parser once the PROGRAM
 // node is pushed.
 export function emptyArena(): AST propagates<disposable> {
-  let nodes: Vec<ASTNode> = vec.vec_new(64);
+  let nodes: Vec<ASTNode> = vec.vecNew(64);
   const sentinelLoc: SourceLocation = { pos: 0, line: 0, column: 0, length: 0 };
-  vec.vec_push(ref nodes, createASTNode(ASTNodeKind.PROGRAM, sentinelLoc));
-  let childIds: Vec<NodeId> = vec.vec_new(64);
-  let strings: Vec<string> = vec.vec_new(16);
+  vec.vecPush(ref nodes, createASTNode(ASTNodeKind.PROGRAM, sentinelLoc));
+  let childIds: Vec<NodeId> = vec.vecNew(64);
+  let strings: Vec<string> = vec.vecNew(16);
   return {
     nodes: nodes,
     childIds: childIds,
@@ -41,5 +41,5 @@ export function emptyArena(): AST propagates<disposable> {
 }
 
 export function childAt(ref ast: AST, node: ASTNode, i: usize): NodeId {
-  return vec.vec_get(ref ast.childIds, node.childStart + i);
+  return vec.vecGet(ref ast.childIds, node.childStart + i);
 }

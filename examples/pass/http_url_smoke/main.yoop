@@ -43,10 +43,10 @@ function run(): Result<int32, HttpError> {
     let _a: int32 = showTarget("/todos/7?done=true&note=a%20b+c&flag#frag")?;
     let _b: int32 = showTarget("/todos")?;
 
-    disposable segs: Vec<string> = vec.vec_new(4);
+    disposable segs: Vec<string> = vec.vecNew(4);
     let count: usize = url.pathSegments("/a/b%2Dc/", ref segs)?;
     printf(`segments=${count}`);
-    for s in vec.vec_as_array(ref segs) {
+    for s in vec.vecAsArray(ref segs) {
         printf(` [${s}]`);
     }
     printf("\n");

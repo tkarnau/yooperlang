@@ -63,7 +63,7 @@ function main(): int32 {
 
     // Both readers are parked in the multiplexer now, with no worker
     // thread tied up by either of them.
-    conc.sleep_ms(120);
+    conc.sleepMs(120);
     printf("both parked\n");
 
     let msg: uint8[] = [88];

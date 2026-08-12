@@ -16,10 +16,10 @@ export function consumeKindPrefixWithArgs(ref ps: ParserState): Result<NodeId, P
   if (sl.peek(ref ps).tag == TokenTags.LPAREN) {
     sl.advance(ref ps);
     let peekTag = sl.peek(ref ps).tag;
-    disposable argNodeIds: Vec<NodeId> = vec.vec_new(4);
+    disposable argNodeIds: Vec<NodeId> = vec.vecNew(4);
     while (peekTag != TokenTags.RPAREN && peekTag != TokenTags.EOF) {
       // push into "args" nodes as a node list
-      // ... todo vec.vec_push(ref argNodeIds, sl.pushNode(ref ps, tp));
+      // ... todo vec.vecPush(ref argNodeIds, sl.pushNode(ref ps, tp));
       if (peekTag == TokenTags.COMMA) {
         sl.advance(ref ps);
         peekTag = sl.peek(ref ps).tag;

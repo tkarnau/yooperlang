@@ -13,11 +13,11 @@ import { Disposable, disposable } from "../core/kinds.yoop";
 import {
     Map,
     KeyOps,
-    map_new,
-    map_insert,
-    map_contains_key,
-    map_remove,
-    map_len,
+    mapNew,
+    mapInsert,
+    mapContainsKey,
+    mapRemove,
+    mapLen,
 } from "./map.yoop";
 
 export type Set<K> implements Disposable propagates<disposable> {
@@ -27,23 +27,23 @@ export type Set<K> implements Disposable propagates<disposable> {
     }
 }
 
-export function set_new<K>(initial_cap: usize, ops: KeyOps<K>): Set<K> propagates<disposable> {
-    return { inner: map_new(initial_cap, ops) };
+export function setNew<K>(initial_cap: usize, ops: KeyOps<K>): Set<K> propagates<disposable> {
+    return { inner: mapNew(initial_cap, ops) };
 }
 
 // Insert `k`. Returns true if `k` was already present.
-export function set_insert<K>(ref s: Set<K>, k: K): bool {
-    return map_insert(ref s.inner, k, true);
+export function setInsert<K>(ref s: Set<K>, k: K): bool {
+    return mapInsert(ref s.inner, k, true);
 }
 
-export function set_contains<K>(ref s: Set<K>, k: K): bool {
-    return map_contains_key(ref s.inner, k);
+export function setContains<K>(ref s: Set<K>, k: K): bool {
+    return mapContainsKey(ref s.inner, k);
 }
 
-export function set_remove<K>(ref s: Set<K>, k: K): bool {
-    return map_remove(ref s.inner, k);
+export function setRemove<K>(ref s: Set<K>, k: K): bool {
+    return mapRemove(ref s.inner, k);
 }
 
-export function set_len<K>(ref s: Set<K>): usize {
-    return map_len(ref s.inner);
+export function setLen<K>(ref s: Set<K>): usize {
+    return mapLen(ref s.inner);
 }

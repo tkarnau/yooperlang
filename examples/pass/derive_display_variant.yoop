@@ -12,7 +12,7 @@ import { disposable } from "std/core/kinds.yoop";
 type Center implements Display {
   x: int32,
   y: int32,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     return `<${self.x},${self.y}>`;
   }
 }
@@ -35,7 +35,7 @@ type Envelope propagates<disposable> {
 
 // A derived variant satisfies a Display bound like any struct does.
 function describe<T implements Display>(ref x: T): string {
-  return Display.to_string(ref x);
+  return Display.toString(ref x);
 }
 
 function main(): int {
@@ -48,9 +48,9 @@ function main(): int {
   const bytes: Shape = Shape.Bytes { xs: [1, 2, 3] };
   printf(`${bytes}\n`);
 
-  let nums: Vec<int32> = vec.vec_new(2);
-  vec.vec_push(ref nums, 7);
-  vec.vec_push(ref nums, 8);
+  let nums: Vec<int32> = vec.vecNew(2);
+  vec.vecPush(ref nums, 7);
+  vec.vecPush(ref nums, 8);
   const many: Shape = Shape.Many { v: nums, tag: 9 };
   printf(`${many}\n`);
 

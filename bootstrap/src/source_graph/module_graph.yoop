@@ -48,12 +48,12 @@ variant LoadModuleResult {
 // moment imports parse, they get a clear refusal here instead of silently
 // vanishing from a graph the driver cannot yet build.
 function countLeadingImports(ref ast: AST): usize {
-  const program = vec.vec_get(ref ast.nodes, ast.root);
+  const program = vec.vecGet(ref ast.nodes, ast.root);
   let count: usize = 0;
   let i: usize = 0;
   while (i < program.childCount) {
-    const childId = vec.vec_get(ref ast.childIds, program.childStart + i);
-    const child = vec.vec_get(ref ast.nodes, childId);
+    const childId = vec.vecGet(ref ast.childIds, program.childStart + i);
+    const child = vec.vecGet(ref ast.nodes, childId);
     if (child.kind != ASTNodeKind.IMPORT_DECL) {
       break; // imports-first: the first non-import ends the run
     }
@@ -69,9 +69,9 @@ function loadModule(absPath: string): LoadModuleResult {
     return LoadModuleResult.Err { error: `entry file not found: ${absPath}` };
   }
 
-  // Read the source bytes. read_file_into returns "" on success, else an error.
-  const srcBuf: Vec<uint8> = vec.vec_new(4096);
-  const readErr = fs.read_file_into(ref srcBuf, absPath);
+  // Read the source bytes. readFileInto returns "" on success, else an error.
+  const srcBuf: Vec<uint8> = vec.vecNew(4096);
+  const readErr = fs.readFileInto(ref srcBuf, absPath);
   if (readErr.len > 0) {
     return LoadModuleResult.Err { error: `error reading ${absPath}: ${readErr}` };
   }
@@ -79,7 +79,7 @@ function loadModule(absPath: string): LoadModuleResult {
   // Parse into an AST arena. parse borrows the byte array for the duration of
   // the call; srcBuf outlives it and is moved into Module.src below (the AST's
   // spans are byte offsets into it, so the module keeps the source around).
-  const parseResult = parse(vec.vec_as_array(ref srcBuf));
+  const parseResult = parse(vec.vecAsArray(ref srcBuf));
   let ast: AST;
   switch (parseResult) {
     case Result.Err { error: e }: {
@@ -101,7 +101,7 @@ function loadModule(absPath: string): LoadModuleResult {
     absPath: absPath,
     src: srcBuf,
     ast: ast,
-    imports: vec.vec_new(0),
+    imports: vec.vecNew(0),
   };
   return LoadModuleResult.Ok { value: mod };
 }
@@ -118,11 +118,11 @@ export function loadModuleGraph(entryPath: string): LoadGraphResult {
     }
   }
 
-  const modules: Vec<Module> = vec.vec_new(1);
-  vec.vec_push(ref modules, entryModule);
+  const modules: Vec<Module> = vec.vecNew(1);
+  vec.vecPush(ref modules, entryModule);
 
   // No std autoloads wired yet; an empty map keeps the ModuleGraph shape whole.
-  const autoLoads: Map<string, string> = map.map_new(0, map.string_key_ops());
+  const autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
 
   const graph: ModuleGraph = {
     modules: modules,
@@ -146,15 +146,15 @@ export function resolveImportPath(
     return Result.Err { error: `import path "${sourcePath}" must end in .yoop` };
   }
 
-  const isStd = str.string_starts_with(sourcePath, "std/");
+  const isStd = str.stringStartsWith(sourcePath, "std/");
   let joinedPath: string;
   if (isStd) {
     const rest = str.sliceFrom(sourcePath, 4); // drop "std/", root at stdRoot
-    joinedPath = fs.path_join([stdRoot, rest]);
+    joinedPath = fs.pathJoin([stdRoot, rest]);
   } else {
-    const isRel = str.string_starts_with(sourcePath, "./")
-      || str.string_starts_with(sourcePath, "../");
-    const isAbs = str.string_starts_with(sourcePath, "/");
+    const isRel = str.stringStartsWith(sourcePath, "./")
+      || str.stringStartsWith(sourcePath, "../");
+    const isAbs = str.stringStartsWith(sourcePath, "/");
     if (!isRel && !isAbs) {
       return Result.Err {
         error: `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`
@@ -164,7 +164,7 @@ export function resolveImportPath(
       joinedPath = sourcePath;
     } else {
       const baseDir = fs.dirName(importerAbsPath);
-      joinedPath = fs.path_join([baseDir, sourcePath]);
+      joinedPath = fs.pathJoin([baseDir, sourcePath]);
     }
   }
 

@@ -42,7 +42,7 @@ extern "C" from "yoop_runtime" {
 const HOST: string = "127.0.0.1";
 
 function portArg(): int32 {
-    switch (num.parseBytesToInt32(intr.string_as_bytes(env.argAt(1)), 10)) {
+    switch (num.parseBytesToInt32(intr.stringAsBytes(env.argAt(1)), 10)) {
         case Result.Ok { value: n }: { return n; }
         case Result.Err { error: _e }: { return 0; }
     }
@@ -51,16 +51,16 @@ function portArg(): int32 {
 // Write a request and read the whole reply, so the fixture exercises the data
 // path and not just the handshake.
 async roundTrip(ref s: TlsStream): string {
-    let req: uint8[] = intr.string_as_bytes(
+    let req: uint8[] = intr.stringAsBytes(
         `GET /hi HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
     switch (await Writable.write(ref s, ref req)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: e }: { return `write: ${e}`; }
     }
 
-    disposable acc: Vec<uint8> = vec.vec_new(4096);
-    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(2048), 2048);
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    disposable acc: Vec<uint8> = vec.vecNew(4096);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(2048), 2048);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     let reading: bool = true;
     while (reading) {
         switch (await Readable.read(ref s, ref window)) {
@@ -68,15 +68,15 @@ async roundTrip(ref s: TlsStream): string {
                 if (n <= 0) {
                     reading = false;
                 } else {
-                    vec.vec_extend_from(ref acc, intr.array_slice(window, 0, usize(n)));
+                    vec.vecExtendFrom(ref acc, intr.arraySlice(window, 0, usize(n)));
                 }
             }
             case Result.Err { error: e }: { return `read: ${e}`; }
         }
     }
-    let text: string = intr.string_from_bytes_unchecked(vec.vec_as_array(ref acc));
+    let text: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref acc));
     let at: usize = 0;
-    let b: uint8[] = intr.string_as_bytes(text);
+    let b: uint8[] = intr.stringAsBytes(text);
     for (let i: usize = 0; i + 3 < b.len; i += 1) {
         if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') {
             at = i + 4;
@@ -84,7 +84,7 @@ async roundTrip(ref s: TlsStream): string {
         }
     }
     if (at == 0) { return "no body"; }
-    return intr.string_from_bytes_unchecked(intr.array_slice(b, at, b.len));
+    return intr.stringFromBytesUnchecked(intr.arraySlice(b, at, b.len));
 }
 
 async attempt(label: string, port: int32, host: string, ref cfg: TlsConfig, doRequest: bool): void {

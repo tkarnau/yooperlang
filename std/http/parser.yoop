@@ -72,8 +72,8 @@ function requireHeadEnd(buf: uint8[], what: string): Result<usize, HttpError> {
 
 // End offset of the first line (the request line or the status line).
 function firstLineEnd(buf: uint8[], headEnd: usize, what: string): Result<usize, HttpError> {
-    let head: uint8[] = bytes.bytes_slice(buf, 0, headEnd);
-    let cr: usize = bytes.bytes_index_of(head, '\r');
+    let head: uint8[] = bytes.bytesSlice(buf, 0, headEnd);
+    let cr: usize = bytes.bytesIndexOf(head, '\r');
     if (cr == head.len) {
         return Result.Err { error: errBadRequest(`${what} line is not CRLF terminated`) };
     }
@@ -84,11 +84,11 @@ function firstLineEnd(buf: uint8[], headEnd: usize, what: string): Result<usize,
 // framing back, which is compatible for the connection-close style the
 // server uses.
 function checkVersion(versionBytes: uint8[]): Result<string, HttpError> {
-    let v: string = intr.string_from_bytes_unchecked(versionBytes);
-    if (bytes.bytes_eq(versionBytes, intr.string_as_bytes("HTTP/1.1"))) {
+    let v: string = intr.stringFromBytesUnchecked(versionBytes);
+    if (bytes.bytesEq(versionBytes, intr.stringAsBytes("HTTP/1.1"))) {
         return Result.Ok { value: v };
     }
-    if (bytes.bytes_eq(versionBytes, intr.string_as_bytes("HTTP/1.0"))) {
+    if (bytes.bytesEq(versionBytes, intr.stringAsBytes("HTTP/1.0"))) {
         return Result.Ok { value: v };
     }
     return Result.Err { error: httpError(status(505), `unsupported HTTP version "${v}"`) };
@@ -125,34 +125,34 @@ export function parseRequestHead(buf: uint8[]): Result<ParsedRequest, HttpError>
     let lineEnd: usize = firstLineEnd(buf, headEnd, "request")?;
 
     // request-line = method SP request-target SP HTTP-version
-    let line: uint8[] = bytes.bytes_slice(buf, 0, lineEnd);
-    let sp1: usize = bytes.bytes_index_of(line, ' ');
+    let line: uint8[] = bytes.bytesSlice(buf, 0, lineEnd);
+    let sp1: usize = bytes.bytesIndexOf(line, ' ');
     if (sp1 == line.len) {
         return Result.Err { error: errBadRequest("request line has no space after the method") };
     }
-    let afterMethod: uint8[] = bytes.bytes_slice(line, sp1 + 1, line.len);
-    let sp2: usize = bytes.bytes_index_of(afterMethod, ' ');
+    let afterMethod: uint8[] = bytes.bytesSlice(line, sp1 + 1, line.len);
+    let sp2: usize = bytes.bytesIndexOf(afterMethod, ' ');
     if (sp2 == afterMethod.len) {
         return Result.Err { error: errBadRequest("request line has no space after the target") };
     }
 
-    let methodBytes: uint8[] = bytes.bytes_slice(line, 0, sp1);
+    let methodBytes: uint8[] = bytes.bytesSlice(line, 0, sp1);
     let method: HttpMethod = HttpMethod.Get;
     switch (methodFromBytes(methodBytes)) {
         case Option.Some { value: m }: { method = m; }
         case Option.None: {
-            let token: string = intr.string_from_bytes_unchecked(methodBytes);
+            let token: string = intr.stringFromBytesUnchecked(methodBytes);
             return Result.Err { error: httpError(notImplemented(), `unsupported method "${token}"`) };
         }
     }
 
-    let targetBytes: uint8[] = bytes.bytes_slice(afterMethod, 0, sp2);
+    let targetBytes: uint8[] = bytes.bytesSlice(afterMethod, 0, sp2);
     if (targetBytes.len == 0) {
         return Result.Err { error: errBadRequest("request line has an empty target") };
     }
-    let version: string = checkVersion(bytes.bytes_slice(afterMethod, sp2 + 1, afterMethod.len))?;
+    let version: string = checkVersion(bytes.bytesSlice(afterMethod, sp2 + 1, afterMethod.len))?;
 
-    let req: Request = requestNew(method, intr.string_from_bytes_unchecked(targetBytes));
+    let req: Request = requestNew(method, intr.stringFromBytesUnchecked(targetBytes));
     req.version = version;
     switch (fillRequest(buf, lineEnd + 2, headEnd, ref req)) {
         case Result.Ok { value: info }: {
@@ -178,18 +178,18 @@ export function parseResponseHead(buf: uint8[]): Result<ParsedResponse, HttpErro
     let lineEnd: usize = firstLineEnd(buf, headEnd, "status")?;
 
     // status-line = HTTP-version SP status-code SP [ reason-phrase ]
-    let line: uint8[] = bytes.bytes_slice(buf, 0, lineEnd);
-    let sp1: usize = bytes.bytes_index_of(line, ' ');
+    let line: uint8[] = bytes.bytesSlice(buf, 0, lineEnd);
+    let sp1: usize = bytes.bytesIndexOf(line, ' ');
     if (sp1 == line.len) {
         return Result.Err { error: errBadRequest("status line has no space after the version") };
     }
-    let _version: string = checkVersion(bytes.bytes_slice(line, 0, sp1))?;
+    let _version: string = checkVersion(bytes.bytesSlice(line, 0, sp1))?;
 
-    let afterVersion: uint8[] = bytes.bytes_slice(line, sp1 + 1, line.len);
-    let sp2: usize = bytes.bytes_index_of(afterVersion, ' ');
-    let codeBytes: uint8[] = bytes.bytes_slice(afterVersion, 0, sp2);
+    let afterVersion: uint8[] = bytes.bytesSlice(line, sp1 + 1, line.len);
+    let sp2: usize = bytes.bytesIndexOf(afterVersion, ' ');
+    let codeBytes: uint8[] = bytes.bytesSlice(afterVersion, 0, sp2);
     let code: int32 = 0;
-    switch (bytes.bytes_parse_int(codeBytes)) {
+    switch (bytes.bytesParseInt(codeBytes)) {
         case Result.Ok { value: bp }: {
             if (bp.consumed != codeBytes.len) {
                 return Result.Err { error: errBadRequest("status code has trailing characters") };

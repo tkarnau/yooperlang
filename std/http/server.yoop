@@ -52,7 +52,7 @@ module http;
 //
 // Strings built while parsing a request are never freed, so a long-lived
 // server's memory grows with the distinct header values it has seen. Note
-// what this is NOT: `string_from_bytes_unchecked` mallocs and copies (see
+// what this is NOT: `stringFromBytesUnchecked` mallocs and copies (see
 // its codegen, and the `_from_` naming convention in std/core/strings.yoop),
 // and it returns `owned string`, so `strings.strFree` accepts these and the
 // storage is releasable. What is missing is the bookkeeping - Request and
@@ -158,19 +158,19 @@ async readRequestHead(
 ): Result<Option<usize>, HttpError> {
     // Bytes left over from the previous request on this connection may
     // already contain a whole head.
-    let pre: usize = findHeadEnd(vec.vec_as_array(ref buf));
+    let pre: usize = findHeadEnd(vec.vecAsArray(ref buf));
     if (pre != buf.len) { return Result.Ok { value: Option.Some { value: pre } }; }
 
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     while (true) {
         let n: usize = await readRequestBytes(ref r, ref window)? "reading the request head";
         if (n == 0) {
             if (buf.len == 0) { return Result.Ok { value: Option.None }; }
             return Result.Err { error: errBadRequest("connection closed mid-head") };
         }
-        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
 
-        let at: usize = findHeadEnd(vec.vec_as_array(ref buf));
+        let at: usize = findHeadEnd(vec.vecAsArray(ref buf));
         if (at != buf.len) { return Result.Ok { value: Option.Some { value: at } }; }
         if (buf.len > cfg.maxHeadBytes) {
             return Result.Err {
@@ -201,13 +201,13 @@ async readBody(
     bodyStart: usize,
     need: usize,
 ): Result<usize, HttpError> {
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     while (buf.len < bodyStart + need) {
         let n: usize = await readRequestBytes(ref r, ref window)? "reading the request body";
         if (n == 0) {
             return Result.Err { error: errBadRequest("connection closed mid-body") };
         }
-        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
     }
     return Result.Ok { value: need };
 }
@@ -228,20 +228,20 @@ async readChunkedBody(
     ref out: Vec<uint8>,
     maxBody: usize,
 ): Result<usize, HttpError> {
-    let window: uint8[] = bytes.bytes_to_array(ref scratch);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
     let reader: ChunkedReader = chunkedReaderNew(bodyStart);
 
     while (true) {
         // Re-take the view every pass: the read below may have grown and
         // therefore MOVED the Vec's buffer.
-        let done: bool = chunkedFeed(vec.vec_as_array(ref buf), ref reader, ref out, maxBody)?;
+        let done: bool = chunkedFeed(vec.vecAsArray(ref buf), ref reader, ref out, maxBody)?;
         if (done) { return Result.Ok { value: reader.end }; }
 
         let n: usize = await readRequestBytes(ref r, ref window)? "reading the chunked request body";
         if (n == 0) {
             return Result.Err { error: errBadRequest("connection closed mid-chunk") };
         }
-        vec.vec_extend_from(ref buf, intr.array_slice(window, 0, n));
+        vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, n));
     }
 }
 
@@ -249,13 +249,13 @@ async readChunkedBody(
 // That tail is the start of the next pipelined request; it is usually empty.
 function compact(ref buf: Vec<uint8>, n: usize): void {
     if (n >= buf.len) {
-        vec.vec_clear(ref buf);
+        vec.vecClear(ref buf);
         return;
     }
-    let view: uint8[] = vec.vec_as_array(ref buf);
-    disposable tail: Bytes = bytes.bytes_from_array(intr.array_slice(view, n, view.len));
-    vec.vec_clear(ref buf);
-    vec.vec_extend_from(ref buf, bytes.bytes_to_array(ref tail));
+    let view: uint8[] = vec.vecAsArray(ref buf);
+    disposable tail: Bytes = bytes.bytesFromArray(intr.arraySlice(view, n, view.len));
+    vec.vecClear(ref buf);
+    vec.vecExtendFrom(ref buf, bytes.bytesToArray(ref tail));
 }
 
 // ----- writing ------------------------------------------------------------
@@ -270,7 +270,7 @@ async writeResponse(
 ): Result<usize, HttpError> {
     let body: uint8[] = responseBodyBytes(ref resp);
 
-    disposable out: Vec<uint8> = vec.vec_new(512 + body.len);
+    disposable out: Vec<uint8> = vec.vecNew(512 + body.len);
     pushStr(ref out, `HTTP/1.1 ${resp.status.code} ${reasonPhrase(resp.status.code)}`);
     pushCrlf(ref out);
 
@@ -294,7 +294,7 @@ async writeResponse(
         pushBytes(ref out, body);
     }
 
-    let view: uint8[] = vec.vec_as_array(ref out);
+    let view: uint8[] = vec.vecAsArray(ref out);
     switch (await Writer.write(ref w, ref view)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
@@ -303,9 +303,9 @@ async writeResponse(
 }
 
 function isFramingHeader(name: string): bool {
-    return str.string_eq_ignore_ascii_case(name, "Content-Length")
-        || str.string_eq_ignore_ascii_case(name, "Connection")
-        || str.string_eq_ignore_ascii_case(name, "Transfer-Encoding");
+    return str.stringEqIgnoreAsciiCase(name, "Content-Length")
+        || str.stringEqIgnoreAsciiCase(name, "Connection")
+        || str.stringEqIgnoreAsciiCase(name, "Transfer-Encoding");
 }
 
 // A header value carrying CR or LF would let a handler inject a second
@@ -336,16 +336,16 @@ async exchange(
     ref resp: Response,
     ref meta: ExchangeMeta,
 ): Result<usize, HttpError> {
-    let disposable pr: ParsedRequest = parseRequestHead(vec.vec_as_array(ref buf))?;
+    let disposable pr: ParsedRequest = parseRequestHead(vec.vecAsArray(ref buf))?;
 
     if (pr.info.chunked) {
         // A chunked body is decoded into `decoded`, which is connection-owned
         // and lives past this call - so the view handed to the handler stays
         // valid for as long as the Content-Length path's view into `buf` does.
-        vec.vec_clear(ref decoded);
+        vec.vecClear(ref decoded);
         let raw: usize = await readChunkedBody(
             ref r, ref buf, ref scratch, pr.bodyStart, ref decoded, cfg.maxBodyBytes)?;
-        pr.request.body = vec.vec_as_array(ref decoded);
+        pr.request.body = vec.vecAsArray(ref decoded);
         // RAW bytes, not decoded: this is where the next pipelined request
         // begins, and the chunk framing was part of the message.
         meta.consumed = raw;
@@ -360,15 +360,15 @@ async exchange(
 
         // The read above may have grown (and moved) the buffer, so the body
         // view has to be taken after it, not before.
-        let view: uint8[] = vec.vec_as_array(ref buf);
-        pr.request.body = intr.array_slice(view, pr.bodyStart, pr.bodyStart + need);
+        let view: uint8[] = vec.vecAsArray(ref buf);
+        pr.request.body = intr.arraySlice(view, pr.bodyStart, pr.bodyStart + need);
         meta.consumed = pr.bodyStart + need;
     }
 
     meta.headOnly = methodEq(pr.request.method, HttpMethod.Head);
     // HTTP/1.0 defaults to close; 1.1 defaults to keep-alive.
     meta.clientWantsClose = pr.info.connectionClose
-        || !str.string_eq(pr.request.version, "HTTP/1.1");
+        || !str.stringEq(pr.request.version, "HTTP/1.1");
     meta.line = `${methodLabel(pr.request.method)} ${pr.request.target}`;
 
     switch (await Dispatcher.handle(ref d, ref pr.request, ref resp)) {
@@ -445,14 +445,14 @@ export async serveConnectionOn(
     // overshoot it just because keep-alive would have allowed more.
     if (budget > 0 && budget < limit) { limit = budget; }
 
-    disposable buf: Vec<uint8> = vec.vec_new(cfg.readChunk);
-    disposable scratch: Bytes = bytes.bytes_from_raw(intr.heap_alloc(cfg.readChunk), cfg.readChunk);
+    disposable buf: Vec<uint8> = vec.vecNew(cfg.readChunk);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(cfg.readChunk), cfg.readChunk);
     // Decoded chunked bodies land here. Connection-owned rather than
     // per-request so the handler's view outlives `exchange`, and started small
     // rather than at readChunk because a connection that never sends a chunked
     // body should not pay for one - it grows on first use and is then reused
     // for the rest of the connection.
-    disposable decoded: Vec<uint8> = vec.vec_new(64);
+    disposable decoded: Vec<uint8> = vec.vecNew(64);
 
     while (served < limit) {
         // Head first: a clean close here is how a keep-alive connection ends.
@@ -526,7 +526,7 @@ async replyWithError(ref w: Writer, ref e: HttpError, cfg: ServerConfig): bool {
 
 // Accept and serve until `n` requests have been answered. `n <= 0` runs
 // forever. The listener stays owned by the caller (the usual shape is a
-// `disposable lr: ListenResult = tcp.tcp_listen(...)`).
+// `disposable lr: ListenResult = tcp.tcpListen(...)`).
 //
 // Only a listener failure ends this loop. Anything a connection does to
 // itself - malformed bytes, an abrupt close, a handler error - costs that
@@ -665,7 +665,7 @@ task connectionTask(
 // error: the client is being refused either way, and a server at capacity has
 // nothing useful to do about a refusal that did not land.
 async refuse(ref w: Writer): void {
-    let out: uint8[] = intr.string_as_bytes(BUSY_RESPONSE);
+    let out: uint8[] = intr.stringAsBytes(BUSY_RESPONSE);
     switch (await Writer.write(ref w, ref out)) {
         case Result.Ok { value: _n }: { }
         case Result.Err { error: _e }: { }

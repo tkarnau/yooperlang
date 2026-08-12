@@ -3,7 +3,7 @@
 // block, the split target, and the body offset.
 //
 // The buffer is a string literal rather than a table of decimal byte values:
-// `string_as_bytes` is a view, not a copy, so this is the same bytes the
+// `stringAsBytes` is a view, not a copy, so this is the same bytes the
 // socket would have delivered.
 
 import { disposable, Disposable } from "../../../std/core/kinds.yoop";
@@ -19,7 +19,7 @@ extern "C" from "stdio.h" {
 const REQUEST: string = "GET /hello?name=yoop HTTP/1.1\r\nHost: localhost\r\nContent-Length: 0\r\n\r\n";
 
 function run(): Result<int32, HttpError> {
-    let disposable p: ParsedRequest = parser.parseRequestHead(intr.string_as_bytes(REQUEST))?;
+    let disposable p: ParsedRequest = parser.parseRequestHead(intr.stringAsBytes(REQUEST))?;
     printf(`method=${types.methodLabel(p.request.method)} path=${p.request.path} version=${p.request.version} cl=${parser.expectedBodyLen(ref p)} host=${types.headerOr(ref p.request, "host", "?")}\n`);
     printf(`query name=${types.queryOr(ref p.request, "name", "?")}\n`);
     return Result.Ok { value: 0 };
@@ -29,7 +29,7 @@ function run(): Result<int32, HttpError> {
 // too-permissive parser stops looking, so this one puts the bad field there
 // on purpose.
 function rejects(what: string, raw: string): void {
-    switch (parser.parseRequestHead(intr.string_as_bytes(raw))) {
+    switch (parser.parseRequestHead(intr.stringAsBytes(raw))) {
         case Result.Ok { value: p }: {
             printf(`${what}: UNEXPECTEDLY ACCEPTED\n`);
             Disposable.dispose(ref p);
@@ -40,7 +40,7 @@ function rejects(what: string, raw: string): void {
 
 // The mirror of `rejects`, for a head that must get THROUGH the parser.
 function accepts(what: string, raw: string): void {
-    switch (parser.parseRequestHead(intr.string_as_bytes(raw))) {
+    switch (parser.parseRequestHead(intr.stringAsBytes(raw))) {
         case Result.Ok { value: p }: {
             disposable parsed: ParsedRequest = p;
             printf(`${what}: accepted chunked=${parsed.info.chunked}\n`);

@@ -79,12 +79,12 @@ type SlowHandler implements Handler {
 let state: ServeState = http.serveStateNew(MAX_CONCURRENT);
 
 task serverTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 64);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 64);
     if (lr.error.len > 0) {
         printf(`bind err: ${lr.error}\n`);
         return 1;
     }
-    serverPort = lr.listener.bound_port;
+    serverPort = lr.listener.boundPort;
     let h: SlowHandler = { };
     let d: Dispatcher = Dispatcher.from(ref h);
 

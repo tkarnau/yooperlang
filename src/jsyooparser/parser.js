@@ -2267,7 +2267,7 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
     node.isAsync = isAsync;
     node.name = parseIdentAsName();
-    // Optional type params, e.g. `function heap_alloc<T>(n: usize): T[];`.
+    // Optional type params, e.g. `function heapAlloc<T>(n: usize): T[];`.
     // Only useful inside `extern "intrinsic"` blocks where the canonical
     // builtin decl carries the real (generic) signature - the annotations
     // here are documentation. The typechecker skips resolution for canonical

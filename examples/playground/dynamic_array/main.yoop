@@ -62,7 +62,7 @@ type DynArray<T> implements Disposable propagates<disposable> {
         }
         self.isDisposed = true;
         printf(`(dispose: freeing DynArray, len=${self.len} cap=${self.cap})\n`);
-        intr.heap_free(self.data);
+        intr.heapFree(self.data);
         return { err: "" };
     }
 }
@@ -72,7 +72,7 @@ type DynArray<T> implements Disposable propagates<disposable> {
 // and is simply moved out via return. Adding `disposable` here would opt into
 // local auto-cleanup, which would contradict returning it.
 function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable> {
-    let newArr: DynArray<T> = { data: intr.heap_alloc(initial_cap), len: 0, cap: initial_cap, isDisposed: false };
+    let newArr: DynArray<T> = { data: intr.heapAlloc(initial_cap), len: 0, cap: initial_cap, isDisposed: false };
 
     return newArr;
 }
@@ -80,14 +80,14 @@ function new_dynarray<T>(initial_cap: usize): DynArray<T> propagates<disposable>
 function push<T>(a: ref DynArray<T>, value: T): void {
     if (a.len >= a.cap) {
         let new_cap: usize = a.cap * 2;
-        let new_data: T[] = intr.heap_alloc(new_cap);
+        let new_data: T[] = intr.heapAlloc(new_cap);
         let i: usize = 0;
         while (i < a.len) {
             new_data[i] = a.data[i];
             i = i + 1;
         }
         printf(`growing capacity of array to ${new_cap}\n`);
-        intr.heap_free(a.data);
+        intr.heapFree(a.data);
         a.data = new_data;
         a.cap = new_cap;
     }

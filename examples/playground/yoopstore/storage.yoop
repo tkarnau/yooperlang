@@ -13,26 +13,26 @@ import * as fs from "std/fs.yoop";
 // this with an unvalidated `rel` is unsafe; see safepath.sanitize.
 export function join_path(root: string, rel: string): string {
     let parts: string[] = [root, rel];
-    return fs.path_join(parts);
+    return fs.pathJoin(parts);
 }
 
-export function write_file(full_path: string, body: uint8[]): string {
-    let err: string = fs.mkdir_p(full_path);
+export function writeFile(full_path: string, body: uint8[]): string {
+    let err: string = fs.mkdirP(full_path);
     if (err.len > 0) { return err; }
-    return fs.write_file(full_path, body);
+    return fs.writeFile(full_path, body);
 }
 
-export function read_file_into(ref out: Vec<uint8>, full_path: string): string {
-    return fs.read_file_into(ref out, full_path);
+export function readFileInto(ref out: Vec<uint8>, full_path: string): string {
+    return fs.readFileInto(ref out, full_path);
 }
 
-export function delete_file(full_path: string): string {
-    return fs.delete_file(full_path);
+export function deleteFile(full_path: string): string {
+    return fs.deleteFile(full_path);
 }
 
 // Size in bytes of the file at `full_path`, or -1 if it doesn't exist or
 // isn't a regular file. Used by the HEAD handler to fill Content-Length
 // without reading the body.
-export function file_size(full_path: string): int64 {
-    return fs.file_size(full_path);
+export function fileSize(full_path: string): int64 {
+    return fs.fileSize(full_path);
 }

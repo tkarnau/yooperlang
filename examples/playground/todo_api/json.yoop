@@ -16,8 +16,8 @@ import * as intr from "std/core/intrinsics.yoop";
 // as the characters they produce; everything else below 0x20 goes out as
 // \u00XX, which is the only legal way to carry a control byte in JSON.
 export function pushString(ref out: Vec<uint8>, s: string): void {
-    vec.vec_push(ref out, '"');
-    for c in intr.string_as_bytes(s) {
+    vec.vecPush(ref out, '"');
+    for c in intr.stringAsBytes(s) {
         if (c == '"') {
             pushRaw(ref out, "\\\"");
         } else if (c == '\\') {
@@ -30,21 +30,21 @@ export function pushString(ref out: Vec<uint8>, s: string): void {
             pushRaw(ref out, "\\t");
         } else if (c < 32) {
             pushRaw(ref out, "\\u00");
-            vec.vec_push(ref out, hexDigit(c / 16));
-            vec.vec_push(ref out, hexDigit(c % 16));
+            vec.vecPush(ref out, hexDigit(c / 16));
+            vec.vecPush(ref out, hexDigit(c % 16));
         } else {
             // Bytes at or above 0x20 pass through, which keeps multi-byte
             // UTF-8 intact: JSON strings are UTF-8 and need no escaping above
             // the ASCII range.
-            vec.vec_push(ref out, c);
+            vec.vecPush(ref out, c);
         }
     }
-    vec.vec_push(ref out, '"');
+    vec.vecPush(ref out, '"');
 }
 
 // Literal text, no escaping - punctuation, numbers, `true`/`false`.
 export function pushRaw(ref out: Vec<uint8>, s: string): void {
-    vec.vec_extend_from(ref out, intr.string_as_bytes(s));
+    vec.vecExtendFrom(ref out, intr.stringAsBytes(s));
 }
 
 export function pushBool(ref out: Vec<uint8>, b: bool): void {
@@ -55,7 +55,7 @@ export function pushBool(ref out: Vec<uint8>, b: bool): void {
 // sequence of field writes.
 export function pushField(ref out: Vec<uint8>, name: string): void {
     pushString(ref out, name);
-    vec.vec_push(ref out, ':');
+    vec.vecPush(ref out, ':');
 }
 
 function hexDigit(n: uint8): uint8 {
@@ -67,10 +67,10 @@ function hexDigit(n: uint8): uint8 {
 // rather than into a buffer because it is always short and the caller wants
 // to hand it straight to `respondJson`.
 export function errorObject(message: string): string {
-    disposable out: Vec<uint8> = vec.vec_new(64 + message.len);
+    disposable out: Vec<uint8> = vec.vecNew(64 + message.len);
     pushRaw(ref out, "{");
     pushField(ref out, "error");
     pushString(ref out, message);
     pushRaw(ref out, "}\n");
-    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref out));
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref out));
 }

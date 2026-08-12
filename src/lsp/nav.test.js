@@ -554,13 +554,13 @@ describe("nav: directory modules", () => {
         "a.yoop": `module m;
 import * as vec, { Vec } from "std/core/vec.yoop";
 export function capA(): usize {
-    let v: Vec<int32> = vec.vec_new(4);
+    let v: Vec<int32> = vec.vecNew(4);
     return v.cap;
 }
 `,
         "b.yoop": `module m;
 export function capB(): usize {
-    let v: Vec<int32> = vec.vec_new(8);
+    let v: Vec<int32> = vec.vecNew(8);
     return v.cap;
 }
 `,

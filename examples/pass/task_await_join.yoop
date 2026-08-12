@@ -30,7 +30,7 @@ task doubler(n: int32): int32 {
 // Takes a known amount of time, so "the joiner really waited" is observable
 // rather than a scheduling coincidence.
 task afterMs(value: int32, ms: uint64): int32 {
-    conc.sleep_ms(ms);
+    conc.sleepMs(ms);
     return value;
 }
 
@@ -62,7 +62,7 @@ task fanOut(): int32 {
 // reports "already done" and nothing suspends at all.
 task joinFinished(): int32 {
     pooled a = doubler(50);
-    conc.sleep_ms(80);                  // let it finish first
+    conc.sleepMs(80);                  // let it finish first
     return await conc.awaitTask(a);
 }
 

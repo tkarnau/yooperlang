@@ -48,14 +48,14 @@ export async send(
 ): Result<ClientResponse, HttpError> propagates<disposable> {
     let u: Uri = http.parseTarget(ref req)?;
 
-    if (!str.string_eq(u.scheme, "https")) {
+    if (!str.stringEq(u.scheme, "https")) {
         // Anything that is not https goes to the plain client, which does its
         // own connecting. Delegating rather than duplicating keeps one code
         // path for the ordinary case.
         return await http.send(ref c, ref req);
     }
 
-    // `parse_uri` already yields 443 for an https URL with no explicit port.
+    // `parseUri` already yields 443 for an https URL with no explicit port.
     disposable s: TlsStream = await tlsConnectMapped(u.host, u.port, ref cfg)?;
     let r: Reader = Reader.from(ref s);
     let w: Writer = Writer.from(ref s);

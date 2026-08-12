@@ -38,9 +38,9 @@ function main(): int {
       log.info(`module graph load failed: ${e}`);
     }
     case LoadGraphResult.Ok { value: moduleGraph }: {
-      // vec.vec_get: even though modules is an dynamic array (1D vector), you must reference the
+      // vec.vecGet: even though modules is an dynamic array (1D vector), you must reference the
       // Vector module and pass the vector reference pointer and the desired index to get at a pointer to the specific module we want
-      const entryMod = vec.vec_get(ref moduleGraph.modules, moduleGraph.entryIndex);
+      const entryMod = vec.vecGet(ref moduleGraph.modules, moduleGraph.entryIndex);
       log.info(`entry AST dump: ${entryMod.ast}`); // derive(display) on AST gives us free stringify now.
 
       // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
@@ -55,17 +55,17 @@ function main(): int {
 }
 
 function runCompilerAssertions(): void {
-  debug.assert(strings.string_eq(tokenScanList[0].str, "..."), "tokenScanList is not sorted");
+  debug.assert(strings.stringEq(tokenScanList[0].str, "..."), "tokenScanList is not sorted");
   const testSplittingStr = "this_is_a_test";
-  disposable pieces: Vec<string> = vec.vec_new(0);
+  disposable pieces: Vec<string> = vec.vecNew(0);
   const splitResult = strings.split(ref pieces, testSplittingStr, "_", false);
   debug.assert(pieces.len == 4, `split expected 4 elements, found ${pieces.len}: result ${splitResult}, ${pieces.data[0]}`);
-  debug.assert(strings.string_eq(pieces.data[0], "this"), `split failed, expected "this" in slot 1, found ${pieces.data[0]}`);
-  debug.assert(strings.string_eq(pieces.data[1], "is"), `split failed, expected "is" in slot 2, found ${pieces.data[1]}`);
-  debug.assert(strings.string_eq(pieces.data[2], "a"), `split failed, expected "a" in slot 3, found ${pieces.data[2]}`);
-  debug.assert(strings.string_eq(pieces.data[3], "test"), `split failed, expected "test" in slot 4, found ${pieces.data[3]}`);
+  debug.assert(strings.stringEq(pieces.data[0], "this"), `split failed, expected "this" in slot 1, found ${pieces.data[0]}`);
+  debug.assert(strings.stringEq(pieces.data[1], "is"), `split failed, expected "is" in slot 2, found ${pieces.data[1]}`);
+  debug.assert(strings.stringEq(pieces.data[2], "a"), `split failed, expected "a" in slot 3, found ${pieces.data[2]}`);
+  debug.assert(strings.stringEq(pieces.data[3], "test"), `split failed, expected "test" in slot 4, found ${pieces.data[3]}`);
 
   // file stuff
   // const normalizeResult = fs.normalizePath("./bootstrap/../bootstrap/src/main.yoop");
-  // debug.assert(strings.string_eq(normalizeResult, "main.yoop"), `normalizePath failed, exepected "main.yoop", found ${normalizeResult}`);
+  // debug.assert(strings.stringEq(normalizeResult, "main.yoop"), `normalizePath failed, exepected "main.yoop", found ${normalizeResult}`);
 }

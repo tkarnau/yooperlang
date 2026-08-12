@@ -99,7 +99,7 @@ export type DateTime implements Display {
 
     // ISO-8601, which is the only rendering that sorts correctly as text and
     // is unambiguous across locales.
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return iso8601(self);
     }
 }
@@ -156,15 +156,15 @@ export function localNow(): DateTime {
 // ----- rendering ----------------------------------------------------------
 
 // Zero-padded decimal, which is most of what a timestamp is. Uses
-// `strings.padStart` over `format.int_to_string` rather than a hand-rolled
+// `strings.padStart` over `format.intToString` rather than a hand-rolled
 // digit loop - the exact pairing the takeaways found four copies of in a
 // project that had both modules available and never found them (4.1).
 function pad2(v: int32): string {
-    return str.padStart(fmt.int_to_string(int64(v)), 2, "0");
+    return str.padStart(fmt.intToString(int64(v)), 2, "0");
 }
 
 function pad4(v: int32): string {
-    return str.padStart(fmt.int_to_string(int64(v)), 4, "0");
+    return str.padStart(fmt.intToString(int64(v)), 4, "0");
 }
 
 // ISO-8601 / RFC 3339: `2026-08-11T19:04:07Z`, or with a `+HH:MM` / `-HH:MM`
@@ -176,14 +176,14 @@ function pad4(v: int32): string {
 export function iso8601(dt: DateTime): string {
     if (!dt.ok) { return "invalid-time"; }
 
-    let head: string = str.string_concat_all([
+    let head: string = str.stringConcatAll([
         pad4(dt.year), "-", pad2(dt.month), "-", pad2(dt.day),
         "T",
         pad2(dt.hour), ":", pad2(dt.minute), ":", pad2(dt.second),
     ]);
 
     if (dt.utcOffsetMinutes == 0) {
-        return str.string_concat(head, "Z");
+        return str.stringConcat(head, "Z");
     }
 
     let total: int32 = dt.utcOffsetMinutes;
@@ -192,7 +192,7 @@ export function iso8601(dt: DateTime): string {
         sign = "-";
         total = 0 - total;
     }
-    return str.string_concat_all([
+    return str.stringConcatAll([
         head, sign, pad2(total / 60), ":", pad2(total % 60),
     ]);
 }
@@ -200,20 +200,20 @@ export function iso8601(dt: DateTime): string {
 // `2026-08-11`, for a filename or a log directory.
 export function dateOnly(dt: DateTime): string {
     if (!dt.ok) { return "invalid-date"; }
-    return str.string_concat_all([pad4(dt.year), "-", pad2(dt.month), "-", pad2(dt.day)]);
+    return str.stringConcatAll([pad4(dt.year), "-", pad2(dt.month), "-", pad2(dt.day)]);
 }
 
 // `19:04:07`.
 export function timeOnly(dt: DateTime): string {
     if (!dt.ok) { return "invalid-time"; }
-    return str.string_concat_all([pad2(dt.hour), ":", pad2(dt.minute), ":", pad2(dt.second)]);
+    return str.stringConcatAll([pad2(dt.hour), ":", pad2(dt.minute), ":", pad2(dt.second)]);
 }
 
 // A timestamp safe to put in a filename on every platform: no colons (illegal
 // on Windows, awkward everywhere), no timezone suffix. `20260811-190407`.
 export function fileStamp(dt: DateTime): string {
     if (!dt.ok) { return "invalid-time"; }
-    return str.string_concat_all([
+    return str.stringConcatAll([
         pad4(dt.year), pad2(dt.month), pad2(dt.day),
         "-",
         pad2(dt.hour), pad2(dt.minute), pad2(dt.second),

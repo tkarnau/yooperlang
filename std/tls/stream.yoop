@@ -125,7 +125,7 @@ export type TlsStream implements (Disposable, Readable, Writable) propagates<dis
     async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
         let sent: usize = 0;
         while (sent < buf.len) {
-            let slice: uint8[] = intr.array_slice(buf, sent, buf.len);
+            let slice: uint8[] = intr.arraySlice(buf, sent, buf.len);
             let n: int64 = writePlain(ref self.ssl, slice);
             if (n >= 0) {
                 sent = sent + usize(n);
@@ -164,11 +164,11 @@ export type TlsStream implements (Disposable, Readable, Writable) propagates<dis
 // owes the peer a flight AND wants its reply, and a loop that waits for the
 // reply first deadlocks against a peer doing the same thing.
 async flushOut(ref s: TlsStream): string {
-    let window: uint8[] = bytes.bytes_to_array(ref s.outBuf);
+    let window: uint8[] = bytes.bytesToArray(ref s.outBuf);
     while (true) {
         let n: int64 = pull(ref s.ssl, ref window);
         if (n <= 0) { return ""; }
-        let outView: uint8[] = intr.array_slice(window, 0, usize(n));
+        let outView: uint8[] = intr.arraySlice(window, 0, usize(n));
         switch (await Writable.write(ref s.conn, ref outView)) {
             case Result.Ok { value: _w }: { }
             case Result.Err { error: e }: { return `tls send: ${e}`; }
@@ -187,7 +187,7 @@ async pump(ref s: TlsStream, status: int32): string {
     if (e.len > 0) { return e; }
     if (status != TLS_WANT_READ) { return ""; }
 
-    let window: uint8[] = bytes.bytes_to_array(ref s.inBuf);
+    let window: uint8[] = bytes.bytesToArray(ref s.inBuf);
     switch (await Readable.read(ref s.conn, ref window)) {
         case Result.Ok { value: n }: {
             if (n <= 0) {
@@ -244,7 +244,7 @@ export async tlsConnect(host: string, port: int32, ref cfg: TlsConfig): Result<T
     // first write, several frames from the cause. The error paths dispose it
     // by hand instead, which is the trade the advisory ownership model makes:
     // the compiler stays quiet and the transfer is written out.
-    let cr: ConnectResult = tcp.tcp_connect(host, port);
+    let cr: ConnectResult = tcp.tcpConnect(host, port);
     if (cr.error.len > 0) {
         let msg: string = cr.error;
         Disposable.dispose(ref cr);
@@ -257,8 +257,8 @@ export async tlsConnect(host: string, port: int32, ref cfg: TlsConfig): Result<T
         conn:   cr.stream,
         ssl:    ssl,
         ctx:    ctx,
-        outBuf: bytes.bytes_from_raw(intr.heap_alloc(TLS_CHUNK), TLS_CHUNK),
-        inBuf:  bytes.bytes_from_raw(intr.heap_alloc(TLS_CHUNK), TLS_CHUNK),
+        outBuf: bytes.bytesFromRaw(intr.heapAlloc(TLS_CHUNK), TLS_CHUNK),
+        inBuf:  bytes.bytesFromRaw(intr.heapAlloc(TLS_CHUNK), TLS_CHUNK),
         closed: false,
     };
 

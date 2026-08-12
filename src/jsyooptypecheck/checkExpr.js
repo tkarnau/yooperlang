@@ -450,11 +450,11 @@ function resolveCall(node, scope, ctx) {
     if (trait) {
       return resolveTraitQualifiedCall(node, trait, callee.field, scope, ctx);
     }
-    // Generic function call via namespace: `intr.heap_alloc(8)` or
-    // `vec.vec_new(...)`. The source module's genericFuncTable holds the
+    // Generic function call via namespace: `intr.heapAlloc(8)` or
+    // `vec.vecNew(...)`. The source module's genericFuncTable holds the
     // canonical decl; namespace lookups otherwise only check localSymbols
     // and structTable, so generic funcs need an explicit hop here.
-    // Also covers intrinsic special-cases (`conc.wait_until`, `conc.cancel`)
+    // Also covers intrinsic special-cases (`conc.waitUntil`, `conc.cancel`)
     // where the special-case branches do the typing work - bare-callee form
     // and namespace-prefixed form should land in the same checker.
     //
@@ -471,7 +471,7 @@ function resolveCall(node, scope, ctx) {
       const srcEnv = ctx.typeContext.moduleEnv?.get(nsType.moduleId);
       const srcBuiltins = srcEnv?.builtinIntrinsicNames;
       if (srcBuiltins?.has(callee.field)) {
-        if (callee.field === "wait_until") {
+        if (callee.field === "waitUntil") {
           callee.namespaceLookup = {
             moduleId: nsType.moduleId,
             exportName: callee.field,
@@ -556,14 +556,14 @@ function resolveCall(node, scope, ctx) {
     return resolveCallWithSig(node, calleeType, scope, ctx);
   }
 
-  // `wait_until(h, deadline_ns)` and `cancel(h)` are builtin call forms (the
+  // `waitUntil(h, deadline_ns)` and `cancel(h)` are builtin call forms (the
   // bounded-wait sibling of the `wait` keyword and its cancellation
   // counterpart). They're only special-cased when the current module has
   // imported them via an `extern "intrinsic"` block in std/core/concurrency
   // - user code that hasn't imported the intrinsics module is free to define
-  // and call its own `wait_until` / `cancel` functions.
+  // and call its own `waitUntil` / `cancel` functions.
   const builtinIntrinsicNames = ctx.typeContext.builtinIntrinsicNames;
-  if (callee === "wait_until" && builtinIntrinsicNames?.has("wait_until")) {
+  if (callee === "waitUntil" && builtinIntrinsicNames?.has("waitUntil")) {
     return resolveWaitUntilCall(node, scope, ctx);
   }
   if (callee === "cancel" && builtinIntrinsicNames?.has("cancel")) {
@@ -933,7 +933,7 @@ function derivedFieldLabel(templateNode, expr) {
 // `` `hi ${name}` `` - every interpolation must be a printable scalar
 // (string, bool, or any numeric type) or a type that implements
 // `Display`. For Display types we rewrite the interpolation at
-// typecheck time to call `Display.to_string(ref expr)` first and use
+// typecheck time to call `Display.toString(ref expr)` first and use
 // the resulting string - codegen still only sees printf-style args.
 function resolveTemplateLiteral(node, scope, ctx) {
   for (const part of node.parts) {
@@ -991,7 +991,7 @@ function resolveTemplateLiteral(node, scope, ctx) {
           part.expr,
           `@derive(display) on "${node.deriveOwner}" cannot print ${
             label ? `field "${label}"` : "a field"
-          } of type ${formatType(exprType)} - add @derive(display) to that type, give it a manual Display impl, or write ${node.deriveOwner}'s to_string by hand`,
+          } of type ${formatType(exprType)} - add @derive(display) to that type, give it a manual Display impl, or write ${node.deriveOwner}'s toString by hand`,
         );
         continue;
       }
@@ -1011,7 +1011,7 @@ function resolveTemplateLiteral(node, scope, ctx) {
   return setType(node, PrimType(primAnnotations.string));
 }
 
-// Phase 9.F: build the post-typecheck shape of `Display.to_string(ref expr)`
+// Phase 9.F: build the post-typecheck shape of `Display.toString(ref expr)`
 // directly. We bypass the parser by stamping `calleeMethodOf` +
 // `calleeMangledName` + a synthetic REF_EXPRESSION arg, mirroring what
 // resolveTraitQualifiedCall does for source-written trait calls.
@@ -1036,16 +1036,16 @@ function synthesizeDisplayCall(originalExpr, structType, exprType) {
   }
   return {
     kind: ASTNodeKind.CALL_EXPRESSION,
-    callee: "Display.to_string", // diagnostic-only; codegen reads calleeMangledName
+    callee: "Display.toString", // diagnostic-only; codegen reads calleeMangledName
     args: [argNode],
     sourceLoc: originalExpr.sourceLoc,
     resolvedType: PrimType(primAnnotations.string),
     calleeMethodOf: structType,
-    calleeMethodName: "to_string",
+    calleeMethodName: "toString",
     calleeTrait: (structType.implementsTraits ?? []).find(
       (t) => t.name === "Display",
     ),
-    calleeMangledName: mangleTraitMethod(structType, "Display", "to_string"),
+    calleeMangledName: mangleTraitMethod(structType, "Display", "toString"),
   };
 }
 
@@ -2110,9 +2110,9 @@ function sourceTypeName(type) {
   return formatType(type);
 }
 
-// Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` - bounded-wait
+// Phase 10.F: `waitUntil(h, deadline_ns): WaitResult<T>` - bounded-wait
 // counterpart to the `wait` keyword. Recognized by callee name in
-// resolveCall; user-defined `wait_until` functions are shadowed.
+// resolveCall; user-defined `waitUntil` functions are shadowed.
 //
 //   - arg[0]: must resolve to a `Task<T>` (the same shape `wait` accepts);
 //     T is extracted and used to instantiate the result type.
@@ -2131,7 +2131,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until(h, deadline_ns) takes exactly 2 arguments, got ${node.args.length}`,
+      `waitUntil(h, deadline_ns) takes exactly 2 arguments, got ${node.args.length}`,
     );
     for (const arg of node.args) resolveExprType(arg, scope, ctx);
     return setType(node, ErrorType());
@@ -2145,7 +2145,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until's first argument must be a Task<T>, got ${formatType(handleType)}`,
+      `waitUntil's first argument must be a Task<T>, got ${formatType(handleType)}`,
     );
     resolveExprType(node.args[1], scope, ctx);
     return setType(node, ErrorType());
@@ -2163,7 +2163,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until's deadline_ns argument must be uint64, got ${formatType(deadlineType)}`,
+      `waitUntil's deadline_ns argument must be uint64, got ${formatType(deadlineType)}`,
     );
     return setType(node, ErrorType());
   }
@@ -2173,7 +2173,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until requires WaitResult<T> in scope - import it from "std/core/concurrency.yoop"`,
+      `waitUntil requires WaitResult<T> in scope - import it from "std/core/concurrency.yoop"`,
     );
     return setType(node, ErrorType());
   }
@@ -2722,7 +2722,7 @@ export function checkInitializer(
   }
   // Bidirectional inference for generic function calls: when the callee is a
   // generic function, hint the expected return type so type params that
-  // appear only in the return position (e.g. `heap_alloc<T>(n: usize): T[]`)
+  // appear only in the return position (e.g. `heapAlloc<T>(n: usize): T[]`)
   // can be inferred from context.
   if (
     valueNode.kind === ASTNodeKind.CALL_EXPRESSION &&
@@ -2741,7 +2741,7 @@ export function checkInitializer(
     }
   }
   // Same bidirectional inference, but for namespace-prefixed generic calls
-  // like `intr.heap_alloc(8)`. The remote module's genericFuncTable carries
+  // like `intr.heapAlloc(8)`. The remote module's genericFuncTable carries
   // the canonical decl; we route through resolveGenericCall directly so the
   // expectedType hint reaches return-position type params.
   if (
@@ -3489,7 +3489,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
 // `expectedReturnType` (optional): if supplied (typically by `checkInitializer`
 // when the call appears in a typed binding/initializer position), the return
 // type is also unified against it. This enables type-parameters that only
-// appear in the return position to be inferred - e.g. `heap_alloc<T>(n: usize): T[]`
+// appear in the return position to be inferred - e.g. `heapAlloc<T>(n: usize): T[]`
 // where T is bound from the LHS annotation.
 function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null) {
   const sig = generic.genericSig;
@@ -3544,7 +3544,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     }
   }
 
-  // Return-type-driven inference (e.g. for `heap_alloc<T>(n: usize): T[]`
+  // Return-type-driven inference (e.g. for `heapAlloc<T>(n: usize): T[]`
   // where T appears only in the return). Only applied when a hint is
   // available (initializer / return / arg-pinning contexts).
   if (expectedReturnType && expectedReturnType.kind !== typeKinds.error) {

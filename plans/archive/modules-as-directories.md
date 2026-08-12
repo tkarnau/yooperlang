@@ -18,7 +18,7 @@ Losing the thread while reading a 1199-line grab bag is the thing to fix. The
 point of the bootstrap experiment is to feel the language's ergonomics, and this
 is the language telling us something.
 
-**Not to be confused with** [archive/package-system.md](archive/package-system.md),
+**Not to be confused with** [archive/package-system.md](package-system.md),
 which is about fetching third-party dependencies (`@yoopackage`, URLs, a
 manifest). That is a distribution concern and a different axis. See the
 terminology note below for how the two stay out of each other's way.
@@ -32,7 +32,7 @@ terminology note below for how the two stay out of each other's way.
   `export` starts meaning "visible outside this module" rather than "visible
   outside this file". Non-exported declarations become visible to sibling files
   in the same module, which is the entire point.
-- Not the std `snake_case` to `camelCase` rename (`vec_new` to `vecNew`). That
+- Not the std `snake_case` to `camelCase` rename (`vecNew` to `vecNew`). That
   is a known separate migration and mixing it in would make every diff here
   non-mechanical. Keep it on its own track.
 
@@ -40,7 +40,7 @@ terminology note below for how the two stay out of each other's way.
 
 Use **module** for the directory-or-file unit, and **source file** for one
 `.yoop` file. Reserve **package** for the distribution unit in
-[archive/package-system.md](archive/package-system.md).
+[archive/package-system.md](package-system.md).
 
 This is not just tidiness. The compiler already spells this concept
 `moduleId` / `moduleEnv` / `moduleGraph` / `resolvedModuleId` across roughly 150
@@ -586,7 +586,7 @@ What each merge bought, measured:
 out to be void.** The plan wanted it merged partly because deque.yoop and map.yoop
 duplicated `next_pow2_floor8` - but phase 1 already fixed that by hoisting the
 helper to std/core/numbers.yoop. Measuring the rest: every name set.yoop imports
-from map.yoop (`Map`, `KeyOps`, `map_new`, `map_insert`, ...) is ALSO used outside
+from map.yoop (`Map`, `KeyOps`, `mapNew`, `mapInsert`, ...) is ALSO used outside
 std/collections, so merging privatizes nothing. That leaves only churn: 15
 external import sites, and a `collections.` prefix replacing the meaningful
 `map.` / `deque.` / `set.` distinction. That is the same argument this plan

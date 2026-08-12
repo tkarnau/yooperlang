@@ -1,18 +1,27 @@
 # Plans
 
-This directory is intentionally small. THIS file is the single source of truth
-for "what am I working on right now." Everything else is either a live reference
-for an already-shipped system, or it is history/future kept out of the way:
+**This directory is history and forward work, not guidance.** Plan docs record
+how a system was designed and BUILT, at the time it was built. Several describe a
+language that has since changed shape.
 
-- [archive/](archive/) - dormant, future, or historical plans. Viewable, but
-  not in the immediate working set (the old `roadmap.md`, the `phase-10.md`
-  tracker, the package system, comptime, variant ergonomics, dynamic vtables,
-  and the app-building papercut logs).
-- [completed/](completed/) - per-phase write-ups for everything that has already
-  landed (phases 1 through 9, library phases A through D, and the 10.x
-  sub-phases). Read these to understand how a shipped feature was built.
+If you want to know how to write Yoop today, read
+[../docs/writing_yoop.md](../docs/writing_yoop.md); it wins over anything here.
+For compiler internals, read
+[../docs/compiler_internals.md](../docs/compiler_internals.md).
 
-Style: ASCII only. No em-dashes, no curly quotes, no fancy markdown tables.
+Style for anything written here: ASCII only. No em-dashes, no curly quotes, no
+fancy markdown tables.
+
+Layout:
+
+- **This file** - what is being worked on now, plus the index below.
+- **Top level** - the small set of docs that are still ACTIVE: open work, or a
+  contract the current work is written against.
+- [archive/](archive/) - dormant, future, historical, and everything that has
+  fully LANDED. Viewable and still useful when you want the reasoning behind a
+  shipped system; just not part of the working set.
+- [completed/](completed/) - per-phase write-ups for everything that shipped
+  (phases 1 through 9, library phases A through D, the 10.x sub-phases).
 
 ---
 
@@ -29,21 +38,8 @@ Two things, in priority order:
 
 Everything not in service of those two is deferred. The full language surface
 (structs, traits, kinds, generics, enums/unions, errors-as-values, tasks, and a
-starting standard library) already shipped through phase 9 plus library phases
-A through D. The language is usable; now it has to compile itself.
-
----
-
-## The two documents that matter for this work
-
-- [bootstrap-pipeline-contracts.md](bootstrap-pipeline-contracts.md) - the
-  north-star. Pins the data shape that crosses each layer boundary in the
-  self-hosting compiler (arena + NodeId AST, side-table decoration,
-  Result + Diagnostic error channel) so the yoop and JS implementations can
-  diverge internally without losing a shared, diffable target.
-- [ownership-and-typestate-redesign.md](ownership-and-typestate-redesign.md) -
-  the advisory ownership model the bootstrap follows (ownership is opt-in and
-  silent by default; the marker/typestate kinds are the part with teeth).
+starting standard library) already shipped. The language is usable; now it has to
+compile itself.
 
 ---
 
@@ -81,282 +77,120 @@ Immediate build sequence (from the contracts doc):
 
 ---
 
-## Active TODOs
+## Active docs (top level)
 
-Small, concrete next steps (the running scratch list; `scratch.md` is the
-informal personal version):
+- [bootstrap-pipeline-contracts.md](bootstrap-pipeline-contracts.md) -
+  **north star.** Pins the data shape that crosses each layer boundary in the
+  self-hosting compiler (arena + NodeId AST, side-table decoration,
+  Result + Diagnostic error channel) so the Yoop and JS implementations can
+  diverge internally without losing a shared, diffable target.
+- [ownership-and-typestate-redesign.md](ownership-and-typestate-redesign.md) -
+  **north star.** The advisory ownership model the bootstrap follows: ownership
+  is opt-in and silent by default, and the marker/typestate kinds are the part
+  with teeth. Summarized for daily use in
+  [../docs/writing_yoop.md](../docs/writing_yoop.md).
+- [strings-ownership-and-ergonomics.md](strings-ownership-and-ergonomics.md) -
+  S1, S2, S2.1 and S3 (`Text`) have LANDED. **S4 (routing bare `string`
+  allocation through `ctxAlloc`) and S5 (`string ==`) are open**, which is why
+  this is still here: today a bare `string` ignores the allocator context
+  entirely while `Text` respects it.
+- [tls.md](tls.md) - PLANNED / in progress. `std/tls/` and `std/https/` exist.
+- [yooperdoom-takeaways.md](yooperdoom-takeaways.md) - the action list from a
+  15,000 line DOOM port. **Partly stale**: re-verified on 2026-08-11, `bool ==`
+  (2.1) and `printf` with a template-literal format (2.3) are FIXED, and the
+  bare-block (2.4b) and nested-function (2.5) items are deliberate errors with
+  good diagnostics now. The live items are 1.1 (untyped-literal arithmetic
+  reaching codegen) and 1.2 (allocation failure is a null dereference); both are
+  in the sharp-edges list in [../docs/writing_yoop.md](../docs/writing_yoop.md).
 
-- ~~**VERIFY ON MACOS/LINUX: the Windows uplift and the IOCP conversion.**~~
-  DONE on macOS (arm64, 2026-08-07): `npm test` = **958 pass / 0 fail / 0
-  skipped**, and again at `YOOP_E2E_CONCURRENCY=1` with the same result, so
-  nothing in the new concurrent harness is order-dependent. Every item in the
-  list below was checked individually and none of them needed a fix. The one
-  red test was unrelated to the uplift: `qmark_handler_block` was written
-  against the OLD synchronous harness in the branch this merged with, so it
-  destructured a Promise and read `exitCode` as `undefined`. Fixed by making it
-  `async` + `await` like the other 201 call sites. What was verified, in the
-  order the list gives them:
-  - The three lldb tests **run** on macOS (confirmed not skipped) and pass, so
-    the `{ debug: true }` opt-in is correctly placed. This was the flagged risk
-    - Windows skips them, so a wrong opt-in would have stayed green there.
-  - `sh runtime/tests/run_tests.sh` passes end to end on POSIX.
-  - The runtime compiles clean under `-Wall -Wextra -Werror` on macOS (12
-    objects, zero diagnostics), so the strictness that moved onto the prebuild
-    is not hiding a POSIX-only warning.
-  - The port-0 bind path (`yoop_sock_bound_port`, the `socklen_t` POSIX branch)
-    works: `http_client_loopback` and `async_server_smoke` both pass.
-  - The two cross-platform fixes hold on macOS too - `enum_eq` covers the
-    string-literal interning, and the coroutine fixtures cover the
-    `llvm.coro.end` discard.
-  Kept below for reference, since it is a good map of what the uplift touched.
-  - **The poller was split per platform** (Go netpoll style). `runtime/yoop_io.c`
-    is now a platform-neutral core and the engines live in
-    `runtime/yoop_io_kqueue.c` / `yoop_io_epoll.c` / `yoop_io_windows.c` behind
-    `runtime/yoop_io_internal.h`. The kqueue and epoll bodies are the SAME code
-    that was in yoop_io.c, moved - but each engine now owns its own self-pipe
-    and the registration table stayed behind, so the seam is new even though the
-    logic is not. Only one engine compiles per host (each is wrapped in its own
-    `#ifdef`), which is why all three sit unconditionally in `RUNTIME_SOURCES`.
-  - **Readiness is no longer the portable contract; the OPERATION is.** std/net
-    now calls `yoop_iop_recv_begin` / `send_begin` / `accept_begin` +
-    `yoop_iop_end` (task-suspending) and `yoop_iop_wait` / `yoop_iop_accept_wait`
-    (thread-parking, cancel + deadline aware). On POSIX these are still
-    "nonblocking syscall, and on EAGAIN arm a readiness interest and retry on
-    resume" - the retry just moved inside the runtime. The forcing reason is
-    that a completion port cannot answer "is this socket writable" or "is this
-    LISTENING socket readable" at all. `std/net/socket_ffi.yoop` was rewritten
-    against this and no longer imports the readiness API.
-  - **`runtime/yoop_fs.c` is new** - the filesystem/dirent helpers extracted out
-    of yoop_io.c. Both `RUNTIME_SOURCES` in `../src/runtimeBuild.js` and the
-    mirror list in `../runtime/tests/run_tests.sh` were updated; check
-    `sh runtime/tests/run_tests.sh` still passes on POSIX, since that script is
-    never exercised on Windows.
-  - **The runtime C tests were rewritten** to use portable shims
-    (`runtime/tests/test_support.h`): `yoop_thread_spawn`/`join` instead of
-    pthread directly, and `yoop_socketpair` instead of `pipe()`. On POSIX
-    `yoop_socketpair` IS `pipe()`, so coverage there is unchanged.
-  - **Two fixes are cross-platform and matter on the Mac too**, independent of
-    Windows. (1) `llvm.coro.end`'s result must be DISCARDED, not bound to a
-    temp: its signature changed in LLVM 19/20 and newer LLVM auto-upgrades the
-    old spelling, leaving `%tN =` in front of a now-void call and failing
-    verification with "Broken module found". This will bite the Mac on its next
-    LLVM upgrade. (2) Identical string literals are now interned into one
-    global, because `enum<string>` equality lowers to `icmp eq ptr` and was
-    silently relying on the linker's constant merger.
-  - **One Windows-only fix lives in a SHARED header.** `yoop_cv_wait_until_locked`
-    in `runtime/yoop_platform.h` now loops until the monotonic clock actually
-    passes the deadline, because `SleepConditionVariableCS` can report a timeout
-    up to one system tick (15.6ms) early. The kqueue/epoll branches of that
-    function are untouched, but it is the one timed-wait primitive the whole
-    runtime goes through, so it is worth a look during review.
-  - **The test suites now prebuild the C runtime once per process**
-    (`prebuiltRuntimeObjects` in `../src/toolchain.js`) instead of recompiling
-    all 12 translation units per fixture. Measured 4.9x on a fixed 109-test e2e
-    slice. It also moved `-Wall -Wextra -Werror` onto the runtime prebuild,
-    which is where `runtimeC.test.js` used to get it - if a POSIX-only warning
-    exists in the runtime, this is now what will surface it, as a hard error.
-  - **CHECK THE LLDB TESTS FIRST - Windows structurally cannot catch a break
-    there.** `runFixtureEntry` no longer passes `-g` unconditionally; it is now
-    opt-in via `{ debug: true }`, and the three lldb tests are the only callers
-    that ask for it. On Windows those tests SKIP (debug info is CodeView, not
-    DWARF), so if that opt-in were wrong the Windows suite would stay green and
-    only macOS would fail. They are `dwarf: lldb resolves main...`, `dwarf:
-    lldb reads struct / string / array / variant locals...`, and `dwarf: a
-    function breakpoint stops after the parameter stores`. The change is worth
-    keeping: `-g` cost ~100ms of a ~415ms link and wrote 13.5MB per fixture
-    (8MB .pdb + 4.7MB incremental-link .ilk) that no assertion reads - roughly
-    3.4GB per suite run.
-  - **The e2e harness is async and runs tests concurrently.** `runFixture`,
-    `runFixtureEntry` and `runFixtureWithAsset` are `async` (201 call sites
-    now `await` them) and each describe takes `concurrency: E2E_CONCURRENCY`,
-    defaulting to half the cores capped at 12. Set `YOOP_E2E_CONCURRENCY=1` to
-    get the old sequential order back, which is the first thing to try if a
-    test looks order-dependent on macOS. The two fixtures that LISTEN
-    (`http_client_loopback`, `async_server_smoke`) bind port 0 and read the
-    kernel-assigned port from `TcpListener.bound_port`, so there is no fixed
-    port to collide over.
-  - **`tcp_listen` now reports the port it ACTUALLY bound**, via a new
-    `yoop_sock_bound_port` (getsockname) in `../runtime/yoop_net.c`. It used to
-    echo the port the caller asked for, which made binding :0 useless - the
-    field's own comment documented that gap. Identical behavior for a fixed
-    port; the POSIX branch uses `socklen_t` and is unexercised on Windows.
-  - For reference, the speed work took the suite from ~360s to ~45s on Windows
-    (prebuilt objects, then dropping the unread debug info, then concurrency).
-    Profiling was what found the real constraint: 12 concurrent clang processes
-    sitting at 9% total CPU on a 24-core box meant the suite was I/O-bound, not
-    CPU-bound, and concurrency only started paying once the 3.4GB of debug
-    output went away.
-- ~~Bootstrap: create a `Vec` iterator concept (needed to write the layers
-  idiomatically without index plumbing).~~ DONE: `vecIter` +
-  `VecIter<T> implements Iterable<T>` in `std/core/vec.yoop`, landed alongside
-  two other loop-ergonomics fixes the layers wanted - a loop-scoped counter
-  (`for (let i = 0; i < n; i += 1)`, with the counter's type taken from the
-  condition so it lands on `usize`) and `a..b` ranges (`for i in 0..n`, sugar
-  for a `Range` value in `std/core/range.yoop`). See SPEC.md section 9.
-- ~~Typecheck: a struct used as a variant payload has to be declared before the
-  variant or its fields resolve against an unpopulated shell, and the resulting
-  diagnostic misleads (`type "T" has no field "f"` on a field that IS declared).~~
-  DONE, fixed while merging std/db/sqlite into a directory module. Pass C built a
-  fresh `StructType` and REPLACED the table entry, so any field that had already
-  resolved to that struct kept pointing at the empty pass-A shell. `StructShell`
-  is now unfrozen and pass C fills it IN PLACE (`fillStructShell` in
-  [../src/jsyooptypecheck/types.js](../src/jsyooptypecheck/types.js)) - the same
-  fix variant shells got in 13.A and vtable shells in 9.G. Declaration order no
-  longer matters for struct fields OR variant payloads. A related crash in
-  `detectRecursiveField` (it walked a shell's null `fields`) is fixed too; a plain
-  forward reference used to abort the compiler with a TypeError. Across the source
-  files of a directory module the same bug SILENTLY MISCOMPILED rather than
-  erroring, which is how it was found: a sqlite handle came back as a shifted
-  pointer and segfaulted inside libsqlite3. See
-  [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md) for the original
-  report.
-- Two playground examples are stale since the async conversion and no longer
+Reference for shipped systems whose invariants are subtle enough to be worth
+keeping close (all cited by
+[../docs/compiler_internals.md](../docs/compiler_internals.md)):
+
+- [runtime-design.md](runtime-design.md) - the concurrency runtime contract
+  (worker pool, task struct layout, refcounted pooled handles). Written against
+  the 6.3 MVP, so read its scope lists with the "since landed" note at the top.
+- [async-coroutines.md](async-coroutines.md) - `async`/`await` and the LLVM
+  coroutine lowering that lets a task blocked on I/O give its worker thread back.
+- [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md) -
+  cancellation tokens, deadline- and cancel-aware I/O, and the multiplexer fixes
+  that went with them. Supersedes runtime-design.md on cancellation.
+- [clearance-kinds.md](clearance-kinds.md) - the marker/clearance kind design and
+  implementation (conferred/restrictive transitions, decl-authority).
+- [kinds-design.md](kinds-design.md) - heuristics for when a kind earns its cost.
+
+---
+
+## Recently landed (moved to archive/)
+
+These all shipped; the docs moved to [archive/](archive/) on 2026-08-11 so the
+working set stays small.
+
+- [archive/modules-as-directories.md](archive/modules-as-directories.md) - a
+  module as a DIRECTORY of files that each declare `module <name>;`. Phases 1
+  through 3 landed; `std/core/cancel`, `std/db/sqlite`, `std/net`, `std/http` and
+  `std/tls` are directory modules. Records where the plan itself turned out to be
+  wrong, plus the pass C ordering bug it surfaced (a module's semantics depended
+  on the alphabetical spelling of its filenames).
+- [archive/modules-folder.md](archive/modules-folder.md) - the program-owned
+  `modules/` import root. Flat by policy; nesting is a hard error, because two
+  copies of a type would link fine and then mismatch as `Value` versus `Value`.
+- [archive/arena-and-context-allocators.md](archive/arena-and-context-allocators.md)
+  and [archive/async-allocator-context.md](archive/async-allocator-context.md) -
+  the ambient allocator, arenas, the temp allocator, and the per-task context
+  swap.
+- [archive/kinds-in-std.md](archive/kinds-in-std.md) - moving `task`, `async`,
+  `joined`, `pooled` and `Task` out of the compiler into `std/core/kinds.yoop`.
+- [archive/task-combinators.md](archive/task-combinators.md) - `awaitTask`, and
+  why `TaskGroup`/`awaitAll`/`awaitRace` are deferred.
+- [archive/testing-via-kinds.md](archive/testing-via-kinds.md) - the `--test`
+  harness built out of userland kinds. Usage is in
+  [../docs/writing_yoop.md](../docs/writing_yoop.md); the driver flow is in
+  [../docs/compiler_internals.md](../docs/compiler_internals.md).
+- [archive/library-design.md](archive/library-design.md) - the original standard
+  library design contract.
+- [archive/sqlite-binding-papercuts.md](archive/sqlite-binding-papercuts.md) -
+  what binding libsqlite3 proved the FFI surface can already do without a compiler
+  change. The `transaction` kind it asked for is built.
+
+---
+
+## Open TODOs
+
+- **Naming migration, remaining tail.** std went fully `camelCase` on 2026-08-11
+  (`vecNew`, `mapGet`, `Display.toString`). Still `snake_case`: tool-internal
+  helpers in [../tools/](../tools/) (~30 names), example-local helpers under
+  [../examples/](../examples/), and some module-level consts that should be
+  `SCREAMING_SNAKE` (`tokenScanList` in `bootstrap/src/contracts.yoop`).
+- **Two playground examples are stale** since the async conversion and no longer
   compile: `examples/playground/todo_api` and `examples/playground/yoopstore`
   both hit `async function must be awaited` on `serve` / `serveDefault`. Nothing
   under playground/ is covered by e2e, which is why this sat unnoticed. Fixing
   them is a call-site `await` plus whatever coloring that cascades into.
-- Figure out the idempotent cleanup/dispose pattern (free-then-null, guard on
-  null) so `dispose` is safe to call more than once - this is the discipline the
+- **Figure out the idempotent cleanup/dispose pattern** (free-then-null, guard on
+  null) so `dispose` is safe to call more than once. This is the discipline the
   advisory ownership model leans on instead of compiler-enforced affine moves.
-- Generic call-site inference cannot see through a generic enum's type
-  arguments: `function bridge<T>(r: Result<T, string>): Result<T, E>` will not
-  infer `T` from a `Result<int32, string>` argument, and there is no turbofish
-  to say it out loud. The workaround is one bridging helper per payload type
-  (`examples/playground/todo_api/store.yoop` has four). Surfaced by the
-  std/http rework; see [completed/std-http-rework.md](completed/std-http-rework.md).
-- The std/http rework (DONE, same doc) fixed four compiler bugs on its way
-  through - two `sizeOfType` under-counts that corrupted memory, a module-level
-  `const` string that kept its escapes undecoded, and a `switch` payload
-  binding that could carry an unpopulated struct shell. Worth reading as a list
-  of the shapes that go wrong when a layout or a pass-order assumption drifts.
-- A program-owned `modules/` import root
-  ([modules-folder.md](modules-folder.md)) - **resolution has LANDED**. The
-  module rework had already made a third-party package a solved shape
-  (`std/http` IS one structurally), so all that was left was one more import
-  root: `modules/<name>`, resolved by walking up from the importing file to the
-  nearest `modules` directory, then through the exact tail the `std/` branch
-  already runs. Flat by policy - one copy of a name per program, so there is no
-  version conflict to reconcile - and nesting is an explicit error rather than
-  silence, because two copies of a type would link fine and then mismatch as
-  `Value` versus `Value`. Working example at
-  [examples/modules_demo/](../examples/modules_demo/), including a module with a
-  dependency of its own and tests that ship inside the module directory.
-  Deliberately NOT a package manager. Also landed: [tools/yoopdist](../tools/yoopdist)
-  (**written in Yoop**) builds the directory a user installs, and
-  [modules/](../modules/) at the repo root is the home for officially supported
-  non-std modules - clients, and C bindings that declare a library without
-  vendoring its sources. Writing the tool in Yoop immediately found a silent std
-  bug: `lastIndexOfSeq` had an inverted loop condition, so it never matched and
-  `fs.dirName` returned its own input. Still to build: the consumer-side
-  recorded-versus-installed view (`yoopiler modules`).
-
----
-
-## Recently landed
-
-- [modules-as-directories.md](modules-as-directories.md) - make a module a
-  DIRECTORY of source files rather than a single file. Motivated by the
-  bootstrap: acyclicity at file granularity is what forces a shared-vocabulary
-  dumping ground (`bootstrap/src/contracts.yoop`, 1199 lines), and that is
-  costing more reading context than the file split saves. Sequenced so there is
-  no flip day: a directory becomes a module only when its files declare
-  `module <name>;`, so the compiler change lands green with zero std changes and
-  each directory opts in as its own revertable commit. Distinct from the archived
-  package MANAGER plan - different axis, and the doc pins the terminology so they
-  stay apart. **Phases 1 and 2 have landed** and the doc records where the plan
-  itself turned out to be wrong. Phase 1: the five cross-file name collisions in
-  std are gone, no compiler change. Phase 2: directory modules work end to end
-  behind the opt-in `module <name>;` header, so nothing in the tree behaves
-  differently until a directory opts in. A pass C ordering bug found right after
-  phase 2 (a module's semantics depended on the alphabetical spelling of its
-  filenames) is also fixed - pass C is now group-major / stage-minor. Import
-  locality is enforced too: a module's files share its declarations but not its
-  imports, so using a name only a sibling imported is an error. That is a
-  checking pass rather than true lexical per-file scope, deliberately - the doc
-  records why (deferred resolution would have to carry file identity) and what
-  the two conservative-rejection differences are. **Phase 3 has landed** for four
-  directories - `std/core/cancel`, `std/db/sqlite`, `std/net`, `std/http` - and
-  std/collections is deliberately skipped (merging it privatizes nothing, and
-  phase 1 already removed the duplicated helper that was the reason to). The
-  merges paid for themselves: `std/http/wire.yoop` now exports NOTHING where its
-  header used to say "internal by convention" while exporting everything, and the
-  whole sqlite and socket FFI surfaces went private. They also flushed out three
-  compiler bugs, all recorded in the doc: the struct-shell replacement (a silent
-  MISCOMPILE, plus a pre-existing crash on any forward struct reference), the
-  string/array literal global counter, and a per-invocation `fromFn` shim set.
-  Remaining, optional: true lexical per-file import scope.
-
----
-
-## Reference docs (shipped systems, kept handy)
-
-These describe systems that already work; they are not pending plans. Kept at
-the top level because the day-to-day work and the CLAUDE.md notes cite them.
-
-- [runtime-design.md](runtime-design.md) - the concurrency runtime contract
-  (pthread worker pool, task struct layout, refcounted pooled handles). The
-  implementation reference for the task/`wait` machinery. Written against the
-  6.3 MVP, so read its scope lists with the "since landed" note at the top.
-- [async-coroutines.md](async-coroutines.md) - `async`/`await` and the
-  LLVM-coroutine lowering that lets a task blocked on I/O give its worker
-  thread back. Explains why this needed a language change (a suspend has
-  to propagate up a call chain, and `llvm.coro.suspend` only suspends one
-  frame). `std/net` and `std/http` are converted; the doc records the
-  coloring cascade that caused, and what is still blocking-only
-  (ambient stream timeouts, `flush`).
-- [cancellation-and-io-deadlines.md](cancellation-and-io-deadlines.md) -
-  cancellation tokens (`std/core/cancel/`), deadline- and cancel-aware
-  I/O waits, and the multiplexer fixes that went with them (the same-fd
-  waiter conflict, the monotonic deadline clock, restartable init). Read
-  this alongside runtime-design.md, which it supersedes on cancellation.
-- [kinds-design.md](kinds-design.md) - heuristics for when a kind earns its
-  cost, and in-tree opportunities (`validated`, `authenticated`, `tainted`).
-- [clearance-kinds.md](clearance-kinds.md) - the marker/clearance kind design
-  and its v0 implementation (conferred/restrictive transitions, decl-authority).
-- [library-design.md](library-design.md) - the standard-library design contract
-  (library principles, foundational traits/kinds, the networking + HTTP layers).
-
-- [sqlite-binding-papercuts.md](sqlite-binding-papercuts.md) - what binding
-  libsqlite3 (`std/db/`) proved the FFI surface can already do without a compiler
-  change (opaque handles, `void **` out-params, pointer-sized-int sentinels, and
-  the envelope-struct trick that keeps `unsafe_ptr` out of a safe module), plus
-  the one typecheck papercut it found. The `transaction` kind it asked for is
-  now built (as a binding kind, not a region kind - a region has no name, and
-  with no name there is nothing to call `commit` on).
-- [completed/std-http-rework.md](completed/std-http-rework.md) - the as-built
-  notes for `std/http`: one `Result<T, HttpError>` error channel, a non-generic
-  serve loop over the `Dispatcher` vtable, keep-alive, router path captures, and
-  the compiler bugs and ergonomic gaps the rewrite surfaced.
-
-One design exploration, not a shipped system and not scheduled:
-
-- [testing-via-kinds.md](testing-via-kinds.md) - a test harness written in
-  userland kinds and traits rather than compiler-baked `@test` attributes. A
-  working DSL already exists at
-  [../examples/playground/yooptest/main.yoop](../examples/playground/yooptest/main.yoop).
-  Tests live in `*.test.yoop`, flagged with `import.test;`, with suites marked by
-  a function-position `suite` kind; the driver globs them, generates a synthetic
-  entry module whose `main` hands the suite table to `std/test.yoop`, and builds
-  one throwaway executable in the temp dir it already makes. All policy
-  (ordering, arena isolation, filtering, reporting) is Yoop code in std. Doubles
-  as a stress test of whether the kind system is carrying its weight.
+- **Generic call-site inference cannot see through a generic enum's type
+  arguments**: `function bridge<T>(r: Result<T, string>)` will not infer `T` from
+  a `Result<int32, string>` argument, and there is no turbofish to say it out
+  loud. The workaround is one bridging helper per payload type.
+- **Consumer-side `yoopiler modules`** - the recorded-versus-installed view for
+  the `modules/` root.
 
 ---
 
 ## What is deliberately NOT being worked on
 
-These come up in design discussions but are out of scope for the current focus.
 The reasoning lives in [archive/phase-10.md](archive/phase-10.md) ("Out of
 scope") and the individual archived plans:
 
 - Classes/inheritance, garbage collection, capturing closures, `match` as an
   expression - permanently no, or covered by an existing workaround.
 - A package MANAGER ([archive/package-system.md](archive/package-system.md)) -
-  manifest, fetch command, URLs, hashes, versions. Only worth building when
-  there is somewhere to fetch from. Note this is now narrower than it was: the
-  program-owned `modules/` root ([modules-folder.md](modules-folder.md)) covers
-  using third-party code, and a manifest would only decide what populates the
-  folder.
+  manifest, fetch command, URLs, hashes, versions. Only worth building when there
+  is somewhere to fetch from, and narrower than it was: the `modules/` root
+  covers USING third-party code, and a manifest would only decide what populates
+  the folder.
 - Comptime/bytecode beyond the shipped `@precompile`
   ([archive/phase-11-comptime.md](archive/phase-11-comptime.md)), variant
   ergonomics ([archive/phase-13-variant-ergonomics.md](archive/phase-13-variant-ergonomics.md)),

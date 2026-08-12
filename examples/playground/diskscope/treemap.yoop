@@ -142,7 +142,7 @@ function squarify(ref nodes: Vec<FsNode>, rects: Rect[], ids: int32[], n: int32,
 export function layout_node(ref nodes: Vec<FsNode>, rects: Rect[], id: int32, x: int32, y: int32, w: int32, h: int32): void {
     let vis: bool = w >= MIN_TILE && h >= MIN_TILE;
     rects[usize(id)] = { x: x, y: y, w: w, h: h, vis: vis };
-    let node: FsNode = vec.vec_get(ref nodes, usize(id));
+    let node: FsNode = vec.vecGet(ref nodes, usize(id));
     if (node.kind == EntryKind.DIR && node.children.len > usize(0) && w > MIN_SUBDIV && h > MIN_SUBDIV) {
         let ix: int32 = x + PAD;
         let iy: int32 = y + PAD;
@@ -162,7 +162,7 @@ export function hit_test(ref nodes: Vec<FsNode>, rects: Rect[], id: int32, mx: i
     let r: Rect = rects[usize(id)];
     if (!r.vis) { return -1; }
     if (mx < r.x || mx >= r.x + r.w || my < r.y || my >= r.y + r.h) { return -1; }
-    let node: FsNode = vec.vec_get(ref nodes, usize(id));
+    let node: FsNode = vec.vecGet(ref nodes, usize(id));
     let i: usize = usize(0);
     while (i < node.children.len) {
         let h: int32 = hit_test(ref nodes, rects, node.children.data[i], mx, my);
@@ -207,8 +207,8 @@ function hsv(h: float64, s: float64, v: float64): uint32 {
 
 function ends_with(s: string, suffix: string): bool {
     if (suffix.len > s.len) { return false; }
-    switch (str.string_slice(s, s.len - suffix.len, s.len)) {
-        case Result.Ok { value: tail }: { return str.string_eq(tail, suffix); }
+    switch (str.stringSlice(s, s.len - suffix.len, s.len)) {
+        case Result.Ok { value: tail }: { return str.stringEq(tail, suffix); }
         case Result.Err { error: _ }: { return false; }
     }
 }

@@ -3,17 +3,17 @@
 ## Status: resolution has LANDED
 
 The first cut is in. `modules/<name>` resolves, flat is enforced, and
-[examples/modules_demo/](../examples/modules_demo/) is a working program using an
+[examples/modules_demo/](../../examples/modules_demo) is a working program using an
 installed module that has a dependency of its own. Full `npm test` is green (991
 tests). What landed:
 
 - The resolver branch, the upward walk, the nested-root rejection, and the three
-  diagnostics, in [moduleGraph.js](../src/jsyoopdriver/moduleGraph.js).
+  diagnostics, in [moduleGraph.js](../../src/jsyoopdriver/moduleGraph.js).
 - Unit coverage in
-  [moduleGraph.test.js](../src/jsyoopdriver/moduleGraph.test.js) (10 cases, real
+  [moduleGraph.test.js](../../src/jsyoopdriver/moduleGraph.test.js) (10 cases, real
   directory trees in a temp dir rather than a stubbed fs, because the feature IS
   filesystem behavior).
-- Two e2e cases in [e2e.test.js](../src/e2e.test.js): the demo program compiles
+- Two e2e cases in [e2e.test.js](../../src/e2e.test.js): the demo program compiles
   and runs, and the module's own tests run out of its `modules/` directory.
 - SPEC.md section 1 gained a `modules/` subsection; the "no package manager"
   non-goal was narrowed rather than deleted.
@@ -24,9 +24,9 @@ developed and against the consumer's flat `modules/` once installed, with no
 rewriting. And the **tests-for-a-shared-module** question, listed below as
 unresolved, resolved itself in the affirmative - see that section.
 
-Also landed since: [tools/yoopdist](../tools/yoopdist), the dist builder, **written
+Also landed since: [tools/yoopdist](../../tools/yoopdist), the dist builder, **written
 in Yoop** - it copies a module's sources and tests, skips its `modules/` folder,
-and regenerates the `requires` block. And [modules/](../modules/) at the repo root
+and regenerates the `requires` block. And [modules/](../../modules) at the repo root
 is now the home for officially supported non-std modules, which makes the repo its
 own consuming program.
 
@@ -34,13 +34,13 @@ Still NOT built, deliberately: the consumer-side reader (`yoopiler modules`, the
 recorded-versus-installed view), and there is no manifest or fetch.
 
 Writing the tool in Yoop paid for itself immediately by finding a **silent std
-bug**: `lastIndexOfSeq` in [std/core/bytes.yoop](../std/core/bytes.yoop) had an
+bug**: `lastIndexOfSeq` in [std/core/bytes.yoop](../../std/core/bytes.yoop) had an
 inverted loop condition (`i` started one BELOW `max` and the guard was `i > max`),
 so the body never executed and every call reported not-found. It failed quietly -
 `fs.dirName` returned its own input, which is a wrong answer with no error
 attached and a parent-directory walk that never terminates. Fixed, with a
 regression fixture at
-[examples/pass/strings_last_index_of.yoop](../examples/pass/strings_last_index_of.yoop).
+[examples/pass/strings_last_index_of.yoop](../../examples/pass/strings_last_index_of.yoop).
 A related sharp edge is documented but deliberately NOT changed: `dirName` on a
 path with no separator returns that path rather than `""`, so a caller walking
 parents must stop when the result stops changing.
@@ -63,7 +63,7 @@ a clean two-branch shape to add it to.
 - **Not a package manager.** No manifest, no fetch, no URLs, no versions, no
   lockfile, no cache. The developer puts a directory in `modules/`, by copy,
   submodule, or symlink. The archived manifest-and-fetch design
-  ([archive/package-system.md](archive/package-system.md)) stays archived; if it
+  ([archive/package-system.md](package-system.md)) stays archived; if it
   ever lands it lands on top of this, because it would only be deciding what
   populates the folder, not how imports resolve.
 - **Not a new vocabulary.** There is deliberately no `package` concept in the
@@ -121,7 +121,7 @@ rather than apologizing for it as a limitation.
 
 The escape hatch exists whether or not it is wanted, which is why it gets an
 explicit error instead of silence. `moduleId` is a hash of the resolved path
-([moduleId.js:21](../src/jsyoopdriver/moduleId.js#L21)), so two copies of `json`
+([moduleId.js:21](../../src/jsyoopdriver/moduleId.js#L21)), so two copies of `json`
 at two paths are two distinct modules with distinct mangled symbols. They would
 link. But they are also **two distinct nominal types**: passing copy A's
 `json.Value` to a function expecting copy B's `json.Value` fails, and the
@@ -216,7 +216,7 @@ into `math`). It does not trip the "imports its own module" guard, because the
 test file is not part of the module. The payoff is that the module is exercised
 through its published surface, with an import line character-for-character
 identical to the consuming program's, and the tests travel with the module when
-it ships. Worked example: [examples/modules_demo/](../examples/modules_demo/).
+it ships. Worked example: [examples/modules_demo/](../../examples/modules_demo).
 
 ## The `MODULE` file (advisory versions)
 
@@ -224,7 +224,7 @@ There is no manifest driving resolution, but a shared module should still be abl
 to say what it is and what it was built against. The file that does this is
 **informational and inert**: nothing in it is resolved, chosen, or enforced. It is
 the dependency-shaped version of the same call the ownership redesign made
-([ownership-and-typestate-redesign.md](ownership-and-typestate-redesign.md)):
+([ownership-and-typestate-redesign.md](../ownership-and-typestate-redesign.md)):
 document the contract, do not enforce it.
 
 It lives in the module directory, so it travels with the shippable unit:
@@ -254,7 +254,7 @@ comments, blank lines ignored, `requires` repeatable) is a dozen lines to parse 
 tooling ever needs to and zero if a human is just reading it.
 
 **Generation splits by who knows what.** The author owns the `version` line; a
-tool owns the `requires` block. This is built: [tools/yoopdist](../tools/yoopdist),
+tool owns the `requires` block. This is built: [tools/yoopdist](../../tools/yoopdist),
 written in Yoop, reads the module's imports, resolves each `modules/` dependency's
 version from the modules root the module develops against, and rewrites only the
 dependency snapshot. It cannot invent a version number and does not derive one
@@ -309,19 +309,19 @@ module at an absolute path:
 
 ## What changes
 
-- [src/jsyoopdriver/moduleGraph.js](../src/jsyoopdriver/moduleGraph.js) -
+- [src/jsyoopdriver/moduleGraph.js](../../src/jsyoopdriver/moduleGraph.js) -
   `resolveImportTarget` grows a `modules/` branch. The cleanest shape is to
   restructure it as "pick a root, then run the shared tail": `std/` picks
   `stdRoot`, `modules/` picks the walked-up root, everything else picks
   `dirname(fromAbsPath)`. The tail is already written and stays one copy.
   `loadDirectoryUnit` (or its caller) grows the nested-`modules` check.
 - A small helper for the upward walk. It belongs next to `moduleId.js` in the
-  driver rather than in [install_root.js](../src/install_root.js): the modules
+  driver rather than in [install_root.js](../../src/install_root.js): the modules
   root is **program-relative and never install-relative**, so it must not become
   a fourth `CANDIDATE_PREFIXES` entry. Worth a comment saying so, since that file
   is otherwise the obvious home for "where do things live."
-- Docs: [SPEC.md](../SPEC.md) section 1 (import paths) and the line at
-  [SPEC.md:1832](../SPEC.md#L1832) that says there is no package manager, which
+- Docs: [SPEC.md](../../SPEC.md) section 1 (import paths) and the line at
+  [SPEC.md:1832](../../SPEC.md#L1832) that says there is no package manager, which
   becomes "no package manager; a program-owned `modules/` root."
 
 Nothing in the packaging path changes. `modules/` is never shipped inside the
@@ -354,12 +354,12 @@ compiler distribution.
 
 ## Deferred
 
-- **A manifest and a fetch command.** [archive/package-system.md](archive/package-system.md).
+- **A manifest and a fetch command.** [archive/package-system.md](package-system.md).
   Only worth building when there is somewhere to fetch from.
 - **Multi-version.** Blocked on type identity, not on resolution. See the flat
   section above.
 - **A package shipping its own `.c` file.** `RUNTIME_SOURCES` in
-  [runtimeBuild.js](../src/runtimeBuild.js) is a fixed list and yoop source has no
+  [runtimeBuild.js](../../src/runtimeBuild.js) is a fixed list and yoop source has no
   way to add a translation unit to the clang invocation. A package can bind to a
   system library today but cannot carry glue code. This is a real boundary and it
   is worth knowing about before someone tries; it is not in scope here.

@@ -267,7 +267,16 @@ export const tokenScanList = [
 // `in`, `from`, and `as` cannot be demoted - they carry real grammar in
 // positions where an identifier is also legal (`for x in`, `import ... from`,
 // `import * as`). They get a targeted diagnostic instead of a fix.
+// NULL PROTOTYPE, and it is load-bearing. This table is consulted as
+// `keywordTagList[value]` with `value` being arbitrary user source text, so an
+// ordinary object literal answers `Object.prototype`'s members: an identifier
+// spelled `toString`, `valueOf`, `constructor` or `hasOwnProperty` came back as
+// a native function and was lexed as that garbage tag instead of an `ident`.
+// The symptom is a parse error on a declaration that is perfectly legal
+// (`function toString(ref self): string;` -> "expected ident, got undefined").
+// `Object.values` in parser.js is own-properties-only, so it is unaffected.
 export const keywordTagList = {
+  __proto__: null,
   let: TokenTags.let,
   function: TokenTags.function,
   const: TokenTags.const,

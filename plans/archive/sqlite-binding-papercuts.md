@@ -2,9 +2,9 @@
 
 ## Context
 
-[std/db/sqlite/ffi.yoop](../std/db/sqlite/ffi.yoop) +
-[std/db/sqlite/db.yoop](../std/db/sqlite/db.yoop) bind libsqlite3, and
-[examples/playground/sqlite_demo/main.yoop](../examples/playground/sqlite_demo/main.yoop)
+[std/db/sqlite/ffi.yoop](../../std/db/sqlite/ffi.yoop) +
+[std/db/sqlite/db.yoop](../../std/db/sqlite/db.yoop) bind libsqlite3, and
+[examples/playground/sqlite_demo/main.yoop](../../examples/playground/sqlite_demo/main.yoop)
 drives them from the application side (on-disk db, schema, batched prepared
 insert inside a transaction, two read shapes, cleanup).
 
@@ -18,7 +18,7 @@ needed. What follows is what worked, and the one thing that bit.
 Worth recording because none of it was obvious going in:
 
 - **`extern "C" from library "sqlite3"` links with no setup.** It lowers to
-  `-lsqlite3` in [yoopiler.js](../src/yoopiler.js), and libsqlite3 ships in the
+  `-lsqlite3` in [yoopiler.js](../../src/yoopiler.js), and libsqlite3 ships in the
   macOS SDK. Linux needs libsqlite3-dev installed.
 - **`ref x: unsafe_ptr` is a working `void **`.** This is what makes
   `sqlite3_open` and `sqlite3_prepare_v2` bindable at all - both hand back their
@@ -126,7 +126,7 @@ constructs, and pattern-matches correctly. The public API keeps
 Per the kinds-design.md question of "what trait or kind would help here":
 
 - **A `transaction` kind was the clear win. BUILT** - see
-  [completed/std-http-rework.md](completed/std-http-rework.md). It landed as a
+  [completed/std-http-rework.md](../completed/std-http-rework.md). It landed as a
   BINDING kind rather than the region kind predicted here, and the reason is
   worth recording: a region has no name, and with no name there is nothing to
   call `commit` on. A transaction that committed itself whenever the block

@@ -1,7 +1,7 @@
 // Phase 13.C: @derive(display) - pre-typecheck expansion.
 //
 // For each module-top-level `@derive(display)`-wrapped TYPE_DECL, generate a
-// `Display.to_string` method AS YOOP SOURCE TEXT from the decl's field
+// `Display.toString` method AS YOOP SOURCE TEXT from the decl's field
 // annotations, reparse it with the ordinary parser (inside a dummy wrapper
 // type, which satisfies the parser's methods-need-implements constraint),
 // restamp every sourceLoc onto the original type decl, and graft the method
@@ -83,9 +83,9 @@ export function expandDerives(modules, errors) {
         });
         continue;
       }
-      if ((typeDecl.methods ?? []).some((m) => m.name === "to_string")) {
+      if ((typeDecl.methods ?? []).some((m) => m.name === "toString")) {
         errors.push({
-          message: `${isVariant ? "variant" : "type"} "${typeDecl.name}" already defines "to_string" - remove @derive(display) or the manual method`,
+          message: `${isVariant ? "variant" : "type"} "${typeDecl.name}" already defines "toString" - remove @derive(display) or the manual method`,
           sourceLoc: typeDecl.sourceLoc,
         });
         continue;
@@ -149,7 +149,7 @@ function buildToStringMethod(decl, isVariant) {
     : generateStructBody(decl, labels);
   const src =
     `type __DeriveHost implements Display {\n` +
-    `  function to_string(ref self): string {\n` +
+    `  function toString(ref self): string {\n` +
     bodyLines.map((line) => `    ${line}\n`).join("") +
     `  }\n` +
     `}\n`;

@@ -44,16 +44,16 @@ export type FsNode propagates<disposable> {
 // Copy a borrowed C string (e.g. a readdir result, valid only until the next
 // readdir) into a fresh owned heap string.
 function dup_str(s: string): string {
-    return str.string_concat(s, "");
+    return str.stringConcat(s, "");
 }
 
 function join_path(dir: string, name: string): string {
-    return str.string_concat_all([dir, "/", name]);
+    return str.stringConcatAll([dir, "/", name]);
 }
 
 // Append an FsNode and return its id.
 function push_node(ref nodes: Vec<FsNode>, n: FsNode): int32 {
-    vec.vec_push(ref nodes, n);
+    vec.vecPush(ref nodes, n);
     return int32(nodes.len) - 1;
 }
 
@@ -75,13 +75,13 @@ export function scan(ref nodes: Vec<FsNode>, path: string, name: string, depth: 
             kind: EntryKind.FILE,
             size: sz,
             depth: depth,
-            children: vec.vec_new(usize(0)),
+            children: vec.vecNew(usize(0)),
         };
         return push_node(ref nodes, leaf);
     }
 
     // A directory: walk its entries, recurse, and sum.
-    let kids: Vec<int32> = vec.vec_new(usize(8));
+    let kids: Vec<int32> = vec.vecNew(usize(8));
     let total: int64 = 0;
     let d: unsafe_ptr = yoop_io_opendir(path);
     if (d != null) {
@@ -91,7 +91,7 @@ export function scan(ref nodes: Vec<FsNode>, path: string, name: string, depth: 
             let child_path: string = join_path(path, child_name);
             let cid: int32 = scan(ref nodes, child_path, child_name, depth + 1, ref budget);
             if (cid >= 0) {
-                vec.vec_push(ref kids, cid);
+                vec.vecPush(ref kids, cid);
                 total = total + nodes.data[usize(cid)].size;
             }
             entry = yoop_io_readdir(d);
@@ -147,7 +147,7 @@ export function sort_children_by_size(ref nodes: Vec<FsNode>, ref kids: Vec<int3
 
 export function human_size(bytes: int64): string {
     if (bytes < int64(1024)) {
-        return str.string_concat_all([fmt.int_to_string(bytes), " B"]);
+        return str.stringConcatAll([fmt.intToString(bytes), " B"]);
     }
     let units: string[] = ["KB", "MB", "GB", "TB", "PB"];
     let div: int64 = int64(1024);
@@ -159,7 +159,7 @@ export function human_size(bytes: int64): string {
     let tenths: int64 = (bytes * int64(10)) / div;
     let whole: int64 = tenths / int64(10);
     let frac: int64 = tenths - whole * int64(10);
-    return str.string_concat_all([
-        fmt.int_to_string(whole), ".", fmt.int_to_string(frac), " ", units[usize(k)],
+    return str.stringConcatAll([
+        fmt.intToString(whole), ".", fmt.intToString(frac), " ", units[usize(k)],
     ]);
 }

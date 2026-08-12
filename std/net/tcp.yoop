@@ -3,7 +3,7 @@ module net;
 // std/net/tcp.yoop - TcpListener + TcpStream.
 //
 // Safe wrappers over std/net/socket_ffi. `TcpListener` owns a listening
-// socket and exposes `tcp_accept`. `TcpStream` owns a connected socket
+// socket and exposes `tcpAccept`. `TcpStream` owns a connected socket
 // and implements Readable + Writable + Disposable.
 //
 // All blocking operations (accept, read, write) park the calling pthread
@@ -66,7 +66,7 @@ export type TcpListener implements Disposable propagates<disposable> {
     // rather than echoing what the caller asked for. That distinction only
     // matters when the caller passes port 0 to mean "any free port" - then
     // this is the one the kernel picked, and it is the only way to find out.
-    bound_port: int32,
+    boundPort: int32,
     function dispose(ref self): void {
         Disposable.dispose(ref self.socket);
     }
@@ -86,11 +86,11 @@ export type ListenResult implements Disposable propagates<disposable> {
 // leaves a TcpListener with fd=-1 (disposes are no-ops).
 //
 // Pass port 0 to let the kernel choose any free port, then read
-// `result.listener.bound_port` to find out which one it picked. That is the
+// `result.listener.boundPort` to find out which one it picked. That is the
 // collision-free way to listen when several programs (or several tests) run at
 // once - nobody has to agree a fixed port up front.
-export function tcp_listen(host: string, port: int32, backlog: int32): ListenResult propagates<disposable> {
-    let r: Result<c_int, string> = ffi_listen(host, port, backlog);
+export function tcpListen(host: string, port: int32, backlog: int32): ListenResult propagates<disposable> {
+    let r: Result<c_int, string> = ffiListen(host, port, backlog);
     let fd: c_int = -1;
     let err_msg: string = "";
     switch (r) {
@@ -106,7 +106,7 @@ export function tcp_listen(host: string, port: int32, backlog: int32): ListenRes
         else { bound = port; }
     }
     return {
-        listener: { socket: { fd: fd }, bound_port: bound },
+        listener: { socket: { fd: fd }, boundPort: bound },
         error: err_msg,
     };
 }
@@ -270,8 +270,8 @@ export function tcpWriteAllTimeoutMs(ref stream: TcpStream, ref buf: uint8[], ms
 
 export type AcceptResult implements Disposable propagates<disposable> {
     stream:    TcpStream,
-    peer_host: uint32,
-    peer_port: uint16,
+    peerHost: uint32,
+    peerPort: uint16,
     error:     string,
     function dispose(ref self): void {
         Disposable.dispose(ref self.stream);
@@ -282,30 +282,30 @@ export type AcceptResult implements Disposable propagates<disposable> {
 // On success the returned AcceptResult.stream owns the client fd; the
 // caller is responsible for disposing it (or letting auto-cleanup at
 // scope end do so).
-export function tcp_accept(ref l: TcpListener): AcceptResult propagates<disposable> {
-    let r: Result<AcceptedFd, string> = ffi_accept(l.socket.fd);
+export function tcpAccept(ref l: TcpListener): AcceptResult propagates<disposable> {
+    let r: Result<AcceptedFd, string> = ffiAccept(l.socket.fd);
     let fd: c_int = -1;
-    let peer_host: uint32 = 0;
-    let peer_port: uint16 = 0;
+    let peerHost: uint32 = 0;
+    let peerPort: uint16 = 0;
     let err_msg: string = "";
     switch (r) {
         case Result.Ok { value: ok }: {
             fd = ok.fd;
-            peer_host = ok.peer_host;
-            peer_port = ok.peer_port;
+            peerHost = ok.peerHost;
+            peerPort = ok.peerPort;
         }
         case Result.Err { error: e }: { err_msg = e; }
     }
     return {
         stream:    newStream(fd),
-        peer_host: peer_host,
-        peer_port: peer_port,
+        peerHost: peerHost,
+        peerPort: peerPort,
         error:     err_msg,
     };
 }
 
 // Accept one inbound connection, giving up when `t` fires. This is what
-// lets an accept loop notice a shutdown request: the plain `tcp_accept`
+// lets an accept loop notice a shutdown request: the plain `tcpAccept`
 // parks until a client arrives and nothing short of a signal gets it
 // back.
 //
@@ -360,8 +360,8 @@ export type ConnectResult implements Disposable propagates<disposable> {
 
 // Open a fresh socket and connect it to host:port. Returns the connected
 // stream + error. On error, the inner socket holds fd=-1.
-export function tcp_connect(host: string, port: int32): ConnectResult propagates<disposable> {
-    let open: Result<c_int, string> = ffi_socket_open();
+export function tcpConnect(host: string, port: int32): ConnectResult propagates<disposable> {
+    let open: Result<c_int, string> = ffiSocketOpen();
     let fd: c_int = -1;
     let open_err: string = "";
     switch (open) {
@@ -374,7 +374,7 @@ export function tcp_connect(host: string, port: int32): ConnectResult propagates
             error:  open_err,
         };
     }
-    let c: ConnectOutcome = ffi_connect(fd, host, port);
+    let c: ConnectOutcome = ffiConnect(fd, host, port);
     switch (c) {
         case ConnectOutcome.Ok: {
             return {
@@ -383,7 +383,7 @@ export function tcp_connect(host: string, port: int32): ConnectResult propagates
             };
         }
         case ConnectOutcome.Err { error: connect_e }: {
-            let _rc: c_int = ffi_close(fd);
+            let _rc: c_int = ffiClose(fd);
             return {
                 stream: newStream(-1),
                 error:  connect_e,

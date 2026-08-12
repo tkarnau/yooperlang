@@ -6,7 +6,7 @@
 // WHY THIS EXISTS. A 15,000 line project written against this standard library
 // imported std/core/format.yoop in three files and hand-rolled a `48 + n % 10`
 // digit loop in four others; one of them zero-padded a number by hand, which
-// is exactly `padStart(int_to_string(n), 4, "0")`. Nothing was missing. The
+// is exactly `padStart(intToString(n), 4, "0")`. Nothing was missing. The
 // project just never found the parts of the library that already existed.
 // See plans/yooperdoom-takeaways.md 4.1.
 //
@@ -53,7 +53,7 @@ const YOOP_SUFFIX: string = ".yoop";
 // std's slice returns a Result; every use here has already bounds-checked, so
 // an Err means a bug in this file rather than bad input. Collapse it.
 function sliceOr(s: string, start: usize, end: usize): string {
-    switch (str.string_slice(s, start, end)) {
+    switch (str.stringSlice(s, start, end)) {
         case Result.Ok { value: v }: { return v; }
         case Result.Err { error: _ }: { return ""; }
     }
@@ -63,11 +63,11 @@ function isBlankByte(b: uint8): bool {
     return b == 32 || b == 9 || b == 13;
 }
 
-// Byte-wise `a < b`, so the module list can be sorted. std has string_eq but
+// Byte-wise `a < b`, so the module list can be sorted. std has stringEq but
 // no ordering, and an index in filesystem order reads as random.
 function strLess(a: string, b: string): bool {
-    let ab: uint8[] = intr.string_as_bytes(a);
-    let bb: uint8[] = intr.string_as_bytes(b);
+    let ab: uint8[] = intr.stringAsBytes(a);
+    let bb: uint8[] = intr.stringAsBytes(b);
     let n: usize = ab.len;
     if (bb.len < n) { n = bb.len; }
     for (let i: usize = 0; i < n; i += 1) {
@@ -77,12 +77,12 @@ function strLess(a: string, b: string): bool {
 }
 
 function pushStr(ref out: Vec<uint8>, s: string) : void {
-    vec.vec_extend_from(ref out, intr.string_as_bytes(s));
+    vec.vecExtendFrom(ref out, intr.stringAsBytes(s));
 }
 
 function endsWith(s: string, suffix: string): bool {
-    let sb: uint8[] = intr.string_as_bytes(s);
-    let fb: uint8[] = intr.string_as_bytes(suffix);
+    let sb: uint8[] = intr.stringAsBytes(s);
+    let fb: uint8[] = intr.stringAsBytes(suffix);
     if (fb.len > sb.len) { return false; }
     let off: usize = sb.len - fb.len;
     for (let i: usize = 0; i < fb.len; i += 1) {
@@ -91,13 +91,13 @@ function endsWith(s: string, suffix: string): bool {
     return true;
 }
 
-// Read a whole file as a string. `string_from_bytes_unchecked` copies, so the
+// Read a whole file as a string. `stringFromBytesUnchecked` copies, so the
 // result does not borrow the Vec.
 function readAll(path: string): string {
-    disposable buf: Vec<uint8> = vec.vec_new(4096);
-    let err: string = fs.read_file_into(ref buf, path);
+    disposable buf: Vec<uint8> = vec.vecNew(4096);
+    let err: string = fs.readFileInto(ref buf, path);
     if (err.len > 0) { return ""; }
-    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref buf));
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
 }
 
 // ----- line walking -------------------------------------------------------
@@ -107,7 +107,7 @@ function readAll(path: string): string {
 // from. Returns false at end of input.
 
 function nextLine(src: string, ref at: usize, ref line: string): bool {
-    let b: uint8[] = intr.string_as_bytes(src);
+    let b: uint8[] = intr.stringAsBytes(src);
     if (at >= b.len) { return false; }
     let start: usize = at;
     let end: usize = start;
@@ -124,14 +124,14 @@ function nextLine(src: string, ref at: usize, ref line: string): bool {
 }
 
 function startsWith(s: string, prefix: string): bool {
-    return str.string_starts_with(s, prefix);
+    return str.stringStartsWith(s, prefix);
 }
 
 // The comment body of `line`, with the `//` and one following space removed.
 // Callers have already checked that it starts with `//`.
 function commentBody(line: string): string {
     let body: string = sliceOr(line, 2, line.len);
-    if (body.len > 0 && intr.string_as_bytes(body)[0] == 32) {
+    if (body.len > 0 && intr.stringAsBytes(body)[0] == 32) {
         body = sliceOr(body, 1, body.len);
     }
     return body;
@@ -146,7 +146,7 @@ function commentBody(line: string): string {
 // continuation from wherever `at` currently sits. Stops at a bare `//`, which
 // is the paragraph break the whole library already uses.
 function paragraphFrom(src: string, ref at: usize, first: string): string {
-    disposable buf: Vec<uint8> = vec.vec_new(256);
+    disposable buf: Vec<uint8> = vec.vecNew(256);
     pushStr(ref buf, first);
     let line: string = "";
     let probe: usize = at;
@@ -158,13 +158,13 @@ function paragraphFrom(src: string, ref at: usize, first: string): string {
         pushStr(ref buf, body);
         at = probe;
     }
-    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref buf));
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
 }
 
 // Drop the `<path> - ` prefix the header convention uses. It is redundant
 // next to the heading this tool prints above it.
 function stripPathPrefix(body: string): string {
-    let dash: usize = str.string_index_of(body, " - ");
+    let dash: usize = str.stringIndexOf(body, " - ");
     if (dash < body.len) { return sliceOr(body, dash + 3, body.len); }
     return body;
 }
@@ -275,7 +275,7 @@ function collectExports(ref out: Vec<uint8>, src: string): int32 {
         // right before the first `(`, `<`, `{`, `:`, or `=`. Walking back from
         // that is what keeps this working for every decl shape at once instead
         // of enumerating them.
-        let b: uint8[] = intr.string_as_bytes(rest);
+        let b: uint8[] = intr.stringAsBytes(rest);
         let stop: usize = 0;
         while (stop < b.len
             && b[stop] != 40 && b[stop] != 60 && b[stop] != 123
@@ -331,22 +331,22 @@ type Mod {
 function sortedEntries(ref out: Vec<string>, dirPath: string): void {
     disposable d: fs.DirIter = fs.openDir(dirPath);
     for name in d {
-        vec.vec_push(ref out, name);
+        vec.vecPush(ref out, name);
     }
     // Insertion sort - these are directories of a few dozen entries.
     for (let i: usize = 1; i < out.len; i += 1) {
-        let cur: string = vec.vec_get(ref out, i);
+        let cur: string = vec.vecGet(ref out, i);
         let j: usize = i;
-        while (j > 0 && strLess(cur, vec.vec_get(ref out, j - 1))) {
-            vec.vec_set(ref out, j, vec.vec_get(ref out, j - 1));
+        while (j > 0 && strLess(cur, vec.vecGet(ref out, j - 1))) {
+            vec.vecSet(ref out, j, vec.vecGet(ref out, j - 1));
             j = j - 1;
         }
-        vec.vec_set(ref out, j, cur);
+        vec.vecSet(ref out, j, cur);
     }
 }
 
 function joinPath(a: string, b: string): string {
-    return str.string_concat_all([a, "/", b]);
+    return str.stringConcatAll([a, "/", b]);
 }
 
 // Build the entry for a DIRECTORY module: one summary for the module, then a
@@ -358,17 +358,17 @@ function joinPath(a: string, b: string): string {
 // file rather than the module, which is how `std/http` came out reading as
 // "a minimal HTTP/1.1 client".
 function dirModule(dirPath: string, importPath: string): Mod {
-    disposable names: Vec<string> = vec.vec_new(16);
+    disposable names: Vec<string> = vec.vecNew(16);
     sortedEntries(ref names, dirPath);
 
-    disposable detail: Vec<uint8> = vec.vec_new(512);
-    disposable exports: Vec<uint8> = vec.vec_new(1024);
+    disposable detail: Vec<uint8> = vec.vecNew(512);
+    disposable exports: Vec<uint8> = vec.vecNew(1024);
     let summary: string = "";
     let fallback: string = "";
     let total: int32 = 0;
 
     for (let i: usize = 0; i < names.len; i += 1) {
-        let name: string = vec.vec_get(ref names, i);
+        let name: string = vec.vecGet(ref names, i);
         if (!endsWith(name, YOOP_SUFFIX)) { continue; }
         let full: string = joinPath(dirPath, name);
         let src: string = readAll(full);
@@ -388,21 +388,21 @@ function dirModule(dirPath: string, importPath: string): Mod {
     return {
         importPath: importPath,
         summary: summary,
-        detail: intr.string_from_bytes_unchecked(vec.vec_as_array(ref detail)),
-        exports: intr.string_from_bytes_unchecked(vec.vec_as_array(ref exports)),
+        detail: intr.stringFromBytesUnchecked(vec.vecAsArray(ref detail)),
+        exports: intr.stringFromBytesUnchecked(vec.vecAsArray(ref exports)),
         exportCount: total,
     };
 }
 
 function fileModule(filePath: string, importPath: string): Mod {
     let src: string = readAll(filePath);
-    disposable exports: Vec<uint8> = vec.vec_new(1024);
+    disposable exports: Vec<uint8> = vec.vecNew(1024);
     let n: int32 = collectExports(ref exports, src);
     return {
         importPath: importPath,
         summary: headerSummary(src),
         detail: "",
-        exports: intr.string_from_bytes_unchecked(vec.vec_as_array(ref exports)),
+        exports: intr.stringFromBytesUnchecked(vec.vecAsArray(ref exports)),
         exportCount: n,
     };
 }
@@ -413,11 +413,11 @@ function fileModule(filePath: string, importPath: string): Mod {
 // list files: a directory module must be imported by its directory, and
 // importing one of its files is an error.
 function isDirectoryModule(dirPath: string): bool {
-    disposable names: Vec<string> = vec.vec_new(16);
+    disposable names: Vec<string> = vec.vecNew(16);
     sortedEntries(ref names, dirPath);
     let sawYoop: bool = false;
     for (let i: usize = 0; i < names.len; i += 1) {
-        let name: string = vec.vec_get(ref names, i);
+        let name: string = vec.vecGet(ref names, i);
         if (!endsWith(name, YOOP_SUFFIX)) { continue; }
         sawYoop = true;
         let src: string = readAll(joinPath(dirPath, name));
@@ -429,11 +429,11 @@ function isDirectoryModule(dirPath: string): bool {
 // Walk `dirPath`, appending every importable module to `mods`. `importBase` is
 // the import path prefix for this directory ("std", "std/core", ...).
 function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
-    disposable names: Vec<string> = vec.vec_new(32);
+    disposable names: Vec<string> = vec.vecNew(32);
     sortedEntries(ref names, dirPath);
 
     for (let i: usize = 0; i < names.len; i += 1) {
-        let name: string = vec.vec_get(ref names, i);
+        let name: string = vec.vecGet(ref names, i);
         let full: string = joinPath(dirPath, name);
         let meta: fs.FileMeta = fs.statPath(full);
         if (!meta.ok) { continue; }
@@ -441,7 +441,7 @@ function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
         if (meta.isDir) {
             let sub: string = joinPath(importBase, name);
             if (isDirectoryModule(full)) {
-                vec.vec_push(ref mods, dirModule(full, sub));
+                vec.vecPush(ref mods, dirModule(full, sub));
             } else {
                 walk(ref mods, full, sub);
             }
@@ -449,13 +449,13 @@ function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
         }
 
         if (!endsWith(name, YOOP_SUFFIX)) { continue; }
-        vec.vec_push(ref mods, fileModule(full, joinPath(importBase, name)));
+        vec.vecPush(ref mods, fileModule(full, joinPath(importBase, name)));
     }
 }
 
 // ----- rendering ----------------------------------------------------------
 
-const PREAMBLE: string = "# The Yooperlang standard library\n\n**Generated by `tools/stdindex` - do not edit by hand.** Regenerate with\n`npm run gen:index` after adding a module or changing a module header.\n\nEvery entry below is something you can import. A path ending in `.yoop` is a\nsingle-file module; a path without one is a DIRECTORY module, whose files share\none namespace - import the directory, never a file inside it.\n\nStd **value** imports use the namespace form; types, traits, and kinds may use\nthe named form:\n\n```js\nimport * as str from \"std/core/strings.yoop\";\nimport { Result } from \"std/core/types.yoop\";\n\nlet padded: string = str.padStart(str.int_to_string(n), 4, \"0\");\n```\n\n";
+const PREAMBLE: string = "# The Yooperlang standard library\n\n**Generated by `tools/stdindex` - do not edit by hand.** Regenerate with\n`npm run gen:index` after adding a module or changing a module header.\n\nEvery entry below is something you can import. A path ending in `.yoop` is a\nsingle-file module; a path without one is a DIRECTORY module, whose files share\none namespace - import the directory, never a file inside it.\n\nStd **value** imports use the namespace form; types, traits, and kinds may use\nthe named form:\n\n```js\nimport * as str from \"std/core/strings.yoop\";\nimport { Result } from \"std/core/types.yoop\";\n\nlet padded: string = str.padStart(str.intToString(n), 4, \"0\");\n```\n\n";
 
 function render(ref out: Vec<uint8>, ref mods: Vec<Mod>): void {
     pushStr(ref out, PREAMBLE);
@@ -505,7 +505,7 @@ function main(): int32 {
         return 1;
     }
 
-    disposable mods: Vec<Mod> = vec.vec_new(64);
+    disposable mods: Vec<Mod> = vec.vecNew(64);
     walk(ref mods, stdRoot, stdRoot);
 
     if (mods.len == 0) {
@@ -513,10 +513,10 @@ function main(): int32 {
         return 1;
     }
 
-    disposable out: Vec<uint8> = vec.vec_new(16384);
+    disposable out: Vec<uint8> = vec.vecNew(16384);
     render(ref out, ref mods);
 
-    let err: string = fs.write_file(outPath, vec.vec_as_array(ref out));
+    let err: string = fs.writeFile(outPath, vec.vecAsArray(ref out));
     if (err.len > 0) {
         printf(`stdindex: writing ${outPath}: ${err}\n`);
         return 1;

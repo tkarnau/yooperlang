@@ -27,11 +27,11 @@ type Holder { p: ref Thing, r: ref Renderer }
 function bumpVia(h: Holder): void { h.p.v = h.p.v + 1; }
 
 function main(): int32 {
-    let things: Thing[] = intr.heap_alloc(1);
+    let things: Thing[] = intr.heapAlloc(1);
     things[0] = { v: 7 };
     let t: ref Thing = ref things[0];
 
-    let renderers: Renderer[] = intr.heap_alloc(1);
+    let renderers: Renderer[] = intr.heapAlloc(1);
     renderers[0] = { owner: t, id: 3 };   // ref binding into a ref field
     let r: ref Renderer = ref renderers[0];
 

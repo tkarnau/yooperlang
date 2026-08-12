@@ -116,7 +116,7 @@ const RUNTIME_DECLARES = [
   "declare void @llvm.coro.destroy(ptr)",
   "declare i1 @llvm.coro.done(ptr)",
   // Context-routed allocation (runtime/yoop_alloc.c): dispatch through the
-  // current allocator. Back the ctx_alloc/ctx_free intrinsics.
+  // current allocator. Back the ctxAlloc/ctxFree intrinsics.
   "declare ptr @yoop_ctx_alloc(i64, i64)",
   "declare void @yoop_ctx_free(ptr)",
   "declare ptr @memcpy(ptr, ptr, i64)",
@@ -1563,7 +1563,7 @@ export function codegen(ast) {
       return { val: tmp, yoopType: dstType };
     }
     // Namespace call: io.greet("hello") - callee is a FIELD_ACCESS node.
-    // For generic calls (`vec.vec_new(...)`), node.genericInstantiation
+    // For generic calls (`vec.vecNew(...)`), node.genericInstantiation
     // holds the monomorphic mangled name; otherwise we mangle the bare
     // export name.
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
@@ -2507,7 +2507,7 @@ function needsStrlen(node) {
         return;
       }
     }
-    // Phase 8.H: string_as_bytes calls strlen internally.
+    // Phase 8.H: stringAsBytes calls strlen internally.
     if (
       n.kind === ASTNodeKind.CALL_EXPRESSION &&
       n.genericInstantiation?.declId === "$builtin__string_as_bytes"
@@ -3774,7 +3774,7 @@ function codegenWithModuleId(
   // instances belonging to OTHER modules (e.g. `Set<K>`'s body in
   // std/collections/set.yoop references generic functions defined in
   // std/collections/map.yoop - when Set<string> is monomorphized,
-  // map_contains_key<string, bool> lands in the map module's registry
+  // mapContainsKey<string, bool> lands in the map module's registry
   // slot, which may have already finished its own per-instance sweep).
   // The outer fixed-point in codegenProgram keeps calling each module's
   // closure until a full pass produces no new emissions.
@@ -3790,7 +3790,7 @@ function codegenWithModuleId(
         // exist in the registry as caching artifacts - the concrete instances
         // produced when the outer generic is monomorphized are what get IR.
         if (inst.argTypes.some((t) => t?.kind === typeKinds.typeParam)) continue;
-        // Builtin generic funcs (heap_alloc / heap_free) have no AST body -
+        // Builtin generic funcs (heapAlloc / heapFree) have no AST body -
         // codegen inlines them at every call site (see emitCallExpr).
         if (inst.declId?.startsWith("$builtin")) continue;
         inst.emitted = true;
@@ -5291,7 +5291,7 @@ function codegenWithModuleId(
     return { val: resVal, yoopType: resultType };
   }
 
-  // Phase 10.F + 10.F.2: `wait_until(h, deadline_ns): WaitResult<T>`
+  // Phase 10.F + 10.F.2: `waitUntil(h, deadline_ns): WaitResult<T>`
   // lowering. The runtime returns an i32 outcome - 0 done, 1 timeout, 2
   // cancelled - and we dispatch via a switch to build the matching
   // variant. The result-slot byte offset is the universal task-struct
@@ -5424,8 +5424,8 @@ function codegenWithModuleId(
     return { val: out, yoopType: PrimType("int32") };
   }
 
-  // Inline emission for builtin generic functions: heap_alloc / heap_free
-  // (Phase 7+) and array_slice (Phase 8.H). These have `declId` starting with
+  // Inline emission for builtin generic functions: heapAlloc / heapFree
+  // (Phase 7+) and arraySlice (Phase 8.H). These have `declId` starting with
   // `$builtin` and no AST body; codegen lowers each call directly.
   function emitBuiltinGenericCall(node, fnLines) {
     const inst = node.genericInstantiation;
@@ -5463,7 +5463,7 @@ function codegenWithModuleId(
       return { val: fatVal, yoopType: arrayType };
     }
     if (inst.declId === "$builtin__ctx_alloc") {
-      // Same as heap_alloc, but the byte allocation routes through the current
+      // Same as heapAlloc, but the byte allocation routes through the current
       // allocator (yoop_ctx_alloc) instead of malloc. Alignment is 8, which
       // satisfies every current Yoop scalar/struct type.
       const elemType = inst.argTypes[0];
@@ -5492,7 +5492,7 @@ function codegenWithModuleId(
       return { val: fatVal, yoopType: arrayType };
     }
     if (inst.declId === "$builtin__ctx_free") {
-      // Same as heap_free, but frees through the current allocator.
+      // Same as heapFree, but frees through the current allocator.
       const elemType = inst.argTypes[0];
       const arrayType = ArrayType(elemType);
       ensureArrayTypeDef(elemType);
@@ -5602,7 +5602,7 @@ function codegenWithModuleId(
       return { val: raw, yoopType: PrimType("string") };
     }
     if (inst.declId === "$builtin__bytes_as_string_unchecked") {
-      // Borrowing inverse of string_as_bytes: project field 0 (the data
+      // Borrowing inverse of stringAsBytes: project field 0 (the data
       // pointer) out of the fat pointer and call it a string. No malloc, no
       // memcpy, no strlen - the caller guarantees the nul terminator, which
       // is why this is `_unchecked`. `buf.len` is deliberately discarded: a
@@ -5622,7 +5622,7 @@ function codegenWithModuleId(
       return { val: dataPtr, yoopType: PrimType("string") };
     }
     if (inst.declId === "$builtin__array_slice") {
-      // Phase 8.H: array_slice<T>(xs, start, end) - borrowing view, no copy.
+      // Phase 8.H: arraySlice<T>(xs, start, end) - borrowing view, no copy.
       // Build {xs.ptr + start * sizeof(T), end - start} as a fresh fat pointer.
       const elemType = inst.argTypes[0];
       const arrayType = ArrayType(elemType);
@@ -5665,9 +5665,9 @@ function codegenWithModuleId(
 
   // Lower an interpolated template literal to a string by routing each
   // `${expr}` through the matching `<prim>_to_string` shim (or the
-  // Display.to_string call the typechecker pre-synthesized for struct
+  // Display.toString call the typechecker pre-synthesized for struct
   // operands), collecting the parts into a `string[]` fat pointer, and
-  // feeding that to `string_concat_all`. Requires the driver to have
+  // feeding that to `stringConcatAll`. Requires the driver to have
   // autoloaded std/core/format.yoop + std/core/strings.yoop.
   function emitInterpolatedTemplateLiteral(node, fnLines) {
     const fmtMod = requireAutoloadedStd(
@@ -5688,8 +5688,8 @@ function codegenWithModuleId(
       }
       const r = emitExpr(part.expr, fnLines);
       // Phase 12: a value enum shares its underlying primitive's LLVM repr,
-      // so route it through the same per-prim to_string shim (string passes
-      // through, ints go to int_to_string, etc).
+      // so route it through the same per-prim toString shim (string passes
+      // through, ints go to intToString, etc).
       const t = valueEnumUnderlying(r.yoopType);
       if (t.kind === typeKinds.prim && t.name === "string") {
         partVals.push(r.val);
@@ -5697,7 +5697,7 @@ function codegenWithModuleId(
       }
       if (t.kind === typeKinds.prim && t.name === "bool") {
         const tmp = freshTemp();
-        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__bool_to_string(i1 ${r.val})`);
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__boolToString(i1 ${r.val})`);
         partVals.push(tmp);
         continue;
       }
@@ -5710,7 +5710,7 @@ function codegenWithModuleId(
           fnLines.push(`  ${w} = ${unsigned ? "zext" : "sext"} ${llvm} ${r.val} to i64`);
           widened = w;
         }
-        const fn = unsigned ? "uint_to_string" : "int_to_string";
+        const fn = unsigned ? "uintToString" : "intToString";
         const tmp = freshTemp();
         fnLines.push(`  ${tmp} = call ptr @${fmtMod}__${fn}(i64 ${widened})`);
         partVals.push(tmp);
@@ -5725,7 +5725,7 @@ function codegenWithModuleId(
           widened = w;
         }
         const tmp = freshTemp();
-        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__float_to_string(double ${widened})`);
+        fnLines.push(`  ${tmp} = call ptr @${fmtMod}__floatToString(double ${widened})`);
         partVals.push(tmp);
         continue;
       }
@@ -5738,7 +5738,7 @@ function codegenWithModuleId(
   }
 
   // Build a `string[]` fat pointer over already-emitted string values and
-  // hand it to std/core/strings.yoop's `string_concat_all`. Shared by
+  // hand it to std/core/strings.yoop's `stringConcatAll`. Shared by
   // interpolated template literals and the Phase 10.E.2 `?` context concat.
   function emitStringConcatParts(partVals, fnLines) {
     const strMod = requireAutoloadedStd("strings", "string concatenation");
@@ -5770,7 +5770,7 @@ function codegenWithModuleId(
     fnLines.push(`  ${fatVal} = load ${arrLlvm}, ptr ${fatSlot}`);
 
     const result = freshTemp();
-    fnLines.push(`  ${result} = call ptr @${strMod}__string_concat_all(${arrLlvm} ${fatVal})`);
+    fnLines.push(`  ${result} = call ptr @${strMod}__stringConcatAll(${arrLlvm} ${fatVal})`);
     return { val: result, yoopType: stringTy };
   }
 
@@ -5788,7 +5788,7 @@ function codegenWithModuleId(
   }
 
   function emitCallExpr(node, fnLines) {
-    // Phase 10.F: builtin wait_until lowering (multi-module path).
+    // Phase 10.F: builtin waitUntil lowering (multi-module path).
     if (node.builtinWaitUntil) {
       return emitWaitUntilCall(node, fnLines);
     }
@@ -5822,7 +5822,7 @@ function codegenWithModuleId(
       return { val: tmp, yoopType: dstType };
     }
     if (node.callee && typeof node.callee === "object" && node.callee.namespaceLookup) {
-      // Generic-namespace calls (`vec.vec_new(...)`) carry a
+      // Generic-namespace calls (`vec.vecNew(...)`) carry a
       // `genericInstantiation` from the typechecker - its mangled name
       // includes the type-arg suffix so we land on the concrete monomorphic
       // function rather than the (non-existent) base symbol.
@@ -7284,7 +7284,7 @@ export function compileEntry(entryAbsPath, opts = {}) {
   const { modules, autoloadedStdModuleIds } = loadModuleGraph(entryAbsPath);
   const { errors, moduleEnv, programState } = typecheckProgram(modules);
   // Thread the well-known std module ids through programState so codegen
-  // can mint mangled symbols (`<fmtModId>__int_to_string`, etc.) when
+  // can mint mangled symbols (`<fmtModId>__intToString`, etc.) when
   // lowering interpolated template literals.
   programState.autoloadedStdModuleIds = autoloadedStdModuleIds ?? {};
   // --track-heap parity with the yoopiler.js driver. Tests pass this

@@ -47,7 +47,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
   // NodeId than its children - fine, ids need not follow tree order.
   function pushNode(ref self, node: ASTNode): NodeId {
     const id: NodeId = self.ast.nodes.len;
-    vec.vec_push(ref self.ast.nodes, node);
+    vec.vecPush(ref self.ast.nodes, node);
     return id;
   }
   // Splice a scratch run of child NodeIds into the shared childIds pool as one
@@ -56,7 +56,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
   // itself append runs to childIds, so a partial splice would interleave.
   function buildListNode(ref self, ref ids: Vec<NodeId>, loc: SourceLocation): NodeId {
     const start: usize = self.ast.childIds.len;
-    vec.vec_extend_from(ref self.ast.childIds, vec.vec_as_array(ref ids));
+    vec.vecExtendFrom(ref self.ast.childIds, vec.vecAsArray(ref ids));
     let listNode = createASTNode(ASTNodeKind.NODE_LIST, loc);
     listNode.childStart = start;
     listNode.childCount = ids.len;

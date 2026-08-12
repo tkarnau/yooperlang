@@ -37,11 +37,11 @@ function main(): int32 {
         let _n: uint64 = rt.counterInc(ref c);
     }
     let _done: int32 = wait t;
-    printf(`counter=${fmt.uint_to_string(rt.counterGet(ref c))}\n`);
+    printf(`counter=${fmt.uintToString(rt.counterGet(ref c))}\n`);
 
     rt.counterSet(ref c, 100);
     let _s: uint64 = rt.counterSub(ref c, 40);
-    printf(`afterSet+Sub=${fmt.uint_to_string(rt.counterGet(ref c))}\n`);
+    printf(`afterSet+Sub=${fmt.uintToString(rt.counterGet(ref c))}\n`);
 
     // CAS: the first swap sees the value it expects, the second does not and
     // reports back what it actually observed.
@@ -49,7 +49,7 @@ function main(): int32 {
     let first: bool = rt.counterCas(ref c, ref seen, 61);
     let stale: uint64 = 60;
     let second: bool = rt.counterCas(ref c, ref stale, 62);
-    printf(`cas first=${first} second=${second} observed=${fmt.uint_to_string(stale)}\n`);
+    printf(`cas first=${first} second=${second} observed=${fmt.uintToString(stale)}\n`);
 
     printf(`rss>0: ${rt.rssBytes() > 0}\n`);
 

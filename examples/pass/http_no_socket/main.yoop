@@ -60,7 +60,7 @@ type MemReader implements Readable {
 type MemWriter implements Writable propagates<disposable> {
     sink: Vec<uint8>,
     async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
-        vec.vec_extend_from(ref self.sink, buf);
+        vec.vecExtendFrom(ref self.sink, buf);
         return Result.Ok { value: c_ssize_t(buf.len) };
     }
     function flush(ref self): FlushOutcome {
@@ -85,8 +85,8 @@ type EchoHandler implements Handler {
 
 // The whole point: `serveConnectionOn` has no idea what is behind these.
 async runOne(label: string, request: string): void {
-    let mr: MemReader = { storage: intr.string_as_bytes(request), pos: 0 };
-    disposable sink: Vec<uint8> = vec.vec_new(1024);
+    let mr: MemReader = { storage: intr.stringAsBytes(request), pos: 0 };
+    disposable sink: Vec<uint8> = vec.vecNew(1024);
     let mw: MemWriter = { sink: sink };
 
     let r: Reader = Reader.from(ref mr);
@@ -99,7 +99,7 @@ async runOne(label: string, request: string): void {
         ref r, ref w, ref d, http.defaultConfig(), 1);
 
     // The response, exactly as it would have gone onto a wire.
-    let out: string = intr.string_from_bytes_unchecked(vec.vec_as_array(ref mw.sink));
+    let out: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref mw.sink));
     printf(`${label} served=${served} bytes=${mw.sink.len}\n`);
     printf(`${label} status=${firstLine(out)}\n`);
     printf(`${label} body=${afterHead(out)}\n`);
@@ -107,18 +107,18 @@ async runOne(label: string, request: string): void {
 
 // The status line, up to the CR.
 function firstLine(s: string): string {
-    let b: uint8[] = intr.string_as_bytes(s);
+    let b: uint8[] = intr.stringAsBytes(s);
     let end: usize = 0;
     while (end < b.len && b[end] != '\r') { end = end + 1; }
-    return intr.string_from_bytes_unchecked(intr.array_slice(b, 0, end));
+    return intr.stringFromBytesUnchecked(intr.arraySlice(b, 0, end));
 }
 
 // Everything past the blank line that ends the head.
 function afterHead(s: string): string {
-    let b: uint8[] = intr.string_as_bytes(s);
+    let b: uint8[] = intr.stringAsBytes(s);
     for (let i: usize = 0; i + 3 < b.len; i += 1) {
         if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') {
-            return intr.string_from_bytes_unchecked(intr.array_slice(b, i + 4, b.len));
+            return intr.stringFromBytesUnchecked(intr.arraySlice(b, i + 4, b.len));
         }
     }
     return "";

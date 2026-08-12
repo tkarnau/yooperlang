@@ -80,7 +80,7 @@ export function sha256New(): Sha256 {
     return {
         h0: 0x6a09e667, h1: 0xbb67ae85, h2: 0x3c6ef372, h3: 0xa54ff53a,
         h4: 0x510e527f, h5: 0x9b05688c, h6: 0x1f83d9ab, h7: 0x5be0cd19,
-        buf: intr.heap_alloc(64),
+        buf: intr.heapAlloc(64),
         bufLen: 0,
         total: 0,
     };
@@ -89,7 +89,7 @@ export function sha256New(): Sha256 {
 // Free the partial-block buffer. Paired with sha256New; `digest` does not do
 // it, because a caller may want the state afterwards.
 export function sha256Free(ref s: Sha256): void {
-    intr.heap_free(s.buf);
+    intr.heapFree(s.buf);
 }
 
 // Feed bytes in. May be called any number of times with any sizes.
@@ -166,20 +166,20 @@ export function digest(ref s: Sha256, ref out: Vec<uint8>): void {
 }
 
 function pushBE32(ref out: Vec<uint8>, v: uint32): void {
-    vec.vec_push(ref out, uint8((v >> 24) & 255));
-    vec.vec_push(ref out, uint8((v >> 16) & 255));
-    vec.vec_push(ref out, uint8((v >> 8) & 255));
-    vec.vec_push(ref out, uint8(v & 255));
+    vec.vecPush(ref out, uint8((v >> 24) & 255));
+    vec.vecPush(ref out, uint8((v >> 16) & 255));
+    vec.vecPush(ref out, uint8((v >> 8) & 255));
+    vec.vecPush(ref out, uint8(v & 255));
 }
 
 // One 64-byte block, read from `data` at `off`. FIPS 180-4 section 6.2.2.
 function compress(ref s: Sha256, data: uint8[], off: usize): void {
-    disposable w: Vec<uint32> = vec.vec_new(64);
+    disposable w: Vec<uint32> = vec.vecNew(64);
 
     // The first 16 words are the block, big-endian.
     for (let i: usize = 0; i < 16; i += 1) {
         let b: usize = off + i * 4;
-        vec.vec_push(ref w,
+        vec.vecPush(ref w,
             (uint32(data[b]) << 24)
             | (uint32(data[b + 1]) << 16)
             | (uint32(data[b + 2]) << 8)
@@ -187,12 +187,12 @@ function compress(ref s: Sha256, data: uint8[], off: usize): void {
     }
     // The remaining 48 are the message schedule.
     for (let i: usize = 16; i < 64; i += 1) {
-        let wm15: uint32 = vec.vec_get(ref w, i - 15);
-        let wm2: uint32 = vec.vec_get(ref w, i - 2);
+        let wm15: uint32 = vec.vecGet(ref w, i - 15);
+        let wm2: uint32 = vec.vecGet(ref w, i - 2);
         let s0: uint32 = rotr(wm15, 7) ^ rotr(wm15, 18) ^ (wm15 >> 3);
         let s1: uint32 = rotr(wm2, 17) ^ rotr(wm2, 19) ^ (wm2 >> 10);
-        vec.vec_push(ref w,
-            vec.vec_get(ref w, i - 16) + s0 + vec.vec_get(ref w, i - 7) + s1);
+        vec.vecPush(ref w,
+            vec.vecGet(ref w, i - 16) + s0 + vec.vecGet(ref w, i - 7) + s1);
     }
 
     let a: uint32 = s.h0;
@@ -207,7 +207,7 @@ function compress(ref s: Sha256, data: uint8[], off: usize): void {
     for (let i: usize = 0; i < 64; i += 1) {
         let sig1: uint32 = rotr(e, 6) ^ rotr(e, 11) ^ rotr(e, 25);
         let ch: uint32 = (e & f) ^ ((~e) & g);
-        let t1: uint32 = hh + sig1 + ch + K[i] + vec.vec_get(ref w, i);
+        let t1: uint32 = hh + sig1 + ch + K[i] + vec.vecGet(ref w, i);
         let sig0: uint32 = rotr(a, 2) ^ rotr(a, 13) ^ rotr(a, 22);
         let maj: uint32 = (a & b) ^ (a & c) ^ (b & c);
         let t2: uint32 = sig0 + maj;
@@ -252,37 +252,37 @@ export function sha256(ref out: Vec<uint8>, data: uint8[]): void {
 // disagrees with every other implementation, which is a bug you find in
 // production against someone else's server.
 export function hmacSha256(ref out: Vec<uint8>, key: uint8[], message: uint8[]): void {
-    disposable block: Vec<uint8> = vec.vec_new(SHA256_BLOCK_BYTES);
+    disposable block: Vec<uint8> = vec.vecNew(SHA256_BLOCK_BYTES);
 
     if (key.len > SHA256_BLOCK_BYTES) {
         sha256(ref block, key);
     } else {
-        vec.vec_extend_from(ref block, key);
+        vec.vecExtendFrom(ref block, key);
     }
     while (block.len < SHA256_BLOCK_BYTES) {
-        vec.vec_push(ref block, 0);
+        vec.vecPush(ref block, 0);
     }
 
     // inner = H((K ^ 0x36) ++ message)
-    disposable inner: Vec<uint8> = vec.vec_new(SHA256_DIGEST_BYTES);
+    disposable inner: Vec<uint8> = vec.vecNew(SHA256_DIGEST_BYTES);
     let si: Sha256 = sha256New();
-    disposable ipad: Vec<uint8> = vec.vec_new(SHA256_BLOCK_BYTES);
+    disposable ipad: Vec<uint8> = vec.vecNew(SHA256_BLOCK_BYTES);
     for (let i: usize = 0; i < SHA256_BLOCK_BYTES; i += 1) {
-        vec.vec_push(ref ipad, vec.vec_get(ref block, i) ^ 0x36);
+        vec.vecPush(ref ipad, vec.vecGet(ref block, i) ^ 0x36);
     }
-    update(ref si, vec.vec_as_array(ref ipad));
+    update(ref si, vec.vecAsArray(ref ipad));
     update(ref si, message);
     digest(ref si, ref inner);
     sha256Free(ref si);
 
     // out = H((K ^ 0x5c) ++ inner)
     let so: Sha256 = sha256New();
-    disposable opad: Vec<uint8> = vec.vec_new(SHA256_BLOCK_BYTES);
+    disposable opad: Vec<uint8> = vec.vecNew(SHA256_BLOCK_BYTES);
     for (let i: usize = 0; i < SHA256_BLOCK_BYTES; i += 1) {
-        vec.vec_push(ref opad, vec.vec_get(ref block, i) ^ 0x5c);
+        vec.vecPush(ref opad, vec.vecGet(ref block, i) ^ 0x5c);
     }
-    update(ref so, vec.vec_as_array(ref opad));
-    update(ref so, vec.vec_as_array(ref inner));
+    update(ref so, vec.vecAsArray(ref opad));
+    update(ref so, vec.vecAsArray(ref inner));
     digest(ref so, ref out);
     sha256Free(ref so);
 }
@@ -291,10 +291,10 @@ export function hmacSha256(ref out: Vec<uint8>, key: uint8[], message: uint8[]):
 
 // Lowercase hex of `data`, appended to `out`. What goes in a signature header.
 export function toHex(ref out: Vec<uint8>, data: uint8[]): void {
-    let digits: uint8[] = intr.string_as_bytes("0123456789abcdef");
+    let digits: uint8[] = intr.stringAsBytes("0123456789abcdef");
     for (let i: usize = 0; i < data.len; i += 1) {
-        vec.vec_push(ref out, digits[usize(data[i] >> 4)]);
-        vec.vec_push(ref out, digits[usize(data[i] & 15)]);
+        vec.vecPush(ref out, digits[usize(data[i] >> 4)]);
+        vec.vecPush(ref out, digits[usize(data[i] & 15)]);
     }
 }
 

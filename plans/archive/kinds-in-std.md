@@ -6,7 +6,7 @@
 
 ## The problem
 
-[builtinKinds.js](../src/jsyooptypecheck/builtinKinds.js) hardcodes three
+[coreKinds.js](../../src/jsyooptypecheck/coreKinds.js) hardcodes three
 kinds whose own comment admits they "carry synthetic clauses that aren't
 expressible in source":
 
@@ -20,9 +20,9 @@ names WHAT gets called to retain or release. Codegen simply knows it means
 on behavior that lives somewhere else entirely.
 
 `task` is worse: it is not a kind at all, but a lexer keyword handled
-structurally in `parseFunctionDecl`. [SPEC.md section 6](../SPEC.md) writes
+structurally in `parseFunctionDecl`. [SPEC.md section 6](../../SPEC.md) writes
 it as `kind task { appliesTo function; provides Task; }` and
-[section 7](../SPEC.md) says dropping `function` is the general rule for
+[section 7](../../SPEC.md) says dropping `function` is the general rule for
 ANY function-position kind, with `task function fetch(...)` explicitly
 equivalent and prefixes stacking (`pure task compute(...)`). None of that
 is implemented.
@@ -110,7 +110,7 @@ declaration prefixes.
 
 ## Status: LANDED
 
-All four stages are in, and `builtinKinds.js` is deleted.
+All four stages are in, and `coreKinds.js` is deleted.
 
 What shipped differently from the plan:
 

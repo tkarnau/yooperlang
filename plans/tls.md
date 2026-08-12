@@ -323,7 +323,7 @@ Real TLS 1.3 handshakes, verified, over the memory-BIO design. Landed:
    certificate, a proxy, one node of a cluster). Without it the only way to
    reach those is to disable verification entirely - a knob meant for one
    narrow case ending up disabling everything.
-3. **Ownership of the socket MOVES into the TlsStream**, so `tcp_connect`'s
+3. **Ownership of the socket MOVES into the TlsStream**, so `tcpConnect`'s
    result is bound with a plain `let` and disposed by hand on the error paths.
    A `disposable` binding there closes the fd the moment `tlsConnect` returns,
    which surfaced as "Bad file descriptor" on the first write, several frames
@@ -345,7 +345,7 @@ so one import there would make every program that speaks HTTP link OpenSSL.
 Instead:
 
 - `std/http` gained `sendOn(ref c, ref req, ref u, ref r, ref w)`: the whole
-  client minus the socket. `send` is that plus `tcp_connect`.
+  client minus the socket. `send` is that plus `tcpConnect`.
 - `std/https` is a third module that depends on both and supplies the
   connection, dispatching on the URL scheme (an `http://` URL delegates
   straight to `http.send`).

@@ -15,7 +15,7 @@ function main(): int32 {
 
     // Allocated, but the binding declares the borrowed form, which drops the
     // marker. Rejected too - annotate it `owned string` to keep it.
-    const dropped: string = str.string_concat("a", "b");
+    const dropped: string = str.stringConcat("a", "b");
     str.strFree(dropped);
 
     return 0;

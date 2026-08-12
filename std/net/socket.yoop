@@ -13,7 +13,7 @@ module net;
 // in the compiler's sense - its diagnostic lives in the `error` field).
 // The caller's typical pattern is auto-cleanup at scope end:
 //
-//   disposable r: SocketResult = open_tcp_socket();
+//   disposable r: SocketResult = openTcpSocket();
 //   if (r.error.len > 0) { return ...; }
 //   // operations on r.socket via `ref` borrow
 //
@@ -32,16 +32,16 @@ export type Socket implements Disposable propagates<disposable> {
     fd: c_int,
     function dispose(ref self): void {
         if (self.fd >= 0) {
-            let rc: c_int = ffi_close(self.fd);
+            let rc: c_int = ffiClose(self.fd);
             self.fd = -1;
         }
     }
 }
 
-// SocketResult / open_tcp_socket are the safe surface - callers that
+// SocketResult / openTcpSocket are the safe surface - callers that
 // need a raw socket reach through this rather than going to socket_ffi.
 // Implements Disposable so the caller can `disposable r: SocketResult =
-// open_tcp_socket()` and let autocleanup do the right thing.
+// openTcpSocket()` and let autocleanup do the right thing.
 type SocketResult implements Disposable propagates<disposable> {
     socket: Socket,
     error:  string,
@@ -50,8 +50,8 @@ type SocketResult implements Disposable propagates<disposable> {
     }
 }
 
-function open_tcp_socket(): SocketResult propagates<disposable> {
-    let r: Result<c_int, string> = ffi_socket_open();
+function openTcpSocket(): SocketResult propagates<disposable> {
+    let r: Result<c_int, string> = ffiSocketOpen();
     let fd: c_int = -1;
     let err_msg: string = "";
     switch (r) {

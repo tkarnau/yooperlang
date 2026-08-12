@@ -3,7 +3,7 @@ import { Display } from "std/core/traits.yoop";
 @derive(display)
 type Clash implements Display {
   n: int32,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     return "manual";
   }
 }

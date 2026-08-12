@@ -14,7 +14,7 @@ the named form:
 import * as str from "std/core/strings.yoop";
 import { Result } from "std/core/types.yoop";
 
-let padded: string = str.padStart(str.int_to_string(n), 4, "0");
+let padded: string = str.padStart(str.intToString(n), 4, "0");
 ```
 
 ## Contents
@@ -27,7 +27,7 @@ let padded: string = str.padStart(str.int_to_string(n), 4, "0");
 - `std/core/bytes.yoop` - Phase 8.H byte-buffer primitives.
 - `std/core/cancel` - cancellation tokens: a cancelled flag, an optional deadline, and parent/child links, which blocking calls fold into their own timed waits. One module across two files; import the DIRECTORY.
 - `std/core/concurrency.yoop` - bounded-wait surface for Task<T>.
-- `std/core/format.yoop` - primitive `to_string` shims.
+- `std/core/format.yoop` - primitive `toString` shims.
 - `std/core/intrinsics.yoop` - the compiler-recognized intrinsic surface.
 - `std/core/kinds.yoop` - foundational trait + kind shared across std.
 - `std/core/numbers.yoop` - numeric parsing and small integer helpers.
@@ -61,14 +61,14 @@ double-ended queue (ring buffer).
 Exports:
 
 - `Deque` - type
-- `deque_new` - function
-- `deque_push_back` - function
-- `deque_push_front` - function
-- `deque_pop_front` - function
-- `deque_pop_back` - function
-- `deque_get` - function
-- `deque_len` - function
-- `deque_clear` - function
+- `dequeNew` - function
+- `dequePushBack` - function
+- `dequePushFront` - function
+- `dequePopFront` - function
+- `dequePopBack` - function
+- `dequeGet` - function
+- `dequeLen` - function
+- `dequeClear` - function
 
 ## `std/collections/map.yoop`
 
@@ -78,21 +78,21 @@ Exports:
 
 - `KeyOps` - type
 - `Map` - type
-- `map_new` - function
-- `map_insert` - function
-- `map_get` - function
-- `map_contains_key` - function
-- `map_remove` - function
-- `map_len` - function
-- `map_clear` - function
+- `mapNew` - function
+- `mapInsert` - function
+- `mapGet` - function
+- `mapContainsKey` - function
+- `mapRemove` - function
+- `mapLen` - function
+- `mapClear` - function
 - `MapEntry` - type
 - `MapIter` - type
-- `map_iter` - function
-- `string_key_ops` - function
-- `int32_key_ops` - function
-- `int64_key_ops` - function
-- `uint64_key_ops` - function
-- `bytes_key_ops` - function
+- `mapIter` - function
+- `stringKeyOps` - function
+- `int32KeyOps` - function
+- `int64KeyOps` - function
+- `uint64KeyOps` - function
+- `bytesKeyOps` - function
 
 ## `std/collections/set.yoop`
 
@@ -101,11 +101,11 @@ generic hash set.
 Exports:
 
 - `Set` - type
-- `set_new` - function
-- `set_insert` - function
-- `set_contains` - function
-- `set_remove` - function
-- `set_len` - function
+- `setNew` - function
+- `setInsert` - function
+- `setContains` - function
+- `setRemove` - function
+- `setLen` - function
 
 ## `std/core/alloc.yoop`
 
@@ -153,20 +153,20 @@ Phase 8.H byte-buffer primitives.
 Exports:
 
 - `propagates` - type Bytes implements Disposable
-- `bytes_to_array` - function
-- `bytes_from_array` - function
-- `bytes_from_raw` - function
-- `bytes_from_vec` - function
-- `bytes_eq` - function
-- `bytes_index_of` - function
+- `bytesToArray` - function
+- `bytesFromArray` - function
+- `bytesFromRaw` - function
+- `bytesFromVec` - function
+- `bytesEq` - function
+- `bytesIndexOf` - function
 - `lastIndexOfSeq` - function
-- `bytes_index_of_seq` - function
-- `bytes_starts_with` - function
-- `bytes_eq_ignore_ascii_case` - function
-- `bytes_slice` - function
-- `bytes_copy` - function
+- `bytesIndexOfSeq` - function
+- `bytesStartsWith` - function
+- `bytesEqIgnoreAsciiCase` - function
+- `bytesSlice` - function
+- `bytesCopy` - function
 - `BytesParsed` - type
-- `bytes_parse_int` - function
+- `bytesParseInt` - function
 
 ## `std/core/cancel`
 
@@ -212,20 +212,20 @@ Exports:
 - `WaitResult` - variant
 - `awaitReadable` - async
 - `awaitWritable` - async
-- `now_ns` - function
-- `sleep_ms` - function
+- `nowNs` - function
+- `sleepMs` - function
 - `awaitTask` - async
 
 ## `std/core/format.yoop`
 
-primitive `to_string` shims.
+primitive `toString` shims.
 
 Exports:
 
-- `bool_to_string` - function
-- `uint_to_string` - function
-- `int_to_string` - function
-- `float_to_string` - function
+- `boolToString` - function
+- `uintToString` - function
+- `intToString` - function
+- `floatToString` - function
 
 ## `std/core/intrinsics.yoop`
 
@@ -273,16 +273,16 @@ Phase 8.H string primitives and bridges.
 
 Exports:
 
-- `string_from_bytes` - function
-- `string_eq` - function
-- `string_eq_ignore_ascii_case` - function
-- `string_starts_with` - function
-- `string_index_of` - function
+- `stringFromBytes` - function
+- `stringEq` - function
+- `stringEqIgnoreAsciiCase` - function
+- `stringStartsWith` - function
+- `stringIndexOf` - function
 - `lastIndexOf` - function
-- `string_slice` - function
-- `string_hash` - function
-- `string_concat` - function
-- `string_concat_all` - function
+- `stringSlice` - function
+- `stringHash` - function
+- `stringConcat` - function
+- `stringConcatAll` - function
 - `padStart` - function
 - `padEnd` - function
 - `sliceFrom` - function
@@ -372,14 +372,14 @@ Phase 8.H growable vector type.
 Exports:
 
 - `Vec` - type
-- `vec_new` - function
-- `vec_push` - function
-- `vec_get` - function
-- `vec_set` - function
-- `vec_clear` - function
-- `vec_as_array` - function
-- `vec_extend_from` - function
-- `vec_from_array` - function
+- `vecNew` - function
+- `vecPush` - function
+- `vecGet` - function
+- `vecSet` - function
+- `vecClear` - function
+- `vecAsArray` - function
+- `vecExtendFrom` - function
+- `vecFromArray` - function
 - `VecIter` - type
 - `vecIter` - function
 
@@ -500,15 +500,15 @@ filesystem operations for regular files.
 
 Exports:
 
-- `path_join` - function
-- `mkdir_p` - function
-- `write_file` - function
-- `read_file_into` - function
+- `pathJoin` - function
+- `mkdirP` - function
+- `writeFile` - function
+- `readFileInto` - function
 - `propagates` - type ReadFileResult implements Disposable
-- `read_file` - function
-- `delete_file` - function
+- `readFile` - function
+- `deleteFile` - function
 - `exists` - function
-- `file_size` - function
+- `fileSize` - function
 - `implements` - type DirIter
 - `openDir` - function
 - `FileMeta` - type
@@ -713,7 +713,7 @@ Exports:
 
 - `Display` - type SocketAddr implements
 - `localhost` - function
-- `any_addr` - function
+- `anyAddr` - function
 - `propagates` - type Socket implements Disposable
 - `ffiAcceptAsync` - async
 - `ffiRecvAsync` - async
@@ -721,7 +721,7 @@ Exports:
 - `IoOutcome` - variant
 - `propagates` - type TcpListener implements Disposable
 - `propagates` - type ListenResult implements Disposable
-- `tcp_listen` - function
+- `tcpListen` - function
 - `implements` - type TcpStream
 - `AcceptOutcome` - variant
 - `tcpSetTimeoutMs` - function
@@ -731,14 +731,14 @@ Exports:
 - `tcpWriteAllCt` - function
 - `tcpWriteAllTimeoutMs` - function
 - `propagates` - type AcceptResult implements Disposable
-- `tcp_accept` - function
+- `tcpAccept` - function
 - `tcpAcceptCt` - function
 - `tcpAcceptTimeoutMs` - function
 - `tcpAcceptAsync` - async
 - `propagates` - type ConnectResult implements Disposable
-- `tcp_connect` - function
+- `tcpConnect` - function
 - `Uri` - type
-- `parse_uri` - function
+- `parseUri` - function
 
 ## `std/runtime.yoop`
 

@@ -37,7 +37,7 @@ function skipLineComment(src: uint8[], pos: usize): usize {
 // returns position after all discard space, comments, etc
 export function skipWhitespace(src: uint8[], pos: usize): usize {
   let p = pos;
-  // let strBytes = intr.string_as_bytes(src);
+  // let strBytes = intr.stringAsBytes(src);
 
   while (p < src.len) {
     let ch = src[p];
@@ -198,7 +198,7 @@ function scanCharPredicates(
 }
 
 function allocDigitPredicateArr(size: usize): ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] {
-  return intr.heap_alloc(size);
+  return intr.heapAlloc(size);
 }
 
 export function scanHexDigitsAndUnderscores(src: uint8[], start: usize): Result<usize, string> {
@@ -207,7 +207,7 @@ export function scanHexDigitsAndUnderscores(src: uint8[], start: usize): Result<
   predicates[1] = validUnderscorePred;
   const result = scanCharPredicates(src, start, ref predicates);
 
-  intr.heap_free(predicates);
+  intr.heapFree(predicates);
   return result;
 }
 
@@ -217,7 +217,7 @@ export function scanBinDigitsAndUnderscores(src: uint8[], start: usize): Result<
   predicates[1] = validUnderscorePred;
   const result = scanCharPredicates(src, start, ref predicates);
 
-  intr.heap_free(predicates);
+  intr.heapFree(predicates);
   return result;
 }
 
@@ -227,7 +227,7 @@ export function scanOctDigitsAndUnderscores(src: uint8[], start: usize): Result<
   predicates[1] = validUnderscorePred;
   const result = scanCharPredicates(src, start, ref predicates);
 
-  intr.heap_free(predicates);
+  intr.heapFree(predicates);
   return result;
 }
 
@@ -237,7 +237,7 @@ export function scanDecDigitsAndUnderscores(src: uint8[], start: usize): Result<
   predicates[1] = validUnderscorePred;
   const result = scanCharPredicates(src, start, ref predicates);
 
-  intr.heap_free(predicates);
+  intr.heapFree(predicates);
   return result;
 }
 

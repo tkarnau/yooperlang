@@ -26,7 +26,7 @@
 // directory) or `yoopiler strange_add.test.yoop` (just that file).
 
 import { ephemeral } from "./core/kinds.yoop";
-import { string_eq, string_index_of } from "./core/strings.yoop";
+import { stringEq, stringIndexOf } from "./core/strings.yoop";
 import { arenaScope } from "./core/alloc.yoop";
 import { argCount, argAt } from "./env.yoop";
 
@@ -51,7 +51,7 @@ let FAILED: int32 = 0;
 // the arena scope opens.
 //
 // That flush is the whole fix. Before it, an over-budget suite was a null
-// deref inside vec_push, the process died with `signal: 'SIGSEGV'` and
+// deref inside vecPush, the process died with `signal: 'SIGSEGV'` and
 // `output: [null, null, null]`, and every line the run had already printed
 // went with it - so the last thing visible was a PASSING case from an earlier
 // suite. See plans/yooperdoom-takeaways.md 1.2.
@@ -85,7 +85,7 @@ export type Case implements HandlesCase {
         } else {
             FAILED = FAILED + 1;
             printf("not ok %d - %s\n", CASE_INDEX, self.name);
-            if (!string_eq(self.detail, "")) {
+            if (!stringEq(self.detail, "")) {
                 printf("    %s\n", self.detail);
             }
         }
@@ -141,9 +141,9 @@ function selected(name: string): bool {
     return false;
 }
 
-// Substring test. `string_index_of` returns the haystack length on a miss.
+// Substring test. `stringIndexOf` returns the haystack length on a miss.
 function contains(haystack: string, needle: string): bool {
-    const found = string_index_of(haystack, needle);
+    const found = stringIndexOf(haystack, needle);
     return found < haystack.len;
 }
 

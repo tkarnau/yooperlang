@@ -18,7 +18,7 @@ export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingEr
   node.childA = parseTypeParamList(ref ps)?;
   sl.expect(ref ps, TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
-  disposable ids: Vec<NodeId> = vec.vec_new(4);
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
   let peekTag = sl.peek(ref ps).tag;
   while (
     peekTag == TokenTags.IDENT ||
@@ -31,7 +31,7 @@ export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingEr
       peekTag = sl.peek(ref ps).tag;
     }
     if (peekTag != TokenTags.RPAREN && peekTag != TokenTags.EOF) {
-      vec.vec_push(ref ids, parseFunctionParam(ref ps)?);
+      vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
       peekTag = sl.peek(ref ps).tag;
     }
   }

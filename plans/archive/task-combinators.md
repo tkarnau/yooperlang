@@ -78,10 +78,10 @@ which an `extern "C"` signature cannot name):
 - `armComplete<T>(h: Task<T>): c_int`
 - `isDone<T>(h: Task<T>): c_int`
 
-`isDone` looks redundant - `wait_until(h, now_ns())` polls without parking,
+`isDone` looks redundant - `waitUntil(h, nowNs())` polls without parking,
 since the runtime checks state before it consults the clock. It is not: that
 expression does not survive monomorphization inside a generic function, because
-`wait_until`'s stamped `WaitResult<T>` result reaches codegen with an
+`waitUntil`'s stamped `WaitResult<T>` result reaches codegen with an
 unsubstituted type parameter and trips `llvmType`. That is bug 2 below.
 
 Then `conc.awaitTask`:
@@ -162,7 +162,7 @@ All four were latent before this work; none were introduced by it.
    scope exit but the call site never retains, so passing a `pooled` binding
    into it corrupts the heap (`tiny_free_list_remove_ptr`). Verified against
    an unmodified checkout. This is why `awaitTask` borrows.
-2. **`wait_until` inside a generic function crashes codegen.** Its stamped
+2. **`waitUntil` inside a generic function crashes codegen.** Its stamped
    `WaitResult<T>` result survives monomorphization as a `TypeParamType` and
    reaches `llvmType`. Worked around by making `isDone` an intrinsic.
 3. **`>>`-closing nested type applications do not parse in FIELD position.**
@@ -182,17 +182,17 @@ All four were latent before this work; none were introduced by it.
 
 ## Files
 
-- [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) - park byte, the two
+- [runtime/yoop_runtime.c](../../runtime/yoop_runtime.c) - park byte, the two
   transition helpers, the waiter registry, `fire_waiters_locked` in
   `yoop_handle_signal_done`, `queue_push_locked`.
-- [runtime/yoop_runtime.h](../runtime/yoop_runtime.h) - the three new entry
+- [runtime/yoop_runtime.h](../../runtime/yoop_runtime.h) - the three new entry
   points.
-- [src/jsyooptypecheck/typecheck.js](../src/jsyooptypecheck/typecheck.js),
-  [checkExpr.js](../src/jsyooptypecheck/checkExpr.js) - `armComplete` / `isDone`
+- [src/jsyooptypecheck/typecheck.js](../../src/jsyooptypecheck/typecheck.js),
+  [checkExpr.js](../../src/jsyooptypecheck/checkExpr.js) - `armComplete` / `isDone`
   intrinsic registration and resolution (bare + namespaced).
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - their
+- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) - their
   lowering, plus the two array/type-param fixes above.
-- [std/core/concurrency.yoop](../std/core/concurrency.yoop) - `awaitTask`.
-- [examples/pass/task_await_join.yoop](../examples/pass/task_await_join.yoop) -
+- [std/core/concurrency.yoop](../../std/core/concurrency.yoop) - `awaitTask`.
+- [examples/pass/task_await_join.yoop](../../examples/pass/task_await_join.yoop) -
   the fixture, pinned to one worker in e2e so a regression deadlocks rather
   than returning a wrong answer.

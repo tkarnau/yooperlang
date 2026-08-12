@@ -37,7 +37,7 @@ const PORT: int32  = 18080;
 const DATA_ROOT: string = "./data";
 
 function main(): int32 {
-    disposable lr: ListenResult = tcp.tcp_listen(HOST, PORT, 128) {
+    disposable lr: ListenResult = tcp.tcpListen(HOST, PORT, 128) {
         if (lr.error.len > 0) {
             printf(`bind failed: ${lr.error}\n`);
             return 1;

@@ -34,7 +34,7 @@ type HelloHandler implements Handler {
 // `run` is async because everything under it is: the accept, the reads,
 // and the writes all suspend rather than blocking a worker thread.
 async run(): Result<int32, HttpError> {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 18080, 128);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 18080, 128);
     if (lr.error.len > 0) {
         return Result.Err { error: types.errIo(lr.error) };
     }

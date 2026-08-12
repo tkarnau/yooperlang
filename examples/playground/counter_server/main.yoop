@@ -88,7 +88,7 @@ type Metrics implements Handler {
     // handler is reached through a pointer that must outlive the route
     // table - two handlers would need a third object to share.
     async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
-        if (strings.string_eq(req.path, COUNT_PATH)) {
+        if (strings.stringEq(req.path, COUNT_PATH)) {
             bump(ref self);
         }
         types.respondJson(ref resp, types.ok(), statsJson(ref self));
@@ -103,7 +103,7 @@ function nowSecond(): uint64 {
     return rt.monotonicNs() / 1000000000;
 }
 
-// heap_alloc does not zero, and a Counter[] is raw memory until written.
+// heapAlloc does not zero, and a Counter[] is raw memory until written.
 function initMetrics(ref m: Metrics): void {
     for (let i: usize = 0; i < WINDOW; i += 1) {
         m.slotSecond[i] = { value: 0 };
@@ -156,18 +156,18 @@ function windowHits(ref m: Metrics): uint64 {
     return sum;
 }
 
-// Fixed two decimal places. `float_to_string` is %g-style (it drops
+// Fixed two decimal places. `floatToString` is %g-style (it drops
 // trailing zeros, so 5.0 prints as "5") and the ask was hundredths - so
 // round in integer space and place the point by hand.
 function twoDecimals(x: float64): string {
     let scaled: uint64 = uint64(x * 100.0 + 0.5);
     let whole: uint64 = scaled / 100;
     let frac: uint64 = scaled % 100;
-    let f: string = fmt.uint_to_string(frac);
+    let f: string = fmt.uintToString(frac);
     if (frac < 10) {
-        f = strings.string_concat("0", f);
+        f = strings.stringConcat("0", f);
     }
-    return `${fmt.uint_to_string(whole)}.${f}`;
+    return `${fmt.uintToString(whole)}.${f}`;
 }
 
 function rateString(ref m: Metrics): string {
@@ -179,12 +179,12 @@ function rateString(ref m: Metrics): string {
 // The introspection payload. Enough to answer "is it alive, is it keeping
 // up, and is it leaking" without attaching anything to the process.
 function statsJson(ref m: Metrics): string {
-    let u: string = fmt.uint_to_string(uptimeSeconds(ref m));
-    let w: string = fmt.uint_to_string(windowSeconds(ref m));
-    let c: string = fmt.uint_to_string(rt.counterGet(ref m.hits));
-    let open: string = fmt.uint_to_string(rt.counterGet(ref m.connectionsOpen));
-    let tot: string = fmt.uint_to_string(rt.counterGet(ref m.connectionsTotal));
-    let rss: string = fmt.uint_to_string(rt.rssBytes());
+    let u: string = fmt.uintToString(uptimeSeconds(ref m));
+    let w: string = fmt.uintToString(windowSeconds(ref m));
+    let c: string = fmt.uintToString(rt.counterGet(ref m.hits));
+    let open: string = fmt.uintToString(rt.counterGet(ref m.connectionsOpen));
+    let tot: string = fmt.uintToString(rt.counterGet(ref m.connectionsTotal));
+    let rss: string = fmt.uintToString(rt.rssBytes());
     return `{"count":${c},"rps":${rateString(ref m)},"windowSeconds":${w},"uptimeSeconds":${u},"connectionsOpen":${open},"connectionsTotal":${tot},"workers":${m.workers},"cpus":${m.cpus},"rssBytes":${rss}}
 `;
 }
@@ -282,7 +282,7 @@ async acceptLoop(
 function intArg(n: int32, fallback: int32, label: string): int32 {
     if (env.argCount() <= n) { return fallback; }
     let raw: string = env.argAt(n);
-    switch (numbers.parseBytesToInt32(intr.string_as_bytes(raw), 10)) {
+    switch (numbers.parseBytesToInt32(intr.stringAsBytes(raw), 10)) {
         case Result.Ok { value: v }: {
             if (v > 0) { return v; }
             printf(`${label} "${raw}" must be positive, using ${fallback}\n`);
@@ -298,13 +298,13 @@ function intArg(n: int32, fallback: int32, label: string): int32 {
 // ----- the server ---------------------------------------------------------
 
 async run(port: int32, workers: int32): Result<int32, HttpError> {
-    let disposable lr: ListenResult = tcp.tcp_listen(BIND_HOST, port, BACKLOG);
+    let disposable lr: ListenResult = tcp.tcpListen(BIND_HOST, port, BACKLOG);
     if (lr.error.len > 0) {
         return Result.Err { error: types.errIo(lr.error) };
     }
 
-    let secs: Counter[] = intr.heap_alloc(WINDOW);
-    let hits: Counter[] = intr.heap_alloc(WINDOW);
+    let secs: Counter[] = intr.heapAlloc(WINDOW);
+    let hits: Counter[] = intr.heapAlloc(WINDOW);
     let metrics: Metrics = {
         hits: { value: 0 },
         connectionsOpen: { value: 0 },

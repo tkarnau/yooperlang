@@ -164,7 +164,7 @@ export kind pooled {
 //
 //     function strFree(s: owned string): void { ... }
 //
-//     strFree(str.string_concat("a", "b"));   // ok, the result is owned
+//     strFree(str.stringConcat("a", "b"));   // ok, the result is owned
 //     strFree("a literal");                   // compile error
 //
 // It is CONFERRED, so it reads in the useful direction: a sink that names it

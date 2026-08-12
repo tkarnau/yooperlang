@@ -7,7 +7,7 @@ import * as str from "std/core/strings.yoop";
 export function parseIdentAsName(ref pState: ParserState): Result<string, ParsingError> {
   const identToken = SelfLexing.expect(ref pState, TokenTags.IDENT)?;
   const src = pState.src;
-  const nameResult = str.string_from_bytes(bytes.bytes_slice(
+  const nameResult = str.stringFromBytes(bytes.bytesSlice(
     src,
     identToken.start,
     identToken.start + usize(identToken.length)

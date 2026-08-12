@@ -4,7 +4,7 @@
 // longer an error - it typechecks cleanly and the user owns the lifetime.
 // (Formerly examples/fail/vec_no_disposable.)
 
-import { Vec, vec_new } from "../../../std/core/vec.yoop";
+import { Vec, vecNew } from "../../../std/core/vec.yoop";
 import { disposable } from "../../../std/core/kinds.yoop";
 
 extern "C" from "stdio.h" {
@@ -12,7 +12,7 @@ extern "C" from "stdio.h" {
 }
 
 function main(): int32 {
-    let v: Vec<int32> = vec_new(4);
+    let v: Vec<int32> = vecNew(4);
     printf(`leaked: ${v.cap}\n`);
     return 0;
 }

@@ -2,7 +2,7 @@
 //
 // What this exercises:
 //   - HTTP client (std/http/client.yoop) fetching plain text from wttr.in
-//   - DNS-resolved hostname dial (ffi_connect -> yoop_net_resolve_ipv4)
+//   - DNS-resolved hostname dial (ffiConnect -> yoop_net_resolve_ipv4)
 //   - Local wall-clock time via small yoop_runtime helpers
 //   - SDL2 drawing with disposable RAII for the window + renderer
 //   - 7-segment style digits drawn from filled rectangles
@@ -251,7 +251,7 @@ function fetch_temperature_inner(): Result<TempParse, HttpError> {
     let body: uint8[] = client.responseBytes(ref r);
     let parsed: TempParse = parse_wttr_temp(body);
     if (!parsed.ok) {
-        let body_str: string = intr.string_from_bytes_unchecked(body);
+        let body_str: string = intr.stringFromBytesUnchecked(body);
         printf(`weather parse failed for body: ${body_str}\n`);
     }
     return Result.Ok { value: parsed };
@@ -709,7 +709,7 @@ function run_scene(temp: TempParse): void {
 
     // CPU pixel buffer the shader writes into. Heap-allocated and
     // intentionally leaked at process exit -- short-running demo.
-    let sun_pixels: uint8[] = intr.heap_alloc(usize(SUN_TEX_DIM * SUN_TEX_DIM * 4));
+    let sun_pixels: uint8[] = intr.heapAlloc(usize(SUN_TEX_DIM * SUN_TEX_DIM * 4));
 
     // The star field's seed is fixed per run so the points don't
     // dance frame-to-frame. (Random-then-cached would be nicer; a

@@ -100,7 +100,7 @@ move invalidation). The obligation tracker keys everything on `bindingName` and
 creates at most one obligation per resource. So:
 
 ```
-let disposable a: Vec<uint8> = vec_new(8);
+let disposable a: Vec<uint8> = vecNew(8);
 let disposable b: Vec<uint8> = a;   // two structs, ONE heap buffer
 // both fire dispose at scope end -> double free, nothing catches it
 ```
@@ -114,7 +114,7 @@ The compiler trusts this; it does not enforce it.
 Because there is no move concept, the tracker hand-codes the few places a
 resource may leave a binding (bare-IDENT return, IDENT fields inside the
 returned literal). It does NOT recognize move-into-literal at a let/const site,
-passing into a function/collection (`vec_push`), or consuming via `switch`
+passing into a function/collection (`vecPush`), or consuming via `switch`
 (SWITCH_STATEMENT is not walked at all - case bindings are untracked and the
 body silently leaks). Each missing site is a separate hole.
 
@@ -211,7 +211,7 @@ The chosen direction (Part 4.1) is this, plus a thin opt-in convenience layer.
 The compiler does not enforce resource lifetimes. It offers opt-in help and
 otherwise stays out of the way. Concretely:
 
-- Default is SILENT. A plain `let buf = vec_new(8);` that is never disposed,
+- Default is SILENT. A plain `let buf = vecNew(8);` that is never disposed,
   returned, or marked produces no diagnostic. You are trusted (Jai/Odin
   baseline). No more unsatisfied-obligation errors.
 

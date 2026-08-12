@@ -1,7 +1,7 @@
 // Phase 10.F.2: external cancellation via `cancel(h)`.
 //
 // A `cancel(h)` call sets the cancel byte in h's handle prefix and
-// broadcasts so any `wait_until` parked on the handle wakes immediately
+// broadcasts so any `waitUntil` parked on the handle wakes immediately
 // and observes `WaitResult.Cancelled`. The task body itself is not yet
 // cooperative (in-body polling lands in 10.F.2.b) - the worker keeps
 // running it to natural completion. The cancellation semantics this
@@ -11,7 +11,7 @@
 // Fixture shape:
 //   1. Spawn `slow()` (sleeps 200ms then returns 99).
 //   2. From a second pooled task, sleep 30ms then `cancel(slow)`.
-//   3. Main calls `conc.wait_until(slow, now+1s)` - the 1s deadline is huge,
+//   3. Main calls `conc.waitUntil(slow, now+1s)` - the 1s deadline is huge,
 //      so the only path to Cancelled is through the cancel(h) at t≈30ms.
 // Final `wait slow` drains the still-running task so its handle frees
 // cleanly (same pattern as the wait_until_smoke fixture).
@@ -24,12 +24,12 @@ extern "C" from "stdio.h" {
 }
 
 task slow(): int32 {
-    conc.sleep_ms(200);
+    conc.sleepMs(200);
     return 99;
 }
 
 task canceller(target: Task<int32>): int32 {
-    conc.sleep_ms(30);
+    conc.sleepMs(30);
     conc.cancel(target);
     return 0;
 }
@@ -38,8 +38,8 @@ function main(): int32 {
     pooled target = slow();
     pooled killer = canceller(target);
 
-    let deadline: uint64 = conc.now_ns() + 1_000_000_000;
-    let r: WaitResult<int32> = conc.wait_until(target, deadline);
+    let deadline: uint64 = conc.nowNs() + 1_000_000_000;
+    let r: WaitResult<int32> = conc.waitUntil(target, deadline);
     switch (r) {
         case WaitResult.Done { value: v }: { printf(`unexpected done=${v}\n`); }
         case WaitResult.Timeout: { printf(`unexpected timeout\n`); }

@@ -36,7 +36,7 @@ export type Token implements Display {
   length: int,
   intVal: uint64,
   floatVal: float64,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     return `tag: ${tagName(self.tag)}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
   }
 }
@@ -50,7 +50,7 @@ type LexedError implements (Display, Into<ParsingError>) {
   src: ref uint8[],
   pos: usize,
   error: string,
-  function to_string(ref self): string {
+  function toString(ref self): string {
     return `pos: ${self.pos}, err: ${self.error}`;
   }
   function into(ref self): ParsingError {
@@ -402,9 +402,9 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
   res.nextPos = end;
   res.token.length = int32(len);
 
-  const byteSubstr = bytes.bytes_slice(src, pos, end);
+  const byteSubstr = bytes.bytesSlice(src, pos, end);
   let str: string = "";
-  switch (strings.string_from_bytes(byteSubstr)) {
+  switch (strings.stringFromBytes(byteSubstr)) {
     case Result.Err { error: e }: {
       return createLexedError(ref src, pos, `invalid identifier bytes: ${e}`);
     }
@@ -416,10 +416,10 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
   // Default to a plain identifier; promote to a keyword tag on an exact match.
   // This is the array-scan analogue of the JS `keywordTagList[value]` lookup -
   // Yoop has no map indexing operator, so we mirror `tokenScanList` and walk
-  // the small reserved-word table with `string_eq`.
+  // the small reserved-word table with `stringEq`.
   res.token.tag = TokenTags.IDENT;
   for kw in keywordList {
-    if (strings.string_eq(str, kw.str)) {
+    if (strings.stringEq(str, kw.str)) {
       res.token.tag = kw.tag;
       break;
     }
@@ -452,9 +452,9 @@ export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedErr
     }
 
     // need to figure out how to do substring from bytes array in this language
-    const scanAheadSlice = bytes.bytes_slice(src, p, p + tokenScanObj.str.len);
-    const tokenBytes = intr.string_as_bytes(tokenScanObj.str);
-    if (bytes.bytes_eq(scanAheadSlice, tokenBytes)) {
+    const scanAheadSlice = bytes.bytesSlice(src, p, p + tokenScanObj.str.len);
+    const tokenBytes = intr.stringAsBytes(tokenScanObj.str);
+    if (bytes.bytesEq(scanAheadSlice, tokenBytes)) {
       res.token.tag = tokenScanObj.tag;
       res.token.start = p;
       res.token.length = int32(tokenScanObj.str.len);
@@ -508,7 +508,7 @@ export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedErr
 // that we will just use a uint8[] instead of a string for lexing.
 export function tokenize(src: uint8[]): Result<Token[], string> {
   // should just allocate enough space for all possible / 2 for now... this might be a mistake :)
-  disposable tokens: Vec<Token> = vec.vec_new((src.len / 2) + 1); // minimum of 1
+  disposable tokens: Vec<Token> = vec.vecNew((src.len / 2) + 1); // minimum of 1
   let pos: usize = 0;
   let iters = 0;
   const maxIters = int32(src.len * 2 + 100);
@@ -521,9 +521,9 @@ export function tokenize(src: uint8[]): Result<Token[], string> {
         return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };
       }
       case Result.Ok { value: v } : {
-        vec.vec_push(ref tokens, v.token); // push either way for now...
+        vec.vecPush(ref tokens, v.token); // push either way for now...
         if (v.token.tag == TokenTags.EOF) {
-          return Result.Ok { value: vec.vec_as_array(ref tokens) };
+          return Result.Ok { value: vec.vecAsArray(ref tokens) };
         }
         pos = v.nextPos;
       }

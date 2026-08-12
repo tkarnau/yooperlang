@@ -4,7 +4,7 @@ import { Result } from "std/core/types.yoop";
 import { scanHexDigitsAndUnderscores } from "./sourceCodeProcessing/charUtils.yoop";
 
 function report(label: string, s: string): void {
-  const bytes = intr.string_as_bytes(s);
+  const bytes = intr.stringAsBytes(s);
   switch (scanHexDigitsAndUnderscores(bytes, 0)) {
     case Result.Ok { value: end }: { log.info(`${label}: ok end=${end}`); }
     case Result.Err { error: e }: { log.info(`${label}: err ${e}`); }

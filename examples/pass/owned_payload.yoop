@@ -18,13 +18,13 @@ variant Slot {
 }
 
 function hold(s: string): Slot {
-    return Slot.Held { text: str.string_concat(s, "!") };
+    return Slot.Held { text: str.stringConcat(s, "!") };
 }
 
 function main(): int32 {
     // Generic: `v` inherits argument 0 of Result<owned string, string>, so it
     // can be freed. The Err payload is a plain string and cannot be.
-    switch (str.string_slice("hello world", 0, 5)) {
+    switch (str.stringSlice("hello world", 0, 5)) {
         case Result.Ok { value: v }: {
             printf("slice [%s]\n", v);
             str.strFree(v);

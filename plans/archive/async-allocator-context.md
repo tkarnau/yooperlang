@@ -8,13 +8,13 @@
 
 Companion to [arena-and-context-allocators.md](arena-and-context-allocators.md)
 (which designed the context but predates coroutines) and
-[async-coroutines.md](async-coroutines.md) (which added the suspension the
+[async-coroutines.md](../async-coroutines.md) (which added the suspension the
 context does not survive).
 
 ## The bug, demonstrated
 
 Two tasks, one arena, a socketpair suspend in the shape of
-[examples/pass/async_yield_smoke.yoop](../examples/pass/async_yield_smoke.yoop).
+[examples/pass/async_yield_smoke.yoop](../../examples/pass/async_yield_smoke.yoop).
 Task A pushes an arena as the ambient allocator and then awaits. Task B never
 touches the arena and allocates 1024 bytes.
 
@@ -46,11 +46,11 @@ Three distinct failure vectors, all from one root cause:
    wrong, with no connection back to the code that broke it.
 
 There is a fourth vector that needs no async code at all.
-`yoop_task_wait` ([yoop_runtime.c:399](../runtime/yoop_runtime.c#L399))
+`yoop_task_wait` ([yoop_runtime.c:399](../../runtime/yoop_runtime.c#L399))
 re-entrantly drains the queue on the calling thread so a nested wait chain
 cannot deadlock the pool. So a plain synchronous function that has an arena
 installed - exactly the shape of
-[examples/pass/arena_request_loop.yoop](../examples/pass/arena_request_loop.yoop) -
+[examples/pass/arena_request_loop.yoop](../../examples/pass/arena_request_loop.yoop) -
 and then does `wait h` will run an arbitrary unrelated task on its own thread,
 inside its own arena. Arenas and tasks are already incompatible today, in
 straight-line code, without anybody writing `async`.
@@ -58,7 +58,7 @@ straight-line code, without anybody writing `async`.
 ## Why it happens, and why we are well placed to fix it
 
 `yoop_ctx_alloc` reads a `_Thread_local` slot
-([yoop_alloc.c:35](../runtime/yoop_alloc.c#L35)). The push/pop STACK lives in
+([yoop_alloc.c:35](../../runtime/yoop_alloc.c#L35)). The push/pop STACK lives in
 yoop locals - `ArenaScope.prev`, `Vec.alloc` - and only the current top is in
 TLS. That split is what makes this cheap to fix:
 
@@ -67,7 +67,7 @@ TLS. That split is what makes this cheap to fix:
   task for free.
 - Only the single current-top slot is misplaced, and there is exactly one
   place in the runtime where a task starts, resumes, or gives its thread back:
-  `run_task_step` ([yoop_runtime.c:149](../runtime/yoop_runtime.c#L149)). It
+  `run_task_step` ([yoop_runtime.c:149](../../runtime/yoop_runtime.c#L149)). It
   already performs precisely this save/install/restore dance for
   `tls_current_task`, for precisely the same reason.
 
@@ -190,7 +190,7 @@ Two different affinities look alike and want opposite things.
   binds it to the calling thread. A GL context is the clearest case:
   `SDL_GL_MakeCurrent` (and `wglMakeCurrent` underneath it) makes a context
   current *on the calling thread*, which is also why
-  [yoop_gl_win32.c](../runtime/yoop_gl_win32.c) resolves entry points against
+  [yoop_gl_win32.c](../../runtime/yoop_gl_win32.c) resolves entry points against
   "the current context". Resume on another worker and every GL call after the
   await goes to a thread with no context. Others in this family: a Windows COM
   STA apartment, a pushed locale, a thread-local tracing stack. **This is what
@@ -212,7 +212,7 @@ instructive:
   one round trip per statement. Pinning would rule out async transactions
   entirely.
 - The repo's actual `transaction` kind
-  ([std/db/sqlite/db.yoop](../std/db/sqlite/db.yoop)) is `appliesTo binding`,
+  ([std/db/sqlite/db.yoop](../../std/db/sqlite/db.yoop)) is `appliesTo binding`,
   not `region`, and its doc comment says why: a region has no name, and with
   no name there is nothing to call `commit` on. The rollback is the disposer;
   the commit has to be said out loud.
@@ -228,7 +228,7 @@ instructive:
   resumes.
 
 Where the bad example came from, so it does not come back: `ephemeral`'s doc
-comment in [std/core/kinds.yoop](../std/core/kinds.yoop) lists "an allocator
+comment in [std/core/kinds.yoop](../../std/core/kinds.yoop) lists "an allocator
 scope, a pushed context, a transaction" as region-guard shapes. That list is
 about guards whose EXIT means something, which is a different set that merely
 overlaps on allocator scopes.
@@ -253,7 +253,7 @@ Default `ephemeral` stays unpinned and becomes genuinely async-safe once stage
 
 **Honest note on priority.** Narrowing the motivating set to genuine thread
 affinity leaves stage 2 without an active in-tree consumer: the GL code lives
-in [examples/playground/](../examples/playground/) (shader_demo, nebula_arena)
+in [examples/playground/](../../examples/playground) (shader_demo, nebula_arena)
 and is single-threaded, using no tasks at all. So this is a guard against a
 hazard nobody in the tree is currently exposed to. Worth building when
 something does mix GL (or another thread-current API) with tasks; not worth
@@ -262,16 +262,16 @@ building ahead of that.
 Pieces:
 
 - **Parser.** `pinnedToThread` as a contextual ident in the kind body, mirroring
-  `pausable` ([parser.js:1267](../src/jsyooparser/parser.js#L1267)). It stays an
+  `pausable` ([parser.js:1267](../../src/jsyooparser/parser.js#L1267)). It stays an
   ordinary identifier everywhere else.
 - **Typecheck.** `populateKindFromClauses`
-  ([typecheck.js](../src/jsyooptypecheck/typecheck.js)) sets
+  ([typecheck.js](../../src/jsyooptypecheck/typecheck.js)) sets
   `kt.pinnedToThread`. Legal alongside `appliesTo region` and
   `appliesTo binding`; rejected on `appliesTo function`, where the sensible
   meaning would be "this function may not be async" and that is a separate
   feature, not this one wearing a disguise.
 - **A new `containsSuspend` walk**, in `src/jsyooptypecheck/suspend.js` as a
-  sibling of [diverge.js](../src/jsyooptypecheck/diverge.js). Walk the region's
+  sibling of [diverge.js](../../src/jsyooptypecheck/diverge.js). Walk the region's
   statements looking for `AWAIT_EXPRESSION`.
 
   A purely syntactic walk is COMPLETE here, which is worth stating because it
@@ -281,7 +281,7 @@ Pieces:
   A block with no `await` token in it cannot suspend. That is the async
   coloring rule paying for itself.
 - **Call site.** `validateKindBinding`
-  ([checkStatement.js](../src/jsyooptypecheck/checkStatement.js)), which
+  ([checkStatement.js](../../src/jsyooptypecheck/checkStatement.js)), which
   already gates named-vs-anonymous region bindings. Explicit-block form walks
   `stmt.trailingBlock`; implicit form (`ephemeral guard(x);`, disposed at
   enclosing scope end) walks the remaining statements of the enclosing block.
@@ -395,7 +395,7 @@ one `YOOP_TEMP_CAP` (64 KiB) malloc/free per task, because the arena is
 destroyed rather than returned to a free list. For a server spawning a task per
 connection that would matter - but nothing in std allocates from temp today
 (the only consumer in the tree is
-[examples/pass/arena_scope.yoop](../examples/pass/arena_scope.yoop)), so a pool
+[examples/pass/arena_scope.yoop](../../examples/pass/arena_scope.yoop)), so a pool
 would be speculative. If temp ever becomes hot on a per-connection task, a
 free list of temp arenas is the change to make.
 
@@ -403,7 +403,7 @@ free list of temp arenas is the change to make.
 
 `mustNotShare acrossThreads` already exists (Phase 9.J) and is checked at
 task-spawn argument sites in `enforceMustNotShareAcrossThreads`
-([checkExpr.js:2689](../src/jsyooptypecheck/checkExpr.js#L2689)). It reads
+([checkExpr.js:2689](../../src/jsyooptypecheck/checkExpr.js#L2689)). It reads
 `binding.kindType`, so using it today would mean writing a kind keyword on
 every arena binding:
 
@@ -412,7 +412,7 @@ taskLocal ar = mem.arenaNew(65536);   // ceremony on every arena
 ```
 
 Better: let the TYPE carry it, via the `propagates<K>` slot that already exists
-on `StructType.propagatedKinds` ([types.js:140](../src/jsyooptypecheck/types.js#L140)).
+on `StructType.propagatedKinds` ([types.js:140](../../src/jsyooptypecheck/types.js#L140)).
 
 ```yoop
 export kind taskLocal {
@@ -437,53 +437,53 @@ this plan; the marker is a guardrail on the obvious mistake, not a proof.
 
 Stage 1:
 
-- [runtime/yoop_runtime.c](../runtime/yoop_runtime.c) - the handle-layout
+- [runtime/yoop_runtime.c](../../runtime/yoop_runtime.c) - the handle-layout
   comment, `handle_ctx_slot`, the swap in `run_task_step`.
-- [runtime/yoop_alloc.c](../runtime/yoop_alloc.c) - `YoopTaskCtx`, plus
+- [runtime/yoop_alloc.c](../../runtime/yoop_alloc.c) - `YoopTaskCtx`, plus
   `yoop_ctx_save` / `restore` / `load_task` / `store_task` / `discard_task`.
-- [runtime/yoop_alloc.h](../runtime/yoop_alloc.h) - NEW. `yoop_alloc.c` had no
+- [runtime/yoop_alloc.h](../../runtime/yoop_alloc.h) - NEW. `yoop_alloc.c` had no
   header at all, because nothing in the runtime called into it; the
   `from "runtime/yoop_alloc.h"` string in
-  [std/core/alloc.yoop](../std/core/alloc.yoop) was a documentation label
+  [std/core/alloc.yoop](../../std/core/alloc.yoop) was a documentation label
   naming a file that did not exist. The scheduler calls these now, so the
   declarations have to be somewhere both translation units can see, and the
   label stopped being a fiction. No packaging change: `runtime/` is copied
   wholesale by both `files` in package.json and the build_sea staging step.
-- [src/jsyoopcodegen/codegen.js](../src/jsyoopcodegen/codegen.js) - the task
+- [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) - the task
   struct field list (near line 3406) gains a `ptr` at index 7; the result-slot
   index moves 7 to 8 and the arg indices `8 + i` to `9 + i`.
   **Five sites, not three, and two of them are byte offsets rather than struct
   indices**: 4119 and 4203 (args), 4150 / 5081 / 6435 (result by index), and
   5095 / 5160 (result by `getelementptr inbounds i8, ptr %h, i64 48` - the
-  anonymous-`wait` and `wait_until` paths). Grepping for the struct index alone
+  anonymous-`wait` and `waitUntil` paths). Grepping for the struct index alone
   finds neither byte-offset site, and the symptom is every task result reading
   back as zero.
-- [runtime/tests/](../runtime/tests/) - `submit_one.c`, `submit_many.c` and
+- [runtime/tests/](../../runtime/tests) - `submit_one.c`, `submit_many.c` and
   `refcount.c` hand-mirror the handle prefix, and all three had drifted: they
   still declared `result` at offset 32, where the coroutine handle has lived
   since the async work. The scheduler was writing through the coro and context
   slots past the end of a 40-byte struct, so they segfaulted rather than
   reporting a mismatch. All three now carry `_Static_assert`s on every offset.
 
-Stage 2: [parser.js](../src/jsyooparser/parser.js),
-[typecheck.js](../src/jsyooptypecheck/typecheck.js),
-[checkStatement.js](../src/jsyooptypecheck/checkStatement.js), new
+Stage 2: [parser.js](../../src/jsyooparser/parser.js),
+[typecheck.js](../../src/jsyooptypecheck/typecheck.js),
+[checkStatement.js](../../src/jsyooptypecheck/checkStatement.js), new
 `src/jsyooptypecheck/suspend.js`,
-[std/core/kinds.yoop](../std/core/kinds.yoop).
+[std/core/kinds.yoop](../../std/core/kinds.yoop).
 
-Stage 3: [runtime/yoop_alloc.c](../runtime/yoop_alloc.c) +
-[std/core/alloc.yoop](../std/core/alloc.yoop).
+Stage 3: [runtime/yoop_alloc.c](../../runtime/yoop_alloc.c) +
+[std/core/alloc.yoop](../../std/core/alloc.yoop).
 
-Stage 4: [runtime/yoop_alloc.c](../runtime/yoop_alloc.c) +
-[std/core/alloc.yoop](../std/core/alloc.yoop).
+Stage 4: [runtime/yoop_alloc.c](../../runtime/yoop_alloc.c) +
+[std/core/alloc.yoop](../../std/core/alloc.yoop).
 
-Enforcement: [checkExpr.js](../src/jsyooptypecheck/checkExpr.js),
-[std/core/kinds.yoop](../std/core/kinds.yoop),
-[std/core/alloc.yoop](../std/core/alloc.yoop).
+Enforcement: [checkExpr.js](../../src/jsyooptypecheck/checkExpr.js),
+[std/core/kinds.yoop](../../std/core/kinds.yoop),
+[std/core/alloc.yoop](../../std/core/alloc.yoop).
 
 ## Tests
 
-- [examples/pass/async_arena_context.yoop](../examples/pass/async_arena_context.yoop) -
+- [examples/pass/async_arena_context.yoop](../../examples/pass/async_arena_context.yoop) -
   the probe above, promoted. Asserts the neighbor task sees `used=0` and the
   resumed task sees its own 64 bytes. Runs under both `YOOP_NUM_WORKERS=1` and
   `=4`. The original reasoning for two counts was that each exposes a different
@@ -492,14 +492,14 @@ Enforcement: [checkExpr.js](../src/jsyooptypecheck/checkExpr.js),
   exercises the leak-into-a-neighbor path when a worker rather than main's
   re-entrant `wait` dispatch picks the neighbor up. Both counts are still worth
   running, for the scheduling coverage rather than the vector coverage.
-- [examples/pass/arena_sync_wait.yoop](../examples/pass/arena_sync_wait.yoop) -
+- [examples/pass/arena_sync_wait.yoop](../../examples/pass/arena_sync_wait.yoop) -
   vector 4, no async in user code: an arena installed in `main`, a `wait` that
   dispatches an unrelated task. Pinned to one worker with that worker parked in
   a blocking sleep, so main is guaranteed to be the dispatching thread. This is
   the deterministic one - it fails at every worker count without the fix
   (`task: arena used=640`, the task's 512 bytes landed in main's region).
 
-- [examples/pass/task_temp_isolation.yoop](../examples/pass/task_temp_isolation.yoop) -
+- [examples/pass/task_temp_isolation.yoop](../../examples/pass/task_temp_isolation.yoop) -
   stage 4. Same one-worker-plus-blocking-hog setup as `arena_sync_wait`, so
   main dispatches the task itself. Held per-thread the task reports
   `temp used=576` (main's 64 bytes already spent in the shared arena) and its
@@ -518,8 +518,8 @@ Still to build, with their stages:
   proving the `joined` bindings inside a region are joined before the region's
   own dispose.
 - Runtime C tests for the shared arena's CAS bump under N threads, added to
-  BOTH [runtime/tests/](../runtime/tests/) and the mirror list in
-  [run_tests.sh](../runtime/tests/run_tests.sh).
+  BOTH [runtime/tests/](../../runtime/tests) and the mirror list in
+  [run_tests.sh](../../runtime/tests/run_tests.sh).
 
 ## What implementation changed (stage 1)
 
@@ -527,7 +527,7 @@ Three things the design above did not anticipate, all found by building it:
 
 1. **Two of the result-slot reads are byte offsets, not struct indices.** The
    anonymous-`wait` path (a `pooled h` parameter, where there is no known task
-   fn to give a typed GEP) and the `wait_until` path both hard-code
+   fn to give a typed GEP) and the `waitUntil` path both hard-code
    `i64 40`. Missing them compiled clean and produced task results of zero -
    `wait_until_smoke` and `propagates_full` caught it, which is a good argument
    for those two fixtures existing.
@@ -547,17 +547,17 @@ Three things the design above did not anticipate, all found by building it:
 1. **Cleanup ordering.** Does the `joined` cleanup for a binding declared
    inside an `ephemeral` region fire before the region's `dispose`? Stage 3's
    lifetime story leans on LIFO ordering here. `projectCleanups`
-   ([kindCheck.js](../src/jsyooptypecheck/kindCheck.js)) is where to check, and
+   ([kindCheck.js](../../src/jsyooptypecheck/kindCheck.js)) is where to check, and
    a fixture should pin it either way before stage 3 starts.
-2. **`Vec` allocator capture.** `vec_new` captures whatever is ambient at
-   construction ([vec.yoop:49](../std/core/vec.yoop#L49)). After stage 1 that
+2. **`Vec` allocator capture.** `vecNew` captures whatever is ambient at
+   construction ([vec.yoop:49](../../std/core/vec.yoop#L49)). After stage 1 that
    capture is correct, and the push/pop around grow and free is balanced with
    no await between, so `Vec` needs no change. Confirm with a fixture that
    grows a Vec after a suspend rather than assuming it.
 3. **Does anything in `std/http` want a per-request arena?** The request-scoped
    arena is the motivating use case for stage 3, but the server currently uses
    none, so stage 3 has no in-tree consumer yet. Worth building
-   [examples/playground/todo_api](../examples/playground/todo_api) into one
+   [examples/playground/todo_api](../../examples/playground/todo_api) into one
    before committing to the shared flavor.
 
 ## Sub-phase ordering

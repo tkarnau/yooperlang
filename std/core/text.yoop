@@ -52,14 +52,14 @@ export type Text implements (Disposable, Display) propagates<disposable> {
     // fresh string, which is sound here because template lowering copies the
     // bytes into the concatenated result while the Text is still alive - and
     // it means interpolating a Text costs nothing beyond that copy.
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return view(ref self);
     }
 
     function dispose(ref self): void {
         if (self.cap > 0) {
             let prev: Allocator = pushAllocator(self.alloc);
-            intr.ctx_free(self.data);
+            intr.ctxFree(self.data);
             popAllocator(prev);
             self.cap = 0;
             self.len = 0;
@@ -75,21 +75,21 @@ export type Text implements (Disposable, Display) propagates<disposable> {
 export function make(capHint: usize): Text propagates<disposable> {
     let a: Allocator = currentAllocator();
     let n: usize = capHint + 1;
-    let buf: uint8[] = intr.ctx_alloc(n);
+    let buf: uint8[] = intr.ctxAlloc(n);
     buf[0] = 0;
     return { data: buf, len: 0, cap: n, alloc: a };
 }
 
 // Copy a borrowed string into fresh owned storage.
 export function fromString(s: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let t: Text = make(src.len);
     pushBytes(ref t, src);
     return t;
 }
 
 // Copy a byte buffer into fresh owned storage. The bytes are NOT validated as
-// UTF-8; use strings.string_from_bytes first if the source is untrusted.
+// UTF-8; use strings.stringFromBytes first if the source is untrusted.
 export function fromBytes(src: uint8[]): Text propagates<disposable> {
     let t: Text = make(src.len);
     pushBytes(ref t, src);
@@ -109,14 +109,14 @@ export function reserve(t: ref Text, wanted: usize): void {
 
     // Grow through this Text's own allocator, not whatever is ambient now.
     let prev: Allocator = pushAllocator(t.alloc);
-    let fresh: uint8[] = intr.ctx_alloc(newCap);
+    let fresh: uint8[] = intr.ctxAlloc(newCap);
     let i: usize = 0;
     while (i < t.len) {
         fresh[i] = t.data[i];
         i = i + 1;
     }
     if (t.cap > 0) {
-        intr.ctx_free(t.data);
+        intr.ctxFree(t.data);
     }
     popAllocator(prev);
     fresh[t.len] = 0;
@@ -139,7 +139,7 @@ export function pushBytes(t: ref Text, src: uint8[]): void {
 
 // Append a borrowed string.
 export function push(t: ref Text, s: string): void {
-    pushBytes(ref t, intr.string_as_bytes(s));
+    pushBytes(ref t, intr.stringAsBytes(s));
 }
 
 // Append one raw byte. No UTF-8 checking - this is the building block
@@ -224,12 +224,12 @@ export function truncateBytes(t: ref Text, newLen: usize): void {
 export function view(t: ref Text): string {
     // The intrinsic discards the fat pointer's len and relies on the nul that
     // invariant 2 guarantees, so `data` can be handed over whole.
-    return intr.bytes_as_string_unchecked(t.data);
+    return intr.bytesAsStringUnchecked(t.data);
 }
 
 // Borrow the contents as bytes, excluding the nul.
 export function bytes(t: ref Text): uint8[] {
-    return intr.array_slice(t.data, 0, t.len);
+    return intr.arraySlice(t.data, 0, t.len);
 }
 
 export function isEmpty(t: ref Text): bool {
@@ -247,7 +247,7 @@ const FIRST_4BYTE:     uint8 = 0b1111_0000;  // 0xF0 == TAG_4BYTE
 const PAST_LAST_START: uint8 = 0b1111_0101;  // 0xF5 and up would encode past U+10FFFF
 
 // Byte length of the UTF-8 sequence starting with `first`, or 0 if `first` is
-// not a legal start byte. The same table string_from_bytes validates against,
+// not a legal start byte. The same table stringFromBytes validates against,
 // exported because every caller doing manual UTF-8 work needs it.
 //
 // A nonzero result does NOT mean the sequence is valid — overlong 3- and 4-byte
@@ -264,7 +264,7 @@ export function seqLen(first: uint8): usize {
 // Number of codepoints in `s`. O(n) - it walks. Stops early on a malformed
 // byte rather than reporting a count it cannot justify.
 export function charCount(s: string): usize {
-    let buf: uint8[] = intr.string_as_bytes(s);
+    let buf: uint8[] = intr.stringAsBytes(s);
     let i: usize = 0;
     let n: usize = 0;
     while (i < buf.len) {
@@ -280,7 +280,7 @@ export function charCount(s: string): usize {
 // than n + 1 codepoints. This is the bridge between the two coordinate
 // systems and is what makes a byte-offset API safe to use on real text.
 export function byteOffsetOfChar(s: string, n: usize): usize {
-    let buf: uint8[] = intr.string_as_bytes(s);
+    let buf: uint8[] = intr.stringAsBytes(s);
     let i: usize = 0;
     let seen: usize = 0;
     while (i < buf.len) {
@@ -321,7 +321,7 @@ function decodeAt(buf: uint8[], at: usize, w: usize): uint32 {
 // Decode the codepoint starting at BYTE offset `at`. Returns U+FFFD for a
 // malformed or truncated sequence, so it always makes progress.
 export function charAtByte(s: string, at: usize): uint32 {
-    let buf: uint8[] = intr.string_as_bytes(s);
+    let buf: uint8[] = intr.stringAsBytes(s);
     if (at >= buf.len) { return 0; }
 
     let w: usize = seqLen(buf[at]);
@@ -357,14 +357,14 @@ export type Chars implements Iterable<uint32> {
 }
 
 export function chars(s: string): Chars {
-    return { buf: intr.string_as_bytes(s), i: 0 };
+    return { buf: intr.stringAsBytes(s), i: 0 };
 }
 
 // ----- queries on a borrowed string (no allocation) ------------------------
 
 export function startsWith(s: string, prefix: string): bool {
-    let a: uint8[] = intr.string_as_bytes(s);
-    let b: uint8[] = intr.string_as_bytes(prefix);
+    let a: uint8[] = intr.stringAsBytes(s);
+    let b: uint8[] = intr.stringAsBytes(prefix);
     if (b.len > a.len) { return false; }
     let i: usize = 0;
     while (i < b.len) {
@@ -375,8 +375,8 @@ export function startsWith(s: string, prefix: string): bool {
 }
 
 export function endsWith(s: string, suffix: string): bool {
-    let a: uint8[] = intr.string_as_bytes(s);
-    let b: uint8[] = intr.string_as_bytes(suffix);
+    let a: uint8[] = intr.stringAsBytes(s);
+    let b: uint8[] = intr.stringAsBytes(suffix);
     if (b.len > a.len) { return false; }
     let off: usize = a.len - b.len;
     let i: usize = 0;
@@ -391,8 +391,8 @@ export function endsWith(s: string, suffix: string): bool {
 // An empty needle matches at `start`, mirroring the usual convention.
 // (`from` is a keyword in extern blocks, so the parameter cannot use it.)
 export function indexOfFrom(s: string, needle: string, start: usize): usize {
-    let a: uint8[] = intr.string_as_bytes(s);
-    let b: uint8[] = intr.string_as_bytes(needle);
+    let a: uint8[] = intr.stringAsBytes(s);
+    let b: uint8[] = intr.stringAsBytes(needle);
     if (b.len == 0) { return start; }
     if (b.len > a.len) { return a.len; }
     let i: usize = start;
@@ -418,8 +418,8 @@ export function contains(s: string, needle: string): bool {
 }
 
 export function equals(a: string, b: string): bool {
-    let x: uint8[] = intr.string_as_bytes(a);
-    let y: uint8[] = intr.string_as_bytes(b);
+    let x: uint8[] = intr.stringAsBytes(a);
+    let y: uint8[] = intr.stringAsBytes(b);
     if (x.len != y.len) { return false; }
     let i: usize = 0;
     while (i < x.len) {
@@ -432,8 +432,8 @@ export function equals(a: string, b: string): bool {
 // ----- transforms (each returns a fresh owned Text) ------------------------
 
 export function concat(a: string, b: string): Text propagates<disposable> {
-    let sa: uint8[] = intr.string_as_bytes(a);
-    let sb: uint8[] = intr.string_as_bytes(b);
+    let sa: uint8[] = intr.stringAsBytes(a);
+    let sb: uint8[] = intr.stringAsBytes(b);
     let t: Text = make(sa.len + sb.len);
     pushBytes(ref t, sa);
     pushBytes(ref t, sb);
@@ -452,7 +452,7 @@ export function join(parts: string[], sep: string): Text propagates<disposable> 
 }
 
 export function repeat(s: string, n: usize): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let t: Text = make(src.len * n);
     let i: usize = 0;
     while (i < n) {
@@ -466,7 +466,7 @@ export function repeat(s: string, n: usize): Text propagates<disposable> {
 // is why the names say ascii: real Unicode case folding is locale-dependent
 // and can change a string's length.
 export function toLowerAscii(s: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let t: Text = make(src.len);
     let i: usize = 0;
     while (i < src.len) {
@@ -479,7 +479,7 @@ export function toLowerAscii(s: string): Text propagates<disposable> {
 }
 
 export function toUpperAscii(s: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let t: Text = make(src.len);
     let i: usize = 0;
     while (i < src.len) {
@@ -497,44 +497,44 @@ function isSpaceByte(c: uint8): bool {
 }
 
 export function trim(s: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let start: usize = 0;
     while (start < src.len && isSpaceByte(src[start])) { start = start + 1; }
     let end: usize = src.len;
     while (end > start && isSpaceByte(src[end - 1])) { end = end - 1; }
-    return fromBytes(intr.array_slice(src, start, end));
+    return fromBytes(intr.arraySlice(src, start, end));
 }
 
 export function trimStart(s: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let start: usize = 0;
     while (start < src.len && isSpaceByte(src[start])) { start = start + 1; }
-    return fromBytes(intr.array_slice(src, start, src.len));
+    return fromBytes(intr.arraySlice(src, start, src.len));
 }
 
 export function trimEnd(s: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let end: usize = src.len;
     while (end > 0 && isSpaceByte(src[end - 1])) { end = end - 1; }
-    return fromBytes(intr.array_slice(src, 0, end));
+    return fromBytes(intr.arraySlice(src, 0, end));
 }
 
 // Every occurrence of `needle` replaced by `repl`. An empty needle returns a
 // copy rather than looping forever.
 export function replaceAll(s: string, needle: string, repl: string): Text propagates<disposable> {
     if (needle.len == 0) { return fromString(s); }
-    let src: uint8[] = intr.string_as_bytes(s);
-    let rep: uint8[] = intr.string_as_bytes(repl);
-    let nee: uint8[] = intr.string_as_bytes(needle);
+    let src: uint8[] = intr.stringAsBytes(s);
+    let rep: uint8[] = intr.stringAsBytes(repl);
+    let nee: uint8[] = intr.stringAsBytes(needle);
     let t: Text = make(src.len);
     let i: usize = 0;
     while (i < src.len) {
         let at: usize = indexOfFrom(s, needle, i);
         if (at >= src.len) {
-            pushBytes(ref t, intr.array_slice(src, i, src.len));
+            pushBytes(ref t, intr.arraySlice(src, i, src.len));
             return t;
         }
-        pushBytes(ref t, intr.array_slice(src, i, at));
+        pushBytes(ref t, intr.arraySlice(src, i, at));
         pushBytes(ref t, rep);
         i = at + nee.len;
     }
@@ -545,7 +545,7 @@ export function replaceAll(s: string, needle: string, repl: string): Text propag
 // splits a multi-byte codepoint - the byte offsets are yours to get right,
 // and silently producing invalid UTF-8 is worse than saying so.
 export function subBytes(s: string, start: usize, end: usize): Result<Text, string> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let lo: usize = start;
     let hi: usize = end;
     if (hi > src.len) { hi = src.len; }
@@ -556,7 +556,7 @@ export function subBytes(s: string, start: usize, end: usize): Result<Text, stri
     if (hi > 0 && hi < src.len && src[hi] >= 128 && src[hi] < 192) {
         return Result.Err { error: "text.subBytes: end splits a codepoint" };
     }
-    return Result.Ok { value: fromBytes(intr.array_slice(src, lo, hi)) };
+    return Result.Ok { value: fromBytes(intr.arraySlice(src, lo, hi)) };
 }
 
 // Sub-range in CODEPOINTS. Always lands on boundaries, so it cannot fail.
@@ -564,14 +564,14 @@ export function subChars(s: string, startChar: usize, endChar: usize): Text prop
     let lo: usize = byteOffsetOfChar(s, startChar);
     let hi: usize = byteOffsetOfChar(s, endChar);
     if (hi < lo) { hi = lo; }
-    let src: uint8[] = intr.string_as_bytes(s);
-    return fromBytes(intr.array_slice(src, lo, hi));
+    let src: uint8[] = intr.stringAsBytes(s);
+    return fromBytes(intr.arraySlice(src, lo, hi));
 }
 
 // Replace codepoint `n` with `repl`. The shape that motivated this module:
 // poking one byte only works for ASCII, so the general case rebuilds.
 export function replaceChar(s: string, n: usize, repl: string): Text propagates<disposable> {
-    let src: uint8[] = intr.string_as_bytes(s);
+    let src: uint8[] = intr.stringAsBytes(s);
     let start: usize = byteOffsetOfChar(s, n);
     let t: Text = make(src.len);
     if (start >= src.len) {
@@ -580,9 +580,9 @@ export function replaceChar(s: string, n: usize, repl: string): Text propagates<
     }
     let w: usize = seqLen(src[start]);
     if (w == 0) { w = 1; }
-    pushBytes(ref t, intr.array_slice(src, 0, start));
+    pushBytes(ref t, intr.arraySlice(src, 0, start));
     push(ref t, repl);
-    pushBytes(ref t, intr.array_slice(src, start + w, src.len));
+    pushBytes(ref t, intr.arraySlice(src, start + w, src.len));
     return t;
 }
 
@@ -611,7 +611,7 @@ export function padEnd(s: string, width: usize, fill: string): Text propagates<d
 // Decimal integer with an optional leading sign. Rejects an empty string,
 // stray characters, and anything that is not a digit - no partial parses.
 export function parseInt(s: string): Result<int64, string> {
-    let buf: uint8[] = intr.string_as_bytes(s);
+    let buf: uint8[] = intr.stringAsBytes(s);
     if (buf.len == 0) {
         return Result.Err { error: "text.parseInt: empty string" };
     }

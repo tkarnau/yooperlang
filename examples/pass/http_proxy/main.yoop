@@ -57,12 +57,12 @@ type OriginHandler implements Handler {
 }
 
 task originTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`origin bind err: ${lr.error}\n`);
         return 1;
     }
-    originPort = lr.listener.bound_port;
+    originPort = lr.listener.boundPort;
     let h: OriginHandler = { };
     let d: Dispatcher = Dispatcher.from(ref h);
     // Two requests: the proxy forwards one GET and one POST.
@@ -111,11 +111,11 @@ type ProxyHandler implements Handler {
                 types.setHeader(ref resp, "X-Proxied", "yes");
                 // The body is COPIED out of the client response, because
                 // `got` is disposed at the end of this arm and the server
-                // writes `resp` after the handler returns. `bytes_from_array`
+                // writes `resp` after the handler returns. `bytesFromArray`
                 // is what makes that copy owned.
                 types.respondBytes(ref resp, got.status,
                     headerOr(ref got, "Content-Type"),
-                    bytes.bytes_from_array(client.responseBytes(ref got)));
+                    bytes.bytesFromArray(client.responseBytes(ref got)));
                 return HandleOutcome.Ok;
             }
             case Result.Err { error: e }: {
@@ -130,12 +130,12 @@ type ProxyHandler implements Handler {
 }
 
 task proxyTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`proxy bind err: ${lr.error}\n`);
         return 1;
     }
-    proxyPort = lr.listener.bound_port;
+    proxyPort = lr.listener.boundPort;
     let h: ProxyHandler = { upstreamPort: originPort };
     let d: Dispatcher = Dispatcher.from(ref h);
     switch (await http.serveDefault(ref lr.listener, ref d, 2)) {

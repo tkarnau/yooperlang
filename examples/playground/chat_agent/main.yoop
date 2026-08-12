@@ -25,12 +25,12 @@
 
 import { disposable } from "../../../std/core/kinds.yoop";
 import * as intr from "../../../std/core/intrinsics.yoop";
-import { string_index_of } from "../../../std/core/strings.yoop";
-import { Vec, vec_new, vec_push, vec_as_array } from "../../../std/core/vec.yoop";
-import { Bytes, bytes_from_vec } from "../../../std/core/bytes.yoop";
+import { stringIndexOf } from "../../../std/core/strings.yoop";
+import { Vec, vecNew, vecPush, vecAsArray } from "../../../std/core/vec.yoop";
+import { Bytes, bytesFromVec } from "../../../std/core/bytes.yoop";
 
 import { Result } from "../../../std/core/types.yoop";
-import { ListenResult, tcp_listen } from "std/net";
+import { ListenResult, tcpListen } from "std/net";
 import * as httpServer, {
     Handler, HandleOutcome, Dispatcher,
 } from "std/http";
@@ -79,16 +79,16 @@ kind cleared {
 type UserInput implements Cleansable<UserInput> {
     text: string,
     function cleanse(ref self): UserInput {
-        let disposable buf: Vec<uint8> = vec_new(64);
-        let bs: uint8[] = intr.string_as_bytes(self.text);
+        let disposable buf: Vec<uint8> = vecNew(64);
+        let bs: uint8[] = intr.stringAsBytes(self.text);
         let i: usize = 0;
         while (i < bs.len) {
             let c: uint8 = bs[i];
-            if (c >= 32) { vec_push(ref buf, c); }
+            if (c >= 32) { vecPush(ref buf, c); }
             i = i + 1;
         }
-        let view: uint8[] = vec_as_array(ref buf);
-        let safe: string = intr.string_from_bytes_unchecked(view);
+        let view: uint8[] = vecAsArray(ref buf);
+        let safe: string = intr.stringFromBytesUnchecked(view);
         return { text: safe };
     }
 }
@@ -97,24 +97,24 @@ type UserInput implements Cleansable<UserInput> {
 // a tainted value is legal (restrictive widens freely); the consumer is
 // the side that has to handle it.
 function read_user_input(ref req: Request): tainted UserInput {
-    let raw: string = intr.string_from_bytes_unchecked(req.body);
+    let raw: string = intr.stringFromBytesUnchecked(req.body);
     return { text: raw };
 }
 
 // ----- byte-buffer helpers ----------------------------------------------
 
 function push_str(ref out: Vec<uint8>, s: string): void {
-    let bs: uint8[] = intr.string_as_bytes(s);
+    let bs: uint8[] = intr.stringAsBytes(s);
     let i: usize = 0;
     while (i < bs.len) {
-        vec_push(ref out, bs[i]);
+        vecPush(ref out, bs[i]);
         i = i + 1;
     }
 }
 
 function push_decimal(ref out: Vec<uint8>, n: int32): void {
     if (n <= 0) {
-        vec_push(ref out, 48);   // '0'
+        vecPush(ref out, 48);   // '0'
         return;
     }
     let digits: int32[] = [0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
@@ -127,14 +127,14 @@ function push_decimal(ref out: Vec<uint8>, n: int32): void {
     }
     let j: int32 = count - 1;
     while (j >= 0) {
-        vec_push(ref out, uint8(48 + digits[j]));
+        vecPush(ref out, uint8(48 + digits[j]));
         j = j - 1;
     }
 }
 
 // True iff `needle` occurs anywhere in `haystack`.
 function contains(haystack: string, needle: string): bool {
-    return string_index_of(haystack, needle) < haystack.len;
+    return stringIndexOf(haystack, needle) < haystack.len;
 }
 
 // ----- the brain ---------------------------------------------------------
@@ -195,14 +195,14 @@ type ChatHandler implements Handler {
         let clean: cleared UserInput = Cleansable.cleanse(ref dirty);
 
         // 3. The brain is statically guaranteed to see a cleansed message.
-        let disposable reply: Vec<uint8> = vec_new(128);
+        let disposable reply: Vec<uint8> = vecNew(128);
         ChatBrain.reply(ref self.brain, clean, self.turns, ref reply);
 
         // Owned bytes (zero-copy hand-off): the buffer outlives `handle`,
         // is disposed with the Response, and is still valid when the server
         // serializes the response after handle returns.
         http.respondBytes(ref resp, http.ok(), "text/plain; charset=utf-8",
-            bytes_from_vec(ref reply));
+            bytesFromVec(ref reply));
         return HandleOutcome.Ok;
     }
 }
@@ -213,7 +213,7 @@ type ChatHandler implements Handler {
 // threaded in by the caller rather than reading module-level constants.
 
 task chat_server(port: int32, turns: int32): int32 {
-    let disposable lr: ListenResult = tcp_listen("127.0.0.1", port, 16);
+    let disposable lr: ListenResult = tcpListen("127.0.0.1", port, 16);
     if (lr.error.len > 0) {
         printf(`server bind err: ${lr.error}\n`);
         return 1;
@@ -235,7 +235,7 @@ function send_turn(ref c: Client, user_msg: string): void {
     let disposable req: ClientRequest = client.request(HttpMethod.Post, "http://127.0.0.1:18085/chat");
     // The body is a borrowing view of the literal; string literals live in
     // immutable rodata, so it is safe to hand off without a copy.
-    client.setBody(ref req, "text/plain; charset=utf-8", intr.string_as_bytes(user_msg));
+    client.setBody(ref req, "text/plain; charset=utf-8", intr.stringAsBytes(user_msg));
 
     switch (client.send(ref c, ref req)) {
         case Result.Ok { value: r }: {
@@ -251,7 +251,7 @@ function main(): int32 {
     let port: int32 = 18085;
     let turns: int32 = 5;
     joined sh = chat_server(port, turns);
-    // Give the server a moment to bind. tcp_connect races accept() fine,
+    // Give the server a moment to bind. tcpConnect races accept() fine,
     // but it cannot connect before listen() has run.
     let _slept: int32 = usleep(150000);   // 150ms
 

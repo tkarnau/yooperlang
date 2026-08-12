@@ -27,13 +27,13 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
 
   // Collect each TYPE_PARAM's NodeId in a scratch buffer, then splice the whole
   // run into the arena in one shot (see buildListNode).
-  disposable ids: Vec<NodeId> = vec.vec_new(4);
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
   while (true) {
     let tp = sl.buildSourcedNode(ref ps, ASTNodeKind.TYPE_PARAM);
     tp.name = parseIdentAsName(ref ps)?;
     // TODO: optional `implements` bound list (`T implements Display`) - needs
     // parseTypeAnnotation; deferred until type-annotation nodes are designed.
-    vec.vec_push(ref ids, sl.pushNode(ref ps, tp));
+    vec.vecPush(ref ids, sl.pushNode(ref ps, tp));
     if (sl.peek(ref ps).tag != TokenTags.COMMA) {
       break;
     }

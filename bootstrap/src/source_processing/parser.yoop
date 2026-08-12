@@ -18,15 +18,15 @@ function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
 
   // Collect each top-level decl's NodeId in a scratch buffer, then splice the
   // whole run into the arena's shared childIds pool as the PROGRAM body.
-  disposable body: Vec<NodeId> = vec.vec_new(8);
+  disposable body: Vec<NodeId> = vec.vecNew(8);
   let peekTag = SelfLexing.peek(ref ps).tag;
   while (peekTag != TokenTags.EOF) {
     switch (peekTag) {
       case TokenTags.TYPE: {
-        vec.vec_push(ref body, parseTypeDecl(ref ps)?);
+        vec.vecPush(ref body, parseTypeDecl(ref ps)?);
       }
       case TokenTags.FUNCTION /*, TokenTags.TASK */: {
-        vec.vec_push(ref body, parseFunctionDecl(ref ps)?);
+        vec.vecPush(ref body, parseFunctionDecl(ref ps)?);
       }
       // TODO: rest of tags...
       default: {
@@ -43,7 +43,7 @@ function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
   const start: usize = ps.ast.childIds.len;
   // copy the dynamic body into the childIds so we can destroy
   // the scratch buffer (body: Vec<NodeId>)
-  vec.vec_extend_from(ref ps.ast.childIds, vec.vec_as_array(ref body));
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref body));
   program.childStart = start;
   program.childCount = body.len;
   ps.ast.root = SelfLexing.pushNode(ref ps, program);

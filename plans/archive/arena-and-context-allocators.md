@@ -1,7 +1,7 @@
 # Design doc: Arena and context allocators
 
 Status: SUBSTANTIALLY IMPLEMENTED. Stages 1, 2, 3, 4, 5, and 7 have landed
-(`runtime/yoop_alloc.c`, `std/core/alloc.yoop`, the `ctx_alloc`/`ctx_free`
+(`runtime/yoop_alloc.c`, `std/core/alloc.yoop`, the `ctxAlloc`/`ctxFree`
 intrinsics, `Vec<T>` and `Deque<T>` rerouted container-owned, fixtures
 `arena_context.yoop`, `arena_scope.yoop`, `arena_vec.yoop`, and the per-request
 showcase `arena_request_loop.yoop`). Stage 6 (escape safety) is DELIBERATELY
@@ -10,7 +10,7 @@ lexically scopes the handle, and v2 (the part that matters) needs allocator-
 provenance tracking that does not exist yet. Remaining mechanical follow-up:
 reroute the provenance-sensitive containers (`Bytes`, `Map` buckets) that take
 ownership of buffers from mixed sources. This is the "real ergonomic win"
-deferred in Part 5 of [ownership-and-typestate-redesign.md](ownership-and-typestate-redesign.md)
+deferred in Part 5 of [ownership-and-typestate-redesign.md](../ownership-and-typestate-redesign.md)
 (the relaxation it was gated behind has landed). It is the single foundational
 piece that makes no-GC ergonomics survivable for the two target audiences:
 a per-REQUEST arena for web code, a per-FRAME arena for game code.
@@ -34,10 +34,10 @@ Style note: ASCII only, no em-dashes, no fancy tables, per repo convention.
 ## Context
 
 Yoop has no garbage collector and (by deliberate choice) advisory, opt-in
-ownership. The only allocation path today is `intr.heap_alloc<T>` /
-`intr.heap_free<T>`, which lower straight to libc `malloc` / `free`
+ownership. The only allocation path today is `intr.heapAlloc<T>` /
+`intr.heapFree<T>`, which lower straight to libc `malloc` / `free`
 (`codegen.js` ~4598). Every std container (`Vec`, `Map`, heap strings) calls
-`heap_alloc` directly and frees one object at a time, usually via a
+`heapAlloc` directly and frees one object at a time, usually via a
 `disposable` binding that injects a `dispose` at scope end.
 
 That is the "honest no-tracking" baseline (Jai/Odin without the convenience
@@ -64,8 +64,8 @@ error (Part 4.7) - which is exactly where Yoop's ambition is supposed to live.
 
 ## What we have today (the surfaces this builds on)
 
-1. **Allocation lowering.** `heap_alloc<T>(n)` -> `@malloc(n * sizeof T)`,
-   `heap_free<T>(a)` -> `@free`. Inline-emitted by `declId` in `codegen.js`
+1. **Allocation lowering.** `heapAlloc<T>(n)` -> `@malloc(n * sizeof T)`,
+   `heapFree<T>(a)` -> `@free`. Inline-emitted by `declId` in `codegen.js`
    (~4598-4663). No allocator abstraction; the call site IS libc.
 
 2. **Scope-end injection.** The `disposable` kind
@@ -79,8 +79,8 @@ error (Part 4.7) - which is exactly where Yoop's ambition is supposed to live.
 
 3. **Fn-pointer-struct precedent.** `KeyOps<K> { hash: (k: K) => uint64,
    eq: (a: K, b: K) => bool }` (`std/collections/map.yoop`) with a constructor
-   that names free functions (`string_key_ops()` returns
-   `{ hash: string_hash, eq: string_eq }`). An `Allocator` value is the same
+   that names free functions (`stringKeyOps()` returns
+   `{ hash: stringHash, eq: stringEq }`). An `Allocator` value is the same
    shape: a record of function pointers plus an opaque data pointer. This is
    also exactly how Jai/Odin represent an allocator (a procedure + a data
    pointer), so the idiom and the prior art agree.
@@ -230,7 +230,7 @@ that doesn't even name the binding can be sugar over the same lowering later.
 ### 4.5 Routing the standard library through the context
 
 The win only materializes if std containers allocate from the AMBIENT
-allocator instead of calling `heap_alloc` directly. Two coupled changes:
+allocator instead of calling `heapAlloc` directly. Two coupled changes:
 
 1. **Allocate via the context.** A new intrinsic pair routes through
    `currentAllocator()`:
@@ -240,8 +240,8 @@ allocator instead of calling `heap_alloc` directly. Two coupled changes:
    export function new<T>(): ref T;           // single-object convenience
    ```
 
-   `Vec`, `Map`, and heap-string construction switch from `intr.heap_alloc`
-   to `alloc`. `heap_alloc` stays as the explicit "malloc, ignore the context"
+   `Vec`, `Map`, and heap-string construction switch from `intr.heapAlloc`
+   to `alloc`. `heapAlloc` stays as the explicit "malloc, ignore the context"
    escape hatch.
 
 2. **Containers remember their allocator.** A `Vec` allocated from an arena

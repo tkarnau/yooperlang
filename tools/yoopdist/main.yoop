@@ -43,7 +43,7 @@ const MODULES_DIR: string = "modules";
 // std's slice returns a Result; every use here has already bounds-checked, so
 // an Err means a bug in this file rather than bad input. Collapse it.
 function sliceOr(s: string, start: usize, end: usize): string {
-    switch (str.string_slice(s, start, end)) {
+    switch (str.stringSlice(s, start, end)) {
         case Result.Ok { value: v }: { return v; }
         case Result.Err { error: _ }: { return ""; }
     }
@@ -53,7 +53,7 @@ function sliceOr(s: string, start: usize, end: usize): string {
 function dropCarriageReturn(line: string): string {
     if (line.len == 0) { return line; }
     const tail = sliceOr(line, line.len - 1, line.len);
-    if (str.string_eq(tail, "\r")) {
+    if (str.stringEq(tail, "\r")) {
         return sliceOr(line, 0, line.len - 1);
     }
     return line;
@@ -62,9 +62,9 @@ function dropCarriageReturn(line: string): string {
 // The value following `key` on a `<key> <value>` line, or "" if the line is
 // not that key. Leading spaces after the key are skipped.
 function valueAfterKey(line: string, key: string): string {
-    if (!str.string_starts_with(line, key)) { return ""; }
+    if (!str.stringStartsWith(line, key)) { return ""; }
     let rest: string = str.sliceFrom(line, key.len);
-    while (rest.len > 0 && str.string_starts_with(rest, " ")) {
+    while (rest.len > 0 && str.stringStartsWith(rest, " ")) {
         rest = str.sliceFrom(rest, 1);
     }
     return rest;
@@ -77,11 +77,11 @@ function valueAfterKey(line: string, key: string): string {
 // binding frees at the closing brace. Same reason std/fs's DirIter copies the
 // name out of its dirent buffer.
 function readText(path: string): string {
-    disposable r = fs.read_file(path);
+    disposable r = fs.readFile(path);
     if (r.error.len > 0) { return ""; }
-    const bytes: uint8[] = vec.vec_as_array(ref r.data);
-    switch (str.string_from_bytes(bytes)) {
-        case Result.Ok { value: v }: { return str.string_concat(v, ""); }
+    const bytes: uint8[] = vec.vecAsArray(ref r.data);
+    switch (str.stringFromBytes(bytes)) {
+        case Result.Ok { value: v }: { return str.stringConcat(v, ""); }
         case Result.Err { error: _ }: { return ""; }
     }
 }
@@ -95,13 +95,13 @@ function splitLines(ref out: Vec<string>, text: string): void {
 function isTestFile(name: string): bool {
     const suffix = ".test.yoop";
     if (name.len < suffix.len) { return false; }
-    return str.string_eq(sliceOr(name, name.len - suffix.len, name.len), suffix);
+    return str.stringEq(sliceOr(name, name.len - suffix.len, name.len), suffix);
 }
 
 function isYoopFile(name: string): bool {
     const suffix = ".yoop";
     if (name.len < suffix.len) { return false; }
-    return str.string_eq(sliceOr(name, name.len - suffix.len, name.len), suffix);
+    return str.stringEq(sliceOr(name, name.len - suffix.len, name.len), suffix);
 }
 
 // The name from a `module <name>;` header, or "" if the file has none.
@@ -111,16 +111,16 @@ function isYoopFile(name: string): bool {
 // required to be the first item of a file and is written at column 0 by
 // convention, which is what the VS Code grammar keys on too.
 function moduleHeaderName(src: string): string {
-    disposable lines: Vec<string> = vec.vec_new(64);
+    disposable lines: Vec<string> = vec.vecNew(64);
     splitLines(ref lines, src);
-    const arr: string[] = vec.vec_as_array(ref lines);
+    const arr: string[] = vec.vecAsArray(ref lines);
     for raw in arr {
         const line = dropCarriageReturn(raw);
-        if (str.string_starts_with(line, "module ")) {
+        if (str.stringStartsWith(line, "module ")) {
             const rest = str.sliceFrom(line, 7);
-            const semi = str.string_index_of(rest, ";");
+            const semi = str.stringIndexOf(rest, ";");
             if (semi < rest.len) {
-                return str.string_concat(sliceOr(rest, 0, semi), "");
+                return str.stringConcat(sliceOr(rest, 0, semi), "");
             }
         }
     }
@@ -135,22 +135,22 @@ function moduleHeaderName(src: string): string {
 // worth having.
 function moduleDepOnLine(line: string): string {
     const marker = "\"modules/";
-    const at = str.string_index_of(line, marker);
+    const at = str.stringIndexOf(line, marker);
     if (at >= line.len) { return ""; }
     const rest = str.sliceFrom(line, at + marker.len);
     // The name runs to whichever comes first: a path separator (a module under
     // a grouping directory, or a source file inside one) or the closing quote.
-    let end = str.string_index_of(rest, "/");
-    const quote = str.string_index_of(rest, "\"");
+    let end = str.stringIndexOf(rest, "/");
+    const quote = str.stringIndexOf(rest, "\"");
     if (quote < end) { end = quote; }
     if (end >= rest.len || end == 0) { return ""; }
-    return str.string_concat(sliceOr(rest, 0, end), "");
+    return str.stringConcat(sliceOr(rest, 0, end), "");
 }
 
 function containsName(ref v: Vec<string>, name: string): bool {
-    const arr: string[] = vec.vec_as_array(ref v);
+    const arr: string[] = vec.vecAsArray(ref v);
     for existing in arr {
-        if (str.string_eq(existing, name)) { return true; }
+        if (str.stringEq(existing, name)) { return true; }
     }
     return false;
 }
@@ -164,11 +164,11 @@ function containsName(ref v: Vec<string>, name: string): bool {
 function findModulesRoot(startDir: string): string {
     let dir = startDir;
     while (dir.len > 0) {
-        const candidate = fs.path_join([dir, MODULES_DIR]);
+        const candidate = fs.pathJoin([dir, MODULES_DIR]);
         const meta = fs.statPath(candidate);
         if (meta.ok && meta.isDir) { return candidate; }
         const parent = fs.dirName(dir);
-        if (str.string_eq(parent, dir)) { return ""; }
+        if (str.stringEq(parent, dir)) { return ""; }
         dir = parent;
     }
     return "";
@@ -178,14 +178,14 @@ function findModulesRoot(startDir: string): string {
 // A dependency with no MODULE file produces no version claim rather than a
 // guess - silence when there is no data.
 function recordedVersion(moduleDir: string): string {
-    const text = readText(fs.path_join([moduleDir, MODULE_FILE]));
+    const text = readText(fs.pathJoin([moduleDir, MODULE_FILE]));
     if (text.len == 0) { return "unknown"; }
-    disposable lines: Vec<string> = vec.vec_new(32);
+    disposable lines: Vec<string> = vec.vecNew(32);
     splitLines(ref lines, text);
-    const arr: string[] = vec.vec_as_array(ref lines);
+    const arr: string[] = vec.vecAsArray(ref lines);
     for raw in arr {
         const value = valueAfterKey(dropCarriageReturn(raw), "version");
-        if (value.len > 0) { return str.string_concat(value, ""); }
+        if (value.len > 0) { return str.stringConcat(value, ""); }
     }
     return "unknown";
 }
@@ -200,20 +200,20 @@ function recordedVersion(moduleDir: string): string {
 // exactly what disting an already-dist'd module used to do.
 function priorRequireVersion(sourceText: string, dep: string): string {
     if (sourceText.len == 0) { return ""; }
-    disposable lines: Vec<string> = vec.vec_new(64);
+    disposable lines: Vec<string> = vec.vecNew(64);
     splitLines(ref lines, sourceText);
-    const arr: string[] = vec.vec_as_array(ref lines);
+    const arr: string[] = vec.vecAsArray(ref lines);
     for raw in arr {
         const rest = valueAfterKey(dropCarriageReturn(raw), "requires");
         if (rest.len == 0) { continue; }
-        const space = str.string_index_of(rest, " ");
+        const space = str.stringIndexOf(rest, " ");
         if (space >= rest.len) { continue; }
-        if (!str.string_eq(sliceOr(rest, 0, space), dep)) { continue; }
+        if (!str.stringEq(sliceOr(rest, 0, space), dep)) { continue; }
         let version: string = str.sliceFrom(rest, space);
-        while (version.len > 0 && str.string_starts_with(version, " ")) {
+        while (version.len > 0 && str.stringStartsWith(version, " ")) {
             version = str.sliceFrom(version, 1);
         }
-        if (version.len > 0) { return str.string_concat(version, ""); }
+        if (version.len > 0) { return str.stringConcat(version, ""); }
     }
     return "";
 }
@@ -229,21 +229,21 @@ function rebuildModuleFile(
     ref deps: Vec<string>,
     ref versions: Vec<string>,
 ): string {
-    disposable out: Vec<string> = vec.vec_new(64);
+    disposable out: Vec<string> = vec.vecNew(64);
 
     if (sourceText.len == 0) {
         // No MODULE to carry forward. Emit a skeleton with the version left
         // unmistakably unset - inventing one would be the tool claiming
         // authority it does not have.
-        vec.vec_push(ref out, `name     ${moduleName}\n`);
-        vec.vec_push(ref out, "version  0.0.0\n");
-        vec.vec_push(ref out, "\n");
-        vec.vec_push(ref out, "# Generated by yoopdist because the source module had no MODULE file.\n");
-        vec.vec_push(ref out, "# Set `version` by hand - yoopdist never invents or bumps it.\n");
+        vec.vecPush(ref out, `name     ${moduleName}\n`);
+        vec.vecPush(ref out, "version  0.0.0\n");
+        vec.vecPush(ref out, "\n");
+        vec.vecPush(ref out, "# Generated by yoopdist because the source module had no MODULE file.\n");
+        vec.vecPush(ref out, "# Set `version` by hand - yoopdist never invents or bumps it.\n");
     } else {
-        disposable lines: Vec<string> = vec.vec_new(64);
+        disposable lines: Vec<string> = vec.vecNew(64);
         splitLines(ref lines, sourceText);
-        const arr: string[] = vec.vec_as_array(ref lines);
+        const arr: string[] = vec.vecAsArray(ref lines);
         // Blank lines are held back and only emitted once a non-blank line
         // follows. That preserves interior spacing exactly while dropping every
         // trailing blank - including the "" that split() yields for a text
@@ -254,59 +254,59 @@ function rebuildModuleFile(
         for raw in arr {
             const line = dropCarriageReturn(raw);
             // Drop the old snapshot; it is about to be replaced.
-            if (str.string_starts_with(line, "requires")) { continue; }
+            if (str.stringStartsWith(line, "requires")) { continue; }
             if (line.len == 0) {
                 pendingBlanks = pendingBlanks + 1;
                 continue;
             }
             while (pendingBlanks > 0) {
-                vec.vec_push(ref out, "\n");
+                vec.vecPush(ref out, "\n");
                 pendingBlanks = pendingBlanks - 1;
             }
-            vec.vec_push(ref out, `${line}\n`);
+            vec.vecPush(ref out, `${line}\n`);
         }
     }
 
-    const depArr: string[] = vec.vec_as_array(ref deps);
-    const verArr: string[] = vec.vec_as_array(ref versions);
+    const depArr: string[] = vec.vecAsArray(ref deps);
+    const verArr: string[] = vec.vecAsArray(ref versions);
     if (depArr.len > 0) {
-        vec.vec_push(ref out, "\n");
+        vec.vecPush(ref out, "\n");
         // Only explain `requires` in a file we authored. Carrying an existing
         // MODULE forward means the author already said whatever they wanted to
         // say about it, and a second boilerplate header every dist would just
         // accumulate.
         if (sourceText.len == 0) {
-            vec.vec_push(ref out, "# Dependency versions recorded when this was shipped. Informational: the\n");
-            vec.vec_push(ref out, "# compiler does not resolve, choose, or enforce anything from this file.\n");
+            vec.vecPush(ref out, "# Dependency versions recorded when this was shipped. Informational: the\n");
+            vec.vecPush(ref out, "# compiler does not resolve, choose, or enforce anything from this file.\n");
         }
         let i: usize = 0;
         while (i < depArr.len) {
-            vec.vec_push(ref out, `requires ${depArr[i]} ${verArr[i]}\n`);
+            vec.vecPush(ref out, `requires ${depArr[i]} ${verArr[i]}\n`);
             i = i + 1;
         }
     }
 
-    const parts: string[] = vec.vec_as_array(ref out);
-    return str.string_concat_all(parts);
+    const parts: string[] = vec.vecAsArray(ref out);
+    return str.stringConcatAll(parts);
 }
 
 // ----- copying ------------------------------------------------------------
 
 function copyFileBytes(src: string, dst: string): string {
-    disposable r = fs.read_file(src);
+    disposable r = fs.readFile(src);
     if (r.error.len > 0) { return r.error; }
-    const bytes: uint8[] = vec.vec_as_array(ref r.data);
-    return fs.write_file(dst, bytes);
+    const bytes: uint8[] = vec.vecAsArray(ref r.data);
+    return fs.writeFile(dst, bytes);
 }
 
 function writeText(path: string, body: string): string {
-    disposable buf: Vec<uint8> = vec.vec_new(body.len + 1);
-    const bytes: uint8[] = intr.string_as_bytes(body);
+    disposable buf: Vec<uint8> = vec.vecNew(body.len + 1);
+    const bytes: uint8[] = intr.stringAsBytes(body);
     for b in bytes {
-        vec.vec_push(ref buf, b);
+        vec.vecPush(ref buf, b);
     }
-    const arr: uint8[] = vec.vec_as_array(ref buf);
-    return fs.write_file(path, arr);
+    const arr: uint8[] = vec.vecAsArray(ref buf);
+    return fs.writeFile(path, arr);
 }
 
 // ----- main ---------------------------------------------------------------
@@ -335,33 +335,33 @@ function main(): int32 {
     }
 
     // ----- read the directory -----
-    disposable yoopFiles: Vec<string> = vec.vec_new(32);
-    disposable skippedDirs: Vec<string> = vec.vec_new(8);
+    disposable yoopFiles: Vec<string> = vec.vecNew(32);
+    disposable skippedDirs: Vec<string> = vec.vecNew(8);
     let hasModuleFile: bool = false;
     let sawOwnModulesDir: bool = false;
 
     disposable dir = fs.openDir(moduleDir);
     for name in dir {
-        const full = fs.path_join([moduleDir, name]);
+        const full = fs.pathJoin([moduleDir, name]);
         const meta = fs.statPath(full);
         if (meta.ok && meta.isDir) {
-            if (str.string_eq(name, MODULES_DIR)) {
+            if (str.stringEq(name, MODULES_DIR)) {
                 sawOwnModulesDir = true;
             } else {
-                vec.vec_push(ref skippedDirs, str.string_concat(name, ""));
+                vec.vecPush(ref skippedDirs, str.stringConcat(name, ""));
             }
             continue;
         }
-        if (str.string_eq(name, MODULE_FILE)) {
+        if (str.stringEq(name, MODULE_FILE)) {
             hasModuleFile = true;
             continue;
         }
         if (isYoopFile(name)) {
-            vec.vec_push(ref yoopFiles, str.string_concat(name, ""));
+            vec.vecPush(ref yoopFiles, str.stringConcat(name, ""));
         }
     }
 
-    const fileArr: string[] = vec.vec_as_array(ref yoopFiles);
+    const fileArr: string[] = vec.vecAsArray(ref yoopFiles);
     if (fileArr.len == 0) {
         printf("yoopdist: \"%s\" holds no .yoop source files\n", moduleDir);
         return 1;
@@ -374,11 +374,11 @@ function main(): int32 {
     // from a directory module's source list), so it neither supplies the name
     // nor contributes a dependency to the snapshot.
     let moduleName: string = "";
-    disposable deps: Vec<string> = vec.vec_new(8);
+    disposable deps: Vec<string> = vec.vecNew(8);
 
     for fileName in fileArr {
         if (isTestFile(fileName)) { continue; }
-        const src = readText(fs.path_join([moduleDir, fileName]));
+        const src = readText(fs.pathJoin([moduleDir, fileName]));
         const declared = moduleHeaderName(src);
         if (declared.len == 0) {
             printf("yoopdist: %s has no `module <name>;` header\n", fileName);
@@ -389,26 +389,26 @@ function main(): int32 {
         if (moduleName.len == 0) {
             moduleName = declared;
         } else {
-            if (!str.string_eq(declared, moduleName)) {
+            if (!str.stringEq(declared, moduleName)) {
                 printf("yoopdist: %s declares `module %s;` but this directory is module \"%s\"\n",
                        fileName, declared, moduleName);
                 return 1;
             }
         }
 
-        disposable lines: Vec<string> = vec.vec_new(64);
+        disposable lines: Vec<string> = vec.vecNew(64);
         splitLines(ref lines, src);
-        const lineArr: string[] = vec.vec_as_array(ref lines);
+        const lineArr: string[] = vec.vecAsArray(ref lines);
         for raw in lineArr {
             const line = dropCarriageReturn(raw);
-            if (!str.string_starts_with(line, "import")) { continue; }
+            if (!str.stringStartsWith(line, "import")) { continue; }
             const dep = moduleDepOnLine(line);
             if (dep.len == 0) { continue; }
             // A module importing itself by name would be a compiler error, but
             // guard anyway rather than emit a self-referential requires line.
-            if (str.string_eq(dep, moduleName)) { continue; }
+            if (str.stringEq(dep, moduleName)) { continue; }
             if (!containsName(ref deps, dep)) {
-                vec.vec_push(ref deps, dep);
+                vec.vecPush(ref deps, dep);
             }
         }
     }
@@ -418,28 +418,28 @@ function main(): int32 {
     // installed here.
     let sourceModule: string = "";
     if (hasModuleFile) {
-        sourceModule = readText(fs.path_join([moduleDir, MODULE_FILE]));
+        sourceModule = readText(fs.pathJoin([moduleDir, MODULE_FILE]));
     }
 
     // ----- resolve each dependency's recorded version -----
     const modulesRoot = findModulesRoot(moduleDir);
-    disposable versions: Vec<string> = vec.vec_new(8);
-    const depArr: string[] = vec.vec_as_array(ref deps);
+    disposable versions: Vec<string> = vec.vecNew(8);
+    const depArr: string[] = vec.vecAsArray(ref deps);
     for dep in depArr {
         let version: string = "unknown";
         if (modulesRoot.len > 0) {
-            version = recordedVersion(fs.path_join([modulesRoot, dep]));
+            version = recordedVersion(fs.pathJoin([modulesRoot, dep]));
         }
-        if (str.string_eq(version, "unknown")) {
+        if (str.stringEq(version, "unknown")) {
             const prior = priorRequireVersion(sourceModule, dep);
             if (prior.len > 0) { version = prior; }
         }
-        vec.vec_push(ref versions, version);
+        vec.vecPush(ref versions, version);
     }
 
     // ----- write the dist -----
-    const outDir = fs.path_join([outRoot, moduleName]);
-    const mkErr = fs.mkdir_p(fs.path_join([outDir, "x"]));
+    const outDir = fs.pathJoin([outRoot, moduleName]);
+    const mkErr = fs.mkdirP(fs.pathJoin([outDir, "x"]));
     if (mkErr.len > 0) {
         printf("yoopdist: %s\n", mkErr);
         return 1;
@@ -448,8 +448,8 @@ function main(): int32 {
     let copied: int32 = 0;
     for fileName in fileArr {
         const err = copyFileBytes(
-            fs.path_join([moduleDir, fileName]),
-            fs.path_join([outDir, fileName]),
+            fs.pathJoin([moduleDir, fileName]),
+            fs.pathJoin([outDir, fileName]),
         );
         if (err.len > 0) {
             printf("yoopdist: %s\n", err);
@@ -459,7 +459,7 @@ function main(): int32 {
     }
 
     const rebuilt = rebuildModuleFile(sourceModule, moduleName, ref deps, ref versions);
-    const werr = writeText(fs.path_join([outDir, MODULE_FILE]), rebuilt);
+    const werr = writeText(fs.pathJoin([outDir, MODULE_FILE]), rebuilt);
     if (werr.len > 0) {
         printf("yoopdist: %s\n", werr);
         return 1;
@@ -471,7 +471,7 @@ function main(): int32 {
     if (!hasModuleFile) {
         printf("  no MODULE in the source; wrote a skeleton with version 0.0.0\n");
     }
-    const verArr: string[] = vec.vec_as_array(ref versions);
+    const verArr: string[] = vec.vecAsArray(ref versions);
     if (depArr.len == 0) {
         printf("  no modules/ dependencies\n");
     } else {
@@ -490,7 +490,7 @@ function main(): int32 {
     if (sawOwnModulesDir) {
         printf("  skipped modules/ (development dependencies never ship)\n");
     }
-    const skipped: string[] = vec.vec_as_array(ref skippedDirs);
+    const skipped: string[] = vec.vecAsArray(ref skippedDirs);
     for d in skipped {
         printf("  skipped subdirectory %s/ (dist one module at a time)\n", d);
     }
