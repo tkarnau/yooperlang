@@ -90,7 +90,9 @@ function addFile(ref mod: Module, absPath: string, srcBuf: Vec<uint8>): string {
   const parsed = parseInto(mod.ast, vec.vecAsArray(ref srcBuf));
   switch (parsed) {
     case Result.Err { error: e }: {
-      return `parse error in ${absPath}: ${e}`;
+      // `rawMessage` and not the whole ParsingError: @derive(display) on it
+      // renders every field, including the source it points into.
+      return `${absPath}:${e.sourceLoc.line + 1}:${e.sourceLoc.column}: ${e.rawMessage}`;
     }
     case Result.Ok { value: file }: {
       mod.ast = file.ast;

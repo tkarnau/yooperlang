@@ -41,3 +41,14 @@ export variant Symbol {
   Namespace   { module: ModuleId },       // `import * as ns`
   Imported    { target: SymbolId },       // by-name import: a redirect to another module's symbol
 }
+
+// True for a symbol that names a VALUE - something you call or read - rather
+// than a type, a trait or a kind. The distinction exists for exactly one rule:
+// std values must be imported through a namespace, and std types need not be.
+export function isValueSymbol(ref prog: Program, symId: SymbolId): bool {
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { return true; }
+    case Symbol.Value { typeId: t }: { return true; }
+    default: { return false; }
+  }
+}

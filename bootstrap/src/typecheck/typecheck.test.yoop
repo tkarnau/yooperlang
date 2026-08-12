@@ -391,6 +391,43 @@ suite function importsOfNamesTheSourceDoesNotOfferAreRefused(): void {
   }
 }
 
+suite function stdValueImportsMustUseTheNamespaceForm(): void {
+  // Common std function names - `info`, `error`, `panic`, `get` - would compete
+  // with the user's own identifiers if they could be imported bare, and
+  // `log.error(...)` says where it came from at every call site. Same rule, and
+  // the same message, as src/jsyooptypecheck/imports.js.
+  let value = checkTwoModules(
+    "export function twice(n: int): int { return n * 2; }",
+    "import { twice } from \"std/core/tiny.yoop\";\nfunction main(): int { return twice(1); }"
+  );
+  let test theory: Case = t.asserts("a bare value import from std is refused") {
+    theory.isSuccessful = diagnosticsMention(ref value, "must use the namespace form");
+    theory.detail = `wanted a namespace-form diagnostic, got: ${firstDiagnostic(ref value)}`;
+  }
+
+  // Types are exempt: capitalized, far fewer of them, and `Vec` reads worse as
+  // `vec.Vec`.
+  let typeImport = checkTwoModules(
+    "export type Span { start: int, len: int }",
+    "import { Span } from \"std/core/tiny.yoop\";\nfunction main(): int { const s: Span = { start: 1, len: 2 }; return s.len; }"
+  );
+  let test theory: Case = t.asserts("a TYPE import from std is allowed") {
+    theory.isSuccessful = typeImport.diagnostics.len == 0;
+    theory.detail = `importing a std type reported ${typeImport.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref typeImport)}`;
+  }
+
+  // The rule is about std, not about imports. A user module's values import
+  // bare, which is what every other fixture here relies on.
+  let user = checkTwoModules(
+    "export function twice(n: int): int { return n * 2; }",
+    "import { twice } from \"./lib.yoop\";\nfunction main(): int { return twice(1); }"
+  );
+  let test theory: Case = t.asserts("a bare value import from a USER module is fine") {
+    theory.isSuccessful = user.diagnostics.len == 0;
+    theory.detail = `a user-module value import reported ${user.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref user)}`;
+  }
+}
+
 suite function namespacesReachAModulesExports(): void {
   let prog = checkTwoModules(
     "export function add(a: int, b: int): int { return a + b; }",

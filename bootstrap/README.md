@@ -33,7 +33,7 @@ a shared header file.
       parse/           layer 2: recursive descent, one file per construct
       source_graph/    layer 0: Module / SourceFile / ModuleGraph, reading a
                        module's files, the import walk, path resolution,
-                       module ids
+                       module ids, finding the std root
       typecheck/       layer 3: ids, Type, Symbol, Program, the passes
       codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
       link/            layer 6: IR -> executable, by shelling out to clang
@@ -116,11 +116,27 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
     `module <name>;` is ONE module - one namespace, one mangled prefix, and its
     files see each other's declarations without importing
 
-Not yet: side-effect imports (`import "./init.yoop";`), the `std/` and
-`modules/` import roots, `ns.CONSTANT` (anything but a call through a
-namespace), generic variants, value `enum`s, unions, `for x in xs`,
-module-level `let` / `const`, nested field paths (`a.b.c = v`), floats, traits,
-kinds, generics.
+  * `std/...` import paths, resolved against a root the compiler DISCOVERS:
+    `YOOP_STD_ROOT` if set, otherwise a probe beside the executable. Values from
+    std must come through a namespace (`import * as log from "std/log.yoop"`);
+    types may be imported by name.
+
+Not yet: side-effect imports (`import "./init.yoop";`), the `modules/` import
+root, std AUTOLOADS, `ns.CONSTANT` (anything but a call through a namespace),
+generic variants, value `enum`s, unions, `for x in xs`, module-level
+`let` / `const`, nested field paths (`a.b.c = v`), floats, traits, kinds,
+generics.
+
+**Resolving `std/` is not the same as compiling it.** The path arithmetic works
+today; the real standard library still needs language the bootstrap does not
+have. Pointing it at `std/` gives, in the order you hit them:
+
+    std/core/types.yoop    generic variant "Result" is not supported yet
+    std/core/strings.yoop  a generic type application in an annotation
+    std/core/vec.yoop      "implements" clauses on a type decl
+    std/log.yoop           `extern` blocks
+
+Generics is the big one, and `Result<T, E>` is on the far side of it.
 
 Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
 `int32 + usize` and is an error. Write the cast.
@@ -210,6 +226,12 @@ Two invariants control flow introduced, both easy to break:
   to hand out an ordinal and a count rather than the case's `Vec<Field>`, because
   that is exactly the bug it caused - a null dereference three passes away from
   the annotation that caused it.
+- **The std root is DISCOVERED once, by the driver, and passed in.**
+  `loadModuleGraph` takes it as a parameter rather than probing for it, so a
+  caller that already knows its root - a test pointing at a stub, and eventually
+  the LSP - never touches the filesystem probing in `std_root.yoop`. The
+  discovery rule honours `YOOP_STD_ROOT`, which is what the JS reference honours
+  too, so one variable retargets both compilers at the same tree.
 - **A diagnostic carries the FILE it was found in.** `Program.currentFile` is
   ambient, set by each pass as it starts a file, because the alternative is a
   path parameter on forty `reportError` call sites that all want the same

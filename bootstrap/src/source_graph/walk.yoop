@@ -39,12 +39,17 @@ type Loader propagates<disposable> {
   modules: Vec<Module>,
   byPath: Map<string, usize>,
   onStack: Map<string, bool>,
+  stdRoot: string,
 }
 
 // A loaded module's index in `Loader.modules`, or the error that stopped us.
 type LoadUnitResult = Result<usize, string>;
 
-export function loadModuleGraph(entryPath: string): LoadGraphResult {
+// `stdRoot` is where `std/...` imports resolve. It is a PARAMETER rather than
+// something this layer discovers, so a caller that already knows its root (a
+// test pointing at a stub, and eventually the LSP) never touches the
+// filesystem probing in std_root.yoop. The driver discovers it and passes it.
+export function loadModuleGraph(entryPath: string, stdRoot: string): LoadGraphResult {
   if (!fs.exists(entryPath)) {
     return LoadGraphResult.Err { error: `entry file not found: ${entryPath}` };
   }
@@ -63,6 +68,7 @@ export function loadModuleGraph(entryPath: string): LoadGraphResult {
     modules: vec.vecNew(4),
     byPath: byPath,
     onStack: onStack,
+    stdRoot: stdRoot,
   };
 
   const loaded = loadUnit(ref loader, entryAbs, entryPath, true);
@@ -195,7 +201,7 @@ function loadImportsOfFile(ref st: Loader, ref mod: Module, fileIndex: usize): s
 
     const sourcePath = vec.vecGet(ref mod.ast.strings, decl.strId);
     let targetAbs: string;
-    switch (resolveImportTarget(absPath, sourcePath)) {
+    switch (resolveImportTarget(absPath, sourcePath, st.stdRoot)) {
       case Result.Err { error: e }: { return e; }
       case Result.Ok { value: abs }: { targetAbs = abs; }
     }
@@ -242,19 +248,28 @@ function refuseSelfImport(ref mod: Module, absPath: string, sourcePath: string, 
 // One import path -> one absolute source file, with the forms the bootstrap
 // does not handle refused BY NAME. `resolveImportPath` in resolve.yoop is the
 // path arithmetic; this is the policy around it.
-function resolveImportTarget(importerAbsPath: string, sourcePath: string): Result<string, string> {
-  if (str.stringStartsWith(sourcePath, "std/")) {
-    return Result.Err {
-      error: `import "${sourcePath}" from ${importerAbsPath}: std imports are not supported by the bootstrap compiler yet`
-    };
-  }
+function resolveImportTarget(
+  importerAbsPath: string,
+  sourcePath: string,
+  stdRoot: string
+): Result<string, string> {
   if (str.stringStartsWith(sourcePath, "modules/")) {
     return Result.Err {
       error: `import "${sourcePath}" from ${importerAbsPath}: the modules/ import root is not supported by the bootstrap compiler yet`
     };
   }
-  // stdRoot is unreachable given the refusals above, so it is passed empty.
-  const resolved = resolveImportPath(importerAbsPath, sourcePath, "")?;
+
+  // A std import that cannot resolve is usually a broken INSTALL rather than a
+  // typo, so it gets the message that says which root was searched. Checked
+  // before resolving so the answer does not depend on why the path failed.
+  if (str.stringStartsWith(sourcePath, "std/")) {
+    const problem = stdRootProblem(stdRoot);
+    if (problem.len > 0) {
+      return Result.Err { error: `import "${sourcePath}" from ${importerAbsPath}: ${problem}` };
+    }
+  }
+
+  const resolved = resolveImportPath(importerAbsPath, sourcePath, stdRoot)?;
 
   // A path either names a `.yoop` file or a module DIRECTORY. Anything else is
   // refused with the extension message rather than a bare "not found", which

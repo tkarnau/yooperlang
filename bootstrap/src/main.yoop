@@ -18,7 +18,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 
-import { loadModuleGraph, LoadGraphResult } from "./source_graph";
+import { loadModuleGraph, LoadGraphResult, discoverStdRoot } from "./source_graph";
 import { typecheckProgram, Program } from "./typecheck";
 import { Severity, formatLocation } from "./diagnostics";
 import { codegenProgram } from "./codegen";
@@ -35,7 +35,11 @@ function main(): int {
     outPath = env.argAt(3);   // `-o <out>`
   }
 
-  switch (loadModuleGraph(entryPath)) {
+  // Where `std/...` resolves. Discovered once here and handed to the graph, so
+  // the layer that RESOLVES paths never has to probe for a directory.
+  const stdRoot = discoverStdRoot(env.argAt(0));
+
+  switch (loadModuleGraph(entryPath, stdRoot)) {
     case LoadGraphResult.Err { error: e }: {
       log.error(`${e}`);
       return 1;

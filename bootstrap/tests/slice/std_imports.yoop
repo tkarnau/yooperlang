@@ -1,0 +1,21 @@
+// The `std/` import root.
+//
+// The path resolves against a std root the compiler DISCOVERS rather than
+// knows: YOOP_STD_ROOT if set, otherwise a probe beside the executable. This
+// fixture's root is the std_imports.std/ directory beside it - see the harness
+// note in src/slice.test.js.
+//
+// Two rules are load-bearing here:
+//   VALUES from std must come through a namespace, so common names like `twice`
+//   cannot compete with the user's own identifiers
+//   TYPES are exempt, which is why `Span` is a plain named import
+
+import { Span }, * as tiny from "std/core/tiny.yoop";
+
+function main(): int {
+  printf("twice=%d\n", tiny.twice(21));
+
+  const s: Span = { start: 10, len: 4 };
+  printf("end=%d\n", tiny.endOf(s));
+  return 0;
+}

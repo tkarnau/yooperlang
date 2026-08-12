@@ -32,11 +32,11 @@ suite function unresolvableImportsAreRefusedByName(): void {
     theory.detail = `wanted a not-found diagnostic, got: ${loadError("graph", "missing.yoop")}`;
   }
 
-  // These two are OUTSIDE the subset rather than wrong, so the message has to
-  // say which feature is missing - not "cannot resolve", which reads as a typo.
-  let test theory: Case = t.asserts("a std/ import names the missing feature") {
-    theory.isSuccessful = loadFails("std_import.yoop", "std imports are not supported");
-    theory.detail = `wanted a std-not-supported diagnostic, got: ${loadError("graph", "std_import.yoop")}`;
+  // A std import that cannot resolve is usually a broken INSTALL, not a typo,
+  // so it names the root that was searched and the variable that retargets it.
+  let test theory: Case = t.asserts("a std/ import with no root names the override") {
+    theory.isSuccessful = loadFails("std_import.yoop", "YOOP_STD_ROOT");
+    theory.detail = `wanted a std-root diagnostic, got: ${loadError("graph", "std_import.yoop")}`;
   }
 
   let test theory: Case = t.asserts("a missing entry file is refused before anything is parsed") {
@@ -74,7 +74,7 @@ suite function aMalformedDirectoryModuleIsRefusedByName(): void {
 // proves the program behaves; this proves the module underneath it has the
 // shape every later layer assumes.
 suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
-  switch (loadModuleGraph(fixture("slice", "dir_modules.yoop"))) {
+  switch (loadModuleGraph(fixture("slice", "dir_modules.yoop"), "")) {
     case LoadGraphResult.Err { error: e }: {
       let test theory: Case = t.asserts("the directory-module fixture loads") {
         theory.isSuccessful = false;
@@ -142,7 +142,7 @@ suite function importingTheWrongThingNamesTheRightForm(): void {
 // It proves at the slice level that the program RUNS; here it proves the graph
 // underneath it has the shape typecheck depends on.
 suite function theGraphIsDedupedAndTopologicallyOrdered(): void {
-  switch (loadModuleGraph(fixture("slice", "imports.yoop"))) {
+  switch (loadModuleGraph(fixture("slice", "imports.yoop"), "")) {
     case LoadGraphResult.Err { error: e }: {
       let test theory: Case = t.asserts("the diamond fixture loads") {
         theory.isSuccessful = false;
@@ -172,6 +172,49 @@ suite function theGraphIsDedupedAndTopologicallyOrdered(): void {
       let test theory: Case = t.asserts("every module gets a distinct id") {
         theory.isSuccessful = idsAreDistinct(ref graph);
         theory.detail = "two modules share a mangling id, so their symbols would collide";
+      }
+    }
+  }
+}
+
+// `std/...` resolves against a root the caller supplies, which is the whole
+// reason loadModuleGraph takes one instead of probing for it: this test points
+// at the slice fixture's stub std with no environment involved.
+suite function stdImportsResolveAgainstTheGivenRoot(): void {
+  const stubRoot = fixture("slice", "std_imports.std");
+
+  switch (loadModuleGraph(fixture("slice", "std_imports.yoop"), stubRoot)) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("a std import resolves under the root") {
+        theory.isSuccessful = false;
+        theory.detail = `loading the std fixture against ${stubRoot} failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let test theory: Case = t.asserts("the std module joins the graph like any other") {
+        theory.isSuccessful = graph.modules.len == 2;
+        theory.detail = `the std fixture produced ${graph.modules.len} modules, wanted 2`;
+      }
+      let test theory: Case = t.asserts("the resolved path is under the std root, not the importer") {
+        const stdModule = vec.vecGet(ref graph.modules, 0);
+        const path = vec.vecGet(ref stdModule.files, 0).absPath;
+        theory.isSuccessful = str.stringIndexOf(path, "std_imports.std") < path.len;
+        theory.detail = `std/core/tiny.yoop resolved to ${path}, wanted it under the stub root`;
+      }
+    }
+  }
+
+  // The same import with NO root is the broken-install case, and it must not
+  // silently fall back to resolving relative to the importer.
+  let test theory: Case = t.asserts("an empty std root refuses rather than guessing") {
+    switch (loadModuleGraph(fixture("slice", "std_imports.yoop"), "")) {
+      case LoadGraphResult.Err { error: e }: {
+        theory.isSuccessful = str.stringIndexOf(e, "YOOP_STD_ROOT") < e.len;
+        theory.detail = `wanted the override named, got: ${e}`;
+      }
+      case LoadGraphResult.Ok { value: graph }: {
+        theory.isSuccessful = false;
+        theory.detail = "a std import resolved with no std root at all";
       }
     }
   }
@@ -217,7 +260,7 @@ function fixture(dir: string, name: string): string {
 
 // The load error for a fixture, or "" when it loaded clean.
 function loadError(dir: string, name: string): string {
-  switch (loadModuleGraph(fixture(dir, name))) {
+  switch (loadModuleGraph(fixture(dir, name), "")) {
     case LoadGraphResult.Err { error: e }: { return e; }
     case LoadGraphResult.Ok { value: graph }: { return ""; }
   }

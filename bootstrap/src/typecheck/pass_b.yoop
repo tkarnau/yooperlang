@@ -29,6 +29,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
 import { AST, ASTNode, childAt, nodeAt } from "../ast";
 import { Module, ImportEdge } from "../source_graph";
 
@@ -72,10 +73,11 @@ function wireImport(ref prog: Program, ref tm: TypedModule, m: Module, edge: Imp
     bindNamespace(ref prog, ref tm, decl, edge.resolvedModuleIndex);
   }
 
+  const fromStd = str.stringStartsWith(vec.vecGet(ref m.ast.strings, decl.strId), "std/");
   let s: usize = 0;
   while (s < decl.childCount) {
     const spec = nodeAt(ref m.ast, childAt(ref m.ast, decl, s));
-    bindImportedName(ref prog, ref tm, ref source, ref m.ast, spec);
+    bindImportedName(ref prog, ref tm, ref source, ref m.ast, spec, fromStd);
     s += 1;
   }
 }
@@ -108,7 +110,8 @@ function bindImportedName(
   ref tm: TypedModule,
   ref source: TypedModule,
   ref ast: AST,
-  spec: ASTNode
+  spec: ASTNode,
+  fromStd: bool
 ): void {
   const exportName = vec.vecGet(ref ast.strings, spec.strId);
 
@@ -134,6 +137,21 @@ function bindImportedName(
       }
       return;
     }
+  }
+
+  // std VALUES must come through a namespace. Common function names - `info`,
+  // `error`, `panic`, `get` - would otherwise compete with the user's own
+  // identifiers, and `log.error(...)` says where it came from at every call
+  // site. Types are exempt: they are capitalized, there are far fewer of them,
+  // and `Vec` reads worse as `vec.Vec`. Same rule, same reasoning, as
+  // src/jsyooptypecheck/imports.js.
+  if (fromStd && isValueSymbol(ref prog, symId)) {
+    reportError(
+      ref prog,
+      `imports of value "${exportName}" from std must use the namespace form: write \`import * as <ns> from "..."\` and call as \`<ns>.${exportName}(...)\``,
+      spec.sourceLoc
+    );
+    return;
   }
 
   if (map.mapInsert(ref tm.names, spec.name, symId)) {

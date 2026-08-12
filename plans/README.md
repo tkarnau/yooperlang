@@ -135,11 +135,29 @@ bindings, a struct inside a payload, and value-copy semantics. The layout is
 `typecheck/layout.yoop` to match the JS reference. Errors-as-values is the point
 of it - `Result` and `Option` are in essentially every bootstrap signature.
 
-What the bootstrap still needs before it can read its own source: the `std/`
-import root (58 of its files), template literals (65) - which is also the first
-feature to need the yoop RUNTIME linked rather than just libc - and generics
-(31). Generic variants are refused by name; `Result<T, E>` needs that work
-first.
+**The `std/` import root landed on 2026-08-12.** `std/...` resolves against a
+root discovered from `YOOP_STD_ROOT` or probed beside the executable - the same
+variable the JS reference honours, which is what lets one setting point both
+compilers at a stub. `tests/slice/std_imports.yoop` does exactly that, with its
+own `std_imports.std/` beside it, so the resolution path is tested end to end
+long before the language can compile the real std. Values from std must come
+through a namespace; types may not need to. Same rule, same message, as
+src/jsyooptypecheck/imports.js.
+
+Pointing it at the REAL std now gives a precise, ordered blocker list instead of
+a blanket refusal - which is the whole reason to do this before the features it
+is waiting on:
+
+    std/core/types.yoop    generic variant "Result" is not supported yet
+    std/core/strings.yoop  a generic type application in an annotation
+    std/core/vec.yoop      "implements" clauses on a type decl
+    std/log.yoop           `extern` blocks
+
+So what remains before the bootstrap can read its own source is: **generics**
+(31 of its files, and the gate in front of `Result<T, E>` and therefore in front
+of all of std), **traits and `implements`**, **`extern`**, and **template
+literals** (65 files, and the first feature to need the yoop RUNTIME linked
+rather than just libc).
 
 Immediate build sequence:
 

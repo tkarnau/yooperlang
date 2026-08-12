@@ -1,0 +1,82 @@
+module source_graph;
+
+/*
+  Where `std/...` imports resolve to.
+
+  The compiler needs a directory of .yoop source that is not part of the
+  compiler binary, so it has to be FOUND rather than known. Two ways, in order:
+
+    YOOP_STD_ROOT     an explicit override. The same variable the JS reference
+                      honours (src/install_root.js), so one setting points both
+                      compilers at the same tree - which is what lets a test
+                      point them both at a stub.
+    beside the exe    the packaged layouts: <prefix>/bin/yoopiler next to
+                      <prefix>/lib/std, and the flat variant.
+
+  Discovery is here and RESOLUTION is in resolve.yoop, because the two answer
+  different questions and only one of them needs the filesystem to cooperate: a
+  caller that already knows its root (a test, the LSP) passes it in and never
+  reaches this file.
+*/
+
+import * as fs from "std/fs.yoop";
+import * as env from "std/env.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+const STD_ROOT_VAR: string = "YOOP_STD_ROOT";
+
+// The std root for this run. `exePath` is argv[0]; an empty one just means the
+// probes below find nothing, which the caller reports.
+//
+// Always returns a path, even when nothing exists there. A readable "not found"
+// naming a directory the user can look at beats a load-time failure, and
+// `stdRootProblem` turns it into an actionable message.
+export function discoverStdRoot(exePath: string): string {
+  const override = env.getOr(STD_ROOT_VAR, "");
+  if (override.len > 0) {
+    return override;
+  }
+
+  disposable candidates: Vec<string> = stdRootCandidates(exePath);
+  let i: usize = 0;
+  while (i < candidates.len) {
+    const candidate = vec.vecGet(ref candidates, i);
+    if (fs.exists(candidate)) {
+      return candidate;
+    }
+    i += 1;
+  }
+  if (candidates.len > 0) {
+    return vec.vecGet(ref candidates, 0);
+  }
+  return "";
+}
+
+// The packaged layouts, most specific first. Mirrors CANDIDATE_PREFIXES in
+// src/install_root.js; the "repo checkout" candidate has no analogue here,
+// because a compiled binary has no source directory to be relative to.
+function stdRootCandidates(exePath: string): Vec<string> propagates<disposable> {
+  let out: Vec<string> = vec.vecNew(3);
+  if (exePath.len == 0) {
+    return out;
+  }
+  const binDir = fs.dirName(exePath);
+  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "lib", "std"]));   // bin/ + lib/
+  vec.vecPush(ref out, fs.pathJoin([binDir, "lib", "std"]));         // flat
+  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "std"]));          // beside bin/
+  return out;
+}
+
+// "" when the root is usable, else what is wrong with it and how to fix it.
+// The driver asks once, up front, so a broken install fails with a pointer at
+// the override instead of a confusing per-import "cannot resolve" much later.
+export function stdRootProblem(stdRoot: string): string {
+  if (stdRoot.len == 0) {
+    return `cannot locate the standard library - set ${STD_ROOT_VAR} to the directory containing core/`;
+  }
+  if (!fs.exists(stdRoot)) {
+    return `standard library not found at ${stdRoot}\n  set ${STD_ROOT_VAR} to the directory containing core/`;
+  }
+  return "";
+}

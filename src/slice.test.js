@@ -54,10 +54,21 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
 
   for (const name of fixtures) {
     const stem = name.replace(/\.yoop$/, "");
+    // A fixture that needs a standard library brings its own: `<stem>.std/`
+    // beside it becomes YOOP_STD_ROOT for that fixture only. Both compilers
+    // honour the same variable, so the parity assertion still holds.
+    //
+    // A stub rather than the real std/, because the real one needs traits,
+    // generics and kinds - the point of the fixture is the RESOLUTION path,
+    // which can be tested long before the language can compile std itself.
+    const stubStd = path.join(SLICE, `${stem}.std`);
+    const env = fs.existsSync(stubStd)
+      ? { ...process.env, YOOP_STD_ROOT: stubStd }
+      : process.env;
 
     it(`${stem}: the bootstrap compiler produces the expected behaviour`, () => {
       const expected = fs.readFileSync(path.join(SLICE, `${stem}.expected`), "utf8");
-      const got = buildAndRun(boot, [path.join(SLICE, name), "-o", path.join(work, `${stem}_bs`)], path.join(work, `${stem}_bs`));
+      const got = buildAndRun(boot, [path.join(SLICE, name), "-o", path.join(work, `${stem}_bs`)], path.join(work, `${stem}_bs`), env);
       assert.equal(got, expected, `${stem}: the bootstrap compiler is wrong`);
     });
 
@@ -69,6 +80,7 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
         "node",
         [path.join(REPO, "src/yoopiler.js"), path.join(SLICE, name), "-o", path.join(work, `${stem}_js`)],
         path.join(work, `${stem}_js`),
+        env,
       );
       assert.equal(got, expected, `${stem}: the JS reference disagrees with the fixture`);
     });
@@ -76,8 +88,8 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
 });
 
 // Runs the program and renders it in .expected form: stdout, then `exit=N`.
-function buildAndRun(compiler, args, exe) {
-  execFileSync(compiler, args, { cwd: REPO, stdio: "pipe" });
+function buildAndRun(compiler, args, exe, env = process.env) {
+  execFileSync(compiler, args, { cwd: REPO, stdio: "pipe", env });
   try {
     return `${execFileSync(exe, { encoding: "utf8" })}exit=0\n`;
   } catch (err) {

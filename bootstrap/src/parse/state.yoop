@@ -103,8 +103,10 @@ export type ParserState implements SelfLexing propagates<disposable> {
   }
   function createParsingError(ref self, message: string, length: Option<usize>): ParsingError {
     const sourceLoc = posToSourceLocation(self.src, self.pos, 1);
-    // log the current ast...
-    Log.info(`creating parser error - current AST\n${self.ast}`);
+    // No AST dump here. It was a bring-up aid, and once imports reached real
+    // files it printed the whole partial arena above every syntax error - tens
+    // of kilobytes between the reader and the one line that mattered. `--dump-ast`
+    // is the place for that, when it exists.
     return {
       sourceLoc: sourceLoc,
       isParseError: true,
