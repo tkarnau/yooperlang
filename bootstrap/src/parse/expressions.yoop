@@ -80,6 +80,17 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       // the node stays a fixed-size struct.
       node.strId = internString(ref ps, decodeStringLiteral(ref ps, tok)?);
     }
+    // `self` inside a method body. It is a keyword rather than an IDENT, but it
+    // reads as an ordinary local: the parameter list already bound the name, so
+    // everything downstream - `self.w`, `ref self` - is the usual machinery.
+    case TokenTags.SELF: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+      SelfLexing.advance(ref ps)?;
+      node.name = SELF_PARAM;
+    }
+    case TokenTags.TEMPLATELITERAL: {
+      node = parseTemplateLiteral(ref ps)?;
+    }
     case TokenTags.IDENT: {
       const name = parseIdentAsName(ref ps)?;
       // handle errno stuff...

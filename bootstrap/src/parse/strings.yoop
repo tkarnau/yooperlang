@@ -26,11 +26,24 @@ export function internString(ref ps: ParserState, text: string): usize {
 // `"a\nb"` -> the three characters a, newline, b. `tok` must be a STRLITERAL,
 // so its span includes both quotes.
 export function decodeStringLiteral(ref ps: ParserState, tok: Token): Result<string, ParsingError> {
-  const src = ps.src;
-  const start = tok.start + 1;                       // past the opening quote
-  const end = tok.start + usize(tok.length) - 1;     // before the closing one
+  return decodeStringRange(
+    ref ps,
+    tok.start + 1,                          // past the opening quote
+    tok.start + usize(tok.length) - 1       // before the closing one
+  );
+}
 
-  disposable out: Vec<uint8> = vec.vecNew(usize(tok.length));
+// The same decoding over an arbitrary byte range, with no quotes assumed.
+// A template literal's literal runs are delimited by `${` and `}` rather than
+// by quotes, so they have no span to strip - see parse/templates.yoop.
+export function decodeStringRange(
+  ref ps: ParserState,
+  start: usize,
+  end: usize
+): Result<string, ParsingError> {
+  const src = ps.src;
+
+  disposable out: Vec<uint8> = vec.vecNew(end - start + 1);
   let i = start;
   while (i < end) {
     const ch = src[i];
@@ -54,6 +67,11 @@ export function decodeStringLiteral(ref ps: ParserState, tok: Token): Result<str
       case '\\': { vec.vecPush(ref out, 92); }
       case '"':  { vec.vecPush(ref out, 34); }
       case '\'': { vec.vecPush(ref out, 39); }
+      case '`':  { vec.vecPush(ref out, 96); }
+      // `\${` is a literal dollar-brace. Only a template literal can produce
+      // one, and templates.yoop already relies on the escape covering the byte
+      // after it when it decides what opens an interpolation.
+      case '$':  { vec.vecPush(ref out, 36); }
       default: {
         return Result.Err { error: SelfLexing.createParsingError(
           ref ps, `unknown escape in string literal: \\${src[i]}`, Option.None,

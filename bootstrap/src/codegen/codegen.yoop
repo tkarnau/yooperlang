@@ -66,6 +66,9 @@ export function codegenProgram(ref prog: Program, ref graph: ModuleGraph): Resul
   if (e.usesPrintf) {
     emitGlobal(ref e, "declare i32 @printf(ptr, ...)");
   }
+  if (e.usesStringBuilder) {
+    emitStringBuilderDeclarations(ref e);
+  }
   return Result.Ok { value: finish(ref e) };
 }
 
@@ -122,8 +125,41 @@ function emitFile(
     if (declNode.kind == ASTNodeKind.EXTERN_BLOCK) {
       emitExternDeclares(ref e, ref prog, ref tm, m, declNode);
     }
+    // A type's METHODS are ordinary functions with a `ref self` first
+    // parameter, emitted under a name that carries the type. The type itself
+    // still contributes no code.
+    if (declNode.kind == ASTNodeKind.TYPE_DECL ||
+        declNode.kind == ASTNodeKind.VARIANT_DECL) {
+      const err = emitMethods(ref e, ref prog, ref tm, m, declNode);
+      if (err.len > 0) {
+        return err;
+      }
+    }
     // A TYPE_DECL contributes no code until something instantiates it, and an
     // IMPORT_DECL never contributes any.
+    i += 1;
+  }
+  return "";
+}
+
+// Every METHOD in a type decl's member run. Fields contribute nothing; a method
+// is a function whose receiver happens to be spelled `self`.
+function emitMethods(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  declNode: ASTNode
+): string {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref m.ast, childAt(ref m.ast, declNode, i));
+    if (member.kind == ASTNodeKind.METHOD_DECL) {
+      const err = emitFunction(ref e, ref prog, ref tm, m, member, NO_FUNC_INSTANCE);
+      if (err.len > 0) {
+        return err;
+      }
+    }
     i += 1;
   }
   return "";
@@ -176,12 +212,21 @@ function emitFunction(
   };
 
   beginFunctionBuffers(ref e);
-  const retTy = returnTypeOf(ref cx, declNode.name);
+  // A method is not in the module namespace, so its return type comes from its
+  // own signature rather than from a name lookup.
+  const isMethod = declNode.kind == ASTNodeKind.METHOD_DECL;
+  let retTy = returnTypeOf(ref cx, declNode.name);
+  if (isMethod) {
+    retTy = methodReturnTypeOf(ref cx, declNode);
+  }
 
   disposable params: Vec<ParamInfo> = vec.vecNew(4);
   collectParams(ref cx, declNode, ref params);
 
-  const symbol = definitionSymbol(ref cx, declNode.name);
+  let symbol = definitionSymbol(ref cx, declNode.name);
+  if (isMethod) {
+    symbol = methodDefinitionSymbol(ref cx, declNode);
+  }
   emitFunctionOpen(ref cx, symbol.home, symbol.name, retTy, ref params);
   emitParamPrologue(ref cx, ref params);
 

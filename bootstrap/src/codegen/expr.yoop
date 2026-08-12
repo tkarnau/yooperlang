@@ -33,6 +33,9 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
       };
       return "";
     }
+    case ASTNodeKind.TEMPLATE_LITERAL: {
+      return emitTemplateLiteral(ref cx, expr, exprId, ref out);
+    }
     case ASTNodeKind.BOOL_LITERAL: {
       // i1 immediates are spelled `true` / `false`, which Operand.Bool writes.
       out = Operand.Bool { value: expr.intVal != 0 };

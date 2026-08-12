@@ -51,6 +51,10 @@ export type TypedModule propagates<disposable> {
   // Keyed by `uint64(nodeId)`: std/collections/map has no usize KeyOps, and
   // usize and uint64 are distinct types even where they are the same width.
   calleeInstance: Map<uint64, usize>,
+  // Which TYPE a trait-method call resolved its receiver to, keyed the same
+  // way. Codegen needs it to name the symbol: `Display.toString(ref p)` becomes
+  // `@m__Point__toString`, and only the receiver's type says which Point.
+  calleeReceiver: Map<uint64, TypeId>,
   allowsUnsafe: bool,
   // Sparse decorations (calleeMangled, genericInstances, castTargets, ...) are
   // added as Map<NodeId, T> slots here when the checker needs them.
@@ -143,6 +147,7 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let importedFrom: Map<string, ImportOrigin> = map.mapNew(0, map.stringKeyOps());
   let calleeInstance: Map<uint64, usize> = map.mapNew(0, map.uint64KeyOps());
   let externNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let calleeReceiver: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
   return {
     moduleId: moduleId,
     names: names,
@@ -150,6 +155,7 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     importedFrom: importedFrom,
     externNames: externNames,
     calleeInstance: calleeInstance,
+    calleeReceiver: calleeReceiver,
     resolvedTypes: vec.vecNew(0),
     allowsUnsafe: false,
   };

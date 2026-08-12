@@ -48,7 +48,48 @@ function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root
     if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
       checkFunctionBody(ref prog, ref tm, ref m.ast, declNode);
     }
+    // A type's METHODS have bodies too, and they are not module-level names -
+    // so the walk has to reach into the decl to find them.
+    if (declNode.kind == ASTNodeKind.TYPE_DECL ||
+        declNode.kind == ASTNodeKind.VARIANT_DECL) {
+      checkMethodBodies(ref prog, ref tm, ref m.ast, declNode);
+    }
     i += 1;
+  }
+}
+
+// Every METHOD_DECL member of a type decl. Its signature is already in the
+// owner's method table, so this is the same job checkFunctionBody does with the
+// lookup replaced.
+function checkMethodBodies(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const ownerType = ownTypeOf(ref prog, ref tm, declNode.name);
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const memberId = childAt(ref ast, declNode, i);
+    const member = nodeAt(ref ast, memberId);
+    if (member.kind == ASTNodeKind.METHOD_DECL) {
+      checkBodyAgainst(ref prog, ref tm, ref ast, member,
+        lookupMethod(ref prog, ownerType, member.name));
+    }
+    i += 1;
+  }
+}
+
+// The type a decl's own name binds to. Only used to reach a method table.
+function ownTypeOf(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Struct { typeId: t }: { return t; }
+    case Symbol.VariantT { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
   }
 }
 
@@ -80,6 +121,19 @@ function checkFunctionBody(
     default: { return; }
   }
 
+  checkBodyAgainst(ref prog, ref tm, ref ast, declNode, signature);
+}
+
+// Bind the parameters from `signature` and check the body against its return
+// type. Shared by a function and a method, which differ only in where the
+// signature was found.
+function checkBodyAgainst(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  signature: TypeId
+): void {
   let retType: TypeId = TYPE_VOID_ID;
   let paramTypes: Vec<TypeId> = vec.vecNew(0);
   switch (typeAt(ref prog, signature)) {
@@ -263,6 +317,10 @@ function checkExpr(
       }
     }
     case ASTNodeKind.STRING_LITERAL: {
+      resolved = primTypeId(PrimKind.STRING);
+    }
+    case ASTNodeKind.TEMPLATE_LITERAL: {
+      checkTemplateParts(ref prog, ref tm, ref ast, expr, ref scope);
       resolved = primTypeId(PrimKind.STRING);
     }
     case ASTNodeKind.BOOL_LITERAL: {
@@ -543,6 +601,21 @@ function checkAgainstSignature(
     }
   }
 
+  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, funcType, calleeName, ref scope);
+}
+
+// The arity and type check, against a Func type that is already resolved.
+// Shared by an ordinary call and a trait-method call, which differ only in how
+// they FIND the Func.
+function checkArgsAgainstFunc(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  funcType: TypeId,
+  calleeName: string,
+  ref scope: LocalScope
+): TypeId {
   let params: Vec<TypeId> = vec.vecNew(0);
   let ret: TypeId = TYPE_ERROR_ID;
   let variadic = false;
@@ -620,6 +693,13 @@ function checkQualifiedCall(
       base.sourceLoc
     );
     return TYPE_ERROR_ID;
+  }
+
+  // `Display.toString(ref p)` - the base is a TRAIT, not a namespace, and the
+  // method is found on the RECEIVER's concrete type rather than in a module.
+  const traitType = traitTypeNamed(ref prog, ref tm, base.name);
+  if (traitType != TYPE_ERROR_ID) {
+    return checkTraitCall(ref prog, ref tm, ref ast, expr, exprId, base, traitType, ref scope);
   }
 
   let sourceIndex: ModuleId = 0;
@@ -742,6 +822,64 @@ function checkRefExpr(
     return TYPE_ERROR_ID;
   }
   return internRef(ref prog, inner);
+}
+
+// `Trait.method(ref receiver, ...)` - resolved STATICALLY by the receiver.
+//
+// The trait's own signature is only used to check the method EXISTS on it. What
+// the call actually reaches is the receiver's own method, because that is the
+// one with a body; two types implementing one trait are two symbols, and which
+// of them this call means is decided here rather than at run time.
+function checkTraitCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  traitType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (lookupMethod(ref prog, traitType, expr.name) == TYPE_ERROR_ID) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      `trait "${base.name}" has no method "${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // The RECEIVER is the first argument, and it is what picks the impl - so it
+  // is checked before the rest, with no expectation, and its type read back.
+  if (expr.childA == 0 || nodeAt(ref ast, expr.childA).childCount == 0) {
+    reportError(
+      ref prog,
+      `"${base.name}.${expr.name}" needs a receiver - write \`${base.name}.${expr.name}(ref x, ...)\``,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const args = nodeAt(ref ast, expr.childA);
+  const receiverId = childAt(ref ast, args, 0);
+  const receiverType = receiverTypeOf(ref prog,
+    checkExpr(ref prog, ref tm, ref ast, receiverId, TYPE_ERROR_ID, ref scope));
+
+  const method = lookupMethod(ref prog, receiverType, expr.name);
+  if (method == TYPE_ERROR_ID) {
+    reportError(
+      ref prog,
+      `${formatType(ref prog, receiverType)} does not implement "${base.name}.${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // Which impl this call landed on, for codegen. The receiver's TYPE is the
+  // answer, and the symbol name follows from it plus the method name.
+  map.mapInsert(ref tm.calleeReceiver, uint64(exprId), receiverType);
+
+  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, method, expr.name, ref scope);
 }
 
 // `printf` is a compiler builtin on both sides rather than an extern anyone has
@@ -1437,4 +1575,48 @@ function checkLiteralFieldValues(
     i += 1;
   }
   return present;
+}
+
+// Every `${...}` in a template literal, checked and decorated.
+//
+// A template literal BUILDS a string, so each interpolation has to become one.
+// Refusing the shapes that cannot here, by name and pointing at the
+// interpolation, is what keeps codegen from meeting a part it has no lowering
+// for - `${somePoint}` should say so at the `${`, not surface as an internal
+// error after the whole program typechecked.
+function checkTemplateParts(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): void {
+  let i: usize = 0;
+  while (i < expr.childCount) {
+    const partId = childAt(ref ast, expr, i);
+    const part = nodeAt(ref ast, partId);
+    // A literal run is already a string and has no expression to check.
+    if (part.kind != ASTNodeKind.EXPR_PART) {
+      vec.vecSet(ref tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+      i += 1;
+      continue;
+    }
+
+    // TYPE_ERROR_ID doubles as "no expectation" here, the same way every other
+    // free-standing expression in this file passes it: an interpolation takes
+    // whatever the expression is.
+    const inner = checkExpr(ref prog, ref tm, ref ast, part.childA, TYPE_ERROR_ID, ref scope);
+    vec.vecSet(ref tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+    // An expression that already failed produced its own diagnostic; a second
+    // one naming the error type would only be noise.
+    if (inner != TYPE_ERROR_ID &&
+        templatePartKind(ref prog, inner) == TemplatePartKind.UNSUPPORTED) {
+      reportError(
+        ref prog,
+        `cannot interpolate a value of type "${formatType(ref prog, inner)}" into a template literal - only strings, integers and bools are supported so far`,
+        part.sourceLoc
+      );
+    }
+    i += 1;
+  }
 }

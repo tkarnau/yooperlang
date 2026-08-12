@@ -1,0 +1,77 @@
+// Template literals - `` `line ${n}: ${msg}` ``.
+//
+// A built string, made at run time out of literal runs and interpolations. This
+// is the first bootstrap feature that ALLOCATES: the result is a fresh buffer,
+// so unlike every other expression in the slice it does not just move values
+// between registers and stack slots.
+//
+// The lowering measures every part, allocates once, and copies each into place.
+// One allocation per template regardless of part count, and it is fully
+// unrolled - the part count is known at compile time, so there is no loop.
+//
+// A template with no interpolation must NOT allocate: it is a string literal
+// wearing backticks, and most template literals in real source are exactly
+// that. Nothing here can observe the difference, which is the point - the
+// assertion that it stays cheap lives in the IR, not in stdout.
+
+type Rect {
+  w: int,
+  h: int,
+}
+
+function area(r: Rect): int {
+  return r.w * r.h;
+}
+
+function tagName(kind: int): string {
+  if (kind == 0) {
+    return "IDENT";
+  }
+  return "INT";
+}
+
+// A template built from parameters, so nothing here is constant-foldable and
+// the concat has to actually run.
+function describe(kind: int, line: int, col: int): string {
+  return `${tagName(kind)} at ${line}:${col}`;
+}
+
+function main(): int {
+  printf("%s\n", `no interpolation`);
+  printf("%s\n", describe(0, 12, 5));
+  printf("%s\n", describe(1, 340, 2));
+
+  // Adjacent interpolations with no literal run between them, plus a leading
+  // and a trailing one - the three places an off-by-one in the part scan hides.
+  const n: int = 7;
+  printf("%s\n", `${n}${n} ${n} end`);
+
+  // A bool becomes "true" or "false" with no allocation of its own, and an
+  // unsigned integer must not render as a signed one.
+  const ok: bool = false;
+  const u: usize = 4294967296;
+  printf("%s\n", `ok=${ok} big=${u}`);
+
+  // `\${` is a literal dollar-brace, not an interpolation, and a template can
+  // escape its own delimiter.
+  printf("%s\n", `literal \${n} and a backtick \``);
+
+  // An interpolation containing braces OF ITS OWN. Nothing here matches braces
+  // to find where the interpolation ends - the expression parser does - which
+  // is what keeps a struct literal from closing it early.
+  printf("%s\n", `area=${area({ w: 3, h: 4 })}`);
+
+  // A template whose interpolation is itself a call returning a template.
+  printf("%s\n", `outer ${describe(0, 1, 2)}`);
+
+  // Every width goes through i64, so a narrow signed value must sign-extend
+  // and a narrow unsigned one must not.
+  const small: int8 = -128;
+  const wide: uint8 = 200;
+  printf("%s\n", `small=${small} wide=${wide}`);
+
+  // The empty template is a string, and an empty one.
+  printf("[%s]\n", ``);
+
+  return 0;
+}

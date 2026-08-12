@@ -84,6 +84,9 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
       case TokenTags.VARIANT: {
         vec.vecPush(ref body, parseVariantDecl(ref ps)?);
       }
+      case TokenTags.TRAIT: {
+        vec.vecPush(ref body, parseTraitDecl(ref ps)?);
+      }
       case TokenTags.FUNCTION /*, TokenTags.TASK */: {
         vec.vecPush(ref body, parseFunctionDecl(ref ps)?);
       }

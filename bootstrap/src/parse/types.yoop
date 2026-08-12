@@ -169,15 +169,11 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
       }
     }
   }
-  // TODO: the `implements` / `propagates` / `contains` clauses. They sit here,
-  // between the kind prefix and the body. Reject them by name for now rather
-  // than letting them fall through to the body parse and produce a confusing
-  // "expected {" - a reserved-for-later construct should say so out loud.
-  if (
-    SelfLexing.peek(ref ps).tag == TokenTags.IMPLEMENTS ||
-    peekIsWord(ref ps, "propagates") ||
-    peekIsWord(ref ps, "contains")
-  ) {
+  // The clauses between the kind prefix and the body. `implements` is real now;
+  // `propagates` / `contains` are still refused BY NAME rather than allowed to
+  // fall through to the body parse and produce a confusing "expected {".
+  node.childD = parseImplementsClause(ref ps)?;
+  if (peekIsWord(ref ps, "propagates") || peekIsWord(ref ps, "contains")) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
       `"${peekText(ref ps)}" clauses on a type decl are not supported by the bootstrap parser yet`,
@@ -202,7 +198,14 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
     SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
     SelfLexing.peek(ref ps).tag != TokenTags.EOF
   ) {
-    vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+    // Fields and METHODS share the run. Splitting them here would mean two
+    // lists on a node that has one, and every later pass already switches on
+    // the member's kind anyway.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+      vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name)?);
+    } else {
+      vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+    }
     // A trailing comma after the last field is allowed, so consume the
     // separator whenever there is one and let the loop condition decide.
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
@@ -219,18 +222,9 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
-// One `name: Type` inside a struct body. Methods (`function foo(ref self)`)
-// are legal here in the language but not yet in this parser, so they get a
-// named refusal instead of an "expected IDENT".
+// One `name: Type` inside a struct body. A `function` here is a METHOD and was
+// dispatched by the caller before reaching this.
 function parseFieldDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
-  if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
-    return Result.Err { error: SelfLexing.createParsingError(
-      ref ps,
-      `methods inside a type decl are not supported by the bootstrap parser yet`,
-      peekLengthUsize(ref ps),
-    )};
-  }
-
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_DECL);
   node.name = parseIdentAsName(ref ps)?;
   SelfLexing.expect(ref ps, TokenTags.COLON)?;

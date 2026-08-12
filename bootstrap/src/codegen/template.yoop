@@ -1,0 +1,218 @@
+module codegen;
+
+/*
+  Template literals - building a string at run time.
+
+  Every part is reduced to a NUL-terminated `ptr`, then all of them are measured,
+  one buffer is allocated, and each is copied into place:
+
+    %l0   = call i64 @strlen(ptr @.str.0)     ; measure every part
+    %l1   = call i64 @strlen(ptr %n)
+    %s0   = add i64 0, %l0                    ; running offsets, so each part
+    %s1   = add i64 %s0, %l1                  ; knows where it lands
+    %sz   = add i64 %s1, 1                    ; room for the NUL
+    %dst  = call ptr @malloc(i64 %sz)
+    %d0   = getelementptr i8, ptr %dst, i64 0
+    call ptr @memcpy(ptr %d0, ptr @.str.0, i64 %l0)
+    ...
+    %end  = getelementptr i8, ptr %dst, i64 %s1
+    store i8 0, ptr %end
+
+  The part count is known at compile time, so this is fully unrolled - no loop,
+  no bounds check, and one allocation per template regardless of part count.
+
+  WHY LIBC AND NOT STD. The JS reference lowers this to std's `stringConcatAll`
+  and `format.intToString`, autoloaded into every graph. Reaching those from here
+  would mean the bootstrap could compile a 9-file, ~1450-line slice of std first
+  - which needs `export kind`, `extern "intrinsic"` with generics, vtables,
+  `propagates` clauses and the range expression. The two std functions bottom out
+  in a raw malloc plus byte copying and decimal conversion, so calling libc
+  directly is the SAME operation with the same observable result, including the
+  allocation behavior: a built string is a raw malloc that ignores the allocator
+  context either way. When that std slice compiles, this file is where the
+  routing changes, and nothing above it moves.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { TemplatePartKind, templatePartKind, primBitWidth, primIsSigned } from "../typecheck";
+
+// Wide enough for any i64 rendering: 20 digits, a sign, and the NUL is 22.
+const INT_DIGITS_CAPACITY: uint64 = 24;
+
+// `` `a${x}b` ``
+export function emitTemplateLiteral(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  ref out: Operand
+): string {
+  // No interpolation is just a string literal, and must not allocate - most
+  // template literals in real source are one of these.
+  if (expr.childCount == 0) {
+    out = Operand.StrRef { id: internStringConstant(cx.e, "") };
+    return "";
+  }
+  if (expr.childCount == 1) {
+    const only = nodeAt(cx.ast, childAt(cx.ast, expr, 0));
+    if (only.kind == ASTNodeKind.STRING_PART) {
+      out = Operand.StrRef { id: literalConstantOf(ref cx, only) };
+      return "";
+    }
+  }
+
+  cx.e.usesStringBuilder = true;
+
+  disposable parts: Vec<Operand> = vec.vecNew(expr.childCount);
+  let i: usize = 0;
+  while (i < expr.childCount) {
+    let part: Operand = Operand.None;
+    const err = emitTemplatePart(ref cx, childAt(cx.ast, expr, i), ref part);
+    if (err.len > 0) {
+      return err;
+    }
+    vec.vecPush(ref parts, part);
+    i += 1;
+  }
+
+  return emitConcatParts(ref cx, ref parts, ref out);
+}
+
+// One part, as a NUL-terminated ptr.
+function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): string {
+  const part = nodeAt(cx.ast, partId);
+  if (part.kind == ASTNodeKind.STRING_PART) {
+    out = Operand.StrRef { id: literalConstantOf(ref cx, part) };
+    return "";
+  }
+
+  let value: Operand = Operand.None;
+  const err = emitExpr(ref cx, part.childA, ref value);
+  if (err.len > 0) {
+    return err;
+  }
+
+  switch (partKindOf(ref cx, part.childA)) {
+    // Already a NUL-terminated ptr, which is exactly what a yoop string is.
+    case TemplatePartKind.STRING: {
+      out = value;
+      return "";
+    }
+    case TemplatePartKind.BOOL: {
+      const dest = freshTemp(cx.e);
+      emitSelectPtr(
+        ref cx,
+        dest,
+        value,
+        internStringConstant(cx.e, "true"),
+        internStringConstant(cx.e, "false")
+      );
+      out = Operand.Temp { id: dest };
+      return "";
+    }
+    case TemplatePartKind.INT: {
+      out = emitIntToString(ref cx, part.childA, value);
+      return "";
+    }
+    // Pass D refuses anything else by name, so reaching here is a compiler bug
+    // rather than a user error.
+    default: {
+      return "codegen: template literal part is not a string, integer or bool";
+    }
+  }
+}
+
+// An integer part, rendered as decimal into a fresh buffer.
+//
+// Every width goes through i64 so there is one format string per signedness
+// rather than one per type, and the buffer is sized for the widest possible
+// rendering so there is no length to probe first.
+function emitIntToString(ref cx: Cx, exprId: NodeId, value: Operand): Operand {
+  const t = resolvedTypeAt(ref cx, exprId);
+  const signed = primIsSigned(cx.prog, t);
+  const bits = primBitWidth(cx.prog, t);
+
+  let widened = value;
+  if (bits != 64) {
+    const w = freshTemp(cx.e);
+    emitIntCast(ref cx, w, llvmIntCastOp(bits, 64, signed), typeOf(ref cx, exprId), value, "i64");
+    widened = Operand.Temp { id: w };
+  }
+
+  const buf = freshTemp(cx.e);
+  emitMalloc(ref cx, buf, Operand.Imm { value: INT_DIGITS_CAPACITY });
+  emitSprintfInt(ref cx, buf, decimalFormatConstant(ref cx, signed), widened);
+  return Operand.Temp { id: buf };
+}
+
+function decimalFormatConstant(ref cx: Cx, signed: bool): usize {
+  if (signed) {
+    return internStringConstant(cx.e, "%lld");
+  }
+  return internStringConstant(cx.e, "%llu");
+}
+
+// Measure, allocate once, copy each part into place, terminate.
+function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand): string {
+  disposable lengths: Vec<usize> = vec.vecNew(parts.len);
+  let i: usize = 0;
+  while (i < parts.len) {
+    const len = freshTemp(cx.e);
+    emitStrlen(ref cx, len, vec.vecGet(ref parts, i));
+    vec.vecPush(ref lengths, len);
+    i += 1;
+  }
+
+  // offsets[k] is where part k starts, so offsets[parts.len] is the total.
+  // Part 0 starts at a literal 0 rather than an emitted `add`.
+  disposable offsets: Vec<Operand> = vec.vecNew(parts.len + 1);
+  vec.vecPush(ref offsets, Operand.Imm { value: 0 });
+  i = 0;
+  while (i < parts.len) {
+    const sum = freshTemp(cx.e);
+    emitBinOp(
+      ref cx, sum, "add", "i64",
+      vec.vecGet(ref offsets, i),
+      Operand.Temp { id: vec.vecGet(ref lengths, i) }
+    );
+    vec.vecPush(ref offsets, Operand.Temp { id: sum });
+    i += 1;
+  }
+  const total = vec.vecGet(ref offsets, parts.len);
+
+  const size = freshTemp(cx.e);
+  emitBinOp(ref cx, size, "add", "i64", total, Operand.Imm { value: 1 });
+  const dst = freshTemp(cx.e);
+  emitMalloc(ref cx, dst, Operand.Temp { id: size });
+
+  i = 0;
+  while (i < parts.len) {
+    const at = freshTemp(cx.e);
+    emitGepByteOffset(ref cx, at, dst, vec.vecGet(ref offsets, i));
+    emitMemcpy(
+      ref cx, at,
+      vec.vecGet(ref parts, i),
+      Operand.Temp { id: vec.vecGet(ref lengths, i) }
+    );
+    i += 1;
+  }
+
+  // strlen stops at the NUL, so the result is only a string once this runs.
+  const end = freshTemp(cx.e);
+  emitGepByteOffset(ref cx, end, dst, total);
+  emitStoreNulByte(ref cx, end);
+
+  out = Operand.Temp { id: dst };
+  return "";
+}
+
+function literalConstantOf(ref cx: Cx, part: ASTNode): usize {
+  return internStringConstant(cx.e, vec.vecGet(ref cx.ast.strings, part.strId));
+}
+
+// Which of the three stringifiable shapes a part's expression resolved to.
+// Pass D already refused anything else, using the same classifier.
+function partKindOf(ref cx: Cx, exprId: NodeId): TemplatePartKind {
+  return templatePartKind(cx.prog, resolvedTypeAt(ref cx, exprId));
+}

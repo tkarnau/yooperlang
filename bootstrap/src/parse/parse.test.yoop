@@ -437,6 +437,257 @@ suite function importsMustComeFirst(): void {
   }
 }
 
+suite function traitDeclCarriesItsMethodSignatures(): void {
+  let ast = parseOk("trait Display { function toString(ref self): string; function width(ref self, pad: int): int; }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("a trait is a TRAIT_DECL at the top level") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.TRAIT_DECL && str.stringEq(decl.name, "Display");
+    theory.detail = `the first top-level node is ${decl.kind} named "${decl.name}", wanted TRAIT_DECL "Display"`;
+  }
+
+  let test theory: Case = t.asserts("each signature is one node in the trait's own child run") {
+    theory.isSuccessful = decl.childCount == 2;
+    theory.detail = `the trait has ${decl.childCount} method signature(s), wanted 2`;
+  }
+
+  const sig = nodeAt(ref ast, childAt(ref ast, decl, 0));
+  let test theory: Case = t.asserts("a signature is a METHOD_SIG, not a FUNCTION_DECL") {
+    theory.isSuccessful = sig.kind == ASTNodeKind.METHOD_SIG && str.stringEq(sig.name, "toString");
+    theory.detail = `the first member is ${sig.kind} named "${sig.name}", wanted METHOD_SIG "toString"`;
+  }
+
+  let test theory: Case = t.asserts("a signature has no body, which is what separates it from a method") {
+    theory.isSuccessful = sig.childD == 0;
+    theory.detail = `the signature's body slot is ${sig.childD}, wanted 0`;
+  }
+}
+
+// The one thing the parser does that nothing else could: `self` is written
+// WITHOUT a type, and the annotation is synthesized from the enclosing type.
+// Every later layer depends on it, and none of them would notice it missing
+// until a receiver silently typed as the error type.
+suite function selfGetsTheEnclosingTypeAsItsAnnotation(): void {
+  let ast = parseOk("type Point implements Display { x: int, function toString(ref self): string { return \"p\"; } }");
+  const method = typeMember(ref ast, 1);
+
+  let test theory: Case = t.asserts("a method in a type body is a METHOD_DECL with a body") {
+    theory.isSuccessful = method.kind == ASTNodeKind.METHOD_DECL && method.childD != 0;
+    theory.detail = `the member is ${method.kind} with body slot ${method.childD}, wanted METHOD_DECL and non-zero`;
+  }
+
+  const params = nodeAt(ref ast, method.childB);
+  let test theory: Case = t.asserts("the receiver is an ordinary parameter, so a method is an ordinary function") {
+    theory.isSuccessful = params.childCount == 1;
+    theory.detail = `the method has ${params.childCount} parameter(s), wanted 1`;
+  }
+
+  const receiver = nodeAt(ref ast, childAt(ref ast, params, 0));
+  let test theory: Case = t.asserts("the receiver is named self and is marked ref") {
+    theory.isSuccessful = str.stringEq(receiver.name, "self") && receiver.flagA;
+    theory.detail = `the receiver is "${receiver.name}" with isRef=${receiver.flagA}, wanted "self" and true`;
+  }
+
+  const annot = nodeAt(ref ast, receiver.childA);
+  let test theory: Case = t.asserts("self's annotation is filled in with the enclosing type's name") {
+    theory.isSuccessful = str.stringEq(annot.name, "Point");
+    theory.detail = `self annotates as "${annot.name}", wanted "Point"`;
+  }
+}
+
+suite function implementsClauseIsAListOfAnnotations(): void {
+  let bare = parseOk("type Point implements Display, Ord { x: int, }");
+  const list = nodeAt(ref bare, topLevel(ref bare, 0).childD);
+
+  let test theory: Case = t.asserts("every named trait lands in the clause's list") {
+    theory.isSuccessful = list.childCount == 2;
+    theory.detail = `the clause names ${list.childCount} trait(s), wanted 2`;
+  }
+
+  let test theory: Case = t.asserts("the first named trait keeps its name") {
+    const first = nodeAt(ref bare, childAt(ref bare, list, 0));
+    theory.isSuccessful = str.stringEq(first.name, "Display");
+    theory.detail = `the first trait is "${first.name}", wanted "Display"`;
+  }
+
+  // Both spellings are one clause. The parenthesized form appears throughout
+  // std, so a parser that took only the bare one would reject real code.
+  let parens = parseOk("type Point implements (Display, Ord) { x: int, }");
+  let test theory: Case = t.asserts("the parenthesized form is the same list") {
+    const parenList = nodeAt(ref parens, topLevel(ref parens, 0).childD);
+    theory.isSuccessful = parenList.childCount == 2;
+    theory.detail = `the parenthesized clause names ${parenList.childCount} trait(s), wanted 2`;
+  }
+
+  let none = parseOk("type Point { x: int, }");
+  let test theory: Case = t.asserts("no clause is 0, not an empty list") {
+    theory.isSuccessful = topLevel(ref none, 0).childD == 0;
+    theory.detail = `a type with no clause has childD ${topLevel(ref none, 0).childD}, wanted 0`;
+  }
+}
+
+// A variant's methods share the member run with its cases. The cases keep their
+// declaration-order tags either way, and that ordering is ABI.
+suite function variantMethodsShareTheMemberRunWithCases(): void {
+  let ast = parseOk("variant Status implements Describe { Idle, Done { n: int }, function code(ref self): int { return 0; } }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("a variant takes an implements clause the same way a type does") {
+    theory.isSuccessful = decl.childD != 0;
+    theory.detail = `the variant's implements slot is ${decl.childD}, wanted non-zero`;
+  }
+
+  let test theory: Case = t.asserts("cases and methods are all members of the one run") {
+    theory.isSuccessful = decl.childCount == 3;
+    theory.detail = `the variant has ${decl.childCount} member(s), wanted 3`;
+  }
+
+  let test theory: Case = t.asserts("the method is a METHOD_DECL, told apart by the keyword alone") {
+    const method = nodeAt(ref ast, childAt(ref ast, decl, 2));
+    theory.isSuccessful = method.kind == ASTNodeKind.METHOD_DECL;
+    theory.detail = `the third member is ${method.kind}, wanted METHOD_DECL`;
+  }
+}
+
+suite function selfReadsAsAnOrdinaryLocalInsideABody(): void {
+  let ast = parseOk("type Point implements Display { x: int, function get(ref self): int { return self.x; } }");
+  const method = typeMember(ref ast, 1);
+  const block = nodeAt(ref ast, method.childD);
+  const statements = nodeAt(ref ast, block.childA);
+  const returned = nodeAt(ref ast, nodeAt(ref ast, childAt(ref ast, statements, 0)).childA);
+  const base = nodeAt(ref ast, returned.childA);
+
+  let test theory: Case = t.asserts("self.x is an ordinary field access on an ordinary IDENT") {
+    theory.isSuccessful = base.kind == ASTNodeKind.IDENT && str.stringEq(base.name, "self");
+    theory.detail = `the access base is ${base.kind} named "${base.name}", wanted IDENT "self"`;
+  }
+}
+
+suite function templateLiteralsSplitIntoPartsInSourceOrder(): void {
+  let plain = parseOk("function f(): string { return `just text`; }");
+  const noInterp = returnedExpression(ref plain);
+
+  let test theory: Case = t.asserts("a template literal is a TEMPLATE_LITERAL") {
+    theory.isSuccessful = noInterp.kind == ASTNodeKind.TEMPLATE_LITERAL;
+    theory.detail = `the returned expression is ${noInterp.kind}, wanted TEMPLATE_LITERAL`;
+  }
+
+  let test theory: Case = t.asserts("no interpolation is a single literal run") {
+    theory.isSuccessful = noInterp.childCount == 1;
+    theory.detail = `an uninterpolated template has ${noInterp.childCount} part(s), wanted 1`;
+  }
+
+  let test theory: Case = t.asserts("a literal run holds its DECODED text in the string pool") {
+    const part = nodeAt(ref plain, childAt(ref plain, noInterp, 0));
+    const text = poolString(ref plain, part.strId);
+    theory.isSuccessful = part.kind == ASTNodeKind.STRING_PART && str.stringEq(text, "just text");
+    theory.detail = `the part is ${part.kind} holding "${text}", wanted STRING_PART "just text"`;
+  }
+
+  let ast = parseOk("function f(): string { return `a${x}b`; }");
+  const mixed = returnedExpression(ref ast);
+
+  let test theory: Case = t.asserts("literal runs and interpolations alternate in source order") {
+    theory.isSuccessful = mixed.childCount == 3 &&
+      nodeAt(ref ast, childAt(ref ast, mixed, 0)).kind == ASTNodeKind.STRING_PART &&
+      nodeAt(ref ast, childAt(ref ast, mixed, 1)).kind == ASTNodeKind.EXPR_PART &&
+      nodeAt(ref ast, childAt(ref ast, mixed, 2)).kind == ASTNodeKind.STRING_PART;
+    theory.detail = `\`a\${x}b\` produced ${mixed.childCount} part(s), wanted STRING_PART, EXPR_PART, STRING_PART`;
+  }
+
+  let test theory: Case = t.asserts("an interpolation holds a real expression") {
+    const exprPart = nodeAt(ref ast, childAt(ref ast, mixed, 1));
+    const inner = nodeAt(ref ast, exprPart.childA);
+    theory.isSuccessful = inner.kind == ASTNodeKind.IDENT && str.stringEq(inner.name, "x");
+    theory.detail = `the interpolation holds ${inner.kind} named "${inner.name}", wanted IDENT "x"`;
+  }
+
+  // An empty literal run would cost a concat operand contributing nothing, so
+  // it is never emitted - which is also why the part count is worth asserting.
+  let bare = parseOk("function f(): string { return `${x}`; }");
+  let test theory: Case = t.asserts("an interpolation alone produces no empty literal runs") {
+    theory.isSuccessful = returnedExpression(ref bare).childCount == 1;
+    theory.detail = `\`\${x}\` produced ${returnedExpression(ref bare).childCount} part(s), wanted 1`;
+  }
+
+  let empty = parseOk("function f(): string { return ``; }");
+  let test theory: Case = t.asserts("the empty template has no parts at all") {
+    theory.isSuccessful = returnedExpression(ref empty).childCount == 0;
+    theory.detail = `the empty template produced ${returnedExpression(ref empty).childCount} part(s), wanted 0`;
+  }
+}
+
+// Where an interpolation ENDS is decided by the expression parser, not by
+// matching braces in the raw text. These are the cases that separate the two:
+// brace matching gets every one of them wrong.
+suite function interpolationEndsWhereItsExpressionEnds(): void {
+  let braces = parseOk("function f(): string { return `v=${g({ x: 1, y: 2 })}!`; }");
+  const withBraces = returnedExpression(ref braces);
+
+  let test theory: Case = t.asserts("braces inside an interpolation do not close it") {
+    theory.isSuccessful = withBraces.childCount == 3;
+    theory.detail = `an interpolated struct literal produced ${withBraces.childCount} part(s), wanted 3`;
+  }
+
+  let test theory: Case = t.asserts("the literal run after such an interpolation is intact") {
+    const tail = nodeAt(ref braces, childAt(ref braces, withBraces, 2));
+    const text = poolString(ref braces, tail.strId);
+    theory.isSuccessful = str.stringEq(text, "!");
+    theory.detail = `the trailing run is "${text}", wanted "!"`;
+  }
+
+  // A `}` inside a nested STRING. The JS reference cannot lex this one at all.
+  let quoted = parseOk("function f(): string { return `v=${g(\"}\")}!`; }");
+  let test theory: Case = t.asserts("a brace inside a nested string literal does not close it") {
+    theory.isSuccessful = returnedExpression(ref quoted).childCount == 3;
+    theory.detail = `an interpolated \"}\" produced ${returnedExpression(ref quoted).childCount} part(s), wanted 3`;
+  }
+
+  // The parser is repositioned mid-template while interpolations are parsed, so
+  // whether it lands back on the token AFTER the template is a real question.
+  let resumes = parseOk("function f(): int { const s: string = `a${x}b`; return 1; }");
+  let test theory: Case = t.asserts("the parser resumes at the token after the closing backtick") {
+    const fn = topLevel(ref resumes, 0);
+    const block = nodeAt(ref resumes, fn.childD);
+    const statements = nodeAt(ref resumes, block.childA);
+    theory.isSuccessful = statements.childCount == 2;
+    theory.detail = `the body parsed ${statements.childCount} statement(s) after a template, wanted 2`;
+  }
+}
+
+suite function templateEscapesAreDecodedNotInterpreted(): void {
+  // `\${` is a literal dollar-brace. Without this the escape scan and the
+  // interpolation scan disagree, and the text silently becomes an expression.
+  let escaped = parseOk("function f(): string { return `\\${x}`; }");
+  const node = returnedExpression(ref escaped);
+
+  let test theory: Case = t.asserts("an escaped dollar-brace opens no interpolation") {
+    theory.isSuccessful = node.childCount == 1 &&
+      nodeAt(ref escaped, childAt(ref escaped, node, 0)).kind == ASTNodeKind.STRING_PART;
+    theory.detail = `\`\\\${x}\` produced ${node.childCount} part(s), wanted one STRING_PART`;
+  }
+
+  let test theory: Case = t.asserts("and decodes to the literal characters") {
+    const part = nodeAt(ref escaped, childAt(ref escaped, node, 0));
+    const text = poolString(ref escaped, part.strId);
+    theory.isSuccessful = str.stringEq(text, "${x}");
+    theory.detail = `the run decoded to "${text}", wanted "\${x}"`;
+  }
+
+  let tick = parseOk("function f(): string { return `a\\`b`; }");
+  let test theory: Case = t.asserts("a template can escape its own delimiter") {
+    const part = nodeAt(ref tick, childAt(ref tick, returnedExpression(ref tick), 0));
+    const text = poolString(ref tick, part.strId);
+    theory.isSuccessful = str.stringEq(text, "a`b");
+    theory.detail = `the run decoded to "${text}", wanted "a\`b"`;
+  }
+
+  let test theory: Case = t.asserts("an interpolation with no expression is refused") {
+    theory.isSuccessful = parseError("function f(): string { return `${}`; }").len > 0;
+    theory.detail = "`${}` parsed without a diagnostic";
+  }
+}
+
 // ----- helpers ---------------------------------------------------------------
 
 // Parses, or hands back an empty arena so the assertion that asked fails rather
@@ -514,6 +765,15 @@ function firstStatement(ref ast: AST): ASTNode {
   const block = nodeAt(ref ast, fn.childD);
   const statements = nodeAt(ref ast, block.childA);
   return nodeAt(ref ast, childAt(ref ast, statements, 0));
+}
+
+// The i-th member of `type T { ... }` at the top of the file.
+function typeMember(ref ast: AST, i: usize): ASTNode {
+  const decl = topLevel(ref ast, 0);
+  if (i >= decl.childCount) {
+    return nodeAt(ref ast, 0);
+  }
+  return nodeAt(ref ast, childAt(ref ast, decl, i));
 }
 
 function poolString(ref ast: AST, id: usize): string {

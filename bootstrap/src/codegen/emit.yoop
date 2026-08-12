@@ -26,6 +26,9 @@ export type Emitter propagates<disposable> {
   nextStr: usize,       // the @.str.N counter, module-wide
   nextLabel: usize,     // the label counter, reset per function
   usesPrintf: bool,
+  // Set by the first template literal that actually builds one, so a program
+  // with none declares no libc string functions at all.
+  usesStringBuilder: bool,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
@@ -38,6 +41,7 @@ export function emitterNew(): Emitter propagates<disposable> {
     nextStr: 0,
     nextLabel: 0,
     usesPrintf: false,
+    usesStringBuilder: false,
   };
 }
 

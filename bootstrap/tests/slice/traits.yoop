@@ -1,0 +1,89 @@
+// Traits, with STATIC dispatch.
+//
+// `Shape.area(ref r)` is resolved at COMPILE time by the receiver's concrete
+// type: `r` is a Rect, Rect's method table names a function, and that function
+// is what is called. There is no vtable, no function pointer, and no tag read at
+// run time - the emitted call is as direct as `area(ref r)` would have been.
+//
+// The shape that makes this cheap: a method IS a function whose first parameter
+// is `ref self`. The parser fills in the annotation the source leaves out, and
+// from there every later layer treats a method as an ordinary function - which
+// is why the borrow machinery needs nothing new to pass a receiver.
+//
+// Two rules this file pins down, both of which a looser implementation would
+// pass without:
+//
+//   - A method is REQUIRED by a trait. There are no inherent methods, so
+//     `Shape.method(ref x)` is the only spelling a call ever needs.
+//   - The TYPE is in the mangled symbol and the trait is not. Two types
+//     implementing one trait need two symbols; one type cannot declare the same
+//     method name twice, so the type plus the name is already unique.
+
+import { Shape, Rect } from "./lib/shapes.yoop";
+
+trait Describe {
+  function code(ref self): int;
+  function label(ref self): string;
+}
+
+// TWO implementers of one trait. `Describe.code` below is written identically
+// at both call sites and lands on two different functions.
+type Empty implements Describe {
+  function code(ref self): int { return 0; }
+  function label(ref self): string { return "empty"; }
+}
+
+type Tally implements Describe {
+  hits: int,
+  weight: int,
+  function code(ref self): int { return self.hits * self.weight; }
+  function label(ref self): string { return "tally"; }
+}
+
+// A variant implements a trait the same way a struct does - its methods share
+// the member run with its cases, and the cases keep their declaration-order
+// tags regardless.
+variant Status implements Describe {
+  Idle,
+  Running { pct: int },
+  Done { code: int },
+  function code(ref self): int {
+    switch (self) {
+      case Status.Idle: { return -1; }
+      case Status.Running { pct: p }: { return p; }
+      case Status.Done { code: c }: { return c; }
+    }
+  }
+  function label(ref self): string { return "status"; }
+}
+
+// A method receiver is a genuine BORROW, so a method that reads a field sees
+// whatever the caller last wrote - not a snapshot taken at the call.
+function bump(ref t: Tally): void {
+  t.hits = t.hits + 1;
+}
+
+function main(): int {
+  const e: Empty = { };
+  const t: Tally = { hits: 3, weight: 5 };
+  printf("%s=%d %s=%d\n", Describe.label(ref e), Describe.code(ref e),
+                          Describe.label(ref t), Describe.code(ref t));
+
+  // The receiver is the live object: bump wrote hits 4 -> 5, so code() is 25.
+  let counter: Tally = { hits: 4, weight: 5 };
+  bump(ref counter);
+  printf("bumped=%d\n", Describe.code(ref counter));
+
+  const idle: Status = Status.Idle;
+  const running: Status = Status.Running { pct: 42 };
+  const done: Status = Status.Done { code: 7 };
+  printf("%s %d %d %d\n", Describe.label(ref idle), Describe.code(ref idle),
+                          Describe.code(ref running), Describe.code(ref done));
+
+  // Imported type, imported trait: one symbol, defined in shapes and called
+  // from here.
+  const r: Rect = { w: 6, h: 7 };
+  printf("area=%d scaled=%d\n", Shape.area(ref r), Shape.scaledArea(ref r, 3));
+
+  return 0;
+}

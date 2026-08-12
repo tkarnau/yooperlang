@@ -81,10 +81,12 @@ types file.
   compound-assignment forms, expressions by precedence climbing, `module`
   headers, `export`, every `import` form but the side-effect one (named,
   namespace, combined, and directory-module paths), and `variant` decls with
-  their constructors and patterns. Not yet: traits,
-  enums, unions,
-  methods in a type body, `implements`/`propagates`/`contains` clauses - each a
-  named "not supported yet" refusal rather than a mis-parse.
+  their constructors and patterns, `trait` decls, `implements` clauses and
+  methods in a type or variant body (`self` is a keyword, and its annotation is
+  synthesized from the enclosing type), and template literals with `${...}`
+  interpolation. Not yet: enums, unions, `for x in`,
+  `propagates`/`contains` clauses, type-parameter bounds - each a named "not
+  supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
   is built, with pass A (shells + redeclaration + exports), pass B (imports and
   namespaces), pass C (function signatures, struct fields) and a thin pass D
@@ -195,18 +197,81 @@ unbound. Patterns got their own payload parser in the process: they bind NAMES,
 not expressions, and reusing the struct-literal parser had put that rule in
 pass D and made `_` a syntax error.
 
-So what remains before the bootstrap can read its own source is: **traits and
-`implements`** (and the type-parameter bounds that come with them), which is the
-wall; **template literals** (65 files, and the first feature to need the yoop
-RUNTIME linked rather than just libc); **`ref` at a call site landed** next: a borrow costs no
-instructions at all, because every local already lives in an alloca and a `ref`
-parameter arrives as that pointer - so it gets no alloca and no spill, and the
-incoming pointer IS its slot. A `ref T` parameter is `ref T` in the signature
-(so a bare value is a type error) and plain `T` in the body (so nothing in the
-body knows about references).
+**`ref` at a call site landed next.** A borrow costs no instructions at all,
+because every local already lives in an alloca and a `ref` parameter arrives as
+that pointer - so it gets no alloca and no spill, and the incoming pointer IS
+its slot. A `ref T` parameter is `ref T` in the signature (so a bare value is a
+type error) and plain `T` in the body (so nothing in the body knows about
+references). Doing this before traits was worth it: a method's receiver is a
+borrow, so traits inherited the whole mechanism rather than growing a second one.
 
-What std hits next, past that: **the `a..b` range expression**, and **`null` and
-the unsafe-pointer surface** behind it.
+**Traits landed on 2026-08-12, with STATIC dispatch.** `Shape.area(ref r)` is
+resolved at compile time by the receiver's concrete type, so the emitted call is
+as direct as an ordinary one - no vtable, no indirect call, nothing read at run
+time. That is the form the bootstrap's own source uses almost exclusively
+(`SelfLexing.peek(ref ps)`).
+
+The shape that made it cheap: **a method IS a function whose first parameter is
+`ref self`**. The source omits the annotation because there is only one type it
+could be, so the parser fills it in from the enclosing type's name - and from
+there every later layer treats a method as an ordinary function. Codegen got no
+traits file at all, only a mangled name. Two rules fell out and are worth
+keeping:
+
+- The symbol carries the TYPE and not the trait (`Rect__area`). Two types
+  implementing one trait need two symbols; one type cannot declare a method name
+  twice, so type plus name is already unique, and a call site needs nothing
+  beyond the receiver's type.
+- There are no INHERENT methods. A method no implemented trait requires is
+  refused, which is what keeps `Trait.method(ref x)` the only spelling a call
+  ever needs. The JS reference already worked this way; the bootstrap was looser
+  and got tightened to match.
+
+`traits.yoop` in the slice fixtures covers two implementers of one trait, a
+variant implementing one, a method calling another on `self`, a receiver mutated
+between calls, and a trait and type imported from another module.
+
+Bounds (`<T implements Comparable<T>>`) are deliberately NOT in this pass. A
+generic body is checked once with an opaque `T`, which is sound only because a
+type parameter can promise nothing - bounds are what break that, so they are
+their own piece of work.
+
+**Template literals landed on 2026-08-12**, interpolation included. They are the
+first bootstrap feature that ALLOCATES: the result is a fresh buffer rather than
+values moved between registers and stack slots.
+
+Two decisions are worth keeping.
+
+**An interpolation ends where its EXPRESSION ends.** The parser repositions into
+the same source buffer at the byte after `${` and parses an ordinary expression;
+wherever it stops IS the closing brace. That is cheaper than matching braces and
+it is also the only version that is CORRECT - brace matching gets
+`${g({ x: 1 })}` and `${g("}")}` wrong. The JS reference matches braces, and it
+turns out it cannot lex the second one at all, so the bootstrap is strictly
+better here. Repositioning is legitimate because ParserState's whole cursor is
+`pos` plus a one-token lookahead.
+
+**A built string is libc, not std.** The JS reference lowers this to std's
+`stringConcatAll` and `format.intToString`, autoloaded into every graph. Reaching
+those would have meant compiling a 9-file, ~1450-line slice of std first - which
+needs `export kind`, `extern "intrinsic"` with generics, vtables, `propagates`
+clauses and the range expression. Both std functions bottom out in a raw malloc
+plus byte copying and decimal conversion, so `strlen`/`malloc`/`memcpy`/`sprintf`
+is the same operation with the same observable result, including that a built
+string ignores the allocator context. `codegen/template.yoop` is the single place
+that changes when that std slice becomes reachable. Strings, integers of every
+width and bools interpolate; floats and structs are refused by name, pointing at
+the interpolation.
+
+Probing all 45 non-test files under `std/` with the bootstrap: five compile all
+the way to clang (`core/atomic`, `core/types`, `debug`, `env`, `log`). Template
+literals are off the blocker list entirely; what those files hit next is:
+
+- **`for x in <iterable>`** - 7 files, the new biggest bar
+- **`export kind` and `export async`** - 7 files
+- **`extern "intrinsic"`** with generics - 3 files
+- **`null` and the unsafe-pointer surface** - 3 files
+- the **`a..b` range expression**, and char literals
 
 Immediate build sequence:
 

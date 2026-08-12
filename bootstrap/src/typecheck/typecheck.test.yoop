@@ -1322,3 +1322,121 @@ suite function structsAreChecked(): void {
     theory.detail = "p.x = true produced no diagnostic";
   }
 }
+
+// ----- traits ----------------------------------------------------------------
+
+suite function traitsAreCheckedAgainstTheirImplementers(): void {
+  const display = "trait Display { function toString(ref self): string; } ";
+
+  let ok = checkSource(`${display}type P implements Display { x: int, function toString(ref self): string { return "p"; } } function main(): int { const p: P = { x: 1 }; printf("%s", Display.toString(ref p)); return 0; }`);
+  let test theory: Case = t.asserts("a type that implements what it claims checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Claiming a trait is a promise. Unkept, it would otherwise surface at the
+  // call site as a missing method on a type that says it has one.
+  let missing = checkSource(`${display}type P implements Display { x: int, } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a claimed trait with no method is refused, by method name") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "toString");
+    theory.detail = `wanted a diagnostic naming the missing method, got: ${firstDiagnostic(ref missing)}`;
+  }
+
+  // There are no inherent methods, so a method with no trait behind it can
+  // never be called - `Trait.method(ref x)` is the only spelling there is.
+  let inherent = checkSource(`${display}type P implements Display { x: int, function toString(ref self): string { return "p"; } function extra(ref self): int { return 1; } } function main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a method no trait requires is refused") {
+    theory.isSuccessful = diagnosticsMention(ref inherent, "extra");
+    theory.detail = `wanted a diagnostic naming the unrequired method, got: ${firstDiagnostic(ref inherent)}`;
+  }
+
+  let notTrait = checkSource("type Helper { n: int, } type P implements Helper { x: int, } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("implementing something that is not a trait is refused") {
+    theory.isSuccessful = diagnosticsMention(ref notTrait, "is not a trait");
+    theory.detail = `wanted a diagnostic naming the non-trait, got: ${firstDiagnostic(ref notTrait)}`;
+  }
+}
+
+suite function traitCallsResolveThroughTheReceiver(): void {
+  const decls = "trait Display { function toString(ref self): string; } type P implements Display { x: int, function toString(ref self): string { return \"p\"; } } ";
+
+  // Static dispatch has nothing to dispatch ON without a receiver, so the
+  // diagnostic has to say so rather than report an arity mismatch.
+  let noReceiver = checkSource(`${decls}function main(): int { printf("%s", Display.toString()); return 0; }`);
+  let test theory: Case = t.asserts("a trait call with no receiver is refused") {
+    theory.isSuccessful = noReceiver.diagnostics.len > 0;
+    theory.detail = "a receiverless trait call produced no diagnostic";
+  }
+
+  let unknownMethod = checkSource(`${decls}function main(): int { const p: P = { x: 1 }; return Display.width(ref p); }`);
+  let test theory: Case = t.asserts("a method the trait does not declare is refused") {
+    theory.isSuccessful = unknownMethod.diagnostics.len > 0;
+    theory.detail = "calling an undeclared trait method produced no diagnostic";
+  }
+
+  // The receiver's CONCRETE type is what picks the method, so a receiver that
+  // does not implement the trait has nothing to pick.
+  let wrongReceiver = checkSource(`${decls}type Q { n: int, } function main(): int { const q: Q = { n: 1 }; printf("%s", Display.toString(ref q)); return 0; }`);
+  let test theory: Case = t.asserts("a receiver without the method is refused") {
+    theory.isSuccessful = wrongReceiver.diagnostics.len > 0;
+    theory.detail = "a receiver that does not implement the trait produced no diagnostic";
+  }
+
+  // A method body is checked like any other function body. Nothing else does
+  // this - the module walk only reaches top-level names, so a method body would
+  // otherwise go unchecked all the way to codegen.
+  let badBody = checkSource("trait Display { function toString(ref self): string; } type P implements Display { x: int, function toString(ref self): string { return self.x; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("a method body is checked against its own return type") {
+    theory.isSuccessful = badBody.diagnostics.len > 0;
+    theory.detail = "returning an int from a string method produced no diagnostic";
+  }
+
+  let unknownSelfField = checkSource("trait Display { function toString(ref self): string; } type P implements Display { x: int, function toString(ref self): string { return self.nope; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("self is typed as the enclosing type, so a bad field on it is caught") {
+    theory.isSuccessful = diagnosticsMention(ref unknownSelfField, "nope");
+    theory.detail = `wanted a diagnostic naming the unknown field, got: ${firstDiagnostic(ref unknownSelfField)}`;
+  }
+}
+
+// ----- template literals -----------------------------------------------------
+
+suite function templateLiteralsAreStringsAndCheckTheirParts(): void {
+  let ok = checkSource("function f(n: int, s: string, b: bool): string { return `${s}: ${n} ${b}`; }");
+  let test theory: Case = t.asserts("a string, an integer and a bool can all be interpolated") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A template literal BUILDS a string, so it is one - which is what lets it be
+  // returned from a `string` function and passed to `%s`.
+  let wrongReturn = checkSource("function f(): int { return `text`; }");
+  let test theory: Case = t.asserts("a template literal is typed as a string") {
+    theory.isSuccessful = wrongReturn.diagnostics.len > 0;
+    theory.detail = "returning a template literal from an int function produced no diagnostic";
+  }
+
+  // Refused in pass D, pointing at the interpolation, so codegen never meets a
+  // part it has no lowering for.
+  let structPart = checkSource("type P { x: int, } function f(p: P): string { return `${p}`; }");
+  let test theory: Case = t.asserts("interpolating a struct is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref structPart, "P");
+    theory.detail = `wanted a diagnostic naming the type, got: ${firstDiagnostic(ref structPart)}`;
+  }
+
+  // Floats are deliberately out of this pass rather than missing by accident,
+  // so the refusal has to name the type instead of "unsupported expression".
+  let floatPart = checkSource("function f(x: float64): string { return `${x}`; }");
+  let test theory: Case = t.asserts("interpolating a float is refused by type name") {
+    theory.isSuccessful = diagnosticsMention(ref floatPart, "float64");
+    theory.detail = `wanted a diagnostic naming float64, got: ${firstDiagnostic(ref floatPart)}`;
+  }
+
+  // The expression inside an interpolation is checked like any other, so a
+  // mistake in it is reported once, at its own location - not swallowed and not
+  // doubled up with a "cannot interpolate" for the resulting error type.
+  let badInner = checkSource("function f(): string { return `${nope}`; }");
+  let test theory: Case = t.asserts("an unknown name inside an interpolation is reported once") {
+    theory.isSuccessful = badInner.diagnostics.len == 1 && diagnosticsMention(ref badInner, "nope");
+    theory.detail = `reported ${badInner.diagnostics.len}: ${firstDiagnostic(ref badInner)}`;
+  }
+}

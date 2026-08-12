@@ -130,6 +130,9 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     case TokenTags.CONST: {
       node.childA = parseVarDecl(ref ps)?;
     }
+    case TokenTags.TRAIT: {
+      node.childA = parseTraitDecl(ref ps)?;
+    }
     default: {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,

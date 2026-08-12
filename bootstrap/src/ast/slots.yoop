@@ -179,8 +179,12 @@ export function astNodeChildCName(v: ASTNodeKind): string {
 
 export function astNodeChildDName(v: ASTNodeKind): string {
   switch(v) {
-    case ASTNodeKind.FUNCTION_DECL: {
+    case ASTNodeKind.FUNCTION_DECL,
+         ASTNodeKind.METHOD_DECL: {
       return "functionBody";
+    }
+    case ASTNodeKind.TYPE_DECL: {
+      return "implementsList";
     }
     case ASTNodeKind.FOR_LOOP: {
       return "stepExpr";
@@ -233,8 +237,13 @@ export function astNodeChildListName(v: ASTNodeKind): string {
     case ASTNodeKind.PROGRAM: {
       return "body";
     }
+    // Fields AND methods, in one run - every consumer switches on the member's
+    // kind anyway.
     case ASTNodeKind.TYPE_DECL: {
-      return "fields";
+      return "members";
+    }
+    case ASTNodeKind.TRAIT_DECL: {
+      return "methodSigs";
     }
     case ASTNodeKind.VARIANT_DECL: {
       return "cases";

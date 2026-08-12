@@ -81,6 +81,18 @@ function registerFileShells(
           x += 1;
         }
       }
+      case ASTNodeKind.TRAIT_DECL: {
+        // Same shell discipline as everything else: the NAME resolves now, the
+        // method signatures are pass C's - they name types the module may not
+        // have registered yet.
+        const traitShell = internType(ref prog, Type.Trait {
+          decl: { name: declNode.name, module: moduleId, populated: false },
+          methods: map.mapNew(0, map.stringKeyOps()),
+          typeParams: vec.vecNew(0),
+          extendsTraits: vec.vecNew(0),
+        });
+        bindName(ref prog, ref tm, declNode, Symbol.Trait { typeId: traitShell }, exported);
+      }
       case ASTNodeKind.CONST_DECL: {
         // A shell like every other: the annotation is pass C's to resolve, and
         // so is the value. What matters here is that the NAME resolves.

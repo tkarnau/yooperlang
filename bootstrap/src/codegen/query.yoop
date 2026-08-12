@@ -16,8 +16,9 @@ import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID
   TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
   lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
   variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute,
-  DeclId, DECL_NONE_ID, GenericSort, derefType } from "../typecheck";
-import { nodeAt } from "../ast";
+  DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
+  nominalModuleOf } from "../typecheck";
+import { ASTNode, childAt, nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
 
@@ -182,6 +183,30 @@ export function isRefAt(ref cx: Cx, nodeId: NodeId): bool {
 // What a `ref T` points at, as LLVM spells it. The node's own type otherwise.
 export function pointeeTypeOf(ref cx: Cx, nodeId: NodeId): string {
   return llvmType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
+}
+
+// A method's declared return type. Read off the RECEIVER's method table rather
+// than the module namespace, because a method is not a module-level name.
+export function methodReturnTypeOf(ref cx: Cx, declNode: ASTNode): string {
+  const owner = methodOwnerOf(ref cx, declNode);
+  switch (typeAt(cx.prog, lookupMethod(cx.prog, owner, declNode.name))) {
+    case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(cx.prog, r); }
+    default: { return "void"; }
+  }
+}
+
+// The type a method hangs off, taken from its own `ref self` parameter - which
+// the parser annotated with the enclosing type's name. No separate bookkeeping
+// is needed because the receiver's annotation already says it.
+export function methodOwnerOf(ref cx: Cx, declNode: ASTNode): TypeId {
+  if (declNode.childB == 0) {
+    return TYPE_ERROR_ID;
+  }
+  const list = nodeAt(cx.ast, declNode.childB);
+  if (list.childCount == 0) {
+    return TYPE_ERROR_ID;
+  }
+  return derefType(cx.prog, resolvedTypeAt(ref cx, childAt(cx.ast, list, 0)));
 }
 
 export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {

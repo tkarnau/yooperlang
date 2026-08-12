@@ -1,0 +1,5 @@
+empty=0 tally=15
+bumped=25
+status -1 42 7
+area=42 scaled=126
+exit=0

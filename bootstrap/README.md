@@ -70,8 +70,8 @@ It is a real compiler now, so build it and point it at a file:
 ## What it can compile today
 
 Deliberately tiny, and it grows from the bottom. Everything outside the subset
-is refused BY NAME - "pass D does not handle X yet", "methods inside a type decl
-are not supported by the bootstrap parser yet" - rather than mis-compiled.
+is refused BY NAME - "pass D does not handle X yet", "unsupported extern ABI" -
+rather than mis-compiled.
 
   * top-level `function` decls, called from each other
   * `type` decls with fields
@@ -106,6 +106,29 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
 
     A switch over a variant is exhaustive or has a default, never neither and
     never both, and a pattern BINDS its payload into the arm.
+  * `trait` decls, `implements` clauses, and methods, with STATIC dispatch:
+
+        trait Shape { function area(ref self): int; }
+        type Rect implements Shape {
+          w: int,
+          h: int,
+          function area(ref self): int { return self.w * self.h; }
+        }
+        printf("%d\\n", Shape.area(ref r));
+
+    `Shape.area(ref r)` is resolved at COMPILE time by the receiver's concrete
+    type, so the emitted call is as direct as an ordinary one. A variant takes
+    methods the same way a struct does. There are no INHERENT methods: a method
+    a trait does not require is refused, which keeps `Trait.method(ref x)` the
+    only spelling a call ever needs.
+  * template literals, including `${...}` interpolation:
+
+        `${tagName(kind)} at ${line}:${col}`
+
+    Strings, integers of every width, and bools can be interpolated; a float or
+    a struct is refused by name, pointing at the interpolation. A template with
+    no interpolation does not allocate - it is a string literal wearing
+    backticks. This is the first bootstrap feature that allocates at all.
   * `return`, with or without a value
   * int literals, string literals, `+ - * / %`
   * calls, including the `printf` builtin. A call's arguments are checked
@@ -307,6 +330,49 @@ Two invariants control flow introduced, both easy to break:
   first is what makes passing a bare value an error; the second is what keeps
   every read, write and field access in the body from needing to know about
   references at all. `bindParams` is where the two part company.
+- **A METHOD IS A FUNCTION whose first parameter is `ref self`.** The source
+  omits the annotation because there is only one type it could be, so the PARSER
+  fills it in from the enclosing type's name (`parse/traits.yoop`). Everything
+  below that point treats a method as an ordinary function - the same childB /
+  childC / childD slots, the same body checker, the same emitter, and the borrow
+  machinery unchanged. Do not add a method-shaped path to a later pass; if one
+  seems necessary, the annotation is probably not being synthesized.
+- **A method's symbol carries the TYPE and not the TRAIT** (`Rect__area`). Two
+  types implementing one trait need two symbols, so the type has to be in it. A
+  type cannot declare the same method name twice no matter how many traits asked
+  for it, so the type plus the name is already unique - and a call site has the
+  receiver's type and the method name, and needs nothing else. The home module is
+  the one that declared the TYPE, so an imported type's method stays one symbol.
+- **A method body is only reached through its type decl.** Pass D's walk visits
+  top-level names, and a method is not one, so `checkMethodBodies` reaches into
+  each TYPE_DECL and VARIANT_DECL. Miss that and a method body is never checked
+  at all, and its parameters are never decorated - which codegen finds out about
+  much later and much less clearly.
+- **A variant's methods share the member run with its cases,** so the case
+  ordinal counts off `cases.len` and not off the loop index. Counting off the
+  index puts a hole in the tag numbering, and the tag numbering is ABI.
+- **An interpolation ends where its EXPRESSION ends, not at a matching brace.**
+  `parseTemplateLiteral` repositions into the same source buffer at the byte
+  after `${` and parses an ordinary expression; wherever that stops IS the
+  closing brace. Brace matching gets `${g({ x: 1 })}` and `${g("}")}` wrong -
+  the JS reference matches braces and cannot lex the second one at all. Do not
+  "simplify" this into a scan.
+- **The template parser must not lex PAST the closing brace.** The bytes after
+  it are template text, not code, so the brace is PEEKED and never consumed, and
+  the cursor is repositioned for whatever comes next. Consuming it lexes one
+  token of raw text as code, and an unterminated one is reported as a lex error
+  from the middle of a string.
+- **Repositioning is legitimate because ParserState's whole cursor is `pos` plus
+  the one-token `currentLex`.** Setting `pos` and priming with one `advance`
+  puts the parser anywhere. Anything added to ParserState that is not derivable
+  from those two breaks this, so keep the state that small.
+- **A built string is libc, not std** - `strlen` / `malloc` / `memcpy` /
+  `sprintf`, all in `codegen/instr_str.yoop`. The JS reference routes through
+  std's `stringConcatAll` and `format.intToString`, which the bootstrap cannot
+  reach until a 9-file slice of std compiles. Both bottom out in a raw malloc
+  plus byte copying, so the observable result is the same, including that a
+  built string ignores the allocator context. `codegen/template.yoop` is the one
+  place that changes when std becomes reachable.
 - **A diagnostic carries the FILE it was found in.** `Program.currentFile` is
   ambient, set by each pass as it starts a file, because the alternative is a
   path parameter on forty `reportError` call sites that all want the same
@@ -398,6 +464,13 @@ exactly one:
     vocab.yoop              which opcode/predicate an operator lowers to
     context.yoop            the Cx, and the raw text appenders
     query.yoop              THE typecheck boundary - everything codegen asks
+    mangle.yoop             what a symbol is CALLED in the emitted module
+    template.yoop           template literals: parts -> one built string
+    instr_str.yoop          the libc calls a built string is made of
+
+There is no traits.yoop here, and that is the point: a method is an ordinary
+function by the time codegen sees it, so it emits through the same path. All
+traits cost this layer is a mangled name, in mangle.yoop.
 
 The walking code should read as "load the local, then multiply" - if you can see
 a quotation mark in `expr.yoop`, something is in the wrong file.

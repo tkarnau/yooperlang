@@ -1,0 +1,122 @@
+module codegen;
+
+// The libc calls a built string is made of: measure, allocate, copy, terminate,
+// and integer-to-decimal.
+//
+// A yoop `string` is a NUL-terminated `ptr`, the same thing C means by one, so
+// every operation here is the C one. They live in their own file because they
+// are the only instructions in codegen that reach for libc beyond printf, and
+// keeping them together is what makes the set auditable - see template.yoop for
+// why it is this set and not std's.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+
+// The printf-family signature LLVM wants spelled out at a variadic call site.
+const SPRINTF_SIGNATURE: string = "i32 (ptr, ptr, ...)";
+
+//   %t1 = call i64 @strlen(ptr %t0)
+export function emitStrlen(ref cx: Cx, dest: usize, str: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call i64 @strlen(ptr ");
+  operand(ref cx, str);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t2 = call ptr @malloc(i64 %t1)
+export function emitMalloc(ref cx: Cx, dest: usize, size: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call ptr @malloc(i64 ");
+  operand(ref cx, size);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   call ptr @memcpy(ptr %t3, ptr %t0, i64 %t1)
+export function emitMemcpy(ref cx: Cx, dst: usize, src: Operand, len: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "call ptr @memcpy(ptr ");
+  temp(ref cx, dst);
+  part(ref cx, ", ptr ");
+  operand(ref cx, src);
+  part(ref cx, ", i64 ");
+  operand(ref cx, len);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t4 = getelementptr i8, ptr %t2, i64 %t3
+//
+// Byte arithmetic on an existing buffer, which is what stepping a write cursor
+// through the destination is.
+export function emitGepByteOffset(ref cx: Cx, dest: usize, base: usize, offset: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr i8, ptr ");
+  temp(ref cx, base);
+  part(ref cx, ", i64 ");
+  operand(ref cx, offset);
+  endInstr(ref cx);
+}
+
+//   store i8 0, ptr %t5
+export function emitStoreNulByte(ref cx: Cx, addr: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "store i8 0, ptr ");
+  temp(ref cx, addr);
+  endInstr(ref cx);
+}
+
+//   call i32 (ptr, ptr, ...) @sprintf(ptr %t2, ptr @.str.0, i64 %t1)
+//
+// The result is ignored: the buffer is sized for the widest possible i64
+// rendering, so there is no truncation to detect. `fmt` is `%lld` or `%llu`.
+export function emitSprintfInt(ref cx: Cx, buf: usize, fmt: usize, value: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "call ");
+  part(ref cx, SPRINTF_SIGNATURE);
+  part(ref cx, " @sprintf(ptr ");
+  temp(ref cx, buf);
+  part(ref cx, ", ptr ");
+  operand(ref cx, Operand.StrRef { id: fmt });
+  part(ref cx, ", i64 ");
+  operand(ref cx, value);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t4 = select i1 %t3, ptr @.str.1, ptr @.str.2
+export function emitSelectPtr(
+  ref cx: Cx,
+  dest: usize,
+  cond: Operand,
+  whenTrue: usize,
+  whenFalse: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = select i1 ");
+  operand(ref cx, cond);
+  part(ref cx, ", ptr ");
+  operand(ref cx, Operand.StrRef { id: whenTrue });
+  part(ref cx, ", ptr ");
+  operand(ref cx, Operand.StrRef { id: whenFalse });
+  endInstr(ref cx);
+}
+
+// The declarations the calls above need, emitted once per module and only when
+// something actually built a string.
+//
+//   declare i64 @strlen(ptr)
+//   declare ptr @malloc(i64)
+//   declare ptr @memcpy(ptr, ptr, i64)
+//   declare i32 @sprintf(ptr, ptr, ...)
+export function emitStringBuilderDeclarations(ref e: Emitter): void {
+  emitGlobal(ref e, "declare i64 @strlen(ptr)");
+  emitGlobal(ref e, "declare ptr @malloc(i64)");
+  emitGlobal(ref e, "declare ptr @memcpy(ptr, ptr, i64)");
+  emitGlobal(ref e, "declare i32 @sprintf(ptr, ptr, ...)");
+}

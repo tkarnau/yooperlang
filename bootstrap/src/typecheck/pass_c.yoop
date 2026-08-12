@@ -71,6 +71,8 @@ function fillFileShells(
     // A decl with type parameters belongs to the generic sweep, and only to it.
     const isGeneric = declNode.childA != 0
       && (declNode.kind == ASTNodeKind.TYPE_DECL || declNode.kind == ASTNodeKind.VARIANT_DECL);
+    // A trait fills in the CONCRETE sweep regardless of its own type params:
+    // nothing instantiates a trait, so there is no template to fill first.
     if (isGeneric != genericPass) {
       i += 1;
       continue;
@@ -85,6 +87,9 @@ function fillFileShells(
       }
       case ASTNodeKind.VARIANT_DECL: {
         fillVariantCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
+      }
+      case ASTNodeKind.TRAIT_DECL: {
+        fillTraitMethods(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
       case ASTNodeKind.CONST_DECL: {
         fillModuleConst(ref prog, ref tm, ref m.ast, declNode);
@@ -257,17 +262,24 @@ function fillStructFields(
     return;
   }
 
-  // The fields are the TYPE_DECL's own childIds run.
+  // Fields and METHODS share the decl's own run, so this takes the fields and
+  // collectMethods takes the others.
   let fields: Vec<Field> = vec.vecNew(declNode.childCount);
   let f: usize = 0;
   while (f < declNode.childCount) {
     const fieldNode = nodeAt(ref ast, childAt(ref ast, declNode, f));
+    if (fieldNode.kind != ASTNodeKind.FIELD_DECL) {
+      f += 1;
+      continue;
+    }
     vec.vecPush(ref fields, {
       name: fieldNode.name,
       typeId: resolveTypeAnnotation(ref prog, ref tm, ref ast, fieldNode.childA),
     });
     f += 1;
   }
+  let methods: Map<string, TypeId> = collectMethods(ref prog, ref tm, ref ast, declNode);
+  let traits: Vec<TypeId> = collectImplementedTraits(ref prog, ref tm, ref ast, declNode);
   endTypeParams(ref prog);
 
   // `module` and `generic` carry through from the shell pass A registered:
@@ -276,10 +288,13 @@ function fillStructFields(
   setType(ref prog, typeId, Type.Struct {
     decl: { name: declNode.name, module: moduleId, populated: true },
     fields: fields,
-    methods: map.mapNew(0, map.stringKeyOps()),
-    implementsTraits: vec.vecNew(0),
+    methods: methods,
+    implementsTraits: traits,
     generic: genericInstOf(ref prog, typeId),
   });
+  // Checked AFTER the table is set: the promise is about the finished type.
+  checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
+  checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
 }
 
 // The `generic` record already on a shell, copied so re-setting the slot keeps
@@ -322,6 +337,13 @@ function fillVariantCases(
   let c: usize = 0;
   while (c < declNode.childCount) {
     const caseNode = nodeAt(ref ast, childAt(ref ast, declNode, c));
+    // Methods share the member run with the cases. Skipping them here and
+    // counting the ordinal off `cases.len` rather than off `c` is what keeps a
+    // method from putting a hole in the tag numbering, which is ABI.
+    if (caseNode.kind == ASTNodeKind.METHOD_DECL) {
+      c += 1;
+      continue;
+    }
 
     let fields: Vec<Field> = vec.vecNew(caseNode.childCount);
     let f: usize = 0;
@@ -334,18 +356,23 @@ function fillVariantCases(
       f += 1;
     }
 
-    vec.vecPush(ref cases, { name: caseNode.name, ordinal: int(c), fields: fields });
+    vec.vecPush(ref cases, { name: caseNode.name, ordinal: int(cases.len), fields: fields });
     c += 1;
   }
+
+  let methods: Map<string, TypeId> = collectMethods(ref prog, ref tm, ref ast, declNode);
+  let traits: Vec<TypeId> = collectImplementedTraits(ref prog, ref tm, ref ast, declNode);
 
   endTypeParams(ref prog);
   setType(ref prog, typeId, Type.Variant {
     decl: { name: declNode.name, module: moduleId, populated: true },
     cases: cases,
-    methods: map.mapNew(0, map.stringKeyOps()),
-    implementsTraits: vec.vecNew(0),
+    methods: methods,
+    implementsTraits: traits,
     generic: genericInstOf(ref prog, typeId),
   });
+  checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
+  checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
 }
 
 // `const SEEK_SET: c_int = 0;` - the annotation, and the value.
