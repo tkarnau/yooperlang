@@ -241,6 +241,131 @@ suite function variantConstructorsAndPatternsShareOneShape(): void {
   }
 }
 
+suite function typeArgumentsParseInAnnotations(): void {
+  // `<` in annotation position is never a comparison - nothing else can appear
+  // there - which is what makes this unambiguous where an expression's `a < b`
+  // would not be.
+  let ast = parseOk("function f(): int { const v: Result<int, string> = 0; return 0; }");
+  const annot = firstVarDeclAnnotation(ref ast);
+
+  let test theory: Case = t.asserts("a generic application carries its argument list") {
+    theory.isSuccessful = annot.kind == ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME
+      && str.stringEq(annot.name, "Result")
+      && annot.childA != 0;
+    theory.detail = `parsed a ${annot.kind} named "${annot.name}" with argsList ${annot.childA}`;
+  }
+  let test theory: Case = t.asserts("each argument is its own annotation node") {
+    const list = nodeAt(ref ast, annot.childA);
+    const first = nodeAt(ref ast, childAt(ref ast, list, 0));
+    const second = nodeAt(ref ast, childAt(ref ast, list, 1));
+    theory.isSuccessful = list.childCount == 2
+      && str.stringEq(first.name, "int") && str.stringEq(second.name, "string");
+    theory.detail = `got ${list.childCount} argument(s): "${first.name}", "${second.name}"`;
+  }
+
+  // Arguments are full annotations, so they nest.
+  let nested = parseOk("function f(): int { const v: Box<Vec<int>> = 0; return 0; }");
+  let test theory: Case = t.asserts("arguments nest") {
+    const outer = firstVarDeclAnnotation(ref nested);
+    const args = nodeAt(ref nested, outer.childA);
+    const inner = nodeAt(ref nested, childAt(ref nested, args, 0));
+    theory.isSuccessful = str.stringEq(inner.name, "Vec") && inner.childA != 0;
+    theory.detail = `the inner argument is "${inner.name}" with argsList ${inner.childA}`;
+  }
+
+  let bare = parseOk("function f(): int { const v: int = 0; return 0; }");
+  let test theory: Case = t.asserts("a plain annotation has no argument list") {
+    theory.isSuccessful = firstVarDeclAnnotation(ref bare).childA == 0;
+    theory.detail = "a non-generic annotation carries a type-argument list";
+  }
+
+  let test theory: Case = t.asserts("an empty argument list is refused") {
+    const src = "function f(): int { const v: Box<> = 0; return 0; }";
+    theory.isSuccessful = refusalMentions(src, "empty type argument list");
+    theory.detail = `wanted an empty-list refusal, got: ${parseError(src)}`;
+  }
+}
+
+suite function externBlocksDeclareSignaturesWithNoBody(): void {
+  let ast = parseOk("extern \"C\" from \"stdio.h\" { function puts(s: string): int; function fflush(f: int): int; }");
+  const block = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("an extern block holds one node per signature") {
+    theory.isSuccessful = block.kind == ASTNodeKind.EXTERN_BLOCK && block.childCount == 2;
+    theory.detail = `parsed a ${block.kind} with ${block.childCount} signature(s), wanted EXTERN_BLOCK with 2`;
+  }
+  let test theory: Case = t.asserts("the library name is recorded, not dropped") {
+    theory.isSuccessful = str.stringEq(poolString(ref ast, block.strId), "stdio.h");
+    theory.detail = `the library is "${poolString(ref ast, block.strId)}", wanted "stdio.h"`;
+  }
+  let test theory: Case = t.asserts("a signature has params and a return but NO body") {
+    const fn = nodeAt(ref ast, childAt(ref ast, block, 0));
+    theory.isSuccessful = fn.kind == ASTNodeKind.EXTERN_FUNCTION_DECL
+      && str.stringEq(fn.name, "puts") && fn.childB != 0 && fn.childC != 0 && fn.childD == 0;
+    theory.detail = `puts parsed as ${fn.kind} with body slot ${fn.childD}, which must be empty`;
+  }
+
+  // `from` is required, matching the JS reference - a program written against a
+  // looser rule would not compile with the other compiler.
+  let test theory: Case = t.asserts("the `from` clause is required") {
+    const src = "extern \"C\" { function puts(s: string): int; }";
+    theory.isSuccessful = refusalMentions(src, "expected FROM");
+    theory.detail = `wanted a missing-from refusal, got: ${parseError(src)}`;
+  }
+  let test theory: Case = t.asserts("an ABI other than C is refused by name") {
+    const src = "extern \"rust\" from \"x\" { function f(): int; }";
+    theory.isSuccessful = refusalMentions(src, "unsupported extern ABI");
+    theory.detail = `wanted an ABI refusal, got: ${parseError(src)}`;
+  }
+}
+
+suite function importDirectivesAreFlagsNotImports(): void {
+  // Same keyword as an import; the `.` is the whole difference.
+  let ast = parseOk("import.unsafe;\nfunction f(): int { return 1; }");
+  const program = nodeAt(ref ast, ast.root);
+
+  let test theory: Case = t.asserts("`import.unsafe;` sets a flag and declares nothing") {
+    theory.isSuccessful = program.flagA && program.childCount == 1;
+    theory.detail = `unsafe=${program.flagA} with ${program.childCount} top-level node(s), wanted true and 1`;
+  }
+
+  let plain = parseOk("function f(): int { return 1; }");
+  let test theory: Case = t.asserts("a module without the directive is not unsafe") {
+    theory.isSuccessful = !nodeAt(ref plain, plain.root).flagA;
+    theory.detail = "a module with no import.unsafe came out flagged";
+  }
+
+  let test theory: Case = t.asserts("an unknown directive lists the ones that exist") {
+    theory.isSuccessful = refusalMentions("import.wat;", "import.unsafe");
+    theory.detail = `wanted the known directives listed, got: ${parseError("import.wat;")}`;
+  }
+}
+
+suite function kindPrefixesInAnnotationsAreKept(): void {
+  // `owned string` - the kind is contextual, so two IDENTs in a row is what
+  // identifies one. Recorded rather than dropped, even though nothing enforces
+  // kinds yet: the limitation is "not enforced", not "not parsed".
+  let ast = parseOk("function f(s: owned string): int { return 1; }");
+  const annot = firstParamAnnotation(ref ast);
+
+  let test theory: Case = t.asserts("the type is still the type") {
+    theory.isSuccessful = str.stringEq(annot.name, "string");
+    theory.detail = `the annotation resolved to "${annot.name}", wanted "string"`;
+  }
+  let test theory: Case = t.asserts("the prefix is recorded on the annotation") {
+    const list = nodeAt(ref ast, annot.childB);
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, 0));
+    theory.isSuccessful = annot.childB != 0 && str.stringEq(prefix.name, "owned");
+    theory.detail = `the recorded prefix is "${prefix.name}", wanted "owned"`;
+  }
+
+  let bare = parseOk("function f(s: string): int { return 1; }");
+  let test theory: Case = t.asserts("an unprefixed annotation records none") {
+    theory.isSuccessful = firstParamAnnotation(ref bare).childB == 0;
+    theory.detail = "a plain annotation came out with a kind prefix";
+  }
+}
+
 suite function exportWrapsTheDeclItDecorates(): void {
   let ast = parseOk("export function f(): int { return 1; }");
   const childId = childAt(ref ast, nodeAt(ref ast, ast.root), 0);
@@ -278,9 +403,17 @@ suite function importFormsOutsideTheSubsetAreRefusedByName(): void {
     theory.detail = `wanted a refusal naming side-effect imports, got: ${parseError("import \"./x.yoop\";")}`;
   }
 
-  let test theory: Case = t.asserts("`export const` is refused rather than half-parsed") {
-    theory.isSuccessful = refusalMentions("export const X = 1;", "export function");
-    theory.detail = `wanted a refusal naming the supported export forms, got: ${parseError("export const X = 1;")}`;
+  let test theory: Case = t.asserts("`export let` is refused rather than half-parsed") {
+    theory.isSuccessful = refusalMentions("export let x: int = 1;", "export function");
+    theory.detail = `wanted a refusal naming the supported export forms, got: ${parseError("export let x: int = 1;")}`;
+  }
+
+  // Module-level `let` parses - it is the same decl parser - and is refused in
+  // pass A instead, where the difference between a const and a mutable global
+  // is a semantic one rather than a syntactic one.
+  let test theory: Case = t.asserts("`export const` is a supported form") {
+    theory.isSuccessful = parseError("export const X: int = 1;").len == 0;
+    theory.detail = `export const failed to parse: ${parseError("export const X: int = 1;")}`;
   }
 }
 
@@ -337,8 +470,17 @@ function refusalMentions(src: string, needle: string): bool {
   return str.stringIndexOf(message, needle) < message.len;
 }
 
+// Total on purpose. A failed `parseOk` hands back an EMPTY arena, and indexing
+// a PROGRAM with no children walked off the end of the arena and took the whole
+// test binary down with a segfault - so a broken source literal killed the run
+// instead of failing one assertion. Every navigation helper below stops at the
+// sentinel node instead.
 function topLevel(ref ast: AST, i: usize): ASTNode {
-  return nodeAt(ref ast, childAt(ref ast, nodeAt(ref ast, ast.root), i));
+  const program = nodeAt(ref ast, ast.root);
+  if (i >= program.childCount) {
+    return nodeAt(ref ast, 0);
+  }
+  return nodeAt(ref ast, childAt(ref ast, program, i));
 }
 
 // The expression in `function f(): int { return <expr>; }` - the shortest route
@@ -353,6 +495,18 @@ function firstSwitchPattern(ref ast: AST): ASTNode {
   const arm = nodeAt(ref ast, childAt(ref ast, sw, 0));
   const patterns = nodeAt(ref ast, arm.childA);
   return nodeAt(ref ast, childAt(ref ast, patterns, 0));
+}
+
+// The annotation on `const v: <annot> = ...` in the first statement.
+function firstVarDeclAnnotation(ref ast: AST): ASTNode {
+  return nodeAt(ref ast, firstStatement(ref ast).childA);
+}
+
+// The annotation on the first parameter of `function f(x: <annot>)`.
+function firstParamAnnotation(ref ast: AST): ASTNode {
+  const fn = topLevel(ref ast, 0);
+  const params = nodeAt(ref ast, fn.childB);
+  return nodeAt(ref ast, nodeAt(ref ast, childAt(ref ast, params, 0)).childA);
 }
 
 function firstStatement(ref ast: AST): ASTNode {

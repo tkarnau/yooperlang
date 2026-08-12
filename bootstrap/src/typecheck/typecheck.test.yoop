@@ -16,7 +16,7 @@ import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNodeKind, childAt, nodeAt } from "../ast";
 import { Module, ModuleGraph, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
-import { Program, TypedModule, Symbol, Type, typecheckProgram } from "../typecheck";
+import { Program, TypedModule, Symbol, Type, typecheckProgram, initProgram } from "../typecheck";
 import { Diagnostic, errorAt } from "../diagnostics";
 
 suite function passARegistersATopLevelFunction(): void {
@@ -99,13 +99,7 @@ function checkSource(src: string): Program {
       // Program. Otherwise a test asserting "this is refused" cannot tell
       // "refused by the parser" from "accepted silently" - both would read as
       // zero diagnostics, and the assertion would be meaningless.
-      let diagnostics: Vec<Diagnostic> = vec.vecNew(1);
-      vec.vecPush(ref diagnostics, errorAt(e, { pos: 0, line: 0, column: 0, length: 0 }));
-      return {
-        types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0),
-        diagnostics: diagnostics,
-        currentFile: "",
-      };
+      return parseFailureProgram(e);
     }
     case LoadModuleResult.Ok { value: m }: {
       let graph = singleModuleGraph(m);
@@ -156,6 +150,351 @@ suite function localsRejectBadPrograms(): void {
   let test theory: Case = t.asserts("a local with neither annotation nor initializer is a diagnostic") {
     theory.isSuccessful = bare.diagnostics.len > 0;
     theory.detail = "let x; with nothing to infer from produced no diagnostic";
+  }
+}
+
+// ----- module-level consts --------------------------------------------------
+
+suite function moduleConstsAreInlinedValues(): void {
+  let ok = checkSource("const N: int = 7;\nfunction main(): int { return N + 1; }");
+  let test theory: Case = t.asserts("a module const is readable from a body") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reading a module const reported: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A LOCAL of the same name wins, which is the precedence every language gives
+  // them and the one a reader assumes.
+  let shadowed = checkSource("const N: int = 7;\nfunction main(): int { const N = 1; return N; }");
+  let test theory: Case = t.asserts("a local of the same name shadows the const") {
+    theory.isSuccessful = shadowed.diagnostics.len == 0;
+    theory.detail = `shadowing a module const reported: ${firstDiagnostic(ref shadowed)}`;
+  }
+
+  // The initializer has to be something there IS to inline.
+  let computed = checkSource("const N: int = other();\nfunction other(): int { return 1; }\nfunction main(): int { return N; }");
+  let test theory: Case = t.asserts("a non-literal initializer is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref computed, "integer literal initializer");
+    theory.detail = `wanted a const-eval refusal, got: ${firstDiagnostic(ref computed)}`;
+  }
+
+  let unannotated = checkSource("const N = 7;\nfunction main(): int { return N; }");
+  let test theory: Case = t.asserts("a module const needs an annotation") {
+    theory.isSuccessful = diagnosticsMention(ref unannotated, "needs a type annotation");
+    theory.detail = `wanted an annotation diagnostic, got: ${firstDiagnostic(ref unannotated)}`;
+  }
+
+  let mutable = checkSource("let N: int = 7;\nfunction main(): int { return N; }");
+  let test theory: Case = t.asserts("module-level `let` is refused rather than treated as a const") {
+    theory.isSuccessful = diagnosticsMention(ref mutable, "module-level \"let\"");
+    theory.detail = `wanted a module-let refusal, got: ${firstDiagnostic(ref mutable)}`;
+  }
+
+  // Cross-module: the VALUE travels, because there is no global to point at.
+  let imported = checkTwoModules(
+    "export const WIDTH: int = 80;",
+    "import { WIDTH } from \"./lib.yoop\";\nfunction main(): int { return WIDTH; }"
+  );
+  let test theory: Case = t.asserts("an exported const is readable from another module") {
+    theory.isSuccessful = imported.diagnostics.len == 0;
+    theory.detail = `importing a const reported: ${firstDiagnostic(ref imported)}`;
+  }
+}
+
+suite function discardBindsNothing(): void {
+  const RES: string = "variant Res { Ok { value: int }, Err { code: int, detail: int } }\n";
+
+  let ok = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: c, detail: _ }: { return c; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("`_` names a field without binding it") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `a discard binding reported: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Named but not bound - so it does not become readable.
+  let read = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: c, detail: _ }: { return _; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a discarded field is not readable") {
+    theory.isSuccessful = read.diagnostics.len > 0;
+    theory.detail = "reading `_` after discarding it produced no diagnostic";
+  }
+
+  // Discarding is not the same as omitting: every field still has to be NAMED,
+  // so a case that grows one breaks its patterns loudly.
+  let omitted = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: c }: { return c; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("omitting a field is still an error") {
+    theory.isSuccessful = diagnosticsMention(ref omitted, "must bind all of them");
+    theory.detail = `wanted a bind-all diagnostic, got: ${firstDiagnostic(ref omitted)}`;
+  }
+
+  // Two discards in one pattern must not collide the way two real bindings of
+  // one name would.
+  let twice = checkSource(`${RES}function f(r: Res): int { switch (r) { case Res.Ok { value: v }: { return v; } case Res.Err { code: _, detail: _ }: { return 0; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("two discards in one pattern do not collide") {
+    theory.isSuccessful = twice.diagnostics.len == 0;
+    theory.detail = `two discard bindings reported: ${firstDiagnostic(ref twice)}`;
+  }
+}
+
+// ----- borrows --------------------------------------------------------------
+
+suite function refIsADistinctTypeFromTheThingBorrowed(): void {
+  const CLEAR: string = "function clear(ref n: int): void { n = 0; }\n";
+
+  let ok = checkSource(`${CLEAR}function main(): int { let n: int = 1; clear(ref n); return n; }`);
+  let test theory: Case = t.asserts("a borrow satisfies a `ref` parameter") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `passing a borrow reported: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Writing `ref` is REQUIRED, not inferred: the reader has to be able to see
+  // at the call which arguments the callee may write through.
+  let byValue = checkSource(`${CLEAR}function main(): int { let n: int = 1; clear(n); return n; }`);
+  let test theory: Case = t.asserts("passing a value where a borrow is wanted is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref byValue, "is ref int32, not int32");
+    theory.detail = `wanted a ref-vs-value diagnostic, got: ${firstDiagnostic(ref byValue)}`;
+  }
+
+  // And the other direction.
+  let byRef = checkSource("function takes(n: int): int { return n; }\nfunction main(): int { let n: int = 1; return takes(ref n); }");
+  let test theory: Case = t.asserts("passing a borrow where a value is wanted is a diagnostic") {
+    theory.isSuccessful = byRef.diagnostics.len > 0;
+    theory.detail = "passing `ref n` to a by-value parameter produced no diagnostic";
+  }
+
+  // The BODY sees a plain `int`, not a `ref int` - a borrow IS the thing it
+  // borrows as far as the callee is concerned, which is what keeps every read
+  // and write in the body from needing to know about references.
+  let body = checkSource("function addTo(ref n: int, by: int): void { n = n + by; }\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("a `ref` parameter reads as its pointee inside the body") {
+    theory.isSuccessful = body.diagnostics.len == 0;
+    theory.detail = `arithmetic on a ref parameter reported: ${firstDiagnostic(ref body)}`;
+  }
+
+  // A borrow needs an ADDRESS, and only a named binding has one.
+  let temp = checkSource("function f(ref n: int): void { }\nfunction g(): int { return 1; }\nfunction main(): int { f(ref g()); return 0; }");
+  let test theory: Case = t.asserts("`ref` of a non-name is refused by name") {
+    theory.isSuccessful = diagnosticsMention(ref temp, "takes a named binding");
+    theory.detail = `wanted a named-binding diagnostic, got: ${firstDiagnostic(ref temp)}`;
+  }
+}
+
+// ----- calls ----------------------------------------------------------------
+
+const ADD: string = "function add(a: int, b: int): int { return a + b; }\n";
+
+suite function callArgumentsAreCheckedAgainstParameters(): void {
+  let ok = checkSource(`${ADD}function main(): int { return add(1, 2); }`);
+  let test theory: Case = t.asserts("a matching call checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `a well-formed call reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  let tooFew = checkSource(`${ADD}function main(): int { return add(1); }`);
+  let test theory: Case = t.asserts("too few arguments is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref tooFew, "takes 2 argument(s), got 1");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref tooFew)}`;
+  }
+
+  let tooMany = checkSource(`${ADD}function main(): int { return add(1, 2, 3); }`);
+  let test theory: Case = t.asserts("too many arguments is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref tooMany, "takes 2 argument(s), got 3");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref tooMany)}`;
+  }
+
+  // The POSITION is named, because "wrong argument type" on a five-argument
+  // call is most of a message and none of the answer.
+  let wrongType = checkSource(`${ADD}function main(): int { return add(1, "x"); }`);
+  let test theory: Case = t.asserts("an argument of the wrong type names its position") {
+    theory.isSuccessful = diagnosticsMention(ref wrongType, "argument 2 of \"add\"");
+    theory.detail = `wanted a positional type diagnostic, got: ${firstDiagnostic(ref wrongType)}`;
+  }
+
+  // Each argument is checked AGAINST its parameter, so an untyped literal pins
+  // to it. Without that, `wide(7)` would default the 7 to int32 and then
+  // complain that int32 and int64 differ.
+  let pinned = checkSource("function wide(n: int64): int64 { return n; }\nfunction main(): int { return 0; }\nfunction f(): int64 { return wide(7); }");
+  let test theory: Case = t.asserts("an untyped literal pins to the parameter's width") {
+    theory.isSuccessful = pinned.diagnostics.len == 0;
+    theory.detail = `passing 7 to an int64 parameter reported: ${firstDiagnostic(ref pinned)}`;
+  }
+
+  // printf is variadic and has no signature to check against - it must keep
+  // taking whatever it is given.
+  let variadic = checkSource("function main(): int { printf(\"%d %s\\n\", 1, \"two\"); return 0; }");
+  let test theory: Case = t.asserts("printf still takes any arguments") {
+    theory.isSuccessful = variadic.diagnostics.len == 0;
+    theory.detail = `printf with mixed arguments reported: ${firstDiagnostic(ref variadic)}`;
+  }
+
+  // A mistake INSIDE an argument must still be reported when the callee itself
+  // is unknown, rather than hidden behind the unknown-name error.
+  let both = checkSource("function main(): int { return nope(missing); }");
+  let test theory: Case = t.asserts("an unknown callee does not hide errors in its arguments") {
+    theory.isSuccessful = diagnosticsMention(ref both, "unknown function")
+      && diagnosticsMention(ref both, "unknown name");
+    theory.detail = `wanted both diagnostics, got ${both.diagnostics.len}: ${firstDiagnostic(ref both)}`;
+  }
+}
+
+suite function qualifiedCallArgumentsAreCheckedToo(): void {
+  // The signature is the SOURCE module's and the arguments are in THIS module's
+  // scope; both sides are program-wide TypeIds, so nothing is translated.
+  let wrong = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.add(1); }"
+  );
+  let test theory: Case = t.asserts("a namespaced call checks arity") {
+    theory.isSuccessful = diagnosticsMention(ref wrong, "takes 2 argument(s), got 1");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref wrong)}`;
+  }
+
+  let imported = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import { add } from \"./lib.yoop\";\nfunction main(): int { return add(1, \"x\"); }"
+  );
+  let test theory: Case = t.asserts("an imported call checks argument types") {
+    theory.isSuccessful = diagnosticsMention(ref imported, "argument 2");
+    theory.detail = `wanted a positional type diagnostic, got: ${firstDiagnostic(ref imported)}`;
+  }
+}
+
+// ----- generics -------------------------------------------------------------
+
+const BOX: string = "type Box<T> { value: T }\n";
+
+suite function genericTypesInstantiateOnDemand(): void {
+  let ok = checkSource(`${BOX}function main(): int { const b: Box<int> = { value: 1 }; return b.value; }`);
+  let test theory: Case = t.asserts("a generic applied to an argument checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `using Box<int> reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The substituted field really is the argument's type, not the parameter's.
+  let wrong = checkSource(`${BOX}function main(): int { const b: Box<int> = { value: "x" }; return 0; }`);
+  let test theory: Case = t.asserts("a field takes the SUBSTITUTED type") {
+    theory.isSuccessful = wrong.diagnostics.len > 0;
+    theory.detail = "assigning a string to Box<int>.value produced no diagnostic";
+  }
+
+  // Two applications of one decl must be two DISTINCT types, or a Box<string>
+  // would be interchangeable with a Box<int>. Asserted through a RETURN rather
+  // than a call argument, because call arguments are not matched against
+  // parameters yet - for any type, not just these.
+  let mixed = checkSource(`${BOX}function f(): Box<int> { const s: Box<string> = { value: "x" }; return s; }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("two instantiations are different types") {
+    theory.isSuccessful = diagnosticsMention(ref mixed, "cannot return");
+    theory.detail = `wanted Box<string> and Box<int> to differ, got: ${firstDiagnostic(ref mixed)}`;
+  }
+
+  // And the SAME application twice is one type, or nothing could be passed
+  // between two annotations that spell it the same way.
+  let same = checkSource(`${BOX}function f(): Box<int> { const b: Box<int> = { value: 1 }; return b; }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("the same application twice is ONE type") {
+    theory.isSuccessful = same.diagnostics.len == 0;
+    theory.detail = `two Box<int> annotations disagreed: ${firstDiagnostic(ref same)}`;
+  }
+}
+
+suite function genericApplicationsAreChecked(): void {
+  let bare = checkSource(`${BOX}function main(): int { const b: Box = { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a generic used without arguments says how many it needs") {
+    theory.isSuccessful = diagnosticsMention(ref bare, "needs type arguments");
+    theory.detail = `wanted a missing-arguments diagnostic, got: ${firstDiagnostic(ref bare)}`;
+  }
+
+  let tooMany = checkSource(`${BOX}function main(): int { const b: Box<int, int> = { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("the wrong number of arguments is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref tooMany, "type argument(s), got");
+    theory.detail = `wanted an arity diagnostic, got: ${firstDiagnostic(ref tooMany)}`;
+  }
+
+  let notGeneric = checkSource("type Point { x: int }\nfunction main(): int { const p: Point<int> = { x: 1 }; return 0; }");
+  let test theory: Case = t.asserts("arguments on a non-generic type are a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref notGeneric, "is not generic");
+    theory.detail = `wanted a not-generic diagnostic, got: ${firstDiagnostic(ref notGeneric)}`;
+  }
+
+  // A type parameter is in scope ONLY inside its own decl's body.
+  let escaped = checkSource(`${BOX}function main(): int { const t: T = 1; return 0; }`);
+  let test theory: Case = t.asserts("a type parameter is not visible outside its decl") {
+    theory.isSuccessful = diagnosticsMention(ref escaped, "unknown type");
+    theory.detail = `wanted an unknown-type diagnostic for T, got: ${firstDiagnostic(ref escaped)}`;
+  }
+}
+
+suite function genericFunctionsInferTheirTypeArguments(): void {
+  const ID: string = "function identity<T>(x: T): T { return x; }\n";
+
+  // From the ARGUMENT: nothing else mentions T.
+  let fromArg = checkSource(`${ID}function main(): int { const n: int = 1; return identity(n); }`);
+  let test theory: Case = t.asserts("an argument determines the type parameter") {
+    theory.isSuccessful = fromArg.diagnostics.len == 0;
+    theory.detail = `inferring from an argument reported: ${firstDiagnostic(ref fromArg)}`;
+  }
+
+  // From the EXPECTED type: nothing but the RETURN mentions T. This is exactly
+  // `Option.None` - a payload-less case of a generic variant carries no value
+  // to infer from, so the annotation is the only thing that can say which
+  // instantiation it is.
+  const MAKE: string = "variant Maybe<T> { Some { value: T }, Nothing }\nfunction nothing<T>(): Maybe<T> { return Maybe.Nothing; }\n";
+  let fromExpected = checkSource(`${MAKE}function main(): int { const m: Maybe<int> = nothing(); return 0; }`);
+  let test theory: Case = t.asserts("the expected type determines a parameter the arguments do not") {
+    theory.isSuccessful = fromExpected.diagnostics.len == 0;
+    theory.detail = `inferring from the expected type reported: ${firstDiagnostic(ref fromExpected)}`;
+  }
+
+  // Neither source says anything, so it has to be REFUSED rather than guessed.
+  let unanchored = checkSource(`${MAKE}function main(): int { const m = nothing(); return 0; }`);
+  let test theory: Case = t.asserts("a parameter nothing determines names itself") {
+    theory.isSuccessful = diagnosticsMention(ref unanchored, "cannot infer \"T\"");
+    theory.detail = `wanted an inference diagnostic naming T, got: ${firstDiagnostic(ref unanchored)}`;
+  }
+
+  // An inferred signature is checked like any other: once T is int32, a string
+  // argument is as wrong as it would be in a concrete function.
+  let mismatch = checkSource("function pairUp<T>(a: T, b: T): T { return a; }\nfunction main(): int { const n: int = 1; const s: string = \"x\"; return pairUp(n, s); }");
+  let test theory: Case = t.asserts("arguments are checked against the INFERRED signature") {
+    theory.isSuccessful = mismatch.diagnostics.len > 0;
+    theory.detail = "passing an int and a string to pairUp<T>(a: T, b: T) produced no diagnostic";
+  }
+
+  // The BODY is checked once with T opaque. That is what catches an operation
+  // no instantiation could support, without re-checking per instance.
+  let opaque = checkSource("function bad<T>(x: T): T { return x + 1; }\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("an operation an opaque T cannot support is a diagnostic") {
+    theory.isSuccessful = opaque.diagnostics.len > 0;
+    theory.detail = "adding 1 to an unbounded T produced no diagnostic";
+  }
+}
+
+suite function genericVariantsTakeTheirInstanceFromContext(): void {
+  const RESULT: string = "variant Result<T, E> { Ok { value: T }, Err { error: E } }\n";
+
+  let ok = checkSource(`${RESULT}function main(): int { const r: Result<int, int> = Result.Ok { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("an annotated constructor resolves its instantiation") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `constructing Result<int, int> reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // `Result<int, string>` and `Result<int, int>` share the case name `Ok`, so
+  // the constructor alone cannot say which instantiation it is.
+  let unanchored = checkSource(`${RESULT}function main(): int { const r = Result.Ok { value: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("an unannotated constructor says it cannot tell which") {
+    theory.isSuccessful = diagnosticsMention(ref unanchored, "cannot tell which");
+    theory.detail = `wanted a which-instantiation diagnostic, got: ${firstDiagnostic(ref unanchored)}`;
+  }
+
+  let sw = checkSource(`${RESULT}function f(r: Result<int, int>): int { switch (r) { case Result.Ok { value: v }: { return v; } case Result.Err { error: e }: { return e; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("a switch over an instance takes its patterns from the scrutinee") {
+    theory.isSuccessful = sw.diagnostics.len == 0;
+    theory.detail = `switching over Result<int, int> reported ${sw.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref sw)}`;
+  }
+
+  // Substitution has to reach INTO each case's payload independently.
+  let payload = checkSource(`${RESULT}function f(r: Result<int, string>): int { switch (r) { case Result.Ok { value: v }: { return v; } case Result.Err { error: e }: { return e; } } }\nfunction main(): int { return 0; }`);
+  let test theory: Case = t.asserts("each case's payload substitutes its own parameter") {
+    // `Err`'s payload is `string` here, so returning it from an int function is
+    // the error - which only shows up if E substituted independently of T.
+    theory.isSuccessful = payload.diagnostics.len > 0;
+    theory.detail = "returning Result<int, string>'s string payload as an int produced no diagnostic";
   }
 }
 
@@ -636,13 +975,12 @@ function bufferOf(src: string): Vec<uint8> propagates<disposable> {
 // A parse failure has to come back as a DIAGNOSTIC, not as an empty Program -
 // see the note in checkSource.
 function parseFailureProgram(message: string): Program propagates<disposable> {
-  let diagnostics: Vec<Diagnostic> = vec.vecNew(1);
-  vec.vecPush(ref diagnostics, errorAt(message, { pos: 0, line: 0, column: 0, length: 0 }));
-  return {
-    types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0),
-    diagnostics: diagnostics,
-        currentFile: "",
-  };
+  // A REAL Program with one diagnostic in it, rather than a hand-built literal.
+  // initProgram is where the arenas and their reserved slots are decided, and a
+  // literal here went stale every time one of them was added.
+  let prog = initProgram();
+  vec.vecPush(ref prog.diagnostics, errorAt(message, { pos: 0, line: 0, column: 0, length: 0 }));
+  return prog;
 }
 
 // Control flow: the parts that never reach an executable.

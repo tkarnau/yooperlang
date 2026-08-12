@@ -13,6 +13,8 @@ module codegen;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+import { Text }, * as text from "std/core/text.yoop";
+import { DISCARD_BINDING } from "../parse";
 
 // `Shape.Circle { r: 2 }`
 //
@@ -117,6 +119,15 @@ export function emitPatternBindings(
     const fieldId = childAt(cx.ast, list, i);
     const fieldNode = nodeAt(cx.ast, fieldId);
     const binding = nodeAt(cx.ast, fieldNode.childA);
+
+    // `_` binds nothing, so there is nothing to load and no slot to load it
+    // into. Skipping the read entirely is also the only correct thing: the
+    // payload bytes hold some other case's value on this path if the pattern
+    // matched a case with fewer fields.
+    if (text.equals(binding.name, DISCARD_BINDING)) {
+      i += 1;
+      continue;
+    }
     const fieldTy = typeOf(ref cx, fieldId);
 
     const payloadAddr = freshTemp(cx.e);

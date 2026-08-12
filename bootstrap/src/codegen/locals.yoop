@@ -21,8 +21,17 @@ export type LocalSlot {
   // hoisted into one entry block and two sibling branches may each declare `a`.
   // The number is what makes them unique; the name is spelled out at each use
   // as `%<name>.<id>.addr`, so no string is ever built for it.
+  // Slot id 0 is RESERVED and means "the incoming argument pointer is the
+  // slot" - a `ref` parameter. `nextSlot` is incremented before it is used, so
+  // no ordinary slot ever gets 0; the same reserved-zero idiom SymbolId and
+  // DeclId use. `slot()` writes `%<name>.arg` for it instead of
+  // `%<name>.<id>.addr`, which is why nothing else in codegen has to change:
+  // every load and store only ever needed an ADDRESS, and this is one.
   id: usize,
 }
+
+// A slot id that names the incoming argument pointer rather than an alloca.
+export const ARG_PTR_SLOT: usize = 0;
 
 export type FnLocals propagates<disposable> {
   slots: Map<string, LocalSlot>,
@@ -38,6 +47,15 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
   cx.locals.nextSlot += 1;
   const info: LocalSlot = { ty: ty, id: cx.locals.nextSlot };
   emitAlloca(ref cx, name, info.id, ty);
+  map.mapInsert(ref cx.locals.slots, name, info);
+  return info;
+}
+
+// A `ref` parameter: the incoming pointer IS the slot, so there is no alloca to
+// emit and nothing to spill. `pointeeTy` is what the pointer points at, because
+// that is what every load and store through the slot moves.
+export function declareRefParam(ref cx: Cx, name: string, pointeeTy: string): LocalSlot {
+  const info: LocalSlot = { ty: pointeeTy, id: ARG_PTR_SLOT };
   map.mapInsert(ref cx.locals.slots, name, info);
   return info;
 }

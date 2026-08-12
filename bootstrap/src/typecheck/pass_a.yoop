@@ -16,7 +16,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import * as str from "std/core/strings.yoop";
-import { ASTNode, ASTNodeKind, NodeId, childAt, declOf, isExportDecl, nodeAt, kindName } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, isExportDecl, nodeAt, kindName } from "../ast";
 import { Module } from "../source_graph";
 
 export function passARegisterShells(
@@ -57,13 +57,42 @@ function registerFileShells(
     const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childId));
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
-        registerFunctionShell(ref prog, ref tm, declNode, exported, isEntry);
+        registerFunctionShell(ref prog, ref tm, declNode, exported, isEntry, moduleId, ref m.ast);
       }
       case ASTNodeKind.TYPE_DECL: {
-        registerTypeShell(ref prog, ref tm, declNode, moduleId, exported);
+        registerTypeShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
       }
       case ASTNodeKind.VARIANT_DECL: {
-        registerVariantShell(ref prog, ref tm, declNode, moduleId, exported);
+        registerVariantShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
+      }
+      case ASTNodeKind.EXTERN_BLOCK: {
+        // Each declared signature is an ordinary function NAME with an
+        // extraordinary symbol: it keeps its exact spelling for the linker.
+        // `Symbol.Func` all the same - what differs is mangling, which is
+        // codegen's business, so nothing here has to know.
+        let x: usize = 0;
+        while (x < declNode.childCount) {
+          const externNode = nodeAt(ref m.ast, childAt(ref m.ast, declNode, x));
+          const externShell = internType(ref prog, Type.Func {
+            params: vec.vecNew(0), ret: TYPE_ERROR_ID, variadic: false,
+          });
+          bindName(ref prog, ref tm, externNode, Symbol.Func { typeId: externShell }, exported);
+          map.mapInsert(ref tm.externNames, externNode.name, true);
+          x += 1;
+        }
+      }
+      case ASTNodeKind.CONST_DECL: {
+        // A shell like every other: the annotation is pass C's to resolve, and
+        // so is the value. What matters here is that the NAME resolves.
+        bindName(ref prog, ref tm, declNode,
+          Symbol.Value { typeId: TYPE_ERROR_ID, intVal: 0 }, exported);
+      }
+      case ASTNodeKind.LET_DECL: {
+        reportError(
+          ref prog,
+          `module-level "let" is not supported by the bootstrap typechecker yet - a module-level binding must be \`const\``,
+          declNode.sourceLoc
+        );
       }
       case ASTNodeKind.IMPORT_DECL: {
         // Pass B's job, and it needs no shell here: the name it binds is the
@@ -92,7 +121,9 @@ function registerFunctionShell(
   ref tm: TypedModule,
   declNode: ASTNode,
   exported: bool,
-  isEntry: bool
+  isEntry: bool,
+  moduleId: ModuleId,
+  ref ast: AST
 ): void {
   // `main` is the ONE user symbol that keeps its bare C name (see
   // mangle.yoop), so a second module declaring one emits a second `@main`.
@@ -108,11 +139,7 @@ function registerFunctionShell(
   }
 
   if (declNode.childA != 0) {
-    reportError(
-      ref prog,
-      `generic function "${declNode.name}" is not supported by the bootstrap typechecker yet`,
-      declNode.sourceLoc
-    );
+    registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.FUNC, ref ast);
     return;
   }
 
@@ -132,14 +159,11 @@ function registerTypeShell(
   ref tm: TypedModule,
   declNode: ASTNode,
   moduleId: ModuleId,
-  exported: bool
+  exported: bool,
+  ref ast: AST
 ): void {
   if (declNode.childA != 0) {
-    reportError(
-      ref prog,
-      `generic type "${declNode.name}" is not supported by the bootstrap typechecker yet`,
-      declNode.sourceLoc
-    );
+    registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.STRUCT, ref ast);
     return;
   }
 
@@ -153,6 +177,82 @@ function registerTypeShell(
   bindName(ref prog, ref tm, declNode, Symbol.Struct { typeId: shellId }, exported);
 }
 
+// A generic decl binds to its DeclId rather than to a type: there is no one
+// type it names. What pass A builds is the TEMPLATE - one `Type.TypeParam` per
+// parameter, and an empty nominal type bound to them, which pass C fills.
+//
+// The parameters are interned per DECL, so two decls that both call a parameter
+// `T` get different TypeIds and substitution can never confuse them.
+function registerGenericShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool,
+  sort: GenericSort,
+  ref ast: AST
+): void {
+  const declId: DeclId = prog.generics.len;
+
+  let params: Vec<TypeId> = vec.vecNew(2);
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
+    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+      name: paramNode.name, originDecl: declId, bounds: vec.vecNew(0),
+    }));
+    i += 1;
+  }
+
+  // The template's own arguments ARE its parameters, which is what makes
+  // `isOpenInstance` recognize it and codegen skip it.
+  let templateArgs: Vec<TypeId> = vec.vecNew(params.len);
+  vec.vecExtendFrom(ref templateArgs, vec.vecAsArray(ref params));
+
+  let template: TypeId = TYPE_ERROR_ID;
+  switch (sort) {
+    case GenericSort.FUNC: {
+      // A function's template is an ordinary Func type whose params and return
+      // are filled in pass C - with the parameters above in scope, so they land
+      // as TypeParam ids and substitution can replace them.
+      template = internType(ref prog, Type.Func {
+        params: vec.vecNew(0),
+        ret: TYPE_ERROR_ID,
+        variadic: false,
+      });
+    }
+    case GenericSort.VARIANT: {
+      template = internType(ref prog, Type.Variant {
+        decl: { name: declNode.name, module: moduleId, populated: false },
+        cases: vec.vecNew(0),
+        methods: map.mapNew(0, map.stringKeyOps()),
+        implementsTraits: vec.vecNew(0),
+        generic: { origin: declId, args: templateArgs },
+      });
+    }
+    default: {
+      template = internType(ref prog, Type.Struct {
+        decl: { name: declNode.name, module: moduleId, populated: false },
+        fields: vec.vecNew(0),
+        methods: map.mapNew(0, map.stringKeyOps()),
+        implementsTraits: vec.vecNew(0),
+        generic: { origin: declId, args: templateArgs },
+      });
+    }
+  }
+
+  vec.vecPush(ref prog.generics, {
+    name: declNode.name,
+    module: moduleId,
+    sort: sort,
+    params: params,
+    template: template,
+    declNode: 0,
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.GenericDecl { decl: declId, sort: sort }, exported);
+}
+
 // Same shell discipline as a struct: the NAME resolves now, the cases are
 // filled in pass C. A case's payload types can name the variant itself
 // (`variant List { Cons { rest: List } }` would), so they cannot be resolved
@@ -162,14 +262,11 @@ function registerVariantShell(
   ref tm: TypedModule,
   declNode: ASTNode,
   moduleId: ModuleId,
-  exported: bool
+  exported: bool,
+  ref ast: AST
 ): void {
   if (declNode.childA != 0) {
-    reportError(
-      ref prog,
-      `generic variant "${declNode.name}" is not supported by the bootstrap typechecker yet`,
-      declNode.sourceLoc
-    );
+    registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.VARIANT, ref ast);
     return;
   }
 

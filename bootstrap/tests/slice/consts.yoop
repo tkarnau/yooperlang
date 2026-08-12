@@ -1,0 +1,42 @@
+// Module-level `const`, and the `_` discard in a pattern.
+//
+// A const is INLINED at every use rather than emitted as a global: there is
+// nothing to load from, which is also what makes an imported one cost nothing.
+// That is why the initializer has to be a compile-time integer - there has to
+// be something to inline.
+//
+// `_` names a payload field without binding it. Still NAMED, so a case that
+// grows a field breaks its patterns loudly - the difference between ignoring a
+// payload and forgetting it.
+
+const SEEK_SET: int = 0;
+const SEEK_END: int = 2;
+const ORIGIN: int = -5;
+export const WIDTH: int64 = 80;
+
+variant Res {
+  Ok { value: int },
+  Err { code: int, detail: int },
+}
+
+function codeOf(r: Res): int {
+  switch (r) {
+    case Res.Ok { value: v }: { return v; }
+    // Names both fields, binds one. Dropping `detail:` entirely would be an
+    // error, which is the point.
+    case Res.Err { code: c, detail: _ }: { return c; }
+  }
+}
+
+function main(): int {
+  printf("seek=%d %d\n", SEEK_SET, SEEK_END);
+  printf("origin=%d width=%lld\n", ORIGIN, WIDTH);
+
+  const good: Res = Res.Ok { value: 7 };
+  const bad: Res = Res.Err { code: 13, detail: 99 };
+  printf("codes=%d %d\n", codeOf(good), codeOf(bad));
+
+  // A const reads like any other value: usable in arithmetic and as an
+  // argument, with no load in the emitted IR.
+  return SEEK_END + codeOf(good) - 9;
+}

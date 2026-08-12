@@ -68,6 +68,9 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     case ASTNodeKind.IDENT: {
       return emitLocalRead(ref cx, expr, ref out);
     }
+    case ASTNodeKind.REF_EXPRESSION: {
+      return emitRefExpr(ref cx, expr, ref out);
+    }
     case ASTNodeKind.ASSIGNMENT: {
       return emitAssignment(ref cx, expr, ref out);
     }
@@ -87,12 +90,41 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
 function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   switch (lookupLocal(cx.locals, expr.name)) {
     case Option.None: {
+      // Not a local, so it is a module-level `const` - pass D already refused
+      // anything else. A const is INLINED rather than loaded: there is no
+      // global to read from, which is what makes an imported one cost nothing.
+      switch (moduleConstOf(ref cx, expr.name)) {
+        case Option.Some { value: v }: {
+          out = constOperand(v);
+          return "";
+        }
+        case Option.None: { }
+      }
       return internalError("no stack slot for", expr.name);
     }
     case Option.Some { value: slotInfo }: {
       const dest = freshTemp(cx.e);
       emitLoad(ref cx, dest, slotInfo.ty, expr.name, slotInfo.id);
       out = Operand.Temp { id: dest };
+      return "";
+    }
+  }
+}
+
+// `ref x` - the ADDRESS of x's slot, with no instruction at all.
+//
+// Every local already lives in an alloca and every `ref` parameter already IS a
+// pointer, so a borrow is a name for storage that exists rather than anything
+// that has to be built. Pass D refused any target but a plain name, which is
+// what makes the lookup below total.
+function emitRefExpr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  const target = nodeAt(cx.ast, expr.childA);
+  switch (lookupLocal(cx.locals, target.name)) {
+    case Option.None: {
+      return internalError("no stack slot to borrow", target.name);
+    }
+    case Option.Some { value: slotInfo }: {
+      out = Operand.SlotAddr { name: target.name, id: slotInfo.id };
       return "";
     }
   }

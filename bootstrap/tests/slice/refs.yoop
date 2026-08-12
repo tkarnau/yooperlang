@@ -1,0 +1,63 @@
+// `ref` at a call site: a BORROW.
+//
+// The callee sees the caller's object, not a copy, so writes through it are
+// visible after the call. That is the whole feature, and `refs.yoop` exists to
+// prove it - a by-value lowering passes every other assertion in this file.
+//
+// Writing `ref` is REQUIRED rather than inferred: a `ref v: T` parameter is
+// `ref T` in the signature, so passing a bare `v` is a type error. The reader
+// can see at the call which arguments the callee may write through.
+//
+// The lowering has no instructions in it at all. Every local already lives in
+// an alloca, so a borrow is the address of storage that exists; and a `ref`
+// parameter arrives AS that pointer, so it needs no alloca and no spill - the
+// incoming pointer IS its slot, and every load and store in the body lands on
+// the caller's object unchanged.
+
+type Counter {
+  hits: int,
+  misses: int,
+}
+
+function bump(ref c: Counter, by: int): void {
+  c.hits = c.hits + by;
+}
+
+function clear(ref n: int): void {
+  n = 0;
+}
+
+// A borrow passed ONWARD: `inner` is already a pointer here, so handing it to
+// `bump` hands over the same one rather than a pointer to a copy.
+function bumpTwice(ref c: Counter): void {
+  bump(ref c, 1);
+  bump(ref c, 1);
+}
+
+// Reading through a borrow needs no ceremony - the body sees a plain Counter.
+function totalOf(ref c: Counter): int {
+  return c.hits + c.misses;
+}
+
+function main(): int {
+  let c: Counter = { hits: 1, misses: 4 };
+  bump(ref c, 5);
+  printf("hits=%d total=%d\n", c.hits, totalOf(ref c));
+
+  bumpTwice(ref c);
+  printf("twice=%d\n", c.hits);
+
+  let n: int = 99;
+  clear(ref n);
+  printf("cleared=%d\n", n);
+
+  // A borrow of a loop-mutated local, to show the slot is the same storage the
+  // loop is writing.
+  let acc: int = 0;
+  for (let i = 0; i < 3; i = i + 1) {
+    bump(ref c, i);
+    acc = acc + c.hits;
+  }
+  printf("acc=%d final=%d\n", acc, c.hits);
+  return 0;
+}

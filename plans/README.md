@@ -153,11 +153,60 @@ is waiting on:
     std/core/vec.yoop      "implements" clauses on a type decl
     std/log.yoop           `extern` blocks
 
-So what remains before the bootstrap can read its own source is: **generics**
-(31 of its files, and the gate in front of `Result<T, E>` and therefore in front
-of all of std), **traits and `implements`**, **`extern`**, and **template
-literals** (65 files, and the first feature to need the yoop RUNTIME linked
-rather than just libc).
+**Generic TYPES landed on 2026-08-12, and `std/core/types.yoop` compiles.**
+That is `Result<T, E>` and `Option<T>` - the file the rest of std is built on -
+going all the way to an executable through the bootstrap.
+
+The design worth remembering: a generic decl is resolved ONCE into a TEMPLATE
+whose member types are `TypeParam` placeholders, and an instance is that
+template substituted. Instantiation is therefore pure TypeId arithmetic and
+never touches an AST, which is what makes cross-module generics work - `Vec<T>`
+is declared in one module's arena and applied in another's, and typecheck is
+handed a Program, not the graph. Instantiating from syntax instead would have
+meant threading the ModuleGraph through every pass.
+
+**Generic FUNCTIONS landed the same day**, with call-site inference: from the
+arguments first, then from the expected type - which is the only source when
+nothing but the return type mentions the parameter, as in `Option.None`. A
+generic body is CHECKED once with its parameters opaque and EMITTED once per
+instantiation, substituting in `resolvedTypeAt` and nowhere else. That is sound
+only because parameters have no bounds yet, and it is the decision to revisit
+when they do; the note is in bootstrap/README.md.
+
+Call arguments are also checked against their parameters now - arity and types.
+That had been silently unchecked for every call in the language, which is a
+worse category of gap than a refusal, and it was found by writing a generics
+test that turned out to be asserting something nothing checked.
+
+**`extern` blocks, `import.unsafe;` and kind prefixes landed next**, which
+together got `std/log.yoop` compiling - a module whose whole job is calling into
+the runtime through externs. An extern is the one function whose symbol keeps
+its exact spelling, since that spelling IS what the linker resolves against;
+`mangle.yoop` learned the exception from a table pass A fills. Kind prefixes are
+parsed and RECORDED rather than dropped: nothing enforces kinds, so the
+limitation is "not enforced" instead of "not parsed".
+
+**Module-level `const` and the `_` discard landed after that.** A const is
+INLINED at every use rather than emitted as a global, which is what makes an
+imported one cost nothing and why its initializer has to be a compile-time
+integer. `_` names a payload field without binding it - still named, so a case
+that grows a field breaks its patterns loudly rather than silently leaving one
+unbound. Patterns got their own payload parser in the process: they bind NAMES,
+not expressions, and reusing the struct-literal parser had put that rule in
+pass D and made `_` a syntax error.
+
+So what remains before the bootstrap can read its own source is: **traits and
+`implements`** (and the type-parameter bounds that come with them), which is the
+wall; **template literals** (65 files, and the first feature to need the yoop
+RUNTIME linked rather than just libc); **`ref` at a call site landed** next: a borrow costs no
+instructions at all, because every local already lives in an alloca and a `ref`
+parameter arrives as that pointer - so it gets no alloca and no spill, and the
+incoming pointer IS its slot. A `ref T` parameter is `ref T` in the signature
+(so a bare value is a type error) and plain `T` in the body (so nothing in the
+body knows about references).
+
+What std hits next, past that: **the `a..b` range expression**, and **`null` and
+the unsafe-pointer surface** behind it.
 
 Immediate build sequence:
 

@@ -1,5 +1,6 @@
 module codegen;
 
+
 // What every codegen function needs, in one value.
 //
 // These five things travel together through the whole walk, so passing them
@@ -29,12 +30,31 @@ export type Cx {
   ast: ref AST,
   locals: ref FnLocals,
   loops: ref LoopStack,   // where break/continue jump; see loops.yoop
+  // Which monomorphization of a generic function is being emitted, as an index
+  // into Program.funcInstances - or NO_FUNC_INSTANCE for ordinary code.
+  //
+  // A generic body is TYPE-CHECKED once, with its parameters left opaque, so
+  // its decoration holds TypeParam ids. Codegen emits it once per instance and
+  // substitutes on the way out: `typeOf` is the single place that happens. See
+  // the note in query.yoop.
+  instance: usize,
 }
+
+// `Cx.instance` when the code being emitted is not inside a generic function.
+//
+// Index 0, and `initGenerics` burns that slot on a dead entry - the same
+// reserved-zero idiom SymbolId and DeclId use. A max-value sentinel was the
+// first attempt and it was worse than wrong: it silently WRAPPED to 0, so the
+// first monomorphization in every program was emitted as if it were ordinary
+// code, under the generic's bare name and with its type parameters unresolved.
+export const NO_FUNC_INSTANCE: usize = 0;
 
 // One parameter of the function being emitted.
 export type ParamInfo {
   name: string,
-  ty: string,
+  ty: string,        // as the signature spells it - `ptr` for a `ref` parameter
+  isRef: bool,
+  pointeeTy: string, // what a `ref` parameter points AT; unused otherwise
 }
 
 // One argument at a call site, already lowered.
@@ -71,6 +91,12 @@ export function temp(ref cx: Cx, id: usize): void {
 export function slot(ref cx: Cx, name: string, id: usize): void {
   text.pushByte(ref cx.e.fn, '%');
   text.push(ref cx.e.fn, name);
+  // The reserved id: a `ref` parameter's slot is the incoming pointer, which
+  // LLVM already named `%<name>.arg`. See ARG_PTR_SLOT in locals.yoop.
+  if (id == ARG_PTR_SLOT) {
+    text.push(ref cx.e.fn, ".arg");
+    return;
+  }
   text.pushByte(ref cx.e.fn, '.');
   text.pushUint(ref cx.e.fn, uint64(id));
   text.push(ref cx.e.fn, ".addr");

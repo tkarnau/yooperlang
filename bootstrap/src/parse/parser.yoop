@@ -13,6 +13,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNodeKind, NodeId, emptyArena } from "../ast";
 import { TokenTags, tagName, createLexedVal } from "../lex";
 import { ParsingError } from "../diagnostics";
+import * as str from "std/core/strings.yoop";
 
 
 // main parsing logic, starts with top level and handles all child levels
@@ -47,13 +48,38 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
     }
     switch (peekTag) {
       case TokenTags.IMPORT: {
-        vec.vecPush(ref body, parseImportDecl(ref ps)?);
+        // `import.unsafe;` is a module FLAG, not an import. Same keyword; the
+        // `.` is what tells them apart, so the fork is here.
+        if (SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.DOT) {
+          const directive = parseImportDirective(ref ps)?;
+          if (str.stringEq(directive, "unsafe")) {
+            program.flagA = true;
+          }
+          // `import.test` needs nothing recorded: a test module's suites are
+          // the harness's business, and the bootstrap does not run them.
+        } else {
+          vec.vecPush(ref body, parseImportDecl(ref ps)?);
+        }
+      }
+      case TokenTags.EXTERN: {
+        vec.vecPush(ref body, parseExternBlock(ref ps)?);
       }
       case TokenTags.EXPORT: {
         vec.vecPush(ref body, parseExportDecl(ref ps)?);
       }
       case TokenTags.TYPE: {
         vec.vecPush(ref body, parseTypeDecl(ref ps)?);
+      }
+      case TokenTags.CONST, TokenTags.LET: {
+        // Module-level `const NAME: T = <literal>;`. The same parser as the
+        // statement form - what differs is only where the name is bound, which
+        // is pass A's business and not the parser's.
+        //
+        // `let` is parsed here too, and refused in pass A. The difference
+        // between a constant and a mutable global is semantic, so the message
+        // that names it belongs where the semantics are - "unexpected token at
+        // top level: LET" says nothing about what to do instead.
+        vec.vecPush(ref body, parseVarDecl(ref ps)?);
       }
       case TokenTags.VARIANT: {
         vec.vecPush(ref body, parseVariantDecl(ref ps)?);
@@ -116,6 +142,7 @@ export function parseInto(ast: AST, src: uint8[]): Result<ParsedFile, ParsingErr
     pos: 0,
     ast: ast,
     src: ref src,
+    pendingGt: false,
   };
 
   SelfLexing.advance(ref pState)?; // prime: load the first real token into currentLex

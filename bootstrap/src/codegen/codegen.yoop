@@ -40,7 +40,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { ModuleGraph, Module } from "../source_graph";
-import { Program, TypedModule } from "../typecheck";
+import { Program, TypedModule, DECL_NONE_ID, funcInstanceAt } from "../typecheck";
 
 // Hands back the finished IR as a Text. The caller owns it and its allocator
 // reclaims it - a `string` here would be a malloc the size of the whole module.
@@ -101,13 +101,55 @@ function emitFile(
     const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
     const declNode = nodeAt(ref m.ast, declId);
     if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
-      const err = emitFunction(ref e, ref prog, ref tm, m, declNode);
+      // A GENERIC function has no single body to emit: one per instantiation
+      // pass D recorded, each walking this same AST with a different
+      // substitution active. A function nothing ever called emits nothing,
+      // which is monomorphization doing its job.
+      if (declNode.childA != 0) {
+        const err = emitFunctionInstances(ref e, ref prog, ref tm, m, declNode);
+        if (err.len > 0) {
+          return err;
+        }
+      } else {
+        const err = emitFunction(ref e, ref prog, ref tm, m, declNode, NO_FUNC_INSTANCE);
+        if (err.len > 0) {
+          return err;
+        }
+      }
+    }
+    // An extern has no body to emit - just a `declare` so the linker knows the
+    // symbol is someone else's.
+    if (declNode.kind == ASTNodeKind.EXTERN_BLOCK) {
+      emitExternDeclares(ref e, ref prog, ref tm, m, declNode);
+    }
+    // A TYPE_DECL contributes no code until something instantiates it, and an
+    // IMPORT_DECL never contributes any.
+    i += 1;
+  }
+  return "";
+}
+
+// Every monomorphization of one generic function decl. The instances belong to
+// the whole PROGRAM, so this picks out the ones whose origin is this decl.
+function emitFunctionInstances(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  declNode: ASTNode
+): string {
+  const declId = genericFuncDeclIdOf(ref prog, ref tm, declNode.name);
+  if (declId == DECL_NONE_ID) {
+    return "";
+  }
+  let i: usize = 0;
+  while (i < prog.funcInstances.len) {
+    if (funcInstanceAt(ref prog, i).origin == declId) {
+      const err = emitFunction(ref e, ref prog, ref tm, m, declNode, i);
       if (err.len > 0) {
         return err;
       }
     }
-    // A TYPE_DECL contributes no code until something instantiates it, and an
-    // IMPORT_DECL never contributes any.
     i += 1;
   }
   return "";
@@ -118,7 +160,8 @@ function emitFunction(
   ref prog: Program,
   ref tm: TypedModule,
   m: Module,
-  declNode: ASTNode
+  declNode: ASTNode,
+  instance: usize
 ): string {
   // One locals map per function; the Cx bundles it with everything else so the
   // walk below is not threading five arguments through every call.
@@ -129,6 +172,7 @@ function emitFunction(
   // avoids copying the whole arena.
   let cx: Cx = {
     e: e, prog: prog, tm: tm, ast: ref m.ast, locals: ref locals, loops: ref loops,
+    instance: instance,
   };
 
   beginFunctionBuffers(ref e);
@@ -174,7 +218,14 @@ function collectParams(ref cx: Cx, declNode: ASTNode, ref params: Vec<ParamInfo>
   while (i < list.childCount) {
     const paramId = childAt(cx.ast, list, i);
     const paramNode = nodeAt(cx.ast, paramId);
-    vec.vecPush(ref params, { name: paramNode.name, ty: typeOf(ref cx, paramId) });
+    // `ty` is what the SIGNATURE says (a `ref` parameter is `ptr`);
+    // `pointeeTy` is what it points at, which is what the body loads and stores.
+    vec.vecPush(ref params, {
+      name: paramNode.name,
+      ty: typeOf(ref cx, paramId),
+      isRef: isRefAt(ref cx, paramId),
+      pointeeTy: pointeeTypeOf(ref cx, paramId),
+    });
     i += 1;
   }
 }
@@ -189,6 +240,15 @@ function emitParamPrologue(ref cx: Cx, ref params: Vec<ParamInfo>): void {
   let i: usize = 0;
   while (i < params.len) {
     const p = vec.vecGet(ref params, i);
+    // A `ref` parameter arrives as a pointer to the caller's object; that
+    // pointer is the slot, so there is no alloca and no spill. Every read and
+    // write in the body then lands on the caller's storage, which is what a
+    // borrow means.
+    if (p.isRef) {
+      declareRefParam(ref cx, p.name, p.pointeeTy);
+      i += 1;
+      continue;
+    }
     const slotInfo = declareLocal(ref cx, p.name, p.ty);
     emitStoreArg(ref cx, p.ty, p.name, slotInfo.id);
     i += 1;

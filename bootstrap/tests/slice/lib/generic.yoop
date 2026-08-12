@@ -1,0 +1,32 @@
+// A generic declared in ONE module and applied in another.
+//
+// This is the case the template design exists for: instantiating `Pair<int, int>`
+// from the entry module needs this decl's field types, and the entry module has
+// no way to reach this file's AST. Resolving the body once - here, where the AST
+// IS in hand - into types with TypeParam placeholders is what removes the
+// question. Substitution afterwards is pure TypeId arithmetic.
+
+export type Pair<A, B> {
+  first: A,
+  second: B,
+}
+
+export variant Maybe<T> {
+  Some { value: T },
+  Nothing,
+}
+
+export function pairSum(p: Pair<int, int>): int {
+  return p.first + p.second;
+}
+
+// A generic FUNCTION, declared here and instantiated from the entry module.
+// The body is checked once with `A` and `B` opaque; codegen emits one copy per
+// set of arguments the callers asked for.
+export function makePair<A, B>(a: A, b: B): Pair<A, B> {
+  return { first: a, second: b };
+}
+
+export function firstOf<A, B>(p: Pair<A, B>): A {
+  return p.first;
+}

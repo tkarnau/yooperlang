@@ -14,6 +14,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { Module } from "../source_graph";
+import { TokenTags } from "../lex";
 
 export function passCFillShells(
   ref prog: Program,
@@ -21,11 +22,34 @@ export function passCFillShells(
   m: Module,
   moduleId: ModuleId
 ): void {
+  // GENERIC decls first, every file of them, then the concrete ones.
+  //
+  // The order is load-bearing: a concrete decl with a `Vec<int>` field asks for
+  // an instance of Vec, and substituting into an unfilled template would
+  // produce an instance with no members. Doing every template first means a
+  // concrete decl can name any generic in its module regardless of where the
+  // two appear in the source.
+  fillEachFile(ref prog, ref tm, m, moduleId, true);
+  fillEachFile(ref prog, ref tm, m, moduleId, false);
+
+  // Then fill the instances all of that registered. Late enough that every
+  // template they can reach is populated - this module's just were, and
+  // earlier modules' were before this module was reached at all.
+  materializeInstances(ref prog);
+}
+
+function fillEachFile(
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  moduleId: ModuleId,
+  genericPass: bool
+): void {
   let f: usize = 0;
   while (f < m.files.len) {
     const file = vec.vecGet(ref m.files, f);
     beginFile(ref prog, file.absPath);
-    fillFileShells(ref prog, ref tm, m, file.root, moduleId);
+    fillFileShells(ref prog, ref tm, m, file.root, moduleId, genericPass);
     f += 1;
   }
 }
@@ -35,13 +59,23 @@ function fillFileShells(
   ref tm: TypedModule,
   m: Module,
   root: NodeId,
-  moduleId: ModuleId
+  moduleId: ModuleId,
+  genericPass: bool
 ): void {
   const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
   while (i < programNode.childCount) {
     const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
     const declNode = nodeAt(ref m.ast, declId);
+
+    // A decl with type parameters belongs to the generic sweep, and only to it.
+    const isGeneric = declNode.childA != 0
+      && (declNode.kind == ASTNodeKind.TYPE_DECL || declNode.kind == ASTNodeKind.VARIANT_DECL);
+    if (isGeneric != genericPass) {
+      i += 1;
+      continue;
+    }
+
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
         fillFunctionSignature(ref prog, ref tm, ref m.ast, declNode);
@@ -52,6 +86,20 @@ function fillFileShells(
       case ASTNodeKind.VARIANT_DECL: {
         fillVariantCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
+      case ASTNodeKind.CONST_DECL: {
+        fillModuleConst(ref prog, ref tm, ref m.ast, declNode);
+      }
+      case ASTNodeKind.EXTERN_BLOCK: {
+        // An extern's signature fills exactly like a function's - it has the
+        // same childB/childC slots, and no body is the only difference.
+        let x: usize = 0;
+        while (x < declNode.childCount) {
+          fillFunctionSignature(
+            ref prog, ref tm, ref m.ast, nodeAt(ref m.ast, childAt(ref m.ast, declNode, x))
+          );
+          x += 1;
+        }
+      }
       default: {
         // Pass A already reported anything it could not register, and an
         // IMPORT_DECL was pass B's business.
@@ -61,20 +109,80 @@ function fillFileShells(
   }
 }
 
+// The type a decl's members are filled INTO, and the parameter names that have
+// to be in scope while they are.
+//
+// For an ordinary decl that is just its own shell and no parameters. For a
+// generic one it is the TEMPLATE, with the decl's parameter names bound - which
+// is what makes a field annotated `T` resolve to a TypeParam rather than to an
+// unknown type.
+type FillTarget = TypeId;
+
+function beginFill(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  wantVariant: bool
+): FillTarget {
+  if (declNode.childA == 0) {
+    return concreteShellOf(ref prog, ref tm, declNode, wantVariant);
+  }
+
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  let declId: DeclId = DECL_NONE_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.GenericDecl { decl: d, sort: s }: { declId = d; }
+    default: { return TYPE_ERROR_ID; }
+  }
+
+  let info = genericAt(ref prog, declId);
+  disposable names: Vec<string> = typeParamNames(ref ast, declNode);
+  beginTypeParams(ref prog, ref info.params, ref names);
+  return info.template;
+}
+
+// The parameter NAMES, in declaration order, read back off the decl's
+// `<T, U>` list. Their TypeIds were interned in pass A; this pairs them up.
+function typeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propagates<disposable> {
+  let names: Vec<string> = vec.vecNew(2);
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    i += 1;
+  }
+  return names;
+}
+
+function concreteShellOf(ref prog: Program, ref tm: TypedModule, declNode: ASTNode, wantVariant: bool): TypeId {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Struct { typeId: t }: { if (!wantVariant) { return t; } return TYPE_ERROR_ID; }
+    case Symbol.VariantT { typeId: t }: { if (wantVariant) { return t; } return TYPE_ERROR_ID; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
 function fillFunctionSignature(
   ref prog: Program,
   ref tm: TypedModule,
   ref ast: AST,
   declNode: ASTNode
 ): void {
-  const symId = lookupOwnName(ref tm, declNode.name);
-  if (symId == SYMBOL_NONE_ID) {
+  // A generic function's signature goes into its TEMPLATE, with its type
+  // parameters in scope so `T` in a parameter or return annotation lands as a
+  // TypeParam. An ordinary one goes into its own shell, with nothing in scope.
+  const typeId = beginFillFunction(ref prog, ref tm, ref ast, declNode);
+  if (typeId == TYPE_ERROR_ID) {
+    endTypeParams(ref prog);
     return;   // pass A refused it and said why
-  }
-  let typeId: TypeId = TYPE_ERROR_ID;
-  switch (symbolAt(ref prog, symId)) {
-    case Symbol.Func { typeId: t }: { typeId = t; }
-    default: { return; }
   }
 
   // childB is the param NODE_LIST, childC the return annotation.
@@ -84,16 +192,53 @@ function fillFunctionSignature(
     let p: usize = 0;
     while (p < list.childCount) {
       const paramNode = nodeAt(ref ast, childAt(ref ast, list, p));
-      vec.vecPush(ref params, resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA));
+      const annotated = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
+      // `ref v: Vec<T>` is `ref Vec<T>` in the SIGNATURE - which is what makes
+      // passing a bare `v` a type error rather than a silent copy. The body
+      // still sees a plain `Vec<T>`; bindParams unwraps it. See pass_d.yoop.
+      if (paramNode.flagA) {
+        vec.vecPush(ref params, internRef(ref prog, annotated));
+      } else {
+        vec.vecPush(ref params, annotated);
+      }
       p += 1;
     }
   }
+  const ret = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childC);
+  endTypeParams(ref prog);
 
   setType(ref prog, typeId, Type.Func {
     params: params,
-    ret: resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childC),
+    ret: ret,
     variadic: false,
   });
+}
+
+// The Func type a signature fills, and the type-parameter scope it fills under.
+// The function-shaped twin of `beginFill`.
+function beginFillFunction(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): TypeId {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { return t; }
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      if (s != GenericSort.FUNC) {
+        return TYPE_ERROR_ID;
+      }
+      let info = genericAt(ref prog, d);
+      disposable names: Vec<string> = typeParamNames(ref ast, declNode);
+      beginTypeParams(ref prog, ref info.params, ref names);
+      return info.template;
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
 }
 
 function fillStructFields(
@@ -103,14 +248,13 @@ function fillStructFields(
   declNode: ASTNode,
   moduleId: ModuleId
 ): void {
-  const symId = lookupOwnName(ref tm, declNode.name);
-  if (symId == SYMBOL_NONE_ID) {
+  // The shell for an ordinary decl, the TEMPLATE for a generic one - and for a
+  // generic one this also puts its parameter names in scope, so a field
+  // annotated `T` resolves to a TypeParam.
+  const typeId = beginFill(ref prog, ref tm, ref ast, declNode, false);
+  if (typeId == TYPE_ERROR_ID) {
+    endTypeParams(ref prog);
     return;
-  }
-  let typeId: TypeId = TYPE_ERROR_ID;
-  switch (symbolAt(ref prog, symId)) {
-    case Symbol.Struct { typeId: t }: { typeId = t; }
-    default: { return; }
   }
 
   // The fields are the TYPE_DECL's own childIds run.
@@ -124,17 +268,38 @@ function fillStructFields(
     });
     f += 1;
   }
+  endTypeParams(ref prog);
 
-  // `module` carries through from the shell pass A registered: it is what
-  // codegen mangles the LLVM type name against, so two modules can each declare
-  // a `Point` without one silently becoming the other.
+  // `module` and `generic` carry through from the shell pass A registered:
+  // `module` is what codegen mangles the LLVM type name against, and `generic`
+  // is what marks a template as one.
   setType(ref prog, typeId, Type.Struct {
     decl: { name: declNode.name, module: moduleId, populated: true },
     fields: fields,
     methods: map.mapNew(0, map.stringKeyOps()),
     implementsTraits: vec.vecNew(0),
-    generic: { origin: 0, args: vec.vecNew(0) },
+    generic: genericInstOf(ref prog, typeId),
   });
+}
+
+// The `generic` record already on a shell, copied so re-setting the slot keeps
+// it. An ordinary decl's is the empty one pass A gave it.
+function genericInstOf(ref prog: Program, typeId: TypeId): GenericInst propagates<disposable> {
+  switch (typeAt(ref prog, typeId)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      let args: Vec<TypeId> = vec.vecNew(g.args.len);
+      vec.vecExtendFrom(ref args, vec.vecAsArray(ref g.args));
+      return { origin: g.origin, args: args };
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      let args: Vec<TypeId> = vec.vecNew(g.args.len);
+      vec.vecExtendFrom(ref args, vec.vecAsArray(ref g.args));
+      return { origin: g.origin, args: args };
+    }
+    default: {
+      return { origin: DECL_NONE_ID, args: vec.vecNew(0) };
+    }
+  }
 }
 
 // The cases, in DECLARATION ORDER. That order is the tag, and the tag is ABI:
@@ -147,14 +312,10 @@ function fillVariantCases(
   declNode: ASTNode,
   moduleId: ModuleId
 ): void {
-  const symId = lookupOwnName(ref tm, declNode.name);
-  if (symId == SYMBOL_NONE_ID) {
+  const typeId = beginFill(ref prog, ref tm, ref ast, declNode, true);
+  if (typeId == TYPE_ERROR_ID) {
+    endTypeParams(ref prog);
     return;
-  }
-  let typeId: TypeId = TYPE_ERROR_ID;
-  switch (symbolAt(ref prog, symId)) {
-    case Symbol.VariantT { typeId: t }: { typeId = t; }
-    default: { return; }
   }
 
   let cases: Vec<VariantCase> = vec.vecNew(declNode.childCount);
@@ -177,13 +338,89 @@ function fillVariantCases(
     c += 1;
   }
 
+  endTypeParams(ref prog);
   setType(ref prog, typeId, Type.Variant {
     decl: { name: declNode.name, module: moduleId, populated: true },
     cases: cases,
     methods: map.mapNew(0, map.stringKeyOps()),
     implementsTraits: vec.vecNew(0),
-    generic: { origin: 0, args: vec.vecNew(0) },
+    generic: genericInstOf(ref prog, typeId),
   });
+}
+
+// `const SEEK_SET: c_int = 0;` - the annotation, and the value.
+//
+// The initializer must be a compile-time INTEGER: a const is inlined at every
+// use rather than emitted as a global, so there has to be something to inline.
+// Anything else is refused by name rather than silently becoming zero.
+function fillModuleConst(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+
+  // childA is the annotation, childB the initializer.
+  if (declNode.childA == 0) {
+    reportError(
+      ref prog,
+      `module-level const "${declNode.name}" needs a type annotation`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childA);
+
+  let value: int64 = 0;
+  if (!constIntValue(ref ast, declNode.childB, ref value)) {
+    reportError(
+      ref prog,
+      `module-level const "${declNode.name}" needs an integer literal initializer - the bootstrap inlines consts, so there is nothing else it can be yet`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  if (!isIntPrimType(ref prog, declared)) {
+    reportError(
+      ref prog,
+      `module-level const "${declNode.name}" is ${formatType(ref prog, declared)}; only integer consts are supported yet`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+
+  setSymbol(ref prog, symId, Symbol.Value { typeId: declared, intVal: value });
+}
+
+// An integer literal, with or without a leading `-`. True when it read one.
+//
+// `-5` is a UNARY_EXPRESSION over a literal rather than a negative literal -
+// the parser does not fold it, because `-x` and `-5` are the same shape until
+// you look at the operand. So this unwraps one level of minus.
+function constIntValue(ref ast: AST, exprId: NodeId, ref out: int64): bool {
+  if (exprId == 0) {
+    return false;
+  }
+  const expr = nodeAt(ref ast, exprId);
+  if (expr.kind == ASTNodeKind.UNARY_EXPRESSION && expr.operator == TokenTags.MINUS) {
+    if (!constIntValue(ref ast, expr.childA, ref out)) {
+      return false;
+    }
+    out = -out;
+    return true;
+  }
+  if (expr.kind == ASTNodeKind.INT_LITERAL) {
+    out = int64(expr.intVal);
+    if (expr.flagA) {
+      out = -out;
+    }
+    return true;
+  }
+  return false;
 }
 
 export function lookupOwnName(ref tm: TypedModule, name: string): SymbolId {

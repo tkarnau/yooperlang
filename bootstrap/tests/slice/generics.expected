@@ -1,0 +1,9 @@
+box=7 hello
+wrapper=5 1
+result=42 -1
+pair=7
+maybe=11 -1
+identity=6 six
+boxUp=6
+makePair=12 6
+exit=0

@@ -29,7 +29,10 @@ export enum GenericSort { STRUCT, FUNC, TRAIT, VARIANT }
 export variant Symbol {
   Struct      { typeId: TypeId },
   Func        { typeId: TypeId },         // a named function's FuncType
-  Value       { typeId: TypeId },         // a module-level const binding
+  // A module-level `const`. The VALUE rides along because a const is inlined
+  // at every use rather than emitted as a global - there is nothing to load
+  // from, and an importer needs the value, not an address.
+  Value       { typeId: TypeId, intVal: int64 },
   Trait       { typeId: TypeId },
   VariantT    { typeId: TypeId },         // tagged `variant` (enum-with-payload)
   Union       { typeId: TypeId },
@@ -48,7 +51,7 @@ export variant Symbol {
 export function isValueSymbol(ref prog: Program, symId: SymbolId): bool {
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Func { typeId: t }: { return true; }
-    case Symbol.Value { typeId: t }: { return true; }
+    case Symbol.Value { typeId: t, intVal: v }: { return true; }
     default: { return false; }
   }
 }

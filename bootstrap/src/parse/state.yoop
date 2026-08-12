@@ -46,6 +46,12 @@ export type ParserState implements SelfLexing propagates<disposable> {
   pos: usize,
   ast: AST,
   src: ref uint8[],
+  // `Vec<Map<string, TypeId>>` ends in a `>>`, which the lexer hands over as
+  // ONE right-shift token. Closing the inner list consumes it and leaves a
+  // virtual `>` behind for the outer one; `consumeClosingGt` is the only thing
+  // that ever reads this, so every other parse site sees the tokens as they
+  // are. Same trick, same reason, as the JS reference's pendingGtFromRshift.
+  pendingGt: bool,
   function buildSourcedNode(ref self, astNodeKind: ASTNodeKind): ASTNode {
     // Node loc is the CURRENT token's start (self.pos tracks where the NEXT
     // lex begins, which is past the current token).

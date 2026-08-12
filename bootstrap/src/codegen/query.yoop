@@ -15,7 +15,8 @@ import { NodeId } from "../ast";
 import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
   TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
   lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
-  variantModuleIdOf, variantDeclNameOf } from "../typecheck";
+  variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute,
+  DeclId, DECL_NONE_ID, GenericSort, derefType } from "../typecheck";
 import { nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
@@ -24,11 +25,37 @@ import { nodeAt } from "../ast";
 // to assume every node it visits has one (see the layer contract in
 // plans/bootstrap-pipeline-contracts.md), so there is no error path here.
 export function typeOf(ref cx: Cx, nodeId: NodeId): string {
-  return llvmType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+  return llvmType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+}
+
+// The TypeId pass D recorded, with the current monomorphization applied.
+//
+// This is THE place a generic function's opaque `T` becomes a concrete type.
+// The body was checked once with its parameters left standing, so its
+// decoration is written in terms of them; every instance walks that same
+// decoration and substitutes on the way out. Everything else in codegen reads
+// types through here and never learns that generics exist.
+export function resolvedTypeAt(ref cx: Cx, nodeId: NodeId): TypeId {
+  const recorded = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  if (cx.instance == NO_FUNC_INSTANCE) {
+    return recorded;
+  }
+  let inst = funcInstanceAt(cx.prog, cx.instance);
+  let info = genericAt(cx.prog, inst.origin);
+  return substitute(cx.prog, recorded, ref info.params, ref inst.args);
 }
 
 // The declared return type of a top-level function, as LLVM spells it.
 export function returnTypeOf(ref cx: Cx, name: string): string {
+  // Inside a monomorphization the SIGNATURE is the instance's, not the generic
+  // decl's - the decl's return type still mentions a TypeParam.
+  if (cx.instance != NO_FUNC_INSTANCE) {
+    let inst = funcInstanceAt(cx.prog, cx.instance);
+    switch (typeAt(cx.prog, inst.funcType)) {
+      case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(cx.prog, r); }
+      default: { return "void"; }
+    }
+  }
   switch (map.mapGet(ref cx.tm.names, name)) {
     case Option.None: { return "void"; }
     case Option.Some { value: symId }: {
@@ -98,6 +125,63 @@ export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): 
 // assignment paths tell a struct from an array.
 export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
   return isStructType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+}
+
+// The generic-function DeclId a name binds to, or DECL_NONE_ID when the name is
+// not one. Takes prog/tm rather than a Cx because the walk asks BEFORE there is
+// a Cx to ask through - it is deciding how many bodies to build one for.
+export function genericFuncDeclIdOf(ref prog: Program, ref tm: TypedModule, name: string): DeclId {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.GenericDecl { decl: d, sort: s }: {
+          if (s == GenericSort.FUNC) {
+            return d;
+          }
+          return DECL_NONE_ID;
+        }
+        default: { return DECL_NONE_ID; }
+      }
+    }
+    case Option.None: { return DECL_NONE_ID; }
+  }
+}
+
+// The value of a module-level `const` by name. `None` when the name is not one,
+// which is how the local-read path tells "inline this" from an internal error.
+export function moduleConstOf(ref cx: Cx, name: string): Option<int64> {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Value { typeId: t, intVal: v }: { return Option.Some { value: v }; }
+        default: { return Option.None; }
+      }
+    }
+    case Option.None: { return Option.None; }
+  }
+}
+
+// A constant as an operand. Negative values go through NegImm for the same
+// reason a negated literal pattern does - the emitter writes the sign.
+export function constOperand(v: int64): Operand {
+  if (v < 0) {
+    return Operand.NegImm { value: uint64(-v) };
+  }
+  return Operand.Imm { value: uint64(v) };
+}
+
+// True when a node resolved to a `ref T`, which is how the parameter prologue
+// tells a borrow from a value.
+export function isRefAt(ref cx: Cx, nodeId: NodeId): bool {
+  switch (typeAt(cx.prog, resolvedTypeAt(ref cx, nodeId))) {
+    case Type.Ref { inner: i }: { return true; }
+    default: { return false; }
+  }
+}
+
+// What a `ref T` points at, as LLVM spells it. The node's own type otherwise.
+export function pointeeTypeOf(ref cx: Cx, nodeId: NodeId): string {
+  return llvmType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
 }
 
 export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {

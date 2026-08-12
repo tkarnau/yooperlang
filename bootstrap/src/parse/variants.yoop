@@ -113,10 +113,58 @@ export function parseVariantPattern(ref ps: ParserState): Result<NodeId, Parsing
   node.name = parseIdentAsName(ref ps)?;
 
   if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
-    node.childA = parseStructLiteralFields(ref ps)?;
+    node.childA = parsePatternFields(ref ps)?;
   }
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
+
+// `{ value: v, error: _ }` - the BINDINGS a pattern introduces.
+//
+// Shaped like a struct literal and deliberately not parsed as one: the right
+// of each `:` is a NAME, not an expression. Reusing the literal parser meant
+// parsing an expression and then rejecting anything that was not an identifier,
+// which put the rule in pass D and made `_` a syntax error rather than a
+// discard.
+//
+// `_` binds nothing. It says "this case carries a field and I do not want it",
+// which is the difference between ignoring a payload and forgetting it - pass D
+// still requires every field to be named.
+function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
+    field.name = parseIdentAsName(ref ps)?;
+    SelfLexing.expect(ref ps, TokenTags.COLON)?;
+
+    let binding = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.DISCARD) {
+      SelfLexing.advance(ref ps)?;
+      binding.name = DISCARD_BINDING;
+    } else {
+      binding.name = parseIdentAsName(ref ps)?;
+    }
+    field.childA = SelfLexing.pushNode(ref ps, binding);
+
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, field));
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The name a `_` binding carries. Spelled out rather than left empty so a
+// reader of the arena sees what it is, and unreachable as a real identifier
+// because `_` does not lex as one.
+export const DISCARD_BINDING: string = "_";
 
 // True when the arm's pattern is a variant one rather than an integer literal.
 // `case Result.Ok` starts with an IDENT; `case 1` and `case -1` do not.

@@ -14,6 +14,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Diagnostic, SourceLocation, errorAt } from "../diagnostics";
+import { NodeId } from "../ast";
 
 // One entry of TypedModule.importedFrom. Both halves are needed to name the
 // symbol an imported call lands on: `import { tag as mathTag }` binds
@@ -39,7 +40,17 @@ export type TypedModule propagates<disposable> {
   // imported type compare equal to the original - and a shared SymbolId cannot
   // say which module has to define the symbol codegen calls.
   importedFrom: Map<string, ImportOrigin>,
+  // Names declared in an `extern` block. Their symbol IS the linker's spelling,
+  // so codegen must not mangle them - and it cannot tell from the Symbol, which
+  // is an ordinary `Symbol.Func`.
+  externNames: Map<string, bool>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
+  // Which monomorphized function a CALL node resolved to, when the callee was
+  // generic. Sparse, because most calls are not - the shape program.yoop's
+  // header describes for exactly this kind of decoration.
+  // Keyed by `uint64(nodeId)`: std/collections/map has no usize KeyOps, and
+  // usize and uint64 are distinct types even where they are the same width.
+  calleeInstance: Map<uint64, usize>,
   allowsUnsafe: bool,
   // Sparse decorations (calleeMangled, genericInstances, castTargets, ...) are
   // added as Map<NodeId, T> slots here when the checker needs them.
@@ -51,6 +62,19 @@ export type Program propagates<disposable> {
   symbols: Vec<Symbol>,         // interned; indexed by SymbolId
   modules: Vec<TypedModule>,    // by ModuleId; parallel to the driver's modules
   diagnostics: Vec<Diagnostic>,
+  // Generic decls, by DeclId, and the (origin, args) instances of them. See
+  // generics.yoop - the whole reason both live on Program is that instantiation
+  // is TypeId arithmetic and must not need an AST.
+  generics: Vec<GenericDeclInfo>,
+  instances: Vec<Instance>,
+  // Monomorphized generic FUNCTIONS. Separate from `instances` because they
+  // produce a symbol rather than a type, and codegen walks them to decide what
+  // bodies to emit.
+  funcInstances: Vec<FuncInstance>,
+  // The type-parameter names in scope while a generic decl's body is resolved.
+  // Ambient for the same reason `currentFile` is; `beginTypeParams` is the one
+  // writer.
+  typeParams: Map<string, TypeId>,
   // The source file every pass below is currently walking, stamped onto each
   // diagnostic by `reportError`. Ambient rather than threaded because the
   // alternative is a `filePath` parameter on forty call sites that all want the
@@ -93,15 +117,22 @@ export function initProgram(): Program propagates<disposable> {
   // SymbolId 0 must never be a real symbol, so a "not found" 0 stays
   // unambiguous. Burn index 0 on a dead entry.
   let symbols: Vec<Symbol> = vec.vecNew(8);
-  vec.vecPush(ref symbols, Symbol.Value { typeId: TYPE_ERROR_ID });
+  vec.vecPush(ref symbols, Symbol.Value { typeId: TYPE_ERROR_ID, intVal: 0 });
 
-  return {
+  let typeParams: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+  let prog: Program = {
     types: types,
     symbols: symbols,
     modules: vec.vecNew(0),
     diagnostics: vec.vecNew(0),
+    generics: vec.vecNew(4),
+    instances: vec.vecNew(4),
+    funcInstances: vec.vecNew(4),
+    typeParams: typeParams,
     currentFile: "",
   };
+  initGenerics(ref prog);   // burns DeclId 0
+  return prog;
 }
 
 export function initTypedModule(moduleId: string): TypedModule propagates<disposable> {
@@ -110,11 +141,15 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let names: Map<string, SymbolId> = map.mapNew(0, map.stringKeyOps());
   let exports: Map<string, SymbolId> = map.mapNew(0, map.stringKeyOps());
   let importedFrom: Map<string, ImportOrigin> = map.mapNew(0, map.stringKeyOps());
+  let calleeInstance: Map<uint64, usize> = map.mapNew(0, map.uint64KeyOps());
+  let externNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   return {
     moduleId: moduleId,
     names: names,
     exports: exports,
     importedFrom: importedFrom,
+    externNames: externNames,
+    calleeInstance: calleeInstance,
     resolvedTypes: vec.vecNew(0),
     allowsUnsafe: false,
   };
@@ -188,6 +223,12 @@ export function internSymbol(ref prog: Program, s: Symbol): SymbolId {
 // slot sees it.
 export function setType(ref prog: Program, id: TypeId, t: Type): void {
   vec.vecSet(ref prog.types, id, t);
+}
+
+// Replace a symbol arena slot, the same way setType replaces a type's. Pass A
+// binds a shell and pass C fills it; every holder of the id sees the new one.
+export function setSymbol(ref prog: Program, id: SymbolId, s: Symbol): void {
+  vec.vecSet(ref prog.symbols, id, s);
 }
 
 export function typeAt(ref prog: Program, id: TypeId): Type {

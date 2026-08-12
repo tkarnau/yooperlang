@@ -22,18 +22,48 @@ import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 import * as str from "std/core/strings.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { DISCARD_BINDING } from "../parse";
 
 // The variant type a module-level name refers to, or TYPE_ERROR_ID when the
 // name is not a variant. SILENT: every caller has a better message than this
 // one could give, because only the caller knows what it was hoping for.
-export function variantTypeNamed(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+//
+// `expected` is what a GENERIC variant resolves through. `Result.Ok { value: 1 }`
+// names no instantiation - `Result<int, string>` and `Result<int, int>` have
+// the same case - so the type comes from context, exactly as a struct literal's
+// does. When the context is an instance of that decl, it IS the answer.
+export function variantTypeNamed(
+  ref prog: Program,
+  ref tm: TypedModule,
+  name: string,
+  expected: TypeId
+): TypeId {
   const symId = lookupOwnName(ref tm, name);
   if (symId == SYMBOL_NONE_ID) {
     return TYPE_ERROR_ID;
   }
   switch (symbolAt(ref prog, symId)) {
     case Symbol.VariantT { typeId: t }: { return t; }
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      if (s == GenericSort.VARIANT && instanceOriginOf(ref prog, expected) == d) {
+        return expected;
+      }
+      return TYPE_ERROR_ID;
+    }
     default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// True when `name` is a generic variant decl - used to tell "you need context"
+// apart from "that is not a variant at all".
+function isGenericVariantNamed(ref prog: Program, ref tm: TypedModule, name: string): bool {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return false;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.GenericDecl { decl: d, sort: s }: { return s == GenericSort.VARIANT; }
+    default: { return false; }
   }
 }
 
@@ -57,7 +87,11 @@ export function isPayloadlessConstructor(
     case Option.Some { value: t }: { return false; }
     case Option.None: { }
   }
-  return variantTypeNamed(ref prog, ref tm, base.name) != TYPE_ERROR_ID;
+  // A generic variant counts too: `Result.None` needs context to know WHICH
+  // instantiation, but it is still a constructor and not a field read, and
+  // saying so here is what gets it the right diagnostic.
+  return variantTypeNamed(ref prog, ref tm, base.name, TYPE_ERROR_ID) != TYPE_ERROR_ID
+    || isGenericVariantNamed(ref prog, ref tm, base.name);
 }
 
 // `Result.Ok { value: 1 }` and `Result.None`, which differ only in where the
@@ -70,11 +104,23 @@ export function checkVariantConstructor(
   expr: ASTNode,
   baseId: NodeId,
   payloadList: NodeId,
+  expected: TypeId,
   ref scope: LocalScope
 ): TypeId {
   const base = nodeAt(ref ast, baseId);
-  const variantType = variantTypeNamed(ref prog, ref tm, base.name);
+  const variantType = variantTypeNamed(ref prog, ref tm, base.name, expected);
   if (variantType == TYPE_ERROR_ID) {
+    // A generic variant with no usable context is its own mistake: the case is
+    // real, the instantiation is not knowable. `Result<int, string>` and
+    // `Result<int, int>` have the same `Ok`, so only the annotation can say.
+    if (isGenericVariantNamed(ref prog, ref tm, base.name)) {
+      reportError(
+        ref prog,
+        `cannot tell which "${base.name}" this is - annotate the binding or the parameter it goes to`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
     reportError(
       ref prog,
       `"${base.name}" is not a variant, so "${base.name}.${expr.name}" constructs nothing`,
@@ -173,8 +219,10 @@ export function checkVariantPattern(
   const base = nodeAt(ref ast, pattern.childB);
 
   // The pattern names its own variant, so a pattern from the WRONG variant is
-  // caught here rather than silently matching by ordinal.
-  const named = variantTypeNamed(ref prog, ref tm, base.name);
+  // caught here rather than silently matching by ordinal. For a generic one the
+  // SCRUTINEE is the context: `case Result.Ok` in a switch over
+  // `Result<int, string>` means that instantiation and no other.
+  const named = variantTypeNamed(ref prog, ref tm, base.name, scrutType);
   if (named == TYPE_ERROR_ID) {
     reportError(ref prog, `"${base.name}" is not a variant`, pattern.sourceLoc);
     return -1;
@@ -240,15 +288,16 @@ function bindPatternPayload(
 
       const bindingId = fieldNode.childA;
       const binding = nodeAt(ref ast, bindingId);
-      if (binding.kind != ASTNodeKind.IDENT) {
-        reportError(
-          ref prog,
-          `a pattern binds a NAME, so "${fieldNode.name}:" must be followed by one`,
-          fieldNode.sourceLoc
-        );
+
+      // `_` names the field without binding it. Still counted as "given", so a
+      // case that grows a field breaks its patterns loudly - the difference
+      // between ignoring a payload and forgetting it.
+      if (str.stringEq(binding.name, DISCARD_BINDING)) {
+        vec.vecSet(ref tm.resolvedTypes, fieldId, declared.typeId);
         i += 1;
         continue;
       }
+
       if (!scopeDeclare(ref scope, binding.name, declared.typeId)) {
         reportError(
           ref prog,

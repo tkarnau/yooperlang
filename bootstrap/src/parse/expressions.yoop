@@ -64,6 +64,14 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
         node.intVal = 0;
       }
     }
+    case TokenTags.REF: {
+      // `ref x` at a call site: a BORROW, which is a distinct type from `x`.
+      // Writing it is required rather than inferred - the whole point is that
+      // the reader can see which arguments the callee may write through.
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.REF_EXPRESSION);
+      SelfLexing.advance(ref ps)?;
+      node.childA = parseExpression(ref ps, 0)?;
+    }
     case TokenTags.STRLITERAL: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRING_LITERAL);
       const tok = SelfLexing.advance(ref ps)?;

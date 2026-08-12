@@ -127,10 +127,13 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     case TokenTags.VARIANT: {
       node.childA = parseVariantDecl(ref ps)?;
     }
+    case TokenTags.CONST: {
+      node.childA = parseVarDecl(ref ps)?;
+    }
     default: {
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
-        `only \`export function\`, \`export type\` and \`export variant\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
+        `only \`export function\`, \`export type\`, \`export variant\` and \`export const\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
         peekLengthUsize(ref ps),
       )};
     }

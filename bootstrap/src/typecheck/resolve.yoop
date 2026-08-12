@@ -10,7 +10,8 @@ import * as str from "std/core/strings.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Option } from "std/core/types.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, kindName } from "../ast";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
 
 export function resolveTypeAnnotation(
   ref prog: Program,
@@ -32,7 +33,7 @@ export function resolveTypeAnnotation(
       return internArray(ref prog, elem);
     }
     case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
-      return resolveTypeName(ref prog, ref tm, annot);
+      return resolveTypeName(ref prog, ref tm, ref ast, annot);
     }
     default: {
       reportError(ref prog, `not a type annotation: ${kindName(annot.kind)}`, annot.sourceLoc);
@@ -41,12 +42,27 @@ export function resolveTypeAnnotation(
   }
 }
 
-function resolveTypeName(ref prog: Program, ref tm: TypedModule, annot: ASTNode): TypeId {
+function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, annot: ASTNode): TypeId {
   if (isVoidName(annot.name)) {
     return TYPE_VOID_ID;
   }
+
+  // A type PARAMETER, while a generic decl's body is being resolved. Checked
+  // before anything else so `T` inside `Box<T>` cannot be shadowed by a
+  // primitive spelling or an unrelated decl of the same name.
+  const asParam = typeParamNamed(ref prog, annot.name);
+  if (asParam != TYPE_ERROR_ID) {
+    if (annot.childA != 0) {
+      reportError(ref prog, `type parameter "${annot.name}" is not generic`, annot.sourceLoc);
+    }
+    return asParam;
+  }
+
   switch (primKindOfName(annot.name)) {
     case Option.Some { value: k }: {
+      if (annot.childA != 0) {
+        reportError(ref prog, `"${annot.name}" is not generic`, annot.sourceLoc);
+      }
       return primTypeId(k);
     }
     case Option.None: {
@@ -55,7 +71,7 @@ function resolveTypeName(ref prog: Program, ref tm: TypedModule, annot: ASTNode)
       // reference resolves here.
       switch (map.mapGet(ref tm.names, annot.name)) {
         case Option.Some { value: symId }: {
-          return typeIdOfSymbol(ref prog, symId, annot);
+          return typeIdOfSymbol(ref prog, ref tm, ref ast, symId, annot);
         }
         case Option.None: {
           reportError(ref prog, `unknown type "${annot.name}"`, annot.sourceLoc);
@@ -66,19 +82,80 @@ function resolveTypeName(ref prog: Program, ref tm: TypedModule, annot: ASTNode)
   }
 }
 
-function typeIdOfSymbol(ref prog: Program, symId: SymbolId, annot: ASTNode): TypeId {
+function typeIdOfSymbol(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  symId: SymbolId,
+  annot: ASTNode
+): TypeId {
   switch (symbolAt(ref prog, symId)) {
-    case Symbol.Struct { typeId: t }:    { return t; }
-    case Symbol.VariantT { typeId: t }:  { return t; }
-    case Symbol.Union { typeId: t }:     { return t; }
-    case Symbol.ValueEnum { typeId: t }: { return t; }
-    case Symbol.Trait { typeId: t }:     { return t; }
-    case Symbol.Vtable { typeId: t }:    { return t; }
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      return resolveGenericApplication(ref prog, ref tm, ref ast, d, annot);
+    }
+    case Symbol.Struct { typeId: t }:    { return closedType(ref prog, t, annot); }
+    case Symbol.VariantT { typeId: t }:  { return closedType(ref prog, t, annot); }
+    case Symbol.Union { typeId: t }:     { return closedType(ref prog, t, annot); }
+    case Symbol.ValueEnum { typeId: t }: { return closedType(ref prog, t, annot); }
+    case Symbol.Trait { typeId: t }:     { return closedType(ref prog, t, annot); }
+    case Symbol.Vtable { typeId: t }:    { return closedType(ref prog, t, annot); }
     default: {
       reportError(ref prog, `"${annot.name}" is not a type`, annot.sourceLoc);
       return TYPE_ERROR_ID;
     }
   }
+}
+
+// A non-generic type used with `<...>` is a mistake worth naming, rather than
+// arguments silently ignored.
+function closedType(ref prog: Program, t: TypeId, annot: ASTNode): TypeId {
+  if (annot.childA != 0) {
+    reportError(ref prog, `"${annot.name}" is not generic, so it takes no type arguments`, annot.sourceLoc);
+  }
+  return t;
+}
+
+// `Vec<int>` - resolve the arguments, then hand them to the registry.
+//
+// The arity check is here because it is the only place that knows both numbers,
+// and because getting it wrong produces an instance with a missing member type
+// rather than an error.
+function resolveGenericApplication(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declId: DeclId,
+  annot: ASTNode
+): TypeId {
+  let info = genericAt(ref prog, declId);
+
+  if (annot.childA == 0) {
+    reportError(
+      ref prog,
+      `"${annot.name}" is generic, so it needs type arguments - write \`${annot.name}<...>\` with ${info.params.len} of them`,
+      annot.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  const list = nodeAt(ref ast, annot.childA);
+  disposable args: Vec<TypeId> = vec.vecNew(list.childCount);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref args, resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, list, i)));
+    i += 1;
+  }
+
+  if (args.len != info.params.len) {
+    reportError(
+      ref prog,
+      `"${annot.name}" takes ${info.params.len} type argument(s), got ${args.len}`,
+      annot.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  return instantiate(ref prog, declId, ref args);
 }
 
 // The canonical spellings. `void` is absent on purpose: it is the ABSENCE of a
@@ -375,6 +452,15 @@ export function variantDeclNameOf(ref prog: Program, variantType: TypeId): strin
       return d.name;
     }
     default: { return ""; }
+  }
+}
+
+// `ref T` -> `T`, and anything else unchanged. What a callee sees when it is
+// handed a borrow.
+export function derefType(ref prog: Program, id: TypeId): TypeId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Ref { inner: i }: { return i; }
+    default: { return id; }
   }
 }
 

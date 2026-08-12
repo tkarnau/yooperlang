@@ -15,6 +15,9 @@ export variant Operand {
   Bool   { value: bool },     // true / false, how LLVM spells an i1 immediate
   Temp   { id: usize },       // %t3
   StrRef { id: usize },       // @.str.0
+  // `%v.3.addr` - a local's slot ADDRESS rather than its value. What `ref x`
+  // evaluates to: a borrow is the address, and the slot already is one.
+  SlotAddr { name: string, id: usize },
   None,                       // a void call's non-result
 }
 
@@ -42,6 +45,18 @@ export function emitOperand(ref e: Emitter, op: Operand): void {
     case Operand.StrRef { id: n }: {
       text.push(ref e.fn, "@.str.");
       text.pushUint(ref e.fn, uint64(n));
+    }
+    case Operand.SlotAddr { name: n, id: i }: {
+      text.pushByte(ref e.fn, '%');
+      text.push(ref e.fn, n);
+      // Mirrors `slot()` in context.yoop, including its reserved id.
+      if (i == ARG_PTR_SLOT) {
+        text.push(ref e.fn, ".arg");
+      } else {
+        text.pushByte(ref e.fn, '.');
+        text.pushUint(ref e.fn, uint64(i));
+        text.push(ref e.fn, ".addr");
+      }
     }
     case Operand.None: { text.push(ref e.fn, "void"); }
   }

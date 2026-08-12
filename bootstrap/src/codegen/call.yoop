@@ -60,7 +60,7 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   if (!isVoid) {
     dest = freshTemp(cx.e);
   }
-  const callee = calleeSymbol(ref cx, expr);
+  const callee = calleeSymbol(ref cx, expr, exprId);
   emitCall(ref cx, dest, retTy, callee.home, callee.name, isPrintf, ref args);
 
   if (isVoid) {

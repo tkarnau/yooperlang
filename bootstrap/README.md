@@ -89,6 +89,11 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
   * `switch` over an integer, with multi-pattern arms and a required `default`
   * structs as VALUES: `{ x: 1 }` literals, field read and write, passing and
     returning by value
+  * generics: generic `type`, `variant` and `function` decls, monomorphized on
+    demand. Types take explicit arguments (`Box<int>`, `Result<int, string>`,
+    `Vec<Map<string, TypeId>>`); a function's are INFERRED, from the arguments
+    first and then from the expected type - which is the only source when
+    nothing but the return type mentions the parameter (`nothing(): Maybe<T>`).
   * `variant` decls, their constructors and their switch patterns:
 
         variant Shape { Circle { r: int }, Rect { w: int, h: int }, Empty }
@@ -103,7 +108,11 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
     never both, and a pattern BINDS its payload into the arm.
   * `return`, with or without a value
   * int literals, string literals, `+ - * / %`
-  * calls, including the `printf` builtin
+  * calls, including the `printf` builtin. A call's arguments are checked
+    AGAINST the callee's parameters - right number, right types - and each one
+    is checked against its own parameter, which is what pins an untyped literal
+    to it (`wide(7)` gives the 7 an int64). `printf` is the exception: variadic,
+    so there is no signature to check against.
   * `export function` / `export type`, and every import form but one:
 
         import { add, scale as times, Point } from "./lib/mathx.yoop";
@@ -116,6 +125,27 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
     `module <name>;` is ONE module - one namespace, one mangled prefix, and its
     files see each other's declarations without importing
 
+  * `extern "C" from "stdio.h" { function puts(s: string): int; }` - signatures
+    for functions that live somewhere else. An extern is the one function whose
+    symbol keeps its exact spelling, since that spelling IS what the linker
+    resolves against.
+  * `import.unsafe;` / `import.test;` - module-level FLAGS rather than imports,
+    which is what the `.` distinguishes.
+  * module-level `const NAME: T = <integer literal>;`, INLINED at every use
+    rather than emitted as a global - which is what makes an imported one cost
+    nothing, and why the initializer has to be something there is to inline.
+    Module-level `let` is refused: a mutable global is a different feature.
+  * `_` in a pattern (`case Res.Err { code: c, detail: _ }`) - names a payload
+    field without binding it. Still NAMED, so a case that grows a field breaks
+    its patterns loudly.
+  * `ref` at a call site (`vec.vecPush(ref out, x)`) - a BORROW. Writing it is
+    required, not inferred: a `ref v: T` parameter is `ref T` in the signature,
+    so passing a bare `v` is a type error and the reader can see at the call
+    which arguments the callee may write through.
+  * kind prefixes in an annotation (`owned string`), parsed and RECORDED. No
+    kind is enforced, so nothing reads them yet; the limitation is "not
+    enforced" rather than "not parsed", and the JS reference additionally checks
+    the kind was imported, which the bootstrap has no kind table to do.
   * `std/...` import paths, resolved against a root the compiler DISCOVERS:
     `YOOP_STD_ROOT` if set, otherwise a probe beside the executable. Values from
     std must come through a namespace (`import * as log from "std/log.yoop"`);
@@ -123,20 +153,21 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
 
 Not yet: side-effect imports (`import "./init.yoop";`), the `modules/` import
 root, std AUTOLOADS, `ns.CONSTANT` (anything but a call through a namespace),
-generic variants, value `enum`s, unions, `for x in xs`, module-level
-`let` / `const`, nested field paths (`a.b.c = v`), floats, traits, kinds,
-generics.
+type-parameter BOUNDS (`T implements Display`), kind prefixes in a type
+argument, value `enum`s, unions, `for x in xs`, module-level
+`let` / `const`, nested field paths (`a.b.c = v`), floats, traits, kinds.
 
-**Resolving `std/` is not the same as compiling it.** The path arithmetic works
-today; the real standard library still needs language the bootstrap does not
-have. Pointing it at `std/` gives, in the order you hit them:
 
-    std/core/types.yoop    generic variant "Result" is not supported yet
-    std/core/strings.yoop  a generic type application in an annotation
+**`std/core/types.yoop` and `std/log.yoop` compile** - `Result<T, E>` and
+`Option<T>`, and a module whose whole job is calling into the runtime through
+externs. The next ones up still need language the bootstrap does not have:
+
+    std/core/strings.yoop  the `a..b` range expression
+    std/fs.yoop            `null`, and the unsafe-pointer surface behind it
     std/core/vec.yoop      "implements" clauses on a type decl
-    std/log.yoop           `extern` blocks
+    std/core/text.yoop     the same
 
-Generics is the big one, and `Result<T, E>` is on the far side of it.
+Traits are the wall.
 
 Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
 `int32 + usize` and is an error. Write the cast.
@@ -226,12 +257,56 @@ Two invariants control flow introduced, both easy to break:
   to hand out an ordinal and a count rather than the case's `Vec<Field>`, because
   that is exactly the bug it caused - a null dereference three passes away from
   the annotation that caused it.
+- **A generic decl is resolved ONCE into a TEMPLATE, and an instance is that
+  template SUBSTITUTED.** Instantiation is pure TypeId arithmetic and never
+  touches an AST - which is what makes cross-module generics work at all, since
+  `Vec<T>` is declared in one module's arena and applied in another's, and
+  typecheck is handed a Program rather than the graph. The alternative
+  (instantiate from the decl's syntax) would need every pass to carry the
+  ModuleGraph. See `typecheck/generics.yoop`.
+- **An instance is REGISTERED before it is filled, and deduplicated by (origin,
+  args).** That is what makes `type Node<T> { next: Node<T> }` terminate rather
+  than recurse: the second request is a registry hit. It is also why
+  `Box<int>` written in two places is ONE type - and it has to be, or nothing
+  could be passed between two annotations that spell it the same way.
+- **Templates are skipped by codegen.** A template's members are TypeParams,
+  which have no LLVM type and which nothing ever holds a value of; only the
+  instances substitution produced are real. `isOpenInstance` is the test.
+- **A generic function's body is CHECKED once and EMITTED once per
+  instantiation.** Pass D checks it with its parameters left opaque, so its
+  decoration is written in terms of them; codegen walks that same decoration per
+  instance and substitutes on the way out, in `resolvedTypeAt` and nowhere else.
+  That is sound only because a parameter has no BOUNDS: an opaque `T` supports
+  nothing, so a body that checks generically checks for every instantiation
+  (`return x + 1` on an unbounded `T` is rejected at the decl). When bounds land,
+  this is the decision to revisit - re-checking per instantiation is the
+  alternative, and it costs a decoration vector per instance.
+- **Reserved index 0 is the sentinel, everywhere.** SymbolId, DeclId and the
+  function-instance index all burn slot 0 on a dead entry. The first attempt at
+  the last one used a max-value constant instead, and it silently WRAPPED to 0 -
+  so the first monomorphization in every program was emitted as ordinary code,
+  under the generic's bare name with its parameters unresolved. Use the idiom.
+- **`>>` is one token, and closing a nested type-argument list splits it.**
+  `Vec<Map<string, TypeId>>` ends in a right-shift, so `consumeClosingGt`
+  consumes it and remembers that one `>` is still owed. Same trick, same reason,
+  as the JS reference's `pendingGtFromRshift`.
 - **The std root is DISCOVERED once, by the driver, and passed in.**
   `loadModuleGraph` takes it as a parameter rather than probing for it, so a
   caller that already knows its root - a test pointing at a stub, and eventually
   the LSP - never touches the filesystem probing in `std_root.yoop`. The
   discovery rule honours `YOOP_STD_ROOT`, which is what the JS reference honours
   too, so one variable retargets both compilers at the same tree.
+- **A borrow costs no instructions.** Every local already lives in an alloca, so
+  `ref x` is the ADDRESS of storage that exists; and a `ref` parameter arrives
+  as that pointer, so it gets no alloca and no spill - the incoming pointer IS
+  its slot (`LocalSlot.id == ARG_PTR_SLOT`, the reserved zero again). Every load
+  and store in the body then works unchanged, because they only ever needed an
+  address, and they land on the caller's object. `refs.yoop` in the slice
+  fixtures is the test a by-value lowering would still pass most of.
+- **A `ref T` parameter is `ref T` in the SIGNATURE and `T` in the BODY.** The
+  first is what makes passing a bare value an error; the second is what keeps
+  every read, write and field access in the body from needing to know about
+  references at all. `bindParams` is where the two part company.
 - **A diagnostic carries the FILE it was found in.** `Program.currentFile` is
   ambient, set by each pass as it starts a file, because the alternative is a
   path parameter on forty `reportError` call sites that all want the same

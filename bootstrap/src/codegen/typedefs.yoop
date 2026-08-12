@@ -8,8 +8,13 @@ module codegen;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
-import { Program, Type, TypeId, Field, VariantCase, moduleIdOf, typeAt,
-  variantPayloadSize } from "../typecheck";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, childAt, nodeAt } from "../ast";
+import { Module } from "../source_graph";
+import { Program, TypedModule, Type, TypeId, Field, VariantCase, Symbol, moduleIdOf, symbolAt,
+  typeAt, variantPayloadSize, isOpenInstance } from "../typecheck";
 
 // `%struct.Point = type { i32, i32 }` for every struct the program declared.
 //
@@ -24,13 +29,16 @@ function emitStructTypeDefs(ref e: Emitter, ref prog: Program): void {
   let id: usize = 0;
   while (id < prog.types.len) {
     switch (typeAt(ref prog, id)) {
+      // A TEMPLATE is skipped: its members are TypeParams, which have no LLVM
+      // type and which nothing ever holds a value of. Only the INSTANCES
+      // substitution produced are real types, and they are in this same arena.
       case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
-        if (d.populated) {
+        if (d.populated && !isOpenInstance(ref prog, id)) {
           emitStructTypeDef(ref e, ref prog, moduleIdOf(ref prog, d.module), d.name, ref f);
         }
       }
       case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
-        if (d.populated) {
+        if (d.populated && !isOpenInstance(ref prog, id)) {
           emitVariantTypeDefs(ref e, ref prog, id, moduleIdOf(ref prog, d.module), d.name, ref cs);
         }
       }
@@ -82,6 +90,67 @@ function emitVariantTypeDefs(
       text.push(ref e.globals, " }\n");
     }
     i += 1;
+  }
+}
+
+//   declare i32 @yoop_log_info(ptr)
+//
+// One line per extern, in the module-level globals. The name is NOT mangled:
+// an extern IS the linker's spelling, which is the whole point of declaring one.
+export function emitExternDeclares(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  blockNode: ASTNode
+): void {
+  let i: usize = 0;
+  while (i < blockNode.childCount) {
+    const externNode = nodeAt(ref m.ast, childAt(ref m.ast, blockNode, i));
+    text.push(ref e.globals, "declare ");
+    text.push(ref e.globals, externReturnType(ref prog, ref tm, externNode.name));
+    text.push(ref e.globals, " @");
+    text.push(ref e.globals, externNode.name);
+    text.push(ref e.globals, "(");
+    emitExternParams(ref e, ref prog, ref tm, externNode.name);
+    text.push(ref e.globals, ")\n");
+    i += 1;
+  }
+}
+
+function externReturnType(ref prog: Program, ref tm: TypedModule, name: string): string {
+  switch (externFuncType(ref prog, ref tm, name)) {
+    case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(ref prog, r); }
+    default: { return "void"; }
+  }
+}
+
+function emitExternParams(ref e: Emitter, ref prog: Program, ref tm: TypedModule, name: string): void {
+  switch (externFuncType(ref prog, ref tm, name)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      let i: usize = 0;
+      while (i < p.len) {
+        if (i > 0) {
+          text.push(ref e.globals, ", ");
+        }
+        text.push(ref e.globals, llvmType(ref prog, vec.vecGet(ref p, i)));
+        i += 1;
+      }
+    }
+    default: { }
+  }
+}
+
+// The Func type pass C filled for an extern, by name.
+function externFuncType(ref prog: Program, ref tm: TypedModule, name: string): Type propagates<disposable> {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.Func { typeId: t }: { return typeAt(ref prog, t); }
+        default: { return Type.ErrorT; }
+      }
+    }
+    case Option.None: { return Type.ErrorT; }
   }
 }
 

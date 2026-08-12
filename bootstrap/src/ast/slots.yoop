@@ -46,7 +46,8 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.EXPORT_DECL: {
       return "exportedDecl";
     }
-    case ASTNodeKind.UNARY_EXPRESSION: {
+    case ASTNodeKind.UNARY_EXPRESSION,
+         ASTNodeKind.REF_EXPRESSION: {
       return "operand";
     }
     case ASTNodeKind.INDEX_EXPRESSION,
@@ -71,6 +72,11 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE: {
       return "elementType";
+    }
+    // `Vec<int>`: the NODE_LIST of argument annotations, 0 when the name is
+    // used bare.
+    case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
+      return "typeArgsList";
     }
     case ASTNodeKind.PARAM,
          ASTNodeKind.CONST_DECL,

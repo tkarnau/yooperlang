@@ -6,8 +6,36 @@ import { Result, Option } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { NodeId, ASTNodeKind } from "../ast";
-import { TokenTags, posToSourceLocation } from "../lex";
+import { TokenTags, tagName, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
+
+// The closing `>` of a type-parameter or type-argument list, splitting a `>>`
+// in two when the lexer handed one over.
+//
+// `Box<Vec<int>>` ends in a single right-shift token. Consuming it here and
+// remembering that one `>` is still owed is what lets the outer list close
+// without the lexer needing to know anything about types.
+export function consumeClosingGt(ref ps: ParserState): Result<usize, ParsingError> {
+  if (ps.pendingGt) {
+    ps.pendingGt = false;
+    return Result.Ok { value: 0 };
+  }
+  const tag = SelfLexing.peek(ref ps).tag;
+  if (tag == TokenTags.GT) {
+    SelfLexing.advance(ref ps)?;
+    return Result.Ok { value: 0 };
+  }
+  if (tag == TokenTags.RSHIFT) {
+    SelfLexing.advance(ref ps)?;
+    ps.pendingGt = true;
+    return Result.Ok { value: 0 };
+  }
+  return Result.Err { error: SelfLexing.createParsingError(
+    ref ps,
+    `expected '>', got ${tagName(tag)}`,
+    peekLengthUsize(ref ps),
+  )};
+}
 
 // `<T, U>` after a type name (generics, etc). Returns the NodeId of a NODE_LIST holding the
 // TYPE_PARAM nodes, or 0 (the none sentinel) when there is no list.
@@ -40,7 +68,68 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
     }
     SelfLexing.advance(ref ps)?; // consume `,`
   }
-  SelfLexing.expect(ref ps, TokenTags.GT)?;
+  consumeClosingGt(ref ps)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The run of kind names before a type in an annotation, as a NODE_LIST of
+// KIND_PREFIX nodes - or 0 when there is none, which is the common case.
+//
+// The rule is one token of lookahead: an IDENT followed by ANOTHER IDENT cannot
+// be the type itself, so it is a prefix. That is the same ambiguity the type
+// decl's own kind prefix resolves, and the same way.
+function parseKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return Result.Ok { value: 0 };
+  }
+  if (SelfLexing.peekAhead(ref ps, 1)?.tag != TokenTags.IDENT) {
+    return Result.Ok { value: 0 };
+  }
+
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (
+    SelfLexing.peek(ref ps).tag == TokenTags.IDENT &&
+    SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.IDENT
+  ) {
+    let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+    node.name = parseIdentAsName(ref ps)?;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, node));
+  }
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// `<int, string>` after a type name in an ANNOTATION: the arguments a generic
+// is applied to. Returns a NODE_LIST of type annotations, or 0 when there is no
+// list.
+//
+// The mirror of parseTypeParamList - that one reads the DECLARATION's `<T, U>`
+// and produces names; this reads the USE's `<int, string>` and produces types.
+function parseTypeArgList(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.LT) {
+    return Result.Ok { value: 0 };
+  }
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.advance(ref ps)?; // consume `<`
+
+  if (SelfLexing.peek(ref ps).tag == TokenTags.GT) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `empty type argument list <> is not allowed`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (true) {
+    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      break;
+    }
+    SelfLexing.advance(ref ps)?; // consume `,`
+  }
+  consumeClosingGt(ref ps)?;
 
   return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }
@@ -163,10 +252,23 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
     refNode.childA = parseTypeAnnotation(ref ps)?;
     return Result.Ok { value: SelfLexing.pushNode(ref ps, refNode) };
   }
-  // other conditions.. for now just do a basic type without namespace...
+  // A KIND PREFIX: `owned string`, `cleared validated Foo`. Kinds are
+  // contextual and lex as IDENT, so two IDENTs in a row is what identifies one
+  // - the last is the type, everything before it is prefix.
+  //
+  // Recorded on the annotation rather than dropped. The bootstrap enforces no
+  // kinds at all, so nothing reads it yet; keeping it means the limitation is
+  // "not enforced" instead of "not parsed", and the day enforcement lands the
+  // information is already where it needs to be.
   let typeNameNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
+  typeNameNode.childB = parseKindPrefixes(ref ps)?;
   let name = parseIdentAsName(ref ps)?;
   typeNameNode.name = name;
+  // `Vec<int>`, `Result<int, string>` - the ARGUMENTS of a generic
+  // application. Unambiguous here in a way it is not in an expression: `a < b`
+  // cannot appear in annotation position, so a `<` after a type name is always
+  // a type-argument list.
+  typeNameNode.childA = parseTypeArgList(ref ps)?;
   let inner = SelfLexing.pushNode(ref ps, typeNameNode);
 
   // Trailing `[]`, repeatable: `int[][]` is an array of arrays. Left to right,
