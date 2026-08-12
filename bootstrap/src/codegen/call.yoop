@@ -17,8 +17,9 @@ import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 // is formatted until emitCall runs.
 function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
   // A cast is not a call - pass D typed it as the target primitive, and the
-  // lowering is one conversion instruction (or none).
-  if (isPrimTypeName(expr.name)) {
+  // lowering is one conversion instruction (or none). Only an UNQUALIFIED name
+  // can be one: `ns.usize(x)` reaches a member of `ns`, whatever it is named.
+  if (expr.childB == 0 && isPrimTypeName(expr.name)) {
     return emitCast(ref cx, expr, exprId, ref out);
   }
 
@@ -41,8 +42,9 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   }
 
   // printf is the one variadic callee we know about; emitCall owns what a
-  // variadic call site has to spell out.
-  const isPrintf = text.equals(expr.name, "printf");
+  // variadic call site has to spell out. Unqualified only, for the same reason
+  // the cast check above is.
+  const isPrintf = expr.childB == 0 && text.equals(expr.name, "printf");
   let retTy = typeOf(ref cx, exprId);
   if (isPrintf) {
     cx.e.usesPrintf = true;
@@ -58,7 +60,8 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   if (!isVoid) {
     dest = freshTemp(cx.e);
   }
-  emitCall(ref cx, dest, retTy, expr.name, isPrintf, ref args);
+  const callee = calleeSymbol(ref cx, expr);
+  emitCall(ref cx, dest, retTy, callee.home, callee.name, isPrintf, ref args);
 
   if (isVoid) {
     out = Operand.None;

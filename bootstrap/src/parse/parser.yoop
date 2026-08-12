@@ -16,23 +16,62 @@ import { ParsingError } from "../diagnostics";
 
 
 // main parsing logic, starts with top level and handles all child levels
-function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
+function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
   let program = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PROGRAM);
+
+  // `module <name>;`, when the file has one. It lands on the PROGRAM node's
+  // `name` - empty for a file with no header, which is what makes it a
+  // single-file module. The graph has already read the header (see
+  // header.yoop); parsing it again here is what puts it in the AST, where pass
+  // A can check the file agrees with the directory it was loaded as part of.
+  program.name = parseModuleHeader(ref ps)?;
 
   // Collect each top-level decl's NodeId in a scratch buffer, then splice the
   // whole run into the arena's shared childIds pool as the PROGRAM body.
   disposable body: Vec<NodeId> = vec.vecNew(8);
+  // The imports-first rule. Every consumer of the AST reads the leading run of
+  // IMPORT_DECLs and stops at the first decl (the module graph does it to find
+  // the edges, pass B to bind them), so an import further down would be
+  // silently ignored rather than misunderstood. Refuse it here instead.
+  let seenNonImport = false;
   let peekTag = SelfLexing.peek(ref ps).tag;
   while (peekTag != TokenTags.EOF) {
+    if (peekTag != TokenTags.IMPORT) {
+      seenNonImport = true;
+    } else if (seenNonImport) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        "imports must come first: every `import` belongs above the first declaration in the file",
+        peekLengthUsize(ref ps),
+      )};
+    }
     switch (peekTag) {
+      case TokenTags.IMPORT: {
+        vec.vecPush(ref body, parseImportDecl(ref ps)?);
+      }
+      case TokenTags.EXPORT: {
+        vec.vecPush(ref body, parseExportDecl(ref ps)?);
+      }
       case TokenTags.TYPE: {
         vec.vecPush(ref body, parseTypeDecl(ref ps)?);
+      }
+      case TokenTags.VARIANT: {
+        vec.vecPush(ref body, parseVariantDecl(ref ps)?);
       }
       case TokenTags.FUNCTION /*, TokenTags.TASK */: {
         vec.vecPush(ref body, parseFunctionDecl(ref ps)?);
       }
       // TODO: rest of tags...
       default: {
+        // A header below the first declaration. It is contextual (it lexes as
+        // IDENT), so without this it reads as an unhelpful "unexpected IDENT".
+        if (peekIsWord(ref ps, "module")) {
+          return Result.Err { error: SelfLexing.createParsingError(
+            ref ps,
+            "a `module <name>;` header must be the FIRST thing in the file, above the imports",
+            peekLengthUsize(ref ps),
+          )};
+        }
         return Result.Err { error: SelfLexing.createParsingError(
           ref ps,
           `unexpected token at top level: ${tagName(peekTag)}`,
@@ -51,18 +90,43 @@ function parseAST(ref ps: ParserState): Result<AST, ParsingError> {
   program.childCount = body.len;
   ps.ast.root = SelfLexing.pushNode(ref ps, program);
 
-  return Result.Ok { value: ps.ast };
+  return Result.Ok { value: ps.ast.root };
 }
 
-export function parse(src: uint8[]): Result<AST, ParsingError> propagates<disposable> {
+// One parsed source file: the arena it went into, and its own PROGRAM node.
+//
+// The arena is handed back rather than borrowed because ParserState OWNS it for
+// the duration - it is moved in and moved out, which is what lets several files
+// of a directory module accumulate into one arena without any of them holding a
+// reference to it.
+export type ParsedFile propagates<disposable> {
+  ast: AST,
+  root: NodeId,
+}
+
+// Parse `src` into an EXISTING arena, appending to it.
+//
+// This is what makes a directory module one module: every source file in it
+// parses into the same arena, so NodeIds are unique across the whole module and
+// the typecheck decoration stays one dense vector indexed by NodeId. Each file
+// keeps its own PROGRAM root.
+export function parseInto(ast: AST, src: uint8[]): Result<ParsedFile, ParsingError> propagates<disposable> {
   let pState: ParserState = {
     currentLex: createLexedVal(), // EOF placeholder; primed by the advance below
     pos: 0,
-    ast: emptyArena(),
+    ast: ast,
     src: ref src,
   };
 
   SelfLexing.advance(ref pState)?; // prime: load the first real token into currentLex
 
-  return parseAST(ref pState);
+  const root = parseAST(ref pState)?;
+  return Result.Ok { value: { ast: pState.ast, root: root } };
+}
+
+// Parse one file into an arena of its own. The single-file case, and what tests
+// and tools want.
+export function parse(src: uint8[]): Result<AST, ParsingError> propagates<disposable> {
+  const parsed = parseInto(emptyArena(), src)?;
+  return Result.Ok { value: parsed.ast };
 }

@@ -1,0 +1,28 @@
+// A DIRECTORY module: ./lib/geo is two source files that each declare
+// `module geo;`, sharing one namespace, one mangled prefix, and one arena.
+//
+// What each line is for:
+//   `from "./lib/geo"`  the path names the DIRECTORY, with no .yoop
+//   `boxArea`           declared in area.yoop, which uses a type from
+//                       point.yoop with no import between them
+//   `geo.origin()`      a namespace over a directory module works like any other
+//   `geo.test.yoop`     sits in that directory and must NOT be absorbed
+
+import { Point, boxArea }, * as geo from "./lib/geo";
+
+function main(): int {
+  const p: Point = { x: 3, y: 4 };
+  printf("area=%d\n", boxArea(p));
+
+  const o: Point = geo.origin();
+  printf("origin=%d %d\n", o.x, o.y);
+
+  const big: Point = geo.scaled(p, 3);
+  printf("scaled=%d %d area=%d\n", big.x, big.y, geo.boxArea(big));
+
+  // Crosses files inside the module: doubled lives in point.yoop and calls a
+  // private helper there, boxArea lives in area.yoop.
+  const twice: Point = geo.doubled(p);
+  printf("doubled=%d %d area=%d\n", twice.x, twice.y, geo.boxArea(twice));
+  return 0;
+}

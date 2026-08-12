@@ -1,0 +1,95 @@
+module codegen;
+
+// What a symbol is CALLED in the emitted module.
+//
+// One LLVM module holds every yoop module in the graph, so `add` in two of them
+// would be one symbol and one of the two definitions would win silently. Every
+// symbol therefore carries its home module:
+//
+//   function `add` in module `mathx_1`  ->  @mathx_1__add
+//   type `Point` in module `mathx_1`    ->  %struct.mathx_1__Point
+//
+// Two symbols keep their bare C name, and both are decided here rather than at
+// the emit sites: `main`, which the linker looks for by that exact spelling,
+// and `printf`, which is libc's. A home module of "" means exactly that.
+
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { ASTNode, NodeId, nodeAt } from "../ast";
+import { Symbol, moduleIdOf, symbolAt } from "../typecheck";
+
+// Between the module and the name. Long enough that a module ending in `_` and
+// a name starting with one cannot collide with an ordinary identifier.
+export const SYMBOL_MODULE_SEPARATOR: string = "__";
+
+// A symbol as it is spelled in the IR, in the two pieces emitCall and
+// emitFunctionOpen append. `home` is "" for a bare C name.
+export type SymbolName {
+  home: string,
+  name: string,
+}
+
+// The symbol a call expression lands on.
+//
+// Both halves can differ from what the call site wrote, and for two different
+// reasons:
+//
+//   ns.fn()        the home is whatever module `ns` names; the member name is
+//                  already the export name, since a namespace has no aliases
+//   fn()           `import { tag as mathTag }` calls `mathTag` here and has to
+//                  reach mathx's `tag`, so the name comes from the import table
+//                  too - the local name would emit a call to a symbol nothing
+//                  defines
+//
+// An unqualified name absent from `importedFrom` is this module's own. That is
+// the whole rule, and it is why pass B records the table.
+export function calleeSymbol(ref cx: Cx, expr: ASTNode): SymbolName {
+  if (expr.childB != 0) {
+    return { home: qualifyingModuleOf(ref cx, expr.childB), name: expr.name };
+  }
+  if (keepsCName(expr.name)) {
+    return { home: "", name: expr.name };
+  }
+  switch (map.mapGet(ref cx.tm.importedFrom, expr.name)) {
+    case Option.Some { value: origin }: {
+      return { home: origin.moduleId, name: origin.exportName };
+    }
+    case Option.None: {
+      return { home: cx.tm.moduleId, name: expr.name };
+    }
+  }
+}
+
+// The mangling id of the module an `ns.fn()` base names. Pass D already proved
+// the base is a namespace, so a miss here is an internal error rather than a
+// user one - and "" is the safest thing to emit, since it fails at link time
+// with the bare name rather than silently calling the wrong function.
+function qualifyingModuleOf(ref cx: Cx, baseId: NodeId): string {
+  const base = nodeAt(cx.ast, baseId);
+  switch (map.mapGet(ref cx.tm.names, base.name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Namespace { module: mi }: { return moduleIdOf(cx.prog, mi); }
+        default: { return ""; }
+      }
+    }
+    case Option.None: { return ""; }
+  }
+}
+
+// The symbol a DEFINITION is emitted under: always the module being walked,
+// under the name it was declared with, except for the entry point.
+export function definitionSymbol(ref cx: Cx, name: string): SymbolName {
+  if (keepsCName(name)) {
+    return { home: "", name: name };
+  }
+  return { home: cx.tm.moduleId, name: name };
+}
+
+// `main` is the C entry point and `printf` is libc's. Mangling either one
+// produces IR that compiles and then fails to link, which is a bad place to
+// find out.
+function keepsCName(name: string): bool {
+  return str.stringEq(name, "main") || str.stringEq(name, "printf");
+}

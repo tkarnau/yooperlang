@@ -8,7 +8,8 @@ module codegen;
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
-import { Program, Type, Field, typeAt } from "../typecheck";
+import { Program, Type, TypeId, Field, VariantCase, moduleIdOf, typeAt,
+  variantPayloadSize } from "../typecheck";
 
 // `%struct.Point = type { i32, i32 }` for every struct the program declared.
 //
@@ -25,7 +26,12 @@ function emitStructTypeDefs(ref e: Emitter, ref prog: Program): void {
     switch (typeAt(ref prog, id)) {
       case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
         if (d.populated) {
-          emitStructTypeDef(ref e, ref prog, d.name, ref f);
+          emitStructTypeDef(ref e, ref prog, moduleIdOf(ref prog, d.module), d.name, ref f);
+        }
+      }
+      case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+        if (d.populated) {
+          emitVariantTypeDefs(ref e, ref prog, id, moduleIdOf(ref prog, d.module), d.name, ref cs);
         }
       }
       default: { }
@@ -34,8 +40,59 @@ function emitStructTypeDefs(ref e: Emitter, ref prog: Program): void {
   }
 }
 
-function emitStructTypeDef(ref e: Emitter, ref prog: Program, name: string, ref fields: Vec<Field>): void {
-  text.push(ref e.globals, structLlvmName(name));
+// The variant itself, plus one payload struct per case that carries something:
+//
+//   %variant.m__Shape = type { i32, [16 x i8] }
+//   %variantc.m__Shape__Circle = type { i32 }
+//   %variantc.m__Shape__Rect = type { i32, i32 }
+//
+// The payload is a byte ARRAY rather than a union because LLVM has no union:
+// one blob big enough for the largest case, addressed as whichever case struct
+// the tag says it holds. A payload-less case contributes no struct at all -
+// there would be nothing in it.
+function emitVariantTypeDefs(
+  ref e: Emitter,
+  ref prog: Program,
+  variantType: TypeId,
+  moduleId: string,
+  name: string,
+  ref cases: Vec<VariantCase>
+): void {
+  text.push(ref e.globals, variantLlvmName(moduleId, name));
+  text.push(ref e.globals, " = type { ");
+  text.push(ref e.globals, VARIANT_TAG_TYPE);
+  text.push(ref e.globals, ", [");
+  text.pushUint(ref e.globals, uint64(variantPayloadSize(ref prog, variantType)));
+  text.push(ref e.globals, " x i8] }\n");
+
+  let i: usize = 0;
+  while (i < cases.len) {
+    let c = vec.vecGet(ref cases, i);
+    if (c.fields.len > 0) {
+      text.push(ref e.globals, variantCaseLlvmName(moduleId, name, c.name));
+      text.push(ref e.globals, " = type { ");
+      let f: usize = 0;
+      while (f < c.fields.len) {
+        if (f > 0) {
+          text.push(ref e.globals, ", ");
+        }
+        text.push(ref e.globals, llvmType(ref prog, vec.vecGet(ref c.fields, f).typeId));
+        f += 1;
+      }
+      text.push(ref e.globals, " }\n");
+    }
+    i += 1;
+  }
+}
+
+function emitStructTypeDef(
+  ref e: Emitter,
+  ref prog: Program,
+  moduleId: string,
+  name: string,
+  ref fields: Vec<Field>
+): void {
+  text.push(ref e.globals, structLlvmName(moduleId, name));
   text.push(ref e.globals, " = type { ");
   let i: usize = 0;
   while (i < fields.len) {

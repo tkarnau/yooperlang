@@ -1,0 +1,6 @@
+// Half of an import cycle: a imports b, b imports a. Nothing else here matters.
+import { fromB } from "./cycle_b.yoop";
+
+export function fromA(): int {
+  return fromB();
+}

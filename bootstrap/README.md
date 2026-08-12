@@ -31,7 +31,9 @@ a shared header file.
                        the lexer
       ast/             the arena: node kinds, ASTNode, AST, slot-name helpers
       parse/           layer 2: recursive descent, one file per construct
-      source_graph/    layer 0: Module / ModuleGraph, loading, import resolution
+      source_graph/    layer 0: Module / SourceFile / ModuleGraph, reading a
+                       module's files, the import walk, path resolution,
+                       module ids
       typecheck/       layer 3: ids, Type, Symbol, Program, the passes
       codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
       link/            layer 6: IR -> executable, by shelling out to clang
@@ -87,12 +89,38 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
   * `switch` over an integer, with multi-pattern arms and a required `default`
   * structs as VALUES: `{ x: 1 }` literals, field read and write, passing and
     returning by value
+  * `variant` decls, their constructors and their switch patterns:
+
+        variant Shape { Circle { r: int }, Rect { w: int, h: int }, Empty }
+        const c: Shape = Shape.Circle { r: 2 };
+        switch (s) {
+          case Shape.Circle { r: r }: { return r; }
+          case Shape.Rect { w: w, h: h }: { return w * h; }
+          case Shape.Empty: { return 0; }
+        }
+
+    A switch over a variant is exhaustive or has a default, never neither and
+    never both, and a pattern BINDS its payload into the arm.
   * `return`, with or without a value
   * int literals, string literals, `+ - * / %`
   * calls, including the `printf` builtin
+  * `export function` / `export type`, and every import form but one:
 
-Not yet: imports, `for x in xs`, module-level `let` / `const`, nested field
-paths (`a.b.c = v`), floats, traits, kinds, generics.
+        import { add, scale as times, Point } from "./lib/mathx.yoop";
+        import * as mathx from "./lib/mathx.yoop";
+        import { Point }, * as mathx from "./lib/mathx.yoop";
+        import { Point } from "./lib/geo";        // a DIRECTORY module
+
+  * `ns.fn(...)`, resolved against the namespaced module's EXPORTS
+  * directory modules: a directory whose `.yoop` files each declare
+    `module <name>;` is ONE module - one namespace, one mangled prefix, and its
+    files see each other's declarations without importing
+
+Not yet: side-effect imports (`import "./init.yoop";`), the `std/` and
+`modules/` import roots, `ns.CONSTANT` (anything but a call through a
+namespace), generic variants, value `enum`s, unions, `for x in xs`,
+module-level `let` / `const`, nested field paths (`a.b.c = v`), floats, traits,
+kinds, generics.
 
 Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
 `int32 + usize` and is an error. Write the cast.
@@ -139,6 +167,68 @@ Two invariants control flow introduced, both easy to break:
   instruction over two evaluated operands. `expressions.yoop` in the slice
   fixtures is the test that catches a non-short-circuiting lowering; every other
   assertion in it passes either way.
+- **The module graph is topologically ordered, and everything above it leans on
+  that.** A module's imports are loaded, and therefore indexed, before it is; so
+  a module's ModuleId is greater than every module it imports. That single fact
+  is what lets typecheck run all four passes in ONE walk per module instead of
+  four walks over the graph, and what makes pass B a lookup rather than a second
+  fixpoint. An import cycle is refused during the walk, which is the only place
+  that can see one.
+- **A MODULE is the namespace and mangling unit; a SOURCE FILE is the
+  compilation unit.** They are the same thing for `./util.yoop` and different for
+  a directory module. Every layer above walks `m.files`, never one root.
+- **A module's files share ONE arena.** NodeIds are therefore unique across the
+  whole module, which is what keeps typecheck's decoration a single dense vector
+  indexed by NodeId rather than one vector per file - the alternative would have
+  changed every one of pass D's decoration sites. `parseInto` moves the arena in
+  and back out, so each file appends to it and keeps its own PROGRAM root.
+- **The module header is read by LEXING three tokens, not by parsing.** The
+  graph cannot parse a file until it knows which module owns it (that is which
+  arena it goes in), and it cannot know that without the header - so
+  `parse/header.yoop` answers the question without an AST. That is what the JS
+  reference needs a parse cache for.
+- **A variant is `{ i32 tag, [N x i8] payload }`,** with one payload STRUCT per
+  case that carries something (`%variantc.m__Shape__Circle`). LLVM has no union,
+  so N is the largest case's naturally-aligned size and every case reads the same
+  bytes as a different struct. The sizes come from `typecheck/layout.yoop`, which
+  matches the JS reference case for case - the two compilers never link together,
+  but a payload-size disagreement would show up as a corrupted field rather than
+  as an error, so it is worth being able to diff. The tag is i32 for the same
+  reason, which means an 8-byte payload field sits at offset 4; that matches the
+  reference and is fine on every target the compiler supports.
+- **A variant is a VALUE, and both directions go through a stack slot.** The
+  payload is addressed as whichever case struct the tag names, and only an
+  ADDRESS can be reinterpreted that way - a loaded value has none. Same
+  asymmetry as a struct field write versus a read, and for the same reason.
+- **An exhaustive variant switch has no default arm, so its jump table gets an
+  `unreachable` block.** Without one the fall-through would make the switch look
+  non-terminating, and a function whose every arm returns would be rejected for
+  having no return on some path. `variants.yoop` in the slice fixtures covers it.
+- **A `Vec` read out of the type arena is a SHALLOW copy that shares the arena's
+  storage.** Never mark one `disposable`: it frees the arena's own fields, and
+  the next lookup reads freed memory. `VariantCaseLookup` is deliberately shaped
+  to hand out an ordinal and a count rather than the case's `Vec<Field>`, because
+  that is exactly the bug it caused - a null dereference three passes away from
+  the annotation that caused it.
+- **A diagnostic carries the FILE it was found in.** `Program.currentFile` is
+  ambient, set by each pass as it starts a file, because the alternative is a
+  path parameter on forty `reportError` call sites that all want the same
+  answer. A bare `12:5` was already ambiguous across modules and became
+  ambiguous within one.
+- **An import binds the source module's SymbolId - the same integer, not a
+  copy.** Type equality is `id == id`, so this is what makes an imported `Point`
+  compare equal to the declared one instead of being a second nominal type. It
+  also means an imported shell stays correct when pass C fills it, since filling
+  re-SETS the arena slot the id already points at.
+- **Every symbol is mangled `<moduleId>__<name>`,** because one LLVM module holds
+  the whole graph and two yoop modules may each define `add`. `main` and `printf`
+  are the only exceptions and are decided in one place (`codegen/mangle.yoop`).
+  That carve-out is why a non-entry module declaring `main` is a typecheck error:
+  two bare `@main`s would otherwise reach the linker.
+- **A call is mangled against the callee's HOME module, under its EXPORT name.**
+  `import { scale as times }` calls `times` locally and must emit
+  `@mathx_1__scale` - using the local name emits a call to a symbol nothing
+  defines. `TypedModule.importedFrom` carries both halves.
 
 A program in this subset needs no yoop runtime - only libc - which is what keeps
 the link step a single clang invocation. Linking the runtime arrives with the
@@ -149,7 +239,13 @@ the module's file list, so a test reaches its module through the same import
 path a consumer writes:
 
     node ../src/yoopiler.js --test src/lex
+    node ../src/yoopiler.js --test src/parse
+    node ../src/yoopiler.js --test src/source_graph
     node ../src/yoopiler.js --test src/typecheck
+
+`src/source_graph` is the one that reads files from disk: `tests/graph/` holds
+programs whose import structure is the point, all of them refusals, plus the
+`tests/slice/imports.yoop` diamond read back for its topological order.
 
 ## Parity with the JS reference
 
@@ -197,6 +293,7 @@ exactly one:
     call.yoop               call expressions
     switch.yoop             `switch` -> a jump table
     struct.yoop             struct literals, field read and write
+    variant.yoop            variant constructors, tags, pattern bindings
     typedefs.yoop           the module-level struct type definitions
     instr.yoop              emit one LLVM instruction
     instr_mem.yoop          the same, for aggregates and computed addresses

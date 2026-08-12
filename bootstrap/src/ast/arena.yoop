@@ -72,3 +72,22 @@ export function childAt(ref ast: AST, node: ASTNode, i: usize): NodeId {
 export function nodeAt(ref ast: AST, id: NodeId): ASTNode {
   return vec.vecGet(ref ast.nodes, id);
 }
+
+// The DECL a top-level PROGRAM child names, looking through an `export`.
+//
+// `export function f() {}` parses as an EXPORT_DECL wrapping the FUNCTION_DECL
+// (the shape the JS reference uses), so every pass that walks the top level -
+// pass A, pass C, pass D, codegen - would otherwise repeat the same unwrap and
+// one of them would eventually forget. Exportedness itself is a separate
+// question, answered by `isExportDecl` at the one place that cares.
+export function declOf(ref ast: AST, id: NodeId): NodeId {
+  const node = nodeAt(ref ast, id);
+  if (node.kind == ASTNodeKind.EXPORT_DECL) {
+    return node.childA;
+  }
+  return id;
+}
+
+export function isExportDecl(ref ast: AST, id: NodeId): bool {
+  return nodeAt(ref ast, id).kind == ASTNodeKind.EXPORT_DECL;
+}

@@ -1,0 +1,370 @@
+// Tests for the `parse` module - the import and export declarations.
+//
+// These assert the ARENA SHAPE, because that shape is a contract every later
+// layer reads: the module graph pulls a source path out of `strId`, pass B
+// walks the specifier run, and four separate walks look through an EXPORT_DECL.
+// A test that only checked "it parses" would let any of those drift.
+//
+// The refusals are here for the same reason as the acceptances. Every form
+// outside the subset has to fail BY NAME - a silently dropped import resurfaces
+// much later as "unknown function", pointing at the wrong file.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Result } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, childAt, declOf, emptyArena, isExportDecl, nodeAt } from "../ast";
+import { parse } from "../parse";
+
+suite function namedImportsBuildSpecifierNodes(): void {
+  let ast = parseOk("import { add, scale as times } from \"./lib/mathx.yoop\";");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("an import is an IMPORT_DECL at the top level") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.IMPORT_DECL;
+    theory.detail = `the first top-level node is ${decl.kind}, wanted IMPORT_DECL`;
+  }
+
+  let test theory: Case = t.asserts("the decoded source path lands in the string pool") {
+    const path = poolString(ref ast, decl.strId);
+    theory.isSuccessful = str.stringEq(path, "./lib/mathx.yoop");
+    theory.detail = `the interned source path is "${path}", wanted "./lib/mathx.yoop"`;
+  }
+
+  let test theory: Case = t.asserts("each specifier is one node in the decl's own child run") {
+    theory.isSuccessful = decl.childCount == 2;
+    theory.detail = `the import has ${decl.childCount} specifier(s), wanted 2`;
+  }
+
+  const plain = nodeAt(ref ast, childAt(ref ast, decl, 0));
+  let test theory: Case = t.asserts("a bare specifier binds the export name locally") {
+    theory.isSuccessful = plain.kind == ASTNodeKind.IMPORT_SPECIFIER
+      && str.stringEq(plain.name, "add")
+      && str.stringEq(poolString(ref ast, plain.strId), "add");
+    theory.detail = `{ add } gave local "${plain.name}" / export "${poolString(ref ast, plain.strId)}"`;
+  }
+
+  // The half that a single `name` slot could not carry, and the reason
+  // IMPORT_SPECIFIER exists at all.
+  const aliased = nodeAt(ref ast, childAt(ref ast, decl, 1));
+  let test theory: Case = t.asserts("an aliased specifier keeps BOTH names") {
+    theory.isSuccessful = str.stringEq(aliased.name, "times")
+      && str.stringEq(poolString(ref ast, aliased.strId), "scale");
+    theory.detail = `{ scale as times } gave local "${aliased.name}" / export "${poolString(ref ast, aliased.strId)}", wanted times / scale`;
+  }
+}
+
+suite function theModuleHeaderLandsOnTheProgramNode(): void {
+  // The header is what makes a file part of a DIRECTORY module. The graph reads
+  // it with three tokens of lexing before choosing an arena (see header.yoop);
+  // this is the same name, recorded in the AST.
+  let ast = parseOk("module lex;\nimport { A } from \"./a.yoop\";\nfunction f(): int { return 1; }");
+  const program = nodeAt(ref ast, ast.root);
+
+  let test theory: Case = t.asserts("the declared name lands on PROGRAM") {
+    theory.isSuccessful = str.stringEq(program.name, "lex");
+    theory.detail = `the program declares module "${program.name}", wanted "lex"`;
+  }
+  let test theory: Case = t.asserts("the header is not a top-level declaration") {
+    theory.isSuccessful = program.childCount == 2;
+    theory.detail = `the header file has ${program.childCount} top-level nodes, wanted 2 (the import and the function)`;
+  }
+
+  let bare = parseOk("function f(): int { return 1; }");
+  let test theory: Case = t.asserts("a file with no header declares no module") {
+    theory.isSuccessful = nodeAt(ref bare, bare.root).name.len == 0;
+    theory.detail = `a headerless file declared module "${nodeAt(ref bare, bare.root).name}"`;
+  }
+
+  // It has to be FIRST, above the imports - which is where the graph looks.
+  const late = "import { A } from \"./a.yoop\";\nmodule lex;";
+  let test theory: Case = t.asserts("a header below anything else is refused") {
+    theory.isSuccessful = refusalMentions(late, "must be the FIRST thing");
+    theory.detail = `wanted a header-position refusal, got: ${parseError(late)}`;
+  }
+}
+
+suite function namespaceImportsBindOneNameToTheModule(): void {
+  let ast = parseOk("import * as mathx from \"./lib/mathx.yoop\";");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("the namespace local name lands on the decl") {
+    theory.isSuccessful = str.stringEq(decl.name, "mathx");
+    theory.detail = `the import bound namespace "${decl.name}", wanted "mathx"`;
+  }
+  let test theory: Case = t.asserts("a namespace clause produces no specifiers") {
+    theory.isSuccessful = decl.childCount == 0;
+    theory.detail = `a bare \`* as\` import produced ${decl.childCount} specifier(s), wanted 0`;
+  }
+
+  // Both clauses, one source path. The order they are written in is free, which
+  // is why the parser reads them as two independent optional clauses.
+  let both = parseOk("import { Point }, * as mathx from \"./lib/mathx.yoop\";");
+  const combined = topLevel(ref both, 0);
+  let test theory: Case = t.asserts("the combined form carries a namespace AND specifiers") {
+    theory.isSuccessful = str.stringEq(combined.name, "mathx") && combined.childCount == 1;
+    theory.detail = `\`{ Point }, * as mathx\` gave namespace "${combined.name}" and ${combined.childCount} specifier(s)`;
+  }
+
+  let reversed = parseOk("import * as mathx, { Point } from \"./lib/mathx.yoop\";");
+  const flipped = topLevel(ref reversed, 0);
+  let test theory: Case = t.asserts("the clauses may be written in either order") {
+    theory.isSuccessful = str.stringEq(flipped.name, "mathx") && flipped.childCount == 1;
+    theory.detail = `\`* as mathx, { Point }\` gave namespace "${flipped.name}" and ${flipped.childCount} specifier(s)`;
+  }
+
+  let named = parseOk("import { Point } from \"./lib/mathx.yoop\";");
+  let test theory: Case = t.asserts("a plain named import leaves the namespace name empty") {
+    theory.isSuccessful = topLevel(ref named, 0).name.len == 0;
+    theory.detail = `a named-only import bound namespace "${topLevel(ref named, 0).name}", wanted none`;
+  }
+}
+
+suite function aQualifiedCallIsACallNotAFieldRead(): void {
+  // The parser cannot tell `mathx.add(1, 2)` from a field holding a function -
+  // that needs name resolution - so it records the SHAPE and pass D decides.
+  let ast = parseOk("function f(): int { return mathx.add(1, 2); }");
+  const call = returnedExpression(ref ast);
+
+  let test theory: Case = t.asserts("`ns.fn(args)` parses as a CALL_EXPRESSION") {
+    theory.isSuccessful = call.kind == ASTNodeKind.CALL_EXPRESSION;
+    theory.detail = `mathx.add(1, 2) parsed as ${call.kind}, wanted CALL_EXPRESSION`;
+  }
+  let test theory: Case = t.asserts("the member is in `name`, exactly like an unqualified call") {
+    theory.isSuccessful = str.stringEq(call.name, "add");
+    theory.detail = `the call name is "${call.name}", wanted the member "add"`;
+  }
+  let test theory: Case = t.asserts("the base it was reached through is in childB") {
+    const base = nodeAt(ref ast, call.childB);
+    theory.isSuccessful = call.childB != 0
+      && base.kind == ASTNodeKind.IDENT
+      && str.stringEq(base.name, "mathx");
+    theory.detail = `childB is a ${base.kind} named "${base.name}", wanted IDENT mathx`;
+  }
+
+  // The regression this could easily cause: a field READ must stay a field read.
+  let field = parseOk("function f(): int { return p.x; }");
+  const read = returnedExpression(ref field);
+  let test theory: Case = t.asserts("a dotted name with no arguments is still a FIELD_ACCESS") {
+    theory.isSuccessful = read.kind == ASTNodeKind.FIELD_ACCESS && str.stringEq(read.name, "x");
+    theory.detail = `p.x parsed as ${read.kind} named "${read.name}", wanted FIELD_ACCESS x`;
+  }
+
+  let plain = parseOk("function f(): int { return add(1, 2); }");
+  let test theory: Case = t.asserts("an unqualified call has no base") {
+    theory.isSuccessful = returnedExpression(ref plain).childB == 0;
+    theory.detail = "add(1, 2) carries a qualifying base; only ns.fn() should";
+  }
+}
+
+suite function variantDeclsCarryTheirCasesInOrder(): void {
+  let ast = parseOk("variant Shape { Circle { r: int }, Rect { w: int, h: int }, Empty }");
+  const decl = topLevel(ref ast, 0);
+
+  let test theory: Case = t.asserts("a variant decl holds one node per case") {
+    theory.isSuccessful = decl.kind == ASTNodeKind.VARIANT_DECL && decl.childCount == 3;
+    theory.detail = `parsed a ${decl.kind} with ${decl.childCount} cases, wanted VARIANT_DECL with 3`;
+  }
+
+  // DECLARATION ORDER is the tag order, and the tag is ABI - so the order the
+  // arena holds them in is the thing worth pinning.
+  let test theory: Case = t.asserts("cases keep their declaration order") {
+    const first = nodeAt(ref ast, childAt(ref ast, decl, 0));
+    const last = nodeAt(ref ast, childAt(ref ast, decl, 2));
+    theory.isSuccessful = str.stringEq(first.name, "Circle") && str.stringEq(last.name, "Empty");
+    theory.detail = `the first and last cases are "${first.name}" and "${last.name}", wanted Circle and Empty`;
+  }
+
+  let test theory: Case = t.asserts("a case carries its own fields") {
+    const rect = nodeAt(ref ast, childAt(ref ast, decl, 1));
+    theory.isSuccessful = rect.kind == ASTNodeKind.VARIANT_CASE && rect.childCount == 2;
+    theory.detail = `Rect is a ${rect.kind} with ${rect.childCount} field(s), wanted VARIANT_CASE with 2`;
+  }
+
+  let test theory: Case = t.asserts("a payload-less case has an empty field run") {
+    const empty = nodeAt(ref ast, childAt(ref ast, decl, 2));
+    theory.isSuccessful = empty.childCount == 0;
+    theory.detail = `Empty carries ${empty.childCount} field(s), wanted 0`;
+  }
+}
+
+suite function variantConstructorsAndPatternsShareOneShape(): void {
+  // The braces are what make a constructor unambiguous at parse time.
+  let ast = parseOk("function f(): int { return Shape.Circle { r: 2 }; }");
+  const ctor = returnedExpression(ref ast);
+
+  let test theory: Case = t.asserts("`V.Case { ... }` parses as a VARIANT_CONSTRUCTOR") {
+    theory.isSuccessful = ctor.kind == ASTNodeKind.VARIANT_CONSTRUCTOR
+      && str.stringEq(ctor.name, "Circle");
+    theory.detail = `parsed a ${ctor.kind} named "${ctor.name}", wanted VARIANT_CONSTRUCTOR Circle`;
+  }
+  let test theory: Case = t.asserts("the variant name is the qualifying base") {
+    const base = nodeAt(ref ast, ctor.childB);
+    theory.isSuccessful = base.kind == ASTNodeKind.IDENT && str.stringEq(base.name, "Shape");
+    theory.detail = `childB is a ${base.kind} named "${base.name}", wanted IDENT Shape`;
+  }
+
+  // A payload-LESS constructor is the same tokens as a field read, so the
+  // parser leaves it alone and pass D decides once names resolve.
+  let bare = parseOk("function f(): int { return Shape.Empty; }");
+  let test theory: Case = t.asserts("a payload-less constructor stays a FIELD_ACCESS") {
+    theory.isSuccessful = returnedExpression(ref bare).kind == ASTNodeKind.FIELD_ACCESS;
+    theory.detail = `Shape.Empty parsed as ${returnedExpression(ref bare).kind}, wanted FIELD_ACCESS`;
+  }
+
+  let sw = parseOk("function f(): int { switch (s) { case Shape.Circle { r: v }: { return v; } } }");
+  const pattern = firstSwitchPattern(ref sw);
+  let test theory: Case = t.asserts("a case pattern is a VARIANT_PATTERN with the same slots") {
+    theory.isSuccessful = pattern.kind == ASTNodeKind.VARIANT_PATTERN
+      && str.stringEq(pattern.name, "Circle")
+      && str.stringEq(nodeAt(ref sw, pattern.childB).name, "Shape");
+    theory.detail = `parsed a ${pattern.kind} named "${pattern.name}"`;
+  }
+  let test theory: Case = t.asserts("a pattern's payload holds BINDING names") {
+    const list = nodeAt(ref sw, pattern.childA);
+    const field = nodeAt(ref sw, childAt(ref sw, list, 0));
+    const binding = nodeAt(ref sw, field.childA);
+    theory.isSuccessful = str.stringEq(field.name, "r")
+      && binding.kind == ASTNodeKind.IDENT && str.stringEq(binding.name, "v");
+    theory.detail = `{ r: v } gave field "${field.name}" bound to a ${binding.kind} named "${binding.name}"`;
+  }
+
+  // The regression the constructor could easily cause.
+  let literal = parseOk("function f(): int { const p: Point = { x: 1 }; return 0; }");
+  let test theory: Case = t.asserts("a plain struct literal is untouched") {
+    theory.isSuccessful = !refusalMentions("function f(): int { const p: Point = { x: 1 }; return 0; }", "expected");
+    theory.detail = "an unqualified struct literal stopped parsing";
+  }
+}
+
+suite function exportWrapsTheDeclItDecorates(): void {
+  let ast = parseOk("export function f(): int { return 1; }");
+  const childId = childAt(ref ast, nodeAt(ref ast, ast.root), 0);
+
+  let test theory: Case = t.asserts("`export function` is an EXPORT_DECL, not a flag") {
+    theory.isSuccessful = isExportDecl(ref ast, childId);
+    theory.detail = `the top-level node is ${nodeAt(ref ast, childId).kind}, wanted EXPORT_DECL`;
+  }
+
+  let test theory: Case = t.asserts("declOf looks through the wrapper to the decl") {
+    const inner = nodeAt(ref ast, declOf(ref ast, childId));
+    theory.isSuccessful = inner.kind == ASTNodeKind.FUNCTION_DECL && str.stringEq(inner.name, "f");
+    theory.detail = `declOf gave a ${inner.kind} named "${inner.name}", wanted FUNCTION_DECL f`;
+  }
+
+  let typeAst = parseOk("export type Point { x: int, y: int }");
+  const typeChild = childAt(ref typeAst, nodeAt(ref typeAst, typeAst.root), 0);
+  let test theory: Case = t.asserts("`export type` wraps the same way") {
+    const inner = nodeAt(ref typeAst, declOf(ref typeAst, typeChild));
+    theory.isSuccessful = inner.kind == ASTNodeKind.TYPE_DECL && inner.childCount == 2;
+    theory.detail = `declOf gave a ${inner.kind} with ${inner.childCount} field(s), wanted TYPE_DECL with 2`;
+  }
+
+  let test theory: Case = t.asserts("declOf is the identity on an unwrapped decl") {
+    let bare = parseOk("function g(): int { return 1; }");
+    const only = childAt(ref bare, nodeAt(ref bare, bare.root), 0);
+    theory.isSuccessful = declOf(ref bare, only) == only;
+    theory.detail = "declOf moved a decl that was never wrapped in an export";
+  }
+}
+
+suite function importFormsOutsideTheSubsetAreRefusedByName(): void {
+  let test theory: Case = t.asserts("a side-effect import says so") {
+    theory.isSuccessful = refusalMentions("import \"./x.yoop\";", "side-effect imports");
+    theory.detail = `wanted a refusal naming side-effect imports, got: ${parseError("import \"./x.yoop\";")}`;
+  }
+
+  let test theory: Case = t.asserts("`export const` is refused rather than half-parsed") {
+    theory.isSuccessful = refusalMentions("export const X = 1;", "export function");
+    theory.detail = `wanted a refusal naming the supported export forms, got: ${parseError("export const X = 1;")}`;
+  }
+}
+
+suite function importsMustComeFirst(): void {
+  // The whole graph layer reads the LEADING run of IMPORT_DECLs and stops at
+  // the first declaration, so an import below one would be silently ignored.
+  const src = "function f(): int { return 1; }\nimport { a } from \"./x.yoop\";";
+
+  let test theory: Case = t.asserts("an import below a declaration is refused") {
+    theory.isSuccessful = refusalMentions(src, "imports must come first");
+    theory.detail = `wanted the imports-first refusal, got: ${parseError(src)}`;
+  }
+
+  let test theory: Case = t.asserts("several imports in a row are fine") {
+    let ast = parseOk("import { a } from \"./a.yoop\";\nimport { b } from \"./b.yoop\";\nfunction f(): int { return 1; }");
+    const program = nodeAt(ref ast, ast.root);
+    theory.isSuccessful = program.childCount == 3
+      && topLevel(ref ast, 0).kind == ASTNodeKind.IMPORT_DECL
+      && topLevel(ref ast, 1).kind == ASTNodeKind.IMPORT_DECL;
+    theory.detail = `wanted two imports then a function, got ${program.childCount} top-level nodes`;
+  }
+}
+
+// ----- helpers ---------------------------------------------------------------
+
+// Parses, or hands back an empty arena so the assertion that asked fails rather
+// than the test crashing.
+function parseOk(src: string): AST propagates<disposable> {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  switch (parse(vec.vecAsArray(ref srcBuf))) {
+    case Result.Ok { value: ast }: { return ast; }
+    case Result.Err { error: e }: { return emptyArena(); }
+  }
+}
+
+// The parse error's message, or "" when the source parsed clean.
+function parseError(src: string): string {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  switch (parse(vec.vecAsArray(ref srcBuf))) {
+    case Result.Ok { value: ast }: { return ""; }
+    case Result.Err { error: e }: { return e.rawMessage; }
+  }
+}
+
+// True when `src` is refused AND the message names `needle`. Both halves
+// matter: a refusal with the wrong message sends the reader somewhere else.
+function refusalMentions(src: string, needle: string): bool {
+  const message = parseError(src);
+  if (message.len == 0) {
+    return false;
+  }
+  return str.stringIndexOf(message, needle) < message.len;
+}
+
+function topLevel(ref ast: AST, i: usize): ASTNode {
+  return nodeAt(ref ast, childAt(ref ast, nodeAt(ref ast, ast.root), i));
+}
+
+// The expression in `function f(): int { return <expr>; }` - the shortest route
+// from a source literal to an expression node.
+function returnedExpression(ref ast: AST): ASTNode {
+  return nodeAt(ref ast, firstStatement(ref ast).childA);
+}
+
+// The first pattern of the first arm of `function f(): int { switch ... }`.
+function firstSwitchPattern(ref ast: AST): ASTNode {
+  const sw = firstStatement(ref ast);
+  const arm = nodeAt(ref ast, childAt(ref ast, sw, 0));
+  const patterns = nodeAt(ref ast, arm.childA);
+  return nodeAt(ref ast, childAt(ref ast, patterns, 0));
+}
+
+function firstStatement(ref ast: AST): ASTNode {
+  const fn = topLevel(ref ast, 0);
+  const block = nodeAt(ref ast, fn.childD);
+  const statements = nodeAt(ref ast, block.childA);
+  return nodeAt(ref ast, childAt(ref ast, statements, 0));
+}
+
+function poolString(ref ast: AST, id: usize): string {
+  if (id >= ast.strings.len) {
+    return "";
+  }
+  return vec.vecGet(ref ast.strings, id);
+}

@@ -14,6 +14,7 @@ module codegen;
 //   instr_flow.yoop the same, for branches, labels and the jump table
 //   switch.yoop    `switch` -> a jump table
 //   struct.yoop    struct literals, field read and write
+//   variant.yoop   variant constructors, tags, and pattern bindings
 //   typedefs.yoop  the module-level `%struct.X = type { ... }` lines
 //   array.yoop     array literals, indexing, `.len`
 //   call.yoop      call expressions, and the argument ordering rule
@@ -37,7 +38,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
-import { AST, ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
 import { ModuleGraph, Module } from "../source_graph";
 import { Program, TypedModule } from "../typecheck";
 
@@ -70,17 +71,43 @@ export function codegenProgram(ref prog: Program, ref graph: ModuleGraph): Resul
 
 // Returns "" on success, else the internal error that stopped it.
 function emitModule(ref e: Emitter, ref prog: Program, ref tm: TypedModule, m: Module): string {
-  const programNode = nodeAt(ref m.ast, m.ast.root);
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const err = emitFile(ref e, ref prog, ref tm, m, vec.vecGet(ref m.files, f).root);
+    if (err.len > 0) {
+      return err;
+    }
+    f += 1;
+  }
+  return "";
+}
+
+// One source file of a module. Every file emits into the same LLVM module and
+// mangles against the same id, which is what makes a directory module one unit
+// to the linker as well as to the typechecker.
+function emitFile(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  root: NodeId
+): string {
+  const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
   while (i < programNode.childCount) {
-    const declNode = nodeAt(ref m.ast, childAt(ref m.ast, programNode, i));
+    // `export function f()` wraps the decl, and exportedness changes nothing
+    // here - a module-qualified symbol is emitted either way, and whether it
+    // was legal to NAME it was settled in pass B.
+    const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
+    const declNode = nodeAt(ref m.ast, declId);
     if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
       const err = emitFunction(ref e, ref prog, ref tm, m, declNode);
       if (err.len > 0) {
         return err;
       }
     }
-    // A TYPE_DECL contributes no code until something instantiates it.
+    // A TYPE_DECL contributes no code until something instantiates it, and an
+    // IMPORT_DECL never contributes any.
     i += 1;
   }
   return "";
@@ -110,9 +137,8 @@ function emitFunction(
   disposable params: Vec<ParamInfo> = vec.vecNew(4);
   collectParams(ref cx, declNode, ref params);
 
-  // No mangling yet: the graph is one module, and `main` in particular has to
-  // keep its C name for the linker. Mangling arrives with imports.
-  emitFunctionOpen(ref cx, declNode.name, retTy, ref params);
+  const symbol = definitionSymbol(ref cx, declNode.name);
+  emitFunctionOpen(ref cx, symbol.home, symbol.name, retTy, ref params);
   emitParamPrologue(ref cx, ref params);
 
   let err = "";

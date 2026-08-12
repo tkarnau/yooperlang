@@ -1,0 +1,270 @@
+// Tests for the `source_graph` module - layer 0.
+//
+// The graph walk is the one part of the compiler that can hang rather than
+// fail: an import cycle with no detection is an infinite recursion, and it only
+// shows up as a compiler that never returns. So the refusals get pinned here,
+// by message, against real files.
+//
+// Fixtures live in bootstrap/tests/graph/ and are reached by PATH, which is the
+// one thing here that depends on where the test was run from. Both documented
+// working directories are tried (see `fixture` at the bottom), so this works
+// from the repository root and from bootstrap/ alike.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { LoadGraphResult, ModuleGraph, loadModuleGraph, moduleIdFor } from "../source_graph";
+
+suite function anImportCycleIsRefusedRatherThanFollowed(): void {
+  let test theory: Case = t.asserts("a two-module cycle is detected") {
+    theory.isSuccessful = loadFails("cycle_a.yoop", "import cycle");
+    theory.detail = `wanted a cycle diagnostic, got: ${loadError("graph", "cycle_a.yoop")}`;
+  }
+}
+
+suite function unresolvableImportsAreRefusedByName(): void {
+  let test theory: Case = t.asserts("an import of a file that is not there says so") {
+    theory.isSuccessful = loadFails("missing.yoop", "not found");
+    theory.detail = `wanted a not-found diagnostic, got: ${loadError("graph", "missing.yoop")}`;
+  }
+
+  // These two are OUTSIDE the subset rather than wrong, so the message has to
+  // say which feature is missing - not "cannot resolve", which reads as a typo.
+  let test theory: Case = t.asserts("a std/ import names the missing feature") {
+    theory.isSuccessful = loadFails("std_import.yoop", "std imports are not supported");
+    theory.detail = `wanted a std-not-supported diagnostic, got: ${loadError("graph", "std_import.yoop")}`;
+  }
+
+  let test theory: Case = t.asserts("a missing entry file is refused before anything is parsed") {
+    theory.isSuccessful = loadFails("no_such_file.yoop", "entry file not found");
+    theory.detail = `wanted an entry-not-found diagnostic, got: ${loadError("graph", "no_such_file.yoop")}`;
+  }
+}
+
+// A directory module is one namespace made of several files, so the ways it can
+// be malformed are all about the SET of files rather than any one of them.
+suite function aMalformedDirectoryModuleIsRefusedByName(): void {
+  // Half a module is not a state worth supporting: this is what catches a file
+  // dropped into a module directory by someone who did not notice it opted in.
+  let test theory: Case = t.asserts("a file with no header in a module directory says so") {
+    theory.isSuccessful = loadFails("mixed_dir.yoop", "must declare it");
+    theory.detail = `wanted a mixed-directory diagnostic, got: ${loadError("graph", "mixed_dir.yoop")}`;
+  }
+
+  // Identity is the DIRECTORY and the name is only a label, so a disagreement
+  // cannot split one directory into two modules - it is simply an error.
+  let test theory: Case = t.asserts("two files declaring different names say so") {
+    theory.isSuccessful = loadFails("name_clash.yoop", "must declare the same name");
+    theory.detail = `wanted a name-disagreement diagnostic, got: ${loadError("graph", "name_clash.yoop")}`;
+  }
+
+  // `*.test.yoop` is excluded from a module's files, so a directory holding
+  // only tests holds no source at all.
+  let test theory: Case = t.asserts("a directory with no source files says so") {
+    theory.isSuccessful = loadFails("empty_dir.yoop", "holds no .yoop source files");
+    theory.detail = `wanted an empty-directory diagnostic, got: ${loadError("graph", "empty_dir.yoop")}`;
+  }
+}
+
+// The accepting case, read back from the slice fixture that RUNS it. The slice
+// proves the program behaves; this proves the module underneath it has the
+// shape every later layer assumes.
+suite function aDirectoryModuleIsOneModuleOfSeveralFiles(): void {
+  switch (loadModuleGraph(fixture("slice", "dir_modules.yoop"))) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("the directory-module fixture loads") {
+        theory.isSuccessful = false;
+        theory.detail = `loading the slice directory module failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      // ./lib/geo plus the entry. If the directory had become two modules there
+      // would be three.
+      let test theory: Case = t.asserts("a directory of two files is ONE module") {
+        theory.isSuccessful = graph.modules.len == 2;
+        theory.detail = `the graph holds ${graph.modules.len} modules, wanted 2 (geo and the entry)`;
+      }
+
+      let geo = vec.vecGet(ref graph.modules, 0);
+      // geo.test.yoop sits in that directory and must not be absorbed - if it
+      // were, its `import.test;` would have failed the parse above.
+      let test theory: Case = t.asserts("*.test.yoop is excluded from the module's files") {
+        theory.isSuccessful = geo.files.len == 2;
+        theory.detail = `module "${geo.name}" holds ${geo.files.len} files, wanted 2 (the .test.yoop is not one of them)`;
+      }
+
+      let test theory: Case = t.asserts("the declared name is carried on the module") {
+        theory.isSuccessful = str.stringEq(geo.name, "geo") && geo.dir.len > 0;
+        theory.detail = `the module is named "${geo.name}" with dir "${geo.dir}"`;
+      }
+
+      // One arena for the whole module is what keeps typecheck's decoration a
+      // single dense vector: two files must not share a root.
+      let test theory: Case = t.asserts("each file has its own root in the shared arena") {
+        const a = vec.vecGet(ref geo.files, 0).root;
+        const b = vec.vecGet(ref geo.files, 1).root;
+        theory.isSuccessful = a != 0 && b != 0 && a != b;
+        theory.detail = `the two files have roots ${a} and ${b}; they must be distinct and non-zero`;
+      }
+
+      // Files are loaded in name order so a module's contents do not depend on
+      // what order the filesystem happened to hand them back.
+      let test theory: Case = t.asserts("files are loaded in sorted order") {
+        const first = vec.vecGet(ref geo.files, 0).absPath;
+        theory.isSuccessful = str.stringIndexOf(first, "area.yoop") < first.len;
+        theory.detail = `the first file is ${first}, wanted area.yoop to sort ahead of point.yoop`;
+      }
+    }
+  }
+}
+
+suite function importingTheWrongThingNamesTheRightForm(): void {
+  // The module is the unit, so naming one of its files suggests you get only
+  // that file. Say which form works instead of silently loading the directory.
+  let test theory: Case = t.asserts("importing one source file of a module names the module form") {
+    theory.isSuccessful = loadFails("file_of_module.yoop", "import the module itself instead");
+    theory.detail = `wanted a name-the-module diagnostic, got: ${loadError("graph", "file_of_module.yoop")}`;
+  }
+
+  // This one would otherwise be reported as an import cycle, which describes
+  // something that did not happen.
+  let test theory: Case = t.asserts("a file importing its own module says to drop the import") {
+    theory.isSuccessful = loadFails("self_import.yoop", "imports its own module");
+    theory.detail = `wanted a self-import diagnostic, got: ${loadError("graph", "self_import.yoop")}`;
+  }
+}
+
+// The slice fixture is a diamond: the entry and mathx both import counter.
+// It proves at the slice level that the program RUNS; here it proves the graph
+// underneath it has the shape typecheck depends on.
+suite function theGraphIsDedupedAndTopologicallyOrdered(): void {
+  switch (loadModuleGraph(fixture("slice", "imports.yoop"))) {
+    case LoadGraphResult.Err { error: e }: {
+      let test theory: Case = t.asserts("the diamond fixture loads") {
+        theory.isSuccessful = false;
+        theory.detail = `loading the slice diamond failed: ${e}`;
+      }
+    }
+    case LoadGraphResult.Ok { value: graph }: {
+      let test theory: Case = t.asserts("a module imported twice is loaded once") {
+        // entry + mathx + counter. A fourth would mean counter loaded twice,
+        // which links as a duplicate symbol rather than a graph error.
+        theory.isSuccessful = graph.modules.len == 3;
+        theory.detail = `the diamond produced ${graph.modules.len} modules, wanted 3`;
+      }
+
+      let test theory: Case = t.asserts("the entry is the LAST module, not a second copy") {
+        theory.isSuccessful = graph.entryIndex == graph.modules.len - 1;
+        theory.detail = `entryIndex is ${graph.entryIndex} of ${graph.modules.len} modules; leaves-first order puts the entry last`;
+      }
+
+      // What every later pass leans on: by the time a module is reached, each
+      // module it imports already has an index, and that index is lower.
+      let test theory: Case = t.asserts("every import points at an EARLIER module") {
+        theory.isSuccessful = importsAllPointBackwards(ref graph);
+        theory.detail = "an import edge points forward; the order is not topological";
+      }
+
+      let test theory: Case = t.asserts("every module gets a distinct id") {
+        theory.isSuccessful = idsAreDistinct(ref graph);
+        theory.detail = "two modules share a mangling id, so their symbols would collide";
+      }
+    }
+  }
+}
+
+suite function moduleIdsAreReadableAndSymbolSafe(): void {
+  let test theory: Case = t.asserts("the id is the base name plus the graph position") {
+    const id = moduleIdFor("/a/b/mathx.yoop", 1);
+    theory.isSuccessful = str.stringEq(id, "mathx_1");
+    theory.detail = `moduleIdFor("/a/b/mathx.yoop", 1) gave "${id}", wanted "mathx_1"`;
+  }
+
+  // The id goes straight into an LLVM symbol name, where `-` is not legal.
+  let test theory: Case = t.asserts("characters an LLVM identifier cannot hold are replaced") {
+    const id = moduleIdFor("/a/b/my-util.v2.yoop", 0);
+    theory.isSuccessful = str.stringEq(id, "my_util_v2_0");
+    theory.detail = `moduleIdFor("/a/b/my-util.v2.yoop", 0) gave "${id}", wanted "my_util_v2_0"`;
+  }
+
+  let test theory: Case = t.asserts("two files with the same base name still differ") {
+    theory.isSuccessful = !str.stringEq(moduleIdFor("/a/util.yoop", 0), moduleIdFor("/b/util.yoop", 1));
+    theory.detail = "two util.yoop in different directories got the same id";
+  }
+}
+
+// ----- helpers ---------------------------------------------------------------
+
+// A fixture path that works from either documented working directory: the
+// repository root, and bootstrap/ (which is what the commands in
+// bootstrap/README.md assume). Falls back to the repo-root spelling so a truly
+// missing fixture fails with a path a reader recognizes.
+function fixture(dir: string, name: string): string {
+  const fromRepoRoot = `bootstrap/tests/${dir}/${name}`;
+  if (fs.exists(fromRepoRoot)) {
+    return fromRepoRoot;
+  }
+  const fromBootstrap = `tests/${dir}/${name}`;
+  if (fs.exists(fromBootstrap)) {
+    return fromBootstrap;
+  }
+  return fromRepoRoot;
+}
+
+// The load error for a fixture, or "" when it loaded clean.
+function loadError(dir: string, name: string): string {
+  switch (loadModuleGraph(fixture(dir, name))) {
+    case LoadGraphResult.Err { error: e }: { return e; }
+    case LoadGraphResult.Ok { value: graph }: { return ""; }
+  }
+}
+
+// True when the fixture is refused AND the message names `needle`. Both halves
+// matter: a refusal with the wrong message sends the reader somewhere else.
+function loadFails(name: string, needle: string): bool {
+  const message = loadError("graph", name);
+  if (message.len == 0) {
+    return false;
+  }
+  return str.stringIndexOf(message, needle) < message.len;
+}
+
+function importsAllPointBackwards(ref graph: ModuleGraph): bool {
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    let m = vec.vecGet(ref graph.modules, i);
+    let f: usize = 0;
+    while (f < m.files.len) {
+      let file = vec.vecGet(ref m.files, f);
+      let e: usize = 0;
+      while (e < file.imports.len) {
+        if (vec.vecGet(ref file.imports, e).resolvedModuleIndex >= i) {
+          return false;
+        }
+        e += 1;
+      }
+      f += 1;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+function idsAreDistinct(ref graph: ModuleGraph): bool {
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    let j = i + 1;
+    while (j < graph.modules.len) {
+      if (str.stringEq(vec.vecGet(ref graph.modules, i).id, vec.vecGet(ref graph.modules, j).id)) {
+        return false;
+      }
+      j += 1;
+    }
+    i += 1;
+  }
+  return true;
+}

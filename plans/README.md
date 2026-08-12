@@ -56,9 +56,14 @@ per directory - `diagnostics`, `lex`, `ast`, `parse`, `source_graph`,
 [../bootstrap/README.md](../bootstrap/README.md). Do not reintroduce a shared
 types file.
 
-- **Layer 0 - module graph**: STARTED. `source_graph/` has `Module` /
-  `ModuleGraph`, `loadModuleGraph` (single entry module), and dormant
-  import-path resolution. No import edges yet.
+- **Layer 0 - module graph**: WORKING. `source_graph/` walks imports depth-first,
+  dedupes by absolute path (so a diamond loads its shared leaf once), refuses
+  import cycles, and hands back a topologically ordered `Vec<Module>` with the
+  entry LAST. Each module gets a readable, LLVM-safe id (`mathx_1`) that every
+  symbol it defines is mangled against. A module is one file, or a DIRECTORY of
+  files that each declare `module <name>;` and share one namespace, one id and
+  one AST arena. Not yet: the `std/` and `modules/` roots, autoloads,
+  side-effect imports - all refused by name.
 - **Layer 1 - lex**: WORKING AND AT PARITY. `npm run test:parity` diffs the
   bootstrap token stream against the JS lexer's over 557 real source files.
   Getting there found three bugs: `0o755` lexed base-2, 14 words were promoted
@@ -73,13 +78,20 @@ types file.
   `if`/`else if`/`else`, `while`, `for`, `break`/`continue`, calls, arrays
   (`T[]`, literals, indexing, `.len`), structs as values (literals, field read
   and write), `switch` with multi-pattern arms, integer casts, unary and
-  compound-assignment forms, and expressions by precedence climbing. Not yet: imports, traits, variants, enums, unions,
+  compound-assignment forms, expressions by precedence climbing, `module`
+  headers, `export`, every `import` form but the side-effect one (named,
+  namespace, combined, and directory-module paths), and `variant` decls with
+  their constructors and patterns. Not yet: traits,
+  enums, unions,
   methods in a type body, `implements`/`propagates`/`contains` clauses - each a
   named "not supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
-  is built, with pass A (shells + redeclaration), pass C (function signatures,
-  struct fields) and a thin pass D (bodies + resolvedTypes decoration). Pass B
-  is a no-op while the graph is one module. The largest layer.
+  is built, with pass A (shells + redeclaration + exports), pass B (imports and
+  namespaces), pass C (function signatures, struct fields) and a thin pass D
+  (bodies + resolvedTypes decoration, including `ns.fn()` resolution). An import
+  binds the SOURCE module's SymbolId - the same integer - which is what makes an
+  imported type compare equal to the declared one, since type equality is
+  `id == id`. Diagnostics name the file they came from. The largest layer.
 - **Layer 4 - bytecode IR**: the one planned deviation from the JS pipeline
   (JS has no IR; the bootstrap may add one). Hold the codegen input contract
   stable so this stays an absorbable, contained change. Deferred until a pass or
@@ -90,8 +102,9 @@ types file.
   alloca + store/load, and `if`/`while`/`for`/`break`/`continue` as labels and
   branches over a loop-label stack, and short-circuiting `&&`/`||` through a
   stack slot rather than a phi, arrays as a `{ ptr, i64 }` descriptor, `switch`
-  as an LLVM jump table, named struct types passed by value, and C varargs
-  promotion). Split
+  as an LLVM jump table, named struct types passed by value, C varargs
+  promotion, `<moduleId>__<name>` symbol mangling so one LLVM module can
+  hold the whole graph, and variants as a tag plus a payload blob). Split
   into deciding (`expr`/`stmt`), emitting (`instr`, one function per LLVM
   instruction with a sample of its output) and appending (`context`); the rules
   are in bootstrap/README.md and are bootstrap-specific.
@@ -102,6 +115,31 @@ types file.
 asserts the JS compiler and the bootstrap produce identical stdout and exit
 codes. Seeding every layer first was the right call: it is what turned codegen
 and link from "someday" into concrete, small modules.
+
+**The module system landed on 2026-08-12.** Three slice fixtures cover it:
+`imports.yoop` (named imports, aliases, a diamond), `namespaces.yoop` (`* as ns`
+and `ns.fn()`), and `dir_modules.yoop` (a directory of files sharing one
+namespace). Every layer carries its share - the graph walk and the directory
+unit (layer 0), headers and all three import clauses (layer 2), pass B and the
+export table (layer 3), symbol mangling (layer 5).
+
+The one refactor it forced is worth knowing: a Module now owns several
+SourceFiles that share ONE arena, so NodeIds stay unique per module and
+typecheck's decoration stays a single dense vector. Diagnostics gained a file
+path in the same change, because `12:5` stopped identifying anything.
+
+**Variants landed on 2026-08-12.** `tests/slice/variants.yoop` covers tagged
+unions end to end: constructors, exhaustive and defaulted switches, payload
+bindings, a struct inside a payload, and value-copy semantics. The layout is
+`{ i32 tag, [N x i8] payload }` with one payload struct per case, sized by
+`typecheck/layout.yoop` to match the JS reference. Errors-as-values is the point
+of it - `Result` and `Option` are in essentially every bootstrap signature.
+
+What the bootstrap still needs before it can read its own source: the `std/`
+import root (58 of its files), template literals (65) - which is also the first
+feature to need the yoop RUNTIME linked rather than just libc - and generics
+(31). Generic variants are refused by name; `Result<T, E>` needs that work
+first.
 
 Immediate build sequence:
 

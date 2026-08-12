@@ -142,6 +142,9 @@ export function formatType(ref prog: Program, id: TypeId): string {
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       return d.name;
     }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
     case Type.ErrorT: { return "<error>"; }
     default: { return "<type>"; }
   }
@@ -248,6 +251,139 @@ export function structFieldCount(ref prog: Program, structType: TypeId): usize {
       return f.len;
     }
     default: { return 0; }
+  }
+}
+
+// Where a named case sits in a variant, and how much it carries.
+//
+// Deliberately shaped like FieldLookup, and deliberately NOT carrying the case's
+// `Vec<Field>`. A Vec read out of the type arena is a SHALLOW copy that shares
+// the arena's storage, so handing one out invites a caller to dispose it and
+// free the arena's own fields out from under every later lookup. That is not
+// hypothetical - it is the bug this shape exists to prevent, found as a null
+// dereference three passes away from the annotation that caused it.
+//
+// Callers that need the fields ask for them one at a time, below.
+export type VariantCaseLookup {
+  ordinal: int,
+  fieldCount: usize,
+  found: bool,
+}
+
+export function lookupVariantCase(ref prog: Program, variantType: TypeId, name: string): VariantCaseLookup {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      let i: usize = 0;
+      while (i < cs.len) {
+        const c = vec.vecGet(ref cs, i);
+        if (str.stringEq(c.name, name)) {
+          return { ordinal: c.ordinal, fieldCount: c.fields.len, found: true };
+        }
+        i += 1;
+      }
+      return { ordinal: 0, fieldCount: 0, found: false };
+    }
+    default: {
+      return { ordinal: 0, fieldCount: 0, found: false };
+    }
+  }
+}
+
+// The i'th field of a case, by ordinal. `found` is false when either index is
+// out of range, which keeps every caller total without a bounds check of its
+// own.
+export function variantCaseFieldAt(ref prog: Program, variantType: TypeId, ordinal: usize, i: usize): FieldLookup {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      if (ordinal >= cs.len) {
+        return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+      }
+      let c = vec.vecGet(ref cs, ordinal);
+      if (i >= c.fields.len) {
+        return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+      }
+      return { index: i, typeId: vec.vecGet(ref c.fields, i).typeId, found: true };
+    }
+    default: {
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+  }
+}
+
+// A case's field BY NAME: its position in the payload and its type.
+export function variantCaseFieldNamed(ref prog: Program, variantType: TypeId, ordinal: usize, name: string): FieldLookup {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      if (ordinal >= cs.len) {
+        return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+      }
+      let c = vec.vecGet(ref cs, ordinal);
+      let i: usize = 0;
+      while (i < c.fields.len) {
+        const f = vec.vecGet(ref c.fields, i);
+        if (str.stringEq(f.name, name)) {
+          return { index: i, typeId: f.typeId, found: true };
+        }
+        i += 1;
+      }
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+    default: {
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+  }
+}
+
+// How many cases a variant has, for the exhaustiveness check.
+export function variantCaseCount(ref prog: Program, variantType: TypeId): usize {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return cs.len;
+    }
+    default: { return 0; }
+  }
+}
+
+// The name of the case at `ordinal`, for the "you did not handle X" message.
+export function variantCaseNameAt(ref prog: Program, variantType: TypeId, ordinal: usize): string {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      if (ordinal >= cs.len) {
+        return "";
+      }
+      return vec.vecGet(ref cs, ordinal).name;
+    }
+    default: { return ""; }
+  }
+}
+
+// The declaring module and the declared name, which together give a variant its
+// emitted LLVM names. Two accessors rather than one because the caller composes
+// three different names out of them.
+export function variantModuleIdOf(ref prog: Program, variantType: TypeId): string {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return moduleIdOf(ref prog, d.module);
+    }
+    default: { return ""; }
+  }
+}
+
+export function variantDeclNameOf(ref prog: Program, variantType: TypeId): string {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    default: { return ""; }
+  }
+}
+
+export function isVariantType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return true;
+    }
+    default: { return false; }
   }
 }
 

@@ -10,7 +10,7 @@ module codegen;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Type, TypeId, PrimKind, Program, typeAt, TYPE_VOID_ID } from "../typecheck";
+import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID } from "../typecheck";
 
 export type Emitter propagates<disposable> {
   globals: Text,        // constants and declares, emitted first
@@ -128,7 +128,12 @@ export function llvmType(ref prog: Program, id: TypeId): string {
     // than a literal `{ ... }` so the IR is readable and so a struct passed by
     // value keeps one spelling everywhere it appears.
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
-      return structLlvmName(d.name);
+      return structLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
+    // A variant is `{ i32 tag, [N x i8] payload }` - one named type per decl,
+    // regardless of which case a given value holds. Typedefs.yoop emits it.
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return variantLlvmName(moduleIdOf(ref prog, d.module), d.name);
     }
     default: { return "ptr"; }
   }
@@ -152,8 +157,31 @@ function llvmPrim(p: PrimKind): string {
 // How an array value is spelled in the IR: `{ data, len }`.
 export const ARRAY_DESCRIPTOR: string = "{ ptr, i64 }";
 
-// The LLVM name for a declared struct. No module mangling yet - the graph is one
-// module; that arrives with imports, alongside the same change for functions.
-export function structLlvmName(name: string): string {
-  return `%struct.${name}`;
+// The LLVM name for a declared struct, qualified by the module that declared it
+// so two modules can each have a `Point`. Same rule as a function symbol, see
+// mangle.yoop.
+//
+// This builds a string per call, which the emit-path rule normally forbids -
+// `llvmType` returns a `string` and every caller pushes it, so making this
+// append-only means changing that signature and every one of its callers. It
+// was already one malloc per call before the module prefix; that is a known,
+// contained wart, not a new one.
+export function structLlvmName(moduleId: string, name: string): string {
+  return `%struct.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
 }
+
+// The whole variant value: `%variant.mathx_1__Result`.
+export function variantLlvmName(moduleId: string, name: string): string {
+  return `%variant.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
+}
+
+// ONE case's payload, as a struct of its fields:
+// `%variantc.mathx_1__Result__Ok`. Emitted only for cases that carry
+// something, and only ever used to address the payload bytes.
+export function variantCaseLlvmName(moduleId: string, name: string, caseName: string): string {
+  return `%variantc.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}${SYMBOL_MODULE_SEPARATOR}${caseName}`;
+}
+
+// The tag. Fixed at i32 to match the JS reference's layout - see the alignment
+// note in variantPayloadSize's neighbours in typecheck/layout.yoop.
+export const VARIANT_TAG_TYPE: string = "i32";

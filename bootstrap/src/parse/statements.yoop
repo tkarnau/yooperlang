@@ -256,10 +256,15 @@ function parseSwitchArm(ref ps: ParserState): ParsingResult {
     arm.childA = SelfLexing.buildListNode(ref ps, ref none, loc);
   } else {
     SelfLexing.expect(ref ps, TokenTags.CASE)?;
-    // `case 1, 2:` - several patterns share one arm.
+    // `case 1, 2:` and `case Result.Ok { value: v }, Result.None:` - several
+    // patterns share one arm either way.
     disposable patternIds: Vec<NodeId> = vec.vecNew(2);
     while (true) {
-      vec.vecPush(ref patternIds, parseLiteralPattern(ref ps)?);
+      if (peekIsVariantPattern(ref ps)) {
+        vec.vecPush(ref patternIds, parseVariantPattern(ref ps)?);
+      } else {
+        vec.vecPush(ref patternIds, parseLiteralPattern(ref ps)?);
+      }
       if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
         break;
       }

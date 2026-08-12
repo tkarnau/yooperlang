@@ -1,0 +1,3 @@
+import { a } from "./clash";
+
+function main(): int { return a(); }

@@ -1,0 +1,74 @@
+// Variants: tagged unions, their constructors, and switch patterns.
+//
+// What each piece is for:
+//   Shape            three cases with 1, 2 and 0 fields - the payload array is
+//                    sized by the LARGEST, and every case reads the same bytes
+//                    as a different struct
+//   `Shape.Empty`    a payload-less constructor, which is the same tokens as a
+//                    field read and only tells apart once names resolve
+//   `area`           an EXHAUSTIVE switch with no default: every arm returns,
+//                    and the jump table's default is an unreachable block
+//   `describe`       the same variant with a default arm instead
+//   `Pair`           a payload holding a STRUCT, so the payload is not just
+//                    scalars and the size arithmetic has to be right
+//   fields reordered `Shape.Rect { h: 3, w: 4 }` lists h first, so it only
+//                    works if payload fields are stored by POSITION
+
+type Point {
+  x: int,
+  y: int,
+}
+
+variant Shape {
+  Circle { r: int },
+  Rect { w: int, h: int },
+  Empty,
+}
+
+variant Pair {
+  Origin,
+  At { p: Point, label: int },
+}
+
+function area(s: Shape): int {
+  switch (s) {
+    case Shape.Circle { r: r }: { return 3 * r * r; }
+    case Shape.Rect { w: w, h: h }: { return w * h; }
+    case Shape.Empty: { return 0; }
+  }
+}
+
+// A default arm instead of covering every case, and several payload-less cases
+// sharing one arm.
+function describe(s: Shape): int {
+  switch (s) {
+    case Shape.Circle { r: r }: { return r; }
+    default: { return -1; }
+  }
+}
+
+function pairSum(p: Pair): int {
+  switch (p) {
+    case Pair.Origin: { return 0; }
+    case Pair.At { p: pt, label: n }: { return pt.x + pt.y + n; }
+  }
+}
+
+function main(): int {
+  const c: Shape = Shape.Circle { r: 2 };
+  const r: Shape = Shape.Rect { h: 3, w: 4 };
+  const e: Shape = Shape.Empty;
+  printf("area=%d %d %d\n", area(c), area(r), area(e));
+  printf("describe=%d %d\n", describe(c), describe(e));
+
+  // A variant is a VALUE: assigning copies it, so the copy can be re-tagged
+  // without touching the original.
+  let m: Shape = c;
+  m = Shape.Rect { w: 5, h: 5 };
+  printf("copy=%d original=%d\n", area(m), area(c));
+
+  const origin: Pair = Pair.Origin;
+  const at: Pair = Pair.At { p: { x: 3, y: 4 }, label: 10 };
+  printf("pair=%d %d\n", pairSum(origin), pairSum(at));
+  return 0;
+}

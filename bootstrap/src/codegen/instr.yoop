@@ -218,10 +218,14 @@ export function emitNot(ref cx: Cx, dest: usize, value: Operand): void {
 // buffer, because the hoisted allocas and the instruction stream are appended
 // after them by emitFunctionClose.
 //
-//   define i32 @add(i32 %a.arg, i32 %b.arg) {
+//   define i32 @mathx_1__add(i32 %a.arg, i32 %b.arg) {
 //   entry:
+//
+// `homeModule` is the mangling prefix, or "" for a symbol that keeps its bare C
+// name. Which one it is was decided in mangle.yoop; this just spells it.
 export function emitFunctionOpen(
   ref cx: Cx,
+  homeModule: string,
   name: string,
   retTy: string,
   ref params: Vec<ParamInfo>
@@ -229,6 +233,10 @@ export function emitFunctionOpen(
   headerPart(ref cx, "define ");
   headerPart(ref cx, retTy);
   headerPart(ref cx, " @");
+  if (homeModule.len > 0) {
+    headerPart(ref cx, homeModule);
+    headerPart(ref cx, SYMBOL_MODULE_SEPARATOR);
+  }
   headerPart(ref cx, name);
   headerPart(ref cx, "(");
   let i: usize = 0;
@@ -255,17 +263,20 @@ export function emitFunctionClose(ref cx: Cx): void {
   flushFunction(cx.e);
 }
 
-//   %t7 = call i32 @answer()
+//   %t7 = call i32 @main_2__answer()
 //   %t8 = call i32 (ptr, ...) @printf(ptr @.str.0, i32 %t7)
-//   call void @doThing()
+//   call void @mathx_1__doThing()
 //
 // `dest` is ignored when `retTy` is void. A variadic callee needs its FULL
 // function type at the call site, not just the return type, which is the only
-// reason `isVariadic` exists.
+// reason `isVariadic` exists. `calleeHome` is the callee's mangling prefix, or
+// "" for a bare C name - printf above being the reason it can differ from the
+// module currently being emitted.
 export function emitCall(
   ref cx: Cx,
   dest: usize,
   retTy: string,
+  calleeHome: string,
   calleeName: string,
   isVariadic: bool,
   ref args: Vec<CallArg>
@@ -283,6 +294,10 @@ export function emitCall(
     part(ref cx, retTy);
   }
   part(ref cx, " @");
+  if (calleeHome.len > 0) {
+    part(ref cx, calleeHome);
+    part(ref cx, SYMBOL_MODULE_SEPARATOR);
+  }
   part(ref cx, calleeName);
   part(ref cx, "(");
   let i: usize = 0;

@@ -15,6 +15,15 @@ import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Diagnostic, SourceLocation, errorAt } from "../diagnostics";
 
+// One entry of TypedModule.importedFrom. Both halves are needed to name the
+// symbol an imported call lands on: `import { tag as mathTag }` binds
+// `mathTag` in this module and still has to call the `tag` that mathx defines.
+@derive(display)
+export type ImportOrigin {
+  moduleId: string,     // the DEFINING module's mangling id
+  exportName: string,   // the name it is declared under THERE
+}
+
 // Per-module typecheck state, indexed positionally by ModuleId (parallel to the
 // driver's module list). This does NOT own the module's AST - the ModuleGraph
 // does; decoration references nodes by NodeId (decision D2), so codegen reads
@@ -24,6 +33,12 @@ export type TypedModule propagates<disposable> {
   moduleId: string,               // stable id copied from Module.id; mangling basis
   names: Map<string, SymbolId>,   // the one symbol namespace (replaces the 13 JS tables)
   exports: Map<string, SymbolId>, // the exported subset of `names`
+  // Where an imported name came from, keyed by the LOCAL name. Pass B fills it;
+  // a name absent from it belongs to this module. It exists because an import
+  // binds the source module's SymbolId directly - which is what makes an
+  // imported type compare equal to the original - and a shared SymbolId cannot
+  // say which module has to define the symbol codegen calls.
+  importedFrom: Map<string, ImportOrigin>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
   allowsUnsafe: bool,
   // Sparse decorations (calleeMangled, genericInstances, castTargets, ...) are
@@ -36,7 +51,18 @@ export type Program propagates<disposable> {
   symbols: Vec<Symbol>,         // interned; indexed by SymbolId
   modules: Vec<TypedModule>,    // by ModuleId; parallel to the driver's modules
   diagnostics: Vec<Diagnostic>,
+  // The source file every pass below is currently walking, stamped onto each
+  // diagnostic by `reportError`. Ambient rather than threaded because the
+  // alternative is a `filePath` parameter on forty call sites that all want the
+  // same answer - and because it has exactly one writer, `walkFile`.
+  currentFile: string,
   // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
+}
+
+// Announce which file the pass is about to walk. Every pass that iterates
+// `m.files` calls this first; a diagnostic raised outside one carries "".
+export function beginFile(ref prog: Program, absPath: string): void {
+  prog.currentFile = absPath;
 }
 
 // The reserved singletons are pushed here, in the order ids.yoop declares them.
@@ -74,14 +100,21 @@ export function initProgram(): Program propagates<disposable> {
     symbols: symbols,
     modules: vec.vecNew(0),
     diagnostics: vec.vecNew(0),
+    currentFile: "",
   };
 }
 
 export function initTypedModule(moduleId: string): TypedModule propagates<disposable> {
+  // Annotated rather than inline: `V` is not inferable from stringKeyOps alone
+  // and there is no turbofish.
+  let names: Map<string, SymbolId> = map.mapNew(0, map.stringKeyOps());
+  let exports: Map<string, SymbolId> = map.mapNew(0, map.stringKeyOps());
+  let importedFrom: Map<string, ImportOrigin> = map.mapNew(0, map.stringKeyOps());
   return {
     moduleId: moduleId,
-    names: map.mapNew(0, map.stringKeyOps()),
-    exports: map.mapNew(0, map.stringKeyOps()),
+    names: names,
+    exports: exports,
+    importedFrom: importedFrom,
     resolvedTypes: vec.vecNew(0),
     allowsUnsafe: false,
   };
@@ -165,6 +198,18 @@ export function symbolAt(ref prog: Program, id: SymbolId): Symbol {
   return vec.vecGet(ref prog.symbols, id);
 }
 
+// A ModuleId back to the mangling id it names. Codegen asks this about the
+// module a struct was DECLARED in, which is the one thing a TypeId knows about
+// its home and the emitted name needs.
+export function moduleIdOf(ref prog: Program, id: ModuleId): string {
+  if (id >= prog.modules.len) {
+    return "";
+  }
+  return vec.vecGet(ref prog.modules, id).moduleId;
+}
+
 export function reportError(ref prog: Program, message: string, sourceLoc: SourceLocation): void {
-  vec.vecPush(ref prog.diagnostics, errorAt(message, sourceLoc));
+  let d = errorAt(message, sourceLoc);
+  d.filePath = prog.currentFile;
+  vec.vecPush(ref prog.diagnostics, d);
 }

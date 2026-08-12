@@ -1,0 +1,275 @@
+module typecheck;
+
+/*
+  Pass D's variant work: constructors, patterns, and exhaustiveness.
+
+  Split out of pass_d.yoop because it is one coherent job with one shared
+  vocabulary - a variant name, a case name, and a payload - reached from three
+  unrelated places in the walk (an expression, a dotted name, a switch arm).
+
+  The parser could not resolve any of those names, so everything here starts by
+  turning `Result.Ok` into a TypeId plus an ordinal. Two shapes arrive:
+
+    VARIANT_CONSTRUCTOR   `Result.Ok { value: 1 }` - the braces made it
+                          unambiguous at parse time
+    FIELD_ACCESS          `Result.None` - the same tokens as `p.x`, and only
+                          telling apart once names resolve
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// The variant type a module-level name refers to, or TYPE_ERROR_ID when the
+// name is not a variant. SILENT: every caller has a better message than this
+// one could give, because only the caller knows what it was hoping for.
+export function variantTypeNamed(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.VariantT { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// True when `expr` is a FIELD_ACCESS that is really a payload-less constructor
+// (`Result.None`). Checked before the base is checked as a VALUE, because a
+// variant name is not one and would be reported as an unknown name.
+export function isPayloadlessConstructor(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): bool {
+  const base = nodeAt(ref ast, expr.childA);
+  if (base.kind != ASTNodeKind.IDENT) {
+    return false;
+  }
+  // A local WINS. Otherwise a variable named after a variant would silently
+  // stop being readable, which is a much worse failure than a shadowing rule.
+  switch (scopeLookup(ref scope, base.name)) {
+    case Option.Some { value: t }: { return false; }
+    case Option.None: { }
+  }
+  return variantTypeNamed(ref prog, ref tm, base.name) != TYPE_ERROR_ID;
+}
+
+// `Result.Ok { value: 1 }` and `Result.None`, which differ only in where the
+// two names sit: a constructor keeps the case in `name` and the variant in
+// childB, a field access keeps the case in `name` and the variant in childA.
+export function checkVariantConstructor(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  baseId: NodeId,
+  payloadList: NodeId,
+  ref scope: LocalScope
+): TypeId {
+  const base = nodeAt(ref ast, baseId);
+  const variantType = variantTypeNamed(ref prog, ref tm, base.name);
+  if (variantType == TYPE_ERROR_ID) {
+    reportError(
+      ref prog,
+      `"${base.name}" is not a variant, so "${base.name}.${expr.name}" constructs nothing`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  const found = lookupVariantCase(ref prog, variantType, expr.name);
+  if (!found.found) {
+    reportError(
+      ref prog,
+      `variant "${base.name}" has no case "${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  checkPayloadValues(
+    ref prog, ref tm, ref ast, expr, base.name, payloadList,
+    variantType, usize(found.ordinal), found.fieldCount, ref scope
+  );
+  return variantType;
+}
+
+// The `{ field: value }` half of a constructor: every field of the case present
+// exactly once, each value checked AGAINST its declared type so an untyped
+// literal pins to it.
+function checkPayloadValues(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  variantName: string,
+  payloadList: NodeId,
+  variantType: TypeId,
+  ordinal: usize,
+  fieldCount: usize,
+  ref scope: LocalScope
+): void {
+  let given: usize = 0;
+  if (payloadList != 0) {
+    const list = nodeAt(ref ast, payloadList);
+    given = list.childCount;
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldId = childAt(ref ast, list, i);
+      const fieldNode = nodeAt(ref ast, fieldId);
+      const declared = variantCaseFieldNamed(ref prog, variantType, ordinal, fieldNode.name);
+      if (!declared.found) {
+        reportError(
+          ref prog,
+          `case "${variantName}.${expr.name}" has no field "${fieldNode.name}"`,
+          fieldNode.sourceLoc
+        );
+      } else {
+        const actual = checkExpr(ref prog, ref tm, ref ast, fieldNode.childA, declared.typeId, ref scope);
+        if (actual != TYPE_ERROR_ID && actual != declared.typeId) {
+          reportError(
+            ref prog,
+            `field "${fieldNode.name}" of "${variantName}.${expr.name}" is ${formatType(ref prog, declared.typeId)}, not ${formatType(ref prog, actual)}`,
+            fieldNode.sourceLoc
+          );
+        }
+        // The field node carries its POSITION in the payload, which is what
+        // codegen stores at - a literal may list the fields in any order.
+        vec.vecSet(ref tm.resolvedTypes, fieldId, declared.typeId);
+      }
+      i += 1;
+    }
+  }
+
+  if (given != fieldCount) {
+    reportError(
+      ref prog,
+      `case "${variantName}.${expr.name}" carries ${fieldCount} field(s), got ${given}`,
+      expr.sourceLoc
+    );
+  }
+}
+
+// One `case Result.Ok { value: v }:` pattern.
+//
+// Returns the case's ORDINAL so the caller can track exhaustiveness, or -1 when
+// the pattern did not resolve. The payload names are DECLARED as locals in the
+// arm's scope, which is why the arm's scope has to be pushed before this runs.
+export function checkVariantPattern(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  patternId: NodeId,
+  scrutType: TypeId,
+  ref scope: LocalScope
+): int {
+  const pattern = nodeAt(ref ast, patternId);
+  const base = nodeAt(ref ast, pattern.childB);
+
+  // The pattern names its own variant, so a pattern from the WRONG variant is
+  // caught here rather than silently matching by ordinal.
+  const named = variantTypeNamed(ref prog, ref tm, base.name);
+  if (named == TYPE_ERROR_ID) {
+    reportError(ref prog, `"${base.name}" is not a variant`, pattern.sourceLoc);
+    return -1;
+  }
+  if (named != scrutType) {
+    reportError(
+      ref prog,
+      `this switch is over ${formatType(ref prog, scrutType)}, but the pattern matches ${formatType(ref prog, named)}`,
+      pattern.sourceLoc
+    );
+    return -1;
+  }
+
+  const found = lookupVariantCase(ref prog, scrutType, pattern.name);
+  if (!found.found) {
+    reportError(
+      ref prog,
+      `variant "${base.name}" has no case "${pattern.name}"`,
+      pattern.sourceLoc
+    );
+    return -1;
+  }
+
+  vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
+  bindPatternPayload(
+    ref prog, ref tm, ref ast, pattern,
+    scrutType, usize(found.ordinal), found.fieldCount, ref scope
+  );
+  return found.ordinal;
+}
+
+// `{ value: v }` in a pattern binds `v`, it does not compare against it. Every
+// field of the case must be named, so a case that grows a field breaks its
+// patterns loudly instead of leaving one silently unbound.
+function bindPatternPayload(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  pattern: ASTNode,
+  variantType: TypeId,
+  ordinal: usize,
+  fieldCount: usize,
+  ref scope: LocalScope
+): void {
+  let given: usize = 0;
+  if (pattern.childA != 0) {
+    const list = nodeAt(ref ast, pattern.childA);
+    given = list.childCount;
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldId = childAt(ref ast, list, i);
+      const fieldNode = nodeAt(ref ast, fieldId);
+      const declared = variantCaseFieldNamed(ref prog, variantType, ordinal, fieldNode.name);
+      if (!declared.found) {
+        reportError(
+          ref prog,
+          `case "${pattern.name}" has no field "${fieldNode.name}" to bind`,
+          fieldNode.sourceLoc
+        );
+        i += 1;
+        continue;
+      }
+
+      const bindingId = fieldNode.childA;
+      const binding = nodeAt(ref ast, bindingId);
+      if (binding.kind != ASTNodeKind.IDENT) {
+        reportError(
+          ref prog,
+          `a pattern binds a NAME, so "${fieldNode.name}:" must be followed by one`,
+          fieldNode.sourceLoc
+        );
+        i += 1;
+        continue;
+      }
+      if (!scopeDeclare(ref scope, binding.name, declared.typeId)) {
+        reportError(
+          ref prog,
+          `"${binding.name}" is already declared, so this pattern cannot bind it`,
+          binding.sourceLoc
+        );
+      }
+      // Both the field node and the binding carry the field's type: codegen
+      // reads the field node to know what to load, and the binding to know what
+      // slot to declare.
+      vec.vecSet(ref tm.resolvedTypes, fieldId, declared.typeId);
+      vec.vecSet(ref tm.resolvedTypes, bindingId, declared.typeId);
+      i += 1;
+    }
+  }
+
+  if (given != fieldCount) {
+    reportError(
+      ref prog,
+      `case "${pattern.name}" carries ${fieldCount} field(s), so the pattern must bind all of them - it binds ${given}`,
+      pattern.sourceLoc
+    );
+  }
+}

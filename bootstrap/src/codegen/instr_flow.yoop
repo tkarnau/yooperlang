@@ -72,3 +72,14 @@ export function emitLabel(ref cx: Cx, id: usize): void {
   part(ref cx, ":");
   endInstr(ref cx);
 }
+
+//   unreachable
+//
+// A terminator for a block that cannot be entered. The jump table's default on
+// an exhaustive variant switch is the only one that needs it: LLVM requires
+// every block to end in a terminator even when nothing can reach it.
+export function emitUnreachable(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "unreachable");
+  endInstr(ref cx);
+}

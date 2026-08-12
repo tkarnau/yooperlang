@@ -108,9 +108,39 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     }
     if (postfixTag == TokenTags.DOT) {
       SelfLexing.advance(ref ps)?;
+      const baseId = SelfLexing.pushNode(ref ps, node);
+      const member = parseIdentAsName(ref ps)?;
+
+      // `ns.fn(...)` is a QUALIFIED CALL, not a field read of a function value.
+      // The parser cannot tell a namespace from a struct local - that needs name
+      // resolution - so it records the shape and pass D decides: a
+      // CALL_EXPRESSION carries the member in `name` exactly like an unqualified
+      // call, plus the base it was reached through in `childB`.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
+        let callNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+        callNode.name = member;
+        callNode.childB = baseId;
+        callNode.childA = parseCallArgs(ref ps)?;
+        node = callNode;
+        continue;
+      }
+
+      // `Result.Ok { value: 1 }` - a variant constructor with a payload. The
+      // braces are what make it unambiguous; a payload-less `Result.None` is
+      // the same tokens as `p.x` and stays a FIELD_ACCESS for pass D to sort
+      // out once names resolve.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+        let ctorNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CONSTRUCTOR);
+        ctorNode.name = member;
+        ctorNode.childB = baseId;
+        ctorNode.childA = parseStructLiteralFields(ref ps)?;
+        node = ctorNode;
+        continue;
+      }
+
       let fieldNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_ACCESS);
-      fieldNode.childA = SelfLexing.pushNode(ref ps, node);
-      fieldNode.name = parseIdentAsName(ref ps)?;
+      fieldNode.childA = baseId;
+      fieldNode.name = member;
       node = fieldNode;
       continue;
     }

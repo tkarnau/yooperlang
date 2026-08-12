@@ -50,9 +50,16 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     case ASTNodeKind.STRUCT_LITERAL: {
       return emitStructLiteral(ref cx, expr, exprId, ref out);
     }
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      return emitVariantConstructor(ref cx, expr, exprId, ref out);
+    }
     case ASTNodeKind.FIELD_ACCESS: {
-      // Either a struct field or an array's `.len`; pass D already rejected
-      // anything else, so the base's type decides which.
+      // Three things wear this shape, and pass D already decided which: a
+      // payload-less variant constructor (`Shape.Empty`, typed as the VARIANT),
+      // a struct field, or an array's `.len`.
+      if (isVariantAt(ref cx, exprId)) {
+        return emitVariantConstructor(ref cx, expr, exprId, ref out);
+      }
       if (isStructAt(ref cx, expr.childA)) {
         return emitStructFieldRead(ref cx, expr, ref out);
       }

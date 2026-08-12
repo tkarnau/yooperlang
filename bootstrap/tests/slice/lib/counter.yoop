@@ -1,0 +1,7 @@
+// The shared leaf of a diamond: both the entry and mathx import this file. If
+// the graph loaded it twice, `bump` would be defined twice and the link would
+// fail - so this file existing at all is the dedupe assertion.
+
+export function bump(n: int): int {
+  return n + 1;
+}

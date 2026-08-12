@@ -7,6 +7,11 @@ export const ASTNodeKind = Object.freeze({
   FIELD_DECL: "FIELD_DECL",
   DESTRUCTURE_DECL: "DESTRUCTURE_DECL",
   IMPORT_DECL: "IMPORT_DECL",
+  // One `{ a, b as c }` entry of an import. This parser keeps specifiers as a
+  // plain array on the IMPORT_DECL and never emits this kind; the bootstrap's
+  // arena has to give the pair a node of its own, and the kind lists are in
+  // lockstep by contract. See bootstrap/src/ast/node_kind.yoop.
+  IMPORT_SPECIFIER: "IMPORT_SPECIFIER",
   EXPORT_DECL: "EXPORT_DECL",
   EXTERN_FUNCTION_DECL: "EXTERN_FUNCTION_DECL",
   EXTERN_TYPE_DECL: "EXTERN_TYPE_DECL",

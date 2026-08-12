@@ -1,0 +1,151 @@
+module typecheck;
+
+/*
+  Pass B - wire imports.
+
+  An import binds the SOURCE module's SymbolId under a local name in this
+  module's namespace. Not a copy, not a redirect: the same integer. That is the
+  whole design, and it buys three things at once.
+
+    * Type identity is free. Equality is `id == id`, so an imported `Point` IS
+      the declared `Point` - there is no second nominal type to reconcile.
+    * Every later lookup is unchanged. `lookupOwnName` in pass C and pass D, and
+      `resolveTypeName` for annotations, already read `tm.names`; none of them
+      need to learn what an import is.
+    * A shell imported before pass C fills it stays correct, because filling is
+      `setType` on the arena slot the id already points at.
+
+  The one thing a shared SymbolId cannot answer is which module has to DEFINE
+  the symbol, which codegen needs to mangle a call. `tm.importedFrom` records
+  that separately.
+
+  What makes this a lookup rather than a second fixpoint is the TOPOLOGICAL
+  order of the graph: every module an import can name sits earlier in the list,
+  so its pass A has already run. Within one module the order is A then B, which
+  is why an import colliding with a local declaration reads that way round.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import { AST, ASTNode, childAt, nodeAt } from "../ast";
+import { Module, ImportEdge } from "../source_graph";
+
+export function passBWireImports(
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module
+): void {
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    let i: usize = 0;
+    while (i < file.imports.len) {
+      wireImport(ref prog, ref tm, m, vec.vecGet(ref file.imports, i));
+      i += 1;
+    }
+    f += 1;
+  }
+}
+
+// The source module's TypedModule is read out of `prog.modules` by the index
+// the graph walk recorded. Topological order is what guarantees it is there:
+// a module's imports are loaded, and registered, before the module itself.
+function wireImport(ref prog: Program, ref tm: TypedModule, m: Module, edge: ImportEdge): void {
+  const decl = nodeAt(ref m.ast, edge.nodeId);
+  if (edge.resolvedModuleIndex >= prog.modules.len) {
+    reportError(
+      ref prog,
+      `internal: module ${edge.resolvedModuleId} is not registered yet`,
+      decl.sourceLoc
+    );
+    return;
+  }
+  let source = vec.vecGet(ref prog.modules, edge.resolvedModuleIndex);
+
+  // The namespace clause, when there is one. A combined import
+  // (`import { A }, * as ns from ...`) carries BOTH, so this is not an
+  // either/or with the specifier loop below.
+  if (decl.name.len > 0) {
+    bindNamespace(ref prog, ref tm, decl, edge.resolvedModuleIndex);
+  }
+
+  let s: usize = 0;
+  while (s < decl.childCount) {
+    const spec = nodeAt(ref m.ast, childAt(ref m.ast, decl, s));
+    bindImportedName(ref prog, ref tm, ref source, ref m.ast, spec);
+    s += 1;
+  }
+}
+
+// `import * as ns from "..."` binds ONE name to the whole module.
+//
+// A namespace symbol names the module by INDEX rather than copying its export
+// table, so `ns.thing` is resolved at the use site against whatever that module
+// exports - and an export added later needs nothing done here.
+function bindNamespace(
+  ref prog: Program,
+  ref tm: TypedModule,
+  decl: ASTNode,
+  sourceIndex: ModuleId
+): void {
+  const symId = internSymbol(ref prog, Symbol.Namespace { module: sourceIndex });
+  if (map.mapInsert(ref tm.names, decl.name, symId)) {
+    reportError(
+      ref prog,
+      `imported namespace "${decl.name}" collides with an existing declaration in this module`,
+      decl.sourceLoc
+    );
+  }
+}
+
+// One `{ a }` or `{ a as b }` specifier: `spec.name` is the local name, and the
+// export name is in the arena's string pool (see ast/slots.yoop).
+function bindImportedName(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref source: TypedModule,
+  ref ast: AST,
+  spec: ASTNode
+): void {
+  const exportName = vec.vecGet(ref ast.strings, spec.strId);
+
+  let symId: SymbolId = SYMBOL_NONE_ID;
+  switch (map.mapGet(ref source.exports, exportName)) {
+    case Option.Some { value: found }: { symId = found; }
+    case Option.None: {
+      // A name the source module declares but does not export gets its own
+      // message: "has no export X" would send the reader looking for a typo in
+      // a name that is right there.
+      if (lookupOwnName(ref source, exportName) != SYMBOL_NONE_ID) {
+        reportError(
+          ref prog,
+          `"${exportName}" is declared in module ${source.moduleId} but not exported - add \`export\` to its declaration`,
+          spec.sourceLoc
+        );
+      } else {
+        reportError(
+          ref prog,
+          `module ${source.moduleId} has no export "${exportName}"`,
+          spec.sourceLoc
+        );
+      }
+      return;
+    }
+  }
+
+  if (map.mapInsert(ref tm.names, spec.name, symId)) {
+    reportError(
+      ref prog,
+      `imported name "${spec.name}" collides with an existing declaration in this module`,
+      spec.sourceLoc
+    );
+    return;
+  }
+  map.mapInsert(ref tm.importedFrom, spec.name, {
+    moduleId: source.moduleId,
+    exportName: exportName,
+  });
+}

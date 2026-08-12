@@ -1,0 +1,137 @@
+module codegen;
+
+// Building a variant value, and taking one apart.
+//
+// The layout is `{ i32 tag, [N x i8] payload }`, and both directions go through
+// a stack slot, because the payload is addressed as whichever case struct the
+// tag says it holds and only an ADDRESS can be reinterpreted that way. A loaded
+// value has none.
+//
+// That is the same reason a struct field WRITE geps while a read extracts: the
+// asymmetry is about addresses, not about aggregates.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+
+// `Shape.Circle { r: 2 }`
+//
+//   %sc.1.addr = alloca %variant.m__Shape
+//   %t1 = getelementptr inbounds %variant.m__Shape, ptr %sc.1.addr, i32 0, i32 0
+//   store i32 0, ptr %t1
+//   %t2 = getelementptr inbounds %variant.m__Shape, ptr %sc.1.addr, i32 0, i32 1
+//   %t3 = getelementptr inbounds %variantc.m__Shape__Circle, ptr %t2, i32 0, i32 0
+//   store i32 2, ptr %t3
+//   %t4 = load %variant.m__Shape, ptr %sc.1.addr
+export function emitVariantConstructor(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  const variantTy = typeOf(ref cx, exprId);
+  const slot = declareAnonSlot(ref cx, variantTy);
+
+  // The tag first. A payload-less case is nothing BUT the tag, and writing it
+  // before the payload keeps the two orders identical.
+  const tagAddr = freshTemp(cx.e);
+  emitGepField(ref cx, tagAddr, variantTy, TEMP_SLOT_NAME, slot.id, 0);
+  emitStoreToPtr(ref cx, VARIANT_TAG_TYPE, Operand.Imm { value: variantOrdinalOf(ref cx, exprId) }, tagAddr);
+
+  const err = emitPayloadStores(ref cx, expr, exprId, variantTy, slot.id);
+  if (err.len > 0) {
+    return err;
+  }
+
+  const dest = freshTemp(cx.e);
+  emitLoadFromSlot(ref cx, dest, variantTy, TEMP_SLOT_NAME, slot.id);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// Each `field: value` stored at its POSITION in the case's payload struct, so a
+// constructor may list the fields in any order - the same rule a struct literal
+// follows.
+function emitPayloadStores(
+  ref cx: Cx,
+  expr: ASTNode,
+  exprId: NodeId,
+  variantTy: string,
+  slotId: usize
+): string {
+  if (expr.childA == 0) {
+    return "";
+  }
+  const caseTy = variantCaseTypeOf(ref cx, exprId, expr.name);
+  const list = nodeAt(cx.ast, expr.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const fieldId = childAt(cx.ast, list, i);
+    const fieldNode = nodeAt(cx.ast, fieldId);
+
+    let value: Operand = Operand.None;
+    const err = emitExpr(ref cx, fieldNode.childA, ref value);
+    if (err.len > 0) {
+      return err;
+    }
+
+    const payloadAddr = freshTemp(cx.e);
+    emitGepField(ref cx, payloadAddr, variantTy, TEMP_SLOT_NAME, slotId, 1);
+    const fieldAddr = freshTemp(cx.e);
+    emitGepFieldOfPtr(ref cx, fieldAddr, caseTy, payloadAddr,
+      variantFieldPositionOf(ref cx, exprId, expr.name, fieldNode.name));
+    emitStoreToPtr(ref cx, typeOf(ref cx, fieldId), value, fieldAddr);
+    i += 1;
+  }
+  return "";
+}
+
+//   %t5 = extractvalue %variant.m__Shape %t4, 0
+//
+// The tag of a variant VALUE, which is what the jump table dispatches on.
+export function emitVariantTag(ref cx: Cx, variantTy: string, value: Operand): usize {
+  const dest = freshTemp(cx.e);
+  emitExtractValue(ref cx, dest, variantTy, value, 0);
+  return dest;
+}
+
+// The payload bindings at the top of one matched arm. `slotId` is a stack slot
+// already holding the scrutinee - the arm needs an address to read the payload
+// through, and every arm reads the SAME slot as a different case struct.
+//
+//   %r.2.addr = alloca i32
+//   %t7 = getelementptr inbounds %variant.m__Shape, ptr %sc.1.addr, i32 0, i32 1
+//   %t8 = getelementptr inbounds %variantc.m__Shape__Circle, ptr %t7, i32 0, i32 0
+//   %t9 = load i32, ptr %t8
+//   store i32 %t9, ptr %r.2.addr
+export function emitPatternBindings(
+  ref cx: Cx,
+  pattern: ASTNode,
+  patternId: NodeId,
+  scrutSlotId: usize
+): string {
+  if (pattern.childA == 0) {
+    return "";
+  }
+  const variantTy = typeOf(ref cx, patternId);
+  const caseTy = variantCaseTypeOf(ref cx, patternId, pattern.name);
+  const list = nodeAt(cx.ast, pattern.childA);
+
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const fieldId = childAt(cx.ast, list, i);
+    const fieldNode = nodeAt(cx.ast, fieldId);
+    const binding = nodeAt(cx.ast, fieldNode.childA);
+    const fieldTy = typeOf(ref cx, fieldId);
+
+    const payloadAddr = freshTemp(cx.e);
+    emitGepField(ref cx, payloadAddr, variantTy, TEMP_SLOT_NAME, scrutSlotId, 1);
+    const fieldAddr = freshTemp(cx.e);
+    emitGepFieldOfPtr(ref cx, fieldAddr, caseTy, payloadAddr,
+      variantFieldPositionOf(ref cx, patternId, pattern.name, fieldNode.name));
+    const loaded = freshTemp(cx.e);
+    emitLoadFromPtr(ref cx, loaded, fieldTy, fieldAddr);
+
+    // A binding is an ordinary local from here on, so it gets an ordinary slot
+    // and every read of it in the arm body is an ordinary load.
+    const slotInfo = declareLocal(ref cx, binding.name, fieldTy);
+    emitStore(ref cx, fieldTy, Operand.Temp { id: loaded }, binding.name, slotInfo.id);
+    i += 1;
+  }
+  return "";
+}

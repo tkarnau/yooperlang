@@ -27,7 +27,22 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   if (serr.len > 0) {
     return serr;
   }
-  const scrutTy = typeOf(ref cx, stmt.childA);
+  const valueTy = typeOf(ref cx, stmt.childA);
+  const overVariant = isVariantAt(ref cx, stmt.childA);
+
+  // A variant dispatches on its TAG, and its arms read payload fields out of a
+  // stack slot - a loaded value has no address to reinterpret. Both are set up
+  // once here rather than per arm, because every arm reads the same slot.
+  let scrutTy = valueTy;
+  let dispatch = scrut;
+  let scrutSlotId: usize = 0;
+  if (overVariant) {
+    const slot = declareAnonSlot(ref cx, valueTy);
+    scrutSlotId = slot.id;
+    emitStore(ref cx, valueTy, scrut, TEMP_SLOT_NAME, scrutSlotId);
+    dispatch = Operand.Temp { id: emitVariantTag(ref cx, valueTy, scrut) };
+    scrutTy = VARIANT_TAG_TYPE;
+  }
 
   // One label per arm, plus the join. Allocated first so the dispatch can name
   // them.
@@ -44,15 +59,29 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
     i += 1;
   }
   const endLabel = freshLabel(cx.e);
-  if (defaultLabel == 0) {
-    // Pass D requires a default arm, so this is unreachable on well-formed
-    // input - but a jump table must have SOME default, and falling to the join
-    // is the answer that cannot produce invalid IR.
-    defaultLabel = endLabel;
+  const hasDefaultArm = defaultLabel != 0;
+
+  // A jump table must name SOME default. An exhaustive variant switch has no
+  // default arm - pass D proved every case is covered, so a value reaching the
+  // default is impossible - and it gets a block saying exactly that. Without it
+  // the fall-through would make the switch look non-terminating to the caller,
+  // and a function whose every arm returns would be rejected for having no
+  // return on some path.
+  let unreachableLabel: usize = 0;
+  if (!hasDefaultArm) {
+    if (overVariant) {
+      unreachableLabel = freshLabel(cx.e);
+      defaultLabel = unreachableLabel;
+    } else {
+      // An integer switch always has a default (pass D requires it), so this is
+      // unreachable on well-formed input - and falling to the join is the
+      // answer that cannot produce invalid IR.
+      defaultLabel = endLabel;
+    }
   }
 
-  emitSwitchOpen(ref cx, scrutTy, scrut, defaultLabel);
-  emitCaseLines(ref cx, stmt, scrutTy, ref armLabels);
+  emitSwitchOpen(ref cx, scrutTy, dispatch, defaultLabel);
+  emitCaseLines(ref cx, stmt, scrutTy, overVariant, ref armLabels);
   emitSwitchClose(ref cx);
 
   // Now the arm bodies.
@@ -61,6 +90,19 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   while (a < stmt.childCount) {
     const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, a));
     emitLabel(ref cx, vec.vecGet(ref armLabels, a));
+
+    // The payload bindings come FIRST in the arm, so the body reads them as
+    // ordinary locals. Only the first pattern of an arm can bind: several
+    // patterns sharing an arm would bind different things under one name, and
+    // pass D requires every field of a case to be bound, so a shared arm can
+    // only be payload-less cases.
+    if (overVariant) {
+      const berr = emitArmBindings(ref cx, arm, scrutSlotId);
+      if (berr.len > 0) {
+        return berr;
+      }
+    }
+
     let err = "";
     let armTerminated = false;
     emitBlock(ref cx, arm.childB, retTy, ref armTerminated, ref err);
@@ -74,7 +116,14 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
     a += 1;
   }
 
-  // If every arm returned AND there was a default, nothing reaches the join.
+  if (unreachableLabel != 0) {
+    emitLabel(ref cx, unreachableLabel);
+    emitUnreachable(ref cx);
+  }
+
+  // If every arm returned AND every value lands in one, nothing reaches the
+  // join - which is true both for a switch with a default and for an exhaustive
+  // variant switch without one.
   if (allTerminated && defaultLabel != endLabel) {
     terminated = true;
     return "";
@@ -84,8 +133,15 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
 }
 
 // The `<ty> <value>, label %Lk` lines - one per pattern, so several patterns can
-// share an arm.
-function emitCaseLines(ref cx: Cx, stmt: ASTNode, scrutTy: string, ref armLabels: Vec<usize>): void {
+// share an arm. A variant's case value is its ORDINAL, an integer's is the
+// literal itself; that is the only difference between the two dispatches.
+function emitCaseLines(
+  ref cx: Cx,
+  stmt: ASTNode,
+  scrutTy: string,
+  overVariant: bool,
+  ref armLabels: Vec<usize>
+): void {
   let i: usize = 0;
   while (i < stmt.childCount) {
     const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, i));
@@ -93,8 +149,12 @@ function emitCaseLines(ref cx: Cx, stmt: ASTNode, scrutTy: string, ref armLabels
       const patterns = nodeAt(cx.ast, arm.childA);
       let p: usize = 0;
       while (p < patterns.childCount) {
-        const pattern = nodeAt(cx.ast, childAt(cx.ast, patterns, p));
-        emitSwitchCase(ref cx, scrutTy, patternOperand(pattern), vec.vecGet(ref armLabels, i));
+        const patternId = childAt(cx.ast, patterns, p);
+        let value: Operand = Operand.Imm { value: variantOrdinalOf(ref cx, patternId) };
+        if (!overVariant) {
+          value = patternOperand(nodeAt(cx.ast, patternId));
+        }
+        emitSwitchCase(ref cx, scrutTy, value, vec.vecGet(ref armLabels, i));
         p += 1;
       }
     }
@@ -109,4 +169,19 @@ function patternOperand(pattern: ASTNode): Operand {
     return Operand.NegImm { value: pattern.intVal };
   }
   return Operand.Imm { value: pattern.intVal };
+}
+
+// The payload bindings for whichever pattern reached this arm. Pass D allows
+// several patterns to share an arm only when none of them binds, so taking the
+// FIRST is not a choice - it is the only one that can bind anything.
+function emitArmBindings(ref cx: Cx, arm: ASTNode, scrutSlotId: usize): string {
+  if (arm.flagA || arm.childA == 0) {
+    return "";
+  }
+  const patterns = nodeAt(cx.ast, arm.childA);
+  if (patterns.childCount == 0) {
+    return "";
+  }
+  const patternId = childAt(cx.ast, patterns, 0);
+  return emitPatternBindings(ref cx, nodeAt(cx.ast, patternId), patternId, scrutSlotId);
 }

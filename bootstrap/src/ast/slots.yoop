@@ -43,6 +43,9 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
       return "inner";
     }
+    case ASTNodeKind.EXPORT_DECL: {
+      return "exportedDecl";
+    }
     case ASTNodeKind.UNARY_EXPRESSION: {
       return "operand";
     }
@@ -58,6 +61,13 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.ARRAY_LITERAL: {
       return "elementsList";
+    }
+    // A NODE_LIST of STRUCT_LITERAL_FIELD, holding field VALUES in a
+    // constructor and binding NAMES in a pattern. 0 when the case carries no
+    // payload.
+    case ASTNodeKind.VARIANT_CONSTRUCTOR,
+         ASTNodeKind.VARIANT_PATTERN: {
+      return "payloadFields";
     }
     case ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE: {
       return "elementType";
@@ -102,6 +112,17 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     case ASTNodeKind.CONST_DECL,
          ASTNodeKind.LET_DECL: {
       return "assignmentExpression";
+    }
+    // `ns.fn(args)`: the base the call was reached through, 0 for a plain
+    // `fn(args)`. The member name is in `name` either way, so every unqualified
+    // call path reads the same as it always did.
+    //
+    // A variant constructor and a variant pattern use the slot the same way,
+    // for the same reason: the qualifier is a name the parser cannot resolve.
+    case ASTNodeKind.CALL_EXPRESSION,
+         ASTNodeKind.VARIANT_CONSTRUCTOR,
+         ASTNodeKind.VARIANT_PATTERN: {
+      return "qualifyingBase";
     }
     case ASTNodeKind.BINARY_EXPRESSION: {
       return "rightNode";
@@ -175,6 +196,30 @@ export function astNodeChildEName(v: ASTNodeKind): string {
   }
 }
 
+// What a node's `strId` indexes in AST.strings, per kind. Unlike the child
+// slots there is no "none" sentinel here - index 0 is a real pool entry - so a
+// kind that uses `strId` must use it unconditionally.
+export function astNodeStrIdName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.STRING_LITERAL: {
+      return "decodedText";
+    }
+    case ASTNodeKind.IMPORT_DECL: {
+      return "sourcePath";
+    }
+    // `name` carries the LOCAL name (what this module binds), because that is
+    // what nearly every consumer wants; the export name is the one that needs
+    // the pool. `import { a as b }` gives name = "b", exportName = "a", and a
+    // plain `import { a }` interns "a" in both places.
+    case ASTNodeKind.IMPORT_SPECIFIER: {
+      return "exportName";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
 // What a node's OWN childStart/childCount run holds, per kind. Kinds absent
 // here do not use their own run - their children hang off the named slots.
 export function astNodeChildListName(v: ASTNodeKind): string {
@@ -185,8 +230,20 @@ export function astNodeChildListName(v: ASTNodeKind): string {
     case ASTNodeKind.TYPE_DECL: {
       return "fields";
     }
+    case ASTNodeKind.VARIANT_DECL: {
+      return "cases";
+    }
+    // A payload-less case has an empty run rather than a missing one.
+    case ASTNodeKind.VARIANT_CASE: {
+      return "fields";
+    }
     case ASTNodeKind.NODE_LIST: {
       return "items";
+    }
+    case ASTNodeKind.IMPORT_DECL: {
+      // `name` on an IMPORT_DECL is the `* as ns` local name, empty when the
+      // import has no namespace clause.
+      return "specifiers";
     }
     case ASTNodeKind.SWITCH_STATEMENT: {
       return "arms";

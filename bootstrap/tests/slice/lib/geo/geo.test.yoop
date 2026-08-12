@@ -1,0 +1,12 @@
+// NOT part of module `geo`, and the build breaks loudly if it ever is: this
+// file declares no `module geo;` header, so absorbing it would trip the
+// mixed-directory check.
+//
+// `*.test.yoop` being excluded from a module's file list is what lets a test
+// live beside the code it covers and still reach it the way a consumer would.
+
+import.test;
+
+function unused(): int {
+  return 0;
+}

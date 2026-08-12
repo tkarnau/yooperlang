@@ -16,11 +16,12 @@ module typecheck;
     A - register decl shells (name -> SymbolId, shell Type) so cross-module and
         forward references resolve.                             [pass_a.yoop]
     B - wire imports: bind imported names into each module's `names` map.
+                                                                [pass_b.yoop]
     C - fill the shells: struct fields, function signatures.  [pass_c.yoop]
     D - check bodies and decorate resolvedTypes.               [pass_d.yoop]
 
-  B is a no-op while the graph is a single module. C and D handle the subset
-  the parser produces today and name what they do not handle.
+  C and D handle the subset the parser produces today and name what they do not
+  handle.
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
@@ -33,9 +34,11 @@ import { ModuleGraph } from "../source_graph";
 export function typecheckProgram(ref graph: ModuleGraph): Program propagates<disposable> {
   let program = initProgram();
 
-  // Pass A. Modules are already topologically ordered, so a module's imports
-  // have their shells before it does - which is what makes pass B a lookup
-  // rather than a second fixpoint.
+  // Modules are already topologically ordered, so a module's imports have their
+  // shells (pass A) and their filled signatures (pass C) before it is reached -
+  // which is what lets all four passes run in one walk per module rather than
+  // four walks over the graph, and what makes pass B a lookup rather than a
+  // second fixpoint.
   let i: usize = 0;
   while (i < graph.modules.len) {
     const m = vec.vecGet(ref graph.modules, i);
@@ -44,9 +47,9 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
     // bookkeeping (len, and the arrays after a rehash) would be written to the
     // copy instead of to the entry in the Vec.
     let tm = initTypedModule(m.id);
-    passARegisterShells(ref program, ref tm, m, i);
-    // B (imports) is a no-op while the graph is one module.
-    passCFillShells(ref program, ref tm, m);
+    passARegisterShells(ref program, ref tm, m, i, i == graph.entryIndex);
+    passBWireImports(ref program, ref tm, m);
+    passCFillShells(ref program, ref tm, m, i);
     passDCheckBodies(ref program, ref tm, m);
     vec.vecPush(ref program.modules, tm);
     i += 1;

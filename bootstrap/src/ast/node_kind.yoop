@@ -16,6 +16,12 @@ export enum ASTNodeKind implements Display {
   FIELD_DECL,
   DESTRUCTURE_DECL,
   IMPORT_DECL,
+  // One `{ a, b as c }` entry of an import. The JS reference keeps these as a
+  // plain `specifiers` array on the IMPORT_DECL, which an arena cannot do - a
+  // node names its children by NodeId, so the pair needs a node to live in.
+  // The kind is in the JS list too, so the lockstep holds; the JS parser simply
+  // never emits one.
+  IMPORT_SPECIFIER,
   EXPORT_DECL,
   EXTERN_FUNCTION_DECL,
   EXTERN_TYPE_DECL,
@@ -170,6 +176,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "FIELD_DECL",
   "DESTRUCTURE_DECL",
   "IMPORT_DECL",
+  "IMPORT_SPECIFIER",
   "EXPORT_DECL",
   "EXTERN_FUNCTION_DECL",
   "EXTERN_TYPE_DECL",

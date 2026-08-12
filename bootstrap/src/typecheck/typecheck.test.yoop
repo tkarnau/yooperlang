@@ -9,10 +9,13 @@ import.test;
 import * as t from "std/test.yoop";
 import { suite, test, Case } from "std/test.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
-import { Module, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNodeKind, childAt, nodeAt } from "../ast";
+import { Module, ModuleGraph, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
 import { Program, TypedModule, Symbol, Type, typecheckProgram } from "../typecheck";
 import { Diagnostic, errorAt } from "../diagnostics";
 
@@ -101,6 +104,7 @@ function checkSource(src: string): Program {
       return {
         types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0),
         diagnostics: diagnostics,
+        currentFile: "",
       };
     }
     case LoadModuleResult.Ok { value: m }: {
@@ -155,12 +159,453 @@ suite function localsRejectBadPrograms(): void {
   }
 }
 
+// ----- variants -------------------------------------------------------------
+
+// Everything a fixture cannot reach, because the program has to be REFUSED.
+const SHAPE: string = "variant Shape { Circle { r: int }, Rect { w: int, h: int }, Empty }\n";
+
+suite function variantsCheckTheirConstructors(): void {
+  let ok = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Circle { r: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a well-formed constructor checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `constructing a case reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  let bare = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Empty; return 0; }`);
+  let test theory: Case = t.asserts("a payload-less constructor is recognized through a field access") {
+    theory.isSuccessful = bare.diagnostics.len == 0;
+    theory.detail = `Shape.Empty reported ${bare.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref bare)}`;
+  }
+
+  let unknown = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Oval { r: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("an unknown case names the variant") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "has no case");
+    theory.detail = `wanted a no-such-case diagnostic, got: ${firstDiagnostic(ref unknown)}`;
+  }
+
+  let short = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Rect { w: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a payload missing a field is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref short, "field(s), got");
+    theory.detail = `wanted a field-count diagnostic, got: ${firstDiagnostic(ref short)}`;
+  }
+
+  let wrongType = checkSource(`${SHAPE}function main(): int { const c: Shape = Shape.Circle { r: "x" }; return 0; }`);
+  let test theory: Case = t.asserts("a payload field of the wrong type is a diagnostic") {
+    theory.isSuccessful = wrongType.diagnostics.len > 0;
+    theory.detail = "a string in an int field produced no diagnostic";
+  }
+}
+
+suite function variantSwitchesMustBeExhaustive(): void {
+  const covered = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Rect { w: w, h: h }: { return w; } case Shape.Empty: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let ok = checkSource(covered);
+  let test theory: Case = t.asserts("covering every case needs no default") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `an exhaustive switch reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The missing case is NAMED, because "not exhaustive" on a ten-case variant
+  // is a worse message than the compiler can afford to give.
+  const missing = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Rect { w: w, h: h }: { return w; } } }\nfunction main(): int { return 0; }`;
+  let gap = checkSource(missing);
+  let test theory: Case = t.asserts("a missing case is named") {
+    theory.isSuccessful = diagnosticsMention(ref gap, "does not cover \"Empty\"");
+    theory.detail = `wanted the missing case named, got: ${firstDiagnostic(ref gap)}`;
+  }
+
+  // A default that can never run is dead code, and usually a misspelled case.
+  const both = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Rect { w: w, h: h }: { return w; } case Shape.Empty: { return 0; } default: { return -1; } } }\nfunction main(): int { return 0; }`;
+  let dead = checkSource(both);
+  let test theory: Case = t.asserts("a default on an exhaustive switch is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref dead, "can never run");
+    theory.detail = `wanted a dead-default diagnostic, got: ${firstDiagnostic(ref dead)}`;
+  }
+
+  const twice = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } case Shape.Circle { r: q }: { return q; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let dup = checkSource(twice);
+  let test theory: Case = t.asserts("matching one case twice is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref dup, "matched twice");
+    theory.detail = `wanted a duplicate-case diagnostic, got: ${firstDiagnostic(ref dup)}`;
+  }
+}
+
+suite function variantPatternsBindTheirPayload(): void {
+  const usesBinding = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Rect { w: w, h: h }: { return w * h; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let ok = checkSource(usesBinding);
+  let test theory: Case = t.asserts("a bound payload field is readable in the arm") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reading a binding reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The binding is arm-LOCAL, exactly like any other name declared in a block.
+  const escapes = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Circle { r: r }: { return r; } default: { return 0; } } return r; }\nfunction main(): int { return 0; }`;
+  let leaked = checkSource(escapes);
+  let test theory: Case = t.asserts("a binding is not visible after the switch") {
+    theory.isSuccessful = leaked.diagnostics.len > 0;
+    theory.detail = "a pattern binding survived its arm";
+  }
+
+  // A case that grows a field should break its patterns loudly rather than
+  // leave one silently unbound.
+  const partial = `${SHAPE}function f(s: Shape): int { switch (s) { case Shape.Rect { w: w }: { return w; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let half = checkSource(partial);
+  let test theory: Case = t.asserts("binding only some of a case's fields is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref half, "must bind all of them");
+    theory.detail = `wanted a bind-all diagnostic, got: ${firstDiagnostic(ref half)}`;
+  }
+}
+
+suite function variantAndIntegerSwitchesDoNotMix(): void {
+  const intPattern = `${SHAPE}function f(s: Shape): int { switch (s) { case 1: { return 1; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let wrong = checkSource(intPattern);
+  let test theory: Case = t.asserts("a literal pattern on a variant switch is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref wrong, "must be variant cases");
+    theory.detail = `wanted a pattern-kind diagnostic, got: ${firstDiagnostic(ref wrong)}`;
+  }
+
+  const casePattern = "function f(n: int): int { switch (n) { case Shape.Circle { r: r }: { return r; } default: { return 0; } } }\nfunction main(): int { return 0; }";
+  let alsoWrong = checkSource(casePattern);
+  let test theory: Case = t.asserts("a variant pattern on an integer switch is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref alsoWrong, "must be literals");
+    theory.detail = `wanted a pattern-kind diagnostic, got: ${firstDiagnostic(ref alsoWrong)}`;
+  }
+
+  const otherVariant = `${SHAPE}variant Other { A, B }\nfunction f(s: Shape): int { switch (s) { case Other.A: { return 1; } default: { return 0; } } }\nfunction main(): int { return 0; }`;
+  let mixed = checkSource(otherVariant);
+  let test theory: Case = t.asserts("a pattern from another variant is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref mixed, "the pattern matches");
+    theory.detail = `wanted a wrong-variant diagnostic, got: ${firstDiagnostic(ref mixed)}`;
+  }
+}
+
 // The first diagnostic message, for failure detail. "" when there are none.
 function firstDiagnostic(ref prog: Program): string {
   if (prog.diagnostics.len == 0) {
     return "";
   }
   return vec.vecGet(ref prog.diagnostics, 0).message;
+}
+
+// True when any diagnostic names `needle`. A refusal with the wrong message
+// sends the reader somewhere else, so the text is part of the assertion.
+function diagnosticsMention(ref prog: Program, needle: string): bool {
+  let i: usize = 0;
+  while (i < prog.diagnostics.len) {
+    const message = vec.vecGet(ref prog.diagnostics, i).message;
+    if (str.stringIndexOf(message, needle) < message.len) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// ----- pass B: imports -------------------------------------------------------
+
+suite function importsBindTheSourceModulesSymbol(): void {
+  let prog = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import { add } from \"./lib.yoop\";\nfunction main(): int { return add(1, 2); }"
+  );
+
+  let test theory: Case = t.asserts("an imported function is callable") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `calling an imported function reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  // The point of binding the SymbolId rather than copying anything: one symbol,
+  // named from two modules.
+  let test theory: Case = t.asserts("both modules name the same SymbolId") {
+    theory.isSuccessful = symbolIdIn(ref prog, 0, "add") == symbolIdIn(ref prog, 1, "add")
+      && symbolIdIn(ref prog, 1, "add") != 0;
+    theory.detail = `lib has SymbolId ${symbolIdIn(ref prog, 0, "add")} for "add" and the entry has ${symbolIdIn(ref prog, 1, "add")}`;
+  }
+}
+
+suite function importedTypesKeepTheirIdentity(): void {
+  let prog = checkTwoModules(
+    "export type Point { x: int, y: int }",
+    "import { Point } from \"./lib.yoop\";\nfunction main(): int { const p: Point = { x: 1, y: 2 }; return p.x; }"
+  );
+
+  let test theory: Case = t.asserts("an imported type resolves in an annotation and a literal") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `using an imported type reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  // Type equality is `id == id`. A second nominal type for the imported Point
+  // would make every value passed between the two modules a type error, so this
+  // is the assertion the whole import design exists to satisfy.
+  let test theory: Case = t.asserts("the imported Point IS the declared Point") {
+    theory.isSuccessful = symbolIdIn(ref prog, 0, "Point") == symbolIdIn(ref prog, 1, "Point")
+      && symbolIdIn(ref prog, 1, "Point") != 0;
+    theory.detail = `lib has SymbolId ${symbolIdIn(ref prog, 0, "Point")} for "Point" and the entry has ${symbolIdIn(ref prog, 1, "Point")}`;
+  }
+}
+
+suite function importAliasesBindTheLocalName(): void {
+  let prog = checkTwoModules(
+    "export function scale(n: int): int { return n * 2; }",
+    "import { scale as times } from \"./lib.yoop\";\nfunction main(): int { return times(2); }"
+  );
+
+  let test theory: Case = t.asserts("the alias is callable") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `calling through an alias reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  let test theory: Case = t.asserts("the export name is NOT bound alongside the alias") {
+    theory.isSuccessful = symbolIdIn(ref prog, 1, "scale") == 0;
+    theory.detail = "`scale as times` bound `scale` too; an alias replaces the name, it does not add one";
+  }
+
+  let original = checkTwoModules(
+    "export function scale(n: int): int { return n * 2; }",
+    "import { scale as times } from \"./lib.yoop\";\nfunction main(): int { return scale(2); }"
+  );
+  let test theory: Case = t.asserts("calling the export name through an alias is a diagnostic") {
+    theory.isSuccessful = original.diagnostics.len > 0;
+    theory.detail = "calling `scale` when only `times` was bound produced no diagnostic";
+  }
+}
+
+suite function importsOfNamesTheSourceDoesNotOfferAreRefused(): void {
+  let unexported = checkTwoModules(
+    "function hidden(): int { return 1; }\nexport function shown(): int { return 2; }",
+    "import { hidden } from \"./lib.yoop\";\nfunction main(): int { return hidden(); }"
+  );
+  // "has no export hidden" would send the reader hunting for a typo in a name
+  // that is right there in the file, so the two cases get different messages.
+  let test theory: Case = t.asserts("importing a declared-but-unexported name says to add `export`") {
+    theory.isSuccessful = diagnosticsMention(ref unexported, "not exported");
+    theory.detail = `wanted a diagnostic about the missing \`export\`, got: ${firstDiagnostic(ref unexported)}`;
+  }
+
+  let missing = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "import { nope } from \"./lib.yoop\";\nfunction main(): int { return nope(); }"
+  );
+  let test theory: Case = t.asserts("importing a name that does not exist says the module has no such export") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "has no export");
+    theory.detail = `wanted a "has no export" diagnostic, got: ${firstDiagnostic(ref missing)}`;
+  }
+}
+
+suite function namespacesReachAModulesExports(): void {
+  let prog = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.add(1, 2); }"
+  );
+
+  let test theory: Case = t.asserts("a qualified call resolves and types") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `calling through a namespace reported ${prog.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref prog)}`;
+  }
+
+  // A namespace binds ONE name. `add` on its own must still be unknown, or the
+  // namespace would be a second, invisible way to import every export.
+  let test theory: Case = t.asserts("a namespace does not bind its members") {
+    theory.isSuccessful = symbolIdIn(ref prog, 1, "add") == 0 && symbolIdIn(ref prog, 1, "lib") != 0;
+    theory.detail = "importing `* as lib` bound `add` directly too";
+  }
+}
+
+suite function namespaceMembersRespectExport(): void {
+  // The rule that makes a namespace safe: it reaches the source module's
+  // EXPORTS, not its names, so `ns.hidden()` fails exactly as `import { hidden }`
+  // does rather than being a way around the keyword.
+  let hidden = checkTwoModules(
+    "function hidden(): int { return 1; }\nexport function shown(): int { return 2; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.hidden(); }"
+  );
+  let test theory: Case = t.asserts("an unexported member says to add `export`") {
+    theory.isSuccessful = diagnosticsMention(ref hidden, "not exported");
+    theory.detail = `wanted a diagnostic about the missing \`export\`, got: ${firstDiagnostic(ref hidden)}`;
+  }
+
+  let missing = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "import * as lib from \"./lib.yoop\";\nfunction main(): int { return lib.nope(); }"
+  );
+  let test theory: Case = t.asserts("a member that does not exist names the namespace") {
+    theory.isSuccessful = diagnosticsMention(ref missing, "has no export");
+    theory.detail = `wanted a "has no export" diagnostic, got: ${firstDiagnostic(ref missing)}`;
+  }
+
+  // `p.x(...)` on a struct local reaches the qualified-call path too, since the
+  // parser cannot tell the two apart. It has to say something better than
+  // "has no export".
+  let notNamespace = checkTwoModules(
+    "export type Point { x: int, y: int }",
+    "import { Point } from \"./lib.yoop\";\nfunction main(): int { const p: Point = { x: 1, y: 2 }; return p.x(); }"
+  );
+  let test theory: Case = t.asserts("qualifying a call with something that is not a namespace says so") {
+    theory.isSuccessful = diagnosticsMention(ref notNamespace, "not an imported namespace");
+    theory.detail = `wanted a not-a-namespace diagnostic, got: ${firstDiagnostic(ref notNamespace)}`;
+  }
+
+  let unknownBase = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "function main(): int { return nope.shown(); }"
+  );
+  let test theory: Case = t.asserts("an unknown qualifying name is an unknown name") {
+    theory.isSuccessful = diagnosticsMention(ref unknownBase, "unknown name");
+    theory.detail = `wanted an unknown-name diagnostic, got: ${firstDiagnostic(ref unknownBase)}`;
+  }
+}
+
+suite function aNamespaceMayNotCollideWithALocalDeclaration(): void {
+  let prog = checkTwoModules(
+    "export function add(a: int, b: int): int { return a + b; }",
+    "import * as tag from \"./lib.yoop\";\nfunction tag(): int { return 2; }\nfunction main(): int { return tag(); }"
+  );
+
+  let test theory: Case = t.asserts("a namespace name this module already declares is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref prog, "collides");
+    theory.detail = `wanted a collision diagnostic, got: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+suite function diagnosticsNameTheFileTheyCameFrom(): void {
+  // A bare "12:5" is a real location in every file of the program at once. Once
+  // a module can span files it is not even enough to know which MODULE, so the
+  // path is stamped on rather than reconstructed by the reader.
+  let prog = checkTwoModules(
+    "export function shown(): int { return 2; }",
+    "import { shown } from \"./lib.yoop\";\nfunction main(): int { return nope; }"
+  );
+
+  let test theory: Case = t.asserts("an error carries the file it was found in") {
+    theory.isSuccessful = prog.diagnostics.len > 0
+      && str.stringEq(vec.vecGet(ref prog.diagnostics, 0).filePath, "entry.yoop");
+    theory.detail = `the diagnostic names file "${firstDiagnosticFile(ref prog)}", wanted "entry.yoop"`;
+  }
+
+  // The error is in the LIBRARY this time, so the two must not be confused.
+  let inLib = checkTwoModules(
+    "export function shown(): int { return nope; }",
+    "import { shown } from \"./lib.yoop\";\nfunction main(): int { return shown(); }"
+  );
+  let test theory: Case = t.asserts("an error in an imported module names THAT file") {
+    theory.isSuccessful = inLib.diagnostics.len > 0
+      && str.stringEq(vec.vecGet(ref inLib.diagnostics, 0).filePath, "lib.yoop");
+    theory.detail = `the diagnostic names file "${firstDiagnosticFile(ref inLib)}", wanted "lib.yoop"`;
+  }
+}
+
+function firstDiagnosticFile(ref prog: Program): string {
+  if (prog.diagnostics.len == 0) {
+    return "";
+  }
+  return vec.vecGet(ref prog.diagnostics, 0).filePath;
+}
+
+suite function onlyTheEntryModuleMayDeclareMain(): void {
+  let prog = checkTwoModules(
+    "export function main(): int { return 1; }",
+    "import { main as libMain } from \"./lib.yoop\";\nfunction main(): int { return libMain(); }"
+  );
+
+  // `main` is the one symbol that keeps its bare C name, so two of them emit
+  // two `@main`. The linker would catch it, naming object files rather than
+  // source lines.
+  let test theory: Case = t.asserts("an imported module declaring main is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref prog, "only the entry module may declare");
+    theory.detail = `wanted a diagnostic about a second main, got: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+suite function anImportMayNotCollideWithALocalDeclaration(): void {
+  let prog = checkTwoModules(
+    "export function tag(): int { return 1; }",
+    "import { tag } from \"./lib.yoop\";\nfunction tag(): int { return 2; }\nfunction main(): int { return tag(); }"
+  );
+
+  let test theory: Case = t.asserts("importing a name this module already declares is a diagnostic") {
+    theory.isSuccessful = diagnosticsMention(ref prog, "collides");
+    theory.detail = `wanted a collision diagnostic, got: ${firstDiagnostic(ref prog)}`;
+  }
+}
+
+// The SymbolId bound to `name` in module `index`, or 0 (the never-handed-out
+// sentinel) when the name is not bound there.
+function symbolIdIn(ref prog: Program, index: usize, name: string): usize {
+  if (index >= prog.modules.len) {
+    return 0;
+  }
+  let tm = vec.vecGet(ref prog.modules, index);
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.Some { value: symId }: { return symId; }
+    case Option.None: { return 0; }
+  }
+}
+
+// A two-module graph built by hand: the library at index 0 and the entry at
+// index 1, with the entry's import edges pointed at index 0.
+//
+// That is exactly the shape walk.yoop produces from the filesystem, minus the
+// filesystem - which is what lets pass B be driven from source literals here
+// while the slice fixture covers the real path end to end.
+function checkTwoModules(libSrc: string, entrySrc: string): Program propagates<disposable> {
+  let lib: Module;
+  switch (moduleFromSource("lib_0", "lib.yoop", bufferOf(libSrc))) {
+    case LoadModuleResult.Err { error: e }: { return parseFailureProgram(e); }
+    case LoadModuleResult.Ok { value: m }: { lib = m; }
+  }
+  let entry: Module;
+  switch (moduleFromSource("entry_1", "entry.yoop", bufferOf(entrySrc))) {
+    case LoadModuleResult.Err { error: e }: { return parseFailureProgram(e); }
+    case LoadModuleResult.Ok { value: m }: { entry = m; }
+  }
+
+  // Every IMPORT_DECL in the entry resolves to the one library module. The edge
+  // list belongs to the FILE, so it is read back out of the Vec and written
+  // whole - pushing into a copy would leave the module with no edges at all.
+  let entryFile = vec.vecGet(ref entry.files, 0);
+  const program = nodeAt(ref entry.ast, entryFile.root);
+  let i: usize = 0;
+  while (i < program.childCount) {
+    const declId = childAt(ref entry.ast, program, i);
+    if (nodeAt(ref entry.ast, declId).kind != ASTNodeKind.IMPORT_DECL) {
+      break;
+    }
+    vec.vecPush(ref entryFile.imports, {
+      nodeId: declId,
+      resolvedModuleIndex: 0,
+      resolvedModuleId: "lib_0",
+    });
+    i += 1;
+  }
+  vec.vecSet(ref entry.files, 0, entryFile);
+
+  let modules: Vec<Module> = vec.vecNew(2);
+  vec.vecPush(ref modules, lib);
+  vec.vecPush(ref modules, entry);
+  let autoLoads: Map<string, string> = map.mapNew(0, map.stringKeyOps());
+  let graph: ModuleGraph = {
+    modules: modules,
+    entryIndex: 1,
+    autoLoadModuleIds: autoLoads,
+  };
+  return typecheckProgram(ref graph);
+}
+
+function bufferOf(src: string): Vec<uint8> propagates<disposable> {
+  let buf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref buf, intr.stringAsBytes(src));
+  return buf;
+}
+
+// A parse failure has to come back as a DIAGNOSTIC, not as an empty Program -
+// see the note in checkSource.
+function parseFailureProgram(message: string): Program propagates<disposable> {
+  let diagnostics: Vec<Diagnostic> = vec.vecNew(1);
+  vec.vecPush(ref diagnostics, errorAt(message, { pos: 0, line: 0, column: 0, length: 0 }));
+  return {
+    types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0),
+    diagnostics: diagnostics,
+        currentFile: "",
+  };
 }
 
 // Control flow: the parts that never reach an executable.

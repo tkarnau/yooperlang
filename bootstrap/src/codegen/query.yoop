@@ -14,7 +14,9 @@ import { Option } from "std/core/types.yoop";
 import { NodeId } from "../ast";
 import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
   TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
-  lookupField, isStructType } from "../typecheck";
+  lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
+  variantModuleIdOf, variantDeclNameOf } from "../typecheck";
+import { nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
 
@@ -96,4 +98,35 @@ export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): 
 // assignment paths tell a struct from an array.
 export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
   return isStructType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+}
+
+export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isVariantType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+}
+
+// ----- variants -------------------------------------------------------------
+//
+// A constructor and a pattern both resolved to the VARIANT type and carry the
+// case's NAME, so every question below is answered from those two.
+
+// The tag to store, or to dispatch on. Declaration order, which pass C fixed.
+export function variantOrdinalOf(ref cx: Cx, nodeId: NodeId): uint64 {
+  const variantType = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  return uint64(lookupVariantCase(cx.prog, variantType, nodeAt(cx.ast, nodeId).name).ordinal);
+}
+
+// The LLVM name of one case's payload struct, which is how the payload bytes
+// are addressed.
+export function variantCaseTypeOf(ref cx: Cx, nodeId: NodeId, caseName: string): string {
+  const variantType = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  return variantCaseLlvmName(variantModuleIdOf(cx.prog, variantType),
+    variantDeclNameOf(cx.prog, variantType), caseName);
+}
+
+// Which POSITION a named field occupies in a case's payload. gep addresses a
+// field by index, so this is the one thing the field name alone does not give.
+export function variantFieldPositionOf(ref cx: Cx, nodeId: NodeId, caseName: string, fieldName: string): usize {
+  const variantType = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  const found = lookupVariantCase(cx.prog, variantType, caseName);
+  return variantCaseFieldNamed(cx.prog, variantType, usize(found.ordinal), fieldName).index;
 }

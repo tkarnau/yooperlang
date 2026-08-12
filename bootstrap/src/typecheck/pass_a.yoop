@@ -15,25 +15,60 @@ module typecheck;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNode, ASTNodeKind, childAt, nodeAt, kindName } from "../ast";
+import * as str from "std/core/strings.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, declOf, isExportDecl, nodeAt, kindName } from "../ast";
 import { Module } from "../source_graph";
 
 export function passARegisterShells(
   ref prog: Program,
   ref tm: TypedModule,
   m: Module,
-  moduleId: ModuleId
+  moduleId: ModuleId,
+  isEntry: bool
 ): void {
-  const programNode = nodeAt(ref m.ast, m.ast.root);
+  // Every file of the module registers into the SAME namespace - that is what
+  // "a module's source files see each other's declarations" means, and the
+  // redeclaration check in bindName is what keeps two of them from colliding.
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    registerFileShells(ref prog, ref tm, m, file.root, moduleId, isEntry);
+    f += 1;
+  }
+}
+
+function registerFileShells(
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  root: NodeId,
+  moduleId: ModuleId,
+  isEntry: bool
+): void {
+  const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
   while (i < programNode.childCount) {
-    const declNode = nodeAt(ref m.ast, childAt(ref m.ast, programNode, i));
+    const childId = childAt(ref m.ast, programNode, i);
+    // `export function f()` is an EXPORT_DECL wrapping the FUNCTION_DECL, so
+    // the decl to register and the question of whether it is exported are two
+    // separate lookups.
+    const exported = isExportDecl(ref m.ast, childId);
+    const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childId));
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
-        registerFunctionShell(ref prog, ref tm, declNode);
+        registerFunctionShell(ref prog, ref tm, declNode, exported, isEntry);
       }
       case ASTNodeKind.TYPE_DECL: {
-        registerTypeShell(ref prog, ref tm, declNode, moduleId);
+        registerTypeShell(ref prog, ref tm, declNode, moduleId, exported);
+      }
+      case ASTNodeKind.VARIANT_DECL: {
+        registerVariantShell(ref prog, ref tm, declNode, moduleId, exported);
+      }
+      case ASTNodeKind.IMPORT_DECL: {
+        // Pass B's job, and it needs no shell here: the name it binds is the
+        // source module's SymbolId, which topological order guarantees already
+        // exists. See pass_b.yoop.
       }
       default: {
         // Everything else is still parser-side work. Say so out loud rather
@@ -52,7 +87,26 @@ export function passARegisterShells(
 
 // A function's signature is resolved in pass C, so the shell carries no params
 // and an error return type. What matters here is that the NAME resolves.
-function registerFunctionShell(ref prog: Program, ref tm: TypedModule, declNode: ASTNode): void {
+function registerFunctionShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  exported: bool,
+  isEntry: bool
+): void {
+  // `main` is the ONE user symbol that keeps its bare C name (see
+  // mangle.yoop), so a second module declaring one emits a second `@main`.
+  // Caught here rather than left to clang, which reports it as a redefinition
+  // of an IR symbol - naming neither of the two files that disagree.
+  if (!isEntry && str.stringEq(declNode.name, "main")) {
+    reportError(
+      ref prog,
+      "only the entry module may declare `main` - it is the C entry point, so an imported module cannot have one too",
+      declNode.sourceLoc
+    );
+    return;
+  }
+
   if (declNode.childA != 0) {
     reportError(
       ref prog,
@@ -67,7 +121,7 @@ function registerFunctionShell(ref prog: Program, ref tm: TypedModule, declNode:
     ret: TYPE_ERROR_ID,
     variadic: false,
   });
-  bindName(ref prog, ref tm, declNode, Symbol.Func { typeId: shellId });
+  bindName(ref prog, ref tm, declNode, Symbol.Func { typeId: shellId }, exported);
 }
 
 // Only struct-shaped `type` decls today. Variants, unions, value enums and
@@ -77,7 +131,8 @@ function registerTypeShell(
   ref prog: Program,
   ref tm: TypedModule,
   declNode: ASTNode,
-  moduleId: ModuleId
+  moduleId: ModuleId,
+  exported: bool
 ): void {
   if (declNode.childA != 0) {
     reportError(
@@ -95,12 +150,53 @@ function registerTypeShell(
     implementsTraits: vec.vecNew(0),
     generic: { origin: 0, args: vec.vecNew(0) },
   });
-  bindName(ref prog, ref tm, declNode, Symbol.Struct { typeId: shellId });
+  bindName(ref prog, ref tm, declNode, Symbol.Struct { typeId: shellId }, exported);
+}
+
+// Same shell discipline as a struct: the NAME resolves now, the cases are
+// filled in pass C. A case's payload types can name the variant itself
+// (`variant List { Cons { rest: List } }` would), so they cannot be resolved
+// until every name in the module is registered.
+function registerVariantShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool
+): void {
+  if (declNode.childA != 0) {
+    reportError(
+      ref prog,
+      `generic variant "${declNode.name}" is not supported by the bootstrap typechecker yet`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+
+  const shellId = internType(ref prog, Type.Variant {
+    decl: { name: declNode.name, module: moduleId, populated: false },
+    cases: vec.vecNew(0),
+    methods: map.mapNew(0, map.stringKeyOps()),
+    implementsTraits: vec.vecNew(0),
+    generic: { origin: 0, args: vec.vecNew(0) },
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.VariantT { typeId: shellId }, exported);
 }
 
 // One namespace per module, so redeclaration is one insert: mapInsert reports
 // whether it overwrote something, which is precisely the condition.
-function bindName(ref prog: Program, ref tm: TypedModule, declNode: ASTNode, sym: Symbol): void {
+//
+// `exports` holds the same SymbolId under the same name, so an importer binds
+// the very symbol this module declared - not a copy of it. That identity is
+// what makes an imported struct compare equal to the original, since type
+// equality is `id == id`.
+function bindName(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  sym: Symbol,
+  exported: bool
+): void {
   const symbolId = internSymbol(ref prog, sym);
   if (map.mapInsert(ref tm.names, declNode.name, symbolId)) {
     reportError(
@@ -108,5 +204,8 @@ function bindName(ref prog: Program, ref tm: TypedModule, declNode: ASTNode, sym
       `"${declNode.name}" is declared more than once in this module`,
       declNode.sourceLoc
     );
+  }
+  if (exported) {
+    map.mapInsert(ref tm.exports, declNode.name, symbolId);
   }
 }

@@ -11,8 +11,10 @@ module typecheck;
 // named "not supported yet" diagnostic rather than a silently untyped node.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt, kindName } from "../ast";
+import { SourceLocation } from "../diagnostics";
 import { Module } from "../source_graph";
 import { TokenTags, tagSpelling } from "../lex";
 import * as str from "std/core/strings.yoop";
@@ -28,10 +30,20 @@ export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Modu
     n += 1;
   }
 
-  const programNode = nodeAt(ref m.ast, m.ast.root);
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    checkFileBodies(ref prog, ref tm, m, file.root);
+    f += 1;
+  }
+}
+
+function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root: NodeId): void {
+  const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
   while (i < programNode.childCount) {
-    const declId = childAt(ref m.ast, programNode, i);
+    const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
     const declNode = nodeAt(ref m.ast, declId);
     if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
       checkFunctionBody(ref prog, ref tm, ref m.ast, declNode);
@@ -286,6 +298,11 @@ function checkExpr(
     case ASTNodeKind.CALL_EXPRESSION: {
       resolved = checkCall(ref prog, ref tm, ref ast, expr, ref scope);
     }
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      resolved = checkVariantConstructor(
+        ref prog, ref tm, ref ast, expr, expr.childB, expr.childA, ref scope
+      );
+    }
     case ASTNodeKind.ASSIGNMENT: {
       resolved = checkAssignment(ref prog, ref tm, ref ast, expr, ref scope);
     }
@@ -313,6 +330,13 @@ function checkCall(
   expr: ASTNode,
   ref scope: LocalScope
 ): TypeId {
+  // `ns.fn(...)`. The parser could not tell a namespace from a value, so the
+  // fork is here, before the cast and printf carve-outs - neither of which a
+  // qualified name can mean.
+  if (expr.childB != 0) {
+    return checkQualifiedCall(ref prog, ref tm, ref ast, expr, ref scope);
+  }
+
   // A cast is handled before the arguments, because its single operand wants to
   // be checked AGAINST the target type (so `int64(1)` pins the literal) rather
   // than with no expectation like a call argument.
@@ -321,16 +345,7 @@ function checkCall(
     return checkCast(ref prog, ref tm, ref ast, expr, earlyCast, ref scope);
   }
 
-  // Every argument is checked with no expectation; printf is variadic and user
-  // functions do not have their params matched yet.
-  if (expr.childA != 0) {
-    const args = nodeAt(ref ast, expr.childA);
-    let a: usize = 0;
-    while (a < args.childCount) {
-      checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID, ref scope);
-      a += 1;
-    }
-  }
+  checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
 
   // printf stays magic, exactly as it is in the JS reference: it is variadic C
   // and almost every program uses it.
@@ -343,6 +358,133 @@ function checkCall(
     reportError(ref prog, `unknown function "${expr.name}"`, expr.sourceLoc);
     return TYPE_ERROR_ID;
   }
+  return returnTypeOfCallable(ref prog, symId, expr.name, expr.sourceLoc);
+}
+
+// Every argument is checked with no expectation; printf is variadic and user
+// functions do not have their params matched yet.
+function checkCallArgs(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): void {
+  if (expr.childA == 0) {
+    return;
+  }
+  const args = nodeAt(ref ast, expr.childA);
+  let a: usize = 0;
+  while (a < args.childCount) {
+    checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID, ref scope);
+    a += 1;
+  }
+}
+
+// `ns.fn(...)` - a call reached through an `import * as ns`.
+//
+// The lookup goes to the source module's EXPORTS rather than its names, which
+// is what keeps a namespace from being a way around `export`: `ns.hidden()`
+// fails for the same reason `import { hidden }` does.
+function checkQualifiedCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+
+  const base = nodeAt(ref ast, expr.childB);
+  if (base.kind != ASTNodeKind.IDENT) {
+    reportError(
+      ref prog,
+      "only an imported namespace may qualify a call so far - methods are not supported by the bootstrap typechecker yet",
+      base.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  let sourceIndex: ModuleId = 0;
+  switch (namespaceModuleOf(ref prog, ref tm, base, ref scope)) {
+    case Option.Some { value: mi }: { sourceIndex = mi; }
+    case Option.None: { return TYPE_ERROR_ID; }   // namespaceModuleOf reported why
+  }
+  let source = vec.vecGet(ref prog.modules, sourceIndex);
+
+  switch (map.mapGet(ref source.exports, expr.name)) {
+    case Option.Some { value: symId }: {
+      return returnTypeOfCallable(ref prog, symId, expr.name, expr.sourceLoc);
+    }
+    case Option.None: {
+      if (lookupOwnName(ref source, expr.name) != SYMBOL_NONE_ID) {
+        reportError(
+          ref prog,
+          `"${expr.name}" is declared in module ${source.moduleId} but not exported - add \`export\` to its declaration`,
+          expr.sourceLoc
+        );
+      } else {
+        reportError(
+          ref prog,
+          `"${base.name}" has no export "${expr.name}"`,
+          expr.sourceLoc
+        );
+      }
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// The module an IDENT names as a namespace. `None` with the reason already
+// reported - an Option rather than a sentinel, because ModuleId 0 is the first
+// module loaded and so is never spare.
+function namespaceModuleOf(
+  ref prog: Program,
+  ref tm: TypedModule,
+  base: ASTNode,
+  ref scope: LocalScope
+): Option<ModuleId> {
+  // A LOCAL first, because `p.x()` on a struct value reaches this path too -
+  // the parser cannot tell it from `ns.fn()`. Without this it would be reported
+  // as an unknown name, since a namespace only ever lives at module level, and
+  // the reader would go hunting for a typo in a name that is right there.
+  switch (scopeLookup(ref scope, base.name)) {
+    case Option.Some { value: localType }: {
+      reportError(
+        ref prog,
+        `"${base.name}" is a local of type ${formatType(ref prog, localType)}, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet`,
+        base.sourceLoc
+      );
+      return Option.None;
+    }
+    case Option.None: { }
+  }
+
+  const symId = lookupOwnName(ref tm, base.name);
+  if (symId == SYMBOL_NONE_ID) {
+    reportError(ref prog, `unknown name "${base.name}"`, base.sourceLoc);
+    return Option.None;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Namespace { module: mi }: { return Option.Some { value: mi }; }
+    default: {
+      reportError(
+        ref prog,
+        `"${base.name}" is not an imported namespace, so it has no members to call`,
+        base.sourceLoc
+      );
+      return Option.None;
+    }
+  }
+}
+
+// The return type of whatever `symId` names, or an error if it is not callable.
+function returnTypeOfCallable(
+  ref prog: Program,
+  symId: SymbolId,
+  name: string,
+  sourceLoc: SourceLocation
+): TypeId {
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Func { typeId: t }: {
       switch (typeAt(ref prog, t)) {
@@ -351,7 +493,7 @@ function checkCall(
       }
     }
     default: {
-      reportError(ref prog, `"${expr.name}" is not callable`, expr.sourceLoc);
+      reportError(ref prog, `"${name}" is not callable`, sourceLoc);
       return TYPE_ERROR_ID;
     }
   }
@@ -664,6 +806,13 @@ function checkFieldAccess(
   expr: ASTNode,
   ref scope: LocalScope
 ): TypeId {
+  // `Result.None` is a payload-less CONSTRUCTOR wearing a field access - the
+  // same tokens as `p.x`. Checked before the base is checked as a value,
+  // because a variant name is not one and would report as an unknown name.
+  if (isPayloadlessConstructor(ref prog, ref tm, ref ast, expr, ref scope)) {
+    return checkVariantConstructor(ref prog, ref tm, ref ast, expr, expr.childA, 0, ref scope);
+  }
+
   const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
   if (baseType == TYPE_ERROR_ID) {
     return TYPE_ERROR_ID;
@@ -775,11 +924,12 @@ function isCastable(ref prog: Program, source: TypeId, target: TypeId): bool {
   return isIntPrimType(ref prog, source) && isIntPrimType(ref prog, target);
 }
 
-// `switch (n) { case 1, 2: {...} default: {...} }`
+// `switch (n) { case 1, 2: {...} default: {...} }` over an integer, or
+// `switch (r) { case Result.Ok { value: v }: {...} ... }` over a variant.
 //
-// Integer scrutinee only so far. An integer switch can never be exhaustive, so
-// `default` is required - without it a value matching no arm would fall out of
-// the statement with nowhere defined to go.
+// The two differ in exactly one way that matters here: an integer switch can
+// never be exhaustive, so `default` is required, while a variant switch is
+// exhaustive when every case appears and then a default would be dead code.
 function checkSwitch(
   ref prog: Program,
   ref tm: TypedModule,
@@ -789,12 +939,21 @@ function checkSwitch(
   ref scope: LocalScope
 ): void {
   const scrutType = checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
-  if (scrutType != TYPE_ERROR_ID && !isIntPrimType(ref prog, scrutType)) {
+  const overVariant = isVariantType(ref prog, scrutType);
+  if (scrutType != TYPE_ERROR_ID && !overVariant && !isIntPrimType(ref prog, scrutType)) {
     reportError(
       ref prog,
-      `cannot switch over ${formatType(ref prog, scrutType)} - the bootstrap typechecker only handles integers so far`,
+      `cannot switch over ${formatType(ref prog, scrutType)} - the bootstrap typechecker handles integers and variants so far`,
       stmt.sourceLoc
     );
+  }
+
+  // Which case ordinals have been matched, so a missing one can be NAMED.
+  disposable covered: Vec<bool> = vec.vecNew(0);
+  let c: usize = 0;
+  while (c < variantCaseCount(ref prog, scrutType)) {
+    vec.vecPush(ref covered, false);
+    c += 1;
   }
 
   let sawDefault = false;
@@ -802,18 +961,29 @@ function checkSwitch(
   while (i < stmt.childCount) {
     const armId = childAt(ref ast, stmt, i);
     const arm = nodeAt(ref ast, armId);
+
+    // The arm's scope opens BEFORE its patterns are checked, because a variant
+    // pattern declares its payload bindings into it.
+    scopePush(ref scope);
     if (arm.flagA) {
       if (sawDefault) {
         reportError(ref prog, "a switch may only have one default arm", arm.sourceLoc);
       }
       sawDefault = true;
+    } else if (overVariant) {
+      checkVariantArm(ref prog, ref tm, ref ast, arm, scrutType, ref covered, ref scope);
     } else {
       checkArmPatterns(ref prog, ref tm, ref ast, arm, scrutType);
     }
     checkBlock(ref prog, ref tm, ref ast, arm.childB, retType, ref scope);
+    scopePop(ref scope);
     i += 1;
   }
 
+  if (overVariant) {
+    checkExhaustive(ref prog, stmt, scrutType, ref covered, sawDefault);
+    return;
+  }
   if (!sawDefault) {
     reportError(
       ref prog,
@@ -821,6 +991,91 @@ function checkSwitch(
       stmt.sourceLoc
     );
   }
+}
+
+// Every pattern of one variant arm. Several may share an arm, and each records
+// the case it covers.
+function checkVariantArm(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  arm: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  ref scope: LocalScope
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(ref ast, list, i);
+    if (nodeAt(ref ast, patternId).kind != ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        ref prog,
+        `this switch is over ${formatType(ref prog, scrutType)}, so its patterns must be variant cases, not literals`,
+        nodeAt(ref ast, patternId).sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    const ordinal = checkVariantPattern(ref prog, ref tm, ref ast, patternId, scrutType, ref scope);
+    if (ordinal >= 0 && usize(ordinal) < covered.len) {
+      if (vec.vecGet(ref covered, usize(ordinal))) {
+        reportError(
+          ref prog,
+          `case "${nodeAt(ref ast, patternId).name}" is matched twice in this switch`,
+          nodeAt(ref ast, patternId).sourceLoc
+        );
+      }
+      vec.vecSet(ref covered, usize(ordinal), true);
+    }
+    i += 1;
+  }
+}
+
+// A variant switch is exhaustive or it has a default - never neither, and never
+// both. "Never both" is the part worth the diagnostic: a default that can never
+// run is dead code, and usually means a case name is misspelled.
+function checkExhaustive(
+  ref prog: Program,
+  stmt: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  sawDefault: bool
+): void {
+  let missing: usize = 0;
+  let firstMissing: usize = 0;
+  let i: usize = 0;
+  while (i < covered.len) {
+    if (!vec.vecGet(ref covered, i)) {
+      if (missing == 0) {
+        firstMissing = i;
+      }
+      missing += 1;
+    }
+    i += 1;
+  }
+
+  if (missing == 0) {
+    if (sawDefault) {
+      reportError(
+        ref prog,
+        `this switch already covers every case of ${formatType(ref prog, scrutType)}, so the default arm can never run`,
+        stmt.sourceLoc
+      );
+    }
+    return;
+  }
+  if (sawDefault) {
+    return;   // the default covers whatever is left
+  }
+  reportError(
+    ref prog,
+    `this switch does not cover "${variantCaseNameAt(ref prog, scrutType, firstMissing)}" (${missing} case(s) unhandled) - add it, or a default arm`,
+    stmt.sourceLoc
+  );
 }
 
 // Each pattern is decorated with the scrutinee's type, which is what tells
@@ -839,6 +1094,15 @@ function checkArmPatterns(
   let i: usize = 0;
   while (i < list.childCount) {
     const patternId = childAt(ref ast, list, i);
+    if (nodeAt(ref ast, patternId).kind == ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        ref prog,
+        "this switch is over an integer, so its patterns must be literals, not variant cases",
+        nodeAt(ref ast, patternId).sourceLoc
+      );
+      i += 1;
+      continue;
+    }
     vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
     i += 1;
   }

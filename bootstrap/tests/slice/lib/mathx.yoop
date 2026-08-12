@@ -1,0 +1,37 @@
+// The imported module. Exports a type and four functions, and keeps one
+// function to itself.
+
+import { bump } from "./counter.yoop";
+
+export type Point {
+  x: int,
+  y: int,
+}
+
+// NOT exported. The entry cannot name it, which is what makes `exports` a real
+// subset of the module's names rather than a copy of them.
+function double(n: int): int {
+  return n * 2;
+}
+
+export function add(a: int, b: int): int {
+  return a + b;
+}
+
+// Reaches a sibling declaration in its own module. That call is not an import,
+// and it has to keep resolving locally once imports exist.
+export function scale(n: int, by: int): int {
+  return double(n) * by / 2;
+}
+
+// Deliberately the same NAME as a function in the entry module, with a
+// different answer. Mangling is the only thing keeping the two apart.
+export function tag(): int {
+  return 20;
+}
+
+// A call THROUGH an import, from an imported module. `bump` is mangled against
+// counter, not against this module.
+export function bumpedTwice(n: int): int {
+  return bump(bump(n));
+}

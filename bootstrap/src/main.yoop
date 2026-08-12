@@ -20,7 +20,7 @@ import { Text }, * as text from "std/core/text.yoop";
 
 import { loadModuleGraph, LoadGraphResult } from "./source_graph";
 import { typecheckProgram, Program } from "./typecheck";
-import { Severity } from "./diagnostics";
+import { Severity, formatLocation } from "./diagnostics";
 import { codegenProgram } from "./codegen";
 import { linkExecutable } from "./link";
 
@@ -82,10 +82,10 @@ function reportDiagnostics(ref prog: Program): usize {
     switch (d.severity) {
       case Severity.ERROR: {
         errors += 1;
-        log.error(`${d.sourceLoc.line + 1}:${d.sourceLoc.column}: ${d.message}`);
+        log.error(`${formatLocation(ref d)}: ${d.message}`);
       }
       case Severity.WARNING: {
-        log.info(`${d.sourceLoc.line + 1}:${d.sourceLoc.column}: warning: ${d.message}`);
+        log.info(`${formatLocation(ref d)}: warning: ${d.message}`);
       }
     }
     i += 1;
