@@ -19,6 +19,12 @@ export function astNodeFlagAName(v: ASTNodeKind): string {
     case ASTNodeKind.FOR_LOOP: {
       return "initDeclares";
     }
+    case ASTNodeKind.SWITCH_ARM: {
+      return "isDefault";
+    }
+    case ASTNodeKind.LITERAL_PATTERN: {
+      return "negated";
+    }
     default: {
       return "undefined";
     }
@@ -43,6 +49,12 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.INDEX_EXPRESSION,
          ASTNodeKind.FIELD_ACCESS: {
       return "base";
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return "scrutinee";
+    }
+    case ASTNodeKind.SWITCH_ARM: {
+      return "patternsList";
     }
     case ASTNodeKind.ARRAY_LITERAL: {
       return "elementsList";
@@ -99,6 +111,9 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.INDEX_EXPRESSION: {
       return "index";
+    }
+    case ASTNodeKind.SWITCH_ARM: {
+      return "armBlock";
     }
     case ASTNodeKind.FOR_LOOP: {
       return "initExpr";
@@ -172,6 +187,9 @@ export function astNodeChildListName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.NODE_LIST: {
       return "items";
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return "arms";
     }
     default: {
       return "undefined";

@@ -1,0 +1,32 @@
+// `switch` over an integer, lowered to an LLVM jump table.
+//
+// `classify` returns from every arm, so no join block is emitted. `describe`
+// assigns instead, so every arm branches to the join. Both shapes have to work
+// or clang rejects the function for having the wrong number of terminators.
+//
+// `case 1, 2, 3:` shares one arm across three patterns, and `case -1:` proves
+// the parser's negation reaches the case value.
+function classify(n: int): int {
+  switch (n) {
+    case 0: { return 100; }
+    case 1, 2, 3: { return 200; }
+    case -1: { return 300; }
+    default: { return 400; }
+  }
+}
+
+function describe(n: int): int {
+  let out: int = 0;
+  switch (n % 3) {
+    case 0: { out = 10; }
+    case 1: { out = 20; }
+    default: { out = 30; }
+  }
+  return out;
+}
+
+function main(): int {
+  printf("%d %d %d %d %d\n", classify(0), classify(2), classify(0 - 1), classify(9), classify(3));
+  printf("%d %d %d\n", describe(3), describe(4), describe(5));
+  return 0;
+}

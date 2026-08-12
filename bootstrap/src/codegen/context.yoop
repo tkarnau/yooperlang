@@ -19,7 +19,8 @@ import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { Option } from "std/core/types.yoop";
 import { AST, NodeId } from "../ast";
-import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID } from "../typecheck";
+import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID, TYPE_ERROR_ID,
+  primTypeIdOfName, primBitWidth, primIsSigned } from "../typecheck";
 
 export type Cx {
   e: ref Emitter,
@@ -40,35 +41,6 @@ export type ParamInfo {
 export type CallArg {
   ty: string,
   value: Operand,
-}
-
-// ----- the typecheck boundary ----------------------------------------------
-
-// The LLVM type of whatever pass D resolved for this node. Codegen is entitled
-// to assume every node it visits has one (see the layer contract in
-// plans/bootstrap-pipeline-contracts.md), so there is no error path here.
-export function typeOf(ref cx: Cx, nodeId: NodeId): string {
-  return llvmType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
-}
-
-// The declared return type of a top-level function, as LLVM spells it.
-export function returnTypeOf(ref cx: Cx, name: string): string {
-  switch (map.mapGet(ref cx.tm.names, name)) {
-    case Option.None: { return "void"; }
-    case Option.Some { value: symId }: {
-      switch (symbolAt(cx.prog, symId)) {
-        case Symbol.Func { typeId: t }: {
-          switch (typeAt(cx.prog, t)) {
-            case Type.Func { params: p, ret: r, variadic: v }: {
-              return llvmType(cx.prog, r);
-            }
-            default: { return "void"; }
-          }
-        }
-        default: { return "void"; }
-      }
-    }
-  }
 }
 
 // ----- raw appenders, used only by instr.yoop -----------------------------

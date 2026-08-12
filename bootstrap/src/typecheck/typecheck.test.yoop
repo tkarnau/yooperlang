@@ -374,3 +374,131 @@ suite function integerWidthsStayApart(): void {
     theory.detail = "returning a usize as int32 produced no diagnostic";
   }
 }
+
+suite function castsAreChecked(): void {
+  let ok = checkSource("function main(): int { const xs: int[] = [1]; return int(xs.len); }");
+  let test theory: Case = t.asserts("a cast makes widths mix") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `int(xs.len) reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let twoArgs = checkSource("function main(): int { return int(1, 2); }");
+  let test theory: Case = t.asserts("a cast takes exactly one argument") {
+    theory.isSuccessful = twoArgs.diagnostics.len > 0;
+    theory.detail = "int(1, 2) produced no diagnostic";
+  }
+
+  let fromBool = checkSource("function main(): int { return int(true); }");
+  let test theory: Case = t.asserts("casting a bool to an int is a diagnostic") {
+    theory.isSuccessful = fromBool.diagnostics.len > 0;
+    theory.detail = "int(true) produced no diagnostic - only numeric casts are supported";
+  }
+
+  let fromArray = checkSource("function main(): int { const xs: int[] = [1]; return int(xs); }");
+  let test theory: Case = t.asserts("casting an array is a diagnostic") {
+    theory.isSuccessful = fromArray.diagnostics.len > 0;
+    theory.detail = "int(xs) produced no diagnostic";
+  }
+
+  // A cast target is a TYPE name, so it must not be shadowed by the symbol
+  // lookup that handles ordinary calls.
+  let notACall = checkSource("function main(): int { let n: int64 = int64(1); return int(n); }");
+  let test theory: Case = t.asserts("a primitive name is a cast, not an unknown function") {
+    theory.isSuccessful = notACall.diagnostics.len == 0;
+    theory.detail = `reported ${notACall.diagnostics.len}: ${firstDiagnostic(ref notACall)}`;
+  }
+}
+
+suite function switchesAreChecked(): void {
+  let ok = checkSource("function main(): int { switch (1) { case 1: { return 1; } default: { return 0; } } }");
+  let test theory: Case = t.asserts("an integer switch with a default checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // An integer switch can never be exhaustive, so the default is required.
+  let noDefault = checkSource("function main(): int { switch (1) { case 1: { return 1; } } return 0; }");
+  let test theory: Case = t.asserts("an integer switch without a default is a diagnostic") {
+    theory.isSuccessful = noDefault.diagnostics.len > 0;
+    theory.detail = "a switch with no default produced no diagnostic";
+  }
+
+  let twoDefaults = checkSource("function main(): int { switch (1) { default: { return 1; } default: { return 2; } } }");
+  let test theory: Case = t.asserts("two default arms is a diagnostic") {
+    theory.isSuccessful = twoDefaults.diagnostics.len > 0;
+    theory.detail = "two defaults produced no diagnostic";
+  }
+
+  let overBool = checkSource("function main(): int { switch (true) { case 1: { return 1; } default: { return 0; } } }");
+  let test theory: Case = t.asserts("switching over a bool is refused for now") {
+    theory.isSuccessful = overBool.diagnostics.len > 0;
+    theory.detail = "switching over a bool produced no diagnostic";
+  }
+
+  // An arm body is a block, so it scopes like one.
+  let armScope = checkSource("function main(): int { switch (1) { case 1: { const a = 1; } default: { } } return a; }");
+  let test theory: Case = t.asserts("an arm-local name is not visible after the switch") {
+    theory.isSuccessful = armScope.diagnostics.len > 0;
+    theory.detail = "reading an arm-local after the switch produced no diagnostic";
+  }
+}
+
+suite function structsAreChecked(): void {
+  const decl = "type P { x: int, y: int } ";
+
+  let ok = checkSource(`${decl}function main(): int { const p: P = { x: 1, y: 2 }; return p.x + p.y; }`);
+  let test theory: Case = t.asserts("a literal, a field read and arithmetic compose") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Order does not matter, because fields are addressed by position.
+  let reordered = checkSource(`${decl}function main(): int { const p: P = { y: 2, x: 1 }; return p.x; }`);
+  let test theory: Case = t.asserts("literal fields may be written in any order") {
+    theory.isSuccessful = reordered.diagnostics.len == 0;
+    theory.detail = `reported ${reordered.diagnostics.len}: ${firstDiagnostic(ref reordered)}`;
+  }
+
+  let missing = checkSource(`${decl}function main(): int { const p: P = { x: 1 }; return p.x; }`);
+  let test theory: Case = t.asserts("a literal missing a field is a diagnostic") {
+    theory.isSuccessful = missing.diagnostics.len > 0;
+    theory.detail = "a literal with only one of two fields produced no diagnostic";
+  }
+
+  let unknownField = checkSource(`${decl}function main(): int { const p: P = { x: 1, y: 2, z: 3 }; return p.x; }`);
+  let test theory: Case = t.asserts("an unknown field in a literal is a diagnostic") {
+    theory.isSuccessful = unknownField.diagnostics.len > 0;
+    theory.detail = "a literal with an extra field produced no diagnostic";
+  }
+
+  let badFieldType = checkSource(`${decl}function main(): int { const p: P = { x: true, y: 2 }; return p.x; }`);
+  let test theory: Case = t.asserts("a field value of the wrong type is a diagnostic") {
+    theory.isSuccessful = badFieldType.diagnostics.len > 0;
+    theory.detail = "assigning a bool to an int field produced no diagnostic";
+  }
+
+  let readMissing = checkSource(`${decl}function main(): int { const p: P = { x: 1, y: 2 }; return p.z; }`);
+  let test theory: Case = t.asserts("reading an unknown field is a diagnostic") {
+    theory.isSuccessful = readMissing.diagnostics.len > 0;
+    theory.detail = "p.z produced no diagnostic";
+  }
+
+  // Which struct a literal is comes from context, so a bare one is ambiguous.
+  let noContext = checkSource(`${decl}function main(): int { const p = { x: 1, y: 2 }; return p.x; }`);
+  let test theory: Case = t.asserts("an unannotated literal is a diagnostic") {
+    theory.isSuccessful = noContext.diagnostics.len > 0;
+    theory.detail = "a literal with nothing to take its type from produced no diagnostic";
+  }
+
+  let assignField = checkSource(`${decl}function main(): int { let p: P = { x: 1, y: 2 }; p.x = 5; return p.x; }`);
+  let test theory: Case = t.asserts("assigning to a field checks clean") {
+    theory.isSuccessful = assignField.diagnostics.len == 0;
+    theory.detail = `reported ${assignField.diagnostics.len}: ${firstDiagnostic(ref assignField)}`;
+  }
+
+  let assignBadType = checkSource(`${decl}function main(): int { let p: P = { x: 1, y: 2 }; p.x = true; return p.x; }`);
+  let test theory: Case = t.asserts("assigning the wrong type to a field is a diagnostic") {
+    theory.isSuccessful = assignBadType.diagnostics.len > 0;
+    theory.detail = "p.x = true produced no diagnostic";
+  }
+}

@@ -18,11 +18,17 @@ import { Text }, * as text from "std/core/text.yoop";
 //   %t4 = extractvalue { ptr, i64 } %t3, 0
 //
 // Field 0 is the data pointer, field 1 is the length.
-export function emitExtractValue(ref cx: Cx, dest: usize, aggregate: Operand, field: usize): void {
+export function emitExtractValue(
+  ref cx: Cx,
+  dest: usize,
+  aggregateTy: string,
+  aggregate: Operand,
+  field: usize
+): void {
   startInstr(ref cx);
   temp(ref cx, dest);
   part(ref cx, " = extractvalue ");
-  part(ref cx, ARRAY_DESCRIPTOR);
+  part(ref cx, aggregateTy);
   part(ref cx, " ");
   operand(ref cx, aggregate);
   part(ref cx, ", ");
@@ -179,5 +185,29 @@ export function emitInsertValueTemp(
   operand(ref cx, value);
   part(ref cx, ", ");
   num(ref cx, field);
+  endInstr(ref cx);
+}
+
+//   %t3 = getelementptr inbounds %struct.Point, ptr %p.1.addr, i32 0, i32 1
+//
+// The address of a struct field by POSITION. Used to fill a literal and to
+// assign to a field; reading one goes through extractvalue on the loaded value
+// instead, which needs no address at all.
+export function emitGepField(
+  ref cx: Cx,
+  dest: usize,
+  structTy: string,
+  slotName: string,
+  slotId: usize,
+  index: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds ");
+  part(ref cx, structTy);
+  part(ref cx, ", ptr ");
+  slot(ref cx, slotName, slotId);
+  part(ref cx, ", i32 0, i32 ");
+  num(ref cx, index);
   endInstr(ref cx);
 }

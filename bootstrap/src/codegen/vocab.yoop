@@ -45,3 +45,42 @@ export function llvmIntPredicate(tag: TokenTags): string {
     default: { return ""; }
   }
 }
+
+// The conversion opcode for an integer cast, or "" when the widths already
+// match and the value passes through untouched.
+//
+//   narrowing        -> trunc
+//   widening, signed -> sext  (sign-extend, so -1 stays -1)
+//   widening, other  -> zext  (zero-extend)
+//
+// Signedness of the SOURCE is what matters: widening a uint8 to int64 must not
+// sign-extend, or 200 becomes -56.
+export function llvmIntCastOp(fromBits: usize, toBits: usize, fromSigned: bool): string {
+  if (toBits == fromBits) {
+    return "";
+  }
+  if (toBits < fromBits) {
+    return "trunc";
+  }
+  if (fromSigned) {
+    return "sext";
+  }
+  return "zext";
+}
+
+// C default argument promotion, for a variadic call.
+//
+// varargs pass integers as 32- or 64-bit and floats as double, so anything
+// narrower has to be widened AT THE CALL SITE. Skipping this is not a rounding
+// error: printf reads a full slot, so passing an `i8` leaves the upper bits
+// holding whatever was there before and the printed number is unrelated to the
+// value. Returns the LLVM type to pass as.
+export function promotedVarargType(bits: usize, isBool: bool): string {
+  if (isBool) {
+    return "i32";
+  }
+  if (bits >= 64) {
+    return "i64";
+  }
+  return "i32";
+}

@@ -72,7 +72,7 @@ is refused BY NAME - "pass D does not handle X yet", "methods inside a type decl
 are not supported by the bootstrap parser yet" - rather than mis-compiled.
 
   * top-level `function` decls, called from each other
-  * `type` decls with fields (registered and resolved, no values yet)
+  * `type` decls with fields
   * `let` / `const` locals, with an annotation or inferred from the initializer
   * function PARAMETERS, readable in the body and passed at call sites
   * assignment to a local (`x = expr`)
@@ -83,16 +83,19 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
   * compound assignment (`x += 1`), including in a `for` step
   * arrays: `T[]` annotations, `[a, b, c]` literals, `xs[i]` read and write,
     `xs.len`, and passing an array to a function
+  * integer casts (`usize(n)`, `int8(x)`)
+  * `switch` over an integer, with multi-pattern arms and a required `default`
+  * structs as VALUES: `{ x: 1 }` literals, field read and write, passing and
+    returning by value
   * `return`, with or without a value
   * int literals, string literals, `+ - * / %`
   * calls, including the `printf` builtin
 
-Not yet: imports, `switch`, `for x in xs`, module-level `let` / `const`, structs
-as values, casts between integer widths, traits, kinds, generics.
+Not yet: imports, `for x in xs`, module-level `let` / `const`, nested field
+paths (`a.b.c = v`), floats, traits, kinds, generics.
 
 Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
-`int32 + usize` and is an error. That is why there is no cast yet and why it is
-the next thing the subset will want.
+`int32 + usize` and is an error. Write the cast.
 
 Two invariants control flow introduced, both easy to break:
 
@@ -116,6 +119,21 @@ Two invariants control flow introduced, both easy to break:
 - **Structural types must intern to one TypeId.** Type equality is `id == id`,
   so two `int[]` annotations that interned separately would compare unequal.
   `internArray` / `internRef` scan before inserting.
+- **Variadic calls must PROMOTE narrow arguments.** C default argument promotion
+  passes integers as 32- or 64-bit, so an `i8` handed to `printf` leaves the rest
+  of the slot holding whatever was there before - the printed number is unrelated
+  to the value, not merely rounded. `casts.yoop` in the slice fixtures is the
+  test; it printed 300 for `narrow(300)` before promotion existed, instead of 44.
+- **A `switch` allocates every arm's label before emitting any of them**, because
+  the jump table names them all up front. That is the one structural difference
+  from `if`.
+- **A struct is a VALUE, and a field read and a field write take different
+  routes.** A read is `extractvalue` on the loaded value, so it works on any
+  struct expression including a call result; a write is `getelementptr` on the
+  binding's slot, because a store needs an address and only a named binding has
+  one. Struct literals store by field POSITION, so a literal may list its fields
+  in any order - `structs.yoop` covers both that and the copy-on-assign that a
+  pointer representation would break.
 - **`&&` and `||` branch, they do not compute.** Both lower to a condition, a
   right-hand-side block, and a stack slot the two paths write - never a single
   instruction over two evaluated operands. `expressions.yoop` in the slice
@@ -177,10 +195,15 @@ exactly one:
     loop_stack.yoop         where break/continue jump
     array.yoop              array literals, indexing, `.len`
     call.yoop               call expressions
+    switch.yoop             `switch` -> a jump table
+    struct.yoop             struct literals, field read and write
+    typedefs.yoop           the module-level struct type definitions
     instr.yoop              emit one LLVM instruction
     instr_mem.yoop          the same, for aggregates and computed addresses
+    instr_flow.yoop         the same, for branches, labels, the jump table
     vocab.yoop              which opcode/predicate an operator lowers to
-    context.yoop            the raw text appenders (only instr.yoop calls these)
+    context.yoop            the Cx, and the raw text appenders
+    query.yoop              THE typecheck boundary - everything codegen asks
 
 The walking code should read as "load the local, then multiply" - if you can see
 a quotation mark in `expr.yoop`, something is in the wrong file.

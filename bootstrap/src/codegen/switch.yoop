@@ -1,0 +1,112 @@
+module codegen;
+
+// `switch` lowered to an LLVM jump table.
+//
+//     switch i32 %scrut, label %Ldefault [ i32 1, label %L1  i32 2, label %L1 ]
+//   L1:  ...  br label %Lend
+//   Ldefault: ...  br label %Lend
+//   Lend:
+//
+// The labels are allocated for EVERY arm before any is emitted, because the
+// dispatch instruction has to name them all up front. That is the one structural
+// difference from `if`, where each branch's label is needed only when reached.
+//
+// Arms do not fall through, so each ends with its own branch to the join. An arm
+// that already terminated (a `return` inside it) gets none - the same one
+// terminator per block rule as everywhere else.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+
+export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): string {
+  terminated = false;
+
+  let scrut: Operand = Operand.None;
+  const serr = emitExpr(ref cx, stmt.childA, ref scrut);
+  if (serr.len > 0) {
+    return serr;
+  }
+  const scrutTy = typeOf(ref cx, stmt.childA);
+
+  // One label per arm, plus the join. Allocated first so the dispatch can name
+  // them.
+  disposable armLabels: Vec<usize> = vec.vecNew(4);
+  let defaultLabel: usize = 0;
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, i));
+    const armLabel = freshLabel(cx.e);
+    vec.vecPush(ref armLabels, armLabel);
+    if (arm.flagA) {
+      defaultLabel = armLabel;
+    }
+    i += 1;
+  }
+  const endLabel = freshLabel(cx.e);
+  if (defaultLabel == 0) {
+    // Pass D requires a default arm, so this is unreachable on well-formed
+    // input - but a jump table must have SOME default, and falling to the join
+    // is the answer that cannot produce invalid IR.
+    defaultLabel = endLabel;
+  }
+
+  emitSwitchOpen(ref cx, scrutTy, scrut, defaultLabel);
+  emitCaseLines(ref cx, stmt, scrutTy, ref armLabels);
+  emitSwitchClose(ref cx);
+
+  // Now the arm bodies.
+  let allTerminated = stmt.childCount > 0;
+  let a: usize = 0;
+  while (a < stmt.childCount) {
+    const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, a));
+    emitLabel(ref cx, vec.vecGet(ref armLabels, a));
+    let err = "";
+    let armTerminated = false;
+    emitBlock(ref cx, arm.childB, retTy, ref armTerminated, ref err);
+    if (err.len > 0) {
+      return err;
+    }
+    if (!armTerminated) {
+      allTerminated = false;
+      emitBr(ref cx, endLabel);
+    }
+    a += 1;
+  }
+
+  // If every arm returned AND there was a default, nothing reaches the join.
+  if (allTerminated && defaultLabel != endLabel) {
+    terminated = true;
+    return "";
+  }
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+// The `<ty> <value>, label %Lk` lines - one per pattern, so several patterns can
+// share an arm.
+function emitCaseLines(ref cx: Cx, stmt: ASTNode, scrutTy: string, ref armLabels: Vec<usize>): void {
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, i));
+    if (!arm.flagA && arm.childA != 0) {
+      const patterns = nodeAt(cx.ast, arm.childA);
+      let p: usize = 0;
+      while (p < patterns.childCount) {
+        const pattern = nodeAt(cx.ast, childAt(cx.ast, patterns, p));
+        emitSwitchCase(ref cx, scrutTy, patternOperand(pattern), vec.vecGet(ref armLabels, i));
+        p += 1;
+      }
+    }
+    i += 1;
+  }
+}
+
+// A literal pattern as an operand. `flagA` is the negation the parser recorded,
+// so `case -1:` reaches here as 1 with the flag set.
+function patternOperand(pattern: ASTNode): Operand {
+  if (pattern.flagA) {
+    return Operand.NegImm { value: pattern.intVal };
+  }
+  return Operand.Imm { value: pattern.intVal };
+}

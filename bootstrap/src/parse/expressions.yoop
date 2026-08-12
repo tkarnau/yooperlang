@@ -39,6 +39,12 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ARRAY_LITERAL);
       node.childA = parseArrayElements(ref ps)?;
     }
+    case TokenTags.LCURLY: {
+      // A `{` in expression position is a struct literal, never a block - a
+      // bare block is not a statement in this language.
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL);
+      node.childA = parseStructLiteralFields(ref ps)?;
+    }
     case TokenTags.LPAREN: {
       // Grouping. The inner expression is already in the arena, so this reads
       // it back as the current node. That leaves the original copy unreferenced
@@ -231,6 +237,33 @@ function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
     }
   }
   SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// `{ x: 1, y: 2 }` - the fields, as a NODE_LIST of STRUCT_LITERAL_FIELD.
+//
+// Each field node carries its NAME and its value in childA. Which struct this
+// is comes from context, so the parser never has to know.
+function parseStructLiteralFields(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
+    field.name = parseIdentAsName(ref ps)?;
+    SelfLexing.expect(ref ps, TokenTags.COLON)?;
+    field.childA = parseExpression(ref ps, 0)?;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, field));
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
   return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }

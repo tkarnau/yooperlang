@@ -71,8 +71,9 @@ types file.
   Handles top-level `type` (struct body, transparent alias, type params, kind
   prefix) and `function` decls, blocks, `let`/`const`, `return`, assignment,
   `if`/`else if`/`else`, `while`, `for`, `break`/`continue`, calls, arrays
-  (`T[]`, literals, indexing, `.len`), unary and compound-assignment forms, and
-  expressions by precedence climbing. Not yet: imports, traits, variants, enums, unions,
+  (`T[]`, literals, indexing, `.len`), structs as values (literals, field read
+  and write), `switch` with multi-pattern arms, integer casts, unary and
+  compound-assignment forms, and expressions by precedence climbing. Not yet: imports, traits, variants, enums, unions,
   methods in a type body, `implements`/`propagates`/`contains` clauses - each a
   named "not supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
@@ -88,8 +89,9 @@ types file.
   arithmetic, comparisons as `icmp`, calls, printf, locals/params as hoisted
   alloca + store/load, and `if`/`while`/`for`/`break`/`continue` as labels and
   branches over a loop-label stack, and short-circuiting `&&`/`||` through a
-  stack slot rather than a phi, and arrays as a `{ ptr, i64 }` descriptor).
-  Split
+  stack slot rather than a phi, arrays as a `{ ptr, i64 }` descriptor, `switch`
+  as an LLVM jump table, named struct types passed by value, and C varargs
+  promotion). Split
   into deciding (`expr`/`stmt`), emitting (`instr`, one function per LLVM
   instruction with a sample of its output) and appending (`context`); the rules
   are in bootstrap/README.md and are bootstrap-specific.

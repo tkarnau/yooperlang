@@ -79,6 +79,9 @@ export function emitStatement(
     case ASTNodeKind.FOR_LOOP: {
       return emitFor(ref cx, stmt, stmtId, retTy);
     }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return emitSwitch(ref cx, stmt, retTy, ref terminated);
+    }
     case ASTNodeKind.BREAK_STATEMENT: {
       terminated = true;
       if (!insideLoop(ref cx)) {

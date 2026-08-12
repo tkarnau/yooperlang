@@ -94,6 +94,20 @@ export function emitLoad(ref cx: Cx, dest: usize, ty: string, name: string, id: 
   endInstr(ref cx);
 }
 
+//   %t6 = load %struct.Point, ptr %sc.1.addr
+//
+// Same as emitLoad, named for what it is used for: pulling a whole aggregate
+// value out of its slot.
+export function emitLoadFromSlot(
+  ref cx: Cx,
+  dest: usize,
+  ty: string,
+  slotName: string,
+  slotId: usize
+): void {
+  emitLoad(ref cx, dest, ty, slotName, slotId);
+}
+
 //   store i32 %a.arg, ptr %a.addr
 //
 // The parameter spill. Separate from emitStore because the source is an incoming
@@ -130,6 +144,31 @@ export function emitBinOp(
   operand(ref cx, lhs);
   part(ref cx, ", ");
   operand(ref cx, rhs);
+  endInstr(ref cx);
+}
+
+//   %t4 = zext i32 %t3 to i64
+//
+// An integer width conversion. `op` is trunc / zext / sext - vocab.yoop decides
+// which from the two widths and the source's signedness.
+export function emitIntCast(
+  ref cx: Cx,
+  dest: usize,
+  op: string,
+  fromTy: string,
+  value: Operand,
+  toTy: string
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = ");
+  part(ref cx, op);
+  part(ref cx, " ");
+  part(ref cx, fromTy);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, " to ");
+  part(ref cx, toTy);
   endInstr(ref cx);
 }
 
@@ -170,37 +209,6 @@ export function emitNot(ref cx: Cx, dest: usize, value: Operand): void {
   part(ref cx, " = xor i1 ");
   operand(ref cx, value);
   part(ref cx, ", true");
-  endInstr(ref cx);
-}
-
-// ----- control flow --------------------------------------------------------
-
-//   br label %L3
-export function emitBr(ref cx: Cx, target: usize): void {
-  startInstr(ref cx);
-  part(ref cx, "br label %");
-  label(ref cx, target);
-  endInstr(ref cx);
-}
-
-//   br i1 %t6, label %L1, label %L2
-export function emitCondBr(ref cx: Cx, cond: Operand, ifTrue: usize, ifFalse: usize): void {
-  startInstr(ref cx);
-  part(ref cx, "br i1 ");
-  operand(ref cx, cond);
-  part(ref cx, ", label %");
-  label(ref cx, ifTrue);
-  part(ref cx, ", label %");
-  label(ref cx, ifFalse);
-  endInstr(ref cx);
-}
-
-// A block label, at column 0:
-//
-//   L3:
-export function emitLabel(ref cx: Cx, id: usize): void {
-  label(ref cx, id);
-  part(ref cx, ":");
   endInstr(ref cx);
 }
 

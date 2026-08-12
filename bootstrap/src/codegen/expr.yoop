@@ -47,8 +47,15 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     case ASTNodeKind.INDEX_EXPRESSION: {
       return emitIndexRead(ref cx, expr, exprId, ref out);
     }
+    case ASTNodeKind.STRUCT_LITERAL: {
+      return emitStructLiteral(ref cx, expr, exprId, ref out);
+    }
     case ASTNodeKind.FIELD_ACCESS: {
-      // `.len` is the only field in the subset; pass D rejected anything else.
+      // Either a struct field or an array's `.len`; pass D already rejected
+      // anything else, so the base's type decides which.
+      if (isStructAt(ref cx, expr.childA)) {
+        return emitStructFieldRead(ref cx, expr, ref out);
+      }
       return emitArrayLen(ref cx, expr, ref out);
     }
     case ASTNodeKind.IDENT: {
@@ -92,6 +99,10 @@ function emitAssignment(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   const err = emitExpr(ref cx, expr.childB, ref value);
   if (err.len > 0) {
     return err;
+  }
+  if (target.kind == ASTNodeKind.FIELD_ACCESS) {
+    out = Operand.None;
+    return emitStructFieldWrite(ref cx, target, expr.childA, value);
   }
   if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
     out = Operand.None;

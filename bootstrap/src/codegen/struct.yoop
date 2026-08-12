@@ -1,0 +1,90 @@
+module codegen;
+
+// Structs as values: literals, field reads, and field assignment.
+//
+// A struct VALUE is the LLVM struct itself, passed and returned by value like
+// any other operand - not a pointer. Yoop struct semantics are value semantics,
+// so this is the representation that matches, and it means assigning a struct
+// copies it.
+//
+// Reads and writes take different routes on purpose:
+//   read  - `extractvalue` on the loaded value, so it works on ANY struct
+//           expression, including a call result
+//   write - `getelementptr` on the binding's slot, because a store needs an
+//           address and only a named binding has one
+//
+// A literal is built the same way the JS reference builds one: alloca, fill each
+// field in place, then load the whole thing out as a value.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Option } from "std/core/types.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// `{ x: 1, y: 2 }`
+export function emitStructLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  const structTy = typeOf(ref cx, exprId);
+  const store = declareAnonSlot(ref cx, structTy);
+
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const fieldId = childAt(cx.ast, list, i);
+      const fieldNode = nodeAt(cx.ast, fieldId);
+
+      let value: Operand = Operand.None;
+      const err = emitExpr(ref cx, fieldNode.childA, ref value);
+      if (err.len > 0) {
+        return err;
+      }
+
+      // Fields are stored by POSITION, which is what the struct's declaration
+      // order fixes. A literal may list them in any order.
+      const pos = fieldPositionOf(ref cx, exprId, fieldNode.name);
+      const addr = freshTemp(cx.e);
+      emitGepField(ref cx, addr, structTy, TEMP_SLOT_NAME, store.id, pos);
+      emitStoreToPtr(ref cx, typeOf(ref cx, fieldId), value, addr);
+      i += 1;
+    }
+  }
+
+  const dest = freshTemp(cx.e);
+  emitLoadFromSlot(ref cx, dest, structTy, TEMP_SLOT_NAME, store.id);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// `p.x` - one extractvalue on the struct value.
+export function emitStructFieldRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  let base: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref base);
+  if (err.len > 0) {
+    return err;
+  }
+  const structTy = typeOf(ref cx, expr.childA);
+  const pos = fieldPositionOf(ref cx, expr.childA, expr.name);
+  const dest = freshTemp(cx.e);
+  emitExtractValue(ref cx, dest, structTy, base, pos);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// `p.x = v` - the address of the field in the binding's own slot, then a store.
+// Pass D already refused any base that is not a named binding, which is what
+// makes the slot lookup below total.
+export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): string {
+  const baseNode = nodeAt(cx.ast, target.childA);
+  switch (lookupLocal(cx.locals, baseNode.name)) {
+    case Option.None: {
+      return internalError("no stack slot for field assignment base", baseNode.name);
+    }
+    case Option.Some { value: slotInfo }: {
+      const structTy = typeOf(ref cx, target.childA);
+      const pos = fieldPositionOf(ref cx, target.childA, target.name);
+      const addr = freshTemp(cx.e);
+      emitGepField(ref cx, addr, structTy, baseNode.name, slotInfo.id, pos);
+      emitStoreToPtr(ref cx, typeOf(ref cx, targetId), value, addr);
+      return "";
+    }
+  }
+}

@@ -124,6 +124,12 @@ export function llvmType(ref prog: Program, id: TypeId): string {
     // the JS reference does) because the descriptor is identical for every
     // element type - there is nothing per-type to declare.
     case Type.Array { elem: el }: { return ARRAY_DESCRIPTOR; }
+    // A named LLVM type, defined once per struct at module level. Named rather
+    // than a literal `{ ... }` so the IR is readable and so a struct passed by
+    // value keeps one spelling everywhere it appears.
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return structLlvmName(d.name);
+    }
     default: { return "ptr"; }
   }
 }
@@ -145,3 +151,9 @@ function llvmPrim(p: PrimKind): string {
 
 // How an array value is spelled in the IR: `{ data, len }`.
 export const ARRAY_DESCRIPTOR: string = "{ ptr, i64 }";
+
+// The LLVM name for a declared struct. No module mangling yet - the graph is one
+// module; that arrives with imports, alongside the same change for functions.
+export function structLlvmName(name: string): string {
+  return `%struct.${name}`;
+}

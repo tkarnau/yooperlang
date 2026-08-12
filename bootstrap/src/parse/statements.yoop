@@ -38,6 +38,9 @@ export function parseStatement(ref ps: ParserState): ParsingResult {
     case TokenTags.FOR: {
       return Result.Ok { value: parseForStatement(ref ps)? };
     }
+    case TokenTags.SWITCH: {
+      return Result.Ok { value: parseSwitchStatement(ref ps)? };
+    }
     case TokenTags.BREAK: {
       return Result.Ok { value: parseLoopJump(ref ps, ASTNodeKind.BREAK_STATEMENT)? };
     }
@@ -202,5 +205,85 @@ function parseLoopJump(ref ps: ParserState, kind: ASTNodeKind): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, kind);
   SelfLexing.advance(ref ps)?;
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `switch (expr) { case A, B: { ... } default: { ... } }`
+//
+//   childA = the scrutinee
+//   own childIds run = the SWITCH_ARM nodes, in source order
+//
+// An arm is:
+//   childA = a NODE_LIST of the arm's patterns (empty for `default`)
+//   childB = the arm's block
+//   flagA  = this is the `default` arm
+//
+// Arms do NOT fall through - each is its own block - so no `break` is needed or
+// accepted as an arm terminator.
+function parseSwitchStatement(ref ps: ParserState): ParsingResult {
+  SelfLexing.expect(ref ps, TokenTags.SWITCH)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.SWITCH_STATEMENT);
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+
+  disposable armIds: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref armIds, parseSwitchArm(ref ps)?);
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  const armStart: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref armIds));
+  node.childStart = armStart;
+  node.childCount = armIds.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+function parseSwitchArm(ref ps: ParserState): ParsingResult {
+  let arm = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.SWITCH_ARM);
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+
+  if (SelfLexing.peek(ref ps).tag == TokenTags.DEFAULT) {
+    SelfLexing.advance(ref ps)?;
+    arm.flagA = true;
+    disposable none: Vec<NodeId> = vec.vecNew(0);
+    arm.childA = SelfLexing.buildListNode(ref ps, ref none, loc);
+  } else {
+    SelfLexing.expect(ref ps, TokenTags.CASE)?;
+    // `case 1, 2:` - several patterns share one arm.
+    disposable patternIds: Vec<NodeId> = vec.vecNew(2);
+    while (true) {
+      vec.vecPush(ref patternIds, parseLiteralPattern(ref ps)?);
+      if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+        break;
+      }
+      SelfLexing.advance(ref ps)?;
+    }
+    arm.childA = SelfLexing.buildListNode(ref ps, ref patternIds, loc);
+  }
+
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  arm.childB = parseBlock(ref ps)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, arm) };
+}
+
+// Only integer literals so far. Variant and enum-case patterns arrive with the
+// types that have cases.
+function parseLiteralPattern(ref ps: ParserState): ParsingResult {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.LITERAL_PATTERN);
+  let negate = false;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.MINUS) {
+    SelfLexing.advance(ref ps)?;
+    negate = true;
+  }
+  const tok = SelfLexing.expect(ref ps, TokenTags.INTLITERAL)?;
+  node.intVal = tok.intVal;
+  node.flagA = negate;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

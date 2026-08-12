@@ -90,7 +90,7 @@ export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): strin
     return err;
   }
   const dest = freshTemp(cx.e);
-  emitExtractValue(ref cx, dest, base, 1);
+  emitExtractValue(ref cx, dest, ARRAY_DESCRIPTOR, base, 1);
   out = Operand.Temp { id: dest };
   return "";
 }
@@ -110,7 +110,7 @@ function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr:
   }
 
   const dataPtr = freshTemp(cx.e);
-  emitExtractValue(ref cx, dataPtr, base, 0);
+  emitExtractValue(ref cx, dataPtr, ARRAY_DESCRIPTOR, base, 0);
   const elemAddr = freshTemp(cx.e);
   emitGepElem(
     ref cx, elemAddr, typeOf(ref cx, exprId),

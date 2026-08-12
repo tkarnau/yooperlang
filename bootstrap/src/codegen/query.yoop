@@ -1,0 +1,99 @@
+module codegen;
+
+// Everything codegen asks the typecheck layer.
+//
+// This file IS the boundary. Codegen reads three things and no more - the AST,
+// a node's resolved type, and a callee's return type - plus the small
+// derivations (cast widths, varargs promotion) that follow from them. If a
+// change to the decoration shape breaks codegen, it breaks here and nowhere
+// else.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { NodeId } from "../ast";
+import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
+  TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
+  lookupField, isStructType } from "../typecheck";
+
+// ----- the typecheck boundary ----------------------------------------------
+
+// The LLVM type of whatever pass D resolved for this node. Codegen is entitled
+// to assume every node it visits has one (see the layer contract in
+// plans/bootstrap-pipeline-contracts.md), so there is no error path here.
+export function typeOf(ref cx: Cx, nodeId: NodeId): string {
+  return llvmType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+}
+
+// The declared return type of a top-level function, as LLVM spells it.
+export function returnTypeOf(ref cx: Cx, name: string): string {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return "void"; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: {
+          switch (typeAt(cx.prog, t)) {
+            case Type.Func { params: p, ret: r, variadic: v }: {
+              return llvmType(cx.prog, r);
+            }
+            default: { return "void"; }
+          }
+        }
+        default: { return "void"; }
+      }
+    }
+  }
+}
+
+// True when a name spells a primitive type, which is what makes `usize(x)` a
+// cast rather than a call.
+export function isPrimTypeName(name: string): bool {
+  return primTypeIdOfName(name) != TYPE_ERROR_ID;
+}
+
+// Which conversion opcode a cast from `argId` to `exprId` needs, or "" for a
+// pass-through.
+export function castOpFor(ref cx: Cx, argId: NodeId, exprId: NodeId): string {
+  const source = vec.vecGet(ref cx.tm.resolvedTypes, argId);
+  const target = vec.vecGet(ref cx.tm.resolvedTypes, exprId);
+  return llvmIntCastOp(
+    primBitWidth(cx.prog, source),
+    primBitWidth(cx.prog, target),
+    primIsSigned(cx.prog, source)
+  );
+}
+
+// The LLVM type a variadic call must pass this argument as, or "" when it is
+// not an integer or bool (a string is already `ptr` and needs nothing).
+export function promotedVarargTypeOf(ref cx: Cx, argId: NodeId): string {
+  const t = vec.vecGet(ref cx.tm.resolvedTypes, argId);
+  const bits = primBitWidth(cx.prog, t);
+  if (bits == 0) {
+    return "";
+  }
+  return promotedVarargType(bits, bits == 1);
+}
+
+// zext for a bool or an unsigned source, sext for a signed one - the same rule
+// the ordinary cast uses, and for the same reason.
+export function varargWidenOp(ref cx: Cx, argId: NodeId): string {
+  const t = vec.vecGet(ref cx.tm.resolvedTypes, argId);
+  if (primIsSigned(cx.prog, t)) {
+    return "sext";
+  }
+  return "zext";
+}
+
+// Which POSITION a named field occupies in the struct that `baseId` resolved to.
+// gep and extractvalue both address a field by index, so this is the one thing
+// codegen needs that a field name alone does not give it.
+export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): usize {
+  const structType = vec.vecGet(ref cx.tm.resolvedTypes, baseId);
+  return lookupField(cx.prog, structType, fieldName).index;
+}
+
+// True when the node resolved to a struct, which is how the field-access and
+// assignment paths tell a struct from an array.
+export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isStructType(cx.prog, vec.vecGet(ref cx.tm.resolvedTypes, nodeId));
+}

@@ -16,7 +16,16 @@ import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 // have to land before the call. Their operands are held as values, so nothing
 // is formatted until emitCall runs.
 function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  // A cast is not a call - pass D typed it as the target primitive, and the
+  // lowering is one conversion instruction (or none).
+  if (isPrimTypeName(expr.name)) {
+    return emitCast(ref cx, expr, exprId, ref out);
+  }
+
   disposable args: Vec<CallArg> = vec.vecNew(4);
+  // The node ids run in parallel with the operands, because varargs promotion
+  // below needs each argument's TYPE, not just its lowered value.
+  disposable argIds: Vec<NodeId> = vec.vecNew(4);
   if (expr.childA != 0) {
     const list = nodeAt(cx.ast, expr.childA);
     let i: usize = 0;
@@ -26,6 +35,7 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
       const err = emitExpr(ref cx, argId, ref value);
       if (err.len > 0) { return err; }
       vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+      vec.vecPush(ref argIds, argId);
       i += 1;
     }
   }
@@ -37,6 +47,10 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   if (isPrintf) {
     cx.e.usesPrintf = true;
     retTy = printfReturnType();
+    const perr = promoteVarargs(ref cx, ref args, ref argIds);
+    if (perr.len > 0) {
+      return perr;
+    }
   }
 
   const isVoid = text.equals(retTy, "void");
@@ -50,6 +64,52 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
     out = Operand.None;
   } else {
     out = Operand.Temp { id: dest };
+  }
+  return "";
+}
+
+// `usize(n)` - one integer conversion, or a pass-through when the widths agree.
+function emitCast(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  const list = nodeAt(cx.ast, expr.childA);
+  const argId = childAt(cx.ast, list, 0);
+
+  let value: Operand = Operand.None;
+  const err = emitExpr(ref cx, argId, ref value);
+  if (err.len > 0) {
+    return err;
+  }
+
+  const op = castOpFor(ref cx, argId, exprId);
+  if (op.len == 0) {
+    // Same width - nothing to emit, the operand IS the result. This is the
+    // common case for `usize(i)` where `i` is already 64-bit.
+    out = value;
+    return "";
+  }
+
+  const dest = freshTemp(cx.e);
+  emitIntCast(ref cx, dest, op, typeOf(ref cx, argId), value, typeOf(ref cx, exprId));
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// Widen every argument past the format string to what C varargs expect.
+//
+// The first argument is the format string itself (already `ptr`), so promotion
+// starts at index 1. An argument that is already the promoted width passes
+// through untouched.
+function promoteVarargs(ref cx: Cx, ref args: Vec<CallArg>, ref argIds: Vec<NodeId>): string {
+  let i: usize = 1;
+  while (i < args.len) {
+    const arg = vec.vecGet(ref args, i);
+    const argId = vec.vecGet(ref argIds, i);
+    const promoted = promotedVarargTypeOf(ref cx, argId);
+    if (promoted.len > 0 && !text.equals(promoted, arg.ty)) {
+      const dest = freshTemp(cx.e);
+      emitIntCast(ref cx, dest, varargWidenOp(ref cx, argId), arg.ty, arg.value, promoted);
+      vec.vecSet(ref args, i, { ty: promoted, value: Operand.Temp { id: dest } });
+    }
+    i += 1;
   }
   return "";
 }

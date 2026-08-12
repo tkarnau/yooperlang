@@ -176,6 +176,9 @@ function checkStatement(
     case ASTNodeKind.FOR_LOOP: {
       checkForLoop(ref prog, ref tm, ref ast, stmt, stmtId, retType, ref scope);
     }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      checkSwitch(ref prog, ref tm, ref ast, stmt, retType, ref scope);
+    }
     case ASTNodeKind.BREAK_STATEMENT, ASTNodeKind.CONTINUE_STATEMENT: {
       if (scope.loopDepth == 0) {
         reportError(
@@ -237,6 +240,9 @@ function checkExpr(
     }
     case ASTNodeKind.ARRAY_LITERAL: {
       resolved = checkArrayLiteral(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.STRUCT_LITERAL: {
+      resolved = checkStructLiteral(ref prog, ref tm, ref ast, expr, expected, ref scope);
     }
     case ASTNodeKind.INDEX_EXPRESSION: {
       resolved = checkIndex(ref prog, ref tm, ref ast, expr, ref scope);
@@ -307,6 +313,14 @@ function checkCall(
   expr: ASTNode,
   ref scope: LocalScope
 ): TypeId {
+  // A cast is handled before the arguments, because its single operand wants to
+  // be checked AGAINST the target type (so `int64(1)` pins the literal) rather
+  // than with no expectation like a call argument.
+  const earlyCast = primTypeIdOfName(expr.name);
+  if (earlyCast != TYPE_ERROR_ID) {
+    return checkCast(ref prog, ref tm, ref ast, expr, earlyCast, ref scope);
+  }
+
   // Every argument is checked with no expectation; printf is variadic and user
   // functions do not have their params matched yet.
   if (expr.childA != 0) {
@@ -443,6 +457,16 @@ function checkAssignment(
         return TYPE_ERROR_ID;
       }
     }
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.FIELD_ACCESS) {
+    // `p.x = v`. checkFieldAccess records the field's type, which the store
+    // needs; the base has to be assignable, which for now means a plain name.
+    const baseNode = nodeAt(ref ast, target.childA);
+    if (baseNode.kind != ASTNodeKind.IDENT) {
+      reportError(ref prog, "only a field of a named binding can be assigned to so far", target.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    targetType = checkFieldAccess(ref prog, ref tm, ref ast, target, ref scope);
     vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
   } else if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
     // `xs[i] = v` - checkIndex records the element type on the node, which is
@@ -652,6 +676,14 @@ function checkFieldAccess(
       reportError(ref prog, `an array has no field "${expr.name}" - only "len"`, expr.sourceLoc);
       return TYPE_ERROR_ID;
     }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      const found = lookupField(ref prog, baseType, expr.name);
+      if (!found.found) {
+        reportError(ref prog, `struct "${d.name}" has no field "${expr.name}"`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      return found.typeId;
+    }
     default: {
       reportError(
         ref prog,
@@ -699,4 +731,200 @@ function counterTypeFromCondition(
     return lhs;
   }
   return TYPE_ERROR_ID;
+}
+
+// `usize(n)` / `int32(x)` - a numeric primitive conversion.
+//
+// Exactly one operand, and it is checked against the target so an untyped
+// literal pins straight to it (`int64(1)` needs no widening at all). Only
+// numeric-to-numeric is allowed, which is the same restriction the JS reference
+// states in its own message.
+function checkCast(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  target: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  let argCount: usize = 0;
+  if (expr.childA != 0) {
+    argCount = nodeAt(ref ast, expr.childA).childCount;
+  }
+  if (argCount != 1) {
+    reportError(ref prog, `cast "${expr.name}(...)" takes exactly one argument`, expr.sourceLoc);
+    return target;
+  }
+
+  const list = nodeAt(ref ast, expr.childA);
+  const argId = childAt(ref ast, list, 0);
+  const argType = checkExpr(ref prog, ref tm, ref ast, argId, target, ref scope);
+  if (argType != TYPE_ERROR_ID && !isCastable(ref prog, argType, target)) {
+    reportError(
+      ref prog,
+      `cannot cast ${formatType(ref prog, argType)} to ${formatType(ref prog, target)} - only numeric primitive casts are supported`,
+      expr.sourceLoc
+    );
+  }
+  return target;
+}
+
+// Integer to integer, in either direction. Floats and bools arrive with the
+// conversions that need them.
+function isCastable(ref prog: Program, source: TypeId, target: TypeId): bool {
+  return isIntPrimType(ref prog, source) && isIntPrimType(ref prog, target);
+}
+
+// `switch (n) { case 1, 2: {...} default: {...} }`
+//
+// Integer scrutinee only so far. An integer switch can never be exhaustive, so
+// `default` is required - without it a value matching no arm would fall out of
+// the statement with nowhere defined to go.
+function checkSwitch(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  const scrutType = checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
+  if (scrutType != TYPE_ERROR_ID && !isIntPrimType(ref prog, scrutType)) {
+    reportError(
+      ref prog,
+      `cannot switch over ${formatType(ref prog, scrutType)} - the bootstrap typechecker only handles integers so far`,
+      stmt.sourceLoc
+    );
+  }
+
+  let sawDefault = false;
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const armId = childAt(ref ast, stmt, i);
+    const arm = nodeAt(ref ast, armId);
+    if (arm.flagA) {
+      if (sawDefault) {
+        reportError(ref prog, "a switch may only have one default arm", arm.sourceLoc);
+      }
+      sawDefault = true;
+    } else {
+      checkArmPatterns(ref prog, ref tm, ref ast, arm, scrutType);
+    }
+    checkBlock(ref prog, ref tm, ref ast, arm.childB, retType, ref scope);
+    i += 1;
+  }
+
+  if (!sawDefault) {
+    reportError(
+      ref prog,
+      "a switch over an integer needs a default arm - it cannot be exhaustive",
+      stmt.sourceLoc
+    );
+  }
+}
+
+// Each pattern is decorated with the scrutinee's type, which is what tells
+// codegen the width to emit the case value at.
+function checkArmPatterns(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  arm: ASTNode,
+  scrutType: TypeId
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(ref ast, list, i);
+    vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
+    i += 1;
+  }
+}
+
+// `{ x: 1, y: 2 }` - which struct it is comes from CONTEXT, not from the
+// literal, so `let p: Point = { ... }` is the only shape that works. A literal
+// with nothing to take its type from is refused by name.
+function checkStructLiteral(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (expected == TYPE_ERROR_ID || !isStructType(ref prog, expected)) {
+    reportError(
+      ref prog,
+      "cannot tell which struct this literal is - annotate the binding or the parameter it goes to",
+      expr.sourceLoc
+    );
+    // Still walk the field values so a mistake inside one is reported too.
+    checkLiteralFieldValues(ref prog, ref tm, ref ast, expr, TYPE_ERROR_ID, ref scope);
+    return TYPE_ERROR_ID;
+  }
+
+  const present = checkLiteralFieldValues(ref prog, ref tm, ref ast, expr, expected, ref scope);
+  const needed = structFieldCount(ref prog, expected);
+  if (present < needed) {
+    reportError(
+      ref prog,
+      `struct literal is missing ${needed - present} of ${needed} fields - every field must be given a value`,
+      expr.sourceLoc
+    );
+  }
+  return expected;
+}
+
+// Checks each `name: value` against the struct's field of that name, and returns
+// how many DISTINCT known fields were given a value.
+function checkLiteralFieldValues(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  structType: TypeId,
+  ref scope: LocalScope
+): usize {
+  let present: usize = 0;
+  if (expr.childA == 0) {
+    return present;
+  }
+  const list = nodeAt(ref ast, expr.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const fieldId = childAt(ref ast, list, i);
+    const fieldNode = nodeAt(ref ast, fieldId);
+
+    let fieldType: TypeId = TYPE_ERROR_ID;
+    if (structType != TYPE_ERROR_ID) {
+      const found = lookupField(ref prog, structType, fieldNode.name);
+      if (found.found) {
+        fieldType = found.typeId;
+        present += 1;
+        // The field's POSITION is what codegen stores to, so record it on the
+        // node rather than making codegen look it up again.
+        vec.vecSet(ref tm.resolvedTypes, fieldId, found.typeId);
+      } else {
+        reportError(
+          ref prog,
+          `${formatType(ref prog, structType)} has no field "${fieldNode.name}"`,
+          fieldNode.sourceLoc
+        );
+      }
+    }
+
+    const got = checkExpr(ref prog, ref tm, ref ast, fieldNode.childA, fieldType, ref scope);
+    if (fieldType != TYPE_ERROR_ID && got != TYPE_ERROR_ID && got != fieldType) {
+      reportError(
+        ref prog,
+        `field "${fieldNode.name}" expects ${formatType(ref prog, fieldType)}, found ${formatType(ref prog, got)}`,
+        fieldNode.sourceLoc
+      );
+    }
+    i += 1;
+  }
+  return present;
 }

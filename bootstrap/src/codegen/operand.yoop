@@ -11,6 +11,7 @@ import { Text }, * as text from "std/core/text.yoop";
 
 export variant Operand {
   Imm    { value: uint64 },   // 42
+  NegImm { value: uint64 },   // -42, for a negative case pattern
   Bool   { value: bool },     // true / false, how LLVM spells an i1 immediate
   Temp   { id: usize },       // %t3
   StrRef { id: usize },       // @.str.0
@@ -23,6 +24,10 @@ export variant Operand {
 export function emitOperand(ref e: Emitter, op: Operand): void {
   switch (op) {
     case Operand.Imm { value: v }: { text.pushUint(ref e.fn, v); }
+    case Operand.NegImm { value: v }: {
+      text.pushByte(ref e.fn, '-');
+      text.pushUint(ref e.fn, v);
+    }
     case Operand.Bool { value: b }: {
       if (b) {
         text.push(ref e.fn, "true");
