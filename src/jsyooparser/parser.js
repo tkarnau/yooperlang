@@ -673,6 +673,12 @@ export function parse(src) {
       }
       while (true) {
         typeArgs.push(parseTypeAnnotation());
+        // Check for the close BEFORE the comma. A nested application consumed
+        // the `>>` and left a pending `>` for THIS list, so `peek()` is already
+        // the token after the whole annotation - and if that happens to be a
+        // field separator (`Vec<Map<K, V>>,`) the comma branch would read it as
+        // a trailing comma inside the type argument list.
+        if (atClosingGt()) break;
         if (peek().tag === TokenTags.comma) {
           advance();
           if (atClosingGt()) {

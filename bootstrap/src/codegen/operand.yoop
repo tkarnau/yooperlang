@@ -11,22 +11,33 @@ import { Text }, * as text from "std/core/text.yoop";
 
 export variant Operand {
   Imm    { value: uint64 },   // 42
+  Bool   { value: bool },     // true / false, how LLVM spells an i1 immediate
   Temp   { id: usize },       // %t3
   StrRef { id: usize },       // @.str.0
   None,                       // a void call's non-result
 }
 
+// Writes into the per-function instruction buffer (`fn`), not the module buffer.
+// An operand is always part of an instruction, and instructions are assembled
+// per function so the hoisted allocas can be spliced in ahead of them.
 export function emitOperand(ref e: Emitter, op: Operand): void {
   switch (op) {
-    case Operand.Imm { value: v }: { text.pushUint(ref e.body, v); }
+    case Operand.Imm { value: v }: { text.pushUint(ref e.fn, v); }
+    case Operand.Bool { value: b }: {
+      if (b) {
+        text.push(ref e.fn, "true");
+      } else {
+        text.push(ref e.fn, "false");
+      }
+    }
     case Operand.Temp { id: n }: {
-      text.push(ref e.body, "%t");
-      text.pushUint(ref e.body, uint64(n));
+      text.push(ref e.fn, "%t");
+      text.pushUint(ref e.fn, uint64(n));
     }
     case Operand.StrRef { id: n }: {
-      text.push(ref e.body, "@.str.");
-      text.pushUint(ref e.body, uint64(n));
+      text.push(ref e.fn, "@.str.");
+      text.pushUint(ref e.fn, uint64(n));
     }
-    case Operand.None: { text.push(ref e.body, "void"); }
+    case Operand.None: { text.push(ref e.fn, "void"); }
   }
 }

@@ -1877,6 +1877,12 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", { 
     assert.equal(stdout, "(1, 2)\n");
   });
 
+  it("nested_generic_trailing_comma: `Vec<Map<K, V>>,` parses", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/nested_generic_trailing_comma.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "blocks=1 a=1\n");
+  });
+
   // Regression: pass C used to REPLACE the enum/union table entry rather than
   // fill the pass-A shell in place. Files inside one module have no dependency
   // order, so the sibling that sorts first resolved both types while they were

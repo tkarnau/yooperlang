@@ -142,3 +142,22 @@ export const KEYWORD_LIST: KeywordDefinition[] = [
   { str: "await",          tag: TokenTags.AWAIT },
   { str: "_",              tag: TokenTags.DISCARD },
 ];
+
+// The SOURCE spelling of a tag, for diagnostics: `+` rather than `PLUS`.
+//
+// Scans the same two tables the lexer matches against, so there is no third
+// list to keep in sync. Falls back to the enum name for tags with no spelling
+// of their own (IDENT, INTLITERAL, EOF).
+export function tagSpelling(tag: TokenTags): string {
+  for d in TOKEN_SCAN_LIST {
+    if (d.tag == tag) {
+      return d.str;
+    }
+  }
+  for k in KEYWORD_LIST {
+    if (k.tag == tag) {
+      return k.str;
+    }
+  }
+  return tagName(tag);
+}

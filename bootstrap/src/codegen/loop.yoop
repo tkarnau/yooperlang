@@ -1,0 +1,132 @@
+module codegen;
+
+// Loops: `while` and `for` lowered to labels and branches.
+//
+// Both follow the same skeleton - a condition block, a body block, and an exit
+// block - and both push a frame onto the loop-label stack (loop_stack.yoop) so
+// `break` and `continue` inside the body know where to jump. The one real
+// difference is that `for` adds a STEP block, because `continue` has to advance
+// the counter before re-testing.
+//
+// The block discipline these obey is documented in flow.yoop.
+
+import { ASTNode, NodeId, nodeAt } from "../ast";
+import { Option } from "std/core/types.yoop";
+
+// `while (c) { body }` becomes:
+//
+//     br label %Lcond
+//   Lcond: ... br i1 %cond, label %Lbody, label %Lend
+//   Lbody: ... br label %Lcond
+//   Lend:
+//
+// The condition gets its own block because it is re-evaluated every iteration,
+// so it cannot live in the block that precedes the loop.
+export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+  const condLabel = freshLabel(cx.e);
+  const bodyLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, condLabel);
+  emitLabel(ref cx, condLabel);
+  let cond: Operand = Operand.None;
+  const cerr = emitExpr(ref cx, stmt.childA, ref cond);
+  if (cerr.len > 0) {
+    return cerr;
+  }
+  emitCondBr(ref cx, cond, bodyLabel, endLabel);
+
+  emitLabel(ref cx, bodyLabel);
+  // `continue` re-tests the condition; `break` leaves.
+  loopPush(ref cx, condLabel, endLabel);
+  let err = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
+  loopPop(ref cx);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!bodyTerminated) {
+    emitBr(ref cx, condLabel);
+  }
+
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+// `for (let i = init; cond; i = step) { body }` becomes:
+//
+//     <store init>
+//     br label %Lcond
+//   Lcond: ... br i1 %cond, label %Lbody, label %Lend
+//   Lbody: ... br label %Lstep
+//   Lstep: <store step>  br label %Lcond
+//   Lend:
+//
+// The STEP gets its own block so `continue` can jump to it - skipping the rest
+// of the body while still advancing the counter. That is the one structural
+// difference from `while`, and the reason LoopLabels carries two labels.
+export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
+  const ty = typeOf(ref cx, stmtId);
+
+  // The counter: a fresh slot when the loop declares it, otherwise the existing
+  // one it steps.
+  const counterName = stmt.name;
+  let counterId: usize = 0;
+  let initValue: Operand = Operand.None;
+  const ierr = emitExpr(ref cx, stmt.childB, ref initValue);
+  if (ierr.len > 0) {
+    return ierr;
+  }
+  if (stmt.flagA) {
+    const slotInfo = declareLocal(ref cx, counterName, ty);
+    counterId = slotInfo.id;
+  } else {
+    switch (lookupLocal(cx.locals, counterName)) {
+      case Option.None: {
+        return internalError("no stack slot for for-loop counter", counterName);
+      }
+      case Option.Some { value: slotInfo }: { counterId = slotInfo.id; }
+    }
+  }
+  emitStore(ref cx, ty, initValue, counterName, counterId);
+
+  const condLabel = freshLabel(cx.e);
+  const bodyLabel = freshLabel(cx.e);
+  const stepLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, condLabel);
+  emitLabel(ref cx, condLabel);
+  let cond: Operand = Operand.None;
+  const cerr = emitExpr(ref cx, stmt.childC, ref cond);
+  if (cerr.len > 0) {
+    return cerr;
+  }
+  emitCondBr(ref cx, cond, bodyLabel, endLabel);
+
+  emitLabel(ref cx, bodyLabel);
+  loopPush(ref cx, stepLabel, endLabel);
+  let err = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childE, retTy, ref bodyTerminated, ref err);
+  loopPop(ref cx);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!bodyTerminated) {
+    emitBr(ref cx, stepLabel);
+  }
+
+  emitLabel(ref cx, stepLabel);
+  let stepValue: Operand = Operand.None;
+  const serr = emitExpr(ref cx, stmt.childD, ref stepValue);
+  if (serr.len > 0) {
+    return serr;
+  }
+  emitStore(ref cx, ty, stepValue, counterName, counterId);
+  emitBr(ref cx, condLabel);
+
+  emitLabel(ref cx, endLabel);
+  return "";
+}

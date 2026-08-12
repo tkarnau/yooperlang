@@ -27,6 +27,7 @@ export type Cx {
   tm: ref TypedModule,
   ast: ref AST,
   locals: ref FnLocals,
+  loops: ref LoopStack,   // where break/continue jump; see loops.yoop
 }
 
 // One parameter of the function being emitted.
@@ -76,28 +77,71 @@ export function returnTypeOf(ref cx: Cx, name: string): string {
 // calling an emitX function, not assembling text by hand.
 
 export function part(ref cx: Cx, s: string): void {
-  text.push(ref cx.e.body, s);
+  text.push(ref cx.e.fn, s);
 }
 
 export function startInstr(ref cx: Cx): void {
-  text.push(ref cx.e.body, "  ");
+  text.push(ref cx.e.fn, "  ");
 }
 
 export function endInstr(ref cx: Cx): void {
-  text.pushByte(ref cx.e.body, 10);
+  text.pushByte(ref cx.e.fn, 10);
 }
 
 // `%t7`
 export function temp(ref cx: Cx, id: usize): void {
-  text.push(ref cx.e.body, "%t");
-  text.pushUint(ref cx.e.body, uint64(id));
+  text.push(ref cx.e.fn, "%t");
+  text.pushUint(ref cx.e.fn, uint64(id));
 }
 
-// `%count.addr` - a local's stack slot.
-export function slot(ref cx: Cx, name: string): void {
-  text.pushByte(ref cx.e.body, '%');
-  text.push(ref cx.e.body, name);
-  text.push(ref cx.e.body, ".addr");
+// `%count.1.addr` - a local's stack slot. Spelled out from the name plus the
+// uniquing number so no string is built per use.
+export function slot(ref cx: Cx, name: string, id: usize): void {
+  text.pushByte(ref cx.e.fn, '%');
+  text.push(ref cx.e.fn, name);
+  text.pushByte(ref cx.e.fn, '.');
+  text.pushUint(ref cx.e.fn, uint64(id));
+  text.push(ref cx.e.fn, ".addr");
+}
+
+// The same slot name, into the prologue buffer.
+export function prologueSlot(ref cx: Cx, name: string, id: usize): void {
+  text.pushByte(ref cx.e.prologue, '%');
+  text.push(ref cx.e.prologue, name);
+  text.pushByte(ref cx.e.prologue, '.');
+  text.pushUint(ref cx.e.prologue, uint64(id));
+  text.push(ref cx.e.prologue, ".addr");
+}
+
+// `L3`
+export function label(ref cx: Cx, id: usize): void {
+  text.push(ref cx.e.fn, "L");
+  text.pushUint(ref cx.e.fn, uint64(id));
+}
+
+// Allocas go to the prologue so they sit at the top of `entry:` and dominate
+// every use, even when the declaration was inside a branch.
+export function prologuePart(ref cx: Cx, s: string): void {
+  text.push(ref cx.e.prologue, s);
+}
+
+// A plain number in the instruction stream (a field index, an element count).
+export function num(ref cx: Cx, v: usize): void {
+  text.pushUint(ref cx.e.fn, uint64(v));
+}
+
+export function prologueUint(ref cx: Cx, v: usize): void {
+  text.pushUint(ref cx.e.prologue, uint64(v));
+}
+
+// The `define ...` line and `entry:` go straight to the module buffer, because
+// the prologue and the instruction stream are appended AFTER them.
+export function headerPart(ref cx: Cx, s: string): void {
+  text.push(ref cx.e.body, s);
+}
+
+export function headerEnd(ref cx: Cx): void {
+  text.pushByte(ref cx.e.body, 10);
 }
 
 export function operand(ref cx: Cx, op: Operand): void {

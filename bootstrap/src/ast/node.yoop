@@ -46,6 +46,10 @@ export type ASTNode {
   childB: NodeId,
   childC: NodeId,
   childD: NodeId,
+  // childE exists because FOR_LOOP needs five: the counter's optional type
+  // annotation, its initializer, the condition, the step, and the body. Adding
+  // a slot is what the fat-node design says to do when a kind needs one.
+  childE: NodeId,
 
   // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
   spanStart: usize,

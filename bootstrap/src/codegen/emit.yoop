@@ -14,9 +14,17 @@ import { Type, TypeId, PrimKind, Program, typeAt, TYPE_VOID_ID } from "../typech
 
 export type Emitter propagates<disposable> {
   globals: Text,        // constants and declares, emitted first
-  body: Text,           // function definitions
+  body: Text,           // finished function definitions
+  // Per-function scratch. Allocas go in `prologue` and everything else in
+  // `fn`, so the allocas end up at the top of `entry:` no matter where the
+  // declaration appeared. That is what makes a local declared inside an `if`
+  // still dominate its uses - LLVM requires the alloca to dominate every
+  // load, and a mid-branch alloca does not.
+  prologue: Text,
+  fn: Text,
   nextTemp: usize,      // the %N SSA counter, reset per function
   nextStr: usize,       // the @.str.N counter, module-wide
+  nextLabel: usize,     // the label counter, reset per function
   usesPrintf: bool,
 }
 
@@ -24,15 +32,18 @@ export function emitterNew(): Emitter propagates<disposable> {
   return {
     globals: text.make(1024),
     body: text.make(8192),
+    prologue: text.make(512),
+    fn: text.make(4096),
     nextTemp: 0,
     nextStr: 0,
+    nextLabel: 0,
     usesPrintf: false,
   };
 }
 
 export function emitLine(ref e: Emitter, line: string): void {
-  text.push(ref e.body, line);
-  text.pushByte(ref e.body, 10);
+  text.push(ref e.fn, line);
+  text.pushByte(ref e.fn, 10);
 }
 
 export function emitGlobal(ref e: Emitter, line: string): void {
@@ -43,15 +54,39 @@ export function emitGlobal(ref e: Emitter, line: string): void {
 // The whole point of Text: an instruction is appended piece by piece with no
 // intermediate string, so emitting IR allocates only when a buffer grows.
 export function emitPart(ref e: Emitter, part: string): void {
-  text.push(ref e.body, part);
+  text.push(ref e.fn, part);
 }
 
 export function emitUint(ref e: Emitter, v: usize): void {
-  text.pushUint(ref e.body, uint64(v));
+  text.pushUint(ref e.fn, uint64(v));
 }
 
 export function endLine(ref e: Emitter): void {
-  text.pushByte(ref e.body, 10);
+  text.pushByte(ref e.fn, 10);
+}
+
+// A fresh block label number, unique within the function.
+export function freshLabel(ref e: Emitter): usize {
+  e.nextLabel += 1;
+  return e.nextLabel;
+}
+
+// Clear the per-function buffers. Called when a function starts.
+export function beginFunctionBuffers(ref e: Emitter): void {
+  text.clear(ref e.prologue);
+  text.clear(ref e.fn);
+  e.nextTemp = 0;
+  e.nextLabel = 0;
+}
+
+// Append the finished function to the module: hoisted allocas, then the
+// instruction stream, then the closing brace. The signature and `entry:` are
+// already in `body` (emitFunctionOpen put them there), which is exactly why
+// the allocas can be collected out of order and still land at the top.
+export function flushFunction(ref e: Emitter): void {
+  text.pushText(ref e.body, ref e.prologue);
+  text.pushText(ref e.body, ref e.fn);
+  text.push(ref e.body, "}\n");
 }
 
 // A fresh SSA temp NUMBER. LLVM requires unnamed values to be numbered in
@@ -84,7 +119,11 @@ export function llvmType(ref prog: Program, id: TypeId): string {
     case Type.Prim { prim: p }: { return llvmPrim(p); }
     case Type.Ref { inner: i }: { return "ptr"; }
     case Type.UnsafePtr { pointee: p }: { return "ptr"; }
-    case Type.Array { elem: el }: { return "ptr"; }
+    // An array is a fat pointer: the data plus its length. Spelled as an
+    // anonymous struct rather than a named `%yoop_array.T` per element type (as
+    // the JS reference does) because the descriptor is identical for every
+    // element type - there is nothing per-type to declare.
+    case Type.Array { elem: el }: { return ARRAY_DESCRIPTOR; }
     default: { return "ptr"; }
   }
 }
@@ -103,3 +142,6 @@ function llvmPrim(p: PrimKind): string {
     default: { return "ptr"; }
   }
 }
+
+// How an array value is spelled in the IR: `{ data, len }`.
+export const ARRAY_DESCRIPTOR: string = "{ ptr, i64 }";

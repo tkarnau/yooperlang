@@ -6,7 +6,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNode, ASTNodeKind, NodeId } from "../ast";
+import { ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
 import { TokenTags, tagName, getTokenPrecedence, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -23,14 +23,40 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
   const peekTag = SelfLexing.peek(ref ps).tag;
   // prefix first
   switch (peekTag) {
-    case TokenTags.MINUS: {
-      SelfLexing.advance(ref ps); // consume the dash
-      const operand = parseExpression(ref ps, 70);
-      // todo finish minus - moved on to intLiteral to test the flow
+    // Prefix operators. 70 binds tighter than every binary operator, so
+    // `-a * b` is `(-a) * b` and `!a && b` is `(!a) && b`.
+    case TokenTags.MINUS, TokenTags.BANG: {
+      SelfLexing.advance(ref ps)?;
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNARY_EXPRESSION);
+      node.operator = peekTag;
+      node.childA = parseExpression(ref ps, 70)?;
     }
     case TokenTags.INTLITERAL: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
       node.intVal = SelfLexing.advance(ref ps)?.intVal;
+    }
+    case TokenTags.LBRACKET: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ARRAY_LITERAL);
+      node.childA = parseArrayElements(ref ps)?;
+    }
+    case TokenTags.LPAREN: {
+      // Grouping. The inner expression is already in the arena, so this reads
+      // it back as the current node. That leaves the original copy unreferenced
+      // in the arena - harmless (nothing walks the arena linearly) and cheaper
+      // than restructuring this function to carry a NodeId instead of a node.
+      SelfLexing.advance(ref ps)?;
+      const innerId = parseExpression(ref ps, 0)?;
+      SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+      node = nodeAt(ref ps.ast, innerId);
+    }
+    case TokenTags.TRUE, TokenTags.FALSE: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BOOL_LITERAL);
+      SelfLexing.advance(ref ps)?;
+      if (peekTag == TokenTags.TRUE) {
+        node.intVal = 1;
+      } else {
+        node.intVal = 0;
+      }
     }
     case TokenTags.STRLITERAL: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRING_LITERAL);
@@ -62,10 +88,75 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     }
   }
 
-  // postfix
+  // Postfix, in a loop so `xs[0][1]` and `xs.len` chain.
+  while (true) {
+    const postfixTag = SelfLexing.peek(ref ps).tag;
+    if (postfixTag == TokenTags.LBRACKET) {
+      SelfLexing.advance(ref ps)?;
+      let indexNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INDEX_EXPRESSION);
+      indexNode.childA = SelfLexing.pushNode(ref ps, node);
+      indexNode.childB = parseExpression(ref ps, 0)?;
+      SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+      node = indexNode;
+      continue;
+    }
+    if (postfixTag == TokenTags.DOT) {
+      SelfLexing.advance(ref ps)?;
+      let fieldNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FIELD_ACCESS);
+      fieldNode.childA = SelfLexing.pushNode(ref ps, node);
+      fieldNode.name = parseIdentAsName(ref ps)?;
+      node = fieldNode;
+      continue;
+    }
+    break;
+  }
 
-  // assignment
-  // compound assignment
+  // Assignment, before the binary loop so `=` is never folded in as an
+  // operator. Right-associative, which is what `a = b = c` needs.
+  if (SelfLexing.peek(ref ps).tag == TokenTags.EQ) {
+    SelfLexing.advance(ref ps)?;
+    let assign = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ASSIGNMENT);
+    assign.childA = SelfLexing.pushNode(ref ps, node);
+    assign.childB = parseExpression(ref ps, 0)?;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, assign) };
+  }
+
+  // Compound assignment, desugared here into `target = target <op> value`.
+  //
+  // The JS reference keeps a dedicated COMPOUND_ASSIGNMENT node so the lvalue
+  // is addressed once - that matters for `xs[f()] += 1`, where re-reading the
+  // target would call `f` twice. Here the only assignable target is a plain
+  // name, and re-reading a name is free, so desugaring is safe. Revisit when
+  // index and field targets land.
+  const compoundOp = binaryOpOfCompound(SelfLexing.peek(ref ps).tag);
+  if (compoundOp != TokenTags.NOTOKEN) {
+    // The predicted moment: index targets exist now, so the desugaring is no
+    // longer universally safe. `xs[f()] += 1` would evaluate `f()` twice - once
+    // to read and once to write. Refuse it until COMPOUND_ASSIGNMENT lands,
+    // rather than silently miscompiling.
+    if (node.kind != ASTNodeKind.IDENT) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        `compound assignment is only supported on a plain name so far - write it out as "target = target <op> value"`,
+        peekLengthUsize(ref ps),
+      )};
+    }
+    SelfLexing.advance(ref ps)?;
+    const targetId = SelfLexing.pushNode(ref ps, node);
+
+    let reread = SelfLexing.buildSourcedNode(ref ps, node.kind);
+    reread.name = node.name;
+    let combined = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
+    combined.operator = compoundOp;
+    combined.childA = SelfLexing.pushNode(ref ps, reread);
+    combined.childB = parseExpression(ref ps, 0)?;
+
+    let assign = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ASSIGNMENT);
+    assign.childA = targetId;
+    assign.childB = SelfLexing.pushNode(ref ps, combined);
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, assign) };
+  }
+
   // binary ops
   while (true) {
     let opToken = SelfLexing.peek(ref ps);
@@ -106,6 +197,40 @@ function parseCallArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
     }
   }
   SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The binary operator a compound assignment stands for, or NOTOKEN when the tag
+// is not one. `x += y` means `x = x + y`.
+function binaryOpOfCompound(tag: TokenTags): TokenTags {
+  switch (tag) {
+    case TokenTags.PLUSEQ: { return TokenTags.PLUS; }
+    case TokenTags.MINUSEQ: { return TokenTags.MINUS; }
+    case TokenTags.MULTEQ: { return TokenTags.MULT; }
+    case TokenTags.DIVIDEEQ: { return TokenTags.DIVIDE; }
+    case TokenTags.MODULUSEQ: { return TokenTags.MODULUS; }
+    default: { return TokenTags.NOTOKEN; }
+  }
+}
+
+// `[a, b, c]` - the elements, as a NODE_LIST. An empty literal is allowed and
+// takes its element type from context.
+function parseArrayElements(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LBRACKET)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RBRACKET &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
 
   return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }

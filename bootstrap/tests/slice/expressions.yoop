@@ -1,0 +1,34 @@
+// Expression forms: compound assignment, unary `-` and `!`, bool literals,
+// parenthesized grouping, and short-circuiting `&&` / `||`.
+//
+// The three "side ran" checks are the real test: `false && side()` and
+// `true || side()` must print nothing, because the right-hand side is never
+// evaluated. A lowering that evaluates both sides passes every other assertion
+// here and fails only these.
+function side(): bool {
+  printf("  side ran\n");
+  return true;
+}
+
+function inRange(n: int, lo: int, hi: int): bool {
+  return n >= lo && n <= hi;
+}
+
+function main(): int {
+  let total: int = 0;
+  for (let i = 1; i <= 5; i += 1) {
+    total += i * i;
+  }
+  printf("total=%d neg=%d\n", total, -total);
+  printf("not=%d %d\n", !true, !(1 == 1));
+  printf("inRange=%d %d\n", inRange(5, 1, 10), inRange(50, 1, 10));
+
+  printf("false && side():\n");
+  const a = false && side();
+  printf("true || side():\n");
+  const b = true || side();
+  printf("true && side():\n");
+  const c = true && side();
+  printf("a=%d b=%d c=%d\n", a, b, c);
+  return 0;
+}

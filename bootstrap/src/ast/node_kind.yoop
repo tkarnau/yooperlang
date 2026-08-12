@@ -156,6 +156,7 @@ export enum ASTNodeKind implements Display {
   // type annotation kinds
   TYPE_ANNOTATION_REF_TYPE,
   TYPE_ANNOTATION_TYPE_NAME,
+  TYPE_ANNOTATION_ARRAY_TYPE,
   function toString(ref self): string {
     return kindName(self);
   }
@@ -250,6 +251,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "NODE_LIST", // node for handling a list of nodes
   "TYPE_ANNOTATION_REF_TYPE",
   "TYPE_ANNOTATION_TYPE_NAME",
+  "TYPE_ANNOTATION_ARRAY_TYPE",
 ];
 
 // Maps an ASTNodeKind case to its source spelling. Used by Display sites

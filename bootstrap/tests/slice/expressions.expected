@@ -1,0 +1,9 @@
+total=55 neg=-55
+not=0 0
+inRange=1 0
+false && side():
+true || side():
+true && side():
+  side ran
+a=0 b=1 c=1
+exit=0

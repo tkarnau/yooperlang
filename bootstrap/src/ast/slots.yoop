@@ -16,6 +16,9 @@ export function astNodeFlagAName(v: ASTNodeKind): string {
     case ASTNodeKind.PARAM: {
       return "isRef";
     }
+    case ASTNodeKind.FOR_LOOP: {
+      return "initDeclares";
+    }
     default: {
       return "undefined";
     }
@@ -34,10 +37,24 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
       return "inner";
     }
+    case ASTNodeKind.UNARY_EXPRESSION: {
+      return "operand";
+    }
+    case ASTNodeKind.INDEX_EXPRESSION,
+         ASTNodeKind.FIELD_ACCESS: {
+      return "base";
+    }
+    case ASTNodeKind.ARRAY_LITERAL: {
+      return "elementsList";
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE: {
+      return "elementType";
+    }
     case ASTNodeKind.PARAM,
          ASTNodeKind.CONST_DECL,
          ASTNodeKind.LET_DECL,
-         ASTNodeKind.FIELD_DECL: {
+         ASTNodeKind.FIELD_DECL,
+         ASTNodeKind.FOR_LOOP: {
       return "typeAnnotation";
     }
     case ASTNodeKind.BLOCK: {
@@ -46,8 +63,15 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.RETURN_STATEMENT: {
       return "returnExpression";
     }
+    case ASTNodeKind.IF_STATEMENT,
+         ASTNodeKind.WHILE_STATEMENT: {
+      return "condition";
+    }
     case ASTNodeKind.BINARY_EXPRESSION: {
       return "leftNode";
+    }
+    case ASTNodeKind.ASSIGNMENT: {
+      return "target";
     }
     default: {
       return "undefined";
@@ -70,6 +94,21 @@ export function astNodeChildBName(v: ASTNodeKind): string {
     case ASTNodeKind.BINARY_EXPRESSION: {
       return "rightNode";
     }
+    case ASTNodeKind.ASSIGNMENT: {
+      return "value";
+    }
+    case ASTNodeKind.INDEX_EXPRESSION: {
+      return "index";
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      return "initExpr";
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      return "thenBlock";
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      return "bodyBlock";
+    }
     default: {
       return "undefined";
     }
@@ -84,6 +123,12 @@ export function astNodeChildCName(v: ASTNodeKind): string {
     case ASTNodeKind.TYPE_DECL: {
       return "aliasTypeAnnotation";
     }
+    case ASTNodeKind.IF_STATEMENT: {
+      return "elseBranch";
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      return "condition";
+    }
     default: {
       return "undefined";
     }
@@ -94,6 +139,20 @@ export function astNodeChildDName(v: ASTNodeKind): string {
   switch(v) {
     case ASTNodeKind.FUNCTION_DECL: {
       return "functionBody";
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      return "stepExpr";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildEName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.FOR_LOOP: {
+      return "bodyBlock";
     }
     default: {
       return "undefined";

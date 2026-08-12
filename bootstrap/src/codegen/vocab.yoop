@@ -1,0 +1,47 @@
+module codegen;
+
+// The LLVM spellings: which opcode or predicate a yoop operator lowers to, and
+// the one variadic signature we know about.
+//
+// Separate from instr.yoop so that file stays a pure catalogue of instructions.
+// Changing what `<` lowers to is a change here; changing how an icmp is
+// FORMATTED is a change there.
+
+import { TokenTags } from "../lex";
+
+// printf is the only variadic callee the bootstrap knows about, so its type is
+// spelled once here rather than at the call site.
+const PRINTF_SIGNATURE: string = "i32 (ptr, ...)";
+
+export function printfReturnType(): string {
+  return "i32";
+}
+
+// The signed-integer opcode for a binary operator, or "" when there is no
+// lowering yet. Unsigned and float variants arrive with the types that need
+// them.
+export function llvmIntOp(tag: TokenTags): string {
+  switch (tag) {
+    case TokenTags.PLUS: { return "add"; }
+    case TokenTags.MINUS: { return "sub"; }
+    case TokenTags.MULT: { return "mul"; }
+    case TokenTags.DIVIDE: { return "sdiv"; }
+    case TokenTags.MODULUS: { return "srem"; }
+    default: { return ""; }
+  }
+}
+
+// The SIGNED icmp predicate for a comparison operator, or "" when the operator
+// is not a comparison. Unsigned variants (`ult`, `ule`, ...) arrive with
+// unsigned types.
+export function llvmIntPredicate(tag: TokenTags): string {
+  switch (tag) {
+    case TokenTags.EQEQ: { return "eq"; }
+    case TokenTags.NEQ: { return "ne"; }
+    case TokenTags.LT: { return "slt"; }
+    case TokenTags.GT: { return "sgt"; }
+    case TokenTags.LTE: { return "sle"; }
+    case TokenTags.GTE: { return "sge"; }
+    default: { return ""; }
+  }
+}

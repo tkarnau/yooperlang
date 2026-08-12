@@ -69,8 +69,10 @@ types file.
   literal values, and nested block comments.
 - **Layer 2 - parse**: IN PROGRESS. The arena and recursive descent are built.
   Handles top-level `type` (struct body, transparent alias, type params, kind
-  prefix) and `function` decls, blocks, `let`/`const`, `return`, and expressions
-  by precedence climbing. Not yet: imports, traits, variants, enums, unions,
+  prefix) and `function` decls, blocks, `let`/`const`, `return`, assignment,
+  `if`/`else if`/`else`, `while`, `for`, `break`/`continue`, calls, arrays
+  (`T[]`, literals, indexing, `.len`), unary and compound-assignment forms, and
+  expressions by precedence climbing. Not yet: imports, traits, variants, enums, unions,
   methods in a type body, `implements`/`propagates`/`contains` clauses - each a
   named "not supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
@@ -83,7 +85,11 @@ types file.
   optimization actually wants it.
 - **Layer 5 - codegen**: IN PROGRESS. `codegen/` emits LLVM IR text for the
   slice subset (functions with parameters, return, int/string literals,
-  arithmetic, calls, printf, and locals/params as alloca + store/load). Split
+  arithmetic, comparisons as `icmp`, calls, printf, locals/params as hoisted
+  alloca + store/load, and `if`/`while`/`for`/`break`/`continue` as labels and
+  branches over a loop-label stack, and short-circuiting `&&`/`||` through a
+  stack slot rather than a phi, and arrays as a `{ ptr, i64 }` descriptor).
+  Split
   into deciding (`expr`/`stmt`), emitting (`instr`, one function per LLVM
   instruction with a sample of its output) and appending (`context`); the rules
   are in bootstrap/README.md and are bootstrap-specific.

@@ -9,8 +9,16 @@ module codegen;
 //                  codegen reads from typecheck: the AST, `typeOf`, `returnTypeOf`
 //   instr.yoop     one function per LLVM instruction, each with a sample of its
 //                  output. Read this to learn WHAT IR we emit
+//   instr_mem.yoop the same, for aggregates and computed addresses
+//   array.yoop     array literals, indexing, `.len`
+//   call.yoop      call expressions, and the argument ordering rule
 //   stmt.yoop      statements -> instructions
+//   flow.yoop      `if` -> labels and branches, and the one terminator per
+//                  block discipline every branching construct follows
+//   loop.yoop      `while` / `for` -> labels and branches
+//   loop_stack.yoop  where break/continue jump
 //   expr.yoop      expressions -> an Operand, plus the instructions to get it
+//   vocab.yoop     which LLVM opcode or predicate an operator lowers to
 //   operand.yoop   what an expression evaluates to, as a value not a string
 //   locals.yoop    a local's stack slot
 //   strings.yoop   string literals -> private module constants
@@ -82,12 +90,15 @@ function emitFunction(
   // One locals map per function; the Cx bundles it with everything else so the
   // walk below is not threading five arguments through every call.
   disposable locals: FnLocals = localsNew();
+  disposable loops: LoopStack = loopStackNew();
   // `e`, `prog` and `tm` are already refs, so they go in as-is; `ref ref T` is
   // not a thing. `m.ast` is a field of a by-value param, and taking a ref to it
   // avoids copying the whole arena.
-  let cx: Cx = { e: e, prog: prog, tm: tm, ast: ref m.ast, locals: ref locals };
+  let cx: Cx = {
+    e: e, prog: prog, tm: tm, ast: ref m.ast, locals: ref locals, loops: ref loops,
+  };
 
-  e.nextTemp = 0;
+  beginFunctionBuffers(ref e);
   const retTy = returnTypeOf(ref cx, declNode.name);
 
   disposable params: Vec<ParamInfo> = vec.vecNew(4);
@@ -99,9 +110,9 @@ function emitFunction(
   emitParamPrologue(ref cx, ref params);
 
   let err = "";
-  let sawReturn = false;
+  let bodyTerminated = false;
   if (declNode.childD != 0) {
-    sawReturn = emitBlock(ref cx, declNode.childD, retTy, ref err);
+    emitBlock(ref cx, declNode.childD, retTy, ref bodyTerminated, ref err);
     if (err.len > 0) {
       return err;
     }
@@ -109,7 +120,7 @@ function emitFunction(
 
   // Every LLVM block needs a terminator, and a void function may just run off
   // the end in yoop.
-  if (!sawReturn) {
+  if (!bodyTerminated) {
     if (text.equals(retTy, "void")) {
       emitRetVoid(ref cx);
     } else {
@@ -146,8 +157,8 @@ function emitParamPrologue(ref cx: Cx, ref params: Vec<ParamInfo>): void {
   let i: usize = 0;
   while (i < params.len) {
     const p = vec.vecGet(ref params, i);
-    declareLocal(ref cx, p.name, p.ty);
-    emitStoreArg(ref cx, p.ty, p.name);
+    const slotInfo = declareLocal(ref cx, p.name, p.ty);
+    emitStoreArg(ref cx, p.ty, p.name, slotInfo.id);
     i += 1;
   }
 }

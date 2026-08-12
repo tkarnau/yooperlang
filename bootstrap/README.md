@@ -75,14 +75,52 @@ are not supported by the bootstrap parser yet" - rather than mis-compiled.
   * `type` decls with fields (registered and resolved, no values yet)
   * `let` / `const` locals, with an annotation or inferred from the initializer
   * function PARAMETERS, readable in the body and passed at call sites
+  * assignment to a local (`x = expr`)
+  * `if` / `else if` / `else`, `while`, and `for (let i = 0; i < n; i = i + 1)`
+  * `break` and `continue`, checked to be inside a loop
+  * comparisons `== != < > <= >=`, and `&&` / `||` with real short-circuiting
+  * `true` / `false`, unary `-` and `!`, parenthesized grouping
+  * compound assignment (`x += 1`), including in a `for` step
+  * arrays: `T[]` annotations, `[a, b, c]` literals, `xs[i]` read and write,
+    `xs.len`, and passing an array to a function
   * `return`, with or without a value
   * int literals, string literals, `+ - * / %`
   * calls, including the `printf` builtin
 
-Not yet: imports, assignment, control flow (`if` / `while` / `switch`), structs
-as values, traits, kinds, generics. Each is the next slice outward, and control
-flow is the one that forces real work - it is where the flat single-block
-emitter has to grow labels and branches.
+Not yet: imports, `switch`, `for x in xs`, module-level `let` / `const`, structs
+as values, casts between integer widths, traits, kinds, generics.
+
+Integer widths do NOT mix, matching the JS reference: `xs[0] + xs.len` is
+`int32 + usize` and is an error. That is why there is no cast yet and why it is
+the next thing the subset will want.
+
+Two invariants control flow introduced, both easy to break:
+
+- **Allocas are hoisted** into `entry:` via `Emitter.prologue`. An alloca must
+  dominate every load, and one emitted inside an `if` arm does not dominate a
+  use after the join. Slot names carry a uniquing number for the same reason -
+  sibling branches may each declare `a`.
+- **One terminator per block.** `emitBlock` / `emitStatement` report whether the
+  path definitely `terminated` - a `ret`, but also a `break` or `continue` -
+  so no `br` follows one. An `if` whose both arms return emits no join block at
+  all. Getting this wrong produces invalid IR that clang rejects, not a wrong
+  answer.
+- **A `for` loop's step gets its own block.** `continue` jumps to the STEP, not
+  the condition, so the counter still advances; wiring it to the condition
+  instead spins forever. That is why `LoopLabels` carries two targets.
+- **An array is a `{ ptr, i64 }` descriptor** - data plus length - and a
+  literal's storage is a hoisted `alloca [N x T]` that the descriptor points
+  into. So a literal BORROWS the enclosing function's stack: returning one hands
+  back a dangling pointer. The JS reference has the same property; a
+  heap-allocating form is a separate feature.
+- **Structural types must intern to one TypeId.** Type equality is `id == id`,
+  so two `int[]` annotations that interned separately would compare unequal.
+  `internArray` / `internRef` scan before inserting.
+- **`&&` and `||` branch, they do not compute.** Both lower to a condition, a
+  right-hand-side block, and a stack slot the two paths write - never a single
+  instruction over two evaluated operands. `expressions.yoop` in the slice
+  fixtures is the test that catches a non-short-circuiting lowering; every other
+  assertion in it passes either way.
 
 A program in this subset needs no yoop runtime - only libc - which is what keeps
 the link step a single clang invocation. Linking the runtime arrives with the
@@ -126,13 +164,22 @@ into unreadable string-append soup fastest, and it is the layer whose bugs are
 hardest to spot by reading, so it gets rules of its own.
 
 **Keep files in `codegen/` small and single-purpose** - roughly 150 lines. If a
-file is doing two jobs, split it.
+file is doing two jobs, split it. `instr.yoop` is the one deliberate exception:
+it is a flat catalogue of every instruction, and its value is that you can read
+the whole IR surface in one place, so it grows by entries rather than splitting.
 
 **Separate DECIDING from EMITTING.** Three layers, and a function belongs to
 exactly one:
 
     expr.yoop / stmt.yoop   walk the AST, decide what should happen
+    flow.yoop               the same, for `if` (block discipline lives here)
+    loop.yoop               the same, for `while` / `for`
+    loop_stack.yoop         where break/continue jump
+    array.yoop              array literals, indexing, `.len`
+    call.yoop               call expressions
     instr.yoop              emit one LLVM instruction
+    instr_mem.yoop          the same, for aggregates and computed addresses
+    vocab.yoop              which opcode/predicate an operator lowers to
     context.yoop            the raw text appenders (only instr.yoop calls these)
 
 The walking code should read as "load the local, then multiply" - if you can see

@@ -14,6 +14,7 @@ import { Map }, * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import { Module, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
 import { Program, TypedModule, Symbol, Type, typecheckProgram } from "../typecheck";
+import { Diagnostic, errorAt } from "../diagnostics";
 
 suite function passARegistersATopLevelFunction(): void {
   let prog = checkSource("function answer(): int { return 42; }");
@@ -91,7 +92,16 @@ function checkSource(src: string): Program {
 
   switch (moduleFromSource("test", "test.yoop", srcBuf)) {
     case LoadModuleResult.Err { error: e }: {
-      return { types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0), diagnostics: vec.vecNew(0) };
+      // A parse failure has to come back as a DIAGNOSTIC, not as an empty
+      // Program. Otherwise a test asserting "this is refused" cannot tell
+      // "refused by the parser" from "accepted silently" - both would read as
+      // zero diagnostics, and the assertion would be meaningless.
+      let diagnostics: Vec<Diagnostic> = vec.vecNew(1);
+      vec.vecPush(ref diagnostics, errorAt(e, { pos: 0, line: 0, column: 0, length: 0 }));
+      return {
+        types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0),
+        diagnostics: diagnostics,
+      };
     }
     case LoadModuleResult.Ok { value: m }: {
       let graph = singleModuleGraph(m);
@@ -151,4 +161,216 @@ function firstDiagnostic(ref prog: Program): string {
     return "";
   }
   return vec.vecGet(ref prog.diagnostics, 0).message;
+}
+
+// Control flow: the parts that never reach an executable.
+suite function controlFlowChecksConditions(): void {
+  let ok = checkSource("function main(): int { if (1 < 2) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("a comparison is a valid condition") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `a comparison condition reported ${ok.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref ok)}`;
+  }
+
+  let bad = checkSource("function main(): int { if (1) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("an int condition is a diagnostic") {
+    theory.isSuccessful = bad.diagnostics.len > 0;
+    theory.detail = "a non-bool condition produced no diagnostic";
+  }
+
+  let loop = checkSource("function main(): int { let i: int = 0; while (i < 3) { i = i + 1; } return i; }");
+  let test theory: Case = t.asserts("a while loop with an assignment checks clean") {
+    theory.isSuccessful = loop.diagnostics.len == 0;
+    theory.detail = `the loop reported ${loop.diagnostics.len} diagnostic(s): ${firstDiagnostic(ref loop)}`;
+  }
+}
+
+suite function blockScopingIsEnforced(): void {
+  // A name declared inside a branch must not survive the branch, or codegen
+  // would read a slot that only one path ever wrote.
+  let leaked = checkSource("function main(): int { if (1 < 2) { const a = 1; } return a; }");
+  let test theory: Case = t.asserts("a branch-local name is not visible after the branch") {
+    theory.isSuccessful = leaked.diagnostics.len > 0;
+    theory.detail = "reading a branch-local after the branch produced no diagnostic";
+  }
+
+  // Sibling branches are separate scopes, so reusing the name is fine.
+  let siblings = checkSource("function main(): int { if (1 < 2) { const a = 1; } else { const a = 2; } return 0; }");
+  let test theory: Case = t.asserts("sibling branches may reuse a name") {
+    theory.isSuccessful = siblings.diagnostics.len == 0;
+    theory.detail = `sibling branches reusing a name reported ${siblings.diagnostics.len}: ${firstDiagnostic(ref siblings)}`;
+  }
+}
+
+suite function assignmentIsChecked(): void {
+  let unknown = checkSource("function main(): int { nope = 1; return 0; }");
+  let test theory: Case = t.asserts("assigning to an undeclared name is a diagnostic") {
+    theory.isSuccessful = unknown.diagnostics.len > 0;
+    theory.detail = "assigning to an undeclared name produced no diagnostic";
+  }
+
+  let mismatch = checkSource("function main(): int { let s: string = \"a\"; s = 1; return 0; }");
+  let test theory: Case = t.asserts("assigning the wrong type is a diagnostic") {
+    theory.isSuccessful = mismatch.diagnostics.len > 0;
+    theory.detail = "assigning an int to a string local produced no diagnostic";
+  }
+}
+
+suite function loopJumpsNeedALoop(): void {
+  let outside = checkSource("function main(): int { break; return 0; }");
+  let test theory: Case = t.asserts("break outside a loop is a diagnostic") {
+    theory.isSuccessful = outside.diagnostics.len > 0;
+    theory.detail = "break at function level produced no diagnostic";
+  }
+
+  let outsideCont = checkSource("function main(): int { continue; return 0; }");
+  let test theory: Case = t.asserts("continue outside a loop is a diagnostic") {
+    theory.isSuccessful = outsideCont.diagnostics.len > 0;
+    theory.detail = "continue at function level produced no diagnostic";
+  }
+
+  // Inside an `if` that is itself inside a loop still counts as in the loop.
+  let nested = checkSource("function main(): int { let i: int = 0; while (i < 3) { if (i == 1) { break; } i = i + 1; } return i; }");
+  let test theory: Case = t.asserts("break inside a branch inside a loop is fine") {
+    theory.isSuccessful = nested.diagnostics.len == 0;
+    theory.detail = `break inside a nested branch reported ${nested.diagnostics.len}: ${firstDiagnostic(ref nested)}`;
+  }
+
+  // The depth has to come back down when the loop closes.
+  let after = checkSource("function main(): int { let i: int = 0; while (i < 1) { i = i + 1; } break; return 0; }");
+  let test theory: Case = t.asserts("break after a loop closes is still a diagnostic") {
+    theory.isSuccessful = after.diagnostics.len > 0;
+    theory.detail = "break after the loop produced no diagnostic - loopDepth did not unwind";
+  }
+}
+
+suite function forLoopScopesItsCounter(): void {
+  let ok = checkSource("function main(): int { let t: int = 0; for (let i = 0; i < 3; i = i + 1) { t = t + i; } return t; }");
+  let test theory: Case = t.asserts("a for loop with a declared counter checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `the for loop reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let leaked = checkSource("function main(): int { for (let i = 0; i < 3; i = i + 1) { } return i; }");
+  let test theory: Case = t.asserts("the counter is not visible after the loop") {
+    theory.isSuccessful = leaked.diagnostics.len > 0;
+    theory.detail = "reading the counter after the loop produced no diagnostic";
+  }
+
+  let constCounter = checkSource("function main(): int { for (const i = 0; i < 3; i = i + 1) { } return 0; }");
+  let test theory: Case = t.asserts("a const counter is refused") {
+    theory.isSuccessful = constCounter.diagnostics.len > 0;
+    theory.detail = "a const for-loop counter produced no diagnostic";
+  }
+}
+
+suite function logicalAndUnaryAreTyped(): void {
+  let ok = checkSource("function main(): int { const a = true && !false; if (a) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("bool literals, ! and && compose cleanly") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let notInt = checkSource("function main(): int { const a = !5; return 0; }");
+  let test theory: Case = t.asserts("! on an int is a diagnostic") {
+    theory.isSuccessful = notInt.diagnostics.len > 0;
+    theory.detail = "applying ! to an int produced no diagnostic";
+  }
+
+  let andInt = checkSource("function main(): int { const a = 1 && 2; return 0; }");
+  let test theory: Case = t.asserts("&& on ints is a diagnostic") {
+    theory.isSuccessful = andInt.diagnostics.len > 0;
+    theory.detail = "&& over ints produced no diagnostic";
+  }
+
+  let negBool = checkSource("function main(): int { const a = -true; return 0; }");
+  let test theory: Case = t.asserts("unary - on a bool is a diagnostic") {
+    theory.isSuccessful = negBool.diagnostics.len > 0;
+    theory.detail = "negating a bool produced no diagnostic";
+  }
+
+  // A comparison already yields bool, so this is the common real-world shape.
+  let chained = checkSource("function main(): int { let n: int = 5; if (n > 1 && n < 10) { return 1; } return 0; }");
+  let test theory: Case = t.asserts("a range check composes two comparisons") {
+    theory.isSuccessful = chained.diagnostics.len == 0;
+    theory.detail = `reported ${chained.diagnostics.len}: ${firstDiagnostic(ref chained)}`;
+  }
+}
+
+suite function compoundAssignmentDesugars(): void {
+  let ok = checkSource("function main(): int { let n: int = 1; n += 2; n *= 3; return n; }");
+  let test theory: Case = t.asserts("compound assignment checks like the expanded form") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let badType = checkSource("function main(): int { let s: string = \"a\"; s += 1; return 0; }");
+  let test theory: Case = t.asserts("compound assignment still type-checks the operands") {
+    theory.isSuccessful = badType.diagnostics.len > 0;
+    theory.detail = "adding an int to a string local produced no diagnostic";
+  }
+}
+
+suite function arraysAreTyped(): void {
+  // `.len` is usize, so it does not mix with an int32 element without a cast -
+  // the JS reference rejects that too. Keep the widths apart here.
+  let ok = checkSource("function main(): int { const xs: int[] = [1, 2, 3]; let n: usize = xs.len; return xs[0]; }");
+  let test theory: Case = t.asserts("a literal, an index and .len compose") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Structural interning: two separate `int[]` annotations must be the SAME
+  // TypeId, or passing one to the other is a spurious mismatch.
+  let passed = checkSource("function take(xs: int[]): usize { return xs.len; } function main(): int { const ys: int[] = [1]; return 0; }");
+  let test theory: Case = t.asserts("two int[] annotations are the same type") {
+    theory.isSuccessful = passed.diagnostics.len == 0;
+    theory.detail = `passing int[] to an int[] parameter reported ${passed.diagnostics.len}: ${firstDiagnostic(ref passed)}`;
+  }
+
+  let mixed = checkSource("function main(): int { const xs = [1, true]; return 0; }");
+  let test theory: Case = t.asserts("mixed element types are a diagnostic") {
+    theory.isSuccessful = mixed.diagnostics.len > 0;
+    theory.detail = "an array of an int and a bool produced no diagnostic";
+  }
+
+  let emptyBare = checkSource("function main(): int { const xs = []; return 0; }");
+  let test theory: Case = t.asserts("an unannotated empty literal is a diagnostic") {
+    theory.isSuccessful = emptyBare.diagnostics.len > 0;
+    theory.detail = "an empty literal with nothing to infer from produced no diagnostic";
+  }
+
+  let indexNonArray = checkSource("function main(): int { let n: int = 1; return n[0]; }");
+  let test theory: Case = t.asserts("indexing a non-array is a diagnostic") {
+    theory.isSuccessful = indexNonArray.diagnostics.len > 0;
+    theory.detail = "indexing an int produced no diagnostic";
+  }
+
+  let badField = checkSource("function main(): int { const xs: int[] = [1]; return xs.size; }");
+  let test theory: Case = t.asserts("an unknown array field is a diagnostic") {
+    theory.isSuccessful = badField.diagnostics.len > 0;
+    theory.detail = "xs.size produced no diagnostic";
+  }
+
+  // The desugaring re-reads the target, so it is only sound on a plain name.
+  let compoundIndex = checkSource("function main(): int { let xs: int[] = [1]; xs[0] += 1; return xs[0]; }");
+  let test theory: Case = t.asserts("compound assignment to an index is refused, not miscompiled") {
+    theory.isSuccessful = compoundIndex.diagnostics.len > 0;
+    theory.detail = "xs[0] += 1 was accepted; the desugaring would evaluate the index twice";
+  }
+}
+
+suite function integerWidthsStayApart(): void {
+  // usize and int32 are different types, matching the JS reference. The
+  // diagnostic has to NAME both, or a width mismatch is a guessing game.
+  let mixed = checkSource("function main(): int { const xs: int[] = [1]; return xs[0] + xs.len; }");
+  let test theory: Case = t.asserts("mixing int32 and usize in + is a diagnostic") {
+    theory.isSuccessful = mixed.diagnostics.len > 0;
+    theory.detail = "adding an int32 element to a usize length produced no diagnostic";
+  }
+
+  let badReturn = checkSource("function f(xs: int[]): int { return xs.len; } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("returning usize from an int function is a diagnostic") {
+    theory.isSuccessful = badReturn.diagnostics.len > 0;
+    theory.detail = "returning a usize as int32 produced no diagnostic";
+  }
 }

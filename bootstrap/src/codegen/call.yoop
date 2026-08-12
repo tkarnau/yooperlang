@@ -1,0 +1,55 @@
+module codegen;
+
+// Call expressions.
+//
+// The ordering rule is the whole content of this file: every argument is
+// lowered BEFORE the call line is written, because an argument can emit its own
+// instructions and those have to land first. Holding the results as Operand
+// values is what makes that possible without building any text early.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+
+// Arguments are lowered FIRST - each may emit its own instructions, and those
+// have to land before the call. Their operands are held as values, so nothing
+// is formatted until emitCall runs.
+function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  disposable args: Vec<CallArg> = vec.vecNew(4);
+  if (expr.childA != 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const argId = childAt(cx.ast, list, i);
+      let value: Operand = Operand.None;
+      const err = emitExpr(ref cx, argId, ref value);
+      if (err.len > 0) { return err; }
+      vec.vecPush(ref args, { ty: typeOf(ref cx, argId), value: value });
+      i += 1;
+    }
+  }
+
+  // printf is the one variadic callee we know about; emitCall owns what a
+  // variadic call site has to spell out.
+  const isPrintf = text.equals(expr.name, "printf");
+  let retTy = typeOf(ref cx, exprId);
+  if (isPrintf) {
+    cx.e.usesPrintf = true;
+    retTy = printfReturnType();
+  }
+
+  const isVoid = text.equals(retTy, "void");
+  let dest: usize = 0;
+  if (!isVoid) {
+    dest = freshTemp(cx.e);
+  }
+  emitCall(ref cx, dest, retTy, expr.name, isPrintf, ref args);
+
+  if (isVoid) {
+    out = Operand.None;
+  } else {
+    out = Operand.Temp { id: dest };
+  }
+  return "";
+}

@@ -1,0 +1,183 @@
+module codegen;
+
+// The instruction catalogue for AGGREGATES and computed addresses: taking a
+// field out of an array descriptor, building one, and stepping a data pointer.
+//
+// Split from instr.yoop when that file outgrew being readable in one sitting.
+// Same house rules: named for the instruction, a sample of its output, and no
+// decisions - see the header of instr.yoop.
+
+import { Text }, * as text from "std/core/text.yoop";
+
+// ----- arrays --------------------------------------------------------------
+//
+// An array value is a `{ ptr, i64 }` descriptor. These four instructions are
+// everything the subset needs: take a field out of a descriptor, build one, and
+// step a data pointer to an element.
+
+//   %t4 = extractvalue { ptr, i64 } %t3, 0
+//
+// Field 0 is the data pointer, field 1 is the length.
+export function emitExtractValue(ref cx: Cx, dest: usize, aggregate: Operand, field: usize): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = extractvalue ");
+  part(ref cx, ARRAY_DESCRIPTOR);
+  part(ref cx, " ");
+  operand(ref cx, aggregate);
+  part(ref cx, ", ");
+  num(ref cx, field);
+  endInstr(ref cx);
+}
+
+//   %t5 = insertvalue { ptr, i64 } undef, ptr %t4, 0
+//   %t6 = insertvalue { ptr, i64 } %t5, i64 3, 1
+//
+// `base` is the descriptor being extended - `undef` for the first field, then
+// the previous temp. `fieldTy` is the type of the value going in.
+export function emitInsertValue(
+  ref cx: Cx,
+  dest: usize,
+  base: string,
+  fieldTy: string,
+  value: Operand,
+  field: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = insertvalue ");
+  part(ref cx, ARRAY_DESCRIPTOR);
+  part(ref cx, " ");
+  part(ref cx, base);
+  part(ref cx, ", ");
+  part(ref cx, fieldTy);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ");
+  num(ref cx, field);
+  endInstr(ref cx);
+}
+
+//   %t7 = getelementptr inbounds i32, ptr %t4, i64 %t6
+//
+// Steps a data pointer to element `index`. No bounds check - the language does
+// not specify one yet, and adding it here would diverge from the JS reference.
+export function emitGepElem(
+  ref cx: Cx,
+  dest: usize,
+  elemTy: string,
+  dataPtr: Operand,
+  indexTy: string,
+  index: Operand
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds ");
+  part(ref cx, elemTy);
+  part(ref cx, ", ptr ");
+  operand(ref cx, dataPtr);
+  part(ref cx, ", ");
+  part(ref cx, indexTy);
+  part(ref cx, " ");
+  operand(ref cx, index);
+  endInstr(ref cx);
+}
+
+//   %t3 = getelementptr inbounds [3 x i32], ptr %sc.1.addr, i64 0, i64 0
+//
+// The address of element 0 of a fixed-size backing store - how an array literal
+// turns its `alloca [N x T]` into the data pointer a descriptor holds.
+export function emitGepArrayBase(
+  ref cx: Cx,
+  dest: usize,
+  count: usize,
+  elemTy: string,
+  slotName: string,
+  slotId: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds [");
+  num(ref cx, count);
+  part(ref cx, " x ");
+  part(ref cx, elemTy);
+  part(ref cx, "], ptr ");
+  slot(ref cx, slotName, slotId);
+  part(ref cx, ", i64 0, i64 ");
+  num(ref cx, 0);
+  endInstr(ref cx);
+}
+
+//   %t9 = getelementptr inbounds [3 x i32], ptr %sc.1.addr, i64 0, i64 2
+//
+// The address of a SPECIFIC element of a literal's backing store, used while
+// filling it in.
+export function emitGepArrayBaseAt(
+  ref cx: Cx,
+  dest: usize,
+  count: usize,
+  elemTy: string,
+  slotId: usize,
+  index: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds [");
+  num(ref cx, count);
+  part(ref cx, " x ");
+  part(ref cx, elemTy);
+  part(ref cx, "], ptr ");
+  slot(ref cx, TEMP_SLOT_NAME, slotId);
+  part(ref cx, ", i64 0, i64 ");
+  num(ref cx, index);
+  endInstr(ref cx);
+}
+
+//   store i32 %t4, ptr %t3
+//
+// Store through a computed address rather than a named slot.
+export function emitStoreToPtr(ref cx: Cx, ty: string, value: Operand, addr: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ptr ");
+  temp(ref cx, addr);
+  endInstr(ref cx);
+}
+
+//   %t5 = load i32, ptr %t3
+export function emitLoadFromPtr(ref cx: Cx, dest: usize, ty: string, addr: usize): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = load ");
+  part(ref cx, ty);
+  part(ref cx, ", ptr ");
+  temp(ref cx, addr);
+  endInstr(ref cx);
+}
+
+// insertvalue whose base is a previous temp rather than `undef`.
+export function emitInsertValueTemp(
+  ref cx: Cx,
+  dest: usize,
+  base: usize,
+  fieldTy: string,
+  value: Operand,
+  field: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = insertvalue ");
+  part(ref cx, ARRAY_DESCRIPTOR);
+  part(ref cx, " ");
+  temp(ref cx, base);
+  part(ref cx, ", ");
+  part(ref cx, fieldTy);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ");
+  num(ref cx, field);
+  endInstr(ref cx);
+}

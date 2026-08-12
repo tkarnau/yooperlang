@@ -14,6 +14,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
 import { Module } from "../source_graph";
+import { TokenTags, tagSpelling } from "../lex";
 import * as str from "std/core/strings.yoop";
 import { Option } from "std/core/types.yoop";
 
@@ -115,11 +116,13 @@ function checkBlock(
     return;
   }
   const list = nodeAt(ref ast, block.childA);
+  scopePush(ref scope);
   let i: usize = 0;
   while (i < list.childCount) {
     checkStatement(ref prog, ref tm, ref ast, childAt(ref ast, list, i), retType, ref scope);
     i += 1;
   }
+  scopePop(ref scope);
 }
 
 function checkStatement(
@@ -139,7 +142,11 @@ function checkStatement(
       // The return type is what an untyped literal in the expression pins to.
       const got = checkExpr(ref prog, ref tm, ref ast, stmt.childA, retType, ref scope);
       if (got != TYPE_ERROR_ID && retType != TYPE_ERROR_ID && got != retType) {
-        reportError(ref prog, "returned expression does not match the declared return type", stmt.sourceLoc);
+        reportError(
+          ref prog,
+          `cannot return ${formatType(ref prog, got)} from a function returning ${formatType(ref prog, retType)}`,
+          stmt.sourceLoc
+        );
       }
     }
     case ASTNodeKind.EXPRESSION_STATEMENT: {
@@ -147,6 +154,36 @@ function checkStatement(
     }
     case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
       checkVarDecl(ref prog, ref tm, ref ast, stmt, stmtId, ref scope);
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      checkCondition(ref prog, ref tm, ref ast, stmt.childA, ref scope);
+      checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
+      if (stmt.childC != 0) {
+        // The else branch is a BLOCK, or another IF_STATEMENT for `else if`.
+        if (nodeAt(ref ast, stmt.childC).kind == ASTNodeKind.IF_STATEMENT) {
+          checkStatement(ref prog, ref tm, ref ast, stmt.childC, retType, ref scope);
+        } else {
+          checkBlock(ref prog, ref tm, ref ast, stmt.childC, retType, ref scope);
+        }
+      }
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      checkCondition(ref prog, ref tm, ref ast, stmt.childA, ref scope);
+      scope.loopDepth += 1;
+      checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
+      scope.loopDepth -= 1;
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      checkForLoop(ref prog, ref tm, ref ast, stmt, stmtId, retType, ref scope);
+    }
+    case ASTNodeKind.BREAK_STATEMENT, ASTNodeKind.CONTINUE_STATEMENT: {
+      if (scope.loopDepth == 0) {
+        reportError(
+          ref prog,
+          `"${kindName(stmt.kind)}" is only legal inside a loop`,
+          stmt.sourceLoc
+        );
+      }
     }
     default: {
       reportError(ref prog, `pass D does not handle ${kindName(stmt.kind)} yet`, stmt.sourceLoc);
@@ -192,17 +229,59 @@ function checkExpr(
     case ASTNodeKind.STRING_LITERAL: {
       resolved = primTypeId(PrimKind.STRING);
     }
+    case ASTNodeKind.BOOL_LITERAL: {
+      resolved = primTypeId(PrimKind.BOOL);
+    }
+    case ASTNodeKind.UNARY_EXPRESSION: {
+      resolved = checkUnary(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.ARRAY_LITERAL: {
+      resolved = checkArrayLiteral(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.INDEX_EXPRESSION: {
+      resolved = checkIndex(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      resolved = checkFieldAccess(ref prog, ref tm, ref ast, expr, ref scope);
+    }
     case ASTNodeKind.BINARY_EXPRESSION: {
-      const left = checkExpr(ref prog, ref tm, ref ast, expr.childA, expected, ref scope);
+      // A comparison's operands constrain each other but NOT the result, so an
+      // untyped literal in `n < 10` pins to `n`, never to the bool the whole
+      // expression produces.
+      const compares = isComparison(expr.operator);
+      const logical = isLogical(expr.operator);
+      let operandExpected = expected;
+      if (compares) {
+        operandExpected = TYPE_ERROR_ID;
+      } else if (logical) {
+        // `&&` / `||` take bools and produce one.
+        operandExpected = primTypeId(PrimKind.BOOL);
+      }
+      const left = checkExpr(ref prog, ref tm, ref ast, expr.childA, operandExpected, ref scope);
       const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, left, ref scope);
       if (left != right) {
-        reportError(ref prog, "binary operands have different types", expr.sourceLoc);
+        reportError(
+          ref prog,
+          `operator "${tagSpelling(expr.operator)}" cannot be applied to ${formatType(ref prog, left)} and ${formatType(ref prog, right)}`,
+          expr.sourceLoc
+        );
+      } else if (compares) {
+        resolved = primTypeId(PrimKind.BOOL);
+      } else if (logical) {
+        if (left != primTypeId(PrimKind.BOOL)) {
+          reportError(ref prog, "logical operands must be bool", expr.sourceLoc);
+        } else {
+          resolved = primTypeId(PrimKind.BOOL);
+        }
       } else {
         resolved = left;
       }
     }
     case ASTNodeKind.CALL_EXPRESSION: {
       resolved = checkCall(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.ASSIGNMENT: {
+      resolved = checkAssignment(ref prog, ref tm, ref ast, expr, ref scope);
     }
     case ASTNodeKind.IDENT: {
       switch (scopeLookup(ref scope, expr.name)) {
@@ -316,4 +395,308 @@ function bindLocal(ref prog: Program, ref scope: LocalScope, stmt: ASTNode, type
   if (!scopeDeclare(ref scope, stmt.name, typeId)) {
     reportError(ref prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
   }
+}
+
+// A condition has to be a bool. Reporting here rather than in codegen keeps the
+// "codegen is total on well-formed input" contract honest.
+function checkCondition(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  ref scope: LocalScope
+): void {
+  const got = checkExpr(ref prog, ref tm, ref ast, exprId, primTypeId(PrimKind.BOOL), ref scope);
+  if (got != TYPE_ERROR_ID && got != primTypeId(PrimKind.BOOL)) {
+    reportError(ref prog, "condition must be a bool", nodeAt(ref ast, exprId).sourceLoc);
+  }
+}
+
+// Operators whose RESULT is a bool regardless of what they compare.
+function isComparison(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.EQEQ, TokenTags.NEQ, TokenTags.LT,
+         TokenTags.GT, TokenTags.LTE, TokenTags.GTE: {
+      return true;
+    }
+    default: { return false; }
+  }
+}
+
+// `target = value`. Only a plain name is assignable so far; fields and index
+// expressions arrive with the constructs that produce them.
+function checkAssignment(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const target = nodeAt(ref ast, expr.childA);
+  let targetType: TypeId = TYPE_ERROR_ID;
+
+  if (target.kind == ASTNodeKind.IDENT) {
+    switch (scopeLookup(ref scope, target.name)) {
+      case Option.Some { value: t }: { targetType = t; }
+      case Option.None: {
+        reportError(ref prog, `unknown name "${target.name}"`, target.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+    }
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    // `xs[i] = v` - checkIndex records the element type on the node, which is
+    // what the store needs.
+    targetType = checkIndex(ref prog, ref tm, ref ast, target, ref scope);
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else {
+    reportError(ref prog, `cannot assign to ${kindName(target.kind)}`, target.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+
+  const valueType = checkExpr(ref prog, ref tm, ref ast, expr.childB, targetType, ref scope);
+  if (valueType != TYPE_ERROR_ID && valueType != targetType) {
+    reportError(ref prog, `cannot assign to "${target.name}": types do not match`, expr.sourceLoc);
+  }
+  // An assignment is a statement, not a value - nothing consumes its type.
+  return TYPE_VOID_ID;
+}
+
+// `for (let i = 0; i < n; i = i + 1) { ... }`
+//
+// The counter lives in a scope of its OWN, wrapped around the body: it is
+// visible to the condition, the step and the body, but not after the loop. When
+// the init only steps an outer counter (`for (i = 0; ...)`) that name must
+// already exist.
+function checkForLoop(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  scopePush(ref scope);
+
+  let counterType: TypeId = TYPE_ERROR_ID;
+  if (stmt.childA != 0) {
+    counterType = resolveTypeAnnotation(ref prog, ref tm, ref ast, stmt.childA);
+  } else if (nodeAt(ref ast, stmt.childB).kind == ASTNodeKind.INT_LITERAL) {
+    // An untyped literal initializer takes its type from the CONDITION, which
+    // is what makes the idiomatic `for (let i = 0; i < xs.len; ...)` work: `i`
+    // becomes usize so it can be compared against a length and used as an
+    // index. Without this the literal would default to int32 and every such
+    // loop would be a width mismatch. Same rule as the JS reference's
+    // counterTypeFromCondition.
+    counterType = counterTypeFromCondition(ref prog, ref tm, ref ast, stmt.childC, ref scope);
+  }
+  const initType = checkExpr(ref prog, ref tm, ref ast, stmt.childB, counterType, ref scope);
+  if (counterType == TYPE_ERROR_ID) {
+    counterType = initType;   // inferred from the initializer
+  } else if (initType != TYPE_ERROR_ID && initType != counterType) {
+    reportError(ref prog, `initializer does not match the declared type of "${stmt.name}"`, stmt.sourceLoc);
+  }
+
+  if (stmt.flagA) {
+    if (!scopeDeclare(ref scope, stmt.name, counterType)) {
+      reportError(ref prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+    }
+  } else {
+    // Stepping an existing counter: it has to exist, and it decides the type.
+    switch (scopeLookup(ref scope, stmt.name)) {
+      case Option.Some { value: t }: { counterType = t; }
+      case Option.None: {
+        reportError(ref prog, `unknown name "${stmt.name}"`, stmt.sourceLoc);
+      }
+    }
+  }
+  vec.vecSet(ref tm.resolvedTypes, stmtId, counterType);
+
+  checkCondition(ref prog, ref tm, ref ast, stmt.childC, ref scope);
+
+  const stepType = checkExpr(ref prog, ref tm, ref ast, stmt.childD, counterType, ref scope);
+  if (stepType != TYPE_ERROR_ID && counterType != TYPE_ERROR_ID && stepType != counterType) {
+    reportError(ref prog, `for-loop step does not match the type of "${stmt.name}"`, stmt.sourceLoc);
+  }
+
+  scope.loopDepth += 1;
+  checkBlock(ref prog, ref tm, ref ast, stmt.childE, retType, ref scope);
+  scope.loopDepth -= 1;
+
+  scopePop(ref scope);
+}
+
+// `-x` keeps the operand's numeric type; `!x` takes a bool and gives a bool.
+function checkUnary(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (expr.operator == TokenTags.BANG) {
+    const got = checkExpr(ref prog, ref tm, ref ast, expr.childA, primTypeId(PrimKind.BOOL), ref scope);
+    if (got != TYPE_ERROR_ID && got != primTypeId(PrimKind.BOOL)) {
+      reportError(ref prog, "operand of ! must be bool", expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    return primTypeId(PrimKind.BOOL);
+  }
+
+  // Unary minus. The expectation flows through so `-1` in an int64 slot pins to
+  // int64 rather than defaulting to int32.
+  const got = checkExpr(ref prog, ref tm, ref ast, expr.childA, expected, ref scope);
+  if (got != TYPE_ERROR_ID && !isIntPrimType(ref prog, got)) {
+    reportError(ref prog, "operand of unary - must be an integer", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return got;
+}
+
+// `&&` / `||` - bool in, bool out, and short-circuiting in codegen.
+function isLogical(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.ANDAND, TokenTags.OROR: { return true; }
+    default: { return false; }
+  }
+}
+
+// `[a, b, c]` - every element must agree, and an empty literal takes its element
+// type from context.
+function checkArrayLiteral(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  // An expected `T[]` tells the elements what to be, which is what lets
+  // `let xs: int64[] = [1, 2]` pin its untyped literals to int64.
+  let elemExpected: TypeId = TYPE_ERROR_ID;
+  if (expected != TYPE_ERROR_ID) {
+    switch (typeAt(ref prog, expected)) {
+      case Type.Array { elem: e }: { elemExpected = e; }
+      default: { }
+    }
+  }
+
+  let elemType: TypeId = elemExpected;
+  if (expr.childA != 0) {
+    const list = nodeAt(ref ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const got = checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, list, i), elemType, ref scope);
+      if (elemType == TYPE_ERROR_ID) {
+        elemType = got;   // the first element sets the type
+      } else if (got != TYPE_ERROR_ID && got != elemType) {
+        reportError(ref prog, "array elements have different types", expr.sourceLoc);
+      }
+      i += 1;
+    }
+  }
+
+  if (elemType == TYPE_ERROR_ID) {
+    reportError(ref prog, "cannot infer the element type of an empty array literal - annotate the binding", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return internArray(ref prog, elemType);
+}
+
+// `xs[i]` - the base must be an array and the index an integer.
+function checkIndex(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  const idxType = checkExpr(ref prog, ref tm, ref ast, expr.childB, primTypeId(PrimKind.USIZE), ref scope);
+  if (idxType != TYPE_ERROR_ID && !isIntPrimType(ref prog, idxType)) {
+    reportError(ref prog, "an array index must be an integer", expr.sourceLoc);
+  }
+
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, baseType)) {
+    case Type.Array { elem: e }: { return e; }
+    default: {
+      reportError(ref prog, `cannot index ${formatType(ref prog, baseType)}`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `xs.len` is the only field access in the subset. Struct fields arrive with
+// struct values.
+function checkFieldAccess(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, baseType)) {
+    case Type.Array { elem: e }: {
+      if (str.stringEq(expr.name, "len")) {
+        return primTypeId(PrimKind.USIZE);
+      }
+      reportError(ref prog, `an array has no field "${expr.name}" - only "len"`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    default: {
+      reportError(
+        ref prog,
+        `field access on ${formatType(ref prog, baseType)} is not supported by the bootstrap typechecker yet`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// The integer type a comparison in the loop condition implies for the counter,
+// or TYPE_ERROR_ID when it implies nothing.
+//
+// Both sides are probed with diagnostics SUPPRESSED, because the counter is not
+// declared yet - reading it here legitimately fails, and that failure is what
+// identifies which side is the informative one. The real check runs afterwards
+// and reports for real, so one mistake still produces one diagnostic.
+function counterTypeFromCondition(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  condId: NodeId,
+  ref scope: LocalScope
+): TypeId {
+  if (condId == 0) {
+    return TYPE_ERROR_ID;
+  }
+  const cond = nodeAt(ref ast, condId);
+  if (cond.kind != ASTNodeKind.BINARY_EXPRESSION || !isComparison(cond.operator)) {
+    return TYPE_ERROR_ID;
+  }
+
+  const savedCount = prog.diagnostics.len;
+  const lhs = checkExpr(ref prog, ref tm, ref ast, cond.childA, TYPE_ERROR_ID, ref scope);
+  const rhs = checkExpr(ref prog, ref tm, ref ast, cond.childB, TYPE_ERROR_ID, ref scope);
+  // Diagnostic is a plain struct with no owned storage, so dropping the tail
+  // frees nothing and leaks nothing.
+  prog.diagnostics.len = savedCount;
+
+  if (isIntPrimType(ref prog, rhs)) {
+    return rhs;
+  }
+  if (isIntPrimType(ref prog, lhs)) {
+    return lhs;
+  }
+  return TYPE_ERROR_ID;
 }

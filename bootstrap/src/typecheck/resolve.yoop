@@ -24,7 +24,11 @@ export function resolveTypeAnnotation(
   switch (annot.kind) {
     case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
       const inner = resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childA);
-      return internType(ref prog, Type.Ref { inner: inner });
+      return internRef(ref prog, inner);
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE: {
+      const elem = resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childA);
+      return internArray(ref prog, elem);
     }
     case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
       return resolveTypeName(ref prog, ref tm, annot);
@@ -133,6 +137,7 @@ export function formatType(ref prog: Program, id: TypeId): string {
     case Type.Void: { return "void"; }
     case Type.Prim { prim: p }: { return primName(p); }
     case Type.Ref { inner: i }: { return `ref ${formatType(ref prog, i)}`; }
+    case Type.Array { elem: e }: { return `${formatType(ref prog, e)}[]`; }
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
       return d.name;
     }

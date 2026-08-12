@@ -1,38 +1,70 @@
 module codegen;
 
-// Where a local lives in the emitted function.
+// Where a local or parameter lives in the emitted function.
 //
-// Every local gets an `alloca` and is read back with a `load`. That is the
+// Every one gets an `alloca` and is read back with a `load`. That is the
 // unoptimized-but-always-correct lowering: no SSA construction, no phi nodes,
-// and it stays correct once branches exist. LLVM's mem2reg pass promotes these
-// to registers anyway, so the cost is IR size, not runtime.
+// and it stays correct once branches exist. LLVM's mem2reg promotes them, so
+// the cost is IR size, not runtime.
+//
+// The allocas are HOISTED into the entry block (see Emitter.prologue). An
+// alloca must dominate every load, and one emitted inside an `if` arm does not
+// dominate a use after the join.
 
 import { Map }, * as map from "std/collections/map.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Option } from "std/core/types.yoop";
 
 export type LocalSlot {
-  ty: string,    // the LLVM type stored there
+  ty: string,   // the LLVM type stored there
+  // Slot names must be unique across the WHOLE function, since every alloca is
+  // hoisted into one entry block and two sibling branches may each declare `a`.
+  // The number is what makes them unique; the name is spelled out at each use
+  // as `%<name>.<id>.addr`, so no string is ever built for it.
+  id: usize,
 }
-
-// A local's alloca is always named `%<yoopName>.addr`, so there is nothing to
-// store: emitters write the two pieces directly and skip a per-use malloc.
 
 export type FnLocals propagates<disposable> {
   slots: Map<string, LocalSlot>,
+  nextSlot: usize,
 }
 
 export function localsNew(): FnLocals propagates<disposable> {
-  return { slots: map.mapNew(0, map.stringKeyOps()) };
+  return { slots: map.mapNew(0, map.stringKeyOps()), nextSlot: 0 };
 }
 
-// Emits the alloca and records the slot type. `.addr` keeps the name out of
-// the `%tN` temp namespace.
-export function declareLocal(ref cx: Cx, name: string, ty: string): void {
-  emitAlloca(ref cx, name, ty);
-  map.mapInsert(ref cx.locals.slots, name, { ty: ty });
+// Emits the alloca into the function prologue and records the slot.
+export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
+  cx.locals.nextSlot += 1;
+  const info: LocalSlot = { ty: ty, id: cx.locals.nextSlot };
+  emitAlloca(ref cx, name, info.id, ty);
+  map.mapInsert(ref cx.locals.slots, name, info);
+  return info;
 }
 
 export function lookupLocal(ref l: FnLocals, name: string): Option<LocalSlot> {
   return map.mapGet(ref l.slots, name);
+}
+
+// The slot name compiler-introduced temporaries share. Each still gets a unique
+// number, so `%sc.4.addr` and `%sc.9.addr` never collide.
+export const TEMP_SLOT_NAME: string = "sc";
+
+// A stack slot with no user-visible name, for a value codegen needs to write on
+// two different paths and read once after they join - what `&&` and `||` need
+// instead of a phi node.
+export function declareAnonSlot(ref cx: Cx, ty: string): LocalSlot {
+  cx.locals.nextSlot += 1;
+  const info: LocalSlot = { ty: ty, id: cx.locals.nextSlot };
+  emitAlloca(ref cx, TEMP_SLOT_NAME, info.id, ty);
+  return info;
+}
+
+// Backing storage for an array literal: `alloca [N x T]`, hoisted like every
+// other slot. The literal's descriptor points at element 0 of this.
+export function declareArraySlot(ref cx: Cx, elemTy: string, count: usize): LocalSlot {
+  cx.locals.nextSlot += 1;
+  const info: LocalSlot = { ty: elemTy, id: cx.locals.nextSlot };
+  emitAllocaArray(ref cx, TEMP_SLOT_NAME, info.id, elemTy, count);
+  return info;
 }

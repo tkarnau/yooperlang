@@ -94,15 +94,54 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   idea as JS Symbol: hand out one unique, shared handle for a value so everyone
   downstream compares handles instead of contents.
 
-  Note these do NOT deduplicate yet. Structural types (Ref<T>, Array<T>, Func)
-  should collapse to one id per distinct shape, or `id == id` equality will call
-  two identical types different. That lands with the first pass that compares
-  structural types; nominal types are already unique by decl.
+  STRUCTURAL types have to deduplicate, because type equality is `id == id`.
+  Two separate `int[]` annotations that interned to two different TypeIds would
+  compare unequal, and passing one to a function expecting the other would be a
+  spurious error. `internArray` / `internRef` below scan for an existing entry
+  first; nominal types need none of this, since they are unique by decl.
+
+  A linear scan is fine at this scale (a few hundred types in the whole
+  program). If it ever is not, the fix is a side map from shape to TypeId, not a
+  change to the equality rule.
 */
 
 export function internType(ref prog: Program, t: Type): TypeId {
   vec.vecPush(ref prog.types, t);
   return prog.types.len - 1;
+}
+
+// One TypeId per distinct element type, so `int[] == int[]`.
+export function internArray(ref prog: Program, elem: TypeId): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Array { elem: existing }: {
+        if (existing == elem) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return internType(ref prog, Type.Array { elem: elem });
+}
+
+// Same, for `ref T`.
+export function internRef(ref prog: Program, inner: TypeId): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Ref { inner: existing }: {
+        if (existing == inner) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return internType(ref prog, Type.Ref { inner: inner });
 }
 
 export function internSymbol(ref prog: Program, s: Symbol): SymbolId {

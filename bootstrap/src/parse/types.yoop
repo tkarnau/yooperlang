@@ -167,6 +167,17 @@ export function parseTypeAnnotation(ref ps: ParserState): Result<NodeId, Parsing
   let typeNameNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME);
   let name = parseIdentAsName(ref ps)?;
   typeNameNode.name = name;
+  let inner = SelfLexing.pushNode(ref ps, typeNameNode);
 
-  return Result.Ok { value: SelfLexing.pushNode(ref ps, typeNameNode) };
+  // Trailing `[]`, repeatable: `int[][]` is an array of arrays. Left to right,
+  // so each `[]` wraps what came before.
+  while (SelfLexing.peek(ref ps).tag == TokenTags.LBRACKET) {
+    SelfLexing.advance(ref ps)?;
+    SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
+    let arrayNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE);
+    arrayNode.childA = inner;
+    inner = SelfLexing.pushNode(ref ps, arrayNode);
+  }
+
+  return Result.Ok { value: inner };
 }

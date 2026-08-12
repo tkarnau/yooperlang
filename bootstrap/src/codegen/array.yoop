@@ -1,0 +1,131 @@
+module codegen;
+
+// Arrays: literals, indexing, and `.len`.
+//
+// An array VALUE is a `{ ptr, i64 }` descriptor - the data pointer and the
+// length - passed around like any other operand. Everything here is either
+// building one or taking it apart.
+//
+// A literal's storage is a hoisted `alloca [N x T]` and the descriptor points at
+// element 0 of it. That means a literal borrows stack memory belonging to the
+// enclosing FUNCTION, so returning one hands back a dangling pointer. The JS
+// reference has the same property ("no copy - the array borrows the underlying
+// memory"); a heap-allocating form is a separate feature.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { Type, typeAt } from "../typecheck";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// `[a, b, c]` - store each element into the backing slot, then build the
+// descriptor that points at it.
+export function emitArrayLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  const elemTy = elementLlvmType(ref cx, exprId);
+  let count: usize = 0;
+  if (expr.childA != 0) {
+    count = nodeAt(cx.ast, expr.childA).childCount;
+  }
+
+  const store = declareArraySlot(ref cx, elemTy, count);
+
+  if (count > 0) {
+    const list = nodeAt(cx.ast, expr.childA);
+    let i: usize = 0;
+    while (i < count) {
+      const elemId = childAt(cx.ast, list, i);
+      let value: Operand = Operand.None;
+      const err = emitExpr(ref cx, elemId, ref value);
+      if (err.len > 0) {
+        return err;
+      }
+      const addr = freshTemp(cx.e);
+      emitGepArrayBaseAt(ref cx, addr, count, elemTy, store.id, i);
+      emitStoreToPtr(ref cx, elemTy, value, addr);
+      i += 1;
+    }
+  }
+
+  // data pointer, then length, into a fresh descriptor.
+  const dataPtr = freshTemp(cx.e);
+  emitGepArrayBase(ref cx, dataPtr, count, elemTy, TEMP_SLOT_NAME, store.id);
+  const withData = freshTemp(cx.e);
+  emitInsertValue(ref cx, withData, "undef", "ptr", Operand.Temp { id: dataPtr }, 0);
+  const withLen = freshTemp(cx.e);
+  emitInsertValueTemp(ref cx, withLen, withData, "i64", Operand.Imm { value: uint64(count) }, 1);
+  out = Operand.Temp { id: withLen };
+  return "";
+}
+
+// `xs[i]` - step the data pointer, then load.
+export function emitIndexRead(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let addr: usize = 0;
+  const err = emitElementAddress(ref cx, expr, exprId, ref addr);
+  if (err.len > 0) {
+    return err;
+  }
+  const elemTy = typeOf(ref cx, exprId);
+  const dest = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, dest, elemTy, addr);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// `xs[i] = v` - the same address, then store.
+export function emitIndexWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): string {
+  let addr: usize = 0;
+  const err = emitElementAddress(ref cx, target, targetId, ref addr);
+  if (err.len > 0) {
+    return err;
+  }
+  emitStoreToPtr(ref cx, typeOf(ref cx, targetId), value, addr);
+  return "";
+}
+
+// `xs.len` - field 1 of the descriptor.
+export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  let base: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref base);
+  if (err.len > 0) {
+    return err;
+  }
+  const dest = freshTemp(cx.e);
+  emitExtractValue(ref cx, dest, base, 1);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+// The address of `xs[i]`, shared by the read and the write so the two cannot
+// disagree about how an element is located.
+function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr: usize): string {
+  let base: Operand = Operand.None;
+  const berr = emitExpr(ref cx, expr.childA, ref base);
+  if (berr.len > 0) {
+    return berr;
+  }
+  let index: Operand = Operand.None;
+  const ierr = emitExpr(ref cx, expr.childB, ref index);
+  if (ierr.len > 0) {
+    return ierr;
+  }
+
+  const dataPtr = freshTemp(cx.e);
+  emitExtractValue(ref cx, dataPtr, base, 0);
+  const elemAddr = freshTemp(cx.e);
+  emitGepElem(
+    ref cx, elemAddr, typeOf(ref cx, exprId),
+    Operand.Temp { id: dataPtr },
+    typeOf(ref cx, expr.childB), index
+  );
+  addr = elemAddr;
+  return "";
+}
+
+// The LLVM element type of an array-typed node.
+function elementLlvmType(ref cx: Cx, exprId: NodeId): string {
+  const arrayType = vec.vecGet(ref cx.tm.resolvedTypes, exprId);
+  switch (typeAt(cx.prog, arrayType)) {
+    case Type.Array { elem: e }: { return llvmType(cx.prog, e); }
+    default: { return "i8"; }
+  }
+}

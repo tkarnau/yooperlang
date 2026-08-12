@@ -8,6 +8,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { NodeId, ASTNodeKind } from "../ast";
 import { TokenTags, posToSourceLocation } from "../lex";
+import * as str from "std/core/strings.yoop";
 
 function parseReturnStatement(ref ps: ParserState): ParsingResult {
   SelfLexing.expect(ref ps, TokenTags.RETURN)?;
@@ -28,10 +29,70 @@ export function parseStatement(ref ps: ParserState): ParsingResult {
     case TokenTags.RETURN: {
       return Result.Ok { value: parseReturnStatement(ref ps)? };
     }
+    case TokenTags.IF: {
+      return Result.Ok { value: parseIfStatement(ref ps)? };
+    }
+    case TokenTags.WHILE: {
+      return Result.Ok { value: parseWhileStatement(ref ps)? };
+    }
+    case TokenTags.FOR: {
+      return Result.Ok { value: parseForStatement(ref ps)? };
+    }
+    case TokenTags.BREAK: {
+      return Result.Ok { value: parseLoopJump(ref ps, ASTNodeKind.BREAK_STATEMENT)? };
+    }
+    case TokenTags.CONTINUE: {
+      return Result.Ok { value: parseLoopJump(ref ps, ASTNodeKind.CONTINUE_STATEMENT)? };
+    }
     default: {
       return Result.Ok { value: parseExpressionStatement(ref ps)? };
     }
   }
+}
+
+// `if (cond) { ... }` with an optional `else { ... }` or `else if ...`.
+//
+//   childA = condition
+//   childB = then block
+//   childC = else branch: a BLOCK, or another IF_STATEMENT for `else if`
+//            (0 when there is no else)
+function parseIfStatement(ref ps: ParserState): ParsingResult {
+  SelfLexing.expect(ref ps, TokenTags.IF)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IF_STATEMENT);
+
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  node.childB = parseBlock(ref ps)?;
+
+  if (SelfLexing.peek(ref ps).tag == TokenTags.ELSE) {
+    SelfLexing.advance(ref ps)?;
+    // `else if` chains by nesting an IF_STATEMENT in the else slot, so codegen
+    // needs no special case for the chain.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.IF) {
+      node.childC = parseIfStatement(ref ps)?;
+    } else {
+      node.childC = parseBlock(ref ps)?;
+    }
+  }
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `while (cond) { ... }`
+//
+//   childA = condition
+//   childB = body block
+function parseWhileStatement(ref ps: ParserState): ParsingResult {
+  SelfLexing.expect(ref ps, TokenTags.WHILE)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.WHILE_STATEMENT);
+
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  node.childB = parseBlock(ref ps)?;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
 export function parseBlock(ref ps: ParserState): ParsingResult {
@@ -52,5 +113,94 @@ export function parseBlock(ref ps: ParserState): ParsingResult {
   SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
 
   // push node into ps...
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `for (let i = 0; i < n; i = i + 1) { ... }`
+//
+// Deliberately the same constrained shape as the JS reference rather than a
+// general three-statement C loop: the init and the step both target ONE named
+// counter. That keeps the node fixed-shape and matches what the language
+// actually offers.
+//
+//   name   = the counter
+//   flagA  = the init declares it (`let i = ...`) vs steps an outer one
+//   childA = its type annotation (0 = inferred from the initializer)
+//   childB = the initializer
+//   childC = the condition
+//   childD = the step expression
+//   childE = the body block
+function parseForStatement(ref ps: ParserState): ParsingResult {
+  SelfLexing.expect(ref ps, TokenTags.FOR)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FOR_LOOP);
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+
+  // `const` cannot be stepped, so refuse it by name rather than letting the
+  // step fail later with something less obvious.
+  if (SelfLexing.peek(ref ps).tag == TokenTags.CONST) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `a for-loop counter must be declared with "let" - "const" cannot be stepped`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+
+  node.flagA = SelfLexing.peek(ref ps).tag == TokenTags.LET;
+  if (node.flagA) {
+    SelfLexing.advance(ref ps)?;
+  }
+  node.name = parseIdentAsName(ref ps)?;
+  if (node.flagA && SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
+    SelfLexing.advance(ref ps)?;
+    node.childA = parseTypeAnnotation(ref ps)?;
+  }
+  SelfLexing.expect(ref ps, TokenTags.EQ)?;
+  node.childB = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  node.childC = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  // The step is an implicit assignment to the counter, so only the right-hand
+  // side is stored. `i = i + 1` today; the compound forms (`i += 1`) lower to
+  // the same shape once they parse.
+  const stepName = parseIdentAsName(ref ps)?;
+  if (!str.stringEq(stepName, node.name)) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `for-loop step must assign to the counter "${node.name}"`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+  // `i = i + 1` or the compound form `i += 1`. Both end up as the same stored
+  // right-hand side, so the compound spelling needs no new node kind - the same
+  // trick the JS reference uses in its step slot.
+  const stepCompound = binaryOpOfCompound(SelfLexing.peek(ref ps).tag);
+  if (stepCompound != TokenTags.NOTOKEN) {
+    SelfLexing.advance(ref ps)?;
+    let counterRead = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+    counterRead.name = node.name;
+    let combined = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.BINARY_EXPRESSION);
+    combined.operator = stepCompound;
+    combined.childA = SelfLexing.pushNode(ref ps, counterRead);
+    combined.childB = parseExpression(ref ps, 0)?;
+    node.childD = SelfLexing.pushNode(ref ps, combined);
+  } else {
+    SelfLexing.expect(ref ps, TokenTags.EQ)?;
+    node.childD = parseExpression(ref ps, 0)?;
+  }
+
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  node.childE = parseBlock(ref ps)?;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `break;` / `continue;` - just the keyword. Whether one is legal HERE is a
+// typecheck question (it needs an enclosing loop), not a parse one.
+function parseLoopJump(ref ps: ParserState, kind: ASTNodeKind): ParsingResult {
+  let node = SelfLexing.buildSourcedNode(ref ps, kind);
+  SelfLexing.advance(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
