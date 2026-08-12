@@ -1,0 +1,43 @@
+module typecheck;
+
+// A module-level name binding.
+//
+// One symbol namespace per module (a module scope is Map<string, SymbolId>)
+// replaces the JS reference's 13-table split across structTable / traitTable /
+// variantTable / the generic* tables / importedNames. Name lookup becomes one
+// `get` plus one `switch`, and the redeclaration check becomes one `has`.
+
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId } from "../ast";
+
+// Which generic-decl family a `Symbol.GenericDecl` points at. Replaces the JS
+// genericStructTable / genericFuncTable / genericTraitTable / genericVariantTable
+// four-table split with one tag; the decl itself lives in a side table keyed by
+// DeclId. Concrete instantiations never live here - they go in the registry.
+export enum GenericSort { STRUCT, FUNC, TRAIT, VARIANT }
+
+// A module-level name binding. One symbol namespace per module (a module scope
+// is Map<string, SymbolId>) replaces the JS 13-table split; the value here says
+// what the name means, so lookup is one get + one switch.
+//
+// The eight type-carrying cases (Struct..Vtable) could collapse into a single
+// `Type { typeId }`, since Program.types[typeId] already discriminates which
+// nominal kind it is - kept explicit here for 1:1 readability against the JS
+// tables. Collapse if the redundancy bites. Symbol is all-scalar (no Vec/Map),
+// so unlike Type it needs no `propagates` clause.
+@derive(display)
+export variant Symbol {
+  Struct      { typeId: TypeId },
+  Func        { typeId: TypeId },         // a named function's FuncType
+  Value       { typeId: TypeId },         // a module-level const binding
+  Trait       { typeId: TypeId },
+  VariantT    { typeId: TypeId },         // tagged `variant` (enum-with-payload)
+  Union       { typeId: TypeId },
+  ValueEnum   { typeId: TypeId },
+  Vtable      { typeId: TypeId },
+  Alias       { annot: NodeId, home: ModuleId },   // transparent `type X = ...` RHS
+  Kind        { kindId: KindId },         // a kind decl (disposable, tainted, ...)
+  GenericDecl { decl: DeclId, sort: GenericSort }, // stays out of the concrete tables
+  Namespace   { module: ModuleId },       // `import * as ns`
+  Imported    { target: SymbolId },       // by-name import: a redirect to another module's symbol
+}

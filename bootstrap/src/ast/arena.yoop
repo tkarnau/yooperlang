@@ -1,6 +1,26 @@
+module ast;
+
+// The AST arena itself: one owned Vec of nodes, one flat pool of child ids, and
+// one string pool. A whole module's AST is a single value you can pass, dump,
+// and diff against the JS reference.
+//
+// `childIds` is the variable-arity story. A node's own run of children is a
+// (childStart, childCount) slice into this pool; any SECOND list a kind needs is
+// reached through a named child slot pointing at a NODE_LIST node whose own
+// slice holds it. That is what keeps ASTNode a fixed-size struct.
+
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, SourceLocation, TokenTags } from "../contracts.yoop";
+import { TokenTags } from "../lex";
+import { SourceLocation } from "../diagnostics";
+
+@derive(display)
+export type AST propagates<disposable> {
+  nodes: Vec<ASTNode>,
+  childIds: Vec<NodeId>,
+  strings: Vec<string>, // string pool: decoded string-literal text
+  root: NodeId,
+}
 
 export function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocation): ASTNode {
   return {
@@ -40,6 +60,14 @@ export function emptyArena(): AST propagates<disposable> {
   };
 }
 
+// The i'th child in a node's own childIds run. Callers are responsible for
+// staying inside `node.childCount`.
 export function childAt(ref ast: AST, node: ASTNode, i: usize): NodeId {
   return vec.vecGet(ref ast.childIds, node.childStart + i);
+}
+
+// The node a NodeId names. Reads better than the vecGet at every call site, and
+// gives us one place to put a bounds assertion later.
+export function nodeAt(ref ast: AST, id: NodeId): ASTNode {
+  return vec.vecGet(ref ast.nodes, id);
 }

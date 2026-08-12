@@ -1,5 +1,11 @@
-import { Iterable, IterStep } from "std/core/traits.yoop";
-import { Vec } from "std/core/vec.yoop";
+module utils;
+
+// Generic in-place sorting. `Comparable<T>` is the ordering a caller supplies;
+// everything else here is the quicksort that consumes it.
+//
+// This lives in the bootstrap rather than in std because it is the first thing
+// that wanted a user-supplied ordering, and std has no sort yet. Move it to std
+// the moment a second consumer appears.
 
 export trait Comparable<T> {
   function compare(ref self, b: T): int8;
@@ -38,22 +44,4 @@ export function quickSort<T implements Comparable<T>>(arr: T[], low: usize, high
     quickSort(arr, low, p - 1);
   }
   quickSort(arr, p + 1, high);
-}
-
-export type IterableVec<T> implements Iterable<T> {
-  data: T[],
-  cur: usize,
-  end: usize,
-  function next(ref self): IterStep<T> {
-    if (self.cur >= self.end) {
-      return IterStep.Done;
-    }
-    let v = self.data[self.cur];
-    self.cur += 1;
-    return IterStep.Yield { value: v };
-  }
-}
-
-export function vecIter<T>(v: ref Vec<T>): IterableVec<T> {
-  return { data: v.data, cur: 0, end: v.len };
 }

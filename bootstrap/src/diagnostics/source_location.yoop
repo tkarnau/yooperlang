@@ -1,0 +1,20 @@
+module diagnostics;
+
+// A span inside ONE source file: the byte offset it starts at, the line and
+// column it renders as, and how many bytes it covers.
+//
+// There is deliberately no file reference here, matching the JS reference
+// (src/helpers.js). A diagnostic learns its file from the module that produced
+// it, which is what keeps a location small enough to sit on every AST node.
+
+import { Display } from "std/core/traits.yoop";
+
+export type SourceLocation implements Display {
+  pos: usize,
+  line: usize,
+  column: usize,
+  length: usize,
+  function toString(ref self): string {
+    return `pos: ${self.pos}, line: ${self.line}, column: ${self.column}, length: ${self.length}`;
+  }
+}

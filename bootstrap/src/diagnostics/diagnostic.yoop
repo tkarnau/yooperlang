@@ -1,0 +1,26 @@
+module diagnostics;
+
+// The accumulating error channel (decision D3 in
+// plans/bootstrap-pipeline-contracts.md).
+//
+// Lex and parse fail fast and hand back a ParsingError; typecheck instead
+// COLLECTS Diagnostics and never stops, so the user sees every error in one
+// run. Both shapes point into the original source through a SourceLocation,
+// which is the part the contract actually pins.
+
+export enum Severity { ERROR, WARNING }
+
+@derive(display)
+export type Diagnostic {
+  message: string,
+  sourceLoc: SourceLocation,
+  severity: Severity,
+}
+
+export function errorAt(message: string, sourceLoc: SourceLocation): Diagnostic {
+  return { message: message, sourceLoc: sourceLoc, severity: Severity.ERROR };
+}
+
+export function warningAt(message: string, sourceLoc: SourceLocation): Diagnostic {
+  return { message: message, sourceLoc: sourceLoc, severity: Severity.WARNING };
+}

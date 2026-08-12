@@ -1,0 +1,51 @@
+module source_graph;
+
+// Import-path resolution. Dormant until the parser emits IMPORT_DECL nodes and
+// the graph goes multi-module; kept because it is standalone path logic, not a
+// layer-interfacing assumption.
+
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result } from "std/core/types.yoop";
+
+export function resolveImportPath(
+  importerAbsPath: string,
+  sourcePath: string,
+  stdRoot: string
+): Result<string, string> {
+  if (!fs.hasYoopFileNameSuffix(sourcePath)) {
+    return Result.Err { error: `import path "${sourcePath}" must end in .yoop` };
+  }
+
+  const isStd = str.stringStartsWith(sourcePath, "std/");
+  let joinedPath: string;
+  if (isStd) {
+    const rest = str.sliceFrom(sourcePath, 4); // drop "std/", root at stdRoot
+    joinedPath = fs.pathJoin([stdRoot, rest]);
+  } else {
+    const isRel = str.stringStartsWith(sourcePath, "./")
+      || str.stringStartsWith(sourcePath, "../");
+    const isAbs = str.stringStartsWith(sourcePath, "/");
+    if (!isRel && !isAbs) {
+      return Result.Err {
+        error: `import path "${sourcePath}" must be relative (./...), absolute, or start with std/`
+      };
+    }
+    if (isAbs) {
+      joinedPath = sourcePath;
+    } else {
+      const baseDir = fs.dirName(importerAbsPath);
+      joinedPath = fs.pathJoin([baseDir, sourcePath]);
+    }
+  }
+
+  const canonicalPath = fs.normalizePath(joinedPath);
+  if (canonicalPath.len == 0) {
+    return Result.Err { error: `unable to identify a canonical path from ${joinedPath}` };
+  }
+  if (!fs.exists(canonicalPath)) {
+    return Result.Err { error: `cannot resolve import ${sourcePath} from ${importerAbsPath}: file not found` };
+  }
+
+  return Result.Ok { value: canonicalPath };
+}

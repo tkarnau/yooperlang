@@ -1,0 +1,114 @@
+module typecheck;
+
+// The whole-program typecheck state, and the interners that grow it.
+//
+// Types and symbols are interned ONCE across the program, so a TypeId or a
+// SymbolId means the same thing in every module. Per-module name maps point
+// into the shared `symbols` arena, which is what reduces an import to a name
+// binding rather than a table merge.
+//
+// Diagnostics are accumulated here rather than returned as a Result: the point
+// of the typecheck layer is to report every error in one run.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Diagnostic, SourceLocation, errorAt } from "../diagnostics";
+
+// Per-module typecheck state, indexed positionally by ModuleId (parallel to the
+// driver's module list). This does NOT own the module's AST - the ModuleGraph
+// does; decoration references nodes by NodeId (decision D2), so codegen reads
+// the AST from the graph and the resolved types from here, correlated by index.
+@derive(display)
+export type TypedModule propagates<disposable> {
+  moduleId: string,               // stable id copied from Module.id; mangling basis
+  names: Map<string, SymbolId>,   // the one symbol namespace (replaces the 13 JS tables)
+  exports: Map<string, SymbolId>, // the exported subset of `names`
+  resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
+  allowsUnsafe: bool,
+  // Sparse decorations (calleeMangled, genericInstances, castTargets, ...) are
+  // added as Map<NodeId, T> slots here when the checker needs them.
+}
+
+@derive(display)
+export type Program propagates<disposable> {
+  types: Vec<Type>,             // interned; indexed by TypeId (low ids reserved for singletons)
+  symbols: Vec<Symbol>,         // interned; indexed by SymbolId
+  modules: Vec<TypedModule>,    // by ModuleId; parallel to the driver's modules
+  diagnostics: Vec<Diagnostic>,
+  // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
+}
+
+// The reserved singletons are pushed here, in the order ids.yoop declares them.
+// Anything that changes this order has to change those constants too.
+export function initProgram(): Program propagates<disposable> {
+  let types: Vec<Type> = vec.vecNew(8);
+  vec.vecPush(ref types, Type.ErrorT);      // TYPE_ERROR_ID
+  vec.vecPush(ref types, Type.Void);        // TYPE_VOID_ID
+  vec.vecPush(ref types, Type.UntypedInt);  // TYPE_UNTYPED_INT_ID
+
+  // SymbolId 0 must never be a real symbol, so a "not found" 0 stays
+  // unambiguous. Burn index 0 on a dead entry.
+  let symbols: Vec<Symbol> = vec.vecNew(8);
+  vec.vecPush(ref symbols, Symbol.Value { typeId: TYPE_ERROR_ID });
+
+  return {
+    types: types,
+    symbols: symbols,
+    modules: vec.vecNew(0),
+    diagnostics: vec.vecNew(0),
+  };
+}
+
+export function initTypedModule(moduleId: string): TypedModule propagates<disposable> {
+  return {
+    moduleId: moduleId,
+    names: map.mapNew(0, map.stringKeyOps()),
+    exports: map.mapNew(0, map.stringKeyOps()),
+    resolvedTypes: vec.vecNew(0),
+    allowsUnsafe: false,
+  };
+}
+
+/*
+  Interning
+
+  Interning might not be familiar from outside systems work, but it is the same
+  idea as JS Symbol: hand out one unique, shared handle for a value so everyone
+  downstream compares handles instead of contents.
+
+  Note these do NOT deduplicate yet. Structural types (Ref<T>, Array<T>, Func)
+  should collapse to one id per distinct shape, or `id == id` equality will call
+  two identical types different. That lands with the first pass that compares
+  structural types; nominal types are already unique by decl.
+*/
+
+export function internType(ref prog: Program, t: Type): TypeId {
+  vec.vecPush(ref prog.types, t);
+  return prog.types.len - 1;
+}
+
+export function internSymbol(ref prog: Program, s: Symbol): SymbolId {
+  vec.vecPush(ref prog.symbols, s);
+  return prog.symbols.len - 1;
+}
+
+// Replace an arena slot in place. This is the value-semantic stand-in for the
+// JS reference mutating a shared shell object: pass A interns a shell, pass C
+// calls this with the filled version, and every TypeId already pointing at the
+// slot sees it.
+export function setType(ref prog: Program, id: TypeId, t: Type): void {
+  vec.vecSet(ref prog.types, id, t);
+}
+
+export function typeAt(ref prog: Program, id: TypeId): Type {
+  return vec.vecGet(ref prog.types, id);
+}
+
+export function symbolAt(ref prog: Program, id: SymbolId): Symbol {
+  return vec.vecGet(ref prog.symbols, id);
+}
+
+export function reportError(ref prog: Program, message: string, sourceLoc: SourceLocation): void {
+  vec.vecPush(ref prog.diagnostics, errorAt(message, sourceLoc));
+}

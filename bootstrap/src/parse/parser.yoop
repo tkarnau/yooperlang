@@ -1,15 +1,18 @@
-import * as debug from "std/debug.yoop";
-import { Result, Option } from "std/core/types.yoop";
+module parse;
+
+// Layer 2 entry point: source bytes -> one AST arena rooted at a PROGRAM node.
+//
+// Everything below this file is a recursive descent over the same ParserState;
+// the files are split by what they parse (types, functions, statements,
+// expressions, ...), not by layering, and they all see each other because they
+// are one directory module.
+
+import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import * as bytes from "std/core/bytes.yoop";
-import { AST, ASTNode, ASTNodeKind, NodeId, TokenTags, tagName, SourceLocation, ParsingError } from "../contracts.yoop";
-import { Token, LexedVal, createLexedVal, lexNext } from "./lexer.yoop";
-import { skipWhitespace, posToSourceLocation } from "./char_utils.yoop";
-import { SelfLexing, ParserState, peekLengthUsize } from "./parsing/parser_state.yoop";
-import { emptyArena } from "../utils/ast_utils.yoop";
-import { parseTypeDecl } from "./parsing/types.yoop";
-import { parseFunctionDecl } from "./parsing/functions.yoop";
+import { AST, ASTNodeKind, NodeId, emptyArena } from "../ast";
+import { TokenTags, tagName, createLexedVal } from "../lex";
+import { ParsingError } from "../diagnostics";
 
 
 // main parsing logic, starts with top level and handles all child levels

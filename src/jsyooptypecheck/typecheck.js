@@ -16,7 +16,11 @@ import { expandDerives } from "../jsyoopderive/expand.js";
 import {
   ArrayType,
   VariantType,
+  UnionShell,
+  fillUnionShell,
   ValueEnumType,
+  ValueEnumShell,
+  fillValueEnumShell,
   ErrorType,
   isIntPrim,
   FuncType,
@@ -2253,8 +2257,9 @@ export function typecheckProgram(modules) {
             sourceLoc: d.sourceLoc,
           });
         } else {
-          // Shell - fields filled in pass C.
-          unionTable.set(d.name, UnionType(d.name, [], mod.id));
+          // Shell - fields filled IN PLACE in pass C, so a reference resolved
+          // before then still sees them. See UnionShell in types.js.
+          unionTable.set(d.name, UnionShell(d.name, mod.id));
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
@@ -2274,8 +2279,10 @@ export function typecheckProgram(modules) {
             sourceLoc: d.sourceLoc,
           });
         } else {
-          // Shell - underlying is null + cases empty; pass C fills both.
-          enumTable.set(d.name, ValueEnumType(d.name, null, new Map(), [], new Map(), mod.id, false));
+          // Shell - underlying is null + cases empty; pass C fills both IN
+          // PLACE, so anything that resolves this name before then still sees
+          // the finished enum. See ValueEnumShell in types.js.
+          enumTable.set(d.name, ValueEnumShell(d.name, mod.id));
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
@@ -3215,7 +3222,13 @@ export function typecheckProgram(modules) {
           }
           fields.push({ name: f.name, type: ft });
         }
-        const fullUnion = UnionType(d.name, fields, mod.id);
+        // Fill the pass-A shell in place; fall back to a fresh UnionType if the
+        // table entry is not our shell (a redeclaration replaced it).
+        const unionShell = unionTable.get(d.name);
+        const fullUnion =
+          unionShell && !Object.isFrozen(unionShell)
+            ? fillUnionShell(unionShell, fields)
+            : UnionType(d.name, fields, mod.id);
         d.resolvedType = fullUnion;
         unionTable.set(d.name, fullUnion);
       }
@@ -3287,15 +3300,27 @@ export function typecheckProgram(modules) {
           priorValue = value;
           ordinal++;
         }
-        const fullEnum = ValueEnumType(
-          d.name,
-          underlying ?? PrimType("int32"),
-          cases,
-          [],
-          new Map(),
-          mod.id,
-          isOpen,
-        );
+        // Fill the pass-A shell IN PLACE. Replacing the table entry left a
+        // sibling file's already-resolved reference pointing at an enum with a
+        // null underlying (see ValueEnumShell). Falls back to a fresh
+        // ValueEnumType if the entry is not our shell - e.g. a redeclaration
+        // replaced it.
+        const enumShell = enumTable.get(d.name);
+        const resolvedUnderlying = underlying ?? PrimType("int32");
+        const fullEnum =
+          enumShell &&
+          !Object.isFrozen(enumShell) &&
+          enumShell.underlying === null
+            ? fillValueEnumShell(enumShell, resolvedUnderlying, cases, isOpen)
+            : ValueEnumType(
+                d.name,
+                resolvedUnderlying,
+                cases,
+                [],
+                new Map(),
+                mod.id,
+                isOpen,
+              );
         d.resolvedType = fullEnum;
         enumTable.set(d.name, fullEnum);
       }

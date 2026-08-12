@@ -1,10 +1,10 @@
+module parse;
+
+// `let` / `const` bindings, with or without a kind prefix.
+
 import { Result } from "std/core/types.yoop";
-import { ParsingResult, TokenTags, ASTNodeKind } from "../../contracts.yoop";
-import { ParserState, SelfLexing as sl } from "./parser_state.yoop";
-import { Token } from "../lexer.yoop";
-import { parseIdentAsName } from "./names.yoop";
-import { parseTypeAnnotation } from "./types.yoop";
-import { parseExpression } from "./expressions.yoop";
+import { ASTNodeKind } from "../ast";
+import { TokenTags, Token } from "../lex";
 
 export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // Three accepted shapes here:
@@ -14,12 +14,12 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // Shape (3) is dispatched in parseStatement; (1) and (2) start with let/const.
   let declToken: Token;
   declToken.tag = TokenTags.NOTOKEN;
-  if (sl.peek(ref ps).tag == TokenTags.LET || sl.peek(ref ps).tag == TokenTags.CONST) {
-    declToken = sl.advance(ref ps)?;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.LET || SelfLexing.peek(ref ps).tag == TokenTags.CONST) {
+    declToken = SelfLexing.advance(ref ps)?;
   }
 
   // destructuring
-  if (declToken.tag != TokenTags.NOTOKEN && sl.peek(ref ps).tag == TokenTags.LCURLY) {
+  if (declToken.tag != TokenTags.NOTOKEN && SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
     // todo...
   }
   // todo kindprefix stuff
@@ -28,13 +28,13 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
     nodeKind = ASTNodeKind.LET_DECL;
   }
 
-  let node = sl.buildSourcedNode(ref ps, nodeKind);
+  let node = SelfLexing.buildSourcedNode(ref ps, nodeKind);
   node.name = parseIdentAsName(ref ps)?;
 
   // type annotation is optional, when omitted, the typechecker infers
   // the binding's type from its initializer
-  if (sl.peek(ref ps).tag == TokenTags.COLON) {
-    sl.advance(ref ps)?; // consume the colon
+  if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
+    SelfLexing.advance(ref ps)?; // consume the colon
     node.childA = parseTypeAnnotation(ref ps)?;
   }
 
@@ -44,13 +44,13 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // plain let/const path
 
   // if it is just a semicolon, it is uninitialized...
-  if (sl.peek(ref ps).tag == TokenTags.SEMICOLON) {
-    sl.advance(ref ps)?;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
+    SelfLexing.advance(ref ps)?;
   } else { // otherwise it is a regular assignment
-    sl.expect(ref ps, TokenTags.EQ)?;
+    SelfLexing.expect(ref ps, TokenTags.EQ)?;
     node.childB = parseExpression(ref ps, 0)?;
-    sl.expect(ref ps, TokenTags.SEMICOLON)?;
+    SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
   }
 
-  return Result.Ok { value: sl.pushNode(ref ps, node ) };
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
 }

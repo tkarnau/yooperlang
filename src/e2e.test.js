@@ -1876,6 +1876,19 @@ describe("e2e: multi-file pass fixtures compile and produce expected output", { 
     assert.equal(exitCode, 0);
     assert.equal(stdout, "(1, 2)\n");
   });
+
+  // Regression: pass C used to REPLACE the enum/union table entry rather than
+  // fill the pass-A shell in place. Files inside one module have no dependency
+  // order, so the sibling that sorts first resolved both types while they were
+  // still shells and kept holding them - the enum arrived with a null
+  // `underlying` ("cannot switch over enum Color") and the union with empty
+  // fields ("union Bits has no field asInt"). The fixture's filenames are load
+  // bearing: aa_uses.yoop must sort before zz_decls.yoop.
+  it("dir_module_shell_order: enum/union shells are filled in place, not replaced", async () => {
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/dir_module_shell_order/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(stdout, "green\nbits=42\n");
+  });
 });
 
 // Phase 13.C: @derive(display) - pre-typecheck expansion generates the

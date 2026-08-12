@@ -1,12 +1,15 @@
+module parse;
+
+// Lookahead helpers that answer a shape question without consuming anything.
+
 import { Result, Option } from "std/core/types.yoop";
-import { TokenTags, ParsingError } from "../../contracts.yoop";
-import { ParserState, SelfLexing as sl } from "./parser_state.yoop";
+import { TokenTags } from "../lex";
 
 export function findMatchingRParen(ref ps: ParserState, lParentIdx: usize): Option<usize> {
   let depth = 1;
   let i = lParentIdx + 1;
   while (depth > 0) {
-    const peekAheadResult = sl.peekAhead(ref ps, 1);
+    const peekAheadResult = SelfLexing.peekAhead(ref ps, 1);
     switch (peekAheadResult) {
       case Result.Err { error: e }: {
         return Option.None {}; // ignore this error, as we may peek too far and that's ok

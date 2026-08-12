@@ -1,13 +1,29 @@
+module parse;
+
+// What every parse function is handed: the cursor, the arena being built, and
+// the source it reads from.
+//
+// The parser lexes ON DEMAND (one token of lookahead in `currentLex`, more via
+// `peekAhead`) rather than consuming a materialized token stream. That is a
+// deliberate deviation from the layer contract's `parse(tokens)` shape - the
+// boundary still holds, since `tokenize` exists and produces the same stream.
+//
+// `SelfLexing` is a trait rather than plain functions so the cursor operations
+// read as methods on the state; ParserState is its only implementer.
+
 import { Result, Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import * as bytes from "std/core/bytes.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import * as Log from "std/log.yoop";
 
-import { AST, ASTNode, ASTNodeKind, NodeId, TokenTags, tagName, SourceLocation, ParsingError } from "../../contracts.yoop";
-import { Token, LexedVal, createLexedVal, lexNext } from "../lexer.yoop";
-import { skipWhitespace, posToSourceLocation } from "../char_utils.yoop";
-import { createASTNode } from "../../utils/ast_utils.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, createASTNode } from "../ast";
+import { TokenTags, tagName, Token, LexedVal, createLexedVal, lexNext, posToSourceLocation } from "../lex";
+import { SourceLocation, ParsingError } from "../diagnostics";
+
+// What a parse function hands back: the NodeId it appended to the arena, or the
+// first error it hit. Parsing fails fast; typecheck is the layer that
+// accumulates (see diagnostics/diagnostic.yoop).
+export type ParsingResult = Result<NodeId, ParsingError>;
 
 export trait SelfLexing {
   function advance(ref self): Result<Token, ParsingError>;

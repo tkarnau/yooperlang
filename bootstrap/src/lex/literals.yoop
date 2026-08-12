@@ -1,85 +1,17 @@
-/* 
-  Author: Tom Karnau
+module lex;
 
-  
-  Main lexer logic
-*/
+// The three literal forms that need real scanning: char literals (escapes and
+// UTF-8 decoding), numeric literals (base prefixes, digit separators, floats),
+// and the identifier/keyword run.
+//
+// Each takes the source and a start position and hands back a LexedVal, the
+// same shape lexNext returns, so the dispatch in lexer.yoop stays a flat list
+// of "is it this? then this."
 
-import * as vec, { Vec } from "std/core/vec.yoop";
 import * as bytes from "std/core/bytes.yoop";
-import * as log from "std/log.yoop";
-import * as intr from "std/core/intrinsics.yoop";
 import * as numbers from "std/core/numbers.yoop";
 import * as strings from "std/core/strings.yoop";
 import { Result } from "std/core/types.yoop";
-import { Disposable, disposable } from "std/core/kinds.yoop";
-import { Display, Into } from "std/core/traits.yoop";
-import {
-  skipWhitespace,
-  isHexDigit,
-  scanStringLiteral,
-  isDigit,
-  scanHexDigitsAndUnderscores,
-  scanBinDigitsAndUnderscores,
-  scanOctDigitsAndUnderscores,
-  scanDecDigitsAndUnderscores,
-  scanIdentity,
-  isIdentStart,
-  digitValue,
-  posToSourceLocation,
-} from "./char_utils.yoop";
-import { TokenTags, ParsingError, tagName, tokenScanList, keywordList } from "../contracts.yoop";
-
-export type Token implements Display {
-  tag: TokenTags,
-  start: usize,
-  length: int,
-  intVal: uint64,
-  floatVal: float64,
-  function toString(ref self): string {
-    return `tag: ${tagName(self.tag)}, start: ${self.start}, length ${self.length}, intVal: ${self.intVal}, floatVal: ${self.floatVal}`;
-  }
-}
-
-export type LexedVal {
-  token: Token,
-  nextPos: usize,
-}
-
-type LexedError implements (Display, Into<ParsingError>) {
-  src: ref uint8[],
-  pos: usize,
-  error: string,
-  function toString(ref self): string {
-    return `pos: ${self.pos}, err: ${self.error}`;
-  }
-  function into(ref self): ParsingError {
-    return {
-      sourceLoc: posToSourceLocation(self.src, self.pos, usize(1)),
-      isParseError: true,
-      rawMessage: self.error,
-      src: self.src,
-      err: `parsing error from lexing: ${self.error}`
-    };
-  }
-}
-
-function createLexedError(ref src: uint8[], pos: usize, error: string): Result<LexedVal, LexedError> {
-  return Result.Err { error: { error: error, pos: pos, src: ref src } };
-}
-
-export function createLexedVal(): LexedVal {
-  return {
-    token: {
-      tag: TokenTags.EOF,
-      start: 0,
-      length: 0,
-      intVal: 0,
-      floatVal: 0.0,
-    },
-    nextPos: 0
-  };
-}
 
 function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
   let res = createLexedVal();
@@ -415,10 +347,10 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
 
   // Default to a plain identifier; promote to a keyword tag on an exact match.
   // This is the array-scan analogue of the JS `keywordTagList[value]` lookup -
-  // Yoop has no map indexing operator, so we mirror `tokenScanList` and walk
+  // Yoop has no map indexing operator, so we mirror `TOKEN_SCAN_LIST` and walk
   // the small reserved-word table with `stringEq`.
   res.token.tag = TokenTags.IDENT;
-  for kw in keywordList {
+  for kw in KEYWORD_LIST {
     if (strings.stringEq(str, kw.str)) {
       res.token.tag = kw.tag;
       break;
@@ -426,109 +358,4 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
   }
 
   return Result.Ok { value: res };
-}
-
-export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedError> {
-  let res = createLexedVal();
-  res.token.start = pos;
-  res.nextPos = pos;
-
-  // skip whitespace
-  let p = skipWhitespace(src, pos);
-  if (p >= src.len) {
-    res.token.tag = TokenTags.EOF;
-    res.token.start = p;
-    res.nextPos = p;
-
-    return Result.Ok { value: res };
-  }
-
-  let ch = src[p];
-
-  // common language token?
-  for tokenScanObj in tokenScanList {
-    if (p + (tokenScanObj.str.len - 1) >= src.len) {
-      continue; // not enough string left
-    }
-
-    // need to figure out how to do substring from bytes array in this language
-    const scanAheadSlice = bytes.bytesSlice(src, p, p + tokenScanObj.str.len);
-    const tokenBytes = intr.stringAsBytes(tokenScanObj.str);
-    if (bytes.bytesEq(scanAheadSlice, tokenBytes)) {
-      res.token.tag = tokenScanObj.tag;
-      res.token.start = p;
-      res.token.length = int32(tokenScanObj.str.len);
-      res.nextPos = p + tokenScanObj.str.len;
-
-      return Result.Ok { value: res };
-    }
-  }
-
-  // char literal?
-  if (ch == '\'') {
-    return lexCharLiteral(src, p);
-  }
-
-  // string literal?
-  if (ch == '"' || ch == '`') {
-    let end = scanStringLiteral(src, p);
-    switch (end) {
-      case Option.None {}: {
-        return createLexedError(ref src, pos, "unterminated string literal");
-      }
-      case Option.Some { value: newPos }: {
-        if (ch == '`') {
-          res.token.tag = TokenTags.TEMPLATELITERAL;
-        } else {
-          res.token.tag = TokenTags.STRLITERAL;
-        }
-        res.token.start = p;
-        res.token.length = int32(newPos - p);
-        res.nextPos = newPos;
-
-        return Result.Ok { value: res };
-      }
-    }
-  }
-
-  // numeric literal?
-  if (isDigit(ch)) {
-    return lexNumericLiteral(src, p);
-  }
-
-  // identifier or keyword?
-  if (isIdentStart(ch)) {
-    return lexIdentifierOrKeyword(src, p);
-  }
-
-  return createLexedError(ref src, pos, "unrecognized character at position");
-}
-
-// we need to do so much single-character peeking and processing
-// that we will just use a uint8[] instead of a string for lexing.
-export function tokenize(src: uint8[]): Result<Token[], string> {
-  // should just allocate enough space for all possible / 2 for now... this might be a mistake :)
-  disposable tokens: Vec<Token> = vec.vecNew((src.len / 2) + 1); // minimum of 1
-  let pos: usize = 0;
-  let iters = 0;
-  const maxIters = int32(src.len * 2 + 100);
-
-  while (iters < maxIters) {
-    iters = iters + 1;
-    const lexResult = lexNext(ref src, pos);
-    switch (lexResult) {
-      case Result.Err { error: e } : {
-        return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };
-      }
-      case Result.Ok { value: v } : {
-        vec.vecPush(ref tokens, v.token); // push either way for now...
-        if (v.token.tag == TokenTags.EOF) {
-          return Result.Ok { value: vec.vecAsArray(ref tokens) };
-        }
-        pos = v.nextPos;
-      }
-    }
-  }
-
-  return Result.Err { error: "tokenize: exceeded iteration failsafe" };
 }

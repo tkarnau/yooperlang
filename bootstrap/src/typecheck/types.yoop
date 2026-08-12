@@ -1,0 +1,122 @@
+module typecheck;
+
+// The interned type.
+//
+// Every inner type reference is a TypeId, never a nested Type value. That
+// indirection is what sidesteps recursive value ownership, and it is what lets
+// a pass "fill a shell": pass A inserts a Struct with empty fields, pass C
+// re-sets the same arena slot with the fields resolved, and every TypeId
+// pointing at it sees the filled version.
+//
+// Mirrors the ~22 constructors in src/jsyooptypecheck/types.js, minus KindType.
+// A kind is a DECL, not a value's type, so it lives in the symbol table
+// (Symbol.Kind) - which drops the single heaviest, most-mutable JS type case
+// out of the type arena entirely.
+
+import { Vec } from "std/core/vec.yoop";
+import { Map } from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// Canonical primitive kinds. Resolution canonicalizes source spellings up front
+// (`int` -> INT32, `float` -> FLOAT32, the c_* aliases -> their LP64 widths), so
+// the arena only ever holds a canonical PrimKind, never a raw name string.
+export enum PrimKind {
+  INT8, INT16, INT32, INT64, ISIZE,
+  UINT8, UINT16, UINT32, UINT64, USIZE,
+  FLOAT32, FLOAT64,
+  BOOL, STRING,
+}
+
+// Identity shared by every nominal type (struct / variant / union / enum /
+// trait / vtable). `populated` is the shell/filled bit: pass A registers a shell
+// (populated = false, empty member lists) so cross-module and forward refs
+// resolve; pass C re-sets the arena slot with populated = true once fields /
+// methods are known. This is the value-semantic replacement for the JS
+// `fields: null` shell sentinel.
+@derive(display)
+export type NominalDecl {
+  name: string,
+  module: ModuleId,
+  populated: bool,
+}
+
+// When a nominal type is an instantiation of a generic decl, `origin` names the
+// generic decl and `args` are the type-args used. `origin == 0` means "not an
+// instance". Substitution re-instantiates open instances (args that are
+// themselves TypeParams) through the registry.
+@derive(display)
+export type GenericInst propagates<disposable> {
+  origin: DeclId,
+  args: Vec<TypeId>,
+}
+
+@derive(display)
+export type Field {
+  name: string,
+  typeId: TypeId,
+}
+
+// One case of a tagged `variant`. `ordinal` is the stable 0-indexed
+// declaration-order tag and is ABI: reordering cases changes the emitted i32
+// discriminator. Empty `fields` = a payload-less case.
+@derive(display)
+export type VariantCase propagates<disposable> {
+  name: string,
+  ordinal: int,
+  fields: Vec<Field>,
+}
+
+// One case of a value `enum`. `value` is the case's compile-time constant of the
+// enum's underlying primitive. For `enum<string>` the constant is a string;
+// store its string-pool index here (or add a valueStr slot) when Phase-12 string
+// enums land in the bootstrap.
+@derive(display)
+export type EnumCase {
+  name: string,
+  ordinal: int,
+  value: int64,
+}
+
+// The interned type. Every inner type reference is a `TypeId` (an arena index),
+// never a nested `Type` value - that indirection is what sidesteps recursive
+// value ownership and lets a pass "fill a shell" by re-setting one slot. Mirrors
+// the ~22 constructors in src/jsyooptypecheck/types.js, minus KindType (now a
+// Symbol) and with the JS mutable exceptions (Struct.fields, Trait.methods,
+// TypeParam.bounds) folded into the uniform shell-then-reset pattern.
+@derive(display)
+export variant Type propagates<disposable> {
+  // Leaves: no inner TypeId. The singletons below should get RESERVED low
+  // TypeIds allocated once at Program init, so equality on them is `id == id`.
+  Prim            { prim: PrimKind },
+  Void,
+  UntypedInt,
+  UntypedFloat,
+  UntypedNull,
+  ErrorT,
+  SelfPlaceholder,                        // trait-method `ref self` placeholder
+
+  // Structural: compose other TypeIds.
+  Ref       { inner: TypeId },
+  Array     { elem: TypeId },
+  Task      { result: TypeId },
+  UnsafePtr { pointee: TypeId },          // pointee 0 = opaque `unsafe_ptr` (no <T>)
+  Func      { params: Vec<TypeId>, ret: TypeId, variadic: bool },
+  FuncPtr   { params: Vec<TypeId>, ret: TypeId },   // `(p: T) => R` value type
+  Namespace { module: ModuleId },         // `import * as ns`; exports on the scope
+
+  // Nominal: named, per-module, shell-then-filled (see NominalDecl.populated).
+  Struct    { decl: NominalDecl, fields: Vec<Field>, methods: Map<string, TypeId>,
+              implementsTraits: Vec<TypeId>, generic: GenericInst },
+  Variant   { decl: NominalDecl, cases: Vec<VariantCase>, methods: Map<string, TypeId>,
+              implementsTraits: Vec<TypeId>, generic: GenericInst },
+  Union     { decl: NominalDecl, fields: Vec<Field> },
+  ValueEnum { decl: NominalDecl, underlying: TypeId, cases: Vec<EnumCase>, isOpen: bool },
+  Trait     { decl: NominalDecl, methods: Map<string, TypeId>,
+              typeParams: Vec<TypeId>, extendsTraits: Vec<TypeId> },
+  VTable    { decl: NominalDecl, forTrait: TypeId, fields: Vec<Field>,
+              methodOrder: Vec<string> },
+
+  // Generics: a TypeParam placeholder inside a generic body. `bounds` is empty
+  // in pass A and re-set in pass C once `implements` clauses resolve.
+  TypeParam { name: string, originDecl: DeclId, bounds: Vec<TypeId> },
+}

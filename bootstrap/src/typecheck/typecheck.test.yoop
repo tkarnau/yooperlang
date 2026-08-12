@@ -1,0 +1,88 @@
+// Tests for the `typecheck` module - currently pass A.
+//
+// These drive the real pipeline (lex -> parse -> typecheck) over source
+// literals rather than poking Program by hand, so a change in the AST shape
+// shows up here as a failing assertion instead of a stale test that still
+// passes.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { Module, LoadModuleResult, moduleFromSource, singleModuleGraph } from "../source_graph";
+import { Program, TypedModule, Symbol, Type, typecheckProgram } from "../typecheck";
+
+suite function passARegistersATopLevelFunction(): void {
+  let prog = checkSource("function add(a: int, b: int): int { return a + b; }");
+
+  let test theory: Case = t.asserts("the function name is bound in the module namespace") {
+    theory.isSuccessful = hasName(ref prog, "add");
+    theory.detail = `"add" is not in the module namespace after pass A`;
+  }
+  let test theory: Case = t.asserts("no diagnostics for a plain function decl") {
+    theory.isSuccessful = prog.diagnostics.len == 0;
+    theory.detail = `pass A reported ${prog.diagnostics.len} diagnostic(s) on a clean function decl`;
+  }
+}
+
+suite function passARegistersATypeDecl(): void {
+  let prog = checkSource("type Point { }\nfunction main(): int { return 0; }");
+
+  let test theory: Case = t.asserts("the type name is bound alongside the function") {
+    theory.isSuccessful = hasName(ref prog, "Point") && hasName(ref prog, "main");
+    theory.detail = `wanted both "Point" and "main" bound; the module namespace is missing one`;
+  }
+}
+
+suite function passACatchesRedeclaration(): void {
+  let prog = checkSource("function dup(): int { return 0; }\nfunction dup(): int { return 1; }");
+
+  let test theory: Case = t.asserts("declaring the same name twice is a diagnostic, not a silent overwrite") {
+    theory.isSuccessful = prog.diagnostics.len == 1;
+    theory.detail = `wanted exactly 1 diagnostic for the duplicate "dup", got ${prog.diagnostics.len}`;
+  }
+}
+
+suite function reservedTypeIdsComeFirst(): void {
+  let prog = checkSource("function main(): int { return 0; }");
+
+  let test theory: Case = t.asserts("the singleton types occupy the reserved low ids") {
+    // ids.yoop pins these; initProgram pushes them in that order.
+    theory.isSuccessful = prog.types.len >= 3;
+    theory.detail = `the type arena has ${prog.types.len} entries, wanted at least the 3 reserved singletons`;
+  }
+  let test theory: Case = t.asserts("SymbolId 0 is never handed out") {
+    // A real symbol at index 0 would make "not found" indistinguishable from
+    // the first thing declared.
+    theory.isSuccessful = prog.symbols.len >= 2;
+    theory.detail = `the symbol arena has ${prog.symbols.len} entries; index 0 must be the dead slot`;
+  }
+}
+
+// lex -> parse -> typecheck over a source literal. A parse failure comes back as
+// an empty Program, which fails whichever assertion asked about it.
+function checkSource(src: string): Program {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+
+  switch (moduleFromSource("test", "test.yoop", srcBuf)) {
+    case LoadModuleResult.Err { error: e }: {
+      return { types: vec.vecNew(0), symbols: vec.vecNew(0), modules: vec.vecNew(0), diagnostics: vec.vecNew(0) };
+    }
+    case LoadModuleResult.Ok { value: m }: {
+      let graph = singleModuleGraph(m);
+      return typecheckProgram(ref graph);
+    }
+  }
+}
+
+function hasName(ref prog: Program, name: string): bool {
+  if (prog.modules.len == 0) {
+    return false;
+  }
+  let tm = vec.vecGet(ref prog.modules, 0);
+  return map.mapContainsKey(ref tm.names, name);
+}

@@ -1,0 +1,21 @@
+// Regression: a value enum or union declared in a directory-module file that
+// sorts AFTER a sibling using it used to reach consumers as its pass-A shell -
+// a null `underlying` for the enum (so `switch` refused it) and empty `fields`
+// for the union (so field access refused it). Pass C now fills both shells in
+// place instead of replacing the table entry, the way structs and vtables
+// already did.
+
+import * as shapes from "./shapes";
+import { Color, Bits } from "./shapes";
+
+function main(): int32 {
+  switch (shapes.pickColor()) {
+    case Color.RED: { printf("red\n"); }
+    case Color.GREEN: { printf("green\n"); }
+    default: { printf("other\n"); }
+  }
+
+  const b: Bits = shapes.bitsOf(42);
+  printf("bits=%d\n", b.asInt);
+  return 0;
+}

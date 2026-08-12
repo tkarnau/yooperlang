@@ -1,25 +1,26 @@
+module parse;
+
+// Function declarations and their parameter lists.
+
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ParserState, SelfLexing as sl } from "./parser_state.yoop";
-import { NodeId, ParsingError, TokenTags, ASTNodeKind } from "../../contracts.yoop";
-import { parseIdentAsName } from "./names.yoop";
-import { parseTypeParamList, parseTypeAnnotation } from "./types.yoop";
-import { posToSourceLocation } from "../char_utils.yoop";
-import { parseBlock } from "./statements.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
 
 export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
   // todo task stuff???
-  sl.expect(ref ps, TokenTags.FUNCTION)?;
-  let node = sl.buildSourcedNode(ref ps, ASTNodeKind.FUNCTION_DECL);
+  SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FUNCTION_DECL);
   node.name = parseIdentAsName(ref ps)?;
   // function {name}<{typeparams}>({args}){{body}}
 
   node.childA = parseTypeParamList(ref ps)?;
-  sl.expect(ref ps, TokenTags.LPAREN)?;
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(4);
-  let peekTag = sl.peek(ref ps).tag;
+  let peekTag = SelfLexing.peek(ref ps).tag;
   while (
     peekTag == TokenTags.IDENT ||
     peekTag == TokenTags.REF ||
@@ -27,41 +28,41 @@ export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingEr
     peekTag == TokenTags.POOLED
   ) {
     if (peekTag == TokenTags.COMMA) {
-      sl.advance(ref ps)?;
-      peekTag = sl.peek(ref ps).tag;
+      SelfLexing.advance(ref ps)?;
+      peekTag = SelfLexing.peek(ref ps).tag;
     }
     if (peekTag != TokenTags.RPAREN && peekTag != TokenTags.EOF) {
       vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
-      peekTag = sl.peek(ref ps).tag;
+      peekTag = SelfLexing.peek(ref ps).tag;
     }
   }
-  node.childB = sl.buildListNode(ref ps, ref ids, loc);
-  sl.expect(ref ps, TokenTags.RPAREN)?;
-  sl.expect(ref ps, TokenTags.COLON)?;
+  node.childB = SelfLexing.buildListNode(ref ps, ref ids, loc);
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
   // todo propagation clauses, etc... before function body
 
   // parse function body as a block
   node.childD = parseBlock(ref ps)?;
 
-  return Result.Ok { value: sl.pushNode(ref ps, node) };
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
 export function parseFunctionParam(ref ps: ParserState): Result<NodeId, ParsingError> {
-  let node = sl.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
   // todo task pooled stuff...
   // todo kind prefix stuff...
-  if (sl.peek(ref ps).tag == TokenTags.REF) {
-    sl.advance(ref ps)?;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.REF) {
+    SelfLexing.advance(ref ps)?;
     node.flagA = true; // isRef
   } else {
     node.flagA = false;
   }
 
   node.name = parseIdentAsName(ref ps)?;
-  sl.expect(ref ps, TokenTags.COLON)?;
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
   // type annotation stuff
   node.childA = parseTypeAnnotation(ref ps)?;
   // isRef and refType stuff
-  return Result.Ok { value: sl.pushNode(ref ps, node) };
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

@@ -13,12 +13,9 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Disposable, disposable } from "std/core/kinds.yoop";
 import * as fs from "std/fs.yoop";
 
-import { isHexDigit } from "./source_processing/char_utils.yoop";
-import { tokenize, Token } from "./source_processing/lexer.yoop";
-import { parse } from "./source_processing/parser.yoop";
-import { tokenScanList } from "./contracts.yoop";
-import { loadModuleGraph, LoadGraphResult } from "./source_graph/module_graph.yoop";
-import { typecheckProgram } from "./typecheck/typecheck.yoop";
+import { TOKEN_SCAN_LIST } from "./lex";
+import { loadModuleGraph, LoadGraphResult } from "./source_graph";
+import { typecheckProgram } from "./typecheck";
 
 @precompile {
   log.info("hello, yooper from a precompile!");
@@ -55,7 +52,7 @@ function main(): int {
 }
 
 function runCompilerAssertions(): void {
-  debug.assert(strings.stringEq(tokenScanList[0].str, "..."), "tokenScanList is not sorted");
+  debug.assert(strings.stringEq(TOKEN_SCAN_LIST[0].str, "..."), "TOKEN_SCAN_LIST is not sorted");
   const testSplittingStr = "this_is_a_test";
   disposable pieces: Vec<string> = vec.vecNew(0);
   const splitResult = strings.split(ref pieces, testSplittingStr, "_", false);

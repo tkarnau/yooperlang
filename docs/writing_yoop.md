@@ -65,8 +65,8 @@ The short list. Most broken builds are one of these.
 
 ## 2. Naming and files
 
-- **Files and directories: `snake_case`.** `char_utils.yoop`,
-  `source_processing/`. This is the one place underscores belong.
+- **Files and directories: `snake_case`.** `scan_tables.yoop`,
+  `source_graph/`. This is the one place underscores belong.
   Module names are the exception forced by the directory-module rule: a module
   name matches its folder, so prefer single words (`http`, `net`, `cancel`).
 - **Types and type-like declarations: `PascalCase`.** struct / `type`, `trait`,
@@ -102,8 +102,8 @@ fix as part of unrelated work):
   (about 30 names across yoopbinder / yoopdist / stdindex).
 - Example-local helper functions under [../examples/](../examples/) are a mixed
   corpus.
-- Some module-level consts are still `camelCase` where they should be
-  `SCREAMING_SNAKE` (`tokenScanList` in `bootstrap/src/contracts.yoop`).
+- Module-level consts should be `SCREAMING_SNAKE`. The bootstrap's were fixed
+  on 2026-08-12 (`TOKEN_SCAN_LIST`, `KEYWORD_LIST`); check any new one you add.
 
 ---
 
@@ -442,6 +442,11 @@ is built on top.
 - Layer boundaries: module graph -> lex -> parse -> typecheck -> codegen. A
   bytecode IR between typecheck and codegen is the one planned deviation from the
   JS pipeline and is deferred until a pass actually wants it.
+- **One directory module per layer**, each a handful of small files:
+  `diagnostics`, `lex`, `ast`, `parse`, `source_graph`, `typecheck`, `utils`.
+  A layer's vocabulary lives WITH that layer. The old `contracts.yoop` that held
+  all of it at once is gone (2026-08-12); wanting to add a shared types file is
+  the smell it left behind, and the answer is to put the type with its owner.
 - The AST is an **arena plus NodeId indices**, not a tree of pointers: a fat node
   with `childA/B/C` slots and list-node indirection, NodeId 0 reserved as null.
   Build with the scratch-Vec-then-splice pattern.

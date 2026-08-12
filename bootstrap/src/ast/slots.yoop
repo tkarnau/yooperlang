@@ -1,0 +1,121 @@
+module ast;
+
+// What the fat node's reusable slots MEAN, per kind.
+//
+// ASTNode has four anonymous child slots and one anonymous flag (see node.yoop
+// for why). These functions are the lookup table that turns `childB` back into
+// `functionParamList` for a dump or an error message. They are documentation
+// the compiler can execute - add a case here whenever a kind starts using a
+// slot, or the dump will just say "undefined".
+
+export function astNodeFlagAName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.INT_LITERAL: {
+      return "negated";
+    }
+    case ASTNodeKind.PARAM: {
+      return "isRef";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildAName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.TYPE_DECL,
+         ASTNodeKind.FUNCTION_DECL: {
+      return "typeParams";
+    }
+    case ASTNodeKind.KIND_PREFIX: {
+      return "argsList";
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
+      return "inner";
+    }
+    case ASTNodeKind.PARAM,
+         ASTNodeKind.CONST_DECL,
+         ASTNodeKind.LET_DECL,
+         ASTNodeKind.FIELD_DECL: {
+      return "typeAnnotation";
+    }
+    case ASTNodeKind.BLOCK: {
+      return "statementsList";
+    }
+    case ASTNodeKind.RETURN_STATEMENT: {
+      return "returnExpression";
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return "leftNode";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildBName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.TYPE_DECL: {
+      return "kindPrefix";
+    }
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "functionParamList";
+    }
+    case ASTNodeKind.CONST_DECL,
+         ASTNodeKind.LET_DECL: {
+      return "assignmentExpression";
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      return "rightNode";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildCName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "returnTypeAnnotation";
+    }
+    case ASTNodeKind.TYPE_DECL: {
+      return "aliasTypeAnnotation";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+export function astNodeChildDName(v: ASTNodeKind): string {
+  switch(v) {
+    case ASTNodeKind.FUNCTION_DECL: {
+      return "functionBody";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}
+
+// What a node's OWN childStart/childCount run holds, per kind. Kinds absent
+// here do not use their own run - their children hang off the named slots.
+export function astNodeChildListName(v: ASTNodeKind): string {
+  switch (v) {
+    case ASTNodeKind.PROGRAM: {
+      return "body";
+    }
+    case ASTNodeKind.TYPE_DECL: {
+      return "fields";
+    }
+    case ASTNodeKind.NODE_LIST: {
+      return "items";
+    }
+    default: {
+      return "undefined";
+    }
+  }
+}

@@ -300,6 +300,23 @@ export const VariantType = (
 export const UnionType = (name, fields, moduleId = null) =>
   freezerWrap(typeKinds.union, { name, fields, moduleId });
 
+// The pass-A shell for a union, unfrozen so pass C can fill it in place - same
+// reason as ValueEnumShell below. Unlike StructShell this keeps `fields` as an
+// empty array rather than null: nothing in the checker uses `fields === null`
+// as a union shell test, and an empty array keeps every existing reader
+// total. Shell-ness is "not frozen yet".
+export const UnionShell = (name, moduleId = null) => ({
+  kind: typeKinds.union,
+  name,
+  fields: [],
+  moduleId,
+});
+
+export function fillUnionShell(shell, fields) {
+  shell.fields = fields;
+  return Object.freeze(shell);
+}
+
 // Phase 12: a value enum - nominal alias over a primitive underlying type
 // (any signed/unsigned int width, or string). Each case is a named compile-
 // time constant of the underlying type.
@@ -311,6 +328,35 @@ export const UnionType = (name, fields, moduleId = null) =>
 //     reachable set is no longer the named cases alone.
 export const ValueEnumType = (name, underlying, cases, implementsTraits = [], methods = new Map(), moduleId = null, isOpen = false) =>
   freezerWrap(typeKinds.valueEnum, { name, underlying, cases, implementsTraits, methods, moduleId, isOpen });
+
+// The pass-A shell for a value enum: unfrozen, with `underlying` null until
+// pass C fills it. Same discipline as StructShell above, and for the same
+// reason. Replacing the table entry in pass C instead left anything that had
+// already resolved the NAME holding the shell - a null underlying - which
+// surfaced much later as "cannot switch over enum X: its underlying type is
+// null". Directory modules made it reachable: within one module the files have
+// no dependency order, so a sibling's function signature can resolve the enum
+// before the enum's own decl is processed.
+export const ValueEnumShell = (name, moduleId = null) => ({
+  kind: typeKinds.valueEnum,
+  name,
+  underlying: null,
+  cases: new Map(),
+  implementsTraits: [],
+  methods: new Map(),
+  moduleId,
+  isOpen: false,
+});
+
+// Fill a value-enum shell in place and freeze it. `implementsTraits` /
+// `methods` are deliberately left alone: impl validation populates them later,
+// and they are already present on the shell.
+export function fillValueEnumShell(shell, underlying, cases, isOpen) {
+  shell.underlying = underlying;
+  shell.cases = cases;
+  shell.isOpen = isOpen;
+  return Object.freeze(shell);
+}
 
 // Phase 9.G: a first-class function value type - what `(p: T) => R` resolves
 // to in a type annotation. Distinct from FuncType (which describes a named

@@ -48,31 +48,45 @@ compile itself.
 Source lives under [../bootstrap/src/](../bootstrap/src/). Build order is
 bottom-up, diffing each layer against the JS reference before moving up.
 
-- **Layer 0 - module graph**: STARTED.
-  `bootstrap/src/source_graph/module_graph.yoop` has `Module` + `loadModule`
-  (Result-shaped).
-- **Layer 1 - lex**: IN PROGRESS.
-  `bootstrap/src/source_processing/lexer.yoop` + `char_utils.yoop`; `Token` and
-  `TokenTags` are defined, and the scan/keyword tables in
-  `bootstrap/src/contracts.yoop` mirror the JS tables.
-- **Layer 2 - parse**: NOT STARTED. `ASTNodeKind` + `ASTNode`/`SourceLocation`
-  shells exist in `contracts.yoop`; the arena (decision D1 in the contracts doc)
-  and the parser are the next build.
-- **Layer 3 - typecheck**: NOT STARTED. The largest layer.
+**`contracts.yoop` is gone as of 2026-08-12.** Its 1199 lines were an artifact
+of a module being one FILE; directory modules removed the reason, and each
+layer's vocabulary now lives with the layer that owns it. The tree is one module
+per directory - `diagnostics`, `lex`, `ast`, `parse`, `source_graph`,
+`typecheck`, `utils` - and the map is in
+[../bootstrap/README.md](../bootstrap/README.md). Do not reintroduce a shared
+types file.
+
+- **Layer 0 - module graph**: STARTED. `source_graph/` has `Module` /
+  `ModuleGraph`, `loadModuleGraph` (single entry module), and dormant
+  import-path resolution. No import edges yet.
+- **Layer 1 - lex**: WORKING. `lex/` covers the full token set; the old
+  `tests/lexer_tests` harness checks every keyword, structural token, and atom,
+  and `lex/lex.test.yoop` covers sorting, precedence, keyword-vs-ident,
+  literal values, and nested block comments.
+- **Layer 2 - parse**: IN PROGRESS. The arena and recursive descent are built.
+  Handles top-level `type` (struct body, transparent alias, type params, kind
+  prefix) and `function` decls, blocks, `let`/`const`, `return`, and expressions
+  by precedence climbing. Not yet: imports, traits, variants, enums, unions,
+  methods in a type body, `implements`/`propagates`/`contains` clauses - each a
+  named "not supported yet" refusal rather than a mis-parse.
+- **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
+  is built. Pass A registers shells for `function` and `type` decls and reports
+  redeclarations; passes B (imports), C (fill shells) and D (bodies) are not
+  built. The largest layer.
 - **Layer 4 - bytecode IR**: the one planned deviation from the JS pipeline
   (JS has no IR; the bootstrap may add one). Hold the codegen input contract
   stable so this stays an absorbable, contained change. Deferred until a pass or
   optimization actually wants it.
 - **Layer 5 - codegen**: NOT STARTED.
 
-Immediate build sequence (from the contracts doc):
+Immediate build sequence:
 
-1. Lock the arena + side-table decoration + Result/Diagnostic shapes into
-   `contracts.yoop`.
-2. Finish the lexer; diff its token stream against the JS lexer.
-3. Build the parser onto the arena; diff AST dumps.
-4. Build typecheck; diff resolved types + diagnostics.
-5. Build codegen straight from the typed AST (skip the IR layer initially, as
+1. Add a deterministic token dump and diff the stream against the JS lexer.
+2. Grow the parser toward the constructs the bootstrap itself uses, and diff AST
+   dumps against the JS dump.
+3. Typecheck pass C (fill the shells: struct fields, function signatures), then
+   pass D (bodies + decoration); diff resolved types + diagnostics.
+4. Build codegen straight from the typed AST (skip the IR layer initially, as
    JS does); diff the `.ll` and run the binary.
 
 ---
@@ -159,9 +173,9 @@ working set stays small.
 
 - **Naming migration, remaining tail.** std went fully `camelCase` on 2026-08-11
   (`vecNew`, `mapGet`, `Display.toString`). Still `snake_case`: tool-internal
-  helpers in [../tools/](../tools/) (~30 names), example-local helpers under
-  [../examples/](../examples/), and some module-level consts that should be
-  `SCREAMING_SNAKE` (`tokenScanList` in `bootstrap/src/contracts.yoop`).
+  helpers in [../tools/](../tools/) (~30 names) and example-local helpers under
+  [../examples/](../examples/). The bootstrap's module-level consts were fixed
+  on 2026-08-12 (`TOKEN_SCAN_LIST`, `KEYWORD_LIST`, `WHITESPACE_CHAR_CODES`).
 - **Two playground examples are stale** since the async conversion and no longer
   compile: `examples/playground/todo_api` and `examples/playground/yoopstore`
   both hit `async function must be awaited` on `serve` / `serveDefault`. Nothing

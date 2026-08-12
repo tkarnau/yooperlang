@@ -706,10 +706,15 @@ none of them should be attempted earlier:
 - Split the oversized files now that splitting is free and does not mean
   inventing a vocabulary module. std/http/types.yoop is the obvious first
   candidate; bootstrap/src/contracts.yoop is the actual motivating case.
-- Dissolve `bootstrap/src/contracts.yoop`. Each layer takes back its own
-  vocabulary: tokens to the lexer module, AST to the parser module, `Type` /
-  `Symbol` / `Program` to the typecheck module. `utils/ast_utils.yoop` and
-  `utils/array_utils.yoop` merge back into one utils module.
+- Dissolve `bootstrap/src/contracts.yoop`. **DONE 2026-08-12**, close to as
+  written: tokens to a `lex` module, the arena to its own `ast` module (not the
+  parser's - typecheck and codegen consume the AST and must not depend on
+  parse), `Type` / `Symbol` / `Program` to `typecheck`, and the two utils files
+  merged back into one `utils` module. One addition the plan did not predict: a
+  small `diagnostics` module for `SourceLocation` / `Diagnostic` /
+  `ParsingError`, which is a genuine leaf every layer needs rather than a
+  cycle-avoidance dump. Doing it also surfaced a real compiler bug - see the
+  pass-C shell note in docs/compiler_internals.md.
 - Revisit the std `snake_case` to `camelCase` rename as its own track.
 
 ## Settled defaults

@@ -1,8 +1,12 @@
+module parse;
+
+// Turning an IDENT token's byte span back into a string.
+
 import { Result, Option } from "std/core/types.yoop";
-import { TokenTags, ParsingError } from "../../contracts.yoop";
-import { ParserState, SelfLexing } from "./parser_state.yoop";
 import * as bytes from "std/core/bytes.yoop";
 import * as str from "std/core/strings.yoop";
+import { TokenTags } from "../lex";
+import { ParsingError } from "../diagnostics";
 
 export function parseIdentAsName(ref pState: ParserState): Result<string, ParsingError> {
   const identToken = SelfLexing.expect(ref pState, TokenTags.IDENT)?;

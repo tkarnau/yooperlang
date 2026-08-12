@@ -14,19 +14,18 @@
 import { Result } from "std/core/types.yoop";
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-import { tokenize, Token } from "../../src/source_processing/lexer.yoop";
-import { keywordList, tokenScanList, TokenTags } from "../../src/contracts.yoop";
+import { tokenize, Token, KEYWORD_LIST, TOKEN_SCAN_LIST, TokenTags } from "../../src/lex";
 
 
 // store this at compile time so that we can declare a fixed array of assertion
 // values
-// @precompile const KEYWORD_COUNT = keywordList.len;
+// @precompile const KEYWORD_COUNT = KEYWORD_LIST.len;
 
 function main(): int {
   // first test all defined keywords
   // const expectedKeywordTokens: Token[KEYWORD_COUNT]; 
   let keywordTestString = "";
-  for kd in keywordList {
+  for kd in KEYWORD_LIST {
     keywordTestString = `${keywordTestString}${kd.str} `;
   }
 
@@ -39,10 +38,10 @@ function main(): int {
       return 1;
     }
     case Result.Ok { value: tokens } : {
-      const expectedCount = keywordList.len;
+      const expectedCount = KEYWORD_LIST.len;
       log.info(`keyword lex finished - found ${tokens.len} tokens, expecting ${expectedCount} keyword tokens, verifying results...`);
       let count: usize = 0;
-      for kd in keywordList {
+      for kd in KEYWORD_LIST {
         let found = false;
         for tok in tokens {
           if (tok.tag == kd.tag) {
@@ -67,7 +66,7 @@ function main(): int {
 
   // next test all structural tokens
   let tokenScanTestString = "";
-  for tokScan in tokenScanList {
+  for tokScan in TOKEN_SCAN_LIST {
     tokenScanTestString = `${tokenScanTestString}${tokScan.str} `;
   }
 
@@ -79,10 +78,10 @@ function main(): int {
       return 1;
     }
     case Result.Ok { value: tokens} : {
-      const expectedCount = tokenScanList.len;
+      const expectedCount = TOKEN_SCAN_LIST.len;
       log.info(`structural token lex finished - found ${tokens.len} tokens, expecting ${expectedCount} structural tokens, verifying results...`);
       let count: usize = 0;
-      for tokScan in tokenScanList {
+      for tokScan in TOKEN_SCAN_LIST {
         let found = false;
         for tok in tokens {
           if (tok.tag == tokScan.tag) {

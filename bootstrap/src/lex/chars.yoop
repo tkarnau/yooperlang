@@ -1,18 +1,22 @@
-/*
-  Author: Tom Karnau
+module lex;
 
-  Character Utilities - primarily used by lexer and parser functionality
-*/
+// Byte-level scanning primitives: whitespace and comment skipping, the
+// character-class predicates, the digit-run scanners, and the pos-to-line/column
+// mapping every diagnostic needs.
+//
+// The lexer is the only real consumer, but `posToSourceLocation` is also called
+// by the parser (which tracks its own position), so these are module-visible
+// rather than lexer-private.
 
 import * as intr from "std/core/intrinsics.yoop";
 import * as log from "std/log.yoop";
 import * as debug from "std/debug.yoop";
 import { Option, Result } from "std/core/types.yoop";
-import { SourceLocation } from "../contracts.yoop";
+import { SourceLocation } from "../diagnostics";
 
-const whitespaceCharCodes: uint8[] = [32, 9, 13, 10];
+const WHITESPACE_CHAR_CODES: uint8[] = [32, 9, 13, 10];
 function isWhitespace(ch: uint8): bool {
-  for i in whitespaceCharCodes {
+  for i in WHITESPACE_CHAR_CODES {
     if (ch == i) {
       return true;
     }
