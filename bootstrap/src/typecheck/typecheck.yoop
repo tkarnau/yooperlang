@@ -16,10 +16,11 @@ module typecheck;
     A - register decl shells (name -> SymbolId, shell Type) so cross-module and
         forward references resolve.                             [pass_a.yoop]
     B - wire imports: bind imported names into each module's `names` map.
-    C - fill the shells: struct fields, function signatures, trait methods.
-    D - check bodies, infer module-level decls, decorate resolvedTypes.
+    C - fill the shells: struct fields, function signatures.  [pass_c.yoop]
+    D - check bodies and decorate resolvedTypes.               [pass_d.yoop]
 
-  B through D are not built yet.
+  B is a no-op while the graph is a single module. C and D handle the subset
+  the parser produces today and name what they do not handle.
 */
 
 import { Vec }, * as vec from "std/core/vec.yoop";
@@ -44,6 +45,9 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
     // copy instead of to the entry in the Vec.
     let tm = initTypedModule(m.id);
     passARegisterShells(ref program, ref tm, m, i);
+    // B (imports) is a no-op while the graph is one module.
+    passCFillShells(ref program, ref tm, m);
+    passDCheckBodies(ref program, ref tm, m);
     vec.vecPush(ref program.modules, tm);
     i += 1;
   }

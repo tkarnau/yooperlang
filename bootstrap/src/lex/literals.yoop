@@ -199,7 +199,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
         }
       }
     } else if (next == 'o') {
-      base = 2;
+      base = 8;
       pos += 2;
       digitsStart = pos;
       const scanOctResult = scanOctDigitsAndUnderscores(src, pos);

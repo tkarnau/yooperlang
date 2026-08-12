@@ -1,0 +1,93 @@
+module codegen;
+
+// The IR text buffer, and the TypeId -> LLVM type mapping.
+//
+// Two buffers rather than one: LLVM wants module-level globals (string
+// constants, declares) above the function definitions, but we only discover a
+// string constant while walking a function body. Emitting into two Vecs and
+// joining them at the end is the whole trick.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable, owned } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { Type, TypeId, PrimKind, Program, typeAt, TYPE_VOID_ID } from "../typecheck";
+
+export type Emitter propagates<disposable> {
+  globals: Vec<string>,   // constants and declares, emitted first
+  body: Vec<string>,      // function definitions
+  nextTemp: usize,        // the %N SSA counter, reset per function
+  nextStr: usize,         // the @.str.N counter, module-wide
+  usesPrintf: bool,
+}
+
+export function emitterNew(): Emitter propagates<disposable> {
+  return {
+    globals: vec.vecNew(16),
+    body: vec.vecNew(64),
+    nextTemp: 0,
+    nextStr: 0,
+    usesPrintf: false,
+  };
+}
+
+export function emitLine(ref e: Emitter, line: string): void {
+  vec.vecPush(ref e.body, `${line}\n`);
+}
+
+export function emitGlobal(ref e: Emitter, line: string): void {
+  vec.vecPush(ref e.globals, `${line}\n`);
+}
+
+// A fresh SSA temp name. LLVM requires unnamed values to be numbered in strict
+// order within a function, which is why this is a counter and not a hash.
+export function freshTemp(ref e: Emitter): string {
+  e.nextTemp += 1;
+  return `%t${e.nextTemp}`;
+}
+
+export function finish(ref e: Emitter): owned string {
+  disposable all: Vec<string> = vec.vecNew(e.globals.len + e.body.len + 1);
+  let i: usize = 0;
+  while (i < e.globals.len) {
+    vec.vecPush(ref all, vec.vecGet(ref e.globals, i));
+    i += 1;
+  }
+  vec.vecPush(ref all, "\n");
+  let j: usize = 0;
+  while (j < e.body.len) {
+    vec.vecPush(ref all, vec.vecGet(ref e.body, j));
+    j += 1;
+  }
+  return str.stringConcatAll(vec.vecAsArray(ref all));
+}
+
+// A yoop type as LLVM spells it. Everything pointer-shaped is `ptr` - LLVM has
+// been fully opaque-pointer since 15, so there is nothing to point AT here.
+export function llvmType(ref prog: Program, id: TypeId): string {
+  if (id == TYPE_VOID_ID) {
+    return "void";
+  }
+  switch (typeAt(ref prog, id)) {
+    case Type.Void: { return "void"; }
+    case Type.Prim { prim: p }: { return llvmPrim(p); }
+    case Type.Ref { inner: i }: { return "ptr"; }
+    case Type.UnsafePtr { pointee: p }: { return "ptr"; }
+    case Type.Array { elem: el }: { return "ptr"; }
+    default: { return "ptr"; }
+  }
+}
+
+function llvmPrim(p: PrimKind): string {
+  switch (p) {
+    case PrimKind.INT8, PrimKind.UINT8: { return "i8"; }
+    case PrimKind.INT16, PrimKind.UINT16: { return "i16"; }
+    case PrimKind.INT32, PrimKind.UINT32: { return "i32"; }
+    case PrimKind.INT64, PrimKind.UINT64: { return "i64"; }
+    case PrimKind.ISIZE, PrimKind.USIZE: { return "i64"; }
+    case PrimKind.FLOAT32: { return "float"; }
+    case PrimKind.FLOAT64: { return "double"; }
+    case PrimKind.BOOL: { return "i1"; }
+    case PrimKind.STRING: { return "ptr"; }
+    default: { return "ptr"; }
+  }
+}

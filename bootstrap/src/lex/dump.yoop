@@ -1,0 +1,56 @@
+module lex;
+
+// The other half of the Layer 1 parity target. src/dumpTokens.js documents the
+// format and what it deliberately leaves out; this must stay byte-identical to
+// it, and src/parity.test.js is what proves it.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable, owned } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { Result } from "std/core/types.yoop";
+
+export function dumpTokens(src: uint8[]): Result<owned string, string> {
+  // One piece per line, concatenated once at the end. Growing a string per
+  // token would reallocate the whole dump on every append.
+  disposable pieces: Vec<string> = vec.vecNew((src.len / 4) + 8);
+
+  let pos: usize = 0;
+  let iters: usize = 0;
+  const maxIters: usize = src.len * 2 + 100;
+  while (iters < maxIters) {
+    iters += 1;
+    switch (lexNext(ref src, pos)) {
+      case Result.Err { error: e }: {
+        return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };
+      }
+      case Result.Ok { value: v }: {
+        vec.vecPush(ref pieces, formatToken(v.token));
+        if (v.token.tag == TokenTags.EOF) {
+          return Result.Ok { value: str.stringConcatAll(vec.vecAsArray(ref pieces)) };
+        }
+        pos = v.nextPos;
+      }
+    }
+  }
+
+  return Result.Err { error: "dumpTokens: exceeded iteration failsafe" };
+}
+
+// Plain `string`, not `owned`: a template literal is not provably allocator
+// storage, so `owned` is only claimable where it passes through from something
+// that mints it (stringConcatAll, above).
+function formatToken(t: Token): string {
+  if (t.tag == TokenTags.INTLITERAL || t.tag == TokenTags.CHARLITERAL) {
+    // Past 2^53 the JS reference's parseInt is a lossy double while this side
+    // accumulates a real uint64. Both print `unsafe` there so the dump declares
+    // the gap instead of failing parity over a known JS limitation.
+    if (t.intVal > JS_MAX_SAFE_INT) {
+      return `${tagName(t.tag)} ${t.start} ${t.length} int=unsafe\n`;
+    }
+    return `${tagName(t.tag)} ${t.start} ${t.length} int=${t.intVal}\n`;
+  }
+  return `${tagName(t.tag)} ${t.start} ${t.length}\n`;
+}
+
+// Number.MAX_SAFE_INTEGER, the largest integer a JS double represents exactly.
+const JS_MAX_SAFE_INT: uint64 = 9007199254740991;

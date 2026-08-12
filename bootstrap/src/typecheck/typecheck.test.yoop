@@ -16,15 +16,27 @@ import { Module, LoadModuleResult, moduleFromSource, singleModuleGraph } from ".
 import { Program, TypedModule, Symbol, Type, typecheckProgram } from "../typecheck";
 
 suite function passARegistersATopLevelFunction(): void {
-  let prog = checkSource("function add(a: int, b: int): int { return a + b; }");
+  let prog = checkSource("function answer(): int { return 42; }");
 
   let test theory: Case = t.asserts("the function name is bound in the module namespace") {
-    theory.isSuccessful = hasName(ref prog, "add");
-    theory.detail = `"add" is not in the module namespace after pass A`;
+    theory.isSuccessful = hasName(ref prog, "answer");
+    theory.detail = `"answer" is not in the module namespace after pass A`;
   }
-  let test theory: Case = t.asserts("no diagnostics for a plain function decl") {
+  let test theory: Case = t.asserts("a function inside the supported subset checks clean") {
     theory.isSuccessful = prog.diagnostics.len == 0;
-    theory.detail = `pass A reported ${prog.diagnostics.len} diagnostic(s) on a clean function decl`;
+    theory.detail = `reported ${prog.diagnostics.len} diagnostic(s) on a program that is entirely in the subset`;
+  }
+}
+
+// The subset is small on purpose. What matters is that stepping outside it is
+// REFUSED rather than silently mis-compiled - reading a parameter needs codegen
+// support that does not exist, so pass D has to stop it here.
+suite function outOfSubsetConstructsAreRefused(): void {
+  let prog = checkSource("function add(a: int, b: int): int { return a + b; }");
+
+  let test theory: Case = t.asserts("reading a parameter is refused, not silently accepted") {
+    theory.isSuccessful = prog.diagnostics.len > 0;
+    theory.detail = `reading a parameter produced no diagnostic; codegen would emit a zero-arg function and lose the arguments`;
   }
 }
 

@@ -1,0 +1,76 @@
+module parse;
+
+// Decoding a string literal, and parking the result in the arena's string pool.
+//
+// The lexer returns string literals RAW - wrapping quotes included, escapes
+// untouched - because deciding what `\n` means is a language question, not a
+// scanning one. This is where that decision happens.
+
+import { Result, Option } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import * as bytes from "std/core/bytes.yoop";
+import { NodeId } from "../ast";
+import { Token } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// Append `text` to the arena's string pool and hand back its index. Nodes carry
+// the index in `strId` rather than the text, which is what keeps ASTNode a
+// fixed-size struct.
+export function internString(ref ps: ParserState, text: string): usize {
+  vec.vecPush(ref ps.ast.strings, text);
+  return ps.ast.strings.len - 1;
+}
+
+// `"a\nb"` -> the three characters a, newline, b. `tok` must be a STRLITERAL,
+// so its span includes both quotes.
+export function decodeStringLiteral(ref ps: ParserState, tok: Token): Result<string, ParsingError> {
+  const src = ps.src;
+  const start = tok.start + 1;                       // past the opening quote
+  const end = tok.start + usize(tok.length) - 1;     // before the closing one
+
+  disposable out: Vec<uint8> = vec.vecNew(usize(tok.length));
+  let i = start;
+  while (i < end) {
+    const ch = src[i];
+    if (ch != '\\') {
+      vec.vecPush(ref out, ch);
+      i += 1;
+      continue;
+    }
+
+    i += 1;
+    if (i >= end) {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps, "string literal ends in a trailing backslash", Option.None,
+      )};
+    }
+    switch (src[i]) {
+      case 'n':  { vec.vecPush(ref out, 10); }
+      case 'r':  { vec.vecPush(ref out, 13); }
+      case 't':  { vec.vecPush(ref out, 9); }
+      case '0':  { vec.vecPush(ref out, 0); }
+      case '\\': { vec.vecPush(ref out, 92); }
+      case '"':  { vec.vecPush(ref out, 34); }
+      case '\'': { vec.vecPush(ref out, 39); }
+      default: {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps, `unknown escape in string literal: \\${src[i]}`, Option.None,
+        )};
+      }
+    }
+    i += 1;
+  }
+
+  switch (str.stringFromBytes(vec.vecAsArray(ref out))) {
+    case Result.Err { error: e }: {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps, `invalid string literal bytes: ${e}`, Option.None,
+      )};
+    }
+    case Result.Ok { value: text }: {
+      return Result.Ok { value: text };
+    }
+  }
+}

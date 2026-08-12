@@ -1,68 +1,88 @@
 /*
   Author: Tom Karnau
 
-  Main entry point for the self-hosted yooperlang compiler
+  The self-hosted yooperlang compiler.
+
+    yoopiler_boot <entry.yoop> [-o <out>]
+
+  Runs the whole pipeline - module graph, lex, parse, typecheck, codegen, link -
+  and produces an executable. The language subset it accepts is small and grows
+  from the bottom up; anything outside it is refused BY NAME rather than
+  mis-compiled. bootstrap/README.md has the current subset.
 */
 
 import * as log from "std/log.yoop";
-import * as intr from "std/core/intrinsics.yoop";
-import * as debug from "std/debug.yoop";
-import { Display } from "std/core/traits.yoop";
-import * as strings from "std/core/strings.yoop";
+import * as env from "std/env.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
-import { Disposable, disposable } from "std/core/kinds.yoop";
-import * as fs from "std/fs.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
 
-import { TOKEN_SCAN_LIST } from "./lex";
 import { loadModuleGraph, LoadGraphResult } from "./source_graph";
-import { typecheckProgram } from "./typecheck";
-
-@precompile {
-  log.info("hello, yooper from a precompile!");
-}
+import { typecheckProgram, Program } from "./typecheck";
+import { Severity } from "./diagnostics";
+import { codegenProgram } from "./codegen";
+import { linkExecutable } from "./link";
 
 function main(): int {
-  log.info("hello, yooper!");
-
-  runCompilerAssertions(); // ensures tokens and other utilties we added here are still working correctly
-  // need unit testing solution of some kind...
-
-  // smoke test for now: load a common source file into a one-module graph (single file program).
-  const entryPath = "/Users/tom/dev/personal/yooperlang/bootstrap/examples/single_module.yoop";
-  // this loadModuleGraph(path) lexes and parses the main source file into a graph (imports and other things add more modules/nodes to that graph)
-  switch (loadModuleGraph(entryPath)) { 
-    case LoadGraphResult.Err { error: e }: {
-      log.info(`module graph load failed: ${e}`);
-    }
-    case LoadGraphResult.Ok { value: moduleGraph }: {
-      // vec.vecGet: even though modules is an dynamic array (1D vector), you must reference the
-      // Vector module and pass the vector reference pointer and the desired index to get at a pointer to the specific module we want
-      const entryMod = vec.vecGet(ref moduleGraph.modules, moduleGraph.entryIndex);
-      log.info(`entry AST dump: ${entryMod.ast}`); // derive(display) on AST gives us free stringify now.
-
-      // Layer 3: hand the parsed graph to the typechecker. It is an empty shell
-      // for now (returns a Program with no types/symbols/diagnostics) - this
-      // wires the call so the layer can be built out incrementally.
-      let prog = typecheckProgram(ref moduleGraph);
-      log.info(`prog dump: ${prog}`);
-    }
+  if (env.argCount() < 2) {
+    log.error("usage: yoopiler_boot <entry.yoop> [-o <out>]");
+    return 2;
+  }
+  const entryPath = env.argAt(1);
+  let outPath = "a.out";
+  if (env.argCount() >= 4) {
+    outPath = env.argAt(3);   // `-o <out>`
   }
 
-  return 0;
+  switch (loadModuleGraph(entryPath)) {
+    case LoadGraphResult.Err { error: e }: {
+      log.error(`${e}`);
+      return 1;
+    }
+    case LoadGraphResult.Ok { value: moduleGraph }: {
+      let prog = typecheckProgram(ref moduleGraph);
+      if (reportDiagnostics(ref prog) > 0) {
+        return 1;
+      }
+      log.info("typecheck: ok");
+
+      switch (codegenProgram(ref prog, ref moduleGraph)) {
+        case Result.Err { error: e }: {
+          log.error(`codegen: ${e}`);
+          return 1;
+        }
+        case Result.Ok { value: ir }: {
+          log.info("llvm IR: ok");
+          const linkErr = linkExecutable(ir, `${outPath}.ll`, outPath);
+          if (linkErr.len > 0) {
+            log.error(linkErr);
+            return 1;
+          }
+          log.info(`compiled: ${outPath}`);
+          return 0;
+        }
+      }
+    }
+  }
 }
 
-function runCompilerAssertions(): void {
-  debug.assert(strings.stringEq(TOKEN_SCAN_LIST[0].str, "..."), "TOKEN_SCAN_LIST is not sorted");
-  const testSplittingStr = "this_is_a_test";
-  disposable pieces: Vec<string> = vec.vecNew(0);
-  const splitResult = strings.split(ref pieces, testSplittingStr, "_", false);
-  debug.assert(pieces.len == 4, `split expected 4 elements, found ${pieces.len}: result ${splitResult}, ${pieces.data[0]}`);
-  debug.assert(strings.stringEq(pieces.data[0], "this"), `split failed, expected "this" in slot 1, found ${pieces.data[0]}`);
-  debug.assert(strings.stringEq(pieces.data[1], "is"), `split failed, expected "is" in slot 2, found ${pieces.data[1]}`);
-  debug.assert(strings.stringEq(pieces.data[2], "a"), `split failed, expected "a" in slot 3, found ${pieces.data[2]}`);
-  debug.assert(strings.stringEq(pieces.data[3], "test"), `split failed, expected "test" in slot 4, found ${pieces.data[3]}`);
-
-  // file stuff
-  // const normalizeResult = fs.normalizePath("./bootstrap/../bootstrap/src/main.yoop");
-  // debug.assert(strings.stringEq(normalizeResult, "main.yoop"), `normalizePath failed, exepected "main.yoop", found ${normalizeResult}`);
+// Prints every accumulated diagnostic and returns the error count. Warnings do
+// not stop the compile.
+function reportDiagnostics(ref prog: Program): usize {
+  let errors: usize = 0;
+  let i: usize = 0;
+  while (i < prog.diagnostics.len) {
+    const d = vec.vecGet(ref prog.diagnostics, i);
+    switch (d.severity) {
+      case Severity.ERROR: {
+        errors += 1;
+        log.error(`${d.sourceLoc.line + 1}:${d.sourceLoc.column}: ${d.message}`);
+      }
+      case Severity.WARNING: {
+        log.info(`${d.sourceLoc.line + 1}:${d.sourceLoc.column}: warning: ${d.message}`);
+      }
+    }
+    i += 1;
+  }
+  return errors;
 }

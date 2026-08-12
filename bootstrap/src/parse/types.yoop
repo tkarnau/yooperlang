@@ -6,7 +6,7 @@ import { Result, Option } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { NodeId, ASTNodeKind } from "../ast";
-import { TokenTags, tagName, posToSourceLocation } from "../lex";
+import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
 // `<T, U>` after a type name (generics, etc). Returns the NodeId of a NODE_LIST holding the
@@ -66,11 +66,13 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
       }
     }
     if (afterIdx > 0) {
+      // What may follow a kind prefix. `propagates` / `contains` are
+      // contextual and lex as IDENT, so they are not listed by tag - an IDENT
+      // here is already ambiguous with the prefix's own name and is resolved
+      // by the LCURLY / EQ that eventually terminates the decl.
       const after = SelfLexing.peekAhead(ref ps, afterIdx)?;
       if (
         after.tag == TokenTags.IMPLEMENTS ||
-        after.tag == TokenTags.PROPAGATES ||
-        after.tag == TokenTags.CONTAINS ||
         after.tag == TokenTags.LCURLY ||
         after.tag == TokenTags.EQ
       ) {
@@ -82,15 +84,14 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
   // between the kind prefix and the body. Reject them by name for now rather
   // than letting them fall through to the body parse and produce a confusing
   // "expected {" - a reserved-for-later construct should say so out loud.
-  const clauseTag = SelfLexing.peek(ref ps).tag;
   if (
-    clauseTag == TokenTags.IMPLEMENTS ||
-    clauseTag == TokenTags.PROPAGATES ||
-    clauseTag == TokenTags.CONTAINS
+    SelfLexing.peek(ref ps).tag == TokenTags.IMPLEMENTS ||
+    peekIsWord(ref ps, "propagates") ||
+    peekIsWord(ref ps, "contains")
   ) {
     return Result.Err { error: SelfLexing.createParsingError(
       ref ps,
-      `${tagName(clauseTag)} clauses on a type decl are not supported by the bootstrap parser yet`,
+      `"${peekText(ref ps)}" clauses on a type decl are not supported by the bootstrap parser yet`,
       peekLengthUsize(ref ps),
     )};
   }

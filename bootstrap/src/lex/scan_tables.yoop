@@ -89,9 +89,12 @@ export type KeywordDefinition {
   tag: TokenTags,
 }
 
-// Mirrors the JS lexer's `keywordTagList`. Two intentional notes carried over:
-//   * `contains` is absent - it's recognized CONTEXTUALLY by the parser inside
-//     kind decls / propagation clauses, so it stays usable as a plain ident.
+// Mirrors the JS lexer's `keywordTagList` exactly - src/parity.test.js fails if
+// the two drift. Two things that surprise people:
+//   * Most kind vocabulary is NOT here: `contains`, `kind`, `requires`,
+//     `propagates`, `task`, `pooled`, `io`, `field`, `layout` and friends lex
+//     as plain IDENT and the parser recognizes them CONTEXTUALLY, which is what
+//     keeps them usable as ordinary names. Use `peekIsWord` to match one.
 //   * `_` lexes to DISCARD - bare underscores are discarded.
 export const KEYWORD_LIST: KeywordDefinition[] = [
   { str: "let",            tag: TokenTags.LET },
@@ -109,7 +112,6 @@ export const KEYWORD_LIST: KeywordDefinition[] = [
   { str: "extern",         tag: TokenTags.EXTERN },
   { str: "from",           tag: TokenTags.FROM },
   { str: "as",             tag: TokenTags.AS },
-  { str: "library",        tag: TokenTags.LIBRARY },
   { str: "ref",            tag: TokenTags.REF },
   { str: "break",          tag: TokenTags.BREAK },
   { str: "continue",       tag: TokenTags.CONTINUE },
@@ -120,29 +122,16 @@ export const KEYWORD_LIST: KeywordDefinition[] = [
   { str: "self",           tag: TokenTags.SELF },
   { str: "extends",        tag: TokenTags.EXTENDS },
   { str: "vtable",         tag: TokenTags.VTABLE },
-  { str: "kind",           tag: TokenTags.KIND },
   { str: "appliesTo",      tag: TokenTags.APPLIESTO },
-  { str: "requires",       tag: TokenTags.REQUIRES },
   { str: "mustCall",       tag: TokenTags.MUSTCALL },
   { str: "ownsBlock",      tag: TokenTags.OWNSBLOCK },
   { str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND },
-  { str: "binding",        tag: TokenTags.BINDING },
   { str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE },
   { str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE },
   { str: "forbids",        tag: TokenTags.FORBIDS },
-  { str: "scope",          tag: TokenTags.SCOPE },
   { str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES },
-  { str: "parameter",      tag: TokenTags.PARAMETER },
-  { str: "field",          tag: TokenTags.FIELD },
-  { str: "io",             tag: TokenTags.IO },
   { str: "globalState",    tag: TokenTags.GLOBALSTATE },
-  { str: "task",           tag: TokenTags.TASK },
   { str: "wait",           tag: TokenTags.WAIT },
-  { str: "joined",         tag: TokenTags.JOINED },
-  { str: "pooled",         tag: TokenTags.POOLED },
-  { str: "propagates",     tag: TokenTags.PROPAGATES },
-  { str: "layout",         tag: TokenTags.LAYOUT },
-  { str: "align",          tag: TokenTags.ALIGN },
   { str: "switch",         tag: TokenTags.SWITCH },
   { str: "case",           tag: TokenTags.CASE },
   { str: "default",        tag: TokenTags.DEFAULT },
@@ -150,5 +139,6 @@ export const KEYWORD_LIST: KeywordDefinition[] = [
   { str: "variant",        tag: TokenTags.VARIANT },
   { str: "union",          tag: TokenTags.UNION },
   { str: "null",           tag: TokenTags.NULL },
+  { str: "await",          tag: TokenTags.AWAIT },
   { str: "_",              tag: TokenTags.DISCARD },
 ];

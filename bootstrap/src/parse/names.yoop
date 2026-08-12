@@ -1,12 +1,44 @@
 module parse;
 
-// Turning an IDENT token's byte span back into a string.
+// Turning an IDENT token's byte span back into a string, and matching the
+// CONTEXTUAL keywords.
+//
+// Most of the kind vocabulary (`propagates`, `contains`, `kind`, `requires`,
+// `task`, ...) is not a reserved word - it lexes as IDENT so it stays usable as
+// an ordinary name. Recognizing one is therefore a text comparison at the point
+// where the grammar expects it, which is what `peekIsWord` is for.
 
 import { Result, Option } from "std/core/types.yoop";
 import * as bytes from "std/core/bytes.yoop";
 import * as str from "std/core/strings.yoop";
 import { TokenTags } from "../lex";
 import { ParsingError } from "../diagnostics";
+
+// The current token's source text, or "" if there is no text to read.
+export function peekText(ref ps: ParserState): string {
+  const tok = SelfLexing.peek(ref ps);
+  if (tok.length <= 0) {
+    return "";
+  }
+  const src = ps.src;
+  const textResult = str.stringFromBytes(bytes.bytesSlice(
+    src,
+    tok.start,
+    tok.start + usize(tok.length)
+  ));
+  switch (textResult) {
+    case Result.Err { error: e }: { return ""; }
+    case Result.Ok { value: text }: { return text; }
+  }
+}
+
+// True when the current token is the contextual keyword `word`.
+export function peekIsWord(ref ps: ParserState, word: string): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  return str.stringEq(peekText(ref ps), word);
+}
 
 export function parseIdentAsName(ref pState: ParserState): Result<string, ParsingError> {
   const identToken = SelfLexing.expect(ref pState, TokenTags.IDENT)?;

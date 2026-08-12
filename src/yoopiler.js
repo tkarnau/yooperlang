@@ -19,6 +19,7 @@ import {
 } from "./runtimeBuild.js";
 import { formatDiagnostic } from "./helpers.js";
 import { dumpAst, dumpAstJson } from "./dumpAst.js";
+import { dumpTokens } from "./dumpTokens.js";
 import { checkInstallRoots, STD_ROOT } from "./install_root.js";
 import {
   clangEnv,
@@ -83,6 +84,7 @@ function main() {
       outputFile: { type: "string", short: "o" },
       outputModules: { type: "boolean", short: "a" },
       "dump-ast": { type: "boolean" },
+      "dump-tokens": { type: "boolean" },
       "dump-ast-json": { type: "string" },
       "dump-bc": { type: "boolean" },
       "list-attributes": { type: "boolean" },
@@ -162,6 +164,13 @@ function main() {
   const entryAbs = testCtx
     ? testCtx.entryAbs
     : fs.realpathSync(path.resolve(inputFile));
+
+  // Layer 1 parity dump, to stdout so it pipes into a diff. The bootstrap's
+  // matching emitter is bootstrap/tools/dump_tokens.yoop.
+  if (values["dump-tokens"]) {
+    process.stdout.write(dumpTokens(fs.readFileSync(inputFile, "utf8")));
+    return;
+  }
 
   if (values["dump-ast"]) {
     const astOut = values.outputFile ?? `${outputFileName}.ast.html`;

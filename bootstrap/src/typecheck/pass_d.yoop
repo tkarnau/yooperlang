@@ -1,0 +1,201 @@
+module typecheck;
+
+// Pass D - check function bodies and decorate every node codegen will read.
+//
+// Decoration is the dense `TypedModule.resolvedTypes` vector indexed by NodeId
+// (decision D2): the AST stays the parser's immutable output and the types live
+// beside it. Codegen may assume every node it visits has a concrete TypeId here.
+//
+// This is the thinnest pass D that gets a program to an executable. It handles
+// int and string literals, calls, and return statements; anything else gets a
+// named "not supported yet" diagnostic rather than a silently untyped node.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+import { Module } from "../source_graph";
+import * as str from "std/core/strings.yoop";
+
+export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  // One decoration slot per arena node, so a NodeId indexes straight in.
+  // TYPE_ERROR_ID doubles as "nothing resolved here".
+  vec.vecClear(ref tm.resolvedTypes);
+  let n: usize = 0;
+  while (n < m.ast.nodes.len) {
+    vec.vecPush(ref tm.resolvedTypes, TYPE_ERROR_ID);
+    n += 1;
+  }
+
+  const programNode = nodeAt(ref m.ast, m.ast.root);
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const declId = childAt(ref m.ast, programNode, i);
+    const declNode = nodeAt(ref m.ast, declId);
+    if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
+      checkFunctionBody(ref prog, ref tm, ref m.ast, declNode);
+    }
+    i += 1;
+  }
+}
+
+function checkFunctionBody(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  let retType: TypeId = TYPE_VOID_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: {
+      switch (typeAt(ref prog, t)) {
+        case Type.Func { params: p, ret: r, variadic: v }: { retType = r; }
+        default: { return; }
+      }
+    }
+    default: { return; }
+  }
+
+  if (declNode.childD != 0) {
+    checkBlock(ref prog, ref tm, ref ast, declNode.childD, retType);
+  }
+}
+
+function checkBlock(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  blockId: NodeId,
+  retType: TypeId
+): void {
+  const block = nodeAt(ref ast, blockId);
+  if (block.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, block.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    checkStatement(ref prog, ref tm, ref ast, childAt(ref ast, list, i), retType);
+    i += 1;
+  }
+}
+
+function checkStatement(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmtId: NodeId,
+  retType: TypeId
+): void {
+  const stmt = nodeAt(ref ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.RETURN_STATEMENT: {
+      if (stmt.childA == 0) {
+        return;   // bare `return;`
+      }
+      // The return type is what an untyped literal in the expression pins to.
+      const got = checkExpr(ref prog, ref tm, ref ast, stmt.childA, retType);
+      if (got != TYPE_ERROR_ID && retType != TYPE_ERROR_ID && got != retType) {
+        reportError(ref prog, "returned expression does not match the declared return type", stmt.sourceLoc);
+      }
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT: {
+      checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID);
+    }
+    default: {
+      reportError(ref prog, `pass D does not handle ${kindName(stmt.kind)} yet`, stmt.sourceLoc);
+    }
+  }
+}
+
+// Returns the node's type AND records it. `expected` is the type an untyped
+// literal should pin to, or TYPE_ERROR_ID when there is no expectation.
+function checkExpr(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  expected: TypeId
+): TypeId {
+  const expr = nodeAt(ref ast, exprId);
+  let resolved: TypeId = TYPE_ERROR_ID;
+
+  switch (expr.kind) {
+    case ASTNodeKind.INT_LITERAL: {
+      // An int literal is untyped until context pins it; with no expectation it
+      // defaults to int32, matching the JS reference.
+      if (expected != TYPE_ERROR_ID) {
+        resolved = expected;
+      } else {
+        resolved = primTypeId(PrimKind.INT32);
+      }
+    }
+    case ASTNodeKind.STRING_LITERAL: {
+      resolved = primTypeId(PrimKind.STRING);
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      const left = checkExpr(ref prog, ref tm, ref ast, expr.childA, expected);
+      const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, left);
+      if (left != right) {
+        reportError(ref prog, "binary operands have different types", expr.sourceLoc);
+      } else {
+        resolved = left;
+      }
+    }
+    case ASTNodeKind.CALL_EXPRESSION: {
+      resolved = checkCall(ref prog, ref tm, ref ast, expr);
+    }
+    default: {
+      reportError(ref prog, `pass D does not handle ${kindName(expr.kind)} yet`, expr.sourceLoc);
+    }
+  }
+
+  vec.vecSet(ref tm.resolvedTypes, exprId, resolved);
+  return resolved;
+}
+
+function checkCall(ref prog: Program, ref tm: TypedModule, ref ast: AST, expr: ASTNode): TypeId {
+  // Every argument is checked with no expectation; printf is variadic and user
+  // functions do not have their params matched yet.
+  if (expr.childA != 0) {
+    const args = nodeAt(ref ast, expr.childA);
+    let a: usize = 0;
+    while (a < args.childCount) {
+      checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID);
+      a += 1;
+    }
+  }
+
+  // printf stays magic, exactly as it is in the JS reference: it is variadic C
+  // and almost every program uses it.
+  if (isPrintfName(expr.name)) {
+    return primTypeId(PrimKind.INT32);
+  }
+
+  const symId = lookupOwnName(ref tm, expr.name);
+  if (symId == SYMBOL_NONE_ID) {
+    reportError(ref prog, `unknown function "${expr.name}"`, expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: {
+      switch (typeAt(ref prog, t)) {
+        case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
+    default: {
+      reportError(ref prog, `"${expr.name}" is not callable`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `printf` is a compiler builtin on both sides rather than an extern anyone has
+// to declare - see the same carve-out in src/jsyooptypecheck/typecheck.js.
+function isPrintfName(name: string): bool {
+  return str.stringEq(name, "printf");
+}

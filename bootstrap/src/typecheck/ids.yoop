@@ -23,6 +23,16 @@ export const TYPE_ERROR_ID: TypeId   = 0;   // also the "no type yet" sentinel
 export const TYPE_VOID_ID: TypeId    = 1;
 export const TYPE_UNTYPED_INT_ID: TypeId = 2;
 
+// Then one slot per PrimKind, in PrimKind declaration order. Pre-interning them
+// is what makes `int == int` true: the arena does not deduplicate, so two
+// separately interned Prim entries would be two different TypeIds and every
+// equality check on them would be wrong.
+export const PRIM_TYPE_BASE: TypeId = 3;
+
+export function primTypeId(k: PrimKind): TypeId {
+  return PRIM_TYPE_BASE + usize(k);
+}
+
 // A symbol id of 0 means "not found". SymbolId 0 is never handed out - see
 // initProgram, which seeds the arena with a dead entry at index 0.
 export const SYMBOL_NONE_ID: SymbolId = 0;

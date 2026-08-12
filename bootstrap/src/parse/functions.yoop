@@ -21,11 +21,12 @@ export function parseFunctionDecl(ref ps: ParserState): Result<NodeId, ParsingEr
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   let peekTag = SelfLexing.peek(ref ps).tag;
+  // No POOLED case: `pooled` is contextual and lexes as IDENT, which the
+  // first arm already covers.
   while (
     peekTag == TokenTags.IDENT ||
     peekTag == TokenTags.REF ||
-    peekTag == TokenTags.COMMA ||
-    peekTag == TokenTags.POOLED
+    peekTag == TokenTags.COMMA
   ) {
     if (peekTag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;

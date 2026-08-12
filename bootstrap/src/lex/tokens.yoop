@@ -144,6 +144,9 @@ export enum TokenTags {
   // ATTRIBUTE (E.G. `@PRECOMPILE`, `@TEST`, `@VERIFY`). ALWAYS A
   // COMPILE-TIME DIRECTIVE - NEVER QUERYABLE FROM RUNTIME CODE.
   AT,
+  // `await <expr>`. Async coloring: only legal inside an async function or a
+  // task body.
+  AWAIT,
 }
 
 export function getTokenPrecedence(tag: TokenTags): int {
@@ -279,6 +282,7 @@ const TOKEN_TAG_NAMES: string[] = [
   "MODULUSEQ",
   "FATARROW",
   "AT",
+  "AWAIT",
 ];
 
 // Maps a TokenTags case to its source spelling. Used by Display sites

@@ -42,10 +42,27 @@ export type Program propagates<disposable> {
 // The reserved singletons are pushed here, in the order ids.yoop declares them.
 // Anything that changes this order has to change those constants too.
 export function initProgram(): Program propagates<disposable> {
-  let types: Vec<Type> = vec.vecNew(8);
+  let types: Vec<Type> = vec.vecNew(24);
   vec.vecPush(ref types, Type.ErrorT);      // TYPE_ERROR_ID
   vec.vecPush(ref types, Type.Void);        // TYPE_VOID_ID
   vec.vecPush(ref types, Type.UntypedInt);  // TYPE_UNTYPED_INT_ID
+
+  // PRIM_TYPE_BASE onward, in PrimKind declaration order. primTypeId() indexes
+  // straight into this run, so the order here IS the contract.
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT8 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT16 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT32 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT64 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.ISIZE });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT8 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT16 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT32 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT64 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.USIZE });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.FLOAT32 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.FLOAT64 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.BOOL });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.STRING });
 
   // SymbolId 0 must never be a real symbol, so a "not found" 0 stays
   // unambiguous. Burn index 0 on a dead entry.

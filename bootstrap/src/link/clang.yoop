@@ -1,0 +1,36 @@
+module link;
+
+// Layer 6: LLVM IR text -> executable, by shelling out to clang.
+//
+// This layer is identical in both implementations by design - the contracts doc
+// calls it the one that does not deviate. The only wrinkle is that yoop has no
+// process API yet, so we reach for libc's `system` directly. That is why this
+// file is `import.unsafe`.
+//
+// A program that only touches libc needs no yoop runtime, which is what keeps
+// the link line down to one clang invocation. Linking the runtime arrives when
+// the emitted code first needs it.
+
+import.unsafe;
+
+import * as fs from "std/fs.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdlib.h" {
+  function system(cmd: string): c_int;
+}
+
+// Writes `ir` to `irPath`, then links it to `exePath`. Returns "" on success or
+// a human-readable error.
+export function linkExecutable(ir: string, irPath: string, exePath: string): string {
+  const writeErr = fs.writeFile(irPath, intr.stringAsBytes(ir));
+  if (writeErr.len > 0) {
+    return `writing ${irPath}: ${writeErr}`;
+  }
+
+  const rc = system(`clang -Wno-override-module -o "${exePath}" "${irPath}"`);
+  if (rc != 0) {
+    return `clang failed (exit ${rc}) on ${irPath}`;
+  }
+  return "";
+}

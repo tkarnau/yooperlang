@@ -1,0 +1,62 @@
+module codegen;
+
+// String literals become private module-level constants.
+//
+// LLVM's `c"..."` form takes raw bytes with `\XX` hex escapes, and the constant
+// has to be NUL-terminated for anything that hands it to C (printf, here).
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable, owned } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Result } from "std/core/types.yoop";
+
+// Emits `@.str.N = private unnamed_addr constant [L x i8] c"..."` and returns
+// the symbol so a caller can reference it.
+export function internStringConstant(ref e: Emitter, text: string): string {
+  const name = `@.str.${e.nextStr}`;
+  e.nextStr += 1;
+
+  const bytes = intr.stringAsBytes(text);
+  emitGlobal(
+    ref e,
+    `${name} = private unnamed_addr constant [${bytes.len + 1} x i8] c"${llvmEscape(bytes)}\\00", align 1`
+  );
+  return name;
+}
+
+// LLVM accepts printable ASCII literally; everything else, plus `"` and `\`,
+// must be a two-digit hex escape.
+function llvmEscape(bytes: uint8[]): owned string {
+  disposable pieces: Vec<string> = vec.vecNew(bytes.len);
+  let i: usize = 0;
+  while (i < bytes.len) {
+    const b = bytes[i];
+    if (b >= 32 && b < 127 && b != '"' && b != '\\') {
+      vec.vecPush(ref pieces, oneChar(b));
+    } else {
+      vec.vecPush(ref pieces, `\\${hexByte(b)}`);
+    }
+    i += 1;
+  }
+  return str.stringConcatAll(vec.vecAsArray(ref pieces));
+}
+
+function oneChar(b: uint8): string {
+  let one: uint8[] = [b];
+  switch (str.stringFromBytes(one)) {
+    case Result.Err { error: e }: { return "?"; }
+    case Result.Ok { value: s }: { return s; }
+  }
+}
+
+const HEX_DIGITS: string = "0123456789ABCDEF";
+
+function hexByte(b: uint8): string {
+  const digits = intr.stringAsBytes(HEX_DIGITS);
+  let out: uint8[] = [digits[usize(b) / 16], digits[usize(b) % 16]];
+  switch (str.stringFromBytes(out)) {
+    case Result.Err { error: e }: { return "00"; }
+    case Result.Ok { value: s }: { return s; }
+  }
+}

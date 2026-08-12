@@ -59,7 +59,11 @@ types file.
 - **Layer 0 - module graph**: STARTED. `source_graph/` has `Module` /
   `ModuleGraph`, `loadModuleGraph` (single entry module), and dormant
   import-path resolution. No import edges yet.
-- **Layer 1 - lex**: WORKING. `lex/` covers the full token set; the old
+- **Layer 1 - lex**: WORKING AND AT PARITY. `npm run test:parity` diffs the
+  bootstrap token stream against the JS lexer's over 557 real source files.
+  Getting there found three bugs: `0o755` lexed base-2, 14 words were promoted
+  to keywords that the JS lexer leaves as contextual identifiers, and `await`
+  was missing. `lex/` covers the full token set; the old
   `tests/lexer_tests` harness checks every keyword, structural token, and atom,
   and `lex/lex.test.yoop` covers sorting, precedence, keyword-vs-ident,
   literal values, and nested block comments.
@@ -70,20 +74,32 @@ types file.
   methods in a type body, `implements`/`propagates`/`contains` clauses - each a
   named "not supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
-  is built. Pass A registers shells for `function` and `type` decls and reports
-  redeclarations; passes B (imports), C (fill shells) and D (bodies) are not
-  built. The largest layer.
+  is built, with pass A (shells + redeclaration), pass C (function signatures,
+  struct fields) and a thin pass D (bodies + resolvedTypes decoration). Pass B
+  is a no-op while the graph is one module. The largest layer.
 - **Layer 4 - bytecode IR**: the one planned deviation from the JS pipeline
   (JS has no IR; the bootstrap may add one). Hold the codegen input contract
   stable so this stays an absorbable, contained change. Deferred until a pass or
   optimization actually wants it.
-- **Layer 5 - codegen**: NOT STARTED.
+- **Layer 5 - codegen**: IN PROGRESS. `codegen/` emits LLVM IR text for the
+  slice subset (functions, return, int/string literals, arithmetic, calls,
+  printf).
+- **Layer 6 - link**: WORKING. `link/` shells out to clang via libc `system`.
+
+**A vertical slice runs end to end as of 2026-08-12.** The bootstrap compiles
+`bootstrap/tests/slice/*.yoop` to real executables, and `npm run test:slice`
+asserts the JS compiler and the bootstrap produce identical stdout and exit
+codes. Seeding every layer first was the right call: it is what turned codegen
+and link from "someday" into concrete, small modules.
 
 Immediate build sequence:
 
-1. Add a deterministic token dump and diff the stream against the JS lexer.
-2. Grow the parser toward the constructs the bootstrap itself uses, and diff AST
-   dumps against the JS dump.
+1. DONE - token dump + parity harness (src/dumpTokens.js,
+   bootstrap/src/lex/dump.yoop, src/parity.test.js).
+2. Design the layer-2 AST dump. The two ASTs are different shapes (NODE_LIST
+   wrappers and annotation nodes here, plain arrays and annotation objects in
+   JS), so a normalized tree format has to come BEFORE the parser grows much
+   further. Then grow the parser toward what the bootstrap itself uses.
 3. Typecheck pass C (fill the shells: struct fields, function signatures), then
    pass D (bodies + decoration); diff resolved types + diagnostics.
 4. Build codegen straight from the typed AST (skip the IR layer initially, as

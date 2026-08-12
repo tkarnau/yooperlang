@@ -4,8 +4,11 @@ module parse;
 // binary operators while the next one binds tighter than the caller allows.
 
 import { Result } from "std/core/types.yoop";
-import { ASTNode, ASTNodeKind } from "../ast";
-import { TokenTags, tagName, getTokenPrecedence } from "../lex";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, ASTNodeKind, NodeId } from "../ast";
+import { TokenTags, tagName, getTokenPrecedence, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
 
 export function parseExpressionStatement(ref ps: ParserState): ParsingResult {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXPRESSION_STATEMENT);
@@ -29,12 +32,22 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
       node.intVal = SelfLexing.advance(ref ps)?.intVal;
     }
+    case TokenTags.STRLITERAL: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRING_LITERAL);
+      const tok = SelfLexing.advance(ref ps)?;
+      // The lexer hands back the literal RAW, quotes included. Decoding is the
+      // parser's job, and the decoded text goes in the arena's string pool so
+      // the node stays a fixed-size struct.
+      node.strId = internString(ref ps, decodeStringLiteral(ref ps, tok)?);
+    }
     case TokenTags.IDENT: {
       const name = parseIdentAsName(ref ps)?;
       // handle errno stuff...
       // handle unsafe_ptr stuff...
       if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
-        // todo callexpression...
+        node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.CALL_EXPRESSION);
+        node.name = name;
+        node.childA = parseCallArgs(ref ps)?;
       } else {
         node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
         node.name = name;
@@ -74,4 +87,25 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
   }
   // return
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `( arg, arg )` after a callee name. Returns a NODE_LIST NodeId; an empty
+// argument list still gets one, so codegen never special-cases zero args.
+function parseCallArgs(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseExpression(ref ps, 0)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }

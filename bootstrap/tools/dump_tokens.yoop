@@ -1,0 +1,41 @@
+/*
+  Token dump entry point: `dump_tokens <file.yoop>` prints the Layer 1 parity
+  dump to stdout. Paired with src/dumpTokens.js on the JS side; the harness
+  that diffs them is src/parity.test.js.
+*/
+
+import * as env from "std/env.yoop";
+import * as log from "std/log.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as fs from "std/fs.yoop";
+import { Result } from "std/core/types.yoop";
+import { dumpTokens } from "../src/lex";
+
+function main(): int {
+  if (env.argCount() < 2) {
+    log.error("usage: dump_tokens <file.yoop>");
+    return 2;
+  }
+  const path = env.argAt(1);
+
+  disposable src: Vec<uint8> = vec.vecNew(4096);
+  const readErr = fs.readFileInto(ref src, path);
+  if (readErr.len > 0) {
+    log.error(`error reading ${path}: ${readErr}`);
+    return 1;
+  }
+
+  switch (dumpTokens(vec.vecAsArray(ref src))) {
+    case Result.Err { error: e }: {
+      log.error(e);
+      return 1;
+    }
+    case Result.Ok { value: dump }: {
+      // Straight to stdout with no logger prefix - the harness diffs this
+      // byte for byte.
+      printf("%s", dump);
+      return 0;
+    }
+  }
+}

@@ -320,7 +320,10 @@ reference, current bootstrap status.
   input (mirrors JS - codegen assumes a clean AST).
 - JS ref: src/jsyoopcodegen/codegen.js (compileEntry, codegenProgram); returns
   { ir, linkFlags }.
-- Bootstrap status: NOT STARTED.
+- Bootstrap status: IN PROGRESS - bootstrap/src/codegen/ (emit.yoop holds the
+  two-buffer IR writer and the TypeId -> LLVM type map, strings.yoop interns
+  string constants, codegen.yoop walks the typed AST). Returns the IR text; no
+  linkFlags yet, because nothing in the subset needs a library.
 
 ### Layer 6: Link
 
@@ -331,6 +334,11 @@ reference, current bootstrap status.
   runtime from runtimeBuild.js and the accumulated `-l` flags. This layer does
   not deviate.
 - JS ref: src/yoopiler.js clang invocation, src/runtimeBuild.js.
+- Bootstrap status: WORKING - bootstrap/src/link/clang.yoop. yoop has no process
+  API, so it calls libc `system` directly (the file is `import.unsafe`). It does
+  NOT link the runtime yet: a program in the current subset only touches libc,
+  so one clang invocation is the whole line. That changes with the first emitted
+  construct that needs the runtime.
 
 ---
 
@@ -365,15 +373,24 @@ vice versa), so you can swap one layer at a time and cross-check.
 Self-hosting is safest when each layer is verified against the JS reference at
 its boundary BEFORE moving up:
 
-1. Give every boundary a deterministic, serializable dump (token dump, AST
-   dump - the JS side already has AST dumping per the git history; mirror its
-   format in yoop).
+1. Give every boundary a deterministic, serializable dump. Layer 1 is BUILT:
+   src/dumpTokens.js and bootstrap/src/lex/dump.yoop emit the same
+   line-per-token format, src/parity.test.js diffs them, and `npm run
+   test:parity` runs it. Note the JS side's existing --dump-ast is an HTML/JSON
+   VIEWER, not a diff target; layer 2 needs a normalized tree dump because the
+   two ASTs are genuinely different shapes.
 2. For the same input source, assert `yoop_layer_dump == js_layer_dump`:
-   - lex: identical token streams (tag, span, literal values);
+   - lex: identical token streams (tag, span, literal values) - DONE, and it
+     immediately paid for itself: an octal base bug, 14 over-promoted keywords,
+     and a missing `await`;
    - parse: identical AST dumps;
    - typecheck: identical resolved-type annotations + diagnostics;
    - codegen: identical (or behaviorally equivalent) .ll, then identical
-     program output.
+     program output - the BEHAVIOURAL half is DONE for the slice subset
+     (src/slice.test.js runs both compilers over bootstrap/tests/slice/ and
+     compares stdout + exit code). The .ll itself is deliberately not compared:
+     the JS driver autoloads std into every graph, so its IR for
+     `return 42` is 226KB against the bootstrap's 6 lines.
 3. Only once a layer matches do you build the next on top of it.
 
 This turns "rewrite a compiler in itself" into a sequence of small, checkable
