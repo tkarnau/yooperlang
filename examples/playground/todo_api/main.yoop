@@ -197,7 +197,7 @@ function respondTodoList(ref resp: Response, ref todos: Vec<Todo>): void {
 
 type HealthHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, health(ref db, ref resp));
     }
@@ -211,7 +211,7 @@ function health(ref db: Db, ref resp: Response): Result<int32, HttpError> {
 
 type ListHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, listTodos(ref db, ref req, ref resp));
     }
@@ -245,7 +245,7 @@ function listTodos(ref db: Db, ref req: Request, ref resp: Response): Result<int
 
 type ShowHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, showTodo(ref db, ref req, ref resp));
     }
@@ -263,7 +263,7 @@ function showTodo(ref db: Db, ref req: Request, ref resp: Response): Result<int3
 
 type CreateHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, createTodo(ref db, ref req, ref resp));
     }
@@ -284,7 +284,7 @@ function createTodo(ref db: Db, ref req: Request, ref resp: Response): Result<in
 
 type UpdateHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, updateTodo(ref db, ref req, ref resp));
     }
@@ -309,7 +309,7 @@ function updateTodo(ref db: Db, ref req: Request, ref resp: Response): Result<in
 
 type DeleteHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, deleteTodo(ref db, ref req, ref resp));
     }
@@ -325,7 +325,7 @@ function deleteTodo(ref db: Db, ref req: Request, ref resp: Response): Result<in
 // The transaction showcase: every title lands or none does.
 type ImportHandler implements Handler {
     conn: DbRef,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let db: Db = sqlite.borrow(self.conn);
         return finish(ref resp, importTodos(ref db, ref req, ref resp));
     }
@@ -366,7 +366,7 @@ function importTodos(ref db: Db, ref req: Request, ref resp: Response): Result<i
 // header is already written - this only changes the body.
 type NoRouteHandler implements Handler {
     unused: int32,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let what: string = `${http.methodLabel(req.method)} ${req.path}`;
         if (resp.status.code == 405) {
             http.respondJson(ref resp, resp.status,

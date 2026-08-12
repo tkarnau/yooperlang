@@ -27,7 +27,7 @@ extern "C" from "stdio.h" {
 export type StorageHandler implements Handler {
     rootDir: string,
 
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let san: Result<string, string> = safepath.sanitize(req.path);
         let rel: string = "";
         switch (san) {

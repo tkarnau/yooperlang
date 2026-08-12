@@ -1,0 +1,178 @@
+// `serveConcurrent`: a task per connection, bounded, with a 503 at capacity.
+//
+// `serve` handles one connection at a time - it awaits each to completion
+// before accepting the next - so one slow client stalls every other. This is
+// the loop that does not.
+//
+// What the fixture proves, in order:
+//
+//   1. Connections genuinely OVERLAP. Four clients each ask for a handler that
+//      sleeps, and the peak concurrency the server records is > 1. Under
+//      `serve` it would be exactly 1, no matter the timing.
+//   2. The cap HOLDS. Peak never exceeds maxConcurrent.
+//   3. Over the cap is a 503, not a hang. The refusal is answered inline by
+//      the accept loop, with no task spawned.
+//
+// The refusal is made DETERMINISTIC rather than left to chance: two "holder"
+// clients take both slots and their handlers sleep well past the point where
+// the two "late" clients connect. Without that staggering, whether anything
+// got refused would depend on scheduling, and the interesting assertion would
+// pass vacuously on a fast machine.
+//
+// plans/yooperdoom-takeaways.md 3.2.
+
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+
+import * as tcp, { ListenResult } from "std/net";
+import * as http, { Handler, HandleOutcome, Dispatcher, ServeState } from "std/http";
+import * as types, { Request, Response, HttpMethod } from "std/http";
+import * as client, { Client, ClientRequest, ClientResponse } from "std/http";
+import * as atomic from "std/core/atomic.yoop";
+import * as conc from "std/core/concurrency.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "yoop_runtime" {
+    function yoop_sleep_ms(ms: uint64): int32;
+    function yoop_stdout_linebuf(): void;
+}
+
+let serverPort: int32 = 0;
+// How many handler bodies are running at this instant, and the most ever seen.
+// Counted in the HANDLER rather than read from ServeState so the fixture is
+// measuring overlapping WORK, not merely overlapping accepted sockets.
+let liveHandlers: int32 = 0;
+let peakHandlers: int32 = 0;
+let refusals: int32 = 0;
+
+const MAX_CONCURRENT: int32 = 2;
+const CLIENTS: int32 = 4;
+// The handler holds its slot for this long. It has to comfortably outlast
+// LATE_DELAY_MS below, or the "late" clients would find a free slot.
+const HOLD_MS: uint64 = 400;
+const LATE_DELAY_MS: uint64 = 150;
+
+// Sleeps, so connections have to overlap for the peak to exceed 1.
+//
+// The sleep is BLOCKING (`yoop_sleep_ms`, not an await) on purpose: it is the
+// worst case for a serial server, and the one a task-per-connection loop is
+// supposed to survive. Each connection is on its own task, so a blocking
+// handler occupies one worker rather than the whole server.
+type SlowHandler implements Handler {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        let now: int32 = atomic.incrI32(ref liveHandlers);
+        let _p: int32 = atomic.maxI32(ref peakHandlers, now);
+
+        let _s: int32 = yoop_sleep_ms(HOLD_MS);
+
+        let _d: int32 = atomic.decrI32(ref liveHandlers);
+        types.respondText(ref resp, types.ok(), "slow-ok");
+        return HandleOutcome.Ok;
+    }
+}
+
+// The state OUTLIVES the serve call, which is required rather than stylistic:
+// connections are fire-and-forget, so a counter living in `serveConcurrent`'s
+// own frame would dangle the moment it returned.
+let state: ServeState = http.serveStateNew(MAX_CONCURRENT);
+
+task serverTask(): int32 {
+    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 64);
+    if (lr.error.len > 0) {
+        printf(`bind err: ${lr.error}\n`);
+        return 1;
+    }
+    serverPort = lr.listener.bound_port;
+    let h: SlowHandler = { };
+    let d: Dispatcher = Dispatcher.from(ref h);
+
+    let cfg: http.ServerConfig = http.defaultConfig();
+    // One request per connection: every client opens its own, which is what
+    // makes the concurrency visible.
+    cfg.maxRequestsPerConnection = 1;
+
+    switch (await http.serveConcurrent(ref lr.listener, ref d, cfg, ref state, CLIENTS)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { printf(`serve err=${e}\n`); }
+    }
+    return 0;
+}
+
+async oneClient(id: int32): int32 {
+    let c: Client = client.clientNew();
+    let url: string = `http://127.0.0.1:${serverPort}/slow`;
+    switch (await client.get(ref c, url)) {
+        case Result.Ok { value: r }: {
+            disposable resp: ClientResponse = r;
+            if (resp.status.code == 503) {
+                let _r: int32 = atomic.incrI32(ref refusals);
+            }
+            return int32(resp.status.code);
+        }
+        case Result.Err { error: e }: {
+            printf(`client ${id} err ${e}\n`);
+            return 0;
+        }
+    }
+}
+
+// Two holders take both slots and keep them; two late clients then find the
+// server full. Staggering is what makes the refusal deterministic - see the
+// header.
+async fanOut(): int32 {
+    pooled h1 = clientTask(1);
+    pooled h2 = clientTask(2);
+
+    // Both holders are inside their handler's sleep by now.
+    let _s: int32 = yoop_sleep_ms(LATE_DELAY_MS);
+
+    pooled l1 = clientTask(3);
+    pooled l2 = clientTask(4);
+
+    let a: int32 = await conc.awaitTask(h1);
+    let b: int32 = await conc.awaitTask(h2);
+    let c: int32 = await conc.awaitTask(l1);
+    let d: int32 = await conc.awaitTask(l2);
+    return a + b + c + d;
+}
+
+task clientTask(id: int32): int32 {
+    return await oneClient(id);
+}
+
+task driverTask(): int32 {
+    return await fanOut();
+}
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+
+    joined sv = serverTask();
+    let _s: int32 = yoop_sleep_ms(150);
+
+    pooled dr = driverTask();
+    let _codes: int32 = wait dr;
+
+    // Give any still-running connection a moment to finish and decrement.
+    let _s2: int32 = yoop_sleep_ms(250);
+
+    let peak: int32 = atomic.loadI32(ref peakHandlers);
+    let rej: int32 = atomic.loadI32(ref refusals);
+
+    // 1. Connections overlapped. Under `serve` this would be exactly 1, and
+    //    with a cap of 2 it is exactly 2.
+    printf(`peak=${peak}\n`);
+    // 2. The cap held.
+    printf(`withinCap=${peak <= MAX_CONCURRENT}\n`);
+    // 3. Both late clients were refused, and the server agrees with them
+    //    about how many that was.
+    printf(`rejected=${http.serveRejected(ref state)}\n`);
+    printf(`refusedSeen=${rej == http.serveRejected(ref state)}\n`);
+    // 4. Everything was accounted for, and nothing is left in flight.
+    printf(`accepted+rejected=${http.serveAccepted(ref state) + http.serveRejected(ref state)}\n`);
+    printf(`drained=${http.serveInFlight(ref state) == 0}\n`);
+
+    return 0;
+}

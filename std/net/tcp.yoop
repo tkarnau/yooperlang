@@ -390,6 +390,4 @@ export function tcp_connect(host: string, port: int32): ConnectResult propagates
             };
         }
     }
-    // Unreachable.
-    return { stream: newStream(-1), error: "" };
 }

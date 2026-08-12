@@ -273,6 +273,157 @@ describe("e2e: pass fixtures compile, run, and produce expected output", { concu
     );
   });
 
+  // The property that breaks SILENTLY: one `import` added to std/http and
+  // suddenly every program that speaks HTTP needs OpenSSL installed to build.
+  // Link flags are collected program-wide, which is why std/tls and std/https
+  // are separate modules (plans/tls.md D4) - and why this is worth asserting
+  // rather than trusting.
+  //
+  // Needs no clang: it inspects what the driver WOULD hand the linker.
+  it("plain HTTP does not drag in OpenSSL; https:// does", () => {
+    const plain = compileEntry(path.join(repoRoot, "examples/pass/hello_server/main.yoop"));
+    assert.deepEqual(
+      plain.linkFlags,
+      [],
+      "a plain HTTP program must not link OpenSSL",
+    );
+    assert.deepEqual(
+      glueSourcesForLinkFlags(plain.linkFlags),
+      [],
+      "a plain HTTP program must not compile the TLS shim",
+    );
+
+    const secure = compileEntry(path.join(repoRoot, "examples/pass/https_client/main.yoop"));
+    assert.ok(
+      secure.linkFlags.includes("ssl"),
+      `expected an https program to name ssl, got: ${secure.linkFlags.join(",")}`,
+    );
+    assert.ok(
+      glueSourcesForLinkFlags(secure.linkFlags).some((p) => p.endsWith("yoop_tls.c")),
+      "expected an https program to compile the TLS shim",
+    );
+  });
+
+  it("https_client: a real TLS handshake, three refusals, and https:// through the client", async (t) => {
+    // plans/tls.md phase 1. The peer is a NODE HTTPS server: a TLS client
+    // tested only against itself proves almost nothing, and the value is
+    // handshaking with an implementation that rejects us if we get it wrong.
+    //
+    // The three REFUSALS matter more than the connection. A handshake
+    // succeeding says little; a client that cannot be made to refuse has no
+    // security property at all - which is the same lesson the conferred-kind
+    // gate taught (yooperdoom-takeaways 0.1).
+    const skip = tlsSkipReason();
+    if (skip) {
+      t.skip(`TLS: ${skip}`);
+      return;
+    }
+    const server = await startTlsServer();
+    try {
+      const ca = path.join(repoRoot, "examples/pass/https_client/testdata/ca.pem");
+      const { stdout, exitCode } = await runFixtureEntry(
+        "examples/pass/https_client/main.yoop",
+        { args: [String(server.port), ca] },
+      );
+      assert.equal(exitCode, 0);
+      assert.equal(
+        stdout,
+        // Trusting the right CA: connects AND round-trips a request, so the
+        // data path is covered and not just the handshake.
+        "verified   connected body=tls-hello:/hi\n" +
+          // The throwaway CA is not in the system roots.
+          "no CA      refused\n" +
+          // Valid certificate, wrong host. Chain verification alone does NOT
+          // close this - it needs the hostname/IP check.
+          "wrong name refused\n" +
+          // ...and the escape hatch is what opens the gate, nothing else.
+          "verify off connected\n" +
+          // The payoff: an `https://` URL through the ORDINARY client, with
+          // no TLS at the call site. std/http takes Reader/Writer (phase 0)
+          // and TlsStream implements Readable/Writable (phase 1), so
+          // std/https is only where the two meet.
+          "client     200 tls-hello:/hi\n" +
+          "done\n",
+      );
+    } finally {
+      server.stop();
+    }
+  });
+
+  it("http_no_socket: a full HTTP exchange over in-memory Reader/Writer", async () => {
+    // plans/tls.md phase 0. std/http used to name TcpStream in every
+    // signature; it now takes the erased Reader/Writer vtables, so anything
+    // implementing Readable/Writable can drive it - which is what will let a
+    // TlsStream slot in with no other change.
+    //
+    // Useful on its own merits too: a server test with no port, no timing and
+    // no cleanup, that can hand the server bytes no real client would send.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_no_socket/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "get  served=1 bytes=110\n" +
+        "get  status=HTTP/1.1 200 OK\n" +
+        "get  body=path:/hello\n" +
+        "post served=1 bytes=109\n" +
+        "post status=HTTP/1.1 200 OK\n" +
+        "post body=echo:hullo\n" +
+        // The chunked decoder runs on the same path as the socket server,
+        // with no socket to frame it: 3/abc + 2/de.
+        "chunk served=1 bytes=109\n" +
+        "chunk status=HTTP/1.1 200 OK\n" +
+        "chunk body=echo:abcde\n" +
+        // Malformed input answers 400 rather than falling over.
+        "bad  served=1 bytes=148\n" +
+        "bad  status=HTTP/1.1 400 Bad Request\n" +
+        'bad  body=400 Bad Request: header line has no ":"\n' +
+        "\n" +
+        "done\n",
+    );
+  });
+
+  it("http_concurrent: serveConcurrent overlaps connections, holds its cap, and 503s over it", async () => {
+    // `peak=2` is the assertion that matters: two connections were being
+    // handled at the same instant. Under `serve`, which awaits each
+    // connection to completion before accepting the next, it is 1 by
+    // construction no matter the timing.
+    //
+    // The refusals are made deterministic by the fixture (two holders take
+    // both slots and sleep past the point where the late clients connect),
+    // so `rejected=2` is not a timing coincidence.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_concurrent/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "peak=2\n" +
+        "withinCap=1\n" +
+        "rejected=2\n" +
+        // The clients and the server agree about how many were refused.
+        "refusedSeen=1\n" +
+        "accepted+rejected=4\n" +
+        // Every connection task decremented its slot on the way out.
+        "drained=1\n",
+    );
+  });
+
+  it("http_proxy: a handler forwards through the HTTP client (async Handler.handle)", async () => {
+    // The program that could not be written before. `Handler.handle` was
+    // synchronous while `client.send` is async, so a handler could not call
+    // the client - which rules out every sidecar, gateway, and load balancer,
+    // since a proxy is a handler whose body is a client call.
+    //
+    // `via=origin` is the assertion that matters: that header was set by the
+    // ORIGIN, and the client never connected to the origin.
+    const { stdout, exitCode } = await runFixtureEntry("examples/pass/http_proxy/main.yoop");
+    assert.equal(exitCode, 0);
+    assert.equal(
+      stdout,
+      "get  200 origin-hello via=origin proxied=yes\n" +
+        "post 200 origin-echo:payload via=origin proxied=yes\n" +
+        "done\n",
+    );
+  });
+
   it("http_chunked: decodes chunked bodies in both directions, and rejects bad framing", async () => {
     // The peer here is a RAW socket writing canned bytes, because a real HTTP
     // server cannot produce the cases that matter - a bad hex size, a missing
@@ -1595,10 +1746,17 @@ async function runFixtureEntry(relPath, opts = {}) {
   const clangArgs = [
     llPath,
     ...prebuiltRuntimeObjects(RUNTIME_SOURCES),
+    // The same two hooks runFixture and the real driver apply, so a fixture
+    // that names an external library links here exactly as it would under
+    // yoopiler. Missing them was invisible until a fixture actually named
+    // one: std/tls asks for OpenSSL, and without these the link fails with
+    // `library 'ssl' not found` even though the driver builds it fine.
+    ...glueSourcesForLinkFlags(linkFlags ?? []),
     ...(opts.debug ? ["-g"] : []),
     "-O0",
     "-o",
     binPath,
+    ...librarySearchArgs(),
     ...allLinkFlags.flatMap(lowerLinkFlag),
     ...windowsClangArgs(),
   ];
@@ -1606,13 +1764,67 @@ async function runFixtureEntry(relPath, opts = {}) {
   // `env` mirrors runFixture's option - needed by fixtures that pin
   // YOOP_NUM_WORKERS to prove a scheduling property.
   const env = opts.env ? { ...process.env, ...opts.env } : process.env;
-  const result = await runProc(binPath, [], { env, timeout: opts.timeoutMs ?? 30000 });
+  // `args` reaches the fixture through std/env's argAt. Used by fixtures that
+  // have to be told something the test discovered at run time - a port a
+  // helper server bound, a path to a generated file.
+  const result = await runProc(binPath, opts.args ?? [], {
+    env,
+    timeout: opts.timeoutMs ?? 30000,
+  });
   return {
     stdout: result.stdout,
     stderr: result.stderr,
     exitCode: result.status,
     binPath,
   };
+}
+
+// Why the TLS tests cannot run here, or null if they can.
+//
+// std/tls links OpenSSL, which is a real external dependency rather than
+// something the repo vendors. A contributor without it should get a skipped
+// test naming the reason, not a wall of unresolved symbols - the same
+// arrangement dwarfSkipReason makes for lldb.
+let tlsSkipMemo;
+function tlsSkipReason() {
+  if (tlsSkipMemo !== undefined) return tlsSkipMemo;
+  const probe = `#include <openssl/ssl.h>\nint main(void){ return TLS_client_method() ? 0 : 1; }\n`;
+  const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_tlsprobe_"));
+  const src = path.join(dir, "probe.c");
+  fs.writeFileSync(src, probe);
+  const out = path.join(dir, "probe" + EXE_SUFFIX);
+  const res = spawnSync(
+    resolveClang(),
+    [src, "-o", out, ...librarySearchArgs(), ...lowerLinkFlag("ssl"), ...windowsClangArgs()],
+    { encoding: "utf8", env: clangEnv() },
+  );
+  fs.rmSync(dir, { recursive: true, force: true });
+  tlsSkipMemo = res.status === 0 ? null : "OpenSSL headers/libraries not found";
+  return tlsSkipMemo;
+}
+
+// Start the throwaway Node HTTPS server and wait for it to report its port.
+// Binds port 0 so this cannot collide with anything, which is what lets the
+// e2e suite keep running tests concurrently.
+function startTlsServer() {
+  const script = path.join(repoRoot, "examples/pass/https_client/testdata/tls_server.mjs");
+  const child = spawn(process.execPath, [script], { stdio: ["ignore", "pipe", "pipe"] });
+  return new Promise((resolve, reject) => {
+    let buf = "";
+    const timer = setTimeout(() => {
+      child.kill("SIGKILL");
+      reject(new Error("tls_server.mjs did not report a port in time"));
+    }, 15000);
+    child.stdout.on("data", (d) => {
+      buf += d;
+      const m = buf.match(/^PORT (\d+)/m);
+      if (m) {
+        clearTimeout(timer);
+        resolve({ port: Number(m[1]), stop: () => child.kill("SIGKILL") });
+      }
+    });
+    child.on("error", (e) => { clearTimeout(timer); reject(e); });
+  });
 }
 
 // Typecheck a multi-file fixture (entry + imports) and return errors.
@@ -2466,17 +2678,22 @@ describe("e2e: Phase 13.C @derive(display)", { concurrency: E2E_CONCURRENCY }, (
     // MODULE, so all seven of its source files mangle against one module id
     // derived from the directory. Same for the router assertions below.
     assert.match(ir, /define ptr @http_.*__serveConnection\(.*ptr %__ret\) presplitcoroutine/);
-    // The handler itself stays SYNCHRONOUS - it takes a buffered request
-    // and fills a response, so there is nothing for it to await. Async
-    // stops at the I/O boundary rather than coloring user handlers, and
-    // the absence of presplitcoroutine on this define is what proves it.
+    // The handler is ASYNC too now, and this assertion is the inverse of what
+    // it used to be. Async used to stop at the I/O boundary deliberately, to
+    // bound how far the colour spread - but `client.send` is async, so a
+    // synchronous handler could not call the HTTP client, which made a PROXY
+    // unwritable. See examples/pass/http_proxy.
+    //
+    // A handler that does no I/O (this one) pays one frame allocation and
+    // never suspends: an async function with no await runs straight through
+    // on its first step.
     const handlerDefine = ir
       .split("\n")
       .find((l) => l.startsWith("define") && l.includes("__HelloHandler__Handler__handle("));
     assert.ok(handlerDefine, "handler define not found");
     assert.ok(
-      !handlerDefine.includes("presplitcoroutine"),
-      `handler should stay synchronous, got: ${handlerDefine}`,
+      handlerDefine.includes("presplitcoroutine"),
+      `handler should carry the coroutine ABI, got: ${handlerDefine}`,
     );
     // The TCP layer reaches the multiplexer through the async arming path.
     assert.match(ir, /declare i32 @yoop_io_arm_readable/);

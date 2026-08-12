@@ -1,0 +1,304 @@
+module tls;
+
+// std/tls/stream.yoop - TlsConfig, TlsStream, and the pump.
+//
+// The whole file is one idea: OpenSSL never touches the socket. It reads and
+// writes two memory BIOs, and `pump` moves the ciphertext between those BIOs
+// and the TcpStream using the ordinary async recv/send that already work on
+// kqueue, epoll, and IOCP.
+//
+// That is forced rather than chosen - handing OpenSSL the fd means reacting to
+// SSL_ERROR_WANT_WRITE, which is "wait until writable", which
+// runtime/yoop_io_internal.h says cannot be expressed on IOCP at all. See
+// plans/tls.md D2.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
+import { Readable, Writable, FlushOutcome } from "../core/traits.yoop";
+import * as bytes, { Bytes } from "../core/bytes.yoop";
+import * as intr from "../core/intrinsics.yoop";
+import * as tcp, { TcpStream, ConnectResult } from "../net";
+
+// ----- configuration ------------------------------------------------------
+
+// How a connection should be verified.
+//
+// The defaults are the safe ones and the unsafe knob is spelled out in full.
+// A boolean named `verify` defaulting to false is how a TLS client ends up
+// trusting anything; this one takes a sentence to type.
+export type TlsConfig {
+    // Trust roots. Empty means OpenSSL's compiled-in default paths, which is
+    // right on Linux and on a normal macOS OpenSSL install, and finds nothing
+    // on Windows until the system-store bridge lands (plans/tls.md D5).
+    // Point it at a PEM bundle to pin, or to trust a private CA.
+    caFile: string,
+
+    // Turns off BOTH chain verification and hostname checking. Named at
+    // length on purpose: this is the switch that makes TLS decorative.
+    dangerouslyDisableVerification: bool,
+
+    // The name to VERIFY against and to send as SNI, when that differs from
+    // the address dialled. Empty means "use the host you connected to", which
+    // is the usual case.
+    //
+    // The two genuinely come apart: dialling an IP while the certificate
+    // carries a DNS name, going through a proxy or a tunnel, or connecting to
+    // one node of a cluster that all present the service's name. Without this,
+    // the only way to reach those is to turn verification off entirely - which
+    // is how a knob meant for one narrow case ends up disabling everything.
+    serverName: string,
+}
+
+export function tlsConfigNew(): TlsConfig {
+    return { caFile: "", dangerouslyDisableVerification: false, serverName: "" };
+}
+
+// Trust a specific CA bundle instead of the system roots. What a test suite
+// and a private-CA deployment both want.
+export function tlsConfigWithCaFile(path: string): TlsConfig {
+    return { caFile: path, dangerouslyDisableVerification: false, serverName: "" };
+}
+
+// ----- the stream ---------------------------------------------------------
+
+// A TLS session over a TCP connection.
+//
+// Implements `Readable` and `Writable`, which is the entire point: every
+// consumer that takes a `Reader`/`Writer` - all of std/http - accepts one
+// with no change. See plans/tls.md phase 0, which made that true.
+//
+// Owns three things and disposes them in order: the OpenSSL session, the two
+// staging buffers, and the socket.
+export type TlsStream implements (Disposable, Readable, Writable) propagates<disposable> {
+    conn:   TcpStream,
+    // The OpenSSL side, as opaque handles. Only ffi.yoop can see inside them,
+    // which is what keeps this file free of `import.unsafe;`.
+    ssl:    TlsSession,
+    ctx:    TlsCtx,
+    // Ciphertext staging. `out` carries wbio -> socket, `in` carries
+    // socket -> rbio. Separate buffers because a handshake step can want both
+    // in the same iteration.
+    outBuf: Bytes,
+    inBuf:  Bytes,
+    closed: bool,
+
+    function dispose(ref self): void {
+        if (!self.closed) {
+            self.closed = true;
+            // Best-effort close_notify. Whatever it produced is dropped rather
+            // than sent: dispose is not async, and a peer that never sees the
+            // alert simply sees the TCP close instead - which is what a
+            // non-graceful shutdown looks like and is not an error.
+            let _rc: int32 = shutdown(ref self.ssl);
+        }
+        sessionFree(ref self.ssl);
+        ctxFree(ref self.ctx);
+        Disposable.dispose(ref self.outBuf);
+        Disposable.dispose(ref self.inBuf);
+        Disposable.dispose(ref self.conn);
+    }
+
+    // Plaintext out of the session. Same signature as TcpStream's, which is
+    // what lets the two be used interchangeably behind a `Reader`.
+    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        while (true) {
+            let n: int64 = readPlain(ref self.ssl, ref buf);
+            if (n >= 0) { return Result.Ok { value: c_ssize_t(n) }; }
+
+            let status: int32 = int32(n);
+            if (status == TLS_CLOSED) { return Result.Ok { value: c_ssize_t(0) }; }
+            if (status == TLS_ERROR) {
+                return Result.Err { error: `tls read: ${lastError()}` };
+            }
+            // WANT_READ or WANT_WRITE: turn the crank and try again. A
+            // renegotiation or a post-handshake message can make a READ want
+            // to WRITE, which is why both land here.
+            let e: string = await pump(ref self, status);
+            if (e.len > 0) { return Result.Err { error: e }; }
+        }
+    }
+
+    // Plaintext into the session. Loops until the whole buffer is accepted:
+    // `Writable.write` may report a short write, but every caller in std/http
+    // hands over a complete message, so absorbing it here is what keeps them
+    // from each needing their own loop.
+    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        let sent: usize = 0;
+        while (sent < buf.len) {
+            let slice: uint8[] = intr.array_slice(buf, sent, buf.len);
+            let n: int64 = writePlain(ref self.ssl, slice);
+            if (n >= 0) {
+                sent = sent + usize(n);
+                // The ciphertext is in wbio; it has to reach the socket before
+                // this call can claim the bytes are out.
+                let e: string = await flushOut(ref self);
+                if (e.len > 0) { return Result.Err { error: e }; }
+                continue;
+            }
+
+            let status: int32 = int32(n);
+            if (status == TLS_CLOSED) {
+                return Result.Err { error: "tls write: session is closed" };
+            }
+            if (status == TLS_ERROR) {
+                return Result.Err { error: `tls write: ${lastError()}` };
+            }
+            let e2: string = await pump(ref self, status);
+            if (e2.len > 0) { return Result.Err { error: e2 }; }
+        }
+        return Result.Ok { value: c_ssize_t(sent) };
+    }
+
+    // Nothing buffered on the yoop side that a flush could push: `write`
+    // already drains wbio to the socket before it returns.
+    function flush(ref self): FlushOutcome {
+        return FlushOutcome.Ok;
+    }
+}
+
+// ----- the pump -----------------------------------------------------------
+
+// Send everything OpenSSL has queued for the peer.
+//
+// Called before waiting for input, never after. Mid-handshake OpenSSL commonly
+// owes the peer a flight AND wants its reply, and a loop that waits for the
+// reply first deadlocks against a peer doing the same thing.
+async flushOut(ref s: TlsStream): string {
+    let window: uint8[] = bytes.bytes_to_array(ref s.outBuf);
+    while (true) {
+        let n: int64 = pull(ref s.ssl, ref window);
+        if (n <= 0) { return ""; }
+        let outView: uint8[] = intr.array_slice(window, 0, usize(n));
+        switch (await Writable.write(ref s.conn, ref outView)) {
+            case Result.Ok { value: _w }: { }
+            case Result.Err { error: e }: { return `tls send: ${e}`; }
+        }
+    }
+}
+
+// One turn of the crank: flush what is pending, then - if OpenSSL asked for
+// input - read a record's worth from the socket and hand it over.
+//
+// Returns "" on success, or a message. A clean EOF is NOT an error here: it is
+// told to OpenSSL, which then reports CLOSED from the next read, so the
+// end-of-stream decision stays in one place.
+async pump(ref s: TlsStream, status: int32): string {
+    let e: string = await flushOut(ref s);
+    if (e.len > 0) { return e; }
+    if (status != TLS_WANT_READ) { return ""; }
+
+    let window: uint8[] = bytes.bytes_to_array(ref s.inBuf);
+    switch (await Readable.read(ref s.conn, ref window)) {
+        case Result.Ok { value: n }: {
+            if (n <= 0) {
+                pushEof(ref s.ssl);
+                return "";
+            }
+            let got: int64 = push(ref s.ssl, window, usize(n));
+            if (got < 0) { return `tls push: ${lastError()}`; }
+            return "";
+        }
+        case Result.Err { error: re }: { return `tls recv: ${re}`; }
+    }
+}
+
+// ----- connecting ---------------------------------------------------------
+
+// Dial `host:port` and complete a TLS handshake against it.
+//
+// `host` does three jobs and all three matter: SNI (so a shared host answers
+// with the right certificate at all), the hostname CHECK (OpenSSL does not
+// verify the certificate matches the host unless asked - chain verification
+// alone is the classic hole), and the error message.
+export async tlsConnect(host: string, port: int32, ref cfg: TlsConfig): Result<TlsStream, string> propagates<disposable> {
+    let ctx: TlsCtx = ctxNewClient();
+    if (ctxIsNull(ref ctx)) {
+        return Result.Err { error: `tls: ${lastError()}` };
+    }
+
+    if (cfg.dangerouslyDisableVerification) {
+        ctxSetVerify(ref ctx, false);
+    } else {
+        if (ctxLoadVerify(ref ctx, cfg.caFile) != 0) {
+            let msg: string = lastError();
+            ctxFree(ref ctx);
+            return Result.Err { error: `tls: loading trust roots: ${msg}` };
+        }
+    }
+
+    // What the certificate is checked against, which is not always what we
+    // dialled. See TlsConfig.serverName.
+    let verifyName: string = host;
+    if (cfg.serverName.len > 0) { verifyName = cfg.serverName; }
+
+    let ssl: TlsSession = sessionNew(ref ctx, verifyName, !cfg.dangerouslyDisableVerification);
+    if (sessionIsNull(ref ssl)) {
+        let msg: string = lastError();
+        ctxFree(ref ctx);
+        return Result.Err { error: `tls: ${msg}` };
+    }
+
+    // A PLAIN `let`, not `disposable`. Ownership of the socket MOVES into the
+    // TlsStream below, and an auto-cleanup here would close the fd the moment
+    // this function returned - which showed up as "Bad file descriptor" on the
+    // first write, several frames from the cause. The error paths dispose it
+    // by hand instead, which is the trade the advisory ownership model makes:
+    // the compiler stays quiet and the transfer is written out.
+    let cr: ConnectResult = tcp.tcp_connect(host, port);
+    if (cr.error.len > 0) {
+        let msg: string = cr.error;
+        Disposable.dispose(ref cr);
+        sessionFree(ref ssl);
+        ctxFree(ref ctx);
+        return Result.Err { error: `${msg} (connecting to ${host}:${port})` };
+    }
+
+    let s: TlsStream = {
+        conn:   cr.stream,
+        ssl:    ssl,
+        ctx:    ctx,
+        outBuf: bytes.bytes_from_raw(intr.heap_alloc(TLS_CHUNK), TLS_CHUNK),
+        inBuf:  bytes.bytes_from_raw(intr.heap_alloc(TLS_CHUNK), TLS_CHUNK),
+        closed: false,
+    };
+
+    // Drive the handshake to completion before handing the stream over, so a
+    // caller never has to think about it - and so a verification failure is
+    // reported HERE, by connect, rather than surfacing later as a read error.
+    while (true) {
+        let status: int32 = handshake(ref s.ssl);
+        if (status == TLS_OK) {
+            let _e: string = await flushOut(ref s);
+            return Result.Ok { value: s };
+        }
+        if (status == TLS_ERROR || status == TLS_CLOSED) {
+            let detail: string = lastError();
+            let vr: int64 = verifyResult(ref s.ssl);
+            Disposable.dispose(ref s);
+            if (vr != 0) {
+                // The far more useful message when it is a trust problem, and
+                // the common case for a first-time user.
+                return Result.Err {
+                    error: `tls: certificate verification failed for ${verifyName}: ${verifyErrorString(vr)}`,
+                };
+            }
+            return Result.Err { error: `tls: handshake with ${verifyName} failed: ${detail}` };
+        }
+        let e: string = await pump(ref s, status);
+        if (e.len > 0) {
+            Disposable.dispose(ref s);
+            return Result.Err { error: e };
+        }
+    }
+}
+
+// ----- introspection ------------------------------------------------------
+
+// e.g. "TLSv1.3". Empty before the handshake completes.
+export function tlsVersion(ref s: TlsStream): string {
+    return version(ref s.ssl);
+}
+
+export function tlsCipher(ref s: TlsStream): string {
+    return cipher(ref s.ssl);
+}

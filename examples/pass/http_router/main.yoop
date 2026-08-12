@@ -27,7 +27,7 @@ extern "C" from "stdio.h" {
 // Three handlers, each with its own state.
 type HelloHandler implements Handler {
     greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.ok(), self.greeting);
         return HandleOutcome.Ok;
     }
@@ -36,7 +36,7 @@ type HelloHandler implements Handler {
 // Reads the `:name` segment the router captured out of the path.
 type GreetHandler implements Handler {
     fallbackName: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let who: string = types.paramOr(ref req, "name", self.fallbackName);
         types.respondText(ref resp, types.ok(), `Hello, ${who}!\n`);
         return HandleOutcome.Ok;
@@ -45,7 +45,7 @@ type GreetHandler implements Handler {
 
 type HealthHandler implements Handler {
     statusText: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondJson(ref resp, types.ok(), self.statusText);
         return HandleOutcome.Ok;
     }
@@ -53,7 +53,7 @@ type HealthHandler implements Handler {
 
 type FallbackHandler implements Handler {
     note: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.notFound(), `${self.note}: ${req.path}\n`);
         return HandleOutcome.Ok;
     }

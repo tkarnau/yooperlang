@@ -43,7 +43,6 @@ export function expectedBodyLen(ref p: ParsedRequest): usize {
         case Option.Some { value: n }: { return n; }
         case Option.None: { return 0; }
     }
-    return 0;
 }
 
 // ----- parsed response ----------------------------------------------------

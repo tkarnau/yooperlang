@@ -180,7 +180,7 @@ type RuleBot implements ChatBrain {
 type ChatHandler implements Handler {
     brain: RuleBot,
     turns: int32,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         self.turns = self.turns + 1;
 
         // 1. Lift the request body into the tainted form. From here the

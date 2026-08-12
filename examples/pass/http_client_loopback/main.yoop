@@ -42,7 +42,7 @@ let boundPort: int32 = 0;
 // Answers a GET with a fixed body, and a POST with the body it was sent.
 type EchoHandler implements Handler {
     greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         if (types.methodEq(req.method, HttpMethod.Post)) {
             types.respondText(ref resp, types.ok(), `echo:${types.bodyText(ref req)}\n`);
             return HandleOutcome.Ok;

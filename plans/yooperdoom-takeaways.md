@@ -487,7 +487,72 @@ Fixture: `examples/pass/http_chunked/`. Its peer is a RAW socket writing canned
 bytes, because a real HTTP server cannot produce a bad hex size or a missing
 CRLF; the client and server halves under test are the real ones.
 
-### 3.2 An awaitable `Handler.handle`, and task-per-connection in `serve`
+### 3.2 An awaitable `Handler.handle`, and task-per-connection - DONE (2026-08-11)
+
+Both halves landed. `Handler.handle` is `async`, and `serveConcurrent` runs a
+task per connection with a hard cap and a 503 over it.
+
+**The proxy is the proof.** `examples/pass/http_proxy/` runs an origin, a proxy
+whose handler forwards through the std HTTP client, and a client that only ever
+talks to the proxy - and the client sees the origin's body AND a header the
+origin set. That program was unwritable before: `handle` was synchronous,
+`client.send` is async, and `await` is only legal inside an async function.
+
+A handler that does no I/O just declares `async` and never awaits, which costs
+one frame allocation and no suspend. The hello_server e2e assertion that its
+handler carries NO `presplitcoroutine` is now inverted.
+
+**Three constraints shaped the concurrent loop, and each killed a more obvious
+design. They are worth keeping because they are properties of the runtime, not
+of HTTP:**
+
+1. **One accept loop, not N acceptor tasks.** The multiplexer allows one waiter
+   per (fd, direction); a second task awaiting accept on the same listener gets
+   `EAGAIN` back, not a queued turn. Verified directly - the "K workers all
+   calling accept" model does not work today.
+2. **No collection of in-flight task handles.** `Task<T>` cannot go in an array
+   or a Vec: the typechecker requires a kind-prefixed binding (`pooled h =
+   f()`) because that is what manages the handle's refcount. So connections are
+   FIRE AND FORGET - the handle is released at the end of the accept arm and
+   the task runs on, which works and is tested.
+3. **The counter must be caller-owned.** Because connections outlive the accept
+   loop, a counter in `serveConcurrent`'s own frame would dangle the moment it
+   returned. That constraint is a gift: since the state has to be caller-owned
+   anyway, it may as well be readable, so `ServeState` carries `inFlight`,
+   `peak`, `accepted`, `rejected`, and `served`.
+
+At capacity the connection is accepted and answered with a 503 + `Retry-After`
+rather than left to hang - one small write, no task spawned. A refused client
+knows it was refused instead of timing out against a silent peer.
+
+**Two things this needed that did not exist:**
+
+- `std/core/atomic.yoop` (over a new `runtime/yoop_atomic.c`). Yoop could
+  already SHARE mutable storage across tasks - a module-level `let` is visible
+  from every task - but had no way to update it safely, and `n = n + 1` from
+  two workers loses counts. Deliberately tiny: add, load, store, and a
+  high-water max, all sequentially consistent. The surface takes `ref int32`
+  rather than `unsafe_ptr<int32>` so a caller does not need `import.unsafe;` to
+  count something.
+- A codegen fix. `f(ref someModuleLevelGlobal)` emitted `%name` - a local slot
+  that does not exist - instead of `@<modid>__<name>`. It passed typecheck AND
+  IR generation and was rejected by clang, the same failure shape as the
+  extern-sibling mangling bug. `emitLval` already had the `isModuleGlobal`
+  check; the REF_EXPRESSION path did not, in BOTH emitters.
+
+Fixture: `examples/pass/http_concurrent/`. `peak=2` is the assertion that
+matters - two connections handled at the same instant, where `serve` gives 1 by
+construction. The refusals are made deterministic by staggering (two holders
+take both slots and sleep past the point where the late clients connect), so
+`rejected=2` is not a timing coincidence.
+
+**Still serial:** `serve` itself is unchanged, so existing callers keep their
+behaviour. Playground programs were updated to the async handler where one line
+did it; `todo_api`, `yoopstore`, and `chat_agent` still have PRE-EXISTING
+breakage from when `serve` became async (they call it without `await` from a
+sync `main`), which is stale-playground territory rather than fallout here.
+
+### 3.2b The original write-up, for the reasoning
 
 These two are one piece of work and they are the difference between a server
 and a proxy.
@@ -529,11 +594,26 @@ belongs in the library.
 Medium to large, and it touches the async invariants, so read
 `plans/async-coroutines.md` first.
 
-### 3.3 TLS
+### 3.3 TLS - PLANNED, see [tls.md](tls.md)
 
 Correctly identified as "one stdlib module between a demo and a program you
 could ship". Every commercial model API is HTTPS-only, and that single fact is
 the entire reason the yooperdoom sidecar is a Node process.
+
+The plan is written. Two of its findings are worth knowing even if the work
+never starts:
+
+- **The obvious TLS design is unimplementable here.** Handing OpenSSL the fd
+  and reacting to `SSL_ERROR_WANT_WRITE` means "wait until writable", which
+  `runtime/yoop_io_internal.h` states cannot be expressed on IOCP at all. So
+  memory BIOs are forced, not preferred - Yoop moves the ciphertext through the
+  operation-based path that already works on all three platforms.
+- **Phase 0 is worth doing on its own.** `std/http` naming `TcpStream`
+  concretely is what blocks a `TlsStream` from slotting in, and
+  `std/core/traits.yoop` already declares the `Reader`/`Writer` vtables for
+  exactly this case - naming `TlsStream` in its comment. That refactor needs no
+  external dependency, is verifiable with the existing suite, and leaves
+  `std/http` testable with no socket at all.
 
 This is the largest item in this document and it needs its own plan doc, not a
 bullet. The decision to make first is not code, it is scope:
@@ -812,9 +892,12 @@ Closed without code: whether a bare `{ ... }` block should be a statement
 **Then - HTTP, in this order and not in parallel:**
 
 1. ~~Chunked decoding, alone (3.1)~~ **DONE (2026-08-11)**, both directions.
-2. Async `Handler.handle` plus a bounded task-per-connection loop, with a
-   reverse proxy in `examples/pass/` as the proof (3.2)
-3. TLS, with its own plan doc first (3.3)
+2. ~~Async `Handler.handle` plus a bounded task-per-connection loop, with a
+   reverse proxy as the proof (3.2)~~ **DONE (2026-08-11)**.
+3. ~~TLS (3.3)~~ **client-side DONE (2026-08-11)**: phases 0 through 2 of
+   [tls.md](tls.md). Real verified TLS 1.3, and `https://` through the
+   ordinary client. Phase 3 (Windows root store) and phase 4 (server-side
+   TLS) remain.
 
 **Deferred, deliberately:**
 

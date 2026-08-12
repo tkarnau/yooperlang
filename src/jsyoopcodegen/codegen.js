@@ -1174,6 +1174,18 @@ export function codegen(ast) {
 
       case ASTNodeKind.REF_EXPRESSION: {
         if (node.operand.kind === ASTNodeKind.IDENT) {
+          // Phase 8.E: a module-level global has no local slot - its storage
+          // is `@<modid>__<name>`. Without this, `f(ref someGlobal)` emitted
+          // `%someGlobal`, which passes typecheck AND IR generation and is
+          // then rejected by clang as `use of undefined value`. Same shape as
+          // the check emitLval already had, and the same failure mode as the
+          // extern-sibling mangling bug: nothing catches it until link time.
+          if (node.operand.isModuleGlobal) {
+            return {
+              val: `@${node.operand.moduleGlobalSym}`,
+              yoopType: node.resolvedType,
+            };
+          }
           const operandType = symbols.get(node.operand.name);
           if (operandType?.kind === typeKinds.ref) {
             // ref of a ref binding (like `ref self`): forward the underlying pointer
@@ -4552,6 +4564,18 @@ function codegenWithModuleId(
       }
       case ASTNodeKind.REF_EXPRESSION: {
         if (node.operand.kind === ASTNodeKind.IDENT) {
+          // Phase 8.E: a module-level global has no local slot - its storage
+          // is `@<modid>__<name>`. Without this, `f(ref someGlobal)` emitted
+          // `%someGlobal`, which passes typecheck AND IR generation and is
+          // then rejected by clang as `use of undefined value`. Same shape as
+          // the check emitLval already had, and the same failure mode as the
+          // extern-sibling mangling bug: nothing catches it until link time.
+          if (node.operand.isModuleGlobal) {
+            return {
+              val: `@${node.operand.moduleGlobalSym}`,
+              yoopType: node.resolvedType,
+            };
+          }
           const operandType = symbols.get(node.operand.name);
           if (operandType?.kind === typeKinds.ref) {
             // ref of a ref binding (like `ref self`): forward the underlying pointer

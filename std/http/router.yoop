@@ -92,7 +92,6 @@ export function matchPath(pattern: string, path: string, ref out: Params): bool 
         pi = pEnd;
         si = sEnd;
     }
-    return false;
 }
 
 // ----- routes -------------------------------------------------------------
@@ -112,20 +111,20 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
         Disposable.dispose(ref self.routes);
     }
 
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let entries: Route[] = vec.vec_as_array(ref self.routes);
 
         for (let i = 0; i < entries.len; i += 1) {
             paramsClear(ref req.params);
             if (!matchPath(entries[i].pattern, req.path, ref req.params)) { continue; }
             if (methodEq(req.method, entries[i].method)) {
-                return Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
+                return await Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
             }
             // A HEAD with no HEAD route is answered by the GET route; the
             // server drops the body on the way out.
             if (methodEq(req.method, HttpMethod.Head)
                 && methodEq(entries[i].method, HttpMethod.Get)) {
-                return Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
+                return await Dispatcher.handle(ref entries[i].dispatcher, ref req, ref resp);
             }
         }
         paramsClear(ref req.params);
@@ -146,7 +145,7 @@ export type Router implements (Disposable, Handler) propagates<disposable> {
         // API that answers JSON everywhere needs that hook, because otherwise
         // these two responses are the only plain-text ones it emits.
         if (self.hasFallback) {
-            return Dispatcher.handle(ref self.fallback, ref req, ref resp);
+            return await Dispatcher.handle(ref self.fallback, ref req, ref resp);
         }
         if (allow.len > 0) {
             respondText(ref resp, methodNotAllowed(),
@@ -194,7 +193,7 @@ export function routerNew(): Router propagates<disposable> {
 // 500 is the honest answer.
 type NoRoute implements Handler {
     unused: int32,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         respondText(ref resp, serverError(), "500 no route\n");
         return HandleOutcome.Ok;
     }

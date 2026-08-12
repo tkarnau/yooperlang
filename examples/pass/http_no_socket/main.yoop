@@ -1,0 +1,144 @@
+// A complete HTTP request/response exchange with NO SOCKET.
+//
+// `std/http` used to name `TcpStream` in every signature, so the only way to
+// exercise it was to open a listener and dial it. It now takes the erased
+// `Reader` / `Writer` vtables instead, which means anything implementing
+// `Readable` / `Writable` can drive it - a socket, an in-memory buffer, or
+// (the reason this refactor happened) a `TlsStream`.
+//
+// std/core/traits.yoop declared those vtables for exactly this case and named
+// TlsStream in the comment; they had simply never been used.
+//
+// This fixture is the proof, and it is useful on its own merits: a server test
+// that needs no port, no timing, and no cleanup, and that can hand the server
+// bytes no real client would send.
+//
+// See plans/tls.md phase 0.
+
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+import {
+    Readable, Writable, Reader, Writer, FlushOutcome,
+} from "../../../std/core/traits.yoop";
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as http, { Handler, HandleOutcome, Dispatcher } from "std/http";
+import * as types, { Request, Response, HttpMethod } from "std/http";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+// ----- the two ends -------------------------------------------------------
+
+// Serves a canned request, then reports EOF - which is how the server learns
+// a keep-alive connection has ended.
+//
+// `async` even though it never suspends: `Readable.read` is async and an impl
+// has to match. An async function that does no awaiting runs straight through
+// on its first step.
+type MemReader implements Readable {
+    storage: uint8[],
+    pos:     usize,
+    async read(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        let avail: usize = self.storage.len - self.pos;
+        let take:  usize = buf.len;
+        if (avail < take) { take = avail; }
+        for (let i: usize = 0; i < take; i += 1) {
+            buf[i] = self.storage[self.pos + i];
+        }
+        self.pos = self.pos + take;
+        return Result.Ok { value: c_ssize_t(take) };
+    }
+}
+
+// Collects everything written, so the test can read the response back as text.
+// `propagates<disposable>` because it holds a Vec: the kind system wants a
+// struct carrying an owned resource to say so, which is the advisory-ownership
+// rule doing its job.
+type MemWriter implements Writable propagates<disposable> {
+    sink: Vec<uint8>,
+    async write(ref self, ref buf: uint8[]): Result<c_ssize_t, string> {
+        vec.vec_extend_from(ref self.sink, buf);
+        return Result.Ok { value: c_ssize_t(buf.len) };
+    }
+    function flush(ref self): FlushOutcome {
+        return FlushOutcome.Ok;
+    }
+}
+
+// ----- the handler --------------------------------------------------------
+
+type EchoHandler implements Handler {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        if (types.methodEq(req.method, HttpMethod.Post)) {
+            types.respondText(ref resp, types.ok(), `echo:${types.bodyText(ref req)}`);
+            return HandleOutcome.Ok;
+        }
+        types.respondText(ref resp, types.ok(), `path:${req.path}`);
+        return HandleOutcome.Ok;
+    }
+}
+
+// ----- driving it ---------------------------------------------------------
+
+// The whole point: `serveConnectionOn` has no idea what is behind these.
+async runOne(label: string, request: string): void {
+    let mr: MemReader = { storage: intr.string_as_bytes(request), pos: 0 };
+    disposable sink: Vec<uint8> = vec.vec_new(1024);
+    let mw: MemWriter = { sink: sink };
+
+    let r: Reader = Reader.from(ref mr);
+    let w: Writer = Writer.from(ref mw);
+
+    let h: EchoHandler = { };
+    let d: Dispatcher = Dispatcher.from(ref h);
+
+    let served: int32 = await http.serveConnectionOn(
+        ref r, ref w, ref d, http.defaultConfig(), 1);
+
+    // The response, exactly as it would have gone onto a wire.
+    let out: string = intr.string_from_bytes_unchecked(vec.vec_as_array(ref mw.sink));
+    printf(`${label} served=${served} bytes=${mw.sink.len}\n`);
+    printf(`${label} status=${firstLine(out)}\n`);
+    printf(`${label} body=${afterHead(out)}\n`);
+}
+
+// The status line, up to the CR.
+function firstLine(s: string): string {
+    let b: uint8[] = intr.string_as_bytes(s);
+    let end: usize = 0;
+    while (end < b.len && b[end] != '\r') { end = end + 1; }
+    return intr.string_from_bytes_unchecked(intr.array_slice(b, 0, end));
+}
+
+// Everything past the blank line that ends the head.
+function afterHead(s: string): string {
+    let b: uint8[] = intr.string_as_bytes(s);
+    for (let i: usize = 0; i + 3 < b.len; i += 1) {
+        if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') {
+            return intr.string_from_bytes_unchecked(intr.array_slice(b, i + 4, b.len));
+        }
+    }
+    return "";
+}
+
+task run(): int32 {
+    await runOne("get ", "GET /hello HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n");
+    await runOne("post", "POST /e HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhullo");
+    // A chunked body, decoded by the same path the socket server uses - and
+    // here with no socket to frame it.
+    await runOne("chunk", "POST /e HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\nabc\r\n2\r\nde\r\n0\r\n\r\n");
+    // Bytes no real client would send: the server has to answer 400 rather
+    // than fall over, and an in-memory driver is the easy way to check that.
+    await runOne("bad ", "GET /x HTTP/1.1\r\nBadHeaderNoColon\r\n\r\n");
+    return 0;
+}
+
+function main(): int32 {
+    joined r = run();
+    let _rc: int32 = wait r;
+    printf(`done\n`);
+    return 0;
+}

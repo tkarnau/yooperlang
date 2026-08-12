@@ -39,7 +39,7 @@ extern "C" from "stdio.h" {
 // coloring stops at the I/O boundary, one layer below this.
 type HelloHandler implements Handler {
   greeting: string,
-  function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+  async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
     // One call sets the status, the Content-Type, and the body.
     http.respondText(ref resp, http.ok(), self.greeting);
     return HandleOutcome.Ok;

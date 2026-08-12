@@ -164,7 +164,7 @@ task serverTask(): int32 {
 
 // The receiving direction: our real server, decoding a chunked request body.
 type EchoHandler implements Handler {
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.ok(), `got:${types.bodyText(ref req)}`);
         return HandleOutcome.Ok;
     }

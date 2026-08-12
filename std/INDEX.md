@@ -23,6 +23,7 @@ let padded: string = str.padStart(str.int_to_string(n), 4, "0");
 - `std/collections/map.yoop` - generic hash map.
 - `std/collections/set.yoop` - generic hash set.
 - `std/core/alloc.yoop` - allocators and the ambient allocation context.
+- `std/core/atomic.yoop` - atomic integer counters shared across tasks.
 - `std/core/bytes.yoop` - Phase 8.H byte-buffer primitives.
 - `std/core/cancel` - cancellation tokens: a cancelled flag, an optional deadline, and parent/child links, which blocking calls fold into their own timed waits. One module across two files; import the DIRECTORY.
 - `std/core/concurrency.yoop` - bounded-wait surface for Task<T>.
@@ -43,11 +44,13 @@ let padded: string = str.padStart(str.int_to_string(n), 4, "0");
 - `std/env.yoop` - command line arguments and environment variables.
 - `std/fs.yoop` - filesystem operations for regular files.
 - `std/http` - HTTP/1.1 server and client: a `Handler` trait with vtable dispatch, a router with `:param` and `*` patterns, keep-alive, and a buffered client. One module across seven files; import the DIRECTORY.
+- `std/https` - the HTTP client over TLS.
 - `std/log.yoop` - leveled logging to stderr.
 - `std/net` - TCP sockets: listeners, streams, addresses, and URI parsing, over a runtime shim that presents the POSIX shape on every platform. One module across five files; import the DIRECTORY.
 - `std/runtime.yoop` - the process and its worker pool, from the inside.
 - `std/test.yoop` - the test harness.
 - `std/time.yoop` - the wall clock and the calendar.
+- `std/tls` - TLS over a TcpStream, via OpenSSL.
 
 ---
 
@@ -129,6 +132,19 @@ Exports:
 - `arenaScope` - function
 - `Disposable` - type AllocatorScope implements
 - `allocatorScope` - function
+
+## `std/core/atomic.yoop`
+
+atomic integer counters shared across tasks.
+
+Exports:
+
+- `addI32` - function
+- `incrI32` - function
+- `decrI32` - function
+- `loadI32` - function
+- `storeI32` - function
+- `maxI32` - function
 
 ## `std/core/bytes.yoop`
 
@@ -531,6 +547,8 @@ Exports:
 - `Client` - type
 - `clientNew` - function
 - `send` - async
+- `parseTarget` - function
+- `sendOn` - async
 - `get` - async
 - `post` - async
 - `put` - async
@@ -557,7 +575,16 @@ Exports:
 - `ServerConfig` - type
 - `defaultConfig` - function
 - `serveConnection` - async
+- `serveConnectionOn` - async
 - `serve` - async
+- `ServeState` - type
+- `serveStateNew` - function
+- `serveInFlight` - function
+- `servePeak` - function
+- `serveAccepted` - function
+- `serveRejected` - function
+- `serveServed` - function
+- `serveConcurrent` - async
 - `serveDefault` - async
 - `HttpMethod` - variant
 - `methodOrdinal` - function
@@ -645,6 +672,20 @@ Exports:
 - `parseQuery` - function
 - `parseForm` - function
 - `pathSegments` - function
+
+## `std/https`
+
+the HTTP client over TLS.
+
+Source files (one module, one namespace):
+
+- `client.yoop` - 
+
+Exports:
+
+- `send` - async
+- `get` - async
+- `post` - async
 
 ## `std/log.yoop`
 
@@ -753,4 +794,45 @@ Exports:
 - `fileStamp` - function
 - `weekdayName` - function
 - `monthName` - function
+
+## `std/tls`
+
+TLS over a TcpStream, via OpenSSL.
+
+Source files (one module, one namespace):
+
+- `ffi.yoop` - The ONLY file in std/tls that imports unsafe, mirroring std/net's rule that socket_ffi.yoop is the single unsafe file there. Everything the module exports is safe.
+- `stream.yoop` - TlsConfig, TlsStream, and the pump.
+
+Exports:
+
+- `TlsCtx` - type
+- `TlsSession` - type
+- `ctxNewClient` - function
+- `ctxIsNull` - function
+- `ctxFree` - function
+- `ctxLoadVerify` - function
+- `ctxSetVerify` - function
+- `sessionNew` - function
+- `sessionIsNull` - function
+- `sessionFree` - function
+- `handshake` - function
+- `readPlain` - function
+- `writePlain` - function
+- `pull` - function
+- `push` - function
+- `pushEof` - function
+- `shutdown` - function
+- `lastError` - function
+- `verifyResult` - function
+- `verifyErrorString` - function
+- `version` - function
+- `cipher` - function
+- `TlsConfig` - type
+- `tlsConfigNew` - function
+- `tlsConfigWithCaFile` - function
+- `implements` - type TlsStream
+- `tlsConnect` - async
+- `tlsVersion` - function
+- `tlsCipher` - function
 

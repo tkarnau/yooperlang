@@ -8,8 +8,10 @@ module http;
 //   Handler        the trait user code implements
 //   Dispatcher     the vtable for it, so the server is not generic
 //   ServerConfig   the limits (head size, body size, requests per connection)
-//   serve          the loop, over a `Dispatcher` and a config
+//   serve          the serial loop, over a `Dispatcher` and a config
 //   serveDefault   the same loop with the default config
+//   serveConcurrent  a task per connection, bounded by a caller-owned
+//                    `ServeState` that doubles as the introspection surface
 //
 // Three things changed from the first cut and are worth knowing:
 //
@@ -26,12 +28,27 @@ module http;
 //      request asking for `Connection: close`, a 1.0 request, or hitting
 //      `maxRequestsPerConnection` ends the connection cleanly.
 //
-// Two known limitations, stated plainly.
+// TWO accept loops, and the difference matters:
 //
-// One connection is served at a time. The accept loop does not spawn a task
-// per connection yet, so a slow client blocks the next one. `serveConnection`
-// is exported for exactly this reason: a program that needs real concurrency
-// today writes its own accept loop and spawns a task per connection over it.
+//   serve            one connection at a time. Awaits each to completion
+//                    before accepting the next, so one slow client stalls
+//                    every other. Right for a bounded fixture, wrong for a
+//                    server.
+//   serveConcurrent  a task per connection, bounded, with a 503 at capacity.
+//                    Takes a caller-owned `ServeState` that both bounds it and
+//                    reports on it. This is the one a real server wants.
+//
+// `serveConnection` stays exported so a program with its own accept strategy
+// can still reuse the per-connection half.
+//
+// **Nothing below the accept boundary knows what a socket is.** Every reader
+// and writer parameter here is a `Reader` / `Writer` - the type-erased vtables
+// from std/core/traits.yoop - so the same code serves a TcpStream, an
+// in-memory buffer (examples/pass/http_no_socket), or a TlsStream once one
+// exists. The concrete stream is erased in exactly three places: `serve`,
+// `connectionTask`, and the client's `send`. See plans/tls.md phase 0.
+//
+// One known limitation, stated plainly.
 //
 // Strings built while parsing a request are never freed, so a long-lived
 // server's memory grows with the distinct header values it has seen. Note
@@ -47,12 +64,13 @@ module http;
 
 import { Disposable, disposable } from "../core/kinds.yoop";
 import { Result, Option } from "../core/types.yoop";
-import { Readable, Writable } from "../core/traits.yoop";
+import { Readable, Writable, Reader, Writer } from "../core/traits.yoop";
 import * as vec, { Vec } from "../core/vec.yoop";
 import * as str from "../core/strings.yoop";
 import * as bytes, { Bytes } from "../core/bytes.yoop";
 import * as intr from "../core/intrinsics.yoop";
 import * as tcp, { AcceptOutcome, TcpListener, TcpStream } from "../net";
+import * as atomic from "../core/atomic.yoop";
 
 // stdout is block-buffered when it is not a terminal, which would make the
 // access log appear in bursts (or not at all, if the process is killed).
@@ -73,8 +91,21 @@ export variant HandleOutcome {
     Err { error: HttpError },
 }
 
+// Trait indicating the type will implement functionality for handling an http request
+// `handle` is ASYNC, which is what makes a handler able to do I/O of its own.
+//
+// It was deliberately synchronous at first, to bound how far the async colour
+// spread: a handler takes a buffered request and fills a response, so there
+// was nothing for it to await. But `client.send` IS async, so a synchronous
+// handler cannot call the HTTP client - and that means a PROXY cannot be
+// written, which is every sidecar, gateway, and load balancer there is.
+//
+// A handler that does no I/O simply declares `async` and never awaits; an
+// async function that never suspends runs straight through on its first step
+// and costs one frame allocation. See examples/pass/http_proxy for the shape
+// this exists to allow.
 export trait Handler {
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome;
 }
 
 // The type-erased view of a Handler. Routers and middleware hold these
@@ -120,7 +151,7 @@ export function defaultConfig(): ServerConfig {
 // is hit. Returns `None` when the peer closed cleanly before sending anything
 // (the normal end of a keep-alive connection) and `Some { offset }` otherwise.
 async readRequestHead(
-    ref stream: TcpStream,
+    ref r: Reader,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
     cfg: ServerConfig,
@@ -132,7 +163,7 @@ async readRequestHead(
 
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (true) {
-        let n: usize = await readRequestBytes(ref stream, ref window)? "reading the request head";
+        let n: usize = await readRequestBytes(ref r, ref window)? "reading the request head";
         if (n == 0) {
             if (buf.len == 0) { return Result.Ok { value: Option.None }; }
             return Result.Err { error: errBadRequest("connection closed mid-head") };
@@ -147,7 +178,6 @@ async readRequestHead(
             };
         }
     }
-    return Result.Ok { value: Option.None };
 }
 
 // One recv, with the error mapped into the layer's error type. Byte-identical
@@ -156,17 +186,16 @@ async readRequestHead(
 // deliberately socket-free (that is what lets the parsers be tested against a
 // byte literal), so the duplicate stands until std/http is one module and one
 // private copy can serve both directions.
-async readRequestBytes(ref stream: TcpStream, ref window: uint8[]): Result<usize, HttpError> {
-    switch (await Readable.read(ref stream, ref window)) {
+async readRequestBytes(ref r: Reader, ref window: uint8[]): Result<usize, HttpError> {
+    switch (await Reader.read(ref r, ref window)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
-    return Result.Ok { value: 0 };
 }
 
 // Top up `buf` until it holds `bodyStart + need` bytes.
 async readBody(
-    ref stream: TcpStream,
+    ref r: Reader,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
     bodyStart: usize,
@@ -174,7 +203,7 @@ async readBody(
 ): Result<usize, HttpError> {
     let window: uint8[] = bytes.bytes_to_array(ref scratch);
     while (buf.len < bodyStart + need) {
-        let n: usize = await readRequestBytes(ref stream, ref window)? "reading the request body";
+        let n: usize = await readRequestBytes(ref r, ref window)? "reading the request body";
         if (n == 0) {
             return Result.Err { error: errBadRequest("connection closed mid-body") };
         }
@@ -192,7 +221,7 @@ async readBody(
 // The decoder is incremental (see chunkedFeed in wire.yoop), so each read
 // examines only the bytes it added rather than re-walking the whole buffer.
 async readChunkedBody(
-    ref stream: TcpStream,
+    ref r: Reader,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
     bodyStart: usize,
@@ -208,7 +237,7 @@ async readChunkedBody(
         let done: bool = chunkedFeed(vec.vec_as_array(ref buf), ref reader, ref out, maxBody)?;
         if (done) { return Result.Ok { value: reader.end }; }
 
-        let n: usize = await readRequestBytes(ref stream, ref window)? "reading the chunked request body";
+        let n: usize = await readRequestBytes(ref r, ref window)? "reading the chunked request body";
         if (n == 0) {
             return Result.Err { error: errBadRequest("connection closed mid-chunk") };
         }
@@ -234,7 +263,7 @@ function compact(ref buf: Vec<uint8>, n: usize): void {
 // Serialize and send. `headOnly` suppresses the body (a HEAD reply carries
 // the headers the GET would have, including its Content-Length, and no body).
 async writeResponse(
-    ref stream: TcpStream,
+    ref w: Writer,
     ref resp: Response,
     keepAlive: bool,
     headOnly: bool,
@@ -266,7 +295,7 @@ async writeResponse(
     }
 
     let view: uint8[] = vec.vec_as_array(ref out);
-    switch (await Writable.write(ref stream, ref view)) {
+    switch (await Writer.write(ref w, ref view)) {
         case Result.Ok { value: n }: { return Result.Ok { value: usize(n) }; }
         case Result.Err { error: e }: { return Result.Err { error: errIo(e) }; }
     }
@@ -297,7 +326,8 @@ function checkResponseHeaders(ref resp: Response): bool {
 // Parse, dispatch, and let the caller turn any failure into a response. The
 // request lives only for the duration of this call.
 async exchange(
-    ref stream: TcpStream,
+    ref r: Reader,
+    ref w: Writer,
     ref buf: Vec<uint8>,
     ref scratch: Bytes,
     ref decoded: Vec<uint8>,
@@ -314,7 +344,7 @@ async exchange(
         // valid for as long as the Content-Length path's view into `buf` does.
         vec.vec_clear(ref decoded);
         let raw: usize = await readChunkedBody(
-            ref stream, ref buf, ref scratch, pr.bodyStart, ref decoded, cfg.maxBodyBytes)?;
+            ref r, ref buf, ref scratch, pr.bodyStart, ref decoded, cfg.maxBodyBytes)?;
         pr.request.body = vec.vec_as_array(ref decoded);
         // RAW bytes, not decoded: this is where the next pipelined request
         // begins, and the chunk framing was part of the message.
@@ -326,7 +356,7 @@ async exchange(
                 error: httpError(payloadTooLarge(), `body of ${need} bytes exceeds the ${cfg.maxBodyBytes} byte limit`),
             };
         }
-        let _got: usize = await readBody(ref stream, ref buf, ref scratch, pr.bodyStart, need)?;
+        let _got: usize = await readBody(ref r, ref buf, ref scratch, pr.bodyStart, need)?;
 
         // The read above may have grown (and moved) the buffer, so the body
         // view has to be taken after it, not before.
@@ -341,7 +371,7 @@ async exchange(
         || !str.string_eq(pr.request.version, "HTTP/1.1");
     meta.line = `${methodLabel(pr.request.method)} ${pr.request.target}`;
 
-    switch (Dispatcher.handle(ref d, ref pr.request, ref resp)) {
+    switch (await Dispatcher.handle(ref d, ref pr.request, ref resp)) {
         case HandleOutcome.Ok: { return Result.Ok { value: meta.consumed }; }
         case HandleOutcome.Err { error: e }: { return Result.Err { error: e }; }
     }
@@ -379,6 +409,35 @@ export async serveConnection(
     cfg: ServerConfig,
     budget: int32,
 ): int32 {
+    // The socket-shaped front door. Builds the erased pair and hands off, so
+    // the existing signature keeps working for callers with their own accept
+    // loop (examples/playground/counter_server).
+    //
+    // The two views hold POINTERS to `stream`, which outlives this call by
+    // construction - the caller owns it. Same rule `Dispatcher` has.
+    let r: Reader = Reader.from(ref stream);
+    let w: Writer = Writer.from(ref stream);
+    return await serveConnectionOn(ref r, ref w, ref d, cfg, budget);
+}
+
+// Serve requests on one already-erased connection.
+//
+// This is the one that does the work, and it does not know what it is talking
+// to. A TcpStream, a TlsStream, or a pair of in-memory buffers all reach it
+// the same way, which is the whole point of taking `Reader`/`Writer` rather
+// than a concrete stream - see std/core/traits.yoop, which declares those
+// vtables for exactly this case.
+//
+// Reading and writing are SEPARATE views on purpose. They usually come from
+// one stream, but nothing here requires that, which is what lets a test drive
+// a request in from one buffer and collect the response in another.
+export async serveConnectionOn(
+    ref r: Reader,
+    ref w: Writer,
+    ref d: Dispatcher,
+    cfg: ServerConfig,
+    budget: int32,
+): int32 {
     let served: int32 = 0;
     let limit: int32 = cfg.maxRequestsPerConnection;
     if (limit <= 0) { limit = 1; }
@@ -398,10 +457,10 @@ export async serveConnection(
     while (served < limit) {
         // Head first: a clean close here is how a keep-alive connection ends.
         let headAt: Option<usize> = Option.None;
-        switch (await readRequestHead(ref stream, ref buf, ref scratch, cfg)) {
+        switch (await readRequestHead(ref r, ref buf, ref scratch, cfg)) {
             case Result.Ok { value: at }: { headAt = at; }
             case Result.Err { error: e }: {
-                let _ignored: bool = await replyWithError(ref stream, ref e, cfg);
+                let _ignored: bool = await replyWithError(ref w, ref e, cfg);
                 return served;
             }
         }
@@ -413,7 +472,7 @@ export async serveConnection(
         disposable resp: Response = responseNew();
         let meta: ExchangeMeta = newMeta();
         let failed: bool = false;
-        switch (await exchange(ref stream, ref buf, ref scratch, ref decoded, ref d, cfg, ref resp, ref meta)) {
+        switch (await exchange(ref r, ref w, ref buf, ref scratch, ref decoded, ref d, cfg, ref resp, ref meta)) {
             case Result.Ok { value: _n }: { }
             case Result.Err { error: e }: {
                 respondError(ref resp, ref e);
@@ -436,7 +495,7 @@ export async serveConnection(
             let _f: int32 = fflush(0);
         }
 
-        switch (await writeResponse(ref stream, ref resp, keepAlive, meta.headOnly)) {
+        switch (await writeResponse(ref w, ref resp, keepAlive, meta.headOnly)) {
             case Result.Ok { value: _n }: { }
             case Result.Err { error: _e }: { return served; }
         }
@@ -449,14 +508,14 @@ export async serveConnection(
 // Last-ditch reply for a failure that happened before there was a response to
 // put it in (a head that was too large, a socket that died mid-head). Best
 // effort: if this write fails too, the connection is gone anyway.
-async replyWithError(ref stream: TcpStream, ref e: HttpError, cfg: ServerConfig): bool {
+async replyWithError(ref w: Writer, ref e: HttpError, cfg: ServerConfig): bool {
     disposable resp: Response = responseNew();
     respondError(ref resp, ref e);
     if (cfg.logRequests) {
         printf(`- -> ${resp.status.code} (${e.message})\n`);
         let _f: int32 = fflush(0);
     }
-    switch (await writeResponse(ref stream, ref resp, false, false)) {
+    switch (await writeResponse(ref w, ref resp, false, false)) {
         case Result.Ok { value: _n }: { return true; }
         case Result.Err { error: _e2 }: { return false; }
     }
@@ -504,6 +563,174 @@ export async serve(
         }
     }
     return Result.Ok { value: served };
+}
+
+// ----- concurrent serve ----------------------------------------------------
+//
+// `serve` above handles one connection at a time: it AWAITS each to completion
+// before accepting the next, so one slow client stalls every other. That is
+// fine for a bounded fixture and wrong for anything else.
+//
+// `serveConcurrent` spawns a task per connection instead. The shape is
+// constrained in three ways that are worth writing down, because each one
+// ruled out a design that looks more obvious:
+//
+//   1. ONE accept loop, not N acceptor tasks. The multiplexer allows one
+//      waiter per (fd, direction) - a second task awaiting accept on the same
+//      listener gets EAGAIN back, not a queued turn. So the "K workers all
+//      calling accept" model does not work here.
+//   2. Connections are FIRE AND FORGET. A `Task<T>` handle cannot be put in an
+//      array or a Vec - the typechecker requires a kind-prefixed binding
+//      (`pooled h = f()`), which is what manages its refcount - so there is no
+//      collection of in-flight handles to await on. The handle is released at
+//      the end of the accept arm and the task runs on.
+//   3. The counter therefore lives with the CALLER, not in this function's
+//      frame. Because connections outlive the accept loop, a pointer into
+//      `serveConcurrent`'s own frame would dangle the moment it returned.
+//
+// That third constraint is a gift: since the state has to be caller-owned
+// anyway, it may as well be readable, so `ServeState` carries the numbers a
+// running server should be able to report about itself.
+
+// Live counters for one concurrent server. The CALLER owns it and it must
+// outlive every connection - see constraint 3 above.
+//
+// Every field is touched from several workers at once, so all of them are read
+// and written through std/core/atomic. Reading them from outside while the
+// server runs is fine and is the point: this is the introspection surface.
+export type ServeState {
+    // Connections currently being served.
+    inFlight:      int32,
+    // High-water mark of `inFlight`. The one number that cannot be
+    // reconstructed after the fact from the others.
+    peak:          int32,
+    // Connections accepted and handed to a task.
+    accepted:      int32,
+    // Connections refused with a 503 because the server was at capacity.
+    rejected:      int32,
+    // Requests answered, summed across finished connections.
+    served:        int32,
+    // The ceiling on `inFlight`. Zero or less means "one at a time", which
+    // makes `serveConcurrent` behave like `serve`.
+    maxConcurrent: int32,
+}
+
+export function serveStateNew(maxConcurrent: int32): ServeState {
+    let m: int32 = maxConcurrent;
+    if (m <= 0) { m = 1; }
+    return {
+        inFlight: 0, peak: 0, accepted: 0, rejected: 0, served: 0,
+        maxConcurrent: m,
+    };
+}
+
+// Snapshot readers, so a caller does not have to know these are atomic.
+export function serveInFlight(ref s: ServeState): int32 { return atomic.loadI32(ref s.inFlight); }
+export function servePeak(ref s: ServeState): int32     { return atomic.loadI32(ref s.peak); }
+export function serveAccepted(ref s: ServeState): int32 { return atomic.loadI32(ref s.accepted); }
+export function serveRejected(ref s: ServeState): int32 { return atomic.loadI32(ref s.rejected); }
+export function serveServed(ref s: ServeState): int32   { return atomic.loadI32(ref s.served); }
+
+// The canned refusal. Written by hand rather than built through `Response`
+// because it has to be cheap: this is the path a server takes when it is
+// already overloaded, and it must not allocate a header map to say so.
+const BUSY_RESPONSE: string = "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\nContent-Length: 25\r\nConnection: close\r\nRetry-After: 1\r\n\r\n503 Service Unavailable\r\n";
+
+// One connection, on its own task.
+//
+// Takes the stream BY VALUE: ownership moves here, and the `disposable`
+// binding closes it on every path out. `d` and `cfg` are copies - a
+// `Dispatcher` is a context pointer plus method slots, and the handler it
+// points at outlives the server by construction.
+//
+// `counters` is a pointer into the caller's `ServeState`. The decrement at the
+// end is what frees the slot, and it must happen on every exit - which it
+// does, because `serveConnection` swallows its own failures and returns a
+// count rather than propagating.
+task connectionTask(
+    st: TcpStream,
+    d: Dispatcher,
+    cfg: ServerConfig,
+    ref inFlight: int32,
+    ref servedTotal: int32,
+): int32 {
+    disposable conn: TcpStream = st;
+    let n: int32 = await serveConnection(ref conn, ref d, cfg, 0);
+    let _total: int32 = atomic.addI32(ref servedTotal, n);
+    let _left: int32 = atomic.decrI32(ref inFlight);
+    return n;
+}
+
+// Write the 503 and drop the connection. Deliberately ignores its own write
+// error: the client is being refused either way, and a server at capacity has
+// nothing useful to do about a refusal that did not land.
+async refuse(ref w: Writer): void {
+    let out: uint8[] = intr.string_as_bytes(BUSY_RESPONSE);
+    switch (await Writer.write(ref w, ref out)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: _e }: { }
+    }
+}
+
+// Accept forever, serving each connection on its own task.
+//
+// `n` bounds how many connections are ACCEPTED (not completed), so a bounded
+// run returns once it has handed out that many; zero or less runs forever.
+// Because connections are fire-and-forget, some may still be in flight when
+// this returns - which is why `state` has to outlive the call, and why a
+// caller that needs to know when the work is finished polls
+// `serveInFlight(ref state)` rather than trusting the return.
+//
+// At capacity the connection is accepted and answered with a 503 rather than
+// left to hang: refusing costs one small write and no task, and a client that
+// is refused KNOWS it was refused instead of timing out against a silent peer.
+export async serveConcurrent(
+    ref l: TcpListener,
+    ref d: Dispatcher,
+    cfg: ServerConfig,
+    ref state: ServeState,
+    n: int32,
+): Result<int32, HttpError> {
+    let handled: int32 = 0;
+    let unbounded: bool = n <= 0;
+
+    while (unbounded || handled < n) {
+        switch (await tcp.tcpAcceptAsync(ref l)) {
+            case AcceptOutcome.Accepted { stream: st, peerHost: _h, peerPort: _p }: {
+                handled = handled + 1;
+
+                // Claim a slot first, and give it straight back if that put
+                // us over. Incrementing before the test is what makes the
+                // check race-free: two accepts cannot both see room for the
+                // last slot, because the counter has already moved.
+                let live: int32 = atomic.incrI32(ref state.inFlight);
+                if (live > state.maxConcurrent) {
+                    let _back: int32 = atomic.decrI32(ref state.inFlight);
+                    let _r: int32 = atomic.incrI32(ref state.rejected);
+                    disposable busy: TcpStream = st;
+                    let bw: Writer = Writer.from(ref busy);
+                    await refuse(ref bw);
+                    continue;
+                }
+
+                let _p2: int32 = atomic.maxI32(ref state.peak, live);
+                let _a: int32 = atomic.incrI32(ref state.accepted);
+                // Fire and forget: the handle is released at the end of this
+                // arm and the connection runs on. See constraint 2 above.
+                pooled h = connectionTask(st, d, cfg, ref state.inFlight, ref state.served);
+            }
+            case AcceptOutcome.TimedOut: {
+                // No deadline is set on this listener, so unreachable today.
+            }
+            case AcceptOutcome.Cancelled: {
+                return Result.Ok { value: handled };
+            }
+            case AcceptOutcome.Err { error: e }: {
+                return Result.Err { error: errIo(e) };
+            }
+        }
+    }
+    return Result.Ok { value: handled };
 }
 
 // `serve` with the default limits.

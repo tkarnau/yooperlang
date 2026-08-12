@@ -8,14 +8,22 @@ Pipeline: source `.yoop` → **lex** → **parse** → **typecheck** → **codeg
 
 when writing docs or plans or anything... **No 'Emdash'**, **no characters I can't type easily with an american keyboard, like →, or and curly quotes, etc**, **no fancy markdown tables**
 
+## Style Guide
+
+We don't have a style guide yet, but for new code:
+
+- Indentation: 2 spaces (please use on all new yoop code, and convert existing code)
+
 ## Naming and file conventions
 
 The repo currently has a mixture; this is the go-forward convention. Follow it in
 new code. Existing non-conforming names are being renamed retroactively (do not
 block on them, but do not add more).
 
-- **Files and folders: `snake_case`** - repo-wide, both `.yoop` and `.js`. e.g.
-  `source_processing/`, `module_graph.yoop`, `array_utils.yoop`.
+- **Files and folders: `snake_case` except for modules** - modules are forced to
+  match their folder path name, by convention, and should try to be single words
+  so that we don't have a module namespace in code that is snake case while every
+  -thing else is not.
 - **Yooperlang (`.yoop`) identifiers** use one of three cases - never
   `snake_case` (reserved for files/folders; the underscore is still legal in the
   grammar but convention does not use it in identifiers):

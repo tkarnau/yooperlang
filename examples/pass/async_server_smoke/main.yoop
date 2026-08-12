@@ -42,7 +42,7 @@ const CLIENTS: int32 = 3;
 // Synchronous, deliberately: a handler is pure request-in / response-out.
 type EchoHandler implements Handler {
     greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.ok(), self.greeting);
         return HandleOutcome.Ok;
     }

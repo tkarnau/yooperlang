@@ -87,7 +87,7 @@ type Metrics implements Handler {
     // only reports. One handler because both need the same state, and a
     // handler is reached through a pointer that must outlive the route
     // table - two handlers would need a third object to share.
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         if (strings.string_eq(req.path, COUNT_PATH)) {
             bump(ref self);
         }
@@ -193,7 +193,7 @@ function statsJson(ref m: Metrics): string {
 
 type HealthHandler implements Handler {
     body: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondJson(ref resp, types.ok(), self.body);
         return HandleOutcome.Ok;
     }
@@ -201,7 +201,7 @@ type HealthHandler implements Handler {
 
 type MissHandler implements Handler {
     note: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.notFound(), `${self.note}: ${req.path}\n`);
         return HandleOutcome.Ok;
     }

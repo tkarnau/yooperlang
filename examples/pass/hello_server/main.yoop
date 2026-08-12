@@ -25,7 +25,7 @@ extern "C" from "stdio.h" {
 // `Handler` trait, and this is one implementation of it.
 type HelloHandler implements Handler {
     greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.ok(), self.greeting);
         return HandleOutcome.Ok;
     }
