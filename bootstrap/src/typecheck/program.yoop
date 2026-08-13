@@ -127,6 +127,15 @@ export type Program propagates<disposable> {
 export type KindInfo {
   name: string,
   pausable: bool,
+  // `mustCall dispose beforeScopeEnd;` - the method a binding carrying this
+  // kind gets called on it when its scope ends, or "" for a kind that asks for
+  // nothing. This is the clause that makes a kind MEAN something at run time:
+  // every other one is recorded and read by nobody.
+  disposeMethod: string,
+  // `appliesTo region;` rather than `binding`. A region kind can be written
+  // anonymously in front of a block (`ephemeral arenaScope(N) { ... }`); a
+  // binding kind must be given a name.
+  appliesToRegion: bool,
 }
 
 // Announce which file the pass is about to walk. Every pass that iterates
@@ -385,11 +394,11 @@ export function reportError(ref prog: Program, message: string, sourceLoc: Sourc
 // Record a declared kind. A later declaration of the same name does not replace
 // the first - a redeclaration is pass A's diagnostic, and overwriting here
 // would make the registry disagree with the symbol table about which one won.
-export function registerKind(ref prog: Program, name: string, pausable: bool): void {
-  if (map.mapContainsKey(ref prog.kinds, name)) {
+export function registerKind(ref prog: Program, info: KindInfo): void {
+  if (map.mapContainsKey(ref prog.kinds, info.name)) {
     return;
   }
-  map.mapInsert(ref prog.kinds, name, { name: name, pausable: pausable });
+  map.mapInsert(ref prog.kinds, info.name, info);
 }
 
 // What a kind prefix names, or None when nothing in the graph declares it.

@@ -1,0 +1,106 @@
+// Scope-end disposal - the first thing that makes a kind MEAN something at
+// run time.
+//
+// `disposable ids: Vec<NodeId> = vec.vecNew(4);` is a promise that `dispose`
+// runs when `ids` goes out of scope. Keeping it means finding every way OUT of
+// the scope, not just the closing brace: an early `return` has to unwind
+// everything, and a `break` has to unwind out to the loop.
+//
+// Nothing here is hardcoded to `disposable`. A kind carrying
+// `mustCall <method> beforeScopeEnd` names the method, the binding's type has
+// it, and the call is an ordinary static trait dispatch - the same instructions
+// `Closer.close(ref r)` would emit written by hand. That is what makes it
+// emergent rather than built in: the kind below is a user's.
+//
+// Two forms, told apart by what follows the name:
+//
+//   tracked r: Res = open(1);        a BINDING, disposed at scope end
+//   region open(2) { ... }           an anonymous REGION, disposed at the brace
+//
+// Order is REVERSE declaration: a later binding may hold a borrow of an earlier
+// one, so it has to go first.
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+kind region {
+  appliesTo region;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+  ownsBlock;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Res implements Closer {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+function open(n: int): Res {
+  printf("  open %d\n", n);
+  return { id: n };
+}
+
+// Disposal on an early RETURN, from inside a nested block - every enclosing
+// scope unwinds, innermost first.
+function earlyExit(): int {
+  tracked outer: Res = open(20);
+  if (true) {
+    tracked inner: Res = open(21);
+    return 7;
+  }
+  return 0;
+}
+
+function main(): int {
+  // `if (true)` rather than a bare `{ }`: a bare block is not a statement in
+  // this language, in either compiler.
+  printf("simple:\n");
+  if (true) {
+    tracked a: Res = open(1);
+    printf("  body\n");
+  }
+
+  printf("reverse order:\n");
+  if (true) {
+    tracked a: Res = open(2);
+    tracked b: Res = open(3);
+    printf("  body\n");
+  }
+
+  // An inner block disposes at ITS closing brace, before the code after it.
+  printf("inner block:\n");
+  if (true) {
+    tracked a: Res = open(10);
+    printf("  in\n");
+  }
+  printf("  after\n");
+
+  printf("early return:\n");
+  printf("  got %d\n", earlyExit());
+
+  // The anonymous region form. Nothing in the block names the subject.
+  printf("region:\n");
+  region open(30) {
+    printf("  inside\n");
+  }
+  printf("  after\n");
+
+  // A region whose block declares its own disposable: the inner one goes
+  // first, then the region's subject.
+  printf("nested:\n");
+  region open(40) {
+    tracked held: Res = open(41);
+    printf("  inside\n");
+  }
+
+  return 0;
+}

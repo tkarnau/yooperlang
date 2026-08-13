@@ -8,14 +8,17 @@ module link;
 // file is `import.unsafe`.
 //
 // A program that only touches libc needs no yoop runtime, which is what keeps
-// the link line down to one clang invocation. Linking the runtime arrives when
-// the emitted code first needs it.
+// the link line down to one clang invocation and one input. When codegen says
+// it emitted a call into the runtime, its C sources join the line - see
+// runtime_root.yoop for which and why the whole set.
 
 import.unsafe;
 
 import * as fs from "std/fs.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import { Text }, * as text from "std/core/text.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
 
 extern "C" from "stdlib.h" {
   function system(cmd: string): c_int;
@@ -23,13 +26,36 @@ extern "C" from "stdlib.h" {
 
 // Writes `ir` to `irPath`, then links it to `exePath`. Returns "" on success or
 // a human-readable error.
-export function linkExecutable(ref ir: Text, irPath: string, exePath: string): string {
+export function linkExecutable(
+  ref ir: Text,
+  irPath: string,
+  exePath: string,
+  needsRuntime: bool,
+  exeSelfPath: string
+): string {
   const writeErr = fs.writeFile(irPath, text.bytes(ref ir));
   if (writeErr.len > 0) {
     return `writing ${irPath}: ${writeErr}`;
   }
 
-  const rc = system(`clang -Wno-override-module -o "${exePath}" "${irPath}"`);
+  disposable cmd: Text = text.make(256);
+  text.push(ref cmd, `clang -Wno-override-module -o "${exePath}" "${irPath}"`);
+
+  if (needsRuntime) {
+    const runtimeRoot = discoverRuntimeRoot(exeSelfPath);
+    const problem = runtimeRootProblem(runtimeRoot);
+    if (problem.len > 0) {
+      return problem;
+    }
+    disposable sources: Vec<string> = runtimeSources(runtimeRoot);
+    let i: usize = 0;
+    while (i < sources.len) {
+      text.push(ref cmd, ` "${vec.vecGet(ref sources, i)}"`);
+      i += 1;
+    }
+  }
+
+  const rc = system(text.view(ref cmd));
   if (rc != 0) {
     return `clang failed (exit ${rc}) on ${irPath}`;
   }

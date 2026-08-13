@@ -68,6 +68,16 @@ function checkMethodBodies(
   declNode: ASTNode
 ): void {
   const ownerType = ownTypeOf(ref prog, ref tm, declNode.name);
+
+  // A generic type's methods talk about `T` - in `ref self`, in their
+  // parameters, and in any annotation inside the body - so its parameters go
+  // into scope for the whole run, the same way a generic function's do.
+  disposable names: Vec<string> = bodyTypeParamNames(ref ast, declNode);
+  disposable params: Vec<TypeId> = bodyTypeParams(ref prog, ref tm, declNode);
+  if (names.len > 0) {
+    beginTypeParams(ref prog, ref params, ref names);
+  }
+
   let i: usize = 0;
   while (i < declNode.childCount) {
     const memberId = childAt(ref ast, declNode, i);
@@ -77,6 +87,10 @@ function checkMethodBodies(
         lookupMethod(ref prog, ownerType, member.name));
     }
     i += 1;
+  }
+
+  if (names.len > 0) {
+    endTypeParams(ref prog);
   }
 }
 
@@ -89,6 +103,10 @@ function ownTypeOf(ref prog: Program, ref tm: TypedModule, name: string): TypeId
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Struct { typeId: t }: { return t; }
     case Symbol.VariantT { typeId: t }: { return t; }
+    // A GENERIC type's methods hang off its TEMPLATE. Without this the lookup
+    // fails, the body is never checked, and its parameters are never decorated
+    // - which codegen finds out about as an empty owner name and a void return.
+    case Symbol.GenericDecl { decl: d, sort: srt }: { return genericAt(ref prog, d).template; }
     default: { return TYPE_ERROR_ID; }
   }
 }
@@ -318,6 +336,9 @@ function checkStatement(
     case ASTNodeKind.FOR_IN_LOOP: {
       checkForInLoop(ref prog, ref tm, ref ast, stmt, stmtId, retType, ref scope);
     }
+    case ASTNodeKind.KIND_REGION: {
+      checkKindRegion(ref prog, ref tm, ref ast, stmt, stmtId, retType, ref scope);
+    }
     case ASTNodeKind.SWITCH_STATEMENT: {
       checkSwitch(ref prog, ref tm, ref ast, stmt, retType, ref scope);
     }
@@ -520,6 +541,24 @@ function checkCall(
   // qualified name can mean.
   if (expr.childB != 0) {
     return checkQualifiedCall(ref prog, ref tm, ref ast, expr, exprId, expected, ref scope);
+  }
+
+  // `runSuite()` where `runSuite` is a LOCAL holding a function value. A local
+  // shadows a module function of the same name, so this is checked first - and
+  // it is the same indirect call a function-typed FIELD produces, just reached
+  // through a name.
+  switch (scopeLookup(ref scope, expr.name)) {
+    case Option.Some { value: localType }: {
+      switch (typeAt(ref prog, localType)) {
+        case Type.Func { params: p, ret: r, variadic: v }: {
+          map.mapInsert(ref tm.indirectCalls, uint64(exprId), true);
+          checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, localType, expr.name, ref scope);
+          return r;
+        }
+        default: { }
+      }
+    }
+    case Option.None: { }
   }
 
   // A cast is handled before the arguments, because its single operand wants to
@@ -782,18 +821,12 @@ function checkQualifiedCall(
 ): TypeId {
   const base = nodeAt(ref ast, expr.childB);
 
-  // `errno.get()` / `errno.message(c)` - the libc errno bridge. It lowers to
-  // `yoop_errno_get` in the yoop RUNTIME, which the link step does not pull in,
-  // so it is refused by name here rather than surfacing as "unknown name
-  // errno" - the reader would go looking for a missing import.
+  // `errno.get()` / `errno.set(v)` / `errno.message(c)` - the libc errno
+  // bridge, through the yoop runtime. An ambient namespace resolved by
+  // SPELLING rather than by import, the same way the reference's
+  // ERRNO_INTRINSIC is: there is nothing to import it from.
   if (base.kind == ASTNodeKind.IDENT && str.stringEq(base.name, ERRNO_NAMESPACE)) {
-    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
-    reportError(
-      ref prog,
-      `"errno.${expr.name}" reads the libc errno through the yoop runtime, which the bootstrap does not link yet`,
-      expr.sourceLoc
-    );
-    return TYPE_ERROR_ID;
+    return checkErrnoCall(ref prog, ref tm, ref ast, expr, ref scope);
   }
 
   // `m.ops.hash(key)` - an INDIRECT call through a function-typed field. The
@@ -913,6 +946,23 @@ function moduleConstType(ref prog: Program, ref tm: TypedModule, name: string): 
   }
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Value { typeId: t, intVal: v }: { return t; }
+    // A mutable global reads the same way; what differs is that it can be
+    // WRITTEN, which checkAssignment asks about separately.
+    case Symbol.Global { typeId: t, intVal: v }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The type of a module-level name that may be ASSIGNED to - a `let` global and
+// nothing else. TYPE_ERROR_ID for a const, which is what makes writing one an
+// error rather than a silent no-op.
+function moduleGlobalType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Global { typeId: t, intVal: v }: { return t; }
     default: { return TYPE_ERROR_ID; }
   }
 }
@@ -931,10 +981,22 @@ function checkRefExpr(
   ref scope: LocalScope
 ): TypeId {
   const target = nodeAt(ref ast, expr.childA);
-  if (target.kind != ASTNodeKind.IDENT) {
+  // A named binding, or a FIELD of one - `Disposable.dispose(ref self.data)`
+  // is how a container disposes what it owns. Both have storage; a temporary
+  // does not, which is the whole rule.
+  if (target.kind != ASTNodeKind.IDENT && target.kind != ASTNodeKind.FIELD_ACCESS) {
     reportError(
       ref prog,
-      "`ref` takes a named binding - the bootstrap has no address for anything else yet",
+      "`ref` takes a named binding or a field of one - there is no address for a temporary",
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  if (target.kind == ASTNodeKind.FIELD_ACCESS &&
+      nodeAt(ref ast, target.childA).kind != ASTNodeKind.IDENT) {
+    reportError(
+      ref prog,
+      "`ref` on a field needs a named base - `ref a.b.c` is not supported by the bootstrap yet",
       expr.sourceLoc
     );
     return TYPE_ERROR_ID;
@@ -1048,8 +1110,51 @@ function checkVarDecl(
     }
   }
 
+  checkDisposableBinding(ref prog, ref tm, ref ast, stmt, finalType);
   bindLocal(ref prog, ref scope, stmt, finalType);
   vec.vecSet(ref tm.resolvedTypes, stmtId, finalType);
+}
+
+// A binding whose kind demands a scope-end call has to HAVE that method.
+//
+// Checked here rather than left to codegen because the promise is about the
+// program: `disposable buf: Foo` where Foo has no `dispose` is a mistake in the
+// source, and codegen meeting it would be a mistake in the compiler.
+function checkDisposableBinding(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  typeId: TypeId
+): void {
+  if (stmt.childC == 0 || typeId == TYPE_ERROR_ID) {
+    return;
+  }
+  const list = nodeAt(ref ast, stmt.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.disposeMethod.len > 0 &&
+            lookupMethod(ref prog, typeId, info.disposeMethod) == TYPE_ERROR_ID) {
+          reportError(
+            ref prog,
+            `"${stmt.name}" is ${prefix.name}, which requires a "${info.disposeMethod}" method, but ${formatType(ref prog, typeId)} has none`,
+            stmt.sourceLoc
+          );
+        }
+      }
+      case Option.None: {
+        reportError(
+          ref prog,
+          `unknown kind "${prefix.name}" on binding "${stmt.name}"`,
+          prefix.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
 }
 
 function bindLocal(ref prog: Program, ref scope: LocalScope, stmt: ASTNode, typeId: TypeId): void {
@@ -1109,8 +1214,21 @@ function checkAssignment(
         }
       }
       case Option.None: {
-        reportError(ref prog, `unknown name "${target.name}"`, target.sourceLoc);
-        return TYPE_ERROR_ID;
+        // Not a local, so it may be a module-level `let`. A `const` reaches
+        // here too and is refused by name: it has no storage to write to.
+        targetType = moduleGlobalType(ref prog, ref tm, target.name);
+        if (targetType == TYPE_ERROR_ID) {
+          if (moduleConstType(ref prog, ref tm, target.name) != TYPE_ERROR_ID) {
+            reportError(
+              ref prog,
+              `cannot assign to const "${target.name}" - a module-level const is inlined at every use, so there is nothing to write to`,
+              target.sourceLoc
+            );
+          } else {
+            reportError(ref prog, `unknown name "${target.name}"`, target.sourceLoc);
+          }
+          return TYPE_ERROR_ID;
+        }
       }
     }
     vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
@@ -1450,7 +1568,19 @@ function checkFieldAccess(
       if (str.stringEq(expr.name, "len")) {
         return primTypeId(PrimKind.USIZE);
       }
-      reportError(ref prog, `an array has no field "${expr.name}" - only "len"`, expr.sourceLoc);
+      // `xs.ptr` - the DATA pointer, for handing a buffer to C. An array is
+      // already a pointer plus a length, so this is a projection rather than a
+      // conversion, and it borrows: the pointer is only valid while the array
+      // is. Ungated on purpose - reading it is safe, and everything you can DO
+      // with the result already needs `import.unsafe;`.
+      if (str.stringEq(expr.name, "ptr")) {
+        return internUnsafePtr(ref prog, e);
+      }
+      reportError(
+        ref prog,
+        `an array has no field "${expr.name}" - only "len" and "ptr"`,
+        expr.sourceLoc
+      );
       return TYPE_ERROR_ID;
     }
     case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
@@ -2124,3 +2254,123 @@ function isIntLiteralNode(ref ast: AST, exprId: NodeId): bool {
 // The ambient namespace of the libc errno bridge. Not an import: `errno.get()`
 // resolves by spelling, the same way the reference's ERRNO_INTRINSIC does.
 const ERRNO_NAMESPACE: string = "errno";
+
+// `errno.get(): c_int`, `errno.set(v: c_int): void`, `errno.message(c: c_int):
+// string`. Three fixed signatures, checked here rather than registered as
+// symbols because there is no module to register them in.
+function checkErrnoCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const intType = primTypeId(PrimKind.INT32);
+  let args: usize = 0;
+  if (expr.childA != 0) {
+    args = nodeAt(ref ast, expr.childA).childCount;
+  }
+
+  if (str.stringEq(expr.name, "get")) {
+    if (args != 0) {
+      reportError(ref prog, `errno.get() takes no arguments`, expr.sourceLoc);
+    }
+    return intType;
+  }
+  if (str.stringEq(expr.name, "set")) {
+    checkErrnoArg(ref prog, ref tm, ref ast, expr, intType, ref scope);
+    return TYPE_VOID_ID;
+  }
+  if (str.stringEq(expr.name, "message")) {
+    checkErrnoArg(ref prog, ref tm, ref ast, expr, intType, ref scope);
+    return primTypeId(PrimKind.STRING);
+  }
+
+  checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+  reportError(
+    ref prog,
+    `"errno" has no member "${expr.name}" - the ones that exist are get, set and message`,
+    expr.sourceLoc
+  );
+  return TYPE_ERROR_ID;
+}
+
+function checkErrnoArg(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  want: TypeId,
+  ref scope: LocalScope
+): void {
+  if (expr.childA == 0) {
+    reportError(ref prog, `errno.${expr.name}() takes one argument`, expr.sourceLoc);
+    return;
+  }
+  const list = nodeAt(ref ast, expr.childA);
+  if (list.childCount != 1) {
+    reportError(ref prog, `errno.${expr.name}() takes one argument`, expr.sourceLoc);
+    return;
+  }
+  checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, list, 0), want, ref scope);
+}
+
+// `ephemeral arenaScope(N) { ... }` - an anonymous region.
+//
+// The subject is an ordinary expression, checked and decorated so codegen can
+// give it a slot; the block is an ordinary block. What makes it a region is the
+// kind, which has to be one declared `appliesTo region` and has to demand a
+// scope-end call - a kind that asks for nothing would make this shape a plain
+// block with extra words.
+function checkKindRegion(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  const subjectType = checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
+  vec.vecSet(ref tm.resolvedTypes, stmtId, subjectType);
+
+  const list = nodeAt(ref ast, stmt.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.None: {
+        reportError(ref prog, `unknown kind "${prefix.name}"`, prefix.sourceLoc);
+      }
+      case Option.Some { value: info }: {
+        // The reference's rule, and its message names the alternative: a
+        // binding kind used anonymously has nothing to be called ON later.
+        if (!info.appliesToRegion) {
+          reportError(
+            ref prog,
+            `kind "${prefix.name}" does not apply to a region - the anonymous "${prefix.name} EXPR { ... }" form needs a region kind. To use it as a named resource, write "${prefix.name} name: T = EXPR;"`,
+            prefix.sourceLoc
+          );
+        } else if (info.disposeMethod.len == 0) {
+          reportError(
+            ref prog,
+            `kind "${prefix.name}" asks for nothing at scope end, so "${prefix.name} EXPR { ... }" would be a plain block`,
+            prefix.sourceLoc
+          );
+        } else if (subjectType != TYPE_ERROR_ID &&
+                   lookupMethod(ref prog, subjectType, info.disposeMethod) == TYPE_ERROR_ID) {
+          reportError(
+            ref prog,
+            `"${prefix.name}" requires a "${info.disposeMethod}" method, but ${formatType(ref prog, subjectType)} has none`,
+            stmt.sourceLoc
+          );
+        }
+      }
+    }
+    i += 1;
+  }
+
+  scopePush(ref scope);
+  checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
+  scopePop(ref scope);
+}

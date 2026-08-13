@@ -82,6 +82,19 @@ export function emitIndexWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, va
   return "";
 }
 
+// `xs.ptr` - field 0 of the descriptor, the data pointer.
+export function emitArrayPtr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  let base: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref base);
+  if (err.len > 0) {
+    return err;
+  }
+  const dest = freshTemp(cx.e);
+  emitExtractValue(ref cx, dest, ARRAY_DESCRIPTOR, base, 0);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
 // `xs.len` - field 1 of the descriptor.
 export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   let base: Operand = Operand.None;

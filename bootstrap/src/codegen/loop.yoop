@@ -38,11 +38,13 @@ export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string): string {
 
   emitLabel(ref cx, bodyLabel);
   // `continue` re-tests the condition; `break` leaves.
+  disposeEnterLoop(cx.disposes);
   loopPush(ref cx, condLabel, endLabel);
   let err = "";
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
+  disposeExitLoop(cx.disposes);
   if (err.len > 0) {
     return err;
   }
@@ -106,11 +108,13 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
   emitCondBr(ref cx, cond, bodyLabel, endLabel);
 
   emitLabel(ref cx, bodyLabel);
+  disposeEnterLoop(cx.disposes);
   loopPush(ref cx, stepLabel, endLabel);
   let err = "";
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childE, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
+  disposeExitLoop(cx.disposes);
   if (err.len > 0) {
     return err;
   }
@@ -203,11 +207,13 @@ export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: stri
   emitStore(ref cx, elemTy, Operand.Temp { id: elemValue }, stmt.name, loopVar.id);
 
   // `continue` advances the counter first, exactly as in the counted form.
+  disposeEnterLoop(cx.disposes);
   loopPush(ref cx, stepLabel, endLabel);
   let err = "";
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
+  disposeExitLoop(cx.disposes);
   if (err.len > 0) {
     return err;
   }

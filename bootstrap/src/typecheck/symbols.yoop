@@ -33,6 +33,12 @@ export variant Symbol {
   // at every use rather than emitted as a global - there is nothing to load
   // from, and an importer needs the value, not an address.
   Value       { typeId: TypeId, intVal: int64 },
+  // A module-level `let` - a MUTABLE global. Unlike a `const`, which is inlined
+  // at every use, this one is a real LLVM global: it has an address, reads load
+  // from it and writes store to it, so a write in one function is visible in
+  // another. `intVal` is its compile-time initializer, which is all the
+  // bootstrap accepts.
+  Global      { typeId: TypeId, intVal: int64 },
   Trait       { typeId: TypeId },
   VariantT    { typeId: TypeId },         // tagged `variant` (enum-with-payload)
   Union       { typeId: TypeId },

@@ -12,7 +12,8 @@ module codegen;
 // dominate a use after the join.
 
 import { Map }, * as map from "std/collections/map.yoop";
-import { disposable } from "std/core/kinds.yoop";
+import { disposable, Disposable } from "std/core/kinds.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
 import { Option } from "std/core/types.yoop";
 
 export type LocalSlot {
@@ -36,10 +37,49 @@ export const ARG_PTR_SLOT: usize = 0;
 export type FnLocals propagates<disposable> {
   slots: Map<string, LocalSlot>,
   nextSlot: usize,
+  // The names declared in each open block, so leaving one can take them back
+  // out of `slots`.
+  //
+  // The ALLOCAS stay - they are hoisted into `entry:` and a slot id is never
+  // reused - but the NAME has to stop resolving, or a binding that shadowed
+  // something in an inner block goes on shadowing it forever. That is only
+  // observable when the outer name is a module-level global: pass D refuses an
+  // out-of-scope read of a local, so nothing else ever asks.
+  blockNames: Vec<Vec<string>>,
 }
 
 export function localsNew(): FnLocals propagates<disposable> {
-  return { slots: map.mapNew(0, map.stringKeyOps()), nextSlot: 0 };
+  let blocks: Vec<Vec<string>> = vec.vecNew(4);
+  return { slots: map.mapNew(0, map.stringKeyOps()), nextSlot: 0, blockNames: blocks };
+}
+
+export function localsPushBlock(ref l: FnLocals): void {
+  let fresh: Vec<string> = vec.vecNew(2);
+  vec.vecPush(ref l.blockNames, fresh);
+}
+
+// Drop the names the innermost block declared. Their slots survive.
+export function localsPopBlock(ref l: FnLocals): void {
+  if (l.blockNames.len == 0) {
+    return;
+  }
+  let names = vec.vecGet(ref l.blockNames, l.blockNames.len - 1);
+  let i: usize = 0;
+  while (i < names.len) {
+    map.mapRemove(ref l.slots, vec.vecGet(ref names, i));
+    i += 1;
+  }
+  Disposable.dispose(ref names);
+  l.blockNames.len -= 1;
+}
+
+function localsNoteName(ref l: FnLocals, name: string): void {
+  if (l.blockNames.len == 0) {
+    return;
+  }
+  let top = vec.vecGet(ref l.blockNames, l.blockNames.len - 1);
+  vec.vecPush(ref top, name);
+  vec.vecSet(ref l.blockNames, l.blockNames.len - 1, top);
 }
 
 // Emits the alloca into the function prologue and records the slot.
@@ -48,6 +88,7 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
   const info: LocalSlot = { ty: ty, id: cx.locals.nextSlot };
   emitAlloca(ref cx, name, info.id, ty);
   map.mapInsert(ref cx.locals.slots, name, info);
+  localsNoteName(cx.locals, name);
   return info;
 }
 
@@ -57,6 +98,7 @@ export function declareLocal(ref cx: Cx, name: string, ty: string): LocalSlot {
 export function declareRefParam(ref cx: Cx, name: string, pointeeTy: string): LocalSlot {
   const info: LocalSlot = { ty: pointeeTy, id: ARG_PTR_SLOT };
   map.mapInsert(ref cx.locals.slots, name, info);
+  localsNoteName(cx.locals, name);
   return info;
 }
 

@@ -23,22 +23,20 @@ function parseReturnStatement(ref ps: ParserState): ParsingResult {
 export function parseStatement(ref ps: ParserState): ParsingResult {
   const peekTag = SelfLexing.peek(ref ps).tag;
 
-  // `ephemeral arenaScope(N) { ... }` - a kind-prefixed BLOCK, from a kind
-  // carrying `ownsBlock`. Two identifiers then a `(` is the shape; a
-  // kind-prefixed BINDING (`disposable buf: T = ...`) has a `:` instead and is
-  // the var-decl parser's.
+  // A kind can precede two things in statement position, and the token after
+  // the name is what tells them apart.
   //
-  // Refused rather than parsed-and-ignored. The block's whole meaning is that
-  // an allocator is installed for its duration and torn down at the end, and
-  // that is the yoop runtime's allocator context - the same thing `ctxAlloc`
-  // needs. Parsing it and running the body without the arena would be a silent
-  // behavior change, which is worse than not compiling.
+  // `disposable ids: Vec<NodeId> = ...` - a kind-prefixed BINDING. Two
+  // identifiers then a `:` or `=`.
+  if (atKindPrefixedBinding(ref ps)) {
+    return Result.Ok { value: parseVarDecl(ref ps)? };
+  }
+
+  // `ephemeral arenaScope(N) { ... }` - an anonymous REGION. Two identifiers
+  // then a `(`. The subject is built, the block runs, and the kind's
+  // `mustCall` method fires at the closing brace.
   if (atKindPrefixedBlock(ref ps)) {
-    return Result.Err { error: SelfLexing.createParsingError(
-      ref ps,
-      `a kind-prefixed block ("${peekText(ref ps)} ... { }") installs an allocator for its body, which needs the yoop runtime linked`,
-      peekLengthUsize(ref ps),
-    )};
+    return Result.Ok { value: parseKindRegion(ref ps)? };
   }
 
   switch (peekTag) {
@@ -346,6 +344,31 @@ function parseLiteralPattern(ref ps: ParserState): ParsingResult {
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }
 
+// Two identifiers then a `:` or `=`: a kind-prefixed binding.
+function atKindPrefixedBinding(ref ps: ParserState): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  // Walk the prefix run - several kinds may stack - and look at what follows
+  // the last identifier.
+  let i: usize = 1;
+  while (true) {
+    switch (SelfLexing.peekAhead(ref ps, i)) {
+      case Result.Err { error: e }: { return false; }
+      case Result.Ok { value: tok }: {
+        if (tok.tag == TokenTags.COLON || tok.tag == TokenTags.EQ) {
+          // At least one prefix had to precede the name for this to be one.
+          return i >= 2;
+        }
+        if (tok.tag != TokenTags.IDENT) {
+          return false;
+        }
+      }
+    }
+    i += 1;
+  }
+}
+
 // Two identifiers then a `(` in STATEMENT position: a kind-prefixed block.
 function atKindPrefixedBlock(ref ps: ParserState): bool {
   if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
@@ -363,4 +386,21 @@ function atKindPrefixedBlock(ref ps: ParserState): bool {
       }
     }
   }
+}
+
+// `ephemeral arenaScope(N) { ... }`
+//
+//   childC   the kind prefix list, the same slot a prefixed binding uses
+//   childA   the subject expression
+//   childB   the block
+//
+// The subject is anonymous on purpose: a region is held for the block's
+// duration and nothing inside names it. A kind that wants a name declares
+// `appliesTo binding` instead.
+function parseKindRegion(ref ps: ParserState): ParsingResult {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_REGION);
+  node.childC = parseKindPrefixes(ref ps)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  node.childB = parseBlock(ref ps)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
 }

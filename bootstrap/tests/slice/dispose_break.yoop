@@ -1,0 +1,58 @@
+// Disposal on `break` and `continue`.
+//
+// Leaving a scope through a loop jump leaves it just as much as falling off the
+// end does, so the bindings it owns are disposed either way. The bootstrap
+// unwinds out to the loop; the JS reference does not, which is why this fixture
+// is bootstrap-only - see dispose_break.bootonly.
+//
+// `continue` matters as much as `break` and is easier to get wrong: it runs
+// every iteration rather than once, so a missed disposal there leaks N times.
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Res implements Closer {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+function open(n: int): Res {
+  printf("  open %d\n", n);
+  return { id: n };
+}
+
+function main(): int {
+  // Breaks on the second iteration. Both iterations dispose - the first at the
+  // closing brace, the second on the way out.
+  printf("break:\n");
+  let i: int = 0;
+  while (i < 4) {
+    tracked r: Res = open(i);
+    if (i == 1) {
+      break;
+    }
+    i = i + 1;
+  }
+
+  // `continue` skips the rest of the body, so the disposal has to happen on
+  // that path too - three times here, not once.
+  printf("continue:\n");
+  let j: int = 0;
+  while (j < 3) {
+    tracked r: Res = open(10 + j);
+    j = j + 1;
+    continue;
+  }
+
+  printf("done\n");
+  return 0;
+}

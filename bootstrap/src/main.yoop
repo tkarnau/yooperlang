@@ -58,12 +58,14 @@ function main(): int {
           log.error(`codegen: ${e}`);
           return 1;
         }
-        case Result.Ok { value: ir }: {
+        case Result.Ok { value: out }: {
           log.info("llvm IR: ok");
-          disposable irText: Text = ir;
+          disposable irText: Text = out.ir;
           disposable irPath: Text = text.fromString(outPath);
           text.push(ref irPath, ".ll");
-          const linkErr = linkExecutable(ref irText, text.view(ref irPath), outPath);
+          const linkErr = linkExecutable(
+            ref irText, text.view(ref irPath), outPath, out.needsRuntime, env.argAt(0)
+          );
           if (linkErr.len > 0) {
             log.error(linkErr);
             return 1;

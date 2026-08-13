@@ -65,16 +65,16 @@ export function emitIntrinsicCall(
   if (str.stringEq(expr.name, "arraySlice")) {
     return emitArraySlice(ref cx, expr, exprId, ref out);
   }
-  // The allocator-context pair routes through `yoop_ctx_alloc` in the yoop
-  // RUNTIME, and the bootstrap's link step is one clang call with no runtime on
-  // it. Lowering these to malloc/free instead would compile and run and
-  // silently stop an installed arena from capturing the bytes, which is the
-  // whole reason they exist - so they are refused until the runtime links.
-  if (str.stringEq(expr.name, "ctxAlloc") || str.stringEq(expr.name, "ctxFree")) {
-    return unsupportedHere(
-      "an allocator-context intrinsic, which needs the yoop runtime linked",
-      expr.name
-    );
+  // The allocator-context pair. Identical in shape to heapAlloc/heapFree, and
+  // different in exactly one way: the bytes come from the CURRENT allocator, so
+  // an installed arena captures them. That is the whole reason they exist, and
+  // why they were refused rather than lowered to malloc while the runtime was
+  // unlinkable - a program would have run, and quietly not used the arena.
+  if (str.stringEq(expr.name, "ctxAlloc")) {
+    return emitCtxAllocCall(ref cx, expr, exprId, ref out);
+  }
+  if (str.stringEq(expr.name, "ctxFree")) {
+    return emitCtxFreeCall(ref cx, expr, ref out);
   }
   return internalError("no lowering for intrinsic", expr.name);
 }
@@ -170,6 +170,42 @@ function emitHeapAlloc(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Opera
 
   // The length is the ELEMENT count the caller asked for, not the byte count.
   out = buildDescriptor(ref cx, Operand.Temp { id: raw }, n);
+  return "";
+}
+
+// `ctxAlloc<T>(n)` - heapAlloc through the allocator context.
+function emitCtxAllocCall(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let n: Operand = Operand.None;
+  const err = emitIntrinsicArg(ref cx, expr, 0, ref n);
+  if (err.len > 0) {
+    return err;
+  }
+  cx.e.usesRuntime = true;
+
+  const size = freshTemp(cx.e);
+  emitBinOp(
+    ref cx, size, "mul", "i64", n,
+    Operand.Imm { value: uint64(elementSizeOfResult(ref cx, exprId)) }
+  );
+  const raw = freshTemp(cx.e);
+  emitCtxAlloc(ref cx, raw, Operand.Temp { id: size });
+  out = buildDescriptor(ref cx, Operand.Temp { id: raw }, n);
+  return "";
+}
+
+// `ctxFree(a)` - return the bytes to the allocator they came from.
+function emitCtxFreeCall(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  let a: Operand = Operand.None;
+  const err = emitIntrinsicArg(ref cx, expr, 0, ref a);
+  if (err.len > 0) {
+    return err;
+  }
+  cx.e.usesRuntime = true;
+
+  const data = freshTemp(cx.e);
+  emitExtractValue(ref cx, data, ARRAY_DESCRIPTOR, a, 0);
+  emitCtxFree(ref cx, data);
+  out = Operand.None;
   return "";
 }
 

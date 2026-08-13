@@ -11,7 +11,7 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+import { ASTNode, NodeId, childAt, nodeAt, ASTNodeKind } from "../ast";
 
 // Arguments are lowered FIRST - each may emit its own instructions, and those
 // have to land before the call. Their operands are held as values, so nothing
@@ -22,6 +22,12 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   // is about finding a SYMBOL to call and an intrinsic has none.
   if (isIntrinsicCall(ref cx, expr)) {
     return emitIntrinsicCall(ref cx, expr, exprId, ref out);
+  }
+  // `errno.get()` and friends are not calls to anything in this program: they
+  // are the runtime's errno bridge, resolved by SPELLING the same way pass D
+  // resolved them.
+  if (isErrnoCall(ref cx, expr)) {
+    return emitErrnoCall(ref cx, expr, ref out);
   }
   // A cast is not a call - pass D typed it as the target primitive, and the
   // lowering is one conversion instruction (or none). Only an UNQUALIFIED name
@@ -72,16 +78,41 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   // shape is identical to `ns.fn()` in the AST and only name resolution can
   // tell them apart.
   if (map.mapContainsKey(ref cx.tm.indirectCalls, uint64(exprId))) {
+    let fnPtr: usize = 0;
+
+    // With no base, the callee is a LOCAL holding a function value - so the
+    // pointer is loaded from its slot rather than projected out of a struct.
+    if (expr.childB == 0) {
+      switch (lookupLocal(cx.locals, expr.name)) {
+        case Option.None: {
+          return internalError("no stack slot for indirect callee", expr.name);
+        }
+        case Option.Some { value: slotInfo }: {
+          const loaded = freshTemp(cx.e);
+          emitLoad(ref cx, loaded, "ptr", expr.name, slotInfo.id);
+          fnPtr = loaded;
+        }
+      }
+      emitCallIndirect(ref cx, dest, retTy, fnPtr, ref args);
+      if (isVoid) {
+        out = Operand.None;
+      } else {
+        out = Operand.Temp { id: dest };
+      }
+      return "";
+    }
+
     let base: Operand = Operand.None;
     const berr = emitExpr(ref cx, expr.childB, ref base);
     if (berr.len > 0) {
       return berr;
     }
-    const fnPtr = freshTemp(cx.e);
+    const projected = freshTemp(cx.e);
     emitExtractValue(
-      ref cx, fnPtr, typeOf(ref cx, expr.childB), base,
+      ref cx, projected, typeOf(ref cx, expr.childB), base,
       fieldPositionOf(ref cx, expr.childB, expr.name)
     );
+    fnPtr = projected;
     emitCallIndirect(ref cx, dest, retTy, fnPtr, ref args);
     if (isVoid) {
       out = Operand.None;
@@ -146,4 +177,52 @@ function promoteVarargs(ref cx: Cx, ref args: Vec<CallArg>, ref argIds: Vec<Node
     i += 1;
   }
   return "";
+}
+
+// True when this call is `errno.<member>(...)`.
+function isErrnoCall(ref cx: Cx, expr: ASTNode): bool {
+  if (expr.childB == 0) {
+    return false;
+  }
+  const base = nodeAt(cx.ast, expr.childB);
+  return base.kind == ASTNodeKind.IDENT && text.equals(base.name, "errno");
+}
+
+// One of the three errno members. Pass D already refused any other name and
+// checked the arity, so this only has to pick the instruction.
+function emitErrnoCall(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  cx.e.usesRuntime = true;
+
+  if (text.equals(expr.name, "get")) {
+    const dest = freshTemp(cx.e);
+    emitErrnoGet(ref cx, dest);
+    out = Operand.Temp { id: dest };
+    return "";
+  }
+
+  let arg: Operand = Operand.None;
+  const err = emitFirstArg(ref cx, expr, ref arg);
+  if (err.len > 0) {
+    return err;
+  }
+  if (text.equals(expr.name, "set")) {
+    emitErrnoSet(ref cx, arg);
+    out = Operand.None;
+    return "";
+  }
+  const dest = freshTemp(cx.e);
+  emitErrnoMessage(ref cx, dest, arg);
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+function emitFirstArg(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
+  if (expr.childA == 0) {
+    return internalError("errno call has no argument", expr.name);
+  }
+  const args = nodeAt(cx.ast, expr.childA);
+  if (args.childCount == 0) {
+    return internalError("errno call has no argument", expr.name);
+  }
+  return emitExpr(ref cx, childAt(cx.ast, args, 0), ref out);
 }

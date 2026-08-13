@@ -22,13 +22,19 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   if (declToken.tag != TokenTags.NOTOKEN && SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
     // todo...
   }
-  // todo kindprefix stuff
   let nodeKind = ASTNodeKind.CONST_DECL;
   if (declToken.tag == TokenTags.LET) {
     nodeKind = ASTNodeKind.LET_DECL;
   }
 
   let node = SelfLexing.buildSourcedNode(ref ps, nodeKind);
+  // `disposable ids: Vec<NodeId> = ...` - the kind prefix run, before the name.
+  // Two identifiers in a row is what identifies one, the same test every other
+  // kind position uses; the LAST identifier is the binding's name.
+  //
+  // A prefixed binding is CONST by default: shape (3) has no `let` to read, and
+  // the resource is meant to be held rather than reassigned.
+  node.childC = parseKindPrefixes(ref ps)?;
   node.name = parseIdentAsName(ref ps)?;
 
   // type annotation is optional, when omitted, the typechecker infers

@@ -147,6 +147,21 @@ function parseKindClause(ref ps: ParserState): Result<NodeId, ParsingError> {
   node.name = peekText(ref ps);
   SelfLexing.advance(ref ps)?;
 
+  // The clause's first ARGUMENT, interned: the `dispose` in
+  // `mustCall dispose beforeScopeEnd;`, the `region` in `appliesTo region;`.
+  // Those two are the only clauses anything reads, and both are answered by the
+  // word right after the leading one - so one slot covers them and the rest of
+  // the clause stays consumed-and-forgotten.
+  // ALWAYS interned, even when the clause carries nothing - pool index 0 is a
+  // real string, so a 0 in `strId` cannot mean "absent". A clause with no
+  // argument interns "" and reads back as "".
+  let argument = "";
+  if (SelfLexing.peek(ref ps).tag != TokenTags.SEMICOLON &&
+      SelfLexing.peek(ref ps).tag != TokenTags.EOF) {
+    argument = peekText(ref ps);
+  }
+  node.strId = internString(ref ps, argument);
+
   // A clause body can be a BRACED BLOCK - `layout { abi "C"; };` - so the scan
   // tracks nesting rather than stopping at the first `;` it sees. Without that
   // the inner `;` ends the clause and the leftover `}` surfaces as a confusing

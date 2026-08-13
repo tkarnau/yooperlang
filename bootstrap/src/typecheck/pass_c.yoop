@@ -104,6 +104,9 @@ function fillFileShells(
       case ASTNodeKind.CONST_DECL: {
         fillModuleConst(ref prog, ref tm, ref m.ast, declNode);
       }
+      case ASTNodeKind.LET_DECL: {
+        fillModuleGlobal(ref prog, ref tm, ref m.ast, declNode);
+      }
       case ASTNodeKind.VTABLE_DECL: {
         fillVtable(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
@@ -462,6 +465,58 @@ function fillModuleConst(
   }
 
   setSymbol(ref prog, symId, Symbol.Value { typeId: declared, intVal: value });
+}
+
+// `let CASE_INDEX: int32 = 0;` - a module-level MUTABLE global.
+//
+// The same shape a const fills, with one difference that matters: the value is
+// the global's INITIALIZER rather than something inlined at each use. So the
+// annotation is required for the same reason (there is nothing to infer from at
+// module level) and the initializer has to be compile-time, because an LLVM
+// global's initializer is.
+//
+// The reference accepts more here - it constant-FOLDS through function calls,
+// and drops their side effects doing it. The bootstrap takes a literal and
+// refuses the rest by name rather than inheriting that.
+function fillModuleGlobal(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  if (declNode.childA == 0) {
+    reportError(
+      ref prog,
+      `module-level "let ${declNode.name}" needs a type annotation`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childA);
+
+  let value: int64 = 0;
+  if (!constIntValue(ref ast, declNode.childB, ref value)) {
+    reportError(
+      ref prog,
+      `module-level "let ${declNode.name}" needs an integer literal initializer - a global's initializer is fixed at compile time`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+  if (!isIntPrimType(ref prog, declared)) {
+    reportError(
+      ref prog,
+      `module-level "let ${declNode.name}" is ${formatType(ref prog, declared)}; only integer globals are supported yet`,
+      declNode.sourceLoc
+    );
+    return;
+  }
+
+  setSymbol(ref prog, symId, Symbol.Global { typeId: declared, intVal: value });
 }
 
 // An integer literal, with or without a leading `-`. True when it read one.

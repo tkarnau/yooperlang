@@ -30,6 +30,9 @@ export type Cx {
   ast: ref AST,
   locals: ref FnLocals,
   loops: ref LoopStack,   // where break/continue jump; see loops.yoop
+  // What has to be disposed on the way out of each open scope. See
+  // dispose_stack.yoop - the promise `disposable x = ...` makes.
+  disposes: ref DisposeStack,
   // Which monomorphization of a generic function is being emitted, as an index
   // into Program.funcInstances - or NO_FUNC_INSTANCE for ordinary code.
   //
@@ -38,6 +41,14 @@ export type Cx {
   // substitutes on the way out: `typeOf` is the single place that happens. See
   // the note in query.yoop.
   instance: usize,
+  // Which instantiation of a generic TYPE is being emitted, as an index into
+  // Program.instances - or NO_TYPE_INSTANCE for ordinary code.
+  //
+  // The type twin of `instance`, and for the same reason: a generic type's
+  // METHOD is checked once against `Vec<T>` and emitted once per `Vec<string>`,
+  // `Vec<int32>` and so on. Both substitutions compose in resolvedTypeAt, since
+  // a generic function can be called from inside a generic type's method.
+  typeInstance: usize,
 }
 
 // `Cx.instance` when the code being emitted is not inside a generic function.
@@ -48,6 +59,9 @@ export type Cx {
 // first monomorphization in every program was emitted as if it were ordinary
 // code, under the generic's bare name and with its type parameters unresolved.
 export const NO_FUNC_INSTANCE: usize = 0;
+
+// The type twin. Index 0 of Program.instances is burned for it too.
+export const NO_TYPE_INSTANCE: usize = 0;
 
 // One parameter of the function being emitted.
 export type ParamInfo {

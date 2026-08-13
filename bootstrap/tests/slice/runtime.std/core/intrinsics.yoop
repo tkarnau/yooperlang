@@ -1,0 +1,5 @@
+// The allocator-context intrinsics, copied from std/core/intrinsics.yoop.
+extern "intrinsic" from "compiler" {
+    function ctxAlloc<T>(n: usize): T[];
+    function ctxFree<T>(a: T[]): void;
+}

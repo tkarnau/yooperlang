@@ -183,10 +183,12 @@ suite function moduleConstsAreInlinedValues(): void {
     theory.detail = `wanted an annotation diagnostic, got: ${firstDiagnostic(ref unannotated)}`;
   }
 
-  let mutable = checkSource("let N: int = 7;\nfunction main(): int { return N; }");
-  let test theory: Case = t.asserts("module-level `let` is refused rather than treated as a const") {
-    theory.isSuccessful = diagnosticsMention(ref mutable, "module-level \"let\"");
-    theory.detail = `wanted a module-let refusal, got: ${firstDiagnostic(ref mutable)}`;
+  // A module-level `let` is a MUTABLE GLOBAL now, not a refusal - see
+  // moduleGlobalsAreRealStorage below.
+  let mutable = checkSource("let N: int = 7;\nfunction main(): int { N = 8; return N; }");
+  let test theory: Case = t.asserts("module-level `let` is a mutable global, and is writable") {
+    theory.isSuccessful = mutable.diagnostics.len == 0;
+    theory.detail = `reported ${mutable.diagnostics.len}: ${firstDiagnostic(ref mutable)}`;
   }
 
   // Cross-module: the VALUE travels, because there is no global to point at.
@@ -1974,5 +1976,240 @@ suite function stringLenIsByteLength(): void {
   let test theory: Case = t.asserts("and nothing else") {
     theory.isSuccessful = other.diagnostics.len > 0;
     theory.detail = "`s.size` produced no diagnostic";
+  }
+}
+
+// ----- the runtime bridge and generic methods --------------------------------
+
+suite function errnoIsAnAmbientBridge(): void {
+  // Resolved by SPELLING, not by import - there is nothing to import it from,
+  // the same way the reference's ERRNO_INTRINSIC works.
+  let ok = checkSource("function f(): int { errno.set(0); return int(errno.get()); }");
+  let test theory: Case = t.asserts("errno.get and errno.set need no import") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let msg = checkSource("function f(c: c_int): string { return errno.message(c); }");
+  let test theory: Case = t.asserts("errno.message gives a string") {
+    theory.isSuccessful = msg.diagnostics.len == 0;
+    theory.detail = `reported ${msg.diagnostics.len}: ${firstDiagnostic(ref msg)}`;
+  }
+
+  let arity = checkSource("function f(): int { return int(errno.get(1)); }");
+  let test theory: Case = t.asserts("errno.get takes no arguments") {
+    theory.isSuccessful = arity.diagnostics.len > 0;
+    theory.detail = "errno.get(1) produced no diagnostic";
+  }
+
+  let unknown = checkSource("function f(): int { return int(errno.reset()); }");
+  let test theory: Case = t.asserts("an unknown errno member is refused, by name") {
+    theory.isSuccessful = diagnosticsMention(ref unknown, "reset");
+    theory.detail = `wanted an unknown-member refusal, got: ${firstDiagnostic(ref unknown)}`;
+  }
+}
+
+suite function genericTypesCarryTheirMethods(): void {
+  const decls = "trait Sized { function size(ref self): usize; } type Box<T> implements Sized { value: T, count: usize, function size(ref self): usize { return self.count; } } ";
+
+  // `Vec<T>` INSIDE its own body names the TEMPLATE, not a second instance.
+  // Without that, `self.count` is looked up on an empty `Box_T` and the method
+  // is told its own type has no such field.
+  let ok = checkSource(`${decls}function main(): int { const b: Box<int32> = { value: 1, count: 2 }; return int(Sized.size(ref b)); }`);
+  let test theory: Case = t.asserts("a generic type's method reads its own fields") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The instance keeps the methods, so it keeps satisfying the trait.
+  let dispatch = checkSource(`${decls}function main(): int { const b: Box<string> = { value: "x", count: 9 }; return int(Sized.size(ref b)); }`);
+  let test theory: Case = t.asserts("an instantiation still implements what the template does") {
+    theory.isSuccessful = dispatch.diagnostics.len == 0;
+    theory.detail = `reported ${dispatch.diagnostics.len}: ${firstDiagnostic(ref dispatch)}`;
+  }
+
+  // A method body is CHECKED, which it was not while `ownTypeOf` had no
+  // GenericDecl case - it silently did nothing.
+  let badBody = checkSource("trait Sized { function size(ref self): usize; } type Box<T> implements Sized { value: T, function size(ref self): usize { return self.nope; } } function main(): int { return 0; }");
+  let test theory: Case = t.asserts("and its body is actually checked") {
+    theory.isSuccessful = diagnosticsMention(ref badBody, "nope");
+    theory.detail = `wanted an unknown-field diagnostic, got: ${firstDiagnostic(ref badBody)}`;
+  }
+}
+
+suite function borrowsAndArrayFieldsReachFurther(): void {
+  let field = checkSource("type Inner { n: int, } type Outer { part: Inner, } function bump(ref i: Inner): void { i.n = 1; } function f(): void { let o: Outer = { part: { n: 0 } }; bump(ref o.part); }");
+  let test theory: Case = t.asserts("`ref` takes a field of a named binding") {
+    theory.isSuccessful = field.diagnostics.len == 0;
+    theory.detail = `reported ${field.diagnostics.len}: ${firstDiagnostic(ref field)}`;
+  }
+
+  // A temporary still has no address, which is the rule the extension must not
+  // lose.
+  let temporary = checkSource("function g(ref n: int): void { } function f(): void { g(ref (1 + 2)); }");
+  let test theory: Case = t.asserts("but not a temporary") {
+    theory.isSuccessful = temporary.diagnostics.len > 0;
+    theory.detail = "`ref (1 + 2)` produced no diagnostic";
+  }
+
+  let ptr = checkSource("import.unsafe;\nfunction f(xs: uint8[]): unsafe_ptr<uint8> { return xs.ptr; }");
+  let test theory: Case = t.asserts("an array has `.ptr`, the data pointer") {
+    theory.isSuccessful = ptr.diagnostics.len == 0;
+    theory.detail = `reported ${ptr.diagnostics.len}: ${firstDiagnostic(ref ptr)}`;
+  }
+
+  let wrongElem = checkSource("import.unsafe;\nfunction f(xs: uint8[]): unsafe_ptr<int32> { return xs.ptr; }");
+  let test theory: Case = t.asserts("whose pointee is the ELEMENT type") {
+    theory.isSuccessful = wrongElem.diagnostics.len > 0;
+    theory.detail = "a uint8[] gave an unsafe_ptr<int32>";
+  }
+
+  let neither = checkSource("function f(xs: uint8[]): usize { return xs.size; }");
+  let test theory: Case = t.asserts("and nothing else") {
+    theory.isSuccessful = diagnosticsMention(ref neither, "only \"len\" and \"ptr\"");
+    theory.detail = `wanted the two-field message, got: ${firstDiagnostic(ref neither)}`;
+  }
+}
+
+// ----- scope-end disposal ----------------------------------------------------
+
+suite function kindsThatDemandAScopeEndCall(): void {
+  const decls = "kind tracked { appliesTo binding; mustCall close beforeScopeEnd; } trait Closer { function close(ref self): void; } type Res implements Closer { n: int, function close(ref self): void { } } ";
+
+  let ok = checkSource(`${decls}function main(): int { tracked r: Res = { n: 1 }; return 0; }`);
+  let test theory: Case = t.asserts("a binding whose type has the method checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // The promise is about the program: `disposable buf: Foo` where Foo has no
+  // `dispose` is a mistake in the source, and codegen meeting it would be a
+  // mistake in the compiler.
+  let noMethod = checkSource("kind tracked { appliesTo binding; mustCall close beforeScopeEnd; } type Bare { n: int, } function main(): int { tracked r: Bare = { n: 1 }; return 0; }");
+  let test theory: Case = t.asserts("a binding whose type lacks the method is refused, naming both") {
+    theory.isSuccessful = diagnosticsMention(ref noMethod, "close") &&
+      diagnosticsMention(ref noMethod, "Bare");
+    theory.detail = `wanted the method and the type named, got: ${firstDiagnostic(ref noMethod)}`;
+  }
+
+  let unknownKind = checkSource("type Res { n: int, } function main(): int { nosuch r: Res = { n: 1 }; return 0; }");
+  let test theory: Case = t.asserts("an undeclared kind on a binding is refused") {
+    theory.isSuccessful = diagnosticsMention(ref unknownKind, "nosuch");
+    theory.detail = `wanted an unknown-kind refusal, got: ${firstDiagnostic(ref unknownKind)}`;
+  }
+
+  // A kind with no `mustCall` records nothing and demands nothing - which is
+  // what keeps `pooled` and `tainted` from needing a method.
+  let noClause = checkSource("kind tainted { appliesTo binding; } type Bare { n: int, } function main(): int { tainted r: Bare = { n: 1 }; return 0; }");
+  let test theory: Case = t.asserts("a kind that asks for nothing needs no method") {
+    theory.isSuccessful = noClause.diagnostics.len == 0;
+    theory.detail = `reported ${noClause.diagnostics.len}: ${firstDiagnostic(ref noClause)}`;
+  }
+}
+
+suite function regionsNeedARegionKind(): void {
+  const closer = "trait Closer { function close(ref self): void; } type Res implements Closer { n: int, function close(ref self): void { } } function open(): Res { return { n: 1 }; } ";
+  const regionKind = "kind region { appliesTo region; mustCall close beforeScopeEnd; ownsBlock; } ";
+
+  let ok = checkSource(`${regionKind}${closer}function main(): int { region open() { } return 0; }`);
+  let test theory: Case = t.asserts("an anonymous region over a region kind checks clean") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // A binding kind used anonymously has nothing to be called ON later, and the
+  // message has to name the alternative - the reference's does.
+  let bindingKind = checkSource(`kind tracked { appliesTo binding; mustCall close beforeScopeEnd; } ${closer}function main(): int { tracked open() { } return 0; }`);
+  let test theory: Case = t.asserts("a BINDING kind used anonymously is refused, pointing at the named form") {
+    theory.isSuccessful = diagnosticsMention(ref bindingKind, "does not apply to a region") &&
+      diagnosticsMention(ref bindingKind, "name: T = EXPR");
+    theory.detail = `wanted the region refusal and the alternative, got: ${firstDiagnostic(ref bindingKind)}`;
+  }
+
+  let subjectLacks = checkSource(`${regionKind}type Bare { n: int, } function open(): Bare { return { n: 1 }; } function main(): int { region open() { } return 0; }`);
+  let test theory: Case = t.asserts("a region whose subject lacks the method is refused") {
+    theory.isSuccessful = subjectLacks.diagnostics.len > 0;
+    theory.detail = "a subject with no close method produced no diagnostic";
+  }
+
+  // A region kind that demands nothing would make the form a plain block with
+  // extra words, which is worth saying rather than accepting.
+  let noDemand = checkSource(`kind idle { appliesTo region; ownsBlock; } ${closer}function main(): int { idle open() { } return 0; }`);
+  let test theory: Case = t.asserts("a region kind that asks for nothing is refused") {
+    theory.isSuccessful = diagnosticsMention(ref noDemand, "plain block");
+    theory.detail = `wanted the plain-block refusal, got: ${firstDiagnostic(ref noDemand)}`;
+  }
+}
+
+// ----- mutable globals -------------------------------------------------------
+
+// A module-level `const` is INLINED at every use; a module-level `let` is a
+// real global with an address. That difference is the whole feature: a write in
+// one function has to be visible in another, which inlining cannot express.
+suite function moduleGlobalsAreRealStorage(): void {
+  let ok = checkSource("let COUNT: int32 = 0;\nfunction bump(): void { COUNT = COUNT + 1; }\nfunction main(): int { bump(); return int(COUNT); }");
+  let test theory: Case = t.asserts("a global is readable and writable from any function") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  // Writing a const is refused with a message that says WHY - "there is nothing
+  // to write to" rather than a generic const complaint, because the reason is
+  // that it has no storage at all.
+  let writeConst = checkSource("const K: int32 = 1;\nfunction main(): int { K = 2; return 0; }");
+  let test theory: Case = t.asserts("a module const cannot be assigned, and the message says why") {
+    theory.isSuccessful = diagnosticsMention(ref writeConst, "nothing to write to");
+    theory.detail = `wanted the no-storage message, got: ${firstDiagnostic(ref writeConst)}`;
+  }
+
+  // A global's initializer becomes the LLVM global's initializer, which is
+  // fixed at compile time - so it has to be a literal.
+  let computed = checkSource("function f(): int32 { return 1; }\nlet N: int32 = f();\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("a non-literal initializer is refused") {
+    theory.isSuccessful = diagnosticsMention(ref computed, "integer literal initializer");
+    theory.detail = `wanted a literal-initializer refusal, got: ${firstDiagnostic(ref computed)}`;
+  }
+
+  let noAnnot = checkSource("let N = 7;\nfunction main(): int { return 0; }");
+  let test theory: Case = t.asserts("a global needs a type annotation") {
+    theory.isSuccessful = diagnosticsMention(ref noAnnot, "needs a type annotation");
+    theory.detail = `wanted an annotation diagnostic, got: ${firstDiagnostic(ref noAnnot)}`;
+  }
+
+  let wrongWrite = checkSource("let N: int32 = 0;\nfunction main(): int { N = \"x\"; return 0; }");
+  let test theory: Case = t.asserts("a write is checked against the global's type") {
+    theory.isSuccessful = wrongWrite.diagnostics.len > 0;
+    theory.detail = "storing a string into an int32 global produced no diagnostic";
+  }
+
+  // A LOCAL shadows a global, and the local's mutability rules still apply.
+  let shadowed = checkSource("let N: int32 = 0;\nfunction main(): int { const N: int32 = 1; N = 2; return 0; }");
+  let test theory: Case = t.asserts("a local shadows a global, keeping its own constness") {
+    theory.isSuccessful = diagnosticsMention(ref shadowed, "cannot assign to const");
+    theory.detail = `wanted a const-assignment refusal, got: ${firstDiagnostic(ref shadowed)}`;
+  }
+}
+
+// `runSuite()` where `runSuite` is a LOCAL holding a function value - the same
+// indirect call a function-typed field produces, reached through a name.
+suite function functionValuesInLocalsAreCallable(): void {
+  let ok = checkSource("function hello(): void { } function main(): int { const f: () => void = hello; f(); return 0; }");
+  let test theory: Case = t.asserts("a local holding a function value is callable") {
+    theory.isSuccessful = ok.diagnostics.len == 0;
+    theory.detail = `reported ${ok.diagnostics.len}: ${firstDiagnostic(ref ok)}`;
+  }
+
+  let badArgs = checkSource("function hello(): void { } function main(): int { const f: () => void = hello; f(1); return 0; }");
+  let test theory: Case = t.asserts("and its arguments are checked against the local's signature") {
+    theory.isSuccessful = badArgs.diagnostics.len > 0;
+    theory.detail = "calling a no-argument function value with one produced no diagnostic";
+  }
+
+  // A local shadows a module function of the same name, so the local's TYPE is
+  // what the call is checked against.
+  let shadowing = checkSource("function f(n: int32): void { } function main(): int { const f: () => void = g; f(); return 0; } function g(): void { }");
+  let test theory: Case = t.asserts("a local function value shadows a module function") {
+    theory.isSuccessful = shadowing.diagnostics.len == 0;
+    theory.detail = `reported ${shadowing.diagnostics.len}: ${firstDiagnostic(ref shadowing)}`;
   }
 }

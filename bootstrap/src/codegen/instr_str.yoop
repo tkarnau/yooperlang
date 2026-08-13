@@ -15,6 +15,50 @@ import { Text }, * as text from "std/core/text.yoop";
 // The printf-family signature LLVM wants spelled out at a variadic call site.
 const SPRINTF_SIGNATURE: string = "i32 (ptr, ptr, ...)";
 
+//   @m__COUNT = internal global i32 0, align 8
+//
+// A module-level `let`. `internal` because a yoop module is not a C library:
+// nothing outside the emitted program links against it by name, and internal
+// linkage lets LLVM see every use.
+export function emitGlobalVariable(ref e: Emitter, home: string, name: string, ty: string, init: int64): void {
+  text.push(ref e.globals, "@");
+  text.push(ref e.globals, home);
+  text.push(ref e.globals, SYMBOL_MODULE_SEPARATOR);
+  text.push(ref e.globals, name);
+  text.push(ref e.globals, " = internal global ");
+  text.push(ref e.globals, ty);
+  text.push(ref e.globals, " ");
+  text.pushInt(ref e.globals, init);
+  text.push(ref e.globals, ", align 8\n");
+}
+
+//   %t2 = load i32, ptr @m__COUNT
+export function emitLoadGlobal(ref cx: Cx, dest: usize, ty: string, home: string, name: string): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = load ");
+  part(ref cx, ty);
+  part(ref cx, ", ptr @");
+  part(ref cx, home);
+  part(ref cx, SYMBOL_MODULE_SEPARATOR);
+  part(ref cx, name);
+  endInstr(ref cx);
+}
+
+//   store i32 %t3, ptr @m__COUNT
+export function emitStoreGlobal(ref cx: Cx, ty: string, value: Operand, home: string, name: string): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ptr @");
+  part(ref cx, home);
+  part(ref cx, SYMBOL_MODULE_SEPARATOR);
+  part(ref cx, name);
+  endInstr(ref cx);
+}
+
 //   %t1 = call i64 @strlen(ptr %t0)
 export function emitStrlen(ref cx: Cx, dest: usize, str: Operand): void {
   startInstr(ref cx);
@@ -114,6 +158,70 @@ export function emitSelectPtr(
   part(ref cx, ", ptr ");
   operand(ref cx, Operand.StrRef { id: whenFalse });
   endInstr(ref cx);
+}
+
+//   %t2 = call ptr @yoop_ctx_alloc(i64 %t1, i64 8)
+//
+// The allocator-context allocation. Alignment is 8, which satisfies every yoop
+// scalar and struct today - the same constant the reference passes.
+export function emitCtxAlloc(ref cx: Cx, dest: usize, size: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call ptr @yoop_ctx_alloc(i64 ");
+  operand(ref cx, size);
+  part(ref cx, ", i64 8)");
+  endInstr(ref cx);
+}
+
+//   call void @yoop_ctx_free(ptr %t3)
+export function emitCtxFree(ref cx: Cx, ptr: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @yoop_ctx_free(ptr ");
+  temp(ref cx, ptr);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t1 = call i32 @yoop_errno_get()
+export function emitErrnoGet(ref cx: Cx, dest: usize): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call i32 @yoop_errno_get()");
+  endInstr(ref cx);
+}
+
+//   call void @yoop_errno_set(i32 %t1)
+export function emitErrnoSet(ref cx: Cx, value: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "call void @yoop_errno_set(i32 ");
+  operand(ref cx, value);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t2 = call ptr @yoop_errno_message(i32 %t1)
+export function emitErrnoMessage(ref cx: Cx, dest: usize, code: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = call ptr @yoop_errno_message(i32 ");
+  operand(ref cx, code);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+// The declarations every runtime call above needs.
+//
+//   declare ptr @yoop_ctx_alloc(i64, i64)
+//   declare void @yoop_ctx_free(ptr)
+//   declare i32 @yoop_errno_get()
+//   declare void @yoop_errno_set(i32)
+//   declare ptr @yoop_errno_message(i32)
+export function emitRuntimeDeclarations(ref e: Emitter): void {
+  emitGlobal(ref e, "declare ptr @yoop_ctx_alloc(i64, i64)");
+  emitGlobal(ref e, "declare void @yoop_ctx_free(ptr)");
+  emitGlobal(ref e, "declare i32 @yoop_errno_get()");
+  emitGlobal(ref e, "declare void @yoop_errno_set(i32)");
+  emitGlobal(ref e, "declare ptr @yoop_errno_message(i32)");
 }
 
 // The declarations the calls above need, emitted once per module and only when

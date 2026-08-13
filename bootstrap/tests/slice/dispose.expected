@@ -1,0 +1,33 @@
+simple:
+  open 1
+  body
+  close 1
+reverse order:
+  open 2
+  open 3
+  body
+  close 3
+  close 2
+inner block:
+  open 10
+  in
+  close 10
+  after
+early return:
+  open 20
+  open 21
+  close 21
+  close 20
+  got 7
+region:
+  open 30
+  inside
+  close 30
+  after
+nested:
+  open 40
+  open 41
+  inside
+  close 41
+  close 40
+exit=0

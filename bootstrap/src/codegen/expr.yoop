@@ -77,6 +77,9 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
       if (isStringAt(ref cx, expr.childA)) {
         return emitStringLen(ref cx, expr, ref out);
       }
+      if (text.equals(expr.name, "ptr")) {
+        return emitArrayPtr(ref cx, expr, ref out);
+      }
       return emitArrayLen(ref cx, expr, ref out);
     }
     case ASTNodeKind.IDENT: {
@@ -120,6 +123,15 @@ function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
         }
         case Option.None: { }
       }
+      // Or a module-level `let` - a real global, so this is a LOAD rather than
+      // the inlining a const gets.
+      const globalTy = moduleGlobalTypeOf(ref cx, expr.name);
+      if (globalTy.len > 0) {
+        const dest = freshTemp(cx.e);
+        emitLoadGlobal(ref cx, dest, globalTy, cx.tm.moduleId, expr.name);
+        out = Operand.Temp { id: dest };
+        return "";
+      }
       // Or a FUNCTION named without being called - `{ hash: stringHash }`.
       // Its value is its symbol, resolved through the same table a call goes
       // through so an imported one lands on the defining module's name.
@@ -149,6 +161,20 @@ function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
 // what makes the lookup below total.
 function emitRefExpr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   const target = nodeAt(cx.ast, expr.childA);
+
+  // `ref x.f` - the FIELD's address, which is a gep on the base's slot rather
+  // than the slot itself. Same address a field assignment stores through, so
+  // the two cannot disagree about where a field lives.
+  if (target.kind == ASTNodeKind.FIELD_ACCESS) {
+    let addr: usize = 0;
+    const err = emitFieldAddress(ref cx, target, ref addr);
+    if (err.len > 0) {
+      return err;
+    }
+    out = Operand.Temp { id: addr };
+    return "";
+  }
+
   switch (lookupLocal(cx.locals, target.name)) {
     case Option.None: {
       return internalError("no stack slot to borrow", target.name);
@@ -191,6 +217,14 @@ function emitAssignment(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   }
   switch (lookupLocal(cx.locals, target.name)) {
     case Option.None: {
+      // A module-level `let`. Pass D already refused a const here, so a name
+      // that is not a local and not a global is a compiler bug.
+      const globalTy = moduleGlobalTypeOf(ref cx, target.name);
+      if (globalTy.len > 0) {
+        emitStoreGlobal(ref cx, globalTy, value, cx.tm.moduleId, target.name);
+        out = Operand.None;
+        return "";
+      }
       return internalError("no stack slot for assignment target", target.name);
     }
     case Option.Some { value: slotInfo }: {

@@ -525,12 +525,113 @@ runtime.** `vec`, `bytes`, `strings`, `text` and `map` reach codegen and stop at
 meaning is installing an allocator for the block. All three now say so by name
 rather than failing as three unrelated mysteries.
 
-**Linking the runtime is therefore the single next item, and it unblocks the
-rest of the closure by itself.** It is the same shape as std-root discovery:
-find the directory, add its `.c` files to the clang line. One thing beyond it is
-known and separate: a method on a GENERIC type typechecks but cannot be EMITTED
-yet - that needs one copy per instantiation, the way generic functions already
-get, which needs a current-type-instance on the Cx that no equivalent exists for.
+**The runtime links now, and it did unblock the rest - 15 of the 16 closure
+files compile end to end.**
+
+Discovery mirrors the std root (`YOOP_RUNTIME_ROOT`, then beside the exe),
+deliberately: one mental model for "files the compiler did not compile into
+itself". It is LAZY, though, where std is eager - most programs link one input
+and nothing else, so the runtime is only located when codegen says the emitted
+IR calls into it. That flag rides out of codegen WITH the IR, because it is a
+property of those instructions rather than a separate question.
+
+The whole runtime set gets linked rather than just what is used: `yoop_runtime.c`
+calls `yoop_net_startup` and `yoop_io_shutdown`, so the dependency graph belongs
+to the C files and tracking it here would mean keeping a second copy correct.
+
+`ctxAlloc` / `ctxFree` and the `errno` bridge then became real, and the reason
+they were REFUSED rather than faked held up: `ctxAlloc` lowered to malloc would
+have run fine and quietly not used an installed arena, and `errno.get` cannot be
+approximated at all.
+
+Four more gaps fell out on the way, each found by the next file:
+
+- **Methods on a GENERIC type** are now emitted one copy per instantiation, with
+  `cx.typeInstance` as the substitution - the type twin of `cx.instance`. Both
+  compose in `resolvedTypeAt`.
+- **`Vec<T>` inside `Vec<T>`'s own body IS the template**, not a second
+  instantiation. Without that, `ref self` interned an empty `Vec_T` and a method
+  reading `self.i` was told its own type had no such field.
+- **A generic type's method bodies were never CHECKED** - `ownTypeOf` had no
+  `Symbol.GenericDecl` case, so it silently did nothing, and codegen found out
+  as an empty owner name and a void return.
+- **`ref x.f`** - a borrow of a field, 13 sites in std - and **`xs.ptr`**, an
+  array's data pointer.
+
+**The self-hosting closure is 15 of 16.** The one left is `std/test.yoop`, and
+its blocker is no longer the runtime: `ephemeral arenaScope(N) { ... }` desugars
+to a constructor, a body, and a `dispose` at the closing brace, and the bootstrap
+has no scope-end disposal at all - kinds are recorded and nothing enforces them.
+Running the body and never tearing the arena down is a silent leak, so it stays
+refused, now saying that rather than blaming the runtime.
+
+**Scope-end disposal landed next, and it is the first thing that makes a kind
+MEAN something at run time.** Both forms work:
+
+    disposable ids: Vec<NodeId> = vec.vecNew(4);   // a binding
+    ephemeral arenaScope(N) { ... }                // an anonymous region
+
+Nothing is hardcoded to `disposable`. A kind carrying
+`mustCall <method> beforeScopeEnd` names the method, the binding's type has it,
+and the emitted call is an ordinary static trait dispatch - the same
+instructions `Closer.close(ref r)` would produce written by hand. A user's kind
+gets the same treatment, which is the emergent-kinds design actually paying out.
+
+The work was in finding every way OUT of a scope, not in the call: `return`
+unwinds every enclosing scope innermost-first, `break` and `continue` unwind out
+to the loop, and the closing brace unwinds its own. Reverse declaration order
+throughout, because a later binding may hold a borrow of an earlier one.
+
+**One deliberate divergence**: the reference does NOT dispose on `break` - a
+`disposable` in a loop body leaks on the iteration that breaks. The bootstrap
+disposes there. That cannot go in an ordinary fixture, since a `.expected` is
+asserted against both compilers, so the slice harness grew a `<stem>.bootonly`
+marker: the parity bonus is skipped and the marker file carries the reason. It
+is the right shape for a suite meant to outlive the JS compiler.
+
+Two bugs on the way, both worth remembering. Pool index 0 is a REAL string, so a
+`strId` of 0 cannot mean "absent" - the clause argument is now always interned.
+And a `Vec` read out of the dispose stack is a shallow copy: marking it
+`disposable` freed storage the stack still owned and popped it again, which
+aborts. Same trap the type arena carries, and the second time this session it
+has bitten.
+
+**Mutable globals landed last, and with them the self-hosting closure is 16 of
+16 - every std file the bootstrap's own source imports now compiles end to
+end.**
+
+A module `const` is INLINED at every use; a module `let` is a real LLVM global
+with an address, so a write in one function is visible in another. They get
+different Symbols rather than a shared one with a flag, because they are emitted
+differently - and writing a const is refused with "there is nothing to write to"
+rather than a generic complaint, since the reason is that it has no storage.
+Initializers must be literals: a global's initializer is fixed at compile time.
+The reference accepts more there, constant-folding through function calls and
+dropping their side effects; the bootstrap refuses instead.
+
+`std/test.yoop` also needed a function value held in a LOCAL to be callable
+(`const runSuite = suites[i]; runSuite();`) - the same indirect call a
+function-typed field produces, reached through a name.
+
+**A real bug fell out of writing the fixture**, which is the case for fixtures
+that assert against both compilers: codegen's local NAMES were never scoped to
+their block. Slots are hoisted and never reused, so nothing had noticed - but a
+binding that shadowed something in an inner block went on shadowing it forever.
+It is only observable when the outer name is a global, because pass D refuses an
+out-of-scope read of a local, so nothing else ever asked. `unshadowed` read 99
+where it should read 5.
+
+---
+
+## Where the bootstrap stands on self-hosting
+
+The closure - the 16 std files `bootstrap/src` imports - compiles completely.
+What remains before the bootstrap can compile ITSELF is its own source, which is
+a different and larger list: the bootstrap uses `async`-free code throughout but
+leans on `Result`/`Option` propagation (`?`), `switch` over variants with
+payloads, `@derive(display)`, and the test harness's `suite`/`test` kinds. Those
+are the next thing to measure, the same way the std closure was measured rather
+than guessed at.
 
 Past those, and not blocking a parse: **linking the yoop runtime**, which
 `ctxAlloc` / `ctxFree` need, and **instantiating a generic trait**, which

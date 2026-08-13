@@ -28,6 +28,13 @@ export function emitBlock(
   if (block.childA == 0) {
     return;
   }
+
+  // One dispose scope per block. Anything `disposable` declared inside is
+  // unwound below - or by the terminator that leaves early, which does its own
+  // unwinding and then leaves this pop with nothing to emit.
+  disposePushScope(cx.disposes);
+  localsPushBlock(cx.locals);
+
   const list = nodeAt(cx.ast, block.childA);
   let i: usize = 0;
   while (i < list.childCount) {
@@ -35,16 +42,25 @@ export function emitBlock(
     let stmtTerminated = false;
     err = emitStatement(ref cx, stmtId, retTy, ref stmtTerminated);
     if (err.len > 0) {
+      disposePopScope(cx.disposes);
+      localsPopBlock(cx.locals);
       return;
     }
     if (stmtTerminated) {
       // Anything after a terminator is unreachable; emitting it would put a
       // second terminator in this block.
       terminated = true;
+      disposePopScope(cx.disposes);
+      localsPopBlock(cx.locals);
       return;
     }
     i += 1;
   }
+
+  // Fell out the bottom: this scope's bindings are done with.
+  err = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
+  disposePopScope(cx.disposes);
+  localsPopBlock(cx.locals);
 }
 
 export function emitStatement(
@@ -60,6 +76,7 @@ export function emitStatement(
       terminated = true;
       return emitReturn(ref cx, stmt, retTy);
     }
+
     case ASTNodeKind.EXPRESSION_STATEMENT: {
       // The value is discarded; the instructions still have to run.
       let ignored: Operand = Operand.None;
@@ -82,6 +99,9 @@ export function emitStatement(
     case ASTNodeKind.FOR_IN_LOOP: {
       return emitForIn(ref cx, stmt, stmtId, retTy);
     }
+    case ASTNodeKind.KIND_REGION: {
+      return emitKindRegion(ref cx, stmt, stmtId, retTy, ref terminated);
+    }
     case ASTNodeKind.SWITCH_STATEMENT: {
       return emitSwitch(ref cx, stmt, retTy, ref terminated);
     }
@@ -90,6 +110,12 @@ export function emitStatement(
       if (!insideLoop(ref cx)) {
         return internalError("break outside a loop reached", "codegen");
       }
+      // Everything between here and the loop is being left, so it is disposed.
+      // The reference does NOT do this - see dispose_stack.yoop.
+      const err = emitUnwindTo(ref cx, disposeLoopDepth(cx.disposes));
+      if (err.len > 0) {
+        return err;
+      }
       emitBr(ref cx, innermostLoop(ref cx).breakTarget);
       return "";
     }
@@ -97,6 +123,10 @@ export function emitStatement(
       terminated = true;
       if (!insideLoop(ref cx)) {
         return internalError("continue outside a loop reached", "codegen");
+      }
+      const cerr = emitUnwindTo(ref cx, disposeLoopDepth(cx.disposes));
+      if (cerr.len > 0) {
+        return cerr;
       }
       emitBr(ref cx, innermostLoop(ref cx).continueTarget);
       return "";
@@ -109,13 +139,24 @@ export function emitStatement(
 
 function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
   if (stmt.childA == 0) {
+    const verr = emitUnwindTo(ref cx, 0);
+    if (verr.len > 0) {
+      return verr;
+    }
     emitRetVoid(ref cx);
     return "";
   }
+  // The returned VALUE is computed before anything is disposed - it may read a
+  // binding that is about to go, and a returned `Text.view` into an arena has
+  // to be taken while the arena is still there.
   let value: Operand = Operand.None;
   const err = emitExpr(ref cx, stmt.childA, ref value);
   if (err.len > 0) {
     return err;
+  }
+  const uerr = emitUnwindTo(ref cx, 0);
+  if (uerr.len > 0) {
+    return uerr;
   }
   emitRet(ref cx, retTy, value);
   return "";
@@ -140,5 +181,7 @@ function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): string {
   if (hasInit) {
     emitStore(ref cx, ty, value, stmt.name, slotInfo.id);
   }
-  return "";
+  // Recorded AFTER the store: a disposal runs on a binding that exists, and if
+  // the initializer had failed there would be nothing to dispose.
+  return noteDisposable(ref cx, stmt, stmtId, slotInfo.id);
 }

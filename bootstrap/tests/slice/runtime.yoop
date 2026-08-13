@@ -1,0 +1,58 @@
+// Linking the yoop runtime.
+//
+// Most programs never need it: one clang invocation, one input, nothing but
+// their own IR. This one calls into it, so the runtime's C sources join the
+// link line - found the same two ways the std root is (YOOP_RUNTIME_ROOT, then
+// beside the exe), because "the compiler needs files it did not compile into
+// itself" should be one mental model and not two.
+//
+// The whole set gets linked, not just what is used. `ctxAlloc` lives in
+// yoop_alloc.c and `errno.get` in yoop_runtime.c, but yoop_runtime.c calls
+// yoop_net_startup and yoop_io_shutdown, which drag in their own. That
+// dependency graph belongs to the C files, and tracking it here would mean
+// keeping a second copy of it correct.
+//
+// What this buys, and why they were REFUSED rather than faked while the runtime
+// was unlinkable:
+//
+//   ctxAlloc/ctxFree   route through the CURRENT allocator, so an installed
+//                      arena captures them. Lowered to malloc instead, a
+//                      program would run and quietly not use the arena.
+//   errno.get()        the real libc errno behind the last failing call.
+//                      There is no way to approximate it.
+
+import * as intr from "std/core/intrinsics.yoop";
+import.unsafe;
+
+extern "C" from "stdio.h" {
+  function fopen(path: string, mode: string): unsafe_ptr;
+}
+
+function main(): int {
+  // Allocation through the allocator context. With no arena installed it
+  // falls back to malloc, which is what makes this observable at all - the
+  // arena itself is std's, and this fixture is about the LINK.
+  let xs: int32[] = intr.ctxAlloc(4);
+  xs[0] = 11;
+  xs[1] = 22;
+  xs[3] = 44;
+  printf("ctx len=%llu %d %d %d\n", xs.len, xs[0], xs[1], xs[3]);
+  intr.ctxFree(xs);
+
+  // A wider element, so the byte count really comes from the type.
+  let wide: int64[] = intr.ctxAlloc(2);
+  wide[0] = 9000000000;
+  printf("wide len=%llu %lld\n", wide.len, wide[0]);
+  intr.ctxFree(wide);
+
+  // The errno bridge. Cleared, then a call that must fail, then read back.
+  errno.set(0);
+  printf("cleared=%d\n", errno.get());
+
+  let missing: unsafe_ptr = fopen("/no/such/dir/nothing-here", "rb");
+  const code: c_int = errno.get();
+  printf("opened=%d failed=%d\n", missing == null, code > 0);
+  printf("why=%s\n", errno.message(code));
+
+  return 0;
+}

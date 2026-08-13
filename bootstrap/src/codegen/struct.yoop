@@ -73,17 +73,31 @@ export function emitStructFieldRead(ref cx: Cx, expr: ASTNode, ref out: Operand)
 // Pass D already refused any base that is not a named binding, which is what
 // makes the slot lookup below total.
 export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, value: Operand): string {
+  let addr: usize = 0;
+  const err = emitFieldAddress(ref cx, target, ref addr);
+  if (err.len > 0) {
+    return err;
+  }
+  emitStoreToPtr(ref cx, typeOf(ref cx, targetId), value, addr);
+  return "";
+}
+
+// The address of `base.field`, where `base` is a named binding.
+//
+// Shared by a field WRITE and by `ref base.field`, so a store and a borrow
+// cannot disagree about where a field lives.
+export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): string {
   const baseNode = nodeAt(cx.ast, target.childA);
   switch (lookupLocal(cx.locals, baseNode.name)) {
     case Option.None: {
-      return internalError("no stack slot for field assignment base", baseNode.name);
+      return internalError("no stack slot for field base", baseNode.name);
     }
     case Option.Some { value: slotInfo }: {
       const structTy = typeOf(ref cx, target.childA);
       const pos = fieldPositionOf(ref cx, target.childA, target.name);
-      const addr = freshTemp(cx.e);
-      emitGepField(ref cx, addr, structTy, baseNode.name, slotInfo.id, pos);
-      emitStoreToPtr(ref cx, typeOf(ref cx, targetId), value, addr);
+      const dest = freshTemp(cx.e);
+      emitGepField(ref cx, dest, structTy, baseNode.name, slotInfo.id, pos);
+      addr = dest;
       return "";
     }
   }

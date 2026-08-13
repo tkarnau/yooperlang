@@ -62,9 +62,16 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
     // generics and kinds - the point of the fixture is the RESOLUTION path,
     // which can be tested long before the language can compile std itself.
     const stubStd = path.join(SLICE, `${stem}.std`);
-    const env = fs.existsSync(stubStd)
-      ? { ...process.env, YOOP_STD_ROOT: stubStd }
-      : process.env;
+    // The runtime root is the repo's own runtime/ for every fixture. Unlike
+    // std, there is no stub to build: these are C sources clang compiles, and a
+    // fixture that reaches the runtime wants the real ones. The bootstrap only
+    // consults it when the emitted IR actually calls in, so this costs the
+    // other fixtures nothing.
+    const env = {
+      ...process.env,
+      YOOP_RUNTIME_ROOT: path.join(REPO, "runtime"),
+      ...(fs.existsSync(stubStd) ? { YOOP_STD_ROOT: stubStd } : {}),
+    };
 
     it(`${stem}: the bootstrap compiler produces the expected behaviour`, () => {
       const expected = fs.readFileSync(path.join(SLICE, `${stem}.expected`), "utf8");
@@ -72,9 +79,15 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
       assert.equal(got, expected, `${stem}: the bootstrap compiler is wrong`);
     });
 
+    // A `<stem>.bootonly` marker file means the fixture asserts behaviour the
+    // JS reference does NOT share, so the parity bonus is skipped for it. Used
+    // where the bootstrap is deliberately better - the file's contents say why,
+    // and are read here only to force the reason to exist.
+    const bootOnly = fs.existsSync(path.join(SLICE, `${stem}.bootonly`));
+
     // Parity bonus. Delete this block, not the one above, when the JS compiler
     // retires.
-    it(`${stem}: the JS reference agrees`, () => {
+    it(`${stem}: the JS reference agrees`, { skip: bootOnly }, () => {
       const expected = fs.readFileSync(path.join(SLICE, `${stem}.expected`), "utf8");
       const got = buildAndRun(
         "node",

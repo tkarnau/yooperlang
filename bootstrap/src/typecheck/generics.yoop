@@ -73,6 +73,22 @@ export function initGenerics(ref prog: Program): void {
   vec.vecPush(ref prog.funcInstances, {
     origin: DECL_NONE_ID, args: vec.vecNew(0), funcType: TYPE_ERROR_ID, name: "",
   });
+  // Same for the TYPE instances, which codegen reads as NO_TYPE_INSTANCE when
+  // it emits a generic type's method once per instantiation.
+  vec.vecPush(ref prog.instances, {
+    origin: DECL_NONE_ID, args: vec.vecNew(0), typeId: TYPE_ERROR_ID, filled: true,
+  });
+}
+
+// One type instantiation, by index. Codegen walks these to emit a generic
+// type's methods once per instance.
+export function instanceAt(ref prog: Program, i: usize): Instance propagates<disposable> {
+  return vec.vecGet(ref prog.instances, i);
+}
+
+// The number of instantiations recorded, so codegen can walk them.
+export function instanceCount(ref prog: Program): usize {
+  return prog.instances.len;
 }
 
 export function genericAt(ref prog: Program, id: DeclId): GenericDeclInfo propagates<disposable> {
@@ -119,6 +135,18 @@ export function instantiate(ref prog: Program, origin: DeclId, ref args: Vec<Typ
   const existing = findInstance(ref prog, origin, ref args);
   if (existing != TYPE_ERROR_ID) {
     return existing;
+  }
+
+  // `Vec<T>` INSIDE `Vec<T>`'s own body - the arguments are the parameters, so
+  // this names the template rather than a new instantiation. `ref self` in a
+  // generic type's method is written exactly that way.
+  //
+  // Without this it interns a second, empty `Vec_T`, and a method that reads
+  // `self.i` is told the struct has no such field - about a type that is the
+  // one it is being declared on.
+  let declInfo = genericAt(ref prog, origin);
+  if (sameTypeList(ref declInfo.params, ref args)) {
+    return declInfo.template;
   }
 
   let info = genericAt(ref prog, origin);

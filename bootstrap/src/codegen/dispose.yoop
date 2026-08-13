@@ -1,0 +1,200 @@
+module codegen;
+
+/*
+  Emitting the disposals a scope owes.
+
+  `disposable ids: Vec<NodeId> = vec.vecNew(4);` promises that `dispose` runs
+  when `ids` goes out of scope, and this is where that call is written. The
+  bookkeeping - which bindings, which scopes, how far to unwind - is in
+  dispose_stack.yoop; this file only turns an entry into instructions.
+
+  The call is an ordinary static trait dispatch, the same thing
+  `Disposable.dispose(ref ids)` would emit if it were written by hand. That is
+  the whole trick: a kind with `mustCall dispose beforeScopeEnd` names a method,
+  the binding's type has that method, and the machinery for calling it already
+  existed. Nothing here knows what `dispose` does.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
+import * as str from "std/core/strings.yoop";
+import { lookupKind, KindInfo, nominalModuleOf, methodSymbolName, moduleIdOf,
+  lookupMethod, TYPE_ERROR_ID } from "../typecheck";
+
+// Record a binding that owes a disposal, if its kind asks for one.
+//
+// Reads the kind prefix off the declaration and asks the registry what it
+// requires. A kind with no `mustCall` clause - `tainted`, `pooled` - records
+// nothing, which is why this is safe to call for every prefixed binding.
+export function noteDisposable(
+  ref cx: Cx,
+  declNode: ASTNode,
+  declId: NodeId,
+  slot: usize
+): string {
+  if (declNode.childC == 0) {
+    return "";
+  }
+  const method = disposeMethodOf(ref cx, declNode);
+  if (method.len == 0) {
+    return "";
+  }
+
+  const ownerType = resolvedTypeAt(ref cx, declId);
+  if (lookupMethod(cx.prog, ownerType, method) == TYPE_ERROR_ID) {
+    // Pass D refuses this, so reaching here means a check was skipped rather
+    // than a program being wrong.
+    return internalError("no such method to dispose with", method);
+  }
+
+  disposeRecord(cx.disposes, {
+    name: declNode.name,
+    slot: slot,
+    ownerType: ownerType,
+    method: method,
+  });
+  return "";
+}
+
+// The `mustCall` method the declaration's kind prefixes ask for, or "".
+//
+// The FIRST prefix that asks wins. Stacking two kinds that both demand a
+// scope-end call is not something std does, and picking one silently is better
+// than emitting two calls in an order nothing specifies - pass D refuses it.
+export function disposeMethodOf(ref cx: Cx, declNode: ASTNode): string {
+  if (declNode.childC == 0) {
+    return "";
+  }
+  const list = nodeAt(cx.ast, declNode.childC);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(cx.ast, childAt(cx.ast, list, i));
+    switch (lookupKind(cx.prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.disposeMethod.len > 0) {
+          return info.disposeMethod;
+        }
+      }
+      case Option.None: { }
+    }
+    i += 1;
+  }
+  return "";
+}
+
+// Every disposal owed by scope `depth`, in REVERSE declaration order.
+//
+// Reverse because a later binding may hold a borrow of an earlier one: a `Text`
+// built into an arena has to go before the arena does.
+export function emitScopeDisposals(ref cx: Cx, depth: usize): string {
+  if (depth >= disposeScopeDepth(cx.disposes)) {
+    return "";
+  }
+  // NOT `disposable`. This is a SHALLOW copy that shares the scope's storage,
+  // so disposing it frees a buffer the stack still owns and pops it again a
+  // moment later - a double free, which aborts. Same trap a Vec read out of the
+  // type arena carries; see the note in bootstrap/README.md.
+  let pending: Vec<PendingDispose> = disposeScopeAt(cx.disposes, depth);
+  let i: usize = pending.len;
+  while (i > 0) {
+    i -= 1;
+    const err = emitOneDisposal(ref cx, vec.vecGet(ref pending, i));
+    if (err.len > 0) {
+      return err;
+    }
+  }
+  return "";
+}
+
+// Every scope from the innermost down to `target`, innermost first. What
+// `return` (target 0) and `break` (target = the loop's depth) unwind.
+export function emitUnwindTo(ref cx: Cx, target: usize): string {
+  let depth: usize = disposeScopeDepth(cx.disposes);
+  while (depth > target) {
+    depth -= 1;
+    const err = emitScopeDisposals(ref cx, depth);
+    if (err.len > 0) {
+      return err;
+    }
+  }
+  return "";
+}
+
+// One call:  call void @m__Vec_int32__dispose(ptr %ids.3.addr)
+//
+// The receiver is the binding's SLOT ADDRESS - `dispose` takes `ref self`, and
+// a borrow is the address of storage that already exists.
+function emitOneDisposal(ref cx: Cx, entry: PendingDispose): string {
+  disposable args: Vec<CallArg> = vec.vecNew(1);
+  vec.vecPush(ref args, {
+    ty: "ptr",
+    value: Operand.SlotAddr { name: entry.name, id: entry.slot },
+  });
+  emitCall(
+    ref cx, 0, "void",
+    moduleIdOf(cx.prog, nominalModuleOf(cx.prog, entry.ownerType)),
+    methodSymbolName(cx.prog, entry.ownerType, entry.method),
+    false, ref args
+  );
+  return "";
+}
+
+// `ephemeral arenaScope(N) { ... }` - build the subject, run the block, call.
+//
+// The subject gets an ANONYMOUS slot: `dispose` takes `ref self`, so it needs
+// an address, and nothing in the block can name it. Recording it in the block's
+// own dispose scope is what makes the call fire on every way out - the closing
+// brace, a `return`, a `break` - rather than only the first.
+export function emitKindRegion(
+  ref cx: Cx,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  retTy: string,
+  ref terminated: bool
+): string {
+  const method = disposeMethodOf(ref cx, stmt);
+  if (method.len == 0) {
+    return internalError("kind region with no scope-end method", "codegen");
+  }
+
+  let subject: Operand = Operand.None;
+  const err = emitExpr(ref cx, stmt.childA, ref subject);
+  if (err.len > 0) {
+    return err;
+  }
+  const ty = typeOf(ref cx, stmtId);
+  const slot = declareAnonSlot(ref cx, ty);
+  emitStore(ref cx, ty, subject, TEMP_SLOT_NAME, slot.id);
+
+  // Its own scope, holding just the subject, so the block's own disposables
+  // unwind INSIDE it and the region's call comes last.
+  disposePushScope(cx.disposes);
+  disposeRecord(cx.disposes, {
+    name: TEMP_SLOT_NAME,
+    slot: slot.id,
+    ownerType: resolvedTypeAt(ref cx, stmtId),
+    method: method,
+  });
+
+  let bodyErr = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref bodyErr);
+  if (bodyErr.len > 0) {
+    disposePopScope(cx.disposes);
+    return bodyErr;
+  }
+
+  // A body that terminated already unwound this scope on its way out.
+  if (!bodyTerminated) {
+    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
+    if (derr.len > 0) {
+      disposePopScope(cx.disposes);
+      return derr;
+    }
+  }
+  disposePopScope(cx.disposes);
+  terminated = bodyTerminated;
+  return "";
+}

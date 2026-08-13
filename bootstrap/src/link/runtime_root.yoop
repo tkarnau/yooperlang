@@ -1,0 +1,107 @@
+module link;
+
+/*
+  Where the yoop RUNTIME's C sources live, and which of them get linked.
+
+  Most programs never need this. A program that only calls libc links in one
+  clang invocation with nothing but its own IR - which is why the runtime is
+  found lazily, at the moment codegen says it emitted a call into it, rather
+  than located up front like the std root.
+
+  Found the same two ways std is, and deliberately so: one mental model for
+  "the compiler needs files it did not compile into itself".
+
+    YOOP_RUNTIME_ROOT   an explicit override
+    beside the exe      <prefix>/bin/yoopiler next to <prefix>/lib/runtime,
+                        and the flat variant
+
+  WHY THE WHOLE SET AND NOT WHAT IS USED. `ctxAlloc` alone lives in
+  yoop_alloc.c, and `errno.get` in yoop_runtime.c - but yoop_runtime.c calls
+  `yoop_net_startup` and `yoop_io_shutdown`, so linking it drags in the I/O and
+  net files, which drag in their own. The dependency graph is the C files', not
+  the compiler's, and tracking it here would mean maintaining a copy of it. The
+  JS reference links the same set unconditionally for the same reason; the
+  bootstrap at least skips it when nothing needs it.
+
+  `yoop_tls.c` is the one exclusion, and it is the reference's too: it includes
+  <openssl/ssl.h>, so linking it would make OpenSSL a requirement for every
+  program that allocates.
+*/
+
+import * as fs from "std/fs.yoop";
+import * as env from "std/env.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+const RUNTIME_ROOT_VAR: string = "YOOP_RUNTIME_ROOT";
+
+// The runtime directory for this run. `exePath` is argv[0].
+export function discoverRuntimeRoot(exePath: string): string {
+  const override = env.getOr(RUNTIME_ROOT_VAR, "");
+  if (override.len > 0) {
+    return override;
+  }
+
+  disposable candidates: Vec<string> = runtimeRootCandidates(exePath);
+  let i: usize = 0;
+  while (i < candidates.len) {
+    const candidate = vec.vecGet(ref candidates, i);
+    if (fs.exists(candidate)) {
+      return candidate;
+    }
+    i += 1;
+  }
+  if (candidates.len > 0) {
+    return vec.vecGet(ref candidates, 0);
+  }
+  return "";
+}
+
+function runtimeRootCandidates(exePath: string): Vec<string> propagates<disposable> {
+  let out: Vec<string> = vec.vecNew(3);
+  if (exePath.len == 0) {
+    return out;
+  }
+  const binDir = fs.dirName(exePath);
+  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "lib", "runtime"]));
+  vec.vecPush(ref out, fs.pathJoin([binDir, "lib", "runtime"]));
+  vec.vecPush(ref out, fs.pathJoin([binDir, "..", "runtime"]));
+  return out;
+}
+
+// "" when the root is usable, else what is wrong and how to fix it.
+export function runtimeRootProblem(runtimeRoot: string): string {
+  if (runtimeRoot.len == 0) {
+    return `this program calls into the yoop runtime, but the runtime sources cannot be located - set ${RUNTIME_ROOT_VAR} to the directory containing yoop_runtime.c`;
+  }
+  if (!fs.exists(runtimeRoot)) {
+    return `yoop runtime not found at ${runtimeRoot}\n  set ${RUNTIME_ROOT_VAR} to the directory containing yoop_runtime.c`;
+  }
+  return "";
+}
+
+// The sources every program that touches the runtime gets, in the reference's
+// order (src/runtimeBuild.js RUNTIME_SOURCES).
+//
+// The three I/O engines all appear unconditionally: each is wrapped in its own
+// `#ifdef`, so exactly one compiles to anything on a given host and the other
+// two are empty translation units. Listing them beats teaching this file what
+// platform it is on.
+export function runtimeSources(runtimeRoot: string): Vec<string> propagates<disposable> {
+  let out: Vec<string> = vec.vecNew(16);
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_runtime.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io_kqueue.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io_epoll.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_io_windows.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_fs.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_net.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_debug.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_format.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_args.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_alloc.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_atomic.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_cancel.c"]));
+  vec.vecPush(ref out, fs.pathJoin([runtimeRoot, "yoop_time.c"]));
+  return out;
+}

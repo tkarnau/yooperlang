@@ -36,7 +36,8 @@ a shared header file.
                        module ids, finding the std root
       typecheck/       layer 3: ids, Type, Symbol, Program, the passes
       codegen/         layer 5: typed AST -> LLVM IR text (see the rules below)
-      link/            layer 6: IR -> executable, by shelling out to clang
+      link/            layer 6: IR -> executable, by shelling out to clang;
+                     also where the runtime's C sources are found
       utils/           sort and iteration helpers with no home in std yet
     tools/             small entry points (dump_tokens)
     tests/parity/      corpus for the layer-1 parity harness
@@ -131,7 +132,24 @@ rather than mis-compiled.
   * `&x` and `*p` - address-of and dereference, gated on `import.unsafe;`.
     Not `ref x`: `&` yields an `unsafe_ptr` with none of a borrow's guarantees.
     `*p = v` stores through the pointer.
-  * `s.len` on a string - the BYTE length, one `strlen`
+  * `s.len` on a string - the BYTE length, one `strlen` - and `xs.ptr` on an
+    array, its data pointer
+  * `ref x.f` - a borrow of a FIELD, not just of a whole binding
+  * methods on GENERIC types, emitted one copy per instantiation
+  * `ctxAlloc` / `ctxFree` and the `errno` bridge, which LINK the yoop runtime
+  * SCOPE-END DISPOSAL, in both forms:
+
+        disposable ids: Vec<NodeId> = vec.vecNew(4);   // a binding
+        ephemeral arenaScope(N) { ... }                // an anonymous region
+
+    A kind carrying `mustCall <method> beforeScopeEnd` names the method; the
+    call fires on every way out of the scope - the closing brace, an early
+    `return`, a `break` or `continue` - in REVERSE declaration order. Nothing is
+    hardcoded to `disposable`: the call is an ordinary static trait dispatch,
+    and a user's kind gets the same treatment.
+  * module-level `let` - a MUTABLE GLOBAL, with a literal initializer. Distinct
+    from a module `const`, which is inlined and has no storage to write to.
+  * a function value held in a LOCAL, called through its name
   * `break` and `continue`, checked to be inside a loop
   * comparisons `== != < > <= >=`, and `&&` / `||` with real short-circuiting
   * `true` / `false`, unary `-` and `!`, parenthesized grouping
@@ -404,6 +422,49 @@ Two invariants control flow introduced, both easy to break:
 - **A variant's methods share the member run with its cases,** so the case
   ordinal counts off `cases.len` and not off the loop index. Counting off the
   index puts a hole in the tag numbering, and the tag numbering is ABI.
+- **A module `const` is INLINED; a module `let` is a real global.** They get
+  different Symbols because they are emitted differently - one has no storage at
+  all, which is why writing it is refused with "there is nothing to write to"
+  rather than a generic const complaint.
+- **Codegen's local NAMES are scoped to their block, though their slots are
+  not.** Allocas stay hoisted and a slot id is never reused, but a name has to
+  stop resolving at the closing brace - otherwise a binding that shadowed
+  something in an inner block shadows it forever. Only observable when the outer
+  name is a global: pass D refuses an out-of-scope read of a local, so nothing
+  else ever asks.
+- **A disposal fires on EVERY way out of a scope,** not just the closing brace.
+  `return` unwinds every enclosing scope innermost-first; `break` and `continue`
+  unwind out to the loop. The dispose stack (`dispose_stack.yoop`) is what makes
+  "how far" answerable, and it is parallel to the loop-label stack by
+  construction.
+- **Reverse declaration order.** A later binding may hold a borrow of an earlier
+  one - a `Text` built into an arena has to go before the arena.
+- **Disposing on `break` is a DELIBERATE divergence.** The JS reference leaks
+  there. `dispose_break.yoop` asserts the bootstrap alone, via a
+  `<stem>.bootonly` marker that skips the parity bonus and carries the reason.
+- **A returned VALUE is computed before anything is disposed.** It may read a
+  binding that is about to go.
+- **A `Vec` read out of the dispose stack is a SHALLOW copy.** Marking it
+  `disposable` frees storage the stack still owns and pops it again a moment
+  later - a double free, which aborts. Same trap a Vec read out of the type
+  arena carries.
+- **The runtime is found LAZILY, only when the emitted IR calls into it.** Most
+  programs link one input and nothing else; `Emitter.usesRuntime` is what says
+  otherwise, and it rides out of codegen with the IR because it is a property of
+  those instructions. Discovery mirrors the std root on purpose - one mental
+  model for "files the compiler did not compile into itself".
+- **The WHOLE runtime set gets linked, not what is used.** `yoop_runtime.c`
+  calls `yoop_net_startup` and `yoop_io_shutdown`; that dependency graph belongs
+  to the C files, and tracking it here would mean keeping a second copy correct.
+  `yoop_tls.c` is the one exclusion - it needs OpenSSL.
+- **A generic type's METHODS are emitted once per instantiation,** with
+  `cx.typeInstance` as the substitution - the type twin of `cx.instance`. Both
+  compose in `resolvedTypeAt`, since a generic function can be called from
+  inside a generic type's method.
+- **`Vec<T>` inside `Vec<T>`'s own body IS the template,** not a second
+  instantiation. `instantiate` returns the template when the args are the
+  params; without that, `ref self` interns an empty `Vec_T` and a method reading
+  `self.i` is told its own type has no such field.
 - **`resolvedTypeAt` is the ONE place substitution happens, so nothing may read
   `tm.resolvedTypes` directly.** Inside a monomorphization the recorded type is
   still `T[]`; a raw read produces IR that operates on the template. Six query
@@ -656,6 +717,8 @@ exactly one:
     mangle.yoop             what a symbol is CALLED in the emitted module
     template.yoop           template literals: parts -> one built string
     intrinsic.yoop          the calls that are not calls
+    dispose.yoop            emitting what a scope owes
+    dispose_stack.yoop      which bindings, which scopes, how far to unwind
     instr_str.yoop          the libc calls a built string is made of
 
 There is no traits.yoop here, and that is the point: a method is an ordinary

@@ -1,0 +1,14 @@
+break:
+  open 0
+  close 0
+  open 1
+  close 1
+continue:
+  open 10
+  close 10
+  open 11
+  close 11
+  open 12
+  close 12
+done
+exit=0

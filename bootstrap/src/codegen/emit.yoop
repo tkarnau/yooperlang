@@ -29,6 +29,10 @@ export type Emitter propagates<disposable> {
   // Set by the first template literal that actually builds one, so a program
   // with none declares no libc string functions at all.
   usesStringBuilder: bool,
+  // Set by the first call this program emits into the yoop RUNTIME - the
+  // allocator context, the errno bridge. The LINK step reads it: a program
+  // without one links its own IR and nothing else.
+  usesRuntime: bool,
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
@@ -42,6 +46,7 @@ export function emitterNew(): Emitter propagates<disposable> {
     nextLabel: 0,
     usesPrintf: false,
     usesStringBuilder: false,
+    usesRuntime: false,
   };
 }
 

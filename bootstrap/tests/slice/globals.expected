@@ -1,0 +1,9 @@
+start count=0 total=100
+after two bumps count=2
+total=60 limit=3
+looped count=5
+shadowed=99
+unshadowed=5
+  hello
+  goodbye
+exit=0

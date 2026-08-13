@@ -1,0 +1,6 @@
+ctx len=4 11 22 44
+wide len=2 9000000000
+cleared=0
+opened=1 failed=1
+why=No such file or directory
+exit=0

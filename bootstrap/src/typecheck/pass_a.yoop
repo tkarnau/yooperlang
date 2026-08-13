@@ -157,7 +157,12 @@ function registerFileShells(
         // to bind, because `import { disposable } from "std/core/kinds.yoop"`
         // is how every file in the tree reaches one, and an unbound name there
         // would fail the import rather than the enforcement.
-        registerKind(ref prog, declNode.name, hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE));
+        registerKind(ref prog, {
+          name: declNode.name,
+          pausable: hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE),
+          disposeMethod: clauseArgument(ref m.ast, declNode, MUST_CALL_CLAUSE),
+          appliesToRegion: clauseArgumentIs(ref m.ast, declNode, APPLIES_TO_CLAUSE, REGION_SUBJECT),
+        });
         bindName(ref prog, ref tm, declNode, Symbol.Kind { kindId: 0 }, exported);
       }
       case ASTNodeKind.CONST_DECL: {
@@ -167,11 +172,12 @@ function registerFileShells(
           Symbol.Value { typeId: TYPE_ERROR_ID, intVal: 0 }, exported);
       }
       case ASTNodeKind.LET_DECL: {
-        reportError(
-          ref prog,
-          `module-level "let" is not supported by the bootstrap typechecker yet - a module-level binding must be \`const\``,
-          declNode.sourceLoc
-        );
+        // A MUTABLE global. Same shell discipline as a const - the name
+        // resolves now, the annotation and the initializer are pass C's - and a
+        // different Symbol, because the two are emitted differently: a const is
+        // inlined, this one gets an address.
+        bindName(ref prog, ref tm, declNode,
+          Symbol.Global { typeId: TYPE_ERROR_ID, intVal: 0 }, exported);
       }
       case ASTNodeKind.IMPORT_DECL: {
         // Pass B's job, and it needs no shell here: the name it binds is the
@@ -386,9 +392,34 @@ function bindName(
   }
 }
 
-// The one kind clause the bootstrap reads. Everything else is recorded by the
+// The kind clauses the bootstrap reads. Everything else is recorded by the
 // parser and understood by nobody.
 const PAUSABLE_CLAUSE: string = "pausable";
+const MUST_CALL_CLAUSE: string = "mustCall";
+const APPLIES_TO_CLAUSE: string = "appliesTo";
+const REGION_SUBJECT: string = "region";
+
+// The FIRST word after a clause's leading one: the `dispose` in
+// `mustCall dispose beforeScopeEnd;`, the `region` in `appliesTo region;`.
+// "" when the clause is absent or carries nothing.
+function clauseArgument(ref ast: AST, declNode: ASTNode, word: string): string {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const clause = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (str.stringEq(clause.name, word)) {
+      if (clause.strId >= ast.strings.len) {
+        return "";
+      }
+      return vec.vecGet(ref ast.strings, clause.strId);
+    }
+    i += 1;
+  }
+  return "";
+}
+
+function clauseArgumentIs(ref ast: AST, declNode: ASTNode, word: string, want: string): bool {
+  return str.stringEq(clauseArgument(ref ast, declNode, word), want);
+}
 
 // Whether a kind decl carries a clause with this leading word.
 function hasClause(ref ast: AST, declNode: ASTNode, word: string): bool {

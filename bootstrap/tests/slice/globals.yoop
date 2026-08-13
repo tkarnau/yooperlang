@@ -1,0 +1,71 @@
+// Mutable globals, and calling a function value held in a local.
+//
+// A module-level `const` is INLINED at every use - there is no storage, which
+// is what makes an imported one cost nothing. A module-level `let` is the
+// opposite: a real LLVM global with an address, so a write in one function is
+// visible in another. That difference is the whole feature, and it is why the
+// two get different symbols rather than a shared one with a flag.
+//
+// A global's initializer becomes the LLVM global's initializer, which is fixed
+// at compile time - so the bootstrap takes a literal and refuses the rest by
+// name. The reference accepts more: it constant-FOLDS through function calls,
+// and drops their side effects doing it.
+//
+// The second half is what `std/test.yoop` needed: `const runSuite = suites[i];
+// runSuite();` - a function value in a LOCAL, called through its name. It is
+// the same indirect call a function-typed field produces.
+
+let COUNT: int32 = 0;
+let TOTAL: int64 = 100;
+const LIMIT: int32 = 3;
+
+function bump(): void {
+  COUNT = COUNT + 1;
+}
+
+function hello(): void {
+  printf("  hello\n");
+}
+
+function goodbye(): void {
+  printf("  goodbye\n");
+}
+
+function main(): int {
+  printf("start count=%d total=%lld\n", COUNT, TOTAL);
+
+  // A write in another function is visible here - the assertion an inlined
+  // const would fail.
+  bump();
+  bump();
+  printf("after two bumps count=%d\n", COUNT);
+
+  TOTAL = TOTAL - 40;
+  printf("total=%lld limit=%d\n", TOTAL, LIMIT);
+
+  // A global as a loop's accumulator, written every iteration.
+  let i: int32 = 0;
+  while (i < LIMIT) {
+    bump();
+    i = i + 1;
+  }
+  printf("looped count=%d\n", COUNT);
+
+  // A LOCAL shadows a global for the rest of its scope.
+  if (true) {
+    const COUNT: int32 = 99;
+    printf("shadowed=%d\n", COUNT);
+  }
+  printf("unshadowed=%d\n", COUNT);
+
+  // A function value in a local, called through its name.
+  const fns: (() => void)[] = [hello, goodbye];
+  let f: usize = 0;
+  while (f < fns.len) {
+    const call: () => void = fns[f];
+    call();
+    f = f + 1;
+  }
+
+  return 0;
+}

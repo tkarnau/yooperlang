@@ -101,6 +101,10 @@ export enum ASTNodeKind implements Display {
   // One `appliesTo binding;` line inside a kind decl, recorded by its leading
   // word. Nothing enforces kinds, so the rest of the clause is consumed.
   KIND_CLAUSE,
+  // `ephemeral arenaScope(N) { ... }` - an ANONYMOUS region. The subject is
+  // built, the block runs, and the kind's `mustCall` method fires at the
+  // closing brace. childA is the subject expression, childB the block.
+  KIND_REGION,
 
   // phase 6.3 task / concurrency sugar
   WAIT_EXPRESSION,
@@ -238,6 +242,7 @@ const AST_NODE_KIND_NAMES: string[] = [
   "KIND_TRANSITION_CLAUSE",
   "KIND_PREFIX",
   "KIND_CLAUSE",
+  "KIND_REGION",
   "WAIT_EXPRESSION",
   "TASK_AUTO_WAIT",
   "TASK_RELEASE",

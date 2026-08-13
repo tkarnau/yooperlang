@@ -1,0 +1,107 @@
+module codegen;
+
+/*
+  What has to be disposed, and where.
+
+  `disposable ids: Vec<NodeId> = vec.vecNew(4);` is a promise that `dispose`
+  runs when `ids` goes out of scope. Keeping that promise means finding EVERY
+  way out of the scope, not just the closing brace:
+
+    the closing brace   dispose this scope's bindings, in reverse
+    `return`            dispose every enclosing scope, innermost first
+    `break` / `continue`  dispose out to the loop, and no further
+
+  So this is a stack of scopes, each holding its own pending disposals in
+  declaration order - the loop-label stack's shape, for the same reason. Reverse
+  order matters: a later binding may hold a borrow of an earlier one, so it has
+  to go first.
+
+  ONE DIVERGENCE FROM THE REFERENCE, deliberate. The JS compiler disposes on the
+  closing brace and on `return`, but NOT on `break` - a `disposable` declared in
+  a loop body leaks on the iteration that breaks. The bootstrap disposes there
+  too. Reproducing a leak to match is not parity worth having, and a fixture
+  cannot cover the difference (a `.expected` is asserted against both), so it
+  lives in a unit test.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable, Disposable } from "std/core/kinds.yoop";
+import { TypeId } from "../typecheck";
+
+// One binding waiting to be disposed.
+export type PendingDispose {
+  name: string,       // the local's name, for its slot
+  slot: usize,        // its slot id
+  ownerType: TypeId,  // what the method is mangled against
+  method: string,     // the `mustCall` method - `dispose`, `close`, ...
+}
+
+// A stack of scopes. `loopDepth` marks which scopes a `break` has to unwind
+// through: everything above the innermost entry recorded when the loop opened.
+export type DisposeStack propagates<disposable> {
+  scopes: Vec<Vec<PendingDispose>>,
+  // The scope depth at each enclosing loop's entry, so `break` knows how far to
+  // unwind. Parallel to the loop-label stack by construction.
+  loopScopeDepths: Vec<usize>,
+}
+
+export function disposeStackNew(): DisposeStack propagates<disposable> {
+  let scopes: Vec<Vec<PendingDispose>> = vec.vecNew(4);
+  let depths: Vec<usize> = vec.vecNew(4);
+  return { scopes: scopes, loopScopeDepths: depths };
+}
+
+export function disposePushScope(ref d: DisposeStack): void {
+  let fresh: Vec<PendingDispose> = vec.vecNew(2);
+  vec.vecPush(ref d.scopes, fresh);
+}
+
+// Drop the innermost scope WITHOUT emitting anything - the caller has already
+// emitted whatever it needed.
+export function disposePopScope(ref d: DisposeStack): void {
+  if (d.scopes.len == 0) {
+    return;
+  }
+  let top = vec.vecGet(ref d.scopes, d.scopes.len - 1);
+  Disposable.dispose(ref top);
+  d.scopes.len -= 1;
+}
+
+export function disposeRecord(ref d: DisposeStack, entry: PendingDispose): void {
+  if (d.scopes.len == 0) {
+    return;
+  }
+  let top = vec.vecGet(ref d.scopes, d.scopes.len - 1);
+  vec.vecPush(ref top, entry);
+  vec.vecSet(ref d.scopes, d.scopes.len - 1, top);
+}
+
+// How many scopes are open. `return` unwinds all of them.
+export function disposeScopeDepth(ref d: DisposeStack): usize {
+  return d.scopes.len;
+}
+
+export function disposeEnterLoop(ref d: DisposeStack): void {
+  vec.vecPush(ref d.loopScopeDepths, d.scopes.len);
+}
+
+export function disposeExitLoop(ref d: DisposeStack): void {
+  if (d.loopScopeDepths.len > 0) {
+    d.loopScopeDepths.len -= 1;
+  }
+}
+
+// The scope depth the innermost loop opened at - where a `break` unwinds TO.
+// The full depth when there is no loop, which makes `break` outside one a
+// no-op here rather than an underflow; pass D already refused it.
+export function disposeLoopDepth(ref d: DisposeStack): usize {
+  if (d.loopScopeDepths.len == 0) {
+    return d.scopes.len;
+  }
+  return vec.vecGet(ref d.loopScopeDepths, d.loopScopeDepths.len - 1);
+}
+
+// The pending disposals of scope `i`, innermost last.
+export function disposeScopeAt(ref d: DisposeStack, i: usize): Vec<PendingDispose> propagates<disposable> {
+  return vec.vecGet(ref d.scopes, i);
+}
