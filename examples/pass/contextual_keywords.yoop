@@ -1,0 +1,76 @@
+// plans/yooperdoom-takeaways.md 2.2: words that used to be reserved and are
+// now contextual keywords.
+//
+// `kind` was the expensive one. It was legal as a struct FIELD and illegal as
+// a local or parameter, so `Room.kind` compiled and `specialFor(kind: uint8)`
+// did not - and because the rejection lands at the declaration, the collision
+// surfaced nowhere near where the name was chosen. `field`, `scope`, `io`,
+// `align`, `layout`, `requires` and `library` are the same trap with a lower
+// hit rate.
+//
+// Each is unambiguous from its position, so none of them needed reserving.
+// This fixture uses every one as a field, a parameter, and a local, in a file
+// that ALSO declares a real `kind` - which is what proves the contextual
+// recognizer keys on shape rather than on the file not mentioning the word.
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+trait Closeable {
+    function close(ref self): void;
+}
+
+// A real kind declaration, using the clause vocabulary that is also demoted.
+kind guarded {
+    appliesTo binding parameter field;
+    requires Closeable;
+    mustCall close beforeScopeEnd;
+    ownsBlock;
+}
+
+// Every demoted word as a struct field.
+type Room implements Closeable {
+    kind: uint8,
+    field: int32,
+    scope: int32,
+    io: int32,
+    align: int32,
+    layout: int32,
+    requires: int32,
+    library: int32,
+    binding: int32,
+    parameter: int32,
+    propagates: int32,
+    contains: int32,
+
+    function close(ref self): void { self.kind = 0; }
+}
+
+// ...and as parameter names, read back in expression position.
+function specialFor(kind: uint8, field: int32, scope: int32, io: int32,
+                    align: int32, layout: int32, requires: int32,
+                    library: int32, binding: int32, parameter: int32,
+                    propagates: int32, contains: int32): int32 {
+    let kind2: int32 = int32(kind);
+    let sum: int32 = field + scope + io + align + layout;
+    let rest: int32 = requires + library + binding + parameter;
+    return kind2 + sum + rest + propagates + contains;
+}
+
+function main(): int32 {
+    guarded r: Room = { kind: 1, field: 2, scope: 3, io: 4, align: 5,
+                        layout: 6, requires: 7, library: 8, binding: 9,
+                        parameter: 10, propagates: 11, contains: 12 };
+
+    printf(`fields: ${r.kind} ${r.field} ${r.scope} ${r.io} ${r.align} ${r.layout}\n`);
+    printf(`more:   ${r.requires} ${r.library} ${r.binding} ${r.parameter} ${r.propagates} ${r.contains}\n`);
+    printf(`sum=${specialFor(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12)}\n`);
+
+    // ...and as ordinary locals.
+    let kind: int32 = 42;
+    let field: int32 = 43;
+    printf(`locals: ${kind} ${field}\n`);
+
+    return 0;
+}

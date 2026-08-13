@@ -62,17 +62,9 @@ describe("lexer: keywords vs identifiers", () => {
     const tokens = tokenize("type");
     assert.equal(tokens[0].tag, tag("type"));
   });
-  it("'kind' is the kind keyword", () => {
-    const tokens = tokenize("kind");
-    assert.equal(tokens[0].tag, tag("kind"));
-  });
   it("'appliesTo' is the appliesTo keyword", () => {
     const tokens = tokenize("appliesTo");
     assert.equal(tokens[0].tag, tag("appliesTo"));
-  });
-  it("'requires' is the requires keyword", () => {
-    const tokens = tokenize("requires");
-    assert.equal(tokens[0].tag, tag("requires"));
   });
   it("'mustCall' is the mustCall keyword", () => {
     const tokens = tokenize("mustCall");
@@ -86,10 +78,31 @@ describe("lexer: keywords vs identifiers", () => {
     const tokens = tokenize("beforeScopeEnd");
     assert.equal(tokens[0].tag, tag("beforeScopeEnd"));
   });
-  it("'binding' is the binding keyword", () => {
-    const tokens = tokenize("binding");
-    assert.equal(tokens[0].tag, tag("binding"));
-  });
+
+  // yooperdoom-takeaways 2.2: these were reserved words and are now
+  // CONTEXTUAL - recognized by the parser from their position, and ordinary
+  // identifiers everywhere else. `kind` is the one that cost the most: it was
+  // legal as a struct FIELD and illegal as a local or parameter, so
+  // `Room.kind` compiled and `specialFor(kind: uint8)` did not.
+  for (const word of [
+    "kind",
+    "requires",
+    "propagates",
+    "binding",
+    "parameter",
+    "field",
+    "scope",
+    "io",
+    "layout",
+    "align",
+    "library",
+    "contains",
+  ]) {
+    it(`'${word}' lexes as a plain ident (contextual keyword)`, () => {
+      const tokens = tokenize(word);
+      assert.equal(tokens[0].tag, tag("ident"));
+    });
+  }
   it("'disposable' is an ident", () => {
     const tokens = tokenize("disposable");
     assert.equal(tokens[0].tag, tag("ident"));

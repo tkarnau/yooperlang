@@ -1,0 +1,417 @@
+module typecheck;
+
+// Pass A - give every top-level declaration a name binding and a SHELL type.
+//
+// The reason this is its own pass: by the time pass C resolves a struct field
+// that names another struct, or a call that names a function declared further
+// down the file, the name already has a SymbolId and a TypeId. Nothing is filled
+// in yet - `NominalDecl.populated` is false and the member lists are empty -
+// which is exactly the JS reference's `fields: null` shell, expressed in a way a
+// value-semantic language can re-set later.
+//
+// Pass A must NOT resolve a type annotation. It reads decl names and nothing
+// else; anything that needs to look a name up belongs in pass C.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, isExportDecl, nodeAt, kindName } from "../ast";
+import { Module } from "../source_graph";
+
+export function passARegisterShells(
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  moduleId: ModuleId,
+  isEntry: bool
+): void {
+  // Every file of the module registers into the SAME namespace - that is what
+  // "a module's source files see each other's declarations" means, and the
+  // redeclaration check in bindName is what keeps two of them from colliding.
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    registerFileShells(ref prog, ref tm, m, file.root, moduleId, isEntry);
+    f += 1;
+  }
+}
+
+function registerFileShells(
+  ref prog: Program,
+  ref tm: TypedModule,
+  m: Module,
+  root: NodeId,
+  moduleId: ModuleId,
+  isEntry: bool
+): void {
+  const programNode = nodeAt(ref m.ast, root);
+  // `import.unsafe;` is per FILE in the source but per MODULE here: a module's
+  // files share one namespace and one arena, so gating raw pointers per file
+  // would mean a type that resolves in one file and not its sibling.
+  if (programNode.flagA) {
+    tm.unsafeAllowed = true;
+  }
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const childId = childAt(ref m.ast, programNode, i);
+    // `export function f()` is an EXPORT_DECL wrapping the FUNCTION_DECL, so
+    // the decl to register and the question of whether it is exported are two
+    // separate lookups.
+    const exported = isExportDecl(ref m.ast, childId);
+    const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childId));
+    switch (declNode.kind) {
+      case ASTNodeKind.FUNCTION_DECL: {
+        registerFunctionShell(ref prog, ref tm, declNode, exported, isEntry, moduleId, ref m.ast);
+      }
+      case ASTNodeKind.TYPE_DECL: {
+        registerTypeShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
+      }
+      case ASTNodeKind.VARIANT_DECL: {
+        registerVariantShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
+      }
+      case ASTNodeKind.EXTERN_BLOCK: {
+        // Each declared signature is an ordinary function NAME. What is
+        // extraordinary is its symbol, and the ABI decides which way:
+        //
+        //   "C"          the symbol exists in a library and keeps its exact
+        //                spelling for the linker, so it goes in `externNames`
+        //                and codegen does not mangle it
+        //   "intrinsic"  there IS no symbol - codegen lowers the call to
+        //                instructions - so it must NOT go in `externNames`, or
+        //                a call would be emitted to something nothing defines
+        const isIntrinsic = declNode.flagA;
+        let x: usize = 0;
+        while (x < declNode.childCount) {
+          const externNode = nodeAt(ref m.ast, childAt(ref m.ast, declNode, x));
+          if (isIntrinsic && !isKnownIntrinsic(externNode.name)) {
+            // User code cannot fabricate an intrinsic: the name IS the
+            // lowering, so one codegen does not know would typecheck and then
+            // fail much later with nothing to say.
+            reportError(
+              ref prog,
+              `unknown intrinsic "${externNode.name}" - see std/core/intrinsics.yoop for the full list`,
+              externNode.sourceLoc
+            );
+            x += 1;
+            continue;
+          }
+          // An intrinsic is implicitly EXPORTED - there is nowhere to write
+          // `export`, since the block is the declaration - and every module in
+          // std reaches them through `import * as intr`. A C extern is not.
+          const visible = exported || isIntrinsic;
+
+          // A GENERIC intrinsic registers as an ordinary generic decl, so call
+          // sites infer `T` through the same path every generic function uses.
+          // What differs is only that there is no body to monomorphize, which
+          // is codegen's problem and not this pass's.
+          if (externNode.childA != 0) {
+            registerGenericShell(
+              ref prog, ref tm, externNode, moduleId, visible, GenericSort.FUNC, ref m.ast
+            );
+          } else {
+            const externShell = internType(ref prog, Type.Func {
+              params: vec.vecNew(0), ret: TYPE_ERROR_ID, variadic: false,
+            });
+            bindName(
+              ref prog, ref tm, externNode, Symbol.Func { typeId: externShell }, visible
+            );
+          }
+          if (!isIntrinsic) {
+            map.mapInsert(ref tm.externNames, externNode.name, true);
+          } else {
+            registerIntrinsic(ref prog, externNode.name);
+          }
+          x += 1;
+        }
+      }
+      case ASTNodeKind.TRAIT_DECL: {
+        // Same shell discipline as everything else: the NAME resolves now, the
+        // method signatures are pass C's - they name types the module may not
+        // have registered yet.
+        const traitShell = internType(ref prog, Type.Trait {
+          decl: { name: declNode.name, module: moduleId, populated: false },
+          methods: map.mapNew(0, map.stringKeyOps()),
+          typeParams: vec.vecNew(0),
+          extendsTraits: vec.vecNew(0),
+        });
+        bindName(ref prog, ref tm, declNode, Symbol.Trait { typeId: traitShell }, exported);
+      }
+      case ASTNodeKind.VTABLE_DECL: {
+        // A vtable IS a struct - of function pointers, one per trait method -
+        // so it gets a struct shell and pass C fills it like any other. The
+        // SYMBOL is what records that it erases a trait.
+        const vtableShell = internType(ref prog, Type.Struct {
+          decl: { name: declNode.name, module: moduleId, populated: false },
+          fields: vec.vecNew(0),
+          methods: map.mapNew(0, map.stringKeyOps()),
+          implementsTraits: vec.vecNew(0),
+          generic: { origin: 0, args: vec.vecNew(0) },
+        });
+        bindName(ref prog, ref tm, declNode, Symbol.Vtable { typeId: vtableShell }, exported);
+      }
+      case ASTNodeKind.KIND_DECL: {
+        // A kind is a NAME and nothing else here. Nothing enforces kinds, so
+        // there is no shell to fill and no clause to resolve - but the name has
+        // to bind, because `import { disposable } from "std/core/kinds.yoop"`
+        // is how every file in the tree reaches one, and an unbound name there
+        // would fail the import rather than the enforcement.
+        registerKind(ref prog, declNode.name, hasClause(ref m.ast, declNode, PAUSABLE_CLAUSE));
+        bindName(ref prog, ref tm, declNode, Symbol.Kind { kindId: 0 }, exported);
+      }
+      case ASTNodeKind.CONST_DECL: {
+        // A shell like every other: the annotation is pass C's to resolve, and
+        // so is the value. What matters here is that the NAME resolves.
+        bindName(ref prog, ref tm, declNode,
+          Symbol.Value { typeId: TYPE_ERROR_ID, intVal: 0 }, exported);
+      }
+      case ASTNodeKind.LET_DECL: {
+        reportError(
+          ref prog,
+          `module-level "let" is not supported by the bootstrap typechecker yet - a module-level binding must be \`const\``,
+          declNode.sourceLoc
+        );
+      }
+      case ASTNodeKind.IMPORT_DECL: {
+        // Pass B's job, and it needs no shell here: the name it binds is the
+        // source module's SymbolId, which topological order guarantees already
+        // exists. See pass_b.yoop.
+      }
+      default: {
+        // Everything else is still parser-side work. Say so out loud rather
+        // than silently dropping the decl - a missing shell here surfaces much
+        // later as a confusing "unknown name" in pass C.
+        reportError(
+          ref prog,
+          `pass A does not handle ${kindName(declNode.kind)} yet`,
+          declNode.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}
+
+// A function's signature is resolved in pass C, so the shell carries no params
+// and an error return type. What matters here is that the NAME resolves.
+function registerFunctionShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  exported: bool,
+  isEntry: bool,
+  moduleId: ModuleId,
+  ref ast: AST
+): void {
+  // `main` is the ONE user symbol that keeps its bare C name (see
+  // mangle.yoop), so a second module declaring one emits a second `@main`.
+  // Caught here rather than left to clang, which reports it as a redefinition
+  // of an IR symbol - naming neither of the two files that disagree.
+  if (!isEntry && str.stringEq(declNode.name, "main")) {
+    reportError(
+      ref prog,
+      "only the entry module may declare `main` - it is the C entry point, so an imported module cannot have one too",
+      declNode.sourceLoc
+    );
+    return;
+  }
+
+  if (declNode.childA != 0) {
+    registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.FUNC, ref ast);
+    return;
+  }
+
+  const shellId = internType(ref prog, Type.Func {
+    params: vec.vecNew(0),
+    ret: TYPE_ERROR_ID,
+    variadic: false,
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.Func { typeId: shellId }, exported);
+}
+
+// Only struct-shaped `type` decls today. Variants, unions, value enums and
+// transparent aliases all come through TYPE_DECL too once the parser emits
+// their bodies; this is the switch that will grow.
+function registerTypeShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool,
+  ref ast: AST
+): void {
+  if (declNode.childA != 0) {
+    registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.STRUCT, ref ast);
+    return;
+  }
+
+  const shellId = internType(ref prog, Type.Struct {
+    decl: { name: declNode.name, module: moduleId, populated: false },
+    fields: vec.vecNew(0),
+    methods: map.mapNew(0, map.stringKeyOps()),
+    implementsTraits: vec.vecNew(0),
+    generic: { origin: 0, args: vec.vecNew(0) },
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.Struct { typeId: shellId }, exported);
+}
+
+// A generic decl binds to its DeclId rather than to a type: there is no one
+// type it names. What pass A builds is the TEMPLATE - one `Type.TypeParam` per
+// parameter, and an empty nominal type bound to them, which pass C fills.
+//
+// The parameters are interned per DECL, so two decls that both call a parameter
+// `T` get different TypeIds and substitution can never confuse them.
+function registerGenericShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool,
+  sort: GenericSort,
+  ref ast: AST
+): void {
+  const declId: DeclId = prog.generics.len;
+
+  let params: Vec<TypeId> = vec.vecNew(2);
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
+    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+      name: paramNode.name, originDecl: declId, bounds: vec.vecNew(0),
+    }));
+    i += 1;
+  }
+
+  // The template's own arguments ARE its parameters, which is what makes
+  // `isOpenInstance` recognize it and codegen skip it.
+  let templateArgs: Vec<TypeId> = vec.vecNew(params.len);
+  vec.vecExtendFrom(ref templateArgs, vec.vecAsArray(ref params));
+
+  let template: TypeId = TYPE_ERROR_ID;
+  switch (sort) {
+    case GenericSort.FUNC: {
+      // A function's template is an ordinary Func type whose params and return
+      // are filled in pass C - with the parameters above in scope, so they land
+      // as TypeParam ids and substitution can replace them.
+      template = internType(ref prog, Type.Func {
+        params: vec.vecNew(0),
+        ret: TYPE_ERROR_ID,
+        variadic: false,
+      });
+    }
+    case GenericSort.VARIANT: {
+      template = internType(ref prog, Type.Variant {
+        decl: { name: declNode.name, module: moduleId, populated: false },
+        cases: vec.vecNew(0),
+        methods: map.mapNew(0, map.stringKeyOps()),
+        implementsTraits: vec.vecNew(0),
+        generic: { origin: declId, args: templateArgs },
+      });
+    }
+    default: {
+      template = internType(ref prog, Type.Struct {
+        decl: { name: declNode.name, module: moduleId, populated: false },
+        fields: vec.vecNew(0),
+        methods: map.mapNew(0, map.stringKeyOps()),
+        implementsTraits: vec.vecNew(0),
+        generic: { origin: declId, args: templateArgs },
+      });
+    }
+  }
+
+  vec.vecPush(ref prog.generics, {
+    name: declNode.name,
+    module: moduleId,
+    sort: sort,
+    params: params,
+    template: template,
+    declNode: 0,
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.GenericDecl { decl: declId, sort: sort }, exported);
+}
+
+// Same shell discipline as a struct: the NAME resolves now, the cases are
+// filled in pass C. A case's payload types can name the variant itself
+// (`variant List { Cons { rest: List } }` would), so they cannot be resolved
+// until every name in the module is registered.
+function registerVariantShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool,
+  ref ast: AST
+): void {
+  if (declNode.childA != 0) {
+    registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.VARIANT, ref ast);
+    return;
+  }
+
+  const shellId = internType(ref prog, Type.Variant {
+    decl: { name: declNode.name, module: moduleId, populated: false },
+    cases: vec.vecNew(0),
+    methods: map.mapNew(0, map.stringKeyOps()),
+    implementsTraits: vec.vecNew(0),
+    generic: { origin: 0, args: vec.vecNew(0) },
+  });
+  bindName(ref prog, ref tm, declNode, Symbol.VariantT { typeId: shellId }, exported);
+}
+
+// One namespace per module, so redeclaration is one insert: mapInsert reports
+// whether it overwrote something, which is precisely the condition.
+//
+// `exports` holds the same SymbolId under the same name, so an importer binds
+// the very symbol this module declared - not a copy of it. That identity is
+// what makes an imported struct compare equal to the original, since type
+// equality is `id == id`.
+function bindName(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  sym: Symbol,
+  exported: bool
+): void {
+  const symbolId = internSymbol(ref prog, sym);
+  if (map.mapInsert(ref tm.names, declNode.name, symbolId)) {
+    reportError(
+      ref prog,
+      `"${declNode.name}" is declared more than once in this module`,
+      declNode.sourceLoc
+    );
+  }
+  if (exported) {
+    map.mapInsert(ref tm.exports, declNode.name, symbolId);
+  }
+}
+
+// The one kind clause the bootstrap reads. Everything else is recorded by the
+// parser and understood by nobody.
+const PAUSABLE_CLAUSE: string = "pausable";
+
+// Whether a kind decl carries a clause with this leading word.
+function hasClause(ref ast: AST, declNode: ASTNode, word: string): bool {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    if (str.stringEq(nodeAt(ref ast, childAt(ref ast, declNode, i)).name, word)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// The intrinsics that exist. The name IS the lowering, so this list and
+// codegen's dispatch are two halves of one table - adding a name here without
+// a lowering there produces a call to a symbol nothing defines.
+function isKnownIntrinsic(name: string): bool {
+  return str.stringEq(name, "heapAlloc") ||
+    str.stringEq(name, "heapFree") ||
+    str.stringEq(name, "ctxAlloc") ||
+    str.stringEq(name, "ctxFree") ||
+    str.stringEq(name, "stringAsBytes") ||
+    str.stringEq(name, "stringFromBytesUnchecked") ||
+    str.stringEq(name, "bytesAsStringUnchecked") ||
+    str.stringEq(name, "arraySlice");
+}

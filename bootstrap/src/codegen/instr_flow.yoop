@@ -1,0 +1,85 @@
+module codegen;
+
+// The instruction catalogue for CONTROL FLOW: branches, labels, and the jump
+// table. Same house rules as instr.yoop, which documents them.
+
+// ----- control flow --------------------------------------------------------
+
+//   br label %L3
+export function emitBr(ref cx: Cx, target: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "br label %");
+  label(ref cx, target);
+  endInstr(ref cx);
+}
+
+//   br i1 %t6, label %L1, label %L2
+export function emitCondBr(ref cx: Cx, cond: Operand, ifTrue: usize, ifFalse: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "br i1 ");
+  operand(ref cx, cond);
+  part(ref cx, ", label %");
+  label(ref cx, ifTrue);
+  part(ref cx, ", label %");
+  label(ref cx, ifFalse);
+  endInstr(ref cx);
+}
+
+// A jump table. Opened, then one `case` line per pattern, then closed:
+//
+//   switch i32 %t1, label %L4 [
+//     i32 1, label %L1
+//     i32 2, label %L1
+//   ]
+//
+// One instruction for the whole dispatch, rather than a chain of icmp+br - which
+// is also what lets LLVM pick a real jump table when the values are dense.
+export function emitSwitchOpen(ref cx: Cx, ty: string, value: Operand, defaultLabel: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "switch ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", label %");
+  label(ref cx, defaultLabel);
+  part(ref cx, " [");
+  endInstr(ref cx);
+}
+
+//     i32 2, label %L1
+export function emitSwitchCase(ref cx: Cx, ty: string, value: Operand, target: usize): void {
+  part(ref cx, "    ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", label %");
+  label(ref cx, target);
+  endInstr(ref cx);
+}
+
+//   ]
+export function emitSwitchClose(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "]");
+  endInstr(ref cx);
+}
+
+// A block label, at column 0:
+//
+//   L3:
+export function emitLabel(ref cx: Cx, id: usize): void {
+  label(ref cx, id);
+  part(ref cx, ":");
+  endInstr(ref cx);
+}
+
+//   unreachable
+//
+// A terminator for a block that cannot be entered. The jump table's default on
+// an exhaustive variant switch is the only one that needs it: LLVM requires
+// every block to end in a terminator even when nothing can reach it.
+export function emitUnreachable(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "unreachable");
+  endInstr(ref cx);
+}

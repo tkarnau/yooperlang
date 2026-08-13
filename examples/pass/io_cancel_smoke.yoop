@@ -27,7 +27,7 @@ const PORT: int32 = 34572;
 // Stands in for a signal handler or an admin endpoint: waits a beat,
 // then asks the accept loop to stop.
 task shutdownAfter(t: CancelToken, ms: uint64): int32 {
-    conc.sleep_ms(ms);
+    conc.sleepMs(ms);
     cancel.request(ref t);
     return 0;
 }
@@ -48,7 +48,7 @@ async readViaTrait(ref s: TcpStream): void {
 }
 
 function main(): int32 {
-    disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", PORT, 8);
+    disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", PORT, 8);
     if (lr.error.len > 0) {
         printf("listen failed: %s\n", lr.error);
         return 1;
@@ -112,7 +112,7 @@ function main(): int32 {
 // change. The token here has NO deadline - only the explicit cancel ends
 // the read.
 task ambientTask(t: CancelToken): int32 {
-    disposable cr: ConnectResult = tcp.tcp_connect("127.0.0.1", PORT);
+    disposable cr: ConnectResult = tcp.tcpConnect("127.0.0.1", PORT);
     if (cr.error.len > 0) {
         printf("connect failed: %s\n", cr.error);
         return 1;

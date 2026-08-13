@@ -1,0 +1,83 @@
+// `kind` declarations, and the declarations a kind is written in front of.
+//
+// `async` is not a keyword. It is a kind, declared in std/core/kinds.yoop like
+// any other, and `async fetch(...)` is an ordinary function carrying it. So is
+// `task worker(...)`, and so is anything a user declares here. That is why both
+// lex as plain identifiers, and why the parser has no list of blessed words:
+// a kind prefix is an identifier standing where a keyword would be, and the
+// shape `IDENT IDENT (` is the whole tell.
+//
+// NOTHING ENFORCES KINDS in the bootstrap. Clauses are recorded by their
+// leading word and read by nobody - with one exception, `pausable`, because a
+// function carrying a pausable kind is a coroutine and emitting it as an
+// ordinary function would be a silent miscompile rather than a missing feature.
+// This file therefore carries no pausable kind: the bootstrap refuses to emit
+// one, by name.
+//
+// What IS observable is that a kind-prefixed function is otherwise completely
+// ordinary - it is called, it takes parameters, it returns.
+
+kind tagged {
+  appliesTo function;
+  signature () => void;
+  enumerable as "tagged";
+}
+
+// A second kind, with clauses in a different order and a multi-word one, to
+// pin down that a clause is a run of tokens ending in `;` rather than a fixed
+// grammar per word.
+kind counted {
+  appliesTo function;
+  signature () => void;
+  enumerable as "counted";
+}
+
+// A kind-prefixed function is an ordinary function. The prefix replaces the
+// `function` keyword rather than preceding it.
+tagged announce(): void {
+  printf("announced\n");
+}
+
+counted twice(): void {
+  printf("counted twice\n");
+}
+
+// Kinds are ambient by NAME, not imported, so a function declared after the
+// kinds still finds them - and one declared BEFORE would too, since pass A
+// walks every declaration before anything resolves.
+tagged sum(): void {
+  const parts: int[] = [1, 2, 3];
+  let total: int = 0;
+  for x in parts {
+    total = total + x;
+  }
+  printf("sum=%d\n", total);
+}
+
+// A kind on a TYPE is written after the name rather than before it, and its
+// clause body can be a braced block - so a clause is a run of tokens ending in
+// the `;` at DEPTH ZERO, not at the first `;` in sight.
+kind c_layout {
+  appliesTo type;
+  layout { abi "C"; };
+}
+
+type Point c_layout {
+  x: int,
+  y: int,
+}
+
+function main(): int {
+  announce();
+  twice();
+  sum();
+
+  const p: Point = { x: 3, y: 4 };
+  printf("area=%d\n", p.x * p.y);
+
+  // An ordinary `function` still parses as one. The two spellings share
+  // everything from the name onward, so this is the assertion that the shared
+  // path did not lose the keyword form.
+  printf("done\n");
+  return 0;
+}

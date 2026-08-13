@@ -1,0 +1,361 @@
+module typecheck;
+
+/*
+  Traits, the methods that satisfy them, and how a call finds one.
+
+  STATIC dispatch only. `Display.toString(ref p)` is resolved at compile time by
+  the RECEIVER's concrete type: the first argument's type names a struct, that
+  struct's method table names a function, and that function is what is called.
+  No vtable, no indirect call, nothing at run time. It is the form the
+  bootstrap's own source uses almost exclusively - `SelfLexing.peek(ref ps)`.
+
+  Two tables, and the split matters:
+
+    Type.Trait.methods     the trait's SIGNATURES, by name. What an implementer
+                           is checked against.
+    Type.Struct.methods    the struct's own methods, by name. What a call
+                           actually reaches.
+
+  A struct's method is an ordinary function whose first parameter is
+  `ref self` - the parser fills the annotation in - so nothing below pass A
+  treats it specially. Codegen emits it as an ordinary function under a mangled
+  name, and the borrow machinery handles `self`.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+
+// The trait a module-level name refers to, or TYPE_ERROR_ID when it is not one.
+export function traitTypeNamed(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Trait { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// A method's Func type on a nominal type, by name. TYPE_ERROR_ID when absent.
+export function lookupMethod(ref prog: Program, ownerType: TypeId, name: string): TypeId {
+  switch (typeAt(ref prog, ownerType)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return methodInTable(ref mm, name);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return methodInTable(ref mm, name);
+    }
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      return methodInTable(ref mm, name);
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+function methodInTable(ref methods: Map<string, TypeId>, name: string): TypeId {
+  switch (map.mapGet(ref methods, name)) {
+    case Option.Some { value: t }: { return t; }
+    case Option.None: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The nominal type a method call's receiver names, looking through a borrow.
+//
+// `Display.toString(ref p)` passes `ref Point`, and the method lives on Point.
+// Every receiver is a borrow in practice - `ref self` is how a method takes
+// one - but a by-value receiver resolves the same way.
+export function receiverTypeOf(ref prog: Program, argType: TypeId): TypeId {
+  return derefType(ref prog, argType);
+}
+
+// The name codegen emits a method under, and the one a call goes looking for.
+//
+//   `toString` on `Point` in module `m`  ->  `Point__toString`
+//
+// The TYPE is in the name because two types implement the same trait method,
+// and they need two symbols. The TRAIT is not: a type cannot declare the same
+// method name twice regardless of which traits they came from, so the pair is
+// already unique. That is one fewer thing for a call site to know - it has the
+// receiver's type and the method name, and needs nothing else.
+export function methodSymbolName(ref prog: Program, ownerType: TypeId, methodName: string): string propagates<disposable> {
+  return `${nominalNameOf(ref prog, ownerType)}${METHOD_NAME_SEPARATOR}${methodName}`;
+}
+
+export const METHOD_NAME_SEPARATOR: string = "__";
+
+// A nominal type's declared name, for the mangling above and for diagnostics.
+export function nominalNameOf(ref prog: Program, id: TypeId): string {
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      return d.name;
+    }
+    default: { return ""; }
+  }
+}
+
+// The module a nominal type was declared in - what a method symbol mangles
+// against, so an imported type's method stays one symbol.
+export function nominalModuleOf(ref prog: Program, id: TypeId): ModuleId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.module;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.module;
+    }
+    default: { return 0; }
+  }
+}
+
+// ----- pass C: filling the two tables ---------------------------------------
+
+// A trait's method SIGNATURES. No bodies, so this is the whole decl.
+export function fillTraitMethods(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  moduleId: ModuleId
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  let typeId: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Trait { typeId: t }: { typeId = t; }
+    default: { return; }
+  }
+
+  // `trait Joinable<T> { function join(ref self): T; }` - the parameters are in
+  // scope while the SIGNATURES resolve, so `T` means something.
+  //
+  // This is what makes a generic trait DECLARE. It is not what makes one
+  // dispatch: `Iterable<MapEntry<K, V>>` still has to be instantiated before
+  // its `next` can be called, and nothing here does that. The parameters are
+  // recorded on the trait so the day it does, they are already there.
+  disposable typeParams: Vec<TypeId> = traitTypeParams(ref prog, ref ast, declNode);
+  disposable paramNames: Vec<string> = traitTypeParamNames(ref ast, declNode);
+  beginTypeParams(ref prog, ref typeParams, ref paramNames);
+
+  let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const sigNode = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    map.mapInsert(ref methods, sigNode.name,
+      funcTypeOfSignature(ref prog, ref tm, ref ast, sigNode));
+    i += 1;
+  }
+  endTypeParams(ref prog);
+
+  setType(ref prog, typeId, Type.Trait {
+    decl: { name: declNode.name, module: moduleId, populated: true },
+    methods: methods,
+    typeParams: typeParams,
+    extendsTraits: vec.vecNew(0),
+  });
+}
+
+// A trait's type parameters, as opaque TypeParams.
+function traitTypeParams(ref prog: Program, ref ast: AST, declNode: ASTNode): Vec<TypeId> propagates<disposable> {
+  let params: Vec<TypeId> = vec.vecNew(2);
+  if (declNode.childA == 0) {
+    return params;
+  }
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref params, internType(ref prog, Type.TypeParam {
+      name: nodeAt(ref ast, childAt(ref ast, list, i)).name,
+      originDecl: 0,
+      bounds: vec.vecNew(0),
+    }));
+    i += 1;
+  }
+  return params;
+}
+
+function traitTypeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propagates<disposable> {
+  let names: Vec<string> = vec.vecNew(2);
+  if (declNode.childA == 0) {
+    return names;
+  }
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    i += 1;
+  }
+  return names;
+}
+
+// The METHOD members of a type decl, as a name -> Func map. Fields are the
+// caller's business; this walks the same run and takes the other kind.
+export function collectMethods(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): Map<string, TypeId> propagates<disposable> {
+  let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (member.kind == ASTNodeKind.METHOD_DECL) {
+      map.mapInsert(ref methods, member.name,
+        funcTypeOfSignature(ref prog, ref tm, ref ast, member));
+    }
+    i += 1;
+  }
+  return methods;
+}
+
+// The traits a decl's `implements` clause names, resolved. A name that is not a
+// trait is reported here rather than silently ignored - claiming to implement
+// something is a promise, and one made to a non-trait is a typo.
+export function collectImplementedTraits(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): Vec<TypeId> propagates<disposable> {
+  let traits: Vec<TypeId> = vec.vecNew(2);
+  if (declNode.childD == 0) {
+    return traits;
+  }
+  const list = nodeAt(ref ast, declNode.childD);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const annotId = childAt(ref ast, list, i);
+    const annot = nodeAt(ref ast, annotId);
+    const t = traitTypeNamed(ref prog, ref tm, annot.name);
+    if (t == TYPE_ERROR_ID) {
+      reportError(
+        ref prog,
+        `"${annot.name}" is not a trait, so "${declNode.name}" cannot implement it`,
+        annot.sourceLoc
+      );
+    } else {
+      vec.vecPush(ref traits, t);
+    }
+    i += 1;
+  }
+  return traits;
+}
+
+// Every method a claimed trait declares is actually there.
+//
+// Checked once the type's own table is filled, which is why it is a separate
+// step rather than part of collectMethods: the promise is about the finished
+// type, and the diagnostic has to name what is missing.
+export function checkTraitsSatisfied(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  ownerType: TypeId,
+  ref traits: Vec<TypeId>
+): void {
+  let t: usize = 0;
+  while (t < traits.len) {
+    const traitType = vec.vecGet(ref traits, t);
+    switch (typeAt(ref prog, traitType)) {
+      case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+        let it: MapIter<string, TypeId> = map.mapIter(ref mm);
+        for entry in it {
+          if (lookupMethod(ref prog, ownerType, entry.key) == TYPE_ERROR_ID) {
+            reportError(
+              ref prog,
+              `"${declNode.name}" claims to implement "${d.name}" but has no "${entry.key}" method`,
+              declNode.sourceLoc
+            );
+          }
+        }
+      }
+      default: { }
+    }
+    t += 1;
+  }
+}
+
+// Every method a type declares is REQUIRED by a trait it implements.
+//
+// There are no inherent methods: a method exists because a trait asked for it.
+// That is what keeps `Trait.method(ref x)` the only spelling a call ever needs -
+// an inherent one would have no trait to name it through, so it could be
+// defined and never called.
+export function checkMethodsRequired(
+  ref prog: Program,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref traits: Vec<TypeId>
+): void {
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    if (member.kind == ASTNodeKind.METHOD_DECL &&
+        !anyTraitRequires(ref prog, ref traits, member.name)) {
+      reportError(
+        ref prog,
+        `type "${declNode.name}" declares method "${member.name}", but no implemented trait requires it`,
+        member.sourceLoc
+      );
+    }
+    i += 1;
+  }
+}
+
+function anyTraitRequires(ref prog: Program, ref traits: Vec<TypeId>, name: string): bool {
+  let t: usize = 0;
+  while (t < traits.len) {
+    if (lookupMethod(ref prog, vec.vecGet(ref traits, t), name) != TYPE_ERROR_ID) {
+      return true;
+    }
+    t += 1;
+  }
+  return false;
+}
+
+// The Func type of a signature node - a METHOD_SIG or a METHOD_DECL, which
+// carry their params in childB and their return in childC exactly as a
+// FUNCTION_DECL does. That sameness is the point: it is why a method needs no
+// separate filling path.
+function funcTypeOfSignature(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  sigNode: ASTNode
+): TypeId {
+  let params: Vec<TypeId> = vec.vecNew(2);
+  if (sigNode.childB != 0) {
+    const list = nodeAt(ref ast, sigNode.childB);
+    let p: usize = 0;
+    while (p < list.childCount) {
+      const paramNode = nodeAt(ref ast, childAt(ref ast, list, p));
+      const annotated = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
+      // Same rule as an ordinary parameter: `ref` is part of the SIGNATURE, so
+      // `ref self` is `ref Point` and a by-value receiver would not satisfy it.
+      if (paramNode.flagA) {
+        vec.vecPush(ref params, internRef(ref prog, annotated));
+      } else {
+        vec.vecPush(ref params, annotated);
+      }
+      p += 1;
+    }
+  }
+  return internType(ref prog, Type.Func {
+    params: params,
+    ret: resolveTypeAnnotation(ref prog, ref tm, ref ast, sigNode.childC),
+    variadic: false,
+  });
+}

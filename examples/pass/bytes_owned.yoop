@@ -1,6 +1,6 @@
 // Yoopstore-papercut #5: a canonical owned byte buffer (`Bytes`) so APIs can
 // return heap-owned bytes without forcing every caller to thread a Vec.
-// Exercises bytes_from_array (copy), bytes_from_vec (zero-copy seal), and
+// Exercises bytesFromArray (copy), bytesFromVec (zero-copy seal), and
 // transfer-up of the disposable obligation through a propagating return.
 
 import { Bytes } from "std/core/bytes.yoop";
@@ -17,23 +17,23 @@ extern "C" from "stdio.h" {
 // emptied by the seal so its auto-cleanup is a no-op; the buffer travels with
 // the returned Bytes.
 function build(): Bytes propagates<disposable> {
-    disposable v: Vec<uint8> = vec.vec_new(4);
-    vec.vec_push(ref v, 1);
-    vec.vec_push(ref v, 2);
-    vec.vec_push(ref v, 3);
-    return bytes.bytes_from_vec(ref v);
+    disposable v: Vec<uint8> = vec.vecNew(4);
+    vec.vecPush(ref v, 1);
+    vec.vecPush(ref v, 2);
+    vec.vecPush(ref v, 3);
+    return bytes.bytesFromVec(ref v);
 }
 
 function main(): int32 {
     // from_array copies the (stack) source into an owned allocation.
     let src: uint8[] = [9, 8, 7];
-    disposable a: Bytes = bytes.bytes_from_array(src);
-    let av: uint8[] = bytes.bytes_to_array(ref a);
+    disposable a: Bytes = bytes.bytesFromArray(src);
+    let av: uint8[] = bytes.bytesToArray(ref a);
     printf(`from_array len=${av.len} [${av[0]} ${av[1]} ${av[2]}]\n`);
 
     // from_vec seal + transfer-up.
     disposable b: Bytes = build();
-    let bv: uint8[] = bytes.bytes_to_array(ref b);
+    let bv: uint8[] = bytes.bytesToArray(ref b);
     printf(`from_vec len=${bv.len} [${bv[0]} ${bv[1]} ${bv[2]}]\n`);
     return 0;
 }

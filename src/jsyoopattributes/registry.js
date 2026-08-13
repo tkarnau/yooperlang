@@ -174,7 +174,7 @@ REGISTRY.set("precompile", {
 });
 
 // Derive attribute: `@derive(display)` on a struct type decl auto-generates
-// the Display.to_string method. The actual expansion is NOT an attribute-pass
+// the Display.toString method. The actual expansion is NOT an attribute-pass
 // phase - it runs pre-typecheck in src/jsyoopderive/expand.js (called from
 // typecheckProgram), which consumes the ATTRIBUTE node. This entry exists for
 // parse-time shape validation, --list-attributes, and a safety net for derive

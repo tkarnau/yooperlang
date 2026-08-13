@@ -1,0 +1,7 @@
+module selfy;
+
+// Imports its OWN module. Siblings already see each other, so this is a
+// mistake - and reporting it as an import cycle would describe the wrong thing.
+import { b } from "../selfy";
+
+export function a(): int { return b(); }

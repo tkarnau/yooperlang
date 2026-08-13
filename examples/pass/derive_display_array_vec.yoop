@@ -15,17 +15,17 @@ type Bag propagates<disposable> {
 }
 
 function main(): int {
-  let nums: Vec<int32> = vec.vec_new(2);
-  vec.vec_push(ref nums, 7);
-  vec.vec_push(ref nums, 8);
-  let mapNums: Map<string, int32> = map.map_new(2, map.string_key_ops());
-  map.map_insert(ref mapNums, "t", 9);
-  map.map_insert(ref mapNums, "u", 10);
+  let nums: Vec<int32> = vec.vecNew(2);
+  vec.vecPush(ref nums, 7);
+  vec.vecPush(ref nums, 8);
+  let mapNums: Map<string, int32> = map.mapNew(2, map.stringKeyOps());
+  map.mapInsert(ref mapNums, "t", 9);
+  map.mapInsert(ref mapNums, "u", 10);
   const full: Bag = { xs: [1, 2, 3], v: nums, cb: double, m: mapNums };
   printf(`${full}\n`);
 
-  let empty: Vec<int32> = vec.vec_new(0);
-  let emptyMap: Map<string, int32> = map.map_new(0, map.string_key_ops());
+  let empty: Vec<int32> = vec.vecNew(0);
+  let emptyMap: Map<string, int32> = map.mapNew(0, map.stringKeyOps());
   const bare: Bag = { xs: [], v: empty, cb: double, m: emptyMap };
   printf(`${bare}\n`);
   return 0;

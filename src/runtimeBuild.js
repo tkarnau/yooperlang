@@ -5,7 +5,7 @@
 import path from "path";
 
 import { RUNTIME_DIR as runtimeDir } from "./install_root.js";
-import { wantsOpenGL } from "./toolchain.js";
+import { wantsOpenGL, wantsTls } from "./toolchain.js";
 
 // Primary runtime translation unit. Kept as a single string for backwards
 // compatibility with call sites that don't know about extra runtime files
@@ -45,6 +45,14 @@ export const RUNTIME_SOURCES = [
   // Cancellation tokens backing std/core/cancel.yoop: the cancelled
   // flag, the deadline, and the waiter list the multiplexer parks on.
   path.resolve(runtimeDir, "yoop_cancel.c"),
+  // yoop_time_parts - the calendar breakdown backing std/time.yoop. The wall
+  // clock itself lives in yoop_runtime.c, next to the monotonic clock it must
+  // not be confused with.
+  path.resolve(runtimeDir, "yoop_time.c"),
+  // Atomic integer ops backing std/core/atomic.yoop. Needed because yoop can
+  // already SHARE mutable storage across tasks but had no way to update it
+  // safely; std/http's concurrent accept loop is the first caller.
+  path.resolve(runtimeDir, "yoop_atomic.c"),
 ];
 
 export function runtimeLinkFlags() {
@@ -65,7 +73,20 @@ export function runtimeLinkFlags() {
 // `linkFlagNames` is the raw set codegen collected from `extern "C" from
 // library "X"` blocks, before lowerLinkFlag turns them into clang arguments.
 export function glueSourcesForLinkFlags(linkFlagNames) {
-  if (process.platform !== "win32") return [];
-  if (!wantsOpenGL(linkFlagNames)) return [];
-  return [path.resolve(runtimeDir, "yoop_gl_win32.c")];
+  const out = [];
+  // TLS. Compiled in only for a program that named OpenSSL, because
+  // yoop_tls.c #includes <openssl/ssl.h> - putting it in RUNTIME_SOURCES would
+  // make every program in the world need OpenSSL headers to build.
+  //
+  // This is also why std/tls is its own module rather than a file inside
+  // std/net: link flags are collected PROGRAM-WIDE, so an `extern from library
+  // "ssl"` inside std/net would make every program that opens a socket link
+  // OpenSSL. See plans/tls.md D4.
+  if (wantsTls(linkFlagNames)) {
+    out.push(path.resolve(runtimeDir, "yoop_tls.c"));
+  }
+  if (process.platform === "win32" && wantsOpenGL(linkFlagNames)) {
+    out.push(path.resolve(runtimeDir, "yoop_gl_win32.c"));
+  }
+  return out;
 }

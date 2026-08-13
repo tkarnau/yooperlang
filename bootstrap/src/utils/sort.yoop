@@ -1,0 +1,47 @@
+module utils;
+
+// Generic in-place sorting. `Comparable<T>` is the ordering a caller supplies;
+// everything else here is the quicksort that consumes it.
+//
+// This lives in the bootstrap rather than in std because it is the first thing
+// that wanted a user-supplied ordering, and std has no sort yet. Move it to std
+// the moment a second consumer appears.
+
+export trait Comparable<T> {
+  function compare(ref self, b: T): int8;
+}
+
+function swap<T>(arr: T[], i: usize, j: usize): void {
+  const temp = arr[i];
+  arr[i] = arr[j];
+  arr[j] = temp;
+}
+
+function partitionYoop<T implements Comparable<T>>(arr: T[], low: usize, high: usize): usize {
+  const pivot = arr[high];
+  let store = low;
+  let j = low;
+  for (j = low; j < high; j = j + 1) {
+    if (Comparable.compare(ref arr[j], pivot) <= 0) {
+      swap(arr, store, j);
+      store = store + 1;
+    }
+  }
+  swap(arr, store, high);
+  return store;
+}
+
+export function quickSort<T implements Comparable<T>>(arr: T[], low: usize, high: usize): void {
+  // `>=` (not `>`) is load bearing: usize means low can equal high (a single
+  // element range), and the recursion below can produce low == high.
+  if (low >= high) {
+    return;
+  }
+
+  const p = partitionYoop(arr, low, high);
+  // guard the left recursion so `p - 1` never underflows when p == 0.
+  if (p > low) {
+    quickSort(arr, low, p - 1);
+  }
+  quickSort(arr, p + 1, high);
+}

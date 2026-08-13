@@ -1,0 +1,84 @@
+// `for x in xs { ... }` - walk an array, element by element.
+//
+// The counted `for (let i = 0; i < xs.len; i = i + 1)` can express all of this
+// already, so the point is not new power - it is that the index is gone, and
+// with it every off-by-one the index made possible. The bootstrap's own lexer
+// walks its scan tables this way.
+//
+// The lowering evaluates the iterable ONCE, before the loop, and caches its
+// data pointer and length. Re-evaluating per iteration would call
+// `headersView(ref h)` on every step, and an array that grew underneath the
+// walk would change length mid-loop.
+//
+// Only arrays so far. A type implementing `Iterable<T>` is the other form and
+// is refused by name - that one needs generic traits, since `Iterable<T>` has
+// to be instantiated before its `next` can be called.
+
+type Entry {
+  name: string,
+  n: int,
+}
+
+// An array reached through a call, so the "evaluated once" path is the one
+// under test rather than a bare local.
+function view(ref es: Entry[]): Entry[] {
+  return es;
+}
+
+function main(): int {
+  const xs: int[] = [3, 1, 4, 1, 5];
+
+  let total: int = 0;
+  for x in xs {
+    total = total + x;
+  }
+  printf("sum=%d\n", total);
+
+  // `break` leaves, `continue` advances the counter first - the same loop-label
+  // frame the counted form pushes. 3 is added, 1 continues, 4 breaks.
+  let seen: int = 0;
+  for x in xs {
+    if (x == 4) { break; }
+    if (x == 1) { continue; }
+    seen = seen + x;
+  }
+  printf("seen=%d\n", seen);
+
+  // An empty array skips the body entirely. The condition is `uge`, not `eq`,
+  // and an equality test against a zero length would run the body once and then
+  // walk off the end.
+  const empty: int[] = [];
+  let touched: int = 0;
+  for x in empty {
+    touched = touched + 1;
+  }
+  printf("touched=%d\n", touched);
+
+  // Struct elements: the loop variable is a whole struct value, copied into its
+  // own slot, and its fields read like any other struct local's.
+  let es: Entry[] = [{ name: "a", n: 10 }, { name: "b", n: 20 }];
+  let weight: int = 0;
+  for e in view(ref es) {
+    printf("%s=%d ", e.name, e.n);
+    weight = weight + e.n;
+  }
+  printf("| weight=%d\n", weight);
+
+  // Nested loops each get their own counter slot and their own label frame.
+  let pairs: int = 0;
+  for a in xs {
+    for b in xs {
+      pairs = pairs + 1;
+    }
+  }
+  printf("pairs=%d\n", pairs);
+
+  // String elements, and a loop variable shadowing nothing.
+  const names: string[] = ["x", "y", "z"];
+  for s in names {
+    printf("%s", s);
+  }
+  printf("\n");
+
+  return 0;
+}

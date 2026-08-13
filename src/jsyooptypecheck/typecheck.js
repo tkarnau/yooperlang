@@ -16,7 +16,11 @@ import { expandDerives } from "../jsyoopderive/expand.js";
 import {
   ArrayType,
   VariantType,
+  UnionShell,
+  fillUnionShell,
   ValueEnumType,
+  ValueEnumShell,
+  fillValueEnumShell,
   ErrorType,
   isIntPrim,
   FuncType,
@@ -68,6 +72,7 @@ import { checkImportLocality } from "./importLocality.js";
 import { runKindCheck } from "./kindCheck.js";
 import { runKindFlow } from "./kindFlow.js";
 import { lookupCoreKind, setCoreKinds } from "./coreKinds.js";
+import { checkNoUntypedSurvivors } from "./untypedGuard.js";
 
 export { formatType, coerceLiteralToType, isAssignable, unifyArith };
 
@@ -1845,20 +1850,31 @@ export const REQUIRED_CORE_KINDS = new Map([
 ]);
 
 export const INTRINSIC_DECL_IDS = new Map([
-  ["heap_alloc", "$builtin__heap_alloc"],
-  ["heap_free", "$builtin__heap_free"],
-  // Context-routed siblings of heap_alloc/heap_free: allocate/free through the
+  ["heapAlloc", "$builtin__heap_alloc"],
+  ["heapFree", "$builtin__heap_free"],
+  // Context-routed siblings of heapAlloc/heapFree: allocate/free through the
   // current allocator (std/core/alloc.yoop) instead of raw malloc/free.
-  ["ctx_alloc", "$builtin__ctx_alloc"],
-  ["ctx_free", "$builtin__ctx_free"],
-  ["string_as_bytes", "$builtin__string_as_bytes"],
-  ["string_from_bytes_unchecked", "$builtin__string_from_bytes_unchecked"],
-  // The borrowing inverse of string_as_bytes. `_as_` per the intrinsics-index
+  ["ctxAlloc", "$builtin__ctx_alloc"],
+  ["ctxFree", "$builtin__ctx_free"],
+  ["stringAsBytes", "$builtin__string_as_bytes"],
+  ["stringFromBytesUnchecked", "$builtin__string_from_bytes_unchecked"],
+  // The borrowing inverse of stringAsBytes. `_as_` per the intrinsics-index
   // naming convention: a view, no allocation.
-  ["bytes_as_string_unchecked", "$builtin__bytes_as_string_unchecked"],
-  ["array_slice", "$builtin__array_slice"],
-  ["wait_until", "$builtin__wait_until"],
+  ["bytesAsStringUnchecked", "$builtin__bytes_as_string_unchecked"],
+  ["arraySlice", "$builtin__array_slice"],
+  ["waitUntil", "$builtin__wait_until"],
   ["cancel", "$builtin__cancel"],
+  // Arm a completion interest against the CURRENT task, so it can suspend
+  // until `h` finishes instead of blocking a worker in `wait`. An intrinsic
+  // for the same reason waitUntil/cancel are: it takes a Task<T>, and a
+  // plain extern would need the handle as a raw pointer.
+  ["armComplete", "$builtin__armComplete"],
+  // Non-blocking "has it finished?". Expressible as `waitUntil(h, nowNs())`,
+  // but not from inside a GENERIC function: waitUntil's stamped
+  // `WaitResult<T>` result survives monomorphization as a TypeParamType and
+  // trips codegen's llvmType. An intrinsic sidesteps that, and the runtime
+  // predicate it lowers to is a single atomic load.
+  ["isDone", "$builtin__isDone"],
   // The async suspend primitive. Non-generic, and lowered inline by
   // codegen (a bare coro.suspend) rather than to any call, so unlike the
   // entries above it needs no makeBuiltinGenericFuncs counterpart.
@@ -1868,7 +1884,7 @@ export const INTRINSIC_DECL_IDS = new Map([
   // map so it isn't subject to the import-required rule.
 ]);
 
-// Builtin generic functions - `heap_alloc<T>(n: usize): T[]` and friends.
+// Builtin generic functions - `heapAlloc<T>(n: usize): T[]` and friends.
 // Built once per program, then installed into a module's genericFuncTable
 // only when the module imports them (via the std/core/intrinsics.yoop
 // extern "intrinsic" block). Codegen intercepts by `declId` (see codegen.js)
@@ -1882,7 +1898,7 @@ function makeBuiltinGenericFuncs() {
   );
   const heapAlloc = {
     id: allocDeclId,
-    name: "heap_alloc",
+    name: "heapAlloc",
     moduleId: "$builtin",
     paramNames: ["T"],
     paramScope: new Map([["T", allocT]]),
@@ -1899,7 +1915,7 @@ function makeBuiltinGenericFuncs() {
   );
   const heapFree = {
     id: freeDeclId,
-    name: "heap_free",
+    name: "heapFree",
     moduleId: "$builtin",
     paramNames: ["T"],
     paramScope: new Map([["T", freeT]]),
@@ -1908,13 +1924,13 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Phase 8.H: string_as_bytes(s: string): uint8[]
+  // Phase 8.H: stringAsBytes(s: string): uint8[]
   // Zero-copy view of a string's UTF-8 bytes as a fat-pointer array.
   // Sharing the string's storage; the view does not outlive the string.
   const asBytesDeclId = "$builtin__string_as_bytes";
   const stringAsBytes = {
     id: asBytesDeclId,
-    name: "string_as_bytes",
+    name: "stringAsBytes",
     moduleId: "$builtin",
     paramNames: [],
     paramScope: new Map(),
@@ -1926,15 +1942,15 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Phase 8.H: string_from_bytes_unchecked(buf: uint8[]): string
+  // Phase 8.H: stringFromBytesUnchecked(buf: uint8[]): string
   // Copies buf into a fresh malloc'd string, writes a nul terminator. Does
-  // NOT validate UTF-8 - that's the wrapping `string_from_bytes` function's
+  // NOT validate UTF-8 - that's the wrapping `stringFromBytes` function's
   // job (lives in std/core/strings.yoop). This intrinsic is the building
   // block; user code should generally prefer the validating wrapper.
   const fromBytesDeclId = "$builtin__string_from_bytes_unchecked";
   const stringFromBytesUnchecked = {
     id: fromBytesDeclId,
-    name: "string_from_bytes_unchecked",
+    name: "stringFromBytesUnchecked",
     moduleId: "$builtin",
     paramNames: [],
     paramScope: new Map(),
@@ -1946,15 +1962,15 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // bytes_as_string_unchecked(buf: uint8[]): string
-  // The borrowing inverse of string_as_bytes: hands back buf's DATA POINTER
+  // bytesAsStringUnchecked(buf: uint8[]): string
+  // The borrowing inverse of stringAsBytes: hands back buf's DATA POINTER
   // typed as a string, with no allocation and no copy. Two caller
   // obligations, neither of which the compiler can check:
   //   1. `buf.data[buf.len]` must be a nul byte. A `string` is nul
   //      terminated and its length is recovered by strlen, not from the fat
   //      pointer, so a buffer without one reads off the end.
   //   2. The bytes must be valid UTF-8 (same contract as
-  //      string_from_bytes_unchecked).
+  //      stringFromBytesUnchecked).
   // The result borrows buf's storage, so it must not outlive it, and it is
   // invalidated by anything that reallocates buf. std/core/text.yoop's
   // `Text` is the intended caller: it maintains both invariants by
@@ -1962,7 +1978,7 @@ function makeBuiltinGenericFuncs() {
   const asStringDeclId = "$builtin__bytes_as_string_unchecked";
   const bytesAsStringUnchecked = {
     id: asStringDeclId,
-    name: "bytes_as_string_unchecked",
+    name: "bytesAsStringUnchecked",
     moduleId: "$builtin",
     paramNames: [],
     paramScope: new Map(),
@@ -1974,7 +1990,7 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Phase 8.H: array_slice<T>(xs: T[], start: usize, end: usize): T[]
+  // Phase 8.H: arraySlice<T>(xs: T[], start: usize, end: usize): T[]
   // Returns a borrowing fat-pointer view {xs.ptr + start, end - start}.
   // No allocation. Caller is responsible for keeping the parent alive.
   // Matches the naming convention "_slice = view" from the intrinsics
@@ -1991,7 +2007,7 @@ function makeBuiltinGenericFuncs() {
   );
   const arraySlice = {
     id: sliceDeclId,
-    name: "array_slice",
+    name: "arraySlice",
     moduleId: "$builtin",
     paramNames: ["T"],
     paramScope: new Map([["T", sliceT]]),
@@ -2000,13 +2016,13 @@ function makeBuiltinGenericFuncs() {
     isBuiltin: true,
   };
 
-  // Context-routed allocation: same shapes as heap_alloc/heap_free, but codegen
+  // Context-routed allocation: same shapes as heapAlloc/heapFree, but codegen
   // lowers the malloc/free to yoop_ctx_alloc/yoop_ctx_free (current allocator).
   const ctxAllocDeclId = "$builtin__ctx_alloc";
   const ctxAllocT = new TypeParamType("T", ctxAllocDeclId);
   const ctxAlloc = {
     id: ctxAllocDeclId,
-    name: "ctx_alloc",
+    name: "ctxAlloc",
     moduleId: "$builtin",
     paramNames: ["T"],
     paramScope: new Map([["T", ctxAllocT]]),
@@ -2022,7 +2038,7 @@ function makeBuiltinGenericFuncs() {
   const ctxFreeT = new TypeParamType("T", ctxFreeDeclId);
   const ctxFree = {
     id: ctxFreeDeclId,
-    name: "ctx_free",
+    name: "ctxFree",
     moduleId: "$builtin",
     paramNames: ["T"],
     paramScope: new Map([["T", ctxFreeT]]),
@@ -2054,7 +2070,7 @@ function makeBuiltinGenericFuncs() {
 export function typecheckProgram(modules) {
   const errors = [];
   // Phase 13.C: @derive(display) expansion. Runs before pass A so grafted
-  // to_string methods and appended `implements Display` clauses flow through
+  // toString methods and appended `implements Display` clauses flow through
   // the ordinary passes; consumes every top-level derive ATTRIBUTE wrapper.
   expandDerives(modules, errors);
   const moduleEnv = new Map(); // moduleId -> { localSymbols, structTable, exports, importedNames, linkLibraries }
@@ -2158,7 +2174,7 @@ export function typecheckProgram(modules) {
     // type, so nothing downstream (coercion, indexing, codegen) sees the name.
     const aliasTable = reused?.aliasTable ?? new Map();
     // Names this module brought into scope via an `extern "intrinsic"`
-    // block. checkExpr.js's special-case paths for `wait_until` / `cancel`
+    // block. checkExpr.js's special-case paths for `waitUntil` / `cancel`
     // gate on membership here so that user code that hasn't imported the
     // intrinsics module can freely shadow these names.
     const builtinIntrinsicNames = reused?.builtinIntrinsicNames ?? new Set();
@@ -2241,8 +2257,9 @@ export function typecheckProgram(modules) {
             sourceLoc: d.sourceLoc,
           });
         } else {
-          // Shell - fields filled in pass C.
-          unionTable.set(d.name, UnionType(d.name, [], mod.id));
+          // Shell - fields filled IN PLACE in pass C, so a reference resolved
+          // before then still sees them. See UnionShell in types.js.
+          unionTable.set(d.name, UnionShell(d.name, mod.id));
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
@@ -2262,8 +2279,10 @@ export function typecheckProgram(modules) {
             sourceLoc: d.sourceLoc,
           });
         } else {
-          // Shell - underlying is null + cases empty; pass C fills both.
-          enumTable.set(d.name, ValueEnumType(d.name, null, new Map(), [], new Map(), mod.id, false));
+          // Shell - underlying is null + cases empty; pass C fills both IN
+          // PLACE, so anything that resolves this name before then still sees
+          // the finished enum. See ValueEnumShell in types.js.
+          enumTable.set(d.name, ValueEnumShell(d.name, mod.id));
         }
         if (decl.kind === ASTNodeKind.EXPORT_DECL) exports.add(d.name);
         continue;
@@ -2443,7 +2462,7 @@ export function typecheckProgram(modules) {
                 continue;
               }
 
-              // Non-generic intrinsic (printf, wait_until, cancel) - fall
+              // Non-generic intrinsic (printf, waitUntil, cancel) - fall
               // through to the regular extern shell path. Pass C resolves
               // the user-written parameter/return types; checkExpr.js
               // recognizes the name via builtinIntrinsicNames.
@@ -2621,7 +2640,7 @@ export function typecheckProgram(modules) {
     // Intrinsics are no longer auto-injected - they enter genericFuncTable /
     // localSymbols only via an `extern "intrinsic" from "compiler"` block,
     // which user code triggers by importing std/core/intrinsics.yoop (or, for
-    // wait_until/cancel, std/core/concurrency.yoop).
+    // waitUntil/cancel, std/core/concurrency.yoop).
 
     // modules-as-directories: the env object is created by the FIRST source
     // file of a module and reused (not replaced) by the rest, which is what
@@ -3203,7 +3222,13 @@ export function typecheckProgram(modules) {
           }
           fields.push({ name: f.name, type: ft });
         }
-        const fullUnion = UnionType(d.name, fields, mod.id);
+        // Fill the pass-A shell in place; fall back to a fresh UnionType if the
+        // table entry is not our shell (a redeclaration replaced it).
+        const unionShell = unionTable.get(d.name);
+        const fullUnion =
+          unionShell && !Object.isFrozen(unionShell)
+            ? fillUnionShell(unionShell, fields)
+            : UnionType(d.name, fields, mod.id);
         d.resolvedType = fullUnion;
         unionTable.set(d.name, fullUnion);
       }
@@ -3275,15 +3300,27 @@ export function typecheckProgram(modules) {
           priorValue = value;
           ordinal++;
         }
-        const fullEnum = ValueEnumType(
-          d.name,
-          underlying ?? PrimType("int32"),
-          cases,
-          [],
-          new Map(),
-          mod.id,
-          isOpen,
-        );
+        // Fill the pass-A shell IN PLACE. Replacing the table entry left a
+        // sibling file's already-resolved reference pointing at an enum with a
+        // null underlying (see ValueEnumShell). Falls back to a fresh
+        // ValueEnumType if the entry is not our shell - e.g. a redeclaration
+        // replaced it.
+        const enumShell = enumTable.get(d.name);
+        const resolvedUnderlying = underlying ?? PrimType("int32");
+        const fullEnum =
+          enumShell &&
+          !Object.isFrozen(enumShell) &&
+          enumShell.underlying === null
+            ? fillValueEnumShell(enumShell, resolvedUnderlying, cases, isOpen)
+            : ValueEnumType(
+                d.name,
+                resolvedUnderlying,
+                cases,
+                [],
+                new Map(),
+                mod.id,
+                isOpen,
+              );
         d.resolvedType = fullEnum;
         enumTable.set(d.name, fullEnum);
       }
@@ -3758,7 +3795,7 @@ export function typecheckProgram(modules) {
     // anything with no body, so the decl-authority check never runs on an
     // extern, which is exactly what makes the allocating intrinsic the
     // authority for `owned` (see plans/strings-ownership-and-ergonomics.md).
-    // Without this the marker on `string_from_bytes_unchecked` would be
+    // Without this the marker on `stringFromBytesUnchecked` would be
     // silently dropped at every call site.
     for (const decl of m.ast.body) {
       const d = innerDecl(decl);
@@ -3842,7 +3879,7 @@ export function typecheckProgram(modules) {
       // Phase 9.G: vtable nominal table.
       vtableTable: env.vtableTable,
       // Names imported into this module via an `extern "intrinsic"` block.
-      // Gates wait_until/cancel special-cases in checkExpr.js.
+      // Gates waitUntil/cancel special-cases in checkExpr.js.
       builtinIntrinsicNames: env.builtinIntrinsicNames,
       // Phase 8.A: per-module unsafe opt-in flag (for kind-check / pure check).
       allowsUnsafe: !!mod.ast.allowsUnsafe,
@@ -3970,6 +4007,19 @@ export function typecheckProgram(modules) {
       }
     }
     stampErrorOrigin(errors, errStart, mod);
+  }
+
+  // Backstop: nothing may reach codegen still carrying an untyped literal
+  // placeholder. Gated on the program being otherwise clean, because an
+  // unpinned node downstream of a real type error is a consequence of that
+  // error, not a separate bug worth a second (and confusing) diagnostic.
+  // See untypedGuard.js for why this exists at all.
+  if (!errors.some((e) => e.severity !== Severity.warning)) {
+    for (const mod of modules) {
+      const errStart = errors.length;
+      checkNoUntypedSurvivors(mod.ast, errors);
+      stampErrorOrigin(errors, errStart, mod);
+    }
   }
 
   // Split the one accumulating array into the two the callers want. Warnings

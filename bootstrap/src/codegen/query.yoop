@@ -1,0 +1,265 @@
+module codegen;
+
+// Everything codegen asks the typecheck layer.
+//
+// This file IS the boundary. Codegen reads three things and no more - the AST,
+// a node's resolved type, and a callee's return type - plus the small
+// derivations (cast widths, varargs promotion) that follow from them. If a
+// change to the decoration shape breaks codegen, it breaks here and nowhere
+// else.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { NodeId } from "../ast";
+import { PrimKind } from "../typecheck";
+import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
+  TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
+  lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
+  variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute,
+  DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
+  nominalModuleOf } from "../typecheck";
+import { ASTNode, childAt, nodeAt } from "../ast";
+
+// ----- the typecheck boundary ----------------------------------------------
+
+// The LLVM type of whatever pass D resolved for this node. Codegen is entitled
+// to assume every node it visits has one (see the layer contract in
+// plans/bootstrap-pipeline-contracts.md), so there is no error path here.
+export function typeOf(ref cx: Cx, nodeId: NodeId): string {
+  return llvmType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+}
+
+// The TypeId pass D recorded, with the current monomorphization applied.
+//
+// This is THE place a generic function's opaque `T` becomes a concrete type.
+// The body was checked once with its parameters left standing, so its
+// decoration is written in terms of them; every instance walks that same
+// decoration and substitutes on the way out. Everything else in codegen reads
+// types through here and never learns that generics exist.
+export function resolvedTypeAt(ref cx: Cx, nodeId: NodeId): TypeId {
+  const recorded = vec.vecGet(ref cx.tm.resolvedTypes, nodeId);
+  if (cx.instance == NO_FUNC_INSTANCE) {
+    return recorded;
+  }
+  let inst = funcInstanceAt(cx.prog, cx.instance);
+  let info = genericAt(cx.prog, inst.origin);
+  return substitute(cx.prog, recorded, ref info.params, ref inst.args);
+}
+
+// The declared return type of a top-level function, as LLVM spells it.
+export function returnTypeOf(ref cx: Cx, name: string): string {
+  // Inside a monomorphization the SIGNATURE is the instance's, not the generic
+  // decl's - the decl's return type still mentions a TypeParam.
+  if (cx.instance != NO_FUNC_INSTANCE) {
+    let inst = funcInstanceAt(cx.prog, cx.instance);
+    switch (typeAt(cx.prog, inst.funcType)) {
+      case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(cx.prog, r); }
+      default: { return "void"; }
+    }
+  }
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return "void"; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: {
+          switch (typeAt(cx.prog, t)) {
+            case Type.Func { params: p, ret: r, variadic: v }: {
+              return llvmType(cx.prog, r);
+            }
+            default: { return "void"; }
+          }
+        }
+        default: { return "void"; }
+      }
+    }
+  }
+}
+
+// True when a name spells a primitive type, which is what makes `usize(x)` a
+// cast rather than a call.
+export function isPrimTypeName(name: string): bool {
+  return primTypeIdOfName(name) != TYPE_ERROR_ID;
+}
+
+// Which conversion opcode a cast from `argId` to `exprId` needs, or "" for a
+// pass-through.
+export function castOpFor(ref cx: Cx, argId: NodeId, exprId: NodeId): string {
+  const source = resolvedTypeAt(ref cx, argId);
+  const target = resolvedTypeAt(ref cx, exprId);
+  return llvmIntCastOp(
+    primBitWidth(cx.prog, source),
+    primBitWidth(cx.prog, target),
+    primIsSigned(cx.prog, source)
+  );
+}
+
+// The LLVM type a variadic call must pass this argument as, or "" when it is
+// not an integer or bool (a string is already `ptr` and needs nothing).
+export function promotedVarargTypeOf(ref cx: Cx, argId: NodeId): string {
+  const t = resolvedTypeAt(ref cx, argId);
+  const bits = primBitWidth(cx.prog, t);
+  if (bits == 0) {
+    return "";
+  }
+  return promotedVarargType(bits, bits == 1);
+}
+
+// zext for a bool or an unsigned source, sext for a signed one - the same rule
+// the ordinary cast uses, and for the same reason.
+export function varargWidenOp(ref cx: Cx, argId: NodeId): string {
+  const t = resolvedTypeAt(ref cx, argId);
+  if (primIsSigned(cx.prog, t)) {
+    return "sext";
+  }
+  return "zext";
+}
+
+// Which POSITION a named field occupies in the struct that `baseId` resolved to.
+// gep and extractvalue both address a field by index, so this is the one thing
+// codegen needs that a field name alone does not give it.
+export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): usize {
+  const structType = resolvedTypeAt(ref cx, baseId);
+  return lookupField(cx.prog, structType, fieldName).index;
+}
+
+// True when the node resolved to a struct, which is how the field-access and
+// assignment paths tell a struct from an array.
+export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isStructType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+}
+
+// The generic-function DeclId a name binds to, or DECL_NONE_ID when the name is
+// not one. Takes prog/tm rather than a Cx because the walk asks BEFORE there is
+// a Cx to ask through - it is deciding how many bodies to build one for.
+export function genericFuncDeclIdOf(ref prog: Program, ref tm: TypedModule, name: string): DeclId {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.GenericDecl { decl: d, sort: s }: {
+          if (s == GenericSort.FUNC) {
+            return d;
+          }
+          return DECL_NONE_ID;
+        }
+        default: { return DECL_NONE_ID; }
+      }
+    }
+    case Option.None: { return DECL_NONE_ID; }
+  }
+}
+
+// The value of a module-level `const` by name. `None` when the name is not one,
+// which is how the local-read path tells "inline this" from an internal error.
+export function moduleConstOf(ref cx: Cx, name: string): Option<int64> {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Value { typeId: t, intVal: v }: { return Option.Some { value: v }; }
+        default: { return Option.None; }
+      }
+    }
+    case Option.None: { return Option.None; }
+  }
+}
+
+// A constant as an operand. Negative values go through NegImm for the same
+// reason a negated literal pattern does - the emitter writes the sign.
+export function constOperand(v: int64): Operand {
+  if (v < 0) {
+    return Operand.NegImm { value: uint64(-v) };
+  }
+  return Operand.Imm { value: uint64(v) };
+}
+
+// True when a node resolved to a `ref T`, which is how the parameter prologue
+// tells a borrow from a value.
+export function isRefAt(ref cx: Cx, nodeId: NodeId): bool {
+  switch (typeAt(cx.prog, resolvedTypeAt(ref cx, nodeId))) {
+    case Type.Ref { inner: i }: { return true; }
+    default: { return false; }
+  }
+}
+
+// What a `ref T` points at, as LLVM spells it. The node's own type otherwise.
+export function pointeeTypeOf(ref cx: Cx, nodeId: NodeId): string {
+  return llvmType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
+}
+
+// A method's declared return type. Read off the RECEIVER's method table rather
+// than the module namespace, because a method is not a module-level name.
+export function methodReturnTypeOf(ref cx: Cx, declNode: ASTNode): string {
+  const owner = methodOwnerOf(ref cx, declNode);
+  switch (typeAt(cx.prog, lookupMethod(cx.prog, owner, declNode.name))) {
+    case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(cx.prog, r); }
+    default: { return "void"; }
+  }
+}
+
+// The type a method hangs off, taken from its own `ref self` parameter - which
+// the parser annotated with the enclosing type's name. No separate bookkeeping
+// is needed because the receiver's annotation already says it.
+export function methodOwnerOf(ref cx: Cx, declNode: ASTNode): TypeId {
+  if (declNode.childB == 0) {
+    return TYPE_ERROR_ID;
+  }
+  const list = nodeAt(cx.ast, declNode.childB);
+  if (list.childCount == 0) {
+    return TYPE_ERROR_ID;
+  }
+  return derefType(cx.prog, resolvedTypeAt(ref cx, childAt(cx.ast, list, 0)));
+}
+
+export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isVariantType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+}
+
+// ----- variants -------------------------------------------------------------
+//
+// A constructor and a pattern both resolved to the VARIANT type and carry the
+// case's NAME, so every question below is answered from those two.
+
+// The tag to store, or to dispatch on. Declaration order, which pass C fixed.
+export function variantOrdinalOf(ref cx: Cx, nodeId: NodeId): uint64 {
+  const variantType = resolvedTypeAt(ref cx, nodeId);
+  return uint64(lookupVariantCase(cx.prog, variantType, nodeAt(cx.ast, nodeId).name).ordinal);
+}
+
+// The LLVM name of one case's payload struct, which is how the payload bytes
+// are addressed.
+export function variantCaseTypeOf(ref cx: Cx, nodeId: NodeId, caseName: string): string {
+  const variantType = resolvedTypeAt(ref cx, nodeId);
+  return variantCaseLlvmName(variantModuleIdOf(cx.prog, variantType),
+    variantDeclNameOf(cx.prog, variantType), caseName);
+}
+
+// Which POSITION a named field occupies in a case's payload. gep addresses a
+// field by index, so this is the one thing the field name alone does not give.
+export function variantFieldPositionOf(ref cx: Cx, nodeId: NodeId, caseName: string, fieldName: string): usize {
+  const variantType = resolvedTypeAt(ref cx, nodeId);
+  const found = lookupVariantCase(cx.prog, variantType, caseName);
+  return variantCaseFieldNamed(cx.prog, variantType, usize(found.ordinal), fieldName).index;
+}
+
+// True when `name` is a module-level FUNCTION in scope here - what makes a bare
+// name in value position a function pointer rather than a missing local.
+export function isModuleFunction(ref cx: Cx, name: string): bool {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return false; }
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: { return true; }
+        default: { return false; }
+      }
+    }
+  }
+}
+
+// True when the node resolved to a string, which is how the field-access path
+// tells `s.len` from an array's `.len`.
+export function isStringAt(ref cx: Cx, nodeId: NodeId): bool {
+  switch (typeAt(cx.prog, resolvedTypeAt(ref cx, nodeId))) {
+    case Type.Prim { prim: p }: { return p == PrimKind.STRING; }
+    default: { return false; }
+  }
+}

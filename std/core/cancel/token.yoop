@@ -1,3 +1,6 @@
+// std/core/cancel - cancellation tokens: a cancelled flag, an optional
+// deadline, and parent/child links, which blocking calls fold into their
+// own timed waits. One module across two files; import the DIRECTORY.
 module cancel;
 
 // std/core/cancel/token.yoop - cancellation tokens and deadlines.

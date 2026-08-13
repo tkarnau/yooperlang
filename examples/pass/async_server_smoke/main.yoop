@@ -42,7 +42,7 @@ const CLIENTS: int32 = 3;
 // Synchronous, deliberately: a handler is pure request-in / response-out.
 type EchoHandler implements Handler {
     greeting: string,
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         types.respondText(ref resp, types.ok(), self.greeting);
         return HandleOutcome.Ok;
     }
@@ -52,12 +52,12 @@ type EchoHandler implements Handler {
 // here - the accept, the head read, the body read, the response write -
 // is a suspend.
 task serverTask(): int32 {
-    let disposable lr: ListenResult = tcp.tcp_listen("127.0.0.1", 0, 32);
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
     if (lr.error.len > 0) {
         printf(`server bind failed: ${lr.error}\n`);
         return -1;
     }
-    boundPort = lr.listener.bound_port;
+    boundPort = lr.listener.boundPort;
     let h: EchoHandler = { greeting: "pong\n" };
     let d: Dispatcher = Dispatcher.from(ref h);
     switch (await http.serveDefault(ref lr.listener, ref d, CLIENTS)) {
@@ -73,8 +73,8 @@ task serverTask(): int32 {
 // One client request. Returns 1 on a 200 with the expected body.
 task clientTask(): int32 {
     let c: Client = client.clientNew();
-    let url: string = strings.string_concat(
-        strings.string_concat("http://127.0.0.1:", fmt.int_to_string(int64(boundPort))), "/");
+    let url: string = strings.stringConcat(
+        strings.stringConcat("http://127.0.0.1:", fmt.intToString(int64(boundPort))), "/");
     switch (await client.get(ref c, url)) {
         case Result.Ok { value: r }: {
             disposable resp: ClientResponse = r;
@@ -94,7 +94,7 @@ function main(): int32 {
 
     // Let the listener bind before dialing. The clients would retry
     // anyway, but this keeps the output deterministic.
-    let _s: int32 = conc.sleep_ms(100);
+    let _s: int32 = conc.sleepMs(100);
 
     // All three are in flight at once. On a single worker they can only
     // make progress because each one suspends while waiting on the

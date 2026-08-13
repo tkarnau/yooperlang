@@ -1,0 +1,354 @@
+module codegen;
+
+// One function per LLVM instruction this compiler emits.
+//
+// Read this file to learn what IR the bootstrap produces; read expr.yoop and
+// stmt.yoop to learn WHEN. That split is deliberate - the walking code should
+// read as "load the local, then multiply", not as a pile of string appends.
+//
+// House rules for everything in here:
+//   * Named after the IR it emits (`emitLoad`), never after the AST it came
+//     from (`emitIdentExpr`).
+//   * A comment showing the exact line it produces. That sample is the
+//     documentation - if you change the format, change the sample.
+//   * Takes operands and types already decided by the caller. No lookups, no
+//     AST, no decisions.
+//   * Appends piece by piece. A template literal here would be one malloc per
+//     instruction (docs/writing_yoop.md 3.1).
+
+import { Text }, * as text from "std/core/text.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+
+// ----- terminators ---------------------------------------------------------
+
+//   ret i32 %t3
+export function emitRet(ref cx: Cx, ty: string, value: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "ret ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  endInstr(ref cx);
+}
+
+//   ret void
+export function emitRetVoid(ref cx: Cx): void {
+  startInstr(ref cx);
+  part(ref cx, "ret void");
+  endInstr(ref cx);
+}
+
+// ----- memory --------------------------------------------------------------
+
+//   %count.1.addr = alloca i32
+//
+// Goes into the PROLOGUE buffer, not the instruction stream: every alloca is
+// hoisted to the top of `entry:` so it dominates uses in any branch.
+export function emitAlloca(ref cx: Cx, name: string, id: usize, ty: string): void {
+  prologuePart(ref cx, "  ");
+  prologueSlot(ref cx, name, id);
+  prologuePart(ref cx, " = alloca ");
+  prologuePart(ref cx, ty);
+  prologuePart(ref cx, "\n");
+}
+
+//   %sc.1.addr = alloca [3 x i32]
+//
+// Fixed-size backing store for an array literal. Prologue, like every alloca.
+export function emitAllocaArray(
+  ref cx: Cx,
+  name: string,
+  id: usize,
+  elemTy: string,
+  count: usize
+): void {
+  prologuePart(ref cx, "  ");
+  prologueSlot(ref cx, name, id);
+  prologuePart(ref cx, " = alloca [");
+  prologueUint(ref cx, count);
+  prologuePart(ref cx, " x ");
+  prologuePart(ref cx, elemTy);
+  prologuePart(ref cx, "]\n");
+}
+
+//   store i32 42, ptr %count.addr
+export function emitStore(ref cx: Cx, ty: string, value: Operand, name: string, id: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, ", ptr ");
+  slot(ref cx, name, id);
+  endInstr(ref cx);
+}
+
+//   %t4 = load i32, ptr %count.addr
+export function emitLoad(ref cx: Cx, dest: usize, ty: string, name: string, id: usize): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = load ");
+  part(ref cx, ty);
+  part(ref cx, ", ptr ");
+  slot(ref cx, name, id);
+  endInstr(ref cx);
+}
+
+//   %t6 = load %struct.Point, ptr %sc.1.addr
+//
+// Same as emitLoad, named for what it is used for: pulling a whole aggregate
+// value out of its slot.
+export function emitLoadFromSlot(
+  ref cx: Cx,
+  dest: usize,
+  ty: string,
+  slotName: string,
+  slotId: usize
+): void {
+  emitLoad(ref cx, dest, ty, slotName, slotId);
+}
+
+//   store i32 %a.arg, ptr %a.addr
+//
+// The parameter spill. Separate from emitStore because the source is an incoming
+// argument register, not an Operand any expression produced.
+export function emitStoreArg(ref cx: Cx, ty: string, name: string, id: usize): void {
+  startInstr(ref cx);
+  part(ref cx, "store ");
+  part(ref cx, ty);
+  part(ref cx, " %");
+  part(ref cx, name);
+  part(ref cx, ".arg, ptr ");
+  slot(ref cx, name, id);
+  endInstr(ref cx);
+}
+
+// ----- arithmetic ----------------------------------------------------------
+
+//   %t5 = mul i32 %t4, 2
+export function emitBinOp(
+  ref cx: Cx,
+  dest: usize,
+  op: string,
+  ty: string,
+  lhs: Operand,
+  rhs: Operand
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = ");
+  part(ref cx, op);
+  part(ref cx, " ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, lhs);
+  part(ref cx, ", ");
+  operand(ref cx, rhs);
+  endInstr(ref cx);
+}
+
+//   %t4 = zext i32 %t3 to i64
+//
+// An integer width conversion. `op` is trunc / zext / sext - vocab.yoop decides
+// which from the two widths and the source's signedness.
+export function emitIntCast(
+  ref cx: Cx,
+  dest: usize,
+  op: string,
+  fromTy: string,
+  value: Operand,
+  toTy: string
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = ");
+  part(ref cx, op);
+  part(ref cx, " ");
+  part(ref cx, fromTy);
+  part(ref cx, " ");
+  operand(ref cx, value);
+  part(ref cx, " to ");
+  part(ref cx, toTy);
+  endInstr(ref cx);
+}
+
+// ----- comparison ----------------------------------------------------------
+
+//   %t6 = icmp slt i32 %t4, %t5
+//
+// Produces an i1. `pred` is the LLVM predicate (`slt`, `eq`, ...) and `ty` is
+// the type of the OPERANDS, not of the result.
+export function emitICmp(
+  ref cx: Cx,
+  dest: usize,
+  pred: string,
+  ty: string,
+  lhs: Operand,
+  rhs: Operand
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = icmp ");
+  part(ref cx, pred);
+  part(ref cx, " ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, lhs);
+  part(ref cx, ", ");
+  operand(ref cx, rhs);
+  endInstr(ref cx);
+}
+
+//   %t7 = xor i1 %t6, true
+//
+// Logical not. `xor ... true` is the idiomatic i1 negation - shorter than an
+// icmp against zero and what clang itself emits.
+export function emitNot(ref cx: Cx, dest: usize, value: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = xor i1 ");
+  operand(ref cx, value);
+  part(ref cx, ", true");
+  endInstr(ref cx);
+}
+
+// ----- functions -----------------------------------------------------------
+
+// Opens the function: the signature line and `entry:`. Both go to the module
+// buffer, because the hoisted allocas and the instruction stream are appended
+// after them by emitFunctionClose.
+//
+//   define i32 @mathx_1__add(i32 %a.arg, i32 %b.arg) {
+//   entry:
+//
+// `homeModule` is the mangling prefix, or "" for a symbol that keeps its bare C
+// name. Which one it is was decided in mangle.yoop; this just spells it.
+export function emitFunctionOpen(
+  ref cx: Cx,
+  homeModule: string,
+  name: string,
+  retTy: string,
+  ref params: Vec<ParamInfo>
+): void {
+  headerPart(ref cx, "define ");
+  headerPart(ref cx, retTy);
+  headerPart(ref cx, " @");
+  if (homeModule.len > 0) {
+    headerPart(ref cx, homeModule);
+    headerPart(ref cx, SYMBOL_MODULE_SEPARATOR);
+  }
+  headerPart(ref cx, name);
+  headerPart(ref cx, "(");
+  let i: usize = 0;
+  while (i < params.len) {
+    const p = vec.vecGet(ref params, i);
+    if (i > 0) {
+      headerPart(ref cx, ", ");
+    }
+    headerPart(ref cx, p.ty);
+    headerPart(ref cx, " %");
+    headerPart(ref cx, p.name);
+    headerPart(ref cx, ".arg");
+    i += 1;
+  }
+  headerPart(ref cx, ") {");
+  headerEnd(ref cx);
+  headerPart(ref cx, "entry:");
+  headerEnd(ref cx);
+}
+
+// Closes it, assembling the pieces into the module: the hoisted allocas first,
+// then the instruction stream, then `}`.
+export function emitFunctionClose(ref cx: Cx): void {
+  flushFunction(cx.e);
+}
+
+//   %t7 = call i32 @main_2__answer()
+//   %t8 = call i32 (ptr, ...) @printf(ptr @.str.0, i32 %t7)
+//   call void @mathx_1__doThing()
+//
+// `dest` is ignored when `retTy` is void. A variadic callee needs its FULL
+// function type at the call site, not just the return type, which is the only
+// reason `isVariadic` exists. `calleeHome` is the callee's mangling prefix, or
+// "" for a bare C name - printf above being the reason it can differ from the
+// module currently being emitted.
+export function emitCall(
+  ref cx: Cx,
+  dest: usize,
+  retTy: string,
+  calleeHome: string,
+  calleeName: string,
+  isVariadic: bool,
+  ref args: Vec<CallArg>
+): void {
+  startInstr(ref cx);
+  const isVoid = text.equals(retTy, "void");
+  if (!isVoid) {
+    temp(ref cx, dest);
+    part(ref cx, " = ");
+  }
+  part(ref cx, "call ");
+  if (isVariadic) {
+    part(ref cx, PRINTF_SIGNATURE);
+  } else {
+    part(ref cx, retTy);
+  }
+  part(ref cx, " @");
+  if (calleeHome.len > 0) {
+    part(ref cx, calleeHome);
+    part(ref cx, SYMBOL_MODULE_SEPARATOR);
+  }
+  part(ref cx, calleeName);
+  part(ref cx, "(");
+  let i: usize = 0;
+  while (i < args.len) {
+    const a = vec.vecGet(ref args, i);
+    if (i > 0) {
+      part(ref cx, ", ");
+    }
+    part(ref cx, a.ty);
+    part(ref cx, " ");
+    operand(ref cx, a.value);
+    i += 1;
+  }
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
+//   %t7 = call i64 %t5(ptr %t6)
+//
+// A call through a function POINTER rather than a symbol. LLVM's opaque
+// pointers put the signature at the call site, so the return type here is all
+// the callee's type contributes.
+export function emitCallIndirect(
+  ref cx: Cx,
+  dest: usize,
+  retTy: string,
+  callee: usize,
+  ref args: Vec<CallArg>
+): void {
+  startInstr(ref cx);
+  const isVoid = text.equals(retTy, "void");
+  if (!isVoid) {
+    temp(ref cx, dest);
+    part(ref cx, " = ");
+  }
+  part(ref cx, "call ");
+  part(ref cx, retTy);
+  part(ref cx, " ");
+  temp(ref cx, callee);
+  part(ref cx, "(");
+  let i: usize = 0;
+  while (i < args.len) {
+    const a = vec.vecGet(ref args, i);
+    if (i > 0) {
+      part(ref cx, ", ");
+    }
+    part(ref cx, a.ty);
+    part(ref cx, " ");
+    operand(ref cx, a.value);
+    i += 1;
+  }
+  part(ref cx, ")");
+  endInstr(ref cx);
+}

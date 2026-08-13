@@ -1,0 +1,29 @@
+module typecheck;
+
+// Which interpolations a template literal can stringify.
+//
+// `` `line ${n}: ${msg}` `` builds a string, so every `${...}` has to become
+// one. Three shapes can, and the classification lives here rather than in
+// codegen because pass D is what REFUSES the fourth - a part codegen cannot
+// lower has to be a diagnostic pointing at the interpolation, not an internal
+// error much later.
+
+// A float is UNSUPPORTED rather than missing from the enum: it is a perfectly
+// reasonable thing to interpolate, and naming it is what makes the refusal
+// readable. The bootstrap's own source has no float interpolation to test a
+// lowering against, so it is deliberately out of this pass.
+export enum TemplatePartKind { STRING, INT, BOOL, UNSUPPORTED }
+
+export function templatePartKind(ref prog: Program, t: TypeId): TemplatePartKind {
+  switch (typeAt(ref prog, t)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.STRING: { return TemplatePartKind.STRING; }
+        case PrimKind.BOOL: { return TemplatePartKind.BOOL; }
+        case PrimKind.FLOAT32, PrimKind.FLOAT64: { return TemplatePartKind.UNSUPPORTED; }
+        default: { return TemplatePartKind.INT; }
+      }
+    }
+    default: { return TemplatePartKind.UNSUPPORTED; }
+  }
+}

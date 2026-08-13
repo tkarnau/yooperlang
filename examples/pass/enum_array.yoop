@@ -24,7 +24,7 @@ enum K<uint8> { A 0, B 1, C 2 }
 enum Name<string> { Alpha "alpha", Beta "beta" }
 
 function main(): int32 propagates<disposable> {
-    let arr: K[] = intr.heap_alloc(3);
+    let arr: K[] = intr.heapAlloc(3);
     arr[0] = K.A;
     arr[1] = K.C;
     arr[2] = K.B;
@@ -40,13 +40,13 @@ function main(): int32 propagates<disposable> {
     }
 
     // the same element type through a generic container
-    disposable v: Vec<K> = vec.vec_new(4);
-    vec.vec_push(ref v, K.B);
-    vec.vec_push(ref v, K.C);
-    printf(`veclen=${v.len} v0=${uint8(vec.vec_get(ref v, 0))}\n`);
+    disposable v: Vec<K> = vec.vecNew(4);
+    vec.vecPush(ref v, K.B);
+    vec.vecPush(ref v, K.C);
+    printf(`veclen=${v.len} v0=${uint8(vec.vecGet(ref v, 0))}\n`);
 
     // a SECOND value enum in the same program - the cache-key collision
-    let names: Name[] = intr.heap_alloc(2);
+    let names: Name[] = intr.heapAlloc(2);
     names[0] = Name.Alpha;
     names[1] = Name.Beta;
     let same: bool = names[0] == Name.Alpha;

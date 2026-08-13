@@ -14,10 +14,10 @@ extern "C" from "stdio.h" {
 }
 
 function main(): int32 {
-    disposable v: vec.Vec<int32> = vec.vec_new(2);
-    vec.vec_push(ref v, 10);
-    vec.vec_push(ref v, 20);
-    vec.vec_push(ref v, 30);
+    disposable v: vec.Vec<int32> = vec.vecNew(2);
+    vec.vecPush(ref v, 10);
+    vec.vecPush(ref v, 20);
+    vec.vecPush(ref v, 30);
 
     let sum: int32 = 0;
     for x in vec.vecIter(ref v) {
@@ -29,15 +29,15 @@ function main(): int32 {
     // Walks the populated prefix only, so capacity is invisible.
     printf(`len=${v.len} cap=${v.cap}\n`);
 
-    // break works, and the walk sees writes made through vec_set.
-    vec.vec_set(ref v, 1, 99);
+    // break works, and the walk sees writes made through vecSet.
+    vec.vecSet(ref v, 1, 99);
     for x in vec.vecIter(ref v) {
         if (x == 99) { break; }
         printf(`pre=${x}\n`);
     }
 
     // An empty Vec yields nothing.
-    disposable empty: vec.Vec<int32> = vec.vec_new(4);
+    disposable empty: vec.Vec<int32> = vec.vecNew(4);
     for x in vec.vecIter(ref empty) {
         printf(`never=${x}\n`);
     }

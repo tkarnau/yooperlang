@@ -310,6 +310,21 @@ export function unifyArith(left, right, op) {
     return null;
   }
 
+  // Two bools compare for equality. Without this they fall all the way through
+  // to the "both typed -> must match exactly" branch at the bottom, which
+  // requires isIntPrim || isFloatPrim and so rejects them - which is why
+  // `a != b` on two bools used to need the long-form `(a && !b) || (!a && b)`,
+  // and that needed a named helper to stay readable at a call site
+  // (yooperdoom-takeaways 2.1). Codegen needs no change: bool lowers to `i1`
+  // and INT_OP_MAP already maps eqeq/neq onto `icmp eq` / `icmp ne`.
+  //
+  // Ordered comparison on bools (`<`, `>=`) stays rejected. There is no useful
+  // ordering on a truth value, so asking for one is a typo far more often than
+  // it is intent.
+  if (op === "eqeq" || op === "neq") {
+    if (isBool(left) && isBool(right)) return PrimType(primAnnotations.bool);
+  }
+
   // Variant equality: tag comparison. Both sides must be the same variant
   // type. Payload-bearing cases compare *tags only* - structural
   // comparison of payloads is a follow-up (use `switch` for that today;

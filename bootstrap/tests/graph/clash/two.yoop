@@ -1,0 +1,3 @@
+module beta;
+
+export function b(): int { return 2; }

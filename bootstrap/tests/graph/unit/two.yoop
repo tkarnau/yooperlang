@@ -1,0 +1,3 @@
+module unit;
+
+export function b(): int { return 2; }

@@ -1,0 +1,293 @@
+module lex;
+
+// The token vocabulary: every tag the lexer can produce, its source spelling,
+// and its binding power as a binary operator.
+//
+// TokenTags must stay in lockstep with the JS reference's tag list
+// (src/jsyooplexer/lexer.js) - that lockstep is a CONTRACT, because a token
+// dump from either implementation has to diff against the other.
+
+export enum TokenTags {
+  NOTOKEN, // for initializers, etc
+  // atoms
+  EOF,
+  IDENT, // NOT A KEYWORD
+  INTLITERAL,
+  STRLITERAL, // INCLUDED WRAPPING QUOTE CHARACTERS
+  CHARLITERAL,
+  TEMPLATELITERAL, // BACKTICK-QUOTED, MAY CONTAIN ${...} INTERPOLATIONS
+  FLOATLITERAL,
+
+  // KEYWORDS
+  LET,
+  FUNCTION,
+  CONST,
+  RETURN,
+  IF,
+  ELSE,
+  WHILE,
+  FOR,
+  // PHASE 9.D: `FOR ITEM IN XS { ... }` ITERATION FORM.
+  IN,
+  TYPE,
+  IMPORT,
+  EXPORT,
+  EXTERN,
+  FROM,
+  AS,
+  LIBRARY,
+  DOTDOTDOT, // FOR VARIADIC PARAMS AND REST PATTERNS
+  REF,
+  BREAK,
+  CONTINUE,
+  LBRACKET, // [
+  RBRACKET, // ]
+  TRUE,
+  FALSE,
+  TRAIT,
+  IMPLEMENTS,
+  SELF,
+  EXTENDS,
+  // PHASE 9.G: `VTABLE NAME FOR TRAITNAME { ... }` - DECLARES THE
+  // TYPE-ERASED SHAPE OF A TRAIT. PAIRS WITH THE `=>` TOKEN (`FATARROW`)
+  // FOR FIELD TYPE ANNOTATIONS.
+  VTABLE,
+  KIND,
+  // KIND STUFF
+  APPLIESTO,
+  REQUIRES,
+  MUSTCALL,
+  OWNSBLOCK,
+  BEFORESCOPEEND,
+  BINDING,
+  // PHASE 6.2: ESCAPE AND SHARING
+  MUSTNOTESCAPE,
+  MUSTNOTSHARE,
+  FORBIDS,
+  SCOPE,
+  ACROSSSCOPES,
+  PARAMETER,
+  FIELD,
+  IO,
+  GLOBALSTATE,
+  // PHASE 6.3: TASK/CONCURRENCY
+  TASK,
+  WAIT,
+  JOINED,
+  POOLED,
+  // PHASE 6.4: CONTAINMENT / PROPAGATION
+  PROPAGATES,
+  CONTAINS,
+  // PHASE 6.5: LAYOUT / COMPOSITION
+  LAYOUT,
+  ALIGN,
+  AMP, // STANDALONE & (COMPOSITION OPERATOR), DISTINCT FROM &&
+  // PHASE 7.5: SWITCH / PATTERNS / SUM TYPES / UNIONS
+  SWITCH,
+  CASE,
+  DEFAULT,
+  ENUM,
+  VARIANT,
+  UNION,
+  // PHASE 8.A: UNSAFE POINTERS
+  NULL,
+
+  // PUNCTUATION / OPERATORS
+  EQ,
+  SEMICOLON,
+  LPAREN,
+  RPAREN,
+  DISCARD,
+  LCURLY,
+  RCURLY,
+  COLON,
+  COMMA,
+  EQEQ,
+  NEQ,
+  LTE,
+  GTE,
+  LT,
+  GT,
+  ANDAND,
+  OROR,
+  PIPE,
+  LSHIFT,
+  RSHIFT,
+  PLUS,
+  MINUS,
+  MULT,
+  DIVIDE,
+  MODULUS,
+  DOT,
+  QUESTION,
+  // PHASE 9.E: ARRAY SLICE SYNTAX - `XS[I..J]`, `XS[..J]`, `XS[I..]`, `XS[..]`.
+  DOTDOT,
+  // PHASE 9.B: LOGICAL NOT PREFIX - `!FLAG`. LEXER'S LONGEST-FIRST SORT KEEPS
+  // `!=` (`NEQ`) WINNING OVER `!` FOR THE BINARY CASE.
+  BANG,
+  // PHASE 9: BITWISE XOR (`^`) BINARY, BITWISE NOT (`~`) PREFIX.
+  CARET,
+  TILDE,
+  // PHASE 9: COMPOUND ASSIGNMENTS - `X += Y` SHORTHAND FOR `X = X + Y`,
+  // IMPLEMENTED AS DEDICATED AST NODES SO THE LVALUE IS ADDRESSED ONCE.
+  PLUSEQ,
+  MINUSEQ,
+  MULTEQ,
+  DIVIDEEQ,
+  MODULUSEQ,
+  // PHASE 9.G: `=>` SEPARATOR FOR FUNCTION VALUE TYPES IN TYPE POSITION.
+  // ONLY LEGAL IN TYPE ANNOTATIONS (STRUCT FIELDS, PARAMETER / RETURN TYPES,
+  // VTABLE FIELDS). EXPRESSION-POSITION `=>` IS RESERVED FOR A FUTURE
+  // CLOSURE-LITERAL SYNTAX AND IS CURRENTLY A PARSE ERROR THERE.
+  FATARROW,
+  // PHASE 11.A: `@` PREFIX INTRODUCING A COMPILE-TIME / STATIC-ANALYSIS
+  // ATTRIBUTE (E.G. `@PRECOMPILE`, `@TEST`, `@VERIFY`). ALWAYS A
+  // COMPILE-TIME DIRECTIVE - NEVER QUERYABLE FROM RUNTIME CODE.
+  AT,
+  // `await <expr>`. Async coloring: only legal inside an async function or a
+  // task body.
+  AWAIT,
+}
+
+export function getTokenPrecedence(tag: TokenTags): int {
+  switch(tag) {
+    case TokenTags.EQ: { return 10; }
+    case TokenTags.OROR: { return 20; }
+    case TokenTags.ANDAND: { return 30; }
+    case TokenTags.PIPE: { return 35; }
+    case TokenTags.CARET: { return 36; }
+    case TokenTags.AMP: { return 37; }
+    case TokenTags.EQEQ,
+         TokenTags.NEQ,
+         TokenTags.LT,
+         TokenTags.GT,
+         TokenTags.LTE,
+         TokenTags.GTE: { return 40; }
+    case TokenTags.LSHIFT,
+         TokenTags.RSHIFT: { return 45; }
+    case TokenTags.PLUS,
+         TokenTags.MINUS: { return 50; }
+    case TokenTags.MULT,
+         TokenTags.DIVIDE,
+         TokenTags.MODULUS: { return 60; }
+    default: { return 0; }
+  }
+}
+
+const TOKEN_TAG_NAMES: string[] = [
+  "NOTOKEN",
+  "EOF",
+  "IDENT",
+  "INTLITERAL",
+  "STRLITERAL",
+  "CHARLITERAL",
+  "TEMPLATELITERAL",
+  "FLOATLITERAL",
+  "LET",
+  "FUNCTION",
+  "CONST",
+  "RETURN",
+  "IF",
+  "ELSE",
+  "WHILE",
+  "FOR",
+  "IN",
+  "TYPE",
+  "IMPORT",
+  "EXPORT",
+  "EXTERN",
+  "FROM",
+  "AS",
+  "LIBRARY",
+  "DOTDOTDOT",
+  "REF",
+  "BREAK",
+  "CONTINUE",
+  "LBRACKET",
+  "RBRACKET",
+  "TRUE",
+  "FALSE",
+  "TRAIT",
+  "IMPLEMENTS",
+  "SELF",
+  "EXTENDS",
+  "VTABLE",
+  "KIND",
+  "APPLIESTO",
+  "REQUIRES",
+  "MUSTCALL",
+  "OWNSBLOCK",
+  "BEFORESCOPEEND",
+  "BINDING",
+  "MUSTNOTESCAPE",
+  "MUSTNOTSHARE",
+  "FORBIDS",
+  "SCOPE",
+  "ACROSSSCOPES",
+  "PARAMETER",
+  "FIELD",
+  "IO",
+  "GLOBALSTATE",
+  "TASK",
+  "WAIT",
+  "JOINED",
+  "POOLED",
+  "PROPAGATES",
+  "CONTAINS",
+  "LAYOUT",
+  "ALIGN",
+  "AMP",
+  "SWITCH",
+  "CASE",
+  "DEFAULT",
+  "ENUM",
+  "VARIANT",
+  "UNION",
+  "NULL",
+  "EQ",
+  "SEMICOLON",
+  "LPAREN",
+  "RPAREN",
+  "DISCARD",
+  "LCURLY",
+  "RCURLY",
+  "COLON",
+  "COMMA",
+  "EQEQ",
+  "NEQ",
+  "LTE",
+  "GTE",
+  "LT",
+  "GT",
+  "ANDAND",
+  "OROR",
+  "PIPE",
+  "LSHIFT",
+  "RSHIFT",
+  "PLUS",
+  "MINUS",
+  "MULT",
+  "DIVIDE",
+  "MODULUS",
+  "DOT",
+  "QUESTION",
+  "DOTDOT",
+  "BANG",
+  "CARET",
+  "TILDE",
+  "PLUSEQ",
+  "MINUSEQ",
+  "MULTEQ",
+  "DIVIDEEQ",
+  "MODULUSEQ",
+  "FATARROW",
+  "AT",
+  "AWAIT",
+];
+
+// Maps a TokenTags case to its source spelling. Used by Display sites
+// (error messages, token dumps); the int-backed enum decays to its ordinal
+// for the array index. Order MUST mirror the TokenTags decl above.
+export function tagName(v: TokenTags): string {
+  return TOKEN_TAG_NAMES[v];
+}

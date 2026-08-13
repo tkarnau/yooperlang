@@ -11,12 +11,12 @@ type Pair {
 }
 
 function main(): int32 {
-    let buf: int32[] = intr.heap_alloc(5);
+    let buf: int32[] = intr.heapAlloc(5);
     buf[0] = 1;
     buf[4] = 5;
-    intr.heap_free(buf);
+    intr.heapFree(buf);
 
-    let pairs: Pair[] = intr.heap_alloc(3);
+    let pairs: Pair[] = intr.heapAlloc(3);
     pairs[0] = { x: 1, y: 2 };
 
     printf(`done\n`);

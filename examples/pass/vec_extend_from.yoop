@@ -1,5 +1,5 @@
 // Yoopstore-papercut #4: bulk-fill a Vec from a raw array in one shot.
-// vec_from_array builds a fresh Vec copy; vec_extend_from appends an array
+// vecFromArray builds a fresh Vec copy; vecExtendFrom appends an array
 // growing the backing buffer at most once instead of O(log n) push reallocs.
 
 import { Vec } from "std/core/vec.yoop";
@@ -13,19 +13,19 @@ extern "C" from "stdio.h" {
 function main(): int32 {
     let src: int32[] = [10, 20, 30];
 
-    // vec_from_array copies the source (cap == len, no spare).
-    disposable a: Vec<int32> = vec.vec_from_array(src);
-    let sum: int32 = vec.vec_get(ref a, 0) + vec.vec_get(ref a, 1) + vec.vec_get(ref a, 2);
+    // vecFromArray copies the source (cap == len, no spare).
+    disposable a: Vec<int32> = vec.vecFromArray(src);
+    let sum: int32 = vec.vecGet(ref a, 0) + vec.vecGet(ref a, 1) + vec.vecGet(ref a, 2);
     printf(`from_array len=${a.len} cap=${a.cap} sum=${sum}\n`);
 
-    // vec_extend_from grows once (3 -> 5) and appends.
+    // vecExtendFrom grows once (3 -> 5) and appends.
     let more: int32[] = [40, 50];
-    vec.vec_extend_from(ref a, more);
-    printf(`extend len=${a.len} cap=${a.cap} last=${vec.vec_get(ref a, 4)}\n`);
+    vec.vecExtendFrom(ref a, more);
+    printf(`extend len=${a.len} cap=${a.cap} last=${vec.vecGet(ref a, 4)}\n`);
 
     // Extending an empty Vec allocates exactly src.len in a single grow.
-    disposable e: Vec<int32> = vec.vec_new(0);
-    vec.vec_extend_from(ref e, src);
-    printf(`empty len=${e.len} cap=${e.cap} first=${vec.vec_get(ref e, 0)}\n`);
+    disposable e: Vec<int32> = vec.vecNew(0);
+    vec.vecExtendFrom(ref e, src);
+    printf(`empty len=${e.len} cap=${e.cap} first=${vec.vecGet(ref e, 0)}\n`);
     return 0;
 }

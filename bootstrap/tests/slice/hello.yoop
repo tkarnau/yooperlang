@@ -1,0 +1,6 @@
+// String literals: the parser decodes escapes into the arena's string pool and
+// codegen emits a NUL-terminated private constant.
+function main(): int {
+  printf("hello from the bootstrap compiler\n");
+  return 0;
+}

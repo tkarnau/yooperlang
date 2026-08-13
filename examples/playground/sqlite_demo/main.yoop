@@ -120,7 +120,7 @@ function run(): Result<int32, string> {
 
     // Start from a clean file so repeated runs report the same numbers.
     if (fs.exists(DB_PATH)) {
-        let _d: string = fs.delete_file(DB_PATH);
+        let _d: string = fs.deleteFile(DB_PATH);
     }
 
     disposable db: Db = sqlite.open(DB_PATH)?;
@@ -161,7 +161,7 @@ function run(): Result<int32, string> {
     // scope end anyway, but the disposer is idempotent so doing it early is
     // fine and keeps the delete from racing an open handle.
     Disposable.dispose(ref db);
-    let _cleanup: string = fs.delete_file(DB_PATH);
+    let _cleanup: string = fs.deleteFile(DB_PATH);
     return Result.Ok { value: 0 };
 }
 

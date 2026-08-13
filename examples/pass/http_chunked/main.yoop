@@ -1,0 +1,290 @@
+// Chunked transfer decoding, driven from a RAW TCP peer so the framing is
+// controlled byte for byte.
+//
+// A real HTTP server cannot produce the cases that matter here - a chunk split
+// across two packets, a bad hex size, a missing CRLF after the data - so the
+// server half of this fixture is a plain socket that writes canned bytes. The
+// client half is the real `std/http` client, going through the real decoder.
+//
+// plans/yooperdoom-takeaways.md 2 (HTTP): Go's HTTP server chunks anything it
+// cannot size up front, which means ollama and most local model runners. Before
+// this, `readHeaderLines` returned an honest 501 and the first full-size reply
+// from the thing you most wanted to talk to never arrived.
+
+import { disposable, Disposable } from "../../../std/core/kinds.yoop";
+import { Result } from "../../../std/core/types.yoop";
+
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as bytes, { Bytes } from "std/core/bytes.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as str from "std/core/strings.yoop";
+import { Readable, Writable } from "std/core/traits.yoop";
+import * as tcp, { ListenResult, AcceptOutcome, TcpStream } from "std/net";
+import * as client, { Client, ClientResponse } from "std/http";
+import * as http, { Handler, HandleOutcome, Dispatcher } from "std/http";
+import * as types, { Request, Response } from "std/http";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "yoop_runtime" {
+    function yoop_sleep_ms(ms: uint64): int32;
+    // Line-buffer stdout. Without it a hang shows as NO output at all when
+    // stdout is a pipe, which hides where the program actually stopped.
+    function yoop_stdout_linebuf(): void;
+}
+
+let boundPort: int32 = 0;
+// Second listener: the REAL std/http server, for the receiving direction.
+let serverPort: int32 = 0;
+
+// A chunked POST, written by hand so the request framing is controlled the
+// same way the responses above are. Sizes are hex: 7 + 6 = 13 bytes.
+const CHUNKED_POST_HEAD: string = "POST /echo HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n";
+const CHUNKED_POST_BODY: string = "7\r\nchunked\r\n6\r\n-body!\r\n0\r\n\r\n";
+
+// The canned replies, in the order the connections arrive. Each is raw wire
+// bytes: the client sees exactly these, split however the writes below split
+// them.
+//
+// Case 1: the ordinary shape. Two data chunks and an empty trailer section.
+const REPLY_SIMPLE: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n";
+
+// Case 2: chunk extensions (legal, ignored), an uppercase hex size, and a
+// trailer field - all things a real peer sends and a naive decoder trips on.
+// 1A is 26 bytes.
+const REPLY_EXTRAS: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n1A;name=value;flag\r\nabcdefghijklmnopqrstuvwxyz\r\n0\r\nX-Checksum: deadbeef\r\n\r\n";
+
+// Case 3: a body whose total exceeds one read, sent as many small chunks. This
+// is the case that exercises the INCREMENTAL path - the decoder has to resume
+// mid-body without re-walking or double-copying.
+const REPLY_MANY_HEAD: string =
+    "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n";
+
+// Case 4: a size that is not hexadecimal.
+const REPLY_BAD_SIZE: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\nzz\r\nhello\r\n0\r\n\r\n";
+
+// Case 5: chunk data not followed by CRLF. The declared size is 5 but the
+// bytes after it are "helloXX" - a decoder that trusts the size and skips
+// ahead reads the wrong framing from here on.
+const REPLY_NO_CRLF: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhelloXX0\r\n\r\n";
+
+// Case 6: both framings at once. RFC 9112 says reject - this is the exact
+// ambiguity request smuggling is built on.
+const REPLY_BOTH: string = "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nContent-Length: 5\r\n\r\n5\r\nhello\r\n0\r\n\r\n";
+
+// Read the request head off `s` and discard it. The fixture's peer does not
+// care what was asked for; it only has to consume the request so the client's
+// write completes.
+async drainRequest(ref s: TcpStream): void {
+    disposable buf: Vec<uint8> = vec.vecNew(1024);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(1024), 1024);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
+    while (true) {
+        switch (await Readable.read(ref s, ref window)) {
+            case Result.Ok { value: n }: {
+                if (n <= 0) { return; }
+                vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, usize(n)));
+                let view: uint8[] = vec.vecAsArray(ref buf);
+                if (bytes.bytesIndexOfSeq(view, ['\r', '\n', '\r', '\n']) != view.len) {
+                    return;
+                }
+            }
+            case Result.Err { error: _e }: { return; }
+        }
+    }
+}
+
+async writeStr(ref s: TcpStream, text: string): void {
+    let out: uint8[] = intr.stringAsBytes(text);
+    switch (await Writable.write(ref s, ref out)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: _e }: { }
+    }
+}
+
+// Serve one connection with a canned reply written in ONE write.
+//
+// `tcpAcceptAsync`, not `tcpAccept`: the blocking accept HOLDS A WORKER while
+// it waits, and this fixture runs three tasks against a pool that may have
+// fewer threads than that. With the blocking form the raw peer and the real
+// server sit on two workers doing nothing and the client never gets one - the
+// whole program hangs with no output rather than failing.
+async serveCanned(ref l: tcp.TcpListener, reply: string): void {
+    switch (await tcp.tcpAcceptAsync(ref l)) {
+        case AcceptOutcome.Accepted { stream: st, peerHost: _h, peerPort: _p }: {
+            disposable s: TcpStream = st;
+            await drainRequest(ref s);
+            await writeStr(ref s, reply);
+        }
+        case AcceptOutcome.TimedOut: { }
+        case AcceptOutcome.Cancelled: { }
+        case AcceptOutcome.Err { error: _e }: { }
+    }
+}
+
+// Serve one connection with a body split across many writes and many chunks,
+// with a pause between them so the client genuinely has to resume a partial
+// body rather than seeing it all in one read.
+async serveMany(ref l: tcp.TcpListener, count: int32): void {
+    switch (await tcp.tcpAcceptAsync(ref l)) {
+        case AcceptOutcome.Accepted { stream: st, peerHost: _h, peerPort: _p }: {
+            disposable s: TcpStream = st;
+            await drainRequest(ref s);
+            await writeStr(ref s, REPLY_MANY_HEAD);
+            for (let i: int32 = 0; i < count; i += 1) {
+                // A fixed 4-byte payload per chunk, so the expected total is
+                // easy to state: count * 4.
+                await writeStr(ref s, "4\r\nabcd\r\n");
+            }
+            await writeStr(ref s, "0\r\n\r\n");
+        }
+        case AcceptOutcome.TimedOut: { }
+        case AcceptOutcome.Cancelled: { }
+        case AcceptOutcome.Err { error: _e }: { }
+    }
+}
+
+task serverTask(): int32 {
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
+    if (lr.error.len > 0) {
+        printf(`server bind err: ${lr.error}\n`);
+        return 1;
+    }
+    boundPort = lr.listener.boundPort;
+
+    await serveCanned(ref lr.listener, REPLY_SIMPLE);
+    await serveCanned(ref lr.listener, REPLY_EXTRAS);
+    await serveMany(ref lr.listener, 40);
+    await serveCanned(ref lr.listener, REPLY_BAD_SIZE);
+    await serveCanned(ref lr.listener, REPLY_NO_CRLF);
+    await serveCanned(ref lr.listener, REPLY_BOTH);
+    return 0;
+}
+
+// The receiving direction: our real server, decoding a chunked request body.
+type EchoHandler implements Handler {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+        types.respondText(ref resp, types.ok(), `got:${types.bodyText(ref req)}`);
+        return HandleOutcome.Ok;
+    }
+}
+
+task httpServerTask(): int32 {
+    let disposable lr: ListenResult = tcp.tcpListen("127.0.0.1", 0, 32);
+    if (lr.error.len > 0) {
+        printf(`http server bind err: ${lr.error}\n`);
+        return 1;
+    }
+    serverPort = lr.listener.boundPort;
+    let h: EchoHandler = { };
+    let d: Dispatcher = Dispatcher.from(ref h);
+    switch (await http.serveDefault(ref lr.listener, ref d, 1)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { printf(`http server err=${e}\n`); }
+    }
+    return 0;
+}
+
+// Send a hand-framed chunked POST as a raw socket and print what comes back.
+// The head and the body go out in separate writes so the server has to resume
+// a partially-arrived body rather than seeing the whole thing at once.
+async postChunked(): void {
+    disposable cr: tcp.ConnectResult = tcp.tcpConnect("127.0.0.1", serverPort);
+    if (cr.error.len > 0) {
+        printf(`server-side connect err: ${cr.error}\n`);
+        return;
+    }
+    await writeStr(ref cr.stream, CHUNKED_POST_HEAD);
+    let _s: int32 = yoop_sleep_ms(5);
+    await writeStr(ref cr.stream, CHUNKED_POST_BODY);
+
+    disposable buf: Vec<uint8> = vec.vecNew(1024);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(1024), 1024);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
+    // A `break` inside a switch ARM targets the switch's end, not the loop's
+    // (CLAUDE.md records this under alwaysDiverges/hasEscapingBreak), so the
+    // exit condition rides a flag. Written with `break` this loop spins
+    // forever after EOF - which is exactly what it did.
+    let reading: bool = true;
+    while (reading) {
+        switch (await Readable.read(ref cr.stream, ref window)) {
+            case Result.Ok { value: n }: {
+                if (n <= 0) {
+                    reading = false;
+                } else {
+                    vec.vecExtendFrom(ref buf, intr.arraySlice(window, 0, usize(n)));
+                }
+            }
+            case Result.Err { error: _e }: { reading = false; }
+        }
+    }
+    let text: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+    let at: usize = str.stringIndexOf(text, "got:");
+    if (at < text.len) {
+        printf(`request ok  "${str.sliceFrom(text, at)}"\n`);
+    } else {
+        printf(`request err no body in reply\n`);
+    }
+}
+
+// One task for the whole client half: `wait` blocks a thread and is rejected
+// inside a task body, so everything under here is `async` and awaits.
+async exercise(): int32 {
+    let c: Client = client.clientNew();
+    let url: string = `http://127.0.0.1:${boundPort}/`;
+
+    await fetchAndReport(ref c, url, "simple ");
+    await fetchAndReport(ref c, url, "extras ");
+    await fetchAndReport(ref c, url, "many   ");
+    await fetchAndReport(ref c, url, "badsize");
+    await fetchAndReport(ref c, url, "nocrlf ");
+    await fetchAndReport(ref c, url, "both   ");
+
+    // ...and the other direction.
+    await postChunked();
+    return 0;
+}
+
+task clientTask(): int32 {
+    return await exercise();
+}
+
+// Deliberately reports the LENGTH for the large case rather than the body:
+// the point there is that every chunk was decoded exactly once.
+async fetchAndReport(ref c: Client, url: string, label: string): void {
+    switch (await clientFetch(ref c, url)) {
+        case Result.Ok { value: text }: { printf(`${label} ok  ${text}\n`); }
+        case Result.Err { error: e }: { printf(`${label} err ${e}\n`); }
+    }
+}
+
+async clientFetch(ref c: Client, url: string): Result<string, types.HttpError> {
+    switch (await client.get(ref c, url)) {
+        case Result.Ok { value: r }: {
+            disposable resp: ClientResponse = r;
+            let body: uint8[] = client.responseBytes(ref resp);
+            // Long bodies are summarized; short ones are printed, since the
+            // exact bytes are the assertion for those.
+            if (body.len > 32) {
+                return Result.Ok { value: `len=${body.len}` };
+            }
+            return Result.Ok { value: `"${client.responseText(ref resp)}"` };
+        }
+        case Result.Err { error: e }: { return Result.Err { error: e }; }
+    }
+}
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+    joined server = serverTask();
+    joined httpServer = httpServerTask();
+    // Give the listener time to bind and publish its port.
+    let _slept: int32 = yoop_sleep_ms(120);
+
+    pooled cl = clientTask();
+    let _c: int32 = wait cl;
+
+    printf(`done\n`);
+    return 0;
+}

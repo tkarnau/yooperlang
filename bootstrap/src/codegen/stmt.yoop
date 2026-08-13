@@ -1,0 +1,144 @@
+module codegen;
+
+// Statements: emit the instructions one statement implies.
+//
+// Same convention as expr.yoop - "" on success, an internal-error message
+// otherwise, and no text assembly in this file.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+
+// Walks a BLOCK's statement list.
+//
+// `terminated` comes back true when the block definitely ends in a terminator on
+// every path - a `ret`, but also a `break` or `continue`, which is why it is not
+// called "returned". That is what tells the caller whether a `br` is still owed:
+// LLVM allows exactly one terminator per block and rejects a second, so getting
+// this wrong produces invalid IR rather than a wrong answer.
+export function emitBlock(
+  ref cx: Cx,
+  blockId: NodeId,
+  retTy: string,
+  ref terminated: bool,
+  ref err: string
+): void {
+  terminated = false;
+  const block = nodeAt(cx.ast, blockId);
+  if (block.childA == 0) {
+    return;
+  }
+  const list = nodeAt(cx.ast, block.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const stmtId = childAt(cx.ast, list, i);
+    let stmtTerminated = false;
+    err = emitStatement(ref cx, stmtId, retTy, ref stmtTerminated);
+    if (err.len > 0) {
+      return;
+    }
+    if (stmtTerminated) {
+      // Anything after a terminator is unreachable; emitting it would put a
+      // second terminator in this block.
+      terminated = true;
+      return;
+    }
+    i += 1;
+  }
+}
+
+export function emitStatement(
+  ref cx: Cx,
+  stmtId: NodeId,
+  retTy: string,
+  ref terminated: bool
+): string {
+  terminated = false;
+  const stmt = nodeAt(cx.ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.RETURN_STATEMENT: {
+      terminated = true;
+      return emitReturn(ref cx, stmt, retTy);
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT: {
+      // The value is discarded; the instructions still have to run.
+      let ignored: Operand = Operand.None;
+      return emitExpr(ref cx, stmt.childA, ref ignored);
+    }
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      return emitVarDecl(ref cx, stmt, stmtId);
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      return emitIf(ref cx, stmt, retTy, ref terminated);
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      // A loop never counts as terminating: the condition may be false on the
+      // first test, so control can always reach the statement after it.
+      return emitWhile(ref cx, stmt, retTy);
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      return emitFor(ref cx, stmt, stmtId, retTy);
+    }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      return emitForIn(ref cx, stmt, stmtId, retTy);
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      return emitSwitch(ref cx, stmt, retTy, ref terminated);
+    }
+    case ASTNodeKind.BREAK_STATEMENT: {
+      terminated = true;
+      if (!insideLoop(ref cx)) {
+        return internalError("break outside a loop reached", "codegen");
+      }
+      emitBr(ref cx, innermostLoop(ref cx).breakTarget);
+      return "";
+    }
+    case ASTNodeKind.CONTINUE_STATEMENT: {
+      terminated = true;
+      if (!insideLoop(ref cx)) {
+        return internalError("continue outside a loop reached", "codegen");
+      }
+      emitBr(ref cx, innermostLoop(ref cx).continueTarget);
+      return "";
+    }
+    default: {
+      return internalError("codegen cannot emit statement", kindName(stmt.kind));
+    }
+  }
+}
+
+function emitReturn(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+  if (stmt.childA == 0) {
+    emitRetVoid(ref cx);
+    return "";
+  }
+  let value: Operand = Operand.None;
+  const err = emitExpr(ref cx, stmt.childA, ref value);
+  if (err.len > 0) {
+    return err;
+  }
+  emitRet(ref cx, retTy, value);
+  return "";
+}
+
+// `let x: T = expr;` is a stack slot plus a store. Without an initializer it is
+// just the slot - reading it before assignment is typecheck's problem.
+function emitVarDecl(ref cx: Cx, stmt: ASTNode, stmtId: NodeId): string {
+  const ty = typeOf(ref cx, stmtId);
+  const hasInit = stmt.childB != 0;
+
+  let value: Operand = Operand.None;
+  if (hasInit) {
+    // Lowered BEFORE the slot is recorded, so `let x = x;` cannot see itself.
+    const err = emitExpr(ref cx, stmt.childB, ref value);
+    if (err.len > 0) {
+      return err;
+    }
+  }
+
+  const slotInfo = declareLocal(ref cx, stmt.name, ty);
+  if (hasInit) {
+    emitStore(ref cx, ty, value, stmt.name, slotInfo.id);
+  }
+  return "";
+}

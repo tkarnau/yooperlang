@@ -1,0 +1,196 @@
+// std/encoding/base64.yoop - RFC 4648 base64, standard and URL-safe.
+//
+// Pure yoop, no FFI. Nothing about API auth or binary payloads works without
+// this: HTTP Basic is `base64(user:pass)`, a JWT is three base64url segments,
+// and every JSON API that carries bytes carries them base64-encoded.
+//
+//     import * as b64 from "std/encoding/base64.yoop";
+//
+//     disposable enc: Vec<uint8> = vec.vecNew(64);
+//     b64.encode(ref enc, intr.stringAsBytes("hello"));   // aGVsbG8=
+//
+//     disposable dec: Vec<uint8> = vec.vecNew(64);
+//     switch (b64.decode(ref dec, "aGVsbG8=")) { ... }
+//
+// The encoders APPEND to a caller-owned `Vec<uint8>` rather than returning a
+// fresh buffer. That is the shape that composes: building a header value means
+// pushing a prefix, encoding into the same vector, and taking one view at the
+// end - rather than allocating a string per step and freeing each one. It also
+// means the caller decides the allocator, so encoding inside an arena scope
+// costs the arena and nothing else.
+//
+// Two alphabets, one implementation. The URL-safe variant (RFC 4648 section 5)
+// swaps `+/` for `-_` and is what appears in JWTs and query strings; it is a
+// different alphabet, not a different algorithm, so it is a parameter rather
+// than a copy of the code.
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
+import * as vec, { Vec } from "../core/vec.yoop";
+import * as intr from "../core/intrinsics.yoop";
+
+const STD_ALPHABET: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+const URL_ALPHABET: string = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+
+const PAD: uint8 = 61;   // '='
+
+// ----- encoding -----------------------------------------------------------
+
+// Append the base64 of `src` to `out`. Standard alphabet, padded - what
+// `Authorization: Basic` and most APIs expect.
+export function encode(ref out: Vec<uint8>, src: uint8[]): void {
+    encodeWith(ref out, src, STD_ALPHABET, true);
+}
+
+// URL-safe alphabet (`-_` for `+/`), unpadded. This is the JWT / query-string
+// spelling: padding is `=`, which has to be percent-encoded in a URL, so the
+// URL-safe variant conventionally drops it. Decoding does not require it.
+export function encodeUrl(ref out: Vec<uint8>, src: uint8[]): void {
+    encodeWith(ref out, src, URL_ALPHABET, false);
+}
+
+// The one encoder. `alphabet` must be 64 bytes; `pad` decides whether the
+// final group is filled out to four characters with `=`.
+export function encodeWith(
+    ref out: Vec<uint8>,
+    src: uint8[],
+    alphabet: string,
+    pad: bool,
+): void {
+    let tbl: uint8[] = intr.stringAsBytes(alphabet);
+    if (tbl.len < 64) { return; }
+
+    // Whole 3-byte groups: 24 bits in, four 6-bit indices out.
+    let i: usize = 0;
+    while (i + 3 <= src.len) {
+        let n: uint32 = (uint32(src[i]) << 16) | (uint32(src[i + 1]) << 8) | uint32(src[i + 2]);
+        vec.vecPush(ref out, tbl[usize((n >> 18) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 12) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 6) & 63)]);
+        vec.vecPush(ref out, tbl[usize(n & 63)]);
+        i = i + 3;
+    }
+
+    // The tail: one or two bytes left, zero-filled to 24 bits. Only the
+    // leading 2 or 3 indices carry information; the rest is padding.
+    let left: usize = src.len - i;
+    if (left == 1) {
+        let n: uint32 = uint32(src[i]) << 16;
+        vec.vecPush(ref out, tbl[usize((n >> 18) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 12) & 63)]);
+        if (pad) {
+            vec.vecPush(ref out, PAD);
+            vec.vecPush(ref out, PAD);
+        }
+    } else if (left == 2) {
+        let n: uint32 = (uint32(src[i]) << 16) | (uint32(src[i + 1]) << 8);
+        vec.vecPush(ref out, tbl[usize((n >> 18) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 12) & 63)]);
+        vec.vecPush(ref out, tbl[usize((n >> 6) & 63)]);
+        if (pad) { vec.vecPush(ref out, PAD); }
+    }
+}
+
+// Bytes an encode of `n` input bytes will append, for sizing a Vec up front.
+// Exact, so `vecNew(encodedLen(n))` never grows.
+export function encodedLen(srcLen: usize, pad: bool): usize {
+    if (pad) { return ((srcLen + 2) / 3) * 4; }
+    let whole: usize = (srcLen / 3) * 4;
+    let left: usize = srcLen % 3;
+    if (left == 1) { return whole + 2; }
+    if (left == 2) { return whole + 3; }
+    return whole;
+}
+
+// ----- decoding -----------------------------------------------------------
+
+// Decode `src` into `out`, accepting BOTH alphabets and padding either way.
+//
+// Being permissive on input and strict on output is the right split here: a
+// decoder that rejects `-_` cannot read a JWT, and one that demands padding
+// cannot read the half of the world that omits it. What it does NOT accept is
+// a character outside both alphabets, or a length that cannot be a base64
+// message - those are corruption, and a decoder that silently skips them turns
+// a truncated download into wrong bytes.
+//
+// Whitespace is skipped: MIME base64 is line-wrapped at 76 characters, and a
+// value pasted out of a config file usually arrives with a newline on it.
+//
+// On Err, `out` may hold a partial decode. Callers that care should decode
+// into a fresh Vec, or clear it on the error path.
+export function decode(ref out: Vec<uint8>, src: string): Result<usize, string> {
+    return decodeBytes(ref out, intr.stringAsBytes(src));
+}
+
+export function decodeBytes(ref out: Vec<uint8>, src: uint8[]): Result<usize, string> {
+    let written: usize = 0;
+    // The 24-bit accumulator and how many 6-bit groups are in it.
+    let acc: uint32 = 0;
+    let have: int32 = 0;
+    let sawPad: bool = false;
+
+    for (let i: usize = 0; i < src.len; i += 1) {
+        let c: uint8 = src[i];
+        if (isSkippable(c)) { continue; }
+        if (c == PAD) {
+            sawPad = true;
+            continue;
+        }
+        // Padding is terminal: anything after it is a second message glued on,
+        // which is corruption rather than something to quietly concatenate.
+        if (sawPad) {
+            return Result.Err { error: "base64: data after padding" };
+        }
+
+        let v: int32 = sextet(c);
+        if (v < 0) {
+            return Result.Err { error: "base64: invalid character" };
+        }
+        acc = (acc << 6) | uint32(v);
+        have = have + 1;
+
+        if (have == 4) {
+            vec.vecPush(ref out, uint8((acc >> 16) & 255));
+            vec.vecPush(ref out, uint8((acc >> 8) & 255));
+            vec.vecPush(ref out, uint8(acc & 255));
+            written = written + 3;
+            acc = 0;
+            have = 0;
+        }
+    }
+
+    // A leftover group. Three sextets carry two bytes, two carry one; a single
+    // leftover sextet carries nothing and cannot have come from an encoder.
+    if (have == 1) {
+        return Result.Err { error: "base64: truncated input" };
+    }
+    if (have == 2) {
+        vec.vecPush(ref out, uint8((acc >> 4) & 255));
+        written = written + 1;
+    } else if (have == 3) {
+        vec.vecPush(ref out, uint8((acc >> 10) & 255));
+        vec.vecPush(ref out, uint8((acc >> 2) & 255));
+        written = written + 2;
+    }
+
+    return Result.Ok { value: written };
+}
+
+// Space, tab, CR, LF. MIME wraps at 76 columns and pasted values carry
+// newlines, so ignoring these is what makes the decoder usable on real input.
+function isSkippable(c: uint8): bool {
+    return c == 32 || c == 9 || c == 13 || c == 10;
+}
+
+// The 6-bit value of one base64 character, or -1. Accepts both alphabets:
+// `-` and `_` decode the same as `+` and `/`, which is what lets one decoder
+// read both standard and URL-safe input. Computed rather than table-driven so
+// there is no second table to keep in sync with the two above.
+function sextet(c: uint8): int32 {
+    if (c >= 65 && c <= 90)  { return int32(c) - 65; }        // A-Z -> 0..25
+    if (c >= 97 && c <= 122) { return int32(c) - 97 + 26; }   // a-z -> 26..51
+    if (c >= 48 && c <= 57)  { return int32(c) - 48 + 52; }   // 0-9 -> 52..61
+    if (c == 43 || c == 45)  { return 62; }                   // '+' or '-'
+    if (c == 47 || c == 95)  { return 63; }                   // '/' or '_'
+    return -1;
+}

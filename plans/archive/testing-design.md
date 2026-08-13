@@ -1,6 +1,6 @@
 # Testing in Yooperlang - design exploration (SUPERSEDED)
 
-Status: ARCHIVED. Superseded by [../testing-via-kinds.md](../testing-via-kinds.md),
+Status: ARCHIVED. Superseded by [../testing-via-kinds.md](testing-via-kinds.md),
 which takes the opposite direction: a test harness written in userland kinds and
 traits, with the compiler adding only general-purpose primitives. Kept for the
 pros-and-cons trail on the attribute-driven approach, and because its reporting
@@ -36,25 +36,25 @@ code itself.
 This is most of the reason testing is cheap to add.
 
 - An `@`-attribute system. Parser builds ATTRIBUTE nodes in `parseAttribute`
-  ([../src/jsyooparser/parser.js](../src/jsyooparser/parser.js) around line 839).
+  ([../src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) around line 839).
   An attribute is `@name(args?) target` where target is one of: a `{ ... }`
   block, a `let`/`const` decl, or a bare `;`. Args are a parsed expression list.
 - A registry keyed by attribute name with per-phase handlers (parse / typecheck
-  / comptime / codegen): [../src/jsyoopattributes/registry.js](../src/jsyoopattributes/registry.js).
+  / comptime / codegen): [../src/jsyoopattributes/registry.js](../../src/jsyoopattributes/registry.js).
   Only `@precompile` is registered today. The registry doc comments explicitly
   name `@test` / `@expect` / `@verify` / `@assert` as the intended next
   consumers, and the `codegenPhase` hook exists precisely for attributes that
   "lower to runtime code."
 - An attribute pass that walks every module's AST (recursively, into bodies)
   collecting ATTRIBUTE nodes and dispatching their handlers:
-  [../src/jsyoopattributes/pass.js](../src/jsyoopattributes/pass.js).
+  [../src/jsyoopattributes/pass.js](../../src/jsyoopattributes/pass.js).
 - A comptime bytecode interpreter that can evaluate pure code at build time:
-  [../src/jsyoopinterp/](../src/jsyoopinterp/).
+  [../src/jsyoopinterp/](../../src/jsyoopinterp/).
 - A driver entry using `parseArgs`, already carrying mode-ish flags like
-  `--list-attributes`, `--dump-ast`: [../src/yoopiler.js](../src/yoopiler.js).
+  `--list-attributes`, `--dump-ast`: [../src/yoopiler.js](../../src/yoopiler.js).
 - A module-graph loader that walks imports from an entry file:
-  [../src/jsyoopdriver/moduleGraph.js](../src/jsyoopdriver/moduleGraph.js).
-- Prior intent is written down: [archive/phase-11-comptime.md](archive/phase-11-comptime.md)
+  [../src/jsyoopdriver/moduleGraph.js](../../src/jsyoopdriver/moduleGraph.js).
+- Prior intent is written down: [archive/phase-11-comptime.md](phase-11-comptime.md)
   lines 105-119 reserve `@test` / `@expect` / `@verify` as registry entries,
   and the old roadmap (archive/roadmap.md) sketches a pass/fail example-walker
   as the original regression idea.
@@ -71,7 +71,7 @@ on it or deliberately ignore it:
 
 - NO keywords are reserved for testing. `test`, `expect`, `assert`, `verify`,
   `bench` are all ordinary identifiers - none appear in the lexer keyword table
-  (`keywordTagList` in [../src/jsyooplexer/lexer.js](../src/jsyooplexer/lexer.js)).
+  (`keywordTagList` in [../src/jsyooplexer/lexer.js](../../src/jsyooplexer/lexer.js)).
   This matters: attribute names live in the `@` registry namespace, separate
   from the identifier namespace, so adding `@test` does NOT reserve `test` as a
   word - user code can still have a variable or function named `test`. This is a
@@ -79,17 +79,17 @@ on it or deliberately ignore it:
   against the naming-convention approach (Option C), which DOES squat on the
   identifier namespace.
 - Only `@precompile` is actually registered
-  ([../src/jsyoopattributes/registry.js](../src/jsyoopattributes/registry.js)
+  ([../src/jsyoopattributes/registry.js](../../src/jsyoopattributes/registry.js)
   line 58). Nothing else is implemented.
 - `@test` / `@expect` / `@verify` / `@assert` / `@bench` / `@deprecated` are
   carved out only as DOCUMENTATION reservations, not code and not grammar:
   - registry.js doc comments name `@test`/`@expect`/`@verify`/`@assert` as the
     intended next consumers and shape the handler contract around them.
   - a lexer.js comment lists `@test`/`@verify` as example attribute names.
-  - [archive/phase-11-comptime.md](archive/phase-11-comptime.md) lines 105-119
+  - [archive/phase-11-comptime.md](phase-11-comptime.md) lines 105-119
     reserve `@test`/`@expect`/`@verify`/`@deprecated` as "registry shape only,"
     explicitly deferring semantics.
-  - one mention in [completed/phase-10-d-debug-log.md](completed/phase-10-d-debug-log.md).
+  - one mention in [completed/phase-10-d-debug-log.md](../completed/phase-10-d-debug-log.md).
   None of these pin behavior. They reserve the names and the integration points;
   every semantic decision in this doc is still open.
 - No `std/test.yoop` (or any std testing module) exists yet.
@@ -299,7 +299,7 @@ exit code. Built and run through the normal pipeline.
 ### Option B - comptime tests (build-time, no binary)
 
 For tests whose bodies are comptime-evaluable (pure functions, no I/O/alloc),
-run them in the existing interpreter ([../src/jsyoopinterp/interp.js](../src/jsyoopinterp/interp.js))
+run them in the existing interpreter ([../src/jsyoopinterp/interp.js](../../src/jsyoopinterp/interp.js))
 and fail the BUILD directly. No test binary at all.
 
 - Pros: instant feedback, folded into compilation. Leverages a system that
@@ -328,7 +328,7 @@ later refinement once the boundaries are understood.
 ## Decision 5: CLI surface
 
 The driver already parses flags with `parseArgs` in
-[../src/yoopiler.js](../src/yoopiler.js).
+[../src/yoopiler.js](../../src/yoopiler.js).
 
 ### Option A - subcommand: `yoopiler test <entry-or-path>`
 
@@ -412,7 +412,7 @@ In rough order, each independently shippable:
    `codegenPhase` that lowers `@expect` to the early-return-and-record pattern
    (Option 3A).
 2. Add `__yoopTestFail` + a pass/fail counter to the runtime
-   ([../runtime/](../runtime/)).
+   ([../runtime/](../../runtime/)).
 3. Add `--test` to the driver: load graph incl. `*.test.yoop`, collect `@test`
    nodes, synthesize a runner `main`, compile + run, TAP output, exit code
    (Options 4A, 5B, 7).

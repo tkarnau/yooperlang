@@ -20,7 +20,7 @@ type Results implements (Collects, Disposable) propagates<disposable> {
   lines: Vec<string>,
   printClaimed: bool,
   function record(ref self, line: string): void {
-    vec.vec_push(ref self.lines, line);
+    vec.vecPush(ref self.lines, line);
   }
   function report(ref self): void {
     printf(`${self}\n`);
@@ -34,7 +34,7 @@ type Results implements (Collects, Disposable) propagates<disposable> {
       return true;
     }
 
-    vec.vec_push(ref self.lines, suiteName);
+    vec.vecPush(ref self.lines, suiteName);
     return false;
   }
 }
@@ -134,7 +134,7 @@ function strangeAdd(a: int, b: int): int {
 }
 
 function main(): int {
-  disposable results: Results = { lines: vec.vec_new(8), printClaimed: false };
+  disposable results: Results = { lines: vec.vecNew(8), printClaimed: false };
   let sink: Recorder = Recorder.from(ref results);
 
   suite describeSuite("my tests", sink) {

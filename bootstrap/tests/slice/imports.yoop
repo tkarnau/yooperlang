@@ -1,0 +1,28 @@
+// Imports across three modules: the entry, ./lib/mathx.yoop, and the
+// ./lib/counter.yoop that BOTH of them import.
+//
+// What each line is for:
+//   `scale as times`   an aliased specifier binds the local name, not the export
+//   `Point`            an imported TYPE, used as an annotation and a literal
+//   `tag` twice        the same name declared here and imported; only mangling
+//                      keeps them apart, and they answer differently
+//   `bump`             imported by two modules at once (the diamond)
+
+import { add, scale as times, Point, tag as mathTag, bumpedTwice } from "./lib/mathx.yoop";
+import { bump } from "./lib/counter.yoop";
+
+function tag(): int {
+  return 7;
+}
+
+function main(): int {
+  printf("add=%d\n", add(2, 3));
+  printf("times=%d\n", times(4, 5));
+
+  const p: Point = { x: 7, y: 9 };
+  printf("point=%d %d\n", p.x, p.y);
+
+  printf("tags=%d %d\n", tag(), mathTag());
+  printf("bump=%d %d\n", bump(1), bumpedTwice(1));
+  return 0;
+}

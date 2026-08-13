@@ -1,0 +1,5 @@
+area=12
+origin=0 0
+scaled=9 12 area=108
+doubled=6 8 area=48
+exit=0

@@ -1,0 +1,3 @@
+module selfy;
+
+export function b(): int { return 2; }

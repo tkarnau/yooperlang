@@ -87,7 +87,7 @@ export variant JsonValue implements Disposable {
                     i = i + 1;
                 }
                 if (arr.len > 0) {
-                    intr.heap_free(arr);
+                    intr.heapFree(arr);
                 }
             }
             case JsonValue.Object { members: ms }: {
@@ -98,7 +98,7 @@ export variant JsonValue implements Disposable {
                     i = i + 1;
                 }
                 if (ms.len > 0) {
-                    intr.heap_free(ms);
+                    intr.heapFree(ms);
                 }
             }
             default: {} // all other cases are no-op
@@ -130,7 +130,7 @@ type Parser {
 // and doc.root may hold a partial tree (which dispose still cleans up).
 export function parse(input: string): JsonDoc propagates<disposable> {
     let p: Parser = {
-        bytes: intr.string_as_bytes(input),
+        bytes: intr.stringAsBytes(input),
         pos:   0,
         error: "",
     };
@@ -178,7 +178,7 @@ function parse_value(ref p: Parser): JsonValue {
 
 // Match an exact ASCII keyword (true / false / null) starting at p.pos.
 function parse_literal(ref p: Parser, kw: string, on_match: JsonValue): JsonValue {
-    let kw_bytes: uint8[] = intr.string_as_bytes(kw);
+    let kw_bytes: uint8[] = intr.stringAsBytes(kw);
     if (p.pos + kw_bytes.len > p.bytes.len) {
         if (p.error.len == 0) { p.error = "json: unexpected end of input in literal"; }
         return JsonValue.Null;
@@ -251,16 +251,16 @@ function parse_string(ref p: Parser): JsonValue {
         if (p.error.len == 0) { p.error = "json: unterminated string"; }
         return JsonValue.Null;
     }
-    let slice: uint8[] = intr.array_slice(p.bytes, start, p.pos);
+    let slice: uint8[] = intr.arraySlice(p.bytes, start, p.pos);
     p.pos = p.pos + 1;          // consume closing "
-    return JsonValue.String { value: intr.string_from_bytes_unchecked(slice) };
+    return JsonValue.String { value: intr.stringFromBytesUnchecked(slice) };
 }
 
 // Parse `[ value, value, ... ]`. Single-exit pattern so the temporary Vec
 // is always disposed exactly once at the bottom.
 function parse_array(ref p: Parser): JsonValue {
     p.pos = p.pos + 1;          // consume [
-    let items: Vec<JsonValue> = vec.vec_new(4);
+    let items: Vec<JsonValue> = vec.vecNew(4);
     skip_ws(ref p);
     let done: bool = false;
     if (p.pos < p.bytes.len && p.bytes[p.pos] == 93) {
@@ -271,7 +271,7 @@ function parse_array(ref p: Parser): JsonValue {
         if (p.error.len > 0) { break; }
         skip_ws(ref p);
         let v: JsonValue = parse_value(ref p);
-        vec.vec_push(ref items, v);
+        vec.vecPush(ref items, v);
         if (p.error.len > 0) { break; }
         skip_ws(ref p);
         if (p.pos >= p.bytes.len) {
@@ -297,7 +297,7 @@ function parse_array(ref p: Parser): JsonValue {
 // Parse `{ "key": value, ... }`. Same single-exit shape as parse_array.
 function parse_object(ref p: Parser): JsonValue {
     p.pos = p.pos + 1;          // consume {
-    let members: Vec<JsonMember> = vec.vec_new(4);
+    let members: Vec<JsonMember> = vec.vecNew(4);
     skip_ws(ref p);
     let done: bool = false;
     if (p.pos < p.bytes.len && p.bytes[p.pos] == 125) {
@@ -331,7 +331,7 @@ function parse_object(ref p: Parser): JsonValue {
         skip_ws(ref p);
         let v: JsonValue = parse_value(ref p);
         let pair: JsonMember = { key: key_str, value: v };
-        vec.vec_push(ref members, pair);
+        vec.vecPush(ref members, pair);
         if (p.error.len > 0) { break; }
         skip_ws(ref p);
         if (p.pos >= p.bytes.len) {
@@ -361,10 +361,10 @@ function freeze_values(ref v: Vec<JsonValue>): JsonValue[] {
         let empty: JsonValue[] = [];
         return empty;
     }
-    let out: JsonValue[] = intr.heap_alloc(v.len);
+    let out: JsonValue[] = intr.heapAlloc(v.len);
     let i: usize = 0;
     while (i < v.len) {
-        out[i] = vec.vec_get(ref v, i);
+        out[i] = vec.vecGet(ref v, i);
         i = i + 1;
     }
     return out;
@@ -375,10 +375,10 @@ function freeze_members(ref v: Vec<JsonMember>): JsonMember[] {
         let empty: JsonMember[] = [];
         return empty;
     }
-    let out: JsonMember[] = intr.heap_alloc(v.len);
+    let out: JsonMember[] = intr.heapAlloc(v.len);
     let i: usize = 0;
     while (i < v.len) {
-        out[i] = vec.vec_get(ref v, i);
+        out[i] = vec.vecGet(ref v, i);
         i = i + 1;
     }
     return out;
@@ -466,7 +466,7 @@ export function obj_get(ref v: JsonValue, key: string): JsonValue {
         case JsonValue.Object { members: ms }: {
             let i: usize = 0;
             while (i < ms.len) {
-                if (str.string_eq(ms[i].key, key)) {
+                if (str.stringEq(ms[i].key, key)) {
                     return ms[i].value;
                 }
                 i = i + 1;
@@ -489,59 +489,59 @@ export function obj_get(ref v: JsonValue, key: string): JsonValue {
 // of the JsonDoc.
 
 export function stringify(ref v: JsonValue): string {
-    let parts: Vec<string> = vec.vec_new(16);
+    let parts: Vec<string> = vec.vecNew(16);
     append_value(ref parts, ref v);
     let count: usize = parts.len;
-    let arr: string[] = intr.heap_alloc(count);
+    let arr: string[] = intr.heapAlloc(count);
     let i: usize = 0;
     while (i < count) {
-        arr[i] = vec.vec_get(ref parts, i);
+        arr[i] = vec.vecGet(ref parts, i);
         i = i + 1;
     }
     Disposable.dispose(ref parts);
-    let result: string = str.string_concat_all(arr);
+    let result: string = str.stringConcatAll(arr);
 
-    intr.heap_free(arr);
+    intr.heapFree(arr);
     return result;
 }
 
 function append_value(ref parts: Vec<string>, ref v: JsonValue): void {
     switch (v) {
-        case JsonValue.Null: { vec.vec_push(ref parts, "null"); }
-        case JsonValue.Bool { value: b }: { vec.vec_push(ref parts, fmt.bool_to_string(b)); }
-        case JsonValue.Number { value: n }: { vec.vec_push(ref parts, fmt.int_to_string(n)); }
+        case JsonValue.Null: { vec.vecPush(ref parts, "null"); }
+        case JsonValue.Bool { value: b }: { vec.vecPush(ref parts, fmt.boolToString(b)); }
+        case JsonValue.Number { value: n }: { vec.vecPush(ref parts, fmt.intToString(n)); }
         case JsonValue.String { value: s }: {
             // Note: this does not escape control chars / quotes. Round-tripping
             // a string with embedded `"` will produce invalid JSON. Pairs
             // with the parser's lack of unescape - both fixed together.
-            vec.vec_push(ref parts, "\"");
-            vec.vec_push(ref parts, s);
-            vec.vec_push(ref parts, "\"");
+            vec.vecPush(ref parts, "\"");
+            vec.vecPush(ref parts, s);
+            vec.vecPush(ref parts, "\"");
         }
         case JsonValue.Array { items: arr }: {
-            vec.vec_push(ref parts, "[");
+            vec.vecPush(ref parts, "[");
             let i: usize = 0;
             while (i < arr.len) {
-                if (i > 0) { vec.vec_push(ref parts, ","); }
+                if (i > 0) { vec.vecPush(ref parts, ","); }
                 let child: JsonValue = arr[i];
                 append_value(ref parts, ref child);
                 i = i + 1;
             }
-            vec.vec_push(ref parts, "]");
+            vec.vecPush(ref parts, "]");
         }
         case JsonValue.Object { members: ms }: {
-            vec.vec_push(ref parts, "{");
+            vec.vecPush(ref parts, "{");
             let i: usize = 0;
             while (i < ms.len) {
-                if (i > 0) { vec.vec_push(ref parts, ","); }
-                vec.vec_push(ref parts, "\"");
-                vec.vec_push(ref parts, ms[i].key);
-                vec.vec_push(ref parts, "\":");
+                if (i > 0) { vec.vecPush(ref parts, ","); }
+                vec.vecPush(ref parts, "\"");
+                vec.vecPush(ref parts, ms[i].key);
+                vec.vecPush(ref parts, "\":");
                 let val: JsonValue = ms[i].value;
                 append_value(ref parts, ref val);
                 i = i + 1;
             }
-            vec.vec_push(ref parts, "}");
+            vec.vecPush(ref parts, "}");
         }
     }
 }

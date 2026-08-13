@@ -1,0 +1,277 @@
+module ast;
+
+// Every node kind the parser can produce, and the name each one dumps as.
+//
+// ASTNodeKind must stay in lockstep with the JS reference's list in
+// src/contracts.js - that lockstep is a CONTRACT, because an AST dump from
+// either implementation has to diff against the other.
+
+import { Display } from "std/core/traits.yoop";
+
+export enum ASTNodeKind implements Display {
+  FUNCTION_DECL,
+  LET_DECL,
+  CONST_DECL,
+  TYPE_DECL,
+  FIELD_DECL,
+  DESTRUCTURE_DECL,
+  IMPORT_DECL,
+  // One `{ a, b as c }` entry of an import. The JS reference keeps these as a
+  // plain `specifiers` array on the IMPORT_DECL, which an arena cannot do - a
+  // node names its children by NodeId, so the pair needs a node to live in.
+  // The kind is in the JS list too, so the lockstep holds; the JS parser simply
+  // never emits one.
+  IMPORT_SPECIFIER,
+  EXPORT_DECL,
+  EXTERN_FUNCTION_DECL,
+  EXTERN_TYPE_DECL,
+  EXPORT_C_FUNCTION_DECL,
+
+  // literals
+  TEMPLATE_LITERAL,
+  STRING_PART,
+  INT_LITERAL,
+  FLOAT_LITERAL,
+  STRING_LITERAL,
+  BOOL_LITERAL,
+
+  // expressions
+  CALL_EXPRESSION,
+  EXPRESSION_STATEMENT,
+  EXPR_PART,
+  UNARY_EXPRESSION,
+  BINARY_EXPRESSION,
+  FIELD_ACCESS,
+  STRUCT_LITERAL,
+  STRUCT_LITERAL_FIELD,
+
+  // other
+  EXTERN_BLOCK,
+  BLOCK,
+  PARAM,
+  IDENT,
+  NAMESPACE_IDENT,
+  ASSIGNMENT,
+  PROGRAM,
+  RETURN_STATEMENT,
+  IF_STATEMENT,
+  WHILE_STATEMENT,
+  DISCARD_STATEMENT,
+  TRY_OP,
+
+  // phase 4 refs, arrays, control flow
+  FOR_LOOP,
+  // phase 9.D `for item in xs { ... }` - element-walking loop over an array
+  // (default sequential iteration; trait-driven iteration is a later phase).
+  FOR_IN_LOOP,
+  BREAK_STATEMENT,
+  CONTINUE_STATEMENT,
+  ARRAY_LITERAL,
+  INDEX_EXPRESSION,
+  REF_EXPRESSION,
+
+  // phase 5 traits
+  TRAIT_DECL,
+  METHOD_SIG,
+  METHOD_DECL,
+  // Phase 9.G `vtable Name for TraitName { field (params) => ret, ... }`.
+  // A vtable decl is a type-erased shape backing a trait - codegen emits it
+  // as a LLVM struct of `{ ctx, methodPtr1, methodPtr2, ... }`.
+  VTABLE_DECL,
+
+  // phase 6 kinds
+  KIND_DECL,
+  KIND_APPLIES_TO_CLAUSE,
+  KIND_REQUIRES_CLAUSE,
+  KIND_MUSTCALL_CLAUSE,
+  KIND_OWNSBLOCK_CLAUSE,
+  CLEANUP_CALL,
+  // phase 6.2 escape and sharing
+  KIND_MUST_NOT_ESCAPE_CLAUSE,
+  KIND_MUST_NOT_SHARE_CLAUSE,
+  KIND_FORBIDS_CLAUSE,
+  // phase 6.5 layout / composition / parameterized kinds
+  KIND_LAYOUT_CLAUSE,
+  // clearance kinds marker polarity (conferred | restrictive)
+  KIND_MARKER_CLAUSE,
+  // clearance kinds kind-decl-named transition authority
+  // (clearedBy <fn> on a restrictive kind / appliedBy <fn> on a conferred kind)
+  KIND_TRANSITION_CLAUSE,
+  KIND_PREFIX,
+  // One `appliesTo binding;` line inside a kind decl, recorded by its leading
+  // word. Nothing enforces kinds, so the rest of the clause is consumed.
+  KIND_CLAUSE,
+
+  // phase 6.3 task / concurrency sugar
+  WAIT_EXPRESSION,
+  TASK_AUTO_WAIT,
+  TASK_RELEASE,
+  TASK_RETAIN,
+
+  // phase 7.1 generics
+  TYPE_PARAM,
+
+  // phase 7.5 switch / patterns / sum types / unions
+  // Phase 12 ENUM_DECL renamed to VARIANT_DECL (sum types); ENUM_VARIANT
+  // renamed to VARIANT_CASE (one case inside a variant decl). The `enum`
+  // keyword is reserved for the value-enum construct below.
+  SWITCH_STATEMENT,
+  SWITCH_ARM,
+  LITERAL_PATTERN,
+  VARIANT_PATTERN,
+  VARIANT_DECL,
+  VARIANT_CASE,
+  UNION_DECL,
+  VARIANT_CONSTRUCTOR,
+
+  // Phase 12 value enums - C-style named constants of a primitive
+  // underlying type (default int32). `enum<T> Name { Case (value)? , ... }`.
+  // ENUM_CASE is one case inside an ENUM_DECL; its valueExpr is parsed as a
+  // normal expression and const-evaluated at typecheck. The constructor and
+  // pattern AST kinds reuse VARIANT_CONSTRUCTOR / VARIANT_PATTERN - the
+  // typechecker stamps the right resolved type onto them.
+  ENUM_DECL,
+  ENUM_CASE,
+
+  // phase 8.A unsafe pointers
+  ADDRESS_OF_EXPRESSION,
+  DEREF_EXPRESSION,
+  NULL_LITERAL,
+  UNSAFE_PTR_CAST,
+
+  // phase 8.D errno intrinsics
+  ERRNO_INTRINSIC,
+
+  // phase 9.E array slice syntax `xs[i..j]`
+  SLICE_EXPRESSION,
+
+  // phase 9 compound assignments `x += y`, `x -= y`, etc. Stored as a
+  // dedicated node so codegen can address the lvalue once (no double-eval
+  // of expressions inside `xs[f()] += 1`).
+  COMPOUND_ASSIGNMENT,
+
+  // test undefined kind handling for iteration tests
+  FAIL_TEST_KIND,
+
+  // phase 11.A `@<name>(args?) target` compile-time / static-analysis
+  // attribute. The `target` field carries the AST node the attribute
+  // decorates (a decl, statement, block, or null for bare attribute
+  // statements). Per-attribute behavior lives in
+  // src/jsyoopattributes/registry.js - the AST node itself is just the
+  // carrier. Codegen must consume every ATTRIBUTE node before emission;
+  // any that survive are an internal-error.
+  ATTRIBUTE,
+  NODE_LIST, // with a fat node, the list of nodes allows a level of indirection
+  // type annotation kinds
+  TYPE_ANNOTATION_REF_TYPE,
+  TYPE_ANNOTATION_TYPE_NAME,
+  TYPE_ANNOTATION_ARRAY_TYPE,
+  // `(k: K) => uint64` - a function VALUE's type. childA is the parameter
+  // list-node, childB the return annotation.
+  TYPE_ANNOTATION_FUNC_TYPE,
+  function toString(ref self): string {
+    return kindName(self);
+  }
+}
+
+const AST_NODE_KIND_NAMES: string[] = [
+  "FUNCTION_DECL",
+  "LET_DECL",
+  "CONST_DECL",
+  "TYPE_DECL",
+  "FIELD_DECL",
+  "DESTRUCTURE_DECL",
+  "IMPORT_DECL",
+  "IMPORT_SPECIFIER",
+  "EXPORT_DECL",
+  "EXTERN_FUNCTION_DECL",
+  "EXTERN_TYPE_DECL",
+  "EXPORT_C_FUNCTION_DECL",
+  "TEMPLATE_LITERAL",
+  "STRING_PART",
+  "INT_LITERAL",
+  "FLOAT_LITERAL",
+  "STRING_LITERAL",
+  "BOOL_LITERAL",
+  "CALL_EXPRESSION",
+  "EXPRESSION_STATEMENT",
+  "EXPR_PART",
+  "UNARY_EXPRESSION",
+  "BINARY_EXPRESSION",
+  "FIELD_ACCESS",
+  "STRUCT_LITERAL",
+  "STRUCT_LITERAL_FIELD",
+  "EXTERN_BLOCK",
+  "BLOCK",
+  "PARAM",
+  "IDENT",
+  "NAMESPACE_IDENT",
+  "ASSIGNMENT",
+  "PROGRAM",
+  "RETURN_STATEMENT",
+  "IF_STATEMENT",
+  "WHILE_STATEMENT",
+  "DISCARD_STATEMENT",
+  "TRY_OP",
+  "FOR_LOOP",
+  "FOR_IN_LOOP",
+  "BREAK_STATEMENT",
+  "CONTINUE_STATEMENT",
+  "ARRAY_LITERAL",
+  "INDEX_EXPRESSION",
+  "REF_EXPRESSION",
+  "TRAIT_DECL",
+  "METHOD_SIG",
+  "METHOD_DECL",
+  "VTABLE_DECL",
+  "KIND_DECL",
+  "KIND_APPLIES_TO_CLAUSE",
+  "KIND_REQUIRES_CLAUSE",
+  "KIND_MUSTCALL_CLAUSE",
+  "KIND_OWNSBLOCK_CLAUSE",
+  "CLEANUP_CALL",
+  "KIND_MUST_NOT_ESCAPE_CLAUSE",
+  "KIND_MUST_NOT_SHARE_CLAUSE",
+  "KIND_FORBIDS_CLAUSE",
+  "KIND_LAYOUT_CLAUSE",
+  "KIND_MARKER_CLAUSE",
+  "KIND_TRANSITION_CLAUSE",
+  "KIND_PREFIX",
+  "KIND_CLAUSE",
+  "WAIT_EXPRESSION",
+  "TASK_AUTO_WAIT",
+  "TASK_RELEASE",
+  "TASK_RETAIN",
+  "TYPE_PARAM",
+  "SWITCH_STATEMENT",
+  "SWITCH_ARM",
+  "LITERAL_PATTERN",
+  "VARIANT_PATTERN",
+  "VARIANT_DECL",
+  "VARIANT_CASE",
+  "UNION_DECL",
+  "VARIANT_CONSTRUCTOR",
+  "ENUM_DECL",
+  "ENUM_CASE",
+  "ADDRESS_OF_EXPRESSION",
+  "DEREF_EXPRESSION",
+  "NULL_LITERAL",
+  "UNSAFE_PTR_CAST",
+  "ERRNO_INTRINSIC",
+  "SLICE_EXPRESSION",
+  "COMPOUND_ASSIGNMENT",
+  "FAIL_TEST_KIND",
+  "ATTRIBUTE",
+  "NODE_LIST", // node for handling a list of nodes
+  "TYPE_ANNOTATION_REF_TYPE",
+  "TYPE_ANNOTATION_TYPE_NAME",
+  "TYPE_ANNOTATION_ARRAY_TYPE",
+  "TYPE_ANNOTATION_FUNC_TYPE",
+];
+
+// Maps an ASTNodeKind case to its source spelling. Used by Display sites
+// (error messages, AST dumps); the int-backed enum decays to its ordinal
+// for the array index. Order MUST mirror the ASTNodeKind decl above.
+export function kindName(v: ASTNodeKind): string {
+  return AST_NODE_KIND_NAMES[v];
+}

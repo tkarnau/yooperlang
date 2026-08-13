@@ -72,16 +72,16 @@ function main(): int32 {
     // aimed at the same reused stack slot.
     let a: Scaler = { factor: 2 };
     let b: Scaler = { factor: 3 };
-    disposable table: Vec<Entry> = vec.vec_new(2);
+    disposable table: Vec<Entry> = vec.vecNew(2);
     for i in 0..6 {
         if (i % 2 == 1) {
-            vec.vec_push(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref b) });
+            vec.vecPush(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref b) });
         } else {
-            vec.vec_push(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref a) });
+            vec.vecPush(ref table, { name: `slot${i}`, vt: GreeterVt.from(ref a) });
         }
     }
     let total: int32 = 0;
-    let entries: Entry[] = vec.vec_as_array(ref table);
+    let entries: Entry[] = vec.vecAsArray(ref table);
     for (let i = 0; i < entries.len; i += 1) {
         total = total + GreeterVt.greet(ref entries[i].vt, 10);
     }

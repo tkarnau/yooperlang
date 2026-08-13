@@ -1,0 +1,56 @@
+module parse;
+
+// `let` / `const` bindings, with or without a kind prefix.
+
+import { Result } from "std/core/types.yoop";
+import { ASTNodeKind } from "../ast";
+import { TokenTags, Token } from "../lex";
+
+export function parseVarDecl(ref ps: ParserState): ParsingResult {
+  // Three accepted shapes here:
+  //   (1) let|const IDENT : type (= expr)? ;
+  //   (2) let|const IDENT IDENT : type = expr {block} | ;     (kind-prefixed)
+  //   (3) IDENT IDENT : type = expr {block} | ;               (implicit-const kind-prefixed)
+  // Shape (3) is dispatched in parseStatement; (1) and (2) start with let/const.
+  let declToken: Token;
+  declToken.tag = TokenTags.NOTOKEN;
+  if (SelfLexing.peek(ref ps).tag == TokenTags.LET || SelfLexing.peek(ref ps).tag == TokenTags.CONST) {
+    declToken = SelfLexing.advance(ref ps)?;
+  }
+
+  // destructuring
+  if (declToken.tag != TokenTags.NOTOKEN && SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+    // todo...
+  }
+  // todo kindprefix stuff
+  let nodeKind = ASTNodeKind.CONST_DECL;
+  if (declToken.tag == TokenTags.LET) {
+    nodeKind = ASTNodeKind.LET_DECL;
+  }
+
+  let node = SelfLexing.buildSourcedNode(ref ps, nodeKind);
+  node.name = parseIdentAsName(ref ps)?;
+
+  // type annotation is optional, when omitted, the typechecker infers
+  // the binding's type from its initializer
+  if (SelfLexing.peek(ref ps).tag == TokenTags.COLON) {
+    SelfLexing.advance(ref ps)?; // consume the colon
+    node.childA = parseTypeAnnotation(ref ps)?;
+  }
+
+  // kind prefix stuff...
+  // kind prefix bindings always require an initializer
+
+  // plain let/const path
+
+  // if it is just a semicolon, it is uninitialized...
+  if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
+    SelfLexing.advance(ref ps)?;
+  } else { // otherwise it is a regular assignment
+    SelfLexing.expect(ref ps, TokenTags.EQ)?;
+    node.childB = parseExpression(ref ps, 0)?;
+    SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  }
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
+}

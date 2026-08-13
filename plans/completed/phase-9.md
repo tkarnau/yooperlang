@@ -14,7 +14,7 @@ What's left in the friction-finding pass:
   - *"Velocity ranges are distributed because the parser does not yet accept parenthesized subexpressions"* - `(r - 20) * 0.02` had to become `r * 0.02 - 0.4`.
   - *"`bullet_active` is 0/1 instead of a bool array because the language doesn't have a bool[] yet"*.
   - Three identical 8-line draw blocks for the three balls because there's no `for ball in balls` form.
-- **[library-design.md §8](../library-design.md#8-open-language-questions-the-library-exposes)** enumerates the gaps the std library exposes: trait-object parameters, function value types, streaming bodies, Display in templates, the `std/` import root, `?` over enums.
+- **[library-design.md §8](../archive/library-design.md#8-open-language-questions-the-library-exposes)** enumerates the gaps the std library exposes: trait-object parameters, function value types, streaming bodies, Display in templates, the `std/` import root, `?` over enums.
 - **[SPEC.md §16](../../SPEC.md#16-whats-intentionally-not-here) deferrals** that are no longer load-bearing: `extends` on traits (parser still rejects), multiple trait bounds `<T implements (A, B)>` (parser rejects), `mustNotShare acrossThreads` (parser rejects).
 - **The concurrency safety section** ([SPEC.md §8](../../SPEC.md#safety-and-deadlock)) warns about worker-pool deadlock when `wait` nests inside task bodies; the planned mitigation is suspendable `wait`, still unimplemented.
 
@@ -58,7 +58,7 @@ Files touched: [codegen.js](../../src/jsyoopcodegen/codegen.js), tests + a fixtu
 
 ### Phase 9.C - `std/` import root
 
-[library-design.md §8 open question 6](../library-design.md#8-open-language-questions-the-library-exposes) - every user of the std library has to write `import { ... } from "../../../std/core/kinds.yoop";`. The number of `..`s depends on where in `examples/` the file lives. It's ugly and breaks the moment a file moves.
+[library-design.md §8 open question 6](../archive/library-design.md#8-open-language-questions-the-library-exposes) - every user of the std library has to write `import { ... } from "../../../std/core/kinds.yoop";`. The number of `..`s depends on where in `examples/` the file lives. It's ugly and breaks the moment a file moves.
 
 - Add a search-root mechanism in [src/jsyoopdriver/moduleGraph.js](../../src/jsyoopdriver/moduleGraph.js): when an import path starts with `std/`, resolve it against the std directory at the repo root (or against a config-driven location - for now, hardcoded relative to the yoopiler binary).
 - Update the parser to accept `import { ... } from "std/net/tcp";` (no `.yoop` extension required for the std form, or keep the extension - pick one and stay consistent with the relative-path rule from [SPEC.md §1](../../SPEC.md#1-files-modules-imports-and-exports)).
@@ -111,7 +111,7 @@ Files touched: [lexer.js](../../src/jsyooplexer/lexer.js), [parser.js](../../src
 > int-to-string helper exists (`SocketAddr` did get the impl -
 > `addr_to_string` is gone).
 
-[library-design.md §3.4](../library-design.md#34-display--to-string-conversion-new) defines the trait; [library-design.md §8 open question 5](../library-design.md#8-open-language-questions-the-library-exposes) flags that template literals don't consult it. Today `${myStruct}` is a compile error unless the type is `int`/`float`/`bool`/`string`. The fix is a typechecker-only patch.
+[library-design.md §3.4](../archive/library-design.md#34-display--to-string-conversion-new) defines the trait; [library-design.md §8 open question 5](../archive/library-design.md#8-open-language-questions-the-library-exposes) flags that template literals don't consult it. Today `${myStruct}` is a compile error unless the type is `int`/`float`/`bool`/`string`. The fix is a typechecker-only patch.
 
 - When checking a `${expr}` interpolation in a template literal, after the existing primitive table check fails, look up `Display.to_string(ref expr)` on the expression's type. If the type implements `Display`, rewrite the interpolation to call `to_string` first and use the resulting `string`.
 - The rewrite happens at typecheck time, before codegen; codegen still only sees `printf`-style format args.
@@ -134,7 +134,7 @@ Files touched: typechecker template-literal path ([checkExpr.js](../../src/jsyoo
 > the vtable's method slot. Demo: heterogeneous handler list in
 > [examples/pass/vtable_handlers.yoop](../../examples/pass/vtable_handlers.yoop).
 
-The single biggest design-question item in [library-design.md §8](../library-design.md#8-open-language-questions-the-library-exposes) (questions 1, 2, 3) - and the one that unblocks the most downstream work: streaming HTTP bodies, heterogeneous handler lists, routing tables, callbacks. The library-design doc has a concrete proposal; this phase implements it.
+The single biggest design-question item in [library-design.md §8](../archive/library-design.md#8-open-language-questions-the-library-exposes) (questions 1, 2, 3) - and the one that unblocks the most downstream work: streaming HTTP bodies, heterogeneous handler lists, routing tables, callbacks. The library-design doc has a concrete proposal; this phase implements it.
 
 - **Function value types in type position use `=>`**: `(req: Request) => Response`. The `function` keyword stays only at *declaration* sites; at type positions (struct fields, parameter types, return types) the `=>` arrow signals "this is a function value." Disambiguation from the `=` token and from struct literal braces is just lexer + parser work.
 - **`vtable T for Trait { fields }`** - declares the erased shape of a trait. The compiler:
@@ -159,7 +159,7 @@ Files touched: lexer (`=>` token), parser (function type annotations, `vtable` d
 > matching `Err` payload type. Cross-shape (struct ↔ enum, mismatched `Err`
 > payload type) is rejected.
 
-[library-design.md §8 open question 7](../library-design.md#8-open-language-questions-the-library-exposes). Today `?` only understands `err: string`-bearing structs ([Phase 2](phase-2-errors-as-values.md)). Now that enum + variant patterns + exhaustiveness exist (Phase 7.5), the standard `enum Result<T, E> { Ok { value: T }, Err { error: E } }` shape is expressible - but `expr?` on a `Result<T, E>` is a typecheck error.
+[library-design.md §8 open question 7](../archive/library-design.md#8-open-language-questions-the-library-exposes). Today `?` only understands `err: string`-bearing structs ([Phase 2](phase-2-errors-as-values.md)). Now that enum + variant patterns + exhaustiveness exist (Phase 7.5), the standard `enum Result<T, E> { Ok { value: T }, Err { error: E } }` shape is expressible - but `expr?` on a `Result<T, E>` is a typecheck error.
 
 - Introduce a "fallible-enum" convention: any enum with exactly two variants, one named `Ok` and one named `Err`, is recognized by the typechecker as fallible. (Spec text TBD: structural recognition vs. an explicit marker trait. Recommend structural for minimum ceremony - same approach as `err: string`.)
 - `expr?` on a fallible enum: if `Ok`, yields the `Ok` payload (single-field shortened the same way as the struct rule); if `Err`, builds the enclosing function's return-type `Err` variant with the propagated payload and returns. Enclosing return type must also be a fallible enum or a fallible struct *with a compatible error type* (cross-shape propagation deferred - same enum shape only in 9.H).
@@ -200,9 +200,9 @@ Files touched: [codegen.js](../../src/jsyoopcodegen/codegen.js) wait emission, [
 
 ## Out of scope here
 
-- **Closures.** Capture mechanics, capture-by-ref-vs-by-value, allocation strategy - meaningful design tax. The vtable workaround (Phase 9.G) is the substitute. [library-design.md §8 question 3](../library-design.md#8-open-language-questions-the-library-exposes) defers them indefinitely; Phase 9 honors that.
+- **Closures.** Capture mechanics, capture-by-ref-vs-by-value, allocation strategy - meaningful design tax. The vtable workaround (Phase 9.G) is the substitute. [library-design.md §8 question 3](../archive/library-design.md#8-open-language-questions-the-library-exposes) defers them indefinitely; Phase 9 honors that.
 - **Iteration strategies (`.batched()`, `.parallel()`, `.simd()`).** The `for ... in` keyword slot is Phase 9.D; strategy traits are a follow-up once a real user wants one. SPEC §9 already defines them.
-- **`Map<K, V>` / hash collections.** Phase 9 ships the language; collections are stdlib work for a Phase 10+ slot. [library-design.md §8 question 4](../library-design.md#8-open-language-questions-the-library-exposes).
+- **`Map<K, V>` / hash collections.** Phase 9 ships the language; collections are stdlib work for a Phase 10+ slot. [library-design.md §8 question 4](../archive/library-design.md#8-open-language-questions-the-library-exposes).
 - **TLS / HTTP/2 / HTTP/3.** Library extension work; not on the language critical path.
 - **LP64-vs-LLP64 portability** for the `c_long` family. The CI matrix is Linux + macOS; Windows alias correction is a deferred small change.
 - **Self-hosting and optimization passes.** Phase 10.
@@ -210,7 +210,7 @@ Files touched: [codegen.js](../../src/jsyoopcodegen/codegen.js) wait emission, [
 ## Critical files (existing)
 
 - [SPEC.md](../../SPEC.md) - sections 3 (arrays), 5 (traits + `extends`), 8 (concurrency / safety), 9 (loops), 11 (errors) all get edits as Phase 9 sub-phases land.
-- [library-design.md §8](../library-design.md#8-open-language-questions-the-library-exposes) - the open-questions list this phase retires.
+- [library-design.md §8](../archive/library-design.md#8-open-language-questions-the-library-exposes) - the open-questions list this phase retires.
 - [src/jsyooparser/parser.js](../../src/jsyooparser/parser.js) - touched by 9.A, 9.D, 9.E, 9.G, 9.J.
 - [src/jsyooptypecheck/](../../src/jsyooptypecheck/) - touched by every sub-phase except 9.A and 9.C.
 - [src/jsyoopcodegen/codegen.js](../../src/jsyoopcodegen/codegen.js) - touched by 9.B, 9.E, 9.G, 9.I.

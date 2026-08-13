@@ -1,6 +1,6 @@
 module sqlite;
 
-// std/db/sqlite_ffi.yoop - unsafe libc/sqlite3 FFI for the db layer.
+// std/db/sqlite/ffi.yoop - unsafe libc/sqlite3 FFI for the db layer.
 //
 // The /only/ module under std/db that imports unsafe. Every safe wrapper in
 // std/db/sqlite.yoop calls the helpers exported from here; users never reach

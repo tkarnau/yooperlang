@@ -1,0 +1,80 @@
+// Tests for the `lex` module.
+//
+// `*.test.yoop` is excluded from a directory module's file list, so this is its
+// own single-file test module and reaches `lex` through the same import path a
+// consumer writes.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { Result } from "std/core/types.yoop";
+import * as lex from "../lex";
+import { TokenTags } from "../lex";
+
+suite function scanTableIsSortedLongestFirst(): void {
+  let test theory: Case = t.asserts("the longest scannable sorts to the front") {
+    const first = lex.TOKEN_SCAN_LIST[0].str;
+    theory.isSuccessful = first.len == 3;
+    theory.detail = `TOKEN_SCAN_LIST[0] is "${first}" (len ${first.len}), wanted a 3-char entry - unsorted means "..." lexes as three DOTs`;
+  }
+}
+
+suite function precedenceOrdersTheBinaryOperators(): void {
+  let test theory: Case = t.asserts("multiplication binds tighter than addition") {
+    const mult = lex.getTokenPrecedence(TokenTags.MULT);
+    const plus = lex.getTokenPrecedence(TokenTags.PLUS);
+    theory.isSuccessful = mult > plus;
+    theory.detail = `MULT is ${mult} and PLUS is ${plus}; MULT must be higher`;
+  }
+  let test theory: Case = t.asserts("a non-operator has no binding power") {
+    const got = lex.getTokenPrecedence(TokenTags.SEMICOLON);
+    theory.isSuccessful = got == 0;
+    theory.detail = `getTokenPrecedence(SEMICOLON) gave ${got}, wanted 0`;
+  }
+}
+
+suite function keywordsWinOverIdentifiers(): void {
+  let test theory: Case = t.asserts("`return` lexes as RETURN, not IDENT") {
+    const toks = tokensOf("return");
+    theory.isSuccessful = toks.len >= 1 && toks[0].tag == TokenTags.RETURN;
+    theory.detail = `first tag was ${lex.tagName(toks[0].tag)}, wanted RETURN`;
+  }
+  let test theory: Case = t.asserts("`returned` is an identifier, not a keyword prefix match") {
+    const toks = tokensOf("returned");
+    theory.isSuccessful = toks.len >= 1 && toks[0].tag == TokenTags.IDENT;
+    theory.detail = `first tag was ${lex.tagName(toks[0].tag)}, wanted IDENT`;
+  }
+}
+
+suite function numericLiteralsCarryTheirValue(): void {
+  let test theory: Case = t.asserts("underscores are separators, not part of the value") {
+    const toks = tokensOf("1_000");
+    theory.isSuccessful = toks.len >= 1 && toks[0].intVal == 1000;
+    theory.detail = `1_000 lexed to intVal ${toks[0].intVal}, wanted 1000`;
+  }
+  let test theory: Case = t.asserts("hex literals decode against their base") {
+    const toks = tokensOf("0xFF");
+    theory.isSuccessful = toks.len >= 1 && toks[0].intVal == 255;
+    theory.detail = `0xFF lexed to intVal ${toks[0].intVal}, wanted 255`;
+  }
+}
+
+suite function commentsAndWhitespaceDisappear(): void {
+  let test theory: Case = t.asserts("a nested block comment is skipped whole") {
+    const toks = tokensOf("/* outer /* inner */ still outer */ 7");
+    theory.isSuccessful = toks.len == 2
+      && toks[0].tag == TokenTags.INTLITERAL
+      && toks[0].intVal == 7;
+    theory.detail = `got ${toks.len} tokens, first ${lex.tagName(toks[0].tag)}; wanted just INTLITERAL(7) then EOF`;
+  }
+}
+
+// Lex a string all the way to EOF. On a lexer error this returns an empty
+// array, which fails whichever assertion asked for a token.
+function tokensOf(src: string): lex.Token[] {
+  switch (lex.tokenize(intr.stringAsBytes(src))) {
+    case Result.Ok { value: toks }: { return toks; }
+    case Result.Err { error: e }: { return []; }
+  }
+}

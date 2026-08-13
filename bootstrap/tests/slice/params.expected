@@ -1,0 +1,5 @@
+add(3, 4) = 7
+scaled(5, 10) = 100
+wide(7) = 14
+narrowParam(5) = 5
+exit=22

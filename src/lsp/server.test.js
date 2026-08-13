@@ -168,6 +168,76 @@ describe("lsp server: end-to-end", () => {
     });
   });
 
+  // yooperdoom-takeaways 4.1: the comment above a declaration is
+  // documentation, and hover shows it. Same file first, then the case that
+  // actually motivates the feature - a call site in another file.
+  it("hover appends the doc comment written above the declaration", async () => {
+    const { uri, src } = writeFixture(`// Adds two numbers, the boring way.
+// Second line of the doc.
+function add(a: int32, b: int32): int32 {
+    return a + b;
+}
+function main(): int32 {
+    return add(1, 2);
+}
+`);
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: src },
+      });
+      const lines = src.split("\n");
+      const callLine = lines.findIndex((l) => l.includes("return add(1, 2)"));
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: callLine, character: lines[callLine].indexOf("add") },
+      });
+      const value = resp.result?.contents?.value ?? "";
+      assert.match(value, /Adds two numbers, the boring way\./);
+      assert.match(value, /Second line of the doc\./);
+      // The type line still comes first, in its own fence.
+      assert.match(value, /^```yoop\n/);
+    });
+  });
+
+  it("hover reads the doc from the file the declaration lives in", async () => {
+    // The whole point of 4.1: the reader is at a CALL SITE in their own file
+    // and the documentation lives in the library. A 15,000 line project
+    // hand-rolled digit loops in four files because it never found what
+    // std/core/format.yoop already exported.
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_doc_"));
+    const libPath = path.join(dir, "lib.yoop");
+    const mainPath = path.join(dir, "main.yoop");
+    fs.writeFileSync(
+      libPath,
+      `// Pads a number on the left, which is the thing you keep rewriting.
+export function padded(n: int32): int32 {
+    return n;
+}
+`,
+    );
+    const mainSrc = `import * as lib from "./lib.yoop";
+function main(): int32 {
+    return lib.padded(7);
+}
+`;
+    fs.writeFileSync(mainPath, mainSrc);
+    const uri = pathToFileURL(fs.realpathSync(mainPath)).href;
+
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: mainSrc },
+      });
+      const lines = mainSrc.split("\n");
+      const callLine = lines.findIndex((l) => l.includes("lib.padded"));
+      const resp = await client.request("textDocument/hover", {
+        textDocument: { uri },
+        position: { line: callLine, character: lines[callLine].indexOf("padded") },
+      });
+      const value = resp.result?.contents?.value ?? "";
+      assert.match(value, /Pads a number on the left/);
+    });
+  });
+
   it("definition jumps from a call to its function decl", async () => {
     const { uri, src } = writeFixture(`function add(a: int32, b: int32): int32 {
     return a + b;
@@ -312,6 +382,62 @@ function main(): int32 {
       assert.ok(labels.includes("add"));
       assert.ok(labels.includes("main"));
       assert.ok(labels.includes("int32"), `expected int32 primitive in ${labels}`);
+    });
+  });
+
+  // yooperdoom-takeaways 4.1: the doc arrives while you are picking the name,
+  // not after. Same scanner as hover, on the LSP `documentation` field.
+  it("completion carries the doc comment, including for a namespace import", async () => {
+    const dir = fs.mkdtempSync(path.join(os.tmpdir(), "yoop_lsp_comp_"));
+    fs.writeFileSync(
+      path.join(dir, "lib.yoop"),
+      `// lib.yoop - the module header, which says what the MODULE is for.
+
+// Pads a number on the left, which is the thing you keep rewriting.
+export function padded(n: int32): int32 {
+    return n;
+}
+`,
+    );
+    const mainSrc = `import * as lib from "./lib.yoop";
+// Doubles its argument, and says so.
+function twice(n: int32): int32 {
+    return n + n;
+}
+function main(): int32 {
+    return 0;
+}
+`;
+    const mainPath = path.join(dir, "main.yoop");
+    fs.writeFileSync(mainPath, mainSrc);
+    const uri = pathToFileURL(fs.realpathSync(mainPath)).href;
+
+    await withClient(async (client) => {
+      client.notify("textDocument/didOpen", {
+        textDocument: { uri, languageId: "yoop", version: 1, text: mainSrc },
+      });
+      const resp = await client.request("textDocument/completion", {
+        textDocument: { uri },
+        position: { line: 6, character: 4 },
+      });
+      const items = resp.result.items ?? [];
+      const byLabel = (l) => items.find((i) => i.label === l);
+
+      // A decl in the file under the cursor.
+      assert.match(
+        byLabel("twice")?.documentation?.value ?? "",
+        /Doubles its argument, and says so\./,
+      );
+      // A namespace import documents itself with the imported file's HEADER -
+      // there is no decl to look up, and the header is the answer a reader
+      // wants for `lib` anyway.
+      assert.match(
+        byLabel("lib")?.documentation?.value ?? "",
+        /the module header, which says what the MODULE is for/,
+      );
+      // The header must NOT have leaked onto the first decl in that file:
+      // docCommentAt stops at the blank line between them.
+      assert.equal(byLabel("padded"), undefined, "padded is not imported by name");
     });
   });
 

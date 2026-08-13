@@ -1,0 +1,527 @@
+// stdindex - generate std/INDEX.md from the library's own module headers.
+//
+//     stdindex <std-dir> <out-file>
+//     stdindex std std/INDEX.md          (the defaults)
+//
+// WHY THIS EXISTS. A 15,000 line project written against this standard library
+// imported std/core/format.yoop in three files and hand-rolled a `48 + n % 10`
+// digit loop in four others; one of them zero-padded a number by hand, which
+// is exactly `padStart(intToString(n), 4, "0")`. Nothing was missing. The
+// project just never found the parts of the library that already existed.
+// See plans/yooperdoom-takeaways.md 4.1.
+//
+// So this reads what each module already says about itself - the comment block
+// at the top of the file - and turns it into one page you can scan. Generating
+// it rather than writing it is the point: a hand-written index drifts, and a
+// drifted index is worse than none, because it teaches you to stop trusting it.
+//
+// WHAT IT READS.
+//
+//   summary   the first line of the header comment, minus the `<path> - `
+//             prefix the convention already uses.
+//   exports   a LINE SCAN for `export ...`, not a parse. That is deliberate:
+//             this tool must keep working while the parser is being rewritten
+//             for the bootstrap, and an index that is approximately right is
+//             worth more than one that cannot run. Anything it misses is
+//             invisible rather than wrong.
+//
+// WHAT COUNTS AS A MODULE. What you can IMPORT, which is not the same as what
+// is on disk:
+//
+//   std/core/strings.yoop     a single file
+//   std/http                  a DIRECTORY whose files all say `module http;`
+//
+// A directory module gets one entry with its per-file breakdown underneath,
+// because its files share one namespace - importing one of them is an error.
+
+import { disposable, Disposable } from "std/core/kinds.yoop";
+import { Result } from "std/core/types.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
+import * as env from "std/env.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+const YOOP_SUFFIX: string = ".yoop";
+
+// ----- small helpers ------------------------------------------------------
+
+// std's slice returns a Result; every use here has already bounds-checked, so
+// an Err means a bug in this file rather than bad input. Collapse it.
+function sliceOr(s: string, start: usize, end: usize): string {
+    switch (str.stringSlice(s, start, end)) {
+        case Result.Ok { value: v }: { return v; }
+        case Result.Err { error: _ }: { return ""; }
+    }
+}
+
+function isBlankByte(b: uint8): bool {
+    return b == 32 || b == 9 || b == 13;
+}
+
+// Byte-wise `a < b`, so the module list can be sorted. std has stringEq but
+// no ordering, and an index in filesystem order reads as random.
+function strLess(a: string, b: string): bool {
+    let ab: uint8[] = intr.stringAsBytes(a);
+    let bb: uint8[] = intr.stringAsBytes(b);
+    let n: usize = ab.len;
+    if (bb.len < n) { n = bb.len; }
+    for (let i: usize = 0; i < n; i += 1) {
+        if (ab[i] != bb[i]) { return ab[i] < bb[i]; }
+    }
+    return ab.len < bb.len;
+}
+
+function pushStr(ref out: Vec<uint8>, s: string) : void {
+    vec.vecExtendFrom(ref out, intr.stringAsBytes(s));
+}
+
+function endsWith(s: string, suffix: string): bool {
+    let sb: uint8[] = intr.stringAsBytes(s);
+    let fb: uint8[] = intr.stringAsBytes(suffix);
+    if (fb.len > sb.len) { return false; }
+    let off: usize = sb.len - fb.len;
+    for (let i: usize = 0; i < fb.len; i += 1) {
+        if (sb[off + i] != fb[i]) { return false; }
+    }
+    return true;
+}
+
+// Read a whole file as a string. `stringFromBytesUnchecked` copies, so the
+// result does not borrow the Vec.
+function readAll(path: string): string {
+    disposable buf: Vec<uint8> = vec.vecNew(4096);
+    let err: string = fs.readFileInto(ref buf, path);
+    if (err.len > 0) { return ""; }
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+}
+
+// ----- line walking -------------------------------------------------------
+//
+// The whole tool is a line scanner, so this is the one primitive it needs:
+// given a start offset, hand back the TRIMMED line and the offset to continue
+// from. Returns false at end of input.
+
+function nextLine(src: string, ref at: usize, ref line: string): bool {
+    let b: uint8[] = intr.stringAsBytes(src);
+    if (at >= b.len) { return false; }
+    let start: usize = at;
+    let end: usize = start;
+    while (end < b.len && b[end] != 10) { end = end + 1; }
+    at = end + 1;
+
+    // Trim both ends.
+    let s: usize = start;
+    let e: usize = end;
+    while (s < e && isBlankByte(b[s])) { s = s + 1; }
+    while (e > s && isBlankByte(b[e - 1])) { e = e - 1; }
+    line = sliceOr(src, s, e);
+    return true;
+}
+
+function startsWith(s: string, prefix: string): bool {
+    return str.stringStartsWith(s, prefix);
+}
+
+// The comment body of `line`, with the `//` and one following space removed.
+// Callers have already checked that it starts with `//`.
+function commentBody(line: string): string {
+    let body: string = sliceOr(line, 2, line.len);
+    if (body.len > 0 && intr.stringAsBytes(body)[0] == 32) {
+        body = sliceOr(body, 1, body.len);
+    }
+    return body;
+}
+
+// A summary is the first PARAGRAPH of a comment block, not its first line -
+// a sentence that wraps across three lines is still one sentence, and taking
+// only the first of them truncates it mid-clause. Joined with spaces, so the
+// result is one line however the source was wrapped.
+//
+// `first` is the paragraph's opening line (already stripped); this reads the
+// continuation from wherever `at` currently sits. Stops at a bare `//`, which
+// is the paragraph break the whole library already uses.
+function paragraphFrom(src: string, ref at: usize, first: string): string {
+    disposable buf: Vec<uint8> = vec.vecNew(256);
+    pushStr(ref buf, first);
+    let line: string = "";
+    let probe: usize = at;
+    while (nextLine(src, ref probe, ref line)) {
+        if (!startsWith(line, "//")) { break; }
+        let body: string = commentBody(line);
+        if (body.len == 0) { break; }
+        pushStr(ref buf, " ");
+        pushStr(ref buf, body);
+        at = probe;
+    }
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref buf));
+}
+
+// Drop the `<path> - ` prefix the header convention uses. It is redundant
+// next to the heading this tool prints above it.
+function stripPathPrefix(body: string): string {
+    let dash: usize = str.stringIndexOf(body, " - ");
+    if (dash < body.len) { return sliceOr(body, dash + 3, body.len); }
+    return body;
+}
+
+// ----- header extraction --------------------------------------------------
+
+// The module's one-line summary: the first line of the leading comment block,
+// with the `<path> - ` prefix the convention already uses stripped off (it is
+// redundant next to the heading this tool prints).
+//
+// A leading `module <name>;` line is skipped rather than treated as code -
+// every source file of a directory module has to open with it, and those files
+// write their header directly underneath. Breaking there would leave every
+// directory module in the library undocumented. Same rule as the LSP's
+// moduleHeaderComment in src/lsp/nav.js.
+function headerSummary(src: string): string {
+    let at: usize = 0;
+    skipModulePreamble(src, ref at);
+
+    let line: string = "";
+    while (nextLine(src, ref at, ref line)) {
+        if (line.len == 0) { continue; }
+        if (!startsWith(line, "//")) { return ""; }
+        return paragraphFrom(src, ref at, stripPathPrefix(commentBody(line)));
+    }
+    return "";
+}
+
+// Advance `at` past a `module <name>;` line AND any comment block above it,
+// leaving it at the file's own header. Leaves `at` untouched when there is no
+// module declaration (every single-file module).
+//
+// Skipping the comment block too is the part that matters. A directory
+// module's summary lives ABOVE the module line (see moduleSummary), so a
+// scanner that only skipped the declaration would hand back the MODULE's
+// sentence as the FILE's - which is how `std/http/types.yoop` came out
+// described as the whole http module.
+function skipModulePreamble(src: string, ref at: usize): void {
+    let probe: usize = 0;
+    let line: string = "";
+    while (nextLine(src, ref probe, ref line)) {
+        if (line.len == 0) { continue; }
+        if (startsWith(line, "//")) { continue; }
+        if (startsWith(line, "module ") && endsWith(line, ";")) { at = probe; }
+        return;
+    }
+}
+
+// The MODULE's summary, as opposed to the file's: the comment block sitting
+// ABOVE a `module <name>;` line.
+//
+// The two positions mean different things, and a directory module needs both.
+// Every file of `std/http` says `module http;` and then describes ITSELF
+// ("the accept loop", "a minimal HTTP/1.1 client"), so taking any one of them
+// as the module's summary picks a file at random - alphabetically first, which
+// made `std/http` read as "a minimal HTTP/1.1 client". A comment above the
+// module declaration is unambiguously about the module, exactly one file per
+// directory carries it, and it needs no new syntax: comments never reach the
+// token stream, so `module` is still the first ITEM of the file.
+//
+// Returns "" when there is no such block, which is every single-file module
+// and every sibling file of a directory module.
+function moduleSummary(src: string): string {
+    let at: usize = 0;
+    let line: string = "";
+    let first: string = "";
+    while (nextLine(src, ref at, ref line)) {
+        if (line.len == 0) { continue; }
+        if (startsWith(line, "//")) {
+            if (first.len == 0) {
+                first = paragraphFrom(src, ref at, stripPathPrefix(commentBody(line)));
+            }
+            continue;
+        }
+        // The first non-comment line decides. A module declaration means the
+        // block we just read was the module's; anything else means this is an
+        // ordinary file header and belongs to the file.
+        if (startsWith(line, "module ") && endsWith(line, ";")) { return first; }
+        return "";
+    }
+    return "";
+}
+
+// True when this file opens a DIRECTORY module (`module <name>;` before any
+// code). Comments above it are allowed and ignored.
+function declaresModule(src: string): bool {
+    let at: usize = 0;
+    let line: string = "";
+    while (nextLine(src, ref at, ref line)) {
+        if (line.len == 0) { continue; }
+        if (startsWith(line, "//")) { continue; }
+        return startsWith(line, "module ") && endsWith(line, ";");
+    }
+    return false;
+}
+
+// Every `export <something> <Name>` in the file, as "kind Name" pairs, one per
+// line. A LINE SCAN - see the header for why that is the right call here.
+function collectExports(ref out: Vec<uint8>, src: string): int32 {
+    let at: usize = 0;
+    let line: string = "";
+    let count: int32 = 0;
+    while (nextLine(src, ref at, ref line)) {
+        if (!startsWith(line, "export ")) { continue; }
+        let rest: string = sliceOr(line, 7, line.len);
+
+        // `export async fn(...)` / kind-prefixed forms: the NAME is the token
+        // right before the first `(`, `<`, `{`, `:`, or `=`. Walking back from
+        // that is what keeps this working for every decl shape at once instead
+        // of enumerating them.
+        let b: uint8[] = intr.stringAsBytes(rest);
+        let stop: usize = 0;
+        while (stop < b.len
+            && b[stop] != 40 && b[stop] != 60 && b[stop] != 123
+            && b[stop] != 58 && b[stop] != 61) {
+            stop = stop + 1;
+        }
+        // Back up over trailing blanks, then take the last word.
+        let e: usize = stop;
+        while (e > 0 && isBlankByte(b[e - 1])) { e = e - 1; }
+        let s: usize = e;
+        while (s > 0 && !isBlankByte(b[s - 1])) { s = s - 1; }
+        if (e <= s) { continue; }
+
+        let name: string = sliceOr(rest, s, e);
+        if (name.len == 0) { continue; }
+        // The leading words are the decl kind (`function`, `type`, `trait`,
+        // `const`, `async function`, ...). Empty for `export foo` shapes.
+        let declKind: string = "";
+        if (s > 0) {
+            let ks: usize = 0;
+            let ke: usize = s;
+            while (ke > ks && isBlankByte(b[ke - 1])) { ke = ke - 1; }
+            declKind = sliceOr(rest, ks, ke);
+        }
+
+        pushStr(ref out, "- `");
+        pushStr(ref out, name);
+        pushStr(ref out, "`");
+        if (declKind.len > 0) {
+            pushStr(ref out, " - ");
+            pushStr(ref out, declKind);
+        }
+        pushStr(ref out, "\n");
+        count = count + 1;
+    }
+    return count;
+}
+
+// ----- the module list ----------------------------------------------------
+
+type Mod {
+    importPath: string,   // what a user writes in an `import ... from "..."`
+    summary:    string,
+    // For a directory module: the per-file breakdown, already markdown.
+    // Empty for a single-file module.
+    detail:     string,
+    exports:    string,   // markdown bullet list
+    exportCount: int32,
+}
+
+// Sorted entry names of one directory. Sorting matters: readdir order is
+// filesystem order, which reads as random on the page.
+function sortedEntries(ref out: Vec<string>, dirPath: string): void {
+    disposable d: fs.DirIter = fs.openDir(dirPath);
+    for name in d {
+        vec.vecPush(ref out, name);
+    }
+    // Insertion sort - these are directories of a few dozen entries.
+    for (let i: usize = 1; i < out.len; i += 1) {
+        let cur: string = vec.vecGet(ref out, i);
+        let j: usize = i;
+        while (j > 0 && strLess(cur, vec.vecGet(ref out, j - 1))) {
+            vec.vecSet(ref out, j, vec.vecGet(ref out, j - 1));
+            j = j - 1;
+        }
+        vec.vecSet(ref out, j, cur);
+    }
+}
+
+function joinPath(a: string, b: string): string {
+    return str.stringConcatAll([a, "/", b]);
+}
+
+// Build the entry for a DIRECTORY module: one summary for the module, then a
+// line per source file.
+//
+// The module's summary comes from whichever file carries a comment ABOVE its
+// `module <name>;` line (see moduleSummary). Falling back to the first file's
+// own header is deliberately a FALLBACK and not the rule - it describes one
+// file rather than the module, which is how `std/http` came out reading as
+// "a minimal HTTP/1.1 client".
+function dirModule(dirPath: string, importPath: string): Mod {
+    disposable names: Vec<string> = vec.vecNew(16);
+    sortedEntries(ref names, dirPath);
+
+    disposable detail: Vec<uint8> = vec.vecNew(512);
+    disposable exports: Vec<uint8> = vec.vecNew(1024);
+    let summary: string = "";
+    let fallback: string = "";
+    let total: int32 = 0;
+
+    for (let i: usize = 0; i < names.len; i += 1) {
+        let name: string = vec.vecGet(ref names, i);
+        if (!endsWith(name, YOOP_SUFFIX)) { continue; }
+        let full: string = joinPath(dirPath, name);
+        let src: string = readAll(full);
+        if (src.len == 0) { continue; }
+        let s: string = headerSummary(src);
+        if (fallback.len == 0) { fallback = s; }
+        if (summary.len == 0) { summary = moduleSummary(src); }
+        pushStr(ref detail, "- `");
+        pushStr(ref detail, name);
+        pushStr(ref detail, "` - ");
+        pushStr(ref detail, s);
+        pushStr(ref detail, "\n");
+        total = total + collectExports(ref exports, src);
+    }
+
+    if (summary.len == 0) { summary = fallback; }
+    return {
+        importPath: importPath,
+        summary: summary,
+        detail: intr.stringFromBytesUnchecked(vec.vecAsArray(ref detail)),
+        exports: intr.stringFromBytesUnchecked(vec.vecAsArray(ref exports)),
+        exportCount: total,
+    };
+}
+
+function fileModule(filePath: string, importPath: string): Mod {
+    let src: string = readAll(filePath);
+    disposable exports: Vec<uint8> = vec.vecNew(1024);
+    let n: int32 = collectExports(ref exports, src);
+    return {
+        importPath: importPath,
+        summary: headerSummary(src),
+        detail: "",
+        exports: intr.stringFromBytesUnchecked(vec.vecAsArray(ref exports)),
+        exportCount: n,
+    };
+}
+
+// Does this directory hold the source files of ONE module (every .yoop in it
+// declaring `module <name>;`), or is it a directory OF modules (std/core,
+// std/collections)? The distinction is the whole reason the index cannot just
+// list files: a directory module must be imported by its directory, and
+// importing one of its files is an error.
+function isDirectoryModule(dirPath: string): bool {
+    disposable names: Vec<string> = vec.vecNew(16);
+    sortedEntries(ref names, dirPath);
+    let sawYoop: bool = false;
+    for (let i: usize = 0; i < names.len; i += 1) {
+        let name: string = vec.vecGet(ref names, i);
+        if (!endsWith(name, YOOP_SUFFIX)) { continue; }
+        sawYoop = true;
+        let src: string = readAll(joinPath(dirPath, name));
+        if (!declaresModule(src)) { return false; }
+    }
+    return sawYoop;
+}
+
+// Walk `dirPath`, appending every importable module to `mods`. `importBase` is
+// the import path prefix for this directory ("std", "std/core", ...).
+function walk(ref mods: Vec<Mod>, dirPath: string, importBase: string): void {
+    disposable names: Vec<string> = vec.vecNew(32);
+    sortedEntries(ref names, dirPath);
+
+    for (let i: usize = 0; i < names.len; i += 1) {
+        let name: string = vec.vecGet(ref names, i);
+        let full: string = joinPath(dirPath, name);
+        let meta: fs.FileMeta = fs.statPath(full);
+        if (!meta.ok) { continue; }
+
+        if (meta.isDir) {
+            let sub: string = joinPath(importBase, name);
+            if (isDirectoryModule(full)) {
+                vec.vecPush(ref mods, dirModule(full, sub));
+            } else {
+                walk(ref mods, full, sub);
+            }
+            continue;
+        }
+
+        if (!endsWith(name, YOOP_SUFFIX)) { continue; }
+        vec.vecPush(ref mods, fileModule(full, joinPath(importBase, name)));
+    }
+}
+
+// ----- rendering ----------------------------------------------------------
+
+const PREAMBLE: string = "# The Yooperlang standard library\n\n**Generated by `tools/stdindex` - do not edit by hand.** Regenerate with\n`npm run gen:index` after adding a module or changing a module header.\n\nEvery entry below is something you can import. A path ending in `.yoop` is a\nsingle-file module; a path without one is a DIRECTORY module, whose files share\none namespace - import the directory, never a file inside it.\n\nStd **value** imports use the namespace form; types, traits, and kinds may use\nthe named form:\n\n```js\nimport * as str from \"std/core/strings.yoop\";\nimport { Result } from \"std/core/types.yoop\";\n\nlet padded: string = str.padStart(str.intToString(n), 4, \"0\");\n```\n\n";
+
+function render(ref out: Vec<uint8>, ref mods: Vec<Mod>): void {
+    pushStr(ref out, PREAMBLE);
+
+    // Contents, so the page is scannable before it is readable.
+    pushStr(ref out, "## Contents\n\n");
+    for (let i: usize = 0; i < mods.len; i += 1) {
+        let m: ref Mod = ref mods.data[i];
+        pushStr(ref out, "- `");
+        pushStr(ref out, m.importPath);
+        pushStr(ref out, "` - ");
+        pushStr(ref out, m.summary);
+        pushStr(ref out, "\n");
+    }
+    pushStr(ref out, "\n---\n\n");
+
+    for (let i: usize = 0; i < mods.len; i += 1) {
+        let m: ref Mod = ref mods.data[i];
+        pushStr(ref out, "## `");
+        pushStr(ref out, m.importPath);
+        pushStr(ref out, "`\n\n");
+        pushStr(ref out, m.summary);
+        pushStr(ref out, "\n\n");
+
+        if (m.detail.len > 0) {
+            pushStr(ref out, "Source files (one module, one namespace):\n\n");
+            pushStr(ref out, m.detail);
+            pushStr(ref out, "\n");
+        }
+
+        if (m.exportCount > 0) {
+            pushStr(ref out, "Exports:\n\n");
+            pushStr(ref out, m.exports);
+            pushStr(ref out, "\n");
+        }
+    }
+}
+
+function main(): int32 {
+    let stdRoot: string = "std";
+    let outPath: string = "std/INDEX.md";
+    if (env.argCount() > 1) { stdRoot = env.argAt(1); }
+    if (env.argCount() > 2) { outPath = env.argAt(2); }
+
+    if (!fs.exists(stdRoot)) {
+        printf(`stdindex: no such directory: ${stdRoot}\n`);
+        return 1;
+    }
+
+    disposable mods: Vec<Mod> = vec.vecNew(64);
+    walk(ref mods, stdRoot, stdRoot);
+
+    if (mods.len == 0) {
+        printf(`stdindex: found no modules under ${stdRoot}\n`);
+        return 1;
+    }
+
+    disposable out: Vec<uint8> = vec.vecNew(16384);
+    render(ref out, ref mods);
+
+    let err: string = fs.writeFile(outPath, vec.vecAsArray(ref out));
+    if (err.len > 0) {
+        printf(`stdindex: writing ${outPath}: ${err}\n`);
+        return 1;
+    }
+
+    printf(`stdindex: ${mods.len} modules -> ${outPath}\n`);
+    return 0;
+}

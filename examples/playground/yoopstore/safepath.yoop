@@ -22,7 +22,7 @@ const MAX_COMPONENT_LEN: usize = 64;
 
 // `sanitize` returns the path with the leading "/" stripped if everything
 // validates, otherwise an error describing why the path was rejected.
-// The returned string is heap-allocated (via string_from_bytes_unchecked)
+// The returned string is heap-allocated (via stringFromBytesUnchecked)
 // and safe to keep beyond this function's scope.
 export function sanitize(path: string): Result<string, string> {
     if (path.len == 0) {
@@ -31,7 +31,7 @@ export function sanitize(path: string): Result<string, string> {
     if (path.len > MAX_PATH_LEN) {
         return Result.Err { error: "safepath: path too long" };
     }
-    let bytes: uint8[] = intr.string_as_bytes(path);
+    let bytes: uint8[] = intr.stringAsBytes(path);
     if (bytes[0] != 47) {  // '/'
         return Result.Err { error: "safepath: path must start with /" };
     }
@@ -76,8 +76,8 @@ export function sanitize(path: string): Result<string, string> {
     // Strip the leading "/" so storage sees `tom/test/file1` rather than
     // `/tom/test/file1`. The trailing-slash + empty-component checks above
     // guarantee bytes.len >= 2 here.
-    let view: uint8[] = intr.array_slice(bytes, 1, bytes.len);
-    return Result.Ok { value: intr.string_from_bytes_unchecked(view) };
+    let view: uint8[] = intr.arraySlice(bytes, 1, bytes.len);
+    return Result.Ok { value: intr.stringFromBytesUnchecked(view) };
 }
 
 function is_dot_component(b: uint8[], start: usize, end: usize): bool {

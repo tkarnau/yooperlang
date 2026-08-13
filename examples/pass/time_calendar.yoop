@@ -1,0 +1,66 @@
+// std/time.yoop: the wall clock and the calendar.
+//
+// plans/yooperdoom-takeaways.md 4.2 - a project numbered its history files
+// `run-0007-*` rather than timestamping them, explicitly because "a timestamp
+// needs a clock this program has no other reason to read". `nowNs` (monotonic)
+// was already exposed; there was no wall clock in yoop at all.
+//
+// Every expected value here is checkable with one line of Node:
+//
+//     new Date(1755000000 * 1000).toISOString()
+//
+// The assertions are all UTC on FIXED epochs. Local time is exercised too, but
+// only for shape and for landing on the same instant - its exact rendering
+// depends on the machine's timezone, which is not something a fixture gets to
+// decide.
+
+import * as time from "std/time.yoop";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+
+function show(label: string, epoch: int64): void {
+    let d: time.DateTime = time.utcFrom(epoch);
+    printf(`${label} ${time.iso8601(d)}\n`);
+}
+
+function main(): int32 {
+    // The epoch itself, one second before it (a negative time_t), and an
+    // ordinary recent instant.
+    show("epoch ", 0);
+    show("before", -1);
+    show("recent", 1755000000);
+
+    // Leap day, and the second either side of a year boundary - the places an
+    // off-by-one in a hand-rolled calendar shows up.
+    show("leapday", 1709164800);
+    show("nyeve  ", 1735689599);
+    show("nyday  ", 1735689600);
+
+    let d: time.DateTime = time.utcFrom(1755000000);
+    printf(`date  ${time.dateOnly(d)}\n`);
+    printf(`time  ${time.timeOnly(d)}\n`);
+    printf(`stamp ${time.fileStamp(d)}\n`);
+    printf(`names ${time.weekdayName(d)} ${time.monthName(d)}\n`);
+    printf(`parts ${d.year} ${d.month} ${d.day} ${d.hour} ${d.minute} ${d.second}\n`);
+    printf(`wday ${d.weekday} yday ${d.yearday} offset ${d.utcOffsetMinutes}\n`);
+
+    // DateTime implements Display, so it interpolates directly.
+    printf(`display ${d}\n`);
+
+    // Local time: shape only. Whatever the zone, it must convert successfully
+    // and produce a full-length ISO string - either `...Z` (offset 0) or
+    // `...+HH:MM` / `...-HH:MM` (25 characters).
+    let l: time.DateTime = time.localFrom(1755000000);
+    let iso: string = time.iso8601(l);
+    let wellFormed: bool = l.ok && (iso.len == 20 || iso.len == 25);
+    printf(`local ok=${wellFormed}\n`);
+
+    // The clock reads forward of a date already in the past, which is the
+    // only thing about "now" a fixture can assert.
+    printf(`now ahead=${time.nowUnix() > 1700000000}\n`);
+    printf(`ms consistent=${time.nowMillis() / 1000 >= time.nowUnix() - 1}\n`);
+
+    return 0;
+}

@@ -1,0 +1,33 @@
+// Namespace imports: `* as ns`, and calling through it.
+//
+// What each line is for:
+//   `* as mathx`      a namespace binds ONE name to the whole module
+//   `mathx.add(...)`  a qualified call, resolved against mathx's EXPORTS
+//   `{ Point }, * as` the combined form: both clauses, one source path
+//   `tag` twice       the local `tag` and `mathx.tag` are different functions,
+//                     and the qualified form is how you say which
+//   two namespaces    `counter` is reached both directly and through mathx
+
+import { Point }, * as mathx from "./lib/mathx.yoop";
+import * as counter from "./lib/counter.yoop";
+
+function tag(): int {
+  return 7;
+}
+
+function main(): int {
+  printf("add=%d\n", mathx.add(2, 3));
+  printf("scale=%d\n", mathx.scale(4, 5));
+
+  // A named import and a namespace over the same module, in one decl.
+  const p: Point = { x: 7, y: 9 };
+  printf("point=%d %d\n", p.x, p.y);
+
+  printf("tags=%d %d\n", tag(), mathx.tag());
+  printf("bump=%d %d\n", counter.bump(1), mathx.bumpedTwice(1));
+
+  // A qualified call is an ordinary expression: nestable, and usable as an
+  // argument to another one.
+  printf("nested=%d\n", mathx.add(counter.bump(10), mathx.scale(2, 3)));
+  return 0;
+}

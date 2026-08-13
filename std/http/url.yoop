@@ -20,10 +20,10 @@ import * as intr from "../core/intrinsics.yoop";
 
 // ----- small byte helpers -------------------------------------------------
 
-// Fresh string from a byte range. `string_from_bytes_unchecked` copies, so
+// Fresh string from a byte range. `stringFromBytesUnchecked` copies, so
 // the result does not borrow `raw`.
 function sliceStr(raw: uint8[], start: usize, end: usize): string {
-    return intr.string_from_bytes_unchecked(bytes.bytes_slice(raw, start, end));
+    return intr.stringFromBytesUnchecked(bytes.bytesSlice(raw, start, end));
 }
 
 // Hex digit value, or -1. Written against characters rather than the decimal
@@ -63,9 +63,9 @@ export type TargetParts {
 // reach a server, but a sloppy client sends them and the path should not
 // silently grow a "#..." suffix.
 export function splitTarget(target: string): TargetParts {
-    let raw: uint8[] = intr.string_as_bytes(target);
-    let end: usize = bytes.bytes_index_of(raw, '#');
-    let q: usize = bytes.bytes_index_of(bytes.bytes_slice(raw, 0, end), '?');
+    let raw: uint8[] = intr.stringAsBytes(target);
+    let end: usize = bytes.bytesIndexOf(raw, '#');
+    let q: usize = bytes.bytesIndexOf(bytes.bytesSlice(raw, 0, end), '?');
     if (q == end) {
         return { path: sliceStr(raw, 0, end), queryString: "" };
     }
@@ -86,7 +86,7 @@ export function splitTarget(target: string): TargetParts {
 // and guessing is how a decoder ends up with a different string than the
 // validator saw.
 export function percentDecode(s: string, plusIsSpace: bool): Result<string, HttpError> {
-    let raw: uint8[] = intr.string_as_bytes(s);
+    let raw: uint8[] = intr.stringAsBytes(s);
 
     // Nothing to do is the common case for paths; skip the allocation.
     let interesting: bool = false;
@@ -95,7 +95,7 @@ export function percentDecode(s: string, plusIsSpace: bool): Result<string, Http
     }
     if (!interesting) { return Result.Ok { value: s }; }
 
-    disposable out: Vec<uint8> = vec.vec_new(raw.len);
+    disposable out: Vec<uint8> = vec.vecNew(raw.len);
     let i: usize = 0;
     while (i < raw.len) {
         let c: uint8 = raw[i];
@@ -108,41 +108,41 @@ export function percentDecode(s: string, plusIsSpace: bool): Result<string, Http
             if (hi < 0 || lo < 0) {
                 return Result.Err { error: errBadRequest(`invalid percent escape at offset ${i}`) };
             }
-            vec.vec_push(ref out, uint8(hi * 16 + lo));
+            vec.vecPush(ref out, uint8(hi * 16 + lo));
             i = i + 3;
         } else if (plusIsSpace && c == '+') {
-            vec.vec_push(ref out, ' ');
+            vec.vecPush(ref out, ' ');
             i = i + 1;
         } else {
-            vec.vec_push(ref out, c);
+            vec.vecPush(ref out, c);
             i = i + 1;
         }
     }
-    return Result.Ok { value: intr.string_from_bytes_unchecked(vec.vec_as_array(ref out)) };
+    return Result.Ok { value: intr.stringFromBytesUnchecked(vec.vecAsArray(ref out)) };
 }
 
 // Percent-encode everything outside the unreserved set. Used by the client to
 // build a query string; a space becomes `%20` and not `+`, which is valid in
 // both a query and a form body.
 export function percentEncode(s: string): string {
-    let raw: uint8[] = intr.string_as_bytes(s);
+    let raw: uint8[] = intr.stringAsBytes(s);
     let needsWork: bool = false;
     for c in raw {
         if (!isUnreserved(c)) { needsWork = true; }
     }
     if (!needsWork) { return s; }
 
-    disposable out: Vec<uint8> = vec.vec_new(raw.len * 3);
+    disposable out: Vec<uint8> = vec.vecNew(raw.len * 3);
     for c in raw {
         if (isUnreserved(c)) {
-            vec.vec_push(ref out, c);
+            vec.vecPush(ref out, c);
         } else {
-            vec.vec_push(ref out, '%');
-            vec.vec_push(ref out, HEX_DIGITS[usize(c) / 16]);
-            vec.vec_push(ref out, HEX_DIGITS[usize(c) % 16]);
+            vec.vecPush(ref out, '%');
+            vec.vecPush(ref out, HEX_DIGITS[usize(c) / 16]);
+            vec.vecPush(ref out, HEX_DIGITS[usize(c) % 16]);
         }
     }
-    return intr.string_from_bytes_unchecked(vec.vec_as_array(ref out));
+    return intr.stringFromBytesUnchecked(vec.vecAsArray(ref out));
 }
 
 // Decode the path portion of a request-target.
@@ -155,7 +155,7 @@ export function percentEncode(s: string): string {
 // everything downstream, at the cost of a request shape nobody legitimately
 // sends.
 export function decodePath(rawPath: string): Result<string, HttpError> {
-    let raw: uint8[] = intr.string_as_bytes(rawPath);
+    let raw: uint8[] = intr.stringAsBytes(rawPath);
     let i: usize = 0;
     while (i + 2 < raw.len) {
         if (raw[i] == '%') {
@@ -184,17 +184,17 @@ export function decodePath(rawPath: string): Result<string, HttpError> {
 // Both halves are percent-decoded with `+` meaning space, so this is the
 // urlencoded rule for query strings and form bodies alike.
 export function parseUrlEncoded(s: string, ref out: Params): Result<usize, HttpError> {
-    let raw: uint8[] = intr.string_as_bytes(s);
+    let raw: uint8[] = intr.stringAsBytes(s);
     let count: usize = 0;
     let start: usize = 0;
     while (start <= raw.len) {
-        let rest: uint8[] = bytes.bytes_slice(raw, start, raw.len);
-        let rel: usize = bytes.bytes_index_of(rest, '&');
+        let rest: uint8[] = bytes.bytesSlice(raw, start, raw.len);
+        let rel: usize = bytes.bytesIndexOf(rest, '&');
         let end: usize = start + rel;
 
         if (end > start) {
-            let pair: uint8[] = bytes.bytes_slice(raw, start, end);
-            let eq: usize = bytes.bytes_index_of(pair, '=');
+            let pair: uint8[] = bytes.bytesSlice(raw, start, end);
+            let eq: usize = bytes.bytesIndexOf(pair, '=');
             let nameRaw: string = sliceStr(pair, 0, eq);
             let valueRaw: string = "";
             if (eq != pair.len) {
@@ -221,7 +221,7 @@ export function parseQuery(queryString: string, ref out: Params): Result<usize, 
 
 // An `application/x-www-form-urlencoded` request body.
 export function parseForm(body: uint8[], ref out: Params): Result<usize, HttpError> {
-    let text: string = intr.string_from_bytes_unchecked(body);
+    let text: string = intr.stringFromBytesUnchecked(body);
     let n: usize = parseUrlEncoded(text, ref out)? "parsing the form body";
     return Result.Ok { value: n };
 }
@@ -235,17 +235,17 @@ export function parseForm(body: uint8[], ref out: Params): Result<usize, HttpErr
 // The decode happens per segment, after the split, so a `%2F` inside a
 // segment stays data and cannot forge a boundary.
 export function pathSegments(path: string, ref out: Vec<string>): Result<usize, HttpError> {
-    let raw: uint8[] = intr.string_as_bytes(path);
+    let raw: uint8[] = intr.stringAsBytes(path);
     let count: usize = 0;
     let start: usize = 0;
     while (start <= raw.len) {
-        let rest: uint8[] = bytes.bytes_slice(raw, start, raw.len);
-        let rel: usize = bytes.bytes_index_of(rest, '/');
+        let rest: uint8[] = bytes.bytesSlice(raw, start, raw.len);
+        let rel: usize = bytes.bytesIndexOf(rest, '/');
         let end: usize = start + rel;
         if (end > start) {
             let segRaw: string = sliceStr(raw, start, end);
             let seg: string = percentDecode(segRaw, false)? `decoding path segment "${segRaw}"`;
-            vec.vec_push(ref out, seg);
+            vec.vecPush(ref out, seg);
             count = count + 1;
         }
         if (rel == rest.len) { break; }

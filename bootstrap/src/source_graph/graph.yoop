@@ -1,0 +1,52 @@
+module source_graph;
+
+// Layer 0 vocabulary: what a loaded program looks like before typecheck sees it.
+//
+// A MODULE is the namespace and mangling unit; a SOURCE FILE is the compilation
+// unit. For a plain `./util.yoop` import those are the same thing, and for a
+// directory module (every file declaring `module <name>;`) one module holds
+// several files that see each other's declarations without importing.
+//
+// The one design decision everything else follows from: a module's files share
+// ONE arena. NodeIds are therefore unique across the whole module, which is what
+// keeps typecheck's decoration a single dense vector indexed by NodeId instead
+// of a vector per file. Each file keeps its own PROGRAM root and its own source
+// bytes, because the spans in it are byte offsets into exactly those bytes.
+//
+// The graph holds modules in topological order (leaves first) and points at the
+// entry by INDEX rather than keeping a second copy, which would double-own it.
+
+import { Vec } from "std/core/vec.yoop";
+import { Map } from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, NodeId } from "../ast";
+
+export type ImportEdge {
+  nodeId: NodeId,
+  resolvedModuleIndex: usize,
+  resolvedModuleId: string,
+}
+
+// One source file of a module. Imports are per-FILE even though names are
+// per-module: an import binds into the module namespace, but WHERE it was
+// written is what a diagnostic has to point at.
+export type SourceFile propagates<disposable> {
+  absPath: string,
+  src: Vec<uint8>,
+  root: NodeId,                 // its PROGRAM node in the module's shared arena
+  imports: Vec<ImportEdge>,
+}
+
+export type Module propagates<disposable> {
+  id: string,                   // mangling basis, shared by every file
+  dir: string,                  // the directory, or "" for a single-file module
+  name: string,                 // the declared `module <name>;`, "" if none
+  ast: AST,                     // ONE arena for every file below
+  files: Vec<SourceFile>,
+}
+
+export type ModuleGraph propagates<disposable> {
+  modules: Vec<Module>,            // topo-ordered, leaves first; the entry is IN this list
+  entryIndex: usize,               // index of the entry module in `modules` (not a copy)
+  autoLoadModuleIds: Map<string, string>,
+}

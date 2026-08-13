@@ -37,7 +37,7 @@ and for anything else in the tree by the ordinary rule: `import * as m from
 "modules/mongo"` walks up from the importing file to the nearest `modules`
 directory. Modules here depend on each other **flat**, never by nesting - a
 module carrying its own `modules/` directory is a hard error at import time. See
-[plans/modules-folder.md](../plans/modules-folder.md).
+[plans/modules-folder.md](../plans/archive/modules-folder.md).
 
 Note that `examples/modules_demo/` has a `modules/` folder of its own and is
 therefore unaffected by this one: the nearest root wins.

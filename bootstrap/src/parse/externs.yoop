@@ -1,0 +1,146 @@
+module parse;
+
+// `extern` blocks, and the `import.<directive>;` module flags.
+//
+//   extern "C" from "yoop_runtime" {
+//     function yoop_log_info(msg: string): void;
+//   }
+//
+// An extern block declares functions that exist SOMEWHERE ELSE - libc, or the
+// yoop runtime. They are the one kind of function whose symbol keeps its
+// spelling exactly: `yoop_log_info` has to be the name the linker sees, so an
+// extern is never mangled (see mangle.yoop) and never has a body.
+//
+// Two ABIs. "C" means the symbol exists in a library and keeps its spelling.
+// "intrinsic" means the COMPILER is the implementation:
+//
+//   extern "intrinsic" from "compiler" {
+//     function heapAlloc<T>(n: usize): T[];
+//     function stringAsBytes(s: string): uint8[];
+//   }
+//
+// An intrinsic names an operation codegen lowers directly to IR - a malloc plus
+// a fat pointer, a field projection - rather than a call to anything. There is
+// no symbol, so the `from` library is documentation, and the signature exists
+// so the TYPECHECKER has something to check calls against. Several are generic,
+// which an ordinary extern never is.
+//
+// The `from` clause names the library the symbol comes from; nothing consumes
+// it yet - linking against anything but libc is a layer-6 feature the bootstrap
+// does not have - but it is recorded rather than dropped, because the moment
+// linking grows an option it is the thing that decides it.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags, tagName, posToSourceLocation } from "../lex";
+import * as str from "std/core/strings.yoop";
+import { ParsingError } from "../diagnostics";
+
+// `extern "C" from "lib" { ... }`
+//
+//   strId             the `from` library name, interned; 0-length when absent
+//   own childIds run  the EXTERN_FUNCTION_DECLs
+export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_BLOCK);
+  SelfLexing.expect(ref ps, TokenTags.EXTERN)?;
+
+  const abiTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
+  const abi = decodeStringLiteral(ref ps, abiTok)?;
+  if (!str.stringEq(abi, ABI_C) && !str.stringEq(abi, ABI_INTRINSIC)) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `unsupported extern ABI "${abi}" - the ones that exist are "C" and "intrinsic"`,
+      peekLengthUsize(ref ps),
+    )};
+  }
+  // The ABI decides whether a call becomes a CALL or becomes instructions, so
+  // it rides on the block for pass A to read.
+  node.flagA = str.stringEq(abi, ABI_INTRINSIC);
+
+  // `from "lib"` is REQUIRED, matching the JS reference. Making it optional was
+  // the first attempt and it was a divergence for nothing: a program written
+  // against the looser rule would not compile with the other compiler, and the
+  // library name is the thing layer 6 will need the day it links anything but
+  // libc. std spells it `"stdio.h"`, `"yoop_runtime"`, and so on.
+  SelfLexing.expect(ref ps, TokenTags.FROM)?;
+  const libTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
+  node.strId = internString(ref ps, decodeStringLiteral(ref ps, libTok)?);
+
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseExternFunction(ref ps)?);
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref ids));
+  node.childStart = start;
+  node.childCount = ids.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `function name<T>(a: T, b: U): R;` - a signature and nothing else. The same
+// slots a FUNCTION_DECL uses for its type params, params and return, so pass C
+// fills it with the same code; what it does NOT have is childD, the body.
+//
+// Type parameters are here for the intrinsics: `heapAlloc<T>(n: usize): T[]` is
+// generic over what it allocates, and a C extern never is.
+function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_FUNCTION_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+  node.childA = parseTypeParamList(ref ps)?;
+
+  SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  node.childB = SelfLexing.buildListNode(ref ps, ref ids, loc);
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  SelfLexing.expect(ref ps, TokenTags.COLON)?;
+  node.childC = parseTypeAnnotation(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `import.unsafe;` / `import.test;` - a module-level FLAG rather than an
+// import. Same keyword, and the `.` is what tells them apart, which is why this
+// is decided at the `import` and not by the import parser.
+//
+// `unsafe` opts the module into raw pointers; `test` marks a test module (no
+// main, and the harness runs its suites). Both land on the PROGRAM node's flags
+// rather than producing a decl, because neither declares anything.
+export function parseImportDirective(ref ps: ParserState): Result<string, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.IMPORT)?;
+  SelfLexing.expect(ref ps, TokenTags.DOT)?;
+  const name = parseIdentAsName(ref ps)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+
+  if (!str.stringEq(name, "unsafe") && !str.stringEq(name, "test")) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      `unknown import directive "import.${name};" - the ones that exist are \`import.unsafe;\` and \`import.test;\``,
+      peekLengthUsize(ref ps),
+    )};
+  }
+  return Result.Ok { value: name };
+}
+
+export const ABI_C: string = "C";
+export const ABI_INTRINSIC: string = "intrinsic";

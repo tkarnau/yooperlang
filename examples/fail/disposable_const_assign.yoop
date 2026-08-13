@@ -1,0 +1,25 @@
+// plans/yooperdoom-takeaways.md 2.4: the const half of the disposable rule.
+//
+// A BARE `disposable` binding is const, so neither rebinding it nor assigning
+// to its fields is allowed. This is not an oversight - rebinding would drop
+// the outgoing value without disposing it, and the injected cleanup would
+// then fire against the replacement. `let disposable` is the opt-in; see
+// examples/pass/disposable_rebind.yoop for the working form.
+
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+type Buf implements Disposable {
+    id: int32,
+    function dispose(ref self): void { self.id = 0; }
+}
+
+function bufNew(id: int32): Buf {
+    return { id: id };
+}
+
+function main(): int32 {
+    disposable b: Buf = bufNew(1);
+    b.id = 2;             // error: cannot assign to field of const
+    b = bufNew(3);        // error: cannot assign to const
+    return 0;
+}

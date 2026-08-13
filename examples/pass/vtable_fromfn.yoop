@@ -82,7 +82,7 @@ function main(): int32 {
     // Heterogeneous list: two stateless fromFn predicates plus one stateful
     // struct-backed predicate, all the same PredDispatcher type.
     let star: IsChar = { target: '#' };
-    let preds: PredDispatcher[] = intr.heap_alloc(3);
+    let preds: PredDispatcher[] = intr.heapAlloc(3);
     preds[0] = PredDispatcher.fromFn(isDigit);   // ctx-null shim around isDigit
     preds[1] = PredDispatcher.fromFn(isUpper);   // ctx-null shim around isUpper
     preds[2] = PredDispatcher.from(ref star);    // stateful, real ctx
@@ -101,7 +101,7 @@ function main(): int32 {
     let ops: TwoOpVT = TwoOpVT.fromFn(dbl, inc);
     printf(`lo=${TwoOpVT.lo(ref ops, 10)} hi=${TwoOpVT.hi(ref ops, 10)}\n`);
 
-    intr.heap_free(preds);
+    intr.heapFree(preds);
     return 0;
 }
 

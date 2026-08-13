@@ -1,0 +1,19 @@
+0
+7
+1_000
+0xFF
+0xdead_beef
+0b1010_0101
+0o755
+1.5
+2.0e3
+4.25e-2
+'A'
+'\n'
+'\t'
+'\\'
+'\''
+'\x41'
+"a plain string"
+"with \"escapes\" inside"
+`a template ${withInterp} inside`

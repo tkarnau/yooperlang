@@ -17,7 +17,7 @@ import { Display } from "std/core/traits.yoop";
 type Center implements Display {
     x: int32,
     y: int32,
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return `<${self.x},${self.y}>`;
     }
 }
@@ -42,7 +42,7 @@ function main(): int32 {
     const rect: Shape = Shape.Rect { w: 3, h: 4 };
     const dot: Shape = Shape.Dot;
 
-    // @derive(display) generated a to_string for the whole variant - one arm
+    // @derive(display) generated a toString for the whole variant - one arm
     // per case - so these interpolate. The output mirrors constructor syntax,
     // which means a dump reads back as the source that would rebuild it.
     printf(`${circle} area=${area(ref circle)}\n`);

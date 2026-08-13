@@ -1,0 +1,185 @@
+module parse;
+
+// `variant` declarations, their constructors, and their patterns.
+//
+//   variant Result { Ok { value: int }, Err { error: string }, None }
+//
+//   Result.Ok { value: 42 }        a constructor with a payload
+//   Result.None                    a payload-less one, which is just a dotted
+//                                  name and parses as a FIELD_ACCESS
+//   case Result.Ok { value: v }:   a pattern, binding `v` in the arm
+//
+// The three forms share one shape, because they ARE the same shape: a variant
+// name, a case name, and an optional `{ ... }` list. What differs is only what
+// the braces hold - expressions in a constructor, binding names in a pattern -
+// and that difference is pass D's to enforce, not the parser's.
+//
+// A payload-less constructor is indistinguishable from a field read here
+// (`Result.None` and `p.x` are the same tokens), so the parser leaves it as a
+// FIELD_ACCESS and pass D recognizes it once names resolve. That is the same
+// division of labour `ns.fn()` uses.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags, posToSourceLocation } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// `variant Name { Case { field: T }, Bare, ... }`
+//
+//   name                    the variant's name
+//   childA                  typeParams list-node (0 = none)
+//   childD                  implements list-node (0 = none)
+//   childF                  propagates list-node (0 = none)
+//   own childIds run        the VARIANT_CASE nodes, in DECLARATION ORDER, which
+//                           is the tag order and therefore ABI, then any
+//                           METHOD_DECLs
+export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.VARIANT)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+  node.childA = parseTypeParamList(ref ps)?;
+  // Same slot a TYPE_DECL uses, so pass C reads the clause the one way.
+  node.childD = parseImplementsClause(ref ps)?;
+  node.childF = parsePropagatesClause(ref ps)?;
+
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable caseIds: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    // A method, not a case. `function` cannot start a case name, so the two
+    // members never have to be told apart by anything but the keyword.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+      vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
+      continue;
+    }
+    vec.vecPush(ref caseIds, parseVariantCase(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  // Spliced only now: parsing a case appends its own field run to the shared
+  // pool, so a partial splice would interleave the two.
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref caseIds));
+  node.childStart = start;
+  node.childCount = caseIds.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// One `Case { field: T, ... }` or a bare `Case`.
+//
+//   name                    the case's name
+//   own childIds run        its FIELD_DECLs, empty for a payload-less case
+function parseVariantCase(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_CASE);
+  node.name = parseIdentAsName(ref ps)?;
+
+  if (SelfLexing.peek(ref ps).tag != TokenTags.LCURLY) {
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
+
+  SelfLexing.advance(ref ps)?;
+  disposable fieldIds: Vec<NodeId> = vec.vecNew(2);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref fieldIds));
+  node.childStart = start;
+  node.childCount = fieldIds.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `case Result.Ok { value: v }:` / `case Result.None:`
+//
+//   name      the CASE name
+//   childB    an IDENT holding the VARIANT name - the same slot a qualified
+//             call uses for its base, and for the same reason: the qualifier is
+//             a name the parser cannot resolve
+//   childA    a NODE_LIST of STRUCT_LITERAL_FIELD, whose values are the BINDING
+//             names (each an IDENT). 0 when the case has no payload to bind.
+export function parseVariantPattern(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.VARIANT_PATTERN);
+
+  let base = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+  base.name = parseIdentAsName(ref ps)?;
+  node.childB = SelfLexing.pushNode(ref ps, base);
+
+  SelfLexing.expect(ref ps, TokenTags.DOT)?;
+  node.name = parseIdentAsName(ref ps)?;
+
+  if (SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+    node.childA = parsePatternFields(ref ps)?;
+  }
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `{ value: v, error: _ }` - the BINDINGS a pattern introduces.
+//
+// Shaped like a struct literal and deliberately not parsed as one: the right
+// of each `:` is a NAME, not an expression. Reusing the literal parser meant
+// parsing an expression and then rejecting anything that was not an identifier,
+// which put the rule in pass D and made `_` a syntax error rather than a
+// discard.
+//
+// `_` binds nothing. It says "this case carries a field and I do not want it",
+// which is the difference between ignoring a payload and forgetting it - pass D
+// still requires every field to be named.
+function parsePatternFields(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(4);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    let field = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.STRUCT_LITERAL_FIELD);
+    field.name = parseIdentAsName(ref ps)?;
+    SelfLexing.expect(ref ps, TokenTags.COLON)?;
+
+    let binding = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.IDENT);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.DISCARD) {
+      SelfLexing.advance(ref ps)?;
+      binding.name = DISCARD_BINDING;
+    } else {
+      binding.name = parseIdentAsName(ref ps)?;
+    }
+    field.childA = SelfLexing.pushNode(ref ps, binding);
+
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, field));
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// The name a `_` binding carries. Spelled out rather than left empty so a
+// reader of the arena sees what it is, and unreachable as a real identifier
+// because `_` does not lex as one.
+export const DISCARD_BINDING: string = "_";
+
+// True when the arm's pattern is a variant one rather than an integer literal.
+// `case Result.Ok` starts with an IDENT; `case 1` and `case -1` do not.
+export function peekIsVariantPattern(ref ps: ParserState): bool {
+  return SelfLexing.peek(ref ps).tag == TokenTags.IDENT;
+}

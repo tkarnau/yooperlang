@@ -1,0 +1,2126 @@
+module typecheck;
+
+// Pass D - check function bodies and decorate every node codegen will read.
+//
+// Decoration is the dense `TypedModule.resolvedTypes` vector indexed by NodeId
+// (decision D2): the AST stays the parser's immutable output and the types live
+// beside it. Codegen may assume every node it visits has a concrete TypeId here.
+//
+// This is the thinnest pass D that gets a program to an executable. It handles
+// int and string literals, calls, and return statements; anything else gets a
+// named "not supported yet" diagnostic rather than a silently untyped node.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt, kindName } from "../ast";
+import { SourceLocation } from "../diagnostics";
+import { Module } from "../source_graph";
+import { TokenTags, tagSpelling } from "../lex";
+import * as str from "std/core/strings.yoop";
+import { Option } from "std/core/types.yoop";
+
+export function passDCheckBodies(ref prog: Program, ref tm: TypedModule, m: Module): void {
+  // One decoration slot per arena node, so a NodeId indexes straight in.
+  // TYPE_ERROR_ID doubles as "nothing resolved here".
+  vec.vecClear(ref tm.resolvedTypes);
+  let n: usize = 0;
+  while (n < m.ast.nodes.len) {
+    vec.vecPush(ref tm.resolvedTypes, TYPE_ERROR_ID);
+    n += 1;
+  }
+
+  let f: usize = 0;
+  while (f < m.files.len) {
+    const file = vec.vecGet(ref m.files, f);
+    beginFile(ref prog, file.absPath);
+    checkFileBodies(ref prog, ref tm, m, file.root);
+    f += 1;
+  }
+}
+
+function checkFileBodies(ref prog: Program, ref tm: TypedModule, m: Module, root: NodeId): void {
+  const programNode = nodeAt(ref m.ast, root);
+  let i: usize = 0;
+  while (i < programNode.childCount) {
+    const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
+    const declNode = nodeAt(ref m.ast, declId);
+    if (declNode.kind == ASTNodeKind.FUNCTION_DECL) {
+      checkFunctionBody(ref prog, ref tm, ref m.ast, declNode);
+    }
+    // A type's METHODS have bodies too, and they are not module-level names -
+    // so the walk has to reach into the decl to find them.
+    if (declNode.kind == ASTNodeKind.TYPE_DECL ||
+        declNode.kind == ASTNodeKind.VARIANT_DECL) {
+      checkMethodBodies(ref prog, ref tm, ref m.ast, declNode);
+    }
+    i += 1;
+  }
+}
+
+// Every METHOD_DECL member of a type decl. Its signature is already in the
+// owner's method table, so this is the same job checkFunctionBody does with the
+// lookup replaced.
+function checkMethodBodies(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const ownerType = ownTypeOf(ref prog, ref tm, declNode.name);
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const memberId = childAt(ref ast, declNode, i);
+    const member = nodeAt(ref ast, memberId);
+    if (member.kind == ASTNodeKind.METHOD_DECL) {
+      checkBodyAgainst(ref prog, ref tm, ref ast, member,
+        lookupMethod(ref prog, ownerType, member.name));
+    }
+    i += 1;
+  }
+}
+
+// The type a decl's own name binds to. Only used to reach a method table.
+function ownTypeOf(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Struct { typeId: t }: { return t; }
+    case Symbol.VariantT { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+function checkFunctionBody(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  // A GENERIC function is checked ONCE, against its template - so its type
+  // parameters stay opaque and its decoration is written in terms of them.
+  // Codegen substitutes per instantiation rather than pass D re-checking, which
+  // is sound precisely because a parameter has no bounds: an opaque `T` supports
+  // nothing, so a body that checks generically checks for every instantiation.
+  // When bounds land, this is the decision to revisit.
+  let signature: TypeId = TYPE_ERROR_ID;
+  let generic = false;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { signature = t; }
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      if (s != GenericSort.FUNC) {
+        return;
+      }
+      signature = genericAt(ref prog, d).template;
+      generic = true;
+    }
+    default: { return; }
+  }
+
+  if (!generic) {
+    checkBodyAgainst(ref prog, ref tm, ref ast, declNode, signature);
+    return;
+  }
+
+  // The parameters have to be in scope for the BODY, not just the signature:
+  // `let new_data: T[] = ...` is an annotation inside the body, and `T` means
+  // nothing without them. Pass C does the same around a signature; this is the
+  // half that was missing.
+  disposable names: Vec<string> = bodyTypeParamNames(ref ast, declNode);
+  disposable params: Vec<TypeId> = bodyTypeParams(ref prog, ref tm, declNode);
+  beginTypeParams(ref prog, ref params, ref names);
+  checkBodyAgainst(ref prog, ref tm, ref ast, declNode, signature);
+  endTypeParams(ref prog);
+}
+
+// The declared type-parameter NAMES of a generic decl, in order.
+function bodyTypeParamNames(ref ast: AST, declNode: ASTNode): Vec<string> propagates<disposable> {
+  let names: Vec<string> = vec.vecNew(2);
+  if (declNode.childA == 0) {
+    return names;
+  }
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref names, nodeAt(ref ast, childAt(ref ast, list, i)).name);
+    i += 1;
+  }
+  return names;
+}
+
+// The TypeParam ids pass A interned for it - the SAME ids the template's
+// signature uses, so a body annotation and the signature agree.
+function bodyTypeParams(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode
+): Vec<TypeId> propagates<disposable> {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return vec.vecNew(0);
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      let info = genericAt(ref prog, d);
+      return vec.vecFromArray(vec.vecAsArray(ref info.params));
+    }
+    default: { return vec.vecNew(0); }
+  }
+}
+
+// Bind the parameters from `signature` and check the body against its return
+// type. Shared by a function and a method, which differ only in where the
+// signature was found.
+function checkBodyAgainst(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  signature: TypeId
+): void {
+  let retType: TypeId = TYPE_VOID_ID;
+  let paramTypes: Vec<TypeId> = vec.vecNew(0);
+  switch (typeAt(ref prog, signature)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      retType = r;
+      paramTypes = p;
+    }
+    default: { return; }
+  }
+
+  if (declNode.childD != 0) {
+    disposable scope: LocalScope = scopeNew();
+    bindParams(ref prog, ref tm, ref ast, declNode, ref paramTypes, ref scope);
+    checkBlock(ref prog, ref tm, ref ast, declNode.childD, retType, ref scope);
+  }
+}
+
+// Parameters are locals the caller filled in. Their types come from the Func
+// type pass C built, not from re-resolving the annotations, so the signature
+// stays the single source of truth.
+function bindParams(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref paramTypes: Vec<TypeId>,
+  ref scope: LocalScope
+): void {
+  if (declNode.childB == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, declNode.childB);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const paramId = childAt(ref ast, list, i);
+    const paramNode = nodeAt(ref ast, paramId);
+    let t: TypeId = TYPE_ERROR_ID;
+    if (i < paramTypes.len) {
+      t = vec.vecGet(ref paramTypes, i);
+    }
+    // A `ref v: Vec<T>` parameter is `ref Vec<T>` in the SIGNATURE - that is
+    // what makes passing a bare `v` an error - but the BODY sees a plain
+    // `Vec<T>`, because a borrow IS the thing it borrows as far as the callee
+    // is concerned. Unwrapping here is what keeps every read, write and field
+    // access in the body from needing to know about references at all.
+    const bound = derefType(ref prog, t);
+    // A parameter is a local COPY, so writing to it is ordinary. A `ref`
+    // parameter is mutable too - that is the whole point of the borrow.
+    if (!scopeDeclare(ref scope, paramNode.name, bound, true)) {
+      reportError(ref prog, `parameter "${paramNode.name}" is declared more than once`, paramNode.sourceLoc);
+    }
+    // The DECORATION keeps the signature type: it is what codegen emits the
+    // parameter as, and a `ref` parameter arrives as a pointer.
+    vec.vecSet(ref tm.resolvedTypes, paramId, t);
+    i += 1;
+  }
+}
+
+function checkBlock(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  blockId: NodeId,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  const block = nodeAt(ref ast, blockId);
+  if (block.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, block.childA);
+  scopePush(ref scope);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    checkStatement(ref prog, ref tm, ref ast, childAt(ref ast, list, i), retType, ref scope);
+    i += 1;
+  }
+  scopePop(ref scope);
+}
+
+function checkStatement(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmtId: NodeId,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  const stmt = nodeAt(ref ast, stmtId);
+  switch (stmt.kind) {
+    case ASTNodeKind.RETURN_STATEMENT: {
+      if (stmt.childA == 0) {
+        return;   // bare `return;`
+      }
+      // The return type is what an untyped literal in the expression pins to.
+      const got = checkExpr(ref prog, ref tm, ref ast, stmt.childA, retType, ref scope);
+      if (got != TYPE_ERROR_ID && retType != TYPE_ERROR_ID && !typeAccepts(ref prog, retType, got)) {
+        reportError(
+          ref prog,
+          `cannot return ${formatType(ref prog, got)} from a function returning ${formatType(ref prog, retType)}`,
+          stmt.sourceLoc
+        );
+      }
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT: {
+      checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
+    }
+    case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      checkVarDecl(ref prog, ref tm, ref ast, stmt, stmtId, ref scope);
+    }
+    case ASTNodeKind.IF_STATEMENT: {
+      checkCondition(ref prog, ref tm, ref ast, stmt.childA, ref scope);
+      checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
+      if (stmt.childC != 0) {
+        // The else branch is a BLOCK, or another IF_STATEMENT for `else if`.
+        if (nodeAt(ref ast, stmt.childC).kind == ASTNodeKind.IF_STATEMENT) {
+          checkStatement(ref prog, ref tm, ref ast, stmt.childC, retType, ref scope);
+        } else {
+          checkBlock(ref prog, ref tm, ref ast, stmt.childC, retType, ref scope);
+        }
+      }
+    }
+    case ASTNodeKind.WHILE_STATEMENT: {
+      checkCondition(ref prog, ref tm, ref ast, stmt.childA, ref scope);
+      scope.loopDepth += 1;
+      checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
+      scope.loopDepth -= 1;
+    }
+    case ASTNodeKind.FOR_LOOP: {
+      checkForLoop(ref prog, ref tm, ref ast, stmt, stmtId, retType, ref scope);
+    }
+    case ASTNodeKind.FOR_IN_LOOP: {
+      checkForInLoop(ref prog, ref tm, ref ast, stmt, stmtId, retType, ref scope);
+    }
+    case ASTNodeKind.SWITCH_STATEMENT: {
+      checkSwitch(ref prog, ref tm, ref ast, stmt, retType, ref scope);
+    }
+    case ASTNodeKind.BREAK_STATEMENT, ASTNodeKind.CONTINUE_STATEMENT: {
+      if (scope.loopDepth == 0) {
+        reportError(
+          ref prog,
+          `"${kindName(stmt.kind)}" is only legal inside a loop`,
+          stmt.sourceLoc
+        );
+      }
+    }
+    default: {
+      reportError(ref prog, `pass D does not handle ${kindName(stmt.kind)} yet`, stmt.sourceLoc);
+    }
+  }
+}
+
+// Returns the node's type AND records it. `expected` is the type an untyped
+// literal should pin to, or TYPE_ERROR_ID when there is no expectation.
+function checkExpr(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  const expr = nodeAt(ref ast, exprId);
+  let resolved: TypeId = TYPE_ERROR_ID;
+
+  switch (expr.kind) {
+    case ASTNodeKind.INT_LITERAL: {
+      // An int literal is untyped until context pins it, and it may only pin to
+      // an INTEGER type - the JS reference rejects untyped-int-to-float too.
+      // With no expectation, or an expectation it cannot satisfy, it falls back
+      // to int32 and the caller's own check reports the mismatch.
+      if (expected != TYPE_ERROR_ID && isIntPrimType(ref prog, expected)) {
+        resolved = expected;
+      } else {
+        if (expected == TYPE_ERROR_ID) {
+          resolved = primTypeId(PrimKind.INT32);
+        } else {
+          reportError(
+            ref prog,
+            `cannot assign untyped int to ${formatType(ref prog, expected)}`,
+            expr.sourceLoc
+          );
+          // Stay TYPE_ERROR_ID so the caller's own mismatch check stays quiet:
+          // one problem should produce one diagnostic.
+        }
+      }
+    }
+    case ASTNodeKind.STRING_LITERAL: {
+      resolved = primTypeId(PrimKind.STRING);
+    }
+    case ASTNodeKind.TEMPLATE_LITERAL: {
+      checkTemplateParts(ref prog, ref tm, ref ast, expr, ref scope);
+      resolved = primTypeId(PrimKind.STRING);
+    }
+    case ASTNodeKind.BOOL_LITERAL: {
+      resolved = primTypeId(PrimKind.BOOL);
+    }
+    case ASTNodeKind.DEREF_EXPRESSION: {
+      resolved = checkDeref(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.ADDRESS_OF_EXPRESSION: {
+      resolved = checkAddressOf(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.SLICE_EXPRESSION: {
+      resolved = checkSlice(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.NULL_LITERAL: {
+      // Pins to the expected pointer type when there is one, exactly as an
+      // untyped int literal pins to an integer. Without an expectation it stays
+      // untyped, and typeAccepts lets it into any `unsafe_ptr` later.
+      if (isUnsafePtrType(ref prog, expected)) {
+        resolved = expected;
+      } else {
+        resolved = TYPE_UNTYPED_NULL_ID;
+      }
+    }
+    case ASTNodeKind.UNARY_EXPRESSION: {
+      resolved = checkUnary(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.ARRAY_LITERAL: {
+      resolved = checkArrayLiteral(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.STRUCT_LITERAL: {
+      resolved = checkStructLiteral(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.INDEX_EXPRESSION: {
+      resolved = checkIndex(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.FIELD_ACCESS: {
+      resolved = checkFieldAccess(ref prog, ref tm, ref ast, expr, expected, ref scope);
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      // A comparison's operands constrain each other but NOT the result, so an
+      // untyped literal in `n < 10` pins to `n`, never to the bool the whole
+      // expression produces.
+      const compares = isComparison(expr.operator);
+      const logical = isLogical(expr.operator);
+      let operandExpected = expected;
+      if (compares) {
+        operandExpected = TYPE_ERROR_ID;
+      } else if (logical) {
+        // `&&` / `||` take bools and produce one.
+        operandExpected = primTypeId(PrimKind.BOOL);
+      }
+      let left = checkExpr(ref prog, ref tm, ref ast, expr.childA, operandExpected, ref scope);
+      const right = checkExpr(ref prog, ref tm, ref ast, expr.childB, left, ref scope);
+
+      // An untyped int literal takes the OTHER operand's type. The right side
+      // gets that for free - it is checked WITH `left` as its expectation - but
+      // a LEADING literal has already defaulted to int32 by the time the right
+      // side is known. So re-check it, which also re-decorates the node.
+      //
+      // `48 + (rest % 10)` with a uint64 `rest` is the case: without this the
+      // 48 is an int32 and the addition is refused for a difference the writer
+      // never wrote.
+      if (left != right &&
+          isIntLiteralNode(ref ast, expr.childA) &&
+          isIntPrimType(ref prog, right)) {
+        left = checkExpr(ref prog, ref tm, ref ast, expr.childA, right, ref scope);
+      }
+
+      if (left != right) {
+        reportError(
+          ref prog,
+          `operator "${tagSpelling(expr.operator)}" cannot be applied to ${formatType(ref prog, left)} and ${formatType(ref prog, right)}`,
+          expr.sourceLoc
+        );
+      } else if (compares) {
+        resolved = primTypeId(PrimKind.BOOL);
+      } else if (logical) {
+        if (left != primTypeId(PrimKind.BOOL)) {
+          reportError(ref prog, "logical operands must be bool", expr.sourceLoc);
+        } else {
+          resolved = primTypeId(PrimKind.BOOL);
+        }
+      } else {
+        resolved = left;
+      }
+    }
+    case ASTNodeKind.CALL_EXPRESSION: {
+      resolved = checkCall(ref prog, ref tm, ref ast, expr, exprId, expected, ref scope);
+    }
+    case ASTNodeKind.REF_EXPRESSION: {
+      resolved = checkRefExpr(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.VARIANT_CONSTRUCTOR: {
+      resolved = checkVariantConstructor(
+        ref prog, ref tm, ref ast, expr, expr.childB, expr.childA, expected, ref scope
+      );
+    }
+    case ASTNodeKind.ASSIGNMENT: {
+      resolved = checkAssignment(ref prog, ref tm, ref ast, expr, ref scope);
+    }
+    case ASTNodeKind.IDENT: {
+      switch (scopeLookup(ref scope, expr.name)) {
+        case Option.Some { value: t }: { resolved = t; }
+        case Option.None: {
+          // Not a local, so it may be a module-level `const`. Locals win, which
+          // is the same precedence every other language gives them.
+          resolved = moduleConstType(ref prog, ref tm, expr.name);
+          if (resolved == TYPE_ERROR_ID) {
+            // Or a FUNCTION named without being called: `{ hash: stringHash }`
+            // puts one in a function-typed field. Its type is its signature -
+            // a yoop function value IS its address, so there is nothing to
+            // convert and nothing to wrap.
+            resolved = moduleFuncType(ref prog, ref tm, expr.name);
+          }
+          if (resolved == TYPE_ERROR_ID) {
+            reportError(ref prog, `unknown name "${expr.name}"`, expr.sourceLoc);
+          }
+        }
+      }
+    }
+    default: {
+      reportError(ref prog, `pass D does not handle ${kindName(expr.kind)} yet`, expr.sourceLoc);
+    }
+  }
+
+  vec.vecSet(ref tm.resolvedTypes, exprId, resolved);
+  return resolved;
+}
+
+function checkCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  // `ns.fn(...)`. The parser could not tell a namespace from a value, so the
+  // fork is here, before the cast and printf carve-outs - neither of which a
+  // qualified name can mean.
+  if (expr.childB != 0) {
+    return checkQualifiedCall(ref prog, ref tm, ref ast, expr, exprId, expected, ref scope);
+  }
+
+  // A cast is handled before the arguments, because its single operand wants to
+  // be checked AGAINST the target type (so `int64(1)` pins the literal) rather
+  // than with no expectation like a call argument.
+  const earlyCast = primTypeIdOfName(expr.name);
+  if (earlyCast != TYPE_ERROR_ID) {
+    return checkCast(ref prog, ref tm, ref ast, expr, earlyCast, ref scope);
+  }
+
+  // printf stays magic, exactly as it is in the JS reference: it is variadic C
+  // and almost every program uses it. Variadic means there is no signature to
+  // check against, so its arguments are the one case still checked bare.
+  if (isPrintfName(expr.name)) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    return primTypeId(PrimKind.INT32);
+  }
+
+  const symId = lookupOwnName(ref tm, expr.name);
+  if (symId == SYMBOL_NONE_ID) {
+    // Still check the arguments, so a mistake inside one is reported alongside
+    // the unknown name rather than hidden behind it.
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(ref prog, `unknown function "${expr.name}"`, expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return checkAgainstSignature(ref prog, ref tm, ref ast, expr, exprId, symId, expr.name, expected, ref scope);
+}
+
+// Arguments checked with NO expectation. Only for a callee with no signature to
+// check against: printf, and a name that did not resolve.
+function checkCallArgs(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): void {
+  if (expr.childA == 0) {
+    return;
+  }
+  const args = nodeAt(ref ast, expr.childA);
+  let a: usize = 0;
+  while (a < args.childCount) {
+    checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID, ref scope);
+    a += 1;
+  }
+}
+
+// Infer a generic callee's type arguments, monomorphize it, and record which
+// instance this call site landed on. Returns the SUBSTITUTED Func type.
+//
+// Two sources of information, in this order:
+//
+//   the ARGUMENTS   `identity(3)` matches the declared `T` against int32
+//   the EXPECTED    `let v: Box<int> = boxOf(3)` matches `Box<T>` against
+//                   `Box<int>`, which is the only signal when nothing but the
+//                   RETURN type mentions T
+//
+// Arguments go first because they are what the reader is looking at. The
+// expected type fills in whatever they left unknown.
+function instantiateCallee(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  declId: DeclId,
+  calleeName: string,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  let info = genericAt(ref prog, declId);
+
+  // One slot per parameter, TYPE_ERROR_ID meaning "still unknown".
+  disposable bound: Vec<TypeId> = vec.vecNew(info.params.len);
+  let b: usize = 0;
+  while (b < info.params.len) {
+    vec.vecPush(ref bound, TYPE_ERROR_ID);
+    b += 1;
+  }
+
+  // The arguments are checked with NO expectation here, because the parameter
+  // types are exactly what is not known yet. checkAgainstSignature re-checks
+  // them against the substituted signature once it is built, which is where an
+  // untyped literal finally pins.
+  switch (typeAt(ref prog, info.template)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      if (expr.childA != 0) {
+        const args = nodeAt(ref ast, expr.childA);
+        let a: usize = 0;
+        while (a < args.childCount && a < p.len) {
+          const got = checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, args, a), TYPE_ERROR_ID, ref scope);
+          inferTypeArgs(ref prog, vec.vecGet(ref p, a), got, ref info.params, ref bound);
+          a += 1;
+        }
+      }
+      inferTypeArgs(ref prog, r, expected, ref info.params, ref bound);
+    }
+    default: { return TYPE_ERROR_ID; }
+  }
+
+  // A parameter nothing mentioned is not an error the CALL can fix by trying
+  // harder - it needs an annotation somewhere, and saying which one is missing
+  // is the whole message.
+  let u: usize = 0;
+  while (u < bound.len) {
+    if (vec.vecGet(ref bound, u) == TYPE_ERROR_ID) {
+      reportError(
+        ref prog,
+        `cannot infer "${typeParamNameAt(ref prog, ref info.params, u)}" for "${calleeName}" - annotate the binding it goes to`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    u += 1;
+  }
+
+  const instance = instantiateFunction(ref prog, declId, ref bound);
+  map.mapInsert(ref tm.calleeInstance, uint64(exprId), instance);
+  return funcInstanceAt(ref prog, instance).funcType;
+}
+
+// The NAME of the i'th type parameter, for the message above.
+function typeParamNameAt(ref prog: Program, ref params: Vec<TypeId>, i: usize): string {
+  if (i >= params.len) {
+    return "?";
+  }
+  switch (typeAt(ref prog, vec.vecGet(ref params, i))) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: bs }: { return n; }
+    default: { return "?"; }
+  }
+}
+
+// A call checked against the callee's declared parameters: the right NUMBER of
+// arguments, each of the right type. Returns the callee's return type.
+//
+// Each argument is checked AGAINST its parameter, which is what pins an untyped
+// literal to it - `takesLong(1)` gives the 1 an int64 rather than defaulting it
+// to int32 and then complaining they differ.
+function checkAgainstSignature(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  symId: SymbolId,
+  calleeName: string,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  let funcType: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Func { typeId: t }: { funcType = t; }
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      if (s != GenericSort.FUNC) {
+        checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+        reportError(ref prog, `"${calleeName}" is a type, not a function`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      // Nothing wrote the type arguments down, so they are INFERRED from the
+      // arguments and the expected type, and the call is monomorphized against
+      // whatever comes out.
+      funcType = instantiateCallee(
+        ref prog, ref tm, ref ast, expr, exprId, d, calleeName, expected, ref scope
+      );
+      if (funcType == TYPE_ERROR_ID) {
+        return TYPE_ERROR_ID;   // instantiateCallee reported why
+      }
+    }
+    default: {
+      checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+      reportError(ref prog, `"${calleeName}" is not callable`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, funcType, calleeName, ref scope);
+}
+
+// The arity and type check, against a Func type that is already resolved.
+// Shared by an ordinary call and a trait-method call, which differ only in how
+// they FIND the Func.
+function checkArgsAgainstFunc(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  funcType: TypeId,
+  calleeName: string,
+  ref scope: LocalScope
+): TypeId {
+  let params: Vec<TypeId> = vec.vecNew(0);
+  let ret: TypeId = TYPE_ERROR_ID;
+  let variadic = false;
+  switch (typeAt(ref prog, funcType)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      params = p;
+      ret = r;
+      variadic = v;
+    }
+    default: {
+      checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  let given: usize = 0;
+  if (expr.childA != 0) {
+    const args = nodeAt(ref ast, expr.childA);
+    given = args.childCount;
+    let a: usize = 0;
+    while (a < args.childCount) {
+      const argId = childAt(ref ast, args, a);
+      // Past the declared parameters there is nothing to check against; the
+      // arity error below says so once, rather than once per extra argument.
+      let want: TypeId = TYPE_ERROR_ID;
+      if (a < params.len) {
+        want = vec.vecGet(ref params, a);
+      }
+      const got = checkExpr(ref prog, ref tm, ref ast, argId, want, ref scope);
+      if (want != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(ref prog, want, got)) {
+        reportError(
+          ref prog,
+          `argument ${a + 1} of "${calleeName}" is ${formatType(ref prog, want)}, not ${formatType(ref prog, got)}`,
+          nodeAt(ref ast, argId).sourceLoc
+        );
+      }
+      a += 1;
+    }
+  }
+
+  // A variadic callee takes AT LEAST its declared parameters. Nothing user-
+  // written is variadic yet - printf never reaches here - but the signature
+  // carries the flag, so honouring it costs one condition.
+  const wrongCount = given < params.len || (given > params.len && !variadic);
+  if (wrongCount) {
+    reportError(
+      ref prog,
+      `"${calleeName}" takes ${params.len} argument(s), got ${given}`,
+      expr.sourceLoc
+    );
+  }
+  return ret;
+}
+
+// `ns.fn(...)` - a call reached through an `import * as ns`.
+//
+// The lookup goes to the source module's EXPORTS rather than its names, which
+// is what keeps a namespace from being a way around `export`: `ns.hidden()`
+// fails for the same reason `import { hidden }` does.
+function checkQualifiedCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  const base = nodeAt(ref ast, expr.childB);
+
+  // `errno.get()` / `errno.message(c)` - the libc errno bridge. It lowers to
+  // `yoop_errno_get` in the yoop RUNTIME, which the link step does not pull in,
+  // so it is refused by name here rather than surfacing as "unknown name
+  // errno" - the reader would go looking for a missing import.
+  if (base.kind == ASTNodeKind.IDENT && str.stringEq(base.name, ERRNO_NAMESPACE)) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      `"errno.${expr.name}" reads the libc errno through the yoop runtime, which the bootstrap does not link yet`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // `m.ops.hash(key)` - an INDIRECT call through a function-typed field. The
+  // base is a value rather than a name, and the thing being called is the
+  // field's contents, so this is checked before anything looks for a module.
+  //
+  // Tried first because a base that resolves to a struct cannot be a namespace:
+  // a namespace only ever lives at module level, and a local always shadows.
+  const throughField = fieldFuncTypeOf(ref prog, ref tm, ref ast, expr, base, ref scope);
+  if (throughField != TYPE_ERROR_ID) {
+    return checkIndirectCall(ref prog, ref tm, ref ast, expr, exprId, throughField, expected, ref scope);
+  }
+
+  if (base.kind != ASTNodeKind.IDENT) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      "only an imported namespace may qualify a call so far - methods are not supported by the bootstrap typechecker yet",
+      base.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // `Display.toString(ref p)` - the base is a TRAIT, not a namespace, and the
+  // method is found on the RECEIVER's concrete type rather than in a module.
+  const traitType = traitTypeNamed(ref prog, ref tm, base.name);
+  if (traitType != TYPE_ERROR_ID) {
+    return checkTraitCall(ref prog, ref tm, ref ast, expr, exprId, base, traitType, ref scope);
+  }
+
+  let sourceIndex: ModuleId = 0;
+  switch (namespaceModuleOf(ref prog, ref tm, base, ref scope)) {
+    case Option.Some { value: mi }: { sourceIndex = mi; }
+    case Option.None: {
+      checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+      return TYPE_ERROR_ID;   // namespaceModuleOf reported why
+    }
+  }
+  let source = vec.vecGet(ref prog.modules, sourceIndex);
+
+  switch (map.mapGet(ref source.exports, expr.name)) {
+    case Option.Some { value: symId }: {
+      // The signature is the SOURCE module's, but the arguments are checked in
+      // THIS module's scope - the types on both sides are program-wide TypeIds,
+      // so nothing has to be translated between them.
+      return checkAgainstSignature(ref prog, ref tm, ref ast, expr, exprId, symId, expr.name, expected, ref scope);
+    }
+    case Option.None: {
+      checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+      if (lookupOwnName(ref source, expr.name) != SYMBOL_NONE_ID) {
+        reportError(
+          ref prog,
+          `"${expr.name}" is declared in module ${source.moduleId} but not exported - add \`export\` to its declaration`,
+          expr.sourceLoc
+        );
+      } else {
+        reportError(
+          ref prog,
+          `"${base.name}" has no export "${expr.name}"`,
+          expr.sourceLoc
+        );
+      }
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// The module an IDENT names as a namespace. `None` with the reason already
+// reported - an Option rather than a sentinel, because ModuleId 0 is the first
+// module loaded and so is never spare.
+function namespaceModuleOf(
+  ref prog: Program,
+  ref tm: TypedModule,
+  base: ASTNode,
+  ref scope: LocalScope
+): Option<ModuleId> {
+  // A LOCAL first, because `p.x()` on a struct value reaches this path too -
+  // the parser cannot tell it from `ns.fn()`. Without this it would be reported
+  // as an unknown name, since a namespace only ever lives at module level, and
+  // the reader would go hunting for a typo in a name that is right there.
+  switch (scopeLookup(ref scope, base.name)) {
+    case Option.Some { value: localType }: {
+      reportError(
+        ref prog,
+        `"${base.name}" is a local of type ${formatType(ref prog, localType)}, not an imported namespace - calling a method on a value is not supported by the bootstrap typechecker yet`,
+        base.sourceLoc
+      );
+      return Option.None;
+    }
+    case Option.None: { }
+  }
+
+  const symId = lookupOwnName(ref tm, base.name);
+  if (symId == SYMBOL_NONE_ID) {
+    reportError(ref prog, `unknown name "${base.name}"`, base.sourceLoc);
+    return Option.None;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Namespace { module: mi }: { return Option.Some { value: mi }; }
+    default: {
+      reportError(
+        ref prog,
+        `"${base.name}" is not an imported namespace, so it has no members to call`,
+        base.sourceLoc
+      );
+      return Option.None;
+    }
+  }
+}
+
+// The type of a module-level `const` by name, or TYPE_ERROR_ID when the name is
+// not one. Silent: the caller has the location and the better message.
+function moduleConstType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Value { typeId: t, intVal: v }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// `ref x` - a borrow of a NAMED binding.
+//
+// Restricted to a plain name on purpose: a borrow needs an address, and a local
+// is the only thing the bootstrap has one for. `ref f()` would have to
+// materialize a temporary and hand out a pointer to it, which outlives nothing
+// useful and is a different feature.
+function checkRefExpr(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const target = nodeAt(ref ast, expr.childA);
+  if (target.kind != ASTNodeKind.IDENT) {
+    reportError(
+      ref prog,
+      "`ref` takes a named binding - the bootstrap has no address for anything else yet",
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const inner = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (inner == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  return internRef(ref prog, inner);
+}
+
+// `Trait.method(ref receiver, ...)` - resolved STATICALLY by the receiver.
+//
+// The trait's own signature is only used to check the method EXISTS on it. What
+// the call actually reaches is the receiver's own method, because that is the
+// one with a body; two types implementing one trait are two symbols, and which
+// of them this call means is decided here rather than at run time.
+function checkTraitCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  base: ASTNode,
+  traitType: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (lookupMethod(ref prog, traitType, expr.name) == TYPE_ERROR_ID) {
+    checkCallArgs(ref prog, ref tm, ref ast, expr, ref scope);
+    reportError(
+      ref prog,
+      `trait "${base.name}" has no method "${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // The RECEIVER is the first argument, and it is what picks the impl - so it
+  // is checked before the rest, with no expectation, and its type read back.
+  if (expr.childA == 0 || nodeAt(ref ast, expr.childA).childCount == 0) {
+    reportError(
+      ref prog,
+      `"${base.name}.${expr.name}" needs a receiver - write \`${base.name}.${expr.name}(ref x, ...)\``,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const args = nodeAt(ref ast, expr.childA);
+  const receiverId = childAt(ref ast, args, 0);
+  const receiverType = receiverTypeOf(ref prog,
+    checkExpr(ref prog, ref tm, ref ast, receiverId, TYPE_ERROR_ID, ref scope));
+
+  const method = lookupMethod(ref prog, receiverType, expr.name);
+  if (method == TYPE_ERROR_ID) {
+    reportError(
+      ref prog,
+      `${formatType(ref prog, receiverType)} does not implement "${base.name}.${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // Which impl this call landed on, for codegen. The receiver's TYPE is the
+  // answer, and the symbol name follows from it plus the method name.
+  map.mapInsert(ref tm.calleeReceiver, uint64(exprId), receiverType);
+
+  return checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, method, expr.name, ref scope);
+}
+
+// `printf` is a compiler builtin on both sides rather than an extern anyone has
+// to declare - see the same carve-out in src/jsyooptypecheck/typecheck.js.
+function isPrintfName(name: string): bool {
+  return str.stringEq(name, "printf");
+}
+
+// `let x: T = expr;` / `const x = expr;`
+//
+// The annotation, when present, is what an untyped literal initializer pins to.
+// Without one the initializer's own type is taken, which is how `const n = 42;`
+// lands on int32.
+function checkVarDecl(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  ref scope: LocalScope
+): void {
+  let declared: TypeId = TYPE_ERROR_ID;
+  if (stmt.childA != 0) {
+    declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, stmt.childA);
+  }
+
+  if (stmt.childB == 0) {
+    // `let x: T;` with no initializer. Legal only with an annotation - there is
+    // nothing to infer from otherwise.
+    if (declared == TYPE_ERROR_ID) {
+      reportError(ref prog, `"${stmt.name}" needs either a type annotation or an initializer`, stmt.sourceLoc);
+    }
+    bindLocal(ref prog, ref scope, stmt, declared);
+    vec.vecSet(ref tm.resolvedTypes, stmtId, declared);
+    return;
+  }
+
+  const initType = checkExpr(ref prog, ref tm, ref ast, stmt.childB, declared, ref scope);
+  let finalType = initType;
+  if (declared != TYPE_ERROR_ID) {
+    finalType = declared;
+    if (initType != TYPE_ERROR_ID && !typeAccepts(ref prog, declared, initType)) {
+      reportError(ref prog, `initializer does not match the declared type of "${stmt.name}"`, stmt.sourceLoc);
+    }
+  }
+
+  bindLocal(ref prog, ref scope, stmt, finalType);
+  vec.vecSet(ref tm.resolvedTypes, stmtId, finalType);
+}
+
+function bindLocal(ref prog: Program, ref scope: LocalScope, stmt: ASTNode, typeId: TypeId): void {
+  const mutable = stmt.kind == ASTNodeKind.LET_DECL;
+  if (!scopeDeclare(ref scope, stmt.name, typeId, mutable)) {
+    reportError(ref prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+  }
+}
+
+// A condition has to be a bool. Reporting here rather than in codegen keeps the
+// "codegen is total on well-formed input" contract honest.
+function checkCondition(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  ref scope: LocalScope
+): void {
+  const got = checkExpr(ref prog, ref tm, ref ast, exprId, primTypeId(PrimKind.BOOL), ref scope);
+  if (got != TYPE_ERROR_ID && got != primTypeId(PrimKind.BOOL)) {
+    reportError(ref prog, "condition must be a bool", nodeAt(ref ast, exprId).sourceLoc);
+  }
+}
+
+// Operators whose RESULT is a bool regardless of what they compare.
+function isComparison(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.EQEQ, TokenTags.NEQ, TokenTags.LT,
+         TokenTags.GT, TokenTags.LTE, TokenTags.GTE: {
+      return true;
+    }
+    default: { return false; }
+  }
+}
+
+// `target = value`. Only a plain name is assignable so far; fields and index
+// expressions arrive with the constructs that produce them.
+function checkAssignment(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const target = nodeAt(ref ast, expr.childA);
+  let targetType: TypeId = TYPE_ERROR_ID;
+
+  if (target.kind == ASTNodeKind.IDENT) {
+    switch (scopeBinding(ref scope, target.name)) {
+      case Option.Some { value: bound }: {
+        targetType = bound.typeId;
+        // The compound forms desugar to this same node in the parser, so
+        // `a += 1` is covered here too and needs no second check.
+        if (!bound.mutable) {
+          reportError(ref prog, `cannot assign to const "${target.name}"`, target.sourceLoc);
+          return TYPE_ERROR_ID;
+        }
+      }
+      case Option.None: {
+        reportError(ref prog, `unknown name "${target.name}"`, target.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+    }
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.FIELD_ACCESS) {
+    // `p.x = v`. checkFieldAccess records the field's type, which the store
+    // needs; the base has to be assignable, which for now means a plain name.
+    const baseNode = nodeAt(ref ast, target.childA);
+    if (baseNode.kind != ASTNodeKind.IDENT) {
+      reportError(ref prog, "only a field of a named binding can be assigned to so far", target.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    targetType = checkFieldAccess(ref prog, ref tm, ref ast, target, TYPE_ERROR_ID, ref scope);
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.DEREF_EXPRESSION) {
+    // `*p = v` - a store THROUGH a pointer. The target's type is the pointee,
+    // which is the same thing a read of it produces.
+    targetType = checkDeref(ref prog, ref tm, ref ast, target, ref scope);
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    // `xs[i] = v` - checkIndex records the element type on the node, which is
+    // what the store needs.
+    targetType = checkIndex(ref prog, ref tm, ref ast, target, ref scope);
+    vec.vecSet(ref tm.resolvedTypes, expr.childA, targetType);
+  } else {
+    reportError(ref prog, `cannot assign to ${kindName(target.kind)}`, target.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+
+  const valueType = checkExpr(ref prog, ref tm, ref ast, expr.childB, targetType, ref scope);
+  if (valueType != TYPE_ERROR_ID && !typeAccepts(ref prog, targetType, valueType)) {
+    reportError(ref prog, `cannot assign to "${target.name}": types do not match`, expr.sourceLoc);
+  }
+  // An assignment is a statement, not a value - nothing consumes its type.
+  return TYPE_VOID_ID;
+}
+
+// `for (let i = 0; i < n; i = i + 1) { ... }`
+//
+// The counter lives in a scope of its OWN, wrapped around the body: it is
+// visible to the condition, the step and the body, but not after the loop. When
+// the init only steps an outer counter (`for (i = 0; ...)`) that name must
+// already exist.
+function checkForLoop(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  scopePush(ref scope);
+
+  let counterType: TypeId = TYPE_ERROR_ID;
+  if (stmt.childA != 0) {
+    counterType = resolveTypeAnnotation(ref prog, ref tm, ref ast, stmt.childA);
+  } else if (nodeAt(ref ast, stmt.childB).kind == ASTNodeKind.INT_LITERAL) {
+    // An untyped literal initializer takes its type from the CONDITION, which
+    // is what makes the idiomatic `for (let i = 0; i < xs.len; ...)` work: `i`
+    // becomes usize so it can be compared against a length and used as an
+    // index. Without this the literal would default to int32 and every such
+    // loop would be a width mismatch. Same rule as the JS reference's
+    // counterTypeFromCondition.
+    counterType = counterTypeFromCondition(ref prog, ref tm, ref ast, stmt.childC, ref scope);
+  }
+  const initType = checkExpr(ref prog, ref tm, ref ast, stmt.childB, counterType, ref scope);
+  if (counterType == TYPE_ERROR_ID) {
+    counterType = initType;   // inferred from the initializer
+  } else if (initType != TYPE_ERROR_ID && initType != counterType) {
+    reportError(ref prog, `initializer does not match the declared type of "${stmt.name}"`, stmt.sourceLoc);
+  }
+
+  if (stmt.flagA) {
+    // Declared with `let` by construction - the parser refuses `const` here,
+    // because a counter that cannot be stepped is not a counter.
+    if (!scopeDeclare(ref scope, stmt.name, counterType, true)) {
+      reportError(ref prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+    }
+  } else {
+    // Stepping an existing counter: it has to exist, and it decides the type.
+    switch (scopeLookup(ref scope, stmt.name)) {
+      case Option.Some { value: t }: { counterType = t; }
+      case Option.None: {
+        reportError(ref prog, `unknown name "${stmt.name}"`, stmt.sourceLoc);
+      }
+    }
+  }
+  vec.vecSet(ref tm.resolvedTypes, stmtId, counterType);
+
+  checkCondition(ref prog, ref tm, ref ast, stmt.childC, ref scope);
+
+  const stepType = checkExpr(ref prog, ref tm, ref ast, stmt.childD, counterType, ref scope);
+  if (stepType != TYPE_ERROR_ID && counterType != TYPE_ERROR_ID && stepType != counterType) {
+    reportError(ref prog, `for-loop step does not match the type of "${stmt.name}"`, stmt.sourceLoc);
+  }
+
+  scope.loopDepth += 1;
+  checkBlock(ref prog, ref tm, ref ast, stmt.childE, retType, ref scope);
+  scope.loopDepth -= 1;
+
+  scopePop(ref scope);
+}
+
+// `for x in xs { ... }` - walk an array.
+//
+// The loop variable is bound to the ELEMENT type, which is the whole reason it
+// takes no annotation. The statement node is decorated with that element type,
+// because codegen needs it to size the loop variable's slot and to step the
+// data pointer, and it has nowhere else to read it from.
+//
+// Only arrays are walked so far. A type implementing `Iterable<T>` is the other
+// form, and it is refused BY NAME here rather than reported as "not an array" -
+// the difference matters, because one is a missing feature and the other is a
+// mistake.
+function checkForInLoop(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  const iterableType = checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
+  const elemType = forInElementType(ref prog, ref tm, ref ast, stmt, iterableType);
+  vec.vecSet(ref tm.resolvedTypes, stmtId, elemType);
+
+  // The loop variable is scoped to the loop, and shadowing an outer name is a
+  // redeclaration the same way any other binding would be.
+  scopePush(ref scope);
+  // Immutable: the loop variable is a COPY of the element, so assigning to it
+  // writes to something discarded at the end of the iteration. Refusing says
+  // that, where allowing it silently does nothing.
+  if (!scopeDeclare(ref scope, stmt.name, elemType, false)) {
+    reportError(ref prog, `"${stmt.name}" is already declared in this function`, stmt.sourceLoc);
+  }
+
+  scope.loopDepth += 1;
+  checkBlock(ref prog, ref tm, ref ast, stmt.childB, retType, ref scope);
+  scope.loopDepth -= 1;
+  scopePop(ref scope);
+}
+
+// What one step of `for x in <expr>` yields, or TYPE_ERROR_ID with a
+// diagnostic. Split out so the two refusals read as the two different things
+// they are.
+function forInElementType(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  iterableType: TypeId
+): TypeId {
+  // The expression already failed and said so; a second diagnostic here would
+  // only be noise.
+  if (iterableType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, derefType(ref prog, iterableType))) {
+    case Type.Array { elem: e }: { return e; }
+    default: { }
+  }
+
+  const iterated = derefType(ref prog, iterableType);
+  if (implementsIterable(ref prog, iterated)) {
+    reportError(
+      ref prog,
+      `"${formatType(ref prog, iterated)}" implements Iterable, but the bootstrap only walks arrays with "for ... in" so far`,
+      stmt.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  reportError(
+    ref prog,
+    `cannot walk a value of type "${formatType(ref prog, iterated)}" - "for ... in" needs an array`,
+    stmt.sourceLoc
+  );
+  return TYPE_ERROR_ID;
+}
+
+// Whether a type claims Iterable, by NAME. The trait itself is generic, and the
+// bootstrap cannot instantiate a generic trait yet - but it can still tell an
+// unimplemented feature apart from a plain type error, which is the only thing
+// this is for.
+function implementsIterable(ref prog: Program, t: TypeId): bool {
+  switch (typeAt(ref prog, t)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return namesTrait(ref prog, ref it, ITERABLE_TRAIT_NAME);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return namesTrait(ref prog, ref it, ITERABLE_TRAIT_NAME);
+    }
+    default: { return false; }
+  }
+}
+
+const ITERABLE_TRAIT_NAME: string = "Iterable";
+
+function namesTrait(ref prog: Program, ref traits: Vec<TypeId>, name: string): bool {
+  let i: usize = 0;
+  while (i < traits.len) {
+    if (str.stringEq(nominalNameOf(ref prog, vec.vecGet(ref traits, i)), name)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// `-x` keeps the operand's numeric type; `!x` takes a bool and gives a bool.
+function checkUnary(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (expr.operator == TokenTags.BANG) {
+    const got = checkExpr(ref prog, ref tm, ref ast, expr.childA, primTypeId(PrimKind.BOOL), ref scope);
+    if (got != TYPE_ERROR_ID && got != primTypeId(PrimKind.BOOL)) {
+      reportError(ref prog, "operand of ! must be bool", expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    return primTypeId(PrimKind.BOOL);
+  }
+
+  // Unary minus. The expectation flows through so `-1` in an int64 slot pins to
+  // int64 rather than defaulting to int32.
+  const got = checkExpr(ref prog, ref tm, ref ast, expr.childA, expected, ref scope);
+  if (got != TYPE_ERROR_ID && !isIntPrimType(ref prog, got)) {
+    reportError(ref prog, "operand of unary - must be an integer", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return got;
+}
+
+// `&&` / `||` - bool in, bool out, and short-circuiting in codegen.
+function isLogical(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.ANDAND, TokenTags.OROR: { return true; }
+    default: { return false; }
+  }
+}
+
+// `[a, b, c]` - every element must agree, and an empty literal takes its element
+// type from context.
+function checkArrayLiteral(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  // An expected `T[]` tells the elements what to be, which is what lets
+  // `let xs: int64[] = [1, 2]` pin its untyped literals to int64.
+  let elemExpected: TypeId = TYPE_ERROR_ID;
+  if (expected != TYPE_ERROR_ID) {
+    switch (typeAt(ref prog, expected)) {
+      case Type.Array { elem: e }: { elemExpected = e; }
+      default: { }
+    }
+  }
+
+  let elemType: TypeId = elemExpected;
+  if (expr.childA != 0) {
+    const list = nodeAt(ref ast, expr.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const got = checkExpr(ref prog, ref tm, ref ast, childAt(ref ast, list, i), elemType, ref scope);
+      if (elemType == TYPE_ERROR_ID) {
+        elemType = got;   // the first element sets the type
+      } else if (got != TYPE_ERROR_ID && !typeAccepts(ref prog, elemType, got)) {
+        reportError(ref prog, "array elements have different types", expr.sourceLoc);
+      }
+      i += 1;
+    }
+  }
+
+  if (elemType == TYPE_ERROR_ID) {
+    reportError(ref prog, "cannot infer the element type of an empty array literal - annotate the binding", expr.sourceLoc);
+    return TYPE_ERROR_ID;
+  }
+  return internArray(ref prog, elemType);
+}
+
+// `xs[i]` - the base must be an array and the index an integer.
+function checkIndex(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  const idxType = checkExpr(ref prog, ref tm, ref ast, expr.childB, primTypeId(PrimKind.USIZE), ref scope);
+  if (idxType != TYPE_ERROR_ID && !isIntPrimType(ref prog, idxType)) {
+    reportError(ref prog, "an array index must be an integer", expr.sourceLoc);
+  }
+
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, baseType)) {
+    case Type.Array { elem: e }: { return e; }
+    default: {
+      reportError(ref prog, `cannot index ${formatType(ref prog, baseType)}`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `xs.len` is the only field access in the subset. Struct fields arrive with
+// struct values.
+function checkFieldAccess(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  // `Result.None` is a payload-less CONSTRUCTOR wearing a field access - the
+  // same tokens as `p.x`. Checked before the base is checked as a value,
+  // because a variant name is not one and would report as an unknown name.
+  if (isPayloadlessConstructor(ref prog, ref tm, ref ast, expr, ref scope)) {
+    return checkVariantConstructor(ref prog, ref tm, ref ast, expr, expr.childA, 0, expected, ref scope);
+  }
+
+  const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, baseType)) {
+    case Type.Array { elem: e }: {
+      if (str.stringEq(expr.name, "len")) {
+        return primTypeId(PrimKind.USIZE);
+      }
+      reportError(ref prog, `an array has no field "${expr.name}" - only "len"`, expr.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      const found = lookupField(ref prog, baseType, expr.name);
+      if (!found.found) {
+        reportError(ref prog, `struct "${d.name}" has no field "${expr.name}"`, expr.sourceLoc);
+        return TYPE_ERROR_ID;
+      }
+      return found.typeId;
+    }
+    // `s.len` - the string's BYTE length, which is what `strlen` returns and
+    // what `stringAsBytes(s).len` would give. Not a character count: yoop has
+    // no character type, and the byte length is the one every caller here
+    // actually wants.
+    case Type.Prim { prim: p }: {
+      if (p == PrimKind.STRING && str.stringEq(expr.name, "len")) {
+        return primTypeId(PrimKind.USIZE);
+      }
+      reportError(
+        ref prog,
+        `field access on ${formatType(ref prog, baseType)} is not supported by the bootstrap typechecker yet`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    default: {
+      reportError(
+        ref prog,
+        `field access on ${formatType(ref prog, baseType)} is not supported by the bootstrap typechecker yet`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// The integer type a comparison in the loop condition implies for the counter,
+// or TYPE_ERROR_ID when it implies nothing.
+//
+// Both sides are probed with diagnostics SUPPRESSED, because the counter is not
+// declared yet - reading it here legitimately fails, and that failure is what
+// identifies which side is the informative one. The real check runs afterwards
+// and reports for real, so one mistake still produces one diagnostic.
+function counterTypeFromCondition(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  condId: NodeId,
+  ref scope: LocalScope
+): TypeId {
+  if (condId == 0) {
+    return TYPE_ERROR_ID;
+  }
+  const cond = nodeAt(ref ast, condId);
+  if (cond.kind != ASTNodeKind.BINARY_EXPRESSION || !isComparison(cond.operator)) {
+    return TYPE_ERROR_ID;
+  }
+
+  const savedCount = prog.diagnostics.len;
+  const lhs = checkExpr(ref prog, ref tm, ref ast, cond.childA, TYPE_ERROR_ID, ref scope);
+  const rhs = checkExpr(ref prog, ref tm, ref ast, cond.childB, TYPE_ERROR_ID, ref scope);
+  // Diagnostic is a plain struct with no owned storage, so dropping the tail
+  // frees nothing and leaks nothing.
+  prog.diagnostics.len = savedCount;
+
+  if (isIntPrimType(ref prog, rhs)) {
+    return rhs;
+  }
+  if (isIntPrimType(ref prog, lhs)) {
+    return lhs;
+  }
+  return TYPE_ERROR_ID;
+}
+
+// `usize(n)` / `int32(x)` - a numeric primitive conversion.
+//
+// Exactly one operand, and it is checked against the target so an untyped
+// literal pins straight to it (`int64(1)` needs no widening at all). Only
+// numeric-to-numeric is allowed, which is the same restriction the JS reference
+// states in its own message.
+function checkCast(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  target: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  let argCount: usize = 0;
+  if (expr.childA != 0) {
+    argCount = nodeAt(ref ast, expr.childA).childCount;
+  }
+  if (argCount != 1) {
+    reportError(ref prog, `cast "${expr.name}(...)" takes exactly one argument`, expr.sourceLoc);
+    return target;
+  }
+
+  const list = nodeAt(ref ast, expr.childA);
+  const argId = childAt(ref ast, list, 0);
+  // NO expectation: a cast CONVERTS whatever it is given, so the target must
+  // not reach in and pin the operand. Passing `target` here makes
+  // `uint8(48 + (rest % 10))` pin the 48 to uint8 and then refuse to add it to
+  // a uint64 - the cast's own job, done to its input before it runs.
+  const argType = checkExpr(ref prog, ref tm, ref ast, argId, TYPE_ERROR_ID, ref scope);
+  if (argType != TYPE_ERROR_ID && !isCastable(ref prog, argType, target)) {
+    reportError(
+      ref prog,
+      `cannot cast ${formatType(ref prog, argType)} to ${formatType(ref prog, target)} - only numeric primitive casts are supported`,
+      expr.sourceLoc
+    );
+  }
+  return target;
+}
+
+// Integer to integer, in either direction. Floats and bools arrive with the
+// conversions that need them.
+function isCastable(ref prog: Program, source: TypeId, target: TypeId): bool {
+  return isIntPrimType(ref prog, source) && isIntPrimType(ref prog, target);
+}
+
+// `switch (n) { case 1, 2: {...} default: {...} }` over an integer, or
+// `switch (r) { case Result.Ok { value: v }: {...} ... }` over a variant.
+//
+// The two differ in exactly one way that matters here: an integer switch can
+// never be exhaustive, so `default` is required, while a variant switch is
+// exhaustive when every case appears and then a default would be dead code.
+function checkSwitch(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  stmt: ASTNode,
+  retType: TypeId,
+  ref scope: LocalScope
+): void {
+  const scrutType = checkExpr(ref prog, ref tm, ref ast, stmt.childA, TYPE_ERROR_ID, ref scope);
+  const overVariant = isVariantType(ref prog, scrutType);
+  if (scrutType != TYPE_ERROR_ID && !overVariant && !isIntPrimType(ref prog, scrutType)) {
+    reportError(
+      ref prog,
+      `cannot switch over ${formatType(ref prog, scrutType)} - the bootstrap typechecker handles integers and variants so far`,
+      stmt.sourceLoc
+    );
+  }
+
+  // Which case ordinals have been matched, so a missing one can be NAMED.
+  disposable covered: Vec<bool> = vec.vecNew(0);
+  let c: usize = 0;
+  while (c < variantCaseCount(ref prog, scrutType)) {
+    vec.vecPush(ref covered, false);
+    c += 1;
+  }
+
+  let sawDefault = false;
+  let i: usize = 0;
+  while (i < stmt.childCount) {
+    const armId = childAt(ref ast, stmt, i);
+    const arm = nodeAt(ref ast, armId);
+
+    // The arm's scope opens BEFORE its patterns are checked, because a variant
+    // pattern declares its payload bindings into it.
+    scopePush(ref scope);
+    if (arm.flagA) {
+      if (sawDefault) {
+        reportError(ref prog, "a switch may only have one default arm", arm.sourceLoc);
+      }
+      sawDefault = true;
+    } else if (overVariant) {
+      checkVariantArm(ref prog, ref tm, ref ast, arm, scrutType, ref covered, ref scope);
+    } else {
+      checkArmPatterns(ref prog, ref tm, ref ast, arm, scrutType);
+    }
+    checkBlock(ref prog, ref tm, ref ast, arm.childB, retType, ref scope);
+    scopePop(ref scope);
+    i += 1;
+  }
+
+  if (overVariant) {
+    checkExhaustive(ref prog, stmt, scrutType, ref covered, sawDefault);
+    return;
+  }
+  if (!sawDefault) {
+    reportError(
+      ref prog,
+      "a switch over an integer needs a default arm - it cannot be exhaustive",
+      stmt.sourceLoc
+    );
+  }
+}
+
+// Every pattern of one variant arm. Several may share an arm, and each records
+// the case it covers.
+function checkVariantArm(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  arm: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  ref scope: LocalScope
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(ref ast, list, i);
+    if (nodeAt(ref ast, patternId).kind != ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        ref prog,
+        `this switch is over ${formatType(ref prog, scrutType)}, so its patterns must be variant cases, not literals`,
+        nodeAt(ref ast, patternId).sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    const ordinal = checkVariantPattern(ref prog, ref tm, ref ast, patternId, scrutType, ref scope);
+    if (ordinal >= 0 && usize(ordinal) < covered.len) {
+      if (vec.vecGet(ref covered, usize(ordinal))) {
+        reportError(
+          ref prog,
+          `case "${nodeAt(ref ast, patternId).name}" is matched twice in this switch`,
+          nodeAt(ref ast, patternId).sourceLoc
+        );
+      }
+      vec.vecSet(ref covered, usize(ordinal), true);
+    }
+    i += 1;
+  }
+}
+
+// A variant switch is exhaustive or it has a default - never neither, and never
+// both. "Never both" is the part worth the diagnostic: a default that can never
+// run is dead code, and usually means a case name is misspelled.
+function checkExhaustive(
+  ref prog: Program,
+  stmt: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  sawDefault: bool
+): void {
+  let missing: usize = 0;
+  let firstMissing: usize = 0;
+  let i: usize = 0;
+  while (i < covered.len) {
+    if (!vec.vecGet(ref covered, i)) {
+      if (missing == 0) {
+        firstMissing = i;
+      }
+      missing += 1;
+    }
+    i += 1;
+  }
+
+  if (missing == 0) {
+    if (sawDefault) {
+      reportError(
+        ref prog,
+        `this switch already covers every case of ${formatType(ref prog, scrutType)}, so the default arm can never run`,
+        stmt.sourceLoc
+      );
+    }
+    return;
+  }
+  if (sawDefault) {
+    return;   // the default covers whatever is left
+  }
+  reportError(
+    ref prog,
+    `this switch does not cover "${variantCaseNameAt(ref prog, scrutType, firstMissing)}" (${missing} case(s) unhandled) - add it, or a default arm`,
+    stmt.sourceLoc
+  );
+}
+
+// Each pattern is decorated with the scrutinee's type, which is what tells
+// codegen the width to emit the case value at.
+function checkArmPatterns(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  arm: ASTNode,
+  scrutType: TypeId
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(ref ast, list, i);
+    if (nodeAt(ref ast, patternId).kind == ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        ref prog,
+        "this switch is over an integer, so its patterns must be literals, not variant cases",
+        nodeAt(ref ast, patternId).sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
+    i += 1;
+  }
+}
+
+// `{ x: 1, y: 2 }` - which struct it is comes from CONTEXT, not from the
+// literal, so `let p: Point = { ... }` is the only shape that works. A literal
+// with nothing to take its type from is refused by name.
+function checkStructLiteral(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  if (expected == TYPE_ERROR_ID || !isStructType(ref prog, expected)) {
+    reportError(
+      ref prog,
+      "cannot tell which struct this literal is - annotate the binding or the parameter it goes to",
+      expr.sourceLoc
+    );
+    // Still walk the field values so a mistake inside one is reported too.
+    checkLiteralFieldValues(ref prog, ref tm, ref ast, expr, TYPE_ERROR_ID, ref scope);
+    return TYPE_ERROR_ID;
+  }
+
+  const present = checkLiteralFieldValues(ref prog, ref tm, ref ast, expr, expected, ref scope);
+  const needed = structFieldCount(ref prog, expected);
+  if (present < needed) {
+    reportError(
+      ref prog,
+      `struct literal is missing ${needed - present} of ${needed} fields - every field must be given a value`,
+      expr.sourceLoc
+    );
+  }
+  return expected;
+}
+
+// Checks each `name: value` against the struct's field of that name, and returns
+// how many DISTINCT known fields were given a value.
+function checkLiteralFieldValues(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  structType: TypeId,
+  ref scope: LocalScope
+): usize {
+  let present: usize = 0;
+  if (expr.childA == 0) {
+    return present;
+  }
+  const list = nodeAt(ref ast, expr.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const fieldId = childAt(ref ast, list, i);
+    const fieldNode = nodeAt(ref ast, fieldId);
+
+    let fieldType: TypeId = TYPE_ERROR_ID;
+    if (structType != TYPE_ERROR_ID) {
+      const found = lookupField(ref prog, structType, fieldNode.name);
+      if (found.found) {
+        fieldType = found.typeId;
+        present += 1;
+        // The field's POSITION is what codegen stores to, so record it on the
+        // node rather than making codegen look it up again.
+        vec.vecSet(ref tm.resolvedTypes, fieldId, found.typeId);
+      } else {
+        reportError(
+          ref prog,
+          `${formatType(ref prog, structType)} has no field "${fieldNode.name}"`,
+          fieldNode.sourceLoc
+        );
+      }
+    }
+
+    const got = checkExpr(ref prog, ref tm, ref ast, fieldNode.childA, fieldType, ref scope);
+    if (fieldType != TYPE_ERROR_ID && got != TYPE_ERROR_ID && !typeAccepts(ref prog, fieldType, got)) {
+      reportError(
+        ref prog,
+        `field "${fieldNode.name}" expects ${formatType(ref prog, fieldType)}, found ${formatType(ref prog, got)}`,
+        fieldNode.sourceLoc
+      );
+    }
+    i += 1;
+  }
+  return present;
+}
+
+// Every `${...}` in a template literal, checked and decorated.
+//
+// A template literal BUILDS a string, so each interpolation has to become one.
+// Refusing the shapes that cannot here, by name and pointing at the
+// interpolation, is what keeps codegen from meeting a part it has no lowering
+// for - `${somePoint}` should say so at the `${`, not surface as an internal
+// error after the whole program typechecked.
+function checkTemplateParts(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): void {
+  let i: usize = 0;
+  while (i < expr.childCount) {
+    const partId = childAt(ref ast, expr, i);
+    const part = nodeAt(ref ast, partId);
+    // A literal run is already a string and has no expression to check.
+    if (part.kind != ASTNodeKind.EXPR_PART) {
+      vec.vecSet(ref tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+      i += 1;
+      continue;
+    }
+
+    // TYPE_ERROR_ID doubles as "no expectation" here, the same way every other
+    // free-standing expression in this file passes it: an interpolation takes
+    // whatever the expression is.
+    const inner = checkExpr(ref prog, ref tm, ref ast, part.childA, TYPE_ERROR_ID, ref scope);
+    vec.vecSet(ref tm.resolvedTypes, partId, primTypeId(PrimKind.STRING));
+    // An expression that already failed produced its own diagnostic; a second
+    // one naming the error type would only be noise.
+    if (inner != TYPE_ERROR_ID &&
+        templatePartKind(ref prog, inner) == TemplatePartKind.UNSUPPORTED) {
+      reportError(
+        ref prog,
+        `cannot interpolate a value of type "${formatType(ref prog, inner)}" into a template literal - only strings, integers and bools are supported so far`,
+        part.sourceLoc
+      );
+    }
+    i += 1;
+  }
+}
+
+// The Func type of `base.name` when `base` is a value with a function-typed
+// field of that name, or TYPE_ERROR_ID when it is anything else.
+//
+// Deliberately silent: "not a function-typed field" is the ordinary case (every
+// `ns.fn()` in the program reaches here first), so a diagnostic belongs to
+// whoever fails AFTER this returns nothing.
+function fieldFuncTypeOf(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  base: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  // A bare IDENT base is only a value if it is a LOCAL - a module-level name
+  // there is a namespace or a type, and neither has fields.
+  if (base.kind == ASTNodeKind.IDENT) {
+    switch (scopeLookup(ref scope, base.name)) {
+      case Option.None: { return TYPE_ERROR_ID; }
+      case Option.Some { value: t }: {
+        const field = funcFieldOf(ref prog, t, expr.name);
+        if (field != TYPE_ERROR_ID) {
+          // DECORATE the base. Codegen reads the field out of this value, and
+          // it needs both the aggregate's LLVM type and the field's position -
+          // neither of which it can get without the base's resolved type.
+          vec.vecSet(ref tm.resolvedTypes, expr.childB, t);
+        }
+        return field;
+      }
+    }
+  }
+  if (base.kind != ASTNodeKind.FIELD_ACCESS) {
+    return TYPE_ERROR_ID;
+  }
+  // `m.ops.hash(...)`: the base is itself a field read, so check it to learn
+  // its type. Checking it here also DECORATES it, which codegen needs.
+  const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childB, TYPE_ERROR_ID, ref scope);
+  return funcFieldOf(ref prog, baseType, expr.name);
+}
+
+// The type of a struct's field, when that type is a Func. TYPE_ERROR_ID
+// otherwise, including when the base is not a struct at all.
+function funcFieldOf(ref prog: Program, ownerType: TypeId, fieldName: string): TypeId {
+  const found = lookupField(ref prog, derefType(ref prog, ownerType), fieldName);
+  if (!found.found) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, found.typeId)) {
+    case Type.Func { params: p, ret: r, variadic: v }: { return found.typeId; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// A call whose callee is a VALUE rather than a name. The arguments are checked
+// against the signature exactly as a direct call's are - the only difference is
+// where the signature came from.
+function checkIndirectCall(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  exprId: NodeId,
+  funcType: TypeId,
+  expected: TypeId,
+  ref scope: LocalScope
+): TypeId {
+  // Recorded for codegen: the callee is the FIELD's contents, so there is no
+  // symbol to look up and nothing else can tell it that.
+  map.mapInsert(ref tm.indirectCalls, uint64(exprId), true);
+  checkArgsAgainstFunc(ref prog, ref tm, ref ast, expr, funcType, expr.name, ref scope);
+  switch (typeAt(ref prog, funcType)) {
+    case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// The Func type of a module-level function NAME, or TYPE_ERROR_ID.
+function moduleFuncType(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  switch (map.mapGet(ref tm.names, name)) {
+    case Option.None: { return TYPE_ERROR_ID; }
+    case Option.Some { value: symId }: {
+      // No import to follow: an import binds the SOURCE module's SymbolId, the
+      // same integer, so an imported function is already a Symbol.Func here.
+      switch (symbolAt(ref prog, symId)) {
+        case Symbol.Func { typeId: t }: { return t; }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
+  }
+}
+
+// `xs[a..b]` - a BORROWING view over part of an array.
+//
+// The result is the same array type as the base: a slice is a data pointer and
+// a length, exactly like the thing it came from, and it shares the storage. So
+// there is nothing to allocate and nothing to copy - and equally, nothing keeps
+// the base alive, which is the caller's problem the same way it is for any
+// borrow.
+//
+// Bounds are usize and are NOT checked here or at run time. The language does
+// not specify a bounds check on an index either, and inventing one for slices
+// alone would be the odd rule out.
+function checkSlice(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  const baseType = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  const usize = primTypeId(PrimKind.USIZE);
+  // An omitted bound is 0 - "from the beginning" / "to the end" - and there is
+  // no expression to check.
+  if (expr.childB != 0) {
+    checkExpr(ref prog, ref tm, ref ast, expr.childB, usize, ref scope);
+  }
+  if (expr.childC != 0) {
+    checkExpr(ref prog, ref tm, ref ast, expr.childC, usize, ref scope);
+  }
+
+  if (baseType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, derefType(ref prog, baseType))) {
+    case Type.Array { elem: e }: { return derefType(ref prog, baseType); }
+    default: {
+      reportError(
+        ref prog,
+        `cannot slice a value of type "${formatType(ref prog, baseType)}" - only an array can be sliced`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// `&x` - the address of a binding, as a raw pointer.
+//
+// Distinct from `ref x`, which is a checked BORROW. `&` produces an
+// `unsafe_ptr<T>` with none of a borrow's guarantees, and exists to hand a
+// local to C - so it is gated on `import.unsafe;` exactly as the pointer type
+// is. Handing out an address without saying the file is unsafe would let the
+// gate be bypassed by one character.
+//
+// The target must be a NAMED binding: an address needs storage, and a
+// temporary has none. Same limitation `ref` carries, and for the same reason.
+function checkAddressOf(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  if (!tm.unsafeAllowed) {
+    reportError(
+      ref prog,
+      `'&x' takes a raw address and requires 'import.unsafe;' at module top`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const target = nodeAt(ref ast, expr.childA);
+  if (target.kind != ASTNodeKind.IDENT) {
+    reportError(
+      ref prog,
+      "`&` takes a named binding - there is no address for a temporary",
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const inner = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (inner == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  return internUnsafePtr(ref prog, inner);
+}
+
+// `*p` - the value a pointer points at.
+//
+// Only a TYPED pointer can be dereferenced. The opaque `unsafe_ptr` is "some
+// pointer" and has no pointee to produce, so reading through one has no type -
+// which is the practical cost of widening, and the reason the two are distinct.
+function checkDeref(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): TypeId {
+  if (!tm.unsafeAllowed) {
+    reportError(
+      ref prog,
+      `'*p' reads through a raw pointer and requires 'import.unsafe;' at module top`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  const inner = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (inner == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, inner)) {
+    case Type.UnsafePtr { pointee: p }: {
+      if (p == TYPE_ERROR_ID) {
+        reportError(
+          ref prog,
+          `cannot read through an opaque "unsafe_ptr" - it has no pointee type; use "unsafe_ptr<T>"`,
+          expr.sourceLoc
+        );
+        return TYPE_ERROR_ID;
+      }
+      return p;
+    }
+    default: {
+      reportError(
+        ref prog,
+        `cannot dereference a value of type "${formatType(ref prog, inner)}" - only a raw pointer can be`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// A bare integer literal, which is what may still be re-pinned after it has
+// been checked once. `-1` counts: the negation of a literal is still one.
+function isIntLiteralNode(ref ast: AST, exprId: NodeId): bool {
+  const node = nodeAt(ref ast, exprId);
+  if (node.kind == ASTNodeKind.INT_LITERAL) {
+    return true;
+  }
+  if (node.kind == ASTNodeKind.UNARY_EXPRESSION && node.operator == TokenTags.MINUS) {
+    return nodeAt(ref ast, node.childA).kind == ASTNodeKind.INT_LITERAL;
+  }
+  return false;
+}
+
+// The ambient namespace of the libc errno bridge. Not an import: `errno.get()`
+// resolves by spelling, the same way the reference's ERRNO_INTRINSIC does.
+const ERRNO_NAMESPACE: string = "errno";

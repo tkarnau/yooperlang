@@ -1,0 +1,637 @@
+module typecheck;
+
+// Type ANNOTATION (a piece of syntax) -> TypeId (a resolved type).
+//
+// Primitive spellings are canonicalized here, exactly as the JS reference does:
+// `int` is int32, `float` is float32, and the c_* aliases are their LP64
+// widths. The arena never holds a raw name.
+
+import * as str from "std/core/strings.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
+
+export function resolveTypeAnnotation(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  annotId: NodeId
+): TypeId {
+  if (annotId == 0) {
+    return TYPE_VOID_ID;   // no annotation at all
+  }
+  const annot = nodeAt(ref ast, annotId);
+  switch (annot.kind) {
+    case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
+      const inner = resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childA);
+      return internRef(ref prog, inner);
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_ARRAY_TYPE: {
+      const elem = resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childA);
+      return internArray(ref prog, elem);
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME: {
+      return resolveTypeName(ref prog, ref tm, ref ast, annot);
+    }
+    case ASTNodeKind.TYPE_ANNOTATION_FUNC_TYPE: {
+      return resolveFuncTypeAnnotation(ref prog, ref tm, ref ast, annot);
+    }
+    default: {
+      reportError(ref prog, `not a type annotation: ${kindName(annot.kind)}`, annot.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+function resolveTypeName(ref prog: Program, ref tm: TypedModule, ref ast: AST, annot: ASTNode): TypeId {
+  if (isVoidName(annot.name)) {
+    return TYPE_VOID_ID;
+  }
+
+  // A type PARAMETER, while a generic decl's body is being resolved. Checked
+  // before anything else so `T` inside `Box<T>` cannot be shadowed by a
+  // primitive spelling or an unrelated decl of the same name.
+  const asParam = typeParamNamed(ref prog, annot.name);
+  if (asParam != TYPE_ERROR_ID) {
+    if (annot.childA != 0) {
+      reportError(ref prog, `type parameter "${annot.name}" is not generic`, annot.sourceLoc);
+    }
+    return asParam;
+  }
+
+  // `unsafe_ptr` / `unsafe_ptr<T>` - a raw pointer, gated on `import.unsafe;`.
+  //
+  // The bare form is OPAQUE (pointee 0), which is a different type from
+  // `unsafe_ptr<void>`: a typed pointer widens to the opaque one and not back,
+  // which is what lets an extern take any pointer while a typed one stays
+  // checked. Same rule as the reference.
+  if (str.stringEq(annot.name, UNSAFE_PTR_NAME)) {
+    if (!tm.unsafeAllowed) {
+      reportError(
+        ref prog,
+        `'unsafe_ptr<T>' requires 'import.unsafe;' at module top`,
+        annot.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    if (annot.childA == 0) {
+      return internUnsafePtr(ref prog, TYPE_ERROR_ID);
+    }
+    const args = nodeAt(ref ast, annot.childA);
+    if (args.childCount != 1) {
+      reportError(ref prog, `"unsafe_ptr" takes one type argument`, annot.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+    return internUnsafePtr(
+      ref prog,
+      resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, args, 0))
+    );
+  }
+
+  switch (primKindOfName(annot.name)) {
+    case Option.Some { value: k }: {
+      if (annot.childA != 0) {
+        reportError(ref prog, `"${annot.name}" is not generic`, annot.sourceLoc);
+      }
+      return primTypeId(k);
+    }
+    case Option.None: {
+      // Not a primitive, so it has to be a name the module declared. Pass A
+      // registered a shell for every one of those, which is why a forward
+      // reference resolves here.
+      switch (map.mapGet(ref tm.names, annot.name)) {
+        case Option.Some { value: symId }: {
+          return typeIdOfSymbol(ref prog, ref tm, ref ast, symId, annot);
+        }
+        case Option.None: {
+          reportError(ref prog, `unknown type "${annot.name}"`, annot.sourceLoc);
+          return TYPE_ERROR_ID;
+        }
+      }
+    }
+  }
+}
+
+function typeIdOfSymbol(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  symId: SymbolId,
+  annot: ASTNode
+): TypeId {
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.GenericDecl { decl: d, sort: s }: {
+      return resolveGenericApplication(ref prog, ref tm, ref ast, d, annot);
+    }
+    case Symbol.Struct { typeId: t }:    { return closedType(ref prog, t, annot); }
+    case Symbol.VariantT { typeId: t }:  { return closedType(ref prog, t, annot); }
+    case Symbol.Union { typeId: t }:     { return closedType(ref prog, t, annot); }
+    case Symbol.ValueEnum { typeId: t }: { return closedType(ref prog, t, annot); }
+    case Symbol.Trait { typeId: t }:     { return closedType(ref prog, t, annot); }
+    case Symbol.Vtable { typeId: t }:    { return closedType(ref prog, t, annot); }
+    default: {
+      reportError(ref prog, `"${annot.name}" is not a type`, annot.sourceLoc);
+      return TYPE_ERROR_ID;
+    }
+  }
+}
+
+// A non-generic type used with `<...>` is a mistake worth naming, rather than
+// arguments silently ignored.
+function closedType(ref prog: Program, t: TypeId, annot: ASTNode): TypeId {
+  if (annot.childA != 0) {
+    reportError(ref prog, `"${annot.name}" is not generic, so it takes no type arguments`, annot.sourceLoc);
+  }
+  return t;
+}
+
+// `Vec<int>` - resolve the arguments, then hand them to the registry.
+//
+// The arity check is here because it is the only place that knows both numbers,
+// and because getting it wrong produces an instance with a missing member type
+// rather than an error.
+function resolveGenericApplication(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declId: DeclId,
+  annot: ASTNode
+): TypeId {
+  let info = genericAt(ref prog, declId);
+
+  if (annot.childA == 0) {
+    reportError(
+      ref prog,
+      `"${annot.name}" is generic, so it needs type arguments - write \`${annot.name}<...>\` with ${info.params.len} of them`,
+      annot.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  const list = nodeAt(ref ast, annot.childA);
+  disposable args: Vec<TypeId> = vec.vecNew(list.childCount);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    vec.vecPush(ref args, resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, list, i)));
+    i += 1;
+  }
+
+  if (args.len != info.params.len) {
+    reportError(
+      ref prog,
+      `"${annot.name}" takes ${info.params.len} type argument(s), got ${args.len}`,
+      annot.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  return instantiate(ref prog, declId, ref args);
+}
+
+// The canonical spellings. `void` is absent on purpose: it is the ABSENCE of a
+// type annotation as far as the arena is concerned, handled by the caller.
+// The `c_*` names are LP64 ALIASES, not distinct types: the alias IS the target
+// for equality, assignability and codegen alike. Hardcoded to Linux and macOS,
+// as the reference is - Windows LLP64 waits on real target-triple awareness.
+function primKindOfName(name: string): Option<PrimKind> {
+  if (str.stringEq(name, "int") || str.stringEq(name, "int32") || str.stringEq(name, "c_int")) {
+    return Option.Some { value: PrimKind.INT32 };
+  }
+  if (str.stringEq(name, "int8")) { return Option.Some { value: PrimKind.INT8 }; }
+  if (str.stringEq(name, "int16") || str.stringEq(name, "c_short")) {
+    return Option.Some { value: PrimKind.INT16 };
+  }
+  if (str.stringEq(name, "int64") || str.stringEq(name, "c_long")) {
+    return Option.Some { value: PrimKind.INT64 };
+  }
+  if (str.stringEq(name, "isize") || str.stringEq(name, "c_ssize_t")) {
+    return Option.Some { value: PrimKind.ISIZE };
+  }
+  if (str.stringEq(name, "uint8")) { return Option.Some { value: PrimKind.UINT8 }; }
+  if (str.stringEq(name, "uint16") || str.stringEq(name, "c_ushort")) {
+    return Option.Some { value: PrimKind.UINT16 };
+  }
+  if (str.stringEq(name, "uint32") || str.stringEq(name, "c_uint")) {
+    return Option.Some { value: PrimKind.UINT32 };
+  }
+  if (str.stringEq(name, "uint64") || str.stringEq(name, "c_ulong")) {
+    return Option.Some { value: PrimKind.UINT64 };
+  }
+  if (str.stringEq(name, "usize") || str.stringEq(name, "c_size_t")) {
+    return Option.Some { value: PrimKind.USIZE };
+  }
+  if (str.stringEq(name, "float") || str.stringEq(name, "float32")) {
+    return Option.Some { value: PrimKind.FLOAT32 };
+  }
+  if (str.stringEq(name, "float64")) { return Option.Some { value: PrimKind.FLOAT64 }; }
+  if (str.stringEq(name, "bool")) { return Option.Some { value: PrimKind.BOOL }; }
+  if (str.stringEq(name, "string")) { return Option.Some { value: PrimKind.STRING }; }
+  return Option.None;
+}
+
+// `void` reads as an annotation but resolves to the Void singleton.
+export function isVoidName(name: string): bool {
+  return str.stringEq(name, "void");
+}
+
+// True when `id` names an integer primitive. This is what an untyped int
+// literal is allowed to pin to - notably NOT float, which the JS reference also
+// rejects ("cannot assign untyped int to float32").
+export function isIntPrimType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.INT8, PrimKind.INT16, PrimKind.INT32, PrimKind.INT64, PrimKind.ISIZE,
+             PrimKind.UINT8, PrimKind.UINT16, PrimKind.UINT32, PrimKind.UINT64, PrimKind.USIZE: {
+          return true;
+        }
+        default: { return false; }
+      }
+    }
+    default: { return false; }
+  }
+}
+
+export const UNSAFE_PTR_NAME: string = "unsafe_ptr";
+
+export function isUnsafePtrType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.UnsafePtr { pointee: p }: { return true; }
+    default: { return false; }
+  }
+}
+
+// How a type reads in a diagnostic.
+export function formatType(ref prog: Program, id: TypeId): string {
+  switch (typeAt(ref prog, id)) {
+    case Type.Void: { return "void"; }
+    case Type.Prim { prim: p }: { return primName(p); }
+    case Type.Ref { inner: i }: { return `ref ${formatType(ref prog, i)}`; }
+    case Type.Array { elem: e }: { return `${formatType(ref prog, e)}[]`; }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.ErrorT: { return "<error>"; }
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      return `(${formatTypeList(ref prog, ref p)}) => ${formatType(ref prog, r)}`;
+    }
+    default: { return "<type>"; }
+  }
+}
+
+function formatTypeList(ref prog: Program, ref types: Vec<TypeId>): string propagates<disposable> {
+  disposable out: Text = text.make(32);
+  let i: usize = 0;
+  while (i < types.len) {
+    if (i > 0) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, formatType(ref prog, vec.vecGet(ref types, i)));
+    i += 1;
+  }
+  return text.view(ref out);
+}
+
+function primName(p: PrimKind): string {
+  switch (p) {
+    case PrimKind.INT8: { return "int8"; }
+    case PrimKind.INT16: { return "int16"; }
+    case PrimKind.INT32: { return "int32"; }
+    case PrimKind.INT64: { return "int64"; }
+    case PrimKind.ISIZE: { return "isize"; }
+    case PrimKind.UINT8: { return "uint8"; }
+    case PrimKind.UINT16: { return "uint16"; }
+    case PrimKind.UINT32: { return "uint32"; }
+    case PrimKind.UINT64: { return "uint64"; }
+    case PrimKind.USIZE: { return "usize"; }
+    case PrimKind.FLOAT32: { return "float32"; }
+    case PrimKind.FLOAT64: { return "float64"; }
+    case PrimKind.BOOL: { return "bool"; }
+    case PrimKind.STRING: { return "string"; }
+    default: { return "<prim>"; }
+  }
+}
+
+// The primitive a name spells, for cast detection: `usize(x)` is a cast, not a
+// call. Exported so pass D can ask without duplicating the table.
+export function primTypeIdOfName(name: string): TypeId {
+  switch (primKindOfName(name)) {
+    case Option.Some { value: k }: { return primTypeId(k); }
+    case Option.None: { return TYPE_ERROR_ID; }
+  }
+}
+
+// Bit width of an integer primitive; 0 for anything else. `isize`/`usize` are
+// 64 on every target the compiler supports today.
+export function primBitWidth(ref prog: Program, id: TypeId): usize {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.INT8, PrimKind.UINT8: { return 8; }
+        case PrimKind.INT16, PrimKind.UINT16: { return 16; }
+        case PrimKind.INT32, PrimKind.UINT32: { return 32; }
+        case PrimKind.INT64, PrimKind.UINT64, PrimKind.ISIZE, PrimKind.USIZE: { return 64; }
+        case PrimKind.BOOL: { return 1; }
+        default: { return 0; }
+      }
+    }
+    default: { return 0; }
+  }
+}
+
+// Whether an integer primitive is signed, which decides sext vs zext when a
+// cast widens it.
+export function primIsSigned(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.INT8, PrimKind.INT16, PrimKind.INT32, PrimKind.INT64, PrimKind.ISIZE: {
+          return true;
+        }
+        default: { return false; }
+      }
+    }
+    default: { return false; }
+  }
+}
+
+// Where a named field sits in a struct, and what type it holds.
+//
+// The INDEX is what codegen needs (gep and extractvalue address a field by
+// position), and the type is what typecheck needs, so one lookup answers both.
+// `index` comes back as fields.len when the name is absent, which is never a
+// valid position.
+export type FieldLookup {
+  index: usize,
+  typeId: TypeId,
+  found: bool,
+}
+
+export function lookupField(ref prog: Program, structType: TypeId, name: string): FieldLookup {
+  switch (typeAt(ref prog, structType)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      let i: usize = 0;
+      while (i < f.len) {
+        const field = vec.vecGet(ref f, i);
+        if (str.stringEq(field.name, name)) {
+          return { index: i, typeId: field.typeId, found: true };
+        }
+        i += 1;
+      }
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+    default: {
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+  }
+}
+
+// How many fields a struct has, for the all-fields-present check.
+export function structFieldCount(ref prog: Program, structType: TypeId): usize {
+  switch (typeAt(ref prog, structType)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return f.len;
+    }
+    default: { return 0; }
+  }
+}
+
+// Where a named case sits in a variant, and how much it carries.
+//
+// Deliberately shaped like FieldLookup, and deliberately NOT carrying the case's
+// `Vec<Field>`. A Vec read out of the type arena is a SHALLOW copy that shares
+// the arena's storage, so handing one out invites a caller to dispose it and
+// free the arena's own fields out from under every later lookup. That is not
+// hypothetical - it is the bug this shape exists to prevent, found as a null
+// dereference three passes away from the annotation that caused it.
+//
+// Callers that need the fields ask for them one at a time, below.
+export type VariantCaseLookup {
+  ordinal: int,
+  fieldCount: usize,
+  found: bool,
+}
+
+export function lookupVariantCase(ref prog: Program, variantType: TypeId, name: string): VariantCaseLookup {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      let i: usize = 0;
+      while (i < cs.len) {
+        const c = vec.vecGet(ref cs, i);
+        if (str.stringEq(c.name, name)) {
+          return { ordinal: c.ordinal, fieldCount: c.fields.len, found: true };
+        }
+        i += 1;
+      }
+      return { ordinal: 0, fieldCount: 0, found: false };
+    }
+    default: {
+      return { ordinal: 0, fieldCount: 0, found: false };
+    }
+  }
+}
+
+// The i'th field of a case, by ordinal. `found` is false when either index is
+// out of range, which keeps every caller total without a bounds check of its
+// own.
+export function variantCaseFieldAt(ref prog: Program, variantType: TypeId, ordinal: usize, i: usize): FieldLookup {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      if (ordinal >= cs.len) {
+        return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+      }
+      let c = vec.vecGet(ref cs, ordinal);
+      if (i >= c.fields.len) {
+        return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+      }
+      return { index: i, typeId: vec.vecGet(ref c.fields, i).typeId, found: true };
+    }
+    default: {
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+  }
+}
+
+// A case's field BY NAME: its position in the payload and its type.
+export function variantCaseFieldNamed(ref prog: Program, variantType: TypeId, ordinal: usize, name: string): FieldLookup {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      if (ordinal >= cs.len) {
+        return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+      }
+      let c = vec.vecGet(ref cs, ordinal);
+      let i: usize = 0;
+      while (i < c.fields.len) {
+        const f = vec.vecGet(ref c.fields, i);
+        if (str.stringEq(f.name, name)) {
+          return { index: i, typeId: f.typeId, found: true };
+        }
+        i += 1;
+      }
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+    default: {
+      return { index: 0, typeId: TYPE_ERROR_ID, found: false };
+    }
+  }
+}
+
+// How many cases a variant has, for the exhaustiveness check.
+export function variantCaseCount(ref prog: Program, variantType: TypeId): usize {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return cs.len;
+    }
+    default: { return 0; }
+  }
+}
+
+// The name of the case at `ordinal`, for the "you did not handle X" message.
+export function variantCaseNameAt(ref prog: Program, variantType: TypeId, ordinal: usize): string {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      if (ordinal >= cs.len) {
+        return "";
+      }
+      return vec.vecGet(ref cs, ordinal).name;
+    }
+    default: { return ""; }
+  }
+}
+
+// The declaring module and the declared name, which together give a variant its
+// emitted LLVM names. Two accessors rather than one because the caller composes
+// three different names out of them.
+export function variantModuleIdOf(ref prog: Program, variantType: TypeId): string {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return moduleIdOf(ref prog, d.module);
+    }
+    default: { return ""; }
+  }
+}
+
+export function variantDeclNameOf(ref prog: Program, variantType: TypeId): string {
+  switch (typeAt(ref prog, variantType)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    default: { return ""; }
+  }
+}
+
+// `ref T` -> `T`, and anything else unchanged. What a callee sees when it is
+// handed a borrow.
+export function derefType(ref prog: Program, id: TypeId): TypeId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Ref { inner: i }: { return i; }
+    default: { return id; }
+  }
+}
+
+export function isVariantType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return true;
+    }
+    default: { return false; }
+  }
+}
+
+export function isStructType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return true;
+    }
+    default: { return false; }
+  }
+}
+
+// `(k: K) => uint64` - the SAME `Type.Func` a declared function gets.
+//
+// That sameness is the feature: `{ hash: stringHash }` puts a named function
+// into a function-typed field, and it typechecks because both sides intern to
+// one TypeId. A separate "function pointer" type would have to be converted to
+// and from, and nothing would be gained - a yoop function value IS its address.
+//
+// Parameter NAMES are ignored here. Two function types match on parameter types
+// and return type, which is what lets a field declared `(a: K, b: K) => bool`
+// accept a function whose parameters are called something else.
+function resolveFuncTypeAnnotation(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  annot: ASTNode
+): TypeId {
+  let params: Vec<TypeId> = vec.vecNew(2);
+  if (annot.childA != 0) {
+    const list = nodeAt(ref ast, annot.childA);
+    let i: usize = 0;
+    while (i < list.childCount) {
+      const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
+      const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
+      // `ref` is part of the signature here exactly as on a declaration.
+      if (paramNode.flagA) {
+        vec.vecPush(ref params, internRef(ref prog, declared));
+      } else {
+        vec.vecPush(ref params, declared);
+      }
+      i += 1;
+    }
+  }
+  return internType(ref prog, Type.Func {
+    params: params,
+    ret: resolveTypeAnnotation(ref prog, ref tm, ref ast, annot.childB),
+    variadic: false,
+  });
+}
+
+// Whether a value of type `actual` may be used where `expected` is wanted.
+//
+// `id == id` for everything except FUNCTION types, which compare structurally.
+// They have to: a declared function's signature lives in the SHELL pass A
+// registered for it, filled in place by pass C, so two functions with identical
+// signatures keep different TypeIds - and an annotation like
+// `(k: string) => uint64` interns a third. Comparing those by id would make
+// `{ hash: stringHash }` a type error for no reason a reader could see.
+//
+// Deliberately not a general subtyping rule. It answers one question, the same
+// way `==` did before, and everything else in the type system stays `id == id`.
+export function typeAccepts(ref prog: Program, expected: TypeId, actual: TypeId): bool {
+  if (expected == actual) {
+    return true;
+  }
+  // `null` fits any raw pointer and nothing else - the pointer twin of an
+  // untyped int literal pinning to an integer.
+  if (actual == TYPE_UNTYPED_NULL_ID) {
+    return isUnsafePtrType(ref prog, expected);
+  }
+  switch (typeAt(ref prog, expected)) {
+    case Type.Func { params: wantParams, ret: wantRet, variadic: wantVariadic }: {
+      switch (typeAt(ref prog, actual)) {
+        case Type.Func { params: gotParams, ret: gotRet, variadic: gotVariadic }: {
+          return wantRet == gotRet &&
+            wantVariadic == gotVariadic &&
+            sameTypeList(ref wantParams, ref gotParams);
+        }
+        default: { return false; }
+      }
+    }
+    // A TYPED pointer widens to the OPAQUE one, and not back. `unsafe_ptr` is
+    // "some pointer" and `unsafe_ptr<uint8>` is a promise about what it points
+    // at, so forgetting the promise is safe and inventing one is not.
+    case Type.UnsafePtr { pointee: wantPointee }: {
+      if (wantPointee != TYPE_ERROR_ID) {
+        return false;
+      }
+      return isUnsafePtrType(ref prog, actual);
+    }
+    default: { return false; }
+  }
+}

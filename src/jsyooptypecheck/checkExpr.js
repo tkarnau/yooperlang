@@ -274,19 +274,47 @@ function resolveBinary(node, scope, ctx) {
     coerceUntypedLiteralToTyped(node.left, leftType, resultType, ctx.errors);
     coerceUntypedLiteralToTyped(node.right, rightType, resultType, ctx.errors);
   }
-  // A comparison of two UNTYPED operands (`2 % 1 > 0`, `if (1 + 1 == 2)`) is
-  // the end of the line for pinning: the result is `bool`, so the coercion
-  // above cannot push a numeric type down, and no enclosing context ever
-  // will. Codegen then reads `untypedInt` off the operand it picks for the
-  // instruction's type and throws. Default them the way every other
-  // context-free untyped literal defaults. A comparison with ONE typed side
-  // is unaffected - codegen takes the type from that side.
-  const bothUntyped =
-    (leftType.kind === typeKinds.untypedInt ||
-      leftType.kind === typeKinds.untypedFloat) &&
-    (rightType.kind === typeKinds.untypedInt ||
-      rightType.kind === typeKinds.untypedFloat);
-  if (bothUntyped && resultType.kind === typeKinds.prim && isBool(resultType)) {
+  // A COMPARISON is the end of the line for pinning: its result is `bool`, so
+  // the coercion above cannot push a numeric type down (bool is neither an int
+  // nor a float prim, so coerceUntypedLiteralToTyped returns early), and no
+  // enclosing context ever will. Anything still untyped here reaches codegen
+  // unpinned, and `llvmType` throws on it. Two shapes, and each needs its own
+  // answer.
+  const isCmp = ["eqeq", "neq", "lt", "gt", "lte", "gte"].includes(node.op);
+  const leftUntyped =
+    leftType.kind === typeKinds.untypedInt ||
+    leftType.kind === typeKinds.untypedFloat;
+  const rightUntyped =
+    rightType.kind === typeKinds.untypedInt ||
+    rightType.kind === typeKinds.untypedFloat;
+
+  if (isCmp && leftUntyped !== rightUntyped) {
+    // ONE untyped side (`x == -24 + 176` where x is int32). Pin it to the
+    // TYPED SIDE'S type, not to the bool result. Codegen takes the comparison
+    // instruction's type from the left operand and so survives a bare literal
+    // here, but it still RECURSES into the untyped operand to emit it - and a
+    // compound expression like `-24 + 176` has its own untypedInt resolvedType
+    // waiting there. That is the crash yooperdoom hit (takeaways 1.2), and the
+    // reason the old comment's "unaffected, codegen takes the type from that
+    // side" was true of the instruction but not of the operand.
+    //
+    // Pinning to the typed side rather than to the int32 default is also what
+    // reaches the range check: `b == 300` where b is uint8 is a diagnostic
+    // rather than a silently truncated comparison. Note the limit - only the
+    // LEAVES are checked, since coerceUntypedLiteralToTyped range-checks bare
+    // INT_LITERAL/FLOAT_LITERAL nodes and merely retypes the compound ones.
+    // `b == 200 + 100` passes: 200 and 100 each fit in a uint8 and nothing
+    // folds the sum at typecheck. Catching that wants constant folding, which
+    // is a separate job.
+    const typedSide = leftUntyped ? rightType : leftType;
+    if (typedSide.kind === typeKinds.prim) {
+      coerceUntypedLiteralToTyped(node.left, leftType, typedSide, ctx.errors);
+      coerceUntypedLiteralToTyped(node.right, rightType, typedSide, ctx.errors);
+    }
+  } else if (isCmp && leftUntyped && rightUntyped) {
+    // BOTH untyped (`2 % 1 > 0`, `if (1 + 1 == 2)`). There is no typed side to
+    // borrow from, so default them the way every other context-free untyped
+    // literal defaults.
     const pinned =
       leftType.kind === typeKinds.untypedFloat ||
       rightType.kind === typeKinds.untypedFloat
@@ -331,6 +359,38 @@ function calleeDisplayName(callee) {
     return `${callee.object.name}.${callee.field}`;
   }
   return "call";
+}
+
+// `printf(`...`, x)` - a template literal used as a format string, with value
+// arguments after it. Rejected, because it silently prints the wrong thing.
+//
+// The two printf emitters treat a DOUBLE-QUOTED format literal as C printf
+// (its `%` directives are authoritative and trailing args fill them) but a
+// TEMPLATE literal as a literal-percent context: its `%` is escaped to `%%` on
+// the way out, and each bare value arg then gets a specifier APPENDED. So
+//
+//     printf(`%s`, name)    prints  %sbob        <- not a substitution
+//     printf(`n=%d`, n)     prints  n=%d7
+//
+// which is internally consistent and useless: there is no way to spell a
+// directive inside a template, so a trailing value arg can never be the thing
+// the author meant. Both correct spellings are one edit away, and the error
+// names them. See plans/yooperdoom-takeaways.md 2.3.
+function checkPrintfTemplateFormat(node, ctx) {
+  const fmt = node.args?.[0];
+  if (fmt?.kind !== ASTNodeKind.TEMPLATE_LITERAL) return;
+  const extra = node.args.length - 1;
+  if (extra < 1) return;
+  pushError(
+    ctx.errors,
+    node.args[1],
+    `a template literal is not a printf format string, so the ` +
+      `${extra === 1 ? "argument after it" : `${extra} arguments after it`} ` +
+      `cannot be substituted - a template's "%" is printed literally and the ` +
+      `${extra === 1 ? "value is" : "values are"} appended instead. ` +
+      `Interpolate into the template (\`... \${x}\`), or pass a ` +
+      `double-quoted format literal ("...%s", x).`,
+  );
 }
 
 // `f(a, b, c)` or `ns.f(a, b, c)` - looks up the function (local, imported
@@ -390,11 +450,11 @@ function resolveCall(node, scope, ctx) {
     if (trait) {
       return resolveTraitQualifiedCall(node, trait, callee.field, scope, ctx);
     }
-    // Generic function call via namespace: `intr.heap_alloc(8)` or
-    // `vec.vec_new(...)`. The source module's genericFuncTable holds the
+    // Generic function call via namespace: `intr.heapAlloc(8)` or
+    // `vec.vecNew(...)`. The source module's genericFuncTable holds the
     // canonical decl; namespace lookups otherwise only check localSymbols
     // and structTable, so generic funcs need an explicit hop here.
-    // Also covers intrinsic special-cases (`conc.wait_until`, `conc.cancel`)
+    // Also covers intrinsic special-cases (`conc.waitUntil`, `conc.cancel`)
     // where the special-case branches do the typing work - bare-callee form
     // and namespace-prefixed form should land in the same checker.
     //
@@ -411,7 +471,7 @@ function resolveCall(node, scope, ctx) {
       const srcEnv = ctx.typeContext.moduleEnv?.get(nsType.moduleId);
       const srcBuiltins = srcEnv?.builtinIntrinsicNames;
       if (srcBuiltins?.has(callee.field)) {
-        if (callee.field === "wait_until") {
+        if (callee.field === "waitUntil") {
           callee.namespaceLookup = {
             moduleId: nsType.moduleId,
             exportName: callee.field,
@@ -437,6 +497,24 @@ function resolveCall(node, scope, ctx) {
           callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
           callee.object.resolvedType = nsType;
           return resolveCancelCall(node, scope, ctx);
+        }
+        if (callee.field === "armComplete") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveArmCompleteCall(node, scope, ctx);
+        }
+        if (callee.field === "isDone") {
+          callee.namespaceLookup = {
+            moduleId: nsType.moduleId,
+            exportName: callee.field,
+          };
+          callee.object.kind = ASTNodeKind.NAMESPACE_IDENT;
+          callee.object.resolvedType = nsType;
+          return resolveIsDoneCall(node, scope, ctx);
         }
       }
       const remoteGeneric = srcEnv?.genericFuncTable?.get(callee.field);
@@ -478,18 +556,24 @@ function resolveCall(node, scope, ctx) {
     return resolveCallWithSig(node, calleeType, scope, ctx);
   }
 
-  // `wait_until(h, deadline_ns)` and `cancel(h)` are builtin call forms (the
+  // `waitUntil(h, deadline_ns)` and `cancel(h)` are builtin call forms (the
   // bounded-wait sibling of the `wait` keyword and its cancellation
   // counterpart). They're only special-cased when the current module has
   // imported them via an `extern "intrinsic"` block in std/core/concurrency
   // - user code that hasn't imported the intrinsics module is free to define
-  // and call its own `wait_until` / `cancel` functions.
+  // and call its own `waitUntil` / `cancel` functions.
   const builtinIntrinsicNames = ctx.typeContext.builtinIntrinsicNames;
-  if (callee === "wait_until" && builtinIntrinsicNames?.has("wait_until")) {
+  if (callee === "waitUntil" && builtinIntrinsicNames?.has("waitUntil")) {
     return resolveWaitUntilCall(node, scope, ctx);
   }
   if (callee === "cancel" && builtinIntrinsicNames?.has("cancel")) {
     return resolveCancelCall(node, scope, ctx);
+  }
+  if (callee === "armComplete" && builtinIntrinsicNames?.has("armComplete")) {
+    return resolveArmCompleteCall(node, scope, ctx);
+  }
+  if (callee === "isDone" && builtinIntrinsicNames?.has("isDone")) {
+    return resolveIsDoneCall(node, scope, ctx);
   }
   if (callee === "suspendNow" && builtinIntrinsicNames?.has("suspendNow")) {
     return resolveSuspendNowCall(node, scope, ctx);
@@ -499,6 +583,7 @@ function resolveCall(node, scope, ctx) {
   // Stays a magic builtin: the name doesn't compete with user identifiers
   // and is used pervasively; gating it on import would multiply churn.
   if (callee === "printf") {
+    checkPrintfTemplateFormat(node, ctx);
     const sig = ctx.typeContext.moduleSymbols.get("printf");
     if (sig) {
       // Declared via extern block - use variadic path
@@ -848,7 +933,7 @@ function derivedFieldLabel(templateNode, expr) {
 // `` `hi ${name}` `` - every interpolation must be a printable scalar
 // (string, bool, or any numeric type) or a type that implements
 // `Display`. For Display types we rewrite the interpolation at
-// typecheck time to call `Display.to_string(ref expr)` first and use
+// typecheck time to call `Display.toString(ref expr)` first and use
 // the resulting string - codegen still only sees printf-style args.
 function resolveTemplateLiteral(node, scope, ctx) {
   for (const part of node.parts) {
@@ -906,7 +991,7 @@ function resolveTemplateLiteral(node, scope, ctx) {
           part.expr,
           `@derive(display) on "${node.deriveOwner}" cannot print ${
             label ? `field "${label}"` : "a field"
-          } of type ${formatType(exprType)} - add @derive(display) to that type, give it a manual Display impl, or write ${node.deriveOwner}'s to_string by hand`,
+          } of type ${formatType(exprType)} - add @derive(display) to that type, give it a manual Display impl, or write ${node.deriveOwner}'s toString by hand`,
         );
         continue;
       }
@@ -926,7 +1011,7 @@ function resolveTemplateLiteral(node, scope, ctx) {
   return setType(node, PrimType(primAnnotations.string));
 }
 
-// Phase 9.F: build the post-typecheck shape of `Display.to_string(ref expr)`
+// Phase 9.F: build the post-typecheck shape of `Display.toString(ref expr)`
 // directly. We bypass the parser by stamping `calleeMethodOf` +
 // `calleeMangledName` + a synthetic REF_EXPRESSION arg, mirroring what
 // resolveTraitQualifiedCall does for source-written trait calls.
@@ -951,16 +1036,16 @@ function synthesizeDisplayCall(originalExpr, structType, exprType) {
   }
   return {
     kind: ASTNodeKind.CALL_EXPRESSION,
-    callee: "Display.to_string", // diagnostic-only; codegen reads calleeMangledName
+    callee: "Display.toString", // diagnostic-only; codegen reads calleeMangledName
     args: [argNode],
     sourceLoc: originalExpr.sourceLoc,
     resolvedType: PrimType(primAnnotations.string),
     calleeMethodOf: structType,
-    calleeMethodName: "to_string",
+    calleeMethodName: "toString",
     calleeTrait: (structType.implementsTraits ?? []).find(
       (t) => t.name === "Display",
     ),
-    calleeMangledName: mangleTraitMethod(structType, "Display", "to_string"),
+    calleeMangledName: mangleTraitMethod(structType, "Display", "toString"),
   };
 }
 
@@ -2025,9 +2110,9 @@ function sourceTypeName(type) {
   return formatType(type);
 }
 
-// Phase 10.F: `wait_until(h, deadline_ns): WaitResult<T>` - bounded-wait
+// Phase 10.F: `waitUntil(h, deadline_ns): WaitResult<T>` - bounded-wait
 // counterpart to the `wait` keyword. Recognized by callee name in
-// resolveCall; user-defined `wait_until` functions are shadowed.
+// resolveCall; user-defined `waitUntil` functions are shadowed.
 //
 //   - arg[0]: must resolve to a `Task<T>` (the same shape `wait` accepts);
 //     T is extracted and used to instantiate the result type.
@@ -2046,7 +2131,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until(h, deadline_ns) takes exactly 2 arguments, got ${node.args.length}`,
+      `waitUntil(h, deadline_ns) takes exactly 2 arguments, got ${node.args.length}`,
     );
     for (const arg of node.args) resolveExprType(arg, scope, ctx);
     return setType(node, ErrorType());
@@ -2060,7 +2145,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until's first argument must be a Task<T>, got ${formatType(handleType)}`,
+      `waitUntil's first argument must be a Task<T>, got ${formatType(handleType)}`,
     );
     resolveExprType(node.args[1], scope, ctx);
     return setType(node, ErrorType());
@@ -2078,7 +2163,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until's deadline_ns argument must be uint64, got ${formatType(deadlineType)}`,
+      `waitUntil's deadline_ns argument must be uint64, got ${formatType(deadlineType)}`,
     );
     return setType(node, ErrorType());
   }
@@ -2088,7 +2173,7 @@ function resolveWaitUntilCall(node, scope, ctx) {
     pushError(
       ctx.errors,
       node,
-      `wait_until requires WaitResult<T> in scope - import it from "std/core/concurrency.yoop"`,
+      `waitUntil requires WaitResult<T> in scope - import it from "std/core/concurrency.yoop"`,
     );
     return setType(node, ErrorType());
   }
@@ -2131,6 +2216,63 @@ function resolveCancelCall(node, scope, ctx) {
   }
   node.builtinCancel = true;
   return setType(node, VoidType());
+}
+
+// `armComplete(h): c_int` - register the calling task to be woken when `h`
+// completes. Same shape as resolveCancelCall (one Task<T> argument, no type
+// inference to do), differing only in the result type: the runtime's arm
+// contract is an int - 0 armed, 1 no current task, 2 already done, -1 failed.
+function resolveArmCompleteCall(node, scope, ctx) {
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `armComplete(h) takes exactly 1 argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `armComplete's argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  node.builtinArmComplete = true;
+  return setType(node, PrimType(primAnnotations.int32));
+}
+
+// `isDone(h): c_int` - 1 when the handle has finished, 0 otherwise.
+function resolveIsDoneCall(node, scope, ctx) {
+  if (node.args.length !== 1) {
+    pushError(
+      ctx.errors,
+      node,
+      `isDone(h) takes exactly 1 argument, got ${node.args.length}`,
+    );
+    for (const arg of node.args) resolveExprType(arg, scope, ctx);
+    return setType(node, ErrorType());
+  }
+  const handleType = resolveExprType(node.args[0], scope, ctx);
+  if (handleType.kind === typeKinds.error) {
+    return setType(node, ErrorType());
+  }
+  if (handleType.kind !== typeKinds.task) {
+    pushError(
+      ctx.errors,
+      node,
+      `isDone's argument must be a Task<T>, got ${formatType(handleType)}`,
+    );
+    return setType(node, ErrorType());
+  }
+  node.builtinIsDone = true;
+  return setType(node, PrimType(primAnnotations.int32));
 }
 
 // `suspendNow()` - the suspend primitive. Takes no arguments and yields
@@ -2580,7 +2722,7 @@ export function checkInitializer(
   }
   // Bidirectional inference for generic function calls: when the callee is a
   // generic function, hint the expected return type so type params that
-  // appear only in the return position (e.g. `heap_alloc<T>(n: usize): T[]`)
+  // appear only in the return position (e.g. `heapAlloc<T>(n: usize): T[]`)
   // can be inferred from context.
   if (
     valueNode.kind === ASTNodeKind.CALL_EXPRESSION &&
@@ -2599,7 +2741,7 @@ export function checkInitializer(
     }
   }
   // Same bidirectional inference, but for namespace-prefixed generic calls
-  // like `intr.heap_alloc(8)`. The remote module's genericFuncTable carries
+  // like `intr.heapAlloc(8)`. The remote module's genericFuncTable carries
   // the canonical decl; we route through resolveGenericCall directly so the
   // expectedType hint reaches return-position type params.
   if (
@@ -3347,7 +3489,7 @@ function unifyAgainstTypeParam(paramType, argType, declId, subst) {
 // `expectedReturnType` (optional): if supplied (typically by `checkInitializer`
 // when the call appears in a typed binding/initializer position), the return
 // type is also unified against it. This enables type-parameters that only
-// appear in the return position to be inferred - e.g. `heap_alloc<T>(n: usize): T[]`
+// appear in the return position to be inferred - e.g. `heapAlloc<T>(n: usize): T[]`
 // where T is bound from the LHS annotation.
 function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null) {
   const sig = generic.genericSig;
@@ -3402,7 +3544,7 @@ function resolveGenericCall(node, generic, scope, ctx, expectedReturnType = null
     }
   }
 
-  // Return-type-driven inference (e.g. for `heap_alloc<T>(n: usize): T[]`
+  // Return-type-driven inference (e.g. for `heapAlloc<T>(n: usize): T[]`
   // where T appears only in the return). Only applied when a hint is
   // available (initializer / return / arg-pinning contexts).
   if (expectedReturnType && expectedReturnType.kind !== typeKinds.error) {

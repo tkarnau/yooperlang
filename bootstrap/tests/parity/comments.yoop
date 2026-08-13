@@ -1,0 +1,11 @@
+// a line comment
+const a = 1; // trailing
+/* a block comment */
+const b = 2;
+/* outer /* nested */ still outer */
+const c = 3;
+/*
+   multi
+   line
+*/
+const d = 4;

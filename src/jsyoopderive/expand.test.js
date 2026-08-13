@@ -15,7 +15,7 @@ function traitsStub() {
     id: "traits_stub",
     absPath: "/stub/std/core/traits.yoop",
     ast: parse(
-      `export trait Display {\n  function to_string(ref self): string;\n}\n`,
+      `export trait Display {\n  function toString(ref self): string;\n}\n`,
     ),
   };
 }
@@ -42,7 +42,7 @@ function typeDeclIn(mod, name) {
 }
 
 describe("expandDerives", () => {
-  it("grafts to_string + implements Display and consumes the ATTRIBUTE", () => {
+  it("grafts toString + implements Display and consumes the ATTRIBUTE", () => {
     const { mod, errors } = expand(
       `@derive(display)\ntype Point {\n  x: int32,\n  y: int32,\n}\n`,
     );
@@ -54,7 +54,7 @@ describe("expandDerives", () => {
     const decl = typeDeclIn(mod, "Point");
     assert.ok(decl);
     assert.equal(decl.methods.length, 1);
-    assert.equal(decl.methods[0].name, "to_string");
+    assert.equal(decl.methods[0].name, "toString");
     assert.equal(decl.methods[0].params[0].name, "self");
     assert.equal(
       decl.implements.filter((c) => c.name === "Display").length,
@@ -147,12 +147,12 @@ describe("expandDerives", () => {
     assert.equal(typeDeclIn(mod, "P").methods.length, 1);
   });
 
-  it("rejects a type that already defines to_string", () => {
+  it("rejects a type that already defines toString", () => {
     const { mod, errors } = expand(
-      `import { Display } from "std/core/traits.yoop";\n\n@derive(display)\ntype P implements Display {\n  x: int32,\n  function to_string(ref self): string {\n    return "manual";\n  }\n}\n`,
+      `import { Display } from "std/core/traits.yoop";\n\n@derive(display)\ntype P implements Display {\n  x: int32,\n  function toString(ref self): string {\n    return "manual";\n  }\n}\n`,
     );
     assert.equal(errors.length, 1);
-    assert.match(errors[0].message, /already defines "to_string"/);
+    assert.match(errors[0].message, /already defines "toString"/);
     assert.equal(typeDeclIn(mod, "P").methods.length, 1); // manual only
   });
 
@@ -218,7 +218,7 @@ describe("expandDerives: variants (Phase 13.D)", () => {
     return null;
   }
 
-  it("grafts a switch-bodied to_string and appends implements Display", () => {
+  it("grafts a switch-bodied toString and appends implements Display", () => {
     const { mod, errors } = expand(
       `@derive(display)\nvariant Shape {\n  Circle { r: int32 },\n  Dot,\n}\n`,
     );
@@ -226,7 +226,7 @@ describe("expandDerives: variants (Phase 13.D)", () => {
     assert.ok(mod.ast.body.every((d) => d.kind !== ASTNodeKind.ATTRIBUTE));
     const decl = variantDeclIn(mod, "Shape");
     assert.equal(decl.methods.length, 1);
-    assert.equal(decl.methods[0].name, "to_string");
+    assert.equal(decl.methods[0].name, "toString");
     assert.equal(
       decl.implements.filter((c) => c.name === "Display").length,
       1,
@@ -259,11 +259,11 @@ describe("expandDerives: variants (Phase 13.D)", () => {
     assert.match(errors[0].message, /generic variant "Maybe" is not yet supported/);
   });
 
-  it("rejects a variant that already defines to_string", () => {
+  it("rejects a variant that already defines toString", () => {
     const { errors } = expand(
-      `import { Display } from "std/core/traits.yoop";\n\n@derive(display)\nvariant Shape implements Display {\n  Dot,\n  function to_string(ref self): string {\n    return "manual";\n  }\n}\n`,
+      `import { Display } from "std/core/traits.yoop";\n\n@derive(display)\nvariant Shape implements Display {\n  Dot,\n  function toString(ref self): string {\n    return "manual";\n  }\n}\n`,
     );
     assert.equal(errors.length, 1);
-    assert.match(errors[0].message, /variant "Shape" already defines "to_string"/);
+    assert.match(errors[0].message, /variant "Shape" already defines "toString"/);
   });
 });

@@ -10,7 +10,7 @@
 `llvm.coro.suspend` suspends **the current function's frame only**. The
 blocking call in a real program is several frames down:
 
-    user task body -> Readable.read -> TcpStream.read -> ffi_recv -> wait_readable
+    user task body -> Readable.read -> TcpStream.read -> ffiRecv -> wait_readable
 
 For the task body to suspend at the bottom of that, every frame in the
 chain has to be a coroutine that propagates the suspend upward. That is

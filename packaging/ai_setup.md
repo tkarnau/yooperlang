@@ -131,8 +131,8 @@ copying their patterns over inventing syntax.
 Non-obvious rules that commonly trip people up:
 
 - **No turbofish on namespaced generic calls.** Write
-  `let v: Vec<int32> = vec.vec_new(4);` and let the binding annotation drive
-  inference. `vec.vec_new<int32>()` is a parse error.
+  `let v: Vec<int32> = vec.vecNew(4);` and let the binding annotation drive
+  inference. `vec.vecNew<int32>()` is a parse error.
 - **Kind keywords must be imported.** `disposable` and friends are declared in
   the standard library, not built into the grammar:
   `import { disposable } from "std/core/kinds.yoop";`

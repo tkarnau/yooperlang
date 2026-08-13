@@ -1,0 +1,71 @@
+module ast;
+
+// The arena node (decision D1/D1a in plans/bootstrap-pipeline-contracts.md).
+//
+// A node NAMES its children by NodeId instead of containing them, which is what
+// sidesteps recursive ownership in a value-semantic language: the whole AST is
+// one owned Vec, and any pass can hold a node by value without deep-copying a
+// subtree.
+
+import { TokenTags } from "../lex";
+import { SourceLocation } from "../diagnostics";
+
+// An index into AST.nodes. 0 is the reserved "none" sentinel - no real node
+// ever lives at arena index 0 - so an empty child slot is just a 0.
+export type NodeId = usize;
+
+// note(tom): Flat and Fat nodes for now, child slots and flag slots reused:
+// what each slot means depends on the `astNodeKind` and you just have to
+// look it up for now in the string helpers, it is too big of a headache to stitch a dynamic shape
+// through all the places needed. Childs are 64 bit node ids and Flags are bools.
+// after bootstrapping is done, we can implement a language feature to help, but
+// not sure what we'd want anyhow, yet.
+@derive(display)
+export type ASTNode {
+  kind: ASTNodeKind,
+  sourceLoc: SourceLocation,
+  name: string,
+
+  // variable-arity children: a slice into AST.childIds. This is the node's
+  // PRIMARY list (PROGRAM.body, CALL.args, STRUCT_LITERAL.fields, SWITCH.arms,
+  // TYPE_DECL.fields, ...). Any ADDITIONAL list a kind needs is reached through
+  // a named single-child slot below pointing at a NODE_LIST whose own
+  // childStart/childCount holds that list.
+  childStart: usize,
+  // Can I actually use this? Since nodes are arbitrarily added to the list?
+  // Wouldn't we only want direct descendents in this count? You can't just
+  // take it from the childStart and count...
+  childCount: usize, 
+
+  // Named single-child slots for the fat node (0 = none, since NodeId 0 is the
+  // reserved "none" sentinel - no real node lives at arena index 0). Each kind
+  // documents its own meaning, e.g.
+  //   TYPE_DECL:     childA = typeParams list-node
+  //   FUNCTION_DECL: childA = typeParams, childB = params, childC = returnType
+  childA: NodeId,
+  childB: NodeId,
+  childC: NodeId,
+  childD: NodeId,
+  // childE exists because FOR_LOOP needs five: the counter's optional type
+  // annotation, its initializer, the condition, the step, and the body. Adding
+  // a slot is what the fat-node design says to do when a kind needs one.
+  childE: NodeId,
+  // childF is the `propagates<...>` clause, and it means that on every kind
+  // that has one - a FUNCTION_DECL had all five earlier slots spoken for once
+  // kind prefixes landed in childE, and giving the clause its own slot beats
+  // overloading one that already means something else.
+  childF: NodeId,
+
+  // scalar payload reused per kind (e.g. IMPORT_DECL's source-path span)
+  spanStart: usize,
+  spanLen: usize,
+  operator: TokenTags,
+
+  strId: usize,
+  intVal: uint64,
+  flagA: bool, // per-kind flags
+  // @derive(display) above supplies the dump. A hand-written toString would be
+  // the only way to label the anonymous slots with their per-kind meanings
+  // (astNodeChildAName and friends in slots.yoop) - worth doing once the dump is
+  // being diffed against the JS one, not before.
+}

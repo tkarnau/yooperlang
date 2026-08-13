@@ -1,0 +1,8 @@
+missing null=1
+real null=0
+field null=1 tag=7
+mid len=2 20 30
+tail=2 head=2 all=5
+empty=0
+borrowed base=99 view=99
+exit=0

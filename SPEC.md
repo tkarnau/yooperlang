@@ -108,7 +108,7 @@ and what it was built against, which nothing in the compiler reads.
 ### Std imports must use the namespace form for values
 
 Function imports from any `std/` path must use `import * as <ns> from "std/..."`
-- short names like `info`, `error`, `panic`, or `vec_new` would otherwise
+- short names like `info`, `error`, `panic`, or `vecNew` would otherwise
 shadow user identifiers across every module that touched the library. Types,
 traits, kinds, and other declaration-position names (e.g. `Vec`, `Result`,
 `disposable`) can keep their named-import form because their capitalization
@@ -124,8 +124,8 @@ import * as log from "std/log.yoop";
 
 ### Intrinsics live in `std/core/intrinsics.yoop`
 
-The compiler-recognized intrinsics - `heap_alloc<T>`, `heap_free<T>`,
-`string_as_bytes`, `string_from_bytes_unchecked`, `array_slice<T>` - are
+The compiler-recognized intrinsics - `heapAlloc<T>`, `heapFree<T>`,
+`stringAsBytes`, `stringFromBytesUnchecked`, `arraySlice<T>` - are
 declared inside an `extern "intrinsic" from "compiler" { ... }` block in
 [std/core/intrinsics.yoop](std/core/intrinsics.yoop). They are not in scope
 by default; import the module to use them:
@@ -134,15 +134,15 @@ by default; import the module to use them:
 import * as intr from "std/core/intrinsics.yoop";
 
 function main(): int32 {
-    let buf: int32[] = intr.heap_alloc(8);
-    intr.heap_free(buf);
+    let buf: int32[] = intr.heapAlloc(8);
+    intr.heapFree(buf);
     return 0;
 }
 ```
 
-`wait_until<T>` and `cancel<T>` are intrinsics declared in
-[std/core/concurrency.yoop](std/core/concurrency.yoop) (next to `now_ns` and
-`sleep_ms`); import that module as `conc` to use them.
+`waitUntil<T>` and `cancel<T>` are intrinsics declared in
+[std/core/concurrency.yoop](std/core/concurrency.yoop) (next to `nowNs` and
+`sleepMs`); import that module as `conc` to use them.
 
 `printf` is an exception - it stays globally callable without an import
 because the name is specific enough not to collide with user identifiers,
@@ -357,6 +357,20 @@ pooled h         = fetch(url);                     // implicitly const
 let disposable input = open_input(path) { ... }    // explicit let for mutability
 ```
 
+The default is const rather than mutable for a specific reason, not for symmetry:
+an auto-cleanup fires once, at scope end, on whatever the binding holds *then*. So
+rebinding a `disposable` silently drops the outgoing value without disposing it, and
+the compiler cannot see the leak - from its side the obligation was discharged. The
+explicit `let` is the opt-in, and it comes with the obligation to dispose the old
+value before overwriting it:
+
+```js
+let disposable s: Text = text_from("a");
+let next: Text = replace(ref s, "a", "b");
+Disposable.dispose(ref s);      // the outgoing value, by hand
+s = next;
+```
+
 ### Block-owning kinds
 
 A kind can declare `ownsBlock` in its definition (see §6). Such a binding's scope is
@@ -417,13 +431,13 @@ inside the block. A region kind is used with **no binding name**:
 ```js
 // Explicit block - the guard's effect is active inside, undone at `}`
 ephemeral allocator_scope(arena) {
-    const rects = ctx_alloc(n);   // draws from `arena`
+    const rects = ctxAlloc(n);   // draws from `arena`
     // ...
 }                                 // dispose() fires here
 
 // Implicit block - effect active for the rest of the enclosing scope (LIFO)
 ephemeral allocator_scope(arena);
-const rects = ctx_alloc(n);
+const rects = ctxAlloc(n);
 // dispose() fires at the enclosing scope end
 ```
 
@@ -971,8 +985,8 @@ function main(): void {
 | Operator | Meaning |
 |---|---|
 | `wait h` | Block until the task referenced by `h` completes; evaluate to the result. `h` must name a binding of type `Task<T>`. |
-| `wait_until(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) - `Done { value: T }` on completion, `Timeout` on deadline expiry, `Cancelled` if `cancel(h)` was observed first. `deadline_ns` is absolute, in the same clock space as `now_ns()`. Phase 10.F.1 + 10.F.2.a. |
-| `cancel(h)` | External cancellation primitive (Phase 10.F.2.a). Sets the handle's cancel byte and broadcasts so any `wait_until` parked on `h` wakes immediately and observes `WaitResult.Cancelled`. The task body itself is not yet cooperative - it keeps running to natural completion; the caller has simply chosen to stop observing the result. Cooperative in-body polling (the `cancellation: ref Cancel` implicit parameter) lands in 10.F.2.b. |
+| `waitUntil(h, deadline_ns)` | Bounded wait. Returns `WaitResult<T>` from [std/core/concurrency.yoop](std/core/concurrency.yoop) - `Done { value: T }` on completion, `Timeout` on deadline expiry, `Cancelled` if `cancel(h)` was observed first. `deadline_ns` is absolute, in the same clock space as `nowNs()`. Phase 10.F.1 + 10.F.2.a. |
+| `cancel(h)` | External cancellation primitive (Phase 10.F.2.a). Sets the handle's cancel byte and broadcasts so any `waitUntil` parked on `h` wakes immediately and observes `WaitResult.Cancelled`. The task body itself is not yet cooperative - it keeps running to natural completion; the caller has simply chosen to stop observing the result. Cooperative in-body polling (the `cancellation: ref Cancel` implicit parameter) lands in 10.F.2.b. |
 
 `wait` is a keyword-level operation, not a method on `Task<T>`, so the compiler can
 account for it during flow analysis (in particular, the `joined` kind's `autoJoin`
@@ -980,7 +994,7 @@ clause is implemented by inserting a synthetic `wait` at scope exit, and the
 compiler must recognize the operator to detect when an explicit user `wait` makes
 the synthetic insertion redundant).
 
-`wait_until` is the bounded sibling - same builtin-call shape, two args
+`waitUntil` is the bounded sibling - same builtin-call shape, two args
 instead of one. Unlike `wait`, it does **not** dispatch queued tasks on
 the calling thread while blocked: a queued task that ran past the
 deadline would invalidate the user's "give up at time T" contract.
@@ -989,11 +1003,11 @@ parks on the queue condvar with the deadline as the timeout. A typical
 call shape:
 
 ```js
-import { WaitResult, now_ns } from "std/core/concurrency.yoop";
+import { WaitResult, nowNs } from "std/core/concurrency.yoop";
 
 pooled h = fetch(url);
-let deadline: uint64 = now_ns() + 250_000_000;  // 250ms from now
-switch (wait_until(h, deadline)) {
+let deadline: uint64 = nowNs() + 250_000_000;  // 250ms from now
+switch (waitUntil(h, deadline)) {
     case WaitResult.Done { value: body }: { use(body); }
     case WaitResult.Timeout: { abandon_request(); }
 }
@@ -1617,17 +1631,17 @@ Two compiler-recognized generic functions are available globally - no
 import required, no `import.unsafe;` required, no extern decl required:
 
 ```js
-heap_alloc<T>(n: usize): T[]    // malloc n * sizeof(T); fat-pointer view
-heap_free<T>(a: T[]): void      // free the underlying data pointer
+heapAlloc<T>(n: usize): T[]    // malloc n * sizeof(T); fat-pointer view
+heapFree<T>(a: T[]): void      // free the underlying data pointer
 ```
 
-`heap_alloc<T>` returns a fresh heap-backed `T[]`. The element type `T` is
+`heapAlloc<T>` returns a fresh heap-backed `T[]`. The element type `T` is
 inferred from the call's context (typically the LHS annotation, e.g.
-`let xs: int32[] = heap_alloc(64);`). The result is a fat pointer view -
+`let xs: int32[] = heapAlloc(64);`). The result is a fat pointer view -
 indexing, `.len`, and assignment work exactly like a stack-allocated array
 literal.
 
-`heap_free<T>` frees the buffer behind a `heap_alloc`-produced array.
+`heapFree<T>` frees the buffer behind a `heapAlloc`-produced array.
 Using the array after free is undefined behavior; double-free is undefined
 behavior. The yoop type system does not check either invariant - typical
 usage is through a `Disposable + propagates<disposable>` wrapper (see
@@ -1645,30 +1659,30 @@ representations. Both are global (no import needed) and not gated by
 system:
 
 ```js
-string_as_bytes(s: string): uint8[]
+stringAsBytes(s: string): uint8[]
     // Zero-copy view. The returned uint8[] shares the string's storage.
     // The view does not outlive the string.
 
-string_from_bytes_unchecked(buf: uint8[]): string
+stringFromBytesUnchecked(buf: uint8[]): string
     // Fresh heap allocation: malloc(buf.len + 1), memcpy, write NUL.
     // Does NOT validate UTF-8 - callers asserting UTF-8 should reach for
-    // the validating wrapper `string_from_bytes` in std/core/strings.yoop.
+    // the validating wrapper `stringFromBytes` in std/core/strings.yoop.
 
-array_slice<T>(xs: T[], start: usize, end: usize): T[]
+arraySlice<T>(xs: T[], start: usize, end: usize): T[]
     // Zero-copy fat-pointer view {xs.ptr + start, end - start}. Caller
     // responsible for keeping `xs` alive as long as the slice is used.
 ```
 
 Higher-level operations are pure-yoop wrappers in the `std/core/` modules:
 
-- **`std/core/bytes.yoop`** - `bytes_eq`, `bytes_index_of`,
-  `bytes_index_of_seq`, `bytes_starts_with`,
-  `bytes_eq_ignore_ascii_case`, `bytes_slice`, `bytes_copy`,
-  `bytes_parse_int`.
-- **`std/core/strings.yoop`** - `string_eq`, `string_eq_ignore_ascii_case`,
-  `string_starts_with`, `string_index_of`, `string_slice`,
-  `string_concat`, `string_concat_all`, plus the validating
-  `string_from_bytes` wrapper that returns `StringFromBytes { value, err }`.
+- **`std/core/bytes.yoop`** - `bytesEq`, `bytesIndexOf`,
+  `bytesIndexOfSeq`, `bytesStartsWith`,
+  `bytesEqIgnoreAsciiCase`, `bytesSlice`, `bytesCopy`,
+  `bytesParseInt`.
+- **`std/core/strings.yoop`** - `stringEq`, `stringEqIgnoreAsciiCase`,
+  `stringStartsWith`, `stringIndexOf`, `stringSlice`,
+  `stringConcat`, `stringConcatAll`, plus the validating
+  `stringFromBytes` wrapper that returns `StringFromBytes { value, err }`.
 
 Naming convention conveys allocation cost at the call site:
 
@@ -1686,31 +1700,31 @@ type Vec<T> implements Disposable propagates<disposable> {
     // dispose frees the backing buffer
 }
 
-vec_new<T>(initial_cap: usize): Vec<T> propagates<disposable>
-vec_push<T>(v: ref Vec<T>, value: T): void   // MAY REALLOCATE
-vec_get<T>(v: ref Vec<T>, i: usize): T
-vec_set<T>(v: ref Vec<T>, i: usize, value: T): void
-vec_clear<T>(v: ref Vec<T>): void
-vec_as_array<T>(v: ref Vec<T>): T[]          // view; valid until next mutation
+vecNew<T>(initial_cap: usize): Vec<T> propagates<disposable>
+vecPush<T>(v: ref Vec<T>, value: T): void   // MAY REALLOCATE
+vecGet<T>(v: ref Vec<T>, i: usize): T
+vecSet<T>(v: ref Vec<T>, i: usize, value: T): void
+vecClear<T>(v: ref Vec<T>): void
+vecAsArray<T>(v: ref Vec<T>): T[]          // view; valid until next mutation
 ```
 
 `Vec<T>` propagates `disposable`, so every binding picks one of the
 standard discharge mechanisms:
 
 ```js
-disposable v: Vec<int32> = vec_new(4);   // auto-cleanup at scope end
+disposable v: Vec<int32> = vecNew(4);   // auto-cleanup at scope end
 // or
-let v: Vec<int32> = vec_new(4);
+let v: Vec<int32> = vecNew(4);
 // ... use ...
 Disposable.dispose(ref v);               // manual
 // or
 function build(): Vec<int32> propagates<disposable> {
-    return vec_new(4);                   // transfer up
+    return vecNew(4);                   // transfer up
 }
 ```
 
-`vec_push` is flagged "MAY REALLOCATE" in the API contract: when
-`len == cap`, the backing buffer doubles, and any prior `vec_as_array`
+`vecPush` is flagged "MAY REALLOCATE" in the API contract: when
+`len == cap`, the backing buffer doubles, and any prior `vecAsArray`
 view dangles.
 
 ---

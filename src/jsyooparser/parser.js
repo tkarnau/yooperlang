@@ -43,18 +43,25 @@ function isBinaryOp(tag) {
   );
 }
 
+// Clause keywords that are still RESERVED WORDS, so a tag alone identifies
+// them. `requires` and `layout` used to be here and are now contextual idents
+// (see CONTEXTUAL_KIND_CLAUSES below and the note in lexer.js) - the caller
+// checks both.
 function isKindClauseStartTag(tag) {
   return (
     tag === TokenTags.appliesTo ||
-    tag === TokenTags.requires ||
     tag === TokenTags.mustCall ||
     tag === TokenTags.ownsBlock ||
     tag === TokenTags.mustNotEscape ||
     tag === TokenTags.mustNotShare ||
-    tag === TokenTags.forbids ||
-    tag === TokenTags.layout
+    tag === TokenTags.forbids
   );
 }
+
+// Clause keywords that lex as ordinary identifiers and are recognized only
+// here, inside a kind body. Keeping them out of keywordTagList is what lets
+// `requires` be a struct field and `layout` a local everywhere else.
+const CONTEXTUAL_KIND_CLAUSES = new Set(["requires", "layout"]);
 
 // Identifier text -> deferred-feature error message. Used inside kind { ... }
 // to produce a precise "not yet supported" error for clause keywords that
@@ -232,6 +239,35 @@ export function parse(src) {
         peekAhead(idx + 1).tag === TokenTags.eq)
     );
   }
+  // `kind` is a contextual keyword: it lexes as an ordinary IDENT so it stays
+  // usable as a parameter, local, and field name, and is recognized as a
+  // declaration only by its shape here. Three tokens, which is the existing
+  // peekAhead ceiling:
+  //
+  //     kind Name {          a clause body
+  //     kind Name(n: usize)  a parameterized kind
+  //     kind Name = a & b    a composition
+  //
+  // Only ever consulted in DECLARATION position (top level, and after
+  // `export`), which is what keeps it clear of the kind-prefixed BINDING form
+  // `someKind name = ...`: a kind-prefixed binding is rejected at module level
+  // anyway, so `kind Name = ...` there can only be the declaration.
+  //
+  // Reserving the word cost more than it bought - it was legal as a struct
+  // FIELD and illegal as a local or parameter, so `Room.kind` compiled and
+  // `specialFor(kind: uint8)` did not, and the collision surfaced nowhere near
+  // where the name was chosen (yooperdoom-takeaways 2.2).
+  function looksLikeKindDecl() {
+    if (!identTextIs("kind")) return false;
+    if (peekAhead(1).tag !== TokenTags.ident) return false;
+    const after = peekAhead(2).tag;
+    return (
+      after === TokenTags.lcurly ||
+      after === TokenTags.lparen ||
+      after === TokenTags.eq
+    );
+  }
+
   function looksLikeKindPrefixedBindingStart() {
     if (peek().tag !== TokenTags.ident) return false;
     if (bindingNameFollowedByColonOrEq(1)) {
@@ -440,18 +476,23 @@ export function parse(src) {
   // Phase 6.4: shared parser for `propagates<K1, K2, ...>` and `contains<K1, ...>`
   // clauses. Lives on struct decls and function return types. The current token
   // must be `propagates` or `contains` when this is called.
-  // chat-agent-papercut #3: `contains` is contextual - it lexes as IDENT and
-  // is recognized only inside kind decls and propagation clauses.
-  function isContainsKeywordIdent(tok) {
-    return (
-      tok.tag === TokenTags.ident &&
-      src.substring(tok.start, tok.start + tok.length) === "contains"
-    );
+  //
+  // BOTH are contextual idents now - they lex as ordinary IDENTs and are
+  // recognized only here, in kind decls, and in a decl's clause suffix.
+  // `contains` was demoted first (chat-agent-papercut #3); `propagates`
+  // followed for the same reason, and a `requires`/`propagates` pair reads
+  // naturally as struct fields in anything manifest-shaped.
+  function isPropagationClauseStart(tok) {
+    const text = identText(tok);
+    return text === "propagates" || text === "contains";
   }
 
   function parseKindListClause() {
     const tok = advance(); // consume propagates|contains
-    const variant = tok.tag === TokenTags.propagates ? "propagates" : "contains";
+    const variant =
+      src.substring(tok.start, tok.start + tok.length) === "propagates"
+        ? "propagates"
+        : "contains";
     expect(TokenTags.lt);
     const kindNames = [];
     if (peek().tag === TokenTags.gt) {
@@ -498,11 +539,7 @@ export function parse(src) {
   function parsePropagationClauses(node) {
     node.propagatesClause = null;
     node.containsClause = null;
-    while (
-      peek().tag === TokenTags.propagates ||
-      peek().tag === TokenTags.contains ||
-      isContainsKeywordIdent(peek())
-    ) {
+    while (isPropagationClauseStart(peek())) {
       const startTok = peek();
       const clause = parseKindListClause();
       if (clause.variant === "propagates") {
@@ -540,10 +577,22 @@ export function parse(src) {
     // the only shape in which two idents are adjacent in type position. The
     // names are resolved + validated in the typechecker. `ref cleared T` works
     // via the recursion below (the prefix lands on the inner type).
+    //
+    // Exception: a CLAUSE KEYWORD following the type is not part of it. Once
+    // `propagates` and `contains` became contextual idents, a return type like
+    //
+    //     function f(): Bytes propagates<disposable>
+    //
+    // matched the two-adjacent-idents shape and parsed as the kind-prefixed
+    // type `propagates<disposable>` prefixed by `Bytes` - reported as the
+    // baffling `unknown return type "propagates<disposable>"`. The clause is
+    // the caller's to consume (parsePropagationClauses), so the prefix scan
+    // has to stop before it.
     let kindPrefixes = null;
     while (
       peek().tag === TokenTags.ident &&
-      peekAhead(1).tag === TokenTags.ident
+      peekAhead(1).tag === TokenTags.ident &&
+      !isPropagationClauseStart(peekAhead(1))
     ) {
       const tok = advance();
       (kindPrefixes ??= []).push(
@@ -624,6 +673,12 @@ export function parse(src) {
       }
       while (true) {
         typeArgs.push(parseTypeAnnotation());
+        // Check for the close BEFORE the comma. A nested application consumed
+        // the `>>` and left a pending `>` for THIS list, so `peek()` is already
+        // the token after the whole annotation - and if that happens to be a
+        // field separator (`Vec<Map<K, V>>,`) the comma branch would read it as
+        // a trailing comma inside the type argument list.
+        if (atClosingGt()) break;
         if (peek().tag === TokenTags.comma) {
           advance();
           if (atClosingGt()) {
@@ -926,12 +981,6 @@ export function parse(src) {
               node.body.push(parseVTableDecl());
             }
             break;
-          case TokenTags.kind:
-            {
-              seenNonImport = true;
-              node.body.push(parseKindDecl());
-            }
-            break;
           case TokenTags.at:
             {
               // Phase 11.A: `@<name>(args?) target` attribute at top level.
@@ -970,6 +1019,14 @@ export function parse(src) {
             }
             break;
           default: {
+            // `kind Name { ... }` - checked before the kind-prefixed function
+            // form, since `kind` is now an ordinary ident and both start with
+            // one.
+            if (looksLikeKindDecl()) {
+              seenNonImport = true;
+              node.body.push(parseKindDecl());
+              break;
+            }
             // testing-via-kinds: `<kind> function foo(...)` - a kind-prefixed
             // top-level function decl. Two adjacent tokens are enough to
             // recognize it, since `function` is a keyword and can never be an
@@ -1099,7 +1156,7 @@ export function parse(src) {
 
   function parseKindDecl() {
     const node = buildSourcedNode(ASTNodeKind.KIND_DECL);
-    expect(TokenTags.kind);
+    expectContextual("kind");
     node.name = parseIdentAsName();
     node.params = [];
     node.composition = null;
@@ -1151,7 +1208,7 @@ export function parse(src) {
                 peek().length,
               );
             }
-            if (isKindClauseStartTag(peek().tag)) {
+            if (atKindClauseStart()) {
               clauses.push(parseKindClause());
               continue;
             }
@@ -1227,7 +1284,7 @@ export function parse(src) {
 
     node.clauses = [];
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
-      if (isKindClauseStartTag(peek().tag)) {
+      if (atKindClauseStart()) {
         node.clauses.push(parseKindClause());
         continue;
       }
@@ -1310,12 +1367,22 @@ export function parse(src) {
     return node;
   }
 
+  // True when the current token starts a kind clause, by reserved tag OR by
+  // contextual identifier text. Every caller that used to test
+  // `isKindClauseStartTag(peek().tag)` goes through this instead.
+  function atKindClauseStart() {
+    if (isKindClauseStartTag(peek().tag)) return true;
+    return CONTEXTUAL_KIND_CLAUSES.has(identText(peek()));
+  }
+
   function parseKindClause() {
+    // Contextual first: these lex as plain idents, so the tag switch below
+    // would send them to the default arm.
+    if (identTextIs("requires")) return parseRequiresClause();
+    if (identTextIs("layout")) return parseLayoutClause();
     switch (peek().tag) {
       case TokenTags.appliesTo:
         return parseAppliesToClause();
-      case TokenTags.requires:
-        return parseRequiresClause();
       case TokenTags.mustCall:
         return parseMustCallClause();
       case TokenTags.ownsBlock:
@@ -1326,10 +1393,8 @@ export function parse(src) {
         return parseMustNotShareClause();
       case TokenTags.forbids:
         return parseForbidsClause();
-      case TokenTags.layout:
-        return parseLayoutClause();
       default:
-        // unreachable - caller guards with isKindClauseStartTag
+        // unreachable - caller guards with atKindClauseStart
         throw parseError(
           `unexpected token in kind declaration: ${inverseTokenTags[peek().tag]}`,
           peek().start,
@@ -1361,8 +1426,28 @@ export function parse(src) {
   // ident. Used for clause keywords that must stay ordinary identifiers
   // everywhere outside a kind body.
   function identTextIs(word) {
-    if (peek().tag !== TokenTags.ident) return false;
-    return src.substring(peek().start, peek().start + peek().length) === word;
+    return identText(peek()) === word;
+  }
+
+  // The source text of `tok` when it is an identifier, else "". The guard
+  // matters: without it a keyword token's text would match a contextual word
+  // and two different tokens would be treated as the same thing.
+  function identText(tok) {
+    if (!tok || tok.tag !== TokenTags.ident) return "";
+    return src.substring(tok.start, tok.start + tok.length);
+  }
+
+  // The contextual-keyword counterpart of `expect(TokenTags.X)`: assert the
+  // current token is the identifier `word`, consume it, and return it.
+  function expectContextual(word) {
+    if (!identTextIs(word)) {
+      throw parseError(
+        `expected "${word}", got ${identText(peek()) || inverseTokenTags[peek().tag]}`,
+        peek().start,
+        peek().length,
+      );
+    }
+    return advance();
   }
 
   // `refcounted <retain> <release>;` - names the two methods of the kind's
@@ -1482,15 +1567,6 @@ export function parse(src) {
       const tok = peek();
       let site;
       switch (tok.tag) {
-        case TokenTags.binding:
-          site = "binding";
-          break;
-        case TokenTags.parameter:
-          site = "parameter";
-          break;
-        case TokenTags.field:
-          site = "field";
-          break;
         case TokenTags.function:
           // testing-via-kinds: a function-position kind. Deliberately narrow -
           // only `signature` and `enumerable as` are legal alongside it (a
@@ -1511,12 +1587,23 @@ export function parse(src) {
             tok.tag === TokenTags.ident
               ? src.substring(tok.start, tok.start + tok.length)
               : inverseTokenTags[tok.tag];
-          // `region` is a contextual ident (kept usable as an ordinary
-          // identifier everywhere else). A region kind governs a lexical
-          // scope rather than a named value - it is used in the anonymous
-          // `<kind> EXPR { ... }` / `<kind> EXPR;` block form, with no binding.
-          if (name === "region") {
-            site = "region";
+          // Contextual idents, kept usable as ordinary identifiers
+          // everywhere else. `region` was always one; `binding`, `parameter`
+          // and `field` were reserved words until yooperdoom-takeaways 2.2
+          // pointed out they are three of the most natural parameter names in
+          // a compiler, and an appliesTo list is the only place they mean
+          // anything.
+          //
+          // A region kind governs a lexical scope rather than a named value -
+          // it is used in the anonymous `<kind> EXPR { ... }` / `<kind> EXPR;`
+          // block form, with no binding.
+          if (
+            name === "region" ||
+            name === "binding" ||
+            name === "parameter" ||
+            name === "field"
+          ) {
+            site = name;
             break;
           }
           throw parseError(
@@ -1551,7 +1638,7 @@ export function parse(src) {
   function parseMustNotEscapeClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_MUST_NOT_ESCAPE_CLAUSE);
     expect(TokenTags.mustNotEscape);
-    if (peek().tag !== TokenTags.scope) {
+    if (!identTextIs("scope")) {
       const tok = peek();
       const name =
         tok.tag === TokenTags.ident
@@ -1601,7 +1688,7 @@ export function parse(src) {
 
   function parseLayoutClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_LAYOUT_CLAUSE);
-    expect(TokenTags.layout);
+    expectContextual("layout");
     expect(TokenTags.lcurly);
     node.alignExpr = null;
     // Phase 8.B: opt-in marker that this layout mirrors a C struct's ABI.
@@ -1612,7 +1699,7 @@ export function parse(src) {
     let sawAbi = false;
     while (peek().tag !== TokenTags.rcurly && peek().tag !== TokenTags.eof) {
       const tok = peek();
-      if (tok.tag === TokenTags.align) {
+      if (identText(tok) === "align") {
         if (sawAlign) {
           throw parseError(
             "duplicate 'align' sub-clause in layout body",
@@ -1689,9 +1776,6 @@ export function parse(src) {
       const tok = peek();
       let cat;
       switch (tok.tag) {
-        case TokenTags.io:
-          cat = "io";
-          break;
         case TokenTags.globalState:
           cat = "globalState";
           break;
@@ -1700,6 +1784,13 @@ export function parse(src) {
             tok.tag === TokenTags.ident
               ? src.substring(tok.start, tok.start + tok.length)
               : inverseTokenTags[tok.tag];
+          // `io` is a contextual ident - two characters, and far too useful a
+          // parameter name to reserve for one clause (yooperdoom-takeaways
+          // 2.2).
+          if (name === "io") {
+            cat = "io";
+            break;
+          }
           throw parseError(
             `unrecognized forbids category '${name}'; accepted: io, globalState`,
             tok.start,
@@ -1731,7 +1822,7 @@ export function parse(src) {
 
   function parseRequiresClause() {
     const node = buildSourcedNode(ASTNodeKind.KIND_REQUIRES_CLAUSE);
-    expect(TokenTags.requires);
+    expectContextual("requires");
     node.traitName = parseIdentAsName();
     // List form (`requires A B;`) is reserved.
     if (peek().tag === TokenTags.ident) {
@@ -1954,9 +2045,6 @@ export function parse(src) {
       case TokenTags.vtable:
         node.decl = parseVTableDecl();
         break;
-      case TokenTags.kind:
-        node.decl = parseKindDecl();
-        break;
       case TokenTags.variant:
         node.decl = parseVariantDecl();
         break;
@@ -1967,6 +2055,12 @@ export function parse(src) {
         node.decl = parseUnionDecl();
         break;
       default:
+        // `export kind Name { ... }` - before the kind-prefixed function
+        // check, since both start with an ordinary ident now.
+        if (looksLikeKindDecl()) {
+          node.decl = parseKindDecl();
+          break;
+        }
         // `export <kind> ... name(...)` - any kind-prefixed function, with
         // `function` optional per SPEC section 7. Covers `export task f()`,
         // `export async f()`, and the testing-via-kinds `export suite
@@ -2135,7 +2229,7 @@ export function parse(src) {
       );
     }
     expect(TokenTags.from);
-    if (peek().tag === TokenTags.library) {
+    if (identTextIs("library")) {
       advance();
       node.source = {
         kind: "library",
@@ -2179,7 +2273,7 @@ export function parse(src) {
     const node = buildSourcedNode(ASTNodeKind.EXTERN_FUNCTION_DECL);
     node.isAsync = isAsync;
     node.name = parseIdentAsName();
-    // Optional type params, e.g. `function heap_alloc<T>(n: usize): T[];`.
+    // Optional type params, e.g. `function heapAlloc<T>(n: usize): T[];`.
     // Only useful inside `extern "intrinsic"` blocks where the canonical
     // builtin decl carries the real (generic) signature - the annotations
     // here are documentation. The typechecker skips resolution for canonical
@@ -2503,6 +2597,21 @@ export function parse(src) {
       advance(); // consume (
       node = parseExpression();
       expect(TokenTags.rparen);
+    } else if (peek().tag === TokenTags.function) {
+      // A nested function declaration. Yoop has no local functions and no
+      // closures, so this is not a "not yet" - it is a redirect. Without the
+      // special case it reports as `unexpected token in expression: function`,
+      // which reads like the parser lost its place rather than like a rule.
+      //
+      // The shape that hits this most is a helper inside a `suite` body, where
+      // putting the helper next to the cases it serves is the natural
+      // instinct (yooperdoom-takeaways 2.5).
+      throw parseError(
+        `functions cannot be declared inside another function body - ` +
+          `move it to module scope. Yoop has no nested functions or closures.`,
+        peek().start,
+        peek().length,
+      );
     } else {
       throw parseError(
         `unexpected token in expression: ${inverseTokenTags[peek().tag]}`,
@@ -2927,6 +3036,32 @@ export function parse(src) {
         // function body via this path.
         return parseAttribute();
       }
+      case TokenTags.lcurly: {
+        // A brace at STATEMENT start is a bare block, and Yoop has no such
+        // statement - a block is only a statement when something introduces
+        // it (a function body, `if`, a loop, a `switch` arm, a block-owning
+        // kind). Without this case it falls to parseExpressionStatement and
+        // is read as a STRUCT LITERAL, so `{ let x: int32 = 1; }` reports as
+        // `expected colon, got ident` pointing at `x` - a complaint about a
+        // struct literal the user was not writing.
+        //
+        // A struct literal in EXPRESSION position is unaffected: it arrives
+        // through parseExpression from an initializer or argument, not from
+        // here. A bare one as a statement would be a no-op anyway.
+        //
+        // See yooperdoom-takeaways 2.4b - whether to SUPPORT a bare block
+        // (it is the natural way to scope a `disposable` tightly) is an open
+        // design question. Describing it accurately is not.
+        throw parseError(
+          `a bare "{ ... }" block is not a statement - a block belongs to ` +
+            `something: a function body, an if/else, a loop, a switch arm, ` +
+            `or a block-owning kind (\`ephemeral scope(...) { ... }\`). ` +
+            `If you meant a struct literal, give it a target ` +
+            `(\`let x: T = { ... };\`).`,
+          peek().start,
+          peek().length,
+        );
+      }
       case TokenTags.ident: {
         // kind-prefixed binding form: `IDENT IDENT : ...` / `IDENT IDENT = ...`
         // or `IDENT(args) IDENT : ...` (phase 6.5; inferred `=` form added later).
@@ -3337,7 +3472,8 @@ export function parse(src) {
     while (
       peek().tag === TokenTags.ident ||
       peek().tag === TokenTags.ref ||
-      peek().tag === TokenTags.comma
+      peek().tag === TokenTags.comma ||
+      atReservedUsedAsName()
     ) {
       if (peek().tag === TokenTags.comma) advance();
       if (peek().tag !== TokenTags.rparen && peek().tag !== TokenTags.eof) {
@@ -3410,9 +3546,7 @@ export function parse(src) {
         const after = peekAhead(afterIdx);
         if (
           after.tag === TokenTags.implements ||
-          after.tag === TokenTags.propagates ||
-          after.tag === TokenTags.contains ||
-          isContainsKeywordIdent(after) ||
+          isPropagationClauseStart(after) ||
           after.tag === TokenTags.lcurly ||
           after.tag === TokenTags.eq
         ) {
@@ -4094,7 +4228,49 @@ export function parse(src) {
     return node;
   }
 
+  // Reserved words a user is most likely to reach for as a name, with the
+  // reason each one has to stay reserved. These three carry real grammar in
+  // positions where an identifier is also legal, so unlike `kind` / `field` /
+  // `io` (yooperdoom-takeaways 2.2) they cannot be made contextual.
+  const RESERVED_NAME_HINTS = {
+    in: "it separates the two halves of `for x in xs`",
+    from: "it introduces the path in `import ... from` and `extern ... from`",
+    as: "it names the binding in `import * as ns`",
+  };
+
+  // True when the current token is a reserved word sitting where a parameter
+  // NAME belongs (`f(in: int32)`, `f(x, from)`). The param-list loops stop on
+  // any non-ident, so without this the failure surfaces as `expected rparen,
+  // got in` - which describes the parser's state, points at a word the reader
+  // has stopped seeing as a word, and says nothing about what to do. Entering
+  // the loop anyway lets parseIdentAsName report it properly.
+  function atReservedUsedAsName() {
+    if (!keywordTagSet.has(peek().tag)) return false;
+    const after = peekAhead(1).tag;
+    return (
+      after === TokenTags.colon ||
+      after === TokenTags.comma ||
+      after === TokenTags.rparen
+    );
+  }
+
   function parseIdentAsName() {
+    // Without this, a reserved word in name position reports as `expected
+    // ident, got in`, which describes the parser's state rather than the
+    // user's mistake - and the word is often several lines from where the
+    // reader is looking. Naming it is most of the fix.
+    if (keywordTagSet.has(peek().tag)) {
+      const tok = peek();
+      const word = src.substring(tok.start, tok.start + tok.length);
+      const hint = RESERVED_NAME_HINTS[word];
+      throw parseError(
+        `"${word}" is a reserved word and cannot be used as a name` +
+          (hint ? ` (${hint})` : "") +
+          `. Pick a different name.`,
+        tok.start,
+        tok.length,
+      );
+    }
     const identTok = expect(TokenTags.ident);
     const name = src.substring(
       identTok.start,

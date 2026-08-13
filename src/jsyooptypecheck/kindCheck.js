@@ -24,7 +24,7 @@
 //   3. CALL with ref <sentinel>: callee param does not declare mustNotEscape
 
 import { ASTNodeKind, ASTNode } from "../contracts.js";
-import { pushError } from "./errors.js";
+import { pushError, pushWarning } from "./errors.js";
 import { typeKinds } from "./types.js";
 import { isRefcountedKind } from "./coreKinds.js";
 
@@ -132,11 +132,17 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   //                         tracked binding; lets the compiler skip the
   //                         injected cleanup for an autoCleanup binding that
   //                         was already disposed by hand on every path.
-  //   - `transferred`     - vestigial (ownership redesign 2026-06-17): never
-  //                         set now that `propagates<K>` is advisory only;
-  //                         projectCleanups still tolerates it.
-  //   - `reported`        - vestigial; the unsatisfied-obligation error it
-  //                         deduped no longer exists.
+  //   - `transferred`     - the binding was handed to the caller (it appears
+  //                         in a `return` expression), so its cleanup is not
+  //                         this function's problem. Set by
+  //                         `markReturnedObligations`. It stopped being
+  //                         vestigial when the unhandled-disposable WARNING
+  //                         landed - that warning needs to know the
+  //                         return-it-onward case is fine.
+  //   - `reported`        - dedupes the unhandled-disposable warning. One
+  //                         binding can reach projectCleanups several times
+  //                         (a return, then the enclosing block exit) and
+  //                         should warn once.
   function obligationsFor(stmt) {
     const out = [];
     const kt = stmt.resolvedKindType;
@@ -199,13 +205,20 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       }
     };
     for (const propA of rt.propagatedKinds ?? []) addKind(propA, false);
+    // Kinds the PRODUCER advertised on its return, as opposed to kinds the
+    // binding's type merely carries. Only these warn - see `advertised` below.
+    const advertised = new Set();
     if (
       stmt.assignment?.kind === ASTNodeKind.CALL_EXPRESSION &&
       typeof stmt.assignment.callee === "string" &&
       funcDeclTable
     ) {
       const calleeDecl = funcDeclTable.get(stmt.assignment.callee);
-      for (const app of calleeDecl?.returnPropagatedKinds ?? []) addKind(app, false);
+      for (const app of calleeDecl?.returnPropagatedKinds ?? []) {
+        addKind(app, false);
+        const k = app?.kindType ?? app;
+        if (k) advertised.add(k);
+      }
     }
     // The core-kind + Task case is handled above by the early return;
     // here we additionally flip autoCleanup=true when a builtin kind keyword
@@ -232,6 +245,7 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
           structType: rt,
           moduleId: rt.moduleId,
           kindType: K,
+          advertised: advertised.has(K),
           autoCleanup: meta.autoCleanup,
           sourceLoc: stmt.sourceLoc,
         }));
@@ -343,13 +357,74 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
   function projectCleanups(obligations) {
     const out = [];
     for (const o of obligations) {
-      if (o.satisfied || o.transferred) continue;
+      if (o.satisfied) continue;
+      // autoCleanup is decided BEFORE `transferred`. A keyword binding has
+      // always had its cleanup injected here, and `transferred` is new
+      // information that exists only to silence the advisory warning below -
+      // letting it skip the injection would change codegen and leak.
       if (o.autoCleanup) {
         out.push(makeCleanupCall(o));
+        continue;
       }
-      // else: silent. Handling an un-keyworded obligation is the user's choice.
+      if (o.transferred) continue;   // handed to the caller: not our problem
+      // A binding that advertises a cleanup obligation, did not opt into
+      // auto-cleanup, was not disposed by hand, and is not handed to the
+      // caller. Still not an ERROR - the ownership model is advisory and the
+      // user may be managing it deliberately - but silence turned out to hide
+      // real leaks, so it is a warning. Suppress it by taking the kind keyword
+      // (`disposable x = ...`), disposing by hand, or returning the value.
+      if (!o.reported && !fnOrMethodDecl.isDeriveGenerated) {
+        o.reported = true;
+        pushWarning(
+          errors,
+          o.sourceLoc ? { pos: o.sourceLoc.pos, line: o.sourceLoc.line, column: o.sourceLoc.column, length: o.sourceLoc.length } : undefined,
+          `"${o.bindingName}" carries kind '${o.kindType?.name ?? "disposable"}' but nothing handles it - ` +
+            `add the '${o.kindType?.name ?? "disposable"}' keyword to auto-clean it at scope exit, ` +
+            `call its cleanup directly, or return it`,
+          "unhandled-disposable",
+        );
+      }
     }
     return out;
+  }
+
+  // A BY-VALUE use hands the binding on - to the caller (`return x`), to
+  // another function (`f(x)`), or into an aggregate (`{ field: x }`,
+  // `vecPush(ref v, x)`). After that its cleanup is not this scope's business,
+  // so it must not trip the unhandled-disposable warning.
+  //
+  // `ref x` is deliberately NOT a transfer: a borrow lends the value for the
+  // duration of a call and hands it straight back. That distinction is the
+  // whole reason the warning is usable - without it every arena/index idiom in
+  // the tree (`vecGet` into a local, a local pushed into a Vec) looks like a
+  // leak, and with it those go quiet while a binding only ever passed as
+  // `ref x` and never disposed still gets flagged.
+  //
+  // This is a heuristic, not move analysis - the ownership model is advisory
+  // by design. It errs toward silence: a missed leak is better than telling
+  // someone to dispose a value they already handed away, which would be
+  // advice that causes a double free.
+  function markTransferredByValue(expr) {
+    if (!expr || typeof expr !== "object") return;
+    // A borrow, not a transfer. Stop here so the inner IDENT is not marked.
+    if (expr.kind === ASTNodeKind.REF_EXPRESSION) return;
+    if (expr.kind === ASTNodeKind.IDENT) {
+      for (const o of flattenStackReverse()) {
+        if (o.bindingName === expr.name) o.transferred = true;
+      }
+      return;
+    }
+    for (const key of Object.keys(expr)) {
+      if (key === "resolvedType" || key === "sourceLoc") continue;
+      const v = expr[key];
+      if (Array.isArray(v)) {
+        for (const item of v) markTransferredByValue(item);
+      } else if (v && typeof v === "object" && typeof v.kind === "string") {
+        markTransferredByValue(v);
+      } else if (v && typeof v === "object" && v.value) {
+        markTransferredByValue(v.value);
+      }
+    }
   }
 
   // Does a struct field carry the given kind?
@@ -466,6 +541,9 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
             }
           }
           walkExpr(stmt.value);
+          // Anything named in the returned expression is the caller's now, so
+          // it must not trip the unhandled-disposable warning below.
+          markTransferredByValue(stmt.value);
           // Ownership redesign (2026-06-17): returning a value that carries a
           // propagating kind is fine and needs no annotation. `propagates<K>`
           // is now an advisory producer-side signal (surfaced by tooling/IDE),
@@ -621,6 +699,11 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       return;
     }
 
+    // A struct or variant literal takes ownership of whatever it is built from.
+    if (e.kind === ASTNodeKind.STRUCT_LITERAL || e.kind === ASTNodeKind.VARIANT_CONSTRUCTOR) {
+      for (const f of e.fields ?? []) markTransferredByValue(f.value);
+    }
+
     // Phase 6.2: check ASSIGNMENT for field-store escapes.
     if (e.kind === ASTNodeKind.ASSIGNMENT) {
       checkAssignmentEscape(e);
@@ -634,6 +717,9 @@ export function runKindCheck(fnOrMethodDecl, errors, funcDeclTable = null, regis
       checkCallEscape(e);
       markPooledArgRetains(e);
       markManualCleanupSatisfies(e);
+      // An argument passed BY VALUE is handed to the callee (`vecPush(ref v, x)`
+      // moves x into v). `ref x` is a borrow and is skipped inside.
+      for (const arg of e.args ?? []) markTransferredByValue(arg);
       // Fall through to generic recursion below to walk args.
     }
 

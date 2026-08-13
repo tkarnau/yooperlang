@@ -63,7 +63,7 @@ function report(label: string, src: uint8[],
 }
 
 function main(): int32 {
-    let preds: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] = intr.heap_alloc(2);
+    let preds: ((src: uint8[], pos: usize, start: usize) => Result<bool, string>)[] = intr.heapAlloc(2);
     preds[0] = hexDigitPred;       // function name materializes into the slot
     preds[1] = underscorePred;
 
@@ -72,7 +72,7 @@ function main(): int32 {
     report(`_a3`, [ '_', 'a', '3' ], ref preds);          // leading underscore -> err
     report(`aFxy`, [ 'a', 'F', 'x', 'y' ], ref preds);    // stops at 'x'
 
-    intr.heap_free(preds);
+    intr.heapFree(preds);
     return 0;
 }
 

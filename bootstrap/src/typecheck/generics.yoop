@@ -1,0 +1,668 @@
+module typecheck;
+
+/*
+  Generic type declarations, and the instances they are applied to.
+
+  The design in one sentence: a generic decl is resolved ONCE into a TEMPLATE
+  whose member types are `Type.TypeParam` placeholders, and an instance is that
+  template with the placeholders SUBSTITUTED - so instantiation is pure TypeId
+  arithmetic and never touches an AST.
+
+  That is what makes cross-module generics work at all here. `Vec<T>` is
+  declared in one module's arena and applied in another's, and the applying
+  module has no way to reach the declaring module's AST: typecheck is handed a
+  Program, not the graph. Resolving the body once, where the AST IS in hand,
+  removes the question.
+
+    pass A       allocates a DeclId, interns one TypeParam per parameter, and
+                 interns an empty TEMPLATE bound to them
+    pass C       fills the template from the decl's AST, with the parameter
+                 names ambient (see beginTypeParams)
+    an annotation `Vec<int>` looks the decl up, resolves the arguments, and
+                 REGISTERS an instance - deliberately unfilled
+    materialize  fills every registered instance by substitution, once every
+                 template in the module is populated
+
+  Instances are registered before they are filled, and deduplicated by (origin,
+  args), which is what makes `type Node<T> { next: Node<T> }` terminate rather
+  than recurse: the second request for `Node<int>` is a registry hit.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { NodeId } from "../ast";
+
+// DeclId 0 is never handed out, so a "not generic" answer stays unambiguous.
+export const DECL_NONE_ID: DeclId = 0;
+
+// One generic declaration, resolved to the point where instantiating it needs
+// no AST. `declNode` is kept only for diagnostics - the source location of the
+// decl that a bad application should point at.
+@derive(display)
+export type GenericDeclInfo propagates<disposable> {
+  name: string,
+  module: ModuleId,
+  sort: GenericSort,
+  params: Vec<TypeId>,     // the TypeParam ids, in declaration order
+  template: TypeId,        // Struct or Variant whose members use those params
+  declNode: NodeId,
+}
+
+// One (origin, args) -> TypeId entry. A Vec and a linear scan: a program has a
+// few dozen instantiations, and the alternative is hashing a type-id list.
+@derive(display)
+export type Instance propagates<disposable> {
+  origin: DeclId,
+  args: Vec<TypeId>,
+  typeId: TypeId,
+  filled: bool,
+}
+
+export function initGenerics(ref prog: Program): void {
+  // Burn DeclId 0 so "not generic" is never a real decl.
+  vec.vecPush(ref prog.generics, {
+    name: "", module: 0, sort: GenericSort.STRUCT,
+    params: vec.vecNew(0), template: TYPE_ERROR_ID, declNode: 0,
+  });
+  // And index 0 of the function instances, so "not inside a monomorphization"
+  // is never a real one. Codegen reads that as NO_FUNC_INSTANCE.
+  vec.vecPush(ref prog.funcInstances, {
+    origin: DECL_NONE_ID, args: vec.vecNew(0), funcType: TYPE_ERROR_ID, name: "",
+  });
+}
+
+export function genericAt(ref prog: Program, id: DeclId): GenericDeclInfo propagates<disposable> {
+  return vec.vecGet(ref prog.generics, id);
+}
+
+// ----- the ambient type-parameter scope -------------------------------------
+//
+// While a generic decl's body is being resolved, its parameter NAMES have to
+// resolve to their TypeParam ids. Ambient rather than threaded for the same
+// reason `currentFile` is: the alternative is an extra argument on
+// resolveTypeAnnotation and every one of its callers, all wanting the same
+// answer. One writer, and it is always paired.
+
+export function beginTypeParams(ref prog: Program, ref params: Vec<TypeId>, ref names: Vec<string>): void {
+  map.mapClear(ref prog.typeParams);
+  let i: usize = 0;
+  while (i < params.len && i < names.len) {
+    map.mapInsert(ref prog.typeParams, vec.vecGet(ref names, i), vec.vecGet(ref params, i));
+    i += 1;
+  }
+}
+
+export function endTypeParams(ref prog: Program): void {
+  map.mapClear(ref prog.typeParams);
+}
+
+// The TypeParam a name refers to, or TYPE_ERROR_ID outside a generic body.
+export function typeParamNamed(ref prog: Program, name: string): TypeId {
+  switch (map.mapGet(ref prog.typeParams, name)) {
+    case Option.Some { value: t }: { return t; }
+    case Option.None: { return TYPE_ERROR_ID; }
+  }
+}
+
+// ----- instantiation --------------------------------------------------------
+
+// `Vec<int>` -> a TypeId, registering the instance if it is new.
+//
+// The returned type is deliberately NOT filled yet: a generic may be applied
+// before its own template is, and deferring means the order decls appear in
+// never matters. `materializeInstances` fills them once every template is done.
+export function instantiate(ref prog: Program, origin: DeclId, ref args: Vec<TypeId>): TypeId {
+  const existing = findInstance(ref prog, origin, ref args);
+  if (existing != TYPE_ERROR_ID) {
+    return existing;
+  }
+
+  let info = genericAt(ref prog, origin);
+  const instanceName = instanceNameOf(ref prog, info.name, ref args);
+
+  let copiedArgs: Vec<TypeId> = vec.vecNew(args.len);
+  vec.vecExtendFrom(ref copiedArgs, vec.vecAsArray(ref args));
+
+  let shellArgs: Vec<TypeId> = vec.vecNew(args.len);
+  vec.vecExtendFrom(ref shellArgs, vec.vecAsArray(ref args));
+
+  let typeId: TypeId = TYPE_ERROR_ID;
+  switch (info.sort) {
+    case GenericSort.VARIANT: {
+      typeId = internType(ref prog, Type.Variant {
+        decl: { name: instanceName, module: info.module, populated: false },
+        cases: vec.vecNew(0),
+        methods: map.mapNew(0, map.stringKeyOps()),
+        implementsTraits: vec.vecNew(0),
+        generic: { origin: origin, args: shellArgs },
+      });
+    }
+    default: {
+      typeId = internType(ref prog, Type.Struct {
+        decl: { name: instanceName, module: info.module, populated: false },
+        fields: vec.vecNew(0),
+        methods: map.mapNew(0, map.stringKeyOps()),
+        implementsTraits: vec.vecNew(0),
+        generic: { origin: origin, args: shellArgs },
+      });
+    }
+  }
+
+  vec.vecPush(ref prog.instances, {
+    origin: origin, args: copiedArgs, typeId: typeId, filled: false,
+  });
+
+  // Fill NOW when the template is already populated, which is the case for
+  // every instantiation after pass C's generic sweep - including every one pass
+  // D asks for while checking a body. Deferring those would leave them empty,
+  // because the sweep that fills deferred instances has already run by then.
+  //
+  // The deferred path still exists for the other case: one generic decl's body
+  // naming another whose template is not filled yet.
+  if (templateIsPopulated(ref prog, info.template)) {
+    materializeInstances(ref prog);
+  }
+  return typeId;
+}
+
+function templateIsPopulated(ref prog: Program, template: TypeId): bool {
+  switch (typeAt(ref prog, template)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.populated;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.populated;
+    }
+    default: { return false; }
+  }
+}
+
+// The registry lookup: same origin, same arguments in the same order.
+function findInstance(ref prog: Program, origin: DeclId, ref args: Vec<TypeId>): TypeId {
+  let i: usize = 0;
+  while (i < prog.instances.len) {
+    let inst = vec.vecGet(ref prog.instances, i);
+    if (inst.origin == origin && sameTypeIds(ref inst.args, ref args)) {
+      return inst.typeId;
+    }
+    i += 1;
+  }
+  return TYPE_ERROR_ID;
+}
+
+function sameTypeIds(ref a: Vec<TypeId>, ref b: Vec<TypeId>): bool {
+  if (a.len != b.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < a.len) {
+    if (vec.vecGet(ref a, i) != vec.vecGet(ref b, i)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// Fill every registered-but-unfilled instance by substituting into its
+// template. Loops because filling one can register another - a field of type
+// `Box<Vec<int>>` asks for `Vec<int>` while `Box<...>` is being built.
+//
+// Runs at the end of each module's pass C, which is late enough that every
+// template it can reach is populated: its own module's were filled first, and
+// earlier modules' were filled before this module was reached at all.
+export function materializeInstances(ref prog: Program): void {
+  let progressed = true;
+  while (progressed) {
+    progressed = false;
+    let i: usize = 0;
+    while (i < prog.instances.len) {
+      let inst = vec.vecGet(ref prog.instances, i);
+      if (!inst.filled) {
+        // Marked filled BEFORE the work, so an instance that reaches itself
+        // (`Node<int>` holding a `Node<int>`) sees a registry hit rather than
+        // recursing forever.
+        inst.filled = true;
+        vec.vecSet(ref prog.instances, i, inst);
+        fillInstance(ref prog, ref inst);
+        progressed = true;
+      }
+      i += 1;
+    }
+  }
+}
+
+function fillInstance(ref prog: Program, ref inst: Instance): void {
+  let info = genericAt(ref prog, inst.origin);
+  switch (typeAt(ref prog, info.template)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      let fields: Vec<Field> = vec.vecNew(f.len);
+      let i: usize = 0;
+      while (i < f.len) {
+        const field = vec.vecGet(ref f, i);
+        vec.vecPush(ref fields, {
+          name: field.name,
+          typeId: substitute(ref prog, field.typeId, ref info.params, ref inst.args),
+        });
+        i += 1;
+      }
+      // Methods and implemented traits travel WITH the instance. Dropping them
+      // leaves `Vec<string>` with an empty method table, so it stops satisfying
+      // the very traits `Vec<T>` was declared to implement - which surfaces far
+      // away as "Vec_string does not implement Disposable.dispose".
+      let methods: Map<string, TypeId> = substitutedMethods(ref prog, ref mm, ref info.params, ref inst.args);
+      setInstanceStructFields(ref prog, inst.typeId, ref fields, ref methods, ref it);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      let cases: Vec<VariantCase> = vec.vecNew(cs.len);
+      let c: usize = 0;
+      while (c < cs.len) {
+        let source = vec.vecGet(ref cs, c);
+        let fields: Vec<Field> = vec.vecNew(source.fields.len);
+        let i: usize = 0;
+        while (i < source.fields.len) {
+          const field = vec.vecGet(ref source.fields, i);
+          vec.vecPush(ref fields, {
+            name: field.name,
+            typeId: substitute(ref prog, field.typeId, ref info.params, ref inst.args),
+          });
+          i += 1;
+        }
+        vec.vecPush(ref cases, { name: source.name, ordinal: source.ordinal, fields: fields });
+        c += 1;
+      }
+      let methods: Map<string, TypeId> = substitutedMethods(ref prog, ref mm, ref info.params, ref inst.args);
+      setInstanceVariantCases(ref prog, inst.typeId, ref cases, ref methods, ref it);
+    }
+    default: { }
+  }
+}
+
+// Re-set the arena slot, keeping the instance's own name, module and generic
+// record - only the members come from the template.
+// Each method's signature with the instance's arguments applied - `push` on
+// `Vec<string>` takes a string, not a T.
+function substitutedMethods(
+  ref prog: Program,
+  ref methods: Map<string, TypeId>,
+  ref params: Vec<TypeId>,
+  ref args: Vec<TypeId>
+): Map<string, TypeId> propagates<disposable> {
+  let out: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+  let it: MapIter<string, TypeId> = map.mapIter(ref methods);
+  for entry in it {
+    map.mapInsert(ref out, entry.key, substitute(ref prog, entry.value, ref params, ref args));
+  }
+  return out;
+}
+
+function setInstanceStructFields(
+  ref prog: Program,
+  typeId: TypeId,
+  ref fields: Vec<Field>,
+  ref methods: Map<string, TypeId>,
+  ref traits: Vec<TypeId>
+): void {
+  switch (typeAt(ref prog, typeId)) {
+    case Type.Struct { decl: d, fields: old, methods: oldM, implementsTraits: oldT, generic: g }: {
+      setType(ref prog, typeId, Type.Struct {
+        decl: { name: d.name, module: d.module, populated: true },
+        fields: fields, methods: methods, implementsTraits: traits, generic: g,
+      });
+    }
+    default: { }
+  }
+}
+
+function setInstanceVariantCases(
+  ref prog: Program,
+  typeId: TypeId,
+  ref cases: Vec<VariantCase>,
+  ref methods: Map<string, TypeId>,
+  ref traits: Vec<TypeId>
+): void {
+  switch (typeAt(ref prog, typeId)) {
+    case Type.Variant { decl: d, cases: old, methods: oldM, implementsTraits: oldT, generic: g }: {
+      setType(ref prog, typeId, Type.Variant {
+        decl: { name: d.name, module: d.module, populated: true },
+        cases: cases, methods: methods, implementsTraits: traits, generic: g,
+      });
+    }
+    default: { }
+  }
+}
+
+// ----- generic functions ----------------------------------------------------
+
+/*
+  A generic function is monomorphized the same way a generic type is: one
+  instance per distinct set of arguments, each with its own substituted
+  signature and its own mangled symbol.
+
+  What differs is that the arguments are INFERRED rather than written.
+  `vec.vecNew(8)` names no type at all - `T` comes from the expected type, and
+  `vecPush(v, item)` gets it from the arguments. `inferTypeArgs` below is that,
+  and it is deliberately one-directional structural matching rather than real
+  unification: no occurs check, no substitution into the bindings, because a
+  bootstrap generic has no bounds and nothing to make either necessary.
+
+  The BODY is checked exactly once, with its parameters left opaque - never
+  re-checked per instantiation. That is sound here for a reason worth stating:
+  a type parameter has no bounds, so an opaque `T` supports nothing at all, and
+  a body that typechecks generically typechecks for every instantiation. It is
+  the C++ template trap avoided by accident of not having bounds yet - when
+  bounds land, this is the decision to revisit.
+*/
+
+// One monomorphized function.
+@derive(display)
+export type FuncInstance propagates<disposable> {
+  origin: DeclId,
+  args: Vec<TypeId>,
+  funcType: TypeId,   // the substituted Type.Func
+  name: string,       // the mangled symbol: `vecNew_int32`
+}
+
+// Find or create the instance for `args`, and hand back its index.
+export function instantiateFunction(ref prog: Program, origin: DeclId, ref args: Vec<TypeId>): usize {
+  let i: usize = 0;
+  while (i < prog.funcInstances.len) {
+    let inst = vec.vecGet(ref prog.funcInstances, i);
+    if (inst.origin == origin && sameTypeIds(ref inst.args, ref args)) {
+      return i;
+    }
+    i += 1;
+  }
+
+  let info = genericAt(ref prog, origin);
+  let copiedArgs: Vec<TypeId> = vec.vecNew(args.len);
+  vec.vecExtendFrom(ref copiedArgs, vec.vecAsArray(ref args));
+
+  // The signature with every parameter replaced. Substitution reaches into
+  // `Vec<T>` in a parameter or return type as readily as into a bare `T`.
+  let params: Vec<TypeId> = vec.vecNew(0);
+  let ret: TypeId = TYPE_ERROR_ID;
+  switch (typeAt(ref prog, info.template)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      let substituted: Vec<TypeId> = vec.vecNew(p.len);
+      let a: usize = 0;
+      while (a < p.len) {
+        vec.vecPush(ref substituted, substitute(ref prog, vec.vecGet(ref p, a), ref info.params, ref args));
+        a += 1;
+      }
+      params = substituted;
+      ret = substitute(ref prog, r, ref info.params, ref args);
+    }
+    default: { }
+  }
+
+  const funcType = internType(ref prog, Type.Func {
+    params: params, ret: ret, variadic: false,
+  });
+
+  vec.vecPush(ref prog.funcInstances, {
+    origin: origin,
+    args: copiedArgs,
+    funcType: funcType,
+    name: instanceNameOf(ref prog, info.name, ref args),
+  });
+  return prog.funcInstances.len - 1;
+}
+
+export function funcInstanceAt(ref prog: Program, index: usize): FuncInstance propagates<disposable> {
+  return vec.vecGet(ref prog.funcInstances, index);
+}
+
+// Match a DECLARED type against an ACTUAL one, binding any type parameter it
+// meets. `bound` runs parallel to `params`: TYPE_ERROR_ID means "still unknown".
+//
+// One-directional and structural. The first binding for a parameter wins, so
+// the leftmost argument that mentions it decides - which is also the one a
+// reader would expect to.
+export function inferTypeArgs(
+  ref prog: Program,
+  declared: TypeId,
+  actual: TypeId,
+  ref params: Vec<TypeId>,
+  ref bound: Vec<TypeId>
+): void {
+  if (actual == TYPE_ERROR_ID) {
+    return;
+  }
+
+  let p: usize = 0;
+  while (p < params.len) {
+    if (vec.vecGet(ref params, p) == declared) {
+      if (vec.vecGet(ref bound, p) == TYPE_ERROR_ID) {
+        vec.vecSet(ref bound, p, actual);
+      }
+      return;
+    }
+    p += 1;
+  }
+
+  switch (typeAt(ref prog, declared)) {
+    case Type.Array { elem: de }: {
+      switch (typeAt(ref prog, actual)) {
+        case Type.Array { elem: ae }: { inferTypeArgs(ref prog, de, ae, ref params, ref bound); }
+        default: { }
+      }
+    }
+    case Type.Ref { inner: di }: {
+      switch (typeAt(ref prog, actual)) {
+        case Type.Ref { inner: ai }: { inferTypeArgs(ref prog, di, ai, ref params, ref bound); }
+        default: { }
+      }
+    }
+    // `Vec<T>` against `Vec<NodeId>`: same origin, so the arguments line up.
+    // This is the case that makes `let v: Vec<NodeId> = vec.vecNew(8)` work,
+    // where nothing but the RETURN type mentions T.
+    default: {
+      const dOrigin = instanceOriginOf(ref prog, declared);
+      if (dOrigin != DECL_NONE_ID && instanceOriginOf(ref prog, actual) == dOrigin) {
+        inferAcrossInstances(ref prog, declared, actual, ref params, ref bound);
+      }
+    }
+  }
+}
+
+function inferAcrossInstances(
+  ref prog: Program,
+  declared: TypeId,
+  actual: TypeId,
+  ref params: Vec<TypeId>,
+  ref bound: Vec<TypeId>
+): void {
+  disposable dArgs: Vec<TypeId> = instanceArgsOf(ref prog, declared);
+  disposable aArgs: Vec<TypeId> = instanceArgsOf(ref prog, actual);
+  let i: usize = 0;
+  while (i < dArgs.len && i < aArgs.len) {
+    inferTypeArgs(ref prog, vec.vecGet(ref dArgs, i), vec.vecGet(ref aArgs, i), ref params, ref bound);
+    i += 1;
+  }
+}
+
+// A COPY of a nominal type's generic arguments. Copied rather than handed back
+// by reference for the reason spelled out on VariantCaseLookup: a Vec read out
+// of the type arena shares its storage, and handing one out invites a caller to
+// free the arena's own.
+function instanceArgsOf(ref prog: Program, id: TypeId): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(2);
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref g.args));
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref g.args));
+    }
+    default: { }
+  }
+  return out;
+}
+
+// ----- substitution ---------------------------------------------------------
+
+// `T` -> `int`, and everything built out of T with it. The one recursive
+// operation in the type layer, and the reason every inner reference is a TypeId
+// rather than a nested Type: this walks ids, so it needs no ownership rules.
+export function substitute(ref prog: Program, id: TypeId, ref params: Vec<TypeId>, ref args: Vec<TypeId>): TypeId {
+  // A parameter substitutes to its argument. Identity is by TypeId, so two
+  // decls that both call a parameter `T` never collide.
+  let p: usize = 0;
+  while (p < params.len) {
+    if (vec.vecGet(ref params, p) == id) {
+      if (p < args.len) {
+        return vec.vecGet(ref args, p);
+      }
+      return TYPE_ERROR_ID;
+    }
+    p += 1;
+  }
+
+  switch (typeAt(ref prog, id)) {
+    case Type.Array { elem: e }: {
+      return internArray(ref prog, substitute(ref prog, e, ref params, ref args));
+    }
+    case Type.Ref { inner: i }: {
+      return internRef(ref prog, substitute(ref prog, i, ref params, ref args));
+    }
+    // An OPEN instance: `Pair<A, B>` used inside `Box<A>`'s body. Substituting
+    // its arguments and re-instantiating is what turns `Box<A>` into
+    // `Box<int>` when A does.
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return substituteInstance(ref prog, id, ref g, ref params, ref args);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return substituteInstance(ref prog, id, ref g, ref params, ref args);
+    }
+    // A FUNCTION type - a method's signature, or a function-typed field like
+    // `KeyOps<K>.hash`. Substituting through it is what turns
+    // `(ref Vec_T) => void` into `(ref Vec_string) => void`, and without it a
+    // method survives instantiation still talking about the template.
+    case Type.Func { params: fp, ret: fr, variadic: fv }: {
+      let params2: Vec<TypeId> = vec.vecNew(fp.len);
+      let i: usize = 0;
+      while (i < fp.len) {
+        vec.vecPush(ref params2, substitute(ref prog, vec.vecGet(ref fp, i), ref params, ref args));
+        i += 1;
+      }
+      return internFunc(ref prog, ref params2, substitute(ref prog, fr, ref params, ref args), fv);
+    }
+    default: { return id; }   // primitives and everything else are closed
+  }
+}
+
+function substituteInstance(
+  ref prog: Program,
+  id: TypeId,
+  ref g: GenericInst,
+  ref params: Vec<TypeId>,
+  ref args: Vec<TypeId>
+): TypeId {
+  if (g.origin == DECL_NONE_ID) {
+    return id;   // an ordinary nominal type has nothing to substitute
+  }
+  disposable substituted: Vec<TypeId> = vec.vecNew(g.args.len);
+  let changed = false;
+  let i: usize = 0;
+  while (i < g.args.len) {
+    const before = vec.vecGet(ref g.args, i);
+    const after = substitute(ref prog, before, ref params, ref args);
+    if (after != before) {
+      changed = true;
+    }
+    vec.vecPush(ref substituted, after);
+    i += 1;
+  }
+  if (!changed) {
+    return id;
+  }
+  return instantiate(ref prog, g.origin, ref substituted);
+}
+
+// The generic decl a nominal type instantiates, or DECL_NONE_ID when it is an
+// ordinary type. This is what lets `Result.Ok { ... }` check that the context
+// it took its type from really is a Result.
+export function instanceOriginOf(ref prog: Program, id: TypeId): DeclId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return g.origin;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return g.origin;
+    }
+    default: { return DECL_NONE_ID; }
+  }
+}
+
+// True when a nominal type is a TEMPLATE rather than a real instance - any of
+// its arguments is still a TypeParam. Codegen skips these: a TypeParam has no
+// LLVM type, and nothing ever holds a value of one.
+export function isOpenInstance(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return anyTypeParam(ref prog, ref g.args);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return anyTypeParam(ref prog, ref g.args);
+    }
+    default: { return false; }
+  }
+}
+
+function anyTypeParam(ref prog: Program, ref args: Vec<TypeId>): bool {
+  let i: usize = 0;
+  while (i < args.len) {
+    switch (typeAt(ref prog, vec.vecGet(ref args, i))) {
+      case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return true; }
+      default: { }
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// ----- naming ---------------------------------------------------------------
+
+// `Result<int32, string>` -> `Result_int32_string`.
+//
+// The name has to be unique per instantiation, because it is what codegen
+// mangles the LLVM type against - two instances sharing a name would be one
+// type to the linker. Readable for the same reason every other name here is.
+function instanceNameOf(ref prog: Program, base: string, ref args: Vec<TypeId>): string {
+  disposable out: Text = text.make(32);
+  text.push(ref out, base);
+  let i: usize = 0;
+  while (i < args.len) {
+    text.pushByte(ref out, '_');
+    text.push(ref out, mangledTypeName(ref prog, vec.vecGet(ref args, i)));
+    i += 1;
+  }
+  switch (str.stringFromBytes(text.bytes(ref out))) {
+    case Result.Ok { value: s }: { return s; }
+    case Result.Err { error: e }: { return base; }
+  }
+}
+
+// One type as a fragment of an instance name. Not a full mangling scheme - it
+// only has to distinguish the arguments any one generic is applied to.
+export function mangledTypeName(ref prog: Program, id: TypeId): string {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: { return primName(p); }
+    case Type.Void: { return "void"; }
+    case Type.Ref { inner: i }: { return `ref_${mangledTypeName(ref prog, i)}`; }
+    case Type.Array { elem: e }: { return `${mangledTypeName(ref prog, e)}_arr`; }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.name;
+    }
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return n; }
+    default: { return "t"; }
+  }
+}

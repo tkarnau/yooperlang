@@ -1,0 +1,11 @@
+no interpolation
+IDENT at 12:5
+INT at 340:2
+77 7 end
+ok=false big=4294967296
+literal ${n} and a backtick `
+area=12
+outer IDENT at 1:2
+small=-128 wide=200
+[]
+exit=0

@@ -1,14 +1,14 @@
 import * as intr from "std/core/intrinsics.yoop";
 
 function main(): int32 {
-    let buf: int32[] = intr.heap_alloc(5);
+    let buf: int32[] = intr.heapAlloc(5);
     let i: int32 = 0;
     while (i < 5) {
         buf[i] = i * 10;
         i = i + 1;
     }
     printf(`buf[0]=${buf[0]} buf[2]=${buf[2]} buf[4]=${buf[4]} len=${buf.len}\n`);
-    intr.heap_free(buf);
+    intr.heapFree(buf);
     return 0;
 }
 

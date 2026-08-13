@@ -1,5 +1,5 @@
 // Phase 9.B: bool[] works through every standard array path - literal,
-// indexed read/write, conditional use, .len, and Vec<bool> / heap_alloc<bool>.
+// indexed read/write, conditional use, .len, and Vec<bool> / heapAlloc<bool>.
 // This regression fixture pins those guarantees so we notice if someone breaks
 // any of them in a future codegen change.
 
@@ -40,20 +40,20 @@ function main(): int32 {
     }
     printf(`count=${count}\n`);
 
-    // heap_alloc<bool>
-    let heap: bool[] = intr.heap_alloc(3);
+    // heapAlloc<bool>
+    let heap: bool[] = intr.heapAlloc(3);
     heap[0] = true;
     heap[1] = false;
     heap[2] = true;
     printf(`heap=${heap[0]},${heap[1]},${heap[2]}\n`);
-    intr.heap_free(heap);
+    intr.heapFree(heap);
 
     // Vec<bool> instantiates and runs the standard collection methods.
-    disposable v: Vec<bool> = vec.vec_new(4);
-    vec.vec_push(ref v, true);
-    vec.vec_push(ref v, false);
-    vec.vec_push(ref v, true);
-    printf(`vec=${vec.vec_get(ref v, 0)},${vec.vec_get(ref v, 1)},${vec.vec_get(ref v, 2)} vlen=${v.len}\n`);
+    disposable v: Vec<bool> = vec.vecNew(4);
+    vec.vecPush(ref v, true);
+    vec.vecPush(ref v, false);
+    vec.vecPush(ref v, true);
+    printf(`vec=${vec.vecGet(ref v, 0)},${vec.vecGet(ref v, 1)},${vec.vecGet(ref v, 2)} vlen=${v.len}\n`);
 
     return 0;
 }

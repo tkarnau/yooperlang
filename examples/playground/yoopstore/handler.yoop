@@ -4,7 +4,7 @@
 //
 // Response bodies are owned now (yoopstore-papercut #6): the GET path reads
 // the file into a local Vec and *seals* it into the Response via
-// bytes_from_vec (a zero-copy hand-off - papercut #5), so there is no
+// bytesFromVec (a zero-copy hand-off - papercut #5), so there is no
 // per-handler buffer to keep alive across the return and no copy. The
 // Response disposes the bytes itself. The handler therefore owns nothing and
 // doesn't need Disposable.
@@ -27,7 +27,7 @@ extern "C" from "stdio.h" {
 export type StorageHandler implements Handler {
     rootDir: string,
 
-    function handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
+    async handle(ref self, ref req: Request, ref resp: Response): HandleOutcome {
         let san: Result<string, string> = safepath.sanitize(req.path);
         let rel: string = "";
         switch (san) {
@@ -42,8 +42,8 @@ export type StorageHandler implements Handler {
 
         switch (req.method) {
             case HttpMethod.Get: {
-                disposable buf: Vec<uint8> = vec.vec_new(4096);
-                let err: string = storage.read_file_into(ref buf, full);
+                disposable buf: Vec<uint8> = vec.vecNew(4096);
+                let err: string = storage.readFileInto(ref buf, full);
                 if (err.len > 0) {
                     respondText(ref resp, http.notFound(), `not found: ${rel}\n`);
                     return HandleOutcome.Ok;
@@ -52,14 +52,14 @@ export type StorageHandler implements Handler {
                 // Hand the read buffer straight to the Response (no copy);
                 // `buf` is left empty, its auto-cleanup becomes a no-op.
                 http.respondBytes(ref resp, http.ok(), "application/octet-stream",
-                    bytes.bytes_from_vec(ref buf));
+                    bytes.bytesFromVec(ref buf));
                 printf(`GET   /${rel} -> ${n} bytes\n`);
                 return HandleOutcome.Ok;
             }
             case HttpMethod.Head: {
                 // HEAD: fill Content-Length from a stat (papercut #2's
-                // file_size) without reading or sending the body.
-                let sz: int64 = storage.file_size(full);
+                // fileSize) without reading or sending the body.
+                let sz: int64 = storage.fileSize(full);
                 if (sz < 0) {
                     respondText(ref resp, http.notFound(), `not found: ${rel}\n`);
                     return HandleOutcome.Ok;
@@ -77,7 +77,7 @@ export type StorageHandler implements Handler {
                 return storeBody(rel, full, ref req, ref resp);
             }
             case HttpMethod.Delete: {
-                let err: string = storage.delete_file(full);
+                let err: string = storage.deleteFile(full);
                 if (err.len > 0) {
                     respondText(ref resp, http.notFound(), `not found: ${rel}\n`);
                     return HandleOutcome.Ok;
@@ -96,7 +96,7 @@ export type StorageHandler implements Handler {
 }
 
 function storeBody(rel: string, full: string, ref req: Request, ref resp: Response): HandleOutcome {
-    let err: string = storage.write_file(full, req.body);
+    let err: string = storage.writeFile(full, req.body);
     if (err.len > 0) {
         respondText(ref resp, http.serverError(), err);
         return HandleOutcome.Ok;

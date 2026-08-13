@@ -15,7 +15,7 @@ import { Display } from "../core/traits.yoop";
 export type SocketAddr implements Display {
     host: string,
     port: int32,
-    function to_string(ref self): string {
+    function toString(ref self): string {
         return self.host;
     }
 }
@@ -26,6 +26,6 @@ export function localhost(port: int32): SocketAddr {
 }
 
 // 0.0.0.0 - bind to every interface. Use for servers exposed to the network.
-export function any_addr(port: int32): SocketAddr {
+export function anyAddr(port: int32): SocketAddr {
     return { host: "0.0.0.0", port: port };
 }

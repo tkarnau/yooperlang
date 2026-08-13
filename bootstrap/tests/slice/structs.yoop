@@ -1,0 +1,50 @@
+// Structs as values: literals, field reads and writes, passing and returning by
+// value.
+//
+// Two load-bearing cases. `r = p; r.x = 99` proves assignment COPIES - a
+// pointer representation would show 99 for both. And the `Span` literal lists
+// `len` before `start`, so it only works if fields are stored by POSITION rather
+// than in the order written.
+type Point {
+  x: int,
+  y: int,
+}
+
+type Span {
+  start: usize,
+  len: usize,
+}
+
+function manhattan(p: Point): int {
+  let ax: int = p.x;
+  let ay: int = p.y;
+  if (ax < 0) { ax = -ax; }
+  if (ay < 0) { ay = -ay; }
+  return ax + ay;
+}
+
+function shifted(p: Point, dx: int): Point {
+  return { x: p.x + dx, y: p.y };
+}
+
+function endOf(s: Span): usize {
+  return s.start + s.len;
+}
+
+function main(): int {
+  const origin: Point = { x: 0, y: 0 };
+  const p: Point = { x: 3, y: -4 };
+  printf("manhattan=%d %d\n", manhattan(origin), manhattan(p));
+
+  const q: Point = shifted(p, 10);
+  printf("shifted=%d %d\n", q.x, q.y);
+
+  // Value semantics: assigning copies, so mutating the copy leaves p alone.
+  let r: Point = p;
+  r.x = 99;
+  printf("copy=%d original=%d\n", r.x, p.x);
+
+  const s: Span = { len: 4, start: 10 };
+  printf("end=%zu\n", endOf(s));
+  return 0;
+}

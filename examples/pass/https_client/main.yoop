@@ -1,0 +1,164 @@
+// std/tls against a real, independent TLS implementation.
+//
+// The peer is a Node HTTPS server (testdata/tls_server.mjs) using a throwaway
+// CA in testdata/. A TLS client tested only against itself proves almost
+// nothing; the value is in handshaking with something that will reject us if
+// we get the protocol wrong.
+//
+// Four cases, and the three that FAIL matter more than the one that succeeds:
+// a handshake succeeding says little, while a client that cannot be made to
+// refuse is a client with no security property at all.
+//
+//   verified     the CA is trusted -> connects, and a real request round-trips
+//   no CA        the server's CA is not trusted -> refused
+//   wrong name   valid certificate, wrong host -> refused (chain verification
+//                alone does NOT close this; it needs the hostname check)
+//   verify off   the escape hatch actually opens the gate
+//   client       the same thing through the whole std/http client, by URL
+//
+//     https_client <port> <ca.pem path>
+//
+// See plans/tls.md phase 1.
+
+import { Result } from "std/core/types.yoop";
+import { disposable, Disposable } from "std/core/kinds.yoop";
+import { Readable, Writable } from "std/core/traits.yoop";
+import * as vec, { Vec } from "std/core/vec.yoop";
+import * as bytes, { Bytes } from "std/core/bytes.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as env from "std/env.yoop";
+import * as num from "std/core/numbers.yoop";
+import * as tls, { TlsConfig, TlsStream } from "std/tls";
+import * as http, { Client, ClientResponse } from "std/http";
+import * as https from "std/https";
+
+extern "C" from "stdio.h" {
+    function printf(fmt: string, ...): int32;
+}
+extern "C" from "yoop_runtime" {
+    function yoop_stdout_linebuf(): void;
+}
+
+const HOST: string = "127.0.0.1";
+
+function portArg(): int32 {
+    switch (num.parseBytesToInt32(intr.stringAsBytes(env.argAt(1)), 10)) {
+        case Result.Ok { value: n }: { return n; }
+        case Result.Err { error: _e }: { return 0; }
+    }
+}
+
+// Write a request and read the whole reply, so the fixture exercises the data
+// path and not just the handshake.
+async roundTrip(ref s: TlsStream): string {
+    let req: uint8[] = intr.stringAsBytes(
+        `GET /hi HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n`);
+    switch (await Writable.write(ref s, ref req)) {
+        case Result.Ok { value: _n }: { }
+        case Result.Err { error: e }: { return `write: ${e}`; }
+    }
+
+    disposable acc: Vec<uint8> = vec.vecNew(4096);
+    disposable scratch: Bytes = bytes.bytesFromRaw(intr.heapAlloc(2048), 2048);
+    let window: uint8[] = bytes.bytesToArray(ref scratch);
+    let reading: bool = true;
+    while (reading) {
+        switch (await Readable.read(ref s, ref window)) {
+            case Result.Ok { value: n }: {
+                if (n <= 0) {
+                    reading = false;
+                } else {
+                    vec.vecExtendFrom(ref acc, intr.arraySlice(window, 0, usize(n)));
+                }
+            }
+            case Result.Err { error: e }: { return `read: ${e}`; }
+        }
+    }
+    let text: string = intr.stringFromBytesUnchecked(vec.vecAsArray(ref acc));
+    let at: usize = 0;
+    let b: uint8[] = intr.stringAsBytes(text);
+    for (let i: usize = 0; i + 3 < b.len; i += 1) {
+        if (b[i] == '\r' && b[i + 1] == '\n' && b[i + 2] == '\r' && b[i + 3] == '\n') {
+            at = i + 4;
+            i = b.len;
+        }
+    }
+    if (at == 0) { return "no body"; }
+    return intr.stringFromBytesUnchecked(intr.arraySlice(b, at, b.len));
+}
+
+async attempt(label: string, port: int32, host: string, ref cfg: TlsConfig, doRequest: bool): void {
+    switch (await tls.tlsConnect(host, port, ref cfg)) {
+        case Result.Ok { value: st }: {
+            disposable s: TlsStream = st;
+            if (doRequest) {
+                printf(`${label} connected body=${await roundTrip(ref s)}\n`);
+            } else {
+                printf(`${label} connected\n`);
+            }
+        }
+        case Result.Err { error: _e }: {
+            // The message carries a path and an OpenSSL build string, so the
+            // fixture reports only THAT it refused - the negative e2e cases
+            // assert on the reason separately.
+            printf(`${label} refused\n`);
+        }
+    }
+}
+
+task run(): int32 {
+    let port: int32 = portArg();
+    let ca: string = env.argAt(2);
+    if (port == 0) { printf(`bad port arg\n`); return 1; }
+
+    // 1. Trusting the right CA: connects, and a request round-trips.
+    let good: TlsConfig = tls.tlsConfigWithCaFile(ca);
+    await attempt("verified  ", port, HOST, ref good, true);
+
+    // 2. System roots only. The throwaway CA is not among them, so the chain
+    //    cannot be built and the connection is refused.
+    let sys: TlsConfig = tls.tlsConfigNew();
+    await attempt("no CA     ", port, HOST, ref sys, false);
+
+    // 3. The RIGHT server and the RIGHT CA, but verified against a name the
+    //    certificate does not carry. This is the case chain verification
+    //    alone lets through - the certificate is perfectly valid, just not
+    //    for this name - and it is why the hostname check exists.
+    //
+    //    Dialling the real server and overriding only the name is what makes
+    //    this test the hostname check rather than a connection failure.
+    let wrongName: TlsConfig = tls.tlsConfigWithCaFile(ca);
+    wrongName.serverName = "not-the-server.example";
+    await attempt("wrong name", port, HOST, ref wrongName, false);
+
+    // 4. ...and the escape hatch really is the thing that opens the gate.
+    let off: TlsConfig = tls.tlsConfigNew();
+    off.dangerouslyDisableVerification = true;
+    await attempt("verify off", port, HOST, ref off, false);
+
+    // 5. The payoff: an `https://` URL through the ORDINARY client. No TLS in
+    //    sight at the call site - the scheme picks the transport.
+    //
+    //    This works because std/http takes Reader/Writer rather than a socket
+    //    (phase 0) and TlsStream implements Readable/Writable (phase 1), so
+    //    std/https is only the place the two meet.
+    let c: Client = http.clientNew();
+    let viaUrl: TlsConfig = tls.tlsConfigWithCaFile(ca);
+    switch (await https.get(ref c, `https://${HOST}:${port}/hi`, ref viaUrl)) {
+        case Result.Ok { value: r }: {
+            disposable resp: ClientResponse = r;
+            printf(`client     ${resp.status.code} ${http.responseText(ref resp)}\n`);
+        }
+        case Result.Err { error: e }: { printf(`client     err ${e}\n`); }
+    }
+
+    return 0;
+}
+
+function main(): int32 {
+    yoop_stdout_linebuf();
+    joined r = run();
+    let _rc: int32 = wait r;
+    printf(`done\n`);
+    return 0;
+}

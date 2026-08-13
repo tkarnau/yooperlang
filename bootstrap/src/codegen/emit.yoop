@@ -1,0 +1,197 @@
+module codegen;
+
+// The IR text buffer, and the TypeId -> LLVM type mapping.
+//
+// Two buffers rather than one: LLVM wants module-level globals (string
+// constants, declares) above the function definitions, but we only discover a
+// string constant while walking a function body. Emitting into two Vecs and
+// joining them at the end is the whole trick.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID } from "../typecheck";
+
+export type Emitter propagates<disposable> {
+  globals: Text,        // constants and declares, emitted first
+  body: Text,           // finished function definitions
+  // Per-function scratch. Allocas go in `prologue` and everything else in
+  // `fn`, so the allocas end up at the top of `entry:` no matter where the
+  // declaration appeared. That is what makes a local declared inside an `if`
+  // still dominate its uses - LLVM requires the alloca to dominate every
+  // load, and a mid-branch alloca does not.
+  prologue: Text,
+  fn: Text,
+  nextTemp: usize,      // the %N SSA counter, reset per function
+  nextStr: usize,       // the @.str.N counter, module-wide
+  nextLabel: usize,     // the label counter, reset per function
+  usesPrintf: bool,
+  // Set by the first template literal that actually builds one, so a program
+  // with none declares no libc string functions at all.
+  usesStringBuilder: bool,
+}
+
+export function emitterNew(): Emitter propagates<disposable> {
+  return {
+    globals: text.make(1024),
+    body: text.make(8192),
+    prologue: text.make(512),
+    fn: text.make(4096),
+    nextTemp: 0,
+    nextStr: 0,
+    nextLabel: 0,
+    usesPrintf: false,
+    usesStringBuilder: false,
+  };
+}
+
+export function emitLine(ref e: Emitter, line: string): void {
+  text.push(ref e.fn, line);
+  text.pushByte(ref e.fn, 10);
+}
+
+export function emitGlobal(ref e: Emitter, line: string): void {
+  text.push(ref e.globals, line);
+  text.pushByte(ref e.globals, 10);
+}
+
+// The whole point of Text: an instruction is appended piece by piece with no
+// intermediate string, so emitting IR allocates only when a buffer grows.
+export function emitPart(ref e: Emitter, part: string): void {
+  text.push(ref e.fn, part);
+}
+
+export function emitUint(ref e: Emitter, v: usize): void {
+  text.pushUint(ref e.fn, uint64(v));
+}
+
+export function endLine(ref e: Emitter): void {
+  text.pushByte(ref e.fn, 10);
+}
+
+// A fresh block label number, unique within the function.
+export function freshLabel(ref e: Emitter): usize {
+  e.nextLabel += 1;
+  return e.nextLabel;
+}
+
+// Clear the per-function buffers. Called when a function starts.
+export function beginFunctionBuffers(ref e: Emitter): void {
+  text.clear(ref e.prologue);
+  text.clear(ref e.fn);
+  e.nextTemp = 0;
+  e.nextLabel = 0;
+}
+
+// Append the finished function to the module: hoisted allocas, then the
+// instruction stream, then the closing brace. The signature and `entry:` are
+// already in `body` (emitFunctionOpen put them there), which is exactly why
+// the allocas can be collected out of order and still land at the top.
+export function flushFunction(ref e: Emitter): void {
+  text.pushText(ref e.body, ref e.prologue);
+  text.pushText(ref e.body, ref e.fn);
+  text.push(ref e.body, "}\n");
+}
+
+// A fresh SSA temp NUMBER. LLVM requires unnamed values to be numbered in
+// strict order within a function, which is why this is a counter.
+//
+// It hands back a usize rather than a built `%t12` string on purpose: a name is
+// appended into two or three instructions, and building it as a string would be
+// one malloc per use. `Operand.Temp` carries the number and emitOperand writes
+// the text.
+export function freshTemp(ref e: Emitter): usize {
+  e.nextTemp += 1;
+  return e.nextTemp;
+}
+
+export function finish(ref e: Emitter): Text propagates<disposable> {
+  let all: Text = text.make(e.globals.len + e.body.len + 2);
+  text.pushText(ref all, ref e.globals);
+  text.pushByte(ref all, 10);
+  text.pushText(ref all, ref e.body);
+  return all;
+}
+// A yoop type as LLVM spells it. Everything pointer-shaped is `ptr` - LLVM has
+// been fully opaque-pointer since 15, so there is nothing to point AT here.
+export function llvmType(ref prog: Program, id: TypeId): string {
+  if (id == TYPE_VOID_ID) {
+    return "void";
+  }
+  switch (typeAt(ref prog, id)) {
+    case Type.Void: { return "void"; }
+    case Type.Prim { prim: p }: { return llvmPrim(p); }
+    case Type.Ref { inner: i }: { return "ptr"; }
+    // A function VALUE is its address. LLVM's opaque pointers mean the
+    // signature is not part of the type - it appears at the call site instead.
+    case Type.Func { params: p, ret: r, variadic: v }: { return "ptr"; }
+    case Type.UnsafePtr { pointee: p }: { return "ptr"; }
+    // An unpinned `null`, which only reaches codegen in a comparison against a
+    // pointer - and `ptr` is what that compares as.
+    case Type.UntypedNull: { return "ptr"; }
+    // An array is a fat pointer: the data plus its length. Spelled as an
+    // anonymous struct rather than a named `%yoop_array.T` per element type (as
+    // the JS reference does) because the descriptor is identical for every
+    // element type - there is nothing per-type to declare.
+    case Type.Array { elem: el }: { return ARRAY_DESCRIPTOR; }
+    // A named LLVM type, defined once per struct at module level. Named rather
+    // than a literal `{ ... }` so the IR is readable and so a struct passed by
+    // value keeps one spelling everywhere it appears.
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return structLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
+    // A variant is `{ i32 tag, [N x i8] payload }` - one named type per decl,
+    // regardless of which case a given value holds. Typedefs.yoop emits it.
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return variantLlvmName(moduleIdOf(ref prog, d.module), d.name);
+    }
+    default: { return "ptr"; }
+  }
+}
+
+function llvmPrim(p: PrimKind): string {
+  switch (p) {
+    case PrimKind.INT8, PrimKind.UINT8: { return "i8"; }
+    case PrimKind.INT16, PrimKind.UINT16: { return "i16"; }
+    case PrimKind.INT32, PrimKind.UINT32: { return "i32"; }
+    case PrimKind.INT64, PrimKind.UINT64: { return "i64"; }
+    case PrimKind.ISIZE, PrimKind.USIZE: { return "i64"; }
+    case PrimKind.FLOAT32: { return "float"; }
+    case PrimKind.FLOAT64: { return "double"; }
+    case PrimKind.BOOL: { return "i1"; }
+    case PrimKind.STRING: { return "ptr"; }
+    default: { return "ptr"; }
+  }
+}
+
+// How an array value is spelled in the IR: `{ data, len }`.
+export const ARRAY_DESCRIPTOR: string = "{ ptr, i64 }";
+
+// The LLVM name for a declared struct, qualified by the module that declared it
+// so two modules can each have a `Point`. Same rule as a function symbol, see
+// mangle.yoop.
+//
+// This builds a string per call, which the emit-path rule normally forbids -
+// `llvmType` returns a `string` and every caller pushes it, so making this
+// append-only means changing that signature and every one of its callers. It
+// was already one malloc per call before the module prefix; that is a known,
+// contained wart, not a new one.
+export function structLlvmName(moduleId: string, name: string): string {
+  return `%struct.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
+}
+
+// The whole variant value: `%variant.mathx_1__Result`.
+export function variantLlvmName(moduleId: string, name: string): string {
+  return `%variant.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}`;
+}
+
+// ONE case's payload, as a struct of its fields:
+// `%variantc.mathx_1__Result__Ok`. Emitted only for cases that carry
+// something, and only ever used to address the payload bytes.
+export function variantCaseLlvmName(moduleId: string, name: string, caseName: string): string {
+  return `%variantc.${moduleId}${SYMBOL_MODULE_SEPARATOR}${name}${SYMBOL_MODULE_SEPARATOR}${caseName}`;
+}
+
+// The tag. Fixed at i32 to match the JS reference's layout - see the alignment
+// note in variantPayloadSize's neighbours in typecheck/layout.yoop.
+export const VARIANT_TAG_TYPE: string = "i32";

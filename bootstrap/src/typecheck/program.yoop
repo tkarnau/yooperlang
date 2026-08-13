@@ -1,0 +1,408 @@
+module typecheck;
+
+// The whole-program typecheck state, and the interners that grow it.
+//
+// Types and symbols are interned ONCE across the program, so a TypeId or a
+// SymbolId means the same thing in every module. Per-module name maps point
+// into the shared `symbols` arena, which is what reduces an import to a name
+// binding rather than a table merge.
+//
+// Diagnostics are accumulated here rather than returned as a Result: the point
+// of the typecheck layer is to report every error in one run.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Option } from "std/core/types.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Diagnostic, SourceLocation, errorAt } from "../diagnostics";
+import { NodeId } from "../ast";
+
+// One entry of TypedModule.importedFrom. Both halves are needed to name the
+// symbol an imported call lands on: `import { tag as mathTag }` binds
+// `mathTag` in this module and still has to call the `tag` that mathx defines.
+@derive(display)
+export type ImportOrigin {
+  moduleId: string,     // the DEFINING module's mangling id
+  exportName: string,   // the name it is declared under THERE
+}
+
+// Per-module typecheck state, indexed positionally by ModuleId (parallel to the
+// driver's module list). This does NOT own the module's AST - the ModuleGraph
+// does; decoration references nodes by NodeId (decision D2), so codegen reads
+// the AST from the graph and the resolved types from here, correlated by index.
+@derive(display)
+export type TypedModule propagates<disposable> {
+  moduleId: string,               // stable id copied from Module.id; mangling basis
+  names: Map<string, SymbolId>,   // the one symbol namespace (replaces the 13 JS tables)
+  exports: Map<string, SymbolId>, // the exported subset of `names`
+  // Where an imported name came from, keyed by the LOCAL name. Pass B fills it;
+  // a name absent from it belongs to this module. It exists because an import
+  // binds the source module's SymbolId directly - which is what makes an
+  // imported type compare equal to the original - and a shared SymbolId cannot
+  // say which module has to define the symbol codegen calls.
+  importedFrom: Map<string, ImportOrigin>,
+  // Names declared in an `extern` block. Their symbol IS the linker's spelling,
+  // so codegen must not mangle them - and it cannot tell from the Symbol, which
+  // is an ordinary `Symbol.Func`.
+  // `import.unsafe;` at the top of a file in this module. Raw pointers are
+  // gated on it, so the flag has to travel from the PROGRAM node to the passes
+  // that resolve `unsafe_ptr`.
+  unsafeAllowed: bool,
+  externNames: Map<string, bool>,
+  // Functions carrying a PAUSABLE kind (`async fetch(...)`, `task worker(...)`).
+  // They are coroutines, and the bootstrap has no coroutine lowering - so
+  // codegen refuses them by name rather than emitting an ordinary function that
+  // silently never suspends. Recorded here because the Symbol cannot say: a
+  // pausable function is an ordinary `Symbol.Func`, the same way an extern is.
+  pausableNames: Map<string, bool>,
+  // Call nodes whose callee is a VALUE - a function-typed struct field - rather
+  // than a name. Codegen reads the field and calls through it; without this it
+  // would look for a symbol named after the field and emit `call @hash`.
+  // Sparse and keyed by `uint64(nodeId)`, like the other call decorations.
+  indirectCalls: Map<uint64, bool>,
+  resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
+  // Which monomorphized function a CALL node resolved to, when the callee was
+  // generic. Sparse, because most calls are not - the shape program.yoop's
+  // header describes for exactly this kind of decoration.
+  // Keyed by `uint64(nodeId)`: std/collections/map has no usize KeyOps, and
+  // usize and uint64 are distinct types even where they are the same width.
+  calleeInstance: Map<uint64, usize>,
+  // Which TYPE a trait-method call resolved its receiver to, keyed the same
+  // way. Codegen needs it to name the symbol: `Display.toString(ref p)` becomes
+  // `@m__Point__toString`, and only the receiver's type says which Point.
+  calleeReceiver: Map<uint64, TypeId>,
+  allowsUnsafe: bool,
+  // Sparse decorations (calleeMangled, genericInstances, castTargets, ...) are
+  // added as Map<NodeId, T> slots here when the checker needs them.
+}
+
+@derive(display)
+export type Program propagates<disposable> {
+  types: Vec<Type>,             // interned; indexed by TypeId (low ids reserved for singletons)
+  symbols: Vec<Symbol>,         // interned; indexed by SymbolId
+  modules: Vec<TypedModule>,    // by ModuleId; parallel to the driver's modules
+  diagnostics: Vec<Diagnostic>,
+  // Generic decls, by DeclId, and the (origin, args) instances of them. See
+  // generics.yoop - the whole reason both live on Program is that instantiation
+  // is TypeId arithmetic and must not need an AST.
+  generics: Vec<GenericDeclInfo>,
+  instances: Vec<Instance>,
+  // Monomorphized generic FUNCTIONS. Separate from `instances` because they
+  // produce a symbol rather than a type, and codegen walks them to decide what
+  // bodies to emit.
+  funcInstances: Vec<FuncInstance>,
+  // The type-parameter names in scope while a generic decl's body is resolved.
+  // Ambient for the same reason `currentFile` is; `beginTypeParams` is the one
+  // writer.
+  typeParams: Map<string, TypeId>,
+  // The source file every pass below is currently walking, stamped onto each
+  // diagnostic by `reportError`. Ambient rather than threaded because the
+  // alternative is a `filePath` parameter on forty call sites that all want the
+  // same answer - and because it has exactly one writer, `walkFile`.
+  currentFile: string,
+  // Every `kind` declared anywhere in the graph, by NAME.
+  //
+  // Ambient rather than scoped, because a kind prefix is reached by name and
+  // not through an import - `async fetch(...)` in std/http names a kind
+  // declared in std/core/kinds.yoop with nothing linking the two files. The JS
+  // reference has the same registry for the same reason.
+  kinds: Map<string, KindInfo>,
+  // Names declared in an `extern "intrinsic"` block, anywhere in the graph.
+  //
+  // Program-level for the same reason `kinds` is: an intrinsic is identified by
+  // NAME, and the module that CALLS `intr.stringAsBytes` is not the one that
+  // declared it. Codegen lowers each call to instructions rather than emitting
+  // a call, which is also why these are deliberately never in `externNames`.
+  intrinsics: Map<string, bool>,
+  // registry: InstantiationRegistry - deferred until generics land in the bootstrap.
+}
+
+@derive(display)
+// What the bootstrap understands about a declared kind, which is one clause.
+//
+// `pausable` is the clause that changes CODEGEN: a function carrying a pausable
+// kind is a coroutine, and emitting it as an ordinary function would be a
+// silent miscompile rather than a missing feature. Every other clause is
+// recorded by the parser and read by nobody, because nothing enforces kinds.
+export type KindInfo {
+  name: string,
+  pausable: bool,
+}
+
+// Announce which file the pass is about to walk. Every pass that iterates
+// `m.files` calls this first; a diagnostic raised outside one carries "".
+export function beginFile(ref prog: Program, absPath: string): void {
+  prog.currentFile = absPath;
+}
+
+// The reserved singletons are pushed here, in the order ids.yoop declares them.
+// Anything that changes this order has to change those constants too.
+export function initProgram(): Program propagates<disposable> {
+  let types: Vec<Type> = vec.vecNew(24);
+  vec.vecPush(ref types, Type.ErrorT);      // TYPE_ERROR_ID
+  vec.vecPush(ref types, Type.Void);        // TYPE_VOID_ID
+  vec.vecPush(ref types, Type.UntypedInt);  // TYPE_UNTYPED_INT_ID
+  vec.vecPush(ref types, Type.UntypedNull); // TYPE_UNTYPED_NULL_ID
+
+  // PRIM_TYPE_BASE onward, in PrimKind declaration order. primTypeId() indexes
+  // straight into this run, so the order here IS the contract.
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT8 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT16 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT32 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.INT64 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.ISIZE });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT8 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT16 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT32 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.UINT64 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.USIZE });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.FLOAT32 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.FLOAT64 });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.BOOL });
+  vec.vecPush(ref types, Type.Prim { prim: PrimKind.STRING });
+
+  // SymbolId 0 must never be a real symbol, so a "not found" 0 stays
+  // unambiguous. Burn index 0 on a dead entry.
+  let symbols: Vec<Symbol> = vec.vecNew(8);
+  vec.vecPush(ref symbols, Symbol.Value { typeId: TYPE_ERROR_ID, intVal: 0 });
+
+  let typeParams: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+  let kinds: Map<string, KindInfo> = map.mapNew(0, map.stringKeyOps());
+  let intrinsics: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let prog: Program = {
+    types: types,
+    symbols: symbols,
+    modules: vec.vecNew(0),
+    diagnostics: vec.vecNew(0),
+    generics: vec.vecNew(4),
+    instances: vec.vecNew(4),
+    funcInstances: vec.vecNew(4),
+    typeParams: typeParams,
+    currentFile: "",
+    kinds: kinds,
+    intrinsics: intrinsics,
+  };
+  initGenerics(ref prog);   // burns DeclId 0
+  return prog;
+}
+
+export function initTypedModule(moduleId: string): TypedModule propagates<disposable> {
+  // Annotated rather than inline: `V` is not inferable from stringKeyOps alone
+  // and there is no turbofish.
+  let names: Map<string, SymbolId> = map.mapNew(0, map.stringKeyOps());
+  let exports: Map<string, SymbolId> = map.mapNew(0, map.stringKeyOps());
+  let importedFrom: Map<string, ImportOrigin> = map.mapNew(0, map.stringKeyOps());
+  let calleeInstance: Map<uint64, usize> = map.mapNew(0, map.uint64KeyOps());
+  let externNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let pausableNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let indirectCalls: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let calleeReceiver: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
+  return {
+    moduleId: moduleId,
+    names: names,
+    exports: exports,
+    importedFrom: importedFrom,
+    unsafeAllowed: false,
+    externNames: externNames,
+    pausableNames: pausableNames,
+    indirectCalls: indirectCalls,
+    calleeInstance: calleeInstance,
+    calleeReceiver: calleeReceiver,
+    resolvedTypes: vec.vecNew(0),
+    allowsUnsafe: false,
+  };
+}
+
+/*
+  Interning
+
+  Interning might not be familiar from outside systems work, but it is the same
+  idea as JS Symbol: hand out one unique, shared handle for a value so everyone
+  downstream compares handles instead of contents.
+
+  STRUCTURAL types have to deduplicate, because type equality is `id == id`.
+  Two separate `int[]` annotations that interned to two different TypeIds would
+  compare unequal, and passing one to a function expecting the other would be a
+  spurious error. `internArray` / `internRef` below scan for an existing entry
+  first; nominal types need none of this, since they are unique by decl.
+
+  A linear scan is fine at this scale (a few hundred types in the whole
+  program). If it ever is not, the fix is a side map from shape to TypeId, not a
+  change to the equality rule.
+*/
+
+export function internType(ref prog: Program, t: Type): TypeId {
+  vec.vecPush(ref prog.types, t);
+  return prog.types.len - 1;
+}
+
+// One TypeId per distinct element type, so `int[] == int[]`.
+export function internArray(ref prog: Program, elem: TypeId): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Array { elem: existing }: {
+        if (existing == elem) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return internType(ref prog, Type.Array { elem: elem });
+}
+
+// Same, for a FUNCTION type - one TypeId per distinct signature.
+//
+// This is what makes `{ hash: stringHash }` fit a field declared
+// `(k: string) => uint64`: both sides intern to the same id, and type equality
+// is `id == id`. A shell registered by pass A and later re-interned with its
+// real signature lands on the same entry too, which is why filling one in place
+// stays correct.
+//
+// The comparison is on parameter TYPES and the return type. Names never enter
+// it - a function type is positional.
+export function internFunc(
+  ref prog: Program,
+  ref params: Vec<TypeId>,
+  ret: TypeId,
+  variadic: bool
+): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Func { params: p, ret: r, variadic: v }: {
+        if (r == ret && v == variadic && sameTypeList(ref p, ref params)) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  // A fresh Vec rather than the caller's: the arena OWNS what it stores, and a
+  // shallow copy sharing the caller's storage is the bug that already cost a
+  // segfault once (see the VariantCase note in bootstrap/README.md).
+  let owned: Vec<TypeId> = vec.vecFromArray(vec.vecAsArray(ref params));
+  return internType(ref prog, Type.Func {
+    params: owned, ret: ret, variadic: variadic,
+  });
+}
+
+export function sameTypeList(ref a: Vec<TypeId>, ref b: Vec<TypeId>): bool {
+  if (a.len != b.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < a.len) {
+    if (vec.vecGet(ref a, i) != vec.vecGet(ref b, i)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// Same, for `unsafe_ptr<T>` - one TypeId per pointee, and one for the opaque
+// form, which is `pointee == TYPE_ERROR_ID` (id 0, the reserved "none").
+export function internUnsafePtr(ref prog: Program, pointee: TypeId): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.UnsafePtr { pointee: existing }: {
+        if (existing == pointee) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return internType(ref prog, Type.UnsafePtr { pointee: pointee });
+}
+
+// Same, for `ref T`.
+export function internRef(ref prog: Program, inner: TypeId): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Ref { inner: existing }: {
+        if (existing == inner) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return internType(ref prog, Type.Ref { inner: inner });
+}
+
+export function internSymbol(ref prog: Program, s: Symbol): SymbolId {
+  vec.vecPush(ref prog.symbols, s);
+  return prog.symbols.len - 1;
+}
+
+// Replace an arena slot in place. This is the value-semantic stand-in for the
+// JS reference mutating a shared shell object: pass A interns a shell, pass C
+// calls this with the filled version, and every TypeId already pointing at the
+// slot sees it.
+export function setType(ref prog: Program, id: TypeId, t: Type): void {
+  vec.vecSet(ref prog.types, id, t);
+}
+
+// Replace a symbol arena slot, the same way setType replaces a type's. Pass A
+// binds a shell and pass C fills it; every holder of the id sees the new one.
+export function setSymbol(ref prog: Program, id: SymbolId, s: Symbol): void {
+  vec.vecSet(ref prog.symbols, id, s);
+}
+
+export function typeAt(ref prog: Program, id: TypeId): Type {
+  return vec.vecGet(ref prog.types, id);
+}
+
+export function symbolAt(ref prog: Program, id: SymbolId): Symbol {
+  return vec.vecGet(ref prog.symbols, id);
+}
+
+// A ModuleId back to the mangling id it names. Codegen asks this about the
+// module a struct was DECLARED in, which is the one thing a TypeId knows about
+// its home and the emitted name needs.
+export function moduleIdOf(ref prog: Program, id: ModuleId): string {
+  if (id >= prog.modules.len) {
+    return "";
+  }
+  return vec.vecGet(ref prog.modules, id).moduleId;
+}
+
+export function reportError(ref prog: Program, message: string, sourceLoc: SourceLocation): void {
+  let d = errorAt(message, sourceLoc);
+  d.filePath = prog.currentFile;
+  vec.vecPush(ref prog.diagnostics, d);
+}
+
+// Record a declared kind. A later declaration of the same name does not replace
+// the first - a redeclaration is pass A's diagnostic, and overwriting here
+// would make the registry disagree with the symbol table about which one won.
+export function registerKind(ref prog: Program, name: string, pausable: bool): void {
+  if (map.mapContainsKey(ref prog.kinds, name)) {
+    return;
+  }
+  map.mapInsert(ref prog.kinds, name, { name: name, pausable: pausable });
+}
+
+// What a kind prefix names, or None when nothing in the graph declares it.
+export function lookupKind(ref prog: Program, name: string): Option<KindInfo> {
+  return map.mapGet(ref prog.kinds, name);
+}
+
+// Record an intrinsic's name. See `Program.intrinsics` for why it is global.
+export function registerIntrinsic(ref prog: Program, name: string): void {
+  map.mapInsert(ref prog.intrinsics, name, true);
+}
+
+// True when `name` is an intrinsic declared anywhere in the graph.
+export function isIntrinsicName(ref prog: Program, name: string): bool {
+  return map.mapContainsKey(ref prog.intrinsics, name);
+}

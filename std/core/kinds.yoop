@@ -10,6 +10,28 @@ export trait Disposable {
     function dispose(ref self): void;
 }
 
+// A bare `disposable x = ...` binding is CONST, and that is deliberate.
+//
+//     disposable buf: Buf = bufNew();     // const - cannot rebind, cannot
+//                                         // assign to its fields
+//     let disposable buf: Buf = bufNew(); // mutable, and you own the
+//                                         // consequences (below)
+//
+// The auto-cleanup this kind injects fires ONCE, at scope end, on whatever the
+// binding holds at that moment. So rebinding silently drops the outgoing value
+// without disposing it - a leak the compiler cannot see, because from its side
+// the obligation was discharged. Const by default makes that impossible to do
+// by accident; writing `let` is the informed opt-in, and the rule it comes with
+// is "dispose the old value before you overwrite it":
+//
+//     let disposable s: Text = textFrom("a");
+//     let next: Text = replace(ref s, "a", "b");
+//     Disposable.dispose(ref s);          // the outgoing value, by hand
+//     s = next;
+//
+// That loop is the shape that motivates the mutable form at all. Reading the
+// const form as a papercut is the natural first reaction (it was reported as
+// one) - it is a guard rail with a gate in it.
 export kind disposable {
     appliesTo binding;
     requires Disposable;
@@ -142,7 +164,7 @@ export kind pooled {
 //
 //     function strFree(s: owned string): void { ... }
 //
-//     strFree(str.string_concat("a", "b"));   // ok, the result is owned
+//     strFree(str.stringConcat("a", "b"));   // ok, the result is owned
 //     strFree("a literal");                   // compile error
 //
 // It is CONFERRED, so it reads in the useful direction: a sink that names it

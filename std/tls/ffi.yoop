@@ -1,0 +1,157 @@
+// std/tls - TLS over a TcpStream, via OpenSSL.
+//
+// Client-side only for now. What it gives you:
+//
+//     import * as tls from "std/tls";
+//
+//     let cfg: tls.TlsConfig = tls.tlsConfigNew();
+//     disposable s: tls.TlsStream = await tls.tlsConnect("example.com", 443, ref cfg)?;
+//     // s implements Readable + Writable, so anything taking a Reader/Writer
+//     // takes it - including all of std/http.
+//
+// Certificate verification and hostname checking are ON. Turning them off is
+// per-connection, explicit, and named so it cannot be typed by accident.
+//
+// This is a DIRECTORY MODULE of its own rather than a file inside std/net, and
+// that is load-bearing: link flags are collected program-wide, so an
+// `extern from library "ssl"` inside std/net would make every program that
+// opens a socket link OpenSSL. Importing std/tls is what pulls the dependency
+// in - and what compiles runtime/yoop_tls.c into the program.
+//
+// Design, and why the ciphertext moves through yoop rather than through
+// OpenSSL's own socket I/O: plans/tls.md.
+module tls;
+
+// The ONLY file in std/tls that imports unsafe, mirroring std/net's rule that
+// socket_ffi.yoop is the single unsafe file there. Everything the module
+// exports is safe.
+import.unsafe;
+
+// Declared `from library "ssl"` rather than from the runtime: that is what
+// puts OpenSSL on the link line. `lowerLinkFlag` expands the name to both
+// -lssl and -lcrypto, and `glueSourcesForLinkFlags` compiles yoop_tls.c in on
+// the strength of the same declaration - the shim provides these symbols, the
+// library provides what the shim calls. Same arrangement the OpenGL loader
+// uses on Windows.
+extern "C" from library "ssl" {
+    function yoop_tls_ctx_new_client(): unsafe_ptr<void>;
+    function yoop_tls_ctx_free(ctx: unsafe_ptr<void>): void;
+    function yoop_tls_ctx_load_verify(ctx: unsafe_ptr<void>, caFile: string): int32;
+    function yoop_tls_ctx_set_verify(ctx: unsafe_ptr<void>, verify: int32): void;
+
+    function yoop_tls_new(ctx: unsafe_ptr<void>, host: string, checkHostname: int32): unsafe_ptr<void>;
+    function yoop_tls_free(c: unsafe_ptr<void>): void;
+
+    function yoop_tls_handshake(c: unsafe_ptr<void>): int32;
+    function yoop_tls_read(c: unsafe_ptr<void>, buf: unsafe_ptr<uint8>, n: usize): int64;
+    function yoop_tls_write(c: unsafe_ptr<void>, buf: unsafe_ptr<uint8>, n: usize): int64;
+
+    function yoop_tls_pull(c: unsafe_ptr<void>, buf: unsafe_ptr<uint8>, n: usize): int64;
+    function yoop_tls_push(c: unsafe_ptr<void>, buf: unsafe_ptr<uint8>, n: usize): int64;
+    function yoop_tls_push_eof(c: unsafe_ptr<void>): void;
+    function yoop_tls_shutdown(c: unsafe_ptr<void>): int32;
+
+    function yoop_tls_last_error(): string;
+    function yoop_tls_verify_result(c: unsafe_ptr<void>): int64;
+    function yoop_tls_verify_error_string(code: int64): string;
+    function yoop_tls_version(c: unsafe_ptr<void>): string;
+    function yoop_tls_cipher(c: unsafe_ptr<void>): string;
+}
+
+// Status codes, mirrored from runtime/yoop_tls.c. Every one is negative, so a
+// data call can return a byte count and a status through the same value.
+const TLS_OK:          int32 = 0;
+const TLS_WANT_READ:   int32 = -1;
+const TLS_WANT_WRITE:  int32 = -2;
+const TLS_ERROR:       int32 = -3;
+const TLS_CLOSED:      int32 = -4;
+
+// The ciphertext staging buffer, per direction, per connection. A TLS record
+// is at most 16 KiB plus overhead, so this is one record's worth - enough that
+// the common case is a single pull and a single push.
+const TLS_CHUNK: usize = 17408;
+
+// ----- safe handles --------------------------------------------------------
+//
+// Everything below turns the raw pointers above into values the rest of the
+// module can hold without naming `unsafe_ptr`. That is what keeps this file
+// the ONLY one in std/tls that imports unsafe, mirroring std/net's rule for
+// socket_ffi.yoop - `import.unsafe;` is per SOURCE FILE, so the boundary is
+// real rather than a convention.
+//
+// Both handles are plain wrappers, not Disposable: ownership lives with
+// TlsStream, which frees them in the right order relative to the socket.
+
+export type TlsCtx     { p: unsafe_ptr<void> }
+export type TlsSession { p: unsafe_ptr<void> }
+
+export function ctxNewClient(): TlsCtx {
+    return { p: yoop_tls_ctx_new_client() };
+}
+
+export function ctxIsNull(ref c: TlsCtx): bool { return c.p == null; }
+
+export function ctxFree(ref c: TlsCtx): void {
+    if (c.p != null) { yoop_tls_ctx_free(c.p); c.p = null; }
+}
+
+export function ctxLoadVerify(ref c: TlsCtx, caFile: string): int32 {
+    return yoop_tls_ctx_load_verify(c.p, caFile);
+}
+
+export function ctxSetVerify(ref c: TlsCtx, verify: bool): void {
+    let v: int32 = 0;
+    if (verify) { v = 1; }
+    yoop_tls_ctx_set_verify(c.p, v);
+}
+
+export function sessionNew(ref c: TlsCtx, host: string, checkHostname: bool): TlsSession {
+    let ch: int32 = 0;
+    if (checkHostname) { ch = 1; }
+    return { p: yoop_tls_new(c.p, host, ch) };
+}
+
+export function sessionIsNull(ref s: TlsSession): bool { return s.p == null; }
+
+export function sessionFree(ref s: TlsSession): void {
+    if (s.p != null) { yoop_tls_free(s.p); s.p = null; }
+}
+
+export function handshake(ref s: TlsSession): int32 { return yoop_tls_handshake(s.p); }
+
+// Plaintext out. Returns a byte count, or one of the negative statuses.
+export function readPlain(ref s: TlsSession, ref buf: uint8[]): int64 {
+    return yoop_tls_read(s.p, buf.ptr, buf.len);
+}
+
+// Plaintext in. The ciphertext lands in wbio; the caller still has to `pull`.
+export function writePlain(ref s: TlsSession, buf: uint8[]): int64 {
+    return yoop_tls_write(s.p, buf.ptr, buf.len);
+}
+
+// Ciphertext OUT of the session, for the caller to send. 0 means none pending.
+export function pull(ref s: TlsSession, ref buf: uint8[]): int64 {
+    return yoop_tls_pull(s.p, buf.ptr, buf.len);
+}
+
+// Ciphertext the caller recv'd, INTO the session. `n` is how much of `buf` is
+// real, since the recv usually fills less than the window.
+export function push(ref s: TlsSession, buf: uint8[], n: usize): int64 {
+    return yoop_tls_push(s.p, buf.ptr, n);
+}
+
+// Tell the session the peer is gone, so the next read reports a clean end
+// rather than waiting for a record that will never arrive.
+export function pushEof(ref s: TlsSession): void { yoop_tls_push_eof(s.p); }
+
+export function shutdown(ref s: TlsSession): int32 { return yoop_tls_shutdown(s.p); }
+
+export function lastError(): string { return yoop_tls_last_error(); }
+
+// 0 when the chain verified; otherwise an X509_V_ERR_* code whose string form
+// is the thing a user can act on.
+export function verifyResult(ref s: TlsSession): int64 { return yoop_tls_verify_result(s.p); }
+export function verifyErrorString(code: int64): string { return yoop_tls_verify_error_string(code); }
+
+export function version(ref s: TlsSession): string { return yoop_tls_version(s.p); }
+export function cipher(ref s: TlsSession): string { return yoop_tls_cipher(s.p); }

@@ -1,0 +1,3 @@
+import { a } from "./mixed";
+
+function main(): int { return a(); }

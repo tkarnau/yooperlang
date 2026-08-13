@@ -1,0 +1,16 @@
+// A stand-in for std/core/intrinsics.yoop, holding only the intrinsics the
+// bootstrap lowers.
+//
+// The real file is not used because it imports std/core/kinds.yoop for `owned`,
+// which drags a chunk of std into a fixture that is about six lowerings. The
+// SIGNATURES here are copied from it exactly - if they drift, the fixture is
+// testing something the language does not have.
+
+extern "intrinsic" from "compiler" {
+    function heapAlloc<T>(n: usize): T[];
+    function heapFree<T>(a: T[]): void;
+    function stringAsBytes(s: string): uint8[];
+    function stringFromBytesUnchecked(buf: uint8[]): string;
+    function bytesAsStringUnchecked(buf: uint8[]): string;
+    function arraySlice<T>(xs: T[], start: usize, end: usize): T[];
+}

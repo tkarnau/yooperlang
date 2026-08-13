@@ -1,0 +1,6 @@
+// The other half. See cycle_a.yoop.
+import { fromA } from "./cycle_a.yoop";
+
+export function fromB(): int {
+  return fromA();
+}

@@ -25,8 +25,8 @@ import * as intr from "./intrinsics.yoop";
 // "here are N owned bytes" return shape (file reads, response bodies).
 //
 //   * `data` is the owned allocation. Its fat-pointer length is the
-//     allocation size (kept intact so heap_free / --track-heap stay paired
-//     with the original heap_alloc).
+//     allocation size (kept intact so heapFree / --track-heap stay paired
+//     with the original heapAlloc).
 //   * `len`  is the number of valid bytes, which may be < data.len when the
 //     buffer was handed over from a Vec that still had spare capacity.
 //
@@ -38,10 +38,10 @@ export type Bytes implements Disposable propagates<disposable> {
     len:  usize,
     function dispose(ref self): void {
         if (self.data.len > 0) {
-            intr.heap_free(self.data);
+            intr.heapFree(self.data);
             // Reslice to an empty view so a second dispose is a no-op (the
             // pointer dangles but is never dereferenced).
-            self.data = intr.array_slice(self.data, 0, 0);
+            self.data = intr.arraySlice(self.data, 0, 0);
             self.len = 0;
         }
     }
@@ -49,15 +49,15 @@ export type Bytes implements Disposable propagates<disposable> {
 
 // Borrowing view of the valid prefix as a regular uint8[]. Valid until the
 // Bytes is disposed; the caller must keep the Bytes alive while using it.
-export function bytes_to_array(b: ref Bytes): uint8[] {
-    return intr.array_slice(b.data, 0, b.len);
+export function bytesToArray(b: ref Bytes): uint8[] {
+    return intr.arraySlice(b.data, 0, b.len);
 }
 
 // Copy `src` into a fresh owned allocation (capacity == src.len, no spare).
-// `src` is unmodified, so passing a borrowing view (string_as_bytes,
-// array_slice, vec_as_array) is safe.
-export function bytes_from_array(src: uint8[]): Bytes propagates<disposable> {
-    let data: uint8[] = intr.heap_alloc(src.len);
+// `src` is unmodified, so passing a borrowing view (stringAsBytes,
+// arraySlice, vecAsArray) is safe.
+export function bytesFromArray(src: uint8[]): Bytes propagates<disposable> {
+    let data: uint8[] = intr.heapAlloc(src.len);
     let i: usize = 0;
     while (i < src.len) {
         data[i] = src[i];
@@ -67,11 +67,11 @@ export function bytes_from_array(src: uint8[]): Bytes propagates<disposable> {
 }
 
 // Take ownership of an already-heap-allocated buffer (zero-copy). The caller
-// is asserting that `buf` came from heap_alloc (directly or via a Vec /
+// is asserting that `buf` came from heapAlloc (directly or via a Vec /
 // another Bytes) and is transferring ownership - do NOT pass a borrowing
 // view here, or dispose will free memory the Bytes doesn't own. `len` is the
 // count of valid bytes and must be <= buf.len.
-export function bytes_from_raw(buf: uint8[], len: usize): Bytes propagates<disposable> {
+export function bytesFromRaw(buf: uint8[], len: usize): Bytes propagates<disposable> {
     return { data: buf, len: len };
 }
 
@@ -80,7 +80,7 @@ export function bytes_from_raw(buf: uint8[], len: usize): Bytes propagates<dispo
 // a harmless no-op - the buffer now belongs to the returned Bytes. Pass the
 // Vec by ref; after the call the (emptied) Vec still needs its obligation
 // discharged, but disposing it does nothing.
-export function bytes_from_vec(v: ref Vec<uint8>): Bytes propagates<disposable> {
+export function bytesFromVec(v: ref Vec<uint8>): Bytes propagates<disposable> {
     let b: Bytes = { data: v.data, len: v.len };
     v.cap = 0;
     v.len = 0;
@@ -88,7 +88,7 @@ export function bytes_from_vec(v: ref Vec<uint8>): Bytes propagates<disposable> 
 }
 
 // Byte-wise equality. Returns true iff lengths match and every byte matches.
-export function bytes_eq(a: uint8[], b: uint8[]): bool {
+export function bytesEq(a: uint8[], b: uint8[]): bool {
     if (a.len != b.len) { return false; }
     let i: usize = 0;
     while (i < a.len) {
@@ -99,7 +99,7 @@ export function bytes_eq(a: uint8[], b: uint8[]): bool {
 }
 
 // First index `i` such that `buf[i] == needle`, or `buf.len` if not found.
-export function bytes_index_of(buf: uint8[], needle: uint8): usize {
+export function bytesIndexOf(buf: uint8[], needle: uint8): usize {
     let i: usize = 0;
     while (i < buf.len) {
         if (buf[i] == needle) { return i; }
@@ -138,7 +138,7 @@ export function lastIndexOfSeq(buf: uint8[], needle: uint8[]): usize {
 
 // First index `i` such that buf[i..i+needle.len] == needle, or buf.len if
 // not found. Naive O(n*m) scan; HTTP needles are short.
-export function bytes_index_of_seq(buf: uint8[], needle: uint8[]): usize {
+export function bytesIndexOfSeq(buf: uint8[], needle: uint8[]): usize {
     if (needle.len == 0) { return 0; }
     if (needle.len > buf.len) { return buf.len; }
     let max: usize = buf.len - needle.len + 1;
@@ -160,7 +160,7 @@ export function bytes_index_of_seq(buf: uint8[], needle: uint8[]): usize {
 }
 
 // True iff buf starts with prefix.
-export function bytes_starts_with(buf: uint8[], prefix: uint8[]): bool {
+export function bytesStartsWith(buf: uint8[], prefix: uint8[]): bool {
     if (prefix.len > buf.len) { return false; }
     let i: usize = 0;
     while (i < prefix.len) {
@@ -173,7 +173,7 @@ export function bytes_starts_with(buf: uint8[], prefix: uint8[]): bool {
 // ASCII-only case-insensitive byte equality. Non-ASCII bytes compare
 // exactly. HTTP headers are ASCII; full Unicode case folding is out of
 // scope (see plans/phase-8-h-string-bytes-vec.md §8.H.2).
-export function bytes_eq_ignore_ascii_case(a: uint8[], b: uint8[]): bool {
+export function bytesEqIgnoreAsciiCase(a: uint8[], b: uint8[]): bool {
     if (a.len != b.len) { return false; }
     let i: usize = 0;
     while (i < a.len) {
@@ -190,15 +190,15 @@ export function bytes_eq_ignore_ascii_case(a: uint8[], b: uint8[]): bool {
 // Borrowing sub-slice [start, end). Zero-copy view backed by the same
 // storage as `buf`. The caller is responsible for keeping `buf` alive as
 // long as the slice is used.
-export function bytes_slice(buf: uint8[], start: usize, end: usize): uint8[] {
-    return intr.array_slice(buf, start, end);
+export function bytesSlice(buf: uint8[], start: usize, end: usize): uint8[] {
+    return intr.arraySlice(buf, start, end);
 }
 
 // Copy buf into a fresh heap-allocated uint8[]. Caller owns the result and
-// is responsible for freeing it (via heap_free) - though typical use is to
-// hand it off to string_from_bytes_unchecked which retains the bytes.
-export function bytes_copy(buf: uint8[]): uint8[] {
-    let result: uint8[] = intr.heap_alloc(buf.len);
+// is responsible for freeing it (via heapFree) - though typical use is to
+// hand it off to stringFromBytesUnchecked which retains the bytes.
+export function bytesCopy(buf: uint8[]): uint8[] {
+    let result: uint8[] = intr.heapAlloc(buf.len);
     let i: usize = 0;
     while (i < buf.len) {
         result[i] = buf[i];
@@ -215,7 +215,7 @@ export function bytes_copy(buf: uint8[]): uint8[] {
 // against pathological inputs is the caller's responsibility today.
 export type BytesParsed { value: int64, consumed: usize }
 
-export function bytes_parse_int(buf: uint8[]): Result<BytesParsed, string> {
+export function bytesParseInt(buf: uint8[]): Result<BytesParsed, string> {
     let i: usize = 0;
     let val: int64 = 0;
     while (i < buf.len) {
@@ -228,7 +228,7 @@ export function bytes_parse_int(buf: uint8[]): Result<BytesParsed, string> {
         i = i + 1;
     }
     if (i == 0) {
-        return Result.Err { error: "bytes_parse_int: no leading digits" };
+        return Result.Err { error: "bytesParseInt: no leading digits" };
     }
     return Result.Ok { value: { value: val, consumed: i } };
 }

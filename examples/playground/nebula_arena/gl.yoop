@@ -210,11 +210,11 @@ export function compile_shader(stage: ShaderStage, src: string): uint32 {
         let log_len: int32 = 0;
         glGetShaderiv(sh, ShaderParam.InfoLogLength, &log_len);
         if (log_len > 0) {
-            let buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
+            let buf: uint8[] = intr.heapAlloc(usize(log_len) + 1);
             let written: int32 = 0;
             glGetShaderInfoLog(sh, log_len, &written, buf.ptr);
             buf[usize(written)] = 0;
-            let log: string = intr.string_from_bytes_unchecked(buf);
+            let log: string = intr.stringFromBytesUnchecked(buf);
             printf(`shader compile failed:\n${log}\n`);
         }
         glDeleteShader(sh);
@@ -243,11 +243,11 @@ export function link_program(vs: uint32, fs: uint32, attrs: string[]): uint32 {
         let log_len: int32 = 0;
         glGetProgramiv(prog, ProgramParam.InfoLogLength, &log_len);
         if (log_len > 0) {
-            let buf: uint8[] = intr.heap_alloc(usize(log_len) + 1);
+            let buf: uint8[] = intr.heapAlloc(usize(log_len) + 1);
             let written: int32 = 0;
             glGetProgramInfoLog(prog, log_len, &written, buf.ptr);
             buf[usize(written)] = 0;
-            let log: string = intr.string_from_bytes_unchecked(buf);
+            let log: string = intr.stringFromBytesUnchecked(buf);
             printf(`program link failed:\n${log}\n`);
         }
         glDeleteProgram(prog);

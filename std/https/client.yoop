@@ -1,0 +1,92 @@
+// std/https - the HTTP client over TLS.
+//
+//     import * as https from "std/https";
+//
+//     let c: http.Client = http.clientNew();
+//     let cfg: tls.TlsConfig = tls.tlsConfigNew();
+//     disposable r: http.ClientResponse = await https.get(ref c, "https://example.com/", ref cfg)?;
+//
+// A `http://` URL works too and costs nothing extra - the scheme picks the
+// transport, so a program that takes a URL from configuration does not have to
+// care which it got.
+//
+// WHY THIS IS A SEPARATE MODULE, and not two lines inside std/http.
+//
+// Link flags are collected PROGRAM-WIDE from every `extern from library` in
+// the module graph. If std/http imported std/tls, every program that spoke
+// HTTP would link OpenSSL - including the ones that only serve plain
+// connections on a local port. So the dependency runs the other way: std/http
+// knows nothing about TLS and exposes `sendOn`, which runs an exchange over a
+// connection the caller owns, and this module supplies the connection.
+//
+// That layering is also why the code here is so short. Phase 0 of plans/tls.md
+// made std/http take `Reader`/`Writer` instead of a concrete `TcpStream`, and
+// phase 1 made `TlsStream` implement `Readable`/`Writable`. This file is just
+// the place the two meet.
+module https;
+
+import { Disposable, disposable } from "../core/kinds.yoop";
+import { Result } from "../core/types.yoop";
+import { Reader, Writer } from "../core/traits.yoop";
+import * as str from "../core/strings.yoop";
+import * as tcp, { ConnectResult } from "../net";
+import { Uri } from "../net";
+import * as tls, { TlsConfig, TlsStream } from "../tls";
+import * as http, {
+    Client, ClientRequest, ClientResponse, HttpError, HttpMethod,
+} from "../http";
+
+// Send `req`, choosing the transport from its URL's scheme.
+//
+// One connection per call, closed when the response is complete - the same
+// contract `http.send` has. There is no pooling and no redirect following; a
+// 3xx comes back as it arrived.
+export async send(
+    ref c: Client,
+    ref req: ClientRequest,
+    ref cfg: TlsConfig,
+): Result<ClientResponse, HttpError> propagates<disposable> {
+    let u: Uri = http.parseTarget(ref req)?;
+
+    if (!str.stringEq(u.scheme, "https")) {
+        // Anything that is not https goes to the plain client, which does its
+        // own connecting. Delegating rather than duplicating keeps one code
+        // path for the ordinary case.
+        return await http.send(ref c, ref req);
+    }
+
+    // `parseUri` already yields 443 for an https URL with no explicit port.
+    disposable s: TlsStream = await tlsConnectMapped(u.host, u.port, ref cfg)?;
+    let r: Reader = Reader.from(ref s);
+    let w: Writer = Writer.from(ref s);
+    return await http.sendOn(ref c, ref req, ref u, ref r, ref w);
+}
+
+// tlsConnect reports `string`; the http layer speaks `HttpError`. A TLS
+// failure is a connection failure, so it arrives as one - which keeps a
+// caller's error handling uniform whether the URL was http or https.
+async tlsConnectMapped(host: string, port: int32, ref cfg: TlsConfig): Result<TlsStream, HttpError> propagates<disposable> {
+    switch (await tls.tlsConnect(host, port, ref cfg)) {
+        case Result.Ok { value: s }: { return Result.Ok { value: s }; }
+        case Result.Err { error: e }: { return Result.Err { error: http.errIo(e) }; }
+    }
+}
+
+// ----- convenience --------------------------------------------------------
+
+export async get(ref c: Client, url: string, ref cfg: TlsConfig): Result<ClientResponse, HttpError> propagates<disposable> {
+    disposable req: ClientRequest = http.request(HttpMethod.Get, url);
+    return await send(ref c, ref req, ref cfg);
+}
+
+export async post(
+    ref c: Client,
+    url: string,
+    mediaType: string,
+    body: string,
+    ref cfg: TlsConfig,
+): Result<ClientResponse, HttpError> propagates<disposable> {
+    disposable req: ClientRequest = http.request(HttpMethod.Post, url);
+    http.setTextBody(ref req, mediaType, body);
+    return await send(ref c, ref req, ref cfg);
+}
