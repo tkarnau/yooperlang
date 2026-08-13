@@ -15,6 +15,7 @@ import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import { Text }, * as text from "std/core/text.yoop";
 import { DISCARD_BINDING } from "../parse";
+import { TypeId, variantCaseNameAt, variantModuleIdOf, variantDeclNameOf } from "../typecheck";
 
 // `Shape.Circle { r: 2 }`
 //
@@ -145,4 +146,63 @@ export function emitPatternBindings(
     i += 1;
   }
   return "";
+}
+
+// ----- addressing a case by ORDINAL ------------------------------------------
+//
+// Everything above starts from a NodeId carrying the case NAME, because a
+// constructor and a pattern each wrote one in the source. `?` has neither: the
+// cases it addresses are the `Ok` and `Err` that `fallibleShapeOf` found, and
+// it knows them by ordinal. Same three instructions either way.
+
+//   %t3 = getelementptr inbounds %variant.m__Result, ptr %sc.1.addr, i32 0, i32 1
+//   %t4 = getelementptr inbounds %variantc.m__Result__Ok, ptr %t3, i32 0, i32 0
+//   %t5 = load i32, ptr %t4
+//
+// The single payload field of one case, read through a slot already holding the
+// value. Field position 0 always - the only caller is `?`, and a fallible case
+// carries at most one field, which is what made it fallible.
+export function emitCasePayloadLoad(
+  ref cx: Cx,
+  variantType: TypeId,
+  variantTy: string,
+  slotId: usize,
+  ordinal: usize,
+  fieldTy: string
+): usize {
+  const loaded = freshTemp(cx.e);
+  emitLoadFromPtr(ref cx, loaded, fieldTy,
+    emitCasePayloadAddr(ref cx, variantType, variantTy, slotId, ordinal));
+  return loaded;
+}
+
+//   %t3 = getelementptr inbounds %variant.m__Result, ptr %sc.1.addr, i32 0, i32 1
+//   %t4 = getelementptr inbounds %variantc.m__Result__Err, ptr %t3, i32 0, i32 0
+//
+// The payload field's ADDRESS, which is the load above without the load. A
+// `ref self` method on the payload wants exactly this - `?`'s Into conversion
+// calls one - and reinterpreting the payload bytes as a case struct needs an
+// address anyway, so the load was always the last step rather than the whole
+// thing.
+export function emitCasePayloadAddr(
+  ref cx: Cx,
+  variantType: TypeId,
+  variantTy: string,
+  slotId: usize,
+  ordinal: usize
+): usize {
+  const payloadAddr = freshTemp(cx.e);
+  emitGepField(ref cx, payloadAddr, variantTy, TEMP_SLOT_NAME, slotId, 1);
+  const fieldAddr = freshTemp(cx.e);
+  emitGepFieldOfPtr(ref cx, fieldAddr,
+    caseLlvmNameOf(ref cx, variantType, ordinal), payloadAddr, 0);
+  return fieldAddr;
+}
+
+// `%variantc.m__Result__Ok` - one case's payload struct, reached by ORDINAL.
+// The by-name twin is `variantCaseTypeOf` in query.yoop.
+export function caseLlvmNameOf(ref cx: Cx, variantType: TypeId, ordinal: usize): string {
+  return variantCaseLlvmName(variantModuleIdOf(cx.prog, variantType),
+    variantDeclNameOf(cx.prog, variantType),
+    variantCaseNameAt(cx.prog, variantType, ordinal));
 }

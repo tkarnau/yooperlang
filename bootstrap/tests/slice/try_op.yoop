@@ -1,0 +1,237 @@
+// `expr?` - propagate the Err, yield the Ok.
+//
+// `?` is a POSTFIX EXPRESSION rather than a statement rewrite, so most of this
+// file is about the places a statement-level desugar would never have reached:
+// a call argument, a binary operand, a field receiver, a loop body. Each of
+// those lowers to a branch and an early return in the MIDDLE of an expression,
+// which is the part that can produce invalid IR rather than a wrong number.
+//
+// The last section is the one that is easy to get silently wrong: a `?` that
+// takes the error path is a RETURN, so every scope it leaves owes its
+// disposals. Dropping them leaks only on the sad path, which is exactly the
+// path a happy-path test never runs.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+variant Res {
+  Ok { value: int32 },
+  Err { error: int32 },
+}
+
+// A second fallible type with the SAME Err payload and a different Ok. `?`
+// rebuilds the enclosing function's Err around the operand's error rather than
+// forwarding the operand's whole value, so these two interoperate.
+variant Flag {
+  Ok { value: bool },
+  Err { error: int32 },
+}
+
+// Neither case carries anything. `quiet(n)?` on one of these yields nothing and
+// propagates nothing, and both halves have to fall out of the same lowering as
+// the payload-carrying case.
+variant Signal {
+  Ok,
+  Err,
+}
+
+type Pair {
+  lo: int32,
+  hi: int32,
+}
+
+// An Ok payload that is a STRUCT, so `?` can be followed by a field access.
+variant PairRes {
+  Ok { value: Pair },
+  Err { error: int32 },
+}
+
+// Negative in, Err out. Every test below steers through this one function.
+function step(n: int32): Res {
+  if (n < 0) {
+    return Res.Err { error: n };
+  }
+  return Res.Ok { value: n };
+}
+
+function pairFor(n: int32): PairRes {
+  if (n < 0) {
+    return PairRes.Err { error: n };
+  }
+  return PairRes.Ok { value: { lo: n, hi: n * 10 } };
+}
+
+function twice(a: int32): int32 {
+  return a * 2;
+}
+
+// ----- `?` in the shapes a statement desugar would miss ----------------------
+
+// Nested in a call ARGUMENT, and as an operand of `+`. Both `?`s run before the
+// add, and the first one to fail returns out of the whole expression.
+function nested(a: int32, b: int32): Res {
+  return Res.Ok { value: twice(step(a)?) + step(b)? };
+}
+
+// `?` binds tighter than `.`, so this is a field read OF the unwrapped Pair -
+// not a field read of the PairRes, which has no `hi` at all.
+function viaField(n: int32): Res {
+  return Res.Ok { value: pairFor(n)?.hi };
+}
+
+// The error path taken from inside a LOOP. The early return leaves the loop as
+// well as the function, which is a different unwind than falling off the end.
+function summed(limit: int32): Res {
+  let total: int32 = 0;
+  let i: int32 = 0;
+  while (i < limit) {
+    total = total + step(3 - i)?;
+    i = i + 1;
+  }
+  return Res.Ok { value: total };
+}
+
+// Statement position, with the value discarded. The branch still has to happen.
+function guard(n: int32): Res {
+  step(n)?;
+  return Res.Ok { value: 77 };
+}
+
+// Crossing to a DIFFERENT fallible type. Only the Err payloads have to agree;
+// the Ok halves here are int32 and bool.
+function crossed(n: int32): Flag {
+  const v: int32 = step(n)?;
+  return Flag.Ok { value: v > 1 };
+}
+
+function quiet(n: int32): Signal {
+  if (n < 0) {
+    return Signal.Err;
+  }
+  return Signal.Ok;
+}
+
+function quietCaller(n: int32): Signal {
+  quiet(n)?;
+  return Signal.Ok;
+}
+
+// ----- disposal on the early-return path -------------------------------------
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Handle implements Closer {
+  id: int32,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+function open(n: int32): Handle {
+  printf("  open %d\n", n);
+  return { id: n };
+}
+
+// Two bindings, and a `?` between them. On the Err path both are disposed, in
+// REVERSE declaration order, before the function returns - a later binding may
+// hold a borrow of an earlier one. On the Ok path the same two disposals fire
+// at the closing brace instead, so the two runs print the same four lines and
+// differ only in what follows them.
+function withHandles(n: int32): Res {
+  tracked a: Handle = open(1);
+  tracked b: Handle = open(2);
+  const v: int32 = step(n)?;
+  return Res.Ok { value: v };
+}
+
+// A `?` inside a nested block, so the unwind has two scopes to walk rather than
+// one. The inner handle goes first either way.
+function nestedHandles(n: int32): Res {
+  tracked outer: Handle = open(10);
+  if (n < 100) {
+    tracked inner: Handle = open(11);
+    const v: int32 = step(n)?;
+    printf("  reached %d\n", v);
+  }
+  return Res.Ok { value: 0 };
+}
+
+// ----- reporting -------------------------------------------------------------
+
+function show(label: string, r: Res): void {
+  switch (r) {
+    case Res.Ok { value: v }: { printf("%s ok=%d\n", label, v); }
+    case Res.Err { error: e }: { printf("%s err=%d\n", label, e); }
+  }
+}
+
+// The Ok payload is a bool, and it is branched on rather than handed to `%d` -
+// a narrow vararg is a promotion question, and this fixture is about `?`.
+function showFlag(label: string, f: Flag): void {
+  switch (f) {
+    case Flag.Ok { value: v }: {
+      if (v) {
+        printf("%s ok=true\n", label);
+      } else {
+        printf("%s ok=false\n", label);
+      }
+    }
+    case Flag.Err { error: e }: { printf("%s err=%d\n", label, e); }
+  }
+}
+
+function showSignal(label: string, s: Signal): void {
+  switch (s) {
+    case Signal.Ok: { printf("%s ok\n", label); }
+    case Signal.Err: { printf("%s err\n", label); }
+  }
+}
+
+function main(): int32 {
+  const nestedLabel: string = "nested";
+  show(nestedLabel, nested(4, 5));
+  show(nestedLabel, nested(0 - 1, 5));
+  show(nestedLabel, nested(4, 0 - 2));
+
+  const fieldLabel: string = "field";
+  show(fieldLabel, viaField(6));
+  show(fieldLabel, viaField(0 - 3));
+
+  const loopLabel: string = "loop";
+  show(loopLabel, summed(3));
+  show(loopLabel, summed(6));
+
+  const guardLabel: string = "guard";
+  show(guardLabel, guard(1));
+  show(guardLabel, guard(0 - 4));
+
+  const crossLabel: string = "cross";
+  showFlag(crossLabel, crossed(5));
+  showFlag(crossLabel, crossed(0 - 5));
+
+  const quietLabel: string = "quiet";
+  showSignal(quietLabel, quietCaller(1));
+  showSignal(quietLabel, quietCaller(0 - 1));
+
+  const handleLabel: string = "handles";
+  printf("handles happy:\n");
+  show(handleLabel, withHandles(9));
+  printf("handles sad:\n");
+  show(handleLabel, withHandles(0 - 9));
+
+  printf("nested handles happy:\n");
+  show(nestedLabel, nestedHandles(8));
+  printf("nested handles sad:\n");
+  show(nestedLabel, nestedHandles(0 - 8));
+
+  return 0;
+}

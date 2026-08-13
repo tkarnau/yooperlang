@@ -40,6 +40,7 @@ export function createASTNode(astNodeKind: ASTNodeKind, sourceLoc: SourceLocatio
     operator: TokenTags.NOTOKEN,
     strId: 0,
     intVal: 0,
+    floatVal: 0.0,
     flagA: false,
   };
 }
@@ -74,21 +75,38 @@ export function nodeAt(ref ast: AST, id: NodeId): ASTNode {
   return vec.vecGet(ref ast.nodes, id);
 }
 
-// The DECL a top-level PROGRAM child names, looking through an `export`.
+// The DECL a top-level PROGRAM child names, looking through an `export` and
+// through an ATTRIBUTE.
 //
 // `export function f() {}` parses as an EXPORT_DECL wrapping the FUNCTION_DECL
 // (the shape the JS reference uses), so every pass that walks the top level -
 // pass A, pass C, pass D, codegen - would otherwise repeat the same unwrap and
 // one of them would eventually forget. Exportedness itself is a separate
 // question, answered by `isExportDecl` at the one place that cares.
+//
+// An `@derive(display)` wrapper unwraps the same way and for the same reason.
+// The two nest in one order only - the attribute is written ABOVE the `export`,
+// so ATTRIBUTE wraps EXPORT_DECL wraps the decl - which is why this walks down
+// rather than testing once.
 export function declOf(ref ast: AST, id: NodeId): NodeId {
-  const node = nodeAt(ref ast, id);
-  if (node.kind == ASTNodeKind.EXPORT_DECL) {
-    return node.childA;
+  let at = id;
+  while (true) {
+    const node = nodeAt(ref ast, at);
+    if (node.kind == ASTNodeKind.EXPORT_DECL || node.kind == ASTNodeKind.ATTRIBUTE) {
+      at = node.childA;
+      continue;
+    }
+    return at;
   }
-  return id;
 }
 
+// Whether a top-level child is exported, looking through an attribute - the
+// `export` sits under the `@derive`, so a naive test on the outer node says no
+// for every decorated declaration.
 export function isExportDecl(ref ast: AST, id: NodeId): bool {
-  return nodeAt(ref ast, id).kind == ASTNodeKind.EXPORT_DECL;
+  const node = nodeAt(ref ast, id);
+  if (node.kind == ASTNodeKind.ATTRIBUTE) {
+    return nodeAt(ref ast, node.childA).kind == ASTNodeKind.EXPORT_DECL;
+  }
+  return node.kind == ASTNodeKind.EXPORT_DECL;
 }

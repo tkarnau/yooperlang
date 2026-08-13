@@ -8,16 +8,59 @@ import.test;
 import * as t from "std/test.yoop";
 import { suite, test, Case } from "std/test.yoop";
 import * as intr from "std/core/intrinsics.yoop";
+import * as strings from "std/core/strings.yoop";
+import * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
 import * as lex from "../lex";
 import { TokenTags } from "../lex";
+import { floatBits } from "../utils";
 
+// The scan table's order is a correctness requirement, and since it is
+// established at RUNTIME by `lexTablesNew` rather than folded at compile time,
+// these are the assertions that keep it honest. The last one is the one that
+// would survive a rewrite of the table's representation: it asks the LEXER what
+// it does with "...", which is the thing the ordering exists for.
 suite function scanTableIsSortedLongestFirst(): void {
   let test theory: Case = t.asserts("the longest scannable sorts to the front") {
-    const first = lex.TOKEN_SCAN_LIST[0].str;
+    disposable tables: lex.LexTables = lex.lexTablesNew();
+    const first = vec.vecGet(ref tables.scan, 0).str;
     theory.isSuccessful = first.len == 3;
-    theory.detail = `TOKEN_SCAN_LIST[0] is "${first}" (len ${first.len}), wanted a 3-char entry - unsorted means "..." lexes as three DOTs`;
+    theory.detail = `the first scan entry is "${first}" (len ${first.len}), wanted a 3-char entry - unsorted means "..." lexes as three DOTs`;
   }
+  let test theory: Case = t.asserts("no entry is longer than the one before it") {
+    disposable tables: lex.LexTables = lex.lexTablesNew();
+    let bad: usize = 0;
+    let i: usize = 1;
+    while (i < tables.scan.len) {
+      if (vec.vecGet(ref tables.scan, i).str.len > vec.vecGet(ref tables.scan, i - 1).str.len) {
+        bad = i;
+      }
+      i += 1;
+    }
+    theory.isSuccessful = bad == 0 && tables.scan.len > 1;
+    theory.detail = `entry ${bad} of ${tables.scan.len} is longer than the one before it; the table has to be non-increasing by spelling length`;
+  }
+  let test theory: Case = t.asserts("the keyword table is built whole") {
+    disposable tables: lex.LexTables = lex.lexTablesNew();
+    theory.isSuccessful = tables.keywords.len == 44;
+    theory.detail = `the keyword table has ${tables.keywords.len} entries, wanted 44 - a dropped push is a word that silently lexes as an IDENT`;
+  }
+  let test theory: Case = t.asserts("`...` lexes as one DOTDOTDOT and not three DOTs") {
+    theory.isSuccessful = tagRunIs("...", "DOTDOTDOT EOF");
+    theory.detail = `"..." lexed as ${describe("...")}, wanted DOTDOTDOT EOF`;
+  }
+  let test theory: Case = t.asserts("the two-char operators still beat their prefixes") {
+    theory.isSuccessful = tagRunIs(">>= ..", "RSHIFT EQ DOTDOT EOF");
+    theory.detail = `">>= .." lexed as ${describe(">>= ..")}, wanted RSHIFT EQ DOTDOT EOF`;
+  }
+}
+
+// Whether the tag run of `src` reads exactly `wanted`, space separated and
+// including the trailing EOF.
+function tagRunIs(src: string, wanted: string): bool {
+  return strings.stringEq(describe(src), wanted);
 }
 
 suite function precedenceOrdersTheBinaryOperators(): void {
@@ -60,6 +103,128 @@ suite function numericLiteralsCarryTheirValue(): void {
   }
 }
 
+// Float decoding, asserted against BIT PATTERNS rather than against a
+// comparison with another float. The whole point of float_literal.yoop is that
+// the last bit is right, and `got == 1.5` cannot tell a correctly rounded 0.1
+// from one that is an ulp off - only the 64 bits can. The expected values are
+// the IEEE-754 encodings, written by hand from the format rather than captured.
+// Each expected pattern is given as its two 32-bit HALVES rather than as one
+// 64-bit constant. Not cosmetic: this file is compiled by the JS reference,
+// whose own lexer reads an int literal through parseInt and therefore loses
+// bits past 2^53 - `0x3FF8000000000000` written here would not survive to the
+// comparison. src/dumpTokens.js documents that limitation; splitting the
+// constant is how a test works around it.
+suite function floatLiteralsDecodeExactly(): void {
+  let test theory: Case = t.asserts("1.5 is exactly 0x3FF8000000000000") {
+    theory.isSuccessful = bitsAre("1.5", 0x3FF80000, 0x00000000);
+    theory.detail = `1.5 decoded to ${bitsShown("1.5")}`;
+  }
+  let test theory: Case = t.asserts("1.0 is exactly 0x3FF0000000000000") {
+    theory.isSuccessful = bitsAre("1.0", 0x3FF00000, 0x00000000);
+    theory.detail = `1.0 decoded to ${bitsShown("1.0")}`;
+  }
+  let test theory: Case = t.asserts("0.0 is a positive zero") {
+    theory.isSuccessful = bitsAre("0.0", 0x00000000, 0x00000000);
+    theory.detail = `0.0 decoded to ${bitsShown("0.0")}`;
+  }
+  // The one that the old repeated-multiply decoder got wrong: it produced
+  // 0x4005BF0A8B145768, one ulp low.
+  let test theory: Case = t.asserts("2.718281828459045 is correctly rounded") {
+    theory.isSuccessful = bitsAre("2.718281828459045", 0x4005BF0A, 0x8B145769);
+    theory.detail = `e decoded to ${bitsShown("2.718281828459045")}`;
+  }
+  // 16 significant digits, still under 2^53, so the fast path takes it.
+  let test theory: Case = t.asserts("3.141592653589793 is correctly rounded") {
+    theory.isSuccessful = bitsAre("3.141592653589793", 0x400921FB, 0x54442D18);
+    theory.detail = `pi decoded to ${bitsShown("3.141592653589793")}`;
+  }
+  let test theory: Case = t.asserts("0.1 is the nearest double, not a repeated division") {
+    theory.isSuccessful = bitsAre("0.1", 0x3FB99999, 0x9999999A);
+    theory.detail = `0.1 decoded to ${bitsShown("0.1")}`;
+  }
+  // The old decoder produced 0x44DFE185CA57C518 here, again one ulp off.
+  let test theory: Case = t.asserts("an exponent scales in one operation") {
+    theory.isSuccessful = bitsAre("6.02214076e23", 0x44DFE185, 0xCA57C517);
+    theory.detail = `6.02214076e23 decoded to ${bitsShown("6.02214076e23")}`;
+  }
+  let test theory: Case = t.asserts("digit separators are separators in a float too") {
+    theory.isSuccessful = bitsOfFirst("1_000.5") == bitsOfFirst("1000.5");
+    theory.detail = `1_000.5 decoded to ${bitsShown("1_000.5")}, 1000.5 to ${bitsShown("1000.5")}`;
+  }
+}
+
+// Which spellings are one FLOATLITERAL and which are something else. Every one
+// of these was checked against the reference; `1E5` is the one the bootstrap
+// used to get wrong, splitting it into INTLITERAL(1) and IDENT(E5).
+suite function floatLiteralFormsMatchTheReference(): void {
+  let test theory: Case = t.asserts("1e5 is one float token") {
+    theory.isSuccessful = isOneFloat("1e5");
+    theory.detail = `1e5 lexed as ${describe("1e5")}`;
+  }
+  let test theory: Case = t.asserts("an UPPERCASE exponent is a float too") {
+    theory.isSuccessful = isOneFloat("1E5") && bitsOfFirst("1E5") == bitsOfFirst("1e5");
+    theory.detail = `1E5 lexed as ${describe("1E5")}`;
+  }
+  let test theory: Case = t.asserts("a signed exponent lexes") {
+    theory.isSuccessful = isOneFloat("1.5e-3") && isOneFloat("1.5E+3");
+    theory.detail = `1.5e-3 lexed as ${describe("1.5e-3")}, 1.5E+3 as ${describe("1.5E+3")}`;
+  }
+  // A leading dot is not a float on either side - `.5` is a DOT then an int -
+  // and neither is a trailing one, which is why the fraction test needs a digit
+  // after the point.
+  let test theory: Case = t.asserts("a leading dot is not a float literal") {
+    const toks = tokensOf(".5");
+    theory.isSuccessful = toks.len >= 1 && toks[0].tag == TokenTags.DOT;
+    theory.detail = `.5 lexed as ${describe(".5")}`;
+  }
+  let test theory: Case = t.asserts("a trailing dot is an int then a dot") {
+    const toks = tokensOf("1.");
+    theory.isSuccessful = toks.len >= 2
+      && toks[0].tag == TokenTags.INTLITERAL
+      && toks[1].tag == TokenTags.DOT;
+    theory.detail = `1. lexed as ${describe("1.")}`;
+  }
+  // The fraction rule is what keeps a method call on an integer working, and
+  // the same lookahead is why a source buffer ending in `1.` must not be read
+  // one byte past its end.
+  let test theory: Case = t.asserts("a hex literal has no fractional part") {
+    const toks = tokensOf("0xFF");
+    theory.isSuccessful = toks.len >= 1 && toks[0].tag == TokenTags.INTLITERAL;
+    theory.detail = `0xFF lexed as ${describe("0xFF")}`;
+  }
+}
+
+// Outside the exactly-decodable range the lexer REFUSES rather than returning a
+// value that is off in the last bit. Both halves of the range are tested,
+// because they are two separate checks with two separate messages.
+suite function undecodableFloatsAreRefusedByName(): void {
+  let test theory: Case = t.asserts("too many significant digits is refused") {
+    theory.isSuccessful = lexRefusalMentions("1.2345678901234567", "significant digits");
+    theory.detail = `got: ${lexError("1.2345678901234567")}`;
+  }
+  let test theory: Case = t.asserts("a scale past 10^22 is refused") {
+    theory.isSuccessful = lexRefusalMentions("1e308", "decimal scale");
+    theory.detail = `got: ${lexError("1e308")}`;
+  }
+  let test theory: Case = t.asserts("a scale below 10^-22 is refused") {
+    theory.isSuccessful = lexRefusalMentions("1e-308", "decimal scale");
+    theory.detail = `got: ${lexError("1e-308")}`;
+  }
+  // An overflowing literal is refused here rather than becoming an infinity.
+  // The reference refuses it too, with "invalid float literal Infinity"; this
+  // side catches it earlier, as an out-of-range scale.
+  let test theory: Case = t.asserts("a literal that would overflow float64 is refused") {
+    theory.isSuccessful = lexRefusalMentions("1.0e400", "decimal scale");
+    theory.detail = `got: ${lexError("1.0e400")}`;
+  }
+  // Right at the edge in each direction, so the boundary is asserted rather
+  // than assumed. 10^22 is the largest power of ten a float64 holds exactly.
+  let test theory: Case = t.asserts("the edges of the range still decode") {
+    theory.isSuccessful = isOneFloat("1e22") && isOneFloat("1e-22");
+    theory.detail = `1e22 lexed as ${describe("1e22")}, 1e-22 as ${describe("1e-22")}`;
+  }
+}
+
 suite function commentsAndWhitespaceDisappear(): void {
   let test theory: Case = t.asserts("a nested block comment is skipped whole") {
     const toks = tokensOf("/* outer /* inner */ still outer */ 7");
@@ -77,4 +242,64 @@ function tokensOf(src: string): lex.Token[] {
     case Result.Ok { value: toks }: { return toks; }
     case Result.Err { error: e }: { return []; }
   }
+}
+
+// The 64 bits of the first token's float value, which is what a float assertion
+// compares. A refusal or a non-float first token gives 1, a bit pattern no
+// float has (it is the smallest subnormal), so a wrong answer never passes.
+function bitsOfFirst(src: string): uint64 {
+  const toks = tokensOf(src);
+  if (toks.len == 0 || toks[0].tag != TokenTags.FLOATLITERAL) {
+    return 1;
+  }
+  return floatBits(toks[0].floatVal);
+}
+
+// The comparison, in 32-bit halves. See the note on the suite for why the
+// expected value cannot be one constant.
+function bitsAre(src: string, hi: uint64, lo: uint64): bool {
+  const b = bitsOfFirst(src);
+  return (b >> 32) == hi && (b & 0xFFFFFFFF) == lo;
+}
+
+// The two halves, for a failure message that can be compared against the
+// expectation by eye.
+function bitsShown(src: string): string {
+  const b = bitsOfFirst(src);
+  return `hi=${b >> 32} lo=${b & 0xFFFFFFFF}`;
+}
+
+function isOneFloat(src: string): bool {
+  const toks = tokensOf(src);
+  // one FLOATLITERAL plus the EOF the stream always ends with
+  return toks.len == 2 && toks[0].tag == TokenTags.FLOATLITERAL;
+}
+
+// The tag run, for a failure message that says what actually happened rather
+// than just that something did not match.
+function describe(src: string): string {
+  const toks = tokensOf(src);
+  if (toks.len == 0) {
+    return `a lex error: ${lexError(src)}`;
+  }
+  disposable out: Text = text.make(32);
+  let i: usize = 0;
+  while (i < toks.len) {
+    if (i > 0) { text.push(ref out, " "); }
+    text.push(ref out, lex.tagName(toks[i].tag));
+    i += 1;
+  }
+  return text.view(ref out);
+}
+
+function lexError(src: string): string {
+  switch (lex.tokenize(intr.stringAsBytes(src))) {
+    case Result.Ok { value: toks }: { return "<no error>"; }
+    case Result.Err { error: e }: { return e; }
+  }
+}
+
+function lexRefusalMentions(src: string, needle: string): bool {
+  const message = lexError(src);
+  return strings.stringIndexOf(message, needle) < message.len;
 }

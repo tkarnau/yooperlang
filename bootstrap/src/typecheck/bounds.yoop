@@ -1,0 +1,168 @@
+module typecheck;
+
+/*
+  Type-parameter BOUNDS: `function quickSort<T implements Comparable<T>>(...)`.
+
+  A bound is a promise made at the DECLARATION and verified at every
+  instantiation. The body is checked ONCE, with the bound's methods callable on
+  the opaque parameter, and each call site proves its argument keeps the
+  promise. That is the reference's design and it is what keeps this layer's
+  central invariant intact - a generic body has one decoration vector, written
+  in terms of its parameters, that codegen walks per instance and substitutes on
+  the way out. Re-checking the body per instantiation would need one decoration
+  vector per instance, and it would move every diagnostic from the decl (where
+  the author can fix it) to the call sites (where they cannot).
+
+  Three questions, and they are the same question from three sides:
+
+    resolveTypeParamBounds   what did the decl PROMISE      (pass C, here)
+    boundMethodOn            what may the BODY call         (bounds_use.yoop)
+    checkBoundsSatisfied     does an ARGUMENT keep it       (bounds_use.yoop)
+
+  A bound naming a GENERIC trait (`Comparable<T>`) has to APPLY that trait, and
+  that lives next door in trait_apply.yoop - it is the one slice of generic
+  trait instantiation bounds needed, and an `implements` clause needs the same
+  one.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { SourceLocation } from "../diagnostics";
+
+// ----- pass C: what the decl promised ---------------------------------------
+
+// Resolve every `implements` bound on a generic decl's parameters and re-set
+// the TypeParam arena slots with them.
+//
+// Called with the parameter names ALREADY in scope, which is what lets one
+// parameter's bound mention another (`<T implements Cmp<K>, K>`). The slots
+// were interned empty by pass A; this is the ordinary shell-then-fill, and it
+// has to be a fill rather than a fresh intern because the ids are already
+// baked into the template's fields, signatures and method tables.
+export function resolveTypeParamBounds(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  ref params: Vec<TypeId>
+): void {
+  if (declNode.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, declNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount && i < params.len) {
+    const paramNode = nodeAt(ref ast, childAt(ref ast, list, i));
+    if (paramNode.childA != 0) {
+      const paramId = vec.vecGet(ref params, i);
+      disposable bounds: Vec<TypeId> =
+        resolveBoundList(ref prog, ref tm, ref ast, paramNode);
+      setTypeParamBounds(ref prog, paramId, paramNode.name, ref bounds);
+    }
+    i += 1;
+  }
+}
+
+function resolveBoundList(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  paramNode: ASTNode
+): Vec<TypeId> propagates<disposable> {
+  let bounds: Vec<TypeId> = vec.vecNew(2);
+  const list = nodeAt(ref ast, paramNode.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const annotId = childAt(ref ast, list, i);
+    const t = resolveOneBound(ref prog, ref tm, ref ast, annotId, paramNode.name);
+    if (t != TYPE_ERROR_ID) {
+      vec.vecPush(ref bounds, t);
+    }
+    i += 1;
+  }
+  return bounds;
+}
+
+// One bound annotation -> the trait it names, with a generic trait's arguments
+// applied.
+//
+// The name is looked up DIRECTLY rather than through resolveTypeAnnotation,
+// because a trait name is not a type annotation the rest of the language
+// accepts: `x: Comparable<T>` is an error and has to stay one. Only the bound
+// position gives a trait name arguments.
+function resolveOneBound(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  annotId: NodeId,
+  paramName: string
+): TypeId {
+  const annot = nodeAt(ref ast, annotId);
+  if (annot.kind != ASTNodeKind.TYPE_ANNOTATION_TYPE_NAME) {
+    reportError(
+      ref prog,
+      `bound on type parameter "${paramName}" must be a trait name`,
+      annot.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  const symId = lookupOwnName(ref tm, annot.name);
+  if (symId == SYMBOL_NONE_ID) {
+    reportError(
+      ref prog,
+      `unknown trait "${annot.name}" in bound on type parameter "${paramName}"`,
+      annot.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  let traitType: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Trait { typeId: t }: { traitType = t; }
+    default: {
+      reportError(
+        ref prog,
+        `bound on type parameter "${paramName}" must be a trait, got "${annot.name}"`,
+        annot.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+  }
+
+  // Both arities go through applyTraitArgs, including the empty one: a bare
+  // `T implements Comparable` on a GENERIC trait is an arity error and gets the
+  // same message a wrong count does. The reference registers a generic trait
+  // under its spelled-out name, so it answers `unknown trait "Comparable"`
+  // there and `unknown trait "Comparable<T, T>"` for a wrong count - which
+  // sends the reader looking for a declaration that is right in front of them.
+  disposable args: Vec<TypeId> = vec.vecNew(2);
+  if (annot.childA != 0) {
+    const argList = nodeAt(ref ast, annot.childA);
+    let a: usize = 0;
+    while (a < argList.childCount) {
+      vec.vecPush(ref args,
+        resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, argList, a)));
+      a += 1;
+    }
+  }
+  return applyTraitArgs(ref prog, traitType, ref args, annot.name, annot.sourceLoc);
+}
+
+function setTypeParamBounds(
+  ref prog: Program,
+  paramId: TypeId,
+  paramName: string,
+  ref bounds: Vec<TypeId>
+): void {
+  switch (typeAt(ref prog, paramId)) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: old }: {
+      let copied: Vec<TypeId> = vec.vecNew(bounds.len);
+      vec.vecExtendFrom(ref copied, vec.vecAsArray(ref bounds));
+      setType(ref prog, paramId, Type.TypeParam {
+        name: n, originDecl: o, bounds: copied,
+      });
+    }
+    default: { }
+  }
+}

@@ -1,0 +1,28 @@
+// The SAME import written in two files of one directory module.
+//
+// `./lib/shared` is two files that each `import * as counter from
+// "../counter.yoop"`, and one of them also takes `bump` by name. A directory
+// module's files each import what they use, so an alias gets bound once per
+// file that mentions it - and binding it to the same module twice is ONE
+// import rather than a redeclaration. This used to be refused as a collision,
+// which made `vec` unusable in more than one file of a module.
+//
+// The other half of the rule - one alias bound to two DIFFERENT modules, which
+// is a real collision and stays refused - cannot live in a slice fixture,
+// because a fixture has to compile. It is asserted in typecheck.test.yoop.
+//
+// This is its own entry rather than an addition to dir_modules.yoop: that
+// fixture is pinned by source_graph's tests as "one directory module plus the
+// entry", and a second module in it would weaken that count.
+
+import * as shared from "./lib/shared";
+
+function main(): int {
+  // Through the namespace, from the file that declared it.
+  printf("once=%d\n", shared.bumpedOnce(5));
+  // Through the named import in that same file.
+  printf("byName=%d\n", shared.bumpedByName(5));
+  // Through the namespace bound AGAIN in the other file, calling a sibling.
+  printf("twice=%d\n", shared.bumpedTwice(5));
+  return 0;
+}

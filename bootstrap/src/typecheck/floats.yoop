@@ -1,0 +1,65 @@
+module typecheck;
+
+/*
+  Pass D's float work: which operators a float keeps, and which literal nodes
+  may still be re-pinned.
+
+  Small on purpose. Almost everything about a float falls out of rules that
+  already existed - both operands of a binary expression must be the SAME type,
+  so no width mixing and no int/float mixing needs saying, and the untyped
+  literal pins through the same `expected` channel an untyped int does. What is
+  left is the operator SET, which is the one thing the shared path gets wrong by
+  default: `left == right` would let `a & b` on two float64s straight through to
+  codegen.
+
+  The rules, all established by PROBING the reference:
+
+    - `+ - * / %` all work, `%` included. `frem` is a real instruction and the
+      reference emits it.
+    - `== != < > <= >=` work, as ORDERED comparisons - a NaN on either side
+      makes every one of them false, including `!=`.
+    - `& | ^ << >>` do not. Note the reference is INCONSISTENT here and this
+      side is deliberately not: `a | b` on floats is a typecheck error there,
+      while `a & b` passes typecheck and crashes its codegen with "unknown
+      binary op amp for type prim/float64". One diagnostic, one rule, both
+      operators.
+    - `!x` needs a bool and an array index needs an integer, so neither reaches
+      here at all; both refusals already existed and already name the type.
+*/
+
+import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { TokenTags, tagSpelling } from "../lex";
+
+// True when the operator survives on a float. Reports and returns false when it
+// does not, so the caller reads as a guard.
+export function checkFloatOperator(ref prog: Program, expr: ASTNode): bool {
+  switch (expr.operator) {
+    case TokenTags.PLUS, TokenTags.MINUS, TokenTags.MULT, TokenTags.DIVIDE,
+         TokenTags.MODULUS,
+         TokenTags.EQEQ, TokenTags.NEQ,
+         TokenTags.LT, TokenTags.GT, TokenTags.LTE, TokenTags.GTE: {
+      return true;
+    }
+    default: { }
+  }
+  reportError(
+    ref prog,
+    `operator "${tagSpelling(expr.operator)}" cannot be applied to two floats - the bitwise family is integers only`,
+    expr.sourceLoc
+  );
+  return false;
+}
+
+// A bare float literal, which is what may still be re-pinned after it has been
+// checked once. The float twin of `isIntLiteralNode`, and `-1.5` counts for the
+// same reason: the negation of a literal is still one.
+export function isFloatLiteralNode(ref ast: AST, exprId: NodeId): bool {
+  const node = nodeAt(ref ast, exprId);
+  if (node.kind == ASTNodeKind.FLOAT_LITERAL) {
+    return true;
+  }
+  if (node.kind == ASTNodeKind.UNARY_EXPRESSION && node.operator == TokenTags.MINUS) {
+    return nodeAt(ref ast, node.childA).kind == ASTNodeKind.FLOAT_LITERAL;
+  }
+  return false;
+}

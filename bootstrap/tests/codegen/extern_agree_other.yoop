@@ -1,0 +1,5 @@
+extern "C" from "stdio.h" { function puts(s: string): int32; }
+
+export function hello(): int32 {
+  return puts("hello");
+}

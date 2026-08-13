@@ -63,8 +63,10 @@ function main(): int {
           disposable irText: Text = out.ir;
           disposable irPath: Text = text.fromString(outPath);
           text.push(ref irPath, ".ll");
+          disposable libs: Vec<string> = out.linkLibraries;
           const linkErr = linkExecutable(
-            ref irText, text.view(ref irPath), outPath, out.needsRuntime, env.argAt(0)
+            ref irText, text.view(ref irPath), outPath, out.needsRuntime,
+            ref libs, env.argAt(0)
           );
           if (linkErr.len > 0) {
             log.error(linkErr);

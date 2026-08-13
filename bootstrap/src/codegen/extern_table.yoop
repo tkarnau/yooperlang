@@ -1,0 +1,233 @@
+module codegen;
+
+// ONE `declare` per symbol, for the whole LLVM module.
+//
+// Three things declare C symbols into that one module and none of them knows
+// about the others:
+//
+//   * a user's `extern "C" { function malloc(size: usize): unsafe_ptr<void>; }`
+//   * the template-literal lowering, which is libc rather than std
+//     (instr_str.yoop: strlen / malloc / free / memcpy / sprintf)
+//   * the yoop runtime bridge (yoop_ctx_alloc, the errno family)
+//
+// LLVM lets a symbol be declared exactly once, so all three go through this
+// table. std/core/alloc.yoop declaring `malloc` beside a template literal was
+// 44 of the 420 files in the surface probe - the largest single bucket - and it
+// surfaced as clang's `invalid redefinition of function 'malloc'`, which names
+// neither of the two declarations.
+//
+// COMPATIBLE means "spells the same LLVM declaration": same return type, same
+// fixed parameter types in the same order, same `...`. That is everything a
+// `declare` says, so two yoop signatures agreeing on it are interchangeable at
+// the ABI (`usize` and `uint64` are both `i64`; `string` and
+// `unsafe_ptr<void>` are both `ptr`) and two that disagree really do disagree.
+// A compatible re-declaration REUSES the line; an incompatible one is refused
+// BY NAME, which is a deliberate divergence - the reference emits both and
+// leaves clang to reject the second with no source line.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+
+// Where one symbol's signature sits in `ExternTable.types`.
+//
+// A SPAN rather than a `Vec<string>` of its own: a container nested inside a
+// map value is a shallow copy that nothing can dispose without freeing storage
+// the table still owns, which bootstrap/README.md warns about twice. One flat
+// vector has exactly one thing to free.
+export type ExternSig {
+  start: usize,     // index of the RETURN type in `types`
+  count: usize,     // 1 + the number of FIXED parameters
+  variadic: bool,
+}
+
+// Held as a FIELD of the Emitter, so it needs a real `dispose` of its own -
+// disposing the Emitter reaches its disposable fields, and a
+// `propagates<disposable>` type with no method leaves a call to a symbol
+// nothing defines.
+export type ExternTable implements Disposable propagates<disposable> {
+  byName: Map<string, usize>,   // symbol name -> index into `sigs`
+  sigs: Vec<ExternSig>,
+  types: Vec<string>,           // the return type then the parameters, per sig
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.byName);
+    Disposable.dispose(ref self.sigs);
+    Disposable.dispose(ref self.types);
+  }
+}
+
+export function externTableNew(): ExternTable propagates<disposable> {
+  // Annotated rather than inline: `V` is not inferable from stringKeyOps alone
+  // and there is no turbofish.
+  let byName: Map<string, usize> = map.mapNew(16, map.stringKeyOps());
+  let sigs: Vec<ExternSig> = vec.vecNew(16);
+  let types: Vec<string> = vec.vecNew(32);
+  return { byName: byName, sigs: sigs, types: types };
+}
+
+// Declare `name` once. Emits the line the first time, does nothing on a
+// COMPATIBLE repeat, and returns the refusal on an incompatible one.
+//
+// Returns "" on success either way, so a caller that has nothing to say about
+// a duplicate can just check the length.
+export function externDeclare(
+  ref e: Emitter,
+  name: string,
+  ret: string,
+  params: string[],
+  variadic: bool
+): string {
+  switch (map.mapGet(ref e.declared.byName, name)) {
+    case Option.Some { value: idx }: {
+      if (sigMatches(ref e.declared, idx, ret, params, variadic)) {
+        return "";
+      }
+      return externConflict(ref e.declared, idx, name, ret, params, variadic);
+    }
+    case Option.None: { }
+  }
+  recordSig(ref e.declared, name, ret, params, variadic);
+  emitDeclareLine(ref e, name, ret, params, variadic);
+  return "";
+}
+
+// Whether the signature stored at `idx` spells the same LLVM declaration.
+function sigMatches(
+  ref t: ExternTable,
+  idx: usize,
+  ret: string,
+  params: string[],
+  variadic: bool
+): bool {
+  const sig = vec.vecGet(ref t.sigs, idx);
+  if (sig.variadic != variadic || sig.count != params.len + 1) {
+    return false;
+  }
+  if (!text.equals(vec.vecGet(ref t.types, sig.start), ret)) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < params.len) {
+    if (!text.equals(vec.vecGet(ref t.types, sig.start + 1 + i), params[i])) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+function recordSig(
+  ref t: ExternTable,
+  name: string,
+  ret: string,
+  params: string[],
+  variadic: bool
+): void {
+  const start = t.types.len;
+  vec.vecPush(ref t.types, ret);
+  let i: usize = 0;
+  while (i < params.len) {
+    vec.vecPush(ref t.types, params[i]);
+    i += 1;
+  }
+  map.mapInsert(ref t.byName, name, t.sigs.len);
+  vec.vecPush(ref t.sigs, { start: start, count: params.len + 1, variadic: variadic });
+}
+
+// The refusal, naming the symbol and BOTH spellings - the reader has to see
+// which two declarations disagree, and the yoop source spells neither of them
+// in LLVM terms.
+//
+// A template literal is fine here: this path is aborting the compile.
+function externConflict(
+  ref t: ExternTable,
+  idx: usize,
+  name: string,
+  ret: string,
+  params: string[],
+  variadic: bool
+): string {
+  disposable had: Text = text.make(48);
+  pushStoredSignature(ref had, ref t, idx);
+  disposable wanted: Text = text.make(48);
+  pushSignature(ref wanted, ret, params, variadic);
+  return `"${name}" is declared twice with different signatures - ${text.view(ref had)} and then ${text.view(ref wanted)}. One LLVM module holds the whole program, so a symbol may be declared in it exactly once`;
+}
+
+//   i32 (ptr, ...)
+function pushSignature(ref out: Text, ret: string, params: string[], variadic: bool): void {
+  text.push(ref out, ret);
+  text.push(ref out, " (");
+  let i: usize = 0;
+  while (i < params.len) {
+    if (i > 0) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, params[i]);
+    i += 1;
+  }
+  if (variadic) {
+    if (params.len > 0) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, "...");
+  }
+  text.push(ref out, ")");
+}
+
+// The same, for a signature already in the table.
+function pushStoredSignature(ref out: Text, ref t: ExternTable, idx: usize): void {
+  const sig = vec.vecGet(ref t.sigs, idx);
+  text.push(ref out, vec.vecGet(ref t.types, sig.start));
+  text.push(ref out, " (");
+  let i: usize = 1;
+  while (i < sig.count) {
+    if (i > 1) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, vec.vecGet(ref t.types, sig.start + i));
+    i += 1;
+  }
+  if (sig.variadic) {
+    if (sig.count > 1) {
+      text.push(ref out, ", ");
+    }
+    text.push(ref out, "...");
+  }
+  text.push(ref out, ")");
+}
+
+//   declare i32 @printf(ptr, ...)
+//
+// The comma before `...` is conditional: `f(...)` is a legal C declaration and
+// `f(, ...)` is not.
+function emitDeclareLine(
+  ref e: Emitter,
+  name: string,
+  ret: string,
+  params: string[],
+  variadic: bool
+): void {
+  text.push(ref e.globals, "declare ");
+  text.push(ref e.globals, ret);
+  text.push(ref e.globals, " @");
+  text.push(ref e.globals, name);
+  text.push(ref e.globals, "(");
+  let i: usize = 0;
+  while (i < params.len) {
+    if (i > 0) {
+      text.push(ref e.globals, ", ");
+    }
+    text.push(ref e.globals, params[i]);
+    i += 1;
+  }
+  if (variadic) {
+    if (params.len > 0) {
+      text.push(ref e.globals, ", ");
+    }
+    text.push(ref e.globals, "...");
+  }
+  text.push(ref e.globals, ")\n");
+}

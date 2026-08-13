@@ -1,0 +1,20 @@
+module shared;
+
+// One half of the case this module exists for: BOTH files here import
+// ../counter.yoop under the alias `counter`, and this one also takes `bump` by
+// name. A directory module's files each import what they use, so an alias is
+// bound once per file that mentions it - and binding it to the SAME module
+// twice is one import rather than a redeclaration.
+//
+// Binding it to a DIFFERENT module under one name would be a real collision and
+// is still refused; that half is asserted in typecheck.test.yoop.
+
+import { bump }, * as counter from "../counter.yoop";
+
+export function bumpedOnce(n: int): int {
+  return counter.bump(n);
+}
+
+export function bumpedByName(n: int): int {
+  return bump(n);
+}

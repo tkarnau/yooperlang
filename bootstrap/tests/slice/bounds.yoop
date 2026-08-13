@@ -1,0 +1,127 @@
+// Type-parameter BOUNDS - `<T implements Comparable<T>>`.
+//
+// A bound is a promise made at the DECLARATION and kept at every instantiation.
+// The body is CHECKED ONCE with the parameter left opaque, calling the bound's
+// methods on it, and EMITTED once per instantiation with each call dispatched
+// statically to the concrete type's own method. That is why this file has to
+// reach an executable to be worth anything: the checking half would pass just
+// as happily if every instance called the same function.
+//
+// What each section pins down:
+//
+//   1. one bound, two implementers - the same source line lands on two symbols
+//   2. multiple bounds - `(A, B)`, and both callable in one body
+//   3. a GENERIC trait bound naming the parameter itself, which is the shape a
+//      sort needs and the one that required substituting a trait's own
+//      parameter
+//   4. a bounded generic calling ANOTHER bounded generic, passing its opaque
+//      `T` along - the case that needs the monomorphization set to be CLOSED
+//      before codegen runs, because the call site records `partition_T`
+//   5. `ref xs[i]`, borrowing an array element, which any real comparison sort
+//      needs
+
+// ----- 1. one bound, two implementers ---------------------------------------
+
+trait Showable {
+  function show(ref self): int32;
+}
+
+type Lit implements Showable {
+  n: int32,
+  function show(ref self): int32 { return self.n; }
+}
+
+type Doubler implements Showable {
+  n: int32,
+  function show(ref self): int32 { return self.n * 2; }
+}
+
+// ONE body. `Showable.show(ref x)` resolves against the bound here and against
+// the instantiated type at each call site, so this emits twice.
+function describe<T implements Showable>(ref x: T): int32 {
+  return Showable.show(ref x);
+}
+
+// ----- 2. multiple bounds ---------------------------------------------------
+
+trait Weighted {
+  function weight(ref self): int32;
+}
+
+type Crate implements (Showable, Weighted) {
+  n: int32,
+  function show(ref self): int32 { return self.n; }
+  function weight(ref self): int32 { return self.n + 100; }
+}
+
+function summarize<T implements (Showable, Weighted)>(ref x: T): int32 {
+  return Showable.show(ref x) + Weighted.weight(ref x);
+}
+
+// ----- 3. a generic trait bound naming the parameter ------------------------
+
+trait Ordered<U> {
+  function before(ref self, other: U): int32;
+}
+
+type Num implements Ordered<Num> {
+  v: int32,
+  function before(ref self, other: Num): int32 {
+    if (self.v < other.v) { return 1; }
+    return 0;
+  }
+}
+
+// `Ordered<T>` with `T` the function's own parameter. The trait declares
+// `before(ref self, other: U)`, and what the body is checked against is
+// `before(ref T, T)` - the trait's `U` substituted by this `T`.
+function firstIsSmaller<T implements Ordered<T>>(ref a: T, b: T): int32 {
+  return Ordered.before(ref a, b);
+}
+
+// ----- 4 and 5. a bounded generic calling a bounded generic -----------------
+
+// `smallestIndex` calls `firstIsSmaller` with its own opaque `T`, so pass D
+// records an instance whose argument is still a type parameter. Closing the
+// instance set is what turns that into a call to the real monomorphization.
+// `ref xs[i]` is the borrow of an array element.
+function smallestIndex<T implements Ordered<T>>(xs: T[]): usize {
+  let best: usize = 0;
+  let i: usize = 1;
+  while (i < xs.len) {
+    if (firstIsSmaller(ref xs[i], xs[best]) == 1) {
+      best = i;
+    }
+    i = i + 1;
+  }
+  return best;
+}
+
+function main(): int32 {
+  let a: Lit = { n: 7 };
+  let b: Doubler = { n: 7 };
+  // Same call, two symbols: 7 and 14.
+  printf("%s\n", `describe lit=${describe(ref a)} doubler=${describe(ref b)}`);
+
+  let c: Crate = { n: 5 };
+  printf("%s\n", `summarize=${summarize(ref c)}`);
+
+  let lo: Num = { v: 2 };
+  let hi: Num = { v: 9 };
+  printf("%s\n", `ordered lo<hi=${firstIsSmaller(ref lo, hi)} hi<lo=${firstIsSmaller(ref hi, lo)}`);
+
+  let nums: Num[] = [{ v: 8 }, { v: 3 }, { v: 5 }];
+  printf("%s\n", `smallest at ${smallestIndex(nums)}`);
+
+  // A borrowed element is the caller's own storage, so writing through the
+  // borrow is visible in the array. Same property `refs.yoop` asserts one level
+  // up, checked here for an element rather than a binding.
+  bump(ref nums[0]);
+  printf("%s\n", `after bump ${nums[0].v} ${nums[1].v}`);
+
+  return 0;
+}
+
+function bump(ref n: Num): void {
+  n.v = n.v + 1;
+}

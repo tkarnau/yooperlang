@@ -15,7 +15,8 @@ import { Result } from "std/core/types.yoop";
 import * as bytes from "std/core/bytes.yoop";
 import * as str from "std/core/strings.yoop";
 import { ParsingError } from "../diagnostics";
-import { TokenTags, LexedVal, createLexedVal, lexNext } from "../lex";
+import { disposable } from "std/core/kinds.yoop";
+import { TokenTags, LexedVal, LexTables, createLexedVal, lexNext, lexTablesNew } from "../lex";
 
 // `module <name>;` at the very top of a file, or "" when there is none.
 //
@@ -36,8 +37,12 @@ export function parseModuleHeader(ref ps: ParserState): Result<string, ParsingEr
 // the file is parsed for real.
 export function moduleHeaderName(src: uint8[]): string {
   let cursor = src;
+  // Three tokens want the same tables the whole file's parse wants; there is no
+  // module-level table to share, so this owns one for the length of the peek.
+  // See scan_tables.yoop.
+  disposable tables: LexTables = lexTablesNew();
 
-  const first = lexAt(ref cursor, 0);
+  const first = lexAt(ref tables, ref cursor, 0);
   if (first.token.tag != TokenTags.IDENT) {
     return "";
   }
@@ -45,12 +50,12 @@ export function moduleHeaderName(src: uint8[]): string {
     return "";
   }
 
-  const name = lexAt(ref cursor, first.nextPos);
+  const name = lexAt(ref tables, ref cursor, first.nextPos);
   if (name.token.tag != TokenTags.IDENT) {
     return "";
   }
 
-  const semi = lexAt(ref cursor, name.nextPos);
+  const semi = lexAt(ref tables, ref cursor, name.nextPos);
   if (semi.token.tag != TokenTags.SEMICOLON) {
     return "";
   }
@@ -60,8 +65,8 @@ export function moduleHeaderName(src: uint8[]): string {
 // One token, or an EOF placeholder when the source will not lex. A lex error
 // here is not this function's to report - the real parse hits it too, with a
 // location and a message.
-function lexAt(ref src: uint8[], pos: usize): LexedVal {
-  switch (lexNext(src, pos)) {
+function lexAt(ref tables: LexTables, ref src: uint8[], pos: usize): LexedVal {
+  switch (lexNext(ref tables, src, pos)) {
     case Result.Ok { value: lexed }: { return lexed; }
     case Result.Err { error: e }: { return createLexedVal(); }
   }

@@ -1,4 +1,6 @@
 classify: -1 0 1
 sumTo(10)=55 sumTo(0)=0
 sum of 1..4 is 10
+findFirst: 1 -1
+countTo: 107
 exit=0

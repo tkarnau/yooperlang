@@ -1,0 +1,52 @@
+// `@derive(display)` parses and WRAPS the declaration it decorates, and every
+// pass reaches the decl through declOf, which looks through the wrapper the
+// same way it looks through an `export`.
+//
+// So a decorated type is an ORDINARY type here: it has its fields, it passes by
+// value, it can be exported and imported. What is not built is the expansion -
+// generating the `toString` from the field annotations - which is why nothing
+// below interpolates one. typecheck/derive.yoop records the three things that
+// expansion waits on, and interpolating a derived type is refused BY NAME
+// saying so (asserted in typecheck.test.yoop, since a fixture has to compile).
+
+@derive(display)
+export type Point {
+  x: int,
+  y: int,
+}
+
+@derive(display)
+variant Shape {
+  Circle { r: int },
+  Empty,
+}
+
+// Undecorated, to keep the decorated ones honest: both shapes reach the same
+// passes and must behave identically.
+type Plain {
+  n: int,
+}
+
+function areaish(s: Shape): int {
+  switch (s) {
+    case Shape.Circle { r: r }: { return r * r; }
+    case Shape.Empty: { return 0; }
+  }
+}
+
+function main(): int {
+  const p: Point = { x: 3, y: 4 };
+  printf("fields=%d %d\n", p.x, p.y);
+
+  // A decorated type passes by value like any other.
+  const q: Point = p;
+  printf("copied=%d\n", q.x + q.y);
+
+  const c: Shape = Shape.Circle { r: 5 };
+  const e: Shape = Shape.Empty;
+  printf("variant=%d %d\n", areaish(c), areaish(e));
+
+  const pl: Plain = { n: 9 };
+  printf("plain=%d\n", pl.n);
+  return 0;
+}

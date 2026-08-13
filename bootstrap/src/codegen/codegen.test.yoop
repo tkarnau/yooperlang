@@ -1,0 +1,374 @@
+// Tests for the `codegen` module.
+//
+// These drive the real pipeline (lex -> parse -> typecheck -> codegen) over
+// source literals and small on-disk fixtures, then read the emitted IR TEXT.
+// Both things they are about are properties of the whole MODULE rather than of
+// any one instruction - which `declare` lines it holds, and whether linking it
+// needs the yoop runtime - and both used to be decided in three places that
+// could not see each other. That is 2.1 and 2.3 in
+// plans/bootstrap-completion.md.
+//
+// Anything that has to RUN belongs in bootstrap/tests/slice/ instead.
+
+import.test;
+import * as t from "std/test.yoop";
+import { suite, test, Case } from "std/test.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import * as fs from "std/fs.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { Result } from "std/core/types.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
+import { emptyArena } from "../ast";
+import { Module, ModuleGraph, LoadModuleResult, LoadGraphResult, moduleFromSource,
+  singleModuleGraph, loadModuleGraph } from "../source_graph";
+import { Program, typecheckProgram } from "../typecheck";
+import { codegenProgram } from "../codegen";
+
+// std/core/alloc.yoop's own libc block, which is the collision the
+// template-literal lowering had with it: `malloc` and `free` spelled exactly as
+// instr_str.yoop spells them, from a module that also builds a string.
+const LIBC_ALLOC: string = "import.unsafe;\nextern \"C\" from \"stdlib.h\" {\n  function malloc(size: usize): unsafe_ptr<void>;\n  function free(p: unsafe_ptr<void>): void;\n}\n";
+
+suite function aUserExternAndALoweringShareOneDeclare(): void {
+  // The template literal is what pulls in the string builder's own malloc.
+  const src = `${LIBC_ALLOC}function main(): int32 {\n  const n: int32 = 3;\n  const s: string = \`n=\${n}\`;\n  return int32(s.len);\n}\n`;
+
+  let test theory: Case = t.asserts("the program still emits IR at all") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = e.error.len == 0;
+    theory.detail = `codegen refused it: ${e.error}`;
+  }
+  let test theory: Case = t.asserts("`malloc` is declared exactly once") {
+    disposable e: Emitted = emitSource(src);
+    const n = occurrences(text.view(ref e.ir), "declare ptr @malloc(i64)");
+    theory.isSuccessful = n == 1;
+    theory.detail = `the module holds ${n} malloc declares, wanted 1 - clang rejects the second as an invalid redefinition`;
+  }
+  let test theory: Case = t.asserts("`free` is declared exactly once") {
+    disposable e: Emitted = emitSource(src);
+    const n = occurrences(text.view(ref e.ir), "declare void @free(ptr)");
+    theory.isSuccessful = n == 1;
+    theory.detail = `the module holds ${n} free declares, wanted 1`;
+  }
+  let test theory: Case = t.asserts("the lowering's own libc calls are still declared") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "declare ptr @memcpy(ptr, ptr, i64)") == 1;
+    theory.detail = "memcpy is not declared, so the string builder would call a symbol nothing declares";
+  }
+}
+
+suite function aLoweringCollidingWithAWrongSignatureIsRefused(): void {
+  // The same collision, with the user's `malloc` returning an integer instead
+  // of a pointer. That is a real disagreement about the ABI rather than two
+  // spellings of one, so it cannot be silently reused.
+  const bad = "function grow(n: usize): int32 { return int32(n); }\nextern \"C\" from \"stdlib.h\" { function malloc(size: usize): int32; }\nfunction main(): int32 {\n  const n: int32 = 3;\n  const s: string = `n=${n}`;\n  return int32(s.len) + grow(1);\n}\n";
+
+  let test theory: Case = t.asserts("a genuine mismatch is refused rather than emitted") {
+    disposable e: Emitted = emitSource(bad);
+    theory.isSuccessful = e.error.len > 0;
+    theory.detail = "an `extern malloc` returning i32 was accepted beside the string builder's own ptr-returning one";
+  }
+  let test theory: Case = t.asserts("the refusal names the symbol and both signatures") {
+    disposable e: Emitted = emitSource(bad);
+    theory.isSuccessful = text.contains(e.error, "\"malloc\"")
+      && text.contains(e.error, "i32 (i64)")
+      && text.contains(e.error, "ptr (i64)");
+    theory.detail = `the refusal reads "${e.error}"; it has to name malloc and both LLVM signatures`;
+  }
+  let test theory: Case = t.asserts("a differing ARITY is a mismatch too") {
+    const arity = "extern \"C\" from \"stdlib.h\" { function free(p: usize, n: usize): void; }\nfunction main(): int32 {\n  const n: int32 = 3;\n  const s: string = `n=${n}`;\n  return int32(s.len);\n}\n";
+    disposable e: Emitted = emitSource(arity);
+    theory.isSuccessful = e.error.len > 0 && text.contains(e.error, "\"free\"");
+    theory.detail = `a two-parameter \`free\` was accepted beside the lowering's one-parameter one: "${e.error}"`;
+  }
+  let test theory: Case = t.asserts("a `...` on one side and not the other is a mismatch") {
+    const va = "extern \"C\" from \"stdio.h\" { function sprintf(buf: string, fmt: string): int32; }\nfunction main(): int32 {\n  const n: int32 = 3;\n  const s: string = `n=${n}`;\n  return int32(s.len);\n}\n";
+    disposable e: Emitted = emitSource(va);
+    theory.isSuccessful = e.error.len > 0 && text.contains(e.error, "\"sprintf\"");
+    theory.detail = `a non-variadic \`sprintf\` was accepted beside the lowering's variadic one: "${e.error}"`;
+  }
+}
+
+suite function compatibleMeansTheSameLlvmDeclaration(): void {
+  // `usize` and `uint64` are both `i64`, so these two spell ONE declaration
+  // even though the yoop signatures differ. That is the whole definition:
+  // compatible means the `declare` line comes out the same.
+  const same = "import.unsafe;\nextern \"C\" from \"stdlib.h\" { function malloc(size: uint64): unsafe_ptr<void>; }\nfunction main(): int32 {\n  const n: int32 = 3;\n  const s: string = `n=${n}`;\n  return int32(s.len);\n}\n";
+
+  let test theory: Case = t.asserts("two spellings of one LLVM signature are compatible") {
+    disposable e: Emitted = emitSource(same);
+    theory.isSuccessful = e.error.len == 0
+      && occurrences(text.view(ref e.ir), "declare ptr @malloc(i64)") == 1;
+    theory.detail = `usize and uint64 both lower to i64, so this is one declaration; got "${e.error}"`;
+  }
+}
+
+// Two MODULES, because a second declaration of one name inside ONE module is a
+// redeclaration pass A already refuses. Across modules it is ordinary - an
+// extern is not exported and does not travel through an import, so every file
+// that calls `puts` declares its own.
+suite function twoModulesDeclaringOneSymbolShareItsDeclare(): void {
+  let test theory: Case = t.asserts("two agreeing declarations collapse to one line") {
+    disposable e: Emitted = emitFixture("extern_agree.yoop");
+    theory.isSuccessful = e.error.len == 0
+      && occurrences(text.view(ref e.ir), "declare i32 @puts(ptr)") == 1;
+    theory.detail = `error "${e.error}", ${occurrences(text.view(ref e.ir), "declare i32 @puts(ptr)")} puts declares; wanted no error and exactly 1`;
+  }
+  let test theory: Case = t.asserts("two disagreeing declarations are refused by name") {
+    disposable e: Emitted = emitFixture("extern_clash.yoop");
+    theory.isSuccessful = e.error.len > 0 && text.contains(e.error, "\"puts\"");
+    theory.detail = `wanted a refusal naming puts, got "${e.error}"`;
+  }
+}
+
+suite function anExternFromTheRuntimeLinksIt(): void {
+  const src = "extern \"C\" from \"yoop_runtime\" { function yoop_panic(msg: string): void; }\nfunction main(): int32 { return 0; }\n";
+
+  let test theory: Case = t.asserts("`from \"yoop_runtime\"` asks for the runtime") {
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = e.needsRuntime;
+    theory.detail = "an extern block from \"yoop_runtime\" left needsRuntime false, so the link step would offer libc alone";
+  }
+  let test theory: Case = t.asserts("it does NOT pull in the runtime's own declares") {
+    // The user's block declares what it uses. The ctx_alloc family belongs to
+    // codegen's own lowerings, and emitting it here would declare symbols this
+    // program never calls.
+    disposable e: Emitted = emitSource(src);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "declare ptr @yoop_ctx_alloc(i64, i64)") == 0;
+    theory.detail = "a user extern from the runtime dragged in the allocator-context declares";
+  }
+  let test theory: Case = t.asserts("an ordinary header name asks for nothing") {
+    const hdr = "extern \"C\" from \"stdio.h\" { function puts(s: string): int32; }\nfunction main(): int32 { return puts(\"hi\"); }\n";
+    disposable e: Emitted = emitSource(hdr);
+    theory.isSuccessful = !e.needsRuntime;
+    theory.detail = "a `from \"stdio.h\"` block set needsRuntime, so every hello-world would link the runtime";
+  }
+  let test theory: Case = t.asserts("a runtime header reached by PATH counts too") {
+    // std/core/alloc.yoop's own spelling. The test is on the basename, so a
+    // path and a bare name answer the same.
+    const path = "extern \"C\" from \"runtime/yoop_alloc.h\" { function yoop_temp_reset(): void; }\nfunction main(): int32 { return 0; }\n";
+    disposable e: Emitted = emitSource(path);
+    theory.isSuccessful = e.needsRuntime;
+    theory.detail = "`from \"runtime/yoop_alloc.h\"` left needsRuntime false, so std/core/alloc.yoop links libc alone";
+  }
+  let test theory: Case = t.asserts("a header that merely CONTAINS yoop_ does not count") {
+    const near = "extern \"C\" from \"vendor/not_yoop_runtime.h\" { function nope(): void; }\nfunction main(): int32 { return 0; }\n";
+    disposable e: Emitted = emitSource(near);
+    theory.isSuccessful = !e.needsRuntime;
+    theory.detail = "the test is a basename PREFIX, not a substring - `not_yoop_runtime.h` is somebody else's header";
+  }
+  let test theory: Case = t.asserts("the LIBRARY spelling is still a library, not the runtime") {
+    // `from library "yoop_runtime"` means `-lyoop_runtime`, and there is no
+    // such archive - matching the reference, which fails to find it too. The
+    // two spellings of `from` mean different things, and this is where it bites.
+    const lib = "extern \"C\" from library \"yoop_runtime\" { function yoop_panic(msg: string): void; }\nfunction main(): int32 { return 0; }\n";
+    disposable e: Emitted = emitSource(lib);
+    theory.isSuccessful = !e.needsRuntime && e.linkLibraries.len == 1;
+    theory.detail = `needsRuntime=${e.needsRuntime} with ${e.linkLibraries.len} link libraries; wanted false and 1 (-lyoop_runtime)`;
+  }
+}
+
+// ----- helpers ---------------------------------------------------------------
+
+// One codegen run's three answers. A struct rather than three helpers that each
+// re-run the pipeline, so an assertion reads one compile rather than three.
+// An UNSIGNED comparison uses LLVM's unsigned predicates. This is IR-level
+// rather than a slice fixture for one case only - the value ENUM one - because
+// the reference compares an `enum<uint8>` SIGNED and a slice fixture is
+// asserted against both compilers. The rest of the family runs in
+// bootstrap/tests/slice/unsigned_compare.yoop, where it belongs.
+suite function anUnsignedComparePicksTheUnsignedPredicate(): void {
+  const ENUM: string = "enum Flags<uint8> {\n  LOW 10,\n  HIGH 200,\n}\nfunction main(): int32 {\n  if (Flags.HIGH > Flags.LOW) { return 1; }\n  return 0;\n}\n";
+
+  let test theory: Case = t.asserts("an unsigned-backed value enum compares with `ugt`") {
+    disposable e: Emitted = emitSource(ENUM);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp ugt") == 1;
+    theory.detail = `wanted one "icmp ugt" for an enum<uint8>; a signed predicate reads 200 as -56: ${e.error}`;
+  }
+
+  const SIGNED: string = "function main(): int32 {\n  let a: int32 = -1;\n  if (a < 1) { return 1; }\n  return 0;\n}\n";
+
+  let test theory: Case = t.asserts("a signed operand still compares with `slt`") {
+    disposable e: Emitted = emitSource(SIGNED);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp slt") == 1;
+    theory.detail = `wanted one "icmp slt" for an int32: ${e.error}`;
+  }
+
+  const UNSIGNED: string = "function main(): int32 {\n  let a: uint8 = 104;\n  if (a < 128) { return 1; }\n  return 0;\n}\n";
+
+  let test theory: Case = t.asserts("a uint8 against a literal above 127 compares with `ult`") {
+    disposable e: Emitted = emitSource(UNSIGNED);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp ult") == 1;
+    theory.detail = `wanted one "icmp ult" for a uint8: ${e.error}`;
+  }
+}
+
+
+// `for x in <iterator>` - the Iterable lowering. Driven off the TAG of what
+// `next` returns, so there is no length to compare against and no counter to
+// advance: the whole loop is a call, a tag test, and a payload read.
+suite function anIterableForInDrivesOffTheTag(): void {
+  const ITER: string = "variant IterStep<T> { Yield { value: T }, Done, }\ntrait Iterable<T> { function next(ref self): IterStep<T>; }\ntype Counter implements Iterable<int32> { at: int32,\n  function next(ref self): IterStep<int32> { self.at = self.at + 1; return IterStep.Yield { value: self.at }; } }\nfunction main(): int32 { let c: Counter = { at: 0 }; let s: int32 = 0; for n in c { s = s + n; } return s; }\n";
+
+  let test theory: Case = t.asserts("the loop CALLS the receiver's own next") {
+    disposable e: Emitted = emitSource(ITER);
+    // The DEFINE spells its receiver `%self.arg`, so only the call site
+    // matches an anonymous slot - which is where the iterator was spilled.
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "__Counter__next(ptr %sc.") == 1;
+    theory.detail = `wanted one static dispatch to Counter's next, codegen said: ${e.error}`;
+  }
+  let test theory: Case = t.asserts("the loop condition is a TAG test against Yield") {
+    disposable e: Emitted = emitSource(ITER);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "icmp eq i32 %t") >= 1;
+    theory.detail = "no tag comparison in the emitted loop";
+  }
+  let test theory: Case = t.asserts("the element is read out of the Yield payload") {
+    disposable e: Emitted = emitSource(ITER);
+    theory.isSuccessful =
+      occurrences(text.view(ref e.ir), "__IterStep_int32__Yield") >= 1;
+    theory.detail = "the loop body never addresses the Yield case struct";
+  }
+}
+
+// A PROPAGATED disposal geps into the field and calls the FIELD's method - one
+// call per field that carries the kind, and none for a field that does not.
+suite function aPropagatedDisposalGepsIntoEachField(): void {
+  const PROP: string = "kind tracked { appliesTo binding; requires Closer; mustCall close beforeScopeEnd; }\ntrait Closer { function close(ref self): void; }\ntype Res implements Closer propagates<tracked> { id: int32,\n  function close(ref self): void { } }\ntype Pair propagates<tracked> { a: Res, b: Res, plain: int32, }\nfunction main(): int32 { tracked p: Pair = { a: { id: 1 }, b: { id: 2 }, plain: 0 }; return p.plain; }\n";
+
+  let test theory: Case = t.asserts("one close per CARRYING field, and no more") {
+    disposable e: Emitted = emitSource(PROP);
+    const n = occurrences(text.view(ref e.ir), "__Res__close(ptr %t");
+    theory.isSuccessful = n == 2;
+    theory.detail = `wanted 2 propagated close calls, got ${n} - the plain field must not owe one`;
+  }
+  let test theory: Case = t.asserts("the receiver is a gep into the binding, not the binding") {
+    disposable e: Emitted = emitSource(PROP);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "__Pair, ptr %p.") >= 2;
+    theory.detail = "the disposal did not address the binding's fields";
+  }
+  let test theory: Case = t.asserts("the binding itself is never the receiver") {
+    disposable e: Emitted = emitSource(PROP);
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "close(ptr %p.") == 0;
+    theory.detail = "a propagating type has no method of its own, so calling it on the binding would name a symbol nothing defines";
+  }
+}
+
+// A struct FIELD whose own type is a VARIANT reads through a gep, not through
+// a variant CONSTRUCTOR. Getting it the other way round was a silent
+// miscompile - `a.value` came out as case 0 with an unwritten payload - and it
+// is the shape the compiler's own CallArg is written in. `field_variant.yoop`
+// in the slice fixtures runs it; this asserts the instruction.
+suite function aVariantTypedFieldIsReadNotConstructed(): void {
+  const FIELD: string = "variant Step { Zero, Num { n: int32 }, }\ntype Slot { step: Step, }\nfunction show(s: Step): int32 { switch (s) { case Step.Zero: { return 0; } case Step.Num { n: n }: { return n; } } }\nfunction main(): int32 { let sl: Slot = { step: Step.Num { n: 42 } }; return show(sl.step); }\n";
+
+  let test theory: Case = t.asserts("the field read extracts, it does not build a tag") {
+    disposable e: Emitted = emitSource(FIELD);
+    theory.isSuccessful =
+      occurrences(text.view(ref e.ir), "= extractvalue %struct.") >= 1;
+    theory.detail = "the variant-typed field was not read out of the struct at all";
+  }
+  let test theory: Case = t.asserts("main builds exactly ONE Step value") {
+    disposable e: Emitted = emitSource(FIELD);
+    // Two tag stores would mean the read fabricated a second one. The literal
+    // `Step.Num { n: 42 }` is the only Step this program constructs.
+    const n = occurrences(text.view(ref e.ir), "store i32 1, ptr %t");
+    theory.isSuccessful = n == 1;
+    theory.detail = `wanted 1 tag store for the one constructor, got ${n}`;
+  }
+}
+
+// An integer literal at the TOP of the usize range keeps its value. The JS
+// reference wraps this one to zero, which is why the dispose stack uses a bool
+// rather than a max-value sentinel - see dispose_stack.yoop.
+suite function aTopOfRangeUsizeConstKeepsItsValue(): void {
+  let test theory: Case = t.asserts("18446744073709551615 is emitted as itself") {
+    disposable e: Emitted = emitSource(
+      "const BIG: usize = 18446744073709551615;\nfunction main(): usize { return BIG; }\n"
+    );
+    theory.isSuccessful = occurrences(text.view(ref e.ir), "18446744073709551615") >= 1;
+    theory.detail = "the constant was not emitted at its declared value";
+  }
+}
+
+type Emitted implements Disposable propagates<disposable> {
+  ir: Text,               // empty when `error` is set
+  error: string,          // "" when codegen succeeded
+  needsRuntime: bool,
+  linkLibraries: Vec<string>,
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.ir);
+    Disposable.dispose(ref self.linkLibraries);
+  }
+}
+
+function emitSource(src: string): Emitted propagates<disposable> {
+  // Not disposed, matching typecheck.test.yoop: a ModuleGraph owns the arena
+  // every later layer borrows from, and a test process exits before the leak
+  // is worth the ceremony.
+  let graph: ModuleGraph = graphOfSource(src);
+  return emitGraph(ref graph);
+}
+
+function emitFixture(name: string): Emitted propagates<disposable> {
+  switch (loadModuleGraph(fixture(name), "")) {
+    case LoadGraphResult.Ok { value: graph }: { return emitGraph(ref graph); }
+    case LoadGraphResult.Err { error: e }: {
+      return { ir: text.make(0), error: e, needsRuntime: false, linkLibraries: vec.vecNew(1) };
+    }
+  }
+}
+
+function emitGraph(ref graph: ModuleGraph): Emitted propagates<disposable> {
+  disposable prog: Program = typecheckProgram(ref graph);
+  switch (codegenProgram(ref prog, ref graph)) {
+    case Result.Ok { value: out }: {
+      return { ir: out.ir, error: "", needsRuntime: out.needsRuntime, linkLibraries: out.linkLibraries };
+    }
+    case Result.Err { error: e }: {
+      return { ir: text.make(0), error: e, needsRuntime: false, linkLibraries: vec.vecNew(1) };
+    }
+  }
+}
+
+function graphOfSource(src: string): ModuleGraph {
+  let srcBuf: Vec<uint8> = vec.vecNew(src.len + 1);
+  vec.vecExtendFrom(ref srcBuf, intr.stringAsBytes(src));
+  switch (moduleFromSource("test", "test.yoop", srcBuf)) {
+    case LoadModuleResult.Ok { value: m }: { return singleModuleGraph(m); }
+    case LoadModuleResult.Err { error: e }: {
+      // A parse failure gives an EMPTY graph, so every assertion above reads it
+      // as "no declares, no runtime, no error" - which each of them states
+      // positively, so a broken source literal fails rather than passes.
+      let empty: Module = {
+        id: "test", dir: "", name: "", ast: emptyArena(), files: vec.vecNew(1)
+      };
+      return singleModuleGraph(empty);
+    }
+  }
+}
+
+// How many times `needle` appears in `haystack`.
+function occurrences(haystack: string, needle: string): usize {
+  let n: usize = 0;
+  let at: usize = 0;
+  while (at < haystack.len) {
+    const hit = text.indexOfFrom(haystack, needle, at);
+    if (hit >= haystack.len) {
+      return n;
+    }
+    n += 1;
+    at = hit + needle.len;
+  }
+  return n;
+}
+
+// The harness may be run from the repo root or from bootstrap/, the same way
+// the source_graph tests handle it.
+function fixture(name: string): string {
+  const fromRepoRoot = `bootstrap/tests/codegen/${name}`;
+  if (fs.exists(fromRepoRoot)) {
+    return fromRepoRoot;
+  }
+  return `tests/codegen/${name}`;
+}

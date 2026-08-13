@@ -22,7 +22,10 @@ const POINTER_SIZE: usize = 8;
 
 // Size in bytes. Anything this does not know about is assumed pointer-sized,
 // which is what the JS reference assumes too.
-export function sizeOfType(ref prog: Program, id: TypeId): usize {
+// A value enum is a nominal alias, so both of these ask their UNDERLYING type
+// and the enum itself contributes nothing to a layout.
+export function sizeOfType(ref prog: Program, rawId: TypeId): usize {
+  const id = enumUnderlyingOf(ref prog, rawId);
   switch (typeAt(ref prog, id)) {
     case Type.Prim { prim: p }: { return primSize(p); }
     case Type.Ref { inner: i }: { return POINTER_SIZE; }
@@ -43,7 +46,8 @@ export function sizeOfType(ref prog: Program, id: TypeId): usize {
 }
 
 // Alignment in bytes. Same shape as sizeOfType, and the same fallback.
-export function alignOfType(ref prog: Program, id: TypeId): usize {
+export function alignOfType(ref prog: Program, rawId: TypeId): usize {
+  const id = enumUnderlyingOf(ref prog, rawId);
   switch (typeAt(ref prog, id)) {
     case Type.Prim { prim: p }: { return primSize(p); }
     case Type.Ref { inner: i }: { return POINTER_SIZE; }

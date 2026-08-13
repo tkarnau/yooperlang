@@ -1,0 +1,19 @@
+// The same pair, with the two `puts` declarations DISAGREEING about the return
+// type. `int32` and `int64` are `i32` and `i64`, so this is a real
+// disagreement about the ABI rather than two spellings of one signature, and
+// codegen refuses it by name.
+//
+// The reference emits both lines and lets clang reject the second with
+// "invalid redefinition of function 'puts'", which names neither declaration
+// and no source file. That is the deliberate divergence.
+//
+// Read by bootstrap/src/codegen/codegen.test.yoop; it is never run.
+
+import * as other from "./extern_clash_other.yoop";
+
+extern "C" from "stdio.h" { function puts(s: string): int32; }
+
+function main(): int32 {
+  other.hello();
+  return puts("hi");
+}

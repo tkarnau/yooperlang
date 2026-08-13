@@ -1,0 +1,104 @@
+// `for x in <iterator>` over a type implementing `Iterable<T>`.
+//
+// The ARRAY form is a counter over a descriptor and has its own fixture. This
+// one drives the loop off the TAG of whatever `next` hands back, so what it has
+// to prove is different: that `next` is called once per step and once more to
+// learn there are none left, that the loop variable is the `Yield` payload,
+// that an already-exhausted iterator runs the body zero times, and that
+// `break` and `continue` reach the right blocks.
+//
+// The receiver is CONCRETE at every call here, which is the whole reason this
+// needed no vtable: `Counter.next` is a static trait dispatch exactly like
+// `Display.toString(ref p)`.
+
+import { Iterable, IterStep } from "std/core/traits.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// Yields 1, 2, ... up to `limit`, then Done. `calls` counts every next() so the
+// fixture can assert the loop asked exactly once more than it got.
+type Counter implements Iterable<int32> {
+  at: int32,
+  limit: int32,
+  calls: int32,
+
+  function next(ref self): IterStep<int32> {
+    self.calls = self.calls + 1;
+    if (self.at >= self.limit) {
+      return IterStep.Done;
+    }
+    self.at = self.at + 1;
+    return IterStep.Yield { value: self.at };
+  }
+}
+
+// A second iterator, over a different element type, to prove the lowering reads
+// the element type off `Yield` rather than assuming an int.
+type Words implements Iterable<string> {
+  i: usize,
+  words: string[],
+
+  function next(ref self): IterStep<string> {
+    if (self.i >= self.words.len) {
+      return IterStep.Done;
+    }
+    const w = self.words[self.i];
+    self.i = self.i + 1;
+    return IterStep.Yield { value: w };
+  }
+}
+
+function sumTo(limit: int32): int32 {
+  let c: Counter = { at: 0, limit: limit, calls: 0 };
+  let total: int32 = 0;
+  for n in c {
+    total = total + n;
+  }
+  return total;
+}
+
+function main(): int32 {
+  printf("sum=%d\n", sumTo(4));
+
+  // An iterator that is Done on the first call runs the body zero times.
+  let empty: Counter = { at: 5, limit: 5, calls: 0 };
+  let ran: int32 = 0;
+  for n in empty {
+    ran = ran + 1;
+  }
+  printf("ran=%d\n", ran);
+
+  // `break` leaves the loop; `continue` re-enters through the step block, which
+  // for an iterator means asking `next` again rather than advancing a counter.
+  let c: Counter = { at: 0, limit: 10, calls: 0 };
+  let odd: int32 = 0;
+  for n in c {
+    if (n > 7) {
+      break;
+    }
+    if (n % 2 == 0) {
+      continue;
+    }
+    odd = odd + n;
+  }
+  printf("odd=%d\n", odd);
+
+  let w: Words = { i: 0, words: ["yoop", "er", "lang"] };
+  for s in w {
+    printf("word=%s\n", s);
+  }
+
+  // Nested, and the inner iterator is rebuilt each time round the outer one.
+  let outer: Counter = { at: 0, limit: 3, calls: 0 };
+  let pairs: int32 = 0;
+  for a in outer {
+    let inner: Counter = { at: 0, limit: 2, calls: 0 };
+    for b in inner {
+      pairs = pairs + a * b;
+    }
+  }
+  printf("pairs=%d\n", pairs);
+  return 0;
+}

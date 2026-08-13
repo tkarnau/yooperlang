@@ -1,0 +1,82 @@
+// A NAMED kind region: `tracked r: Res = open(1) { ... }`.
+//
+// The third disposal form, and the one that combines the other two. A plain
+// `tracked` binding is disposed when the enclosing scope ends; an anonymous
+// `region open(1) { }` is disposed at the block's closing brace but has no
+// name. This has both: a name the block can read, and a scope that is the block
+// rather than the function.
+//
+// The consequences worth asserting, and each was established by probing the
+// reference:
+//
+//   * the disposal fires at the block's closing brace, BEFORE whatever follows
+//   * the binding is not in scope after the block. `undefined variable` there,
+//     which a fixture cannot show and a parse test does
+//   * an early `return` from inside the block unwinds it, like any other scope
+//   * nesting works, and unwinds innermost-first
+//
+// `dispose.yoop` covers the other two forms, and this file deliberately reuses
+// its kinds so the three read as one feature with three spellings.
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+  ownsBlock;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Res implements Closer {
+  id: int,
+  function close(ref self): void {
+    printf("close %d\n", self.id);
+  }
+}
+
+function open(id: int): Res {
+  printf("open %d\n", id);
+  return { id: id };
+}
+
+// The block is a scope like any other, so `return` unwinds it on the way out.
+function earlyReturn(): int {
+  tracked r: Res = open(9) {
+    printf("in block, id=%d\n", r.id);
+    return r.id * 2;
+  }
+  printf("unreachable\n");
+  return 0;
+}
+
+// Nested regions unwind innermost-first, the same order two bindings in one
+// scope do.
+function nested(): void {
+  tracked outer: Res = open(1) {
+    tracked inner: Res = open(2) {
+      printf("innermost %d %d\n", outer.id, inner.id);
+    }
+    printf("middle\n");
+  }
+  printf("after both\n");
+}
+
+// A plain binding declared alongside one: the region's own disposal is at the
+// brace, and the plain binding's waits for the function.
+function mixed(): void {
+  tracked plain: Res = open(5);
+  tracked owning: Res = open(6) {
+    printf("inside, plain is still %d\n", plain.id);
+  }
+  printf("after the region, plain is still %d\n", plain.id);
+}
+
+function main(): int {
+  printf("early=%d\n", earlyReturn());
+  nested();
+  mixed();
+  printf("done\n");
+  return 0;
+}

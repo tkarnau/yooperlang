@@ -1,0 +1,39 @@
+nested ok=13
+nested err=-1
+nested err=-2
+field ok=60
+field err=-3
+loop ok=6
+loop err=-1
+guard ok=77
+guard err=-4
+cross ok=true
+cross err=-5
+quiet ok
+quiet err
+handles happy:
+  open 1
+  open 2
+  close 2
+  close 1
+handles ok=9
+handles sad:
+  open 1
+  open 2
+  close 2
+  close 1
+handles err=-9
+nested handles happy:
+  open 10
+  open 11
+  reached 8
+  close 11
+  close 10
+nested ok=0
+nested handles sad:
+  open 10
+  open 11
+  close 11
+  close 10
+nested err=-8
+exit=0

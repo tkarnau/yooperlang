@@ -20,6 +20,24 @@ function parseReturnStatement(ref ps: ParserState): ParsingResult {
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
 }
 
+// `_ = expr;` - evaluate for its EFFECTS and throw the value away.
+//
+//   childA = the expression
+//
+// It is not the same statement as a bare `expr;`, even though both discard.
+// `_ =` says the discard was deliberate, which is what makes it the spelling
+// for a call whose result a reader would otherwise expect to see used. The two
+// are checked and emitted identically from here on, so every pass past the
+// parser handles the pair together.
+function parseDiscardStatement(ref ps: ParserState): ParsingResult {
+  SelfLexing.expect(ref ps, TokenTags.DISCARD)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.DISCARD_STATEMENT);
+  SelfLexing.expect(ref ps, TokenTags.EQ)?;
+  node.childA = parseExpression(ref ps, 0)?;
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
 export function parseStatement(ref ps: ParserState): ParsingResult {
   const peekTag = SelfLexing.peek(ref ps).tag;
 
@@ -63,6 +81,9 @@ export function parseStatement(ref ps: ParserState): ParsingResult {
     }
     case TokenTags.CONTINUE: {
       return Result.Ok { value: parseLoopJump(ref ps, ASTNodeKind.CONTINUE_STATEMENT)? };
+    }
+    case TokenTags.DISCARD: {
+      return Result.Ok { value: parseDiscardStatement(ref ps)? };
     }
     default: {
       return Result.Ok { value: parseExpressionStatement(ref ps)? };
@@ -338,6 +359,17 @@ function parseLiteralPattern(ref ps: ParserState): ParsingResult {
     node.flagA = negate;
     return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
   }
+  // A float pattern is refused BY NAME, matching the reference. A jump table
+  // dispatches on an integer, and testing floats for equality is a different
+  // operation with a different answer - `case 0.1` would never match a value
+  // arrived at by arithmetic.
+  if (SelfLexing.peek(ref ps).tag == TokenTags.FLOATLITERAL) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      "float literals are not allowed in switch patterns",
+      peekLengthUsize(ref ps),
+    )};
+  }
   const tok = SelfLexing.expect(ref ps, TokenTags.INTLITERAL)?;
   node.intVal = tok.intVal;
   node.flagA = negate;
@@ -369,7 +401,13 @@ function atKindPrefixedBinding(ref ps: ParserState): bool {
   }
 }
 
-// Two identifiers then a `(` in STATEMENT position: a kind-prefixed block.
+// Two identifiers then a `(` or a `.` in STATEMENT position: a kind-prefixed
+// block.
+//
+// The `.` is what makes `ephemeral mem.arenaScope(1024) { ... }` one. The
+// subject is an ordinary EXPRESSION, so it may be a qualified call as easily as
+// a bare one, and stopping at `(` would refuse the spelling every std user
+// actually writes - values from std must come through a namespace.
 function atKindPrefixedBlock(ref ps: ParserState): bool {
   if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
     return false;
@@ -382,7 +420,9 @@ function atKindPrefixedBlock(ref ps: ParserState): bool {
       }
       switch (SelfLexing.peekAhead(ref ps, 2)) {
         case Result.Err { error: e2 }: { return false; }
-        case Result.Ok { value: third }: { return third.tag == TokenTags.LPAREN; }
+        case Result.Ok { value: third }: {
+          return third.tag == TokenTags.LPAREN || third.tag == TokenTags.DOT;
+        }
       }
     }
   }

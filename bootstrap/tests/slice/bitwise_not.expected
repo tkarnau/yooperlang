@@ -1,0 +1,11 @@
+u8=240
+i32=-6
+u64=18446744073709551614
+i8=-1
+call=240
+pinned=255 -6
+mixed=5
+stacked=0
+enum=254
+masked=2
+exit=0

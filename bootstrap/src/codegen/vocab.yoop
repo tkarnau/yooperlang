@@ -9,13 +9,22 @@ module codegen;
 
 import { TokenTags } from "../lex";
 
-// printf is the only variadic callee the bootstrap knows about, so its type is
-// spelled once here rather than at the call site.
-const PRINTF_SIGNATURE: string = "i32 (ptr, ...)";
+// printf is the one variadic callee the compiler knows without being told. Any
+// other one is a user's `extern "C" { ... , ...): T; }`, whose signature comes
+// out of the type arena - so what is spelled here is only the builtin's half.
+export const PRINTF_NAME: string = "printf";
 
 export function printfReturnType(): string {
   return "i32";
 }
+
+// The builtin printf's signature, as LLVM spells it: `i32 @printf(ptr, ...)`.
+// Split into its three parts rather than kept as one `declare` line, because
+// it goes through the same `externDeclare` table every other declaration does -
+// a module that declares its own extern printf gets THAT declaration, and
+// emitting both would be an invalid redefinition rather than a harmless
+// duplicate. See extern_table.yoop.
+export const PRINTF_BUILTIN_RETURN: string = "i32";
 
 // The integer opcode for a binary operator, or "" when there is no lowering
 // yet. Float variants arrive with the types that need them.
@@ -53,19 +62,109 @@ export function llvmIntOp(tag: TokenTags, signed: bool): string {
   }
 }
 
-// The SIGNED icmp predicate for a comparison operator, or "" when the operator
-// is not a comparison. Unsigned variants (`ult`, `ule`, ...) arrive with
-// unsigned types.
-export function llvmIntPredicate(tag: TokenTags): string {
+// The icmp predicate for a comparison operator, or "" when the operator is not
+// a comparison.
+//
+// `signed` is the OPERAND's signedness, and getting it wrong is a WRONG ANSWER
+// rather than an error: an i8 holding 128 is -128 to `slt`, so `first < 128` on
+// a uint8 byte of 104 came out FALSE. That is how every multi-byte UTF-8 branch
+// in std/core/strings.yoop was being taken, and the only symptom was
+// `stringFromBytes` returning Err on valid input three layers away.
+//
+// `eq` and `ne` take no sign: two identical bit patterns are equal under either
+// reading, which is why the table is four entries rather than six.
+export function llvmIntPredicate(tag: TokenTags, signed: bool): string {
   switch (tag) {
     case TokenTags.EQEQ: { return "eq"; }
     case TokenTags.NEQ: { return "ne"; }
-    case TokenTags.LT: { return "slt"; }
-    case TokenTags.GT: { return "sgt"; }
-    case TokenTags.LTE: { return "sle"; }
-    case TokenTags.GTE: { return "sge"; }
+    case TokenTags.LT: {
+      if (signed) { return "slt"; }
+      return "ult";
+    }
+    case TokenTags.GT: {
+      if (signed) { return "sgt"; }
+      return "ugt";
+    }
+    case TokenTags.LTE: {
+      if (signed) { return "sle"; }
+      return "ule";
+    }
+    case TokenTags.GTE: {
+      if (signed) { return "sge"; }
+      return "uge";
+    }
     default: { return ""; }
   }
+}
+
+// The float opcode for a binary operator, or "" when there is no lowering.
+//
+// No signedness argument, which is the visible difference from the integer
+// table: a float carries its own sign, so there is one `fdiv` where there are
+// two of `sdiv`/`udiv`, and the bitwise entries have no float counterpart at
+// all - pass D refuses those, and an empty string here is what would report it
+// if one ever slipped through.
+export function llvmFloatOp(tag: TokenTags): string {
+  switch (tag) {
+    case TokenTags.PLUS: { return "fadd"; }
+    case TokenTags.MINUS: { return "fsub"; }
+    case TokenTags.MULT: { return "fmul"; }
+    case TokenTags.DIVIDE: { return "fdiv"; }
+    case TokenTags.MODULUS: { return "frem"; }
+    default: { return ""; }
+  }
+}
+
+// The fcmp predicate for a comparison operator, or "" when it is not one.
+//
+// ORDERED (`o...`) rather than unordered, matching the reference. The two
+// differ only when an operand is NaN: an ordered predicate is false there, so
+// `x != x` is FALSE for a NaN, which is C's `==`/`!=` behaviour and not Rust's
+// or JS's. Picking `une` for `!=` instead would be a one-character change that
+// silently disagrees with the reference on exactly one input.
+export function llvmFloatPredicate(tag: TokenTags): string {
+  switch (tag) {
+    case TokenTags.EQEQ: { return "oeq"; }
+    case TokenTags.NEQ: { return "one"; }
+    case TokenTags.LT: { return "olt"; }
+    case TokenTags.GT: { return "ogt"; }
+    case TokenTags.LTE: { return "ole"; }
+    case TokenTags.GTE: { return "oge"; }
+    default: { return ""; }
+  }
+}
+
+// The conversion opcode for a cast where at least one side is a float, or ""
+// when both widths already match and the value passes through untouched.
+//
+// Widths of 0 mean "not a float", which is how an int on either side is spelled
+// - the caller has already established that both sides are numeric.
+//
+//   int   -> float   sitofp / uitofp   (signedness of the SOURCE)
+//   float -> int     fptosi / fptoui   (signedness of the TARGET)
+//   float -> float   fpext / fptrunc
+//
+// Out-of-range is not defined by LLVM in either float-to-int direction. The
+// reference emits the same plain `fptosi`, so both compilers inherit whatever
+// the target does - arm64 saturates, which is why `int32(1e20)` prints
+// 2147483647 rather than trapping. Do not write a fixture that depends on it.
+export function llvmFloatCastOp(
+  fromFloatBits: usize,
+  toFloatBits: usize,
+  fromSigned: bool,
+  toSigned: bool
+): string {
+  if (fromFloatBits == 0) {
+    if (fromSigned) { return "sitofp"; }
+    return "uitofp";
+  }
+  if (toFloatBits == 0) {
+    if (toSigned) { return "fptosi"; }
+    return "fptoui";
+  }
+  if (toFloatBits == fromFloatBits) { return ""; }
+  if (toFloatBits > fromFloatBits) { return "fpext"; }
+  return "fptrunc";
 }
 
 // The conversion opcode for an integer cast, or "" when the widths already
@@ -106,3 +205,9 @@ export function promotedVarargType(bits: usize, isBool: bool): string {
   }
   return "i32";
 }
+
+// The float half of the same rule: C promotes a `float` to a `double` at a
+// variadic call, so `printf("%f", x)` on a float32 needs an `fpext` first.
+// Getting this wrong does not round the number - printf reads eight bytes off
+// the slot as a double and prints something unrelated.
+export const VARARG_FLOAT_TYPE: string = "double";

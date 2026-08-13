@@ -36,7 +36,8 @@ module codegen;
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
-import { TemplatePartKind, templatePartKind, primBitWidth, primIsSigned } from "../typecheck";
+import { TemplatePartKind, templatePartKind, primBitWidth, primIsSigned,
+  floatBitWidth, methodSymbolName, nominalModuleOf, moduleIdOf } from "../typecheck";
 
 // Wide enough for any i64 rendering: 20 digits, a sign, and the NUL is 22.
 const INT_DIGITS_CAPACITY: uint64 = 24;
@@ -115,13 +116,62 @@ function emitTemplatePart(ref cx: Cx, partId: NodeId, ref out: Operand): string 
       out = emitIntToString(ref cx, part.childA, value);
       return "";
     }
+    case TemplatePartKind.FLOAT: {
+      out = emitFloatToString(ref cx, part.childA, value);
+      return "";
+    }
+    case TemplatePartKind.DISPLAY: {
+      return emitDisplayPart(ref cx, part.childA, value, ref out);
+    }
     // Pass D refuses anything else by name, so reaching here is a compiler bug
     // rather than a user error.
     default: {
-      return "codegen: template literal part is not a string, integer or bool";
+      return "codegen: template literal part is not a string, integer, bool or Display";
     }
   }
 }
+
+//   %tmp.7.addr = alloca %struct.m__Point          ; in the prologue
+//   store %struct.m__Point %v, ptr %tmp.7.addr
+//   %t8 = call ptr @m__Point__toString(ptr %tmp.7.addr)
+//
+// A Display part is a CALL, not a rendering: the method returns the string and
+// this only has to hand back its pointer, which is already what every other
+// part reduces to.
+//
+// The receiver SPILLS to an anonymous slot first. `toString` takes `ref self`,
+// and a borrow is the address of storage that exists - but an interpolated
+// expression is a value, and `${f()}` or `${p.inner}` has no storage of its
+// own. Same anonymous-slot pattern a kind region's subject uses, and the alloca
+// is hoisted like every other.
+//
+// The result is a fresh malloc that nothing frees, exactly like the built
+// string it goes into. That is the allocation behavior of a built string
+// throughout, and the note at the top of this file is where it changes.
+function emitDisplayPart(ref cx: Cx, exprId: NodeId, value: Operand, ref out: Operand): string {
+  const ownerType = resolvedTypeAt(ref cx, exprId);
+  const ty = typeOf(ref cx, exprId);
+  const slot = declareAnonSlot(ref cx, ty);
+  emitStore(ref cx, ty, value, TEMP_SLOT_NAME, slot.id);
+
+  disposable args: Vec<CallArg> = vec.vecNew(1);
+  vec.vecPush(ref args, {
+    ty: "ptr",
+    value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: slot.id },
+  });
+
+  const dest = freshTemp(cx.e);
+  emitCall(
+    ref cx, dest, "ptr",
+    moduleIdOf(cx.prog, nominalModuleOf(cx.prog, ownerType)),
+    methodSymbolName(cx.prog, ownerType, TO_STRING_METHOD),
+    ref args
+  );
+  out = Operand.Temp { id: dest };
+  return "";
+}
+
+const TO_STRING_METHOD: string = "toString";
 
 // An integer part, rendered as decimal into a fresh buffer.
 //
@@ -152,6 +202,36 @@ function decimalFormatConstant(ref cx: Cx, signed: bool): usize {
   }
   return internStringConstant(cx.e, "%llu");
 }
+
+// A float part, rendered with `%g` into a fresh buffer.
+//
+// `%g` and not `%f`, and that is not a style choice: the JS reference routes an
+// interpolated float through its runtime's `yoop_float_to_string`, which is
+// `snprintf(tmp, sizeof tmp, "%g", x)` and nothing else. So `${1.5}` is "1.5",
+// `${1.0}` is "1" with no decimal point at all, and `${1.0e20}` is "1e+20". A
+// slice fixture is asserted against both compilers, so anything else here fails
+// the fixture rather than reading as a different preference.
+//
+// A float32 is widened to double first, for the same reason a vararg is: the
+// callee reads eight bytes.
+function emitFloatToString(ref cx: Cx, exprId: NodeId, value: Operand): Operand {
+  let widened = value;
+  if (floatBitWidth(cx.prog, resolvedTypeAt(ref cx, exprId)) == 32) {
+    const w = freshTemp(cx.e);
+    emitIntCast(ref cx, w, "fpext", typeOf(ref cx, exprId), value, "double");
+    widened = Operand.Temp { id: w };
+  }
+
+  const buf = freshTemp(cx.e);
+  emitMalloc(ref cx, buf, Operand.Imm { value: FLOAT_DIGITS_CAPACITY });
+  emitSprintfFloat(ref cx, buf, internStringConstant(cx.e, "%g"), widened);
+  return Operand.Temp { id: buf };
+}
+
+// `%g` is at most six significant digits plus a sign, a point, and a four-char
+// exponent - "-1.23457e-308" is 13 characters. 32 is room to spare and one
+// malloc either way.
+const FLOAT_DIGITS_CAPACITY: uint64 = 32;
 
 // Measure, allocate once, copy each part into place, terminate.
 function emitConcatParts(ref cx: Cx, ref parts: Vec<Operand>, ref out: Operand): string {

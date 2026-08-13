@@ -12,6 +12,7 @@ module codegen;
 // something wrong.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { primIsSigned } from "../typecheck";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
@@ -19,12 +20,43 @@ import { Option } from "std/core/types.yoop";
 import { ASTNode, ASTNodeKind, NodeId, childAt, nodeAt, kindName } from "../ast";
 import { TokenTags, tagName } from "../lex";
 
+// The one entry point. Everything an expression needs is decided by the switch
+// below EXCEPT one thing: whether a `ref T` in this position is being handed on
+// as a borrow or used as the value it borrows. That is a question about the
+// CONTEXT, so pass D answered it and recorded the node; here it costs one load.
+// See borrow.yoop.
 export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
+  // A `ref` PARAMETER handed on as a borrow. Answered ahead of the walk rather
+  // than after it, because the walk would emit a load of the borrowed object
+  // and the whole point is that there is no instruction here at all.
+  if (map.mapContainsKey(ref cx.tm.reborrowUses, uint64(exprId))) {
+    return emitForwardBorrow(ref cx, exprId, ref out);
+  }
+  const err = emitExprInner(ref cx, exprId, ref out);
+  if (err.len > 0) {
+    return err;
+  }
+  if (map.mapContainsKey(ref cx.tm.derefUses, uint64(exprId))) {
+    // The node's own type is already the OPENED one - pass D rewrote it when it
+    // recorded the use - so it is what the load reads.
+    emitOpenBorrow(ref cx, typeOf(ref cx, exprId), ref out);
+  }
+  return "";
+}
+
+function emitExprInner(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
   const expr = nodeAt(cx.ast, exprId);
   switch (expr.kind) {
     case ASTNodeKind.INT_LITERAL: {
       // An immediate: no instruction, the value IS the operand.
       out = Operand.Imm { value: expr.intVal };
+      return "";
+    }
+    // Also an immediate, but WHICH immediate depends on the type pass D pinned
+    // it to: a float32 constant is the bits of the value after rounding to
+    // float precision, and a float64 constant is the bits as decoded.
+    case ASTNodeKind.FLOAT_LITERAL: {
+      out = floatImmFor(ref cx, exprId, expr.floatVal);
       return "";
     }
     case ASTNodeKind.STRING_LITERAL: {
@@ -65,14 +97,34 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
       return emitVariantConstructor(ref cx, expr, exprId, ref out);
     }
     case ASTNodeKind.FIELD_ACCESS: {
-      // Four things wear this shape, and pass D already decided which: a
-      // payload-less variant constructor (`Shape.Empty`, typed as the VARIANT),
-      // a struct field, a STRING's `.len`, or an array's `.len`.
-      if (isVariantAt(ref cx, exprId)) {
-        return emitVariantConstructor(ref cx, expr, exprId, ref out);
+      // Five things wear this shape, and pass D already decided which: an ENUM
+      // CASE (`Color.Red`), a payload-less variant constructor (`Shape.Empty`,
+      // typed as the VARIANT), a struct field, a STRING's `.len`, or an array's
+      // `.len`.
+      //
+      // The enum test is on the BASE and not on the whole expression, because
+      // `p.c` on a struct with a `Color` field resolves to the same enum type.
+      // Pass D decorated the base with the enum only for a case access, and an
+      // enum has no fields, so a base that is one is never anything else.
+      if (isValueEnumAt(ref cx, expr.childA)) {
+        out = enumCaseOperand(ref cx, expr.childA, exprId);
+        return "";
       }
+      // The STRUCT test comes first, and it has to. A field whose own type is a
+      // variant - `CallArg { ty: string, value: Operand }` - makes `a.value` an
+      // expression of variant type, which is exactly what a payload-less
+      // constructor looks like from here. The base is what tells them apart:
+      // `Shape.Empty`'s base is a TYPE NAME and was never checked as a value,
+      // so it carries no resolved type at all, while `a.value`'s base is a
+      // struct. Reading the whole expression instead compiled `a.value` as
+      // `Operand.<case 0>` - a fresh tag and an unwritten payload - which is a
+      // SILENT miscompile, not an error. It cost the self-compile its third
+      // stage; see `field_variant.yoop` in the slice fixtures.
       if (isStructAt(ref cx, expr.childA)) {
         return emitStructFieldRead(ref cx, expr, ref out);
+      }
+      if (isVariantAt(ref cx, exprId)) {
+        return emitVariantConstructor(ref cx, expr, exprId, ref out);
       }
       if (isStringAt(ref cx, expr.childA)) {
         return emitStringLen(ref cx, expr, ref out);
@@ -92,7 +144,7 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
       return emitDeref(ref cx, expr, exprId, ref out);
     }
     case ASTNodeKind.REF_EXPRESSION, ASTNodeKind.ADDRESS_OF_EXPRESSION: {
-      return emitRefExpr(ref cx, expr, ref out);
+      return emitRefExpr(ref cx, expr, expr.childA, ref out);
     }
     case ASTNodeKind.ASSIGNMENT: {
       return emitAssignment(ref cx, expr, ref out);
@@ -102,6 +154,9 @@ export function emitExpr(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
     }
     case ASTNodeKind.CALL_EXPRESSION: {
       return emitCallExpr(ref cx, expr, exprId, ref out);
+    }
+    case ASTNodeKind.TRY_OP: {
+      return emitTryOp(ref cx, expr, exprId, ref out);
     }
     default: {
       return internalError("codegen cannot emit expression", kindName(expr.kind));
@@ -116,19 +171,16 @@ function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
       // Not a local, so it is a module-level `const` - pass D already refused
       // anything else. A const is INLINED rather than loaded: there is no
       // global to read from, which is what makes an imported one cost nothing.
-      switch (moduleConstOf(ref cx, expr.name)) {
-        case Option.Some { value: v }: {
-          out = constOperand(v);
-          return "";
-        }
-        case Option.None: { }
+      if (moduleConstOf(ref cx, expr.name, ref out)) {
+        return "";
       }
       // Or a module-level `let` - a real global, so this is a LOAD rather than
       // the inlining a const gets.
       const globalTy = moduleGlobalTypeOf(ref cx, expr.name);
       if (globalTy.len > 0) {
         const dest = freshTemp(cx.e);
-        emitLoadGlobal(ref cx, dest, globalTy, cx.tm.moduleId, expr.name);
+        const sym = globalSymbol(ref cx, expr.name);
+        emitLoadGlobal(ref cx, dest, globalTy, sym.home, sym.name);
         out = Operand.Temp { id: dest };
         return "";
       }
@@ -159,8 +211,8 @@ function emitLocalRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
 // pointer, so a borrow is a name for storage that exists rather than anything
 // that has to be built. Pass D refused any target but a plain name, which is
 // what makes the lookup below total.
-function emitRefExpr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
-  const target = nodeAt(cx.ast, expr.childA);
+function emitRefExpr(ref cx: Cx, expr: ASTNode, targetId: NodeId, ref out: Operand): string {
+  const target = nodeAt(cx.ast, targetId);
 
   // `ref x.f` - the FIELD's address, which is a gep on the base's slot rather
   // than the slot itself. Same address a field assignment stores through, so
@@ -168,6 +220,20 @@ function emitRefExpr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   if (target.kind == ASTNodeKind.FIELD_ACCESS) {
     let addr: usize = 0;
     const err = emitFieldAddress(ref cx, target, ref addr);
+    if (err.len > 0) {
+      return err;
+    }
+    out = Operand.Temp { id: addr };
+    return "";
+  }
+
+  // `ref xs[i]` - the ELEMENT's address, the same gep an element write stores
+  // through. This is why the target's NodeId is threaded in rather than read
+  // off `expr.childA`: locating an element needs the node's own resolved type,
+  // which is how the element width is known inside a monomorphization.
+  if (target.kind == ASTNodeKind.INDEX_EXPRESSION) {
+    let addr: usize = 0;
+    const err = emitElementAddress(ref cx, target, targetId, ref addr);
     if (err.len > 0) {
       return err;
     }
@@ -221,7 +287,8 @@ function emitAssignment(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
       // that is not a local and not a global is a compiler bug.
       const globalTy = moduleGlobalTypeOf(ref cx, target.name);
       if (globalTy.len > 0) {
-        emitStoreGlobal(ref cx, globalTy, value, cx.tm.moduleId, target.name);
+        const sym = globalSymbol(ref cx, target.name);
+        emitStoreGlobal(ref cx, globalTy, value, sym.home, sym.name);
         out = Operand.None;
         return "";
       }
@@ -235,7 +302,8 @@ function emitAssignment(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   }
 }
 
-// `!x` is an i1 xor; `-x` is `0 - x`, which reuses the ordinary subtract.
+// `!x` is an i1 xor; `~x` is an xor with all ones at the operand's width; `-x`
+// is `0 - x`, which reuses the ordinary subtract.
 function emitUnary(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
   let value: Operand = Operand.None;
   const err = emitExpr(ref cx, expr.childA, ref value);
@@ -245,6 +313,16 @@ function emitUnary(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand):
   const dest = freshTemp(cx.e);
   if (expr.operator == TokenTags.BANG) {
     emitNot(ref cx, dest, value);
+  } else if (expr.operator == TokenTags.TILDE) {
+    // `xor %x, -1`, at the operand's own width. -1 is all ones in two's
+    // complement at every width, so one spelling covers signed and unsigned
+    // alike and there is no separate "complement" instruction to reach for.
+    // Same lowering the reference emits.
+    emitBinOp(ref cx, dest, "xor", typeOf(ref cx, exprId), value, Operand.NegImm { value: 1 });
+  } else if (isFloatAt(ref cx, exprId)) {
+    // `fneg`, not `0.0 - x`. The two differ on a zero: `0.0 - 0.0` is +0.0
+    // while `fneg 0.0` is -0.0, and the reference emits fneg.
+    emitFNeg(ref cx, dest, typeOf(ref cx, exprId), value);
   } else {
     emitBinOp(ref cx, dest, "sub", typeOf(ref cx, exprId), Operand.Imm { value: 0 }, value);
   }
@@ -268,13 +346,28 @@ function emitBinaryExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Oper
   const rerr = emitExpr(ref cx, expr.childB, ref rhs);
   if (rerr.len > 0) { return rerr; }
 
-  // A comparison is an icmp over the OPERAND type and yields i1; arithmetic is
-  // one instruction over the result type. `typeOf(exprId)` is bool for a
+  // A comparison is a compare over the OPERAND type and yields i1; arithmetic
+  // is one instruction over the result type. `typeOf(exprId)` is bool for a
   // comparison, which is why the operand type is read off the left side.
-  const pred = llvmIntPredicate(expr.operator);
+  //
+  // The whole float/int fork is decided by the OPERANDS too, and it has to be:
+  // a float comparison's result type is `i1` just like an integer one's, so
+  // asking the result would pick icmp for `a < b` on two doubles.
+  const floats = isFloatAt(ref cx, expr.childA);
   const dest = freshTemp(cx.e);
+
+  // Signedness comes from the OPERAND, not the result - a comparison's result
+  // is `i1` either way, so asking the node's own type would pick `slt` for
+  // every unsigned compare in the program.
+  const pred = llvmIntPredicate(expr.operator,
+    primIsSigned(cx.prog, resolvedTypeAt(ref cx, expr.childA)));
   if (pred.len > 0) {
-    emitICmp(ref cx, dest, pred, typeOf(ref cx, expr.childA), lhs, rhs);
+    if (floats) {
+      emitFCmp(ref cx, dest, llvmFloatPredicate(expr.operator),
+               typeOf(ref cx, expr.childA), lhs, rhs);
+    } else {
+      emitICmp(ref cx, dest, pred, typeOf(ref cx, expr.childA), lhs, rhs);
+    }
     out = Operand.Temp { id: dest };
     return "";
   }
@@ -282,7 +375,10 @@ function emitBinaryExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Oper
   // Signedness comes from the OPERANDS, not the result: a comparison already
   // returned above, so the result type here is the operand type anyway - but
   // reading the left side is what stays correct if that ever changes.
-  const op = llvmIntOp(expr.operator, primIsSigned(cx.prog, resolvedTypeAt(ref cx, expr.childA)));
+  let op = llvmFloatOp(expr.operator);
+  if (!floats) {
+    op = llvmIntOp(expr.operator, primIsSigned(cx.prog, resolvedTypeAt(ref cx, expr.childA)));
+  }
   if (op.len == 0) {
     return internalError("codegen cannot emit operator", tagName(expr.operator));
   }

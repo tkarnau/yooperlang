@@ -1,0 +1,47 @@
+// The OTHER way a program needs the yoop runtime linked: a user-written
+// `extern "C" from "yoop_runtime" { ... }`.
+//
+// runtime.yoop covers the first way - codegen's own lowerings (`ctxAlloc`, the
+// errno bridge) emit calls into the runtime and set a flag as they do it.
+// Nothing here goes through a lowering: every runtime call below is an ORDINARY
+// call to a symbol this file declared, so the only thing that can put the
+// runtime's C sources on the clang line is the `from` clause itself. Without
+// that, the link fails with `"_yoop_float_to_string", referenced from`, which
+// was 2.3 in plans/bootstrap-completion.md and 18 of the 420 files in the
+// surface probe (std/debug, std/env, std/runtime, std/core/atomic and friends
+// are all in exactly this shape).
+//
+// The two spellings of `from` still mean different things: `from library "m"`
+// would put `-lyoop_runtime` on the line and fail to find an archive that does
+// not exist. Only the HEADER spelling means "the runtime's sources".
+//
+// `yoop_float_to_string` is `snprintf(..., "%g", x)` and nothing else, so its
+// output is C's and is the same on both compilers. It is also the function
+// std/core/format.yoop reaches for, which is what made two std files land in
+// this bucket the moment floats compiled.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+extern "C" from "yoop_runtime" {
+  function yoop_float_to_string(x: float64): string;
+  function yoop_errno_get(): int32;
+  function yoop_errno_set(c: int32): void;
+  function yoop_errno_message(c: int32): string;
+}
+
+function main(): int {
+  printf("%s\n", yoop_float_to_string(1.5));
+  printf("%s\n", yoop_float_to_string(4.0));
+  printf("%s\n", yoop_float_to_string(0.125));
+
+  // The errno bridge reached by NAME rather than through the `errno.` lowering,
+  // which is the whole point of the fixture: same symbols, no intrinsic.
+  yoop_errno_set(0);
+  printf("cleared=%d\n", yoop_errno_get());
+  yoop_errno_set(2);
+  printf("why=%s\n", yoop_errno_message(2));
+
+  return 0;
+}

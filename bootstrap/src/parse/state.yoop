@@ -17,7 +17,8 @@ import { Vec }, * as vec from "std/core/vec.yoop";
 import * as Log from "std/log.yoop";
 
 import { AST, ASTNode, ASTNodeKind, NodeId, createASTNode } from "../ast";
-import { TokenTags, tagName, Token, LexedVal, createLexedVal, lexNext, posToSourceLocation } from "../lex";
+import { TokenTags, tagName, Token, LexedVal, LexTables, createLexedVal, lexNext,
+  posToSourceLocation } from "../lex";
 import { SourceLocation, ParsingError } from "../diagnostics";
 
 // What a parse function hands back: the NodeId it appended to the arena, or the
@@ -46,6 +47,11 @@ export type ParserState implements SelfLexing propagates<disposable> {
   pos: usize,
   ast: AST,
   src: ref uint8[],
+  // The lexer's two scan tables, built once by whoever created this state.
+  // BORROWED rather than owned: the state is copied around by value in a few
+  // places and the tables are not cursor state, so `parseInto` keeps them for
+  // the length of the parse. See scan_tables.yoop for why there is no global.
+  tables: ref LexTables,
   // `Vec<Map<string, TypeId>>` ends in a `>>`, which the lexer hands over as
   // ONE right-shift token. Closing the inner list consumes it and leaves a
   // virtual `>` behind for the outer one; `consumeClosingGt` is the only thing
@@ -99,7 +105,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
     let i: usize = 0;
     let token: Token;
     while (i < n) {
-      const lexRes = lexNext(self.src, p)?;
+      const lexRes = lexNext(self.tables, self.src, p)?;
       token = lexRes.token;
       p = lexRes.nextPos;
       i += 1;
@@ -136,7 +142,7 @@ export type ParserState implements SelfLexing propagates<disposable> {
   }
   function advance(ref self): Result<Token, ParsingError> {
     const tok = self.currentLex.token;
-    const lexedVal = lexNext(self.src, self.pos)?;
+    const lexedVal = lexNext(self.tables, self.src, self.pos)?;
     self.currentLex = lexedVal;
     self.pos = lexedVal.nextPos;
     return Result.Ok { value: tok };

@@ -116,5 +116,22 @@ function main(): int {
   // A generic function declared in ANOTHER module, instantiated from here.
   const made: Pair<int, int> = makePair(n, n);
   printf("makePair=%d %d\n", pairSum(made), firstOf(made));
+
+  // A STRUCT LITERAL handed straight to a generic call. The literal has no type
+  // of its own, so it is skipped while the type argument is inferred and pins
+  // on the re-check against the substituted signature. Two sources of the
+  // answer, and both are exercised: the EXPECTED type (`identity` mentions T
+  // only in its return here) and a SIBLING argument (`chooseFirst`).
+  const lit: Pair<int, int> = identity({ first: 8, second: 9 });
+  printf("litIdentity=%d\n", pairSum(lit));
+
+  const chosen: Pair<int, int> = chooseFirst(made, { first: 1, second: 1 });
+  printf("litSibling=%d\n", pairSum(chosen));
   return 0;
+}
+
+// T comes from the FIRST argument, so the struct literal in the second has
+// something to pin to without the annotation saying anything.
+function chooseFirst<T>(a: T, b: T): T {
+  return a;
 }

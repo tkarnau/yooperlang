@@ -1,0 +1,120 @@
+module typecheck;
+
+// `for x in <expr>` over a type that implements `Iterable<T>`.
+//
+// The whole feature is one question - what does one STEP of this iterator
+// yield, and where in the step value does it sit - and both pass D and codegen
+// ask it. So it lives here rather than inside either, the same way
+// `fallibleShapeOf` does for `?`: the answer is a property of the TYPE, so
+// codegen asking again is a lookup rather than a second typecheck.
+//
+// A type is walkable when it claims `Iterable` and its `next` method returns an
+// IterStep-shaped variant: exactly the two cases `Yield` and `Done`, with
+// `Yield` carrying one field named `value`. That is the reference's rule, and
+// the ELEMENT type is read off that field rather than off the `Iterable<T>`
+// application - which keeps the element type and the payload gep codegen emits
+// in step by construction.
+//
+// The receiver is CONCRETE at every one of these call sites, so `next` is an
+// ordinary static trait dispatch - the same one `Display.toString(ref p)` and
+// `?`'s `Into` conversion already use. Nothing here instantiates a trait as a
+// value and nothing here is a vtable; that is still item 3.4.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import * as str from "std/core/strings.yoop";
+
+// What one step of an iterator is, or why the type is not one.
+//
+// The two bools are separate on purpose: "this is not iterable at all" and
+// "this claims Iterable and its `next` is the wrong shape" are different
+// diagnostics, and only the second names the trait's contract.
+export type IterableWalk {
+  ok: bool,
+  claimsIterable: bool,
+  // What `Yield` carries - the loop variable's type.
+  elemType: TypeId,
+  // The `IterStep<T>` variant `next` returns, which is what codegen spills.
+  stepType: TypeId,
+  // Which tag means "another element". Read rather than assumed to be 0: the
+  // cases are ordered by their declaration in std/core/traits.yoop, and nothing
+  // here should depend on that order.
+  yieldOrdinal: usize,
+}
+
+const ITERABLE_TRAIT_NAME: string = "Iterable";
+export const ITERABLE_NEXT_METHOD: string = "next";
+const ITER_STEP_YIELD_CASE: string = "Yield";
+const ITER_STEP_DONE_CASE: string = "Done";
+const ITER_STEP_VALUE_FIELD: string = "value";
+
+// Whether a type claims Iterable, by NAME. The trait is generic, so what the
+// type records is an APPLICATION of it (`Iterable<string>`, not `Iterable<T>`)
+// and the name is the part that is stable across applications.
+export function implementsIterable(ref prog: Program, t: TypeId): bool {
+  switch (typeAt(ref prog, t)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return namesTrait(ref prog, ref it, ITERABLE_TRAIT_NAME);
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return namesTrait(ref prog, ref it, ITERABLE_TRAIT_NAME);
+    }
+    default: { return false; }
+  }
+}
+
+function namesTrait(ref prog: Program, ref traits: Vec<TypeId>, name: string): bool {
+  let i: usize = 0;
+  while (i < traits.len) {
+    if (str.stringEq(nominalNameOf(ref prog, vec.vecGet(ref traits, i)), name)) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// The step shape of an iterator type, or an `ok: false` answer saying which of
+// the two ways it failed.
+export function iterableWalkOf(ref prog: Program, iterType: TypeId): IterableWalk {
+  let out: IterableWalk = {
+    ok: false,
+    claimsIterable: false,
+    elemType: TYPE_ERROR_ID,
+    stepType: TYPE_ERROR_ID,
+    yieldOrdinal: 0,
+  };
+  if (!implementsIterable(ref prog, iterType)) {
+    return out;
+  }
+  out.claimsIterable = true;
+
+  const nextSig = lookupMethod(ref prog, iterType, ITERABLE_NEXT_METHOD);
+  if (nextSig == TYPE_ERROR_ID) {
+    return out;
+  }
+  let stepType: TypeId = TYPE_ERROR_ID;
+  switch (typeAt(ref prog, nextSig)) {
+    case Type.Func { params: p, ret: r, variadic: v }: { stepType = r; }
+    default: { return out; }
+  }
+
+  // Both cases have to be there. A variant with a `Yield` and no `Done` would
+  // walk forever, and one with a `Done` and no `Yield` yields nothing - neither
+  // is an IterStep, and neither should be lowered as one.
+  const yieldCase = lookupVariantCase(ref prog, stepType, ITER_STEP_YIELD_CASE);
+  const doneCase = lookupVariantCase(ref prog, stepType, ITER_STEP_DONE_CASE);
+  if (!yieldCase.found || !doneCase.found || yieldCase.fieldCount != 1) {
+    return out;
+  }
+  const valueField = variantCaseFieldNamed(ref prog, stepType,
+    usize(yieldCase.ordinal), ITER_STEP_VALUE_FIELD);
+  if (!valueField.found || valueField.index != 0) {
+    return out;
+  }
+
+  out.ok = true;
+  out.elemType = valueField.typeId;
+  out.stepType = stepType;
+  out.yieldOrdinal = usize(yieldCase.ordinal);
+  return out;
+}

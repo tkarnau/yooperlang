@@ -1,0 +1,192 @@
+module typecheck;
+
+/*
+  Closing the set of function monomorphizations.
+
+  A generic function that calls ANOTHER generic function passes its own opaque
+  parameters along:
+
+      function quickSort<T implements Comparable<T>>(arr: T[], lo: usize, hi: usize): void {
+        const p = partitionYoop(arr, lo, hi);      // partitionYoop<T>, T still open
+        quickSort(arr, lo, p - 1);                 // quickSort<T>, likewise
+      }
+
+  Pass D records those calls as instances whose ARGUMENTS are type parameters -
+  `partitionYoop_T`, not `partitionYoop_Token`. Such an instance is not a
+  monomorphization at all: its signature still mentions `T`, which has no LLVM
+  type, so emitting it produces a definition whose parameters are pointers and
+  call sites that pass integers. That is what was happening before bounds -
+  silently, because an unbounded body only ever moved its values around and
+  clang accepted the mismatch. A bounded body dispatches a METHOD on `T`, the
+  symbol name comes out empty, and clang finally says so.
+
+  So: after every body is checked, close the set. For each OPEN instance, find
+  the decl whose parameters it mentions, and for each CONCRETE instance of THAT
+  decl, register the substituted one. Repeat until nothing new appears -
+  `quickSort` calling itself converges on the first round, because the instance
+  the substitution asks for is the one the outer call site already made.
+
+  Codegen then skips the open instances entirely (nothing calls them once every
+  call site resolves) and each call site substitutes its recorded instance
+  through the instance it is being emitted in.
+
+  This is deliberately a whole-program sweep over the instance registry rather
+  than a walk of call sites. The registry is the only thing that knows every
+  instantiation across every module; a call-site walk would need the graph, and
+  typecheck is handed a Program.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+
+// A guard against a generic that instantiates a strictly bigger version of
+// itself (`f<T>` calling `f<Box<T>>`). That does not terminate under any
+// monomorphizing scheme, and the reference has the same problem; bailing after
+// a fixed number of rounds turns an infinite loop into a missing symbol at link
+// time, which is at least a message.
+const MAX_CLOSURE_ROUNDS: usize = 16;
+
+// Register every monomorphization an open instance implies. Called once, after
+// pass D has seen every body in the graph.
+export function closeFuncInstances(ref prog: Program): void {
+  let round: usize = 0;
+  let progressed = true;
+  while (progressed && round < MAX_CLOSURE_ROUNDS) {
+    progressed = false;
+    round += 1;
+    let j: usize = 1;   // 0 is the reserved dead entry
+    while (j < prog.funcInstances.len) {
+      if (closeOneInstance(ref prog, j)) {
+        progressed = true;
+      }
+      j += 1;
+    }
+  }
+}
+
+// One open instance against every concrete instance of the decl it belongs to.
+function closeOneInstance(ref prog: Program, j: usize): bool {
+  disposable openArgs: Vec<TypeId> = funcInstanceArgs(ref prog, j);
+  if (!anyOpenArg(ref prog, ref openArgs)) {
+    return false;
+  }
+  const owner = owningDeclOf(ref prog, ref openArgs);
+  if (owner == DECL_NONE_ID) {
+    return false;
+  }
+  const origin = funcInstanceAt(ref prog, j).origin;
+
+  // The host arguments are COLLECTED first and instantiated after, because
+  // instantiating pushes onto the very vectors this is walking.
+  disposable hosts: Vec<TypeId> = vec.vecNew(4);
+  disposable hostStarts: Vec<usize> = vec.vecNew(4);
+  collectConcreteArgsOf(ref prog, owner, ref hosts, ref hostStarts);
+
+  let info = genericAt(ref prog, owner);
+  let progressed = false;
+  let h: usize = 0;
+  while (h < hostStarts.len) {
+    disposable hostArgs: Vec<TypeId> = sliceOut(ref hosts, ref hostStarts, h, info.params.len);
+    disposable substituted: Vec<TypeId> = vec.vecNew(openArgs.len);
+    let a: usize = 0;
+    while (a < openArgs.len) {
+      vec.vecPush(ref substituted,
+        substitute(ref prog, vec.vecGet(ref openArgs, a), ref info.params, ref hostArgs));
+      a += 1;
+    }
+    const before = prog.funcInstances.len;
+    instantiateFunction(ref prog, origin, ref substituted);
+    if (prog.funcInstances.len > before) {
+      progressed = true;
+    }
+    h += 1;
+  }
+  return progressed;
+}
+
+// Every CONCRETE instance of `owner`, function and type alike, flattened into
+// one arg buffer with a start offset per instance. Flattened because a
+// `Vec<Vec<TypeId>>` of borrowed arena storage is exactly the shape the
+// VariantCaseLookup note warns about.
+function collectConcreteArgsOf(
+  ref prog: Program,
+  owner: DeclId,
+  ref out: Vec<TypeId>,
+  ref starts: Vec<usize>
+): void {
+  let i: usize = 1;
+  while (i < prog.funcInstances.len) {
+    let inst = vec.vecGet(ref prog.funcInstances, i);
+    if (inst.origin == owner && !anyOpenArg(ref prog, ref inst.args)) {
+      vec.vecPush(ref starts, out.len);
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref inst.args));
+    }
+    i += 1;
+  }
+  // A generic function's parameters can also come from the generic TYPE whose
+  // method the call sits in, and those instances live in a different registry.
+  let t: usize = 1;
+  while (t < prog.instances.len) {
+    let inst = vec.vecGet(ref prog.instances, t);
+    if (inst.origin == owner && !anyOpenArg(ref prog, ref inst.args)) {
+      vec.vecPush(ref starts, out.len);
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref inst.args));
+    }
+    t += 1;
+  }
+}
+
+function sliceOut(
+  ref buf: Vec<TypeId>,
+  ref starts: Vec<usize>,
+  which: usize,
+  count: usize
+): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(count);
+  const start = vec.vecGet(ref starts, which);
+  let i: usize = 0;
+  while (i < count && start + i < buf.len) {
+    vec.vecPush(ref out, vec.vecGet(ref buf, start + i));
+    i += 1;
+  }
+  return out;
+}
+
+// A COPY of an instance's arguments - the arena-sharing rule again.
+function funcInstanceArgs(ref prog: Program, index: usize): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(2);
+  let inst = vec.vecGet(ref prog.funcInstances, index);
+  vec.vecExtendFrom(ref out, vec.vecAsArray(ref inst.args));
+  return out;
+}
+
+// Whether any argument still mentions a type parameter - the test for "this is
+// not a monomorphization yet". Recurses through the whole type tree, for the
+// same reason `isOpenInstance` does: `Vec<T>` is open even though its top is a
+// struct.
+export function anyOpenArg(ref prog: Program, ref args: Vec<TypeId>): bool {
+  let i: usize = 0;
+  while (i < args.len) {
+    if (typeIsOpen(ref prog, vec.vecGet(ref args, i))) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// The DECL whose parameters an open argument list mentions - the enclosing
+// generic whose instances can close it. The FIRST one found is the answer: an
+// argument list mentioning two decls' parameters gets closed one decl per
+// round, which is what the fixpoint loop is for.
+function owningDeclOf(ref prog: Program, ref args: Vec<TypeId>): DeclId {
+  let i: usize = 0;
+  while (i < args.len) {
+    const d = firstTypeParamOwner(ref prog, vec.vecGet(ref args, i));
+    if (d != DECL_NONE_ID) {
+      return d;
+    }
+    i += 1;
+  }
+  return DECL_NONE_ID;
+}

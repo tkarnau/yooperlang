@@ -1,0 +1,179 @@
+module typecheck;
+
+/*
+  Value `enum`s: the pass-A shell and the pass-C fill.
+
+  Three files sit beside this one, split by JOB rather than by pass, because
+  each is reached from somewhere unrelated: enum_values.yoop folds a case's
+  constant, enum_lookup.yoop answers what a filled enum holds, and enum_use.yoop
+  is pass D's work (naming a case, the operators, switching).
+
+  A value enum is a NOMINAL ALIAS over a primitive. `Color.Red` is a compile-time
+  constant of the underlying type and nothing else - no tag, no payload, no
+  storage. That is the whole representation, and it is why an enum needs almost
+  no codegen of its own: at the LLVM layer it IS its underlying primitive.
+
+  Two things it does NOT inherit from that primitive, both deliberate and both
+  matching the reference:
+
+    - assignability. An `int32` does not fit a `Color` and a `Color` does not fit
+      an `int32`. Write the cast (`int32(c)`); there is no cast back, because an
+      arbitrary integer names no case.
+    - the operator set. `==` / `!=` and the bitwise family survive; `+ - * / %`
+      do not, because adding two enums produces something that names no case.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, childAt, nodeAt } from "../ast";
+
+// ----- pass A ---------------------------------------------------------------
+
+// Same shell discipline as a struct: the NAME resolves now, the cases and the
+// underlying type are pass C's.
+//
+// The shell's underlying is TYPE_ERROR_ID rather than a guessed int32. A sibling
+// file in the same directory module can resolve this enum's name in a signature
+// before the decl itself is filled, and a guessed underlying would silently
+// become the answer for an `enum<string>` - which surfaces as a pointer compared
+// as an i32, not as an error.
+export function registerEnumShell(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  moduleId: ModuleId,
+  exported: bool
+): void {
+  const shellId = internType(ref prog, Type.ValueEnum {
+    decl: { name: declNode.name, module: moduleId, populated: false,
+            propagatesKind: "" },
+    underlying: TYPE_ERROR_ID,
+    cases: vec.vecNew(0),
+    isOpen: false,
+    methods: map.mapNew(0, map.stringKeyOps()),
+    implementsTraits: vec.vecNew(0),
+  });
+  bindEnumName(ref prog, ref tm, declNode, Symbol.ValueEnum { typeId: shellId }, exported);
+}
+
+// ----- pass C ---------------------------------------------------------------
+
+// The underlying type, the folded cases, the methods and the implemented traits.
+export function fillEnumCases(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode,
+  moduleId: ModuleId
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  let typeId: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.ValueEnum { typeId: t }: { typeId = t; }
+    default: { return; }
+  }
+
+  const underlying = enumUnderlyingAnnotation(ref prog, ref tm, ref ast, declNode);
+  let state: EnumFoldState = { next: 0, isOpen: false };
+  let cases: Vec<EnumCase> = vec.vecNew(declNode.childCount);
+
+  let i: usize = 0;
+  while (i < declNode.childCount) {
+    const caseNode = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    // Methods share the member run with the cases, so the ordinal counts off
+    // `cases.len` and not off the loop index - the same rule a variant's tag
+    // numbering follows, and for the same reason.
+    if (caseNode.kind != ASTNodeKind.ENUM_CASE) {
+      i += 1;
+      continue;
+    }
+    if (enumCaseIndexNamed(ref cases, caseNode.name) >= 0) {
+      reportError(
+        ref prog,
+        `duplicate case name "${caseNode.name}" in enum "${declNode.name}"`,
+        caseNode.sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    vec.vecPush(ref cases, foldEnumCase(
+      ref prog, ref ast, declNode.name, caseNode, underlying, ref cases, ref state
+    ));
+    i += 1;
+  }
+
+  if (cases.len == 0) {
+    reportError(
+      ref prog,
+      `enum "${declNode.name}" must declare at least one case`,
+      declNode.sourceLoc
+    );
+  }
+
+  let methods: Map<string, TypeId> = collectMethods(ref prog, ref tm, ref ast, declNode);
+  let traits: Vec<TypeId> = collectImplementedTraits(ref prog, ref tm, ref ast, declNode);
+
+  setType(ref prog, typeId, Type.ValueEnum {
+    decl: { name: declNode.name, module: moduleId, populated: true,
+            propagatesKind: propagatedKindNameOf(ref ast, declNode) },
+    underlying: underlying,
+    cases: cases,
+    isOpen: state.isOpen,
+    methods: methods,
+    implementsTraits: traits,
+  });
+}
+
+// `enum K<uint8>` - the annotation, checked to be something an enum can alias.
+// Defaults to int32, which is the reference's default too.
+function enumUnderlyingAnnotation(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): TypeId {
+  if (declNode.childC == 0) {
+    return primTypeId(PrimKind.INT32);
+  }
+  const resolved = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childC);
+  if (resolved == TYPE_ERROR_ID) {
+    return primTypeId(PrimKind.INT32);
+  }
+  if (isIntPrimType(ref prog, resolved) || isStringPrimType(ref prog, resolved)) {
+    return resolved;
+  }
+  reportError(
+    ref prog,
+    `enum "${declNode.name}" underlying type is ${formatType(ref prog, resolved)}; it must be int8..int64, uint8..uint64, or string`,
+    nodeAt(ref ast, declNode.childC).sourceLoc
+  );
+  return primTypeId(PrimKind.INT32);
+}
+
+// One namespace per module, the same insert pass A's `bindName` does. Spelled
+// again here rather than exported from pass_a.yoop, which keeps its own binding
+// helper private; the alternative was exporting a five-argument helper for one
+// caller.
+function bindEnumName(
+  ref prog: Program,
+  ref tm: TypedModule,
+  declNode: ASTNode,
+  sym: Symbol,
+  exported: bool
+): void {
+  const symbolId = internSymbol(ref prog, sym);
+  if (map.mapInsert(ref tm.names, declNode.name, symbolId)) {
+    reportError(
+      ref prog,
+      `"${declNode.name}" is declared more than once in this module`,
+      declNode.sourceLoc
+    );
+  }
+  if (exported) {
+    map.mapInsert(ref tm.exports, declNode.name, symbolId);
+  }
+}

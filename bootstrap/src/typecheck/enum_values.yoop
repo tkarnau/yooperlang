@@ -1,0 +1,248 @@
+module typecheck;
+
+/*
+  What a value `enum`'s cases are worth: the constant fold that turns
+  `Sweet 1, Sour 2, SweetAndSour Sweet | Sour` into three numbers.
+
+  Folding happens HERE rather than in the parser, which is the split the
+  reference uses too. `Red { r: int32 }` is a struct literal to a parser, and
+  "unsupported expression form in enum case value" is a better answer than
+  "expected comma" - so the parser takes an ordinary expression and this decides
+  whether it could ever be a constant.
+
+  Every accepted form was established by PROBING the reference rather than by
+  reading it: an int (or char) literal, a unary minus over one, a PRIOR case by
+  bare name, and `| & ^ << >>` between those. Arithmetic is refused - not
+  because it could not be folded, but because the reference refuses it and the
+  two compilers have to agree about what a program means.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt, kindName } from "../ast";
+import { TokenTags, tagSpelling } from "../lex";
+
+// What the fold carries between cases: the value an implicit case takes, and
+// whether any case so far was DERIVED rather than written or counted.
+export type EnumFoldState {
+  next: int64,
+  isOpen: bool,
+}
+
+// One case's constant. The two underlying families take different routes and
+// share only the name.
+export function foldEnumCase(
+  ref prog: Program,
+  ref ast: AST,
+  enumName: string,
+  caseNode: ASTNode,
+  underlying: TypeId,
+  ref cases: Vec<EnumCase>,
+  ref state: EnumFoldState
+): EnumCase {
+  const ordinal = int(cases.len);
+  if (isStringPrimType(ref prog, underlying)) {
+    return { name: caseNode.name, ordinal: ordinal, value: 0,
+             valueStr: foldStringCase(ref prog, ref ast, enumName, caseNode) };
+  }
+
+  // No value written: the previous case's plus one, starting at 0. A case AFTER
+  // an explicit one counts on from it, which is what makes
+  // `{ Zero 0, Eighteen 18, Auto }` give Auto 19.
+  if (caseNode.childA == 0) {
+    const implicit = state.next;
+    state.next = implicit + 1;
+    checkEnumRange(ref prog, enumName, caseNode, underlying, implicit);
+    return { name: caseNode.name, ordinal: ordinal, value: implicit, valueStr: "" };
+  }
+
+  let derived = false;
+  const value = foldIntCase(
+    ref prog, ref ast, enumName, caseNode, caseNode.childA, ref cases, ref derived
+  );
+  if (derived) {
+    // An enum with a derived case is OPEN: `Sweet | Sour` means values outside
+    // the named set are reachable, so a switch over it cannot be exhaustive.
+    state.isOpen = true;
+  }
+  state.next = value + 1;
+  checkEnumRange(ref prog, enumName, caseNode, underlying, value);
+  return { name: caseNode.name, ordinal: ordinal, value: value, valueStr: "" };
+}
+
+// A string-backed case must SAY its value. There is nothing to count on from,
+// so an implicit one would have to invent a string.
+function foldStringCase(
+  ref prog: Program,
+  ref ast: AST,
+  enumName: string,
+  caseNode: ASTNode
+): string {
+  if (caseNode.childA == 0) {
+    reportError(
+      ref prog,
+      `string-backed enum case "${enumName}.${caseNode.name}" needs an explicit string value`,
+      caseNode.sourceLoc
+    );
+    return "";
+  }
+  const valueNode = nodeAt(ref ast, caseNode.childA);
+  if (valueNode.kind != ASTNodeKind.STRING_LITERAL) {
+    reportError(
+      ref prog,
+      `string-backed enum "${enumName}" case "${caseNode.name}" must use a string literal value`,
+      valueNode.sourceLoc
+    );
+    return "";
+  }
+  return vec.vecGet(ref ast.strings, valueNode.strId);
+}
+
+// The constant an integer-backed case's expression folds to.
+function foldIntCase(
+  ref prog: Program,
+  ref ast: AST,
+  enumName: string,
+  caseNode: ASTNode,
+  exprId: NodeId,
+  ref cases: Vec<EnumCase>,
+  ref derived: bool
+): int64 {
+  const expr = nodeAt(ref ast, exprId);
+  switch (expr.kind) {
+    case ASTNodeKind.INT_LITERAL: {
+      if (expr.flagA) {
+        return -int64(expr.intVal);
+      }
+      return int64(expr.intVal);
+    }
+    case ASTNodeKind.STRING_LITERAL: {
+      reportError(
+        ref prog,
+        `string literal in integer-backed enum "${enumName}" case "${caseNode.name}"`,
+        expr.sourceLoc
+      );
+      return 0;
+    }
+    case ASTNodeKind.UNARY_EXPRESSION: {
+      if (expr.operator != TokenTags.MINUS) {
+        reportError(
+          ref prog,
+          `unary operator "${tagSpelling(expr.operator)}" is not allowed in an enum case value`,
+          expr.sourceLoc
+        );
+        return 0;
+      }
+      return -foldIntCase(ref prog, ref ast, enumName, caseNode, expr.childA, ref cases, ref derived);
+    }
+    case ASTNodeKind.IDENT: {
+      // A bare name here is a PRIOR case of this same enum and nothing else -
+      // not a module const, not a local. A forward reference is refused because
+      // the fold is one forward pass and the value would not exist yet.
+      const at = enumCaseIndexNamed(ref cases, expr.name);
+      if (at < 0) {
+        reportError(
+          ref prog,
+          `"${expr.name}" in case "${caseNode.name}" does not name a prior case of enum "${enumName}"`,
+          expr.sourceLoc
+        );
+        return 0;
+      }
+      return vec.vecGet(ref cases, usize(at)).value;
+    }
+    case ASTNodeKind.BINARY_EXPRESSION: {
+      if (!isEnumValueOperator(expr.operator)) {
+        reportError(
+          ref prog,
+          `binary operator "${tagSpelling(expr.operator)}" is not allowed in an enum case value (only | & ^ << >>)`,
+          expr.sourceLoc
+        );
+        return 0;
+      }
+      derived = true;
+      const left = foldIntCase(ref prog, ref ast, enumName, caseNode, expr.childA, ref cases, ref derived);
+      const right = foldIntCase(ref prog, ref ast, enumName, caseNode, expr.childB, ref cases, ref derived);
+      return applyEnumValueOperator(expr.operator, left, right);
+    }
+    default: {
+      reportError(
+        ref prog,
+        `unsupported expression form in enum case value (kind: ${kindName(expr.kind)})`,
+        expr.sourceLoc
+      );
+      return 0;
+    }
+  }
+}
+
+function isEnumValueOperator(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.PIPE, TokenTags.AMP, TokenTags.CARET,
+         TokenTags.LSHIFT, TokenTags.RSHIFT: { return true; }
+    default: { return false; }
+  }
+}
+
+function applyEnumValueOperator(tag: TokenTags, left: int64, right: int64): int64 {
+  switch (tag) {
+    case TokenTags.PIPE: { return left | right; }
+    case TokenTags.AMP: { return left & right; }
+    case TokenTags.CARET: { return left ^ right; }
+    case TokenTags.LSHIFT: { return left << right; }
+    case TokenTags.RSHIFT: { return left >> right; }
+    default: { return 0; }
+  }
+}
+
+// A value that does not fit its declared width is refused rather than
+// truncated: `enum E { A 5000000000 }` at int32 is a mistake about the enum's
+// type, and silently wrapping it would make the case unreachable from its own
+// switch.
+function checkEnumRange(
+  ref prog: Program,
+  enumName: string,
+  caseNode: ASTNode,
+  underlying: TypeId,
+  value: int64
+): void {
+  if (enumValueFits(ref prog, underlying, value)) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `value ${value} for case "${enumName}.${caseNode.name}" does not fit in ${formatType(ref prog, underlying)}`,
+    caseNode.sourceLoc
+  );
+}
+
+// Whether a folded constant fits its underlying width. 64 bits always does - the
+// fold itself is int64 - and an unsigned width refuses a negative value.
+function enumValueFits(ref prog: Program, underlying: TypeId, value: int64): bool {
+  const bits = primBitWidth(ref prog, underlying);
+  if (bits == 0 || bits >= 64) {
+    return true;
+  }
+  if (primIsSigned(ref prog, underlying)) {
+    const limit: int64 = int64(1) << int64(bits - 1);
+    return value >= -limit && value < limit;
+  }
+  if (value < 0) {
+    return false;
+  }
+  return value < (int64(1) << int64(bits));
+}
+
+// The index of a case by name in the run being built, or -1. Shared with
+// enums.yoop's duplicate-name check, which is the same question one step
+// earlier.
+export function enumCaseIndexNamed(ref cases: Vec<EnumCase>, name: string): int {
+  let i: usize = 0;
+  while (i < cases.len) {
+    if (str.stringEq(vec.vecGet(ref cases, i).name, name)) {
+      return int(i);
+    }
+    i += 1;
+  }
+  return -1;
+}

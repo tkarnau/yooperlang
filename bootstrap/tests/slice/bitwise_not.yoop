@@ -1,0 +1,70 @@
+// `~x` - bitwise NOT.
+//
+// It lowers to `xor %x, -1` at the operand's own width. -1 is all ones in two's
+// complement at every width, so one spelling covers signed and unsigned alike
+// and there is no separate complement instruction to reach for. Same lowering
+// the reference emits.
+//
+// Prefix ONLY, which is what makes it simpler than `&` and `*`: those are each
+// both a prefix and a binary operator and are told apart by position, and there
+// is no binary `~` for that question to be about. It binds at the same
+// precedence as unary `-` and `!`, so `~2 & 7` is `(~2) & 7`.
+//
+// The width is the whole point of the fixture: `~a` on a uint8 15 is 240, not
+// -16 and not 4294967280. A lowering that complemented at the wrong width, or
+// that forgot to let the expectation flow down into an untyped literal, gets
+// most of these lines wrong.
+
+enum Flags<uint8> {
+  A 1,
+  B 2,
+  C 4,
+}
+
+function invert8(v: uint8): uint8 {
+  return ~v;
+}
+
+function main(): int {
+  // Every integer width keeps its own type through the complement.
+  let a: uint8 = 15;
+  let b: int32 = 5;
+  let c: uint64 = 1;
+  let d: int8 = 0;
+
+  printf("u8=%d\n", int32(~a));
+  printf("i32=%d\n", ~b);
+  printf("u64=%llu\n", ~c);
+  printf("i8=%d\n", int32(~d));
+
+  // Through a call, so the complement happens in a callee's body against a
+  // parameter rather than against a local.
+  printf("call=%d\n", int32(invert8(a)));
+
+  // The expectation flows down into an untyped literal exactly as unary
+  // minus's does: `~0` in a uint8 slot is 255, not an int32 -1.
+  let w: uint8 = ~0;
+  let n: int64 = ~5;
+  printf("pinned=%d %lld\n", int32(w), n);
+
+  // Precedence: `~` binds tighter than every binary operator, so this is
+  // `(~2) & 7`, which is -3 & 7 = 5. Grouped the other way it would be ~2 = -3.
+  let mixed: int32 = ~2 & 7;
+  printf("mixed=%d\n", mixed);
+
+  // Stacked prefixes, right to left: -1 complemented is 0.
+  let stacked: int32 = ~-1;
+  printf("stacked=%d\n", stacked);
+
+  // An INT-backed value enum is an integer operand and keeps its OWN type, so
+  // the result is a Flags and casts out through its uint8 backing.
+  let all: Flags = ~Flags.A;
+  printf("enum=%d\n", int32(uint8(all)));
+
+  // ...and it still behaves like the enum it is: masking the complement with
+  // B clears nothing, because A and B share no bits.
+  let masked: Flags = all & Flags.B;
+  printf("masked=%d\n", int32(uint8(masked)));
+
+  return 0;
+}

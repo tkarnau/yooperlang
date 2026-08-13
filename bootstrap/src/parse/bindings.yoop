@@ -6,6 +6,12 @@ import { Result } from "std/core/types.yoop";
 import { ASTNodeKind } from "../ast";
 import { TokenTags, Token } from "../lex";
 
+//   name      the binding's name
+//   childA    the type annotation (0 = infer from the initializer)
+//   childB    the initializer
+//   childC    the kind prefix list (0 = none)
+//   childD    the BLOCK a kind-prefixed binding may own (0 = none). When it is
+//             there, the block is the binding's whole scope.
 export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // Three accepted shapes here:
   //   (1) let|const IDENT : type (= expr)? ;
@@ -52,11 +58,29 @@ export function parseVarDecl(ref ps: ParserState): ParsingResult {
   // if it is just a semicolon, it is uninitialized...
   if (SelfLexing.peek(ref ps).tag == TokenTags.SEMICOLON) {
     SelfLexing.advance(ref ps)?;
-  } else { // otherwise it is a regular assignment
-    SelfLexing.expect(ref ps, TokenTags.EQ)?;
-    node.childB = parseExpression(ref ps, 0)?;
-    SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
   }
+  SelfLexing.expect(ref ps, TokenTags.EQ)?;
+  node.childB = parseExpression(ref ps, 0)?;
+
+  // `disposable reg: ArenaScope = arenaScope(4096) { ... }` - the BLOCK form of
+  // a kind-prefixed binding, and childD is where the block goes.
+  //
+  // The block IS the binding's scope: the name is visible inside it, gone after
+  // it, and whatever the kind asks for at scope end fires at the closing brace
+  // rather than at the end of the function. Both halves were established by
+  // probing the reference - reading the name after the block is
+  // `undefined variable` there.
+  //
+  // Gated on there being a kind PREFIX, which is what keeps it decidable. A
+  // plain `const p: Point = { x: 1 }` is followed by `;` and the `{ x: 1 }` was
+  // already eaten by the expression; without the gate an ordinary binding
+  // followed by a bare block statement would swallow the block.
+  if (node.childC != 0 && SelfLexing.peek(ref ps).tag == TokenTags.LCURLY) {
+    node.childD = parseBlock(ref ps)?;
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
+  }
+  SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
 
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node ) };
 }

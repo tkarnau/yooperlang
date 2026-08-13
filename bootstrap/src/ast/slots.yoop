@@ -40,6 +40,9 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.KIND_PREFIX: {
       return "argsList";
     }
+    case ASTNodeKind.TYPE_PARAM: {
+      return "bounds";
+    }
     case ASTNodeKind.TYPE_ANNOTATION_REF_TYPE: {
       return "inner";
     }
@@ -53,6 +56,11 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     case ASTNodeKind.INDEX_EXPRESSION,
          ASTNodeKind.FIELD_ACCESS: {
       return "base";
+    }
+    // `Sweet 1` - the case's value, written by juxtaposition. 0 when the case
+    // takes the implicit one (the previous case's value plus one).
+    case ASTNodeKind.ENUM_CASE: {
+      return "valueExpression";
     }
     case ASTNodeKind.SWITCH_STATEMENT: {
       return "scrutinee";
@@ -93,6 +101,10 @@ export function astNodeChildAName(v: ASTNodeKind): string {
     }
     case ASTNodeKind.RETURN_STATEMENT: {
       return "returnExpression";
+    }
+    case ASTNodeKind.EXPRESSION_STATEMENT,
+         ASTNodeKind.DISCARD_STATEMENT: {
+      return "expression";
     }
     case ASTNodeKind.IF_STATEMENT,
          ASTNodeKind.WHILE_STATEMENT: {
@@ -171,6 +183,12 @@ export function astNodeChildCName(v: ASTNodeKind): string {
     case ASTNodeKind.TYPE_DECL: {
       return "aliasTypeAnnotation";
     }
+    // `enum K<uint8>` - the primitive the cases are constants of. It lives here
+    // rather than in childA because childA means "type parameters" on every
+    // other decl, and an enum has none.
+    case ASTNodeKind.ENUM_DECL: {
+      return "underlyingTypeAnnotation";
+    }
     case ASTNodeKind.IF_STATEMENT: {
       return "elseBranch";
     }
@@ -189,7 +207,8 @@ export function astNodeChildDName(v: ASTNodeKind): string {
          ASTNodeKind.METHOD_DECL: {
       return "functionBody";
     }
-    case ASTNodeKind.TYPE_DECL: {
+    case ASTNodeKind.TYPE_DECL,
+         ASTNodeKind.ENUM_DECL: {
       return "implementsList";
     }
     case ASTNodeKind.FOR_LOOP: {
@@ -252,6 +271,11 @@ export function astNodeChildListName(v: ASTNodeKind): string {
       return "methodSigs";
     }
     case ASTNodeKind.VARIANT_DECL: {
+      return "cases";
+    }
+    // Cases AND methods, in one run - the same arrangement a variant uses, and
+    // the reason an ordinal counts off the cases seen rather than the index.
+    case ASTNodeKind.ENUM_DECL: {
       return "cases";
     }
     // A payload-less case has an empty run rather than a missing one.

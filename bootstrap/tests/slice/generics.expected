@@ -7,4 +7,6 @@ maybe=11 -1
 identity=6 six
 boxUp=6
 makePair=12 6
+litIdentity=17
+litSibling=12
 exit=0

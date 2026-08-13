@@ -141,6 +141,25 @@ export function emitSprintfInt(ref cx: Cx, buf: usize, fmt: usize, value: Operan
   endInstr(ref cx);
 }
 
+//   call i32 (ptr, ptr, ...) @sprintf(ptr %t2, ptr @.str.0, double %t1)
+//
+// The float twin. Same call, and the ONLY difference is that the value rides in
+// a `double` slot rather than an `i64` - which is C's variadic promotion, so
+// there is no float32 spelling here at all and the caller widens first.
+export function emitSprintfFloat(ref cx: Cx, buf: usize, fmt: usize, value: Operand): void {
+  startInstr(ref cx);
+  part(ref cx, "call ");
+  part(ref cx, SPRINTF_SIGNATURE);
+  part(ref cx, " @sprintf(ptr ");
+  temp(ref cx, buf);
+  part(ref cx, ", ptr ");
+  operand(ref cx, Operand.StrRef { id: fmt });
+  part(ref cx, ", double ");
+  operand(ref cx, value);
+  part(ref cx, ")");
+  endInstr(ref cx);
+}
+
 //   %t4 = select i1 %t3, ptr @.str.1, ptr @.str.2
 export function emitSelectPtr(
   ref cx: Cx,
@@ -216,12 +235,20 @@ export function emitErrnoMessage(ref cx: Cx, dest: usize, code: Operand): void {
 //   declare i32 @yoop_errno_get()
 //   declare void @yoop_errno_set(i32)
 //   declare ptr @yoop_errno_message(i32)
-export function emitRuntimeDeclarations(ref e: Emitter): void {
-  emitGlobal(ref e, "declare ptr @yoop_ctx_alloc(i64, i64)");
-  emitGlobal(ref e, "declare void @yoop_ctx_free(ptr)");
-  emitGlobal(ref e, "declare i32 @yoop_errno_get()");
-  emitGlobal(ref e, "declare void @yoop_errno_set(i32)");
-  emitGlobal(ref e, "declare ptr @yoop_errno_message(i32)");
+//
+// Through `externDeclare` rather than straight into the globals, because a
+// user's own `extern "C" from "yoop_runtime"` block may have declared the same
+// symbol already. Returns "" or the refusal - see extern_table.yoop.
+export function emitRuntimeDeclarations(ref e: Emitter): string {
+  let err = externDeclare(ref e, "yoop_ctx_alloc", "ptr", ["i64", "i64"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_ctx_free", "void", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_errno_get", "i32", [], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "yoop_errno_set", "void", ["i32"], false);
+  if (err.len > 0) { return err; }
+  return externDeclare(ref e, "yoop_errno_message", "ptr", ["i32"], false);
 }
 
 // The declarations the calls above need, emitted once per module and only when
@@ -232,10 +259,18 @@ export function emitRuntimeDeclarations(ref e: Emitter): void {
 //   declare void @free(ptr)
 //   declare ptr @memcpy(ptr, ptr, i64)
 //   declare i32 @sprintf(ptr, ptr, ...)
-export function emitStringBuilderDeclarations(ref e: Emitter): void {
-  emitGlobal(ref e, "declare i64 @strlen(ptr)");
-  emitGlobal(ref e, "declare ptr @malloc(i64)");
-  emitGlobal(ref e, "declare void @free(ptr)");
-  emitGlobal(ref e, "declare ptr @memcpy(ptr, ptr, i64)");
-  emitGlobal(ref e, "declare i32 @sprintf(ptr, ptr, ...)");
+//
+// This is the half of 2.1 that used to collide: std/core/alloc.yoop declares
+// its own `malloc` and `free`, and both spell exactly these two lines - so
+// they are now REUSED rather than emitted twice.
+export function emitStringBuilderDeclarations(ref e: Emitter): string {
+  let err = externDeclare(ref e, "strlen", "i64", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "malloc", "ptr", ["i64"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "free", "void", ["ptr"], false);
+  if (err.len > 0) { return err; }
+  err = externDeclare(ref e, "memcpy", "ptr", ["ptr", "ptr", "i64"], false);
+  if (err.len > 0) { return err; }
+  return externDeclare(ref e, "sprintf", "i32", ["ptr", "ptr"], true);
 }

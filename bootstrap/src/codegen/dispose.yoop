@@ -21,7 +21,8 @@ import { Option } from "std/core/types.yoop";
 import { ASTNode, NodeId, childAt, nodeAt } from "../ast";
 import * as str from "std/core/strings.yoop";
 import { lookupKind, KindInfo, nominalModuleOf, methodSymbolName, moduleIdOf,
-  lookupMethod, TYPE_ERROR_ID } from "../typecheck";
+  lookupMethod, TypeId, TYPE_ERROR_ID, PropagatedField, propagatesMustCall,
+  propagatedFieldsOf, propagatedDisposeProblem } from "../typecheck";
 
 // Record a binding that owes a disposal, if its kind asks for one.
 //
@@ -42,19 +43,62 @@ export function noteDisposable(
     return "";
   }
 
-  const ownerType = resolvedTypeAt(ref cx, declId);
-  if (lookupMethod(cx.prog, ownerType, method) == TYPE_ERROR_ID) {
-    // Pass D refuses this, so reaching here means a check was skipped rather
-    // than a program being wrong.
-    return internalError("no such method to dispose with", method);
+  return recordDisposal(ref cx, declNode.name, slot, resolvedTypeAt(ref cx, declId), method);
+}
+
+// Push whatever `<kind> x: T` owes onto the current dispose scope: one call on
+// the binding when T has the method, and one call per qualifying FIELD when T
+// PROPAGATES the kind instead.
+//
+// Both call sites go through here - an ordinary binding and a kind region -
+// because the question "what does this owe" is about the TYPE and neither of
+// them should have to know that propagation exists.
+export function recordDisposal(
+  ref cx: Cx,
+  name: string,
+  slot: usize,
+  ownerType: TypeId,
+  method: string
+): string {
+  if (lookupMethod(cx.prog, ownerType, method) != TYPE_ERROR_ID) {
+    disposeRecord(cx.disposes, {
+      name: name,
+      slot: slot,
+      ownerType: ownerType,
+      method: method,
+      viaField: false,
+      fieldIndex: 0,
+      slotType: "",
+    });
+    return "";
   }
 
-  disposeRecord(cx.disposes, {
-    name: declNode.name,
-    slot: slot,
-    ownerType: ownerType,
-    method: method,
-  });
+  // Pass D proved one of these two before codegen ever ran, so a miss here is a
+  // check that was skipped rather than a program that is wrong.
+  if (!propagatesMustCall(cx.prog, ownerType, method)) {
+    return internalError("no such method to dispose with", method);
+  }
+  if (propagatedDisposeProblem(cx.prog, ownerType, method).len > 0) {
+    return internalError("a propagated disposal reached codegen unusable", name);
+  }
+
+  const slotType = llvmType(cx.prog, ownerType);
+  disposable fields: Vec<PropagatedField> = vec.vecNew(4);
+  propagatedFieldsOf(cx.prog, ownerType, method, ref fields);
+  let i: usize = 0;
+  while (i < fields.len) {
+    const field = vec.vecGet(ref fields, i);
+    disposeRecord(cx.disposes, {
+      name: name,
+      slot: slot,
+      ownerType: field.fieldType,
+      method: method,
+      viaField: true,
+      fieldIndex: field.index,
+      slotType: slotType,
+    });
+    i += 1;
+  }
   return "";
 }
 
@@ -126,19 +170,38 @@ export function emitUnwindTo(ref cx: Cx, target: usize): string {
 //
 // The receiver is the binding's SLOT ADDRESS - `dispose` takes `ref self`, and
 // a borrow is the address of storage that already exists.
+//
+// A PROPAGATED entry geps one level in first, and the field pointer is then the
+// receiver in exactly the same way:
+//
+//   %t1 = getelementptr inbounds %struct.c__Emitter, ptr %e.1.addr, i32 0, i32 0
+//   call void @text__Text__dispose(ptr %t1)
 function emitOneDisposal(ref cx: Cx, entry: PendingDispose): string {
   disposable args: Vec<CallArg> = vec.vecNew(1);
   vec.vecPush(ref args, {
     ty: "ptr",
-    value: Operand.SlotAddr { name: entry.name, id: entry.slot },
+    value: disposeReceiver(ref cx, entry),
   });
   emitCall(
     ref cx, 0, "void",
     moduleIdOf(cx.prog, nominalModuleOf(cx.prog, entry.ownerType)),
     methodSymbolName(cx.prog, entry.ownerType, entry.method),
-    false, ref args
+    ref args
   );
   return "";
+}
+
+//   %t1 = getelementptr inbounds %struct.c__Emitter, ptr %e.1.addr, i32 0, i32 0
+//
+// What `ref self` is for one disposal: the binding's slot, or the address of
+// one of its fields when the obligation was propagated to them.
+function disposeReceiver(ref cx: Cx, entry: PendingDispose): Operand {
+  if (!entry.viaField) {
+    return Operand.SlotAddr { name: entry.name, id: entry.slot };
+  }
+  const fieldAddr = freshTemp(cx.e);
+  emitGepField(ref cx, fieldAddr, entry.slotType, entry.name, entry.slot, entry.fieldIndex);
+  return Operand.Temp { id: fieldAddr };
 }
 
 // `ephemeral arenaScope(N) { ... }` - build the subject, run the block, call.
@@ -147,54 +210,3 @@ function emitOneDisposal(ref cx: Cx, entry: PendingDispose): string {
 // an address, and nothing in the block can name it. Recording it in the block's
 // own dispose scope is what makes the call fire on every way out - the closing
 // brace, a `return`, a `break` - rather than only the first.
-export function emitKindRegion(
-  ref cx: Cx,
-  stmt: ASTNode,
-  stmtId: NodeId,
-  retTy: string,
-  ref terminated: bool
-): string {
-  const method = disposeMethodOf(ref cx, stmt);
-  if (method.len == 0) {
-    return internalError("kind region with no scope-end method", "codegen");
-  }
-
-  let subject: Operand = Operand.None;
-  const err = emitExpr(ref cx, stmt.childA, ref subject);
-  if (err.len > 0) {
-    return err;
-  }
-  const ty = typeOf(ref cx, stmtId);
-  const slot = declareAnonSlot(ref cx, ty);
-  emitStore(ref cx, ty, subject, TEMP_SLOT_NAME, slot.id);
-
-  // Its own scope, holding just the subject, so the block's own disposables
-  // unwind INSIDE it and the region's call comes last.
-  disposePushScope(cx.disposes);
-  disposeRecord(cx.disposes, {
-    name: TEMP_SLOT_NAME,
-    slot: slot.id,
-    ownerType: resolvedTypeAt(ref cx, stmtId),
-    method: method,
-  });
-
-  let bodyErr = "";
-  let bodyTerminated = false;
-  emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref bodyErr);
-  if (bodyErr.len > 0) {
-    disposePopScope(cx.disposes);
-    return bodyErr;
-  }
-
-  // A body that terminated already unwound this scope on its way out.
-  if (!bodyTerminated) {
-    const derr = emitScopeDisposals(ref cx, disposeScopeDepth(cx.disposes) - 1);
-    if (derr.len > 0) {
-      disposePopScope(cx.disposes);
-      return derr;
-    }
-  }
-  disposePopScope(cx.disposes);
-  terminated = bodyTerminated;
-  return "";
-}

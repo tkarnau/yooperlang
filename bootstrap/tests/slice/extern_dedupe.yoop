@@ -1,0 +1,67 @@
+// A user's own libc externs standing beside the ones a LOWERING declares.
+//
+// One LLVM module holds the whole program and a symbol may be declared in it
+// exactly once. Three things declare C symbols into that module and none of
+// them can see the others: this file's `extern` blocks, the template-literal
+// lowering (which is libc rather than std - `strlen` / `malloc` / `free` /
+// `memcpy` / `sprintf`), and the runtime bridge. A file declaring `malloc` and
+// then building a string used to emit two `declare ptr @malloc(i64)` lines and
+// clang rejected the second as "invalid redefinition of function 'malloc'",
+// naming neither of them. That was 2.1 in plans/bootstrap-completion.md and 44
+// of the 420 files in the surface probe - the largest single bucket in it, and
+// every one of them was `malloc`, because std/core/alloc.yoop writes exactly
+// the block below.
+//
+// The signatures here MATCH the lowering's, which is what makes them reusable:
+// `usize` is `i64` and `unsafe_ptr<void>` is `ptr`, so `declare ptr
+// @malloc(i64)` is the one line both want. A signature that genuinely
+// disagreed would be refused by name instead - that half is asserted in
+// bootstrap/src/codegen/codegen.test.yoop, since it never reaches an
+// executable.
+//
+// Note every template goes through `printf("%s\n", ...)` rather than standing
+// in the format slot: a template handed DIRECTLY to printf as its format is
+// rewritten into C conversions by the JS reference and built as a string here,
+// so the two disagree on floats and bools. See bootstrap/README.md.
+
+import.unsafe;
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+// The exact block std/core/alloc.yoop writes.
+extern "C" from "stdlib.h" {
+  function malloc(size: usize): unsafe_ptr<void>;
+  function free(p: unsafe_ptr<void>): void;
+}
+
+// And the rest of what a built string needs, so all five collide at once.
+extern "C" from "string.h" {
+  function strlen(s: string): usize;
+  function memcpy(dst: unsafe_ptr<void>, src: unsafe_ptr<void>, n: usize): unsafe_ptr<void>;
+}
+
+function label(n: int32): string {
+  return `n=${n}`;
+}
+
+function main(): int {
+  // A template literal, which is what drags the lowering's own declares in.
+  const one: string = label(7);
+  printf("%s\n", one);
+
+  // Interpolating several kinds at once, so more of the lowering runs.
+  const many: string = `int ${42} bool ${true} str ${one}`;
+  printf("%s\n", many);
+
+  // The user's own malloc/free, called directly. Same symbols, one declare.
+  let block: unsafe_ptr<void> = malloc(16);
+  printf("alloc ok=%d\n", block != null);
+  free(block);
+
+  // And the user's own strlen, on the string the lowering built.
+  printf("len=%llu measured=%llu\n", one.len, strlen(one));
+
+  return 0;
+}

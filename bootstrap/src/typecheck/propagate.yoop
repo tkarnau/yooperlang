@@ -1,0 +1,128 @@
+module typecheck;
+
+// `propagates<disposable>` on a TYPE - the obligation is passed to the FIELDS.
+//
+// `disposable e: Emitter = emitterNew();` asks for a scope-end `dispose`, and
+// `Emitter` has none. That is not a mistake: `Emitter` declares
+// `propagates<disposable>`, which says the obligation belongs to the things it
+// holds. So the scope-end call is not one call at all - it is one per field
+// that supplies the kind, on that field's own type:
+//
+//     call void @text__Text__dispose(ptr %e.1.globals)
+//     call void @text__Text__dispose(ptr %e.1.body)
+//     ...
+//
+// A field SUPPLIES the kind when its own type propagates it, which is how
+// `Text`, `Vec<T>` and `Map<K, V>` each reach an `Emitter` field. A field of a
+// plain type (a `usize`, a `bool`) supplies nothing and is skipped. That is the
+// reference's rule, read off `fieldCarriedKinds` in src/jsyooptypecheck.
+//
+// TWO DIVERGENCES, both refusals, both because the reference emits a call to a
+// symbol that does not exist rather than saying anything:
+//
+//   - a field whose type propagates the kind but has no such METHOD is
+//     refused BY NAME. Chaining propagation through a second level is a real
+//     feature (the gep is one deeper per level) and nothing in std, examples or
+//     bootstrap/src needs it, so it is named rather than half-built.
+//   - a type that propagates the kind and has NO qualifying field is refused by
+//     name too. The clause promised a cleanup and nothing would be emitted,
+//     which is a leak that compiles.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, childAt, nodeAt } from "../ast";
+
+// One field of a propagating type that owes a cleanup call.
+export type PropagatedField {
+  name: string,
+  index: usize,
+  fieldType: TypeId,
+}
+
+// The kind a decl's `propagates<...>` clause names, or "". Read at pass A, off
+// the arena that holds the declaration - which is the only place it can be
+// read, since every later consumer stands in another module.
+export function propagatedKindNameOf(ref ast: AST, declNode: ASTNode): string {
+  if (declNode.childF == 0) {
+    return "";
+  }
+  const list = nodeAt(ref ast, declNode.childF);
+  if (list.childCount == 0) {
+    return "";
+  }
+  return nodeAt(ref ast, childAt(ref ast, list, 0)).name;
+}
+
+// The kind a nominal type propagates, or "".
+export function propagatedKindOf(ref prog: Program, typeId: TypeId): string {
+  switch (typeAt(ref prog, typeId)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      return d.propagatesKind;
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.propagatesKind;
+    }
+    default: { return ""; }
+  }
+}
+
+// True when `typeId` propagates a kind whose `mustCall` is `method`. This is
+// what makes `disposable e: Emitter` legal without an `Emitter.dispose`.
+export function propagatesMustCall(ref prog: Program, typeId: TypeId, method: string): bool {
+  const kindName = propagatedKindOf(ref prog, typeId);
+  if (kindName.len == 0) {
+    return false;
+  }
+  switch (lookupKind(ref prog, kindName)) {
+    case Option.Some { value: info }: { return str.stringEq(info.disposeMethod, method); }
+    case Option.None: { return false; }
+  }
+}
+
+// The fields of `typeId` that supply the propagated kind, in DECLARATION order.
+// The caller disposes them in reverse, the same way a scope disposes bindings.
+export function propagatedFieldsOf(
+  ref prog: Program,
+  typeId: TypeId,
+  method: string,
+  ref out: Vec<PropagatedField>
+): void {
+  switch (typeAt(ref prog, typeId)) {
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      let i: usize = 0;
+      while (i < f.len) {
+        const field = vec.vecGet(ref f, i);
+        if (propagatesMustCall(ref prog, field.typeId, method)) {
+          vec.vecPush(ref out, { name: field.name, index: i, fieldType: field.typeId });
+        }
+        i += 1;
+      }
+    }
+    default: { }
+  }
+}
+
+// Why a propagating type cannot be disposed, or "" when it can. Pass D reports
+// it; codegen asserts on it, since by then the answer was already checked.
+export function propagatedDisposeProblem(
+  ref prog: Program,
+  typeId: TypeId,
+  method: string
+): string propagates<disposable> {
+  disposable fields: Vec<PropagatedField> = vec.vecNew(4);
+  propagatedFieldsOf(ref prog, typeId, method, ref fields);
+  if (fields.len == 0) {
+    return `no field of ${formatType(ref prog, typeId)} carries it`;
+  }
+  let i: usize = 0;
+  while (i < fields.len) {
+    const field = vec.vecGet(ref fields, i);
+    if (lookupMethod(ref prog, field.fieldType, method) == TYPE_ERROR_ID) {
+      return `field "${field.name}" propagates it too, and the bootstrap does not chain propagated disposal through a second level`;
+    }
+    i += 1;
+  }
+  return "";
+}

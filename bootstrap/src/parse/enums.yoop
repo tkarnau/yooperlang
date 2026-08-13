@@ -1,0 +1,121 @@
+module parse;
+
+// Value `enum` declarations.
+//
+//   enum Severity { ERROR, WARNING }
+//   enum Level<string> { Info "info", Warn "warn" }
+//   enum Flavors { Sweet 1, Sour 2, SweetAndSour Sweet | Sour }
+//   enum ASTNodeKind implements Display { FUNCTION_DECL, ..., function toString(...) {} }
+//
+// A value enum is a NOMINAL ALIAS over a primitive: an integer width or
+// `string`, with named compile-time constants of it. That is what makes it much
+// smaller than a variant - there is no tag, no payload, and no layout to decide.
+//
+// A case's value is written by JUXTAPOSITION rather than with `=`
+// (`Sweet 1`, not `Sweet = 1`), which is the reference's syntax and is what makes
+// the value parse as an ordinary expression here. The parser does not restrict
+// which expression: pass C const-evaluates it and refuses the forms that cannot
+// be a constant, by name. That split is deliberate and matches the reference -
+// `Red { r: int32 }` is a struct literal to a parser, and "unsupported expression
+// form in enum case value" is a better answer than "expected comma".
+//
+// The BACKING type goes in childC, the slot a TYPE_DECL already uses for an
+// annotation, rather than childA where a TYPE_DECL keeps its type parameters. An
+// enum is never generic - `enum K<int64>` is the backing type and not a
+// parameter list - and putting it in childA would make every "does this decl
+// have type parameters" test in pass C answer yes.
+
+import { Result } from "std/core/types.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { NodeId, ASTNodeKind } from "../ast";
+import { TokenTags } from "../lex";
+import { ParsingError } from "../diagnostics";
+
+// `enum Name<Backing> implements T { Case value?, ..., function m() {} }`
+//
+//   name                    the enum's name
+//   childC                  the underlying type annotation (0 = the default,
+//                           int32)
+//   childD                  implements list-node (0 = none), the same slot a
+//                           TYPE_DECL and a VARIANT_DECL use
+//   own childIds run        the ENUM_CASE nodes, in DECLARATION ORDER (which is
+//                           the ordinal, and what an implicit value counts off),
+//                           then any METHOD_DECLs
+export function parseEnumDecl(ref ps: ParserState): Result<NodeId, ParsingError> {
+  SelfLexing.expect(ref ps, TokenTags.ENUM)?;
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ENUM_DECL);
+  node.name = parseIdentAsName(ref ps)?;
+  node.childC = parseEnumUnderlying(ref ps)?;
+  node.childD = parseImplementsClause(ref ps)?;
+
+  SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
+  disposable memberIds: Vec<NodeId> = vec.vecNew(8);
+  while (
+    SelfLexing.peek(ref ps).tag != TokenTags.RCURLY &&
+    SelfLexing.peek(ref ps).tag != TokenTags.EOF
+  ) {
+    // A method, not a case. `function` cannot start a case name, so the two
+    // members never have to be told apart by anything but the keyword - the
+    // same rule a variant body uses, and methods may sit anywhere in the run.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION ||
+        atKindPrefixedMethod(ref ps, true)) {
+      vec.vecPush(ref memberIds, parseMethodDecl(ref ps, node.name, 0)?);
+      continue;
+    }
+    vec.vecPush(ref memberIds, parseEnumCase(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
+      SelfLexing.advance(ref ps)?;
+    }
+  }
+  SelfLexing.expect(ref ps, TokenTags.RCURLY)?;
+
+  // Spliced only now, for the reason a variant's cases are: a method's parameter
+  // list appends its own run to the shared pool while it parses, so a partial
+  // splice would interleave the two.
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref memberIds));
+  node.childStart = start;
+  node.childCount = memberIds.len;
+
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `<uint8>` / `<string>` after the name - the type the cases are constants OF.
+// One annotation, never a list: an enum takes no type parameters, so there is
+// nothing a comma could separate.
+function parseEnumUnderlying(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.LT) {
+    return Result.Ok { value: 0 };
+  }
+  SelfLexing.advance(ref ps)?;
+  const annot = parseTypeAnnotation(ref ps)?;
+  consumeClosingGt(ref ps)?;
+  return Result.Ok { value: annot };
+}
+
+// One `NAME` or `NAME <value-expression>`.
+//
+//   name        the case's name
+//   childA      the value expression, or 0 for an implicit one
+//
+// The value ENDS where the expression ends, so a short list of terminators is
+// the only lookahead needed: a `,`, the closing `}`, or a `function` keyword
+// means this case had no value written. Anything else starts one.
+//
+// `function` is in that list because a comma before a method is OPTIONAL - the
+// reference accepts `Blue\n function toString(...)` - and without it the method
+// keyword would be read as the start of Blue's value, reported as "unexpected
+// token in expression" rather than as whatever is really wrong with the method.
+function parseEnumCase(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ENUM_CASE);
+  node.name = parseIdentAsName(ref ps)?;
+
+  const next = SelfLexing.peek(ref ps).tag;
+  if (next == TokenTags.COMMA || next == TokenTags.RCURLY ||
+      next == TokenTags.FUNCTION || next == TokenTags.EOF) {
+    return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+  }
+  node.childA = parseExpression(ref ps, 0)?;
+  return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}

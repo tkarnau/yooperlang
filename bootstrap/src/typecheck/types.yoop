@@ -38,6 +38,21 @@ export type NominalDecl {
   name: string,
   module: ModuleId,
   populated: bool,
+  // The kind this decl wrote in a `propagates<...>` clause, or "".
+  //
+  // It rides on the decl rather than on the AST because the two things that
+  // read it - pass D checking a binding and codegen emitting its scope-end
+  // call - both stand in a DIFFERENT module from the declaration, so neither
+  // has that arena in hand. Same reason a type alias is forced while its
+  // module's AST is the one being walked.
+  //
+  // ONE kind, not a list: `propagates<disposable, tainted>` records only
+  // `disposable`. That mirrors `disposeMethodOf`'s "the first prefix that asks
+  // wins" and costs nothing today - no file in std, examples or bootstrap/src
+  // writes a second kind on a TYPE. The kind NAME rather than its `mustCall`
+  // method, because a kind is reached from a graph-wide registry and the
+  // registry may not have it yet when pass A stamps this.
+  propagatesKind: string,
 }
 
 // When a nominal type is an instantiation of a generic decl, `origin` names the
@@ -66,15 +81,24 @@ export type VariantCase propagates<disposable> {
   fields: Vec<Field>,
 }
 
-// One case of a value `enum`. `value` is the case's compile-time constant of the
-// enum's underlying primitive. For `enum<string>` the constant is a string;
-// store its string-pool index here (or add a valueStr slot) when Phase-12 string
-// enums land in the bootstrap.
+// One case of a value `enum`, and its compile-time constant.
+//
+// The constant lands in ONE of the two slots, decided by the enum's underlying
+// type: `value` for every integer width, `valueStr` for `enum<string>`. Two
+// slots rather than one union-ish field because they are read by different
+// code - an integer case becomes an immediate operand and a string case becomes
+// an interned constant - so a caller that reaches for the wrong one is a
+// compile error here rather than a zero at run time.
+//
+// `ordinal` is DECLARATION ORDER and is not the value. It is what the
+// exhaustiveness check counts and what names a missing case; the emitted jump
+// table dispatches on `value`, which may be sparse, negative or repeated.
 @derive(display)
 export type EnumCase {
   name: string,
   ordinal: int,
   value: int64,
+  valueStr: string,
 }
 
 // The interned type. Every inner type reference is a `TypeId` (an arena index),
@@ -112,7 +136,11 @@ export variant Type propagates<disposable> {
   Variant   { decl: NominalDecl, cases: Vec<VariantCase>, methods: Map<string, TypeId>,
               implementsTraits: Vec<TypeId>, generic: GenericInst },
   Union     { decl: NominalDecl, fields: Vec<Field> },
-  ValueEnum { decl: NominalDecl, underlying: TypeId, cases: Vec<EnumCase>, isOpen: bool },
+  // A nominal ALIAS over `underlying`, with named constants of it. `isOpen` says
+  // a case's value was DERIVED with a bitwise operator, so the reachable set is
+  // no longer the named cases and a switch over it needs a default.
+  ValueEnum { decl: NominalDecl, underlying: TypeId, cases: Vec<EnumCase>, isOpen: bool,
+              methods: Map<string, TypeId>, implementsTraits: Vec<TypeId> },
   Trait     { decl: NominalDecl, methods: Map<string, TypeId>,
               typeParams: Vec<TypeId>, extendsTraits: Vec<TypeId> },
   VTable    { decl: NominalDecl, forTrait: TypeId, fields: Vec<Field>,

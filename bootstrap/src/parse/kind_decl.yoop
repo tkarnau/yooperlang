@@ -203,6 +203,50 @@ export function atKindPrefixedDecl(ref ps: ParserState): bool {
   }
 }
 
+// True when the parser is looking at a kind-prefixed METHOD inside a type,
+// variant or enum body: `async handle(ref self, ...)`.
+//
+// Stricter than `atKindPrefixedDecl`, and it has to be. A member run holds more
+// than declarations, so two identifiers in a row are not enough to go on:
+//
+//   * an ENUM case may be `AB A | B`, which opens IDENT IDENT. This walks the
+//     whole run of identifiers and requires it to END at a `(`, so `AB A | B`
+//     stops at `|` and is a case again.
+//   * an enum or variant case may be a BARE identifier with the method right
+//     after it and no comma between - `Green` then `function toString(...)`.
+//     That is IDENT FUNCTION and it is genuinely ambiguous with
+//     `traced function area(...)`, the reference's prefix-AND-keyword spelling.
+//     `bareIdentIsMember` is how the caller says which body it is in: a struct
+//     field is always `name: T`, so there the shape can only be a prefix.
+export function atKindPrefixedMethod(ref ps: ParserState, bareIdentIsMember: bool): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  let n: usize = 1;
+  while (n < MAX_METHOD_PREFIX_LOOKAHEAD) {
+    switch (SelfLexing.peekAhead(ref ps, n)) {
+      case Result.Err { error: e }: { return false; }
+      case Result.Ok { value: tok }: {
+        if (tok.tag == TokenTags.IDENT) {
+          n += 1;
+        } else if (tok.tag == TokenTags.FUNCTION) {
+          return !bareIdentIsMember;
+        } else {
+          // At least two identifiers - one prefix and the method's name - and
+          // the run ends where a parameter list starts.
+          return n >= 2 && tok.tag == TokenTags.LPAREN;
+        }
+      }
+    }
+  }
+  return false;
+}
+
+// How many identifiers a kind-prefixed method may stack before the parser stops
+// looking. Nothing in the corpus uses more than two prefixes; the cap exists so
+// a malformed member run cannot make the scan walk the rest of the file.
+const MAX_METHOD_PREFIX_LOOKAHEAD: usize = 8;
+
 // `async fetch(u: string): string { ... }` - one or more kind prefixes, then a
 // declaration carrying them.
 //

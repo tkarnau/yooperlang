@@ -1,0 +1,34 @@
+// An `export enum` reached from another module.
+//
+// What each line is for:
+//   `Shade` imported   an imported enum is the SAME type as the declared one,
+//                      so a case built here fits a parameter over there
+//   `invert`           a switch over the enum, run from the module that
+//                      declared it, on a value built by the importer
+//   the switch here    a switch over an IMPORTED enum, whose cases are named
+//                      through the local name the import bound
+//   `Label`            a string-backed enum crossing a module boundary, whose
+//                      case constants are interned in the importing module
+
+import { Shade, Label, shadeValue, invert } from "./lib/palette.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+function describe(s: Shade): int32 {
+  switch (s) {
+    case Shade.Light: { return 1; }
+    case Shade.Dark: { return 2; }
+  }
+}
+
+function main(): int32 {
+  const light: Shade = Shade.Light;
+  printf("values=%d %d\n", shadeValue(light), shadeValue(Shade.Dark));
+  printf("describe=%d %d\n", describe(light), describe(invert(light)));
+
+  const warm: Label = Label.Warm;
+  printf("%s\n", `label=${warm} ${Label.Cool} same=${warm == Label.Warm}`);
+  return 0;
+}

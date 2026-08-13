@@ -1,0 +1,209 @@
+module typecheck;
+
+/*
+  What makes a type FALLIBLE, and pass D's check for `expr?`.
+
+  Split out of pass_d.yoop because "fallible" is a shape question with one
+  answer that three separate places need - the operand of a `?`, the enclosing
+  function's return type, and the diagnostics about either - and pass_d.yoop is
+  already the largest file in the layer.
+
+  The shape rule was established by PROBING the JS reference rather than by
+  reading it, and it is narrower than it first looks. A fallible type is a
+  `variant` with EXACTLY two cases, named `Ok` and `Err`, each carrying zero or
+  one field. Every part of that is load-bearing:
+
+    variant Half   { Ok { value: int }, Nope }             not fallible: no Err
+    variant Three  { Ok { .. }, Err { .. }, Pending }       not fallible: a third case
+    variant Wide   { Ok { a: int, b: int }, Err { .. } }    not fallible: two fields
+    variant Option { Some { value: T }, None }              not fallible: not Ok/Err
+
+  `Option<T>` is deliberately in that list. `?` on one is refused by the
+  reference, which is worth knowing because "the Rust-shaped feature also works
+  on the Rust-shaped optional" is the natural assumption and it is wrong here.
+
+  The field NAMES do not matter - `Err { error: E }` and `Err { e: E }` are both
+  fallible - because a case with one field has exactly one thing `?` could mean.
+  The case names do matter, and they are the whole test.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, NodeId, nodeAt } from "../ast";
+
+const OK_CASE: string = "Ok";
+const ERR_CASE: string = "Err";
+
+// The two payload types of a fallible type, plus whether it is one at all.
+//
+// Payload types are TYPE_VOID_ID for a case that carries nothing, which is what
+// makes `variant A { Ok, Err }` work: `inner()?` yields nothing and propagates
+// nothing, and both halves fall out of the same code as the payload-carrying
+// case rather than needing a branch.
+export type FallibleShape {
+  isFallible: bool,
+  okOrdinal: usize,
+  errOrdinal: usize,
+  okType: TypeId,    // TYPE_VOID_ID when `Ok` carries no payload
+  errType: TypeId,   // TYPE_VOID_ID when `Err` carries no payload
+}
+
+export function notFallible(): FallibleShape {
+  return { isFallible: false, okOrdinal: 0, errOrdinal: 0,
+    okType: TYPE_VOID_ID, errType: TYPE_VOID_ID };
+}
+
+// Is `t` a fallible variant, and if so what does each case carry?
+//
+// Total, and silent: a caller that gets `isFallible: false` back has a better
+// message than this could give, because only the caller knows whether it was
+// looking at an operand or at a return type.
+export function fallibleShapeOf(ref prog: Program, t: TypeId): FallibleShape {
+  if (!isVariantType(ref prog, t)) {
+    return notFallible();
+  }
+  // Exactly two. A third case means a value that is neither success nor
+  // failure, and `?` has nothing to do with one.
+  if (variantCaseCount(ref prog, t) != 2) {
+    return notFallible();
+  }
+  const ok = lookupVariantCase(ref prog, t, OK_CASE);
+  const err = lookupVariantCase(ref prog, t, ERR_CASE);
+  if (!ok.found || !err.found) {
+    return notFallible();
+  }
+  // At most one field each. Two fields is a value `?` would have to pick from,
+  // and there is no rule that would make one of them the answer.
+  if (ok.fieldCount > 1 || err.fieldCount > 1) {
+    return notFallible();
+  }
+  return {
+    isFallible: true,
+    okOrdinal: usize(ok.ordinal),
+    errOrdinal: usize(err.ordinal),
+    okType: payloadTypeOf(ref prog, t, usize(ok.ordinal), ok.fieldCount),
+    errType: payloadTypeOf(ref prog, t, usize(err.ordinal), err.fieldCount),
+  };
+}
+
+// The single payload field's type, or void when the case carries none.
+function payloadTypeOf(ref prog: Program, t: TypeId, ordinal: usize, fieldCount: usize): TypeId {
+  if (fieldCount == 0) {
+    return TYPE_VOID_ID;
+  }
+  const f = variantCaseFieldAt(ref prog, t, ordinal, 0);
+  if (!f.found) {
+    return TYPE_ERROR_ID;
+  }
+  return f.typeId;
+}
+
+// `expr?` - the operand's Ok payload, having arranged for its Err to become the
+// enclosing function's return value.
+//
+// Three things have to hold, and each gets its own message, because "this does
+// not work" is three genuinely different mistakes:
+//
+//   1. the OPERAND is fallible          - otherwise there is no Err to propagate
+//   2. the ENCLOSING RETURN is fallible - otherwise there is nowhere to send it
+//   3. the two Err types AGREE          - otherwise the value does not fit
+//
+// The result type is the operand's Ok payload, not the enclosing function's:
+// `?` unwraps what it was handed. That is why a function returning
+// `Result<bool, E>` can `?` a `Result<int32, E>` and get an int32.
+export function checkTryOp(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  exprId: NodeId,
+  ref scope: LocalScope
+): TypeId {
+  const expr = nodeAt(ref ast, exprId);
+
+  // No expectation is passed down. The operand's type is what decides the
+  // whole thing, and an expectation here would be about the UNWRAPPED value -
+  // pinning `Result<int32, E>` to an `int32` annotation is not a thing.
+  const operand = checkExpr(ref prog, ref tm, ref ast, expr.childA, TYPE_ERROR_ID, ref scope);
+  if (operand == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+
+  const got = fallibleShapeOf(ref prog, operand);
+  if (!got.isFallible) {
+    reportError(
+      ref prog,
+      `'?' applied to non-fallible type ${formatType(ref prog, operand)} - only variants with exactly an Ok and an Err case are fallible`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  const want = fallibleShapeOf(ref prog, prog.currentReturn);
+  if (!want.isFallible) {
+    reportError(
+      ref prog,
+      `'?' is only legal inside a function that returns a fallible variant (Ok/Err); "${prog.currentFn}" returns ${formatType(ref prog, prog.currentReturn)}`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+
+  // The Err payload has to FIT the one the enclosing Err carries, or CONVERT
+  // into it. The conversion is an `Into<TargetErr>` impl on the operand's error
+  // type, and it runs in the failure branch - so the cost is nothing at all on
+  // the success path, which is what makes it worth having rather than making
+  // every caller write the wrapping out.
+  if (!typeAccepts(ref prog, want.errType, got.errType)) {
+    if (!errorConvertsInto(ref prog, got.errType, want.errType)) {
+      reportError(
+        ref prog,
+        `'?' cannot propagate Err of ${formatType(ref prog, got.errType)} into a function returning Err of ${formatType(ref prog, want.errType)} - the two error types have to match, or the first has to implement Into<${formatType(ref prog, want.errType)}>`,
+        expr.sourceLoc
+      );
+      return TYPE_ERROR_ID;
+    }
+    // Recorded rather than re-derived: codegen has both types in hand and could
+    // compare them, but "these differ" and "these differ AND a conversion was
+    // found" are not the same fact, and only pass D established the second.
+    map.mapInsert(ref tm.tryIntoUses, uint64(exprId), true);
+  }
+
+  return got.okType;
+}
+
+// Does `source` promise `Into<target>`, with an `into` method to back it?
+//
+// Matched by trait NAME plus its single argument rather than by resolving
+// `Into` as a symbol. The trait lives in std/core/traits.yoop, which the
+// reference AUTOLOADS into every graph and the bootstrap does not - so the
+// module writing the `?` may never have heard of `Into`, while the module that
+// declared the error type certainly has. Going through the name keeps the check
+// where the evidence is.
+//
+// The METHOD is checked too, not just the claim. `checkTraitsSatisfied` already
+// refuses a type that claims a trait without supplying its methods, so this is
+// belt and braces - but codegen is about to emit a call to that symbol, and an
+// unfilled shell here would emit a call to nothing.
+function errorConvertsInto(ref prog: Program, source: TypeId, target: TypeId): bool {
+  if (lookupMethod(ref prog, source, INTO_METHOD) == TYPE_ERROR_ID) {
+    return false;
+  }
+  disposable claimed: Vec<TypeId> = claimedTraitsOf(ref prog, source);
+  let i: usize = 0;
+  while (i < claimed.len) {
+    const t = vec.vecGet(ref claimed, i);
+    if (str.stringEq(nominalNameOf(ref prog, t), INTO_TRAIT)) {
+      disposable args: Vec<TypeId> = traitArgsOf(ref prog, t);
+      if (args.len == 1 && vec.vecGet(ref args, 0) == target) {
+        return true;
+      }
+    }
+    i += 1;
+  }
+  return false;
+}
+
+const INTO_TRAIT: string = "Into";
+const INTO_METHOD: string = "into";

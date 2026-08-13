@@ -1,0 +1,6 @@
+p is (3, 4)
+call is (5, 10)
+nested (3, 4) -> (9, 9)
+variant Circle(7) and Empty
+mixed (3, 4) 2 true str
+exit=0

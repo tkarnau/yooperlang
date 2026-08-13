@@ -10,5 +10,22 @@ continue:
   close 11
   open 12
   close 12
+switch break:
+  open 20
+  open 100
+  close 100
+  after switch 0
+  close 20
+  open 21
+  after switch 1
+  close 21
+switch continue:
+  open 30
+  open 200
+  close 200
+  close 30
+  open 31
+  after switch 2
+  close 31
 done
 exit=0

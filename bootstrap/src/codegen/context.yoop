@@ -49,6 +49,11 @@ export type Cx {
   // `Vec<int32>` and so on. Both substitutions compose in resolvedTypeAt, since
   // a generic function can be called from inside a generic type's method.
   typeInstance: usize,
+  // The return type of the function being emitted, already resolved for this
+  // instantiation. `?` is the only reader: its error path builds a value of
+  // THIS type's `Err` case and returns it, so it needs the type and not just
+  // the LLVM spelling `retTy` already carries down the walk.
+  fnRet: TypeId,
 }
 
 // `Cx.instance` when the code being emitted is not inside a generic function.

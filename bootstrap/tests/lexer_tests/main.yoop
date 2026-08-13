@@ -14,18 +14,21 @@
 import { Result } from "std/core/types.yoop";
 import * as log from "std/log.yoop";
 import * as intr from "std/core/intrinsics.yoop";
-import { tokenize, Token, KEYWORD_LIST, TOKEN_SCAN_LIST, TokenTags } from "../../src/lex";
-
-
-// store this at compile time so that we can declare a fixed array of assertion
-// values
-// @precompile const KEYWORD_COUNT = KEYWORD_LIST.len;
+import * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { tokenize, Token, LexTables, lexTablesNew, TokenTags } from "../../src/lex";
 
 function main(): int {
+  // The two scan tables are built at runtime rather than declared as module
+  // arrays - bootstrap/src/lex/scan_tables.yoop says why - so this owns one and
+  // reads both tables out of it.
+  disposable tables: LexTables = lexTablesNew();
+  const keywordList = vec.vecAsArray(ref tables.keywords);
+  const tokenScanList = vec.vecAsArray(ref tables.scan);
+
   // first test all defined keywords
-  // const expectedKeywordTokens: Token[KEYWORD_COUNT]; 
   let keywordTestString = "";
-  for kd in KEYWORD_LIST {
+  for kd in keywordList {
     keywordTestString = `${keywordTestString}${kd.str} `;
   }
 
@@ -38,10 +41,10 @@ function main(): int {
       return 1;
     }
     case Result.Ok { value: tokens } : {
-      const expectedCount = KEYWORD_LIST.len;
+      const expectedCount = keywordList.len;
       log.info(`keyword lex finished - found ${tokens.len} tokens, expecting ${expectedCount} keyword tokens, verifying results...`);
       let count: usize = 0;
-      for kd in KEYWORD_LIST {
+      for kd in keywordList {
         let found = false;
         for tok in tokens {
           if (tok.tag == kd.tag) {
@@ -66,7 +69,7 @@ function main(): int {
 
   // next test all structural tokens
   let tokenScanTestString = "";
-  for tokScan in TOKEN_SCAN_LIST {
+  for tokScan in tokenScanList {
     tokenScanTestString = `${tokenScanTestString}${tokScan.str} `;
   }
 
@@ -78,10 +81,10 @@ function main(): int {
       return 1;
     }
     case Result.Ok { value: tokens} : {
-      const expectedCount = TOKEN_SCAN_LIST.len;
+      const expectedCount = tokenScanList.len;
       log.info(`structural token lex finished - found ${tokens.len} tokens, expecting ${expectedCount} structural tokens, verifying results...`);
       let count: usize = 0;
-      for tokScan in TOKEN_SCAN_LIST {
+      for tokScan in tokenScanList {
         let found = false;
         for tok in tokens {
           if (tok.tag == tokScan.tag) {

@@ -1,0 +1,5 @@
+u8 lt=true gt=true le=true ge=true
+u8 vs literal lt=true ge=true
+wide u16=true u32=true u64=true
+signed i8=true i32=true
+exit=0

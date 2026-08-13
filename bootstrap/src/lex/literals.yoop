@@ -11,6 +11,7 @@ module lex;
 import * as bytes from "std/core/bytes.yoop";
 import * as numbers from "std/core/numbers.yoop";
 import * as strings from "std/core/strings.yoop";
+import * as vec from "std/core/vec.yoop";
 import { Result } from "std/core/types.yoop";
 
 function lexCharLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
@@ -234,8 +235,13 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     }
   }
 
-  // float fractional part - only legal in base10
-  if (base == 10 && end < src.len && src[end] == '.' && isDigit(src[end + 1])) {
+  // float fractional part - only legal in base10.
+  //
+  // The digit after the dot is what makes it a fraction rather than a field
+  // access, so `1.5` is one token and `x.5` never gets here. `end + 1 < src.len`
+  // guards the lookahead: a source buffer ending in `1.` would otherwise read
+  // one byte past its own array.
+  if (base == 10 && end + 1 < src.len && src[end] == '.' && isDigit(src[end + 1])) {
     isFloat = true;
     end += 1;
     const scanDecResult = scanDecDigitsAndUnderscores(src, end);
@@ -249,11 +255,13 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
     }
   }
 
-  // float exponent - only legal in base10
-  if (base == 10 && end < src.len && src[end] == 'e') {
+  // float exponent - only legal in base10. BOTH cases, matching the reference:
+  // `1E5` is a float there, and accepting only the lowercase spelling made it
+  // an int `1` followed by an identifier `E5` here.
+  if (base == 10 && end < src.len && (src[end] == 'e' || src[end] == 'E')) {
     isFloat = true;
     end += 1;
-    if (src[end] == '+' || src[end] == '-') {
+    if (end < src.len && (src[end] == '+' || src[end] == '-')) {
       end += 1;
     }
     const scanDecResult = scanDecDigitsAndUnderscores(src, end);
@@ -270,44 +278,14 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
   // parse the numeric value
   let res = createLexedVal();
   if (isFloat) {
-    // base is always 10 here (isFloat only set in the base-10 paths)
-    let mantissa = 0.0;
-    let fracDigits = 0;
-    let seenDot = false;
-    let expSign = 1;
-    let expVal = 0;
-    let i = digitsStart;
-    while (i < end) {
-      const ch = src[i];
-      if (ch == '_') {
-        // skip separator
-      } else if (ch == '.') {
-        seenDot = true;
-      } else if (ch == 'e' || ch == 'E') {
-        i += 1;
-        if (i < end && (src[i] == '+' || src[i] == '-')) {
-          if (src[i] == '-') { expSign = -1; }
-          i += 1;
-        }
-        while (i < end) {
-          if (src[i] != '_') { expVal = expVal * 10 + digitValue(src[i]); }
-          i += 1;
-        }
-        // exponent consumed the rest
-      } else {
-        mantissa = mantissa * 10.0 + float64(digitValue(ch));
-        if (seenDot) { fracDigits += 1; }
-      }
-      i += 1;
+    // base is always 10 here (isFloat only set in the base-10 paths).
+    // float_literal.yoop owns the conversion and why it is shaped that way.
+    const decoded = decodeFloatLiteral(src, digitsStart, end);
+    if (!decoded.ok) {
+      return createLexedError(ref src, pos, decoded.reason);
     }
-
-    let p = expSign * expVal - fracDigits;
-    let value = mantissa;
-    while (p > 0) { value = value * 10.0; p -= 1; }
-    while (p < 0) { value = value / 10.0; p += 1; }
-
     res.token.tag = TokenTags.FLOATLITERAL;
-    res.token.floatVal = value;
+    res.token.floatVal = decoded.value;
   } else {
     let value: uint64 = 0;
     let i = digitsStart;
@@ -326,7 +304,7 @@ function lexNumericLiteral(src: uint8[], pos: usize): Result<LexedVal, LexedErro
   return Result.Ok { value: res };
 }
 
-function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+function lexIdentifierOrKeyword(ref tables: LexTables, src: uint8[], pos: usize): Result<LexedVal, LexedError> {
   let res = createLexedVal();
   let end = scanIdentity(src, pos);
   let len = end - pos;
@@ -347,10 +325,10 @@ function lexIdentifierOrKeyword(src: uint8[], pos: usize): Result<LexedVal, Lexe
 
   // Default to a plain identifier; promote to a keyword tag on an exact match.
   // This is the array-scan analogue of the JS `keywordTagList[value]` lookup -
-  // Yoop has no map indexing operator, so we mirror `TOKEN_SCAN_LIST` and walk
-  // the small reserved-word table with `stringEq`.
+  // Yoop has no map indexing operator, so we mirror the punctuation scan and
+  // walk the small reserved-word table with `stringEq`.
   res.token.tag = TokenTags.IDENT;
-  for kw in KEYWORD_LIST {
+  for kw in vec.vecAsArray(ref tables.keywords) {
     if (strings.stringEq(str, kw.str)) {
       res.token.tag = kw.tag;
       break;

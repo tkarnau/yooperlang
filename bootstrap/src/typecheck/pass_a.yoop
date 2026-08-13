@@ -61,6 +61,7 @@ function registerFileShells(
     // separate lookups.
     const exported = isExportDecl(ref m.ast, childId);
     const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childId));
+    recordDeriveDisplay(ref prog, ref m.ast, childId, declNode);
     switch (declNode.kind) {
       case ASTNodeKind.FUNCTION_DECL: {
         registerFunctionShell(ref prog, ref tm, declNode, exported, isEntry, moduleId, ref m.ast);
@@ -70,6 +71,9 @@ function registerFileShells(
       }
       case ASTNodeKind.VARIANT_DECL: {
         registerVariantShell(ref prog, ref tm, declNode, moduleId, exported, ref m.ast);
+      }
+      case ASTNodeKind.ENUM_DECL: {
+        registerEnumShell(ref prog, ref tm, declNode, moduleId, exported);
       }
       case ASTNodeKind.EXTERN_BLOCK: {
         // Each declared signature is an ordinary function NAME. What is
@@ -92,6 +96,22 @@ function registerFileShells(
             reportError(
               ref prog,
               `unknown intrinsic "${externNode.name}" - see std/core/intrinsics.yoop for the full list`,
+              externNode.sourceLoc
+            );
+            x += 1;
+            continue;
+          }
+          // `...` describes a CALLING CONVENTION, so it only means something
+          // where there is a call to make. An intrinsic is lowered to
+          // instructions and has no call site to push extra arguments onto, and
+          // a generic signature would carry the flag into every substituted
+          // instance for no one to read. Both are refused here rather than
+          // waved through: accepting a variadic intrinsic would compile and
+          // then silently drop whatever was passed past the fixed parameters.
+          if (externNode.flagA && (isIntrinsic || externNode.childA != 0)) {
+            reportError(
+              ref prog,
+              `\`...\` is only allowed on a non-generic \`extern "C"\` signature - "${externNode.name}" is not one`,
               externNode.sourceLoc
             );
             x += 1;
@@ -131,7 +151,8 @@ function registerFileShells(
         // method signatures are pass C's - they name types the module may not
         // have registered yet.
         const traitShell = internType(ref prog, Type.Trait {
-          decl: { name: declNode.name, module: moduleId, populated: false },
+          decl: { name: declNode.name, module: moduleId, populated: false,
+                  propagatesKind: "" },
           methods: map.mapNew(0, map.stringKeyOps()),
           typeParams: vec.vecNew(0),
           extendsTraits: vec.vecNew(0),
@@ -143,7 +164,8 @@ function registerFileShells(
         // so it gets a struct shell and pass C fills it like any other. The
         // SYMBOL is what records that it erases a trait.
         const vtableShell = internType(ref prog, Type.Struct {
-          decl: { name: declNode.name, module: moduleId, populated: false },
+          decl: { name: declNode.name, module: moduleId, populated: false,
+                  propagatesKind: "" },
           fields: vec.vecNew(0),
           methods: map.mapNew(0, map.stringKeyOps()),
           implementsTraits: vec.vecNew(0),
@@ -236,9 +258,9 @@ function registerFunctionShell(
   bindName(ref prog, ref tm, declNode, Symbol.Func { typeId: shellId }, exported);
 }
 
-// Only struct-shaped `type` decls today. Variants, unions, value enums and
-// transparent aliases all come through TYPE_DECL too once the parser emits
-// their bodies; this is the switch that will grow.
+// Struct-shaped `type` decls and TRANSPARENT ALIASES. Variants, unions and
+// value enums come through their own node kinds; this is the switch that will
+// grow.
 function registerTypeShell(
   ref prog: Program,
   ref tm: TypedModule,
@@ -247,13 +269,41 @@ function registerTypeShell(
   exported: bool,
   ref ast: AST
 ): void {
+  // `type NodeId = usize;` - childC is the RHS annotation, and it is the one
+  // thing that tells an alias apart from a struct with no fields.
+  //
+  // No type is interned for it: the NAME resolves to whatever the RHS resolves
+  // to, so `NodeId` IS `usize` and nothing downstream has to unwrap anything.
+  // The RHS cannot be resolved yet - every type is still a shell - so the
+  // annotation rides on the symbol and pass C forces it.
+  if (declNode.childC != 0) {
+    if (declNode.childA != 0) {
+      // A GENERIC alias (`type Pair<T> = Box<T>;`) would need the parameters in
+      // scope while the RHS resolves and a template to instantiate on use.
+      // Nothing in std, examples or bootstrap/src writes one.
+      reportError(
+        ref prog,
+        `"${declNode.name}" is a GENERIC type alias, which the bootstrap does not support yet - a non-generic \`type X = ...\` does work`,
+        declNode.sourceLoc
+      );
+      return;
+    }
+    bindName(
+      ref prog, ref tm, declNode,
+      Symbol.Alias { annot: declNode.childC, typeId: TYPE_ERROR_ID, resolving: false },
+      exported
+    );
+    return;
+  }
+
   if (declNode.childA != 0) {
     registerGenericShell(ref prog, ref tm, declNode, moduleId, exported, GenericSort.STRUCT, ref ast);
     return;
   }
 
   const shellId = internType(ref prog, Type.Struct {
-    decl: { name: declNode.name, module: moduleId, populated: false },
+    decl: { name: declNode.name, module: moduleId, populated: false,
+            propagatesKind: propagatedKindNameOf(ref ast, declNode) },
     fields: vec.vecNew(0),
     methods: map.mapNew(0, map.stringKeyOps()),
     implementsTraits: vec.vecNew(0),
@@ -309,7 +359,8 @@ function registerGenericShell(
     }
     case GenericSort.VARIANT: {
       template = internType(ref prog, Type.Variant {
-        decl: { name: declNode.name, module: moduleId, populated: false },
+        decl: { name: declNode.name, module: moduleId, populated: false,
+                propagatesKind: propagatedKindNameOf(ref ast, declNode) },
         cases: vec.vecNew(0),
         methods: map.mapNew(0, map.stringKeyOps()),
         implementsTraits: vec.vecNew(0),
@@ -318,7 +369,8 @@ function registerGenericShell(
     }
     default: {
       template = internType(ref prog, Type.Struct {
-        decl: { name: declNode.name, module: moduleId, populated: false },
+        decl: { name: declNode.name, module: moduleId, populated: false,
+                propagatesKind: propagatedKindNameOf(ref ast, declNode) },
         fields: vec.vecNew(0),
         methods: map.mapNew(0, map.stringKeyOps()),
         implementsTraits: vec.vecNew(0),
@@ -356,7 +408,8 @@ function registerVariantShell(
   }
 
   const shellId = internType(ref prog, Type.Variant {
-    decl: { name: declNode.name, module: moduleId, populated: false },
+    decl: { name: declNode.name, module: moduleId, populated: false,
+            propagatesKind: propagatedKindNameOf(ref ast, declNode) },
     cases: vec.vecNew(0),
     methods: map.mapNew(0, map.stringKeyOps()),
     implementsTraits: vec.vecNew(0),

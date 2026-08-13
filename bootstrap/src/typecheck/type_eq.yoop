@@ -1,0 +1,180 @@
+module typecheck;
+
+// When two TypeIds name the same type, and when a value of one may be used
+// where the other is wanted. Two questions, two functions, and the split is
+// the whole design of this file:
+//
+//   sameTypeStructurally   an EQUIVALENCE. Reflexive, symmetric, transitive.
+//                          "these two ids are the same type spelled twice."
+//   typeAccepts            ASSIGNABILITY. Not symmetric. Equivalence, plus the
+//                          two widenings the language has, and those apply at
+//                          the TOP LEVEL only.
+//
+// Keeping them apart is what stops the recursion from smuggling a widening
+// into a nested position. `unsafe_ptr<uint8>` may be passed where a bare
+// `unsafe_ptr` is wanted - forgetting a promise is safe - but a
+// `ref unsafe_ptr<uint8>` may NOT be passed where a `ref unsafe_ptr` is
+// wanted, because the callee could store an opaque pointer through it and
+// break the promise the caller still holds. Same for an ARRAY of each. Both
+// halves match the reference, established by probing it.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+
+// Whether a value of type `actual` may be used where `expected` is wanted.
+//
+// Deliberately not a general subtyping rule. Exactly two things are wider than
+// equivalence, and both are top-level only:
+//
+//   * `null` fits any raw pointer and nothing else - the pointer twin of an
+//     untyped int literal pinning to an integer.
+//   * a TYPED pointer widens to the OPAQUE one, and not back.
+export function typeAccepts(ref prog: Program, expected: TypeId, actual: TypeId): bool {
+  if (expected == actual) {
+    return true;
+  }
+  if (actual == TYPE_UNTYPED_NULL_ID) {
+    return isUnsafePtrType(ref prog, expected);
+  }
+  switch (typeAt(ref prog, expected)) {
+    case Type.UnsafePtr { pointee: wantPointee }: {
+      // Opaque is `pointee == TYPE_ERROR_ID` (id 0, the reserved none). A
+      // TYPED pointer on the left is not wider than anything, so it falls
+      // through to the equivalence test below.
+      if (wantPointee == TYPE_ERROR_ID) {
+        return isUnsafePtrType(ref prog, actual);
+      }
+    }
+    default: { }
+  }
+  return sameTypeStructurally(ref prog, expected, actual);
+}
+
+// Whether two TypeIds name the same type.
+//
+// `id == id` for everything NOMINAL, and a recursive walk through the
+// structural wrappers - because a Func can be buried inside one and a Func is
+// the one type in the system that does NOT have a canonical id.
+//
+// Why Funcs have no canonical id: a declared function's signature lives in the
+// SHELL pass A registered for it and pass C filled in place, so two functions
+// with identical signatures keep different TypeIds, and an annotation like
+// `(k: string) => uint64` interns a third. `internArray` / `internRef` scan
+// before inserting, so they DO canonicalize - but they canonicalize on the id
+// they are handed, and two different Func ids give two different array ids.
+// That is why `((a: int32) => int32)[]` written in two places used to compare
+// unequal to itself: the top-level compare reached an Array on both sides,
+// found two different ids, and stopped.
+//
+// The walk covers exactly the STRUCTURAL cases - the ones built out of other
+// TypeIds by composition rather than by declaration:
+//
+//   Ref, Array, Task, UnsafePtr, Func, FuncPtr
+//
+// and deliberately stops at every NOMINAL one (Struct, Variant, Union,
+// ValueEnum, Trait, VTable, TypeParam). Two reasons, and both matter:
+//
+//   * Nominal identity is the DECL, so two distinct nominal ids really are two
+//     distinct types even when their members line up. Calling them equal would
+//     hand codegen a value of one LLVM struct where another is expected.
+//   * It is what makes the walk TERMINATE on `type Node { next: Node }`. A
+//     nominal type is the only way to build a type that contains itself, and
+//     the walk never enters one. Nothing else can cycle: a structural type is
+//     interned AFTER the types it composes, so `Ref(x)` cannot have itself as
+//     `x`. That is the same termination argument `typeMentionsTypeParam` in
+//     generics.yoop makes, for the same reason.
+//
+// The one shape this refuses that a fuller rule would accept is a generic
+// nominal applied to a Func - two separate `Box<(a: int32) => int32>`
+// annotations. It is unreachable today (nothing in std, examples or bootstrap
+// applies a generic to a function type) and it is not a one-line extension:
+// the two instances are separate registry entries with separate mangled names,
+// so accepting them would need the INSTANCE registry to dedupe on structural
+// argument equality, not just this compare to look through.
+function sameTypeStructurally(ref prog: Program, a: TypeId, b: TypeId): bool {
+  if (a == b) {
+    return true;
+  }
+  switch (typeAt(ref prog, a)) {
+    // Parameter NAMES are ignored, here and in the reference: two function
+    // types match on parameter TYPES, return type and `...`, which is what
+    // lets a field declared `(a: K, b: K) => bool` accept a function whose
+    // parameters are called something else.
+    case Type.Func { params: aParams, ret: aRet, variadic: aVariadic }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.Func { params: bParams, ret: bRet, variadic: bVariadic }: {
+          return aVariadic == bVariadic &&
+            sameTypeStructurally(ref prog, aRet, bRet) &&
+            sameTypeListStructurally(ref prog, ref aParams, ref bParams);
+        }
+        default: { return false; }
+      }
+    }
+    case Type.FuncPtr { params: aParams, ret: aRet }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.FuncPtr { params: bParams, ret: bRet }: {
+          return sameTypeStructurally(ref prog, aRet, bRet) &&
+            sameTypeListStructurally(ref prog, ref aParams, ref bParams);
+        }
+        default: { return false; }
+      }
+    }
+    case Type.Ref { inner: aInner }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.Ref { inner: bInner }: {
+          return sameTypeStructurally(ref prog, aInner, bInner);
+        }
+        default: { return false; }
+      }
+    }
+    case Type.Array { elem: aElem }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.Array { elem: bElem }: {
+          return sameTypeStructurally(ref prog, aElem, bElem);
+        }
+        default: { return false; }
+      }
+    }
+    case Type.Task { result: aResult }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.Task { result: bResult }: {
+          return sameTypeStructurally(ref prog, aResult, bResult);
+        }
+        default: { return false; }
+      }
+    }
+    case Type.UnsafePtr { pointee: aPointee }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.UnsafePtr { pointee: bPointee }: {
+          // The OPAQUE pointer has pointee TYPE_ERROR_ID (id 0, the reserved
+          // none) and is not the same type as any typed one. Two opaque ones
+          // are one interned id and were caught by the `a == b` fast path, so
+          // reaching here with either side opaque means they differ.
+          if (aPointee == TYPE_ERROR_ID || bPointee == TYPE_ERROR_ID) {
+            return false;
+          }
+          return sameTypeStructurally(ref prog, aPointee, bPointee);
+        }
+        default: { return false; }
+      }
+    }
+    default: { return false; }
+  }
+}
+
+// Element-wise, and RECURSIVE - the twin of `sameTypeList` in program.yoop,
+// which compares ids. That one is right for a generic instance's arguments,
+// where the ids are the identity; this one is right for a function type's
+// parameters, where a parameter can itself be a Func.
+function sameTypeListStructurally(ref prog: Program, ref a: Vec<TypeId>, ref b: Vec<TypeId>): bool {
+  if (a.len != b.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < a.len) {
+    if (!sameTypeStructurally(ref prog, vec.vecGet(ref a, i), vec.vecGet(ref b, i))) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}

@@ -55,5 +55,11 @@ export function typecheckProgram(ref graph: ModuleGraph): Program propagates<dis
     i += 1;
   }
 
+  // Every body has been seen, so the set of monomorphizations can finally be
+  // CLOSED: a generic that calls another generic recorded an instance whose
+  // arguments are still its own parameters, and only now is every concrete
+  // instantiation of the caller known. See monomorph.yoop.
+  closeFuncInstances(ref program);
+
   return program;
 }

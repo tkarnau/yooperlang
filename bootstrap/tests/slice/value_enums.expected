@@ -1,0 +1,15 @@
+describe=1 2 3
+warmish=1 0
+flags=5 true false
+flagName=1 3 9
+masked=3
+wide=1000000 1000001
+small=250 251
+dir=asc eq=true ne=true
+level=warn error raw=1
+order=true true
+row=2 7
+bumped=2
+arr=2 0 len=3
+table=green blue
+exit=0

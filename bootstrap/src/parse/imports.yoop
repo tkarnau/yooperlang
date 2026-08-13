@@ -2,15 +2,18 @@ module parse;
 
 // `import` and `export` declarations.
 //
-// Three forms, matching the JS reference:
+// Four forms, matching the JS reference:
 //
 //   import { a, b as c } from "./util.yoop";     named
 //   import * as ns from "./util.yoop";           namespace
 //   import { A }, * as ns from "./util.yoop";    combined (both clauses)
+//   import "./init.yoop";                        side-effect
 //
-// The side-effect form (`import "./init.yoop";`) lexes fine and is refused BY
-// NAME, because a silently dropped import resurfaces much later as "unknown
-// function" and points at the wrong file.
+// The last one binds NO name. It is still an edge in the module graph, which is
+// the whole point of writing it: the imported module's externs, globals and
+// definitions become part of the program even though nothing here says its
+// name. It is the one form with no `from`, since there is no clause for the
+// keyword to separate from the path.
 //
 // An IMPORT_DECL's own childIds run holds its IMPORT_SPECIFIERs, `name` holds
 // the namespace local name (empty when there is no `* as` clause), and the
@@ -29,17 +32,15 @@ export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
   SelfLexing.expect(ref ps, TokenTags.IMPORT)?;
 
   const afterImport = SelfLexing.peek(ref ps).tag;
-  if (afterImport == TokenTags.STRLITERAL) {
-    return Result.Err { error: SelfLexing.createParsingError(
-      ref ps,
-      "side-effect imports (`import \"./x.yoop\";`) are not supported by the bootstrap parser yet",
-      peekLengthUsize(ref ps),
-    )};
-  }
 
   // Either clause may come first, and either may appear alone. The combined
   // form is just both of them with a comma between, which is why this reads as
   // two independent optional clauses rather than three separate shapes.
+  //
+  // The SIDE-EFFECT form has neither, and no `from` either - the path follows
+  // the keyword directly. It still builds an ordinary IMPORT_DECL, because the
+  // node's job is to name a module the graph has to load and every pass above
+  // reads the path off `strId`; what it binds is simply nothing.
   disposable specifiers: Vec<NodeId> = vec.vecNew(4);
   if (afterImport == TokenTags.MULT) {
     node.name = parseNamespaceClause(ref ps)?;
@@ -47,7 +48,7 @@ export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
       SelfLexing.advance(ref ps)?;
       parseNamedClause(ref ps, ref specifiers)?;
     }
-  } else {
+  } else if (afterImport != TokenTags.STRLITERAL) {
     parseNamedClause(ref ps, ref specifiers)?;
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -55,7 +56,9 @@ export function parseImportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     }
   }
 
-  SelfLexing.expect(ref ps, TokenTags.FROM)?;
+  if (afterImport != TokenTags.STRLITERAL) {
+    SelfLexing.expect(ref ps, TokenTags.FROM)?;
+  }
   const pathTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
   node.strId = internString(ref ps, decodeStringLiteral(ref ps, pathTok)?);
   SelfLexing.expect(ref ps, TokenTags.SEMICOLON)?;
@@ -127,7 +130,13 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     case TokenTags.VARIANT: {
       node.childA = parseVariantDecl(ref ps)?;
     }
-    case TokenTags.CONST: {
+    case TokenTags.ENUM: {
+      node.childA = parseEnumDecl(ref ps)?;
+    }
+    // A module-level `const` is INLINED at every use; a module-level `let` is a
+    // real mutable global. Exporting either is the same parse - what differs is
+    // what an importer does with it, and that is pass B's question.
+    case TokenTags.CONST, TokenTags.LET: {
       node.childA = parseVarDecl(ref ps)?;
     }
     case TokenTags.TRAIT: {
@@ -135,6 +144,27 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
     }
     case TokenTags.VTABLE: {
       node.childA = parseVtableDecl(ref ps)?;
+    }
+    // The same refusal the bare form gets in parser.yoop, because the missing
+    // piece is `union` and not `export`.
+    case TokenTags.UNION: {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        "`union` declarations are not supported by the bootstrap yet - a union overlays every field at offset 0, which needs its own layout and field access rather than the struct path",
+        peekLengthUsize(ref ps),
+      )};
+    }
+    // `export "C" function f(...)` - a definition whose SYMBOL keeps its exact
+    // spelling so C can call it. Refused by name rather than left to read as a
+    // typo: the missing piece is that C-ABI-ness has to travel WITH the symbol
+    // (an importing module mangles the name it calls), and `Symbol.Func`
+    // carries nothing but a TypeId today.
+    case TokenTags.STRLITERAL: {
+      return Result.Err { error: SelfLexing.createParsingError(
+        ref ps,
+        "`export \"C\" function` is not supported by the bootstrap yet - it emits the definition under its bare C name, which every caller has to agree on and the symbol table cannot yet record",
+        peekLengthUsize(ref ps),
+      )};
     }
     default: {
       // `export kind async { ... }` and `export async fetch(...)`. Both open
@@ -149,7 +179,7 @@ export function parseExportDecl(ref ps: ParserState): Result<NodeId, ParsingErro
       }
       return Result.Err { error: SelfLexing.createParsingError(
         ref ps,
-        `only \`export function\`, \`export type\`, \`export variant\`, \`export const\`, \`export trait\` and \`export kind\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
+        `only \`export function\`, \`export type\`, \`export variant\`, \`export enum\`, \`export const\`, \`export trait\` and \`export kind\` are supported by the bootstrap parser yet, got ${tagName(declTag)}`,
         peekLengthUsize(ref ps),
       )};
     }

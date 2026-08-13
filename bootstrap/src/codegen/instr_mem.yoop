@@ -240,6 +240,30 @@ export function emitGepFieldOfPtr(
   endInstr(ref cx);
 }
 
+//   %t3 = getelementptr inbounds %struct.Emitter, ptr %t2, i32 0, i32 4
+//
+// The same addressing again, through an arbitrary pointer OPERAND rather than a
+// temp. A borrow reaching one of its fields is why it exists: `cx.e` may lower
+// to a temp, but it may equally be a slot address, and only the operand form
+// takes both.
+export function emitGepFieldOfAddr(
+  ref cx: Cx,
+  dest: usize,
+  structTy: string,
+  basePtr: Operand,
+  index: usize
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = getelementptr inbounds ");
+  part(ref cx, structTy);
+  part(ref cx, ", ptr ");
+  operand(ref cx, basePtr);
+  part(ref cx, ", i32 0, i32 ");
+  num(ref cx, index);
+  endInstr(ref cx);
+}
+
 //   %t3 = getelementptr inbounds %struct.Point, ptr %p.1.addr, i32 0, i32 1
 //
 // The address of a struct field by POSITION. Used to fill a literal and to

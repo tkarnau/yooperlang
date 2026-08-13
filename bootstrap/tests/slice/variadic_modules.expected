@@ -1,0 +1,4 @@
+the entry declared one: 1
+declared its own: 2
+used the builtin: 3
+exit=0

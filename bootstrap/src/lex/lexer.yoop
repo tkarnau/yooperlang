@@ -8,8 +8,13 @@ module lex;
 // dump and the lexer tests.
 //
 // Order of attempts inside lexNext matters: punctuation is matched before
-// literals and identifiers, and TOKEN_SCAN_LIST being longest-first is what
+// literals and identifiers, and the scan table being longest-first is what
 // makes `>=` win over `>`.
+//
+// The tables arrive as a `ref LexTables` rather than being reached as module
+// globals, because there is no module-level array of structs to reach for -
+// scan_tables.yoop's header explains why, and `lexTablesNew` is the init every
+// caller runs once.
 
 import * as vec, { Vec } from "std/core/vec.yoop";
 import * as bytes from "std/core/bytes.yoop";
@@ -71,7 +76,7 @@ export function createLexedVal(): LexedVal {
 }
 
 
-export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedError> {
+export function lexNext(ref tables: LexTables, ref src: uint8[], pos: usize): Result<LexedVal, LexedError> {
   let res = createLexedVal();
   res.token.start = pos;
   res.nextPos = pos;
@@ -89,7 +94,7 @@ export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedErr
   let ch = src[p];
 
   // common language token?
-  for tokenScanObj in TOKEN_SCAN_LIST {
+  for tokenScanObj in vec.vecAsArray(ref tables.scan) {
     if (p + (tokenScanObj.str.len - 1) >= src.len) {
       continue; // not enough string left
     }
@@ -141,7 +146,7 @@ export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedErr
 
   // identifier or keyword?
   if (isIdentStart(ch)) {
-    return lexIdentifierOrKeyword(src, p);
+    return lexIdentifierOrKeyword(ref tables, src, p);
   }
 
   return createLexedError(ref src, pos, "unrecognized character at position");
@@ -152,13 +157,15 @@ export function lexNext(ref src: uint8[], pos: usize): Result<LexedVal, LexedErr
 export function tokenize(src: uint8[]): Result<Token[], string> {
   // should just allocate enough space for all possible / 2 for now... this might be a mistake :)
   disposable tokens: Vec<Token> = vec.vecNew((src.len / 2) + 1); // minimum of 1
+  // Built once for the whole walk rather than per token - see scan_tables.yoop.
+  disposable tables: LexTables = lexTablesNew();
   let pos: usize = 0;
   let iters = 0;
   const maxIters = int32(src.len * 2 + 100);
 
   while (iters < maxIters) {
     iters = iters + 1;
-    const lexResult = lexNext(ref src, pos);
+    const lexResult = lexNext(ref tables, ref src, pos);
     switch (lexResult) {
       case Result.Err { error: e } : {
         return Result.Err { error: `lexer error at ${e.pos}: ${e.error}` };

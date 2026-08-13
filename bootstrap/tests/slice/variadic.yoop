@@ -1,0 +1,64 @@
+// `...` in an extern signature - a variadic C callee, DECLARED rather than
+// built in.
+//
+// This is the shape nearly every program in this tree writes, and until the
+// `...` parsed it blocked 168 of the 401 files the surface probe walks. What
+// the declaration buys over the builtin `printf` is a signature: the format
+// parameter becomes a checked `string`, and the call has an arity to be wrong
+// about, while the arguments past the declared ones stay unchecked because C's
+// calling convention is all that describes them.
+//
+// The promotion half is the one that fails silently rather than loudly. printf
+// reads a full slot per argument, so an `i8` handed to it leaves the upper bits
+// holding whatever was there before - the number printed is unrelated to the
+// value, not merely rounded.
+
+import.unsafe;
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+  // THREE fixed parameters, so the call site has to spell the whole function
+  // type - `i32 (ptr, i64, ptr, ...)` - rather than just the return type. With
+  // a null buffer and a zero size, snprintf reports how many bytes it WOULD
+  // have written, which is a variadic call that needs no storage to check.
+  function snprintf(buf: unsafe_ptr, n: usize, fmt: string, ...): int32;
+  // Not variadic, and in the same block on purpose: both kinds of signature
+  // have to come out of one `declare` run.
+  function puts(s: string): int;
+}
+
+function narrow(big: int64): int8 {
+  return int8(big);
+}
+
+function unsignedNarrow(big: int64): uint8 {
+  return uint8(big);
+}
+
+function main(): int {
+  puts("declared, not built in");
+
+  // Zero variadic arguments is a legal call, and by far the commonest one.
+  printf("no varargs at all\n");
+
+  // A `const` rather than a literal in both spots. `int64(7000000000)` would
+  // pin the literal to int32 FIRST and widen the truncated result, and a string
+  // LITERAL handed straight to printf hits a bug in the JS reference that
+  // prints it twice - neither is what this fixture is about, and a slice
+  // fixture has to run identically under both compilers.
+  const label: string = "seven";
+  const big: int64 = 7000000000;
+  printf("mixed: %d %s %lld\n", 7, label, big);
+
+  // 300 truncated to an int8 is 44. Printing 300 here is the exact failure
+  // promotion exists to prevent - the truncation happened, and then the call
+  // handed printf a slot whose upper bits still held the original.
+  printf("narrow=%d unsigned=%d\n", narrow(int64(300)), unsignedNarrow(int64(200)));
+
+  // A bool is one bit wide and promotes to i32 like every other narrow value.
+  printf("bool=%d\n", true);
+
+  const need: int32 = snprintf(null, usize(0), "%d-%s", 42, "xy");
+  printf("snprintf would write %d bytes\n", need);
+  return 0;
+}

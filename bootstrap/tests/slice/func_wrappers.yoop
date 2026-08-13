@@ -1,0 +1,92 @@
+// A Func WRAPPED in something structural - `((a: int32) => int32)[]`, and a
+// `ref` to one.
+//
+// A Func is the one type in the system with no canonical TypeId: a declared
+// function's signature lives in the shell pass A registered and pass C filled
+// in place, so two identical signatures keep different ids, and an annotation
+// interns a third. Type equality is `id == id` everywhere else, so the compare
+// has to be structural - and it has to REACH the Func, which means walking
+// through every wrapper on the way.
+//
+// `internArray` and `internRef` do canonicalize, but they canonicalize on the
+// id they are handed: two different Func ids give two different Array ids and
+// two different Ref ids. So a top-level-only compare reported an array of
+// functions was not an array of functions, quoting the same spelling on both
+// sides.
+//
+// bootstrap/src/lex/chars.yoop is exactly this shape - a table of scanner
+// predicates passed by `ref` - which is why the whole compiler's import
+// closure stopped on it.
+
+function dbl(a: int32): int32 {
+  return a * 2;
+}
+
+function inc(a: int32): int32 {
+  return a + 1;
+}
+
+function sq(a: int32): int32 {
+  return a * a;
+}
+
+// Annotation 1 of the array-of-functions type.
+function sumThrough(fns: ((a: int32) => int32)[], x: int32): int32 {
+  let total: int32 = 0;
+  for f in fns {
+    total = total + f(x);
+  }
+  return total;
+}
+
+// Annotation 2, behind a `ref` - a separately interned Func, Array and Ref, and
+// the argument at the call below has to be accepted against all three.
+function sumBorrowed(ref fns: ((a: int32) => int32)[], x: int32): int32 {
+  return sumThrough(fns, x);
+}
+
+// Annotation 3, as a RETURN type. Returning the parameter is enough: the
+// return check compares the two annotations against each other.
+function firstTwo(fns: ((a: int32) => int32)[]): ((a: int32) => int32)[] {
+  return fns;
+}
+
+// A Func nested in another Func's PARAMETER list. Both annotations here are
+// their own interning, so this only checks out if the walk recurses into a
+// function type's parameters as well as through the wrappers.
+function applyTo(g: (a: int32) => int32, x: int32): int32 {
+  return g(x);
+}
+
+function callThrough(h: (g: (a: int32) => int32, x: int32) => int32, x: int32): int32 {
+  return h(inc, x);
+}
+
+function main(): int {
+  let fns: ((a: int32) => int32)[] = [dbl, inc, sq];
+
+  // 10*2 + 10+1 + 10*10 = 20 + 11 + 100 = 131
+  printf("byValue=%d\n", sumThrough(fns, 10));
+  printf("byRef=%d\n", sumBorrowed(ref fns, 10));
+
+  // 3*2 + 3+1 + 3*3 = 6 + 4 + 9 = 19
+  let same: ((a: int32) => int32)[] = firstTwo(fns);
+  printf("returned=%d\n", sumThrough(same, 3));
+
+  // A single Func behind a `ref`, which is the wrapper on its own.
+  printf("nested=%d\n", callThrough(applyTo, 41));
+
+  // The same type spelled a fourth time, this time where the compare is an
+  // ASSIGNMENT rather than an argument or a return. An array is a
+  // `{ ptr, len }` descriptor over storage it does not own, so the write lands
+  // on this function's own literal and is visible here.
+  swapFirst(ref fns);
+  printf("afterSwap=%d\n", sumThrough(fns, 10));
+
+  return 0;
+}
+
+function swapFirst(ref fns: ((a: int32) => int32)[]): void {
+  let local: ((a: int32) => int32)[] = fns;
+  local[0] = inc;
+}

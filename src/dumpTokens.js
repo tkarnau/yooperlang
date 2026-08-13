@@ -12,12 +12,18 @@
 // Tag spelling is the bootstrap's SCREAMING form, which is just this side's
 // camelCase uppercased - that mapping is total in both directions.
 //
-// Two things are deliberately NOT in the dump, because they are not comparable
-// across the two implementations rather than because they do not matter:
+// A FLOATLITERAL carries its value as `float=<16 hex digits>` - the IEEE-754
+// bit pattern, not a decimal rendering. The dump skipped float values entirely
+// until 2026-08-13, on the theory that "this side parses with parseFloat and
+// renders with JS number formatting, the bootstrap renders through the C
+// runtime" made them incomparable. The formatting is incomparable; the VALUE is
+// not, and printing the bits sidesteps the formatting question completely. The
+// bootstrap's decoder was off by an ulp for a quarter of the literals it saw
+// the whole time nobody was looking.
 //
-//   * float values. This side parses with parseFloat and renders with JS
-//     number formatting; the bootstrap renders through the C runtime's
-//     float-to-string. FLOATLITERAL still contributes its tag and span.
+// One thing is still deliberately NOT in the dump, because it really is not
+// comparable across the two implementations:
+//
 //   * the exact value of an int literal past 2^53. parseInt here is a double,
 //     while the bootstrap accumulates a real uint64 - so on FNV-1a's offset
 //     basis this side reads ...655000 and the bootstrap reads ...656037, and
@@ -47,10 +53,24 @@ export function dumpTokens(src) {
 
 function formatToken(t) {
   const head = `${t.tag.toUpperCase()} ${t.start} ${t.length}`;
+  if (t.tag === TokenTags.floatLiteral) {
+    return `${head} float=${floatBitsHex(t.floatVal)}`;
+  }
   const carriesInt =
     t.tag === TokenTags.intLiteral || t.tag === TokenTags.charLiteral;
   if (!carriesInt) return head;
   const val =
     t.intVal > Number.MAX_SAFE_INTEGER ? "unsafe" : String(t.intVal);
   return `${head} int=${val}`;
+}
+
+// The 64 bits of a double as 16 uppercase hex digits. Matches
+// bootstrap/src/utils/float_bits.yoop, which reaches the same bytes through
+// memcpy because the language has no bitcast.
+const floatBitsView = new DataView(new ArrayBuffer(8));
+function floatBitsHex(x) {
+  floatBitsView.setFloat64(0, x);
+  return (
+    "0x" + floatBitsView.getBigUint64(0).toString(16).toUpperCase().padStart(16, "0")
+  );
 }

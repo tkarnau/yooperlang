@@ -1,0 +1,141 @@
+module typecheck;
+
+/*
+  What a filled value `enum` holds: its underlying primitive, its cases, and
+  whether a dotted name is one.
+
+  These are the questions pass D and codegen ask, and they are here rather than
+  in enums.yoop for the same reason `lookupVariantCase` is in resolve.yoop
+  rather than in pass_c.yoop - filling a shell and interrogating one are two
+  jobs, and only the second has callers outside typecheck.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map } from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, nodeAt } from "../ast";
+
+export function isValueEnumType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: { return true; }
+    default: { return false; }
+  }
+}
+
+// The primitive an enum aliases, and ANY OTHER TYPE UNCHANGED.
+//
+// The identity fallback is what makes this safe to apply everywhere a question
+// is about REPRESENTATION rather than about identity - `primBitWidth`,
+// `primIsSigned`, `llvmType`, `sizeOfType` all go through it, and a non-enum
+// answers exactly as it did before.
+export function enumUnderlyingOf(ref prog: Program, id: TypeId): TypeId {
+  switch (typeAt(ref prog, id)) {
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: { return u; }
+    default: { return id; }
+  }
+}
+
+// True when a case's value was DERIVED with a bitwise operator, so values
+// outside the named set are reachable and a switch needs a default.
+export function enumIsOpen(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: { return o; }
+    default: { return false; }
+  }
+}
+
+// Where a named case sits in an enum, and what constant it holds.
+//
+// Deliberately shaped like `VariantCaseLookup`, and it hands out COPIES of the
+// two value slots rather than the `EnumCase`. A value read out of the type arena
+// is fine to copy; a Vec read out of it is not, and keeping the shape uniform is
+// what stops the next lookup from being written the dangerous way.
+export type EnumCaseLookup {
+  ordinal: int,
+  value: int64,
+  valueStr: string,
+  found: bool,
+}
+
+export function lookupEnumCase(ref prog: Program, enumType: TypeId, name: string): EnumCaseLookup {
+  switch (typeAt(ref prog, enumType)) {
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      let i: usize = 0;
+      while (i < cs.len) {
+        const c = vec.vecGet(ref cs, i);
+        if (str.stringEq(c.name, name)) {
+          return { ordinal: c.ordinal, value: c.value, valueStr: c.valueStr, found: true };
+        }
+        i += 1;
+      }
+      return { ordinal: 0, value: 0, valueStr: "", found: false };
+    }
+    default: { return { ordinal: 0, value: 0, valueStr: "", found: false }; }
+  }
+}
+
+// How many cases an enum has, for the exhaustiveness check.
+export function enumCaseCount(ref prog: Program, enumType: TypeId): usize {
+  switch (typeAt(ref prog, enumType)) {
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: { return cs.len; }
+    default: { return 0; }
+  }
+}
+
+// The name of the case at `ordinal`, for the "you did not handle X" message.
+export function enumCaseNameAt(ref prog: Program, enumType: TypeId, ordinal: usize): string {
+  switch (typeAt(ref prog, enumType)) {
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      if (ordinal >= cs.len) {
+        return "";
+      }
+      return vec.vecGet(ref cs, ordinal).name;
+    }
+    default: { return ""; }
+  }
+}
+
+// The enum type a module-level name refers to, or TYPE_ERROR_ID when the name is
+// not one. SILENT, exactly as `variantTypeNamed` is: every caller has a better
+// message than this could give.
+export function enumTypeNamed(ref prog: Program, ref tm: TypedModule, name: string): TypeId {
+  const symId = lookupOwnName(ref tm, name);
+  if (symId == SYMBOL_NONE_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.ValueEnum { typeId: t }: { return t; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}
+
+// True when `expr` is a FIELD_ACCESS whose base names an enum - `Color.Red`,
+// which is the same tokens as `p.x`. Checked before the base is checked as a
+// VALUE, because an enum name is not one and would report as an unknown name.
+export function isEnumCaseAccess(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode,
+  ref scope: LocalScope
+): bool {
+  const base = nodeAt(ref ast, expr.childA);
+  if (base.kind != ASTNodeKind.IDENT) {
+    return false;
+  }
+  // A local WINS, the same precedence a payload-less variant constructor gives
+  // one: a variable named after an enum must stay readable.
+  switch (scopeLookup(ref scope, base.name)) {
+    case Option.Some { value: t }: { return false; }
+    case Option.None: { }
+  }
+  return enumTypeNamed(ref prog, ref tm, base.name) != TYPE_ERROR_ID;
+}

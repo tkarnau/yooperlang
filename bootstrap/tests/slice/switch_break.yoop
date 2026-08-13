@@ -1,0 +1,164 @@
+// `break` inside a `switch` arm.
+//
+// A switch is a BREAKABLE scope: `break` leaves the SWITCH, not any loop around
+// it. `continue` is not symmetric - it keeps targeting the enclosing LOOP and
+// looks straight past the switch, so a switch supplies a break target and
+// nothing else.
+//
+// Arms do not fall through here, so a `break` at the end of an arm is
+// decorative. That is exactly why it is worth a fixture: the decorative form is
+// what real code writes (the bootstrap's own lexer has one), and it is the form
+// where a wrong lowering still produces a program that runs.
+
+// A `break` at the END of an arm changes nothing about where control goes.
+function decode(c: int32): int32 {
+  let out: int32 = 0;
+  switch (c) {
+    case 1: {
+      out = 10;
+      break;
+    }
+    case 2: {
+      out = 20;
+      break;
+    }
+    default: {
+      out = 99;
+    }
+  }
+  return out;
+}
+
+// A `break` PART WAY through an arm skips the rest of the arm and lands after
+// the switch - the half a decorative break cannot tell you about. `out = 555`
+// is unreachable and must not run.
+function early(c: int32): int32 {
+  let out: int32 = 0;
+  switch (c) {
+    case 1: {
+      out = 1;
+      if (c == 1) {
+        break;
+      }
+      out = 555;
+    }
+    default: {
+      out = 7;
+    }
+  }
+  // Reached by the break as well as by falling out of an arm.
+  return out + 100;
+}
+
+// EVERY arm ends in a `break`, so every arm reports itself terminated and the
+// join is reached only by those branches. A lowering that treats "all arms
+// terminated" as "nothing reaches the join" emits no join label at all, and the
+// breaks then branch to a label nothing defines - invalid IR, not a wrong
+// answer.
+function allBreak(c: int32): int32 {
+  let out: int32 = 0;
+  switch (c) {
+    case 1: {
+      out = 1;
+      break;
+    }
+    default: {
+      out = 2;
+      break;
+    }
+  }
+  return out;
+}
+
+// A switch NESTED IN A LOOP. `break` leaves the switch and the loop body
+// carries on, so the trailing `+ 1000` runs on every iteration including the
+// one that broke. Five iterations, so 5000 plus the single 1.
+function nested(): int32 {
+  let total: int32 = 0;
+  let i: int32 = 0;
+  while (i < 5) {
+    switch (i) {
+      case 2: {
+        total = total + 1;
+        break;
+      }
+      default: { }
+    }
+    total = total + 1000;
+    i = i + 1;
+  }
+  return total;
+}
+
+// `continue` in that same position targets the LOOP, so the trailing statement
+// IS skipped on the iteration that continues. Four of the five count.
+function continues(): int32 {
+  let total: int32 = 0;
+  let i: int32 = 0;
+  while (i < 5) {
+    i = i + 1;
+    switch (i) {
+      case 2: {
+        continue;
+      }
+      default: { }
+    }
+    total = total + 1;
+  }
+  return total;
+}
+
+// A `break` inside a LOOP inside a switch arm leaves the LOOP: the innermost
+// breakable scope wins, and the statement after the loop still runs.
+function innermost(c: int32): int32 {
+  let total: int32 = 0;
+  switch (c) {
+    case 1: {
+      let i: int32 = 0;
+      while (i < 10) {
+        if (i == 3) {
+          break;
+        }
+        total = total + 1;
+        i = i + 1;
+      }
+      total = total + 100;
+    }
+    default: {
+      total = 0 - 1;
+    }
+  }
+  return total;
+}
+
+// A `break` in a `for` loop's body, inside a switch arm, and a `continue` right
+// beside it. The `for` step block is the one thing `continue` must not skip.
+function counted(c: int32): int32 {
+  let total: int32 = 0;
+  switch (c) {
+    case 1: {
+      for (let i = 0; i < 8; i = i + 1) {
+        if (i == 2) {
+          continue;
+        }
+        if (i == 5) {
+          break;
+        }
+        total = total + i;
+      }
+    }
+    default: { }
+  }
+  return total;
+}
+
+function main(): int32 {
+  printf("decode: %d %d %d\n", decode(1), decode(2), decode(3));
+  printf("early: %d %d\n", early(1), early(4));
+  printf("allBreak: %d %d\n", allBreak(1), allBreak(9));
+  printf("nested: %d\n", nested());
+  printf("continues: %d\n", continues());
+  printf("innermost: %d %d\n", innermost(1), innermost(2));
+  printf("counted: %d\n", counted(1));
+  return 0;
+}

@@ -1,0 +1,4 @@
+values=10 20
+describe=1 2
+label=warm cool same=true
+exit=0

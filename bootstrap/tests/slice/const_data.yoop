@@ -1,0 +1,62 @@
+// Module-level `const`s that are not integers: strings, floats, bools, and
+// arrays of those.
+//
+// `consts.yoop` covers the integer case, where the immediate IS the value.
+// These need a module-level DATUM behind them - a string's bytes, an array's
+// payload - and the const still INLINES: what gets inlined is a constant that
+// points at the datum, so an imported one still costs nothing and there is
+// still no global to load from.
+//
+// An array const inlines as `{ ptr @.arr.0, i64 4 }`, a constant aggregate.
+// LLVM takes one as an operand, which is why an array const needs no
+// instructions at a use either - `.len` is an extractvalue on a constant.
+//
+// What is NOT here, and is refused by name: a const initialized by a CALL. The
+// reference folds one at compile time; the bootstrap has no comptime
+// interpreter, and emitting the call would run it at start-up instead.
+
+const GREETING: string = "yoop";
+const EMPTY: string = "";
+const CODES: uint8[] = [32, 9, 13, 10];
+const SCALE: float64 = 1.5;
+const TINY: float32 = 0.125;
+const NEG: float64 = -2.25;
+const ENABLED: bool = true;
+const NAMES: string[] = ["Sun", "Mon", "Tue"];
+const NOTHING: int32[] = [];
+
+// An imported const would reach the same datum; a const in a SIBLING function
+// reaches it here, which is the same lookup by SymbolId.
+function whitespaceCount(bytes: uint8[]): int {
+  let n: int = 0;
+  for (let i = 0; i < bytes.len; i = i + 1) {
+    for c in CODES {
+      if (bytes[i] == c) {
+        n = n + 1;
+      }
+    }
+  }
+  return n;
+}
+
+function main(): int {
+  printf("greet=%s len=%zu empty=%zu\n", GREETING, GREETING.len, EMPTY.len);
+  printf("codes=%zu first=%d last=%d\n", CODES.len, int(CODES[0]), int(CODES[3]));
+  printf("names=%s %s %s (%zu)\n", NAMES[0], NAMES[1], NAMES[2], NAMES.len);
+  printf("empty-array=%zu\n", NOTHING.len);
+
+  // Two consts of the same width are two data, not one shared one.
+  printf("%s\n", `scale=${SCALE} tiny=${TINY} neg=${NEG} on=${ENABLED}`);
+
+  let sample: uint8[] = [65, 32, 66, 9, 67];
+  printf("ws=%d\n", whitespaceCount(sample));
+
+  // A `for ... in` over a const array walks the payload directly - the iterable
+  // is evaluated once, and here that evaluation is the constant itself.
+  let mutated: int = 0;
+  for c in CODES {
+    mutated = mutated + int(c);
+  }
+  printf("sum=%d\n", mutated);
+  return 0;
+}

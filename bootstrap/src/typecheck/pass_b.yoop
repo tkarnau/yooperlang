@@ -87,20 +87,48 @@ function wireImport(ref prog: Program, ref tm: TypedModule, m: Module, edge: Imp
 // A namespace symbol names the module by INDEX rather than copying its export
 // table, so `ns.thing` is resolved at the use site against whatever that module
 // exports - and an export added later needs nothing done here.
+// A directory module's files EACH import what they use, so one alias is bound
+// once per file that mentions it - `vec` twenty times in codegen. Re-binding it
+// to the same module is the same import written again and is a no-op; binding
+// it to a DIFFERENT module is the real mistake and stays refused.
+//
+// The line is where the reference draws it, established by probing: two files
+// of one module may both write `import * as u from "./a.yoop"`, and may not
+// write `* as u` for two different sources. So an import is not file-SCOPED -
+// it is module-scoped and idempotent.
+//
+// The membership check comes before interning, because a symbol interned for a
+// duplicate would be dead weight nothing ever names.
 function bindNamespace(
   ref prog: Program,
   ref tm: TypedModule,
   decl: ASTNode,
   sourceIndex: ModuleId
 ): void {
-  const symId = internSymbol(ref prog, Symbol.Namespace { module: sourceIndex });
-  if (map.mapInsert(ref tm.names, decl.name, symId)) {
-    reportError(
-      ref prog,
-      `imported namespace "${decl.name}" collides with an existing declaration in this module`,
-      decl.sourceLoc
-    );
+  switch (map.mapGet(ref tm.names, decl.name)) {
+    case Option.Some { value: existing }: {
+      // Comparing SymbolIds would not do: every `import * as ns` interns its
+      // OWN Namespace symbol, so two identical imports never share one. The
+      // module index is the thing that says they mean the same import.
+      switch (symbolAt(ref prog, existing)) {
+        case Symbol.Namespace { module: mi }: {
+          if (mi == sourceIndex) {
+            return;
+          }
+        }
+        default: { }
+      }
+      reportError(
+        ref prog,
+        `imported namespace "${decl.name}" collides with an existing declaration in this module`,
+        decl.sourceLoc
+      );
+      return;
+    }
+    case Option.None: { }
   }
+  const symId = internSymbol(ref prog, Symbol.Namespace { module: sourceIndex });
+  map.mapInsert(ref tm.names, decl.name, symId);
 }
 
 // One `{ a }` or `{ a as b }` specifier: `spec.name` is the local name, and the
@@ -154,14 +182,26 @@ function bindImportedName(
     return;
   }
 
-  if (map.mapInsert(ref tm.names, spec.name, symId)) {
-    reportError(
-      ref prog,
-      `imported name "${spec.name}" collides with an existing declaration in this module`,
-      spec.sourceLoc
-    );
-    return;
+  // The same idempotence a namespace gets, and for the same reason: two files
+  // of one directory module both writing `import { Vec }` is one import, not a
+  // redeclaration. Here the SymbolId settles it directly - an import binds the
+  // source module's own id, so the same export reached twice is the same
+  // integer, and a different one really is a different thing under one name.
+  switch (map.mapGet(ref tm.names, spec.name)) {
+    case Option.Some { value: existing }: {
+      if (existing == symId) {
+        return;
+      }
+      reportError(
+        ref prog,
+        `imported name "${spec.name}" collides with an existing declaration in this module`,
+        spec.sourceLoc
+      );
+      return;
+    }
+    case Option.None: { }
   }
+  map.mapInsert(ref tm.names, spec.name, symId);
   map.mapInsert(ref tm.importedFrom, spec.name, {
     moduleId: source.moduleId,
     exportName: exportName,

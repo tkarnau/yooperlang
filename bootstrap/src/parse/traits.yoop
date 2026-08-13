@@ -48,6 +48,7 @@ export function parseTraitDecl(ref ps: ParserState): Result<NodeId, ParsingError
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TRAIT_DECL);
   node.name = parseIdentAsName(ref ps)?;
   node.childA = parseTypeParamList(ref ps)?;
+  node.childD = parseExtendsClause(ref ps)?;
 
   SelfLexing.expect(ref ps, TokenTags.LCURLY)?;
   disposable ids: Vec<NodeId> = vec.vecNew(4);
@@ -79,13 +80,9 @@ function parseMethodSig(
   traitTypeParams: NodeId
 ): Result<NodeId, ParsingError> {
   // `async read(ref self, ...): R;` - a kind prefix stands where `function`
-  // would, on a method exactly as on a top-level declaration. This is the one
-  // async form the bootstrap's OWN std closure needs, and it needs no codegen
-  // at all: a signature has no body to emit.
-  const prefixes = parseKindPrefixes(ref ps)?;
-  if (prefixes == 0) {
-    SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
-  }
+  // would, on a method exactly as on a top-level declaration. A signature needs
+  // no codegen at all, so this half has always been free.
+  const prefixes = parseMethodKindPrefixes(ref ps)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_SIG);
   node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
@@ -108,14 +105,57 @@ export function parseMethodDecl(
   ownerName: string,
   ownerTypeParams: NodeId
 ): Result<NodeId, ParsingError> {
-  SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  // `async handle(ref self, ...)` - a kind prefix stands where `function` would,
+  // on a method exactly as on a top-level declaration.
+  const prefixes = parseMethodKindPrefixes(ref ps)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.METHOD_DECL);
+  node.childE = prefixes;
   node.name = parseIdentAsName(ref ps)?;
   node.childB = parseMethodParams(ref ps, ownerName, ownerTypeParams)?;
   SelfLexing.expect(ref ps, TokenTags.COLON)?;
   node.childC = parseTypeAnnotation(ref ps)?;
   node.childD = parseBlock(ref ps)?;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// The kind prefixes on a method, plus the `function` keyword when one is there.
+//
+// Three spellings reach here and all three are the reference's:
+//
+//     function area(ref self): int32 { }          no prefix, keyword required
+//     traced area(ref self): int32 { }            the prefix REPLACES it
+//     traced function area(ref self): int32 { }   both, which is also legal
+//
+// So the run of prefixes ends at either another identifier (the method's name)
+// or at `function`, and the keyword is consumed when present and demanded when
+// nothing replaced it. `parseKindPrefixes` alone cannot do this: it stops on
+// IDENT-then-FUNCTION, which is exactly the third spelling.
+function parseMethodKindPrefixes(ref ps: ParserState): Result<NodeId, ParsingError> {
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (SelfLexing.peek(ref ps).tag == TokenTags.IDENT && atMethodPrefixIdent(ref ps)) {
+    let prefix = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+    prefix.name = parseIdentAsName(ref ps)?;
+    vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, prefix));
+  }
+  if (ids.len == 0 || SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+    SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
+  }
+  if (ids.len == 0) {
+    return Result.Ok { value: 0 };
+  }
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// Whether the identifier the parser is on is a PREFIX rather than the method's
+// own name: something follows it that a name cannot be followed by.
+function atMethodPrefixIdent(ref ps: ParserState): bool {
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: tok }: {
+      return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.FUNCTION;
+    }
+  }
 }
 
 // A method's parameter list, with `self`'s annotation filled in.
@@ -150,7 +190,11 @@ function parseMethodParam(
   ownerName: string,
   ownerTypeParams: NodeId
 ): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOTDOT) {
+    return Result.Err { error: variadicNotAllowedHere(ref ps) };
+  }
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
+  node.childE = parseParamKindPrefix(ref ps)?;
   node.flagA = false;
   if (SelfLexing.peek(ref ps).tag == TokenTags.REF) {
     SelfLexing.advance(ref ps)?;
@@ -230,6 +274,32 @@ export function parseVtableDecl(ref ps: ParserState): Result<NodeId, ParsingErro
   node.childStart = start;
   node.childCount = ids.len;
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `trait Child extends Parent` / `trait Child extends A, B`.
+//
+// A comma-separated list of trait names, and it goes in the SAME slot an
+// `implements` clause uses on a type - both are "a list of traits this
+// declaration is promising about", and holding them in one slot is what lets
+// `collectImplementedTraits` read either without knowing which it is looking
+// at. No parenthesized form: the reference does not accept one here, and there
+// is nothing after the list for a comma to be ambiguous with.
+function parseExtendsClause(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.EXTENDS) {
+    return Result.Ok { value: 0 };
+  }
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.advance(ref ps)?;
+
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  while (true) {
+    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      break;
+    }
+    SelfLexing.advance(ref ps)?;
+  }
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }
 
 export function parseImplementsClause(ref ps: ParserState): Result<NodeId, ParsingError> {

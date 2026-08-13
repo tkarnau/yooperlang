@@ -11,7 +11,7 @@ import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { AST, ASTNodeKind, NodeId, emptyArena } from "../ast";
-import { TokenTags, tagName, createLexedVal } from "../lex";
+import { TokenTags, tagName, createLexedVal, LexTables, lexTablesNew } from "../lex";
 import { ParsingError } from "../diagnostics";
 import * as str from "std/core/strings.yoop";
 
@@ -84,6 +84,9 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
       case TokenTags.VARIANT: {
         vec.vecPush(ref body, parseVariantDecl(ref ps)?);
       }
+      case TokenTags.ENUM: {
+        vec.vecPush(ref body, parseEnumDecl(ref ps)?);
+      }
       case TokenTags.TRAIT: {
         vec.vecPush(ref body, parseTraitDecl(ref ps)?);
       }
@@ -92,6 +95,20 @@ function parseAST(ref ps: ParserState): Result<NodeId, ParsingError> {
       }
       case TokenTags.FUNCTION /*, TokenTags.TASK */: {
         vec.vecPush(ref body, parseFunctionDecl(ref ps)?);
+      }
+      case TokenTags.AT: {
+        vec.vecPush(ref body, parseAttribute(ref ps)?);
+      }
+      // A `union` is C's union - every field at offset 0, sized by the largest
+      // - and none of that machinery is here. Named rather than left to
+      // "unexpected token at top level", which reads as a typo on a
+      // declaration that is perfectly well formed. See plans/bootstrap-completion.md.
+      case TokenTags.UNION: {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps,
+          "`union` declarations are not supported by the bootstrap yet - a union overlays every field at offset 0, which needs its own layout and field access rather than the struct path",
+          peekLengthUsize(ref ps),
+        )};
       }
       // TODO: rest of tags...
       default: {
@@ -160,11 +177,16 @@ export type ParsedFile propagates<disposable> {
 // the typecheck decoration stays one dense vector indexed by NodeId. Each file
 // keeps its own PROGRAM root.
 export function parseInto(ast: AST, src: uint8[]): Result<ParsedFile, ParsingError> propagates<disposable> {
+  // The lexer's scan tables, built once per file and borrowed by the state.
+  // They are not module globals because there is no module-level array of
+  // structs to be one - scan_tables.yoop's header has the reason.
+  disposable tables: LexTables = lexTablesNew();
   let pState: ParserState = {
     currentLex: createLexedVal(), // EOF placeholder; primed by the advance below
     pos: 0,
     ast: ast,
     src: ref src,
+    tables: ref tables,
     pendingGt: false,
   };
 

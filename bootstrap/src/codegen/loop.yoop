@@ -10,7 +10,8 @@ module codegen;
 //
 // The block discipline these obey is documented in flow.yoop.
 
-import { ASTNode, NodeId, nodeAt } from "../ast";
+import { AST, ASTNode, ASTNodeKind, NodeId, nodeAt } from "../ast";
+import { IterableWalk } from "../typecheck";
 import { Option } from "std/core/types.yoop";
 
 // `while (c) { body }` becomes:
@@ -22,29 +23,50 @@ import { Option } from "std/core/types.yoop";
 //
 // The condition gets its own block because it is re-evaluated every iteration,
 // so it cannot live in the block that precedes the loop.
-export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string): string {
+//
+// A loop normally does NOT terminate for the caller's purposes - the condition
+// may be false on the first test, so control reaches the statement after it.
+// `while (true)` with no `break` out of it is the exception: nothing can reach
+// the exit block, so the loop terminates and the exit label is not emitted at
+// all. Getting that wrong is not a wrong answer either way - reporting it as
+// non-terminating makes a function whose every path returns from inside the
+// loop fail the "no return on some path" check, and emitting an exit block
+// nothing branches to and nothing terminates is invalid IR.
+export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string, ref terminated: bool): string {
+  terminated = false;
   const condLabel = freshLabel(cx.e);
   const bodyLabel = freshLabel(cx.e);
   const endLabel = freshLabel(cx.e);
+  const alwaysTrue = isLiteralTrue(cx.ast, stmt.childA);
 
   emitBr(ref cx, condLabel);
   emitLabel(ref cx, condLabel);
-  let cond: Operand = Operand.None;
-  const cerr = emitExpr(ref cx, stmt.childA, ref cond);
-  if (cerr.len > 0) {
-    return cerr;
+  // `while (true)` branches UNCONDITIONALLY into the body. `br i1 true, label
+  // %Lbody, label %Lend` would be correct too, but it NAMES the exit block, and
+  // LLVM rejects a reference to a label nothing defines - so the exit could not
+  // then be left out when nothing breaks to it. The condition block itself
+  // stays, because `continue` targets it.
+  if (alwaysTrue) {
+    emitBr(ref cx, bodyLabel);
+  } else {
+    let cond: Operand = Operand.None;
+    const cerr = emitExpr(ref cx, stmt.childA, ref cond);
+    if (cerr.len > 0) {
+      return cerr;
+    }
+    emitCondBr(ref cx, cond, bodyLabel, endLabel);
   }
-  emitCondBr(ref cx, cond, bodyLabel, endLabel);
 
   emitLabel(ref cx, bodyLabel);
   // `continue` re-tests the condition; `break` leaves.
-  disposeEnterLoop(cx.disposes);
   loopPush(ref cx, condLabel, endLabel);
   let err = "";
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
+  // The frame's `sawBreak` is the whole test for whether the exit is
+  // reachable, and it has to be read before the frame is popped.
+  const brokeOut = innermostBreakable(ref cx).sawBreak;
   loopPop(ref cx);
-  disposeExitLoop(cx.disposes);
   if (err.len > 0) {
     return err;
   }
@@ -52,8 +74,27 @@ export function emitWhile(ref cx: Cx, stmt: ASTNode, retTy: string): string {
     emitBr(ref cx, condLabel);
   }
 
+  // `while (true)` that nothing breaks out of: the exit block has no
+  // predecessor, so emitting it would leave a block with no terminator.
+  if (alwaysTrue && !brokeOut) {
+    terminated = true;
+    return "";
+  }
   emitLabel(ref cx, endLabel);
   return "";
+}
+
+// `while (true)` written out, and nothing else. A condition that is CONSTANTLY
+// true by any other route (`1 == 1`, a const) is not folded here: the bootstrap
+// has no comptime interpreter, and the literal is the one spelling that needs
+// none. Anything else keeps the ordinary answer, which is the safe direction -
+// a loop treated as non-terminating only ever emits an extra reachable block.
+function isLiteralTrue(ref ast: AST, condId: NodeId): bool {
+  if (condId == 0) {
+    return false;
+  }
+  const node = nodeAt(ref ast, condId);
+  return node.kind == ASTNodeKind.BOOL_LITERAL && node.intVal != 0;
 }
 
 // `for (let i = init; cond; i = step) { body }` becomes:
@@ -108,13 +149,11 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
   emitCondBr(ref cx, cond, bodyLabel, endLabel);
 
   emitLabel(ref cx, bodyLabel);
-  disposeEnterLoop(cx.disposes);
   loopPush(ref cx, stepLabel, endLabel);
   let err = "";
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childE, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
-  disposeExitLoop(cx.disposes);
   if (err.len > 0) {
     return err;
   }
@@ -159,6 +198,14 @@ export function emitFor(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string
 // That matches the JS reference, and it is why the element is loaded and stored
 // rather than the slot being pointed at the array.
 export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: string): string {
+  // Two forms, and pass D already proved it is one of them. An ITERATOR walks
+  // through its own `next` and has no length to count against, so that is a
+  // different lowering rather than a variation - see loop_iter.yoop.
+  let walk: IterableWalk = iterableWalkAt(ref cx, stmt.childA);
+  if (walk.ok) {
+    return emitForInIterable(ref cx, stmt, stmtId, retTy, ref walk);
+  }
+
   const elemTy = typeOf(ref cx, stmtId);
 
   let iterable: Operand = Operand.None;
@@ -207,13 +254,11 @@ export function emitForIn(ref cx: Cx, stmt: ASTNode, stmtId: NodeId, retTy: stri
   emitStore(ref cx, elemTy, Operand.Temp { id: elemValue }, stmt.name, loopVar.id);
 
   // `continue` advances the counter first, exactly as in the counted form.
-  disposeEnterLoop(cx.disposes);
   loopPush(ref cx, stepLabel, endLabel);
   let err = "";
   let bodyTerminated = false;
   emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
   loopPop(ref cx);
-  disposeExitLoop(cx.disposes);
   if (err.len > 0) {
     return err;
   }

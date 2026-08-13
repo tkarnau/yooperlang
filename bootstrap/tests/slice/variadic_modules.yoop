@@ -1,0 +1,26 @@
+// One `declare i32 @printf(ptr, ...)` line, however many modules asked for it.
+//
+// Three ways a program reaches printf, all in one graph:
+//
+//   here                     an `extern "C"` declaration of its own
+//   ./lib/printer.yoop       another one, in a different module
+//   ./lib/builtin_printer.yoop  no declaration at all - the compiler builtin
+//
+// The first two must collapse to a single `declare`, and the third must not add
+// one on top of them. Getting either wrong produces IR that clang refuses with
+// "invalid redefinition of function 'printf'", which is a link-shaped error
+// message about a thing the program never wrote twice.
+
+import { announceDeclared } from "./lib/printer.yoop";
+import { announceBuiltin } from "./lib/builtin_printer.yoop";
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+function main(): int {
+  printf("the entry declared one: %d\n", 1);
+  announceDeclared(2);
+  announceBuiltin(3);
+  return 0;
+}

@@ -1,0 +1,47 @@
+// `extern "C" from library "m"` - the LINKING form of the `from` clause.
+//
+// Two spellings, and they are not interchangeable:
+//
+//   extern "C" from "math.h"    { ... }   a HEADER name, read by nobody
+//   extern "C" from library "m" { ... }   a LIBRARY name, `-lm` at link time
+//
+// The library names are collected for the whole GRAPH and land on the one clang
+// invocation, the same way the runtime's C sources do - a program links once,
+// so a library named in any file has to be on that one line.
+//
+// `library` is CONTEXTUAL: it lexes as an ordinary identifier on both sides, so
+// a binding called `library` stays legal, which the last function here proves by
+// being called at all.
+//
+// Note this fixture cannot FAIL for a missing flag on macOS - the math
+// functions live in libSystem there and link with no `-lm`. What it does prove
+// is that the form parses, that the flag reaches clang without breaking the
+// line, and that a bare header name beside it still contributes nothing.
+
+extern "C" from library "m" {
+  function sqrt(x: float64): float64;
+  function pow(base: float64, exp: float64): float64;
+}
+
+// The same library named a second time. Both blocks contribute one `-lm`, not
+// two: the collection deduplicates, which matters because a link line with a
+// repeated library is legal but a link line built from an unbounded corpus is
+// not something to leave growing.
+extern "C" from library "m" {
+  function fabs(x: float64): float64;
+}
+
+// A HEADER name beside them, which contributes no flag at all.
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+function shape(library: int): int {
+  return library * 2;
+}
+
+function main(): int {
+  printf("%s\n", `sqrt=${sqrt(16.0)} pow=${pow(2.0, 10.0)} fabs=${fabs(-3.5)}`);
+  printf("contextual=%d\n", shape(21));
+  return 0;
+}

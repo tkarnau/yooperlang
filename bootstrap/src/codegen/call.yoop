@@ -54,15 +54,26 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
     }
   }
 
-  // printf is the one variadic callee we know about; emitCall owns what a
-  // variadic call site has to spell out. Unqualified only, for the same reason
-  // the cast check above is.
-  const isPrintf = expr.childB == 0 && text.equals(expr.name, "printf");
+  // A variadic callee - `printf`, or any user `extern "C"` signature that ended
+  // in `...` - needs two things no ordinary call does: its FULL function type
+  // spelled out, and C default argument promotion on everything past the fixed
+  // parameters. Unqualified only, for the same reason the cast check above is:
+  // `ns.printf(x)` reaches a member of `ns`, whatever it is named.
+  disposable fixedTys: Vec<string> = vec.vecNew(2);
+  let variadic: VariadicCallee = { isVariadic: false, isBuiltinPrintf: false };
+  if (expr.childB == 0) {
+    variadic = variadicCalleeOf(ref cx, expr.name, ref fixedTys);
+  }
   let retTy = typeOf(ref cx, exprId);
-  if (isPrintf) {
-    cx.e.usesPrintf = true;
-    retTy = printfReturnType();
-    const perr = promoteVarargs(ref cx, ref args, ref argIds);
+  if (variadic.isVariadic) {
+    // The BUILTIN has no declaration to emit a `declare` from, so it asks for
+    // one. A declared extern already emitted its own, and asking for the
+    // builtin's too would be an invalid redefinition of the same symbol.
+    if (variadic.isBuiltinPrintf) {
+      cx.e.usesPrintf = true;
+      retTy = printfReturnType();
+    }
+    const perr = promoteVarargs(ref cx, ref args, ref argIds, fixedTys.len);
     if (perr.len > 0) {
       return perr;
     }
@@ -123,7 +134,11 @@ function emitCallExpr(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operan
   }
 
   const callee = calleeSymbol(ref cx, expr, exprId);
-  emitCall(ref cx, dest, retTy, callee.home, callee.name, isPrintf, ref args);
+  if (variadic.isVariadic) {
+    emitCallVariadic(ref cx, dest, retTy, callee.home, callee.name, ref fixedTys, ref args);
+  } else {
+    emitCall(ref cx, dest, retTy, callee.home, callee.name, ref args);
+  }
 
   if (isVoid) {
     out = Operand.None;
@@ -158,13 +173,19 @@ function emitCast(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): 
   return "";
 }
 
-// Widen every argument past the format string to what C varargs expect.
+// Widen every argument past the FIXED parameters to what C varargs expect.
 //
-// The first argument is the format string itself (already `ptr`), so promotion
-// starts at index 1. An argument that is already the promoted width passes
-// through untouched.
-function promoteVarargs(ref cx: Cx, ref args: Vec<CallArg>, ref argIds: Vec<NodeId>): string {
-  let i: usize = 1;
+// Promotion starts at `fixedCount` - 1 for printf's format string, 3 for
+// `snprintf(buf, n, fmt, ...)` - because a fixed parameter has a declared type
+// and is passed as it: only the varargs go through default argument promotion.
+// An argument that is already the promoted width passes through untouched.
+function promoteVarargs(
+  ref cx: Cx,
+  ref args: Vec<CallArg>,
+  ref argIds: Vec<NodeId>,
+  fixedCount: usize
+): string {
+  let i: usize = fixedCount;
   while (i < args.len) {
     const arg = vec.vecGet(ref args, i);
     const argId = vec.vecGet(ref argIds, i);

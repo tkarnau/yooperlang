@@ -1,0 +1,6 @@
+describe lit=7 doubler=14
+summarize=110
+ordered lo<hi=1 hi<lo=0
+smallest at 1
+after bump 9 3
+exit=0

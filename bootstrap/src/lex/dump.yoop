@@ -11,16 +11,19 @@ module lex;
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
 import { Result } from "std/core/types.yoop";
+import { floatBits, pushFloatBitsHex } from "../utils";
 
 export function dumpTokens(src: uint8[]): Result<Text, string> {
   let out: Text = text.make(src.len * 2);
 
+  // Built once for the whole walk rather than per token - see scan_tables.yoop.
+  disposable tables: LexTables = lexTablesNew();
   let pos: usize = 0;
   let iters: usize = 0;
   const maxIters: usize = src.len * 2 + 100;
   while (iters < maxIters) {
     iters += 1;
-    switch (lexNext(ref src, pos)) {
+    switch (lexNext(ref tables, ref src, pos)) {
       case Result.Err { error: e }: {
         return Result.Err { error: e.error };
       }
@@ -57,6 +60,17 @@ function pushToken(t: ref Text, tok: Token): void {
     } else {
       text.pushUint(ref t, tok.intVal);
     }
+  }
+
+  // A float rides as its BIT PATTERN, not as digits. The two sides format
+  // numbers with different libraries and would disagree in the last digit of a
+  // decimal rendering for reasons that have nothing to do with lexing; 64 bits
+  // either match or they do not. This field used to be left out of the dump
+  // entirely on the theory that it was not comparable, and that is how a real
+  // decoding bug went unnoticed - see float_literal.yoop.
+  if (tok.tag == TokenTags.FLOATLITERAL) {
+    text.push(ref t, " float=");
+    pushFloatBitsHex(ref t, floatBits(tok.floatVal));
   }
   text.pushByte(ref t, 10);
 }

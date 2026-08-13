@@ -1,0 +1,74 @@
+module codegen;
+
+// Opening a borrow: turning a `ref T` operand into the `T` it points at.
+//
+// A borrow costs no instructions to MAKE - every local already lives in an
+// alloca, so `ref x` is the address of storage that exists. Using one as a
+// VALUE is the other half, and it is exactly one `load`. That load lives here,
+// so a borrow is never opened twice and never opened by accident.
+//
+// Two positions ask for it, and they ask differently:
+//
+//   * a value position - an argument, an initializer, a returned value. Pass D
+//     decided, because the answer is "what did the context expect", and it
+//     recorded the node in `tm.derefUses`. `emitExpr` applies it.
+//   * a field or index BASE - `srcRef.len`, `cx.e.usesPrintf`. Codegen decides,
+//     because a READ wants the value and a WRITE wants the address, and pass D
+//     cannot see which one a base is under.
+
+import { NodeId, ASTNode, nodeAt } from "../ast";
+import { Option } from "std/core/types.yoop";
+
+// Emits `exprId` as a plain VALUE: the borrow is opened when the node holds one.
+//
+//   %t7 = load { ptr, i64 }, ptr %t6
+//
+// The base positions call this instead of `emitExpr`, which is what makes
+// `srcRef.len` read the length out of the borrowed descriptor rather than out
+// of the pointer itself.
+export function emitExprValue(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
+  const err = emitExpr(ref cx, exprId, ref out);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!isRefAt(ref cx, exprId)) {
+    return "";
+  }
+  emitOpenBorrow(ref cx, pointeeTypeOf(ref cx, exprId), ref out);
+  return "";
+}
+
+//   %t7 = load %struct.Emitter, ptr %t6
+//
+// One load through a pointer operand. Named for the decision rather than for
+// the instruction, because "open a borrow" is what the caller means and the
+// load is only how it is spelled.
+export function emitOpenBorrow(ref cx: Cx, pointeeTy: string, ref out: Operand): void {
+  const dest = freshTemp(cx.e);
+  emitLoadFromAddr(ref cx, dest, pointeeTy, out);
+  out = Operand.Temp { id: dest };
+}
+
+//   %src.arg
+//
+// FORWARDING a borrow: the mirror of opening one, and it emits no instruction
+// at all. A `ref` parameter's incoming pointer IS its slot (ARG_PTR_SLOT), so
+// handing it on as a borrow is the same operand `ref x` would have produced -
+// which is exactly why writing the `ref` is optional there.
+//
+// Pass D decided, because the answer is "what did the position expect", and it
+// recorded the node in `tm.reborrowUses`. Reached BEFORE the ordinary
+// expression walk, since the load that walk would emit is the thing being
+// skipped rather than something to undo.
+export function emitForwardBorrow(ref cx: Cx, exprId: NodeId, ref out: Operand): string {
+  const expr = nodeAt(cx.ast, exprId);
+  switch (lookupLocal(cx.locals, expr.name)) {
+    case Option.None: {
+      return internalError("no stack slot to forward as a borrow", expr.name);
+    }
+    case Option.Some { value: slotInfo }: {
+      out = Operand.SlotAddr { name: expr.name, id: slotInfo.id };
+      return "";
+    }
+  }
+}

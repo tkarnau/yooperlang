@@ -1,0 +1,238 @@
+module typecheck;
+
+/*
+  The two sides of a bound that are READ rather than resolved: what a generic
+  body may call through an opaque parameter, and whether a type argument keeps
+  the promise the bound made. bounds.yoop resolves them; this uses them.
+
+  The pairing is the whole design. `boundMethodOn` lets the body call
+  `Comparable.compare(ref a, b)` on an opaque `T` because the bound says every
+  future `T` will have one; `checkBoundsSatisfied` is what makes that true, at
+  every call site and every generic application. Drop either half and the other
+  is unsound in a different direction - the first alone miscompiles, the second
+  alone makes a bound decorative.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { SourceLocation } from "../diagnostics";
+
+// ----- pass D: what the body may call ---------------------------------------
+
+// The Func a `Trait.method(ref t, ...)` call reaches when the receiver is an
+// opaque type parameter, or TYPE_ERROR_ID when no bound offers it.
+//
+// The signature comes from the BOUND rather than from any implementation: there
+// is no implementation to consult, and the bound is exactly the promise every
+// future one has to keep. `self` is rewritten to the parameter, because a trait
+// signature annotates `self` with the trait's own name (see parseMethodSig) and
+// the receiver here is a `T`.
+export function boundMethodOn(
+  ref prog: Program,
+  paramType: TypeId,
+  traitType: TypeId,
+  methodName: string
+): TypeId {
+  disposable bounds: Vec<TypeId> = boundsOf(ref prog, paramType);
+  let i: usize = 0;
+  while (i < bounds.len) {
+    const bound = vec.vecGet(ref bounds, i);
+    if (sameTraitDecl(ref prog, bound, traitType)) {
+      const method = lookupMethod(ref prog, bound, methodName);
+      if (method == TYPE_ERROR_ID) {
+        return TYPE_ERROR_ID;
+      }
+      return withSelfAs(ref prog, method, paramType);
+    }
+    i += 1;
+  }
+  return TYPE_ERROR_ID;
+}
+
+// A COPY of a TypeParam's bounds, for the reason spelled out on
+// VariantCaseLookup: a Vec read out of the type arena shares the arena's
+// storage, so handing one back by reference invites a caller to free it.
+export function boundsOf(ref prog: Program, id: TypeId): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(2);
+  switch (typeAt(ref prog, id)) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref b));
+    }
+    default: { }
+  }
+  return out;
+}
+
+export function isTypeParam(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return true; }
+    default: { return false; }
+  }
+}
+
+export function typeParamNameOf(ref prog: Program, id: TypeId): string {
+  switch (typeAt(ref prog, id)) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return n; }
+    default: { return "?"; }
+  }
+}
+
+// The same signature with parameter 0 borrowed from `receiver` instead of from
+// the trait. Only the receiver moves; everything else was substituted when the
+// bound was applied.
+function withSelfAs(ref prog: Program, funcType: TypeId, receiver: TypeId): TypeId {
+  switch (typeAt(ref prog, funcType)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      if (p.len == 0) {
+        return funcType;
+      }
+      let params: Vec<TypeId> = vec.vecNew(p.len);
+      vec.vecPush(ref params, internRef(ref prog, receiver));
+      let i: usize = 1;
+      while (i < p.len) {
+        vec.vecPush(ref params, vec.vecGet(ref p, i));
+        i += 1;
+      }
+      return internFunc(ref prog, ref params, r, v);
+    }
+    default: { return funcType; }
+  }
+}
+
+// Two trait TypeIds naming the same DECL - the template and every application
+// of it. Identity is the (module, name) pair rather than the TypeId, because
+// applying arguments interns a new one.
+export function sameTraitDecl(ref prog: Program, a: TypeId, b: TypeId): bool {
+  switch (typeAt(ref prog, a)) {
+    case Type.Trait { decl: da, methods: ma, typeParams: pa, extendsTraits: ea }: {
+      switch (typeAt(ref prog, b)) {
+        case Type.Trait { decl: db, methods: mb, typeParams: pb, extendsTraits: eb }: {
+          return da.module == db.module && str.stringEq(da.name, db.name);
+        }
+        default: { return false; }
+      }
+    }
+    default: { return false; }
+  }
+}
+
+// A trait application's ARGUMENTS - the `typeParams` slot, which holds the
+// arguments for an application and the parameters for the template. Copied for
+// the same arena-sharing reason boundsOf copies.
+export function traitArgsOf(ref prog: Program, id: TypeId): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(2);
+  switch (typeAt(ref prog, id)) {
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref tp));
+    }
+    default: { }
+  }
+  return out;
+}
+
+// ----- the instantiation side: does an argument keep the promise? ------------
+
+// Every bound on every parameter, against the arguments about to be
+// substituted for them. Reports and returns false on the first failure.
+//
+// The bound itself is substituted first: `T implements Comparable<T>` applied
+// with `T = Token` is a promise about `Comparable<Token>`, not about
+// `Comparable<T>`. Skipping that step would compare a bound still talking about
+// the template against an implementation talking about a real type, and every
+// generic-trait bound would look unsatisfied.
+export function checkBoundsSatisfied(
+  ref prog: Program,
+  ref params: Vec<TypeId>,
+  ref args: Vec<TypeId>,
+  what: string,
+  loc: SourceLocation
+): bool {
+  let i: usize = 0;
+  while (i < params.len && i < args.len) {
+    const arg = vec.vecGet(ref args, i);
+    disposable bounds: Vec<TypeId> = boundsOf(ref prog, vec.vecGet(ref params, i));
+    let b: usize = 0;
+    while (b < bounds.len) {
+      const bound = substituteTrait(ref prog, vec.vecGet(ref bounds, b), ref params, ref args);
+      if (!typeSatisfiesBound(ref prog, arg, bound)) {
+        reportError(
+          ref prog,
+          `${what}: "${formatType(ref prog, arg)}" does not satisfy the bound "${boundDescription(ref prog, bound)}" on type parameter "${typeParamNameOf(ref prog, vec.vecGet(ref params, i))}"`,
+          loc
+        );
+        return false;
+      }
+      b += 1;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// Does `concrete` implement the trait this bound names, at the same arguments?
+//
+// A TYPE PARAMETER can satisfy a bound too, and has to: `describeTwice<T
+// implements Display>` calling `describe<T implements Display>(ref x)` passes
+// its own opaque `T`. Its own bounds are the evidence, which is the same rule
+// one level up.
+export function typeSatisfiesBound(ref prog: Program, concrete: TypeId, bound: TypeId): bool {
+  disposable claimed: Vec<TypeId> = claimedTraitsOf(ref prog, concrete);
+  let i: usize = 0;
+  while (i < claimed.len) {
+    const t = vec.vecGet(ref claimed, i);
+    if (sameTraitDecl(ref prog, t, bound)) {
+      disposable have: Vec<TypeId> = traitArgsOf(ref prog, t);
+      disposable want: Vec<TypeId> = traitArgsOf(ref prog, bound);
+      if (sameTypeIdList(ref have, ref want)) {
+        return true;
+      }
+    }
+    i += 1;
+  }
+  return false;
+}
+
+// What a type says it implements: an `implements` clause for a real type, the
+// BOUNDS for a type parameter. One question, two places it is written down.
+export function claimedTraitsOf(ref prog: Program, id: TypeId): Vec<TypeId> propagates<disposable> {
+  let out: Vec<TypeId> = vec.vecNew(2);
+  switch (typeAt(ref prog, id)) {
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref b));
+    }
+    case Type.Struct { decl: d, fields: f, methods: mm, implementsTraits: it, generic: g }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+    }
+    case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+    }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      vec.vecExtendFrom(ref out, vec.vecAsArray(ref it));
+    }
+    default: { }
+  }
+  return out;
+}
+
+// The trait's name, plus its arguments when it has any, for the diagnostic.
+//
+// A template literal rather than a Text, matching every other diagnostic in
+// this layer: `text.view` hands back a BORROW of the Text's buffer, so a
+// `disposable` Text would free the string this returns before the caller
+// interpolates it.
+function boundDescription(ref prog: Program, bound: TypeId): string propagates<disposable> {
+  disposable args: Vec<TypeId> = traitArgsOf(ref prog, bound);
+  const name = nominalNameOf(ref prog, bound);
+  if (args.len == 0) {
+    return name;
+  }
+  let inner: string = formatType(ref prog, vec.vecGet(ref args, 0));
+  let i: usize = 1;
+  while (i < args.len) {
+    inner = `${inner}, ${formatType(ref prog, vec.vecGet(ref args, i))}`;
+    i += 1;
+  }
+  return `${name}<${inner}>`;
+}

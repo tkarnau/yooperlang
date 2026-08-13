@@ -10,6 +10,7 @@ module codegen;
 // turned into 35 mallocs.
 
 import { Text }, * as text from "std/core/text.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 
 // Emits `@.str.N = private unnamed_addr constant [L x i8] c"..."` and returns
@@ -26,6 +27,48 @@ export function internStringConstant(ref e: Emitter, s: string): usize {
   text.push(ref e.globals, " x i8] c\"");
   pushLlvmEscaped(ref e.globals, raw);
   text.push(ref e.globals, "\\00\", align 1\n");
+  return id;
+}
+
+//   @.arr.0 = internal global [4 x i8] [i8 32, i8 9, i8 13, i8 10], align 8
+//
+// The PAYLOAD of a module-level array const, returned as N so a caller can
+// reference it as `Operand.ArrayConst { dataId: N, ... }`. It sits beside the
+// string constants because it is the same kind of thing - a module datum a
+// constant points at - and it is emitted from the same buffer.
+//
+// `internal global` and not `private constant`, because constness is about the
+// BINDING: `A[0] = 9` through a `const` is allowed, and read-only storage would
+// make that a crash rather than a write.
+export function emitArrayPayload(ref e: Emitter, elemTy: string, ref elems: Vec<Operand>): usize {
+  const id = e.nextArr;
+  e.nextArr += 1;
+
+  text.push(ref e.globals, "@.arr.");
+  text.pushUint(ref e.globals, uint64(id));
+  text.push(ref e.globals, " = internal global [");
+  text.pushUint(ref e.globals, uint64(elems.len));
+  text.push(ref e.globals, " x ");
+  text.push(ref e.globals, elemTy);
+  text.push(ref e.globals, "] ");
+  // A zero-length array has no element list to write, and `[0 x i8] []` is not
+  // how LLVM spells one - `zeroinitializer` is.
+  if (elems.len == 0) {
+    text.push(ref e.globals, "zeroinitializer, align 8\n");
+    return id;
+  }
+  text.pushByte(ref e.globals, '[');
+  let i: usize = 0;
+  while (i < elems.len) {
+    if (i > 0) {
+      text.push(ref e.globals, ", ");
+    }
+    text.push(ref e.globals, elemTy);
+    text.pushByte(ref e.globals, ' ');
+    pushOperand(ref e.globals, vec.vecGet(ref elems, i));
+    i += 1;
+  }
+  text.push(ref e.globals, "], align 8\n");
   return id;
 }
 

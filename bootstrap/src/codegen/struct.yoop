@@ -57,11 +57,13 @@ export function emitStructLiteral(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref
 // `p.x` - one extractvalue on the struct value.
 export function emitStructFieldRead(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   let base: Operand = Operand.None;
-  const err = emitExpr(ref cx, expr.childA, ref base);
+  const err = emitExprValue(ref cx, expr.childA, ref base);
   if (err.len > 0) {
     return err;
   }
-  const structTy = typeOf(ref cx, expr.childA);
+  // `pointeeTypeOf`, not `typeOf`: emitExprValue already opened a borrowed base,
+  // so the operand in hand is the struct itself whatever the node's type says.
+  const structTy = pointeeTypeOf(ref cx, expr.childA);
   const pos = fieldPositionOf(ref cx, expr.childA, expr.name);
   const dest = freshTemp(cx.e);
   emitExtractValue(ref cx, dest, structTy, base, pos);
@@ -91,6 +93,28 @@ export function emitStructFieldWrite(ref cx: Cx, target: ASTNode, targetId: Node
 // cannot disagree about where a field lives.
 export function emitFieldAddress(ref cx: Cx, target: ASTNode, ref addr: usize): string {
   const baseNode = nodeAt(cx.ast, target.childA);
+
+  // A BORROWED base is already an address - that is what a `ref T` operand is -
+  // so there is no slot to gep from and no load to do. `cx.e.usesPrintf = true`
+  // is the shape: `cx.e` is a `ref Emitter`, and the field lives in whatever
+  // Emitter it points at rather than in any slot of this function's.
+  //
+  // Checked before the nested-field case, because a borrowed base is very often
+  // a field read itself and the two answers differ.
+  if (isRefAt(ref cx, target.childA)) {
+    let basePtr: Operand = Operand.None;
+    const err = emitExpr(ref cx, target.childA, ref basePtr);
+    if (err.len > 0) {
+      return err;
+    }
+    const dest = freshTemp(cx.e);
+    emitGepFieldOfAddr(
+      ref cx, dest, pointeeTypeOf(ref cx, target.childA), basePtr,
+      fieldPositionOf(ref cx, target.childA, target.name)
+    );
+    addr = dest;
+    return "";
+  }
 
   // A nested base has no slot of its own; its ADDRESS is what the outer gep
   // starts from, so compute that first and then step one field further in.

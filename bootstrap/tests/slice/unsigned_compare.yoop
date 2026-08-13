@@ -1,0 +1,45 @@
+// Comparing UNSIGNED integers, which LLVM spells with its own predicates.
+//
+// `icmp slt` and `icmp ult` are different instructions, and picking the wrong
+// one is a WRONG ANSWER rather than an error: an i8 holding 128 is -128 to a
+// signed compare, so `first < 128` on a byte of 104 comes out FALSE. Every
+// assertion below is chosen to flip if the signed predicate is used - which is
+// the only way to test this, since the two agree on every value that fits in
+// the signed half of the width.
+//
+// `==` and `!=` are deliberately absent: two identical bit patterns are equal
+// under either reading, so there is nothing there to get wrong.
+
+function main(): int32 {
+  let lo: uint8 = 104;
+  let hi: uint8 = 200;
+  printf("%s\n", `u8 lt=${lo < hi} gt=${hi > lo} le=${lo <= hi} ge=${hi >= lo}`);
+
+  // The shape that was actually broken: a uint8 against a literal above 127.
+  // std/core/strings.yoop is a loop of these, and getting it wrong took every
+  // multi-byte UTF-8 branch on plain ASCII.
+  printf("%s\n", `u8 vs literal lt=${lo < 128} ge=${hi >= 128}`);
+
+  let big: uint16 = 40000;
+  let small: uint16 = 100;
+  let huge: uint32 = 4000000000;
+  let tiny: uint32 = 5;
+  let vast: uint64 = 10000000000000000000;
+  let one: uint64 = 1;
+  printf("%s\n", `wide u16=${big > small} u32=${huge > tiny} u64=${vast > one}`);
+
+  // NOT here: ordering an `enum<uint8>` whose cases cross 127. The bootstrap
+  // unwraps the alias and answers unsigned; the reference compares it signed
+  // and says `Flags.HIGH > Flags.LOW` is false for 200 and 10. A fixture is
+  // asserted against BOTH compilers, so that one is recorded as a reference bug
+  // in plans/bootstrap-completion.md rather than tested here.
+
+  // And SIGNED stays signed. These flip the other way if everything were
+  // switched to the unsigned predicate.
+  let neg: int8 = -5;
+  let pos: int8 = 3;
+  let nwide: int32 = -1;
+  let pwide: int32 = 1;
+  printf("%s\n", `signed i8=${neg < pos} i32=${nwide < pwide}`);
+  return 0;
+}

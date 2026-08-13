@@ -32,9 +32,17 @@ describe("vertical slice: the bootstrap compiler produces working executables", 
 
   before(() => {
     work = fs.mkdtempSync(path.join(os.tmpdir(), "yoop-slice-"));
+    // YOOP_BOOT_COMPILER runs the whole suite through an ALREADY BUILT
+    // bootstrap instead of building one here. That is how a self-hosted stage
+    // gets tested: `YOOP_BOOT_COMPILER=/tmp/stage3 npm run test:slice` asserts
+    // the compiler the bootstrap built against the same hand-written
+    // .expected files as the one the JS compiler built.
+    if (process.env.YOOP_BOOT_COMPILER) {
+      boot = process.env.YOOP_BOOT_COMPILER;
+      return;
+    }
     boot = path.join(work, "yoopiler_boot");
-    // The bootstrap compiler, built by the JS compiler. Once it can compile
-    // itself, this line is the thing that changes.
+    // The bootstrap compiler, built by the JS compiler.
     execFileSync("node", [path.join(REPO, "src/yoopiler.js"), BOOT_SRC, "-o", boot], {
       cwd: REPO,
       stdio: "pipe",

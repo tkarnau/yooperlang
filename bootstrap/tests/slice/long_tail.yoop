@@ -1,0 +1,73 @@
+// The long tail: three small features that share nothing but their size.
+//
+//   _ = expr;                      a DISCARD statement
+//   import "./x.yoop";             a SIDE-EFFECT import
+//   trait Child extends Parent     a trait built on another trait
+//   export let                     a mutable global another module writes
+//
+// `_ = expr;` and a bare `expr;` are checked and emitted identically. What the
+// spelling adds is that the discard was deliberate, which is what makes it the
+// right way to drop a result a reader would otherwise expect to see used.
+//
+// `extends` is two merges and nothing else. The child trait's method table
+// absorbs its parents', so `Child.parentMethod(ref x)` resolves with no chain
+// walk anywhere; and `implements Child` claims the parents too, so a bound on
+// the PARENT is satisfied by a type that only named the child.
+
+import "./lib/side_effect.yoop";
+import { tally, bumpTally, TALLY_STEP } from "./lib/tally.yoop";
+
+trait Greeter {
+  function greet(ref self): int32;
+}
+
+// One parent.
+trait LoudGreeter extends Greeter {
+  function shout(ref self): int32;
+}
+
+trait Named {
+  function tag(ref self): int32;
+}
+
+// Two parents, comma separated.
+trait Full extends LoudGreeter, Named {
+  function all(ref self): int32;
+}
+
+type Megaphone implements Full {
+  n: int32,
+  function greet(ref self): int32 { return self.n; }
+  function shout(ref self): int32 { return self.n * 10; }
+  function tag(ref self): int32 { return self.n + 100; }
+  function all(ref self): int32 { return self.n * 1000; }
+}
+
+// Bounded on the GRANDPARENT. Megaphone only ever wrote `implements Full`, so
+// this is the transitive half of the claim.
+function greetOf<T implements Greeter>(ref t: T): int32 {
+  return Greeter.greet(ref t);
+}
+
+function twice(n: int32): int32 {
+  return n * 2;
+}
+
+function main(): int32 {
+  let m: Megaphone = { n: 5 };
+
+  // Through the child, through the parent, and through a bound on the parent.
+  printf("child=%d parent=%d bound=%d\n",
+    Full.greet(ref m), Greeter.greet(ref m), greetOf(ref m));
+  printf("own=%d second=%d\n", Full.shout(ref m), Full.tag(ref m));
+
+  // A deliberate discard. The call still runs - `twice` has no side effect, so
+  // the assertion is the one after it: the statement compiles and the program
+  // keeps going.
+  _ = twice(21);
+
+  const a = bumpTally();
+  const b = bumpTally();
+  printf("step=%d a=%d b=%d tally=%d\n", TALLY_STEP, a, b, tally);
+  return 0;
+}

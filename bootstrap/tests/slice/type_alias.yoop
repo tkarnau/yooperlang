@@ -1,0 +1,69 @@
+// `type X = <annotation>;` - a TRANSPARENT type alias.
+//
+// The name resolves to the RHS's own TypeId. No new type is interned, so
+// `NodeId` and `usize` are one type: they pass to each other's parameters, an
+// untyped literal pins through the alias, and nothing downstream has to unwrap
+// anything. That last part is what makes this cheap - type equality is still
+// `id == id`.
+
+type NodeId = usize;      // an alias to a primitive
+type Count = int32;
+type IdList = NodeId[];   // an alias to an array of an alias
+
+type Point { x: int32, y: int32 }
+type Pt = Point;          // an alias to a struct
+type Coord = Pt;          // a chain, declared BEFORE the link it names below
+
+// Declared after `Coord` uses it on purpose: resolution is lazy, so an alias
+// may name one further down the file.
+type Origin = Coord;
+
+// A struct FIELD annotated with an alias, which is the shape the AST arena has
+// (`childA: NodeId` in a node, and an untyped `0` written into it).
+type Node {
+  id: NodeId,
+  next: NodeId,
+  weight: Count,
+}
+
+// The alias and the target are interchangeable in BOTH directions.
+function takesUsize(n: usize): usize {
+  return n + 1;
+}
+
+function takesNodeId(n: NodeId): NodeId {
+  return n + 10;
+}
+
+function sumIds(ids: IdList): NodeId {
+  let total: NodeId = 0;
+  for (let i = 0; i < ids.len; i = i + 1) {
+    total = total + ids[i];
+  }
+  return total;
+}
+
+function shift(p: Pt, by: int32): Coord {
+  return { x: p.x + by, y: p.y + by };
+}
+
+function main(): int32 {
+  // An untyped int literal pins through the alias to the integer underneath.
+  const n: Node = { id: 0, next: 1, weight: 5 };
+  printf("node: %llu %llu %d\n", n.id, n.next, n.weight);
+
+  let a: NodeId = 5;
+  let b: usize = 7;
+  printf("cross: %llu %llu\n", takesUsize(a), takesNodeId(b));
+
+  const ids: IdList = [1, 2, 3, 4];
+  printf("sum: %llu len=%llu\n", sumIds(ids), ids.len);
+
+  // An alias to a struct is that struct, so a literal annotated with any name
+  // in the chain builds the same thing and reads the same fields.
+  const p: Point = { x: 1, y: 2 };
+  const q: Origin = shift(p, 10);
+  printf("shifted: %d %d\n", q.x, q.y);
+
+  return 0;
+}

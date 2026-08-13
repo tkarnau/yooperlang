@@ -1,0 +1,16 @@
+simple:
+  body 9
+  close 2
+  close 1
+mixed:
+  body
+  close 13
+  close 12
+  close 11
+  close 10
+early return:
+  close 22
+  close 21
+  close 20
+  got 7
+exit=0

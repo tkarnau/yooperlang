@@ -3,16 +3,27 @@ module typecheck;
 // Which interpolations a template literal can stringify.
 //
 // `` `line ${n}: ${msg}` `` builds a string, so every `${...}` has to become
-// one. Three shapes can, and the classification lives here rather than in
-// codegen because pass D is what REFUSES the fourth - a part codegen cannot
+// one. Four shapes can, and the classification lives here rather than in
+// codegen because pass D is what REFUSES the fifth - a part codegen cannot
 // lower has to be a diagnostic pointing at the interpolation, not an internal
 // error much later.
 
-// A float is UNSUPPORTED rather than missing from the enum: it is a perfectly
-// reasonable thing to interpolate, and naming it is what makes the refusal
-// readable. The bootstrap's own source has no float interpolation to test a
-// lowering against, so it is deliberately out of this pass.
-export enum TemplatePartKind { STRING, INT, BOOL, UNSUPPORTED }
+import * as map from "std/collections/map.yoop";
+import * as str from "std/core/strings.yoop";
+
+// FLOAT renders through C's `%g`, which is what the reference's
+// `yoop_float_to_string` runtime helper is: `${1.5}` is "1.5", `${1.0}` is "1",
+// `${1.0e20}` is "1e+20". Matching that shortest-form rendering exactly is the
+// point - a template literal in a slice fixture is asserted against both
+// compilers, so a `%f` here would print "1.500000" and fail the fixture rather
+// than look like a formatting preference.
+//
+// DISPLAY is any type carrying a `toString(ref self): string` method. It is not
+// a shape codegen knows how to render - it is a CALL, and the method does the
+// rendering.
+export enum TemplatePartKind { STRING, INT, BOOL, FLOAT, DISPLAY, UNSUPPORTED }
+
+const TO_STRING: string = "toString";
 
 export function templatePartKind(ref prog: Program, t: TypeId): TemplatePartKind {
   switch (typeAt(ref prog, t)) {
@@ -20,10 +31,57 @@ export function templatePartKind(ref prog: Program, t: TypeId): TemplatePartKind
       switch (p) {
         case PrimKind.STRING: { return TemplatePartKind.STRING; }
         case PrimKind.BOOL: { return TemplatePartKind.BOOL; }
-        case PrimKind.FLOAT32, PrimKind.FLOAT64: { return TemplatePartKind.UNSUPPORTED; }
+        case PrimKind.FLOAT32, PrimKind.FLOAT64: { return TemplatePartKind.FLOAT; }
         default: { return TemplatePartKind.INT; }
       }
     }
-    default: { return TemplatePartKind.UNSUPPORTED; }
+    default: {
+      if (displayMethodOf(ref prog, t) != TYPE_ERROR_ID) {
+        return TemplatePartKind.DISPLAY;
+      }
+      // A value enum with no `toString` renders as its UNDERLYING value - the
+      // string for `enum<string>`, the number for an int-backed one. Checked
+      // AFTER the Display test, which is the precedence the reference has: a
+      // `Color implements Display` prints "R", and a bare `Color` prints 1.
+      const underlying = enumUnderlyingOf(ref prog, t);
+      if (underlying != t) {
+        return templatePartKind(ref prog, underlying);
+      }
+      return TemplatePartKind.UNSUPPORTED;
+    }
+  }
+}
+
+// The `toString(ref self): string` a type carries, or TYPE_ERROR_ID.
+//
+// Having the METHOD is the test, not naming the trait. There are no inherent
+// methods - a method no implemented trait requires is refused at the decl - so
+// a `toString` here is one some trait asked for, and Display is the only trait
+// in the language that asks. Checking the trait by name instead would need the
+// importing module's scope, which the classification does not have and should
+// not: whether a type prints is a property of the TYPE.
+//
+// The RETURN is checked because the interpolation splices the result straight
+// into a string buffer. A `toString` returning something else would produce
+// wrong IR rather than a diagnostic, and the method table cannot rule it out -
+// a trait could declare the name with any signature.
+export function displayMethodOf(ref prog: Program, t: TypeId): TypeId {
+  const method = lookupMethod(ref prog, t, TO_STRING);
+  if (method == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  switch (typeAt(ref prog, method)) {
+    case Type.Func { params: ps, ret: r, variadic: v }: {
+      switch (typeAt(ref prog, r)) {
+        case Type.Prim { prim: p }: {
+          switch (p) {
+            case PrimKind.STRING: { return method; }
+            default: { return TYPE_ERROR_ID; }
+          }
+        }
+        default: { return TYPE_ERROR_ID; }
+      }
+    }
+    default: { return TYPE_ERROR_ID; }
   }
 }

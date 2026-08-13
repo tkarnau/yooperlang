@@ -1,0 +1,76 @@
+// A struct FIELD whose own type is a VARIANT, read back out.
+//
+// `a.value` where `value: Operand` looks exactly like `Shape.Empty` from
+// codegen's side: both are a FIELD_ACCESS whose expression type is a variant.
+// Reading the whole expression to tell them apart compiled `a.value` as a
+// payload-less constructor of case 0 - a fresh tag and an UNWRITTEN payload -
+// which is a silent miscompile rather than an error, and it is the shape the
+// compiler's own `CallArg { ty: string, value: Operand }` is written in. It
+// cost the self-compile its third stage: stage2 emitted `call void @f(ptr
+// 17179869185)` where stage1 emitted `call void @f(ptr %t1)`.
+//
+// The base is what separates them: `Shape.Empty`'s base is a TYPE NAME, never
+// checked as a value, while `a.value`'s base is a struct.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+variant Step {
+  Zero,                     // ordinal 0 - the one a miscompile lands on
+  Num  { n: int32 },
+  Word { s: string },
+}
+
+type Slot {
+  label: string,
+  step: Step,
+}
+
+// Read a variant field out of a struct held in a LOCAL.
+function render(ref sl: Slot): string {
+  switch (sl.step) {
+    case Step.Zero: { return "zero"; }
+    case Step.Num { n: n }: { return `num ${n}`; }
+    case Step.Word { s: s }: { return `word ${s}`; }
+  }
+}
+
+// The same read, but the field is passed BY VALUE to something else - which is
+// the shape `operand(ref cx, a.value)` has.
+function show(st: Step): void {
+  switch (st) {
+    case Step.Zero: { printf("  saw zero\n"); }
+    case Step.Num { n: n }: { printf("  saw num %d\n", n); }
+    case Step.Word { s: s }: { printf("  saw word %s\n", s); }
+  }
+}
+
+function main(): int32 {
+  let a: Slot = { label: "a", step: Step.Num { n: 42 } };
+  let b: Slot = { label: "b", step: Step.Word { s: "hello" } };
+  let c: Slot = { label: "c", step: Step.Zero };
+
+  printf("%s\n", render(ref a));
+  printf("%s\n", render(ref b));
+  printf("%s\n", render(ref c));
+
+  show(a.step);
+  show(b.step);
+  show(c.step);
+
+  // A field read out of a struct returned by a CALL, and out of an array
+  // element - neither has a named binding under it.
+  let slots: Slot[] = [a, b, c];
+  show(slots[1].step);
+
+  // Assigning a variant INTO the field and reading it back.
+  a.step = Step.Word { s: "again" };
+  show(a.step);
+
+  // And a nested path, since a variant field is reached the same way any other
+  // field is.
+  let outer: Slot = { label: "outer", step: Step.Num { n: 7 } };
+  printf("%s\n", render(ref outer));
+  return 0;
+}

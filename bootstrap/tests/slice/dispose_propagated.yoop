@@ -1,0 +1,81 @@
+// PROPAGATED disposal - `propagates<disposable>` on a type with no `dispose`
+// method of its own.
+//
+// `disposable e: Emitter = emitterNew();` asks for a scope-end call, and
+// `Emitter` has none. That is not a mistake. A type that writes
+// `propagates<disposable>` is saying the obligation belongs to the things it
+// HOLDS, so the scope-end call is not one call at all: it is one per field that
+// supplies the kind, made on that field's own type.
+//
+// A field supplies the kind when its own type propagates it. `plain: int` below
+// supplies nothing and is skipped, which is what keeps a propagating struct from
+// owing a call for every field it happens to have.
+//
+// Nothing here is hardcoded to `disposable` any more than the direct form is -
+// the kind is a user's, and `close` is whatever its `mustCall` names.
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+kind tracked {
+  appliesTo binding;
+  requires Closer;
+  mustCall close beforeScopeEnd;
+}
+
+trait Closer {
+  function close(ref self): void;
+}
+
+type Res implements Closer propagates<tracked> {
+  id: int,
+  function close(ref self): void {
+    printf("  close %d\n", self.id);
+  }
+}
+
+// No `close` of its own. Two fields carry the kind and one does not.
+type Pair propagates<tracked> {
+  a: Res,
+  b: Res,
+  plain: int,
+}
+
+// Reverse FIELD order, matching the rule every other disposal follows: a later
+// field may hold a borrow of an earlier one.
+function simple(): void {
+  tracked p: Pair = { a: { id: 1 }, b: { id: 2 }, plain: 9 };
+  printf("  body %d\n", p.plain);
+}
+
+// A propagated binding beside an ordinary one. Bindings unwind in reverse
+// declaration order, and the propagated one contributes its whole field run at
+// its own position rather than at the end.
+function mixed(): void {
+  tracked first: Res = { id: 10 };
+  tracked second: Pair = { a: { id: 11 }, b: { id: 12 }, plain: 0 };
+  tracked third: Res = { id: 13 };
+  printf("  body\n");
+}
+
+// An early `return` unwinds every enclosing scope, and a propagated binding
+// unwinds exactly as a direct one does.
+function earlyExit(): int {
+  tracked outer: Pair = { a: { id: 20 }, b: { id: 21 }, plain: 0 };
+  if (true) {
+    tracked inner: Res = { id: 22 };
+    return 7;
+  }
+  return 0;
+}
+
+function main(): int {
+  printf("simple:\n");
+  simple();
+  printf("mixed:\n");
+  mixed();
+  printf("early return:\n");
+  printf("  got %d\n", earlyExit());
+  return 0;
+}

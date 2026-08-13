@@ -1,0 +1,29 @@
+// An exported value enum, plus a function that takes one. Imported by
+// ../enum_modules.yoop.
+//
+// The point of the split is that an imported enum has to be the SAME type as
+// the declared one - an import binds the source module's SymbolId, and type
+// equality is `id == id`, so a copied symbol would make `Shade.Dark` from here
+// unassignable to a `Shade` over there.
+
+export enum Shade {
+  Light 10,
+  Dark 20,
+}
+
+export enum Label<string> {
+  Warm "warm",
+  Cool "cool",
+}
+
+export function shadeValue(s: Shade): int32 {
+  return int32(s);
+}
+
+// A switch over an imported enum, exhaustive, in the module that DECLARED it.
+export function invert(s: Shade): Shade {
+  switch (s) {
+    case Shade.Light: { return Shade.Dark; }
+    case Shade.Dark: { return Shade.Light; }
+  }
+}

@@ -50,7 +50,40 @@ export function lookupMethod(ref prog: Program, ownerType: TypeId, name: string)
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       return methodInTable(ref mm, name);
     }
+    // A trait's own table first, then its PARENTS' - `Child.parentMethod(x)`
+    // has to resolve, and that is the whole dispatch side of `extends`.
+    //
+    // ONE level deep, deliberately: `extendsTraits` is already flat, because
+    // collectImplementedTraits expands each parent's own chain as it builds
+    // the list. A recursive walk would answer the same thing and would need a
+    // cycle guard that the fill-order rule already makes unnecessary.
     case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      const own = methodInTable(ref mm, name);
+      if (own != TYPE_ERROR_ID) {
+        return own;
+      }
+      let i: usize = 0;
+      while (i < et.len) {
+        switch (typeAt(ref prog, vec.vecGet(ref et, i))) {
+          case Type.Trait { decl: pd, methods: pm, typeParams: ptp, extendsTraits: pet }: {
+            const inherited = methodInTable(ref pm, name);
+            if (inherited != TYPE_ERROR_ID) {
+              return inherited;
+            }
+          }
+          default: { }
+        }
+        i += 1;
+      }
+      return TYPE_ERROR_ID;
+    }
+    // A value enum takes methods exactly as a struct does. That is what makes
+    // `${kind}` on an `enum ... implements Display` a CALL rather than a
+    // rendering of its ordinal, and it costs no new dispatch: a method is an
+    // ordinary function with a `ref self` by the time anything below pass C
+    // sees it.
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
       return methodInTable(ref mm, name);
     }
     default: { return TYPE_ERROR_ID; }
@@ -100,6 +133,10 @@ export function nominalNameOf(ref prog: Program, id: TypeId): string {
     case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
       return d.name;
     }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      return d.name;
+    }
     default: { return ""; }
   }
 }
@@ -112,6 +149,10 @@ export function nominalModuleOf(ref prog: Program, id: TypeId): ModuleId {
       return d.module;
     }
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
+      return d.module;
+    }
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
       return d.module;
     }
     default: { return 0; }
@@ -145,9 +186,14 @@ export function fillTraitMethods(
   // dispatch: `Iterable<MapEntry<K, V>>` still has to be instantiated before
   // its `next` can be called, and nothing here does that. The parameters are
   // recorded on the trait so the day it does, they are already there.
-  disposable typeParams: Vec<TypeId> = traitTypeParams(ref prog, ref ast, declNode);
+  // NOT `disposable`: this vector is MOVED into the Type.Trait below and the
+  // trait outlives this scope, exactly as `methods` does. It used to be marked
+  // disposable and got away with it only because nothing ever read a trait's
+  // typeParams back; bounds do, and a freed one reads as garbage.
+  let typeParams: Vec<TypeId> = traitTypeParams(ref prog, ref ast, declNode);
   disposable paramNames: Vec<string> = traitTypeParamNames(ref ast, declNode);
   beginTypeParams(ref prog, ref typeParams, ref paramNames);
+  resolveTypeParamBounds(ref prog, ref tm, ref ast, declNode, ref typeParams);
 
   let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
   let i: usize = 0;
@@ -157,14 +203,52 @@ export function fillTraitMethods(
       funcTypeOfSignature(ref prog, ref tm, ref ast, sigNode));
     i += 1;
   }
+
+  // `trait Child extends Parent` - the parents, already FLATTENED, because
+  // collectImplementedTraits expands each one's own extends chain as it goes.
+  // NOT disposable: it is moved into the Type.Trait below, the same way
+  // `methods` and `typeParams` are.
+  //
+  // A parent declared BELOW its child would be an unfilled shell here, and
+  // merging one loses its methods silently - so that is refused by name.
+  let parents: Vec<TypeId> = collectImplementedTraits(ref prog, ref tm, ref ast, declNode);
   endTypeParams(ref prog);
+  checkParentsAreFilled(ref prog, ref parents, declNode);
 
   setType(ref prog, typeId, Type.Trait {
-    decl: { name: declNode.name, module: moduleId, populated: true },
+    decl: { name: declNode.name, module: moduleId, populated: true,
+            propagatesKind: "" },
     methods: methods,
     typeParams: typeParams,
-    extendsTraits: vec.vecNew(0),
+    extendsTraits: parents,
   });
+}
+
+// A parent that is not filled yet is refused BY NAME. Its method table is
+// empty at that moment, and an empty parent is invisible rather than wrong:
+// every use of the chain would report the child as missing a method that is
+// right there in the parent, one line up.
+function checkParentsAreFilled(
+  ref prog: Program,
+  ref parents: Vec<TypeId>,
+  declNode: ASTNode
+): void {
+  let p: usize = 0;
+  while (p < parents.len) {
+    switch (typeAt(ref prog, vec.vecGet(ref parents, p))) {
+      case Type.Trait { decl: d, methods: pm, typeParams: tp, extendsTraits: et }: {
+        if (!d.populated) {
+          reportError(
+            ref prog,
+            `trait "${declNode.name}" extends "${d.name}", which is not resolved yet - declare a parent trait before the child that extends it`,
+            declNode.sourceLoc
+          );
+        }
+      }
+      default: { }
+    }
+    p += 1;
+  }
 }
 
 // A trait's type parameters, as opaque TypeParams.
@@ -211,14 +295,65 @@ export function collectMethods(
   let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
   let i: usize = 0;
   while (i < declNode.childCount) {
-    const member = nodeAt(ref ast, childAt(ref ast, declNode, i));
+    const memberId = childAt(ref ast, declNode, i);
+    const member = nodeAt(ref ast, memberId);
     if (member.kind == ASTNodeKind.METHOD_DECL) {
       map.mapInsert(ref methods, member.name,
         funcTypeOfSignature(ref prog, ref tm, ref ast, member));
+      // A method's kind prefixes resolve exactly as a function's do, and here
+      // rather than in a walk of its own because this is the one place that
+      // already visits every method of every decl shape - struct, variant and
+      // value enum all reach it.
+      checkMethodKinds(ref prog, ref tm, ref ast, member, memberId);
     }
     i += 1;
   }
   return methods;
+}
+
+// `async handle(ref self, ...)` - a METHOD's kind prefixes, resolved against the
+// graph's kind registry.
+//
+// The function twin is `checkFunctionKinds`, and the two rules are the same on
+// purpose: an unknown kind is refused, and a PAUSABLE kind marks the method a
+// coroutine so codegen refuses to emit it rather than emitting something that
+// never suspends. The reference checks neither on a method - a typo'd prefix
+// there silently produces an ordinary method - which is a deliberate divergence
+// and the stricter half.
+//
+// Keyed by the METHOD_DECL's NodeId rather than by its NAME, which is what
+// `pausableNames` uses. A method's name is not unique in a module: two types may
+// each declare `read`, and one of them may be a plain function's name as well.
+export function checkMethodKinds(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  member: ASTNode,
+  memberId: NodeId
+): void {
+  if (member.childE == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, member.childE);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.Some { value: info }: {
+        if (info.pausable) {
+          map.mapInsert(ref tm.pausableMethods, uint64(memberId), true);
+        }
+      }
+      case Option.None: {
+        reportError(
+          ref prog,
+          `unknown kind "${prefix.name}" on method "${member.name}"`,
+          prefix.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
 }
 
 // The traits a decl's `implements` clause names, resolved. A name that is not a
@@ -247,11 +382,60 @@ export function collectImplementedTraits(
         annot.sourceLoc
       );
     } else {
-      vec.vecPush(ref traits, t);
+      // `implements Comparable<Token>` records WHICH application it implements,
+      // not just the trait. That is what makes a bound `T implements
+      // Comparable<T>` checkable: the two sides are compared as applications,
+      // and a type implementing `Comparable<int32>` does not satisfy a bound
+      // asking for `Comparable<itself>`.
+      disposable args: Vec<TypeId> = vec.vecNew(2);
+      if (annot.childA != 0) {
+        const argList = nodeAt(ref ast, annot.childA);
+        let a: usize = 0;
+        while (a < argList.childCount) {
+          vec.vecPush(ref args,
+            resolveTypeAnnotation(ref prog, ref tm, ref ast, childAt(ref ast, argList, a)));
+          a += 1;
+        }
+      }
+      const applied = applyTraitArgs(ref prog, t, ref args, annot.name, annot.sourceLoc);
+      vec.vecPush(ref traits, applied);
+      // `type Cat implements Mammal` where `trait Mammal extends Animal` claims
+      // BOTH, so a `T implements Animal` bound is satisfied and Animal's
+      // methods are required. The parent list is already flat - a trait's own
+      // extends clause went through this same function - so one level of
+      // copying covers a chain of any length.
+      extendParentTraits(ref prog, ref traits, applied);
     }
     i += 1;
   }
   return traits;
+}
+
+function extendParentTraits(ref prog: Program, ref out: Vec<TypeId>, traitId: TypeId): void {
+  switch (typeAt(ref prog, traitId)) {
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      let i: usize = 0;
+      while (i < et.len) {
+        const parent = vec.vecGet(ref et, i);
+        if (!containsTypeId(ref out, parent)) {
+          vec.vecPush(ref out, parent);
+        }
+        i += 1;
+      }
+    }
+    default: { }
+  }
+}
+
+function containsTypeId(ref xs: Vec<TypeId>, want: TypeId): bool {
+  let i: usize = 0;
+  while (i < xs.len) {
+    if (vec.vecGet(ref xs, i) == want) {
+      return true;
+    }
+    i += 1;
+  }
+  return false;
 }
 
 // Every method a claimed trait declares is actually there.

@@ -60,9 +60,16 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
   while (true) {
     let tp = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TYPE_PARAM);
     tp.name = parseIdentAsName(ref ps)?;
-    // TODO: optional `implements` bound list (`T implements Display`) - needs
-    // parseTypeAnnotation; deferred until type-annotation nodes are designed.
+    tp.childA = parseTypeParamBounds(ref ps)?; // bounds list-node (0 = none)
     vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, tp));
+    // `<T implements Comparable<T>>` ends in a `>>` that the BOUND's own
+    // argument list already consumed, leaving one `>` owed and the cursor past
+    // this whole list. Same rule, same reason, as parseTypeArgList: while a `>`
+    // is pending nothing may look at the real token stream, or a following
+    // `(a: T, b: T)` reads its comma as another parameter separator.
+    if (ps.pendingGt) {
+      break;
+    }
     if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
       break;
     }
@@ -70,6 +77,41 @@ export function parseTypeParamList(ref ps: ParserState): Result<NodeId, ParsingE
   }
   consumeClosingGt(ref ps)?;
 
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+// `implements Display` / `implements (Renderable, Named)` after a type
+// parameter's name - the traits an argument must satisfy and the body may call
+// through. Returns a NODE_LIST of type annotations, or 0 when there is none.
+//
+// The bare form takes exactly ONE trait, unlike the `implements` clause on a
+// type decl, and that asymmetry is forced rather than chosen: a comma here
+// separates PARAMETERS, so `<X implements A, Y>` is a bounded X beside an
+// unbounded Y and not an X bounded by two traits. Parentheses are what say
+// "these commas are mine" - which is the reference's rule, established by
+// probing it.
+function parseTypeParamBounds(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IMPLEMENTS) {
+    return Result.Ok { value: 0 };
+  }
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  SelfLexing.advance(ref ps)?; // consume `implements`
+
+  disposable ids: Vec<NodeId> = vec.vecNew(2);
+  if (SelfLexing.peek(ref ps).tag != TokenTags.LPAREN) {
+    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+  }
+
+  SelfLexing.advance(ref ps)?; // consume `(`
+  while (true) {
+    vec.vecPush(ref ids, parseTypeAnnotation(ref ps)?);
+    if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+      break;
+    }
+    SelfLexing.advance(ref ps)?; // consume `,`
+  }
+  SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
   return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
 }
 
@@ -222,7 +264,8 @@ export function parseTypeDecl(ref ps: ParserState): Result<NodeId, ParsingError>
     // Fields and METHODS share the run. Splitting them here would mean two
     // lists on a node that has one, and every later pass already switches on
     // the member's kind anyway.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION ||
+        atKindPrefixedMethod(ref ps, false)) {
       vec.vecPush(ref fieldIds, parseMethodDecl(ref ps, node.name, node.childA)?);
     } else {
       vec.vecPush(ref fieldIds, parseFieldDecl(ref ps)?);

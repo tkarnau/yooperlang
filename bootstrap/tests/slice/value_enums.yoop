@@ -1,0 +1,152 @@
+// Value enums: a nominal alias over a primitive, with named constants of it.
+//
+// What each piece is for:
+//   Color            the default backing (int32) and implicit values from 0
+//   Flags            explicit values, and two DERIVED from prior cases by bare
+//                    name - which is the only place a bare case name resolves,
+//                    and what makes the enum OPEN
+//   Wide / Small     a non-default backing, and the counting rule: an implicit
+//                    case is the previous VALUE plus one, not its position
+//   Dir              a string-backed enum - equality and interpolation, and no
+//                    switch, because there is no jump table over pointers
+//   Level            an enum with a trait METHOD that switches on `self`, which
+//                    is what makes `${lvl}` a call rather than a number
+//   `describe`       an EXHAUSTIVE switch with no default - the jump table's
+//                    default is an unreachable block, as for a variant
+//   `flagName`       an open enum, so a default is REQUIRED even here
+//   `warmish`        several cases sharing one arm
+//   `bump`           an enum through a `ref` parameter, written through
+//   `names[...]`     an array INDEXED by an enum, which is the shape a name
+//                    table keyed by a kind wants
+//   Row              an enum as a struct field, stored and read back
+
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+trait Display {
+  function toString(ref self): string;
+}
+
+enum Color { Red, Green, Blue }
+
+enum Flags {
+  A 1,
+  B 2,
+  C 4,
+  AB A | B,
+  ALL A | B | C,
+}
+
+enum Wide<int64> {
+  Zero 0,
+  Big 1000000,
+  Next,
+}
+
+enum Small<uint8> {
+  X 250,
+  Y,
+}
+
+enum Dir<string> {
+  Asc "asc",
+  Desc "desc",
+}
+
+enum Level implements Display {
+  Info,
+  Warn,
+  Error,
+  function toString(ref self): string {
+    switch (self) {
+      case Level.Info: { return "info"; }
+      case Level.Warn: { return "warn"; }
+      case Level.Error: { return "error"; }
+    }
+  }
+}
+
+type Row {
+  c: Color,
+  n: int32,
+}
+
+// Exhaustive, with no default arm at all.
+function describe(c: Color): int32 {
+  switch (c) {
+    case Color.Red: { return 1; }
+    case Color.Green: { return 2; }
+    case Color.Blue: { return 3; }
+  }
+}
+
+// Several cases sharing one arm, and a default.
+function warmish(c: Color): int32 {
+  switch (c) {
+    case Color.Red, Color.Green: { return 1; }
+    default: { return 0; }
+  }
+}
+
+// An OPEN enum: `AB` is derived with `|`, so a value outside the named set is
+// reachable and the default is not dead code.
+function flagName(f: Flags): int32 {
+  switch (f) {
+    case Flags.A: { return 1; }
+    case Flags.AB: { return 3; }
+    default: { return 9; }
+  }
+}
+
+function has(set: Flags, bit: Flags): bool {
+  return (set & bit) == bit;
+}
+
+function bump(ref c: Color): void {
+  c = Color.Blue;
+}
+
+function main(): int32 {
+  printf("describe=%d %d %d\n", describe(Color.Red), describe(Color.Green), describe(Color.Blue));
+  printf("warmish=%d %d\n", warmish(Color.Green), warmish(Color.Blue));
+
+  // The built template goes through `%s` rather than standing in as the format
+  // string itself: the JS reference has a special case for a template written
+  // directly at a printf, and it renders a bool as 1/0 there instead of
+  // true/false. Every other fixture that interpolates a bool takes this route
+  // for the same reason.
+  const combo: Flags = Flags.A | Flags.C;
+  printf("%s\n", `flags=${int32(combo)} ${has(combo, Flags.A)} ${has(combo, Flags.B)}`);
+  printf("flagName=%d %d %d\n", flagName(Flags.A), flagName(Flags.AB), flagName(Flags.C));
+  printf("masked=%d\n", int32(Flags.ALL & Flags.AB));
+
+  printf("wide=%lld %lld\n", int64(Wide.Big), int64(Wide.Next));
+  printf("small=%d %d\n", int32(uint8(Small.X)), int32(uint8(Small.Y)));
+
+  const d: Dir = Dir.Asc;
+  printf("%s\n", `dir=${d} eq=${d == Dir.Asc} ne=${d != Dir.Desc}`);
+
+  const lvl: Level = Level.Warn;
+  printf("%s\n", `level=${lvl} ${Level.Error} raw=${int32(lvl)}`);
+
+  // Ordering, which an int-backed enum keeps and a string-backed one does not.
+  printf("%s\n", `order=${Color.Red < Color.Blue} ${Color.Blue >= Color.Green}`);
+
+  const row: Row = { c: Color.Blue, n: 7 };
+  printf("row=%d %d\n", int32(row.c), row.n);
+
+  let m: Color = Color.Red;
+  bump(ref m);
+  printf("bumped=%d\n", int32(m));
+
+  const xs: Color[] = [Color.Blue, Color.Red, Color.Green];
+  printf("arr=%d %d len=%d\n", int32(xs[0]), int32(xs[1]), int32(xs.len));
+
+  const names: string[] = ["red", "green", "blue"];
+  const picked: string = names[Color.Green];
+  const viaLocal: string = names[m];
+  printf("%s\n", `table=${picked} ${viaLocal}`);
+
+  return 0;
+}

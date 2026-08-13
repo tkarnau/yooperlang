@@ -8,9 +8,11 @@ module codegen;
 // joining them at the end is the whole trick.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID } from "../typecheck";
+import { Type, TypeId, PrimKind, Program, moduleIdOf, typeAt, TYPE_VOID_ID,
+  enumUnderlyingOf } from "../typecheck";
 
 export type Emitter propagates<disposable> {
   globals: Text,        // constants and declares, emitted first
@@ -24,7 +26,19 @@ export type Emitter propagates<disposable> {
   fn: Text,
   nextTemp: usize,      // the %N SSA counter, reset per function
   nextStr: usize,       // the @.str.N counter, module-wide
+  nextArr: usize,       // the @.arr.N counter, for module const array payloads
+  // A module-level const's inlined VALUE, keyed by SymbolId, for the consts
+  // whose value is not just an integer in the symbol. Filled once for the whole
+  // graph before any body is emitted, because a use may be emitted before the
+  // module that declares it is walked. See const_data.yoop.
+  constOps: Map<uint64, Operand>,
   nextLabel: usize,     // the label counter, reset per function
+  // Which C symbols this module has already `declare`d, and with what
+  // signature. On the EMITTER rather than local to the extern pass because the
+  // user externs, the string builder's libc calls and the runtime bridge all
+  // land in one LLVM module and each may name the same symbol. See
+  // extern_table.yoop.
+  declared: ExternTable,
   usesPrintf: bool,
   // Set by the first template literal that actually builds one, so a program
   // with none declares no libc string functions at all.
@@ -36,6 +50,9 @@ export type Emitter propagates<disposable> {
 }
 
 export function emitterNew(): Emitter propagates<disposable> {
+  // Annotated rather than inline: `V` is not inferable from uint64KeyOps alone
+  // and there is no turbofish.
+  let constOps: Map<uint64, Operand> = map.mapNew(0, map.uint64KeyOps());
   return {
     globals: text.make(1024),
     body: text.make(8192),
@@ -43,7 +60,10 @@ export function emitterNew(): Emitter propagates<disposable> {
     fn: text.make(4096),
     nextTemp: 0,
     nextStr: 0,
+    nextArr: 0,
+    constOps: constOps,
     nextLabel: 0,
+    declared: externTableNew(),
     usesPrintf: false,
     usesStringBuilder: false,
     usesRuntime: false,
@@ -119,10 +139,15 @@ export function finish(ref e: Emitter): Text propagates<disposable> {
 }
 // A yoop type as LLVM spells it. Everything pointer-shaped is `ptr` - LLVM has
 // been fully opaque-pointer since 15, so there is nothing to point AT here.
-export function llvmType(ref prog: Program, id: TypeId): string {
-  if (id == TYPE_VOID_ID) {
+export function llvmType(ref prog: Program, rawId: TypeId): string {
+  if (rawId == TYPE_VOID_ID) {
     return "void";
   }
+  // A value enum IS its underlying primitive here: an i32 for the default, an i8
+  // for `enum<uint8>`, a ptr for `enum<string>`. That is the whole reason there
+  // is no enum.yoop in codegen - an enum needs no typedef, no layout and no
+  // conversion, so unwrapping it once at the type boundary is the entire change.
+  const id = enumUnderlyingOf(ref prog, rawId);
   switch (typeAt(ref prog, id)) {
     case Type.Void: { return "void"; }
     case Type.Prim { prim: p }: { return llvmPrim(p); }

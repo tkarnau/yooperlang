@@ -1,14 +1,24 @@
 module codegen;
 
-// Where `break` and `continue` jump to.
+// Where `break` and `continue` jump to, and how far each unwinds.
 //
-// A stack, because loops nest and each jump targets the INNERMOST one. Pushed by
-// the loop lowering in flow.yoop and popped when the loop closes, so a jump
-// only ever sees loops that actually enclose it. Pass D already refused a jump
-// with no enclosing loop, so an empty stack here is an internal error.
+// A stack, because breakable scopes nest and each jump targets the INNERMOST
+// one that can serve it. Pushed by the loop lowering in loop.yoop and by the
+// switch lowering in switch.yoop, popped when that construct closes, so a jump
+// only ever sees frames that actually enclose it.
 //
-// `continueTarget` differs by loop kind, which is the whole reason this carries
-// two labels instead of one:
+// TWO frame kinds, because the two jumps are not symmetric:
+//
+//   a LOOP frame   serves `break` AND `continue`
+//   a SWITCH frame serves `break` only - `continue` looks straight past it to
+//                  the enclosing loop, which is the reference's rule
+//
+// So `break` reads the TOP frame and `continue` scans down for the innermost
+// loop frame. Pass D already refused a jump with no frame to serve it, so an
+// empty answer here is an internal error.
+//
+// `continueTarget` differs by loop kind, which is why a frame carries two
+// labels instead of one:
 //   while - the condition block, so the test runs again
 //   for   - the STEP block, so the counter advances before the test
 
@@ -18,6 +28,19 @@ import { disposable } from "std/core/kinds.yoop";
 export type LoopLabels {
   continueTarget: usize,
   breakTarget: usize,
+  // The dispose-scope depth this frame opened at - where a jump out of it
+  // unwinds TO. It rides on the FRAME rather than in a parallel stack because
+  // `break` and `continue` now unwind to different depths: a `break` out of a
+  // switch inside a loop unwinds the SWITCH's scopes and not the loop's, and
+  // one stack answering both questions gets exactly that case wrong.
+  scopeDepth: usize,
+  // True for a loop, false for a switch. What `continue` scans for.
+  isLoop: bool,
+  // Set when a `break` actually targeted this frame. Only the switch lowering
+  // reads it: a switch whose every arm terminates still has a reachable join
+  // when one of those terminators was a `break` to it, and emitting no join
+  // label would leave that branch pointing at a label nothing defines.
+  sawBreak: bool,
 }
 
 export type LoopStack propagates<disposable> {
@@ -28,8 +51,29 @@ export function loopStackNew(): LoopStack propagates<disposable> {
   return { frames: vec.vecNew(4) };
 }
 
+// A LOOP frame. The scope depth is read here rather than passed in, so a caller
+// cannot open the body's scope first and record a depth the jump would skip.
 export function loopPush(ref cx: Cx, continueTarget: usize, breakTarget: usize): void {
-  vec.vecPush(ref cx.loops.frames, { continueTarget: continueTarget, breakTarget: breakTarget });
+  vec.vecPush(ref cx.loops.frames, {
+    continueTarget: continueTarget,
+    breakTarget: breakTarget,
+    scopeDepth: disposeScopeDepth(cx.disposes),
+    isLoop: true,
+    sawBreak: false,
+  });
+}
+
+// A SWITCH frame. It has no continue target of its own - `continue` skips it -
+// so the slot is zeroed rather than inherited, which keeps a wrong lookup an
+// obvious zero instead of a plausible label from another construct.
+export function switchPush(ref cx: Cx, breakTarget: usize): void {
+  vec.vecPush(ref cx.loops.frames, {
+    continueTarget: 0,
+    breakTarget: breakTarget,
+    scopeDepth: disposeScopeDepth(cx.disposes),
+    isLoop: false,
+    sawBreak: false,
+  });
 }
 
 export function loopPop(ref cx: Cx): void {
@@ -38,13 +82,44 @@ export function loopPop(ref cx: Cx): void {
   }
 }
 
-export function innermostLoop(ref cx: Cx): LoopLabels {
+// The frame a `break` jumps out of: the innermost one, whichever kind it is.
+export function innermostBreakable(ref cx: Cx): LoopLabels {
   if (cx.loops.frames.len == 0) {
-    return { continueTarget: 0, breakTarget: 0 };
+    return { continueTarget: 0, breakTarget: 0, scopeDepth: 0, isLoop: false, sawBreak: false };
   }
   return vec.vecGet(ref cx.loops.frames, cx.loops.frames.len - 1);
 }
 
-export function insideLoop(ref cx: Cx): bool {
+// The frame a `continue` jumps to: the innermost LOOP, looking past any
+// switches between here and it.
+export function innermostLoop(ref cx: Cx): LoopLabels {
+  let i = cx.loops.frames.len;
+  while (i > 0) {
+    i -= 1;
+    const frame = vec.vecGet(ref cx.loops.frames, i);
+    if (frame.isLoop) {
+      return frame;
+    }
+  }
+  return { continueTarget: 0, breakTarget: 0, scopeDepth: 0, isLoop: false, sawBreak: false };
+}
+
+export function insideBreakable(ref cx: Cx): bool {
   return cx.loops.frames.len > 0;
+}
+
+export function insideLoop(ref cx: Cx): bool {
+  return innermostLoop(ref cx).isLoop;
+}
+
+// Record that a `break` jumped to the innermost frame, so its lowering knows
+// the join block is reachable.
+export function noteBreakTaken(ref cx: Cx): void {
+  if (cx.loops.frames.len == 0) {
+    return;
+  }
+  const last = cx.loops.frames.len - 1;
+  let frame = vec.vecGet(ref cx.loops.frames, last);
+  frame.sawBreak = true;
+  vec.vecSet(ref cx.loops.frames, last, frame);
 }

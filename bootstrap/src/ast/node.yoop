@@ -63,6 +63,12 @@ export type ASTNode {
 
   strId: usize,
   intVal: uint64,
+  // FLOAT_LITERAL's value, and nothing else uses it. It gets a slot of its own
+  // rather than riding in `intVal` as a bit pattern because the two float
+  // constants codegen has to emit are the value's bits and the FLOAT32-ROUNDED
+  // value's bits, and only one of those can be precomputed - keeping the number
+  // means either is a call away, and the node reads like the token it came from.
+  floatVal: float64,
   flagA: bool, // per-kind flags
   // @derive(display) above supplies the dump. A hand-written toString would be
   // the only way to label the anonymous slots with their per-kind meanings

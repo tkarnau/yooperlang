@@ -1,0 +1,7 @@
+declared, not built in
+no varargs at all
+mixed: 7 seven 7000000000
+narrow=44 unsigned=200
+bool=1
+snprintf would write 5 bytes
+exit=0

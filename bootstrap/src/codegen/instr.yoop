@@ -148,9 +148,15 @@ export function emitBinOp(
 }
 
 //   %t4 = zext i32 %t3 to i64
+//   %t5 = fpext float %t4 to double
+//   %t6 = fptosi double %t5 to i32
 //
-// An integer width conversion. `op` is trunc / zext / sext - vocab.yoop decides
-// which from the two widths and the source's signedness.
+// A numeric conversion. `op` is trunc / zext / sext for the integer widths, and
+// sitofp / uitofp / fptosi / fptoui / fpext / fptrunc once a float is on either
+// side - every one of them has this exact `<op> <from> <val> to <to>` shape, so
+// there is one emitter and vocab.yoop picks the word. The name stayed
+// `emitIntCast` because renaming it would touch a dozen call sites for no
+// change in what it writes.
 export function emitIntCast(
   ref cx: Cx,
   dest: usize,
@@ -196,6 +202,47 @@ export function emitICmp(
   operand(ref cx, lhs);
   part(ref cx, ", ");
   operand(ref cx, rhs);
+  endInstr(ref cx);
+}
+
+//   %t6 = fcmp olt double %t4, %t5
+//
+// The float twin, and it also produces an i1. The predicate spelling is the
+// only difference - `olt` rather than `slt` - but the OPCODE differs too, and
+// an icmp over two doubles is invalid IR rather than a wrong answer.
+export function emitFCmp(
+  ref cx: Cx,
+  dest: usize,
+  pred: string,
+  ty: string,
+  lhs: Operand,
+  rhs: Operand
+): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = fcmp ");
+  part(ref cx, pred);
+  part(ref cx, " ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, lhs);
+  part(ref cx, ", ");
+  operand(ref cx, rhs);
+  endInstr(ref cx);
+}
+
+//   %t7 = fneg double %t6
+//
+// Unary minus on a float. A single operand, unlike the integer form which is a
+// subtraction from zero - and not interchangeable with one: `0.0 - 0.0` is +0.0
+// while `fneg 0.0` is -0.0.
+export function emitFNeg(ref cx: Cx, dest: usize, ty: string, value: Operand): void {
+  startInstr(ref cx);
+  temp(ref cx, dest);
+  part(ref cx, " = fneg ");
+  part(ref cx, ty);
+  part(ref cx, " ");
+  operand(ref cx, value);
   endInstr(ref cx);
 }
 
@@ -264,35 +311,73 @@ export function emitFunctionClose(ref cx: Cx): void {
 }
 
 //   %t7 = call i32 @main_2__answer()
-//   %t8 = call i32 (ptr, ...) @printf(ptr @.str.0, i32 %t7)
 //   call void @mathx_1__doThing()
 //
-// `dest` is ignored when `retTy` is void. A variadic callee needs its FULL
-// function type at the call site, not just the return type, which is the only
-// reason `isVariadic` exists. `calleeHome` is the callee's mangling prefix, or
-// "" for a bare C name - printf above being the reason it can differ from the
-// module currently being emitted.
+// `dest` is ignored when `retTy` is void. The return type is all the callee's
+// type contributes: LLVM reads the parameter types off the arguments, so an
+// ordinary call never has to spell the signature. `calleeHome` is the callee's
+// mangling prefix, or "" for a bare C name.
 export function emitCall(
   ref cx: Cx,
   dest: usize,
   retTy: string,
   calleeHome: string,
   calleeName: string,
-  isVariadic: bool,
   ref args: Vec<CallArg>
 ): void {
   startInstr(ref cx);
-  const isVoid = text.equals(retTy, "void");
-  if (!isVoid) {
+  callResult(ref cx, dest, retTy);
+  part(ref cx, retTy);
+  callTail(ref cx, calleeHome, calleeName, ref args);
+}
+
+//   %t8 = call i32 (ptr, ...) @printf(ptr @.str.0, i32 %t7)
+//   %t4 = call i32 (ptr, i64, ptr, ...) @snprintf(ptr %t1, i64 64, ptr %t2, i32 7)
+//
+// A variadic callee is the one case where LLVM needs the FULL function type at
+// the call site: the arguments alone cannot say where the fixed parameters stop
+// and the varargs begin. `fixedTys` is the parameter types before the `...`, so
+// an empty one prints `T (...)`, which is what `function f(...): T` means.
+export function emitCallVariadic(
+  ref cx: Cx,
+  dest: usize,
+  retTy: string,
+  calleeHome: string,
+  calleeName: string,
+  ref fixedTys: Vec<string>,
+  ref args: Vec<CallArg>
+): void {
+  startInstr(ref cx);
+  callResult(ref cx, dest, retTy);
+  part(ref cx, retTy);
+  part(ref cx, " (");
+  let f: usize = 0;
+  while (f < fixedTys.len) {
+    part(ref cx, vec.vecGet(ref fixedTys, f));
+    part(ref cx, ", ");
+    f += 1;
+  }
+  part(ref cx, "...)");
+  callTail(ref cx, calleeHome, calleeName, ref args);
+}
+
+// `%t8 = call ` or `call `, depending on whether there is a result to name.
+function callResult(ref cx: Cx, dest: usize, retTy: string): void {
+  if (!text.equals(retTy, "void")) {
     temp(ref cx, dest);
     part(ref cx, " = ");
   }
   part(ref cx, "call ");
-  if (isVariadic) {
-    part(ref cx, PRINTF_SIGNATURE);
-  } else {
-    part(ref cx, retTy);
-  }
+}
+
+// ` @mathx_1__doThing(i32 %t1, ptr %t2)` - everything after the callee's type,
+// which is identical for a variadic call and an ordinary one.
+function callTail(
+  ref cx: Cx,
+  calleeHome: string,
+  calleeName: string,
+  ref args: Vec<CallArg>
+): void {
   part(ref cx, " @");
   if (calleeHome.len > 0) {
     part(ref cx, calleeHome);

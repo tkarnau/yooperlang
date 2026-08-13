@@ -1,0 +1,110 @@
+// FORWARDING a `ref` parameter into another `ref` slot, with no second `ref`.
+//
+// A `ref T` parameter is `ref T` in the signature and `T` in the body, which is
+// what keeps every read and write in the body from knowing about references.
+// The unwrapping is not total, and this file is the exception: a name that
+// ARRIVED as a borrow may be handed on AS one, because `ref ref T` is not a
+// thing and there is nothing new to borrow.
+//
+// All three spellings work on a `ref` parameter and this file uses all three:
+//
+//     bump(c);        forwarded as the borrow it already is
+//     bump(ref c);    the same call, written out
+//     total(c);       used as the T the body sees - a COPY
+//
+// The narrowness is the point. A PLAIN local still has to write `ref` at the
+// call, because that is where a new borrow is created and the reader should see
+// it. Only a name that is already a borrow may skip it, and forwarding one
+// creates no aliasing the caller's own signature did not already declare.
+
+type Counter {
+  hits: int32,
+  misses: int32,
+}
+
+// A `ref T` FIELD, filled from a `ref` parameter. Three of the four sites in
+// the compiler's own source are this shape rather than a call argument.
+type Holder {
+  c: ref Counter,
+}
+
+trait Growable {
+  function grow(ref self, by: int32): int32;
+}
+
+type Box implements Growable {
+  n: int32,
+  // `self` is the most common `ref` parameter in the language, and it forwards
+  // exactly like any other one.
+  function grow(ref self, by: int32): int32 {
+    addTo(self, by);
+    return self.n;
+  }
+}
+
+function addTo(ref b: Box, by: int32): void {
+  b.n = b.n + by;
+}
+
+function bump(ref c: Counter, by: int32): void {
+  c.hits = c.hits + by;
+}
+
+// By VALUE, so the argument is opened rather than forwarded. Writing here must
+// NOT be visible to the caller.
+function totalOf(c: Counter): int32 {
+  c.hits = 0;
+  return c.hits + c.misses;
+}
+
+function forwards(ref c: Counter): int32 {
+  bump(c, 1);
+  bump(ref c, 2);
+  return totalOf(c);
+}
+
+// The field keeps its `ref Counter` type, so a local bound from it is still a
+// borrow and the write below lands on `main`'s counter. Binding the local first
+// is deliberate: `h.c.hits` written directly is outside the two compilers'
+// intersection, the same way `ref_fields.yoop` avoids it.
+function throughField(ref c: Counter): int32 {
+  let h: Holder = { c: c };
+  let held = h.c;
+  held.hits = held.hits + 10;
+  return held.hits;
+}
+
+// An ARRAY behind a borrow - the shape `lexNext(ref tables, src, pos)` has,
+// where `src` is itself a `ref uint8[]` parameter.
+function firstByte(ref xs: uint8[]): uint8 {
+  return xs[0];
+}
+
+// Two hops: a forwarded borrow forwarded again.
+function firstOf(ref xs: uint8[]): uint8 {
+  return firstByte(xs);
+}
+
+function lenOf(ref xs: uint8[]): usize {
+  return xs.len;
+}
+
+function main(): int32 {
+  let c: Counter = { hits: 1, misses: 4 };
+  printf("forwards=%d\n", forwards(ref c));
+  printf("after=%d\n", c.hits);
+
+  printf("field=%d\n", throughField(ref c));
+  printf("orig=%d\n", c.hits);
+
+  let bytes: uint8[] = [7, 8, 9];
+  printf("first=%d len=%d\n", int32(firstOf(ref bytes)), int32(lenOf(ref bytes)));
+
+  // Bound first rather than called inside the printf: two arguments where one
+  // writes what the other reads would be asserting an evaluation order neither
+  // compiler promises.
+  let b: Box = { n: 5 };
+  const grown = Growable.grow(ref b, 3);
+  printf("grow=%d n=%d\n", grown, b.n);
+  return 0;
+}

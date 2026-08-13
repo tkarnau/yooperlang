@@ -1,0 +1,117 @@
+module codegen;
+
+// What the LINK step has to be told, read off the `from` clause of every
+// `extern` block in the graph.
+//
+// Two spellings of the clause, and they mean different things:
+//
+//   extern "C" from "stdio.h"        { ... }   a HEADER name - documentation
+//   extern "C" from library "m"      { ... }   a LIBRARY name - `-lm`
+//   extern "C" from "yoop_runtime"   { ... }   the yoop RUNTIME's C sources
+//
+// The parser told the first two apart (`operator == LIBRARY`) and this collects
+// both answers for the whole GRAPH. Program-wide rather than per module, for
+// the same reason `emitExternDeclares` is: one clang invocation links one
+// program, and a library named in any file has to be on that one command line.
+//
+// The ABI is deliberately NOT consulted for the library form.
+// `extern "intrinsic" from library "x"` contributes `-lx` here exactly as it
+// does in the reference - established by probing, since a probe written that
+// way failed to link `-lcompiler` there. Nothing writes it, and one rule beats
+// a carve-out that would be a divergence nobody could observe.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import * as intr from "std/core/intrinsics.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { AST, ASTNode, ASTNodeKind, childAt, declOf, nodeAt } from "../ast";
+import { ModuleGraph, Module } from "../source_graph";
+import { TokenTags } from "../lex";
+
+// `yoop_` is the runtime's symbol prefix and also its FILE prefix, which is
+// what makes "does this header belong to the runtime" answerable with one rule
+// rather than with a list to keep up to date. Two spellings appear in the tree
+// and both are the runtime: `from "yoop_runtime"` (std/log, std/fs, std/debug
+// and eighteen more) and `from "runtime/yoop_alloc.h"` (std/core/alloc, which
+// spells a path). Nothing else in std, examples or bootstrap names a header
+// starting with `yoop_`, and nothing ever will that is not the runtime.
+//
+// A HEADER name rather than a library name on purpose: the runtime is linked as
+// C SOURCES, so `from library "yoop_runtime"` would put `-lyoop_runtime` on the
+// clang line and fail to find an archive that does not exist - which is exactly
+// what the reference does with that spelling, established by probing it.
+const RUNTIME_HEADER_PREFIX: string = "yoop_";
+
+// What one walk of the graph found. Both are properties of the emitted PROGRAM
+// rather than of any module, so they ride out on CodegenOutput together.
+export type LinkRequests propagates<disposable> {
+  libraries: Vec<string>,
+  // Whether any block declared symbols `from "yoop_runtime"`. Distinct from
+  // `Emitter.usesRuntime`, which means "codegen's own lowerings call into it"
+  // and additionally decides whether the runtime's DECLARE lines are needed.
+  // A user's extern brings its own declarations and only needs the link.
+  namesRuntime: bool,
+}
+
+export function collectLinkRequests(ref graph: ModuleGraph): LinkRequests propagates<disposable> {
+  let names: Vec<string> = vec.vecNew(2);
+  let namesRuntime = false;
+  disposable seen: Map<string, bool> = map.mapNew(4, map.stringKeyOps());
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    const m = vec.vecGet(ref graph.modules, i);
+    let f: usize = 0;
+    while (f < m.files.len) {
+      const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+      let d: usize = 0;
+      while (d < programNode.childCount) {
+        const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, d)));
+        if (declNode.kind == ASTNodeKind.EXTERN_BLOCK) {
+          const name = vec.vecGet(ref m.ast.strings, declNode.strId);
+          if (declNode.operator == TokenTags.LIBRARY) {
+            // Order is stable rather than sorted, because a link line is
+            // order-sensitive and first-seen is the one order a reader can
+            // predict from the source.
+            if (!map.mapContainsKey(ref seen, name)) {
+              map.mapInsert(ref seen, name, true);
+              vec.vecPush(ref names, name);
+            }
+          } else if (isRuntimeHeader(name)) {
+            namesRuntime = true;
+          }
+        }
+        d += 1;
+      }
+      f += 1;
+    }
+    i += 1;
+  }
+  return { libraries: names, namesRuntime: namesRuntime };
+}
+
+// Whether a `from "..."` header name belongs to the yoop runtime. The test is
+// on the BASENAME, so a path (`runtime/yoop_alloc.h`) and a bare name
+// (`yoop_runtime`) answer the same.
+function isRuntimeHeader(name: string): bool {
+  const bytes = intr.stringAsBytes(name);
+  const prefix = intr.stringAsBytes(RUNTIME_HEADER_PREFIX);
+  let start: usize = 0;
+  let i: usize = 0;
+  while (i < bytes.len) {
+    if (bytes[i] == '/') {
+      start = i + 1;
+    }
+    i += 1;
+  }
+  if (start + prefix.len > bytes.len) {
+    return false;
+  }
+  let j: usize = 0;
+  while (j < prefix.len) {
+    if (bytes[start + j] != prefix[j]) {
+      return false;
+    }
+    j += 1;
+  }
+  return true;
+}

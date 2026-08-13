@@ -85,7 +85,7 @@ export function emitIndexWrite(ref cx: Cx, target: ASTNode, targetId: NodeId, va
 // `xs.ptr` - field 0 of the descriptor, the data pointer.
 export function emitArrayPtr(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   let base: Operand = Operand.None;
-  const err = emitExpr(ref cx, expr.childA, ref base);
+  const err = emitExprValue(ref cx, expr.childA, ref base);
   if (err.len > 0) {
     return err;
   }
@@ -98,7 +98,7 @@ export function emitArrayPtr(ref cx: Cx, expr: ASTNode, ref out: Operand): strin
 // `xs.len` - field 1 of the descriptor.
 export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   let base: Operand = Operand.None;
-  const err = emitExpr(ref cx, expr.childA, ref base);
+  const err = emitExprValue(ref cx, expr.childA, ref base);
   if (err.len > 0) {
     return err;
   }
@@ -110,9 +110,9 @@ export function emitArrayLen(ref cx: Cx, expr: ASTNode, ref out: Operand): strin
 
 // The address of `xs[i]`, shared by the read and the write so the two cannot
 // disagree about how an element is located.
-function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr: usize): string {
+export function emitElementAddress(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref addr: usize): string {
   let base: Operand = Operand.None;
-  const berr = emitExpr(ref cx, expr.childA, ref base);
+  const berr = emitExprValue(ref cx, expr.childA, ref base);
   if (berr.len > 0) {
     return berr;
   }
@@ -158,7 +158,7 @@ function elementLlvmType(ref cx: Cx, exprId: NodeId): string {
 // cannot say and codegen already has.
 export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
   let base: Operand = Operand.None;
-  const berr = emitExpr(ref cx, expr.childA, ref base);
+  const berr = emitExprValue(ref cx, expr.childA, ref base);
   if (berr.len > 0) {
     return berr;
   }
@@ -207,7 +207,7 @@ export function emitSlice(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Op
 // array's `.len` there is no field to project - the length has to be measured.
 export function emitStringLen(ref cx: Cx, expr: ASTNode, ref out: Operand): string {
   let base: Operand = Operand.None;
-  const err = emitExpr(ref cx, expr.childA, ref base);
+  const err = emitExprValue(ref cx, expr.childA, ref base);
   if (err.len > 0) {
     return err;
   }

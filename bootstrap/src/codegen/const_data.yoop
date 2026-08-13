@@ -1,0 +1,192 @@
+module codegen;
+
+// Module-level `const`s that need a module-level DATUM: a string's bytes, an
+// array's payload.
+//
+// A const is INLINED at every use - there is no global to load from, which is
+// what makes an imported one cost nothing. An integer needs nothing at all to
+// inline; the immediate IS the value. A string needs its bytes to live
+// somewhere, and an array needs its elements to. So each of those is
+// materialized ONCE for the whole program, here, and every use inlines a
+// constant that points at it:
+//
+//   @.str.3 = private unnamed_addr constant [18 x i8] c"YOOP_RUNTIME_ROOT\00", align 1
+//   @.arr.0 = internal global [4 x i8] [i8 32, i8 9, i8 13, i8 10], align 8
+//
+// with the array use inlining `{ ptr @.arr.0, i64 4 }` - LLVM takes a constant
+// aggregate as an operand, so a descriptor needs no instructions either.
+//
+// Keyed by SymbolId, which is what makes an IMPORTED const work: an import
+// binds the source module's SymbolId rather than a copy, so both modules find
+// the same datum. Run once, before any body, because a use may be emitted
+// before the declaring module is walked.
+//
+// Why `internal global` rather than `private constant` for the array payload:
+// constness is about the BINDING, and `A[0] = 9` through a `const` is allowed
+// here as it is for a local. Read-only storage would turn that into a crash at
+// run time, which is what the reference does.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { Option } from "std/core/types.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { Text }, * as text from "std/core/text.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, declOf, nodeAt } from "../ast";
+import { ModuleGraph, Module } from "../source_graph";
+import { Program, TypedModule, Symbol, SymbolId, SYMBOL_NONE_ID, TypeId, TYPE_ERROR_ID,
+  symbolAt, arrayElementOf } from "../typecheck";
+import { TokenTags } from "../lex";
+
+export function materializeModuleConsts(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): void {
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    const m = vec.vecGet(ref graph.modules, i);
+    let tm = vec.vecGet(ref prog.modules, i);
+    let f: usize = 0;
+    while (f < m.files.len) {
+      const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+      let d: usize = 0;
+      while (d < programNode.childCount) {
+        const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, d)));
+        if (declNode.kind == ASTNodeKind.CONST_DECL) {
+          materializeOne(ref e, ref prog, ref tm, ref m.ast, declNode);
+        }
+        d += 1;
+      }
+      f += 1;
+    }
+    i += 1;
+  }
+}
+
+function materializeOne(
+  ref e: Emitter,
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  let symId: SymbolId = 0;
+  switch (map.mapGet(ref tm.names, declNode.name)) {
+    case Option.None: { return; }
+    case Option.Some { value: s }: { symId = s; }
+  }
+  let declared: TypeId = TYPE_ERROR_ID;
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Value { typeId: t, intVal: v }: { declared = t; }
+    default: { return; }
+  }
+  // Already done: a file may be reached twice through the walk, and an imported
+  // const is materialized by its DECLARING module either way.
+  if (map.mapContainsKey(ref e.constOps, uint64(symId))) {
+    return;
+  }
+
+  const elem = arrayElementOf(ref prog, declared);
+  if (elem != TYPE_ERROR_ID) {
+    map.mapInsert(
+      ref e.constOps, uint64(symId),
+      arrayConstOperand(ref e, ref prog, ref ast, declNode.childB, elem)
+    );
+    return;
+  }
+  // An integer already rides in the symbol; anything else that fits in one
+  // immediate is spelled here so `emitLocalRead` has a single question to ask.
+  let op: Operand = Operand.None;
+  if (scalarConstOperand(ref e, ref prog, ref ast, declNode.childB, declared, ref op)) {
+    map.mapInsert(ref e.constOps, uint64(symId), op);
+  }
+}
+
+//   @.arr.0 = internal global [4 x i8] [i8 32, i8 9, i8 13, i8 10], align 8
+//
+// The payload, plus the descriptor constant that every use inlines.
+function arrayConstOperand(
+  ref e: Emitter,
+  ref prog: Program,
+  ref ast: AST,
+  exprId: NodeId,
+  elem: TypeId
+): Operand {
+  const elemTy = llvmType(ref prog, elem);
+  disposable elems: Vec<Operand> = vec.vecNew(4);
+  if (exprId != 0) {
+    const expr = nodeAt(ref ast, exprId);
+    if (expr.childA != 0) {
+      const list = nodeAt(ref ast, expr.childA);
+      let i: usize = 0;
+      while (i < list.childCount) {
+        let op: Operand = Operand.None;
+        // Pass C already checked every element, so a miss here cannot happen on
+        // well-formed input - `Operand.Imm 0` keeps it total rather than silent.
+        scalarConstOperand(ref e, ref prog, ref ast, childAt(ref ast, list, i), elem, ref op);
+        vec.vecPush(ref elems, op);
+        i += 1;
+      }
+    }
+  }
+  const dataId = emitArrayPayload(ref e, elemTy, ref elems);
+  return Operand.ArrayConst { dataId: dataId, len: elems.len };
+}
+
+// One literal as the constant that spells it. False when the node is not one,
+// which pass C has already ruled out for anything that reaches here.
+function scalarConstOperand(
+  ref e: Emitter,
+  ref prog: Program,
+  ref ast: AST,
+  exprId: NodeId,
+  declared: TypeId,
+  ref out: Operand
+): bool {
+  if (exprId == 0) {
+    return false;
+  }
+  const expr = nodeAt(ref ast, exprId);
+  if (expr.kind == ASTNodeKind.UNARY_EXPRESSION && expr.operator == TokenTags.MINUS) {
+    if (!scalarConstOperand(ref e, ref prog, ref ast, expr.childA, declared, ref out)) {
+      return false;
+    }
+    out = negateConst(out);
+    return true;
+  }
+  if (expr.kind == ASTNodeKind.INT_LITERAL) {
+    if (expr.flagA) {
+      out = Operand.NegImm { value: expr.intVal };
+    } else {
+      out = Operand.Imm { value: expr.intVal };
+    }
+    return true;
+  }
+  if (expr.kind == ASTNodeKind.FLOAT_LITERAL) {
+    out = floatImmForType(ref prog, declared, expr.floatVal);
+    return true;
+  }
+  if (expr.kind == ASTNodeKind.BOOL_LITERAL) {
+    out = Operand.Bool { value: expr.intVal != 0 };
+    return true;
+  }
+  if (expr.kind == ASTNodeKind.STRING_LITERAL) {
+    out = Operand.StrRef {
+      id: internStringConstant(ref e, vec.vecGet(ref ast.strings, expr.strId))
+    };
+    return true;
+  }
+  return false;
+}
+
+// `-1.5` and `-3` fold into the operand rather than emitting an instruction:
+// there is no function to emit one into at module level.
+function negateConst(op: Operand): Operand {
+  switch (op) {
+    case Operand.Imm { value: v }: { return Operand.NegImm { value: v }; }
+    case Operand.NegImm { value: v }: { return Operand.Imm { value: v }; }
+    // The sign is the top BIT of an IEEE-754 value at either width, and the
+    // bits are already stored as a double - so flipping it needs no arithmetic
+    // and no special case for zero, an infinity or a NaN.
+    case Operand.FloatImm { bits: b }: { return Operand.FloatImm { bits: b ^ FLOAT_SIGN_BIT }; }
+    default: { return op; }
+  }
+}
+
+const FLOAT_SIGN_BIT: uint64 = 9223372036854775808;

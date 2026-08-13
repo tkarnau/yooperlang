@@ -88,8 +88,8 @@ types file.
   prefixed forms (`async fetch(...)`, `type X c_layout { ... }`), `propagates`
   clauses, char literals, function types, raw pointers with `null`, vtable
   declarations, array slices, bitwise operators, and address-of / dereference.
-  Not yet: enums, unions, `await`,
-  `propagates`/`contains` clauses, type-parameter bounds - each a named "not
+  Not yet: unions, `await`,
+  `contains` clauses, type-parameter bounds - each a named "not
   supported yet" refusal rather than a mis-parse.
 - **Layer 3 - typecheck**: IN PROGRESS. The interned Type/Symbol/Program model
   is built, with pass A (shells + redeclaration + exports), pass B (imports and
@@ -264,8 +264,10 @@ plus byte copying and decimal conversion, so `strlen`/`malloc`/`memcpy`/`sprintf
 is the same operation with the same observable result, including that a built
 string ignores the allocator context. `codegen/template.yoop` is the single place
 that changes when that std slice becomes reachable. Strings, integers of every
-width and bools interpolate; floats and structs are refused by name, pointing at
-the interpolation.
+width, floats and bools interpolate; a struct is refused by name, pointing at
+the interpolation. A float goes through `sprintf` with `%g`, which is exactly
+what the reference's `yoop_float_to_string` runtime helper is - so the same
+shortest-form rendering comes out without linking the runtime.
 
 **`for x in xs` landed next, over ARRAYS.** The counted form could already
 express all of it, so the point is not new power - it is that the index is gone,
@@ -633,6 +635,11 @@ has now been MEASURED rather than guessed at, the same way the std closure was.
 gives a first blocker; because a directory module loads all its files, the honest
 unit is the MODULE, and there are ten of them. Each module's first blocker:
 
+The table below is the measurement that produced the ORDERED list further down,
+and it is deliberately not re-measured as items land - a first blocker moves the
+moment it is fixed. plans/bootstrap-completion.md carries the current numbers,
+re-probed after each item.
+
     ast           @derive(display)
     codegen       nested generic `>>` in a struct field
     diagnostics   value `enum`
@@ -650,26 +657,25 @@ item below is a STATIC count over all 86 files rather than a probe tally.
 - **`?` propagation - 379 sites in 18 files, and 16 of those 18 are `parse/`.**
   The single biggest item, and far more concentrated than expected: it is
   essentially a `parse/` feature. Nothing else in the compiler leans on it.
-- **File-scoped imports in a directory module - 130 sites across 6 modules.**
-  A namespace alias is currently MODULE-scoped, so the second file in `link/` to
-  write `import * as fs` collides with the first. This is the surprise of the
-  measurement: the probe showed it as a 2-file oddity in `link` because every
-  other module hit an earlier blocker first, but `vec` is imported 20 times in
-  `codegen`, 14 in `parse` and 13 in `typecheck`. Every file importing what it
-  uses is the natural way to write it, and the JS reference allows it. Imports
-  should be per-FILE where declarations are per-MODULE.
+- **Duplicate imports in a directory module - FIXED, see below.** 130 sites
+  across 6 modules, and the surprise of the measurement: the probe showed it as
+  a 2-file oddity in `link` because every other module hit an earlier blocker
+  first, but `vec` is imported 20 times in `codegen`, 14 in `parse` and 13 in
+  `typecheck`.
 - **Value `enum` - 6 decls in 6 files**, and they are core vocabulary
   (`ASTNodeKind`, `TokenKind`, `Severity`). One of them, `ASTNodeKind`,
   `implements Display`, so this is not purely a parse item.
 - **Compound assignment on a field - FIXED, see below.** 18 sites in 8 files,
   and it turned out to need a feature of its own rather than a parser tweak.
-- **`@derive(display)` - 17 sites in 7 files.** Worth knowing: it is the ONLY
-  attribute the bootstrap's source uses. There is no general attribute surface to
-  build, just this one.
-- **Float literals - 5 sites in 2 files**, both in `lex/`. `Token` carries a
-  `floatVal` and `literals.yoop` does mantissa arithmetic, so `lex` cannot
-  compile without floats existing at all. This is the only item here that is a
-  whole missing primitive type rather than a syntax gap.
+- **`@derive(display)` - PARSED and unwrapped, NOT expanded. See below.** 17
+  sites in 7 files, and the ONLY attribute the bootstrap's source uses.
+- **Float literals - FIXED, see plans/bootstrap-completion.md 1.5.** 5 sites in
+  2 files, both in `lex/`. `Token` carries a `floatVal` and `literals.yoop` did
+  mantissa arithmetic, so `lex` could not compile without floats existing at
+  all. This was the only item here that was a whole missing primitive type
+  rather than a syntax gap - and the mantissa arithmetic turned out to be WRONG
+  by an ulp for a quarter of the literals it was given, which nobody had seen
+  because the parity token dump was skipping float values.
 - **`ns.Type` in an annotation - FIXED, see below.** One site (`fs.DirIter` in
   `source_graph/load.yoop`), blocking two modules including the driver.
 - **Nested generic `>>` followed by a comma - FIXED, see below.** A BUG rather
@@ -732,16 +738,19 @@ apparent size. Cheap-and-unblocking first, so each step moves whole modules:
 2. DONE - compound assignment on a field. See below; it was not the one-line
    widening it looked like.
 3. DONE - `ns.Type` in an annotation. See below.
-4. **File-scoped imports in a directory module** - 130 sites, and nothing else
-   on this list touches as much of the tree. Scope an alias to its FILE while
-   declarations stay per-module.
-5. **`@derive(display)`** - 17 sites, one attribute, no general surface to build.
-6. **Value `enum`**, including `implements Display` on one.
-7. **`?` propagation** - the biggest single item, and worth doing with the others
-   out of the way since 16 of its 18 files are `parse/` and will still be sitting
-   behind their own module's blockers otherwise.
+4. DONE - duplicate imports in a directory module. See below; the framing this
+   list originally gave it was wrong.
+5. PARTIAL - `@derive(display)` parses and unwraps, which is what unblocked
+   `ast`, `codegen` and `typecheck`. The EXPANSION is still open and has three
+   prerequisites of its own; see below.
+6. DONE - value `enum`, including `implements Display` on one. See item 1.2 in
+   plans/bootstrap-completion.md for what the reference turned out to do and the
+   three places the bootstrap deliberately differs.
+7. DONE - `?` propagation. See item 1.3 there.
 8. **Floats** - a whole primitive type, needed only by `lex/`. Last because it is
-   the largest and the most self-contained.
+   the largest and the most self-contained, and now the critical path: 87 of the
+   408 probes stop at one line of `lex/lexer.yoop`, because every module above
+   `lex` imports it.
 
 Then, as a separate milestone: the `suite` / `test` kinds, which self-host the
 bootstrap's own regression suite rather than the compiler.
@@ -795,6 +804,115 @@ no such export (a typo here), and unknown namespace (the import is missing).
 different surface - patterns have their own parser - and nothing in the closure
 needs it, so it stays refused rather than half-built.
 
+**Item 4 landed on 2026-08-13, and PROBING the reference changed what it was.**
+This list called it "file-scoped imports" - scope an alias to its file, leave
+declarations module-wide. That was inferred, not measured, and it is wrong.
+
+Two probes settled it. Two files of one directory module binding one alias to
+DIFFERENT modules: the reference refuses it (`local name "u" collides with an
+existing declaration`). Binding it to the SAME module, namespace and named
+import both: the reference accepts it and runs. So an import is not file-scoped
+there either - it is **module-scoped and IDEMPOTENT**, and the bootstrap was
+only missing the idempotence.
+
+That made the fix a few lines in pass B instead of a per-file scope threaded
+through every name lookup, which is the whole argument for probing before
+building. Two details worth keeping:
+
+- **A namespace compares by MODULE INDEX, not by SymbolId.** Every
+  `import * as ns` interns its own `Symbol.Namespace`, so two identical imports
+  never share an id and comparing ids would call every duplicate a collision.
+  A named import is the opposite - it binds the source module's own SymbolId,
+  so the same export reached twice IS the same integer.
+- **The membership check runs before interning**, or a duplicate leaves behind a
+  symbol nothing ever names.
+
+An import still collides with a DECLARATION of the same name, and with a
+different import under one name. Only the exact-repeat case became free.
+
+`link` cleared and hit a new one: a module-level `const` whose initializer is a
+STRING (`RUNTIME_ROOT_VAR`). Consts are inlined, so the bootstrap accepts only
+an integer literal today - a small, contained item.
+
+**Item 5 is PARTIAL as of 2026-08-13, and the measurement under-counted it.**
+The attribute now parses into an ATTRIBUTE node wrapping its target, and
+`declOf` looks through it exactly as it looks through an `export` - so a
+decorated declaration is an ordinary one to every pass. That is what unblocked
+`ast`, `codegen` and `typecheck`, all three of which moved on to the value
+`enum`.
+
+What is NOT built is the EXPANSION - generating the `toString` from the field
+annotations. Starting it turned up three prerequisites that probing the sites
+had not shown, and none of them is small:
+
+1. DONE - **Display dispatch in TEMPLATE INTERPOLATION**, landed 2026-08-13.
+   `${p}` on a type carrying `toString(ref self): string` is now a CALL, and the
+   method does the rendering. Output is byte-for-byte identical to the reference
+   on the whole fixture. Details below.
+2. **A way to reach `Display`.** It lives in std/core/traits.yoop, which the
+   reference AUTOLOADS into every module graph. The bootstrap has no autoload,
+   and none of the deriving files imports it.
+3. **The graft** - splice a method into a decl's member run (a contiguous slice
+   of `childIds`, so it re-splices at the end), merge the implements clause,
+   restamp source locations onto the decl.
+
+The reference's architecture ports cleanly once those exist: generate the method
+as Yoop SOURCE TEXT, reparse it with the ordinary parser into the same arena
+(`parseInto` already supports that - it is how a directory module's files share
+one), and graft the METHOD_DECL in. The rendering spec is in
+src/jsyoopderive/expand.js and is worth matching exactly, since a slice fixture
+is asserted against both compilers.
+
+One divergence to make deliberately when it does land: the reference's
+`classify` has a real bug for Map fields - `classify(annot.typeArgs[1] ===
+"inline")` classifies a BOOLEAN, so the value type is never checked. No derived
+type in the closure has a Map field, so the bootstrap should check both
+arguments and note the difference rather than be bug-compatible.
+
+**Display-in-interpolation landed on its own merits**, and two decisions in it
+are worth keeping.
+
+**Having the METHOD is the test, not naming Display.** There are no inherent
+methods - a method no implemented trait requires is refused at the decl - so a
+`toString` is one some trait asked for, and Display is the only trait that asks.
+Checking the trait by NAME instead would need the importing module's scope,
+which the classification does not have and should not: whether a type prints is
+a property of the TYPE, not of who is looking at it. The RETURN is checked
+though, because the result is spliced straight into a string buffer and a
+`toString` returning an int would emit wrong IR rather than a diagnostic.
+
+**The receiver SPILLS to an anonymous slot.** `toString` takes `ref self`, and a
+borrow is the address of storage that exists - but an interpolated expression is
+a value, and `${f()}` or `${p.inner}` has none of its own. Same anonymous-slot
+pattern a kind region's subject uses, so `${makePoint(5)}` works rather than
+being refused for having nowhere to borrow from.
+
+**The attribute PARSER was too narrow at first, and got widened.** The first
+version took exactly one identifier argument and only a `type`/`variant`/`export`
+target, justified as "deliberately narrow". That was wrong: `@precompile` is a
+SHIPPED feature taking a `let`/`const` decl or a block, so the narrow parser
+refused real code with a message claiming attributes only decorate types and
+variants - a false statement about the language.
+
+The reference splits parser from registry (src/jsyooparser/parser.js plus
+src/jsyoopattributes/registry.js), and the split is the point: the PARSER takes
+zero or more expression arguments and any of six target shapes, and per-attribute
+rules are checked separately. The bootstrap now mirrors that, and every attribute
+diagnostic matches the reference word for word - unknown attribute, unknown
+derive, a RESERVED-but-unbuilt derive (`debug`, `eq`, `clone`, `hash`,
+`default`), a wrong arg count, and a target outside the syntactic set.
+
+One deliberate divergence remains: `@precompile` parses and is refused BY NAME,
+because folding its initializer needs a comptime interpreter the bootstrap has
+no equivalent of. Emitting the decl unfolded would compile and silently do the
+work at run time, which is the thing `@precompile` exists to avoid.
+
+That leaves prerequisites 2 and 3 for the derive expansion. Meanwhile the gap is
+honest rather than silent: a derived type carries no
+`toString`, and interpolating one is refused BY NAME saying the attribute is
+parsed but not expanded, instead of falling through to the generic "only
+strings, integers and bools" message that would send the reader hunting.
+
 `utils` cleared and immediately hit a NEW blocker worth recording:
 **`utils/sort.yoop` needs type-parameter BOUNDS** (`<T implements Comparable<T>>`).
 Bounds were deliberately deferred - a generic body is checked once with an opaque
@@ -811,6 +929,12 @@ two parsers can be diffed.
 
 ## Active docs (top level)
 
+- [bootstrap-completion.md](bootstrap-completion.md) - **the current plan.** The
+  ordered remaining work to finish the bootstrap, including async and
+  coroutines, measured over all 401 non-test files on 2026-08-13. The JS
+  reference's INTERPRETER and `@precompile` are deliberately out of scope:
+  comptime comes back later and comes back self-hosted, where it can introspect
+  the source while compiling and back a REPL.
 - [bootstrap-pipeline-contracts.md](bootstrap-pipeline-contracts.md) -
   **north star.** Pins the data shape that crosses each layer boundary in the
   self-hosting compiler (arena + NodeId AST, side-table decoration,

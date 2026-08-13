@@ -22,11 +22,45 @@ function sumTo(n: int): int {
   return total;
 }
 
+// `while (true)` whose every exit is a `return`. The loop never falls out, so
+// there is no statement after it and no `return` at the end of the function -
+// which only works if the loop reports itself as TERMINATING. Treating it as an
+// ordinary loop reports "no return on some path" about a function that returns
+// on every one.
+function findFirst(xs: int[], want: int): int {
+  let i: usize = 0;
+  while (true) {
+    if (i >= xs.len) {
+      return 0 - 1;
+    }
+    if (xs[i] == want) {
+      return int(i);
+    }
+    i = i + 1;
+  }
+}
+
+// The same loop with a `break` in it. Now the exit IS reachable, so the exit
+// block has to be emitted and the statement after the loop has to run.
+function countTo(n: int): int {
+  let i: int = 0;
+  while (true) {
+    if (i >= n) {
+      break;
+    }
+    i = i + 1;
+  }
+  return i + 100;
+}
+
 function main(): int {
   printf("classify: %d %d %d\n", classify(0 - 5), classify(0), classify(7));
   printf("sumTo(10)=%d sumTo(0)=%d\n", sumTo(10), sumTo(0));
   if (sumTo(4) == 10) {
     printf("sum of 1..4 is 10\n");
   }
+  const xs: int[] = [4, 5, 6];
+  printf("findFirst: %d %d\n", findFirst(xs, 5), findFirst(xs, 9));
+  printf("countTo: %d\n", countTo(7));
   return 0;
 }

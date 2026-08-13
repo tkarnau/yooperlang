@@ -1,0 +1,175 @@
+module codegen;
+
+// `for x in <iterator>` - walking a type that implements `Iterable<T>`.
+//
+// The array form is a counter over a descriptor and lives in loop.yoop. This is
+// the other one, and it is a different lowering rather than a variation: there
+// is no length to test against, so the loop is driven by the TAG of whatever
+// `next` hands back.
+//
+//     %sc.1.addr = alloca %struct.fs__DirIter      ; the iterator, by value
+//     %sc.2.addr = alloca %variant.t__IterStep_string
+//     store %struct.fs__DirIter %v, ptr %sc.1.addr
+//     br label %Ltop
+//   Ltop: %t1 = call %variant.t__IterStep_string @fs__DirIter__next(ptr %sc.1.addr)
+//         store %variant.t__IterStep_string %t1, ptr %sc.2.addr
+//         %t2 = extractvalue %variant.t__IterStep_string %t1, 0
+//         %t3 = icmp eq i32 %t2, 0
+//         br i1 %t3, label %Lbody, label %Lend
+//   Lbody: %t4 = getelementptr %variant.t__IterStep_string, ptr %sc.2.addr, i32 0, i32 1
+//          %t5 = getelementptr %variantc.t__IterStep_string__Yield, ptr %t4, i32 0, i32 0
+//          %t6 = load ptr, ptr %t5
+//          store ptr %t6, ptr %name.3.addr        ; the loop variable
+//          ... br label %Lstep
+//   Lstep: br label %Ltop
+//   Lend:
+//
+// Three things are worth knowing before changing any of it.
+//
+// The iterator is SPILLED to a slot because `next` takes `ref self` and a
+// borrow is an address - there is nothing to borrow from a loaded value. That
+// means the walk advances a COPY of whatever the source named, which is the
+// reference's behaviour too: `DirIter` keeps its state behind a handle so the
+// copy is immaterial, and `MapIter` keeps its cursor inline, so the local the
+// loop was given is left at index 0. Nothing in the corpus reads one after its
+// loop, and a loop that borrowed instead would be a different feature.
+//
+// The STEP is spilled for the same reason every switch arm spills its
+// scrutinee: the payload bytes are read as the `Yield` case struct, and only an
+// address can be reinterpreted that way.
+//
+// The step block is empty - there is no counter to advance - but it still
+// exists, because `continue` has to land somewhere that re-enters the loop
+// rather than re-running the rest of the body.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId } from "../ast";
+import { TypeId, IterableWalk, ITERABLE_NEXT_METHOD, derefType, moduleIdOf,
+  nominalModuleOf, methodSymbolName } from "../typecheck";
+
+export function emitForInIterable(
+  ref cx: Cx,
+  stmt: ASTNode,
+  stmtId: NodeId,
+  retTy: string,
+  ref walk: IterableWalk
+): string {
+  const iterType = derefType(cx.prog, resolvedTypeAt(ref cx, stmt.childA));
+  const iterTy = llvmType(cx.prog, iterType);
+  const stepTy = llvmType(cx.prog, walk.stepType);
+  const elemTy = typeOf(ref cx, stmtId);
+
+  let iterable: Operand = Operand.None;
+  const ierr = emitExpr(ref cx, stmt.childA, ref iterable);
+  if (ierr.len > 0) {
+    return ierr;
+  }
+  const iterSlot = declareAnonSlot(ref cx, iterTy);
+  emitStore(ref cx, iterTy, iterable, TEMP_SLOT_NAME, iterSlot.id);
+  const stepSlot = declareAnonSlot(ref cx, stepTy);
+  const loopVar = declareLocal(ref cx, stmt.name, elemTy);
+
+  const topLabel = freshLabel(cx.e);
+  const bodyLabel = freshLabel(cx.e);
+  const stepLabel = freshLabel(cx.e);
+  const endLabel = freshLabel(cx.e);
+
+  emitBr(ref cx, topLabel);
+  emitLabel(ref cx, topLabel);
+  const step = emitIterNextCall(ref cx, iterType, stepTy, iterSlot.id);
+  emitStore(ref cx, stepTy, Operand.Temp { id: step }, TEMP_SLOT_NAME, stepSlot.id);
+  const isYield = emitTagEqualsYield(ref cx, stepTy, Operand.Temp { id: step }, walk.yieldOrdinal);
+  emitCondBr(ref cx, Operand.Temp { id: isYield }, bodyLabel, endLabel);
+
+  emitLabel(ref cx, bodyLabel);
+  // The loop variable is a COPY of the yielded element, held in its own slot -
+  // the same rule the array form follows, and what makes assigning to it write
+  // to something the next step discards.
+  const elemValue = emitYieldPayloadLoad(ref cx, walk.stepType, stepTy, stepSlot.id,
+    walk.yieldOrdinal, elemTy);
+  emitStore(ref cx, elemTy, Operand.Temp { id: elemValue }, stmt.name, loopVar.id);
+
+  loopPush(ref cx, stepLabel, endLabel);
+  let err = "";
+  let bodyTerminated = false;
+  emitBlock(ref cx, stmt.childB, retTy, ref bodyTerminated, ref err);
+  loopPop(ref cx);
+  if (err.len > 0) {
+    return err;
+  }
+  if (!bodyTerminated) {
+    emitBr(ref cx, stepLabel);
+  }
+
+  emitLabel(ref cx, stepLabel);
+  emitBr(ref cx, topLabel);
+
+  emitLabel(ref cx, endLabel);
+  return "";
+}
+
+//   %t1 = call %variant.t__IterStep_string @fs__DirIter__next(ptr %sc.1.addr)
+//
+// One step. A STATIC trait dispatch, exactly like `Display.toString(ref p)` and
+// `?`'s `Into` conversion: the receiver's concrete type is in hand, so the
+// symbol is the owner plus the method name and no vtable is involved.
+function emitIterNextCall(
+  ref cx: Cx,
+  iterType: TypeId,
+  stepTy: string,
+  iterSlotId: usize
+): usize {
+  disposable args: Vec<CallArg> = vec.vecNew(1);
+  vec.vecPush(ref args, {
+    ty: ITER_RECEIVER_LLVM_TYPE,
+    value: Operand.SlotAddr { name: TEMP_SLOT_NAME, id: iterSlotId },
+  });
+  const dest = freshTemp(cx.e);
+  emitCall(ref cx, dest, stepTy,
+    moduleIdOf(cx.prog, nominalModuleOf(cx.prog, iterType)),
+    methodSymbolName(cx.prog, iterType, ITERABLE_NEXT_METHOD),
+    ref args);
+  return dest;
+}
+
+//   %t2 = extractvalue %variant.t__IterStep_string %t1, 0
+//   %t3 = icmp eq i32 %t2, 0
+//
+// True while the loop has another element. Tested against the ordinal rather
+// than routed through a jump table, for the same reason `?` tests its Err
+// directly: there are two outcomes and one of them just leaves.
+function emitTagEqualsYield(
+  ref cx: Cx,
+  stepTy: string,
+  step: Operand,
+  yieldOrdinal: usize
+): usize {
+  const tag = emitVariantTag(ref cx, stepTy, step);
+  const dest = freshTemp(cx.e);
+  emitICmp(ref cx, dest, "eq", VARIANT_TAG_TYPE,
+    Operand.Temp { id: tag }, Operand.Imm { value: uint64(yieldOrdinal) });
+  return dest;
+}
+
+//   %t4 = getelementptr %variant.t__IterStep_string, ptr %sc.2.addr, i32 0, i32 1
+//   %t5 = getelementptr %variantc.t__IterStep_string__Yield, ptr %t4, i32 0, i32 0
+//   %t6 = load ptr, ptr %t5
+//
+// The element out of a `Yield`. `value` is its only field and therefore field
+// 0, which typecheck/iterable.yoop checks rather than assumes - so this is the
+// same payload read a `case IterStep.Yield { value: x }:` arm emits.
+function emitYieldPayloadLoad(
+  ref cx: Cx,
+  stepType: TypeId,
+  stepTy: string,
+  stepSlotId: usize,
+  yieldOrdinal: usize,
+  elemTy: string
+): usize {
+  return emitCasePayloadLoad(ref cx, stepType, stepTy, stepSlotId, yieldOrdinal, elemTy);
+}
+
+// How `ref self` is spelled at a call site. LLVM's pointers are opaque, so a
+// borrow of any iterator is a `ptr`.
+const ITER_RECEIVER_LLVM_TYPE: string = "ptr";

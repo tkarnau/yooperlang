@@ -2,11 +2,36 @@ module lex;
 
 // The two tables the scanner walks: punctuation/operators, and reserved words.
 //
-// They are separate because they are matched differently. TOKEN_SCAN_LIST is
-// matched by PREFIX against raw bytes, so it must be sorted longest-first or
-// `...` would scan as three `.`s. KEYWORD_LIST is matched against a whole word
-// that `scanIdentity` already delimited, so order there is irrelevant.
+// They are separate because they are matched differently. The punctuation table
+// is matched by PREFIX against raw bytes, so it must be ordered longest-first or
+// `...` would scan as three `.`s. The keyword table is matched against a whole
+// word that `scanIdentity` already delimited, so order there is irrelevant.
+//
+// Both are BUILT AT RUNTIME into a `LexTables` the caller owns, rather than
+// declared as module-level arrays. Two reasons, and the second is the one that
+// decides the shape:
+//
+//   * neither table can BE a module-level array here. An array of STRUCTS has
+//     no static spelling the bootstrap can inline, so a plain
+//     `const KEYWORD_LIST: KeywordDefinition[] = [ ... ]` is refused; and the
+//     punctuation table additionally went through a CALL
+//     (`sortedDefs([ ... ])`), which the JS reference FOLDS with its comptime
+//     interpreter. Comptime is deliberately out of scope for the bootstrap
+//     right now (plans/bootstrap-completion.md), and these two declarations
+//     between them gated 99 of the 420 files in the surface probe - the whole
+//     compiler's own import closure runs through `lex`.
+//   * the longest-first ORDER is a correctness requirement rather than a
+//     formatting preference, and `quickSort` is what enforces it. Hand-sorting
+//     the literal would trade a check for a comment, and the comment already
+//     says what breaks.
+//
+// So the order is established at RUNTIME, once per `LexTables`, by the same
+// sort that used to run at compile time. This is REVERSIBLE: a self-hosted
+// comptime interpreter would let `lexTablesNew` move back to a module const
+// with no change to anything that reads it.
 
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Disposable, disposable } from "std/core/kinds.yoop";
 import { Comparable, quickSort } from "../utils";
 
 export type SortedTokenDefinition implements Comparable<SortedTokenDefinition> {
@@ -23,70 +48,96 @@ export type SortedTokenDefinition implements Comparable<SortedTokenDefinition> {
   }
 }
 
-function sortedDefs(arr: SortedTokenDefinition[]): SortedTokenDefinition[] {
-  quickSort(arr, 0, arr.len - 1);
-  return arr;
-}
-
-// needs to be sorted by largest scannable to smallest by char count
-// so that `...` is found instead of `.`, `.`, `.`
-export const TOKEN_SCAN_LIST: SortedTokenDefinition[] = sortedDefs([
-  { str: "(", tag: TokenTags.LPAREN },
-  { str: ")", tag: TokenTags.RPAREN },
-  { str: ";", tag: TokenTags.SEMICOLON },
-  { str: "=", tag: TokenTags.EQ },
-  { str: "{", tag: TokenTags.LCURLY },
-  { str: "}", tag: TokenTags.RCURLY },
-  { str: ":", tag: TokenTags.COLON },
-  { str: ",", tag: TokenTags.COMMA },
-  { str: "?", tag: TokenTags.QUESTION },
-  { str: "==", tag: TokenTags.EQEQ },
-  { str: "!=", tag: TokenTags.NEQ },
-  { str: "!", tag: TokenTags.BANG },
-  { str: "^", tag: TokenTags.CARET },
-  { str: "~", tag: TokenTags.TILDE },
-  { str: "<=", tag: TokenTags.LTE },
-  { str: ">=", tag: TokenTags.GTE },
-  { str: "<", tag: TokenTags.LT },
-  { str: ">", tag: TokenTags.GT },
-  { str: "&&", tag: TokenTags.ANDAND },
-  { str: "&", tag: TokenTags.AMP },
-  { str: "||", tag: TokenTags.OROR },
-  { str: "|", tag: TokenTags.PIPE },
-  { str: "<<", tag: TokenTags.LSHIFT },
-  { str: ">>", tag: TokenTags.RSHIFT },
-  { str: "+", tag: TokenTags.PLUS },
-  { str: "-", tag: TokenTags.MINUS },
-  { str: "*", tag: TokenTags.MULT },
-  { str: "/", tag: TokenTags.DIVIDE },
-  { str: "%", tag: TokenTags.MODULUS },
-  // Phase 9: compound-assignment two-char operators. Longest-first sort puts
-  // these before the single-char arithmetic ops above.
-  { str: "+=", tag: TokenTags.PLUSEQ },
-  { str: "-=", tag: TokenTags.MINUSEQ },
-  { str: "*=", tag: TokenTags.MULTEQ },
-  { str: "/=", tag: TokenTags.DIVIDEEQ },
-  { str: "%=", tag: TokenTags.MODULUSEQ },
-  // Phase 9.G: function value type separator. Longest-first sort puts this
-  // before `=` and before `>=` / `>`; the lexer's existing logic handles
-  // the disambiguation against `==`.
-  { str: "=>", tag: TokenTags.FATARROW },
-  { str: ".", tag: TokenTags.DOT },
-  { str: "..", tag: TokenTags.DOTDOT },
-  { str: "...", tag: TokenTags.DOTDOTDOT },
-  { str: "[", tag: TokenTags.LBRACKET },
-  { str: "]", tag: TokenTags.RBRACKET },
-  // Phase 11.A: attribute prefix `@`.
-  { str: "@", tag: TokenTags.AT },
-]);
-
 // A reserved word that `lexIdentifierOrKeyword` promotes from IDENT to its
-// dedicated tag on an exact match. Unlike `TOKEN_SCAN_LIST`, order does not
+// dedicated tag on an exact match. Unlike the punctuation table, order does not
 // matter here: `scanIdentity` already gave us a whole-word boundary, so we
 // only ever compare complete tokens (no prefix ambiguity to length-sort away).
 export type KeywordDefinition {
   str: string, // the exact lowercase source spelling
   tag: TokenTags,
+}
+
+// Both tables, built once. Every entry point into the lexer takes one by `ref`
+// rather than reaching for a global, because there is no global to reach for -
+// see the header comment.
+export type LexTables implements Disposable propagates<disposable> {
+  scan: Vec<SortedTokenDefinition>,     // sorted longest spelling first
+  keywords: Vec<KeywordDefinition>,     // in declaration order; order is free
+  function dispose(ref self): void {
+    Disposable.dispose(ref self.scan);
+    Disposable.dispose(ref self.keywords);
+  }
+}
+
+// Build both tables and put the punctuation one in scanning order.
+//
+// Cheap enough to do per FILE and that is how it is used: `parseInto`,
+// `moduleHeaderName`, `tokenize` and `dumpTokens` each own one for the length
+// of their walk. It is 41 + 44 vector pushes and one 41-element quicksort, so
+// well under a microsecond next to reading the file it is about to lex.
+export function lexTablesNew(): LexTables propagates<disposable> {
+  let scan: Vec<SortedTokenDefinition> = vec.vecNew(48);
+  fillTokenScanList(ref scan);
+  // `vecAsArray` is a VIEW over the vector's own storage, so this sorts the
+  // vector in place. Nothing pushes afterwards, which is the rule that view
+  // comes with.
+  quickSort(vec.vecAsArray(ref scan), 0, scan.len - 1);
+
+  let keywords: Vec<KeywordDefinition> = vec.vecNew(48);
+  fillKeywordList(ref keywords);
+  return { scan: scan, keywords: keywords };
+}
+
+// The punctuation and operator table, in whatever order reads best here.
+// `lexTablesNew` is what puts it in scanning order, so a new entry goes
+// wherever its neighbours are rather than wherever its length says.
+function fillTokenScanList(ref out: Vec<SortedTokenDefinition>): void {
+  vec.vecPush(ref out, { str: "(", tag: TokenTags.LPAREN });
+  vec.vecPush(ref out, { str: ")", tag: TokenTags.RPAREN });
+  vec.vecPush(ref out, { str: ";", tag: TokenTags.SEMICOLON });
+  vec.vecPush(ref out, { str: "=", tag: TokenTags.EQ });
+  vec.vecPush(ref out, { str: "{", tag: TokenTags.LCURLY });
+  vec.vecPush(ref out, { str: "}", tag: TokenTags.RCURLY });
+  vec.vecPush(ref out, { str: ":", tag: TokenTags.COLON });
+  vec.vecPush(ref out, { str: ",", tag: TokenTags.COMMA });
+  vec.vecPush(ref out, { str: "?", tag: TokenTags.QUESTION });
+  vec.vecPush(ref out, { str: "==", tag: TokenTags.EQEQ });
+  vec.vecPush(ref out, { str: "!=", tag: TokenTags.NEQ });
+  vec.vecPush(ref out, { str: "!", tag: TokenTags.BANG });
+  vec.vecPush(ref out, { str: "^", tag: TokenTags.CARET });
+  vec.vecPush(ref out, { str: "~", tag: TokenTags.TILDE });
+  vec.vecPush(ref out, { str: "<=", tag: TokenTags.LTE });
+  vec.vecPush(ref out, { str: ">=", tag: TokenTags.GTE });
+  vec.vecPush(ref out, { str: "<", tag: TokenTags.LT });
+  vec.vecPush(ref out, { str: ">", tag: TokenTags.GT });
+  vec.vecPush(ref out, { str: "&&", tag: TokenTags.ANDAND });
+  vec.vecPush(ref out, { str: "&", tag: TokenTags.AMP });
+  vec.vecPush(ref out, { str: "||", tag: TokenTags.OROR });
+  vec.vecPush(ref out, { str: "|", tag: TokenTags.PIPE });
+  vec.vecPush(ref out, { str: "<<", tag: TokenTags.LSHIFT });
+  vec.vecPush(ref out, { str: ">>", tag: TokenTags.RSHIFT });
+  vec.vecPush(ref out, { str: "+", tag: TokenTags.PLUS });
+  vec.vecPush(ref out, { str: "-", tag: TokenTags.MINUS });
+  vec.vecPush(ref out, { str: "*", tag: TokenTags.MULT });
+  vec.vecPush(ref out, { str: "/", tag: TokenTags.DIVIDE });
+  vec.vecPush(ref out, { str: "%", tag: TokenTags.MODULUS });
+  // Phase 9: compound-assignment two-char operators.
+  vec.vecPush(ref out, { str: "+=", tag: TokenTags.PLUSEQ });
+  vec.vecPush(ref out, { str: "-=", tag: TokenTags.MINUSEQ });
+  vec.vecPush(ref out, { str: "*=", tag: TokenTags.MULTEQ });
+  vec.vecPush(ref out, { str: "/=", tag: TokenTags.DIVIDEEQ });
+  vec.vecPush(ref out, { str: "%=", tag: TokenTags.MODULUSEQ });
+  // Phase 9.G: function value type separator. The sort puts this before `=`
+  // and before `>=` / `>`; the lexer's existing logic handles the
+  // disambiguation against `==`.
+  vec.vecPush(ref out, { str: "=>", tag: TokenTags.FATARROW });
+  vec.vecPush(ref out, { str: ".", tag: TokenTags.DOT });
+  vec.vecPush(ref out, { str: "..", tag: TokenTags.DOTDOT });
+  vec.vecPush(ref out, { str: "...", tag: TokenTags.DOTDOTDOT });
+  vec.vecPush(ref out, { str: "[", tag: TokenTags.LBRACKET });
+  vec.vecPush(ref out, { str: "]", tag: TokenTags.RBRACKET });
+  // Phase 11.A: attribute prefix `@`.
+  vec.vecPush(ref out, { str: "@", tag: TokenTags.AT });
 }
 
 // Mirrors the JS lexer's `keywordTagList` exactly - src/parity.test.js fails if
@@ -96,65 +147,72 @@ export type KeywordDefinition {
 //     as plain IDENT and the parser recognizes them CONTEXTUALLY, which is what
 //     keeps them usable as ordinary names. Use `peekIsWord` to match one.
 //   * `_` lexes to DISCARD - bare underscores are discarded.
-export const KEYWORD_LIST: KeywordDefinition[] = [
-  { str: "let",            tag: TokenTags.LET },
-  { str: "function",       tag: TokenTags.FUNCTION },
-  { str: "const",          tag: TokenTags.CONST },
-  { str: "return",         tag: TokenTags.RETURN },
-  { str: "if",             tag: TokenTags.IF },
-  { str: "else",           tag: TokenTags.ELSE },
-  { str: "while",          tag: TokenTags.WHILE },
-  { str: "for",            tag: TokenTags.FOR },
-  { str: "in",             tag: TokenTags.IN },
-  { str: "type",           tag: TokenTags.TYPE },
-  { str: "import",         tag: TokenTags.IMPORT },
-  { str: "export",         tag: TokenTags.EXPORT },
-  { str: "extern",         tag: TokenTags.EXTERN },
-  { str: "from",           tag: TokenTags.FROM },
-  { str: "as",             tag: TokenTags.AS },
-  { str: "ref",            tag: TokenTags.REF },
-  { str: "break",          tag: TokenTags.BREAK },
-  { str: "continue",       tag: TokenTags.CONTINUE },
-  { str: "true",           tag: TokenTags.TRUE },
-  { str: "false",          tag: TokenTags.FALSE },
-  { str: "trait",          tag: TokenTags.TRAIT },
-  { str: "implements",     tag: TokenTags.IMPLEMENTS },
-  { str: "self",           tag: TokenTags.SELF },
-  { str: "extends",        tag: TokenTags.EXTENDS },
-  { str: "vtable",         tag: TokenTags.VTABLE },
-  { str: "appliesTo",      tag: TokenTags.APPLIESTO },
-  { str: "mustCall",       tag: TokenTags.MUSTCALL },
-  { str: "ownsBlock",      tag: TokenTags.OWNSBLOCK },
-  { str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND },
-  { str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE },
-  { str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE },
-  { str: "forbids",        tag: TokenTags.FORBIDS },
-  { str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES },
-  { str: "globalState",    tag: TokenTags.GLOBALSTATE },
-  { str: "wait",           tag: TokenTags.WAIT },
-  { str: "switch",         tag: TokenTags.SWITCH },
-  { str: "case",           tag: TokenTags.CASE },
-  { str: "default",        tag: TokenTags.DEFAULT },
-  { str: "enum",           tag: TokenTags.ENUM },
-  { str: "variant",        tag: TokenTags.VARIANT },
-  { str: "union",          tag: TokenTags.UNION },
-  { str: "null",           tag: TokenTags.NULL },
-  { str: "await",          tag: TokenTags.AWAIT },
-  { str: "_",              tag: TokenTags.DISCARD },
-];
+function fillKeywordList(ref out: Vec<KeywordDefinition>): void {
+  vec.vecPush(ref out, { str: "let",            tag: TokenTags.LET });
+  vec.vecPush(ref out, { str: "function",       tag: TokenTags.FUNCTION });
+  vec.vecPush(ref out, { str: "const",          tag: TokenTags.CONST });
+  vec.vecPush(ref out, { str: "return",         tag: TokenTags.RETURN });
+  vec.vecPush(ref out, { str: "if",             tag: TokenTags.IF });
+  vec.vecPush(ref out, { str: "else",           tag: TokenTags.ELSE });
+  vec.vecPush(ref out, { str: "while",          tag: TokenTags.WHILE });
+  vec.vecPush(ref out, { str: "for",            tag: TokenTags.FOR });
+  vec.vecPush(ref out, { str: "in",             tag: TokenTags.IN });
+  vec.vecPush(ref out, { str: "type",           tag: TokenTags.TYPE });
+  vec.vecPush(ref out, { str: "import",         tag: TokenTags.IMPORT });
+  vec.vecPush(ref out, { str: "export",         tag: TokenTags.EXPORT });
+  vec.vecPush(ref out, { str: "extern",         tag: TokenTags.EXTERN });
+  vec.vecPush(ref out, { str: "from",           tag: TokenTags.FROM });
+  vec.vecPush(ref out, { str: "as",             tag: TokenTags.AS });
+  vec.vecPush(ref out, { str: "ref",            tag: TokenTags.REF });
+  vec.vecPush(ref out, { str: "break",          tag: TokenTags.BREAK });
+  vec.vecPush(ref out, { str: "continue",       tag: TokenTags.CONTINUE });
+  vec.vecPush(ref out, { str: "true",           tag: TokenTags.TRUE });
+  vec.vecPush(ref out, { str: "false",          tag: TokenTags.FALSE });
+  vec.vecPush(ref out, { str: "trait",          tag: TokenTags.TRAIT });
+  vec.vecPush(ref out, { str: "implements",     tag: TokenTags.IMPLEMENTS });
+  vec.vecPush(ref out, { str: "self",           tag: TokenTags.SELF });
+  vec.vecPush(ref out, { str: "extends",        tag: TokenTags.EXTENDS });
+  vec.vecPush(ref out, { str: "vtable",         tag: TokenTags.VTABLE });
+  vec.vecPush(ref out, { str: "appliesTo",      tag: TokenTags.APPLIESTO });
+  vec.vecPush(ref out, { str: "mustCall",       tag: TokenTags.MUSTCALL });
+  vec.vecPush(ref out, { str: "ownsBlock",      tag: TokenTags.OWNSBLOCK });
+  vec.vecPush(ref out, { str: "beforeScopeEnd", tag: TokenTags.BEFORESCOPEEND });
+  vec.vecPush(ref out, { str: "mustNotEscape",  tag: TokenTags.MUSTNOTESCAPE });
+  vec.vecPush(ref out, { str: "mustNotShare",   tag: TokenTags.MUSTNOTSHARE });
+  vec.vecPush(ref out, { str: "forbids",        tag: TokenTags.FORBIDS });
+  vec.vecPush(ref out, { str: "acrossScopes",   tag: TokenTags.ACROSSSCOPES });
+  vec.vecPush(ref out, { str: "globalState",    tag: TokenTags.GLOBALSTATE });
+  vec.vecPush(ref out, { str: "wait",           tag: TokenTags.WAIT });
+  vec.vecPush(ref out, { str: "switch",         tag: TokenTags.SWITCH });
+  vec.vecPush(ref out, { str: "case",           tag: TokenTags.CASE });
+  vec.vecPush(ref out, { str: "default",        tag: TokenTags.DEFAULT });
+  vec.vecPush(ref out, { str: "enum",           tag: TokenTags.ENUM });
+  vec.vecPush(ref out, { str: "variant",        tag: TokenTags.VARIANT });
+  vec.vecPush(ref out, { str: "union",          tag: TokenTags.UNION });
+  vec.vecPush(ref out, { str: "null",           tag: TokenTags.NULL });
+  vec.vecPush(ref out, { str: "await",          tag: TokenTags.AWAIT });
+  vec.vecPush(ref out, { str: "_",              tag: TokenTags.DISCARD });
+}
 
 // The SOURCE spelling of a tag, for diagnostics: `+` rather than `PLUS`.
 //
 // Scans the same two tables the lexer matches against, so there is no third
 // list to keep in sync. Falls back to the enum name for tags with no spelling
 // of their own (IDENT, INTLITERAL, EOF).
+//
+// Builds its own tables rather than taking a `ref LexTables`: every caller is a
+// DIAGNOSTIC in typecheck, three layers above the lexer, and threading a lexer
+// table through them to format an error message would be worse than the two
+// vectors this allocates on a compile that is already failing. The strings it
+// hands back are literals, so they outlive the tables.
 export function tagSpelling(tag: TokenTags): string {
-  for d in TOKEN_SCAN_LIST {
+  disposable tables: LexTables = lexTablesNew();
+  for d in vec.vecAsArray(ref tables.scan) {
     if (d.tag == tag) {
       return d.str;
     }
   }
-  for k in KEYWORD_LIST {
+  for k in vec.vecAsArray(ref tables.keywords) {
     if (k.tag == tag) {
       return k.str;
     }

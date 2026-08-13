@@ -9,16 +9,21 @@ module codegen;
 // else.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
 import { NodeId } from "../ast";
-import { PrimKind, instanceAt } from "../typecheck";
+import { PrimKind, instanceAt, floatBitWidth } from "../typecheck";
+import { floatBits, float32Bits } from "../utils";
 import { Program, TypedModule, TypeId, Type, Symbol, symbolAt, typeAt, TYPE_VOID_ID,
   TYPE_ERROR_ID, primTypeIdOfName, primBitWidth, primIsSigned,
   lookupField, isStructType, isVariantType, lookupVariantCase, variantCaseFieldNamed,
   variantModuleIdOf, variantDeclNameOf, funcInstanceAt, genericAt, substitute,
   DeclId, DECL_NONE_ID, GenericSort, derefType, lookupMethod, methodSymbolName,
-  nominalModuleOf } from "../typecheck";
+  anyOpenArg, findFuncInstance,
+  nominalModuleOf, isValueEnumType, lookupEnumCase,
+  IterableWalk, iterableWalkOf } from "../typecheck";
 import { ASTNode, childAt, nodeAt } from "../ast";
 
 // ----- the typecheck boundary ----------------------------------------------
@@ -57,30 +62,83 @@ export function resolvedTypeAt(ref cx: Cx, nodeId: NodeId): TypeId {
   return resolved;
 }
 
+// A TypeId pass D recorded that is NOT a node's type, run through the same
+// monomorphization. `calleeReceiver` is the one of those: a bounded generic
+// body dispatches `Comparable.compare(ref x, y)` on the opaque `T`, so the
+// receiver pass D wrote down IS a TypeParam and only the instance knows which
+// concrete method the call lands on.
+export function resolvedType(ref cx: Cx, id: TypeId): TypeId {
+  let resolved = id;
+  if (cx.typeInstance != NO_TYPE_INSTANCE) {
+    let tinst = instanceAt(cx.prog, cx.typeInstance);
+    let tinfo = genericAt(cx.prog, tinst.origin);
+    resolved = substitute(cx.prog, resolved, ref tinfo.params, ref tinst.args);
+  }
+  if (cx.instance != NO_FUNC_INSTANCE) {
+    let inst = funcInstanceAt(cx.prog, cx.instance);
+    let info = genericAt(cx.prog, inst.origin);
+    resolved = substitute(cx.prog, resolved, ref info.params, ref inst.args);
+  }
+  return resolved;
+}
+
+// The CONCRETE function instance a recorded one means here.
+//
+// Pass D records a generic-calls-generic call site as an instance whose
+// arguments are the CALLER's type parameters. Substituting them through the
+// instance being emitted gives the arguments the callee really has, and
+// typecheck's closure pass already registered that instance. A miss returns the
+// recorded index unchanged: that is the ordinary case where the arguments were
+// concrete to begin with, and it is also the safe answer if the closure ever
+// fails to reach one, since a missing symbol at link time beats a wrong call.
+export function resolvedFuncInstance(ref cx: Cx, index: usize): usize {
+  let inst = funcInstanceAt(cx.prog, index);
+  if (!anyOpenArg(cx.prog, ref inst.args)) {
+    return index;
+  }
+  disposable args: Vec<TypeId> = vec.vecNew(inst.args.len);
+  let i: usize = 0;
+  while (i < inst.args.len) {
+    vec.vecPush(ref args, resolvedType(ref cx, vec.vecGet(ref inst.args, i)));
+    i += 1;
+  }
+  const found = findFuncInstance(cx.prog, inst.origin, ref args);
+  if (found == 0) {
+    return index;
+  }
+  return found;
+}
+
 // The declared return type of a top-level function, as LLVM spells it.
 export function returnTypeOf(ref cx: Cx, name: string): string {
+  return llvmType(cx.prog, returnTypeIdOf(ref cx, name));
+}
+
+// The same answer as a TypeId, which is what a caller that has to ask the type
+// system something further needs - `?` looks the return type's Err case up.
+export function returnTypeIdOf(ref cx: Cx, name: string): TypeId {
   // Inside a monomorphization the SIGNATURE is the instance's, not the generic
   // decl's - the decl's return type still mentions a TypeParam.
   if (cx.instance != NO_FUNC_INSTANCE) {
     let inst = funcInstanceAt(cx.prog, cx.instance);
     switch (typeAt(cx.prog, inst.funcType)) {
-      case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(cx.prog, r); }
-      default: { return "void"; }
+      case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+      default: { return TYPE_VOID_ID; }
     }
   }
   switch (map.mapGet(ref cx.tm.names, name)) {
-    case Option.None: { return "void"; }
+    case Option.None: { return TYPE_VOID_ID; }
     case Option.Some { value: symId }: {
       switch (symbolAt(cx.prog, symId)) {
         case Symbol.Func { typeId: t }: {
           switch (typeAt(cx.prog, t)) {
             case Type.Func { params: p, ret: r, variadic: v }: {
-              return llvmType(cx.prog, r);
+              return r;
             }
-            default: { return "void"; }
+            default: { return TYPE_VOID_ID; }
           }
         }
-        default: { return "void"; }
+        default: { return TYPE_VOID_ID; }
       }
     }
   }
@@ -94,9 +152,23 @@ export function isPrimTypeName(name: string): bool {
 
 // Which conversion opcode a cast from `argId` to `exprId` needs, or "" for a
 // pass-through.
+//
+// The two families do not share an opcode, so the fork is here rather than
+// inside one table: an int-to-int cast is decided by width and the SOURCE's
+// signedness, while anything touching a float is decided by which side is the
+// float and, for float-to-int, by the TARGET's signedness (fptosi vs fptoui).
 export function castOpFor(ref cx: Cx, argId: NodeId, exprId: NodeId): string {
   const source = resolvedTypeAt(ref cx, argId);
   const target = resolvedTypeAt(ref cx, exprId);
+  const fromFloat = floatBitWidth(cx.prog, source);
+  const toFloat = floatBitWidth(cx.prog, target);
+  if (fromFloat > 0 || toFloat > 0) {
+    return llvmFloatCastOp(
+      fromFloat, toFloat,
+      primIsSigned(cx.prog, source),
+      primIsSigned(cx.prog, target)
+    );
+  }
   return llvmIntCastOp(
     primBitWidth(cx.prog, source),
     primBitWidth(cx.prog, target),
@@ -104,10 +176,16 @@ export function castOpFor(ref cx: Cx, argId: NodeId, exprId: NodeId): string {
   );
 }
 
-// The LLVM type a variadic call must pass this argument as, or "" when it is
-// not an integer or bool (a string is already `ptr` and needs nothing).
+// The LLVM type a variadic call must pass this argument as, or "" when it needs
+// no promotion at all (a string is already `ptr`, a struct is passed as it is).
 export function promotedVarargTypeOf(ref cx: Cx, argId: NodeId): string {
   const t = resolvedTypeAt(ref cx, argId);
+  // A float promotes to double, which is C's rule and not an integer widening -
+  // note this is asked FIRST, because primBitWidth answers 0 for a float and a
+  // fall-through would read as "nothing to do".
+  if (floatBitWidth(cx.prog, t) > 0) {
+    return VARARG_FLOAT_TYPE;
+  }
   const bits = primBitWidth(cx.prog, t);
   if (bits == 0) {
     return "";
@@ -115,10 +193,100 @@ export function promotedVarargTypeOf(ref cx: Cx, argId: NodeId): string {
   return promotedVarargType(bits, bits == 1);
 }
 
+// True when the node's resolved type is a float, which is what picks fadd over
+// add, fcmp over icmp and fneg over a subtraction from zero.
+export function isFloatAt(ref cx: Cx, nodeId: NodeId): bool {
+  return floatBitWidth(cx.prog, resolvedTypeAt(ref cx, nodeId)) > 0;
+}
+
+// A float literal as the immediate its PINNED type wants. A float32 constant is
+// the bits of the value rounded to float precision, so the two widths are two
+// measurements of one number rather than one measurement formatted twice.
+export function floatImmFor(ref cx: Cx, nodeId: NodeId, value: float64): Operand {
+  return floatImmForType(cx.prog, resolvedTypeAt(ref cx, nodeId), value);
+}
+
+// The same, from a TYPE rather than from a decorated node. A module-level const
+// is filled by pass C and never walked by pass D, so it has no decoration to
+// read - its annotation is the only thing that says which width to measure at.
+export function floatImmForType(ref prog: Program, typeId: TypeId, value: float64): Operand {
+  if (floatBitWidth(ref prog, typeId) == 32) {
+    return Operand.FloatImm { bits: float32Bits(value) };
+  }
+  return Operand.FloatImm { bits: floatBits(value) };
+}
+
+// What a VARIADIC call site has to know, which an ordinary one does not.
+//
+// Two facts, and they come out of one name lookup because they are answers to
+// the same question:
+//
+//   isVariadic       the callee's signature ended in `...`, so the call site
+//                    must spell the whole function type and promote the extras
+//   isBuiltinPrintf  nothing DECLARED this printf, so it is the compiler's own
+//                    builtin - which is what decides whether the `declare i32
+//                    @printf(ptr, ...)` line still has to be emitted
+export type VariadicCallee {
+  isVariadic: bool,
+  isBuiltinPrintf: bool,
+}
+
+// The callee's FIXED parameter types - the ones before the `...` - appended to
+// `out`, plus whether it is variadic at all.
+//
+// LLVM needs the fixed half at every variadic call (`call i32 (ptr, ...)
+// @printf`), not just the return type, because that is what tells it where the
+// varargs start. Reading them off the Func type rather than off the ARGUMENTS
+// is the point: `printf("%d")` and `printf("%d", 1, 2)` are the same callee and
+// must spell the same type.
+export function variadicCalleeOf(ref cx: Cx, name: string, ref out: Vec<string>): VariadicCallee {
+  switch (calleeFuncType(ref cx, name)) {
+    case Type.Func { params: p, ret: r, variadic: v }: {
+      if (!v) {
+        return { isVariadic: false, isBuiltinPrintf: false };
+      }
+      let i: usize = 0;
+      while (i < p.len) {
+        vec.vecPush(ref out, llvmType(cx.prog, vec.vecGet(ref p, i)));
+        i += 1;
+      }
+      return { isVariadic: true, isBuiltinPrintf: false };
+    }
+    default: { }
+  }
+  // Nothing declared it. `printf` is still callable - it is a compiler builtin
+  // on both sides - and its fixed half is the format string and nothing else.
+  if (str.stringEq(name, PRINTF_NAME)) {
+    vec.vecPush(ref out, "ptr");
+    return { isVariadic: true, isBuiltinPrintf: true };
+  }
+  return { isVariadic: false, isBuiltinPrintf: false };
+}
+
+// The Func type a NAME binds to in this module, or ErrorT. An extern and an
+// ordinary function are the same `Symbol.Func` here, which is the point - the
+// call site does not care which one it found.
+function calleeFuncType(ref cx: Cx, name: string): Type propagates<disposable> {
+  switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.Some { value: symId }: {
+      switch (symbolAt(cx.prog, symId)) {
+        case Symbol.Func { typeId: t }: { return typeAt(cx.prog, t); }
+        default: { return Type.ErrorT; }
+      }
+    }
+    case Option.None: { return Type.ErrorT; }
+  }
+}
+
 // zext for a bool or an unsigned source, sext for a signed one - the same rule
-// the ordinary cast uses, and for the same reason.
+// the ordinary cast uses, and for the same reason. `fpext` for a float32, which
+// is the only float that ever needs widening: a float64 already IS the vararg
+// type and the caller skips it.
 export function varargWidenOp(ref cx: Cx, argId: NodeId): string {
   const t = resolvedTypeAt(ref cx, argId);
+  if (floatBitWidth(cx.prog, t) > 0) {
+    return "fpext";
+  }
   if (primIsSigned(cx.prog, t)) {
     return "sext";
   }
@@ -129,14 +297,17 @@ export function varargWidenOp(ref cx: Cx, argId: NodeId): string {
 // gep and extractvalue both address a field by index, so this is the one thing
 // codegen needs that a field name alone does not give it.
 export function fieldPositionOf(ref cx: Cx, baseId: NodeId, fieldName: string): usize {
-  const structType = resolvedTypeAt(ref cx, baseId);
+  // Deref'd, because a BORROWED base reaches the same fields at the same
+  // positions - `cx.e.usesPrintf` is field 4 of Emitter whether `cx.e` is an
+  // Emitter or a pointer to one.
+  const structType = derefType(cx.prog, resolvedTypeAt(ref cx, baseId));
   return lookupField(cx.prog, structType, fieldName).index;
 }
 
 // True when the node resolved to a struct, which is how the field-access and
 // assignment paths tell a struct from an array.
 export function isStructAt(ref cx: Cx, nodeId: NodeId): bool {
-  return isStructType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+  return isStructType(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
 }
 
 // The generic-function DeclId a name binds to, or DECL_NONE_ID when the name is
@@ -180,15 +351,24 @@ export function genericFuncDeclIdOf(ref prog: Program, ref tm: TypedModule, name
 
 // The value of a module-level `const` by name. `None` when the name is not one,
 // which is how the local-read path tells "inline this" from an internal error.
-export function moduleConstOf(ref cx: Cx, name: string): Option<int64> {
+export function moduleConstOf(ref cx: Cx, name: string, ref out: Operand): bool {
   switch (map.mapGet(ref cx.tm.names, name)) {
+    case Option.None: { return false; }
     case Option.Some { value: symId }: {
       switch (symbolAt(cx.prog, symId)) {
-        case Symbol.Value { typeId: t, intVal: v }: { return Option.Some { value: v }; }
-        default: { return Option.None; }
+        case Symbol.Value { typeId: t, intVal: v }: {
+          // A string, a float or an array was materialized into a module datum
+          // before any body was emitted; an integer needs none and rides in the
+          // symbol. Both are INLINED - there is no global to load either way.
+          switch (map.mapGet(ref cx.e.constOps, uint64(symId))) {
+            case Option.Some { value: op }: { out = op; }
+            case Option.None: { out = constOperand(v); }
+          }
+          return true;
+        }
+        default: { return false; }
       }
     }
-    case Option.None: { return Option.None; }
   }
 }
 
@@ -218,10 +398,15 @@ export function pointeeTypeOf(ref cx: Cx, nodeId: NodeId): string {
 // A method's declared return type. Read off the RECEIVER's method table rather
 // than the module namespace, because a method is not a module-level name.
 export function methodReturnTypeOf(ref cx: Cx, declNode: ASTNode): string {
+  return llvmType(cx.prog, methodReturnTypeIdOf(ref cx, declNode));
+}
+
+// The method twin of `returnTypeIdOf`, and needed for the same reason.
+export function methodReturnTypeIdOf(ref cx: Cx, declNode: ASTNode): TypeId {
   const owner = methodOwnerOf(ref cx, declNode);
   switch (typeAt(cx.prog, lookupMethod(cx.prog, owner, declNode.name))) {
-    case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(cx.prog, r); }
-    default: { return "void"; }
+    case Type.Func { params: p, ret: r, variadic: v }: { return r; }
+    default: { return TYPE_VOID_ID; }
   }
 }
 
@@ -241,6 +426,49 @@ export function methodOwnerOf(ref cx: Cx, declNode: ASTNode): TypeId {
 
 export function isVariantAt(ref cx: Cx, nodeId: NodeId): bool {
   return isVariantType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+}
+
+// The step shape of a `for ... in` iterable, or an `ok: false` answer meaning
+// "walk it as an array". A property of the TYPE rather than a decoration, so
+// asking again here is a lookup and not a second typecheck - same boundary
+// `fallibleShapeOf` sits on for `?`.
+export function iterableWalkAt(ref cx: Cx, nodeId: NodeId): IterableWalk {
+  return iterableWalkOf(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)));
+}
+
+// ----- value enums ----------------------------------------------------------
+//
+// A case is a CONSTANT, so there is nothing to load and nothing to lay out. The
+// two questions below are the whole of codegen's enum vocabulary.
+
+export function isValueEnumAt(ref cx: Cx, nodeId: NodeId): bool {
+  return isValueEnumType(cx.prog, resolvedTypeAt(ref cx, nodeId));
+}
+
+// True when a node is an enum whose values are integers, which is what decides
+// between an immediate and an interned string constant.
+export function isIntBackedEnumAt(ref cx: Cx, nodeId: NodeId): bool {
+  const t = resolvedTypeAt(ref cx, nodeId);
+  if (!isValueEnumType(cx.prog, t)) {
+    return false;
+  }
+  return primBitWidth(cx.prog, t) > 0;
+}
+
+// The case a `Color.Red` or a `case Color.Red:` names, as an operand.
+//
+// `enumType` is read off the node the pattern or the access was decorated with,
+// and the case NAME off the node itself - exactly the pair a variant ordinal is
+// read from, because both are "a nominal type plus a member name" and neither
+// needs anything else.
+export function enumCaseOperand(ref cx: Cx, enumTypeAt: NodeId, nameAt: NodeId): Operand {
+  const enumType = resolvedTypeAt(ref cx, enumTypeAt);
+  const found = lookupEnumCase(cx.prog, enumType, nodeAt(cx.ast, nameAt).name);
+  if (primBitWidth(cx.prog, enumType) == 0) {
+    // `enum<string>`: the case's constant is a string, interned like a literal.
+    return Operand.StrRef { id: internStringConstant(cx.e, found.valueStr) };
+  }
+  return constOperand(found.value);
 }
 
 // ----- variants -------------------------------------------------------------
@@ -287,7 +515,7 @@ export function isModuleFunction(ref cx: Cx, name: string): bool {
 // True when the node resolved to a string, which is how the field-access path
 // tells `s.len` from an array's `.len`.
 export function isStringAt(ref cx: Cx, nodeId: NodeId): bool {
-  switch (typeAt(cx.prog, resolvedTypeAt(ref cx, nodeId))) {
+  switch (typeAt(cx.prog, derefType(cx.prog, resolvedTypeAt(ref cx, nodeId)))) {
     case Type.Prim { prim: p }: { return p == PrimKind.STRING; }
     default: { return false; }
   }

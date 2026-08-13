@@ -61,8 +61,15 @@ export function methodDefinitionSymbol(ref cx: Cx, declNode: ASTNode): SymbolNam
 export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolName {
   // `Display.toString(ref p)` - pass D recorded which type the receiver
   // resolved to, and that plus the method name IS the symbol.
+  //
+  // The recorded type can be an opaque `T`, when the call is a bounded generic
+  // body dispatching through its bound. That is the same "decoration is written
+  // in terms of the parameters" rule every node type follows, so it goes
+  // through the same substitution - which is what makes one checked body emit
+  // `Token__compare` in one instance and `Num__compare` in the next.
   switch (map.mapGet(ref cx.tm.calleeReceiver, uint64(exprId))) {
-    case Option.Some { value: receiver }: {
+    case Option.Some { value: recorded }: {
+      const receiver = resolvedType(ref cx, recorded);
       return {
         home: moduleIdOf(cx.prog, nominalModuleOf(cx.prog, receiver)),
         name: methodSymbolName(cx.prog, receiver, expr.name),
@@ -77,7 +84,11 @@ export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolN
   // one symbol.
   switch (map.mapGet(ref cx.tm.calleeInstance, uint64(exprId))) {
     case Option.Some { value: index }: {
-      let inst = funcInstanceAt(cx.prog, index);
+      // A generic calling a generic recorded `partitionYoop_T`, because `T` was
+      // all the body knew. Which one it really means depends on the instance
+      // this call is being emitted IN, so the recorded arguments substitute
+      // exactly as a node's recorded type does.
+      let inst = funcInstanceAt(cx.prog, resolvedFuncInstance(ref cx, index));
       return { home: moduleIdOf(cx.prog, genericAt(cx.prog, inst.origin).module), name: inst.name };
     }
     case Option.None: { }
@@ -95,6 +106,24 @@ export function calleeSymbol(ref cx: Cx, expr: ASTNode, exprId: NodeId): SymbolN
     }
     case Option.None: {
       return { home: cx.tm.moduleId, name: expr.name };
+    }
+  }
+}
+
+// The symbol a module-level `let` is READ and WRITTEN through.
+//
+// A global has ONE definition, in the module that declared it, so an importing
+// module's read has to name that module and not itself - `export let counter`
+// read from another file is `@counter_1__counter`, never `@main_0__counter`.
+// Same rule and same table as an imported CALL, which is why this is the two
+// lines it is rather than anything the emit sites have to know about.
+export function globalSymbol(ref cx: Cx, name: string): SymbolName {
+  switch (map.mapGet(ref cx.tm.importedFrom, name)) {
+    case Option.Some { value: origin }: {
+      return { home: origin.moduleId, name: origin.exportName };
+    }
+    case Option.None: {
+      return { home: cx.tm.moduleId, name: name };
     }
   }
 }

@@ -55,11 +55,40 @@ export type TypedModule propagates<disposable> {
   // silently never suspends. Recorded here because the Symbol cannot say: a
   // pausable function is an ordinary `Symbol.Func`, the same way an extern is.
   pausableNames: Map<string, bool>,
+  // The same, for METHODS, keyed by the METHOD_DECL's NodeId. A method's name is
+  // not unique in a module - two types may each declare `read`, and a plain
+  // function may be called `read` as well - so the name table cannot hold them.
+  pausableMethods: Map<uint64, bool>,
   // Call nodes whose callee is a VALUE - a function-typed struct field - rather
   // than a name. Codegen reads the field and calls through it; without this it
   // would look for a symbol named after the field and emit `call @hash`.
   // Sparse and keyed by `uint64(nodeId)`, like the other call decorations.
   indirectCalls: Map<uint64, bool>,
+  // Expression nodes whose `ref T` value is consumed as a plain `T` - a borrow
+  // OPENED because the position wanted the thing rather than the borrow. Pass D
+  // is the only layer that can say so, because the answer is "what did the
+  // context expect", and codegen turns each one into exactly one load.
+  // Sparse and keyed by `uint64(nodeId)`, like the other node decorations.
+  //
+  // Only the EXPECTATION-driven conversions are in here (an argument, an
+  // initializer, an assigned value, a returned value). A field or index BASE is
+  // not, because there codegen already knows whether it wants the value or the
+  // address, and a write wants the address - see `emitFieldAddress`.
+  derefUses: Map<uint64, bool>,
+  // The MIRROR of derefUses: IDENT nodes naming a `ref T` parameter in a
+  // position that wanted the `ref T` rather than the `T` the body sees. The
+  // body's view is a plain `T`, so the node would otherwise emit a load of the
+  // borrowed object; codegen instead hands on the incoming pointer itself.
+  // Sparse and keyed by `uint64(nodeId)`. A node is never in BOTH maps - one
+  // asks for a load and the other asks for none.
+  reborrowUses: Map<uint64, bool>,
+  // TRY_OP nodes whose Err payload has to be CONVERTED on the way out - the
+  // operand's error implements `Into<TargetErr>` and the two payload types
+  // differ. Codegen calls the `into` method in the failure branch; it could
+  // compare the two types itself, but "these differ" and "these differ and a
+  // conversion exists" are different facts and only pass D established the
+  // second. Sparse and keyed by `uint64(nodeId)`.
+  tryIntoUses: Map<uint64, bool>,
   resolvedTypes: Vec<TypeId>,     // dense decoration, indexed by NodeId (0 = none / infer-later)
   // Which monomorphized function a CALL node resolved to, when the callee was
   // generic. Sparse, because most calls are not - the shape program.yoop's
@@ -100,6 +129,17 @@ export type Program propagates<disposable> {
   // alternative is a `filePath` parameter on forty call sites that all want the
   // same answer - and because it has exactly one writer, `walkFile`.
   currentFile: string,
+  // The function pass D is currently inside: its declared return type, and its
+  // name for the diagnostic. Only `?` reads them, and it needs both - the
+  // return type to check the Err against, the name to say whose it is.
+  //
+  // Ambient for the same reason `currentFile` is. The alternative was threading
+  // the return type through `checkExpr`, and `?` can sit at any depth of an
+  // expression, so that is a new parameter on every one of pass D's expression
+  // helpers to answer a question all but one of them ignore. `beginFunction` is
+  // the one writer.
+  currentReturn: TypeId,
+  currentFn: string,
   // Every `kind` declared anywhere in the graph, by NAME.
   //
   // Ambient rather than scoped, because a kind prefix is reached by name and
@@ -107,6 +147,13 @@ export type Program propagates<disposable> {
   // declared in std/core/kinds.yoop with nothing linking the two files. The JS
   // reference has the same registry for the same reason.
   kinds: Map<string, KindInfo>,
+  // Type names carrying `@derive(display)`, anywhere in the graph. The
+  // attribute parses and is unwrapped, but generating its `toString` is not
+  // built yet, so this exists purely so the refusal can say WHY a type that
+  // looks printable is not - see the template-interpolation check in pass D.
+  // Keyed by name rather than TypeId because pass A records it before any type
+  // is interned.
+  derivedDisplay: Map<string, bool>,
   // Names declared in an `extern "intrinsic"` block, anywhere in the graph.
   //
   // Program-level for the same reason `kinds` is: an intrinsic is identified by
@@ -144,6 +191,13 @@ export function beginFile(ref prog: Program, absPath: string): void {
   prog.currentFile = absPath;
 }
 
+// The function whose body pass D is about to walk. Paired with `currentFile`
+// and set for the same reason - see the fields on Program.
+export function beginFunction(ref prog: Program, name: string, retType: TypeId): void {
+  prog.currentFn = name;
+  prog.currentReturn = retType;
+}
+
 // The reserved singletons are pushed here, in the order ids.yoop declares them.
 // Anything that changes this order has to change those constants too.
 export function initProgram(): Program propagates<disposable> {
@@ -178,6 +232,7 @@ export function initProgram(): Program propagates<disposable> {
   let typeParams: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
   let kinds: Map<string, KindInfo> = map.mapNew(0, map.stringKeyOps());
   let intrinsics: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let derivedDisplay: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let prog: Program = {
     types: types,
     symbols: symbols,
@@ -188,7 +243,10 @@ export function initProgram(): Program propagates<disposable> {
     funcInstances: vec.vecNew(4),
     typeParams: typeParams,
     currentFile: "",
+    currentReturn: TYPE_ERROR_ID,
+    currentFn: "",
     kinds: kinds,
+    derivedDisplay: derivedDisplay,
     intrinsics: intrinsics,
   };
   initGenerics(ref prog);   // burns DeclId 0
@@ -204,7 +262,11 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
   let calleeInstance: Map<uint64, usize> = map.mapNew(0, map.uint64KeyOps());
   let externNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
   let pausableNames: Map<string, bool> = map.mapNew(0, map.stringKeyOps());
+  let pausableMethods: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let indirectCalls: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let derefUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let reborrowUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
+  let tryIntoUses: Map<uint64, bool> = map.mapNew(0, map.uint64KeyOps());
   let calleeReceiver: Map<uint64, TypeId> = map.mapNew(0, map.uint64KeyOps());
   return {
     moduleId: moduleId,
@@ -214,7 +276,11 @@ export function initTypedModule(moduleId: string): TypedModule propagates<dispos
     unsafeAllowed: false,
     externNames: externNames,
     pausableNames: pausableNames,
+    pausableMethods: pausableMethods,
     indirectCalls: indirectCalls,
+    derefUses: derefUses,
+    reborrowUses: reborrowUses,
+    tryIntoUses: tryIntoUses,
     calleeInstance: calleeInstance,
     calleeReceiver: calleeReceiver,
     resolvedTypes: vec.vecNew(0),

@@ -77,21 +77,29 @@ export function emitStatement(
       return emitReturn(ref cx, stmt, retTy);
     }
 
-    case ASTNodeKind.EXPRESSION_STATEMENT: {
-      // The value is discarded; the instructions still have to run.
+    // `expr;` and `_ = expr;` alike. The value is discarded; the instructions
+    // still have to run, and a `?` inside one still propagates.
+    case ASTNodeKind.EXPRESSION_STATEMENT, ASTNodeKind.DISCARD_STATEMENT: {
       let ignored: Operand = Operand.None;
       return emitExpr(ref cx, stmt.childA, ref ignored);
     }
     case ASTNodeKind.LET_DECL, ASTNodeKind.CONST_DECL: {
+      // `disposable reg: T = expr { ... }` - the binding OWNS a block, and the
+      // block is its whole scope. dispose.yoop has it, beside the anonymous
+      // region form it is the named twin of.
+      if (stmt.childD != 0) {
+        return emitScopedBinding(ref cx, stmt, stmtId, retTy, ref terminated);
+      }
       return emitVarDecl(ref cx, stmt, stmtId);
     }
     case ASTNodeKind.IF_STATEMENT: {
       return emitIf(ref cx, stmt, retTy, ref terminated);
     }
     case ASTNodeKind.WHILE_STATEMENT: {
-      // A loop never counts as terminating: the condition may be false on the
-      // first test, so control can always reach the statement after it.
-      return emitWhile(ref cx, stmt, retTy);
+      // A loop does not normally count as terminating: the condition may be
+      // false on the first test, so control reaches the statement after it.
+      // `while (true)` with no `break` is the one exception - see loop.yoop.
+      return emitWhile(ref cx, stmt, retTy, ref terminated);
     }
     case ASTNodeKind.FOR_LOOP: {
       return emitFor(ref cx, stmt, stmtId, retTy);
@@ -107,28 +115,36 @@ export function emitStatement(
     }
     case ASTNodeKind.BREAK_STATEMENT: {
       terminated = true;
-      if (!insideLoop(ref cx)) {
-        return internalError("break outside a loop reached", "codegen");
+      // The INNERMOST breakable frame, whichever kind it is - a switch is one
+      // as much as a loop, so a `break` in a switch arm inside a loop leaves
+      // the switch and the loop body carries on after it.
+      if (!insideBreakable(ref cx)) {
+        return internalError("break outside a loop or switch reached", "codegen");
       }
-      // Everything between here and the loop is being left, so it is disposed.
-      // The reference does NOT do this - see dispose_stack.yoop.
-      const err = emitUnwindTo(ref cx, disposeLoopDepth(cx.disposes));
+      const target = innermostBreakable(ref cx);
+      // Everything between here and that frame is being left, so it is
+      // disposed. The reference does NOT do this - see dispose_stack.yoop.
+      const err = emitUnwindTo(ref cx, target.scopeDepth);
       if (err.len > 0) {
         return err;
       }
-      emitBr(ref cx, innermostLoop(ref cx).breakTarget);
+      noteBreakTaken(ref cx);
+      emitBr(ref cx, target.breakTarget);
       return "";
     }
     case ASTNodeKind.CONTINUE_STATEMENT: {
       terminated = true;
+      // The innermost LOOP, looking past any switch in between - not symmetric
+      // with `break`, and the same rule the reference has.
       if (!insideLoop(ref cx)) {
         return internalError("continue outside a loop reached", "codegen");
       }
-      const cerr = emitUnwindTo(ref cx, disposeLoopDepth(cx.disposes));
+      const loop = innermostLoop(ref cx);
+      const cerr = emitUnwindTo(ref cx, loop.scopeDepth);
       if (cerr.len > 0) {
         return cerr;
       }
-      emitBr(ref cx, innermostLoop(ref cx).continueTarget);
+      emitBr(ref cx, loop.continueTarget);
       return "";
     }
     default: {

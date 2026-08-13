@@ -52,7 +52,8 @@ export function parseVariantDecl(ref ps: ParserState): Result<NodeId, ParsingErr
   ) {
     // A method, not a case. `function` cannot start a case name, so the two
     // members never have to be told apart by anything but the keyword.
-    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION) {
+    if (SelfLexing.peek(ref ps).tag == TokenTags.FUNCTION ||
+        atKindPrefixedMethod(ref ps, true)) {
       vec.vecPush(ref caseIds, parseMethodDecl(ref ps, node.name, node.childA)?);
       continue;
     }

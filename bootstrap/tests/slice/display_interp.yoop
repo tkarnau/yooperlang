@@ -1,0 +1,63 @@
+// Display dispatch in TEMPLATE INTERPOLATION: `${p}` on a type carrying
+// `toString(ref self): string` becomes a CALL, and the method does the
+// rendering.
+//
+// What each line is for:
+//   `${p}`             a struct with a hand-written toString
+//   `${makePoint(5)}`  a CALL's result - it has no storage of its own, so the
+//                      receiver spills to an anonymous slot before the borrow
+//   `${s}`             a toString that interpolates ANOTHER Display, which is
+//                      the nested case @derive(display) will generate
+//   `${Shape...}`      a variant, and a constructor expression written inline
+//   the mixed line     Display alongside int, bool and string parts
+//
+// Having the METHOD is what makes a type printable, not naming Display: there
+// are no inherent methods, so a `toString` is one some trait required.
+
+trait Display {
+  function toString(ref self): string;
+}
+
+type Point implements Display {
+  x: int,
+  y: int,
+  function toString(ref self): string {
+    return `(${self.x}, ${self.y})`;
+  }
+}
+
+variant Shape implements Display {
+  Circle { r: int },
+  Empty,
+  function toString(ref self): string {
+    switch (self) {
+      case Shape.Circle { r: r }: { return `Circle(${r})`; }
+      case Shape.Empty: { return "Empty"; }
+    }
+  }
+}
+
+type Segment implements Display {
+  a: Point,
+  b: Point,
+  function toString(ref self): string {
+    return `${self.a} -> ${self.b}`;
+  }
+}
+
+function makePoint(n: int): Point {
+  return { x: n, y: n * 2 };
+}
+
+function main(): int {
+  const p: Point = { x: 3, y: 4 };
+  printf("%s\n", `p is ${p}`);
+  printf("%s\n", `call is ${makePoint(5)}`);
+
+  const s: Segment = { a: p, b: { x: 9, y: 9 } };
+  printf("%s\n", `nested ${s}`);
+
+  printf("%s\n", `variant ${Shape.Circle { r: 7 }} and ${Shape.Empty}`);
+  printf("%s\n", `mixed ${p} ${1 + 1} ${true} ${"str"}`);
+  return 0;
+}

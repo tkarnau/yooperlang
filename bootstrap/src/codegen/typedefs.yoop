@@ -11,8 +11,8 @@ import { Text }, * as text from "std/core/text.yoop";
 import { Map }, * as map from "std/collections/map.yoop";
 import { Option } from "std/core/types.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { ASTNode, childAt, nodeAt } from "../ast";
-import { Module } from "../source_graph";
+import { AST, ASTNode, ASTNodeKind, childAt, declOf, nodeAt } from "../ast";
+import { Module, ModuleGraph } from "../source_graph";
 import { Program, TypedModule, Type, TypeId, Field, VariantCase, Symbol, moduleIdOf, symbolAt,
   typeAt, variantPayloadSize, isOpenInstance } from "../typecheck";
 
@@ -94,50 +94,101 @@ function emitVariantTypeDefs(
 }
 
 //   declare i32 @yoop_log_info(ptr)
+//   declare i32 @printf(ptr, ...)
 //
 // One line per extern, in the module-level globals. The name is NOT mangled:
 // an extern IS the linker's spelling, which is the whole point of declaring one.
-export function emitExternDeclares(
+//
+// A PROGRAM-level walk rather than one per file, because one LLVM module holds
+// the whole graph and a symbol may only be declared in it ONCE. Two files each
+// writing `extern "C" { function printf(fmt: string, ...): int32; }` - which is
+// ordinary, since an extern is not exported and every file that calls printf
+// declares its own - would otherwise emit two `declare i32 @printf` lines, and
+// clang rejects the second as an invalid redefinition.
+//
+// The dedupe itself lives on the EMITTER (extern_table.yoop) rather than here,
+// because the string-builder lowering and the runtime bridge declare libc and
+// runtime symbols of their own AFTER every body is walked, and those collide
+// with a user's `extern malloc` exactly as two user externs collide with each
+// other.
+//
+// Returns "" on success, or the refusal when two declarations of one name
+// disagree about the signature.
+export function emitExternDeclares(ref e: Emitter, ref prog: Program, ref graph: ModuleGraph): string {
+  let i: usize = 0;
+  while (i < graph.modules.len) {
+    const m = vec.vecGet(ref graph.modules, i);
+    let tm = vec.vecGet(ref prog.modules, i);
+    let f: usize = 0;
+    while (f < m.files.len) {
+      const programNode = nodeAt(ref m.ast, vec.vecGet(ref m.files, f).root);
+      let d: usize = 0;
+      while (d < programNode.childCount) {
+        const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, d)));
+        // An INTRINSIC has no symbol at all - codegen lowers the call to
+        // instructions - so a `declare` for one names something nothing
+        // defines. Harmless while nothing calls it, which is why it went
+        // unnoticed, but it is not a declaration of anything.
+        if (declNode.kind == ASTNodeKind.EXTERN_BLOCK && !declNode.flagA) {
+          const err = emitOneBlocksDeclares(ref e, ref prog, ref tm, ref m.ast, declNode);
+          if (err.len > 0) {
+            return err;
+          }
+        }
+        d += 1;
+      }
+      f += 1;
+    }
+    i += 1;
+  }
+  return "";
+}
+
+function emitOneBlocksDeclares(
   ref e: Emitter,
   ref prog: Program,
   ref tm: TypedModule,
-  m: Module,
+  ref ast: AST,
   blockNode: ASTNode
-): void {
+): string {
   let i: usize = 0;
   while (i < blockNode.childCount) {
-    const externNode = nodeAt(ref m.ast, childAt(ref m.ast, blockNode, i));
-    text.push(ref e.globals, "declare ");
-    text.push(ref e.globals, externReturnType(ref prog, ref tm, externNode.name));
-    text.push(ref e.globals, " @");
-    text.push(ref e.globals, externNode.name);
-    text.push(ref e.globals, "(");
-    emitExternParams(ref e, ref prog, ref tm, externNode.name);
-    text.push(ref e.globals, ")\n");
+    const externNode = nodeAt(ref ast, childAt(ref ast, blockNode, i));
+    disposable params: Vec<string> = vec.vecNew(4);
+    let variadic = false;
+    const ret = externSignature(ref prog, ref tm, externNode.name, ref params, ref variadic);
+    const err = externDeclare(
+      ref e, externNode.name, ret, vec.vecAsArray(ref params), variadic
+    );
+    if (err.len > 0) {
+      return err;
+    }
     i += 1;
   }
+  return "";
 }
 
-function externReturnType(ref prog: Program, ref tm: TypedModule, name: string): string {
-  switch (externFuncType(ref prog, ref tm, name)) {
-    case Type.Func { params: p, ret: r, variadic: v }: { return llvmType(ref prog, r); }
-    default: { return "void"; }
-  }
-}
-
-function emitExternParams(ref e: Emitter, ref prog: Program, ref tm: TypedModule, name: string): void {
+// The Func pass C filled for an extern, split into the three things a
+// `declare` is made of: the return type, the FIXED parameters, and whether a
+// `...` rode on the signature.
+function externSignature(
+  ref prog: Program,
+  ref tm: TypedModule,
+  name: string,
+  ref params: Vec<string>,
+  ref variadic: bool
+): string {
   switch (externFuncType(ref prog, ref tm, name)) {
     case Type.Func { params: p, ret: r, variadic: v }: {
       let i: usize = 0;
       while (i < p.len) {
-        if (i > 0) {
-          text.push(ref e.globals, ", ");
-        }
-        text.push(ref e.globals, llvmType(ref prog, vec.vecGet(ref p, i)));
+        vec.vecPush(ref params, llvmType(ref prog, vec.vecGet(ref p, i)));
         i += 1;
       }
+      variadic = v;
+      return llvmType(ref prog, r);
     }
-    default: { }
+    default: { return "void"; }
   }
 }
 

@@ -1,0 +1,289 @@
+module typecheck;
+
+/*
+  Pass D's value-`enum` work: naming a case, the operators an enum keeps, and
+  switching over one.
+
+  Split from enums.yoop the way variants.yoop is split from pass_d.yoop - that
+  file is the DECLARATION side (a shell, a fill, the lookups), this one is the
+  USE side, and the three questions here are reached from three unrelated places
+  in the walk.
+
+  Every rule below was established by PROBING the reference, and two of them are
+  the opposite of the obvious guess:
+
+    - a switch over an enum may have a default ALONGSIDE every case. A variant
+      switch may not - "exhaustive or defaulted, never both" - and the asymmetry
+      is real rather than an oversight: an enum's values are integers, so an
+      integer that names no case is representable and a default is never
+      provably dead.
+    - a switch over a STRING-backed enum is refused outright. There is no jump
+      table over pointers, and the reference says so by name rather than
+      lowering it to a chain of comparisons.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import * as str from "std/core/strings.yoop";
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { TokenTags, tagSpelling } from "../lex";
+
+// `Color.Red` - a compile-time constant of the enum, reached through a name
+// that is not a value.
+//
+// The BASE is decorated with the enum type as well as the whole expression.
+// That is what tells codegen this is a case constant rather than a field read:
+// `p.c` on a struct holding a `Color` field resolves the whole expression to the
+// same enum type, and only the base can say which of the two it is. An enum has
+// no fields, so a base that resolved to one is never anything else.
+export function checkEnumCaseAccess(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  expr: ASTNode
+): TypeId {
+  const base = nodeAt(ref ast, expr.childA);
+  const enumType = enumTypeNamed(ref prog, ref tm, base.name);
+  if (enumType == TYPE_ERROR_ID) {
+    return TYPE_ERROR_ID;
+  }
+  if (!lookupEnumCase(ref prog, enumType, expr.name).found) {
+    reportError(
+      ref prog,
+      `enum "${base.name}" has no case "${expr.name}"`,
+      expr.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  vec.vecSet(ref tm.resolvedTypes, expr.childA, enumType);
+  return enumType;
+}
+
+// Whether a binary operator applies to two operands of this enum type.
+//
+// An enum keeps equality always, and ORDERING and the BITWISE family only when
+// it is integer-backed. It loses arithmetic entirely: adding two enums produces
+// something that names no case, and the reference refuses it, so accepting it
+// here would make one program mean two things.
+//
+// Reports its own diagnostic, and returns false when it did.
+export function checkEnumOperator(
+  ref prog: Program,
+  expr: ASTNode,
+  enumType: TypeId
+): bool {
+  if (expr.operator == TokenTags.EQEQ || expr.operator == TokenTags.NEQ) {
+    return true;
+  }
+  const intBacked = isIntPrimType(ref prog, enumUnderlyingOf(ref prog, enumType));
+  if (intBacked && (isComparisonOperator(expr.operator) || isBitwiseOperator(expr.operator))) {
+    return true;
+  }
+  reportError(
+    ref prog,
+    `operator "${tagSpelling(expr.operator)}" cannot be applied to ${formatType(ref prog, enumType)} and ${formatType(ref prog, enumType)}`,
+    expr.sourceLoc
+  );
+  return false;
+}
+
+function isComparisonOperator(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.LT, TokenTags.GT, TokenTags.LTE, TokenTags.GTE: { return true; }
+    default: { return false; }
+  }
+}
+
+function isBitwiseOperator(tag: TokenTags): bool {
+  switch (tag) {
+    case TokenTags.AMP, TokenTags.PIPE, TokenTags.CARET,
+         TokenTags.LSHIFT, TokenTags.RSHIFT: { return true; }
+    default: { return false; }
+  }
+}
+
+// A switch scrutinee has to be something a jump table can dispatch on. An
+// integer-backed enum is; a string-backed one is not, and says so.
+export function checkEnumScrutinee(ref prog: Program, stmt: ASTNode, scrutType: TypeId): bool {
+  if (isIntPrimType(ref prog, enumUnderlyingOf(ref prog, scrutType))) {
+    return true;
+  }
+  reportError(
+    ref prog,
+    `cannot switch over ${formatType(ref prog, scrutType)}: its underlying type is string, so there is no jump table to build - use if/else with \`==\``,
+    stmt.sourceLoc
+  );
+  return false;
+}
+
+// Every pattern of one enum arm. Several may share an arm, and each records the
+// case it covers.
+//
+// A pattern is the VARIANT_PATTERN node `Color.Red` parses as - the two are the
+// same tokens, and only a resolved name tells them apart, so the parser leaves
+// one shape and this decides.
+export function checkEnumArm(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  arm: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  ref seenValues: Vec<int64>
+): void {
+  if (arm.childA == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, arm.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const patternId = childAt(ref ast, list, i);
+    const pattern = nodeAt(ref ast, patternId);
+    if (pattern.kind != ASTNodeKind.VARIANT_PATTERN) {
+      reportError(
+        ref prog,
+        `this switch is over ${formatType(ref prog, scrutType)}, so its patterns must be enum cases, not literals`,
+        pattern.sourceLoc
+      );
+      i += 1;
+      continue;
+    }
+    checkEnumPattern(
+      ref prog, ref tm, ref ast, patternId, pattern, scrutType, ref covered, ref seenValues
+    );
+    i += 1;
+  }
+}
+
+// One `case Color.Red:` pattern: the right enum, a real case, and not already
+// matched.
+function checkEnumPattern(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  patternId: NodeId,
+  pattern: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  ref seenValues: Vec<int64>
+): void {
+  // A payload brace is meaningless on an enum case - there is nothing to bind -
+  // and it is what a reader writes when they thought this was a variant.
+  if (pattern.childA != 0) {
+    reportError(
+      ref prog,
+      `enum case "${pattern.name}" carries no payload, so this pattern cannot bind one`,
+      pattern.sourceLoc
+    );
+    return;
+  }
+
+  const base = nodeAt(ref ast, pattern.childB);
+  const named = enumTypeNamed(ref prog, ref tm, base.name);
+  if (named == TYPE_ERROR_ID) {
+    reportError(ref prog, `"${base.name}" is not an enum`, pattern.sourceLoc);
+    return;
+  }
+  if (named != scrutType) {
+    reportError(
+      ref prog,
+      `this switch is over ${formatType(ref prog, scrutType)}, but the pattern matches ${formatType(ref prog, named)}`,
+      pattern.sourceLoc
+    );
+    return;
+  }
+
+  const found = lookupEnumCase(ref prog, scrutType, pattern.name);
+  if (!found.found) {
+    reportError(
+      ref prog,
+      `enum "${base.name}" has no case "${pattern.name}"`,
+      pattern.sourceLoc
+    );
+    return;
+  }
+
+  // Two cases may legitimately share a VALUE (`{ Red 1, Crimson 1 }` compiles,
+  // and so does either one on its own) - but a jump table may not name one value
+  // twice, so matching both in ONE switch is the mistake. Caught here because
+  // clang's answer is "duplicate case value in switch" against emitted IR, which
+  // names neither case and no source line. The reference emits exactly that.
+  // The pattern carries the enum type so codegen knows the width to emit the
+  // case value at, and which enum to read the value out of.
+  vec.vecSet(ref tm.resolvedTypes, patternId, scrutType);
+
+  // Marked covered even when the value check below refuses it, so one mistake
+  // does not also produce "this switch does not cover X".
+  if (usize(found.ordinal) < covered.len) {
+    if (vec.vecGet(ref covered, usize(found.ordinal))) {
+      reportError(
+        ref prog,
+        `case "${pattern.name}" is matched twice in this switch`,
+        pattern.sourceLoc
+      );
+    }
+    vec.vecSet(ref covered, usize(found.ordinal), true);
+  }
+
+  let v: usize = 0;
+  while (v < seenValues.len) {
+    if (vec.vecGet(ref seenValues, v) == found.value) {
+      reportError(
+        ref prog,
+        `case "${pattern.name}" has the same value as a case already matched in this switch, so the two arms cannot be told apart`,
+        pattern.sourceLoc
+      );
+      return;
+    }
+    v += 1;
+  }
+  vec.vecPush(ref seenValues, found.value);
+}
+
+// Whether an enum switch covers what it has to.
+//
+// Deliberately NOT the variant rule. A variant switch is exhaustive or has a
+// default and never both, because a variant's tag is exactly its cases. An
+// enum's values are integers, so a value naming no case is representable - which
+// makes a default alongside full coverage legitimate rather than dead, and makes
+// an OPEN enum (one whose case was derived with a bitwise operator) need one.
+export function checkEnumExhaustive(
+  ref prog: Program,
+  stmt: ASTNode,
+  scrutType: TypeId,
+  ref covered: Vec<bool>,
+  sawDefault: bool
+): void {
+  if (sawDefault) {
+    return;
+  }
+  if (enumIsOpen(ref prog, scrutType)) {
+    reportError(
+      ref prog,
+      `switch over open ${formatType(ref prog, scrutType)} requires a default arm - a case is derived with a bitwise operator, so values outside the named set are reachable`,
+      stmt.sourceLoc
+    );
+    return;
+  }
+
+  let missing: usize = 0;
+  let firstMissing: usize = 0;
+  let i: usize = 0;
+  while (i < covered.len) {
+    if (!vec.vecGet(ref covered, i)) {
+      if (missing == 0) {
+        firstMissing = i;
+      }
+      missing += 1;
+    }
+    i += 1;
+  }
+  if (missing == 0) {
+    return;
+  }
+  reportError(
+    ref prog,
+    `this switch does not cover "${enumCaseNameAt(ref prog, scrutType, firstMissing)}" (${missing} case(s) unhandled) - add it, or a default arm`,
+    stmt.sourceLoc
+  );
+}

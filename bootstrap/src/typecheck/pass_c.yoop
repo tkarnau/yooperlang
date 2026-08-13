@@ -22,15 +22,21 @@ export function passCFillShells(
   m: Module,
   moduleId: ModuleId
 ): void {
-  // GENERIC decls first, every file of them, then the concrete ones.
+  // TRAITS first, then GENERIC decls, then the concrete ones - every file of
+  // each before the next starts.
   //
-  // The order is load-bearing: a concrete decl with a `Vec<int>` field asks for
-  // an instance of Vec, and substituting into an unfilled template would
-  // produce an instance with no members. Doing every template first means a
-  // concrete decl can name any generic in its module regardless of where the
-  // two appear in the source.
-  fillEachFile(ref prog, ref tm, m, moduleId, true);
-  fillEachFile(ref prog, ref tm, m, moduleId, false);
+  // Each step is load-bearing. Traits go first because a generic decl's
+  // `implements Comparable<T>` clause and its parameters' BOUNDS both name
+  // traits, and both have to read the trait's type parameters back to know
+  // which application they mean; an unfilled shell answers "takes 0 type
+  // arguments" and the decl is refused for arity. Generics go before concrete
+  // decls because a concrete decl with a `Vec<int>` field asks for an instance
+  // of Vec, and doing every template first means it can name any generic in its
+  // module regardless of where the two appear in the source.
+  fillEachFile(ref prog, ref tm, m, moduleId, FillPhase.TRAITS);
+  fillEachFile(ref prog, ref tm, m, moduleId, FillPhase.GENERICS);
+  fillEachFile(ref prog, ref tm, m, moduleId, FillPhase.ALIASES);
+  fillEachFile(ref prog, ref tm, m, moduleId, FillPhase.CONCRETE);
 
   // Trait satisfaction is checked in its OWN sweep, after every fill.
   //
@@ -47,20 +53,47 @@ export function passCFillShells(
   materializeInstances(ref prog);
 }
 
+// Which decls a sweep is for. A trait is neither generic nor concrete for this
+// purpose - it fills before both, and its own type parameters do not change
+// that, because nothing instantiates a trait and there is no template to fill.
+// ALIASES sits between the two because of what an alias's RHS may name: a
+// generic APPLICATION (`type ParsingResult = Result<NodeId, ParsingError>;`)
+// needs the template filled, and a concrete decl's field may name the alias.
+// Within the phase, order does not matter - resolution is lazy, so an alias
+// naming a later one produces the answer on demand.
+enum FillPhase { TRAITS, GENERICS, ALIASES, CONCRETE }
+
 function fillEachFile(
   ref prog: Program,
   ref tm: TypedModule,
   m: Module,
   moduleId: ModuleId,
-  genericPass: bool
+  phase: FillPhase
 ): void {
   let f: usize = 0;
   while (f < m.files.len) {
     const file = vec.vecGet(ref m.files, f);
     beginFile(ref prog, file.absPath);
-    fillFileShells(ref prog, ref tm, m, file.root, moduleId, genericPass);
+    fillFileShells(ref prog, ref tm, m, file.root, moduleId, phase);
     f += 1;
   }
+}
+
+// Which sweep a declaration belongs to. Exactly one, always.
+function phaseOf(declNode: ASTNode): FillPhase {
+  if (declNode.kind == ASTNodeKind.TRAIT_DECL) {
+    return FillPhase.TRAITS;
+  }
+  // A TYPE_DECL with a childC is `type X = <annotation>;`, which is an alias
+  // and not a struct with no fields.
+  if (declNode.kind == ASTNodeKind.TYPE_DECL && declNode.childC != 0) {
+    return FillPhase.ALIASES;
+  }
+  if (declNode.childA != 0
+      && (declNode.kind == ASTNodeKind.TYPE_DECL || declNode.kind == ASTNodeKind.VARIANT_DECL)) {
+    return FillPhase.GENERICS;
+  }
+  return FillPhase.CONCRETE;
 }
 
 function fillFileShells(
@@ -69,7 +102,7 @@ function fillFileShells(
   m: Module,
   root: NodeId,
   moduleId: ModuleId,
-  genericPass: bool
+  phase: FillPhase
 ): void {
   const programNode = nodeAt(ref m.ast, root);
   let i: usize = 0;
@@ -77,12 +110,7 @@ function fillFileShells(
     const declId = declOf(ref m.ast, childAt(ref m.ast, programNode, i));
     const declNode = nodeAt(ref m.ast, declId);
 
-    // A decl with type parameters belongs to the generic sweep, and only to it.
-    const isGeneric = declNode.childA != 0
-      && (declNode.kind == ASTNodeKind.TYPE_DECL || declNode.kind == ASTNodeKind.VARIANT_DECL);
-    // A trait fills in the CONCRETE sweep regardless of its own type params:
-    // nothing instantiates a trait, so there is no template to fill first.
-    if (isGeneric != genericPass) {
+    if (phaseOf(declNode) != phase) {
       i += 1;
       continue;
     }
@@ -93,10 +121,21 @@ function fillFileShells(
         checkFunctionKinds(ref prog, ref tm, ref m.ast, declNode);
       }
       case ASTNodeKind.TYPE_DECL: {
-        fillStructFields(ref prog, ref tm, ref m.ast, declNode, moduleId);
+        // An ALIAS has no shell to fill - its name resolves straight to the
+        // RHS's TypeId. It is forced here anyway so a LATER module reading it
+        // through an import finds the answer already computed, in the one place
+        // where this module's AST is the one in hand.
+        if (declNode.childC != 0) {
+          forceAliasDecl(ref prog, ref tm, ref m.ast, declNode);
+        } else {
+          fillStructFields(ref prog, ref tm, ref m.ast, declNode, moduleId);
+        }
       }
       case ASTNodeKind.VARIANT_DECL: {
         fillVariantCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
+      }
+      case ASTNodeKind.ENUM_DECL: {
+        fillEnumCases(ref prog, ref tm, ref m.ast, declNode, moduleId);
       }
       case ASTNodeKind.TRAIT_DECL: {
         fillTraitMethods(ref prog, ref tm, ref m.ast, declNode, moduleId);
@@ -163,6 +202,11 @@ function beginFill(
   let info = genericAt(ref prog, declId);
   disposable names: Vec<string> = typeParamNames(ref ast, declNode);
   beginTypeParams(ref prog, ref info.params, ref names);
+  // Bounds resolve INSIDE the scope they belong to, and before anything else
+  // in the decl does: one parameter's bound may name another
+  // (`<T implements Cmp<K>, K>`), and a field or signature that mentions `T`
+  // has to see a T whose promises are already recorded.
+  resolveTypeParamBounds(ref prog, ref tm, ref ast, declNode, ref info.params);
   return info.template;
 }
 
@@ -246,6 +290,7 @@ function fillFunctionSignature(
     let p: usize = 0;
     while (p < list.childCount) {
       const paramNode = nodeAt(ref ast, childAt(ref ast, list, p));
+      checkParamKind(ref prog, ref ast, paramNode);
       const annotated = resolveTypeAnnotation(ref prog, ref tm, ref ast, paramNode.childA);
       // `ref v: Vec<T>` is `ref Vec<T>` in the SIGNATURE - which is what makes
       // passing a bare `v` a type error rather than a silent copy. The body
@@ -264,7 +309,13 @@ function fillFunctionSignature(
   setType(ref prog, typeId, Type.Func {
     params: params,
     ret: ret,
-    variadic: false,
+    // `...` rides on the EXTERN_FUNCTION_DECL's flagA and nowhere else. The
+    // kind is tested rather than the flag alone because this same function
+    // fills a FUNCTION_DECL and a METHOD_DECL, and flagA on either of those is
+    // free for the next feature that wants it. A yoop function cannot be
+    // variadic - the parser refuses `...` outside an extern - so `false` here
+    // is the answer and not a placeholder.
+    variadic: declNode.kind == ASTNodeKind.EXTERN_FUNCTION_DECL && declNode.flagA,
   });
 }
 
@@ -289,6 +340,7 @@ function beginFillFunction(
       let info = genericAt(ref prog, d);
       disposable names: Vec<string> = typeParamNames(ref ast, declNode);
       beginTypeParams(ref prog, ref info.params, ref names);
+      resolveTypeParamBounds(ref prog, ref tm, ref ast, declNode, ref info.params);
       return info.template;
     }
     default: { return TYPE_ERROR_ID; }
@@ -335,7 +387,8 @@ function fillStructFields(
   // `module` is what codegen mangles the LLVM type name against, and `generic`
   // is what marks a template as one.
   setType(ref prog, typeId, Type.Struct {
-    decl: { name: declNode.name, module: moduleId, populated: true },
+    decl: { name: declNode.name, module: moduleId, populated: true,
+            propagatesKind: propagatedKindNameOf(ref ast, declNode) },
     fields: fields,
     methods: methods,
     implementsTraits: traits,
@@ -411,7 +464,8 @@ function fillVariantCases(
 
   endTypeParams(ref prog);
   setType(ref prog, typeId, Type.Variant {
-    decl: { name: declNode.name, module: moduleId, populated: true },
+    decl: { name: declNode.name, module: moduleId, populated: true,
+            propagatesKind: propagatedKindNameOf(ref ast, declNode) },
     cases: cases,
     methods: methods,
     implementsTraits: traits,
@@ -421,9 +475,16 @@ function fillVariantCases(
 
 // `const SEEK_SET: c_int = 0;` - the annotation, and the value.
 //
-// The initializer must be a compile-time INTEGER: a const is inlined at every
-// use rather than emitted as a global, so there has to be something to inline.
-// Anything else is refused by name rather than silently becoming zero.
+// The initializer must be a compile-time CONSTANT of the declared type: a const
+// is inlined at every use rather than loaded from a global, so there has to be
+// something to inline. const_init.yoop is the list of shapes that qualify, and
+// anything else - a name, a call, a struct literal - is refused by name rather
+// than silently becoming zero.
+//
+// Only INTEGER values are read out here, into the symbol. The rest are
+// materialized by codegen straight from this same AST, because a string's
+// spelling and an array's payload are both module-level DATA rather than a
+// number a symbol could carry.
 function fillModuleConst(
   ref prog: Program,
   ref tm: TypedModule,
@@ -446,24 +507,33 @@ function fillModuleConst(
   }
   const declared = resolveTypeAnnotation(ref prog, ref tm, ref ast, declNode.childA);
 
-  let value: int64 = 0;
-  if (!constIntValue(ref ast, declNode.childB, ref value)) {
+  if (!isInlinableConst(ref prog, ref ast, declNode.childB, declared)) {
+    // A CALL gets its own message. The reference FOLDS one at compile time, so
+    // "needs a literal" reads as a syntax complaint about a program that is
+    // perfectly well formed - the missing piece is a comptime interpreter, and
+    // saying so is what points at plans/bootstrap-completion.md rather than at
+    // the line.
+    if (isCallInitializer(ref ast, declNode.childB)) {
+      reportError(
+        ref prog,
+        `module-level const "${declNode.name}" is initialized by a CALL - the reference folds one at compile time and the bootstrap has no comptime interpreter, so there is nothing to inline`,
+        declNode.sourceLoc
+      );
+      return;
+    }
     reportError(
       ref prog,
-      `module-level const "${declNode.name}" needs an integer literal initializer - the bootstrap inlines consts, so there is nothing else it can be yet`,
-      declNode.sourceLoc
-    );
-    return;
-  }
-  if (!isIntPrimType(ref prog, declared)) {
-    reportError(
-      ref prog,
-      `module-level const "${declNode.name}" is ${formatType(ref prog, declared)}; only integer consts are supported yet`,
+      `module-level const "${declNode.name}" needs a literal initializer of type ${formatType(ref prog, declared)} - the bootstrap inlines consts, so it has to be a number, a bool, a string, or an array of those`,
       declNode.sourceLoc
     );
     return;
   }
 
+  // An integer rides in the symbol, which is what keeps the common case a bare
+  // immediate with no module-level datum behind it. Everything else is
+  // materialized by codegen; the symbol only has to say which TYPE it is.
+  let value: int64 = 0;
+  constIntValue(ref ast, declNode.childB, ref value);
   setSymbol(ref prog, symId, Symbol.Value { typeId: declared, intVal: value });
 }
 
@@ -599,6 +669,37 @@ export function checkFunctionKinds(
   }
 }
 
+// `scoped h: ref FileHandle` - the kind a PARAMETER carries.
+//
+// Only that the kind EXISTS. Whether it may apply to a parameter at all is a
+// clause the bootstrap does not record (`appliesTo`), so that half is the
+// reference's and not ours - but an unknown NAME is refused on both sides, and
+// it is the half that catches a typo.
+//
+// Nothing reads the prefix after this. A kind on a parameter is provenance, and
+// none of the clauses that could mean something at run time apply to one.
+function checkParamKind(ref prog: Program, ref ast: AST, paramNode: ASTNode): void {
+  if (paramNode.childE == 0) {
+    return;
+  }
+  const list = nodeAt(ref ast, paramNode.childE);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    const prefix = nodeAt(ref ast, childAt(ref ast, list, i));
+    switch (lookupKind(ref prog, prefix.name)) {
+      case Option.Some { value: info }: { }
+      case Option.None: {
+        reportError(
+          ref prog,
+          `unknown kind "${prefix.name}" on parameter "${paramNode.name}"`,
+          prefix.sourceLoc
+        );
+      }
+    }
+    i += 1;
+  }
+}
+
 // A vtable's fields, and the promise that it erases a real trait.
 //
 // The fields are ordinary struct fields whose types happen to be functions -
@@ -647,7 +748,8 @@ function fillVtable(
   }
 
   setType(ref prog, typeId, Type.Struct {
-    decl: { name: declNode.name, module: moduleId, populated: true },
+    decl: { name: declNode.name, module: moduleId, populated: true,
+            propagatesKind: propagatedKindNameOf(ref ast, declNode) },
     fields: fields,
     methods: map.mapNew(0, map.stringKeyOps()),
     implementsTraits: vec.vecNew(0),
@@ -665,7 +767,9 @@ function checkEachFileTraits(ref prog: Program, ref tm: TypedModule, m: Module):
     let i: usize = 0;
     while (i < programNode.childCount) {
       const declNode = nodeAt(ref m.ast, declOf(ref m.ast, childAt(ref m.ast, programNode, i)));
-      if (declNode.kind == ASTNodeKind.TYPE_DECL || declNode.kind == ASTNodeKind.VARIANT_DECL) {
+      if (declNode.kind == ASTNodeKind.TYPE_DECL ||
+          declNode.kind == ASTNodeKind.VARIANT_DECL ||
+          declNode.kind == ASTNodeKind.ENUM_DECL) {
         checkDeclTraits(ref prog, ref tm, ref m.ast, declNode);
       }
       i += 1;
@@ -685,16 +789,32 @@ function checkDeclTraits(
     return;
   }
   let typeId: TypeId = TYPE_ERROR_ID;
+  let generic: bool = false;
   switch (symbolAt(ref prog, symId)) {
     case Symbol.Struct { typeId: t }: { typeId = t; }
     case Symbol.VariantT { typeId: t }: { typeId = t; }
+    case Symbol.ValueEnum { typeId: t }: { typeId = t; }
     // A generic decl's promise is about its TEMPLATE, which is what carries
     // the methods and the implements list.
-    case Symbol.GenericDecl { decl: d, sort: srt }: { typeId = genericAt(ref prog, d).template; }
+    case Symbol.GenericDecl { decl: d, sort: srt }: {
+      typeId = genericAt(ref prog, d).template;
+      // This sweep RE-READS the implements clause, and for a generic decl that
+      // clause can name the decl's own parameters (`implements Cmp<Box<T>>`).
+      // The fill sweep resolved it inside their scope; so must this one, or
+      // every generic type implementing a generic trait reports "unknown type
+      // T" from a line that resolved fine a moment earlier.
+      let info = genericAt(ref prog, d);
+      disposable names: Vec<string> = typeParamNames(ref ast, declNode);
+      beginTypeParams(ref prog, ref info.params, ref names);
+      generic = true;
+    }
     default: { return; }
   }
 
   disposable traits: Vec<TypeId> = collectImplementedTraits(ref prog, ref tm, ref ast, declNode);
+  if (generic) {
+    endTypeParams(ref prog);
+  }
   checkMethodsRequired(ref prog, ref ast, declNode, ref traits);
   checkTraitsSatisfied(ref prog, ref tm, declNode, typeId, ref traits);
 }

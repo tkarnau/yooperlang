@@ -57,6 +57,13 @@ export enum ASTNodeKind implements Display {
   IF_STATEMENT,
   WHILE_STATEMENT,
   DISCARD_STATEMENT,
+  // `expr?` - yield the operand's Ok payload, or return its Err from the
+  // enclosing function. childA is the operand.
+  //
+  // An EXPRESSION node rather than a statement-level rewrite, because `?`
+  // appears wherever an expression may: `f(g()?)`, `a? + b?`, `f()?.field`.
+  // A desugar in the parser would only ever cover the shape that happens to sit
+  // at the top of a `let`.
   TRY_OP,
 
   // phase 4 refs, arrays, control flow

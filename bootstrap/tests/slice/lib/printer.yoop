@@ -1,0 +1,16 @@
+// A library that declares its OWN printf extern, which the entry module also
+// declares.
+//
+// This is the ordinary shape rather than an odd one: an extern is not exported
+// and does not travel through an import, so every file that calls printf writes
+// the declaration again - 158 files in this tree do. One LLVM module holds the
+// whole graph, though, and a symbol may be declared in it exactly ONCE, so the
+// two declarations have to collapse to one `declare i32 @printf(ptr, ...)`.
+// Emitting both is an invalid redefinition and clang rejects the program.
+extern "C" from "stdio.h" {
+  function printf(fmt: string, ...): int32;
+}
+
+export function announceDeclared(n: int32): void {
+  printf("declared its own: %d\n", n);
+}

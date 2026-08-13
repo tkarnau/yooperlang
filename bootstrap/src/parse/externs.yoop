@@ -25,10 +25,15 @@ module parse;
 // so the TYPECHECKER has something to check calls against. Several are generic,
 // which an ordinary extern never is.
 //
-// The `from` clause names the library the symbol comes from; nothing consumes
-// it yet - linking against anything but libc is a layer-6 feature the bootstrap
-// does not have - but it is recorded rather than dropped, because the moment
-// linking grows an option it is the thing that decides it.
+// The `from` clause has two spellings and they mean DIFFERENT things:
+//
+//   extern "C" from "stdio.h"    { ... }   a HEADER name - documentation
+//   extern "C" from library "m"  { ... }   a LIBRARY name - `-lm` at link time
+//
+// The first is recorded and read by nobody. The second is collected
+// program-wide by codegen and handed to the link step, which is exactly what
+// the reference does with it - established by probing, since a program using
+// `cos` links there and fails to link with the bare-string form.
 
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
@@ -38,9 +43,18 @@ import { TokenTags, tagName, posToSourceLocation } from "../lex";
 import * as str from "std/core/strings.yoop";
 import { ParsingError } from "../diagnostics";
 
+// The contextual keyword that turns a `from` clause into a LINK instruction.
+export const LIBRARY_KEYWORD: string = "library";
+
 // `extern "C" from "lib" { ... }`
 //
-//   strId             the `from` library name, interned; 0-length when absent
+//   strId             the `from` source name, interned
+//   operator          LIBRARY when the source was written `from library "m"`,
+//                     and NONE when it was a bare `from "stdio.h"`. The two are
+//                     not the same thing: a bare name is a HEADER and documents
+//                     where the declaration came from, while `library "m"`
+//                     names something the LINKER has to be told about. See the
+//                     link-flag note below.
 //   own childIds run  the EXTERN_FUNCTION_DECLs
 export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingError> {
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_BLOCK);
@@ -65,6 +79,22 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
   // library name is the thing layer 6 will need the day it links anything but
   // libc. std spells it `"stdio.h"`, `"yoop_runtime"`, and so on.
   SelfLexing.expect(ref ps, TokenTags.FROM)?;
+  // `from library "m"` is the LINKING form: it lowers to `-lm` on the clang
+  // line, program-wide. `from "math.h"` is the documenting form and lowers to
+  // nothing at all. Both are recorded in the same slot, and `operator` is what
+  // says which one was written - so the link step reads a flag rather than
+  // guessing from a name that could be either.
+  //
+  // `library` is CONTEXTUAL - it lexes as an ordinary IDENT on both sides, so
+  // it is recognized by its TEXT the way `kind` and `propagates` are, and a
+  // variable called `library` stays legal everywhere else.
+  //
+  // It must be followed by a STRING; `from library m` is refused on both sides,
+  // which was established by probing the reference.
+  if (peekIsWord(ref ps, LIBRARY_KEYWORD)) {
+    SelfLexing.advance(ref ps)?;
+    node.operator = TokenTags.LIBRARY;
+  }
   const libTok = SelfLexing.expect(ref ps, TokenTags.STRLITERAL)?;
   node.strId = internString(ref ps, decodeStringLiteral(ref ps, libTok)?);
 
@@ -92,6 +122,8 @@ export function parseExternBlock(ref ps: ParserState): Result<NodeId, ParsingErr
 //
 // Type parameters are here for the intrinsics: `heapAlloc<T>(n: usize): T[]` is
 // generic over what it allocates, and a C extern never is.
+//
+//   flagA   the signature is VARIADIC - it ended in `...`
 function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> {
   SelfLexing.expect(ref ps, TokenTags.FUNCTION)?;
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.EXTERN_FUNCTION_DECL);
@@ -101,10 +133,28 @@ function parseExternFunction(ref ps: ParserState): Result<NodeId, ParsingError> 
   SelfLexing.expect(ref ps, TokenTags.LPAREN)?;
   const loc = posToSourceLocation(ps.src, ps.pos, 1);
   disposable ids: Vec<NodeId> = vec.vecNew(4);
+  node.flagA = false;
   while (
     SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
     SelfLexing.peek(ref ps).tag != TokenTags.EOF
   ) {
+    // `printf(fmt: string, ...)`. The `...` CLOSES the list - it is a marker on
+    // the signature rather than a parameter, so it produces no PARAM node and
+    // nothing after it could be one. Probing the JS reference confirms the same
+    // rule: `..., x: int32` there is "expected rparen, got comma", and so is a
+    // trailing comma or a second `...`.
+    if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOTDOT) {
+      SelfLexing.advance(ref ps)?;
+      node.flagA = true;
+      if (SelfLexing.peek(ref ps).tag != TokenTags.RPAREN) {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps,
+          `\`...\` must be the LAST parameter, so nothing may follow it - got ${tagName(SelfLexing.peek(ref ps).tag)}`,
+          peekLengthUsize(ref ps),
+        )};
+      }
+      break;
+    }
     vec.vecPush(ref ids, parseFunctionParam(ref ps)?);
     if (SelfLexing.peek(ref ps).tag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;

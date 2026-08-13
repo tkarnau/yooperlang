@@ -108,7 +108,7 @@ check on a change, and say so when you do.
 
 ## Run / test
 
-- `npm test` - all tests (unit + e2e). Currently 1097 tests, ~40s.
+- `npm test` - all tests (unit + e2e). Currently 1232 tests, ~70s.
 - `npm run test:unit` - fast, no clang.
 - `npm run test:e2e` - full pipeline, requires `clang` on PATH.
 - Compile one file: `node src/yoopiler.js path/to/file.yoop -o out`.
@@ -122,8 +122,12 @@ check on a change, and say so when you do.
   two known false positives - see
   [docs/writing_yoop.md](docs/writing_yoop.md) section 4.
 - Bootstrap: `npm run test:slice` (end-to-end executables),
-  `npm run test:parity` (layer dumps vs the JS reference), and
+  `npm run test:parity` (layer dumps vs the JS reference),
+  `npm run test:selfhost` (the three-stage build and its fixpoint), and
   `node src/yoopiler.js --test bootstrap/src/<module>` per module.
+  **The bootstrap compiles itself as of 2026-08-13**; `YOOP_BOOT_COMPILER=<path>
+  npm run test:slice` runs the slice suite through an already-built stage
+  instead of building one with the JS reference.
 - `yoopiler --lsp` runs the language server over stdio instead of compiling. The
   import of [src/lsp/server.js](src/lsp/server.js) is **dynamic on purpose** -
   that module attaches `process.stdin` handlers at module scope, so a static

@@ -1,0 +1,10 @@
+// The other half: a module that calls printf WITHOUT declaring it, so the call
+// falls back to the compiler builtin.
+//
+// The builtin asks for its own `declare` line, and in a graph where some other
+// module already declared an extern printf that line would be the second one.
+// Both compilers suppress it for the same reason; the JS reference calls the
+// condition `usesLegacyPrintf(ast) && !externFnNames.has("printf")`.
+export function announceBuiltin(n: int32): void {
+  printf("used the builtin: %d\n", n);
+}

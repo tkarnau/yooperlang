@@ -1,0 +1,8 @@
+greet=yoop len=4 empty=0
+codes=4 first=32 last=10
+names=Sun Mon Tue (3)
+empty-array=0
+scale=1.5 tiny=0.125 neg=-2.25 on=true
+ws=2
+sum=64
+exit=0

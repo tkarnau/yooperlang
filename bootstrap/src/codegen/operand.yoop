@@ -8,13 +8,26 @@ module codegen;
 // straight into its buffer with no allocation at all.
 
 import { Text }, * as text from "std/core/text.yoop";
+import { pushFloatBitsHex } from "../utils";
 
 export variant Operand {
   Imm    { value: uint64 },   // 42
   NegImm { value: uint64 },   // -42, for a negative case pattern
+  // `0x3FF8000000000000` - a float constant, as the 64 bits of a DOUBLE. LLVM
+  // takes an arbitrary decimal for a `double` but not for a `float` (`float 1.3`
+  // is "floating point constant invalid for type", because 1.3 does not
+  // round-trip through 32 bits), so the hex form is the only spelling that
+  // works for both and the reference emits it for both too. What differs
+  // between the two widths is which VALUE was measured - see float_bits.yoop.
+  FloatImm { bits: uint64 },
   Bool   { value: bool },     // true / false, how LLVM spells an i1 immediate
   Temp   { id: usize },       // %t3
   StrRef { id: usize },       // @.str.0
+  // `{ ptr @.arr.0, i64 4 }` - an array DESCRIPTOR as a constant aggregate.
+  // LLVM takes one as an operand, which is what lets a module-level array const
+  // be inlined at every use the way an integer one is: the payload lives in a
+  // module datum and the descriptor pointing at it costs no instructions.
+  ArrayConst { dataId: usize, len: usize },
   // `@mathx_1__add` - a FUNCTION's address, which is what a function value is.
   // There is nothing to load: a symbol IS a constant pointer in LLVM.
   FuncRef { home: string, name: string },
@@ -30,48 +43,66 @@ export variant Operand {
 // An operand is always part of an instruction, and instructions are assembled
 // per function so the hoisted allocas can be spliced in ahead of them.
 export function emitOperand(ref e: Emitter, op: Operand): void {
+  pushOperand(ref e.fn, op);
+}
+
+// The same rendering into an ARBITRARY buffer. A module-level const's payload
+// is built out of operands too, and that goes in `globals` rather than in any
+// function's instruction stream.
+export function pushOperand(ref out: Text, op: Operand): void {
   switch (op) {
-    case Operand.Imm { value: v }: { text.pushUint(ref e.fn, v); }
+    case Operand.Imm { value: v }: { text.pushUint(ref out, v); }
     case Operand.NegImm { value: v }: {
-      text.pushByte(ref e.fn, '-');
-      text.pushUint(ref e.fn, v);
+      text.pushByte(ref out, '-');
+      text.pushUint(ref out, v);
     }
+    case Operand.FloatImm { bits: b }: { pushFloatBitsHex(ref out, b); }
     case Operand.Bool { value: b }: {
       if (b) {
-        text.push(ref e.fn, "true");
+        text.push(ref out, "true");
       } else {
-        text.push(ref e.fn, "false");
+        text.push(ref out, "false");
       }
     }
     case Operand.Temp { id: n }: {
-      text.push(ref e.fn, "%t");
-      text.pushUint(ref e.fn, uint64(n));
+      text.push(ref out, "%t");
+      text.pushUint(ref out, uint64(n));
     }
     case Operand.FuncRef { home: h, name: n }: {
-      text.pushByte(ref e.fn, '@');
+      text.pushByte(ref out, '@');
       if (h.len > 0) {
-        text.push(ref e.fn, h);
-        text.push(ref e.fn, SYMBOL_MODULE_SEPARATOR);
+        text.push(ref out, h);
+        text.push(ref out, SYMBOL_MODULE_SEPARATOR);
       }
-      text.push(ref e.fn, n);
+      text.push(ref out, n);
     }
-    case Operand.Null: { text.push(ref e.fn, "null"); }
+    case Operand.Null: { text.push(ref out, "null"); }
     case Operand.StrRef { id: n }: {
-      text.push(ref e.fn, "@.str.");
-      text.pushUint(ref e.fn, uint64(n));
+      text.push(ref out, "@.str.");
+      text.pushUint(ref out, uint64(n));
+    }
+    //   { ptr @.arr.0, i64 4 }
+    // The descriptor spelled out. It must match ARRAY_DESCRIPTOR exactly, or
+    // the aggregate does not typecheck as the array it is standing in for.
+    case Operand.ArrayConst { dataId: d, len: n }: {
+      text.push(ref out, "{ ptr @.arr.");
+      text.pushUint(ref out, uint64(d));
+      text.push(ref out, ", i64 ");
+      text.pushUint(ref out, uint64(n));
+      text.push(ref out, " }");
     }
     case Operand.SlotAddr { name: n, id: i }: {
-      text.pushByte(ref e.fn, '%');
-      text.push(ref e.fn, n);
+      text.pushByte(ref out, '%');
+      text.push(ref out, n);
       // Mirrors `slot()` in context.yoop, including its reserved id.
       if (i == ARG_PTR_SLOT) {
-        text.push(ref e.fn, ".arg");
+        text.push(ref out, ".arg");
       } else {
-        text.pushByte(ref e.fn, '.');
-        text.pushUint(ref e.fn, uint64(i));
-        text.push(ref e.fn, ".addr");
+        text.pushByte(ref out, '.');
+        text.pushUint(ref out, uint64(i));
+        text.push(ref out, ".addr");
       }
     }
-    case Operand.None: { text.push(ref e.fn, "void"); }
+    case Operand.None: { text.push(ref out, "void"); }
   }
 }

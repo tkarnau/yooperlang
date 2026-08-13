@@ -1,0 +1,5 @@
+n=7
+int 42 bool true str n=7
+alloc ok=1
+len=3 measured=3
+exit=0

@@ -1,0 +1,130 @@
+module typecheck;
+
+// What a module-level `const` may be initialized WITH.
+//
+// A const is INLINED at every use rather than loaded from a global, which is
+// what makes an imported one cost nothing - and it is also the whole constraint
+// on this file. The initializer has to be something there IS to inline, so it
+// is a literal, or an array of literals, and never a name, a call or an
+// expression. The reference constant-FOLDS through calls (and drops their side
+// effects doing it); that stays refused here rather than half-built.
+//
+// Four shapes are inlinable, and each has an LLVM spelling that needs no
+// storage of its own except the array's payload:
+//
+//   const N: int32   = 42;               an immediate
+//   const F: float64 = 1.5;              an immediate, as 64 bits of hex
+//   const B: bool    = true;             an immediate
+//   const S: string  = "YOOP_ROOT";      a module-level string constant
+//   const A: uint8[] = [32, 9, 13, 10];  a descriptor over a module-level array
+//
+// Only the SHAPE is decided here. codegen/const_data.yoop materializes the
+// value, and it reads the same AST rather than being handed a copy - which is
+// what keeps the two from disagreeing about what a literal means.
+
+import { AST, ASTNode, ASTNodeKind, NodeId, childAt, nodeAt } from "../ast";
+import { TokenTags } from "../lex";
+
+// Whether `exprId` is a constant of type `declared`, and therefore inlinable.
+//
+// Reported by the CALLER, because a const and a `let` want different wording -
+// one is inlined and the other is a global's initializer, and the reason a call
+// is refused differs accordingly.
+export function isInlinableConst(
+  ref prog: Program,
+  ref ast: AST,
+  exprId: NodeId,
+  declared: TypeId
+): bool {
+  if (exprId == 0 || declared == TYPE_ERROR_ID) {
+    return false;
+  }
+  // An ARRAY const is its elements, each of which has to be a scalar constant
+  // of the element type. Nested arrays are not inlinable: the payload would
+  // need a descriptor per row, and no file in the corpus has one.
+  const elem = arrayElementOf(ref prog, declared);
+  if (elem != TYPE_ERROR_ID) {
+    return isConstArrayLiteral(ref prog, ref ast, exprId, elem);
+  }
+  return isConstScalar(ref prog, ref ast, exprId, declared);
+}
+
+// `[32, 9, 13, 10]` - a literal whose every element is a scalar constant of the
+// element type. An empty literal is legal and gives a zero-length descriptor.
+function isConstArrayLiteral(
+  ref prog: Program,
+  ref ast: AST,
+  exprId: NodeId,
+  elem: TypeId
+): bool {
+  const expr = nodeAt(ref ast, exprId);
+  if (expr.kind != ASTNodeKind.ARRAY_LITERAL) {
+    return false;
+  }
+  if (expr.childA == 0) {
+    return true;
+  }
+  const list = nodeAt(ref ast, expr.childA);
+  let i: usize = 0;
+  while (i < list.childCount) {
+    if (!isConstScalar(ref prog, ref ast, childAt(ref ast, list, i), elem)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}
+
+// One literal, checked against the type it has to fit. The type test is what
+// makes `const S: string = 5;` a refusal rather than a zero.
+function isConstScalar(
+  ref prog: Program,
+  ref ast: AST,
+  exprId: NodeId,
+  declared: TypeId
+): bool {
+  if (exprId == 0) {
+    return false;
+  }
+  const expr = nodeAt(ref ast, exprId);
+  // `-5` is a UNARY_EXPRESSION over a literal rather than a negative literal -
+  // the parser does not fold it, because `-x` and `-5` are the same shape until
+  // you look at the operand. So unwrap one level of minus, for ints and floats
+  // alike.
+  if (expr.kind == ASTNodeKind.UNARY_EXPRESSION && expr.operator == TokenTags.MINUS) {
+    return isConstScalar(ref prog, ref ast, expr.childA, declared);
+  }
+  if (expr.kind == ASTNodeKind.INT_LITERAL) {
+    // An int literal pins to an integer and to nothing else, the same rule pass
+    // D applies inside a body. `const a: float64 = 2;` wants `2.0`.
+    return isIntPrimType(ref prog, enumUnderlyingOf(ref prog, declared));
+  }
+  if (expr.kind == ASTNodeKind.FLOAT_LITERAL) {
+    return isFloatPrimType(ref prog, declared);
+  }
+  if (expr.kind == ASTNodeKind.BOOL_LITERAL) {
+    return declared == primTypeId(PrimKind.BOOL);
+  }
+  if (expr.kind == ASTNodeKind.STRING_LITERAL) {
+    return isStringPrimType(ref prog, enumUnderlyingOf(ref prog, declared));
+  }
+  return false;
+}
+
+// Whether the initializer is a CALL, which is the one refused shape that is
+// refused for a REASON rather than for a spelling: the reference folds it at
+// compile time and there is no comptime interpreter here.
+export function isCallInitializer(ref ast: AST, exprId: NodeId): bool {
+  if (exprId == 0) {
+    return false;
+  }
+  return nodeAt(ref ast, exprId).kind == ASTNodeKind.CALL_EXPRESSION;
+}
+
+// The ELEMENT type of an array, or TYPE_ERROR_ID when the type is not one.
+export function arrayElementOf(ref prog: Program, id: TypeId): TypeId {
+  switch (typeAt(ref prog, id)) {
+    case Type.Array { elem: e }: { return e; }
+    default: { return TYPE_ERROR_ID; }
+  }
+}

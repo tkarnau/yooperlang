@@ -1,0 +1,11 @@
+module shared;
+
+// The identical namespace import, in the other file of the same module. This is
+// the line that used to be refused as a collision.
+
+import * as counter from "../counter.yoop";
+
+export function bumpedTwice(n: int): int {
+  // bumpedOnce is a SIBLING, so it needs no import; counter does.
+  return counter.bump(bumpedOnce(n));
+}

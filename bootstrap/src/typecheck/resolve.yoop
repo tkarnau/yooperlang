@@ -197,10 +197,80 @@ function typeIdOfSymbol(
     case Symbol.ValueEnum { typeId: t }: { return closedType(ref prog, t, annot); }
     case Symbol.Trait { typeId: t }:     { return closedType(ref prog, t, annot); }
     case Symbol.Vtable { typeId: t }:    { return closedType(ref prog, t, annot); }
+    // A transparent alias hands back the RHS's own TypeId, so `NodeId` and
+    // `usize` are the same type and `id == id` keeps working unchanged.
+    case Symbol.Alias { annot: a, typeId: t, resolving: r }: {
+      return closedType(
+        ref prog,
+        resolveAliasSymbol(ref prog, ref tm, ref ast, symId, a, t, r, annot),
+        annot
+      );
+    }
     default: {
       reportError(ref prog, `"${annot.name}" is not a type`, annot.sourceLoc);
       return TYPE_ERROR_ID;
     }
+  }
+}
+
+// The RHS of `type X = <annotation>;`, resolved once and remembered.
+//
+// LAZY on purpose, and it has to be: an alias in the same module may name one
+// declared further down the file, and forcing them in source order would refuse
+// the second one for naming a type that is right there. Asking for the answer is
+// what produces it, so declaration order stops mattering.
+//
+// The `ast` here is the CURRENT module's, which is correct because pass C forces
+// every alias in a module while that module is the one being filled - so an
+// alias reached from another module is already resolved and the annotation is
+// never read against the wrong arena. `forceAliasSymbol` in pass_c.yoop is what
+// keeps that true.
+function resolveAliasSymbol(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  symId: SymbolId,
+  annotId: NodeId,
+  cached: TypeId,
+  resolving: bool,
+  site: ASTNode
+): TypeId {
+  if (cached != TYPE_ERROR_ID) {
+    return cached;
+  }
+  if (resolving) {
+    // `type A = B; type B = A;`. Without this the walk never returns, and a
+    // compiler that hangs says less than one that names the cycle.
+    reportError(
+      ref prog,
+      `type alias "${site.name}" is defined in terms of itself`,
+      site.sourceLoc
+    );
+    return TYPE_ERROR_ID;
+  }
+  setSymbol(ref prog, symId, Symbol.Alias { annot: annotId, typeId: TYPE_ERROR_ID, resolving: true });
+  const target = resolveTypeAnnotation(ref prog, ref tm, ref ast, annotId);
+  setSymbol(ref prog, symId, Symbol.Alias { annot: annotId, typeId: target, resolving: false });
+  return target;
+}
+
+// Force an alias declared in THIS module, so a later module reading it through
+// an import or a namespace finds the answer already there. Called by pass C.
+export function forceAliasDecl(
+  ref prog: Program,
+  ref tm: TypedModule,
+  ref ast: AST,
+  declNode: ASTNode
+): void {
+  const symId = lookupOwnName(ref tm, declNode.name);
+  if (symId == SYMBOL_NONE_ID) {
+    return;
+  }
+  switch (symbolAt(ref prog, symId)) {
+    case Symbol.Alias { annot: a, typeId: t, resolving: r }: {
+      resolveAliasSymbol(ref prog, ref tm, ref ast, symId, a, t, r, declNode);
+    }
+    default: { }
   }
 }
 
@@ -250,6 +320,15 @@ function resolveGenericApplication(
       `"${annot.name}" takes ${info.params.len} type argument(s), got ${args.len}`,
       annot.sourceLoc
     );
+    return TYPE_ERROR_ID;
+  }
+
+  // `Holder<Plain>` where `Holder<T implements Display>` - the same promise a
+  // generic CALL checks, at the other place a generic is applied. Checked
+  // before instantiate registers anything, so a refused application leaves no
+  // half-formed instance in the registry.
+  if (!checkBoundsSatisfied(ref prog, ref info.params, ref args,
+                            `generic "${annot.name}"`, annot.sourceLoc)) {
     return TYPE_ERROR_ID;
   }
 
@@ -320,6 +399,52 @@ export function isIntPrimType(ref prog: Program, id: TypeId): bool {
   }
 }
 
+// True when `id` names a float primitive. The float twin of `isIntPrimType`,
+// and it does NOT unwrap a value enum for the same reason that one does not: an
+// enum's backing may only be an int width or `string`, so a float enum does not
+// exist and unwrapping here would only ever answer a question nobody asked.
+export function isFloatPrimType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.FLOAT32, PrimKind.FLOAT64: { return true; }
+        default: { return false; }
+      }
+    }
+    default: { return false; }
+  }
+}
+
+// 32, 64, or 0 for anything that is not a float.
+//
+// DELIBERATELY separate from `primBitWidth` rather than folded into it.
+// `primBitWidth` answers "how wide is this INTEGER", and three callers use a
+// zero from it to mean "not an integer, leave it alone" - vararg promotion, the
+// integer cast opcode, and interpolation's widening to i64. Teaching it about
+// floats would make each of those quietly start treating a float as an integer
+// of that width, which produces a `zext double` rather than a diagnostic.
+export function floatBitWidth(ref prog: Program, id: TypeId): usize {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: {
+      switch (p) {
+        case PrimKind.FLOAT32: { return 32; }
+        case PrimKind.FLOAT64: { return 64; }
+        default: { return 0; }
+      }
+    }
+    default: { return 0; }
+  }
+}
+
+// True when `id` is the `string` primitive. One of the two things a value enum
+// may alias, and the test the fold uses to pick which value slot to fill.
+export function isStringPrimType(ref prog: Program, id: TypeId): bool {
+  switch (typeAt(ref prog, id)) {
+    case Type.Prim { prim: p }: { return p == PrimKind.STRING; }
+    default: { return false; }
+  }
+}
+
 export const UNSAFE_PTR_NAME: string = "unsafe_ptr";
 
 export function isUnsafePtrType(ref prog: Program, id: TypeId): bool {
@@ -342,25 +467,68 @@ export function formatType(ref prog: Program, id: TypeId): string {
     case Type.Variant { decl: d, cases: cs, methods: mm, implementsTraits: it, generic: g }: {
       return d.name;
     }
+    // "enum Color", not just "Color": a value enum and its underlying primitive
+    // are two different types that a reader will otherwise assume are one, and
+    // most enum diagnostics are exactly about that difference.
+    case Type.ValueEnum { decl: d, underlying: u, cases: cs, isOpen: o,
+                          methods: mm, implementsTraits: it }: {
+      return `enum ${d.name}`;
+    }
     case Type.ErrorT: { return "<error>"; }
     case Type.Func { params: p, ret: r, variadic: v }: {
+      return `(${formatTypeList(ref prog, ref p)}) => ${formatType(ref prog, r)}`;
+    }
+    // A type PARAMETER reads as its own name, which is what a bound diagnostic
+    // inside a generic body wants: "T does not satisfy ..." names the thing the
+    // reader wrote rather than "<type>".
+    case Type.TypeParam { name: n, originDecl: o, bounds: b }: { return n; }
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      return d.name;
+    }
+    // The pointer family. Every one of these used to fall through to "<type>",
+    // which turns a pointer mismatch into "<type>, not <type>" - the same "X is
+    // not X" a reader cannot act on that the Func rendering had.
+    case Type.UnsafePtr { pointee: p }: {
+      if (p == TYPE_ERROR_ID) {
+        return "unsafe_ptr";       // the OPAQUE one: pointee 0, the reserved none
+      }
+      return `unsafe_ptr<${formatType(ref prog, p)}>`;
+    }
+    case Type.UntypedNull: { return "null"; }
+    case Type.Task { result: r }: { return `Task<${formatType(ref prog, r)}>`; }
+    case Type.UntypedInt: { return "untyped int"; }
+    case Type.UntypedFloat: { return "untyped float"; }
+    case Type.Namespace { module: m }: { return "<namespace>"; }
+    case Type.VTable { decl: d, forTrait: ft, fields: f, methodOrder: mo }: {
+      return d.name;
+    }
+    case Type.Union { decl: d, fields: f }: { return d.name; }
+    case Type.FuncPtr { params: p, ret: r }: {
       return `(${formatTypeList(ref prog, ref p)}) => ${formatType(ref prog, r)}`;
     }
     default: { return "<type>"; }
   }
 }
 
-function formatTypeList(ref prog: Program, ref types: Vec<TypeId>): string propagates<disposable> {
-  disposable out: Text = text.make(32);
+// NOT built into a `disposable` Text. `text.view` hands back a BORROW of the
+// buffer, so disposing at scope end returns a dangling string - and the
+// observable symptom was that every Func in a diagnostic rendered as `() => R`
+// with its parameters gone, which is what made "argument 3 is
+// ref () => R[], not ref () => R[]" read as X is not X. A diagnostic is built
+// on a compile that is already failing, so it leaks the way every other one in
+// this layer does.
+function formatTypeList(ref prog: Program, ref types: Vec<TypeId>): string {
+  let out: string = "";
   let i: usize = 0;
   while (i < types.len) {
     if (i > 0) {
-      text.push(ref out, ", ");
+      out = `${out}, ${formatType(ref prog, vec.vecGet(ref types, i))}`;
+    } else {
+      out = formatType(ref prog, vec.vecGet(ref types, i));
     }
-    text.push(ref out, formatType(ref prog, vec.vecGet(ref types, i)));
     i += 1;
   }
-  return text.view(ref out);
+  return out;
 }
 
 function primName(p: PrimKind): string {
@@ -394,7 +562,15 @@ export function primTypeIdOfName(name: string): TypeId {
 
 // Bit width of an integer primitive; 0 for anything else. `isize`/`usize` are
 // 64 on every target the compiler supports today.
-export function primBitWidth(ref prog: Program, id: TypeId): usize {
+//
+// A value enum answers for its UNDERLYING type, here and in `primIsSigned`.
+// Both questions are about representation - which cast opcode, which shift, how
+// wide a vararg slot - and an enum's representation IS its underlying primitive.
+// Note that `isIntPrimType` deliberately does NOT do this: that one decides what
+// an untyped literal may pin to, and pinning a bare `1` to a `Color` would
+// invent a case.
+export function primBitWidth(ref prog: Program, rawId: TypeId): usize {
+  const id = enumUnderlyingOf(ref prog, rawId);
   switch (typeAt(ref prog, id)) {
     case Type.Prim { prim: p }: {
       switch (p) {
@@ -412,7 +588,8 @@ export function primBitWidth(ref prog: Program, id: TypeId): usize {
 
 // Whether an integer primitive is signed, which decides sext vs zext when a
 // cast widens it.
-export function primIsSigned(ref prog: Program, id: TypeId): bool {
+export function primIsSigned(ref prog: Program, rawId: TypeId): bool {
+  const id = enumUnderlyingOf(ref prog, rawId);
   switch (typeAt(ref prog, id)) {
     case Type.Prim { prim: p }: {
       switch (p) {
@@ -657,46 +834,8 @@ function resolveFuncTypeAnnotation(
   });
 }
 
-// Whether a value of type `actual` may be used where `expected` is wanted.
-//
-// `id == id` for everything except FUNCTION types, which compare structurally.
-// They have to: a declared function's signature lives in the SHELL pass A
-// registered for it, filled in place by pass C, so two functions with identical
-// signatures keep different TypeIds - and an annotation like
-// `(k: string) => uint64` interns a third. Comparing those by id would make
-// `{ hash: stringHash }` a type error for no reason a reader could see.
-//
-// Deliberately not a general subtyping rule. It answers one question, the same
-// way `==` did before, and everything else in the type system stays `id == id`.
-export function typeAccepts(ref prog: Program, expected: TypeId, actual: TypeId): bool {
-  if (expected == actual) {
-    return true;
-  }
-  // `null` fits any raw pointer and nothing else - the pointer twin of an
-  // untyped int literal pinning to an integer.
-  if (actual == TYPE_UNTYPED_NULL_ID) {
-    return isUnsafePtrType(ref prog, expected);
-  }
-  switch (typeAt(ref prog, expected)) {
-    case Type.Func { params: wantParams, ret: wantRet, variadic: wantVariadic }: {
-      switch (typeAt(ref prog, actual)) {
-        case Type.Func { params: gotParams, ret: gotRet, variadic: gotVariadic }: {
-          return wantRet == gotRet &&
-            wantVariadic == gotVariadic &&
-            sameTypeList(ref wantParams, ref gotParams);
-        }
-        default: { return false; }
-      }
-    }
-    // A TYPED pointer widens to the OPAQUE one, and not back. `unsafe_ptr` is
-    // "some pointer" and `unsafe_ptr<uint8>` is a promise about what it points
-    // at, so forgetting the promise is safe and inventing one is not.
-    case Type.UnsafePtr { pointee: wantPointee }: {
-      if (wantPointee != TYPE_ERROR_ID) {
-        return false;
-      }
-      return isUnsafePtrType(ref prog, actual);
-    }
-    default: { return false; }
-  }
-}
+// `typeAccepts` - whether a value of one type may be used where another is
+// wanted - and the structural equivalence underneath it live in type_eq.yoop.
+// It moved out of here because the answer stopped being a one-level test: a
+// Func can sit inside a `ref`, an array, a task or another Func's parameter
+// list, and every one of those has to be walked through to reach it.

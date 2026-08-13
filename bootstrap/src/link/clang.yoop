@@ -15,6 +15,7 @@ module link;
 import.unsafe;
 
 import * as fs from "std/fs.yoop";
+import * as str from "std/core/strings.yoop";
 import * as intr from "std/core/intrinsics.yoop";
 import { Text }, * as text from "std/core/text.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
@@ -26,11 +27,16 @@ extern "C" from "stdlib.h" {
 
 // Writes `ir` to `irPath`, then links it to `exePath`. Returns "" on success or
 // a human-readable error.
+//
+// `linkLibraries` is what `extern "C" from library "X"` blocks asked for,
+// collected graph-wide by codegen. A program that names none links its own IR
+// and nothing else, which is the common case.
 export function linkExecutable(
   ref ir: Text,
   irPath: string,
   exePath: string,
   needsRuntime: bool,
+  ref linkLibraries: Vec<string>,
   exeSelfPath: string
 ): string {
   const writeErr = fs.writeFile(irPath, text.bytes(ref ir));
@@ -55,9 +61,63 @@ export function linkExecutable(
     }
   }
 
+  pushLinkLibraries(ref cmd, ref linkLibraries);
+
   const rc = system(text.view(ref cmd));
   if (rc != 0) {
     return `clang failed (exit ${rc}) on ${irPath}`;
   }
   return "";
+}
+
+// `-lm`, `-framework OpenGL`, and the OpenSSL pair.
+//
+// Three rules, and all three are the reference's (`lowerLinkFlag` in
+// src/toolchain.js) so a program links the same way under either compiler:
+//
+//   * `framework:NAME` is an APPLE linker concept and lowers to
+//     `-framework NAME`. It is dropped everywhere else, which the bootstrap
+//     cannot do yet because it has no platform check - so it is emitted, and
+//     that is a known gap rather than a decision.
+//   * `ssl` and `crypto` each mean BOTH. libssl is the protocol and libcrypto
+//     is everything underneath it, and libssl cannot link without it; making a
+//     user name both would be a papercut whose failure mode is a wall of
+//     unresolved symbols rather than a message.
+//   * everything else is `-lNAME`.
+//
+// Not here, and the reason it is not: the reference also probes conventional
+// install prefixes for `-L` / `-I` (Homebrew, vcpkg, YOOP_LIB_PATH). That is
+// toolchain policy rather than compilation, and nothing in the corpus needs it
+// to link - `m` is in libSystem on macOS and the rest are libraries with no
+// `main`, which never reach a link at all.
+function pushLinkLibraries(ref cmd: Text, ref libs: Vec<string>): void {
+  let i: usize = 0;
+  while (i < libs.len) {
+    const name = vec.vecGet(ref libs, i);
+    if (str.stringStartsWith(name, FRAMEWORK_PREFIX)) {
+      text.push(ref cmd, " -framework ");
+      // The name after the prefix, pushed BYTE by byte: `stringSlice` returns a
+      // Result whose Ok is a fresh malloc, and a link line is not worth one.
+      pushFrom(ref cmd, name, FRAMEWORK_PREFIX.len);
+    } else if (str.stringEq(name, "ssl") || str.stringEq(name, "crypto")) {
+      text.push(ref cmd, " -lssl -lcrypto");
+    } else {
+      text.push(ref cmd, " -l");
+      text.push(ref cmd, name);
+    }
+    i += 1;
+  }
+}
+
+const FRAMEWORK_PREFIX: string = "framework:";
+
+// The bytes of `s` from `start` on, appended. No allocation: `stringSlice`
+// would hand back an owned copy nothing frees.
+function pushFrom(ref out: Text, s: string, start: usize): void {
+  const raw = intr.stringAsBytes(s);
+  let i: usize = start;
+  while (i < raw.len) {
+    text.pushByte(ref out, raw[i]);
+    i += 1;
+  }
 }

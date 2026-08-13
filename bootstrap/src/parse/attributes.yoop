@@ -1,0 +1,207 @@
+module parse;
+
+// `@name(args?) target` - an attribute, and what it decorates.
+//
+// The split here mirrors the JS reference (src/jsyooparser/parser.js plus
+// src/jsyoopattributes/registry.js), and the split is the point: the PARSER
+// accepts the general shape, and per-attribute rules are checked separately.
+// Collapsing the two would make "what an attribute may decorate" a property of
+// the syntax, which it is not - `@precompile` takes a `let` decl or a block and
+// `@derive` takes a type, and neither of those is a fact about `@`.
+//
+// The node is only a CARRIER. `@derive(display)` is meant to be expanded into a
+// real method before pass A; that expansion is not built yet (see
+// typecheck/derive.yoop), and `@precompile` needs a comptime interpreter the
+// bootstrap does not have.
+
+import { Result } from "std/core/types.yoop";
+import * as str from "std/core/strings.yoop";
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, ASTNodeKind, childAt, declOf, kindName, nodeAt } from "../ast";
+import { TokenTags, tagName, posToSourceLocation } from "../lex";
+import { ParsingError, SourceLocation } from "../diagnostics";
+
+const ATTR_DERIVE: string = "derive";
+const ATTR_PRECOMPILE: string = "precompile";
+const DERIVE_DISPLAY: string = "display";
+
+//   @derive(display)
+//   export type AST { ... }
+//
+//   ATTRIBUTE:
+//     name              the attribute's name, `derive`
+//     own childIds run  its arguments, as expressions - empty when there are
+//                       none, which is also what `@precompile;` has
+//     childA            the DECL, block or statement it decorates; 0 for the
+//                       bare `@name;` form, which has no target at all
+//
+// Arguments are EXPRESSIONS rather than names. `@derive(display)` happens to
+// pass one identifier, but the reference parses a general expression list and
+// an attribute that wanted `@align(16)` would need it - reading only an
+// identifier here would make the arg shape a property of `@` rather than of the
+// attribute.
+export function parseAttribute(ref ps: ParserState): Result<NodeId, ParsingError> {
+  let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ATTRIBUTE);
+  SelfLexing.expect(ref ps, TokenTags.AT)?;
+  const nameLoc = posToSourceLocation(ps.src, ps.pos, 1);
+  node.name = parseIdentAsName(ref ps)?;
+
+  disposable argIds: Vec<NodeId> = vec.vecNew(1);
+  if (SelfLexing.peek(ref ps).tag == TokenTags.LPAREN) {
+    SelfLexing.advance(ref ps)?;
+    while (
+      SelfLexing.peek(ref ps).tag != TokenTags.RPAREN &&
+      SelfLexing.peek(ref ps).tag != TokenTags.EOF
+    ) {
+      vec.vecPush(ref argIds, parseExpression(ref ps, 0)?);
+      if (SelfLexing.peek(ref ps).tag != TokenTags.COMMA) {
+        break;
+      }
+      SelfLexing.advance(ref ps)?;
+    }
+    SelfLexing.expect(ref ps, TokenTags.RPAREN)?;
+  }
+
+  node.childA = parseAttributeTarget(ref ps, node.name)?;
+
+  const start: usize = ps.ast.childIds.len;
+  vec.vecExtendFrom(ref ps.ast.childIds, vec.vecAsArray(ref argIds));
+  node.childStart = start;
+  node.childCount = argIds.len;
+
+  const id = SelfLexing.pushNode(ref ps, node);
+  checkAttribute(ref ps, id, nameLoc)?;
+  return Result.Ok { value: id };
+}
+
+// What an attribute may decorate, as a matter of SYNTAX. The same six shapes
+// the reference accepts; which of them a given attribute actually allows is
+// `checkAttribute`'s business.
+//
+// A bare `@name;` has no target and yields 0, the none sentinel - not an error.
+// That is the argless statement form.
+function parseAttributeTarget(ref ps: ParserState, attrName: string): Result<NodeId, ParsingError> {
+  const tag = SelfLexing.peek(ref ps).tag;
+  if (tag == TokenTags.LCURLY) {
+    return parseBlock(ref ps);
+  }
+  if (tag == TokenTags.LET || tag == TokenTags.CONST) {
+    return parseVarDecl(ref ps);
+  }
+  if (tag == TokenTags.TYPE) {
+    return parseTypeDecl(ref ps);
+  }
+  if (tag == TokenTags.VARIANT) {
+    return parseVariantDecl(ref ps);
+  }
+  if (tag == TokenTags.EXPORT) {
+    return parseExportDecl(ref ps);
+  }
+  if (tag == TokenTags.SEMICOLON) {
+    SelfLexing.advance(ref ps)?;
+    return Result.Ok { value: 0 };
+  }
+  return Result.Err { error: SelfLexing.createParsingError(
+    ref ps,
+    `@${attrName} requires a '{ ... }' block, a 'let' / 'const' decl, a 'type' / 'variant' declaration (optionally exported), or ';' (got ${tagName(tag)})`,
+    peekLengthUsize(ref ps),
+  )};
+}
+
+// The per-attribute rules - the bootstrap's stand-in for the reference's
+// registry. Kept here rather than in a pass because the reference checks at
+// PARSE time too, so a misspelled attribute fails in the same place with the
+// same shape of message.
+function checkAttribute(ref ps: ParserState, id: NodeId, nameLoc: SourceLocation): Result<NodeId, ParsingError> {
+  const node = nodeAt(ref ps.ast, id);
+
+  if (str.stringEq(node.name, ATTR_DERIVE)) {
+    return checkDerive(ref ps, node, id, nameLoc);
+  }
+  if (str.stringEq(node.name, ATTR_PRECOMPILE)) {
+    // Parsed, and refused BY NAME. `@precompile` folds its initializer at
+    // compile time, which needs the comptime interpreter the bootstrap has no
+    // equivalent of - emitting the decl unfolded would compile and silently do
+    // the work at run time instead, which is the whole thing it exists to avoid.
+    return Result.Err { error: attributeError(
+      ref ps,
+      `@precompile is not supported by the bootstrap yet - it folds its initializer at compile time, and there is no comptime interpreter here`,
+      nameLoc,
+    )};
+  }
+
+  return Result.Err { error: attributeError(
+    ref ps,
+    `unknown attribute @${node.name}. Known attributes: @precompile, @derive.`,
+    nameLoc,
+  )};
+}
+
+// `@derive(display)` on a `type` or `variant`, optionally exported.
+//
+// Exactly one argument, and it names a derive rather than being an arbitrary
+// expression - the general arg list is the SYNTAX, and this is the rule.
+function checkDerive(ref ps: ParserState, node: ASTNode, id: NodeId, nameLoc: SourceLocation): Result<NodeId, ParsingError> {
+  if (node.childCount != 1) {
+    return Result.Err { error: attributeError(
+      ref ps,
+      `@derive requires exactly one derive name argument, e.g. @derive(display)`,
+      nameLoc,
+    )};
+  }
+  const arg = nodeAt(ref ps.ast, childAt(ref ps.ast, node, 0));
+  if (arg.kind == ASTNodeKind.IDENT && str.stringEq(arg.name, DERIVE_DISPLAY)) {
+    return checkDeriveTarget(ref ps, node, id, nameLoc);
+  }
+  // A derive the language RESERVES but has not built is a different mistake
+  // from one it has never heard of, and the fix differs too - wait for it
+  // versus fix the spelling - so the reference gives them separate messages and
+  // so does this.
+  if (arg.kind == ASTNodeKind.IDENT && isDeferredDerive(arg.name)) {
+    return Result.Err { error: attributeError(
+      ref ps,
+      `@derive(${arg.name}) is not yet supported - only @derive(display) is available today`,
+      nameLoc,
+    )};
+  }
+  return Result.Err { error: attributeError(
+    ref ps,
+    `unknown derive "${arg.name}" - supported derives: display`,
+    nameLoc,
+  )};
+}
+
+// Recognized-but-unbuilt derives, matching the reference's DEFERRED_DERIVES.
+function isDeferredDerive(name: string): bool {
+  return str.stringEq(name, "eq") || str.stringEq(name, "clone")
+    || str.stringEq(name, "hash") || str.stringEq(name, "debug")
+    || str.stringEq(name, "default");
+}
+
+function checkDeriveTarget(ref ps: ParserState, node: ASTNode, id: NodeId, nameLoc: SourceLocation): Result<NodeId, ParsingError> {
+
+  const target = nodeAt(ref ps.ast, declOf(ref ps.ast, node.childA));
+  if (target.kind != ASTNodeKind.TYPE_DECL && target.kind != ASTNodeKind.VARIANT_DECL) {
+    return Result.Err { error: attributeError(
+      ref ps,
+      `@derive(display) only applies to a struct 'type' or 'variant' declaration (got ${kindName(target.kind)})`,
+      nameLoc,
+    )};
+  }
+  return Result.Ok { value: id };
+}
+
+// The same error `createParsingError` builds, but at a location the CALLER
+// chose. An attribute's rules are checked after its target is parsed, so by
+// then the cursor sits past the whole declaration - reporting where it stands
+// would point at whatever follows, several lines below the `@`.
+function attributeError(ref ps: ParserState, message: string, loc: SourceLocation): ParsingError {
+  return {
+    sourceLoc: loc,
+    isParseError: true,
+    rawMessage: message,
+    src: ps.src,
+    err: message,
+  };
+}

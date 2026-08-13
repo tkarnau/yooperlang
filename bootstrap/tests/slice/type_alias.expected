@@ -1,0 +1,5 @@
+node: 0 1 5
+cross: 6 17
+sum: 10 len=4
+shifted: 11 12
+exit=0

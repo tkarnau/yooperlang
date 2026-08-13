@@ -1,0 +1,224 @@
+module codegen;
+
+// `expr?` - a tag test, an early return, and an unwrap.
+//
+// The whole lowering is one diamond with a dead half:
+//
+//     <operand emitted here, ending in %v>
+//     %t1 = extractvalue %variant.m__Result %v, 0
+//     %t2 = icmp eq i32 %t1, 1
+//     br i1 %t2, label %L1, label %L2
+//   L1:                              ; the Err path - never joins back
+//     ... read the operand's Err payload
+//     ... build the ENCLOSING function's Err
+//     ... dispose what this scope owes
+//     ret %variant.m__Result %t9
+//   L2:                              ; the Ok path - execution continues here
+//     ... read the operand's Ok payload into the result
+//
+// L2 has exactly ONE predecessor, which is what makes this safe in the middle
+// of an expression: a temp computed before the `?` still dominates everything
+// after it, so `a + f()?` can add `%a` in L2 even though it was defined in the
+// block before the branch. Nothing needs a phi.
+//
+// The Err value is REBUILT rather than forwarded. The enclosing function may
+// return a different fallible type than the operand did - the reference allows
+// that, and only the two Err PAYLOADS have to agree - so the tag and the
+// payload struct both belong to the return type, not to the operand.
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { ASTNode, NodeId, nodeAt } from "../ast";
+import { TypeId, TYPE_VOID_ID, FallibleShape, fallibleShapeOf, moduleIdOf,
+  nominalModuleOf, methodSymbolName } from "../typecheck";
+
+// The result of `?` in an expression, plus the branch and early return that
+// make it one. `out` is left as Operand.None for a payload-less `Ok`, which is
+// exactly what a statement-position `inner(n)?;` wants.
+export function emitTryOp(ref cx: Cx, expr: ASTNode, exprId: NodeId, ref out: Operand): string {
+  let value: Operand = Operand.None;
+  const err = emitExpr(ref cx, expr.childA, ref value);
+  if (err.len > 0) {
+    return err;
+  }
+
+  const operandType = resolvedTypeAt(ref cx, expr.childA);
+  const operandTy = llvmType(cx.prog, operandType);
+  const got = fallibleShapeOf(cx.prog, operandType);
+  const want = fallibleShapeOf(cx.prog, cx.fnRet);
+  // Pass D proved both of these. Codegen does zero type-checking, so reaching
+  // here with either false means pass D let something through.
+  if (!got.isFallible || !want.isFallible) {
+    return internalError("'?' on a non-fallible type reached codegen", "try");
+  }
+
+  // Both directions need an ADDRESS: the payload bytes are read as whichever
+  // case struct the tag names, and only a pointer can be reinterpreted that
+  // way. Same reason a switch arm spills its scrutinee.
+  const slot = declareAnonSlot(ref cx, operandTy);
+  emitStore(ref cx, operandTy, value, TEMP_SLOT_NAME, slot.id);
+
+  const isErr = emitTagEqualsErr(ref cx, operandTy, value, got.errOrdinal);
+  const errLabel = freshLabel(cx.e);
+  const okLabel = freshLabel(cx.e);
+  emitCondBr(ref cx, Operand.Temp { id: isErr }, errLabel, okLabel);
+
+  emitLabel(ref cx, errLabel);
+  const eerr = emitErrReturn(ref cx, exprId, operandType, operandTy, slot.id, ref got, ref want);
+  if (eerr.len > 0) {
+    return eerr;
+  }
+
+  emitLabel(ref cx, okLabel);
+  // The Ok type comes from THIS node's decoration rather than from `got`, even
+  // though the two agree. Everything downstream reads the node's recorded type
+  // to know what this expression produced, so taking the operand from the same
+  // place keeps the value and its type in step by construction - and it is the
+  // one that goes through `resolvedTypeAt`, so it is right inside a generic
+  // instantiation too.
+  out = emitOkPayload(ref cx, operandType, operandTy, slot.id,
+    resolvedTypeAt(ref cx, exprId), got.okOrdinal);
+  return "";
+}
+
+//   %t1 = extractvalue %variant.m__Result %v, 0
+//   %t2 = icmp eq i32 %t1, 1
+//
+// True when the value holds its Err case. Tested against the ordinal rather
+// than routed through a jump table: there are two outcomes and one of them is a
+// return, so a switch would only add a block.
+function emitTagEqualsErr(ref cx: Cx, operandTy: string, value: Operand, errOrdinal: usize): usize {
+  const tag = emitVariantTag(ref cx, operandTy, value);
+  const dest = freshTemp(cx.e);
+  emitICmp(ref cx, dest, "eq", VARIANT_TAG_TYPE,
+    Operand.Temp { id: tag }, Operand.Imm { value: uint64(errOrdinal) });
+  return dest;
+}
+
+// The Err path: read the operand's error out, build the ENCLOSING function's
+// Err around it, unwind, return.
+//
+//   %t3 = getelementptr inbounds %variant.m__R1, ptr %sc.1.addr, i32 0, i32 1
+//   %t4 = getelementptr inbounds %variantc.m__R1__Err, ptr %t3, i32 0, i32 0
+//   %t5 = load ptr, ptr %t4
+//   %t6 = getelementptr inbounds %variant.m__R2, ptr %sc.2.addr, i32 0, i32 0
+//   store i32 1, ptr %t6
+//   ...
+//   ret %variant.m__R2 %t9
+function emitErrReturn(
+  ref cx: Cx,
+  exprId: NodeId,
+  operandType: TypeId,
+  operandTy: string,
+  slotId: usize,
+  ref got: FallibleShape,
+  ref want: FallibleShape
+): string {
+  const retTy = llvmType(cx.prog, cx.fnRet);
+  const outSlot = declareAnonSlot(ref cx, retTy);
+
+  // The tag first, matching the constructor's order - a payload-less Err is
+  // nothing but the tag, and writing it first keeps the two paths identical.
+  const tagAddr = freshTemp(cx.e);
+  emitGepField(ref cx, tagAddr, retTy, TEMP_SLOT_NAME, outSlot.id, 0);
+  emitStoreToPtr(ref cx, VARIANT_TAG_TYPE,
+    Operand.Imm { value: uint64(want.errOrdinal) }, tagAddr);
+
+  // `variant A { Ok, Err }` carries nothing to move, so there is no load and no
+  // store. Pass D already proved the two payload types agree, which includes
+  // agreeing about being void.
+  if (want.errType != TYPE_VOID_ID) {
+    const errTy = llvmType(cx.prog, want.errType);
+    // The two Err payloads either AGREE or convert. Pass D decided which and
+    // recorded it; the conversion is a `ref self` method on the operand's error
+    // type, so what it needs is the payload's address rather than its value.
+    let moved: usize = 0;
+    if (map.mapContainsKey(ref cx.tm.tryIntoUses, uint64(exprId))) {
+      moved = emitIntoCall(ref cx, operandType, operandTy, slotId, got.errOrdinal,
+        got.errType, errTy);
+    } else {
+      moved = emitCasePayloadLoad(ref cx, operandType, operandTy, slotId,
+        got.errOrdinal, errTy);
+    }
+    const payloadAddr = freshTemp(cx.e);
+    emitGepField(ref cx, payloadAddr, retTy, TEMP_SLOT_NAME, outSlot.id, 1);
+    const fieldAddr = freshTemp(cx.e);
+    emitGepFieldOfPtr(ref cx, fieldAddr,
+      caseLlvmNameOf(ref cx, cx.fnRet, want.errOrdinal), payloadAddr, 0);
+    emitStoreToPtr(ref cx, errTy, Operand.Temp { id: moved }, fieldAddr);
+  }
+
+  const built = freshTemp(cx.e);
+  emitLoadFromSlot(ref cx, built, retTy, TEMP_SLOT_NAME, outSlot.id);
+
+  // This IS a return, so every enclosing scope is being left and owes its
+  // disposals - innermost first, exactly as `return` does. The value is built
+  // BEFORE the unwind for the same reason `return`'s is: it may read a binding
+  // that is about to go.
+  const uerr = emitUnwindTo(ref cx, 0);
+  if (uerr.len > 0) {
+    return uerr;
+  }
+  emitRet(ref cx, retTy, Operand.Temp { id: built });
+  return "";
+}
+
+//   %t5 = call %struct.d__ParsingError @lex__LexedError__into(ptr %t4)
+//
+// The `Into<TargetErr>` conversion, called on the operand's Err payload IN
+// PLACE. A static trait dispatch like every other one - the receiver's concrete
+// type is right here, so the symbol is the owner plus the method name and there
+// is no vtable anywhere near it.
+//
+// It runs in the FAILURE branch and nowhere else, which is the whole reason
+// `?` can convert at all without costing the success path anything.
+function emitIntoCall(
+  ref cx: Cx,
+  operandType: TypeId,
+  operandTy: string,
+  slotId: usize,
+  errOrdinal: usize,
+  sourceErrType: TypeId,
+  targetTy: string
+): usize {
+  const addr = emitCasePayloadAddr(ref cx, operandType, operandTy, slotId, errOrdinal);
+  disposable args: Vec<CallArg> = vec.vecNew(1);
+  vec.vecPush(ref args, { ty: REF_LLVM_TYPE, value: Operand.Temp { id: addr } });
+  const dest = freshTemp(cx.e);
+  emitCall(ref cx, dest, targetTy,
+    moduleIdOf(cx.prog, nominalModuleOf(cx.prog, sourceErrType)),
+    methodSymbolName(cx.prog, sourceErrType, INTO_METHOD_NAME),
+    ref args);
+  return dest;
+}
+
+// The one method name `?` reaches by spelling. It is the `Into<T>` trait's only
+// member, and the trait is matched by name too - see errorConvertsInto in
+// typecheck/fallible.yoop for why neither can go through a symbol lookup.
+const INTO_METHOD_NAME: string = "into";
+
+// How a borrow is spelled at a call site. LLVM's pointers are opaque, so a
+// `ref T` argument is a `ptr` whatever T is.
+const REF_LLVM_TYPE: string = "ptr";
+
+// The Ok path: the unwrapped value, or nothing when `Ok` carries no payload.
+//
+// `Operand.None` for the payload-less case is not a failure - it is what a
+// statement-position `inner(n)?;` wants, and there is nothing to load.
+function emitOkPayload(
+  ref cx: Cx,
+  operandType: TypeId,
+  operandTy: string,
+  slotId: usize,
+  okType: TypeId,
+  okOrdinal: usize
+): Operand {
+  if (okType == TYPE_VOID_ID) {
+    return Operand.None;
+  }
+  return Operand.Temp {
+    id: emitCasePayloadLoad(ref cx, operandType, operandTy, slotId, okOrdinal,
+      llvmType(cx.prog, okType))
+  };
+}

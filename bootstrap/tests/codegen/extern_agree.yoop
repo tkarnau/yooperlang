@@ -1,0 +1,18 @@
+// Two MODULES declaring the same `puts`, with the SAME signature.
+//
+// One LLVM module holds both, and a symbol may be declared in it exactly once,
+// so this has to collapse to a single `declare i32 @puts(ptr)`. An extern is
+// not exported and does not travel through an import, so writing it twice is
+// the ordinary case rather than the odd one - every file that calls puts
+// declares its own.
+//
+// Read by bootstrap/src/codegen/codegen.test.yoop; it is never run.
+
+import * as other from "./extern_agree_other.yoop";
+
+extern "C" from "stdio.h" { function puts(s: string): int32; }
+
+function main(): int32 {
+  other.hello();
+  return puts("hi");
+}

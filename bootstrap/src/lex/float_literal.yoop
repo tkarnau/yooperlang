@@ -1,0 +1,132 @@
+module lex;
+
+// Decoding a scanned float literal's DIGITS into a float64.
+//
+// Split out of literals.yoop because the scanning ("where does this token end")
+// and the conversion ("what number is it") are two different jobs, and only the
+// second one has to be exactly right in the last bit.
+//
+// WHY THIS IS NOT THE OBVIOUS LOOP. The first version accumulated the mantissa
+// in a float64 and then multiplied or divided by ten once per decimal place.
+// Both halves lose bits: `mantissa * 10.0 + digit` rounds as soon as the value
+// passes 2^53, and each of the scaling steps rounds again, so the error
+// compounds. It read fine and was wrong by an ulp or two for a quarter of the
+// literals it was given - 2.718281828459045 came out as 2.7182818284590446 and
+// 1e308 as 9.999999999999998e307. Nothing noticed, because the parity token
+// dump was skipping float values precisely because the two sides "could not be
+// compared". They can; that dump now prints the bit pattern and diffs it.
+//
+// WHAT THIS DOES INSTEAD. Accumulate the digits as an exact uint64, then apply
+// the decimal scale with ONE multiply or divide. That is correctly rounded when
+// both operands are exact, which needs the mantissa under 2^53 and the scale
+// within 10^22 - the largest power of ten a float64 holds exactly. Everything
+// in that range decodes to the same bits strtod produces.
+//
+// Outside it, a correct answer needs the big-integer path a real strtod has
+// (Clinger / Eisel-Lemire), and the naive scaling would be off in the last bit.
+// So it is REFUSED BY NAME rather than approximated: an off-by-an-ulp constant
+// is a wrong answer that looks like a right one. No file in std, examples or
+// bootstrap has a literal outside the range - the widest is
+// 3.141592653589793, whose 16-digit mantissa is still under 2^53.
+
+// The largest integer a float64 represents exactly, and the largest power of
+// ten it holds exactly. Together they are the fast path's whole precondition.
+const EXACT_INT_LIMIT: uint64 = 9007199254740992;   // 2^53
+const EXACT_POW10_LIMIT: int64 = 22;                // 10^22
+
+export type FloatDecode {
+  value: float64,
+  ok: bool,
+  reason: string,
+}
+
+// `src[digitsStart..end)` is the literal's text, digit separators and exponent
+// included, with no sign - the parser applies unary minus itself.
+export function decodeFloatLiteral(src: uint8[], digitsStart: usize, end: usize): FloatDecode {
+  let mantissa: uint64 = 0;
+  let mantissaOverflowed = false;
+  let fracDigits: int64 = 0;
+  let seenDot = false;
+  let expSign: int64 = 1;
+  let expVal: int64 = 0;
+  let expOverflowed = false;
+
+  let i = digitsStart;
+  while (i < end) {
+    const ch = src[i];
+    if (ch == '_') {
+      // a separator, and it is legal anywhere the scanner allowed it
+    } else if (ch == '.') {
+      seenDot = true;
+    } else if (ch == 'e' || ch == 'E') {
+      i += 1;
+      if (i < end && (src[i] == '+' || src[i] == '-')) {
+        if (src[i] == '-') { expSign = -1; }
+        i += 1;
+      }
+      while (i < end) {
+        if (src[i] != '_') {
+          // The exponent only has to be compared against 22, so stop growing it
+          // well before an int64 could wrap. `1e999999999` is refused either way.
+          if (expVal > EXACT_POW10_LIMIT) {
+            expOverflowed = true;
+          } else {
+            expVal = expVal * 10 + int64(digitValue(src[i]));
+          }
+        }
+        i += 1;
+      }
+      // the exponent consumed the rest of the token
+    } else {
+      if (mantissa > EXACT_INT_LIMIT) {
+        mantissaOverflowed = true;
+      } else {
+        mantissa = mantissa * 10 + uint64(digitValue(ch));
+      }
+      if (seenDot) { fracDigits += 1; }
+    }
+    i += 1;
+  }
+
+  if (mantissaOverflowed || mantissa > EXACT_INT_LIMIT) {
+    return {
+      value: 0.0,
+      ok: false,
+      reason: "float literal has more significant digits than the bootstrap decodes exactly (the mantissa must fit in 2^53); a correctly rounded conversion for wider ones is not built yet, and approximating it would be off in the last bit",
+    };
+  }
+
+  const scale: int64 = expSign * expVal - fracDigits;
+  if (expOverflowed || scale > EXACT_POW10_LIMIT || scale < -EXACT_POW10_LIMIT) {
+    return {
+      value: 0.0,
+      ok: false,
+      reason: "float literal's decimal scale is outside the range the bootstrap decodes exactly (10^-22 to 10^22); a correctly rounded conversion for wider ones is not built yet, and approximating it would be off in the last bit",
+    };
+  }
+
+  // Both operands are exact here, so the single operation is correctly rounded
+  // and lands on the same bits strtod would produce.
+  const m: float64 = float64(mantissa);
+  if (scale >= 0) {
+    return { value: m * powerOfTen(usize(scale)), ok: true, reason: "" };
+  }
+  return { value: m / powerOfTen(usize(-scale)), ok: true, reason: "" };
+}
+
+// 10^k, exactly, for k up to 22. Each step's true product is representable, so
+// each step is exact; past 22 it silently would not be, which is why the caller
+// checks the range before asking.
+//
+// Computed rather than read from a table: a module-level array const is not
+// something the bootstrap can inline yet, and this has to survive the compiler
+// compiling itself.
+function powerOfTen(k: usize): float64 {
+  let v: float64 = 1.0;
+  let i: usize = 0;
+  while (i < k) {
+    v = v * 10.0;
+    i += 1;
+  }
+  return v;
+}

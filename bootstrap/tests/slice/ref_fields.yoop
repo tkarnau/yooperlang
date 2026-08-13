@@ -1,0 +1,105 @@
+// A BORROW HELD AS A VALUE - a `ref T` struct field, and a local bound to one.
+//
+// `refs.yoop` covers the parameter form, where the borrow is unwrapped once at
+// the declaration and the body never sees it again. This is the other shape: a
+// `ref T` FIELD keeps its type for as long as anything holds it, so every use
+// has to open it. The bootstrap's own source is built out of exactly this -
+// `ParsingError.src` is a `ref uint8[]`, and codegen's `Cx` is seven `ref`
+// fields with nothing else in it.
+//
+// What a use is: reading `.len`, indexing, reading a field, passing to a
+// by-value parameter. Each one costs one `load` and nothing else. What is NOT a
+// use is handing the borrow ONWARD to a `ref` parameter - that passes the
+// pointer, and the difference is visible below because `bumpThrough` writes
+// through it.
+//
+// The write half is the assertion a by-value lowering would fail: if opening a
+// borrow copied instead of loading, `p.x = ...` would land on the copy and the
+// original would still read 3.
+
+type Holder {
+  src: ref uint8[],
+  tag: int,
+}
+
+type Point {
+  x: int,
+  y: int,
+}
+
+type PointHolder {
+  p: ref Point,
+}
+
+// Reading through a held borrow: `.len` and an index, both on a local bound
+// from the field rather than on the field expression itself.
+function describe(ref h: Holder): int {
+  const s = h.src;
+  return int(s.len) * 100 + int(s[0]);
+}
+
+// Passing one to a BY-VALUE parameter. The borrow opens at the call, so the
+// callee gets the descriptor and knows nothing about where it came from.
+function sumOf(xs: uint8[]): int {
+  let total: int = 0;
+  for (let i = 0; i < xs.len; i = i + 1) {
+    total = total + int(xs[i]);
+  }
+  return total;
+}
+
+// And to a `ref` parameter, which passes the pointer ONWARD unchanged.
+function firstThroughRef(ref xs: uint8[]): int {
+  return int(xs[0]);
+}
+
+// Writing through a held borrow, one level and two.
+function bumpThrough(ref ph: PointHolder, by: int): void {
+  let p = ph.p;
+  p.x = p.x + by;
+}
+
+function main(): int {
+  let buf: uint8[] = [7, 8, 9, 10];
+  let h: Holder = { src: ref buf, tag: 1 };
+
+  printf("described=%d\n", describe(ref h));
+
+  const s = h.src;
+  printf("sum=%d first=%d\n", sumOf(s), firstThroughRef(s));
+
+  // A write through the held borrow lands on `buf`, not on a copy of it.
+  let w = h.src;
+  w[1] = 40;
+  printf("buf1=%d sum=%d\n", int(buf[1]), sumOf(s));
+
+  let pt: Point = { x: 3, y: 4 };
+  let ph: PointHolder = { p: ref pt };
+  bumpThrough(ref ph, 10);
+  bumpThrough(ref ph, 10);
+  printf("pt=%d,%d\n", pt.x, pt.y);
+
+  // A nested path THROUGH a borrow: `ph.p` is a `ref Point`, so `ph.p.y` is a
+  // field of the Point it points at rather than of any local here.
+  let held = ph.p;
+  held.y = held.y + 1;
+  printf("held=%d,%d\n", held.x, held.y);
+  printf("orig=%d,%d\n", pt.x, pt.y);
+
+  // `ref a.b.c` - a borrow of a NESTED field path. The address is a gep on a
+  // gep, so the callee writes into the ORIGINAL and not into a copy that was
+  // materialized on the way down.
+  let o: Outer = { mid: { inner: { n: 5 } } };
+  bumpInner(ref o.mid.inner, 3);
+  bumpInner(ref o.mid.inner, 3);
+  printf("nested=%d\n", o.mid.inner.n);
+  return 0;
+}
+
+type Inner { n: int }
+type Mid { inner: Inner }
+type Outer { mid: Mid }
+
+function bumpInner(ref i: Inner, by: int): void {
+  i.n = i.n + by;
+}

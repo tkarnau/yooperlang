@@ -24,8 +24,13 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
   // prefix first
   switch (peekTag) {
     // Prefix operators. 70 binds tighter than every binary operator, so
-    // `-a * b` is `(-a) * b` and `!a && b` is `(!a) && b`.
-    case TokenTags.MINUS, TokenTags.BANG: {
+    // `-a * b` is `(-a) * b` and `!a && b` is `(!a) && b`. `~` joins them at
+    // the same precedence, which is what makes `~2 & 7` mean `(~2) & 7` - the
+    // reference's answer, established by probing (it prints 5, not -3).
+    //
+    // Unlike `&` and `*`, `~` is prefix ONLY, so it needs no position rule:
+    // there is no binary `~` for it to be confused with.
+    case TokenTags.MINUS, TokenTags.BANG, TokenTags.TILDE: {
       SelfLexing.advance(ref ps)?;
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.UNARY_EXPRESSION);
       node.operator = peekTag;
@@ -38,6 +43,13 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     case TokenTags.INTLITERAL, TokenTags.CHARLITERAL: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.INT_LITERAL);
       node.intVal = SelfLexing.advance(ref ps)?.intVal;
+    }
+    // A float literal is its own node rather than an INT_LITERAL with a flag:
+    // it pins to a different set of types, lowers to different opcodes, and
+    // carries a value the int slot cannot hold. The lexer already decoded it.
+    case TokenTags.FLOATLITERAL: {
+      node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.FLOAT_LITERAL);
+      node.floatVal = SelfLexing.advance(ref ps)?.floatVal;
     }
     case TokenTags.LBRACKET: {
       node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.ARRAY_LITERAL);
@@ -172,6 +184,53 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
       node = indexNode;
       continue;
     }
+    // `expr?` - propagate the Err, yield the Ok. Postfix, so it chains with
+    // everything else in this loop for free: `f()?.field` reads a field of the
+    // unwrapped value, and `f()??` unwraps twice. Being IN the loop is also what
+    // puts it inside an arbitrary expression - `g(f()?)` and `a? + b?` need no
+    // special case anywhere.
+    //
+    // There is no ternary `a ? b : c` in this language, so a `?` in expression
+    // position is never anything else and no lookahead is needed.
+    if (postfixTag == TokenTags.QUESTION) {
+      // Two OTHER things a `?` can start in the reference, both refused by
+      // name. Plain propagation is the only one built here, and either of these
+      // read as propagation if the extra tokens are just dropped - which turns
+      // "deal with it here" into "send it up", silently.
+      //
+      // Both are decidable from the tokens right after the `?`, with no real
+      // lookahead: what legitimately follows a postfix `?` is an operator, a
+      // closer, a `.` or a `;`, and never an IDENT or a string.
+      //
+      // `expr? e { ... }` - handle the failure here instead of returning it.
+      // A different feature: it needs a BLOCK with the error bound in it.
+      if (SelfLexing.peekAhead(ref ps, 1)?.tag == TokenTags.IDENT &&
+          SelfLexing.peekAhead(ref ps, 2)?.tag == TokenTags.LCURLY) {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps,
+          "`expr? e { ... }` - handling a failure at the `?` - is not supported by the bootstrap yet; only `?` propagation is",
+          peekLengthUsize(ref ps),
+        )};
+      }
+      // `expr? "context"` - prefix a note onto a `string` Err on the way out,
+      // giving `"loading config: negative input"`. Also a different feature: it
+      // builds a string in the failure branch, and it only applies when the Err
+      // payload is a string.
+      const afterQuestion = SelfLexing.peekAhead(ref ps, 1)?.tag;
+      if (afterQuestion == TokenTags.STRLITERAL ||
+          afterQuestion == TokenTags.TEMPLATELITERAL) {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps,
+          "`expr? \"context\"` - prefixing a note onto a string Err - is not supported by the bootstrap yet; only `?` propagation is",
+          peekLengthUsize(ref ps),
+        )};
+      }
+      let tryNode = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.TRY_OP);
+      SelfLexing.advance(ref ps)?;
+      tryNode.childA = SelfLexing.pushNode(ref ps, node);
+      node = tryNode;
+      continue;
+    }
     // A `(` HERE is a call through a value that is neither a bare name nor a
     // field - `fns[0]("a")`, `f()()`. Both of those are handled earlier: a name
     // in the prefix switch, a field in the DOT branch below. So reaching this
@@ -191,6 +250,29 @@ export function parseExpression(ref ps: ParserState, minPrecedence: int): Parsin
     if (postfixTag == TokenTags.DOT) {
       SelfLexing.advance(ref ps)?;
       const baseId = SelfLexing.pushNode(ref ps, node);
+
+      // `Reader.from(ref s)` - ERASING a concrete type into a vtable value.
+      // `from` is a keyword token (it is how an import and an extern name their
+      // source), so the generic "expected IDENT, got FROM" sent a reader after
+      // punctuation on a line that is perfectly well formed. Refused BY NAME
+      // instead, because what is missing is a FEATURE and not a spelling: a
+      // vtable value is `{ ctx, m0, m1, ... }`, so building one means adding
+      // the ctx slot to the layout, recording which trait the vtable erases and
+      // in what method order, and giving `Trait.method(ref vt, ...)` an
+      // indirect path beside the static one it resolves today.
+      //
+      // Gated on the `(` that makes it a CALL. `l.from.x` on a struct with a
+      // field called `from` is a different gap - the field DECLARATION does not
+      // parse either - and claiming it is about vtables would send the reader
+      // somewhere there is nothing to find.
+      if (SelfLexing.peek(ref ps).tag == TokenTags.FROM && peekAheadIsLParen(ref ps)) {
+        return Result.Err { error: SelfLexing.createParsingError(
+          ref ps,
+          "`X.from(ref v)` builds a type-ERASED vtable value, which the bootstrap does not do yet - declaring and laying out a `vtable` works, building one does not",
+          peekLengthUsize(ref ps),
+        )};
+      }
+
       const member = parseIdentAsName(ref ps)?;
 
       // `ns.fn(...)` is a QUALIFIED CALL, not a field read of a function value.
@@ -461,4 +543,15 @@ function parseSliceRest(
   }
   SelfLexing.expect(ref ps, TokenTags.RBRACKET)?;
   return Result.Ok { value: node };
+}
+
+// Whether the token AFTER the current one is a `(`. One token past the cursor
+// is the whole lookahead ParserState offers, and it is enough here: it is what
+// separates `X.from(ref v)` - a CALL, and the vtable erasure the bootstrap
+// refuses by name - from a field access on a member spelled `from`.
+function peekAheadIsLParen(ref ps: ParserState): bool {
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Ok { value: next }: { return next.tag == TokenTags.LPAREN; }
+    case Result.Err { error: e }: { return false; }
+  }
 }

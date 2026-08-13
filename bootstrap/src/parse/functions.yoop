@@ -5,7 +5,7 @@ module parse;
 import { Result } from "std/core/types.yoop";
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
-import { NodeId, ASTNodeKind } from "../ast";
+import { NodeId, ASTNodeKind, nodeAt } from "../ast";
 import { TokenTags, posToSourceLocation } from "../lex";
 import { ParsingError } from "../diagnostics";
 
@@ -37,11 +37,14 @@ export function parseFunctionRest(
   disposable ids: Vec<NodeId> = vec.vecNew(4);
   let peekTag = SelfLexing.peek(ref ps).tag;
   // No POOLED case: `pooled` is contextual and lexes as IDENT, which the
-  // first arm already covers.
+  // first arm already covers. DOTDOTDOT is here only so `function f(...)`
+  // reaches parseFunctionParam and gets the named refusal below, instead of
+  // falling out of the loop and being reported as a missing `)`.
   while (
     peekTag == TokenTags.IDENT ||
     peekTag == TokenTags.REF ||
-    peekTag == TokenTags.COMMA
+    peekTag == TokenTags.COMMA ||
+    peekTag == TokenTags.DOTDOTDOT
   ) {
     if (peekTag == TokenTags.COMMA) {
       SelfLexing.advance(ref ps)?;
@@ -65,9 +68,11 @@ export function parseFunctionRest(
 }
 
 export function parseFunctionParam(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (SelfLexing.peek(ref ps).tag == TokenTags.DOTDOTDOT) {
+    return Result.Err { error: variadicNotAllowedHere(ref ps) };
+  }
   let node = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.PARAM);
-  // todo task pooled stuff...
-  // todo kind prefix stuff...
+  node.childE = parseParamKindPrefix(ref ps)?;
   if (SelfLexing.peek(ref ps).tag == TokenTags.REF) {
     SelfLexing.advance(ref ps)?;
     node.flagA = true; // isRef
@@ -81,4 +86,68 @@ export function parseFunctionParam(ref ps: ParserState): Result<NodeId, ParsingE
   node.childA = parseTypeAnnotation(ref ps)?;
   // isRef and refType stuff
   return Result.Ok { value: SelfLexing.pushNode(ref ps, node) };
+}
+
+// `scoped h: ref FileHandle` - the kind a PARAMETER carries, written before its
+// name.
+//
+// The tell is one token of lookahead, the same rule every other kind-prefix
+// site uses, widened by one tag: an identifier followed by another IDENTIFIER
+// or by `ref` cannot be the parameter's own name, because a name is always
+// followed by `:`. So `marker h: H` and `marker ref h: H` are both prefixed and
+// `ref h: H` is not - it opens with REF and never reaches the test.
+//
+// Exactly one prefix, which is a rule of the reference's rather than of the
+// grammar: `marker other h: T` is refused there with "a parameter may carry at
+// most one kind prefix", and refusing it here means the two agree on what a
+// program MEANS rather than only on what it looks like.
+export function parseParamKindPrefix(ref ps: ParserState): Result<NodeId, ParsingError> {
+  if (!atParamKindPrefix(ref ps)) {
+    return Result.Ok { value: 0 };
+  }
+  const loc = posToSourceLocation(ps.src, ps.pos, 1);
+  disposable ids: Vec<NodeId> = vec.vecNew(1);
+  let prefix = SelfLexing.buildSourcedNode(ref ps, ASTNodeKind.KIND_PREFIX);
+  prefix.name = parseIdentAsName(ref ps)?;
+  vec.vecPush(ref ids, SelfLexing.pushNode(ref ps, prefix));
+
+  if (atParamKindPrefix(ref ps)) {
+    return Result.Err { error: SelfLexing.createParsingError(
+      ref ps,
+      "a parameter may carry at most one kind prefix",
+      peekLengthUsize(ref ps),
+    )};
+  }
+  return Result.Ok { value: SelfLexing.buildListNode(ref ps, ref ids, loc) };
+}
+
+function atParamKindPrefix(ref ps: ParserState): bool {
+  if (SelfLexing.peek(ref ps).tag != TokenTags.IDENT) {
+    return false;
+  }
+  switch (SelfLexing.peekAhead(ref ps, 1)) {
+    case Result.Err { error: e }: { return false; }
+    case Result.Ok { value: tok }: {
+      return tok.tag == TokenTags.IDENT || tok.tag == TokenTags.REF;
+    }
+  }
+}
+
+// `...` is legal in exactly ONE place: the tail of an `extern "C"` parameter
+// list, which parse/externs.yoop consumes before anything reaches here. Every
+// other parameter list - an ordinary function, a trait method, a function TYPE
+// annotation, a kind decl's operation - refuses it, which is also what the JS
+// reference does (it parses `...` only inside an extern block).
+//
+// The reason is not arbitrary. `...` means "the C calling convention puts the
+// rest of the arguments wherever varargs go"; there is nothing in a yoop
+// function for it to mean, and accepting it would need a rest-parameter feature
+// that does not exist. Refusing it by name here beats a "expected IDENT" that
+// sends the reader looking for a typo.
+export function variadicNotAllowedHere(ref ps: ParserState): ParsingError {
+  return SelfLexing.createParsingError(
+    ref ps,
+    "`...` is only allowed as the LAST parameter of an `extern \"C\"` signature",
+    peekLengthUsize(ref ps),
+  );
 }

@@ -1,0 +1,18 @@
+// An EXPORTED module-level `let` - a mutable global another module both reads
+// and writes. A global has exactly one definition, in the module that declared
+// it, so an importing module's read has to name THIS module's symbol and not
+// its own; getting that wrong emits IR that compiles and then fails to link.
+//
+// The `const` beside it is the contrast: it is INLINED at every use and has no
+// storage at all, so exporting one costs nothing.
+
+import { note } from "./side_effect.yoop";
+
+export let tally: int32 = 0;
+export const TALLY_STEP: int32 = 3;
+
+export function bumpTally(): int32 {
+  tally = tally + TALLY_STEP;
+  _ = note(tally);
+  return tally;
+}

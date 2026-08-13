@@ -1,0 +1,158 @@
+module typecheck;
+
+/*
+  Applying a generic TRAIT: `Comparable<Token>` from `trait Comparable<T>`.
+
+  This is the slice of generic trait instantiation (3.2 in
+  plans/bootstrap-completion.md) that type-parameter BOUNDS needed, and the same
+  slice an `implements` clause needs. Both write a trait name with arguments,
+  and both have to know WHICH application they mean - a bound asking for
+  `Comparable<T>` is not satisfied by a type implementing `Comparable<int32>`.
+
+  The result is a fresh `Type.Trait` whose method SIGNATURES are substituted and
+  whose `typeParams` slot holds the ARGUMENTS rather than the parameters. That
+  mirrors what a generic template does with `GenericInst.args`: a template's
+  arguments ARE its parameters, so one slot reads correctly for both, and two
+  applications of one trait compare by comparing those lists.
+
+  What this is NOT: dispatching THROUGH an applied trait as a receiver -
+  `Iterable<T>.next` in a `for ... in`, or `Into<E>` for `?`. Those need the
+  trait to be a value rather than a promise, and they are the rest of 3.2.
+*/
+
+import { Vec }, * as vec from "std/core/vec.yoop";
+import { Map, MapIter, MapEntry }, * as map from "std/collections/map.yoop";
+import { disposable } from "std/core/kinds.yoop";
+import { SourceLocation } from "../diagnostics";
+
+
+// `Comparable<T>` - the trait with its own parameter substituted.
+//
+// The result is a fresh Type.Trait whose method SIGNATURES are substituted and
+// whose `typeParams` slot holds the ARGUMENTS rather than the parameters. That
+// mirrors what a generic template does with `GenericInst.args`: a template's
+// arguments ARE its parameters, so the same slot reads correctly for both, and
+// checkBoundsSatisfied can compare two applications of one trait by comparing
+// those lists.
+export function applyTraitArgs(
+  ref prog: Program,
+  traitType: TypeId,
+  ref args: Vec<TypeId>,
+  name: string,
+  loc: SourceLocation
+): TypeId {
+  disposable declared: Vec<TypeId> = traitArgsOf(ref prog, traitType);
+  if (declared.len != args.len) {
+    reportError(
+      ref prog,
+      `"${name}" takes ${declared.len} type argument(s), got ${args.len}`,
+      loc
+    );
+    return traitType;
+  }
+  return applyTraitArgsUnchecked(ref prog, traitType, ref args);
+}
+
+// The same application with the arity already known good - what substitution
+// reaches for, where there is no source location to complain at.
+export function applyTraitArgsUnchecked(
+  ref prog: Program,
+  traitType: TypeId,
+  ref args: Vec<TypeId>
+): TypeId {
+  switch (typeAt(ref prog, traitType)) {
+    case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+      if (sameTypeIdList(ref tp, ref args)) {
+        return traitType;   // the arguments ARE the parameters: this is the template
+      }
+      const existing = findTraitApplication(ref prog, traitType, ref args);
+      if (existing != TYPE_ERROR_ID) {
+        return existing;
+      }
+      let methods: Map<string, TypeId> = map.mapNew(0, map.stringKeyOps());
+      let it: MapIter<string, TypeId> = map.mapIter(ref mm);
+      for entry in it {
+        map.mapInsert(ref methods, entry.key,
+          substitute(ref prog, entry.value, ref tp, ref args));
+      }
+      let applied: Vec<TypeId> = vec.vecNew(args.len);
+      vec.vecExtendFrom(ref applied, vec.vecAsArray(ref args));
+      return internType(ref prog, Type.Trait {
+        decl: d,
+        methods: methods,
+        typeParams: applied,
+        extendsTraits: et,
+      });
+    }
+    default: { return traitType; }
+  }
+}
+
+// One TypeId per (trait decl, arguments), scanned before inserting - the same
+// discipline internArray follows and for the same reason. Without it, every
+// call site of a bounded generic would intern its own `Comparable<Token>` and
+// the arena would grow with the program rather than with its types.
+function findTraitApplication(
+  ref prog: Program,
+  traitType: TypeId,
+  ref args: Vec<TypeId>
+): TypeId {
+  let i: usize = 0;
+  while (i < prog.types.len) {
+    switch (typeAt(ref prog, i)) {
+      case Type.Trait { decl: d, methods: mm, typeParams: tp, extendsTraits: et }: {
+        if (sameTraitDecl(ref prog, i, traitType) && sameTypeIdList(ref tp, ref args)) {
+          return i;
+        }
+      }
+      default: { }
+    }
+    i += 1;
+  }
+  return TYPE_ERROR_ID;
+}
+
+// A bound written in terms of one decl's parameters, re-stated in terms of
+// whatever is being substituted for them. `T implements Comparable<T>` applied
+// with `T = Token` is a promise about `Comparable<Token>`.
+export function substituteTrait(
+  ref prog: Program,
+  traitType: TypeId,
+  ref params: Vec<TypeId>,
+  ref args: Vec<TypeId>
+): TypeId {
+  disposable declared: Vec<TypeId> = traitArgsOf(ref prog, traitType);
+  if (declared.len == 0) {
+    return traitType;
+  }
+  disposable applied: Vec<TypeId> = vec.vecNew(declared.len);
+  let changed = false;
+  let i: usize = 0;
+  while (i < declared.len) {
+    const before = vec.vecGet(ref declared, i);
+    const after = substitute(ref prog, before, ref params, ref args);
+    if (after != before) {
+      changed = true;
+    }
+    vec.vecPush(ref applied, after);
+    i += 1;
+  }
+  if (!changed) {
+    return traitType;
+  }
+  return applyTraitArgsUnchecked(ref prog, traitType, ref applied);
+}
+
+function sameTypeIdList(ref a: Vec<TypeId>, ref b: Vec<TypeId>): bool {
+  if (a.len != b.len) {
+    return false;
+  }
+  let i: usize = 0;
+  while (i < a.len) {
+    if (vec.vecGet(ref a, i) != vec.vecGet(ref b, i)) {
+      return false;
+    }
+    i += 1;
+  }
+  return true;
+}

@@ -1,0 +1,9 @@
+// Loaded twice on purpose: by NAME from tally.yoop, and for its EFFECTS ONLY
+// from long_tail.yoop (`import "./lib/side_effect.yoop";`). A side-effect
+// import binds nothing, so the only thing it can be wrong about is the graph -
+// binding a bogus name, or loading this module a second time and defining
+// `note` twice, which fails at the link rather than at the compile.
+
+export function note(n: int32): int32 {
+  return n;
+}

@@ -1,0 +1,74 @@
+module utils;
+
+// The IEEE-754 bit pattern of a float64.
+//
+// WHY THIS EXISTS. LLVM will not take an arbitrary decimal for a `float`
+// constant - `float 1.3` is "floating point constant invalid for type", because
+// 1.3 does not round-trip through 32 bits - so the only spelling that always
+// works is the hexadecimal one the JS reference emits:
+//
+//     store float 0x3FB99999A0000000, ptr %a
+//     store double 0x3FB999999999999A, ptr %b
+//
+// Both are the 64 bits of a DOUBLE: the float32 form is the bits of the value
+// after rounding to float precision and widening back, which is why `floatBits`
+// and `float32Bits` are two functions rather than one taking a width.
+//
+// The parity token dump prints the same 16 hex digits for the same reason - it
+// is the one rendering of a float two implementations cannot disagree about,
+// where "%g" or JS number formatting would differ in the last digit and read as
+// a lexer bug.
+//
+// WHY MEMCPY. There is no bitcast in the language and no reinterpreting union.
+// Doing it with arithmetic (normalize into [1,2), scale the fraction by 2^52)
+// is exact for normals but grows a special case each for zero, the subnormal
+// boundary, infinity and NaN. memcpy through two addresses is five lines and
+// cannot be wrong, at the cost of making this file `import.unsafe`.
+
+import.unsafe;
+
+import { Text }, * as text from "std/core/text.yoop";
+
+extern "C" from "string.h" {
+  function memcpy(dst: unsafe_ptr, src: unsafe_ptr, n: usize): unsafe_ptr;
+}
+
+// The 64 bits of `x`, as they sit in memory.
+export function floatBits(x: float64): uint64 {
+  let bits: uint64 = 0;
+  let tmp: float64 = x;
+  memcpy(&bits, &tmp, 8);
+  return bits;
+}
+
+// The bits of `x` after ROUNDING to float32 and widening back - what LLVM wants
+// for a `float` constant. A value too large for float32 rounds to an infinity,
+// and its bits are that infinity's, which is what the reference emits for
+// `const d: float32 = 1.0e40;` too.
+export function float32Bits(x: float64): uint64 {
+  const narrowed: float32 = float32(x);
+  return floatBits(float64(narrowed));
+}
+
+// The 16 uppercase hex digits of a bit pattern, `0x` prefixed. Appended rather
+// than returned as a string, because the codegen caller is on an emit path and
+// one malloc per instruction is the thing that rule exists to stop.
+export function pushFloatBitsHex(ref out: Text, bits: uint64): void {
+  text.push(ref out, "0x");
+  let i: usize = 0;
+  while (i < 16) {
+    const shift: uint64 = uint64((15 - i) * 4);
+    text.pushByte(ref out, hexDigit((bits >> shift) & 0xF));
+    i += 1;
+  }
+}
+
+// A nibble as its uppercase ASCII digit. Arithmetic rather than a lookup table:
+// a module-level array const is not something the bootstrap can inline yet, and
+// this needs to survive self-compilation.
+function hexDigit(v: uint64): uint8 {
+  if (v < 10) {
+    return uint8(uint64('0') + v);
+  }
+  return uint8(uint64('A') + v - 10);
+}

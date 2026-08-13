@@ -1,0 +1,92 @@
+// Floats: the one whole missing PRIMITIVE type, end to end.
+//
+// Every printed value is a dyadic rational - a fraction whose denominator is a
+// power of two - so its decimal rendering is exact and the fixture is asserting
+// arithmetic rather than chasing a formatting difference in the last digit.
+// 1.5, 0.25, 0.125 and 3.75 are all exact in binary; 0.1 and 1/3 are not, and
+// deliberately do not appear.
+//
+// The float32 half is not decoration. C promotes a `float` to a `double` at a
+// variadic call, so `printf("%f", f32)` without an `fpext` prints eight bytes
+// of which four are whatever was in the slot - garbage, not a rounded number.
+// That is the float twin of what casts.yoop caught for narrow integers.
+
+function area(w: float64, h: float64): float64 {
+  return w * h;
+}
+
+// Accumulating in a loop, so the arithmetic is not all constant-folded away.
+function total(xs: float64[]): float64 {
+  let sum: float64 = 0.0;
+  for v in xs {
+    sum = sum + v;
+  }
+  return sum;
+}
+
+// A borrow of a float writes through to the caller's storage, same as any other
+// type - the slot is the slot.
+function scale(ref x: float64, by: float64): void {
+  x = x * by;
+}
+
+type Rect {
+  w: float64,
+  h: float32,
+}
+
+function main(): int {
+  const a: float64 = 1.5;
+  const b: float64 = 0.25;
+
+  // Every arithmetic opcode: fadd, fsub, fmul, fdiv, frem.
+  printf("add=%f sub=%f\n", a + b, a - b);
+  printf("mul=%f div=%f\n", a * b, a / b);
+  const wide: float64 = 5.5;
+  const two: float64 = 2.0;
+  printf("rem=%f\n", wide % two);
+
+  // fneg, which is not the same instruction as a subtraction from zero.
+  printf("neg=%f\n", -a);
+
+  // fcmp, ordered, in both directions.
+  printf("lt=%d gt=%d eq=%d ne=%d\n", a < b, a > b, a == b, a != b);
+  printf("le=%d ge=%d\n", a <= b, b >= b);
+
+  // float32: its own LLVM type, its own constants, and an fpext at the printf.
+  const f: float32 = 0.125;
+  const g: float32 = 3.75;
+  printf("f32=%f sum=%f\n", f, f + g);
+
+  // Casts in every direction. int32(3.75) truncates toward zero rather than
+  // rounding, in both signs.
+  const n: int32 = 7;
+  printf("i2f=%f f2i=%d f2i_neg=%d\n", float64(n), int32(g), int32(-g));
+  const narrowed: float32 = float32(a);
+  const widened: float64 = float64(f);
+  printf("f64tof32=%f f32tof64=%f\n", float64(narrowed), widened);
+
+  // Unsigned on both sides of the conversion.
+  const u: uint32 = 300;
+  printf("u2f=%f f2u=%d\n", float64(u), uint32(wide));
+
+  // Aggregates: a struct field at each width, and an array element.
+  const r: Rect = { w: 2.5, h: 0.5 };
+  printf("rect=%f x %f area=%f\n", r.w, r.h, area(r.w, 4.0));
+  const xs: float64[] = [1.5, 2.25, 0.25];
+  printf("xs0=%f total=%f len=%d\n", xs[0], total(xs), xs.len);
+
+  // A borrow, written through.
+  let m: float64 = 1.25;
+  scale(ref m, 4.0);
+  printf("scaled=%f\n", m);
+
+  // Interpolation. `%g` shortest form, which is what the reference's
+  // float-to-string helper is: 2.5 keeps its point, 4 loses one it never had.
+  // Routed through `%s` rather than used as printf's format directly - a
+  // template literal in format position renders differently between the two
+  // compilers.
+  printf("%s\n", `d=${a} f=${f} whole=${area(two, two)}`);
+
+  return 0;
+}

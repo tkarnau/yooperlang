@@ -53,6 +53,45 @@ function main(): int {
     continue;
   }
 
+  // A SWITCH nested in a loop, which is where the unwind DEPTH is decided
+  // rather than merely used. `break` leaves the switch, so it disposes what the
+  // ARM owns and stops - the loop body's binding is still live on the statement
+  // after the switch, and disposing it here would be a double free at the
+  // closing brace rather than a compile error.
+  printf("switch break:\n");
+  let k: int = 0;
+  while (k < 2) {
+    tracked outer: Res = open(20 + k);
+    switch (k) {
+      case 0: {
+        tracked inner: Res = open(100);
+        break;
+      }
+      default: { }
+    }
+    printf("  after switch %d\n", k);
+    k = k + 1;
+  }
+
+  // `continue` in the same position targets the LOOP, so it unwinds BOTH - the
+  // arm's binding and the loop body's - and the statement after the switch does
+  // not run. The two jumps reading one depth is exactly the bug this pair
+  // catches.
+  printf("switch continue:\n");
+  let m: int = 0;
+  while (m < 2) {
+    tracked outer: Res = open(30 + m);
+    m = m + 1;
+    switch (m) {
+      case 1: {
+        tracked inner: Res = open(200);
+        continue;
+      }
+      default: { }
+    }
+    printf("  after switch %d\n", m);
+  }
+
   printf("done\n");
   return 0;
 }

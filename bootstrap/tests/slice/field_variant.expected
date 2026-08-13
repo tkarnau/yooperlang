@@ -1,0 +1,10 @@
+num 42
+word hello
+zero
+  saw num 42
+  saw word hello
+  saw zero
+  saw word hello
+  saw word again
+num 7
+exit=0

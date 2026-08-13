@@ -14,6 +14,13 @@ module codegen;
 // Arms do not fall through, so each ends with its own branch to the join. An arm
 // that already terminated (a `return` inside it) gets none - the same one
 // terminator per block rule as everywhere else.
+//
+// The switch is also a BREAKABLE scope: `break` in an arm branches to the join,
+// which is why a SWITCH frame goes on the jump stack (loop_stack.yoop) around
+// the arm bodies. `continue` looks past it to the enclosing loop, so the frame
+// carries no continue target. A `break` is decorative at the end of an arm -
+// nothing falls through here - but it is legal Yoop and reaching the same join
+// by a different route is all it does.
 
 import { Vec }, * as vec from "std/core/vec.yoop";
 import { disposable } from "std/core/kinds.yoop";
@@ -29,6 +36,10 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   }
   const valueTy = typeOf(ref cx, stmt.childA);
   const overVariant = isVariantAt(ref cx, stmt.childA);
+  // A value enum dispatches on the scrutinee ITSELF - its values are integers of
+  // the underlying width, so `valueTy` is already the right type and there is no
+  // tag to extract and no slot to spill into.
+  const overEnum = isValueEnumAt(ref cx, stmt.childA);
 
   // A variant dispatches on its TAG, and its arms read payload fields out of a
   // stack slot - a loaded value has no address to reinterpret. Both are set up
@@ -69,7 +80,7 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   // return on some path.
   let unreachableLabel: usize = 0;
   if (!hasDefaultArm) {
-    if (overVariant) {
+    if (overVariant || overEnum) {
       unreachableLabel = freshLabel(cx.e);
       defaultLabel = unreachableLabel;
     } else {
@@ -81,13 +92,19 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
   }
 
   emitSwitchOpen(ref cx, scrutTy, dispatch, defaultLabel);
-  emitCaseLines(ref cx, stmt, scrutTy, overVariant, ref armLabels);
+  emitCaseLines(ref cx, stmt, scrutTy, overVariant, overEnum, ref armLabels);
   emitSwitchClose(ref cx);
 
-  // Now the arm bodies.
+  // Now the arm bodies. A SWITCH frame goes on the jump stack around them: the
+  // switch is a breakable scope, so a `break` in an arm branches to the join
+  // and unwinds only what the arm opened. It is pushed AFTER the labels exist
+  // and BEFORE any arm body, so the recorded dispose depth is the switch's own
+  // and not an arm's.
+  switchPush(ref cx, endLabel);
   let allTerminated = stmt.childCount > 0;
   let a: usize = 0;
-  while (a < stmt.childCount) {
+  let armErr = "";
+  while (a < stmt.childCount && armErr.len == 0) {
     const arm = nodeAt(cx.ast, childAt(cx.ast, stmt, a));
     emitLabel(ref cx, vec.vecGet(ref armLabels, a));
 
@@ -97,23 +114,27 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
     // pass D requires every field of a case to be bound, so a shared arm can
     // only be payload-less cases.
     if (overVariant) {
-      const berr = emitArmBindings(ref cx, arm, scrutSlotId);
-      if (berr.len > 0) {
-        return berr;
-      }
+      armErr = emitArmBindings(ref cx, arm, scrutSlotId);
     }
 
-    let err = "";
-    let armTerminated = false;
-    emitBlock(ref cx, arm.childB, retTy, ref armTerminated, ref err);
-    if (err.len > 0) {
-      return err;
-    }
-    if (!armTerminated) {
-      allTerminated = false;
-      emitBr(ref cx, endLabel);
+    if (armErr.len == 0) {
+      let armTerminated = false;
+      emitBlock(ref cx, arm.childB, retTy, ref armTerminated, ref armErr);
+      if (armErr.len == 0 && !armTerminated) {
+        allTerminated = false;
+        emitBr(ref cx, endLabel);
+      }
     }
     a += 1;
+  }
+
+  // Read the frame's `sawBreak` before popping it: a `break` in an arm makes
+  // the join reachable even when every arm "terminated", because that break IS
+  // the branch to the join.
+  const brokeToJoin = innermostBreakable(ref cx).sawBreak;
+  loopPop(ref cx);
+  if (armErr.len > 0) {
+    return armErr;
   }
 
   if (unreachableLabel != 0) {
@@ -123,8 +144,10 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
 
   // If every arm returned AND every value lands in one, nothing reaches the
   // join - which is true both for a switch with a default and for an exhaustive
-  // variant switch without one.
-  if (allTerminated && defaultLabel != endLabel) {
+  // variant switch without one. A `break` is the exception: it counts as an arm
+  // terminator, and the terminator it emits is a branch to the join, so the
+  // join is reached after all and its label has to exist.
+  if (allTerminated && !brokeToJoin && defaultLabel != endLabel) {
     terminated = true;
     return "";
   }
@@ -133,13 +156,16 @@ export function emitSwitch(ref cx: Cx, stmt: ASTNode, retTy: string, ref termina
 }
 
 // The `<ty> <value>, label %Lk` lines - one per pattern, so several patterns can
-// share an arm. A variant's case value is its ORDINAL, an integer's is the
-// literal itself; that is the only difference between the two dispatches.
+// share an arm. Three dispatches differ only in what a pattern's value IS: a
+// variant's is its ORDINAL, an enum's is the case's declared CONSTANT (which may
+// be sparse or negative, so it is never the ordinal), and an integer's is the
+// literal itself.
 function emitCaseLines(
   ref cx: Cx,
   stmt: ASTNode,
   scrutTy: string,
   overVariant: bool,
+  overEnum: bool,
   ref armLabels: Vec<usize>
 ): void {
   let i: usize = 0;
@@ -151,7 +177,11 @@ function emitCaseLines(
       while (p < patterns.childCount) {
         const patternId = childAt(cx.ast, patterns, p);
         let value: Operand = Operand.Imm { value: variantOrdinalOf(ref cx, patternId) };
-        if (!overVariant) {
+        if (overEnum) {
+          // The pattern node carries the ENUM type and the case name, which is
+          // the same pair a `Color.Red` expression is read from.
+          value = enumCaseOperand(ref cx, patternId, patternId);
+        } else if (!overVariant) {
           value = patternOperand(nodeAt(cx.ast, patternId));
         }
         emitSwitchCase(ref cx, scrutTy, value, vec.vecGet(ref armLabels, i));

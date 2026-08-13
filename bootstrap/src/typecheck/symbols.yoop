@@ -44,7 +44,14 @@ export variant Symbol {
   Union       { typeId: TypeId },
   ValueEnum   { typeId: TypeId },
   Vtable      { typeId: TypeId },
-  Alias       { annot: NodeId, home: ModuleId },   // transparent `type X = ...` RHS
+  // `type NodeId = usize;` - a TRANSPARENT alias. The name resolves to the
+  // RHS's own TypeId and no new type is interned, which is what makes `NodeId`
+  // and `usize` interchangeable in both directions the way the reference has
+  // them. `annot` is the RHS annotation node, kept because the RHS can only be
+  // resolved once pass C reaches the DECLARING module; `typeId` is the answer
+  // once it has been, and `resolving` is the cycle guard - `type A = A;` would
+  // otherwise recurse forever. See resolveAliasSymbol in resolve.yoop.
+  Alias       { annot: NodeId, typeId: TypeId, resolving: bool },
   Kind        { kindId: KindId },         // a kind decl (disposable, tainted, ...)
   GenericDecl { decl: DeclId, sort: GenericSort }, // stays out of the concrete tables
   Namespace   { module: ModuleId },       // `import * as ns`

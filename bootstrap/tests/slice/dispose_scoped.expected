@@ -1,0 +1,19 @@
+open 9
+in block, id=9
+close 9
+early=18
+open 1
+open 2
+innermost 1 2
+close 2
+middle
+close 1
+after both
+open 5
+open 6
+inside, plain is still 5
+close 6
+after the region, plain is still 5
+close 5
+done
+exit=0
